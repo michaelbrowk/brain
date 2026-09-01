@@ -1,0 +1,37 @@
+name: Full E2E
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 6"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: full-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  full-e2e:
+    runs-on: ubuntu-latest
+    # The exhaustive suite stays available for deliberate manual QA and one
+    # weekly regression pass. Main releases use the compact @release gate in
+    # the separate artifact-producing CI workflow.
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.0.4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+      - name: Install runtime search dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium
+      - run: pnpm test:e2e:full

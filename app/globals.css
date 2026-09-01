@@ -1,0 +1,4947 @@
+@import "tailwindcss";
+
+/* Self-host the exact font artifacts used by the current production release.
+   This keeps the UI unchanged while making builds deterministic and offline. */
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/brain-current/2c55a0e60120577a-s.0-dom-5bn10r2.woff2") format("woff2");
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/brain-current/9c72aa0f40e4eef8-s.1y4-pdgsjb-pw.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/brain-current/ad66f9afd8947f86-s.3lvt2whj97whp.woff2") format("woff2");
+  unicode-range: U+1F00-1FFF;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/brain-current/5476f68d60460930-s.2uwcyprjm3xu3.woff2") format("woff2");
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/brain-current/2bbe8d2671613f1f-s.0k62hbripvv8p.woff2") format("woff2");
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/brain-current/1bffadaabf893a1e-s.3-6t-g6q0vh0a.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Inter";
+  font-style: normal;
+  font-weight: 100 900;
+  font-display: swap;
+  src: url("/fonts/brain-current/83afe278b6a6bb3c-s.p.2bn3s6zvc0dyp.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "Literata";
+  font-style: normal;
+  font-weight: 200 900;
+  font-display: swap;
+  src: url("/fonts/brain-current/dcc06fc59088004f-s.26afxfjuoa9fw.woff2") format("woff2");
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+@font-face {
+  font-family: "Literata";
+  font-style: normal;
+  font-weight: 200 900;
+  font-display: swap;
+  src: url("/fonts/brain-current/14a4f422adc8017e-s.0g2162x3jbg9n.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "Literata";
+  font-style: normal;
+  font-weight: 200 900;
+  font-display: swap;
+  src: url("/fonts/brain-current/294dd5272e5dc576-s.24z3xhdtefne-.woff2") format("woff2");
+  unicode-range: U+1F00-1FFF;
+}
+@font-face {
+  font-family: "Literata";
+  font-style: normal;
+  font-weight: 200 900;
+  font-display: swap;
+  src: url("/fonts/brain-current/c0f3072741f3158c-s.0ip40b8wahlg_.woff2") format("woff2");
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+@font-face {
+  font-family: "Literata";
+  font-style: normal;
+  font-weight: 200 900;
+  font-display: swap;
+  src: url("/fonts/brain-current/32ed8f926ffc9cc2-s.0cu0ymttrfic-.woff2") format("woff2");
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+@font-face {
+  font-family: "Literata";
+  font-style: normal;
+  font-weight: 200 900;
+  font-display: swap;
+  src: url("/fonts/brain-current/b6a9aad84d41ea38-s.19z0m3vc7o74g.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "Literata";
+  font-style: normal;
+  font-weight: 200 900;
+  font-display: swap;
+  src: url("/fonts/brain-current/30bdb5bb2b173ee1-s.p.0zb6_9j98fvm-.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("/fonts/brain-current/13bf9871fe164e7f-s.2f7nqdagzwx2-.woff2") format("woff2");
+  unicode-range: U+0460-052F, U+1C80-1C8A, U+20B4, U+2DE0-2DFF, U+A640-A69F, U+FE2E-FE2F;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("/fonts/brain-current/cc545e633e20c56d-s.176arc174-8zp.woff2") format("woff2");
+  unicode-range: U+0301, U+0400-045F, U+0490-0491, U+04B0-04B1, U+2116;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("/fonts/brain-current/71b036adf157cdcf-s.0bp8oijd_gu96.woff2") format("woff2");
+  unicode-range: U+0370-0377, U+037A-037F, U+0384-038A, U+038C, U+038E-03A1, U+03A3-03FF;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("/fonts/brain-current/89b21bb081cb7469-s.1fby2rem9ngyr.woff2") format("woff2");
+  unicode-range: U+0102-0103, U+0110-0111, U+0128-0129, U+0168-0169, U+01A0-01A1, U+01AF-01B0, U+0300-0301, U+0303-0304, U+0308-0309, U+0323, U+0329, U+1EA0-1EF9, U+20AB;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("/fonts/brain-current/3fe682a82f50d426-s.0vfdmo25voy_0.woff2") format("woff2");
+  unicode-range: U+0100-02BA, U+02BD-02C5, U+02C7-02CC, U+02CE-02D7, U+02DD-02FF, U+0304, U+0308, U+0329, U+1D00-1DBF, U+1E00-1E9F, U+1EF2-1EFF, U+2020, U+20A0-20AB, U+20AD-20C0, U+2113, U+2C60-2C7F, U+A720-A7FF;
+}
+@font-face {
+  font-family: "JetBrains Mono";
+  font-style: normal;
+  font-weight: 100 800;
+  font-display: swap;
+  src: url("/fonts/brain-current/70bc3e132a0a741e-s.p.3t6q91iet4nsy.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* ── Brain design tokens — monochrome ink-on-paper (Maya's spec) ─────────────
+   No accent hue (a deliberate call): chrome interacts in neutral ink,
+   the only "colour" on screen is the text itself. OKLCH, warm neutrals. */
+
+:root {
+  --font-inter: "Inter", Arial, sans-serif;
+  --font-literata: "Literata", "Times New Roman", serif;
+  --font-mono-code: "JetBrains Mono", Arial, monospace;
+  --paper: oklch(0.988 0.004 91); /* editor bg — warm paper (#FCFBF8, v2; ΔE 0.3 vs v1) */
+  --surface: oklch(0.970 0.005 85); /* sidebar / panels */
+  --ink: oklch(0.255 0.010 75); /* primary text — warm near-black */
+  --ink-2: oklch(0.500 0.010 75); /* secondary */
+  --ink-3: oklch(0.530 0.008 75); /* meta / placeholder / chevron (AA on paper) */
+  --line: oklch(0.905 0.006 85); /* 1px hairlines */
+
+  --fill-hover: color-mix(in oklch, var(--ink) 4%, transparent);
+  --fill-active: color-mix(in oklch, var(--ink) 7%, transparent);
+  --selection: color-mix(in oklch, var(--ink) 13%, transparent);
+  --scrim: oklch(0 0 0 / 0.2);
+
+  /* radii — one Shape-Lock system */
+  --r-xs: 4px;
+  --r-sm: 6px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+
+  /* motion */
+  --ease-out: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-drawer: cubic-bezier(0.32, 0.72, 0, 1);
+
+  /* elevation */
+  --shadow-overlay:
+    0 16px 70px -16px rgb(0 0 0 / 0.22), 0 2px 8px rgb(0 0 0 / 0.06);
+  --shadow-lift: 0 8px 24px -8px rgb(0 0 0 / 0.18);
+
+  /* layers — the single z-scale. Components never write raw numbers. */
+  --z-bg: -1; /* background atom inside an isolated surface */
+  --z-content: 0;
+  --z-scroll-edge: 9;
+  --z-toolbar: 10;
+  --z-stickers: 15;
+  --z-sidebar: 20;
+  --z-popover: 30;
+  --z-drawer: 40;
+  --z-modal: 50;
+  --z-toast: 60;
+
+  /* post-it stickers — the one allowed splash of colour (content, not chrome) */
+  --sticker: oklch(0.94 0.083 95);
+  --sticker-ink: oklch(0.32 0.045 95);
+
+  /* editor content colours (curated palette) */
+  --tc-red: oklch(0.52 0.17 25);
+  --tc-orange: oklch(0.52 0.13 55);
+  --tc-yellow: oklch(0.52 0.11 90);
+  --tc-green: oklch(0.51 0.13 150);
+  --tc-blue: oklch(0.52 0.14 245);
+  --tc-purple: oklch(0.49 0.17 300);
+  --tc-pink: oklch(0.53 0.17 350);
+  --tc-gray: oklch(0.5 0 0);
+  --tc-brown: oklch(0.47 0.06 55);
+  --tb-red: oklch(0.92 0.05 25);
+  --tb-orange: oklch(0.93 0.05 60);
+  --tb-yellow: oklch(0.94 0.07 95);
+  --tb-green: oklch(0.93 0.05 150);
+  --tb-blue: oklch(0.93 0.045 245);
+  --tb-purple: oklch(0.93 0.05 300);
+  --tb-pink: oklch(0.94 0.05 350);
+  --tb-gray: oklch(0.92 0 0);
+  --tb-brown: oklch(0.91 0.03 60);
+}
+
+.dark {
+  --sticker: oklch(0.42 0.07 95);
+  --sticker-ink: oklch(0.95 0.04 95);
+  --tc-red: oklch(0.72 0.15 25);
+  --tc-orange: oklch(0.76 0.12 60);
+  --tc-yellow: oklch(0.82 0.12 95);
+  --tc-green: oklch(0.75 0.13 150);
+  --tc-blue: oklch(0.74 0.13 245);
+  --tc-purple: oklch(0.74 0.15 300);
+  --tc-pink: oklch(0.78 0.14 350);
+  --tc-gray: oklch(0.72 0 0);
+  --tc-brown: oklch(0.68 0.07 55);
+  --tb-red: oklch(0.35 0.09 25);
+  --tb-orange: oklch(0.37 0.07 60);
+  --tb-yellow: oklch(0.4 0.08 95);
+  --tb-green: oklch(0.36 0.07 150);
+  --tb-blue: oklch(0.36 0.08 245);
+  --tb-purple: oklch(0.36 0.09 300);
+  --tb-pink: oklch(0.38 0.08 350);
+  --tb-gray: oklch(0.35 0 0);
+  --tb-brown: oklch(0.35 0.05 55);
+
+  --paper: oklch(0.205 0.006 75); /* warm charcoal, not blue-black */
+  --surface: oklch(0.240 0.006 75);
+  --ink: oklch(0.920 0.006 85);
+  --ink-2: oklch(0.720 0.006 85);
+  --ink-3: oklch(0.620 0.006 75); /* AA on charcoal */
+  --line: oklch(0.300 0.006 75);
+
+  --fill-hover: color-mix(in oklch, white 5%, transparent);
+  --fill-active: color-mix(in oklch, white 9%, transparent);
+  --selection: color-mix(in oklch, white 16%, transparent);
+  --scrim: oklch(0 0 0 / 0.65);
+  --shadow-overlay:
+    0 16px 70px -16px rgb(0 0 0 / 0.55), 0 2px 8px rgb(0 0 0 / 0.3);
+}
+
+/* ── Liquid Glass v2 tokens (DESIGN.md v2) ───────────────────────────────────
+   Additive. Every v1 name above keeps its value; the new names below are what
+   the glass surfaces use. Colours are stored as oklch; the hex in each comment
+   is the concept value and round-trips through oklch with ΔE < 0.1 (checked
+   with an OKLab converter; the only non-zero ones are yellow 0.06, red 0.10).
+
+   Transitional names: the v2 light ink is the neutral near-black of the
+   concept (#1D1D1F), ΔE 2.7 from the warm v1 ink. Flipping --ink today would
+   recolour every line of current text, so the v2 values live under
+   --ink-v2 / --ink-2-v2 / --ink-3-v2 until the first surface is restyled
+   (Phase 2); that phase points --ink at them in one line. In dark, --ink-v2
+   and --ink-3-v2 alias the v1 values; --ink-2-v2 is .75 (v1 .72, see the
+   note in .dark). Same story for --scrim-v2 (L4 modal scrim). */
+:root {
+  /* ink set — v2 targets */
+  --ink-v2: oklch(0.232 0.004 286); /* #1D1D1F text, icons in pills */
+  --ink-2-v2: oklch(0.48 0.01 278); /* #5C5D63 secondary; the only grey on glass */
+  --ink-3-v2: oklch(0.54 0.008 286); /* #6E6E73 sources, captions — paper only */
+  --ink-4: oklch(0.622 0.007 286); /* #86868B not text: dividers, faint markers, disabled */
+  --hair: color-mix(in oklch, var(--ink) 10%, transparent);
+  --hair-soft: color-mix(in oklch, var(--ink) 7%, transparent);
+  /* One step above --hair, for a resting hairline that has to answer a hover:
+     the chip, the copies row and the composer body. Not --hair-field-strong —
+     that is the input scale, which starts at 53% because a field's ring has to
+     clear 3:1 at rest, and it would read as a border on a paper block. Defined
+     wherever --hair is, so the step survives the contrast remap below. */
+  --hair-strong: color-mix(in oklch, var(--ink) 18%, transparent);
+
+  /* the one primary action per surface — an ink-filled circle with a paper
+     glyph. Dark inverts on its own (--ink is light there, --paper dark).
+     Hover moves lightness by .08 (light lightens, dark darkens); press is
+     scale .97 (PRESS in lib/motion.ts). Resolved from the v2 ink so the stand
+     and the glass surfaces agree; Phase 2 points it at --ink. */
+  --accent: var(--ink-v2);
+  --accent-ink: var(--paper);
+  --accent-hover: oklch(from var(--ink-v2) calc(l + 0.08) c h);
+
+  /* system hues — blue for links / focus / selection. Yellow is transient
+     (drag handle, insertion indicator) and the sticker; never a button. */
+  --blue: oklch(0.52 0.186 258); /* #0B63D1, 5.6:1 on paper */
+  --blue-ring: oklch(0.52 0.186 258 / 0.55);
+  --blue-tint: oklch(0.52 0.186 258 / 0.07); /* hover on a row, .06–.08 */
+  /* Selection, two steps over the hover tint. A row on the canvas has to say
+     "hovered" and "open" with the same hue, so the two tints are a measured
+     pair rather than one tint doing both jobs (Mail v4 → selected row). It
+     was .11 while the selected band also carried a hairline above and below;
+     with the grid gone the fill has to clear §8's .03 off hover on its own. */
+  --blue-tint-2: oklch(0.52 0.186 258 / 0.18);
+  /* The rim around the selected capsule — the second signal the hairlines
+     used to be, on one row instead of across the column. */
+  --blue-rim: oklch(0.52 0.186 258 / 0.22);
+  --yellow: oklch(0.821 0.149 85); /* #F0BC3C */
+  --yellow-ink: oklch(0.262 0.053 91); /* #2E2300, 9:1 on yellow */
+  --red: oklch(0.553 0.225 27); /* #D70015 destructive + errors only */
+
+  /* edge tints — the paper needs something for glass to refract. Static. */
+  --tint-sky: oklch(0.89 0.033 250 / 0.42); /* #CBDDF0 */
+  --tint-sand: oklch(0.909 0.037 81 / 0.38); /* #EEDFC6 */
+
+  /* materials — three thicknesses; thicker = larger surface */
+  --glass-thin: oklch(1 0 0 / 0.7);
+  --glass-reg: oklch(1 0 0 / 0.66);
+  --glass-thick: oklch(1 0 0 / 0.58);
+  --glass-sheen: linear-gradient(180deg, oklch(1 0 0 / 0.55) 0%, oklch(1 0 0 / 0) 38%);
+  --blur-thin: blur(12px) saturate(160%);
+  --blur-reg: blur(18px) saturate(170%);
+  --blur-thick: blur(28px) saturate(180%);
+  --rim: 0 0 0 0.5px oklch(0.23 0.024 249 / 0.1); /* rgb(20 30 40) */
+  --edge-light:
+    inset 0 1px 0 oklch(1 0 0 / 0.92), inset 1px 0 0 oklch(1 0 0 / 0.55);
+  --shadow-1:
+    0 1px 2px oklch(0.23 0.024 249 / 0.05), 0 4px 12px -4px oklch(0.23 0.024 249 / 0.1);
+  --shadow-2:
+    0 1px 1.5px oklch(0.23 0.024 249 / 0.05),
+    0 8px 20px -8px oklch(0.23 0.024 249 / 0.14);
+  --shadow-3:
+    0 1px 2px oklch(0.23 0.024 249 / 0.05), 0 16px 40px -12px oklch(0.23 0.024 249 / 0.16);
+  --scrim-v2: oklch(0.23 0.024 249 / 0.18);
+  --lift: 0 12px 28px -8px oklch(0.23 0.024 249 / 0.22); /* drag only */
+  --shadow-sticker: 0 10px 24px -10px oklch(0.457 0.093 90 / 0.35); /* warm, an object on the desk */
+
+  /* fills, not materials — what sits on glass never gets its own backdrop */
+  --fill-glass-hover: oklch(0.232 0.004 286 / 0.07); /* ink-tint on glass — THE hover, layered over any fill */
+  --hover-tint: linear-gradient(var(--fill-glass-hover), var(--fill-glass-hover)); /* the same tint as a layer */
+  --hover-tint-selected: var(--hover-tint); /* over the selected capsule; dark darkens instead (contrast) */
+  --fill-glass-selected: oklch(1 0 0 / 0.78);
+  --fill-chip: oklch(1 0 0 / 0.5);
+  --fill-field-glass: oklch(0.232 0.004 286 / 0.055); /* search capsule on glass */
+  --fill-field-glass-hover: oklch(0.232 0.004 286 / 0.1); /* ΔL .034 over paper */
+  --fill-kbd-glass: oklch(1 0 0 / 0.7);
+  --fill-kbd-paper: oklch(0.232 0.004 286 / 0.05);
+  --fill-skeleton-paper: oklch(0.232 0.004 286 / 0.05);
+  --fill-skeleton-glass: oklch(1 0 0 / 0.4);
+  --fill-highlight: oklch(1 0 0 / 0.9); /* top edge of a fill catching light */
+  --fill-rim: oklch(0.23 0.024 249 / 0.08);
+  /* the quiet tint a small paper object takes: status badge, icon tile,
+     segmented track. Dark cannot reuse the light 5% — an ink at 5% over the
+     dark ground is below the noise floor, so dark doubles it. */
+  --fill-tint: color-mix(in oklch, var(--ink) 5%, transparent);
+  /* a field's boundary is the only thing that says "type here", so it is the
+     one hairline held to WCAG 1.4.11: 53% ink measures 3.42:1 against paper
+     (the 10% hair reads 1.22:1). Hover is one step, 4.46:1. Both are
+     measured by the guard in e2e/mail-connect.spec.ts. */
+  --hair-field: color-mix(in oklch, var(--ink) 53%, transparent);
+  --hair-field-strong: color-mix(in oklch, var(--ink) 62%, transparent);
+  /* the same ring in red when the field is invalid: 70% red measures 3.75:1
+     against paper, so the boundary keeps its 3:1 on its own and the hue is
+     the extra signal. Full --red is the hover and focus step, 5.20:1. */
+  --hair-field-invalid: color-mix(in oklch, var(--red) 70%, transparent);
+  --red-tint: oklch(0.553 0.225 27 / 0.08); /* destructive hover */
+  --sticker-gradient: linear-gradient(180deg, oklch(0.965 0.07 99), oklch(0.94 0.109 97)); /* #FFF5BF → #FFEC95 */
+
+  /* context — what sits on a material reads these; materials remap them */
+  --kbd-fill: var(--fill-kbd-paper);
+  --kbd-rim: none;
+  --skeleton-fill: var(--fill-skeleton-paper);
+
+  /* matte set — what every fallback resolves to (values live once, here) */
+  --glass-matte: oklch(1 0 0 / 0.97);
+  --glass-matte-contrast: oklch(1 0 0 / 0.98);
+  --rim-matte: 0 0 0 1px oklch(0.23 0.024 249 / 0.14);
+  --rim-contrast: 0 0 0 1px oklch(0.23 0.024 249 / 0.5);
+  /* selected on matte: white .78 vanishes on a .97 white surface, so the
+     fallback takes the paper rule (blue tint) — see DESIGN.md v2 → Hover */
+  --fill-selected-matte: oklch(0.52 0.186 258 / 0.08);
+  /* chip on matte: white .50 vanishes on the .97 white surface the same way;
+     the fallback takes an ink tint (hover is the layered ink tint, ΔL .04) */
+  --fill-chip-matte: oklch(0.232 0.004 286 / 0.05);
+  --shadow-none: 0 0 0 0 transparent;
+
+  /* scroll-edge layers */
+  --edge-backdrop-1: blur(2px);
+  --edge-backdrop-2: blur(12px);
+  --edge-backdrop-single: blur(10px);
+  /* cover edges — the same construction held always-on over a taller band */
+  --cover-blur-1: blur(4px);
+  --cover-blur-2: blur(20px);
+  --edge-fill: none;
+  --edge-fill-bottom: none;
+
+  /* concentric radii: outer = inner + padding */
+  /* the 28 sidebar row capsule, and the mail list's 60 row capsule: the same
+     radius on two heights, because it is the same object — a row the pointer
+     can fill — and concentric with the 26 panel that holds the first */
+  --r-row: 14px;
+  --r-pill: 18px; /* toolbar pill (36px, full capsule) */
+  --r-popover: 14px; /* item 8 + padding 6 */
+  --r-sheet: 20px; /* control 10 + padding 10 */
+  --r-panel: 26px; /* row 14 + padding 12 */
+  --r-palette: 22px;
+  --r-table: 10px;
+  --r-block: 8px;
+  --r-sticker: 14px;
+  --r-field: 16px; /* search capsule (32px) */
+  --r-group: 16px; /* settings group: row 8 + padding 8 */
+  --r-control: 10px; /* control in a dialog / a field on paper: sheet 20 = 10 + padding 10 */
+  --inset: 12px; /* nothing floating touches the window edge */
+
+  /* type — system SF first, self-hosted Inter as the non-Apple fallback */
+  --font-sf:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", var(--font-inter),
+    system-ui, "Segoe UI", Roboto, sans-serif;
+}
+
+.dark {
+  --ink-v2: var(--ink);
+  /* .75 not the v1 .72: ink-2 on thick glass over the lightest dark backdrop
+     (paper + tint) measured 4.12:1 at .72 on the Phase 0 stand; .75 clears AA. */
+  --ink-2-v2: oklch(0.75 0.006 85);
+  --ink-3-v2: var(--ink-3);
+  --ink-4: oklch(0.52 0.006 75);
+  --hair: oklch(1 0 0 / 0.12);
+  --hair-soft: oklch(1 0 0 / 0.08);
+  --hair-strong: oklch(1 0 0 / 0.2);
+
+  --accent-hover: oklch(from var(--ink-v2) calc(l - 0.08) c h);
+
+  --blue: oklch(0.684 0.154 253); /* #4C9CF5 */
+  --blue-ring: oklch(0.684 0.154 253 / 0.55);
+  --blue-tint: oklch(0.684 0.154 253 / 0.1);
+  --blue-tint-2: oklch(0.684 0.154 253 / 0.24);
+  --blue-rim: oklch(0.684 0.154 253 / 0.28);
+  --yellow: oklch(0.836 0.142 86); /* #F2C24D */
+  --red: oklch(0.707 0.185 26); /* #FF6961 */
+
+  --tint-sky: oklch(0.89 0.0165 250 / 0.18);
+  --tint-sand: oklch(0.909 0.0185 81 / 0.18);
+
+  --glass-thin: oklch(0.295 0.007 286 / 0.55); /* rgb(44 44 48) */
+  --glass-reg: oklch(0.278 0.007 286 / 0.6); /* rgb(40 40 44) */
+  --glass-thick: oklch(0.254 0.007 286 / 0.62); /* rgb(34 34 38) */
+  --glass-sheen: linear-gradient(180deg, oklch(1 0 0 / 0.1) 0%, oklch(1 0 0 / 0) 38%);
+  --rim: 0 0 0 0.5px oklch(0 0 0 / 0.4);
+  --edge-light:
+    inset 0 1px 0 oklch(1 0 0 / 0.1), inset 1px 0 0 oklch(1 0 0 / 0.06);
+  /* dark shadows: alpha ×1.8 */
+  --shadow-1:
+    0 1px 2px oklch(0 0 0 / 0.09), 0 4px 12px -4px oklch(0 0 0 / 0.18);
+  --shadow-2:
+    0 1px 1.5px oklch(0 0 0 / 0.09), 0 8px 20px -8px oklch(0 0 0 / 0.25);
+  --shadow-3:
+    0 1px 2px oklch(0 0 0 / 0.09), 0 16px 40px -12px oklch(0 0 0 / 0.29);
+  --scrim-v2: oklch(0 0 0 / 0.5);
+  --lift: 0 12px 28px -8px oklch(0 0 0 / 0.4);
+
+  --fill-glass-hover: oklch(1 0 0 / 0.08);
+  --fill-glass-selected: oklch(1 0 0 / 0.14);
+  /* white .08 over the white .14 capsule dropped ink to 4.36:1 on the thick
+     material over the lightest dark backdrop; a dark tint keeps ΔL ≥ .04 and
+     the text above 5:1 */
+  --hover-tint-selected: linear-gradient(oklch(0 0 0 / 0.12), oklch(0 0 0 / 0.12));
+  --fill-chip: oklch(1 0 0 / 0.08);
+  --fill-field-glass: oklch(1 0 0 / 0.07);
+  --fill-field-glass-hover: oklch(1 0 0 / 0.11);
+  --fill-kbd-glass: oklch(1 0 0 / 0.1);
+  --fill-kbd-paper: oklch(1 0 0 / 0.08);
+  --fill-skeleton-paper: oklch(1 0 0 / 0.06);
+  --fill-skeleton-glass: oklch(1 0 0 / 0.1);
+  --fill-highlight: oklch(1 0 0 / 0.12);
+  --fill-rim: oklch(0 0 0 / 0.3);
+  --fill-tint: oklch(1 0 0 / 0.1);
+  /* white .36 = 3.36:1 against the dark paper, .50 = 5.26:1 on hover */
+  --hair-field: oklch(1 0 0 / 0.36);
+  --hair-field-strong: oklch(1 0 0 / 0.5);
+  /* red .70 = 3.69:1 against the dark paper, full red 6.34:1 — the same
+     weight as light */
+  --hair-field-invalid: oklch(0.707 0.185 26 / 0.7);
+  --red-tint: oklch(0.707 0.185 26 / 0.12);
+  --sticker-gradient: linear-gradient(180deg, oklch(0.44 0.07 95), oklch(0.4 0.075 95));
+
+  --glass-matte: oklch(0.254 0.007 286 / 0.97);
+  --glass-matte-contrast: oklch(0.254 0.007 286 / 0.98);
+  --rim-matte: 0 0 0 1px oklch(1 0 0 / 0.14);
+  --rim-contrast: 0 0 0 1px oklch(1 0 0 / 0.5);
+  /* dark selected and chip are already tints (white .14 / .08) and read on
+     matte graphite */
+  --fill-selected-matte: oklch(1 0 0 / 0.14);
+  --fill-chip-matte: oklch(1 0 0 / 0.08);
+}
+
+@media (max-width: 767px) {
+  :root {
+    --inset: 8px;
+  }
+}
+
+/* ── Matte fallback — the ONE place materials degrade ───────────────────────
+   Three conditions, one result: an opaque-ish surface with a 1px rim, no blur,
+   no sheen, scroll-edge as a paper gradient. Each block remaps the tokens the
+   materials and .edge consume; the matte values themselves live above. The
+   html[data-glass-fallback] form exists so tests and the dev stand can force
+   the state in engines that cannot emulate the media query. */
+@media (prefers-reduced-transparency: reduce) {
+  :root {
+    --glass-thin: var(--glass-matte);
+    --glass-reg: var(--glass-matte);
+    --glass-thick: var(--glass-matte);
+    --glass-sheen: none;
+    --blur-thin: none;
+    --blur-reg: none;
+    --blur-thick: none;
+    --rim: var(--rim-matte);
+    --fill-glass-selected: var(--fill-selected-matte);
+    --fill-chip: var(--fill-chip-matte);
+    --fill-kbd-glass: var(--fill-kbd-paper);
+    --fill-skeleton-glass: var(--fill-skeleton-paper);
+    --edge-light: var(--shadow-none);
+    --edge-backdrop-1: none;
+    --edge-backdrop-2: none;
+    --edge-backdrop-single: none;
+    --cover-blur-1: none;
+    --cover-blur-2: none;
+    --edge-fill: linear-gradient(var(--paper) 30%, transparent);
+    --edge-fill-bottom: linear-gradient(transparent, var(--paper) 70%);
+  }
+}
+@supports not (backdrop-filter: blur(1px)) {
+  :root {
+    --glass-thin: var(--glass-matte);
+    --glass-reg: var(--glass-matte);
+    --glass-thick: var(--glass-matte);
+    --glass-sheen: none;
+    --blur-thin: none;
+    --blur-reg: none;
+    --blur-thick: none;
+    --rim: var(--rim-matte);
+    --fill-glass-selected: var(--fill-selected-matte);
+    --fill-chip: var(--fill-chip-matte);
+    --fill-kbd-glass: var(--fill-kbd-paper);
+    --fill-skeleton-glass: var(--fill-skeleton-paper);
+    --edge-light: var(--shadow-none);
+    --edge-backdrop-1: none;
+    --edge-backdrop-2: none;
+    --edge-backdrop-single: none;
+    --cover-blur-1: none;
+    --cover-blur-2: none;
+    --edge-fill: linear-gradient(var(--paper) 30%, transparent);
+    --edge-fill-bottom: linear-gradient(transparent, var(--paper) 70%);
+  }
+}
+html[data-glass-fallback="matte"] {
+  --glass-thin: var(--glass-matte);
+  --glass-reg: var(--glass-matte);
+  --glass-thick: var(--glass-matte);
+  --glass-sheen: none;
+  --blur-thin: none;
+  --blur-reg: none;
+  --blur-thick: none;
+  --rim: var(--rim-matte);
+  --fill-glass-selected: var(--fill-selected-matte);
+  --fill-chip: var(--fill-chip-matte);
+  --fill-kbd-glass: var(--fill-kbd-paper);
+  --fill-skeleton-glass: var(--fill-skeleton-paper);
+  --edge-light: var(--shadow-none);
+  --edge-backdrop-1: none;
+  --edge-backdrop-2: none;
+  --edge-backdrop-single: none;
+  --cover-blur-1: none;
+  --cover-blur-2: none;
+  --edge-fill: linear-gradient(var(--paper) 30%, transparent);
+  --edge-fill-bottom: linear-gradient(transparent, var(--paper) 70%);
+}
+/* Increased contrast: near-solid fill, a real border, darker secondary ink,
+   stronger hairlines. Stacks on top of the matte remap when both are on. */
+@media (prefers-contrast: more) {
+  :root {
+    --glass-thin: var(--glass-matte-contrast);
+    --glass-reg: var(--glass-matte-contrast);
+    --glass-thick: var(--glass-matte-contrast);
+    --glass-sheen: none;
+    --rim: var(--rim-contrast);
+    --fill-glass-selected: var(--fill-selected-matte);
+    --fill-chip: var(--fill-chip-matte);
+    --fill-kbd-glass: var(--fill-kbd-paper);
+    --fill-skeleton-glass: var(--fill-skeleton-paper);
+    --edge-light: var(--shadow-none);
+    --ink-2-v2: oklch(0.369 0.009 277); /* #3E3F44 */
+    --ink-3-v2: oklch(0.406 0.008 277); /* #48494E */
+    --hair: color-mix(in oklch, var(--ink) 30%, transparent);
+    --hair-strong: color-mix(in oklch, var(--ink) 42%, transparent);
+  }
+  .dark {
+    --ink-2-v2: oklch(0.82 0.006 85);
+    --ink-3-v2: oklch(0.76 0.006 75);
+    --hair: oklch(1 0 0 / 0.3);
+    --hair-strong: oklch(1 0 0 / 0.42);
+  }
+}
+html[data-glass-fallback="contrast"] {
+  --glass-thin: var(--glass-matte-contrast);
+  --glass-reg: var(--glass-matte-contrast);
+  --glass-thick: var(--glass-matte-contrast);
+  --glass-sheen: none;
+  --rim: var(--rim-contrast);
+  --fill-glass-selected: var(--fill-selected-matte);
+  --fill-chip: var(--fill-chip-matte);
+  --fill-kbd-glass: var(--fill-kbd-paper);
+  --fill-skeleton-glass: var(--fill-skeleton-paper);
+  --edge-light: var(--shadow-none);
+  --ink-2-v2: oklch(0.369 0.009 277);
+  --ink-3-v2: oklch(0.406 0.008 277);
+  --hair: color-mix(in oklch, var(--ink) 30%, transparent);
+  --hair-strong: color-mix(in oklch, var(--ink) 42%, transparent);
+}
+
+/* Mail's own breakpoint: the width at which THREE PANES ARE HONEST, not the
+   width at which a viewport stops being a phone. Those are two questions and
+   `md` only answers the second one. Every figure below was measured in
+   Chromium on the SF stack with a thread open (see DESIGN.md §13 → "Where
+   three panes stop fitting", which carries the full argument):
+
+     the reader head, at its minimum
+       32   the article column's rule, which the strip's left edge shares
+      159   the subject's box. This is the CAPTION's figure first: "12
+            messages · Dec 24, 2025" measures 157 and truncates past it, a
+            condition that can be checked. Twenty characters of subject at
+            15/600 land within 3px of the same width — chosen, where the 157
+            was found
+       10   the head's gap
+      277   the action pill, which does not shrink: Mark unread 105 +
+            Archive 74 + Reply 62 + the ⋯ menu 36, at the pill's fixed 14px
+            button padding. "Mark unread" is the resting label — opening a
+            thread marks it read. Measured on the INBOX: that is the case
+            taken, not the widest. Spam's "Not spam" is a character longer
+            (~4px), which fits inside the 6px between 1154 and 1160
+       12   §4's --inset on the window side
+      ---
+      490
+
+     the message body, at its minimum, is smaller and does not set the line:
+     324 (45 characters, the floor of the 45–75 measure, at the message's own
+     16px) + 8+8 content padding + 26+26 sheet + 32+32 article = 456.
+
+   490 + 360 (the column) + 304 (--inset × 2 + the 280 sidebar) = 1154, so
+   1160 — where the pill's right edge lands on the 12 and the subject keeps
+   165. 1160 is a JUDGEMENT inside a band, not a figure the measurements
+   force: the subject truncates, so the head's hard floor is 32+10+277+12 =
+   331 and the 490 buys 159 of headroom by choice. Read both bounds at the
+   floor and the body sets the line at 1120; read both generously (the body at
+   60 characters rather than 45) and it moves to 1228.
+
+   Below it mail shows ONE pane — the list, or the reader, or the composer —
+   with the back navigation the phone has always had, inside the ordinary
+   desktop shell. A 900px window is a small desktop, not a handset.
+
+   It was `md`, and between 768 and 1159 the promise was false: the pill ran
+   past the window (its right edge measured 967.7 at 900, 820 and 768 alike,
+   clipped identically) and the subject beside it was squeezed to exactly 0.
+
+   The number lives in three places — this token, the .brain-mail-list query
+   below, and MAIL_PANES_MIN_WIDTH in mail-surface.tsx — because a media query
+   cannot read a custom property. ops/design-guardrails.test.ts asserts the
+   three agree. */
+@theme {
+  --breakpoint-panes: 1160px;
+}
+
+/* The reader strip's own line: the width at which the action pill's RESTING
+   labels fit beside the subject's floor on ONE pane. The same figures as
+   above, read for the pane the strip has below `panes` — the window less the
+   sidebar's 304, with the Back button in the head because the list is not:
+
+     304   --inset × 2 + the 280 sidebar
+      32   the article column's rule, which the strip's left edge shares
+      20   the Back capsule: 28, hung 8 into the gutter (-ml-2)
+      10   the head's gap
+     159   the subject's floor (the caption's 157 + 2)
+      10   the head's gap
+     277   the pill at its resting labels
+      12   §4's --inset on the window side
+     ---
+     824, so 830 — the same six 1160 keeps over its floor. The subject holds
+     165 on either side of either switch.
+
+   Below it "Mark unread" — 105 of the 277 — leaves the pill and stays in the
+   ⋯ menu, which has carried it all along. Measured before: 768 left the
+   subject 103 and clipped the caption, 800 left it 135, 824 exactly 159.
+   With the label in the menu the same head keeps 208 at 768.
+
+   It used to be `sm` (640), a phone's number: at 640 the strip is the whole
+   window and 640 − 345 leaves 295. The panes switch put the strip inside the
+   desktop shell from 768 up, where the sidebar takes 304 the phone never
+   paid, and a rule written for the window did not see it. A phone in
+   portrait keeps the label in the menu and still lands 9 under the floor —
+   20 + 20 + 10 + 159 + 10 + 172 + 8 = 399 against 390 — which is DESIGN.md
+   §13's known gap, not this token's.
+
+   `static`, so the token reaches :root and e2e/mail-client.spec.ts reads the
+   line off the page instead of carrying a copy. ops/design-guardrails.test.ts
+   holds the arithmetic and the one call site. */
+@theme static {
+  --breakpoint-strip: 830px;
+}
+
+/* expose tokens to Tailwind utilities (bg-paper, text-ink, border-line…) */
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-ink: var(--ink);
+  --color-ink-2: var(--ink-2);
+  --color-ink-3: var(--ink-3);
+  --color-line: var(--line);
+  --color-fill-hover: var(--fill-hover);
+  --color-fill-active: var(--fill-active);
+
+  /* v2 */
+  --color-ink-4: var(--ink-4);
+  --color-hair: var(--hair);
+  --color-hair-soft: var(--hair-soft);
+  --color-blue: var(--blue);
+  --color-blue-tint: var(--blue-tint);
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+  --color-accent-hover: var(--accent-hover);
+  --color-yellow: var(--yellow);
+  --color-yellow-ink: var(--yellow-ink);
+  --color-red: var(--red);
+
+  --radius-xs: var(--r-xs);
+  --radius-sm: var(--r-sm);
+  --radius-md: var(--r-md);
+  --radius-lg: var(--r-lg);
+  --radius-xl: var(--r-xl);
+  --radius-row: var(--r-row);
+  --radius-pill: var(--r-pill);
+  --radius-popover: var(--r-popover);
+  --radius-sheet: var(--r-sheet);
+  --radius-panel: var(--r-panel);
+  --radius-palette: var(--r-palette);
+  --radius-table: var(--r-table);
+  --radius-block: var(--r-block);
+  --radius-sticker: var(--r-sticker);
+  --radius-field: var(--r-field);
+  --radius-group: var(--r-group);
+
+  --spacing-inset: var(--inset);
+
+  --shadow-thin: var(--shadow-1);
+  --shadow-reg: var(--shadow-2);
+  --shadow-thick: var(--shadow-3);
+  --shadow-lift: var(--lift);
+
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-literata), ui-serif, Georgia, serif;
+  --font-mono: var(--font-mono-code), ui-monospace, monospace;
+  --font-system: var(--font-sf);
+}
+
+/* heading typeface — user setting (Settings → Appearance). The default is
+   the system stack (SF on Apple, Inter elsewhere); Literata stays as the
+   one reading option. */
+:root {
+  --font-headings: var(--font-sf);
+}
+html[data-headings="serif"] {
+  --font-headings: var(--font-literata), ui-serif, Georgia, serif;
+}
+
+* {
+  border-color: var(--line);
+}
+
+html {
+  background: var(--paper);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  font-family: var(--font-sans);
+}
+
+::selection {
+  background: var(--selection);
+}
+
+/* every interactive element gets a pointer cursor */
+button:not(:disabled),
+[role="button"],
+a[href],
+summary,
+label[for],
+[data-radix-collection-item] {
+  cursor: pointer;
+}
+
+/* keyboard visibility — the whole app is keyboard-first.
+   Text inputs are exempt: the caret already shows focus. */
+/* the ring only when focus moves via the KEYBOARD — Radix returns focus to
+   triggers programmatically on menu close, and WebKit marks that
+   focus-visible, so plain :focus-visible ringed every mouse click.
+   html[data-kbd] is set by <InputModality/>. */
+:focus-visible {
+  outline: none;
+}
+html[data-kbd] :focus-visible {
+  outline: 3px solid var(--blue-ring);
+  outline-offset: 2px;
+  border-radius: inherit;
+}
+/* Inside capsules (rows, pills, icon buttons in a pill group) the ring sits
+   inside the shape so it never clips on the panel edge. */
+html[data-kbd] .focus-inset:focus-visible {
+  outline-offset: -3px;
+}
+html[data-kbd] input:focus-visible,
+html[data-kbd] textarea:focus-visible,
+html[data-kbd] [contenteditable]:focus-visible {
+  outline: none;
+}
+
+/* ── Materials (v2) ──────────────────────────────────────────────────────────
+   Three thicknesses. Thickness encodes hierarchy: the larger the surface, the
+   thicker the glass. Both prefixes: Safari still needs -webkit-. The thick
+   material carries a sheen on ::before so the highlight is its own opacity
+   layer (materialize fades it in; nothing animates the blur).
+   Rule: no backdrop-filter inside a backdrop-filter. Anything that sits on a
+   material (selected row, chip, kbd, hover) is a FILL — see mat-fill-*. */
+@utility mat-thin {
+  background: var(--glass-thin);
+  -webkit-backdrop-filter: var(--blur-thin);
+  backdrop-filter: var(--blur-thin);
+  box-shadow: var(--rim), var(--edge-light), var(--shadow-1);
+  border-radius: 9999px;
+  --kbd-fill: var(--fill-kbd-glass);
+  --kbd-rim: 0 0 0 0.5px var(--fill-rim);
+  --skeleton-fill: var(--fill-skeleton-glass);
+}
+@utility mat-reg {
+  background: var(--glass-reg);
+  -webkit-backdrop-filter: var(--blur-reg);
+  backdrop-filter: var(--blur-reg);
+  box-shadow: var(--rim), var(--edge-light), var(--shadow-2);
+  border-radius: var(--r-pill);
+  --kbd-fill: var(--fill-kbd-glass);
+  --kbd-rim: 0 0 0 0.5px var(--fill-rim);
+  --skeleton-fill: var(--fill-skeleton-glass);
+}
+@utility mat-thick {
+  position: relative;
+  background: var(--glass-thick);
+  -webkit-backdrop-filter: var(--blur-thick);
+  backdrop-filter: var(--blur-thick);
+  box-shadow: var(--rim), var(--edge-light), var(--shadow-3);
+  border-radius: var(--r-panel);
+  --kbd-fill: var(--fill-kbd-glass);
+  --kbd-rim: 0 0 0 0.5px var(--fill-rim);
+  --skeleton-fill: var(--fill-skeleton-glass);
+  &::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    pointer-events: none;
+    background: var(--glass-sheen);
+  }
+  & > * {
+    position: relative;
+  }
+}
+/* Fills on glass — selected row capsule and pinned chip. Text on them is 600
+   and full ink. Hover on a fill is the ink tint LAYERED over it
+   (background-image over background-color): a lighter white (.86 / .72, the
+   Phase 0 values) measured ΔL < .01 over paper on the stand — white on white
+   — while the tint reads ≥ .04 over every backdrop. */
+@utility mat-fill-selected {
+  position: relative;
+  isolation: isolate;
+  background-color: var(--fill-glass-selected);
+  box-shadow:
+    inset 0 1px 0 var(--fill-highlight),
+    0 0 0 0.5px var(--fill-rim),
+    0 1px 2px var(--fill-rim);
+  font-weight: 600;
+  color: var(--ink);
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: var(--hover-tint-selected);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 160ms var(--ease-out);
+  }
+  &:hover::after,
+  &[data-hover]::after {
+    opacity: 1;
+    transition-duration: 80ms;
+  }
+}
+@utility mat-fill-chip {
+  position: relative;
+  isolation: isolate;
+  background-color: var(--fill-chip);
+  box-shadow:
+    inset 0 1px 0 var(--fill-highlight),
+    0 0 0 0.5px var(--fill-rim),
+    0 1px 2px var(--fill-rim);
+  font-weight: 600;
+  color: var(--ink);
+  &::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    border-radius: inherit;
+    background: var(--hover-tint);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 160ms var(--ease-out);
+  }
+  &:hover::after,
+  &[data-hover]::after {
+    opacity: 1;
+    transition-duration: 80ms;
+  }
+}
+/* Hover on glass is an ink tint, never white-on-white (ΔL ≥ 0.03). */
+@utility mat-fill-hover {
+  &:hover,
+  &[data-hover] {
+    background-color: var(--fill-glass-hover);
+  }
+}
+
+/* ── Type registers (v2) ─────────────────────────────────────────────────────
+   The only allowed set. Tracking is tied to size (Apple): ≥20px negative em,
+   14–17px −0.15…−0.2px, 13px −0.08px, ≤11px positive. A new size is a design
+   decision, not a styling shortcut. Registers carry the SF stack so a v2
+   surface reads in SF while the body font is still Inter. */
+@utility text-title {
+  font-family: var(--font-sf);
+  font-size: 30px;
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+  font-optical-sizing: auto;
+}
+@utility text-heading {
+  font-family: var(--font-sf);
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+  font-optical-sizing: auto;
+}
+@utility text-subheading {
+  font-family: var(--font-sf);
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.02em;
+  font-optical-sizing: auto;
+}
+@utility text-h3 {
+  font-family: var(--font-sf);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  font-optical-sizing: auto;
+}
+@utility text-body {
+  font-family: var(--font-sf);
+  font-size: 16px;
+  font-weight: 400;
+  line-height: 1.5;
+  letter-spacing: -0.2px;
+  font-optical-sizing: auto;
+}
+@utility text-table {
+  font-family: var(--font-sf);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 1.35;
+  letter-spacing: -0.15px;
+  font-optical-sizing: auto;
+  font-variant-numeric: tabular-nums;
+}
+@utility text-control {
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.08px;
+  font-optical-sizing: auto;
+}
+@utility text-label {
+  font-family: var(--font-sf);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  letter-spacing: 0.06px;
+  font-optical-sizing: auto;
+}
+@utility text-caption {
+  font-family: var(--font-sf);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.35;
+  letter-spacing: 0;
+  font-optical-sizing: auto;
+}
+@utility text-kbd {
+  font-family: var(--font-sf);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.06px;
+  font-optical-sizing: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ── Scroll-edge atom (v2) ───────────────────────────────────────────────────
+   Reserved for lists and panels (sidebar tree, mail list, settings content,
+   palette results). Invisible at rest: the top edge is gated by
+   data-scrolled (the scroller's first pixel out of view, scrollTop > 0), the
+   bottom edge by data-scroll-more (content continues below the fold — the
+   end sentinel out of view); useScrollEdge sets both on the scroller. The
+   page canvas has no edge band — toolbar pills are self-blurring glass. Two
+   variants of one atom:
+   .edge        list content goes UNDER floating chrome — sticky layer,
+                backdrop blur + mask, a direct child of the scroller. Its
+                layers sit at opacity 0 and fade in over 160ms once the
+                scroller carries data-scrolled (instant under reduced
+                motion). Two sibling layers make the progressive blur:
+                12px solid to 30% and gone by 65% (the pill sits in that
+                band), over 2px solid to 65% and gone at 100%. A masked
+                backdrop layer does not shrink its blur radius where the mask
+                fades, it crossfades the blurred copy over the sharp one, so
+                the last step decides what the reader sees at the bottom of
+                the band: the earlier 4px→sharp fade (55%→100%) put a grey
+                double image of a whole text line under the pill, then a
+                sharp one — a shelf. 2px→sharp is a faint halo. The 12px→2px
+                crossfade is between two blurred copies and does not ghost.
+                Siblings, never nested. ≤2 layers per scroller, never on rows.
+   .edge-fade   inside glass panels — mask on the scroller itself, no
+                backdrop-filter. 12px at the top while scrolled, 20px at the
+                bottom while content continues (data-scroll-more), both
+                eased over the same 160ms.
+   Matte fallback: the layers lose their blur and the second one becomes a
+   paper gradient (tokens remapped in the fallback block above). */
+.edge {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-scroll-edge);
+  height: var(--edge-size, 76px);
+  margin-bottom: calc(-1 * var(--edge-size, 76px));
+  pointer-events: none;
+}
+.edge[data-position="bottom"] {
+  top: auto;
+  bottom: 0;
+  margin-bottom: 0;
+  margin-top: calc(-1 * var(--edge-size, 76px));
+}
+.edge > i {
+  position: absolute;
+  inset: 0;
+  display: block;
+  opacity: 0;
+  transition: opacity 160ms var(--ease-out);
+}
+[data-scrolled] > .edge:not([data-position="bottom"]) > i,
+[data-scroll-more] > .edge[data-position="bottom"] > i {
+  opacity: 1;
+}
+/* The matte paper gradient (--edge-fill) rides on the layer whose mask still
+   reaches the bottom so the fallback keeps its full-height fade. */
+.edge > i:nth-child(1) {
+  -webkit-backdrop-filter: var(--edge-backdrop-1);
+  backdrop-filter: var(--edge-backdrop-1);
+  -webkit-mask-image: linear-gradient(#000 65%, transparent);
+  mask-image: linear-gradient(#000 65%, transparent);
+  background: var(--edge-fill);
+}
+.edge > i:nth-child(2) {
+  -webkit-backdrop-filter: var(--edge-backdrop-2);
+  backdrop-filter: var(--edge-backdrop-2);
+  -webkit-mask-image: linear-gradient(#000 30%, transparent 65%);
+  mask-image: linear-gradient(#000 30%, transparent 65%);
+}
+.edge[data-steps="1"] > i:nth-child(1) {
+  -webkit-backdrop-filter: var(--edge-backdrop-single);
+  backdrop-filter: var(--edge-backdrop-single);
+  -webkit-mask-image: linear-gradient(#000 30%, transparent);
+  mask-image: linear-gradient(#000 30%, transparent);
+  background: var(--edge-fill);
+}
+.edge[data-position="bottom"] > i:nth-child(1) {
+  -webkit-mask-image: linear-gradient(transparent, #000 35%);
+  mask-image: linear-gradient(transparent, #000 35%);
+  background: var(--edge-fill-bottom, none);
+}
+.edge[data-position="bottom"] > i:nth-child(2) {
+  -webkit-mask-image: linear-gradient(transparent 35%, #000 70%);
+  mask-image: linear-gradient(transparent 35%, #000 70%);
+}
+.edge[data-position="bottom"][data-steps="1"] > i:nth-child(1) {
+  -webkit-mask-image: linear-gradient(transparent, #000 70%);
+  mask-image: linear-gradient(transparent, #000 70%);
+  background: var(--edge-fill-bottom, none);
+}
+@property --edge-top {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+@property --edge-bottom {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+.edge-fade {
+  --edge-top: 0px;
+  --edge-bottom: 0px;
+  transition:
+    --edge-top 160ms var(--ease-out),
+    --edge-bottom 160ms var(--ease-out);
+  -webkit-mask-image: linear-gradient(
+    transparent 0,
+    #000 var(--edge-top),
+    #000 calc(100% - var(--edge-bottom)),
+    transparent
+  );
+  mask-image: linear-gradient(
+    transparent 0,
+    #000 var(--edge-top),
+    #000 calc(100% - var(--edge-bottom)),
+    transparent
+  );
+}
+.edge-fade[data-scrolled] {
+  --edge-top: 12px;
+}
+.edge-fade[data-scroll-more] {
+  --edge-bottom: 20px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .edge > i,
+  .edge-fade {
+    transition: none;
+  }
+}
+
+/* ── Components (v2) ─────────────────────────────────────────────────────────
+   Phase 1. Plain classes (unlayered, so they win over utilities a consumer
+   still carries) consumed by components/ui/*. Every interactive element has
+   five states — rest, hover, active (press), focus-visible (the global ring,
+   .focus-inset inside capsules), disabled — and the stand renders each one
+   statically through [data-hover] / [data-active] / disabled.
+
+   Hover is ONE mechanism everywhere: the ink tint (--fill-glass-hover) as a
+   background-image layered over whatever fill the element has, plus the
+   second signal the element owns (icon ink-2 → ink, the "…" button, an
+   underline). Lightening a white fill (pill .80, chip .72, selected .86 in
+   the concept) measured ΔL < .01 over paper on the stand; the tint measures
+   ≥ .04 over every stand backdrop in both themes. Hover fills run 80ms in,
+   160ms out. Press is scale .97 (icons .90) on pointer-down, 100ms ease-out,
+   and keeps the hover fill; reduced motion drops the scale and keeps the
+   fill. Disabled is opacity .4 and no pointer events. Focus is the global
+   ring, keyboard only (html[data-kbd] + :focus-visible): a pointer press
+   shows scale + tint, never the ring — no :focus / :active rule below sets
+   an outline. */
+.btn,
+.icon-btn,
+.chip,
+.tree-row,
+.crumb-seg {
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+}
+
+/* Single-line labels. Control is 13/500 with line-height 1; a truncating
+   span (overflow hidden) on that line box clips descenders — "g j p y q".
+   Every truncated label inside a component gets a 1.25 line box (16.25px
+   at 13px, inside every 28/32/36 control), the way SF's UI labels sit in
+   their capsules. A decoration (the breadcrumb underline) goes on the
+   label span, never on the emoji or icon next to it. */
+:is(.btn, .chip, .tree-row, .crumb-seg, .brain-menu-item, .brain-palette-item, .brain-dialog-row, .brain-toast, .brain-mail-row, .brain-mail-row-static) .truncate,
+.tree-row-title,
+.crumb-label {
+  line-height: 1.25;
+}
+
+/* The tint as a LAYER. An element that has a fill of its own (glass pill,
+   chip, the selected capsule, the toast's paper pill) hovers by fading a
+   ::after tinted layer in, so the 80ms in / 160ms out timing is the same as
+   a fill change — a background-image swap would snap. The layer sits under
+   the content (z -1 inside the element's own stacking context). */
+.tint-hover {
+  position: relative;
+  isolation: isolate;
+}
+.tint-hover::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--hover-tint);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms var(--ease-out);
+}
+.tint-hover:hover::after,
+.tint-hover[data-hover]::after {
+  opacity: 1;
+  transition-duration: 80ms;
+}
+
+/* Button — text-control (13/500), one of five variants.
+   This block is UNLAYERED: globals.css opens with `@import "tailwindcss"`,
+   which declares `@layer theme, base, components, utilities`, and unlayered
+   CSS beats every layer whatever the specificity. So `display` here outranks
+   `hidden` / `md:hidden` / `sm:inline-flex` on any .btn or .icon-btn — a
+   responsive show/hide on a button needs the v4 postfix bang (`md:hidden!`)
+   until these classes move into @layer components (their own PR: that flip
+   changes precedence against every utility on every button app-wide). */
+.btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border-radius: var(--r-control);
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.08px;
+  color: var(--ink);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background-color 160ms var(--ease-out),
+    color 160ms var(--ease-out),
+    transform 100ms ease-out;
+}
+.btn:hover,
+.btn[data-hover] {
+  transition-duration: 80ms, 80ms, 100ms;
+}
+.btn:active,
+.btn[data-active] {
+  transform: scale(0.97);
+}
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  opacity: 0.4;
+  pointer-events: none;
+}
+/* glass — regular material capsule 32, floats on paper (never inside glass) */
+.btn-glass {
+  border-radius: 9999px;
+  background-color: var(--glass-reg);
+  -webkit-backdrop-filter: var(--blur-reg);
+  backdrop-filter: var(--blur-reg);
+  box-shadow: var(--rim), var(--edge-light), var(--shadow-2);
+}
+/* quiet — ink-2 text, the tint on hover lifts the text to ink (second signal) */
+.btn-quiet {
+  color: var(--ink-2);
+}
+.btn-quiet:hover,
+.btn-quiet[data-hover] {
+  background-color: var(--fill-glass-hover);
+  color: var(--ink);
+}
+/* ink — the filled primary inside dialogs; hover shifts lightness by .08 */
+.btn-ink {
+  background-color: var(--accent);
+  color: var(--accent-ink);
+}
+.btn-ink:hover,
+.btn-ink[data-hover] {
+  background-color: var(--accent-hover);
+}
+/* accent — the one ink-filled circle per surface (34) */
+.btn-accent {
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  border-radius: 50%;
+  background-color: var(--accent);
+  color: var(--accent-ink);
+}
+.btn-accent:hover,
+.btn-accent[data-hover] {
+  background-color: var(--accent-hover);
+}
+/* destructive — red text, red tint on hover; never a red fill */
+.btn-destructive {
+  color: var(--red);
+  font-weight: 600;
+}
+.btn-destructive:hover,
+.btn-destructive[data-hover] {
+  background-color: var(--red-tint);
+}
+
+/* IconButton — capsule 28 (rows, menus) or 36 (toolbar pills). Icon ink-2 →
+   ink on hover is the second signal; press is .90. */
+.icon-btn {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  border-radius: 9999px;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition:
+    background-color 160ms var(--ease-out),
+    color 160ms var(--ease-out),
+    transform 100ms ease-out;
+}
+.icon-btn[data-size="28"] {
+  width: 28px;
+  height: 28px;
+}
+.icon-btn[data-size="36"] {
+  width: 36px;
+  height: 36px;
+}
+.icon-btn:hover,
+.icon-btn[data-hover] {
+  background-color: var(--fill-glass-hover);
+  color: var(--ink);
+  transition-duration: 80ms, 80ms, 100ms;
+}
+.icon-btn:active,
+.icon-btn[data-active] {
+  transform: scale(0.9);
+}
+.icon-btn:disabled,
+.icon-btn[aria-disabled="true"] {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* Field — on paper: a ring that clears 3:1 at rest (--hair-field), one step
+   stronger on hover, blue on focus. All three are the same mechanism, so the
+   boundary keeps the r10 corners all the way round. The input's own ring is
+   its focus state for every modality (:focus-within on the field, never the
+   keyboard ring, never a press state — a press keeps the hover ring). */
+.field {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--r-control);
+  background: var(--paper);
+  box-shadow: 0 0 0 1px var(--hair-field);
+  color: var(--ink);
+  font-family: var(--font-sf);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: -0.15px;
+  transition: box-shadow 160ms var(--ease-out);
+}
+.field:hover,
+.field[data-hover] {
+  box-shadow: 0 0 0 1px var(--hair-field-strong);
+  transition-duration: 80ms;
+}
+.field:focus-within,
+.field[data-focus] {
+  box-shadow: 0 0 0 1.5px var(--blue);
+}
+.field[data-disabled] {
+  opacity: 0.4;
+  pointer-events: none;
+}
+/* Invalid — the sixth state, and the only one the consumer declares: the
+   input's own `aria-invalid` paints it, so a field cannot be described as
+   broken to a screen reader and look untouched to everyone else. The ladder
+   is the rest ladder in red (70% → full on hover → 1.5px on focus, which
+   holds while the value is still wrong — blue would say it was accepted).
+   Colour is never the only signal: the message that set aria-invalid is on
+   the row. */
+.field:has(input[aria-invalid="true"]) {
+  box-shadow: 0 0 0 1px var(--hair-field-invalid);
+}
+.field:has(input[aria-invalid="true"]):hover,
+.field:has(input[aria-invalid="true"])[data-hover] {
+  box-shadow: 0 0 0 1px var(--red);
+  transition-duration: 80ms;
+}
+.field:has(input[aria-invalid="true"]):focus-within,
+.field:has(input[aria-invalid="true"])[data-focus] {
+  box-shadow: 0 0 0 1.5px var(--red);
+}
+.field > input {
+  min-width: 0;
+  flex: 1;
+  height: 100%;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  outline: none;
+}
+.field > input::placeholder {
+  color: var(--ink-3);
+}
+.field > svg {
+  flex-shrink: 0;
+  color: var(--ink-2);
+}
+/* Field inside a glass panel or popover: an ink fill (never a second
+   material). SearchCapsule is the capsule-32 form with a kbd at the right. */
+.field-glass {
+  background: var(--fill-field-glass);
+  box-shadow: inset 0 0.5px 0 var(--fill-rim);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.08px;
+  transition:
+    background-color 160ms var(--ease-out),
+    box-shadow 160ms var(--ease-out);
+}
+.field-glass:hover,
+.field-glass[data-hover] {
+  background: var(--fill-field-glass-hover);
+  box-shadow: inset 0 0.5px 0 var(--fill-rim);
+  transition-duration: 80ms;
+}
+.field-glass:focus-within,
+.field-glass[data-focus] {
+  background: var(--fill-field-glass);
+  box-shadow: 0 0 0 1.5px var(--blue);
+}
+.field-glass > input::placeholder {
+  color: var(--ink-2);
+}
+.search-capsule {
+  border-radius: var(--r-field);
+}
+
+/* Kbd — a chip that takes its fill from the surface it sits on (--kbd-fill:
+   white .70 + rim on glass, ink .05 on paper). Not interactive. */
+.kbd {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: var(--r-sm);
+  background: var(--kbd-fill);
+  box-shadow: var(--kbd-rim);
+  font-family: var(--font-sf);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.06px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+
+/* Chip — pinned tile on glass: white .50 fill, 600, bold icon when active.
+   Matte fallback remaps --fill-chip to an ink tint. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 10px 0 8px;
+  border-radius: var(--r-row);
+  background-color: var(--fill-chip);
+  box-shadow:
+    inset 0 1px 0 var(--fill-highlight),
+    0 0 0 0.5px var(--fill-rim),
+    0 1px 2px var(--fill-rim);
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.08px;
+  color: var(--ink);
+  cursor: pointer;
+  transition:
+    background-color 160ms var(--ease-out),
+    transform 100ms ease-out;
+}
+.chip:active,
+.chip[data-active] {
+  transform: scale(0.97);
+}
+.chip:disabled,
+.chip[aria-disabled="true"] {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.chip-glyph {
+  display: grid;
+  width: 18px;
+  place-items: center;
+  flex-shrink: 0;
+  font-size: 14px;
+  line-height: 1;
+}
+.chip-glyph > svg {
+  color: var(--ink-2);
+}
+.chip[data-active-state] .chip-glyph > svg {
+  color: var(--ink);
+}
+
+/* Tree row — 28px capsule r14 on glass. Rest is transparent, hover the ink
+   tint + the "…" button, selected a white capsule (600) that flows between
+   rows on SPRING_SELECT (the capsule is a layoutId sibling behind the
+   content), drag lifts on --lift. */
+.tree-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  height: 28px;
+  padding: 0 4px 0 10px;
+  border-radius: var(--r-row);
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.08px;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 160ms var(--ease-out);
+}
+.tree-row > * {
+  position: relative;
+}
+.tree-row > .tree-row-capsule {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background-color: var(--fill-glass-selected);
+  box-shadow:
+    inset 0 1px 0 var(--fill-highlight),
+    0 0 0 0.5px var(--fill-rim),
+    0 1px 2px var(--fill-rim);
+  pointer-events: none;
+}
+.tree-row > .tree-row-capsule::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--hover-tint-selected);
+  opacity: 0;
+  transition: opacity 160ms var(--ease-out);
+}
+.tree-row:not([data-selected]):hover,
+.tree-row:not([data-selected])[data-hover] {
+  background-color: var(--fill-glass-hover);
+  transition-duration: 80ms;
+}
+.tree-row[data-selected] {
+  font-weight: 600;
+}
+.tree-row[data-selected]:hover > .tree-row-capsule::after,
+.tree-row[data-selected][data-hover] > .tree-row-capsule::after {
+  opacity: 1;
+  transition-duration: 80ms;
+}
+.tree-row[data-dragging] {
+  background-color: var(--fill-glass-selected);
+  box-shadow: var(--lift);
+  transform: scale(1.02);
+}
+.tree-row[data-drop-into] {
+  background-color: var(--fill-glass-hover);
+  box-shadow: inset 0 0 0 1.5px var(--yellow);
+}
+.tree-row-glyph {
+  display: grid;
+  width: 18px;
+  place-items: center;
+  flex-shrink: 0;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--ink-2);
+}
+.tree-row[data-selected] .tree-row-glyph,
+.tree-row:hover .tree-row-glyph,
+.tree-row[data-hover] .tree-row-glyph {
+  color: var(--ink);
+}
+.tree-row-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.tree-row-more {
+  opacity: 0;
+  transition: opacity 80ms var(--ease-out);
+}
+.tree-row:hover .tree-row-more,
+.tree-row:focus-within .tree-row-more,
+.tree-row[data-hover] .tree-row-more,
+.tree-row-more:has([data-state="open"]) {
+  opacity: 1;
+}
+.tree-row-toggle {
+  display: grid;
+  width: 18px;
+  height: 18px;
+  place-items: center;
+  flex-shrink: 0;
+  margin-left: -6px;
+  border-radius: 9999px;
+  color: var(--ink-2);
+}
+.tree-row-toggle:hover,
+.tree-row-toggle[data-hover] {
+  background-color: var(--fill-glass-hover);
+  color: var(--ink);
+}
+.tree-row-toggle:active {
+  transform: scale(0.9);
+}
+.tree-row-toggle > svg {
+  transition: transform 200ms var(--ease-out);
+}
+.tree-row-toggle[aria-expanded="true"] > svg {
+  transform: rotate(90deg);
+}
+.tree-row-toggle[data-leaf] {
+  visibility: hidden;
+}
+/* the yellow insertion indicator — transient, gone with the gesture */
+.tree-insert {
+  position: relative;
+  height: 2px;
+  margin: -1px 6px -1px 10px;
+  border-radius: 1px;
+  background: var(--yellow);
+  pointer-events: none;
+}
+.tree-insert::before {
+  content: "";
+  position: absolute;
+  left: -4px;
+  top: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--yellow);
+}
+/* pinned to the edge of the row it belongs to, so "between these two" is drawn
+   on the boundary the pointer is actually on, at the indent of the parent it
+   would land in */
+.tree-insert_edge {
+  position: absolute;
+  left: 0;
+  right: 0;
+  margin-top: 0;
+  margin-bottom: 0;
+  z-index: 1;
+}
+.tree-insert_edge[data-edge="before"] {
+  top: -1px;
+}
+.tree-insert_edge[data-edge="after"] {
+  bottom: -1px;
+}
+@media (hover: none) {
+  .tree-row-more {
+    opacity: 1;
+  }
+}
+
+/* Breadcrumb pill — regular material 36: emoji + parent (ink 500, chevron)
+   › current (600). Parents are links: hover is the tint + an underline. The
+   "Edited 2h ago" meta is NOT inside — it lives on paper. */
+.crumb {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+  min-width: 0;
+  height: 36px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--glass-reg);
+  -webkit-backdrop-filter: var(--blur-reg);
+  backdrop-filter: var(--blur-reg);
+  box-shadow: var(--rim), var(--edge-light), var(--shadow-2);
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.08px;
+  color: var(--ink);
+  --kbd-fill: var(--fill-kbd-glass);
+  --kbd-rim: 0 0 0 0.5px var(--fill-rim);
+}
+.crumb-seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--r-row);
+  color: var(--ink);
+  font-weight: 500;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    background-color 160ms var(--ease-out),
+    transform 100ms ease-out;
+}
+.crumb-seg[aria-current="page"] {
+  font-weight: 600;
+}
+.crumb-seg:is(a, button) {
+  cursor: pointer;
+}
+.crumb-seg:is(a, button):hover,
+.crumb-seg:is(a, button)[data-hover] {
+  background-color: var(--fill-glass-hover);
+  transition-duration: 80ms, 100ms;
+}
+/* the underline decorates the label only — never the emoji or icon */
+.crumb-seg:is(a, button):hover > .crumb-label,
+.crumb-seg:is(a, button)[data-hover] > .crumb-label {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-thickness: 1px;
+}
+.crumb-seg:is(a, button):active,
+.crumb-seg:is(a, button)[data-active] {
+  transform: scale(0.97);
+}
+.crumb-seg:is(a, button):disabled,
+.crumb-seg:is(a, button)[aria-disabled="true"] {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.crumb-glyph {
+  font-size: 14px;
+  line-height: 1;
+}
+.crumb-sep {
+  padding: 0 2px;
+  color: var(--ink-4);
+}
+
+/* Toolbar pill — regular material 36 hosting 36 icon buttons, a hairline
+   between groups. Self-blurring: no edge band under it. */
+.toolbar-pill {
+  display: inline-flex;
+  align-items: center;
+  height: 36px;
+  border-radius: var(--r-pill);
+  background: var(--glass-reg);
+  -webkit-backdrop-filter: var(--blur-reg);
+  backdrop-filter: var(--blur-reg);
+  box-shadow: var(--rim), var(--edge-light), var(--shadow-2);
+  color: var(--ink);
+  --kbd-fill: var(--fill-kbd-glass);
+  --kbd-rim: 0 0 0 0.5px var(--fill-rim);
+}
+.toolbar-pill > .btn {
+  height: 36px;
+  border-radius: var(--r-pill);
+}
+.toolbar-divider {
+  width: 1px;
+  height: 18px;
+  flex-shrink: 0;
+  background: var(--hair);
+}
+
+/* Menu / popover — regular material r14, item r8 inside padding 6.
+   Materializes on Radix data-state through keyframes (never framer: the
+   unmount timing and focus-return leases stay Radix's). Opacity + scale
+   .96 → 1 from the trigger's corner; the edge-light rides its own ::before
+   layer and arrives at 60%. Exit retraces in 120ms. Nothing animates the
+   blur. */
+.brain-menu {
+  position: relative;
+  isolation: isolate;
+  min-width: 184px;
+  padding: 6px;
+  border-radius: var(--r-popover);
+  background: var(--glass-reg);
+  -webkit-backdrop-filter: var(--blur-reg);
+  backdrop-filter: var(--blur-reg);
+  box-shadow: var(--rim), var(--shadow-2);
+  color: var(--ink);
+  outline: none;
+  transform-origin: var(
+    --radix-dropdown-menu-content-transform-origin,
+    var(--radix-context-menu-content-transform-origin, var(--radix-popover-content-transform-origin, top left))
+  );
+  --kbd-fill: var(--fill-kbd-glass);
+  --kbd-rim: 0 0 0 0.5px var(--fill-rim);
+  --skeleton-fill: var(--fill-skeleton-glass);
+}
+.brain-menu::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  box-shadow: var(--edge-light);
+  pointer-events: none;
+}
+.brain-menu[data-state="open"] {
+  animation: materialize-in 220ms var(--ease-out) both;
+}
+.brain-menu[data-state="open"]::before {
+  animation: materialize-edge 220ms linear both;
+}
+.brain-menu[data-state="closed"] {
+  animation: materialize-out 120ms ease-in both;
+}
+.brain-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 32px;
+  padding: 0 8px;
+  border-radius: var(--r-block);
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.08px;
+  color: var(--ink);
+  cursor: pointer;
+  outline: none;
+  user-select: none;
+  transition: background-color 160ms var(--ease-out);
+}
+.brain-menu-item[data-highlighted],
+.brain-menu-item:hover,
+.brain-menu-item[data-hover] {
+  background-color: var(--fill-glass-hover);
+  transition-duration: 80ms;
+}
+.brain-menu-item[data-disabled],
+.brain-menu-item:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.brain-menu-icon {
+  flex-shrink: 0;
+  color: var(--ink-2);
+  transition: color 80ms var(--ease-out);
+}
+.brain-menu-item[data-highlighted] .brain-menu-icon,
+.brain-menu-item:hover .brain-menu-icon,
+.brain-menu-item[data-hover] .brain-menu-icon {
+  color: var(--ink);
+}
+.brain-menu-sep {
+  height: 1px;
+  margin: 6px 4px;
+  background: var(--hair);
+}
+.brain-menu-label {
+  padding: 4px 8px 2px;
+  font-family: var(--font-sf);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  letter-spacing: 0.06px;
+  color: var(--ink-2);
+}
+/* Share popover — the regular material r14 anchored to the Share pill
+   (DESIGN.md v2 → §12 Menu / popover; plan row P3-c). Same materialize canon
+   as .brain-menu: Radix data-state drives the keyframes, the edge-light rides
+   ::before and arrives at 60%, exit retraces in 120ms. Everything inside is
+   a fill — never a second material. */
+.brain-share-popover {
+  position: relative;
+  isolation: isolate;
+  width: 352px;
+  max-width: calc(100vw - 24px);
+  padding: 14px;
+  border-radius: var(--r-popover);
+  background: var(--glass-reg);
+  -webkit-backdrop-filter: var(--blur-reg);
+  backdrop-filter: var(--blur-reg);
+  box-shadow: var(--rim), var(--shadow-2);
+  color: var(--ink);
+  font-family: var(--font-sf);
+  outline: none;
+  transform-origin: var(--radix-popover-content-transform-origin, top right);
+  --kbd-fill: var(--fill-kbd-glass);
+  --kbd-rim: 0 0 0 0.5px var(--fill-rim);
+  --skeleton-fill: var(--fill-skeleton-glass);
+}
+.brain-share-popover::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  box-shadow: var(--edge-light);
+  pointer-events: none;
+}
+.brain-share-popover[data-state="open"] {
+  animation: materialize-in 220ms var(--ease-out) both;
+}
+.brain-share-popover[data-state="open"]::before {
+  animation: materialize-edge 220ms linear both;
+}
+.brain-share-popover[data-state="closed"] {
+  animation: materialize-out 120ms ease-in both;
+}
+
+/* The public-link well: a quiet field-like fill for the URL (a fill, not a
+   second material — the search-capsule rule). */
+.brain-share-url-well {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  flex: 1;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: var(--r-block);
+  background: var(--fill-field-glass);
+  box-shadow: inset 0 0.5px 0 var(--fill-rim);
+}
+
+/* Copy / open beside the well — the icon-button register at 32, grown to
+   the 44px touch minimum on the phone sheet. */
+.brain-share-icon-btn {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 32px;
+  height: 32px;
+  border-radius: 9999px;
+  color: var(--ink-2);
+  cursor: pointer;
+  transition:
+    background-color 160ms var(--ease-out),
+    color 160ms var(--ease-out),
+    transform 100ms ease-out;
+}
+.brain-share-icon-btn:hover {
+  background-color: var(--fill-glass-hover);
+  color: var(--ink);
+  transition-duration: 80ms, 80ms, 100ms;
+}
+.brain-share-icon-btn:active {
+  transform: scale(0.9);
+}
+.brain-share-icon-btn:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* Expiry segments — native radios in a glass-field well; the checked label
+   is the white selected capsule (the palette's selected-row fill). */
+.brain-share-seg {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 2px;
+  padding: 2px;
+  border: 0;
+  border-radius: var(--r-control);
+  background: var(--fill-field-glass);
+}
+.brain-share-seg-option {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 26px;
+  padding: 0 4px;
+  border-radius: var(--r-block);
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.25;
+  letter-spacing: -0.08px;
+  color: var(--ink-2);
+  transition:
+    color 160ms var(--ease-out),
+    background-color 160ms var(--ease-out);
+}
+.brain-share-seg-option:hover {
+  color: var(--ink);
+  transition-duration: 80ms;
+}
+.brain-share-seg-option[data-checked] {
+  background-color: var(--fill-glass-selected);
+  box-shadow:
+    inset 0 1px 0 var(--fill-highlight),
+    0 0 0 0.5px var(--fill-rim),
+    0 1px 2px var(--fill-rim);
+  color: var(--ink);
+  font-weight: 600;
+}
+
+/* Password settings reveal — height through the grid-rows trick, one fade.
+   The inner pane trades a 6px margin for padding so focus rings survive its
+   overflow clip; the global reduced-motion block zeroes the animation. */
+.brain-share-reveal {
+  display: grid;
+  grid-template-rows: 1fr;
+  animation: share-reveal 200ms var(--ease-out);
+}
+.brain-share-reveal > * {
+  min-height: 0;
+  overflow: hidden;
+  margin: -6px;
+  padding: 6px;
+}
+@keyframes share-reveal {
+  from {
+    grid-template-rows: 0fr;
+    opacity: 0;
+  }
+  to {
+    grid-template-rows: 1fr;
+    opacity: 1;
+  }
+}
+
+@media (max-width: 639px) {
+  .brain-share-url-well {
+    height: 44px;
+  }
+  .brain-share-icon-btn {
+    width: 44px;
+    height: 44px;
+  }
+  .brain-share-seg-option {
+    min-height: 44px;
+  }
+}
+
+@keyframes materialize-in {
+  from {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+@keyframes materialize-out {
+  from {
+    opacity: 1;
+    transform: scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: scale(0.96);
+  }
+}
+@keyframes materialize-edge {
+  0%,
+  60% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 1;
+  }
+}
+
+/* Table handle actions (milkdown-generated DOM, styled from
+   editor/table-block.css): the popover over a yellow handle is the regular
+   material. Declared here because the material layer is the one place that
+   blurs. */
+.milkdown .milkdown-table-block .cell-handle .button-group {
+  background-color: var(--glass-reg);
+  -webkit-backdrop-filter: var(--blur-reg);
+  backdrop-filter: var(--blur-reg);
+  box-shadow: var(--rim), var(--edge-light), var(--shadow-2);
+}
+
+/* Skeleton — takes its fill from the surface (--skeleton-fill: ink .05 on
+   paper, white .40 on glass); the pulse stops under reduced motion. */
+.skeleton {
+  border-radius: var(--r-sm);
+  background: var(--skeleton-fill);
+}
+
+/* Sticker — content, not chrome: r14, the warm gradient, Label 11 header
+   with a dot, a warm shadow of its own at rest (an object on the desk). */
+.brain-sticker,
+.brain-sticker-inline {
+  border-radius: var(--r-sticker);
+  background: var(--sticker-gradient);
+  box-shadow: var(--shadow-sticker);
+  color: var(--sticker-ink);
+}
+.brain-sticker-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font-sf);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  letter-spacing: 0.06px;
+  color: var(--sticker-ink);
+  opacity: 0.7;
+}
+.brain-sticker-label::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.6;
+}
+
+/* Toast — ink capsule (opaque: a transient reads over anything), L3 shadow.
+   The pills stand in ONE bottom-centre column (`SnackbarStack`), so a refusal
+   raised over a live undo stacks above it instead of landing on the same
+   coordinates — and the column, not the pill, owns the offset. Below md that
+   offset clears the mobile tab bar: the bar occupies safe+8 to safe+62 and a
+   pill at safe+24 covered the middle three slots for the whole ten seconds of
+   an undo. Same reserve `.brain-mail-scrollfoot` already keeps for that strip
+   (--inset*2 + the bar's 54), and it is kept whether or not the bar is up: a
+   pill that moved with the bar would move under the reader's hand. The rows
+   space on the pill's own margin rather than a `gap`, because a closed pill
+   still leaves its live region mounted and a gap would count the empty ones.
+   The column centres on the CANVAS, not the window: its left edge is the
+   document column's own offset (--canvas-offset — the sidebar's reserve at
+   md+, 0 on a phone and once focus mode has settled), so a pill stands on
+   the line the editor column is centred on and never on the sidebar's glass.
+   Centred on the window it sat 152px left of the canvas centre at 1440 and
+   at 768 it crossed onto the sidebar by 64px, over Settings and Trash. */
+.brain-toast-stack {
+  position: fixed;
+  z-index: var(--z-toast);
+  right: 0;
+  bottom: calc(var(--inset) * 2 + 54px + env(safe-area-inset-bottom, 0px));
+  left: var(--canvas-offset, 0px);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 16px;
+  pointer-events: none;
+}
+@media (min-width: 768px) {
+  .brain-toast-stack {
+    bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  }
+}
+.brain-toast-slot {
+  min-width: 0;
+  max-width: 100%;
+}
+.brain-toast-slot .brain-toast {
+  margin-top: 8px;
+}
+.brain-toast {
+  border-radius: 9999px;
+  background: var(--ink);
+  box-shadow: var(--shadow-3);
+  color: var(--paper);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .btn:active,
+  .btn[data-active],
+  .icon-btn:active,
+  .icon-btn[data-active],
+  .chip:active,
+  .chip[data-active],
+  .crumb-seg:active,
+  .crumb-seg[data-active] {
+    transform: none;
+  }
+  .brain-sidebar-back:active {
+    transform: none;
+  }
+  .tree-row[data-dragging] {
+    transform: none;
+  }
+  .brain-menu[data-state="open"],
+  .brain-share-popover[data-state="open"] {
+    animation-name: dialog-fade;
+  }
+  .brain-menu[data-state="closed"],
+  .brain-share-popover[data-state="closed"] {
+    animation-name: dialog-fade-out;
+  }
+  .brain-menu[data-state="open"]::before,
+  .brain-share-popover[data-state="open"]::before {
+    animation: none;
+  }
+}
+
+/* ── Background under glass (v2) ─────────────────────────────────────────────
+   Two modes on <html data-bg>, read from localStorage "brain-bg" before paint
+   (layout.tsx). "still" = three static radial edge tints. "live" = the same
+   three tints on their own compositing layers, drifting on 48–64s alternate
+   cycles (a full return takes ≥96s, far below the 0.2 Hz vestibular zone),
+   transform + opacity only. Reduced motion stops the drift entirely and the
+   layers rest at their still positions. The element is opt-in: <Background/>
+   renders it as the first child of a surface whose root isolates
+   (isolation: isolate); the current UI does not mount one. */
+.brain-bg {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-bg);
+  pointer-events: none;
+  overflow: hidden;
+  background-color: var(--paper);
+}
+.brain-bg[data-fixed] {
+  position: fixed;
+}
+.brain-bg-still,
+:where(html:not([data-bg="live"])) .brain-bg-auto {
+  /* Two tints, both on the left, where the sidebar's glass has something to
+     refract. The third sat at 100% 50% — open canvas at the window's right
+     edge, where no glass passes over it, so it read as a glow on a wall
+     rather than as light caught in a material, and it was removed. A tint
+     belongs only where a glass surface passes over it. */
+  background-image:
+    radial-gradient(900px 560px at 0% 0%, var(--tint-sky) 0%, transparent 60%),
+    radial-gradient(760px 560px at 6% 100%, var(--tint-sand) 0%, transparent 58%);
+}
+.brain-bg-still > i,
+:where(html:not([data-bg="live"])) .brain-bg-auto > i {
+  display: none;
+}
+.brain-bg-live > i,
+:where(html[data-bg="live"]) .brain-bg-auto > i {
+  position: absolute;
+  display: block;
+  width: 140%;
+  height: 140%;
+  left: -20%;
+  top: -20%;
+  will-change: transform;
+  animation-duration: 48s;
+  animation-timing-function: ease-in-out;
+  animation-iteration-count: infinite;
+  animation-direction: alternate;
+}
+.brain-bg-live > i:nth-child(1),
+:where(html[data-bg="live"]) .brain-bg-auto > i:nth-child(1) {
+  background: radial-gradient(640px 400px at 14% 14%, var(--tint-sky) 0%, transparent 60%);
+  animation-name: bg-drift-a;
+}
+.brain-bg-live > i:nth-child(2),
+:where(html[data-bg="live"]) .brain-bg-auto > i:nth-child(2) {
+  background: radial-gradient(540px 400px at 18% 86%, var(--tint-sand) 0%, transparent 58%);
+  animation-name: bg-drift-b;
+  animation-duration: 56s;
+}
+@keyframes bg-drift-a {
+  from {
+    transform: translate3d(0, 0, 0);
+    opacity: 1;
+  }
+  to {
+    transform: translate3d(4%, 3%, 0);
+    opacity: 0.8;
+  }
+}
+@keyframes bg-drift-b {
+  from {
+    transform: translate3d(0, 0, 0);
+    opacity: 0.85;
+  }
+  to {
+    transform: translate3d(3%, -4%, 0);
+    opacity: 1;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brain-bg-live > i,
+  :where(html[data-bg="live"]) .brain-bg-auto > i {
+    animation: none;
+    will-change: auto;
+    transform: none;
+    opacity: 1;
+  }
+}
+
+/* ── Shell (v2) — the train ─────────────────────────────────────────────────
+   The app shell on the v2 system: the paper is the whole window, the edge
+   tints sit on the static .brain-shell (never background-attachment: fixed,
+   which iOS ignores), the scroller is transparent, and the chrome floats over
+   it with the 12px inset. The shell root flips the transitional ink names to
+   the v2 values and sets the SF stack, so the share page (outside the shell)
+   stays on v1 until Phase 3; the portaled overlays (menus, dialogs, palette,
+   toast, mobile sheets) take the same flip so one viewport reads in one ink.
+   --canvas-offset is the document column's left offset (inset + sidebar +
+   inset); focus mode animates the sidebar on transform and flips the offset
+   once when the spring settles (data-sidebar-collapsed) — one reflow, never
+   a per-frame padding animation (B5). */
+.brain-shell,
+.brain-menu,
+.brain-dialog,
+.brain-palette,
+.brain-palette-mobile,
+.brain-toast,
+.brain-mobile-pages {
+  --ink: var(--ink-v2);
+  --ink-2: var(--ink-2-v2);
+  --ink-3: var(--ink-3-v2);
+  --scrim: var(--scrim-v2);
+  font-family: var(--font-sf);
+  font-optical-sizing: auto;
+}
+.brain-shell {
+  --sidebar-w: 280px;
+  --canvas-offset: 0px;
+  /* the band the floating chrome occupies at the top of the canvas */
+  --chrome-top: calc(env(safe-area-inset-top, 0px) + var(--inset) + 36px);
+  position: relative;
+  isolation: isolate;
+  color: var(--ink);
+  background: transparent;
+}
+@media (min-width: 768px) {
+  .brain-shell {
+    --canvas-offset: calc(var(--inset) * 2 + var(--sidebar-w));
+  }
+  .brain-shell[data-sidebar-collapsed] {
+    --canvas-offset: 0px;
+  }
+}
+.brain-main {
+  position: relative;
+  padding-left: var(--canvas-offset);
+  background: transparent;
+}
+/* B6: nothing the browser scrolls into view (the caret, a search match, a
+   focused control) lands under the pills — pill 36 + inset + 16. ProseMirror
+   gets the same band as scrollMargin / scrollThreshold (milkdown-editor). */
+.brain-page-scroll {
+  background: transparent;
+  scroll-padding-top: calc(var(--chrome-top) + 16px);
+}
+/* the document column starts below the pill band: the band + 28 (a page
+   without a cover); on mobile the header is in flow, so only the inset */
+.brain-shell {
+  --canvas-top: var(--inset);
+}
+@media (min-width: 768px) {
+  .brain-shell {
+    --canvas-top: calc(var(--inset) + 36px + 28px);
+  }
+}
+.brain-page-top {
+  padding-top: var(--canvas-top);
+}
+
+/* Toolbar pills — desktop: an absolute layer at the 12px inset, a sibling
+   of the scroller (nothing animates it, B3); the layer itself lets pointer
+   events through to the canvas, the pills take them. Mobile: the compact
+   row in flow. */
+.brain-topbar {
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.brain-topbar-mobile {
+  display: flex;
+}
+.brain-topbar-desktop {
+  display: none;
+  position: absolute;
+  z-index: var(--z-toolbar);
+  top: calc(var(--inset) + env(safe-area-inset-top, 0px));
+  left: calc(var(--canvas-offset) + var(--inset));
+  right: calc(var(--inset) + env(safe-area-inset-right, 0px));
+  pointer-events: none;
+}
+.brain-topbar-desktop > * {
+  pointer-events: auto;
+}
+@media (min-width: 768px) {
+  .brain-topbar-desktop {
+    display: flex;
+  }
+  .brain-topbar-mobile {
+    display: none;
+  }
+}
+.brain-topbar-mobile {
+  flex-shrink: 0;
+  height: calc(52px + env(safe-area-inset-top, 0px));
+  padding: calc(var(--inset) + env(safe-area-inset-top, 0px))
+    max(var(--inset), env(safe-area-inset-right, 0px)) var(--inset)
+    max(var(--inset), env(safe-area-inset-left, 0px));
+}
+.brain-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+.brain-crumb {
+  min-width: 0;
+}
+/* A crumb with one segment is the page's own title again (DESIGN.md v2 → §12
+   Breadcrumb), so it waits for the title to leave: `.brain-main` takes
+   `data-title-out` from an IntersectionObserver on the title itself
+   (shell/page-head.tsx → useTitleReveal), and the pill arrives on the
+   materialize canon of §6 — opacity + scale .96 → 1 over 220ms, retraced in
+   120ms on the way out. `visibility` and not opacity alone: hidden, the pill
+   is out of the accessibility tree and out of the tab order, and it still
+   holds its box, so the pills at the right of the layer never move and no
+   gap opens under the scroll. */
+.brain-crumb-lone {
+  visibility: hidden;
+  opacity: 0;
+  transform: scale(0.96);
+  transform-origin: left center;
+  transition:
+    opacity 120ms ease-in,
+    transform 120ms ease-in,
+    visibility 0s linear 120ms;
+}
+.brain-main[data-title-out] .brain-crumb-lone {
+  visibility: visible;
+  opacity: 1;
+  transform: scale(1);
+  transition:
+    opacity 220ms var(--ease-out),
+    transform 220ms var(--ease-out),
+    visibility 0s;
+}
+/* §6: a crossfade of 160ms or under, no scale. The reveal itself stays — it
+   is what the pill means here, not decoration. */
+@media (prefers-reduced-motion: reduce) {
+  .brain-crumb-lone {
+    transform: none;
+    transition:
+      opacity 120ms ease-in,
+      visibility 0s linear 120ms;
+  }
+  .brain-main[data-title-out] .brain-crumb-lone {
+    transform: none;
+    transition:
+      opacity 160ms var(--ease-out),
+      visibility 0s;
+  }
+}
+/* Pill buttons carry 14px of padding instead of the .btn 12, so labels sit
+   on the capsule's own rhythm. Named .btn-quiet for the reason the colour
+   rule below is: at (0,2,0) a bare .btn here would also overwrite the 0
+   padding .btn-accent needs for its 34 circle. Every .btn in a pill is quiet
+   today, so the two selectors paint the same pixels. */
+.toolbar-pill > .btn-quiet {
+  padding: 0 14px;
+}
+/* Text on a travelling pill is ink only (DESIGN.md v2 → Materials: a pill
+   passes over anything the canvas shows, and ink-2 on regular glass over a
+   dark cover measured ~3:1). The quiet button and the icon button rest at
+   ink here instead of their ink-2 default; the hover tint and press stay.
+   The rule belongs to the pill, not to one host — a pill carries the same
+   meaning in the topbar, in the mail reader and over the thread list.
+   It names .btn-quiet, not .btn: :is(.btn, .icon-btn) is (0,2,0) and would
+   beat .btn-ink / .btn-accent / .btn-destructive at (0,1,0), so the first red
+   button dropped into a pill would quietly lose its red. Every .btn in a pill
+   today is quiet, so the two selectors paint the same pixels. */
+.toolbar-pill :is(.btn-quiet, .icon-btn) {
+  color: var(--ink);
+}
+/* A pressed toggle reads pressed wherever the pill travels — the third rule
+   of the same set, so it leaves .brain-topbar with the other two. */
+.toolbar-pill > .btn-quiet[aria-pressed="true"] {
+  color: var(--ink);
+  font-weight: 600;
+}
+/* the icon-only share trigger on mobile keeps the 36 capsule */
+.brain-topbar-mobile .toolbar-pill > .btn:empty,
+.brain-topbar-mobile .toolbar-pill > .btn:has(> svg:only-child) {
+  width: 36px;
+  padding: 0;
+}
+
+/* Focus-mode exit — a thin chip at the bottom-left, quiet until hovered */
+.brain-focus-exit {
+  position: fixed;
+  z-index: calc(var(--z-drawer) - 20);
+  left: calc(var(--inset) + env(safe-area-inset-left, 0px));
+  bottom: calc(var(--inset) + env(safe-area-inset-bottom, 0px));
+  display: none;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px 0 6px;
+  color: var(--ink-2);
+  opacity: 0.55;
+  transition:
+    opacity 160ms var(--ease-out),
+    color 160ms var(--ease-out);
+}
+@media (min-width: 768px) {
+  .brain-focus-exit {
+    display: inline-flex;
+  }
+}
+.brain-focus-exit:hover,
+.brain-focus-exit:focus-visible {
+  opacity: 1;
+  color: var(--ink);
+  transition-duration: 80ms;
+}
+
+/* Title block meta on paper: "Edited 2h ago · Saved" (Caption, ink-3) */
+.brain-page-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 20px;
+  margin: -8px 0 12px;
+  color: var(--ink-3);
+}
+.brain-page-meta > time {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Page cover — a full-bleed band that dissolves at its edges instead of
+   ending at them. It fills the canvas, runs up under the floating chrome to
+   the window's top edge, out to the right edge, and LEFT under the sidebar to
+   the window's left edge. The sidebar is thick glass: what passes under it is
+   blurred and re-saturated, so a page with a strong cover tints its own
+   sidebar. That is the decision, not a leak.
+
+   It only works if the cover arrives at the sidebar already spent. The ramp
+   therefore does its work on the open canvas — from --cover-left in to the
+   sidebar's right edge the cover loses ~86% of its density — and what travels
+   on under the glass is a residue, --cover-residue, fading to nothing at the
+   window's left edge. The glass catches a hint of the colour, never a fill.
+
+   Both dissolves are MASKS on the cover's own pixels, never a fill. The ground
+   under the cover is the canvas — var(--paper) plus three static radial tints
+   (.brain-bg on the shell, which does not scroll) — so the colour behind any
+   given point of the cover changes with the scroll position and with x. A fill
+   can match one of those and no more. A mask matches all of them, because it
+   removes the cover instead of painting over it. It is also what lets the
+   residue reach the sidebar as alpha, which is the only thing glass can
+   refract.
+
+   The ramp is eased. A two-stop linear alpha ramp bands in its own middle, and
+   over a saturated photo a hard ramp leaves the image sharp right up to the
+   line where it disappears, which reads as a seam. So the alpha runs through
+   the same seven stops on both edges — the left ones lifted onto the residue
+   floor — and a progressive blur takes the detail out before the alpha does.
+   The foot runs the scroll edge's pair, 4px fading in over the first third and
+   20px over the last half, the step between them blur-to-blur and never
+   blur-to-sharp (a sharp step ghosts a doubled image — see the scroll-edge
+   note); the left ramp is long enough to do it with one. Both bands stop at
+   the sidebar's right edge: under the glass the blur would only compound the
+   sidebar's own. Layers lose their blur under reduced transparency / no
+   backdrop-filter (--cover-blur-* remapped in the fallback blocks) and the
+   mask carries the whole fade on its own.
+
+   Mobile has no sidebar and no offset, so every left token is 0 and the mask
+   is a no-op — an image against the window edge is not a cut. The residue's
+   own stop is min(--inset, --cover-glass) so that it collapses with the rest;
+   left at --inset it would leave an 8px step at the window edge. Focus mode is
+   the same case: the sidebar is away, the cover already reaches the window
+   edge, and the fade would be fading into nothing. */
+.brain-shell {
+  /* how far up the banner the alpha runs — 80% of its height, both sizes */
+  --cover-dissolve: 144px;
+  /* the blur band at the banner's bottom, shorter than the dissolve */
+  --cover-foot: 88px;
+  /* x of the sidebar's right edge, measured from the cover's left edge */
+  --cover-glass: 0px;
+  /* the open canvas the main ramp runs across, starting at --cover-glass */
+  --cover-ramp: 0px;
+  /* what survives under the glass, and the rise the ramp has left above it */
+  --cover-residue: 0.22;
+  --cover-rise: calc(1 - var(--cover-residue));
+}
+/* Registered so the two lengths can be interpolated. Focus mode takes the
+   canvas offset in one reflow once the sidebar's spring settles (B5) — that
+   is a layout decision and it stays. What cannot be a step is the picture:
+   these two lengths are 452px of the cover's left side, and flipping them
+   repaints a third of the image from faded-to-nothing to full density in a
+   single frame. A mask does not transition on its own, so the lengths under
+   it do, and the dissolve slides out with the sidebar instead of cutting. */
+@property --cover-glass {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 0px;
+}
+@property --cover-ramp {
+  syntax: "<length>";
+  inherits: true;
+  initial-value: 0px;
+}
+@media (min-width: 768px) {
+  .brain-shell {
+    --cover-dissolve: 176px;
+    --cover-foot: 124px;
+    --cover-glass: calc(var(--canvas-offset) - var(--inset));
+    --cover-ramp: 160px;
+    transition:
+      --cover-glass 220ms var(--ease-out),
+      --cover-ramp 220ms var(--ease-out);
+  }
+  .brain-shell[data-sidebar-collapsed] {
+    --cover-glass: 0px;
+    --cover-ramp: 0px;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brain-shell {
+    transition: none;
+  }
+}
+/* The scroller becomes the whole canvas and pads its own content, so the
+   cover can bleed under the sidebar. overflow-x: clip beside overflow-y: auto
+   computes to hidden, which clips at the padding box — with the offset on
+   .brain-main the cover had nowhere to go. Nothing moves: the margin the
+   scroller takes is the padding it gives back. */
+.brain-page-scroll {
+  margin-left: calc(-1 * var(--canvas-offset));
+  padding-left: var(--canvas-offset);
+}
+.brain-cover-bleed {
+  margin-left: calc(-1 * var(--canvas-offset));
+}
+/* One easing, turned twice: alpha = 3u² - 2u³, sampled at twelve equal steps
+   of u. The left ramp is the same curve with its floor lifted onto
+   --cover-residue, so the shape of the two edges is one shape. At
+   --cover-ramp: 0 every left stop collapses onto the same position and that
+   mask is a no-op.
+
+   Why a curve and why this many stops. A gradient interpolates linearly
+   between the stops it is given, so a short stop list is a polyline, and every
+   stop is a corner where the rate of the dissolve changes in one pixel. The
+   list this replaces had seven, and its two middle corners fell at 47% and 78%
+   of the band: the rate went 1.4 → 2.3 levels per pixel across one of them and
+   1.4 → 0.7 across the other, which is a visible beginning to the fade about
+   70px above the cover's bottom edge. Above it the picture read as vivid,
+   below it as draining, and the line between the two is what a reader calls a
+   sharp gradient — not the bottom edge, which by then measured clean. Twelve
+   steps put the worst corner at 0.5 levels per pixel, under 8-bit
+   quantisation over a band this tall, and smoothstep is what makes the corners
+   small in the first place: it leaves the top and lands on the canvas with
+   zero slope, so the dissolve has no onset to find and no arrival to see.
+
+   And the run is longer than the band it replaces, because shape alone does
+   not fix a rate. The same curve over the old 124px still peaks at 2.7 levels
+   per pixel — the loss has to go somewhere, and a short band concentrates it.
+   --cover-dissolve is 80% of the banner at both sizes (176 of 220, 144 of
+   180), which spreads the same loss over 139px of the ray fixture instead of
+   98 and drops the peak from 2.75 to 1.89. What it costs is the picture: the
+   banner holds full density for its top 44px only, and by its own midline it
+   is at ~75%. On this fixture that is free. On a photograph it is a real
+   spend, and it buys the one thing a cover cannot have — an edge. Both
+   numbers are gated in measureFoot, which now reads the fade's rate off the
+   mean of every open column rather than only its steps. */
+.brain-cover {
+  --cover-fade-foot: linear-gradient(
+    to top,
+    transparent 0,
+    rgb(0 0 0 / 0.0197) calc(var(--cover-dissolve) * 0.0833),
+    rgb(0 0 0 / 0.0741) calc(var(--cover-dissolve) * 0.1667),
+    rgb(0 0 0 / 0.1562) calc(var(--cover-dissolve) * 0.2500),
+    rgb(0 0 0 / 0.2593) calc(var(--cover-dissolve) * 0.3333),
+    rgb(0 0 0 / 0.3762) calc(var(--cover-dissolve) * 0.4167),
+    rgb(0 0 0 / 0.5000) calc(var(--cover-dissolve) * 0.5000),
+    rgb(0 0 0 / 0.6238) calc(var(--cover-dissolve) * 0.5833),
+    rgb(0 0 0 / 0.7407) calc(var(--cover-dissolve) * 0.6667),
+    rgb(0 0 0 / 0.8438) calc(var(--cover-dissolve) * 0.7500),
+    rgb(0 0 0 / 0.9259) calc(var(--cover-dissolve) * 0.8333),
+    rgb(0 0 0 / 0.9803) calc(var(--cover-dissolve) * 0.9167),
+    #000 var(--cover-dissolve)
+  );
+  --cover-fade-left: linear-gradient(
+    to right,
+    transparent 0,
+    rgb(0 0 0 / var(--cover-residue)) min(var(--inset), var(--cover-glass)),
+    rgb(0 0 0 / var(--cover-residue)) var(--cover-glass),
+    rgb(0 0 0 / calc(var(--cover-residue) + var(--cover-rise) * 0.0197))
+      calc(var(--cover-glass) + var(--cover-ramp) * 0.0833),
+    rgb(0 0 0 / calc(var(--cover-residue) + var(--cover-rise) * 0.0741))
+      calc(var(--cover-glass) + var(--cover-ramp) * 0.1667),
+    rgb(0 0 0 / calc(var(--cover-residue) + var(--cover-rise) * 0.1562))
+      calc(var(--cover-glass) + var(--cover-ramp) * 0.2500),
+    rgb(0 0 0 / calc(var(--cover-residue) + var(--cover-rise) * 0.2593))
+      calc(var(--cover-glass) + var(--cover-ramp) * 0.3333),
+    rgb(0 0 0 / calc(var(--cover-residue) + var(--cover-rise) * 0.3762))
+      calc(var(--cover-glass) + var(--cover-ramp) * 0.4167),
+    rgb(0 0 0 / calc(var(--cover-residue) + var(--cover-rise) * 0.5000))
+      calc(var(--cover-glass) + var(--cover-ramp) * 0.5000),
+    rgb(0 0 0 / calc(var(--cover-residue) + var(--cover-rise) * 0.6238))
+      calc(var(--cover-glass) + var(--cover-ramp) * 0.5833),
+    rgb(0 0 0 / calc(var(--cover-residue) + var(--cover-rise) * 0.7407))
+      calc(var(--cover-glass) + var(--cover-ramp) * 0.6667),
+    rgb(0 0 0 / calc(var(--cover-residue) + var(--cover-rise) * 0.8438))
+      calc(var(--cover-glass) + var(--cover-ramp) * 0.7500),
+    rgb(0 0 0 / calc(var(--cover-residue) + var(--cover-rise) * 0.9259))
+      calc(var(--cover-glass) + var(--cover-ramp) * 0.8333),
+    rgb(0 0 0 / calc(var(--cover-residue) + var(--cover-rise) * 0.9803))
+      calc(var(--cover-glass) + var(--cover-ramp) * 0.9167),
+    #000 calc(var(--cover-glass) + var(--cover-ramp))
+  );
+}
+/* The mask rides the image, not the banner: the banner also holds Change /
+   Remove, which sit 12 in from the bottom-right corner, inside the foot band.
+   Masking the banner would dissolve the controls with the photo. The banner's
+   loading plate travels with the image for the same reason. */
+.brain-cover-visual {
+  -webkit-mask-image: var(--cover-fade-foot), var(--cover-fade-left);
+  mask-image: var(--cover-fade-foot), var(--cover-fade-left);
+  -webkit-mask-composite: source-in;
+  mask-composite: intersect;
+}
+.brain-cover-foot,
+.brain-cover-left {
+  position: absolute;
+  pointer-events: none;
+}
+/* The blur band is shorter than the dissolve and sits inside it: 124 of the
+   176 the alpha runs. Its job is to have the detail gone before the alpha
+   takes the last of the colour, and the detail only needs going where the
+   picture is actually dissolving. It fades in at 70% of the way up the
+   dissolve, where the cover still holds ~79% of its density, and is at full
+   strength through the stretch where the alpha does its bulk work. Above that
+   the alpha is removing two or three percent per twenty pixels and a sharp
+   picture there is a picture, not a seam. */
+.brain-cover-foot {
+  inset: auto 0 0 var(--cover-glass);
+  height: var(--cover-foot);
+}
+.brain-cover-left {
+  inset: 0 auto 0 var(--cover-glass);
+  width: var(--cover-ramp);
+}
+.brain-cover-foot > i,
+.brain-cover-left > i {
+  position: absolute;
+  inset: 0;
+  display: block;
+}
+/* Every layer lets go before its own far edge. A backdrop layer masked to
+   full opacity at the edge of its box does not stop where the alpha stops: a
+   20px blur drags the cover's colour ~20px past the point the mask has already
+   given it up, and then the layer ends with the box. That put a 14px plateau
+   and a 26/255 one-pixel cliff across the whole canvas on a saturated cover
+   (3/255 on a pale one, which is why the pale fixture read clean). So the blur
+   reaches zero where the alpha does, and it steps down on the way out in the
+   order the scroll edge uses on its own trailing end: the wide radius goes
+   first and hands to the narrow one, which carries the last stretch to nothing
+   — blur-to-blur, then a 4px halo over a cover already under 3% alpha.
+   Measured on the ray fixture: worst 1px vertical step 29 → 4 in dark, 28 → 4
+   in light, at rest and travelling under the pills. */
+.brain-cover-foot > i:nth-child(1) {
+  -webkit-backdrop-filter: var(--cover-blur-1);
+  backdrop-filter: var(--cover-blur-1);
+  -webkit-mask-image: linear-gradient(
+    transparent,
+    #000 42%,
+    #000 88%,
+    transparent
+  );
+  mask-image: linear-gradient(transparent, #000 42%, #000 88%, transparent);
+}
+.brain-cover-foot > i:nth-child(2) {
+  -webkit-backdrop-filter: var(--cover-blur-2);
+  backdrop-filter: var(--cover-blur-2);
+  -webkit-mask-image: linear-gradient(
+    transparent 38%,
+    #000 76%,
+    #000 84%,
+    transparent 96%
+  );
+  mask-image: linear-gradient(
+    transparent 38%,
+    #000 76%,
+    #000 84%,
+    transparent 96%
+  );
+}
+/* One layer, not two. The foot needs a 4px step before the 20px one because
+   its whole ramp is 124px and a sharp-to-20px onset over that distance ghosts.
+   The left ramp is 160px and its alpha starts at the residue rather than at 1,
+   so a single 20px layer fading in across 80% of the band is already gentle
+   enough — measured against the two-layer version on the ray fixture, the two
+   frames are the same, and one layer is what keeps a covered page inside the
+   backdrop budget with a popover open (§7).
+
+   It lets go before the band's left edge for the same reason the foot does.
+   Nothing shows there today: the band ends exactly on the sidebar's right
+   edge, and the sidebar's own 28px starts on that line, so a blur cut off at
+   full strength hands straight to another blur. That is a coincidence of two
+   numbers, not a construction — move the inset or the sidebar's width and the
+   cut is in the open. The fade costs the peak 32px of a 160px band and makes
+   the band correct on its own. */
+.brain-cover-left > i {
+  -webkit-backdrop-filter: var(--cover-blur-2);
+  backdrop-filter: var(--cover-blur-2);
+  -webkit-mask-image: linear-gradient(
+    to left,
+    transparent,
+    #000 80%,
+    #000 92%,
+    transparent
+  );
+  mask-image: linear-gradient(
+    to left,
+    transparent,
+    #000 80%,
+    #000 92%,
+    transparent
+  );
+}
+
+/* Cover controls (Change / Remove) — hidden at rest everywhere. A pointer
+   hover reveals them on desktop; on touch a tap on the cover toggles them
+   (data-revealed on the banner) so the chips never sit on the photo
+   permanently. Keyboard focus reveals on every input. Hidden means
+   untappable — a tap lands on the cover, not on an invisible button. */
+.brain-cover-controls {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 200ms var(--ease-out);
+}
+.brain-cover:focus-within .brain-cover-controls,
+.brain-cover[data-revealed] .brain-cover-controls {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: hover) {
+  .brain-cover:hover .brain-cover-controls {
+    opacity: 1;
+    pointer-events: auto;
+  }
+}
+
+/* Floating sidebar — thick material 280 wide, inset 12 on three sides
+   (r26 = row 14 + padding 12). Absolute inside the shell, which is the
+   viewport; the mobile viewport never shows it (Pages is its own sheet). */
+.brain-sidebar {
+  position: absolute;
+  z-index: var(--z-sidebar);
+  top: calc(var(--inset) + env(safe-area-inset-top, 0px));
+  left: calc(var(--inset) + env(safe-area-inset-left, 0px));
+  bottom: calc(var(--inset) + env(safe-area-inset-bottom, 0px));
+  width: var(--sidebar-w);
+  display: flex;
+  flex-direction: column;
+  padding: 12px 12px 10px;
+}
+@media (max-width: 767px) {
+  .brain-sidebar {
+    display: none;
+  }
+}
+.brain-sidebar-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 36px;
+  padding: 0 2px 0 4px;
+}
+.brain-wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  padding: 0 6px;
+  border-radius: var(--r-row);
+  color: var(--ink);
+  transition: background-color 160ms var(--ease-out);
+}
+.brain-wordmark:hover {
+  background-color: var(--fill-glass-hover);
+  transition-duration: 80ms;
+}
+.brain-wordmark:active {
+  transform: scale(0.97);
+}
+.brain-sidebar-search {
+  width: 100%;
+  margin: 8px 0;
+  cursor: pointer;
+  color: var(--ink-2);
+}
+.brain-sidebar-search > span {
+  flex: 1;
+  text-align: left;
+}
+.brain-sidebar-search:hover {
+  color: var(--ink);
+}
+.brain-sidebar-label {
+  padding: 8px 10px 2px;
+  color: var(--ink-2);
+}
+.brain-sidebar-pinned {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 0 2px 4px;
+}
+.brain-sidebar-pinned > .chip {
+  width: 100%;
+  /* the grid cell is narrow — the chip trims its side chrome here so the
+     label keeps a few more characters before the ellipsis */
+  gap: 5px;
+  padding: 0 7px 0 6px;
+}
+/* the pinned chip as a page-ref drop target: the yellow ring, transient */
+.chip[data-page-ref-over] {
+  box-shadow:
+    inset 0 0 0 1.5px var(--yellow),
+    0 0 0 0.5px var(--fill-rim);
+}
+.brain-sidebar-tree {
+  flex: 1;
+  min-height: 0;
+  margin: 4px -4px 0;
+  padding: 0 4px;
+  overscroll-behavior: contain;
+}
+/* the slot's back row (Mail, Settings): the explicit way back to the notes,
+   above the slot content — the wordmark press on :active */
+.brain-sidebar-back {
+  flex-shrink: 0;
+  margin-top: 4px;
+}
+.brain-sidebar-back:active {
+  transform: scale(0.97);
+}
+/* the settings slot: the section list under the panel label */
+.brain-sidebar-settings {
+  flex: 1;
+  min-height: 0;
+  margin: 4px -4px 0;
+  padding: 0 4px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.brain-sidebar-foot {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  margin-top: 2px;
+  padding-top: 6px;
+}
+.brain-sidebar-foot > .tree-row {
+  width: auto;
+  flex: 1;
+}
+/* the count bubble on a nav row (mail folders) */
+.tree-row-count {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border-radius: 9999px;
+  background: var(--fill-chip);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  letter-spacing: 0.06px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-2);
+}
+/* the sidebar's empty state: one quiet row */
+.brain-sidebar-empty {
+  width: 100%;
+  padding: 6px 10px;
+  border-radius: var(--r-row);
+  text-align: left;
+  color: var(--ink-2);
+  transition: background-color 160ms var(--ease-out);
+}
+.brain-sidebar-empty:hover {
+  background-color: var(--fill-glass-hover);
+  color: var(--ink);
+  transition-duration: 80ms;
+}
+/* the lifted row under the pointer during a tree drag (dnd-kit overlay) */
+.tree-row-overlay {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--r-row);
+  background-color: var(--fill-glass-selected);
+  box-shadow:
+    inset 0 1px 0 var(--fill-highlight),
+    0 0 0 0.5px var(--fill-rim),
+    var(--lift);
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.25;
+  letter-spacing: -0.08px;
+  color: var(--ink);
+  transform: scale(1.02) rotate(0.5deg);
+}
+/* the gap the dragged row left: empty, and exactly the row's height, so no row
+   below it moves while the drag decides where the page is going */
+.tree-row-slot {
+  height: 28px;
+}
+
+/* Mobile tab bar — a floating thick capsule over the safe area; the canvas
+   passes under it and it blurs on its own (no edge band, no hairline).
+   `contained` (inside the Pages sheet and the search view) sits in flow at
+   the bottom of that surface.
+
+   IT IS SIZED BY ITS CONTENT, NOT BY THE WINDOW. It used to stretch edge to
+   edge on the 8px inset and divide that into five equal parts: 73px slots
+   carrying a 38px word at 390, so nearly half of every slot was air and the
+   run of five read as a backing laid across the foot of the screen rather
+   than as an object standing on it. Everything else that floats in this
+   product is shrink-to-fit — the breadcrumb pill, the toolbar pills, the
+   toast — and so is the system's own tab bar on this OS. ONE measurement
+   gives the slot: the widest label is "Search" at 37.6 (Label 11/500), 11px
+   of air on each side is 59.6, and §4's 4px step rounds that to 60 — 11.2 as
+   built. Five of them plus the row's 4px ends is 308, held at every window
+   that leaves it that much between the insets (>= 324): the bar clears 41 on
+   each side at 390, 61 at 430, 66 at 440, and never touches the window (§4).
+   Below 324 the window sets the width — (w - 16 - 8) / 5, so 59.2 at 320 —
+   and the 44px track floor is not reached until 244, where the bar is 228 and
+   still on both insets; narrower again it centres back through them. The
+   20px minimum between two adjacent WORDS is a check, not the derivation:
+   two labels centred in equal tracks leave track - (w1 + w2) / 2, so the pair
+   to read is Home<->Search (New is a wordless circle), measured 25.4 here.
+   `fit-content` between the two insets with `margin-inline: auto` centres it:
+   no transform, which the hidden state needs for itself. Every figure per
+   width by e2e/mail-shots.spec.ts. */
+.brain-mobile-tabbar {
+  --tabbar-slot: 60px;
+  position: fixed;
+  z-index: calc(var(--z-drawer) - 20);
+  left: calc(var(--inset) + env(safe-area-inset-left, 0px));
+  right: calc(var(--inset) + env(safe-area-inset-right, 0px));
+  bottom: calc(var(--inset) + env(safe-area-inset-bottom, 0px));
+  width: fit-content;
+  margin-inline: auto;
+  border-radius: var(--r-sheet);
+  transition:
+    transform 200ms var(--ease-out),
+    opacity 200ms var(--ease-out);
+}
+.brain-mobile-tabbar[data-contained] {
+  position: relative;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  max-width: calc(100% - var(--inset) * 2);
+  margin: 0 auto calc(var(--inset) + env(safe-area-inset-bottom, 0px));
+  flex-shrink: 0;
+}
+.brain-mobile-tabbar[data-hidden] {
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(calc(100% + var(--inset) + env(safe-area-inset-bottom, 0px)));
+}
+.brain-mobile-tabbar-items {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(44px, var(--tabbar-slot)));
+  height: 54px;
+  padding: 0 4px;
+}
+.brain-mobile-tab {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 2px;
+  min-height: 44px;
+  border-radius: var(--r-row);
+  font-family: var(--font-sf);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: 0.06px;
+  color: var(--ink-2);
+  transition:
+    background-color 160ms var(--ease-out),
+    color 160ms var(--ease-out);
+}
+.brain-mobile-tab[aria-current="page"] {
+  font-weight: 600;
+  color: var(--ink);
+}
+.brain-mobile-tab:active {
+  background-color: var(--fill-glass-hover);
+  color: var(--ink);
+}
+/* New is the one ink-filled primary on the mobile surface (DESIGN.md v2 →
+   Colour → Dosage): the accent circle — ink fill, paper glyph, inverted in
+   dark by the tokens. Press moves the fill by .08 and scales like every
+   accent; the cell behind it keeps no tint. */
+.brain-mobile-tab-new {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  background-color: var(--accent);
+  color: var(--accent-ink);
+  transition:
+    background-color 160ms var(--ease-out),
+    transform 100ms ease-out;
+}
+.brain-mobile-tab[data-mobile-tab="new"]:active {
+  background-color: transparent;
+}
+.brain-mobile-tab[data-mobile-tab="new"]:active .brain-mobile-tab-new {
+  background-color: var(--accent-hover);
+  transform: scale(0.97);
+}
+@media (prefers-reduced-motion: reduce) {
+  .brain-mobile-tab[data-mobile-tab="new"]:active .brain-mobile-tab-new {
+    transform: none;
+  }
+}
+@media (min-width: 768px) {
+  .brain-mobile-tabbar {
+    display: none;
+  }
+}
+
+/* Settings surface — the canvas at /settings/[section] (DESIGN.md v2 →
+   Settings V1): a 640 paper column with inset groups — an r16 hairline ring
+   (no shadow in paper), 44px rows with a hairline between them, group
+   header H3, descriptions in Caption. The section list lives in the sidebar
+   slot on desktop; mobile is a root list + drill-down with the header in
+   flow. */
+.brain-settings-page {
+  min-height: 100%;
+}
+.brain-settings {
+  width: 100%;
+  max-width: calc(640px + 40px);
+  margin: 0 auto;
+  padding: 16px 20px calc(64px + env(safe-area-inset-bottom, 0px));
+}
+@media (min-width: 768px) {
+  .brain-settings {
+    padding-top: var(--canvas-top);
+  }
+}
+.brain-settings-group {
+  overflow: hidden;
+  border: 1px solid var(--hair);
+  border-radius: var(--r-group);
+}
+.brain-settings-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 8px 14px;
+}
+.brain-settings-row[data-stack] {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  padding-top: 12px;
+  padding-bottom: 12px;
+}
+/* rows chain hairlines even when one sits inside a form (OAuth POST) or a
+   <details> (the IMAP Advanced disclosure) */
+.brain-settings-row + .brain-settings-row,
+.brain-settings-group > * + .brain-settings-row,
+.brain-settings-group > * + * > .brain-settings-row:first-child {
+  border-top: 1px solid var(--hair-soft);
+}
+/* a row that carries a caption under its label (account rows, the backup
+   status lead) */
+.brain-settings-row[data-lead] {
+  min-height: 52px;
+}
+/* the 28px leading icon tile of a lead row: an ink fill on paper, glyph
+   ink-2; "danger" voices a failed state in red text, never a red fill */
+.brain-settings-tile {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-block);
+  background: var(--fill-tint);
+  color: var(--ink-2);
+}
+.brain-settings-tile[data-tone="ok"] {
+  color: var(--ink);
+}
+.brain-settings-tile[data-tone="danger"] {
+  color: var(--red);
+}
+/* a small trailing status badge in a row ("Reconnect needed", "Expired"): a
+   tint capsule naming a state, never an action — table register set by the
+   consumer */
+.brain-settings-badge {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  border-radius: 9999px;
+  background: var(--fill-tint);
+}
+/* the mobile root list: each row is a button with the five states */
+.brain-settings-rootrow {
+  width: 100%;
+  text-align: left;
+  color: var(--ink);
+  transition: background-color 160ms var(--ease-out);
+}
+.brain-settings-rootrow:hover,
+.brain-settings-rootrow[data-hover] {
+  background-color: var(--fill-hover);
+  transition-duration: 80ms;
+}
+.brain-settings-rootrow:active {
+  background-color: var(--fill-active);
+}
+.brain-settings-rootrow-glyph {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  color: var(--ink-2);
+  flex-shrink: 0;
+}
+/* drill-in rows on the desktop surface (mail accounts, Open Mail): the
+   rootrow fills plus a barely-there press — .99 on a 600px row reads like
+   .97 on a button */
+.brain-settings-navrow {
+  transition:
+    background-color 160ms var(--ease-out),
+    transform 100ms ease-out;
+}
+.brain-settings-navrow:hover {
+  transition-duration: 80ms, 100ms;
+}
+.brain-settings-navrow:active {
+  transform: scale(0.99);
+}
+@media (prefers-reduced-motion: reduce) {
+  .brain-settings-navrow:active {
+    transform: none;
+  }
+}
+/* the copy row: the value and the copy icon 28 sit directly in the row. No
+   ring of its own — the group already draws one, and a bordered r10 box at
+   the row's 14px inset can never be concentric with the r16 group (§4). */
+.brain-settings-copyrow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+}
+/* the segmented control: a recessed track r10, the selected segment a
+   raised paper thumb (r8 — concentric with the 2px padding) */
+.brain-settings-segmented {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 2px;
+  border-radius: var(--r-control);
+  background: var(--fill-tint);
+}
+.brain-settings-segment {
+  position: relative;
+  height: 26px;
+  padding: 0 12px;
+  border-radius: 8px;
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.08px;
+  color: var(--ink-2);
+  transition: color 160ms var(--ease-out);
+}
+.brain-settings-segment:hover,
+.brain-settings-segment[data-hover] {
+  color: var(--ink);
+  transition-duration: 80ms;
+}
+.brain-settings-segment[aria-checked="true"] {
+  color: var(--ink);
+  font-weight: 600;
+}
+.brain-settings-segment-thumb {
+  position: absolute;
+  inset: 0;
+  border-radius: 8px;
+  background: var(--paper);
+  box-shadow:
+    0 0 0 1px var(--hair),
+    0 1px 2px color-mix(in oklch, var(--ink) 8%, transparent);
+}
+/* the mobile header of a settings screen: Back, the screen name centred */
+.brain-settings-mobile-head {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  min-height: calc(52px + env(safe-area-inset-top, 0px));
+  padding: env(safe-area-inset-top, 0px) 8px 0;
+  border-bottom: 1px solid var(--hair);
+}
+.brain-settings-mobile-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  min-height: 44px;
+  padding: 0 10px;
+  border-radius: var(--r-row);
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.08px;
+  color: var(--ink-2);
+  transition:
+    background-color 160ms var(--ease-out),
+    color 160ms var(--ease-out);
+}
+.brain-settings-mobile-back:hover {
+  background-color: var(--fill-hover);
+  color: var(--ink);
+  transition-duration: 80ms;
+}
+.brain-settings-mobile-back:active {
+  background-color: var(--fill-active);
+  transform: scale(0.97);
+}
+@media (max-width: 767px) {
+  /* iOS zooms focused form controls below 16px; keep the fields large
+     enough to avoid auto-zoom without disabling browser zoom. The atom sets
+     `font: inherit` on its input, so the size belongs on the field itself. */
+  .brain-settings :where(input, textarea, select) {
+    font-size: 16px;
+  }
+  /* the 32px paper field is a desktop height — thumbs get 40 */
+  .brain-settings .field {
+    height: 40px;
+    font-size: 16px;
+  }
+}
+
+/* Mobile Pages sheet — the drawer of the mobile viewport: a thick sheet
+   with the 8px inset over the safe area (r20), rising on SPRING_SHEET
+   (framer, from the current value; a fade under reduced motion). The Radix
+   content is the transparent full-screen focus scope; the sheet is its
+   child. Rows are tree rows at a touch height. */
+.brain-mobile-pages {
+  background: transparent;
+}
+.brain-mobile-pages-sheet {
+  position: absolute;
+  top: calc(var(--inset) + env(safe-area-inset-top, 0px));
+  right: calc(var(--inset) + env(safe-area-inset-right, 0px));
+  bottom: calc(var(--inset) + env(safe-area-inset-bottom, 0px));
+  left: calc(var(--inset) + env(safe-area-inset-left, 0px));
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--r-sheet);
+  overflow: hidden;
+}
+.brain-mobile-pages-head {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  height: 44px;
+  padding: 0 8px;
+}
+.brain-mobile-pages-sheet .field {
+  margin: 4px 8px 4px;
+}
+.brain-mobile-pages-sheet .field > input {
+  /* iOS zooms a focused control below 16px */
+  font-size: 16px;
+}
+.brain-mobile-pages-sheet .tree-row {
+  height: 40px;
+  font-size: 14px;
+  letter-spacing: -0.15px;
+}
+.brain-mobile-pages-sheet .tree-row-toggle {
+  width: 28px;
+  height: 28px;
+}
+.brain-mobile-pages-sheet .brain-mobile-tabbar[data-contained] {
+  max-width: calc(100% - 8px);
+  margin: 0 auto 4px;
+}
+
+/* ── Mail surfaces (v3, P5 — bundles) ────────────────────────────────────────
+   P5-a — lists on the canvas: the 360 column with a hairline to the reader
+   shortened by the inset; the head floating over the list at every width and
+   in every mode (the nav pill owns account and folder navigation, and there
+   is no second owner to hand it to); rows on the blue selection tint; one
+   edge-blur step where the head overlaps the list. The search capsule is a
+   regular-material pill declared here — the material layer is the one place
+   that blurs.
+
+   THE GROUND RULE (v3): the canvas is the only ground. No pane declares
+   paper — not the column, not the reader/composer pane. Separation is
+   carried by hairlines and the scroll edge, never by a plane, so the seam
+   that used to run down the sidebar gutter has no edge left to draw. The one
+   exception is the HTML message body: it is foreign content that assumes a
+   white page, so each message keeps its own paper sheet inside the reader
+   (`.brain-mail-sheet`) while our own sender and meta markup stay on the
+   canvas. Nothing floats over that sheet, so the ban on glass over the
+   message iframe is satisfied by construction. */
+.brain-mail-list {
+  /* THE COLUMN HAS ONE EDGE (v5). The group boundary, the row capsule and the
+     Compose pill all ride §4's --inset, so nothing inside a group reaches
+     past the mark that groups it. The capsule used to sit at a hard 8 while
+     the boundary sat at 12, which put the fill 4px OUTSIDE its own section on
+     the first and last row of every group — two rows out of three in a
+     preview. The boundary is the structural mark and stays outermost; the
+     capsule moved in to meet it.
+
+     From that edge the two left rules follow, and every text column in the
+     list is one of them: --mail-rule for a row that carries an avatar (inset,
+     4 of the row's own padding, the 10 unread rail, 6, the 32 avatar, 10) and
+     --mail-rule-bare for one that does not (inset, 4, the rail, 6). At the
+     column's own width they are 74 and 32; below md, where --inset is 8, they
+     are the 70 and 28 this list has always used. */
+  --mail-rule: calc(var(--inset) + 62px);
+  --mail-rule-bare: calc(var(--inset) + 20px);
+  /* THE HEAD'S HEIGHT, DECLARED ONCE. One row is the nav pill alone (the
+     merged column and the drafts column: neither has a search capsule, one
+     because there is no cross-account index behind it and the other because
+     there is nothing to search). Two rows is the nav pill, 8 of air and the
+     search capsule under it. The column says which it draws with
+     `data-chrome-rows`; the scroll pad and the top edge-blur below both read
+     the answer from here, so the number lives in one place. */
+  --mail-chrome: 36px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  width: 100%;
+  flex-shrink: 0;
+}
+/* No rule down the column's right edge either (v4). It was the last vertical
+   line in the surface, and it was drawing a boundary the layout already has:
+   360px of two-line rows beside an article column is not a pane a reader can
+   confuse with its neighbour, and the reader's own left padding is wider than
+   any hairline. What is left between the panes is distance and a change of
+   density, which is what separates them in the reference. */
+/* The column is 360 only where something stands beside it. Below the panes
+   breakpoint it is the whole pane (see the derivation at --breakpoint-panes)
+   and takes the width the wrapper gives it. The literal is one of the three
+   copies of 1160 the guardrail test holds together — keep the query on its own
+   line above `.brain-mail-list` so the assertion can find it. */
+@media (min-width: 1160px) {
+  .brain-mail-list {
+    width: 360px;
+  }
+}
+.brain-mail-list[data-chrome-rows="2"] {
+  --mail-chrome: 80px; /* 36 pill + 8 air + 36 search capsule */
+}
+/* The head floats: glass objects on the canvas with the rows running under
+   them, never a plate across the column. On the column's own inset, the same
+   one the boundary rule and the row capsule ride — three right edges within
+   5px is a column that looks ragged for no reason. */
+.brain-mail-head {
+  position: absolute;
+  z-index: var(--z-toolbar);
+  top: var(--inset);
+  right: var(--inset);
+  left: var(--inset);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.brain-mail-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+/* Below md the mobile tab bar floats over the column's foot. The rows reserve
+   the bar's height at their end, so the last row of the column can be scrolled
+   clear of it — a list whose last line you cannot reach has no end — while the
+   rows above it still pass underneath, which is the §7 case the bottom
+   edge-blur answers. The reserve belongs to the rows, not to the scroller: it
+   has to count as content, or the sticky edge below it can never reach the
+   foot of a column that would otherwise fit. */
+.brain-mail-scrollfoot {
+  padding-bottom: calc(54px + var(--inset) * 2 + env(safe-area-inset-bottom, 0px));
+}
+@media (min-width: 768px) {
+  .brain-mail-scrollfoot {
+    padding-bottom: 0;
+  }
+}
+/* THE HEAD HAS ONE MODE (v6). It used to have two, and which one it drew
+   answered a question about somewhere else on the screen: does the rail, over
+   in the shell sidebar, own account and folder navigation? Where it did, the
+   head kept no controls and its toolbar row floated over the rows; where it
+   did not, two native selects stood in flow and the row sat beneath them. The
+   question came in as `railVisible` (from `!sidebarOffCanvas`) and rode into
+   CSS on `data-rail`.
+
+   Both are gone with the rail. Navigation has ONE owner — the pill in this
+   head — at every width and in every mode, so there is nothing left to ask:
+   the head floats, always, on the column's own inset, with the rows passing
+   under it.
+
+   ITS HEIGHT IS ONE NUMBER, and everything else is derived from it. The
+   column declares how many rows its head draws and `--mail-chrome` is that
+   height; the scroll pad and the edge-blur both read it, so a row added or
+   dropped moves the pad and the gradient with it and cannot be forgotten in
+   one of the two places. `ops/design-guardrails.test.ts` holds the two values
+   against the heights they are made of. */
+.brain-mail-navrow {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+/* The head is a layer over the rows, so it lets everything through except
+   its own objects — the gap between the nav pill and the toolbar pill is a
+   place a reader clicks a letter. */
+.brain-mail-head,
+.brain-mail-navrow {
+  pointer-events: none;
+}
+.brain-mail-head :is(.toolbar-pill, .brain-mail-search) {
+  pointer-events: auto;
+}
+/* The trigger fills its capsule from the left and lets the label truncate —
+   which pill gives way is the component's own `min-w-0`, on the nav pill and
+   not on the toolbar one. */
+.brain-mail-nav {
+  min-width: 0;
+  justify-content: flex-start;
+}
+/* the trigger holds the hover tint for as long as its menu is open — the
+   pressed control has to stay findable under the thing it opened */
+.toolbar-pill > .btn-quiet[data-state="open"] {
+  background-color: var(--fill-glass-hover);
+  color: var(--ink);
+}
+/* the second row is the search capsule at the column's full width; in a
+   column flex its own `flex: 1` would stretch it vertically */
+.brain-mail-head > .brain-mail-search {
+  flex: none;
+}
+/* The rows start below the floating head — inset, the head, and the 8 of air
+   that separates chrome from content everywhere else in the column. */
+.brain-mail-scrollpad {
+  padding-top: calc(var(--inset) + var(--mail-chrome) + 8px);
+}
+/* §7's own formula for a blur edge: the chrome it hides content behind, the
+   inset above it, and 28 of bleed past both. Written here rather than passed
+   as a number from the component, so the two heads and the two insets are one
+   arithmetic and not four. Only the top edge — the bottom one is the mobile
+   tab bar's and carries its own 90. */
+.brain-mail-scroll > .edge:not([data-position="bottom"]) {
+  --edge-size: calc(var(--mail-chrome) + var(--inset) + 28px);
+}
+.brain-mail-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  flex: 1;
+  height: 36px;
+  padding: 0 14px;
+  border-radius: var(--r-pill);
+  background: var(--glass-reg);
+  -webkit-backdrop-filter: var(--blur-reg);
+  backdrop-filter: var(--blur-reg);
+  box-shadow: var(--rim), var(--edge-light), var(--shadow-2);
+  color: var(--ink-2);
+  transition:
+    box-shadow 160ms var(--ease-out),
+    color 160ms var(--ease-out);
+}
+.brain-mail-search:focus-within {
+  box-shadow:
+    var(--rim),
+    var(--edge-light),
+    var(--shadow-2),
+    0 0 0 1.5px var(--blue);
+}
+/* The row (v4). Two lines on a 64px pitch, on the canvas — and no line under
+   it.
+
+   The rows used to separate on a hairline inset to the text rule. Sixty of
+   them made a grid: the reader saw a table before a single sender, and the
+   group boundary — the one rule that carries the structure — had to shout
+   over its own children to be heard. What separates two letters now is what
+   separates two paragraphs: the space between them. The pitch grew from 56 to
+   64 to pay for it — 60 of row, 4 of air (`.brain-mail-row-item`).
+
+   The row's fill is a capsule INSET INTO THE COLUMN, not a band across it.
+   That is what lets the open thread be told from the one under the pointer
+   with the hairlines gone: shape, before any measurement of tint. The inset
+   is --inset, mirrored — the boundary rule's own edge, so the capsule can
+   never reach past the mark that groups it — and the row keeps 4 of its own
+   padding inside it so the unread dot has air off the capsule's edge.
+
+   Left rules, measured from the COLUMN: the inset, 4 padding, a 10px rail
+   for the unread dot, 6, the 32 avatar, 10 — --mail-rule, 74 at the column's
+   own width. The dot is a RAIL, not a mark inside the text: every dot in
+   the column lines up vertically, and the reader takes the volume of unread
+   mail in one pass without reading a word.
+
+   Line 1: sender, the message-count chip beside it, then the meta column —
+   the source account as a word, then the time. Line 2: the subject with the
+   snippet continuing it after a `·`, and the attachment glyph in a right-hand
+   column of its own where truncation cannot eat it. */
+.brain-mail-row {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  /* not `auto`: a <button> sizes to its content even as a block-level flex
+     container, so the capsule has to be told the column minus its two insets */
+  width: calc(100% - var(--inset) * 2);
+  height: 60px;
+  margin: 0 var(--inset);
+  padding: 12px 8px 12px 4px;
+  border-radius: var(--r-row);
+  text-align: left;
+  transition:
+    background-color 160ms var(--ease-out),
+    box-shadow 160ms var(--ease-out),
+    transform 100ms ease-out;
+}
+@media (hover: hover) {
+  .brain-mail-row:hover {
+    background-color: var(--blue-tint);
+    transition-duration: 80ms;
+  }
+}
+/* Press is the scale (§8): hover already owns the blue, and a press that
+   repaints the fill it is already wearing says nothing. */
+.brain-mail-row:active {
+  background-color: var(--blue-tint);
+  transform: scale(0.97);
+}
+/* Selection, with nothing left to lean on.
+
+   It used to be one tint step over hover PLUS a hairline above and below —
+   and the hairlines were the condition the review put on it, because the
+   step between the two fills measured ΔL .020 in light, under §8's .03
+   floor. Those hairlines are gone with the rest of the grid, so the second
+   signal has to come from somewhere that is not a line across the column.
+
+   It comes from the capsule. Hover and selected wear the same shape, so what
+   tells them apart is a RIM and a wider step: 1px of the blue at .22 around
+   the fill, and a fill raised until the step off hover clears the floor with
+   room (measured by e2e/mail-shots.spec.ts). A contour on one row is
+   not a grid — it is the object saying it is the one that is open. */
+.brain-mail-row[aria-current="true"] {
+  background-color: var(--blue-tint-2);
+  box-shadow: inset 0 0 0 1px var(--blue-rim);
+}
+/* The open thread keeps all five states, and hover on it cannot be a
+   background-colour: the blue capsule IS its background, and a rule of the
+   same weight lower in the file would simply win. So it takes §8's one
+   mechanism for an element that already has a fill — the ink tint on a layer
+   of its own, fading by opacity over the blue.
+
+   --hover-tint, not --hover-tint-selected: the semantic one darkens in dark
+   (black .12, for white over the white .14 capsule), and black .12 over this
+   blue measures ΔL .027 — under §8's .03 floor. This capsule is tinted, not
+   white, and does not have the white capsule's problem. */
+.brain-mail-row[aria-current="true"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--hover-tint);
+  opacity: 0;
+  transition: opacity 160ms var(--ease-out);
+  pointer-events: none;
+}
+@media (hover: hover) {
+  .brain-mail-row[aria-current="true"]:hover::before {
+    opacity: 1;
+    transition-duration: 80ms;
+  }
+}
+.brain-mail-row[aria-current="true"]:active::before {
+  opacity: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .brain-mail-row {
+    transition: background-color 160ms var(--ease-out);
+  }
+  .brain-mail-row:active {
+    transform: none;
+  }
+  .brain-mail-row[aria-current="true"]::before {
+    transition: none;
+  }
+}
+/* the avatar gutter — 6 before, 10 after, so the text rule lands on 66 */
+.brain-mail-av {
+  position: relative;
+  display: flex;
+  flex-shrink: 0;
+  margin: 1px 10px 0 6px;
+}
+/* the row's own three columns are lifted over the selected row's tint layer;
+   never `.brain-mail-row > *`, which would beat the absolute `.sr-only` */
+.brain-mail-body {
+  position: relative;
+}
+.brain-mail-row_bare .brain-mail-body {
+  margin-left: 6px;
+}
+/* the unread rail and its dot */
+.brain-mail-rail {
+  position: relative;
+  display: grid;
+  place-items: center;
+  align-self: center;
+  flex-shrink: 0;
+  width: 10px;
+}
+.brain-mail-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ink);
+}
+/* The thread's message count is a chip beside the sender, never a bare
+   number left of the date — two tabular runs there read as one number. */
+.brain-mail-count {
+  display: inline-block;
+  flex-shrink: 0;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 8px;
+  background: var(--fill-tint);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: 0.06px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-3);
+}
+
+/* P5-d — the unified inbox (All inboxes). Same column, same head, same rows
+   as the single-account list: two lists in one slot are one design. What
+   differs is only what the mode can honestly offer — unified has no search
+   (search is account-scoped) and no sort (the sections are the order), so
+   the head is the pill alone, riding the right edge over the rows.
+
+   A SECTION IS A GROUP BOUNDED BY ONE RULE (v4). It was a hierarchy of two
+   separators — a soft hairline inset to the text rule under every row, and a
+   heavier one across the column between groups. The hierarchy was legible and
+   it was still wrong: sixty rows of it made a grid, the reader met a table
+   before a sender, and the boundary had to be heard over its own children.
+   The per-row hairline is gone. What is left is ONE line in the column, the
+   group's boundary, on §4's inset 12 at --hair's full weight — a weight it
+   can now afford, because nothing else in the column is a line. Inside a
+   group the letters separate on 64px of row and the space that comes with it.
+
+   One left rule (--mail-rule) for the section label, the senders and both
+   digests. The rows are capsules inset into the column on the boundary's own
+   edge rather than bands across it, which is what gives the open thread a
+   shape of its own now that no hairline marks it — and what keeps the fill
+   from reaching past the rule that says where the group starts. */
+.brain-mail-section {
+  position: relative;
+  margin-top: 24px;
+  padding-top: 12px;
+}
+/* The boundary. It is a rule, so it is drawn where a rule is legible — on the
+   column's own 12 inset, the same one the pill above it rides — rather than
+   into the corners, where a line touching the window would be ban #3. */
+.brain-mail-section::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: var(--inset);
+  right: var(--inset);
+  height: 1px;
+  background: var(--hair);
+  pointer-events: none;
+}
+/* The column's first group opens on the top of the column: there is nothing
+   above it to be divided from, and a rule under the pill would be a line
+   between chrome and scroll. Both shapes the first group can take — the list
+   of sections, and a failed stream's notice standing before it. */
+.brain-mail-scrollfoot > .brain-mail-section:first-child,
+.brain-mail-scrollfoot > :first-child > .brain-mail-section:first-child {
+  margin-top: 0;
+  padding-top: 0;
+}
+.brain-mail-scrollfoot > .brain-mail-section:first-child::before,
+.brain-mail-scrollfoot > :first-child > .brain-mail-section:first-child::before {
+  content: none;
+}
+/* A failed stream is a group like any other, and like every other its rows
+   separate on space rather than on a line — one notice under another is two
+   sentences, and two sentences do not need a rule between them. It carries no
+   avatar, so it stands on the bare rule the avatarless row stands on rather
+   than on a number of its own: a status line about an account belongs in the
+   same column as the mail from it. */
+.brain-mail-notice {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px var(--inset) 8px var(--mail-rule-bare);
+}
+/* The group's rows, and the box the two forms cross-fade inside. It clips
+   nothing at rest — no radius, the full width of the column — and exists so
+   the outgoing form, popped out of flow for the 80ms it fades, cannot paint
+   over the group below it. `clip` and not `hidden`, with the margin the
+   keyboard focus ring needs: a row's ring sits 5px outside it (3px at offset
+   2), and the first and last row of every group would otherwise lose it. */
+.brain-mail-rows {
+  position: relative;
+  overflow: clip;
+  overflow-clip-margin: 6px;
+}
+/* The 4px between one capsule and the next, as the wrapper's padding rather
+   than the row's margin: margins here would collapse through the presence
+   wrapper and land at 2. The pitch stays 64 — 60 of row and 4 of air — so the
+   column reads at the same rhythm whether or not two neighbours are tinted.
+   It matters when they are: the open thread and the row under the pointer sit
+   side by side, and two fills that touch read as one taller fill. */
+.brain-mail-row-item {
+  padding: 2px 0;
+}
+/* Air belongs to the block below: 24px over the boundary rule, 12 between the
+   rule and the header it opens, 4px under the header. The padding-left is
+   --mail-rule minus what the glyph occupies (the 32 gutter + 4 + the 6 gap),
+   so the label starts on the senders' rule wherever that rule is. On the
+   right the header keeps the column's inset plus the 4 its 28 capsules hang
+   into. */
+.brain-mail-section-head {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 calc(var(--inset) + 4px) 0 calc(var(--mail-rule) - 42px);
+  margin-bottom: 4px;
+  text-align: left;
+}
+/* the 16 glyph rides the row's avatar gutter (the inset + 4 padding + 10 rail
+   + 6), so the section label starts on the senders' left rule */
+.brain-mail-section-glyph {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  /* 4 + the header's own 6px gap = the row's 10px avatar-to-text gutter */
+  margin-right: 4px;
+  flex-shrink: 0;
+  color: var(--ink);
+}
+/* The collapsed section's digest: the three freshest senders stacked, who
+   they are, and the newest subject with its time. One row for the pile — so
+   its left padding is the row's whole left offset (the capsule's inset plus
+   the 4 the row keeps inside it), which is what puts the digest's text on
+   --mail-rule with the senders above it. */
+.brain-mail-bundle {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  height: 64px;
+  padding: 12px var(--inset) 12px calc(var(--inset) + 4px);
+  text-align: left;
+}
+/* The stack rides the row's 32 avatar gutter — the same gutter the section
+   header's 16 glyph rides — so the digest's text starts on the senders' left
+   rule and the bundle is the row's object, not a second one. Two marks,
+   because two is what the line beside them names: 18 + the 14 still showing
+   of the one behind it = 32, and the stack's right edge lands where a single
+   avatar's does. The overlap is only what 32 leaves — tightened past this the
+   two circles stop reading as two and start reading as one lumpy badge.
+   The mark behind is CUT, not ringed. A ring has to be painted in some
+   colour, and the only honest colour for the gap between two marks is the
+   ground — which here is a tinted canvas that changes again under hover and
+   under selection. So the one behind takes a notch the shape of the one in
+   front plus 2px of air, and whatever is underneath shows through it. */
+.brain-mail-avstack {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+  width: 32px;
+  margin-left: 6px;
+}
+.brain-mail-avstack > * + * {
+  margin-left: -4px;
+}
+.brain-mail-avstack > * {
+  border-radius: 50%;
+}
+/* the mark in front sits at x 14–32 of the 32 stack, so its centre is 23 and
+   its edge plus the 2px of air is an 11 radius */
+.brain-mail-avstack > *:not(:last-child) {
+  -webkit-mask-image: radial-gradient(circle 11px at 23px 9px, #0000 100%, #000 100%);
+  mask-image: radial-gradient(circle 11px at 23px 9px, #0000 100%, #000 100%);
+}
+/* Seen holds no unread mail, so its collapsed state owes the reader a count
+   and nothing else — but it owes it on the same rule, with the rail and the
+   avatar gutter standing empty rather than closed up. */
+.brain-mail-bundle_flat {
+  height: 44px;
+  padding-left: var(--mail-rule);
+  color: var(--ink-3);
+}
+/* Done carries no rule of its own. It used to fade in on the header's hover,
+   the tree row's "…" convention, which was right while it only marked mail
+   read: a cheap action can afford to be found where the pointer already is.
+   It archives the section now, and a control that REMOVES sixty-four letters
+   cannot be one a reader meets by accident — so it is always drawn, at the
+   IconButton's resting ink-2, the same weight as the chevron beside it, and
+   the undo in the toast is what makes it safe rather than the hiding. */
+/* The chevron lives inside its own 28 IconButton, so it takes that button's
+   ink: ink-2 at rest, ink on hover. That is §8's second signal beside the
+   capsule's fill — the disclosure never had one while it was painted ink-3 by
+   a colour of its own. Only the rotation belongs here. */
+.brain-mail-disclose {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  transition: transform 200ms var(--ease-out);
+}
+.brain-mail-disclose[data-expanded] {
+  transform: rotate(90deg);
+}
+@media (prefers-reduced-motion: reduce) {
+  .brain-mail-disclose {
+    transition: none;
+  }
+}
+/* the per-account sub-header inside People sits on the row's text column, so
+   the section reads as one left-aligned block */
+.brain-mail-subhead {
+  padding: 6px var(--inset) 4px var(--mail-rule);
+}
+/* The message body is the one thing on this surface that gets its own plane.
+   HTML mail is foreign content written for a white page, so it keeps a paper
+   sheet at r14 with a hairline; our own sender and meta markup stay on the
+   canvas around it. Nothing floats over the sheet. */
+.brain-mail-sheet {
+  border-radius: var(--r-row);
+  background: var(--paper);
+  box-shadow: 0 0 0 1px var(--hair-soft);
+  padding: 18px 20px;
+}
+@media (min-width: 768px) {
+  .brain-mail-sheet {
+    padding: 22px 26px;
+  }
+}
+/* P5-b — reader chrome. The toolbar is pills in a strip ABOVE the reader's
+   scroller, in flow: a tall message keeps its whole box in the layout and that
+   box does run up behind the strip, but the scroller clips it at its own top
+   edge, so no pixel of the frame is ever painted there and no backdrop layer
+   can meet one (e2e/design-audit asserts exactly that, against the VISIBLE
+   part of the iframe). No hairline under the strip — ban #3.
+
+   THE STRIP DECLARES NO GROUND (v6). It painted `--paper` and defended it as
+   "the thing the message scrolls under" — a plate against a frame that is
+   clipped before it arrives. What paid for the plate was the tint: the canvas
+   is paper PLUS the sky radial (900×560 at 0% 0%, `--tint-sky` .42), and on a
+   desktop the reader pane starts past 700px, where the radial is spent — the
+   ΔL 0.001 light / 0.004 dark that "invisible at rest" was measured from.
+   On a phone the reader IS the window: the strip sits in the radial's hot
+   corner and the same flat paper measured 13/8/2 in RGB against the canvas
+   beside it — a lit band with a hard horizontal edge under it, read by the
+   owner as a plate over the page AND as a progressive blur that had fired
+   before he scrolled. The paper is gone; the canvas runs behind the subject
+   the way it runs behind every other piece of chrome in the product, and §7's
+   one edge here is the scroller's own fade, which stays at 0 until
+   `data-scrolled`.
+
+   THE STRIP'S TWO EDGES ANSWER TO TWO RULES. Its LEFT padding is the article
+   column's (20 / 32), so the subject stands on the same rule as the message
+   text under it, and the back button hangs its capsule into that gutter
+   (-ml-2) the way an icon control optically aligns to a text edge. Its RIGHT
+   edge is the WINDOW's, and what stands there is chrome, so it takes §4's one
+   inset — the same 12 the page's [Share] and [pin │ …] pills keep on the
+   absolute topbar layer, and the same 12 the column's boundary rule, its row
+   capsule and its Compose pill ride at the edge they belong to. It used to
+   take the article's 32 on both sides, which is symmetry borrowed from the
+   left rule. Symmetry is not a reason, and it left the one pill in mail
+   standing 20px further off the window than every other pill in the product.
+   `max()` rather than a bare --inset because this strip is in flow and
+   full-bleed to the window: on a phone held sideways the safe area is wider
+   than the inset and wins, which is the form `.brain-topbar-mobile` already
+   uses for the same situation. */
+.brain-mail-reader-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  padding: 8px max(var(--inset), env(safe-area-inset-right, 0px)) 8px 20px;
+}
+@media (min-width: 768px) {
+  .brain-mail-reader-head {
+    padding: 12px max(var(--inset), env(safe-area-inset-right, 0px)) 12px 32px;
+  }
+}
+/* Attachment chip on paper: 28 capsule r14, hairline ring, Control 13/500;
+   hover strengthens the ring and adds the paper hover fill. */
+.brain-mail-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--r-row);
+  background: var(--paper);
+  box-shadow: 0 0 0 1px var(--hair);
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.25;
+  letter-spacing: -0.08px;
+  color: var(--ink);
+  transition:
+    background-color 160ms var(--ease-out),
+    box-shadow 160ms var(--ease-out);
+}
+.brain-mail-chip:hover {
+  background-color: var(--fill-hover);
+  box-shadow: 0 0 0 1px var(--hair-strong);
+  transition-duration: 80ms;
+}
+.brain-mail-chip:active {
+  background-color: var(--fill-active);
+}
+
+/* P5-c — the composer. A thick sheet inside the pane on the standard inset:
+   it floats over the canvas the way a dialog does and materializes on open
+   (keyframes on data-state — framer is kept for what physically moves). Every
+   writing surface inside it is a paper inset: the To/Cc/Bcc/Subject fields are
+   the `.field` atom and the message body is a paper block with the same
+   hairline → blue focus ring, because glass never sits under editable text
+   (ban #2). The actions are plain buttons on the sheet rather than a
+   ToolbarPill: a second material inside a material is ban #1. Concentric:
+   sheet 20 = control 10 + padding 10.
+   Below md the composer keeps the sheet form — it slides in from the bottom
+   edge and the grip drags it away on a spring from the current value (ban
+   #8), so there the entrance belongs to framer and the keyframe stays off. */
+.brain-composer {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  padding-top: 8px;
+}
+.brain-composer-sheet {
+  position: relative;
+  isolation: isolate;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  flex: 1;
+  flex-direction: column;
+  margin-inline: auto;
+  border-radius: var(--r-sheet) var(--r-sheet) 0 0;
+  background: var(--glass-thick);
+  -webkit-backdrop-filter: var(--blur-thick);
+  backdrop-filter: var(--blur-thick);
+  box-shadow: var(--rim), var(--shadow-3);
+  color: var(--ink);
+  --kbd-fill: var(--fill-kbd-glass);
+  --kbd-rim: 0 0 0 0.5px var(--fill-rim);
+  --skeleton-fill: var(--fill-skeleton-glass);
+}
+/* the sheen and the edge-light ride their own layer so materialize can bring
+   the edge in at 60% without ever animating the blur */
+.brain-composer-sheet::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--glass-sheen);
+  box-shadow: var(--edge-light);
+  pointer-events: none;
+}
+@media (min-width: 768px) {
+  .brain-composer {
+    padding: var(--inset);
+  }
+  .brain-composer-sheet {
+    max-width: 700px;
+    border-radius: var(--r-sheet);
+  }
+  .brain-composer-sheet[data-state="open"] {
+    animation: materialize-in 220ms var(--ease-out) both;
+  }
+  .brain-composer-sheet[data-state="open"]::before {
+    animation: materialize-edge 220ms linear both;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .brain-composer-sheet[data-state="open"] {
+    animation-name: dialog-fade;
+  }
+  .brain-composer-sheet[data-state="open"]::before {
+    animation: none;
+  }
+}
+/* the grip is the only drag surface — the sheet itself must stay scrollable
+   and selectable, so the drag listener is off everywhere else */
+.brain-composer-grip {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  height: 18px;
+  padding-top: 8px;
+  cursor: grab;
+  touch-action: none;
+}
+.brain-composer-grip:active {
+  cursor: grabbing;
+}
+.brain-composer-grip > span {
+  display: block;
+  width: 36px;
+  height: 4px;
+  border-radius: 9999px;
+  background: var(--ink-4);
+  opacity: 0.5;
+}
+.brain-composer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 10px 10px 8px;
+}
+.brain-composer-grip + .brain-composer-head {
+  padding-top: 4px;
+}
+/* the one scroller on the sheet: inside a glass panel the edge is the fade
+   (mask on the scroller, no second backdrop layer), gated by data-scrolled /
+   data-scroll-more — invisible until the content actually runs past an edge */
+.brain-composer-scroll {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 10px;
+}
+.brain-composer-fields {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+.brain-composer-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.brain-composer-field {
+  min-width: 0;
+}
+/* `flex: 1` belongs to the row, not to the atom. In the column the same
+   declaration resolves to `flex-basis: 0%` on the MAIN axis, which beats the
+   field's own 32px height and collapsed Subject / Cc / Bcc to their content
+   (22px) — off the §4 control scale and under the touch minimum. */
+.brain-composer-row > .brain-composer-field {
+  flex: 1;
+}
+/* The To row has to end on the same rule as the Subject row under it. A
+   text-only button ends at its glyph, 12px inside its own box, so the two
+   rows read as a ragged right edge; the ring puts the toggle's edge back on
+   the fields' rule and gives it the second hover signal a control owes. */
+.brain-composer-copies {
+  background-color: var(--paper);
+  box-shadow: 0 0 0 1px var(--hair);
+  transition:
+    background-color 160ms var(--ease-out),
+    box-shadow 160ms var(--ease-out),
+    color 160ms var(--ease-out),
+    transform 100ms ease-out;
+}
+/* It has a fill of its own, so the tint rides the `.tint-hover` layer (§8) —
+   the quiet variant's tint is a `background-color` and would replace the
+   paper instead of sitting over it. Paper is restated here to hold it. */
+.brain-composer-copies:hover,
+.brain-composer-copies:active {
+  background-color: var(--paper);
+}
+.brain-composer-copies:hover {
+  box-shadow: 0 0 0 1px var(--hair-strong);
+}
+.brain-composer-field > span,
+.brain-composer-from > span:first-child {
+  flex-shrink: 0;
+  min-width: 52px;
+  color: var(--ink-3);
+}
+/* From is draft metadata, not a control: it reads on the label rule the
+   fields use, but carries no ring and no hover — nothing here is clickable
+   until the composer can actually switch accounts. */
+.brain-composer-from {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 10px 2px;
+  /* Control's line-height 1 clips descenders on a truncating span (§3) */
+  line-height: 1.25;
+  color: var(--ink-2);
+}
+/* 16px on touch: iOS zooms the page on any focused field below it. The md
+   step drops to the field register (Table 14). */
+.brain-composer-field > input {
+  font-size: 16px;
+}
+.brain-composer-notice {
+  flex-shrink: 0;
+  padding: 0 2px;
+  color: var(--ink-2);
+}
+/* the message body: a paper inset, never glass under the text. It carries the
+   field's own ring convention — hairline, stronger on hover, blue on focus
+   for every modality. */
+.brain-composer-body {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1 0 auto;
+  flex-direction: column;
+  border-radius: var(--r-control);
+  background: var(--paper);
+  box-shadow: 0 0 0 1px var(--hair);
+  transition: box-shadow 160ms var(--ease-out);
+}
+.brain-composer-body:hover {
+  box-shadow: 0 0 0 1px var(--hair-strong);
+  transition-duration: 80ms;
+}
+.brain-composer-body:focus-within {
+  box-shadow: 0 0 0 1.5px var(--blue);
+}
+/* field-sizing grows the textarea and lets the sheet's own scroller take
+   over; browsers without it keep the min-height and scroll the textarea. */
+.brain-composer-body > textarea {
+  width: 100%;
+  min-height: 200px;
+  flex: 1;
+  padding: 12px 14px;
+  border-radius: inherit;
+  background: transparent;
+  color: var(--ink);
+  outline: none;
+  resize: none;
+  field-sizing: content;
+}
+.brain-composer-body > textarea::placeholder {
+  color: var(--ink-3);
+}
+.brain-composer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  padding: 8px 10px 10px;
+}
+@media (min-width: 768px) {
+  .brain-composer-field > input {
+    font-size: 14px;
+  }
+}
+
+/* Mail account fields remain visually quiet, but their bottom edge must stay
+   distinguishable from the paper in both themes. A named class intentionally
+   wins over the global hairline rule and Tailwind utility ordering. */
+@keyframes dialog-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dialog-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+
+/* Dialogs materialize (DESIGN.md v2 → Motion): opacity + scale .96 → 1 on
+   the resting translate, 220ms; the thick material's sheen + edge-light sit
+   on ::before and arrive at 60%. Exit retraces in 120ms. */
+@keyframes dialog-pop {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -54%) scale(0.96);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -54%) scale(1);
+  }
+}
+
+.brain-dialog[data-state="open"] {
+  animation: dialog-pop 220ms var(--ease-out) forwards;
+}
+.brain-dialog[data-state="open"]::before {
+  animation: materialize-edge 220ms linear both;
+}
+
+.brain-dialog[data-state="closed"] {
+  animation: dialog-pop-out 120ms ease-in forwards;
+}
+
+/* L4: the modal scrim */
+.brain-dialog-overlay {
+  background: var(--scrim-v2);
+}
+
+.brain-dialog-overlay[data-state="open"] {
+  animation: dialog-fade 150ms ease-out forwards;
+}
+
+.brain-dialog-overlay[data-state="closed"] {
+  animation: dialog-fade-out 120ms ease-in forwards;
+}
+
+@keyframes dialog-pop-out {
+  from {
+    opacity: 1;
+    transform: translate(-50%, -54%) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, -54%) scale(0.96);
+  }
+}
+
+@keyframes sheet-slide-up {
+  from {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sheet-slide-down {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+}
+
+/* Compact chrome keeps its visual geometry, while touch input gets the 44px
+   target recommended by the product accessibility contract. The transparent
+   pseudo-element participates in hit testing without changing layout. */
+@media (pointer: coarse) {
+  :where(.brain-touch-hit, .brain-touch-min) {
+    touch-action: manipulation;
+  }
+
+  :where(.brain-touch-hit, .brain-touch-min):not(.absolute):not(.fixed):not(.sticky) {
+    position: relative;
+  }
+
+  :where(.brain-touch-hit, .brain-touch-min)::before {
+    content: "";
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    border-radius: inherit;
+  }
+
+  /* Dense list controls cannot overlap adjacent rows. They still meet the
+     WCAG 2.5.8 minimum while the surrounding row remains the larger target. */
+  .brain-touch-min::before {
+    width: max(100%, 24px);
+    height: max(100%, 24px);
+  }
+
+  /* Keep this rule after the dense-target fallback. Components may inherit
+     both helpers; the explicitly requested 44px target must win. */
+  .brain-touch-hit::before {
+    width: max(100%, 44px);
+    height: max(100%, 44px);
+  }
+
+  /* Two 28 controls 6 apart put their 44 hit strips 10px into each other, and
+     which of the two owns the contested strip was decided by document order —
+     the chevron is later, so it won, and collapsing rather than archiving was
+     the right outcome by accident. On touch the section header spreads them
+     to 44 between centres (28 + 6 gap + 10), so every press lands on exactly
+     one control and nothing rests on the order they happen to be written in.
+     Pointer sizes are untouched: the overlap only exists where the strips do. */
+  .brain-mail-section-head > .brain-touch-hit + .brain-touch-hit {
+    margin-left: 10px;
+  }
+}
+
+/* horizontal-scroll row (under-title toolbar etc.) — children keep their width
+   and the scrollbar is hidden; a carousel instead of wrapping to a 2nd line */
+.brain-hscroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.brain-hscroll::-webkit-scrollbar {
+  display: none;
+}
+.brain-hscroll > * {
+  flex-shrink: 0;
+}
+
+/* rendered markdown in the version-history preview — compact + readable */
+.brain-history-preview > * + * {
+  margin-top: 8px;
+}
+.brain-history-preview h1,
+.brain-history-preview h2,
+.brain-history-preview h3 {
+  font-weight: 600;
+  color: var(--ink);
+  font-size: 14px;
+  margin-top: 14px;
+}
+.brain-history-preview a {
+  color: var(--ink);
+  text-decoration: none;
+  border-bottom: 1px solid var(--line);
+}
+.brain-history-preview ul,
+.brain-history-preview ol {
+  padding-left: 18px;
+  list-style: disc;
+}
+.brain-history-preview hr {
+  border: 0;
+  border-top: 1px solid var(--line);
+  margin: 12px 0;
+}
+.brain-history-preview code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  background: var(--fill-active);
+  padding: 1px 4px;
+  border-radius: 4px;
+}
+
+/* Optically centered resting transform — dialogs sit slightly above the
+   geometric center. Kept as `transform` (not the Tailwind `translate`
+   utilities, which emit the independent `translate` property and would
+   compose with the animated keyframe transforms above).
+   The dialog is the thick material, r20 (control 10 + padding 10), no
+   border: the class wins over the utilities a dialog still carries. The
+   sheen and edge-light live on ::before under the content (z -1 inside the
+   dialog's own stacking context). */
+.brain-dialog {
+  isolation: isolate;
+  transform: translate(-50%, -54%);
+  border: 0;
+  border-radius: var(--r-sheet);
+  background: var(--glass-thick);
+  -webkit-backdrop-filter: var(--blur-thick);
+  backdrop-filter: var(--blur-thick);
+  box-shadow: var(--rim), var(--shadow-3);
+  color: var(--ink);
+  --kbd-fill: var(--fill-kbd-glass);
+  --kbd-rim: 0 0 0 0.5px var(--fill-rim);
+  --skeleton-fill: var(--fill-skeleton-glass);
+}
+.brain-dialog::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--glass-sheen);
+  box-shadow: var(--edge-light);
+  pointer-events: none;
+}
+/* A row inside a dialog (Move's destinations, History's versions): the
+   palette row's construction on the same thick material — the r10 control
+   the sheet's own radius is derived from (§4: control 10 + padding 10 = 20,
+   so the body's inset is 10), 36 tall, Control 13/500 in ink, hover the ink
+   tint, the chosen one the white capsule at 600. Glyph and title are the
+   tree row's atoms — the same 18px glyph box on the same 7px gap — so a page
+   emoji stands off its title here exactly as it does in the tree; it used
+   to touch it. Selection is what the row already says to assistive tech:
+   aria-selected on a tree item, aria-pressed on a button. */
+.brain-dialog-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 36px;
+  border-radius: var(--r-control);
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.08px;
+  color: var(--ink);
+  text-align: left;
+  cursor: pointer;
+  transition: background-color 160ms var(--ease-out);
+}
+.brain-dialog-row:hover,
+.brain-dialog-row[data-hover] {
+  background-color: var(--fill-glass-hover);
+  transition-duration: 80ms;
+}
+.brain-dialog-row:hover .tree-row-glyph,
+.brain-dialog-row[data-hover] .tree-row-glyph {
+  color: var(--ink);
+}
+.brain-dialog-row[aria-selected="true"],
+.brain-dialog-row[aria-pressed="true"] {
+  background-color: var(--fill-glass-selected);
+  box-shadow:
+    inset 0 1px 0 var(--fill-highlight),
+    0 0 0 0.5px var(--fill-rim),
+    0 1px 2px var(--fill-rim);
+  font-weight: 600;
+}
+.brain-dialog-row[aria-selected="true"] .tree-row-glyph,
+.brain-dialog-row[aria-pressed="true"] .tree-row-glyph {
+  color: var(--ink);
+}
+.brain-dialog-row:disabled,
+.brain-dialog-row[aria-disabled="true"] {
+  opacity: 0.4;
+  pointer-events: none;
+}
+/* two-pane sheets (history, settings): the navigation strip is part of the
+   same material — no raised paper inside glass, a hairline only — and the
+   main pane is paper: settings content and a document preview are text,
+   and text lives on paper (DESIGN.md v2 → Materials) */
+.brain-sheet-two-pane-nav {
+  background: transparent;
+  border-color: var(--hair);
+}
+.brain-sheet-two-pane-main {
+  background: var(--paper);
+}
+
+/* Command palette — thick material r22, 560 wide, ≤ 60vh, 12vh from the top.
+   Materializes like a dialog (no resting translate: the panel is centred
+   with the independent `translate` property). */
+.brain-palette {
+  isolation: isolate;
+  width: min(calc(100vw - 2rem), 560px);
+  max-height: 60vh;
+  top: 12vh;
+  border-radius: var(--r-palette);
+  background: var(--glass-thick);
+  -webkit-backdrop-filter: var(--blur-thick);
+  backdrop-filter: var(--blur-thick);
+  box-shadow: var(--rim), var(--shadow-3);
+  color: var(--ink);
+  transform-origin: 50% 20%;
+  --kbd-fill: var(--fill-kbd-glass);
+  --kbd-rim: 0 0 0 0.5px var(--fill-rim);
+  --skeleton-fill: var(--fill-skeleton-glass);
+}
+.brain-palette::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--glass-sheen);
+  box-shadow: var(--edge-light);
+  pointer-events: none;
+}
+.brain-palette[data-state="open"] {
+  animation: materialize-in 220ms var(--ease-out) both;
+}
+.brain-palette[data-state="open"]::before {
+  animation: materialize-edge 220ms linear both;
+}
+.brain-palette[data-state="closed"] {
+  animation: materialize-out 120ms ease-in both;
+}
+/* The phone's search: the palette as a thick sheet on the 8px inset over the
+   safe area, r20 — the Pages sheet's construction (.brain-mobile-pages-sheet).
+   The Radix content is the transparent full-screen focus scope; the sheet is
+   its child and rises on SPRING_SHEET (framer, from the current value; a fade
+   under reduced motion), entrance only — Radix unmounts on close so the tab
+   bar underneath can take focus at once. The tab bar rides inside it as a
+   plain row (data-contained, no material of its own — ban #1). It used to be
+   a paper page of its own, with uppercase 11/500 labels and r6 rows on an ink
+   tint, under a "← Editor" that no other surface on the phone says. */
+.brain-palette-mobile {
+  background: transparent;
+}
+.brain-palette-sheet {
+  position: absolute;
+  top: calc(var(--inset) + env(safe-area-inset-top, 0px));
+  right: calc(var(--inset) + env(safe-area-inset-right, 0px));
+  bottom: calc(var(--inset) + env(safe-area-inset-bottom, 0px));
+  left: calc(var(--inset) + env(safe-area-inset-left, 0px));
+  display: flex;
+  flex-direction: column;
+  border-radius: var(--r-sheet);
+  overflow: hidden;
+}
+.brain-palette-sheet-head {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  height: 44px;
+  padding: 0 8px;
+}
+.brain-palette-sheet .field {
+  margin: 4px 8px 4px;
+}
+.brain-palette-sheet .field > input {
+  /* iOS zooms a focused control below 16px */
+  font-size: 16px;
+}
+.brain-palette-sheet .brain-mobile-tabbar[data-contained] {
+  max-width: calc(100% - 8px);
+  margin: 0 auto 4px;
+}
+/* group headings: Label 11, sentence case; the selected row a white capsule.
+   One rule set for the desktop panel and the phone's sheet: the two are one
+   surface, so nothing below is scoped to one of them. */
+.brain-palette [cmdk-group-heading],
+.brain-palette-sheet [cmdk-group-heading] {
+  padding: 8px 8px 2px;
+  font-family: var(--font-sf);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  letter-spacing: 0.06px;
+  color: var(--ink-2);
+}
+.brain-palette .brain-palette-item,
+.brain-palette-sheet .brain-palette-item {
+  border-radius: var(--r-control);
+  color: var(--ink);
+  transition: background-color 80ms var(--ease-out);
+}
+.brain-palette .brain-palette-item[data-selected="true"],
+.brain-palette-sheet .brain-palette-item[data-selected="true"] {
+  background-color: var(--fill-glass-selected);
+  box-shadow:
+    inset 0 1px 0 var(--fill-highlight),
+    0 0 0 0.5px var(--fill-rim),
+    0 1px 2px var(--fill-rim);
+  font-weight: 600;
+}
+
+@media (max-width: 767px) {
+  .brain-sheet {
+    inset: auto 0 0 0;
+    width: 100dvw;
+    max-width: 100dvw;
+    max-height: 85dvh;
+    border-bottom-width: 0;
+    border-radius: var(--r-sheet) var(--r-sheet) 0 0;
+    transform: translateY(0);
+  }
+
+  .brain-sheet[data-state="open"] {
+    animation: sheet-slide-up 180ms var(--ease-drawer) forwards;
+  }
+
+  .brain-sheet[data-state="closed"] {
+    animation: sheet-slide-down 130ms ease-in forwards;
+  }
+
+  /* iOS zooms a focused control below 16px — the Pages sheet's rule, for
+     every field atom inside a mobile sheet (Move's search) */
+  .brain-sheet .field > input {
+    font-size: 16px;
+  }
+
+  .brain-sheet-two-pane {
+    height: 85dvh;
+    flex-direction: column;
+  }
+
+  .brain-sheet-two-pane-nav {
+    width: 100%;
+    max-height: 148px;
+    overflow-x: hidden;
+    overflow-y: auto;
+    border-right-width: 0;
+    border-bottom-width: 1px;
+  }
+
+  .brain-sheet-two-pane-main {
+    min-height: 0;
+    flex: 1 1 auto;
+  }
+
+  .brain-keyboard-popover {
+    position: fixed !important;
+    top: max(12px, env(safe-area-inset-top)) !important;
+    right: 12px !important;
+    left: 12px !important;
+    bottom: auto !important;
+    width: auto !important;
+    transform: none !important;
+  }
+
+  .brain-keyboard-popover-panel {
+    width: 100%;
+    max-height: min(60dvh, 320px);
+    overflow: hidden;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+
+  /* Every dialog, sheet and the palette crossfades — no transform travel
+     under reduced motion, handled here for all of them rather than per
+     component (the phone's search sheet fades through framer's own reduced
+     branch, like the Pages sheet). */
+  .brain-dialog[data-state="open"],
+  .brain-sheet[data-state="open"],
+  .brain-palette[data-state="open"] {
+    animation-name: dialog-fade;
+  }
+
+  .brain-dialog[data-state="closed"],
+  .brain-sheet[data-state="closed"],
+  .brain-palette[data-state="closed"] {
+    animation-name: dialog-fade-out;
+  }
+
+  .brain-dialog[data-state="open"]::before,
+  .brain-palette[data-state="open"]::before {
+    animation: none;
+  }
+}
+
+@media print {
+  @page {
+    margin: 16mm;
+  }
+
+  /* Printing is a paper export even when the app is currently in dark mode.
+     Override the token source (including the higher-specificity .dark class),
+     not only the background, so text and rules keep printable contrast. */
+  html,
+  html.dark {
+    --paper: oklch(0.988 0.004 91);
+    --surface: oklch(0.970 0.005 85);
+    --ink: oklch(0.255 0.010 75);
+    --ink-2: oklch(0.500 0.010 75);
+    --ink-3: oklch(0.530 0.008 75);
+    --line: oklch(0.905 0.006 85);
+    --sticker: oklch(0.94 0.083 95);
+    --sticker-ink: oklch(0.32 0.045 95);
+  }
+
+  html,
+  body,
+  .brain-shell,
+  .brain-main,
+  .brain-page-scroll {
+    height: auto !important;
+    min-height: 0 !important;
+    overflow: visible !important;
+    background: white !important;
+  }
+
+  .brain-sidebar,
+  .brain-topbar,
+  .brain-mobile-tabbar,
+  .brain-dialog-overlay,
+  .brain-dialog,
+  .brain-block-handle,
+  .brain-drop-cursor,
+  .brain-col-drop-indicator,
+  .brain-stickers-inline,
+  .brain-page-scroll .milkdown-table-block .handle,
+  [role="toolbar"][aria-label="Text formatting"] {
+    display: none !important;
+  }
+
+  .brain-page-scroll > div,
+  .brain-page-scroll article.brain-page-article {
+    width: 100% !important;
+    max-width: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .brain-page-frame,
+  .brain-page-body {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+
+  /* no sidebar on paper: no canvas offset, no bleed, no left fade */
+  .brain-shell {
+    --canvas-offset: 0px;
+    --cover-glass: 0px;
+    --cover-ramp: 0px;
+  }
+
+  .brain-page-scroll article.brain-page-article {
+    min-height: var(--brain-print-sticker-bottom, 0px) !important;
+  }
+
+  /* A PDF contains the note, not its editing controls. Keep the authored
+     absolute y-position and clamp only an out-of-bounds x-position so the
+     180px card remains on the printable page. */
+  .brain-stickers-layer {
+    display: block !important;
+    position: absolute !important;
+    inset: 0 !important;
+    overflow: visible !important;
+    pointer-events: none !important;
+  }
+
+  .brain-sticker {
+    position: absolute !important;
+    left: clamp(0px, var(--brain-sticker-x), calc(100vw - 180px)) !important;
+    top: var(--brain-sticker-y) !important;
+    width: 180px !important;
+    min-height: 76px;
+    box-sizing: border-box;
+    transform: none !important;
+    break-inside: avoid;
+    background: var(--sticker) !important;
+    border: 1px solid color-mix(in oklch, var(--sticker-ink) 16%, transparent);
+    box-shadow: none !important;
+    color: var(--sticker-ink) !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .brain-sticker-chrome,
+  .brain-sticker-editor {
+    display: none !important;
+  }
+
+  .brain-sticker-print-text {
+    display: block !important;
+    min-height: 76px;
+  }
+
+  .brain-page-scroll .tableWrapper,
+  .brain-page-scroll .milkdown-table-block {
+    max-width: 100% !important;
+    overflow: visible !important;
+  }
+
+  .brain-page-scroll table {
+    width: 100% !important;
+    table-layout: fixed;
+    break-inside: avoid;
+  }
+
+  .brain-page-scroll th,
+  .brain-page-scroll td {
+    overflow-wrap: anywhere;
+  }
+
+  .brain-page-scroll img,
+  .brain-page-scroll pre,
+  .brain-page-scroll blockquote {
+    break-inside: avoid;
+  }
+}
+
+
+@keyframes ring-drain {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: 87.96;
+  }
+}

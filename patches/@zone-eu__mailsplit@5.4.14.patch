@@ -1,0 +1,140 @@
+diff --git a/lib/message-splitter.js b/lib/message-splitter.js
+index 0cc20469b76dfaa7aaedf47b7a256dc13d1268e9..c5c8302028409b3693c7db43a38d14e2f0de549d 100644
+--- a/lib/message-splitter.js
++++ b/lib/message-splitter.js
+@@ -12,6 +12,9 @@ const MimeNode = require('./mime-node');
+ 
+ const MAX_HEAD_SIZE = 1 * 1024 * 1024;
+ const MAX_CHILD_NODES = 1000;
++const MAX_TOTAL_HEAD_SIZE = Number.MAX_SAFE_INTEGER;
++const MAX_NESTING_DEPTH = Number.MAX_SAFE_INTEGER;
++const MAX_LINE_SIZE = Number.MAX_SAFE_INTEGER;
+ 
+ const HEAD = 0x01;
+ const BODY = 0x02;
+@@ -33,6 +36,10 @@ class MessageSplitter extends Transform {
+         this.config = config || {};
+         this.maxHeadSize = this.config.maxHeadSize || MAX_HEAD_SIZE;
+         this.maxChildNodes = this.config.maxChildNodes || MAX_CHILD_NODES;
++        this.maxTotalHeadSize = this.config.maxTotalHeadSize || MAX_TOTAL_HEAD_SIZE;
++        this.maxNestingDepth = this.config.maxNestingDepth || MAX_NESTING_DEPTH;
++        this.maxLineSize = this.config.maxLineSize || MAX_LINE_SIZE;
++        this.totalHeadSize = 0;
+         /** @type {MimeNodeType[]} */
+         this.tree = [];
+         this.nodeCounter = 0;
+@@ -343,6 +350,11 @@ class MessageSplitter extends Transform {
+     processLine(line, final, next) {
+         let flush = false;
+ 
++        let pendingLineLength = (this.line ? this.line.length : 0) + (line ? line.length : 0);
++        if (pendingLineLength > this.maxLineSize) {
++            return next(this.createLimitError('Max MIME line size exceeded'));
++        }
++
+         if (this.line && line) {
+             line = Buffer.concat([this.line, line]);
+             this.line = false;
+@@ -364,6 +376,21 @@ class MessageSplitter extends Transform {
+         // we check boundary outside the HEAD/BODY scope as it may appear anywhere
+         let boundary = this.checkBoundary(line);
+         if (boundary) {
++            let nextParent = false;
++            if (boundary === 1) {
++                nextParent = this.node;
++            } else if (boundary === 3) {
++                nextParent = this.node.parentNode;
++                if (nextParent && nextParent.contentType === 'message/rfc822') {
++                    nextParent = nextParent.parentNode;
++                }
++            }
++            if (nextParent !== false) {
++                let limitError = this.checkNewNodeLimits(nextParent);
++                if (limitError) {
++                    return next(limitError);
++                }
++            }
+             // reached boundary, switch context
+             switch (boundary) {
+                 case 1:
+@@ -413,6 +440,10 @@ class MessageSplitter extends Transform {
+ 
+         switch (this.state) {
+             case HEAD: {
++                if (this.totalHeadSize + line.length > this.maxTotalHeadSize) {
++                    return next(this.createLimitError('Max aggregate MIME header size exceeded'));
++                }
++                this.totalHeadSize += line.length;
+                 this.node.addHeaderChunk(line);
+                 if (this.node._headerlen > this.maxHeadSize) {
+                     let err = /** @type {Error & {code?: string}} */ (new Error('Max header size for a MIME node exceeded'));
+@@ -431,6 +462,10 @@ class MessageSplitter extends Transform {
+                         (!currentNode.encoding || ['7bit', '8bit', 'binary'].includes(currentNode.encoding)) &&
+                         (this.config.defaultInlineEmbedded ? currentNode.disposition !== 'attachment' : currentNode.disposition === 'inline')
+                     ) {
++                        let limitError = this.checkNewNodeLimits(currentNode);
++                        if (limitError) {
++                            return next(limitError);
++                        }
+                         currentNode.messageNode = true;
+                         this.newNode(currentNode);
+                         if (currentNode.parentNode) {
+@@ -467,6 +502,38 @@ class MessageSplitter extends Transform {
+         next(null, false);
+     }
+ 
++    /**
++     * Checks total-node and parent-chain depth limits before allocating a MIME node.
++     *
++     * @param {MimeNodeType | false} parent
++     * @returns {(Error & {code?: string}) | false}
++     */
++    checkNewNodeLimits(parent) {
++        if (this.nodeCounter >= this.maxChildNodes) {
++            return this.createLimitError('Max allowed child nodes exceeded');
++        }
++        let depth = 1;
++        let current = parent;
++        while (current) {
++            depth++;
++            if (depth > this.maxNestingDepth) {
++                return this.createLimitError('Max MIME nesting depth exceeded');
++            }
++            current = current.parentNode;
++        }
++        return false;
++    }
++
++    /**
++     * @param {string} message
++     * @returns {Error & {code?: string}}
++     */
++    createLimitError(message) {
++        let err = /** @type {Error & {code?: string}} */ (new Error(message));
++        err.code = 'EMAXLEN';
++        return err;
++    }
++
+     /**
+      * @param {MimeNodeType | false} [parent]
+      * @returns {void}
+diff --git a/lib/types.d.ts b/lib/types.d.ts
+index 02b0d4252a1962f7c0bc2570da1c1de815b3ece1..5e7b542bf28d336357364d862ecbca0e908b77b7 100644
+--- a/lib/types.d.ts
++++ b/lib/types.d.ts
+@@ -29,6 +29,15 @@ export interface SplitterOptions extends LibmimeOptions {
+ 
+     /** Maximum number of MIME child nodes accepted before parsing fails. */
+     maxChildNodes?: number;
++
++    /** Maximum aggregate header bytes accepted across every MIME node. */
++    maxTotalHeadSize?: number;
++
++    /** Maximum root-inclusive MIME nesting depth. */
++    maxNestingDepth?: number;
++
++    /** Maximum bytes retained for one MIME line before a line ending. */
++    maxLineSize?: number;
+ }
+ 
+ /** Configuration for `ChunkedPassthrough`. */

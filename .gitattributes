@@ -1,0 +1,4 @@
+patches/*.patch -whitespace
+test/data-versions/** binary
+test/data-versions/**/*.json -binary
+test/data-versions/**/*.ts -binary

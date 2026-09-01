@@ -1,0 +1,182 @@
+# Reference nginx vhost for Brain. Copy to /etc/nginx/sites-available/brain,
+# replace brain.example.com and the certificate paths, create the edge-secret
+# include from its .example file, then: nginx -t && systemctl reload nginx.
+# Brain itself listens on loopback only (HOSTNAME=127.0.0.1 PORT=3020).
+#
+# This file assumes nothing sits in front of nginx. If something does — see
+# the real-ip block below — that is the one part you have to configure before
+# the rate limits and the client addresses mean anything.
+
+server_tokens off;
+
+map $http_upgrade $brain_connection_upgrade {
+    default upgrade;
+    ""      close;
+}
+
+# --- Optional: a proxy in front of nginx -------------------------------------
+#
+# Everything here is OFF by default, because a rule that rewrites the client
+# address is a hole when the proxy it names is not actually there.
+#
+# Why it matters: the OAuth limit below keys on $binary_remote_addr, and the
+# app is handed $remote_addr as X-Brain-Rate-Source. Direct on the internet,
+# that address is the visitor's and nothing here is needed. Behind any proxy
+# with none of this configured, it is the proxy's, so every visitor on earth
+# shares one rate bucket. Never set real_ip_header without the matching
+# set_real_ip_from ranges: that is what stops a client forging its own address.
+#
+# Behind Cloudflare — refresh the ranges from https://www.cloudflare.com/ips/
+# into the include (docs/mcp-oauth.md), then uncomment all three:
+#
+# include /etc/nginx/brain-cloudflare-ips.conf;
+# real_ip_header CF-Connecting-IP;
+# real_ip_recursive on;
+#
+# Behind your own load balancer or reverse proxy — name its address instead
+# and read the standard header:
+#
+# set_real_ip_from 10.0.0.0/8;
+# real_ip_header X-Forwarded-For;
+# real_ip_recursive on;
+#
+# -----------------------------------------------------------------------------
+
+# Outer per-source limit on the public OAuth routes.
+limit_req_zone $binary_remote_addr zone=brain_oauth:10m rate=10r/m;
+
+upstream brain_app {
+    server 127.0.0.1:3020;
+    keepalive 16;
+}
+
+# Plain HTTP exists only to send the browser to HTTPS. Certbot's nginx plugin
+# adds its own ACME exception here; a webroot renewal wants the commented line.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name brain.example.com;
+
+    # location ^~ /.well-known/acme-challenge/ { root /var/www/certbot; }
+
+    return 301 https://$host$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name brain.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/brain.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/brain.example.com/privkey.pem;
+
+    # TLS 1.2 is the floor. The cipher list is the Mozilla intermediate set
+    # without its DHE entries, which need an ssl_dhparam file this example
+    # does not ship. TLS 1.3 picks its own suites and ignores ssl_ciphers.
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_prefer_server_ciphers off;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305;
+    ssl_session_cache shared:BrainTLS:10m;
+    ssl_session_timeout 1d;
+    ssl_session_tickets off;
+
+    # The app sends this header too. nginx owns it here so it also rides the
+    # answers the app never sees — 413, 502, and the redirect above. Drop
+    # includeSubDomains if Brain sits on an apex you share with other hosts:
+    # it commits every subdomain to HTTPS for the whole max-age.
+    proxy_hide_header Strict-Transport-Security;
+    add_header Strict-Transport-Security "max-age=31536000; includeSubDomains" always;
+
+    # Sets $brain_edge_secret; root-readable, never in Cloudflare or Git.
+    include /etc/nginx/brain-edge-secret.conf;
+
+    # The largest body the app itself accepts: a 100 MiB portable archive at
+    # POST /api/portable/import, above the 25 MiB attachment at POST /api/upload.
+    # An 8m cap here answered both with a 413 that never reached the app, so the
+    # limit the reader could see in the UI and the limit the edge enforced
+    # disagreed. nginx buffers a body this size to disk — keep the temp path on
+    # a filesystem with room for it. Lower this only together with the app's own
+    # limits. The Notion binary route sets its own smaller cap below.
+    client_max_body_size 101m;
+
+    location / {
+        proxy_pass http://brain_app;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $brain_connection_upgrade;
+        proxy_set_header X-Brain-Edge-Secret "";
+        proxy_set_header X-Brain-Rate-Source "";
+        proxy_read_timeout 60s;
+    }
+
+    # Server-sent events: unbuffered, long-lived.
+    location = /api/events {
+        proxy_pass http://brain_app;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Connection "";
+        proxy_set_header X-Brain-Edge-Secret "";
+        proxy_set_header X-Brain-Rate-Source "";
+        proxy_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 1h;
+    }
+
+    # Notion binary upload: up to 25 MiB streamed through unbuffered (docs/operations.md).
+    location = /api/mcp/notion-upload {
+        proxy_pass http://brain_app;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Connection "";
+        proxy_set_header X-Brain-Edge-Secret "";
+        proxy_set_header X-Brain-Rate-Source "";
+        client_max_body_size 26m;
+        proxy_request_buffering off;
+        proxy_read_timeout 120s;
+        proxy_send_timeout 120s;
+    }
+
+    # Public OAuth routes: overwrite both trusted headers, outer source limit.
+    location = /oauth/register {
+        limit_req zone=brain_oauth burst=5 nodelay;
+        proxy_pass http://brain_app;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Connection "";
+        proxy_set_header X-Brain-Edge-Secret $brain_edge_secret;
+        proxy_set_header X-Brain-Rate-Source $remote_addr;
+    }
+
+    location = /oauth/token {
+        limit_req zone=brain_oauth burst=5 nodelay;
+        proxy_pass http://brain_app;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Connection "";
+        proxy_set_header X-Brain-Edge-Secret $brain_edge_secret;
+        proxy_set_header X-Brain-Rate-Source $remote_addr;
+    }
+
+    location = /oauth/revoke {
+        limit_req zone=brain_oauth burst=5 nodelay;
+        proxy_pass http://brain_app;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Connection "";
+        proxy_set_header X-Brain-Edge-Secret $brain_edge_secret;
+        proxy_set_header X-Brain-Rate-Source $remote_addr;
+    }
+}

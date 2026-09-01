@@ -1,0 +1,1322 @@
+/* Milkdown editor — styled from scratch on our ink tokens (no Crepe/Nord theme).
+   Maya's spec: real reading typography, quote without a left border,
+   code without a fake terminal, calm and minimal. */
+
+.milkdown {
+  font-family: var(--font-sf);
+}
+
+/* Page-scoped heading typography. Body copy always stays in the calm system
+   sans; the page-level choice travels only with titles/headings to share/PDF. */
+.brain-page-article[data-page-font="sans"] {
+  --brain-page-headings: var(--font-sf);
+}
+.brain-page-article[data-page-font="serif"] {
+  --brain-page-headings: var(--font-serif);
+}
+.brain-page-article[data-page-font="mono"] {
+  --brain-page-headings: var(--font-mono);
+}
+.brain-page-article .milkdown {
+  font-family: var(--font-sf);
+}
+.brain-page-article .milkdown .ProseMirror h1,
+.brain-page-article .milkdown .ProseMirror h2,
+.brain-page-article .milkdown .ProseMirror h3,
+.brain-page-article .milkdown .ProseMirror h4,
+.brain-page-article .milkdown .ProseMirror h5,
+.brain-page-article .milkdown .ProseMirror h6 {
+  font-family: var(--brain-page-headings, var(--font-headings));
+}
+.brain-page-article[data-small-text="true"]
+  :is(.milkdown .ProseMirror, [data-derived-page-refs]) {
+  font-size: 14px;
+  line-height: 1.5;
+}
+/* iOS zooms a focused editable below 16px. On a phone the small-text setting
+   keeps its tighter leading but the body stays at the zoom-safe size. */
+@media (max-width: 767px) {
+  .brain-page-article[data-small-text="true"]
+    :is(.milkdown .ProseMirror, [data-derived-page-refs]) {
+    font-size: 16px;
+  }
+}
+
+/* Body register: 16 / 400 / 1.5 / −0.2px (DESIGN.md v2 → Typography) */
+:is(.milkdown .ProseMirror, [data-derived-page-refs]) {
+  color: var(--ink);
+  font-size: 16px;
+  line-height: 1.5;
+  letter-spacing: -0.2px;
+  font-optical-sizing: auto;
+  /* Unbroken runs (long URLs, tokens) must wrap instead of panning the page
+     horizontally on narrow viewports — inherited by all prose descendants. */
+  overflow-wrap: break-word;
+}
+
+.milkdown .ProseMirror {
+  outline: none;
+  caret-color: var(--ink);
+  white-space: pre-wrap;
+}
+
+/* `marked` separates rendered HTML blocks with newline text nodes. The editor
+   needs pre-wrap for authored whitespace, but a read-only HTML surface would
+   turn those serializer newlines into visible empty lines between every block. */
+.milkdown .ProseMirror.brain-read-only {
+  white-space: normal;
+}
+
+/* placeholder on the empty document */
+.milkdown .ProseMirror .placeholder::before {
+  content: attr(data-placeholder);
+  color: var(--ink-3);
+  pointer-events: none;
+  position: absolute;
+}
+
+.milkdown .ProseMirror > * + * {
+  margin-top: 12px;
+}
+
+/* Heading registers: H1 = Heading 22/700, H2 = Subheading 17/600,
+   H3 15/600 — tracking tied to size, family from the page's reading choice */
+.milkdown .ProseMirror h1,
+.milkdown .ProseMirror h2,
+.milkdown .ProseMirror h3 {
+  font-family: var(--font-headings);
+  color: var(--ink);
+}
+.milkdown .ProseMirror h1 {
+  font-size: 22px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+  margin-top: 32px;
+}
+.milkdown .ProseMirror h2 {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: -0.02em;
+  margin-top: 24px;
+}
+.milkdown .ProseMirror h3 {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  margin-top: 20px;
+}
+
+.milkdown .ProseMirror ul,
+.milkdown .ProseMirror ol {
+  padding-left: 24px;
+}
+.milkdown .ProseMirror ul {
+  list-style: none;
+}
+.milkdown .ProseMirror ul > li {
+  position: relative;
+}
+.milkdown .ProseMirror ul > li::before {
+  content: "•";
+  position: absolute;
+  left: -18px;
+  color: var(--ink-3);
+}
+.milkdown .ProseMirror ol {
+  list-style: decimal;
+}
+.milkdown .ProseMirror li::marker {
+  color: var(--ink-3);
+}
+.milkdown .ProseMirror li + li {
+  margin-top: 4px;
+}
+
+.milkdown .ProseMirror a {
+  color: var(--ink);
+  /* border-bottom instead of text-decoration: the line sits under the text
+     box, so descenders (р, у, д) are never cut through */
+  text-decoration: none;
+  border-bottom: 1px solid var(--ink-3);
+}
+
+/* Notion-style column layout (:::cols / :::col directives) */
+.milkdown .ProseMirror .brain-cols {
+  display: flex;
+  gap: 40px;
+  /* Equal-height lanes make the whitespace below a short column a real drop
+     target, while the content itself keeps its natural top alignment. */
+  align-items: stretch;
+  margin: 8px 0;
+}
+.milkdown .ProseMirror .brain-col {
+  flex: 1 1 0;
+  min-width: 0;
+}
+/* the first block inside a column shouldn't add extra top margin */
+.milkdown .ProseMirror .brain-col > :first-child {
+  margin-top: 0;
+}
+/* section headings inside a column: a hairline directly under the heading
+   (Notion-style), tight rhythm — no big gaps between sections */
+.milkdown .ProseMirror .brain-col h2 {
+  font-size: 16px;
+  font-weight: 600;
+  border-bottom: 1px solid var(--line);
+  padding-bottom: 6px;
+  margin-top: 28px;
+  margin-bottom: 8px;
+}
+.milkdown .ProseMirror .brain-col h2:first-child {
+  margin-top: 0;
+}
+/* page links in a column read as a tight list, not airy paragraphs */
+.milkdown .ProseMirror .brain-col p {
+  margin: 3px 0;
+}
+/* columns stack on a phone */
+@media (max-width: 640px) {
+  .milkdown .ProseMirror .brain-cols {
+    flex-direction: column;
+    gap: 0;
+  }
+  .milkdown .ProseMirror .brain-col {
+    width: 100%;
+  }
+}
+
+/* block drag handle (Notion-style) — grab any block to reorder it. The
+   BlockProvider positions this and toggles data-show on block hover. */
+.brain-block-handle {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  width: 20px;
+  height: 24px;
+  border-radius: 4px;
+  color: var(--ink-3);
+  cursor: grab;
+  opacity: 0.5;
+  transition:
+    opacity 120ms,
+    background-color 120ms;
+  user-select: none;
+  z-index: 10;
+}
+.brain-block-handle:hover {
+  opacity: 1;
+  background: var(--fill-hover);
+  color: var(--ink-2);
+}
+.brain-block-handle:active {
+  cursor: grabbing;
+}
+.brain-block-handle[data-show="false"] {
+  opacity: 0;
+  pointer-events: none;
+}
+/* insertion line shown while dragging a block */
+.brain-drop-cursor {
+  background-color: var(--ink) !important;
+  border-radius: 2px;
+}
+[data-col-drop="true"] .brain-drop-cursor {
+  display: none;
+}
+/* The drag is carrying a page the body already links, or the editor is not
+   taking mutations. No line, because there is no boundary to promise — the
+   cursor says `no-drop` and the release does nothing, visibly. */
+[data-file-refused="true"] .brain-drop-cursor {
+  display: none !important;
+}
+html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
+  display: none !important;
+}
+.brain-col-drop-indicator {
+  position: absolute;
+  background: var(--ink);
+  border-radius: 2px;
+  pointer-events: none;
+  z-index: 20;
+}
+.brain-col-drop-indicator[data-kind="side"] {
+  transform: translateX(-1px);
+}
+.brain-col-drop-indicator[data-kind="inside"] {
+  transform: translateY(-1px);
+}
+
+/* page reference — an atomic "page block" (Notion child-page mention). Not
+   editable text; renaming happens on the page itself. Click navigates. */
+/* no underline: a page listing many child blocks turned into a wall of
+   hairlines. The pointer cursor + hover fill carry the affordance. */
+:is(.milkdown .ProseMirror, [data-derived-page-refs]) .brain-page-ref {
+  cursor: pointer;
+  font-weight: 500;
+  text-decoration: none;
+  border-bottom: none;
+  border-radius: 4px;
+  padding: 0 3px;
+  margin: 0 -1px;
+  transition: background-color 120ms;
+  white-space: nowrap;
+  overflow-wrap: break-word;
+}
+/* A reference in the body is settled, so it reads primary. A row in the tail
+   is a child the body has not taken yet, so it reads one step down — before
+   and after are not the same picture. The tail's hover belongs to the whole
+   row, which carries the action, so the anchor does not take its own. */
+.milkdown .ProseMirror .brain-page-ref {
+  color: var(--ink);
+}
+.milkdown .ProseMirror .brain-page-ref:hover {
+  background: var(--fill-hover);
+}
+[data-derived-page-refs] .brain-page-ref {
+  color: var(--ink-2);
+}
+:is(.milkdown .ProseMirror, [data-derived-page-refs])
+  .brain-page-ref-missing {
+  color: var(--ink-3);
+  cursor: default;
+}
+:is(.milkdown .ProseMirror, [data-derived-page-refs])
+  .brain-page-ref-missing:hover {
+  background: transparent;
+}
+/* A row in the derived tail names a child the body does not link yet, so it
+   is a drag source: dropping it into the document is how it gets written in.
+   It dims while it travels — the indicator in the document is the live thing. */
+[data-derived-page-refs] .brain-page-ref[data-dragging="true"] {
+  opacity: 0.4;
+}
+/* The row that is travelling does not offer its own menu, and does not hold
+   the fill its own mousedown gave it — the only live thing while a drag is in
+   flight is the indicator in the document. */
+[data-derived-page-refs]
+  p:has(> .brain-page-ref[data-dragging="true"])
+  button[data-file-page-trigger] {
+  opacity: 0;
+}
+[data-derived-page-refs] p:has(> .brain-page-ref[data-dragging="true"]) {
+  background: transparent;
+}
+/* An open row menu belongs to its row, the same way hover does. */
+[data-derived-page-refs]
+  p:has(button[data-file-page-trigger][data-state="open"]) {
+  background: var(--fill-hover);
+}
+/* the page icon sits in its own span so a hair of air separates it from the
+   title; textContent stays "<icon> <title>" for parseDOM and search */
+:is(.milkdown .ProseMirror, [data-derived-page-refs])
+  .brain-page-ref
+  .brain-page-ref-icon {
+  margin-right: 2px;
+}
+/* Consecutive child-page blocks read as one compact list everywhere, not only
+   inside Smart Sort columns. Keep the normal 12px prose boundary before the
+   first reference and after the last one. */
+:is(.milkdown .ProseMirror, [data-derived-page-refs])
+  p.brain-page-ref-only
+  + p.brain-page-ref-only {
+  margin-top: 3px;
+}
+/* Centre-drop lifts the target text briefly without drawing a filled box around
+   the row. Edge drops keep the ordinary insertion line/reorder. */
+.milkdown .ProseMirror p.brain-page-ref-only {
+  transform-origin: left center;
+  transition:
+    transform 180ms var(--ease-out),
+    filter 180ms var(--ease-out);
+}
+.milkdown
+  .ProseMirror
+  p.brain-page-ref-only:has(> a[data-page-ref-nest-target="true"]) {
+  transform: translateY(-1px) scale(1.012);
+  filter: drop-shadow(
+    0 5px 8px color-mix(in oklch, var(--ink) 18%, transparent)
+  );
+}
+.milkdown .ProseMirror[aria-busy="true"] {
+  cursor: progress;
+}
+.milkdown
+  .ProseMirror
+  p.brain-page-ref-only:has(> a[data-page-ref-nest-pending="true"]) {
+  border-radius: var(--r-xs);
+  background: var(--fill-hover);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+/* One confirming flash on the block a filing just wrote, in the same treatment
+   a pending nest uses, then out of the way — so arriving is not the same
+   picture as having been there all along.
+
+   The class comes from a decoration the plugin puts on that block for the
+   window (`BRAIN_PAGE_REF_FILED_CLASS`), not from `.ProseMirror-selectednode`.
+   A NodeSelection on a standalone page block is also what picking one up to
+   move it sets, and "about to leave" drawing "just arrived" is a signal that
+   lies about a block a week old.
+
+   Hold, then release. The peak is `--fill-hover`, ink at 4%, and on
+   `--ease-out` a fade is 86% gone a quarter of the way through: 600ms of
+   animation was ~150ms of anything visible. The fill now holds for the first
+   45% and gives way linearly over the rest, which is the same ramp
+   `materialize-edge` runs on an alpha, and 600 is what a reader sees. */
+@keyframes brain-page-ref-filed {
+  0%,
+  45% {
+    background: var(--fill-hover);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  100% {
+    background: transparent;
+    box-shadow: inset 0 0 0 1px transparent;
+  }
+}
+.milkdown .ProseMirror p.brain-page-ref-only.brain-page-ref-filed {
+  border-radius: var(--r-xs);
+  animation: brain-page-ref-filed 600ms linear both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .milkdown .ProseMirror p.brain-page-ref-only {
+    transition: none;
+  }
+  .milkdown
+    .ProseMirror
+    p.brain-page-ref-only:has(> a[data-page-ref-nest-target="true"]) {
+    transform: none;
+    filter: drop-shadow(
+      0 2px 3px color-mix(in oklch, var(--ink) 16%, transparent)
+    );
+  }
+  /* The flash still holds for its 600ms, it just stops fading. */
+  .milkdown .ProseMirror p.brain-page-ref-only.brain-page-ref-filed {
+    animation-timing-function: steps(1, end);
+  }
+}
+/* a page-block title too long for its container truncates with an ellipsis
+   (the app's truncation register) instead of spilling past the prose measure
+   or into the next column; the title attribute carries the full text. A
+   standalone block hugs its text (fit-content) so the hover fill stays a pill. */
+:is(.milkdown .ProseMirror, [data-derived-page-refs])
+  p.brain-page-ref-only
+  > .brain-page-ref {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.milkdown .ProseMirror .brain-col .brain-page-ref {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* placed AFTER the base nowrap so it wins on a phone: a long page-block title
+   wraps instead of forcing the content wider than the viewport (the residual
+   horizontal scroll on note pages) */
+@media (max-width: 640px) {
+  :is(.milkdown .ProseMirror, [data-derived-page-refs]) .brain-page-ref {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  /* on mobile columns stack full-width and standalone blocks wrap — no
+     overflow to truncate */
+  :is(.milkdown .ProseMirror, [data-derived-page-refs])
+    p.brain-page-ref-only
+    > .brain-page-ref,
+  .milkdown .ProseMirror .brain-col .brain-page-ref {
+    display: inline;
+    overflow: visible;
+  }
+}
+
+/* callout/toggle blocks keep the no-stripe ink-on-paper system: tint + icon,
+   not a border stripe. */
+.milkdown .ProseMirror .brain-callout,
+.milkdown .ProseMirror .brain-toggle {
+  max-width: 620px;
+  box-sizing: border-box;
+}
+
+.milkdown .ProseMirror .brain-callout {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  background: var(--fill-active);
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+}
+.milkdown .ProseMirror .brain-callout-icon {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+}
+.milkdown .ProseMirror .brain-callout-icon:hover {
+  background: var(--fill-hover);
+}
+.milkdown .ProseMirror .brain-callout-icon:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+.milkdown .ProseMirror .brain-callout-content {
+  min-width: 0;
+}
+.milkdown .ProseMirror .brain-callout-content > :first-child,
+.milkdown .ProseMirror .brain-toggle-content > :first-child {
+  margin-top: 0;
+}
+.milkdown .ProseMirror .brain-callout-content > * + *,
+.milkdown .ProseMirror .brain-toggle-content > * + * {
+  margin-top: 8px;
+}
+
+.milkdown .ProseMirror .brain-toggle {
+  background: color-mix(in oklch, var(--ink) 3%, transparent);
+  border-radius: var(--r-md);
+}
+.milkdown .ProseMirror .brain-toggle-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 6px 10px;
+  color: var(--ink);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.milkdown .ProseMirror .brain-toggle-head::-webkit-details-marker {
+  display: none;
+}
+.milkdown .ProseMirror .brain-toggle-arrow {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--ink-3);
+  transition: transform 120ms;
+}
+.milkdown .ProseMirror .brain-toggle[open] .brain-toggle-arrow {
+  transform: rotate(90deg);
+}
+.milkdown .ProseMirror .brain-toggle-summary {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-weight: 500;
+}
+.milkdown .ProseMirror .brain-toggle-content {
+  min-width: 0;
+  padding: 0 12px 12px 34px;
+}
+/* smooth expand/collapse of a native <details> — progressive enhancement:
+   browsers without ::details-content (older) just snap, as before. The global
+   reduced-motion reset zeroes the duration. */
+.milkdown .ProseMirror .brain-toggle {
+  interpolate-size: allow-keywords;
+}
+.milkdown .ProseMirror .brain-toggle::details-content {
+  block-size: 0;
+  overflow: hidden;
+  transition:
+    block-size 200ms cubic-bezier(0.23, 1, 0.32, 1),
+    content-visibility 200ms allow-discrete;
+}
+.milkdown .ProseMirror .brain-toggle[open]::details-content {
+  block-size: auto;
+}
+/* a paragraph ending in an atom gets a ProseMirror trailing <br> for cursor
+   placement — it renders as a phantom second line. Collapse it for page-ref
+   paragraphs so each reference is a single tight line. */
+.milkdown .ProseMirror p:has(> a.brain-page-ref) > br.ProseMirror-trailingBreak {
+  display: none;
+}
+
+/* internal page links carry no underline — that's reserved for external hrefs
+   and atomic page refs, which have their own quieter affordance. */
+.milkdown .ProseMirror a.brain-internal-page-link {
+  text-decoration: none;
+  border-bottom: none;
+  font-weight: 500;
+}
+.milkdown .ProseMirror a.brain-internal-page-link:hover {
+  border-bottom: 1px solid var(--ink-3);
+}
+
+.milkdown .ProseMirror a[href^="/_attachments/"],
+.milkdown .ProseMirror a[href^="/_attachments-v2/"] {
+  display: inline-flex;
+  max-width: 100%;
+  align-items: center;
+  border-radius: var(--r-sm);
+  background: var(--fill-active);
+  padding: 1px 7px;
+  color: var(--ink);
+  font-weight: 500;
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+.milkdown .ProseMirror a[href^="/_attachments/"]:hover,
+.milkdown .ProseMirror a[href^="/_attachments-v2/"]:hover {
+  background: var(--fill-hover);
+  text-decoration: none;
+}
+
+/* link previews: render-time cards over ordinary markdown autolinks. The
+   source paragraph stays in the doc for serialization, but is visually
+   collapsed while the widget carries the reading UI. */
+.milkdown .ProseMirror > p.brain-embed-source {
+  height: 0;
+  min-height: 0;
+  margin: 0 !important;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+.milkdown .ProseMirror > p.brain-embed-source > * {
+  display: none;
+}
+.milkdown .ProseMirror .brain-embed {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px;
+  gap: 14px;
+  align-items: stretch;
+  box-sizing: border-box;
+  max-width: 620px;
+  min-height: 104px;
+  padding: 12px;
+  color: var(--ink);
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  text-decoration: none;
+  transition:
+    border-color 150ms,
+    box-shadow 150ms,
+    background-color 150ms;
+}
+.milkdown .ProseMirror .brain-embed:hover {
+  border-color: var(--ink-3);
+  box-shadow: var(--shadow-lift);
+  text-decoration: none;
+}
+.milkdown .ProseMirror .brain-embed-body {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+}
+.milkdown .ProseMirror .brain-embed-site {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-3);
+  font-size: 12px;
+  line-height: 1.3;
+}
+.milkdown .ProseMirror .brain-embed-favicon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border-radius: var(--r-xs);
+  background: var(--surface);
+}
+.milkdown .ProseMirror .brain-embed-site-name,
+.milkdown .ProseMirror .brain-embed-title,
+.milkdown .ProseMirror .brain-embed-description {
+  min-width: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.milkdown .ProseMirror .brain-embed-site-name {
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.milkdown .ProseMirror .brain-embed-title {
+  display: -webkit-box;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.milkdown .ProseMirror .brain-embed-description {
+  display: -webkit-box;
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+.milkdown .ProseMirror .brain-embed-thumb {
+  display: block;
+  overflow: hidden;
+  min-width: 0;
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+.milkdown .ProseMirror .brain-embed-thumb-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 80px;
+  object-fit: cover;
+}
+.milkdown .ProseMirror .brain-embed.brain-embed-fallback {
+  display: inline-flex;
+  min-height: 0;
+  padding: 0;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  border-radius: var(--r-xs);
+  box-shadow: none;
+  text-decoration: none;
+  border-bottom: 1px solid var(--ink-3);
+  overflow-wrap: anywhere;
+}
+.milkdown .ProseMirror .brain-embed.brain-embed-fallback:hover {
+  box-shadow: none;
+  border-bottom-color: var(--ink);
+}
+.milkdown .ProseMirror .brain-embed-skeleton {
+  display: block;
+  border-radius: var(--r-xs);
+  background: var(--fill-active);
+}
+.milkdown .ProseMirror .brain-embed-skeleton-icon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+}
+.milkdown .ProseMirror .brain-embed-skeleton-site {
+  width: 96px;
+  height: 12px;
+}
+.milkdown .ProseMirror .brain-embed-skeleton-title {
+  width: 82%;
+  height: 18px;
+}
+.milkdown .ProseMirror .brain-embed-skeleton-desc {
+  width: 64%;
+  height: 14px;
+}
+.milkdown .ProseMirror .brain-embed-skeleton-thumb {
+  min-height: 80px;
+}
+@media (max-width: 520px) {
+  .milkdown .ProseMirror .brain-embed {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .milkdown .ProseMirror .brain-embed-thumb,
+  .milkdown .ProseMirror .brain-embed-skeleton-thumb {
+    height: 120px;
+  }
+}
+
+.milkdown .ProseMirror strong {
+  font-weight: 600;
+}
+
+/* inline code */
+.milkdown .ProseMirror code {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  background: var(--surface);
+  border-radius: var(--r-xs);
+  padding: 0.1em 0.35em;
+}
+
+/* code block — no fake terminal, no traffic lights */
+.milkdown .ProseMirror pre {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-lg);
+  padding: 16px;
+  overflow-x: auto;
+}
+.milkdown .ProseMirror pre code {
+  background: none;
+  padding: 0;
+  font-size: 13.5px;
+  line-height: 1.6;
+}
+
+/* math / LaTeX fallback rendering: raw TeX, monochrome, stored as $ / $$
+   markdown. If KaTeX becomes a direct dependency later, these wrappers can host
+   its output without changing the storage format. */
+.milkdown .ProseMirror .brain-math-inline {
+  display: inline-flex;
+  align-items: baseline;
+  max-width: 100%;
+  color: var(--ink);
+  vertical-align: baseline;
+}
+.milkdown .ProseMirror .brain-math-inline::before,
+.milkdown .ProseMirror .brain-math-inline::after {
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 0.86em;
+}
+.milkdown .ProseMirror .brain-math-inline::before {
+  content: "$";
+}
+.milkdown .ProseMirror .brain-math-inline::after {
+  content: "$";
+}
+.milkdown .ProseMirror .brain-math-inline code {
+  background: color-mix(in oklch, var(--ink) 4%, transparent);
+  color: inherit;
+  white-space: break-spaces;
+}
+.milkdown .ProseMirror .brain-math-block {
+  position: relative;
+  max-width: 620px;
+  margin: 14px 0;
+  padding: 18px 18px 18px 42px;
+  background: color-mix(in oklch, var(--ink) 3%, transparent);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  color: var(--ink);
+}
+.milkdown .ProseMirror .brain-math-block::before,
+.milkdown .ProseMirror .brain-math-block::after {
+  position: absolute;
+  left: 14px;
+  color: var(--ink-3);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1;
+  user-select: none;
+}
+.milkdown .ProseMirror .brain-math-block::before {
+  content: "$$";
+  top: 12px;
+}
+.milkdown .ProseMirror .brain-math-block::after {
+  content: "$$";
+  bottom: 12px;
+}
+.milkdown .ProseMirror .brain-math-block code {
+  display: block;
+  min-height: 22px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: inherit;
+}
+
+/* blockquote — NO left border (impeccable ban #1), a soft ink fill instead */
+.milkdown .ProseMirror blockquote {
+  background: color-mix(in oklch, var(--ink) 3%, transparent);
+  border-radius: var(--r-md);
+  padding: 12px 16px;
+  color: var(--ink-2);
+}
+.milkdown .ProseMirror blockquote > * + * {
+  margin-top: 8px;
+}
+
+/* tables — hairline grid, no zebra.
+   Wide tables scroll horizontally; long tables scroll inside the wrapper,
+   which is what lets the header row stay pinned (sticky needs the scroll
+   container to be the wrapper itself). */
+
+.milkdown .ProseMirror table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 14px;
+}
+
+
+.milkdown .ProseMirror th,
+.milkdown .ProseMirror td {
+  border: 1px solid var(--line);
+  padding: 6px 10px;
+  text-align: left;
+}
+.milkdown .ProseMirror th {
+  font-weight: 600;
+}
+
+/* divider */
+.milkdown .ProseMirror hr {
+  border: none;
+  border-top: 1px solid var(--line);
+  margin: 32px 0;
+}
+
+/* A manually assembled section (heading → divider → child pages) should have
+   the same compact rhythm as Smart Sort's heading-with-rule treatment. A
+   standalone divider keeps the generous 32px breathing room above. */
+.milkdown .ProseMirror :is(h1, h2, h3) + hr:has(+ p.brain-page-ref-only) {
+  margin: 6px 0 8px;
+}
+.milkdown
+  .ProseMirror
+  :is(h1, h2, h3)
+  + hr:has(+ p.brain-page-ref-only)
+  + p.brain-page-ref-only {
+  margin-top: 0;
+}
+/* Also compact the natural slash-command order divider → heading → page. */
+.milkdown .ProseMirror hr:has(+ :is(h1, h2, h3) + p.brain-page-ref-only) {
+  margin: 24px 0 8px;
+}
+.milkdown
+  .ProseMirror
+  hr:has(+ :is(h1, h2, h3) + p.brain-page-ref-only)
+  + :is(h1, h2, h3) {
+  margin-top: 0;
+}
+.milkdown
+  .ProseMirror
+  hr:has(+ :is(h1, h2, h3) + p.brain-page-ref-only)
+  + :is(h1, h2, h3)
+  + p.brain-page-ref-only {
+  margin-top: 8px;
+}
+
+/* task list checkboxes — custom box so the check animates in (a native
+   accent-color checkbox toggles with no motion). Reduced-motion zeroes it. */
+.milkdown .ProseMirror input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  position: relative;
+  width: 16px;
+  height: 16px;
+  margin-right: 6px;
+  vertical-align: -3px;
+  border: 1.5px solid var(--ink-3);
+  border-radius: 4px;
+  cursor: pointer;
+  transition:
+    background-color 160ms,
+    border-color 160ms;
+}
+.milkdown .ProseMirror input[type="checkbox"]:checked {
+  background-color: var(--ink);
+  border-color: var(--ink);
+}
+.milkdown .ProseMirror input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  left: 4.5px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--paper);
+  border-width: 0 2px 2px 0;
+  transform: rotate(45deg) scale(0);
+  transform-origin: center;
+  transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+.milkdown .ProseMirror input[type="checkbox"]:checked::after {
+  transform: rotate(45deg) scale(1);
+}
+/* keyboard modality only — globals.css exempts inputs from the global ring
+   (text fields rely on caret + border), but a checkbox has neither */
+html[data-kbd] .milkdown .ProseMirror input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+/* prose measure: cap text blocks at ~68ch; tables/code breathe full width */
+.milkdown .ProseMirror > p,
+.milkdown .ProseMirror > ul,
+.milkdown .ProseMirror > ol,
+.milkdown .ProseMirror > blockquote,
+.milkdown .ProseMirror > h1,
+.milkdown .ProseMirror > h2,
+.milkdown .ProseMirror > h3 {
+  max-width: 620px;
+}
+/* The derived tail stands under the document and its rule separates it from
+   the document's blocks, so it is a document-width object and takes the same
+   measure. It was reading the article's box instead and running 52px past the
+   blocks on its right — invisible until the rule arrived to draw it. */
+.brain-page-article [data-derived-page-refs] {
+  max-width: 620px;
+}
+.brain-page-article[data-full-width="true"] [data-derived-page-refs],
+.brain-page-article[data-full-width="true"] .milkdown .ProseMirror > p,
+.brain-page-article[data-full-width="true"] .milkdown .ProseMirror > ul,
+.brain-page-article[data-full-width="true"] .milkdown .ProseMirror > ol,
+.brain-page-article[data-full-width="true"] .milkdown .ProseMirror > blockquote,
+.brain-page-article[data-full-width="true"] .milkdown .ProseMirror > h1,
+.brain-page-article[data-full-width="true"] .milkdown .ProseMirror > h2,
+.brain-page-article[data-full-width="true"] .milkdown .ProseMirror > h3,
+.brain-page-article[data-full-width="true"] .milkdown .ProseMirror > h4,
+.brain-page-article[data-full-width="true"] .milkdown .ProseMirror > h5,
+.brain-page-article[data-full-width="true"] .milkdown .ProseMirror > h6,
+.brain-page-article[data-full-width="true"] .milkdown .ProseMirror .brain-callout,
+.brain-page-article[data-full-width="true"] .milkdown .ProseMirror .brain-toggle,
+.brain-page-article[data-full-width="true"] .milkdown .ProseMirror .brain-embed,
+.brain-page-article[data-full-width="true"] .milkdown .ProseMirror .brain-math-block {
+  max-width: none;
+}
+
+/* no dead air under the page title */
+.milkdown .ProseMirror > h1:first-child,
+.milkdown .ProseMirror > h2:first-child,
+.milkdown .ProseMirror > h3:first-child {
+  margin-top: 0;
+}
+
+.milkdown .ProseMirror a {
+  transition: text-decoration-color 150ms;
+}
+.milkdown .ProseMirror a:hover {
+  text-decoration-color: var(--ink);
+}
+
+.milkdown .ProseMirror img {
+  max-width: 100%;
+  border-radius: var(--r-md);
+}
+
+/* first-class image figures: stored as ordinary markdown images with caption in
+   alt text and layout attrs packed into the markdown title. */
+.milkdown .ProseMirror .brain-image {
+  position: relative;
+  display: block;
+  max-width: 100%;
+  width: fit-content;
+  margin: 16px 0;
+}
+.milkdown .ProseMirror .brain-image[data-align="left"] {
+  margin-left: 0;
+  margin-right: auto;
+}
+.milkdown .ProseMirror .brain-image[data-align="center"] {
+  margin-left: auto;
+  margin-right: auto;
+}
+.milkdown .ProseMirror .brain-image[data-align="right"] {
+  margin-left: auto;
+  margin-right: 0;
+}
+.milkdown .ProseMirror .brain-image-frame {
+  position: relative;
+  max-width: 100%;
+}
+.milkdown .ProseMirror .brain-image img {
+  display: block;
+  height: auto;
+  max-width: 100%;
+}
+
+/* Image upload is editor UI, not document content. ProseMirror renders this as
+   a mapped decoration at the drop/paste position, then removes it before the
+   ordinary markdown image node is inserted. */
+.milkdown .ProseMirror .brain-image-upload {
+  position: relative;
+  display: block;
+  width: min(100%, 620px);
+  min-height: 148px;
+  max-height: min(62vh, 520px);
+  margin: 16px 0;
+  overflow: hidden;
+  border-radius: var(--r-md);
+  background: var(--fill-active);
+  isolation: isolate;
+}
+.milkdown .ProseMirror .brain-image-upload-preview {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  max-height: min(62vh, 520px);
+  object-fit: contain;
+  opacity: 0.58;
+}
+.milkdown .ProseMirror .brain-image-upload-veil {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  background: var(--fill-hover);
+  animation: brain-image-upload-breathe 1.6s var(--ease-out) infinite alternate;
+}
+.milkdown .ProseMirror .brain-image-upload-meter {
+  position: absolute;
+  right: 12px;
+  bottom: 12px;
+  left: 12px;
+  z-index: 2;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 2px;
+  background: var(--line);
+}
+.milkdown .ProseMirror .brain-image-upload-meter-fill {
+  display: block;
+  width: 100%;
+  height: 100%;
+  transform-origin: left center;
+  background: var(--ink-2);
+  transition: transform 180ms var(--ease-out);
+}
+.milkdown .ProseMirror .brain-image-upload-label {
+  position: absolute;
+  right: 12px;
+  bottom: 20px;
+  z-index: 2;
+  padding: 2px 5px;
+  border-radius: var(--r-xs);
+  background: var(--paper);
+  color: var(--ink-2);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.milkdown .ProseMirror .brain-image-upload-error {
+  display: block;
+  margin: 8px 0;
+  color: var(--ink-2);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+@keyframes brain-image-upload-breathe {
+  from { opacity: 0.16; }
+  to { opacity: 0.5; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .milkdown .ProseMirror .brain-image-upload-veil {
+    animation: none;
+    opacity: 0.28;
+  }
+  .milkdown .ProseMirror .brain-image-upload-meter-fill {
+    transition: none;
+  }
+}
+.milkdown .ProseMirror .brain-image-caption {
+  margin-top: 6px;
+  color: var(--ink-3);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.milkdown .ProseMirror .brain-image-caption[hidden] {
+  display: none;
+}
+.milkdown .ProseMirror .brain-image-chrome {
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 120ms,
+    background-color 120ms,
+    border-color 120ms;
+}
+.milkdown .ProseMirror .brain-image:hover .brain-image-chrome,
+.milkdown .ProseMirror .brain-image:focus-within .brain-image-chrome,
+.milkdown .ProseMirror .brain-image[data-selected="true"] .brain-image-chrome {
+  opacity: 1;
+  pointer-events: auto;
+}
+.milkdown .ProseMirror .brain-image-resize {
+  position: absolute;
+  top: 0;
+  right: -5px;
+  bottom: 0;
+  width: 10px;
+  cursor: ew-resize;
+}
+.milkdown .ProseMirror .brain-image-resize::before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 4px;
+  width: 2px;
+  border-radius: 2px;
+  background: var(--ink-3);
+}
+.milkdown .ProseMirror .brain-image-resize:hover::before {
+  background: var(--ink-2);
+}
+.milkdown .ProseMirror .brain-image-align {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: flex;
+  align-items: center;
+  gap: 1px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-xs);
+  background: var(--surface);
+}
+.milkdown .ProseMirror .brain-image-align-button {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 20px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--ink-3);
+  line-height: 1;
+  cursor: pointer;
+}
+.milkdown .ProseMirror .brain-image-align-button svg {
+  display: block;
+}
+.milkdown .ProseMirror .brain-image-align-button:hover {
+  background: var(--fill-hover);
+  color: var(--ink-2);
+}
+.milkdown .ProseMirror .brain-image-align-button[data-active="true"] {
+  background: var(--fill-active);
+  color: var(--ink);
+}
+
+/* h4-h6 — Tailwind preflight resets them; MCP-written notes use them */
+.milkdown .ProseMirror h4,
+.milkdown .ProseMirror h5,
+.milkdown .ProseMirror h6 {
+  font-family: var(--font-headings);
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.4;
+  margin-top: 16px;
+  max-width: 620px;
+}
+.milkdown .ProseMirror h4 {
+  font-size: 15px;
+}
+.milkdown .ProseMirror h5,
+.milkdown .ProseMirror h6 {
+  font-size: 14px;
+}
+
+/* task items: checkbox replaces the bullet */
+.milkdown .ProseMirror li:has(> input[type="checkbox"])::before,
+.milkdown .ProseMirror li:has(> p > input[type="checkbox"])::before {
+  content: none;
+}
+
+/* unfocused empty page: invite writing (the caret-based slash hint below takes
+   over once focused, so scope this to :not(:focus-within) to avoid a double) */
+.milkdown .ProseMirror:not(:focus-within) > p:only-child:has(> br.ProseMirror-trailingBreak:only-child) {
+  position: relative;
+}
+.milkdown
+  .ProseMirror:not(:focus-within)
+  > p:only-child:has(> br.ProseMirror-trailingBreak:only-child)::before {
+  content: "Write, or press / for commands";
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: var(--ink-3);
+  pointer-events: none;
+}
+
+/* the active empty line teaches the slash menu: ink-4 copy behind a 1px ink
+   caret marker at the left of the block (DESIGN.md v2 → Empty-block hint) */
+.milkdown .ProseMirror p.brain-slash-hint {
+  position: relative;
+}
+.milkdown .ProseMirror p.brain-slash-hint::before {
+  content: "Press / for a block";
+  position: absolute;
+  left: 0;
+  top: 0;
+  /* the documented placeholder exception: ink-3 as a hint on paper
+     (DESIGN.md v2 → Colour) — ink-4 vanished on the warm paper */
+  color: var(--ink-3);
+  pointer-events: none;
+}
+.milkdown .ProseMirror p.brain-slash-hint::after {
+  content: "";
+  position: absolute;
+  left: -10px;
+  top: 0.2em;
+  height: 1.1em;
+  width: 1px;
+  background: var(--ink);
+  pointer-events: none;
+}
+
+/* text colour + highlight marks (curated palette, both themes) */
+.milkdown .ProseMirror [data-color="red"] { color: var(--tc-red); }
+.milkdown .ProseMirror [data-color="orange"] { color: var(--tc-orange); }
+.milkdown .ProseMirror [data-color="yellow"] { color: var(--tc-yellow); }
+.milkdown .ProseMirror [data-color="green"] { color: var(--tc-green); }
+.milkdown .ProseMirror [data-color="blue"] { color: var(--tc-blue); }
+.milkdown .ProseMirror [data-color="purple"] { color: var(--tc-purple); }
+.milkdown .ProseMirror [data-color="pink"] { color: var(--tc-pink); }
+.milkdown .ProseMirror [data-color="gray"] { color: var(--tc-gray); }
+.milkdown .ProseMirror [data-color="brown"] { color: var(--tc-brown); }
+.milkdown .ProseMirror [data-bg] {
+  border-radius: 3px;
+  padding: 0 3px;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+.milkdown .ProseMirror [data-bg="red"] { background: var(--tb-red); }
+.milkdown .ProseMirror [data-bg="orange"] { background: var(--tb-orange); }
+.milkdown .ProseMirror [data-bg="yellow"] { background: var(--tb-yellow); }
+.milkdown .ProseMirror [data-bg="green"] { background: var(--tb-green); }
+.milkdown .ProseMirror [data-bg="blue"] { background: var(--tb-blue); }
+.milkdown .ProseMirror [data-bg="purple"] { background: var(--tb-purple); }
+.milkdown .ProseMirror [data-bg="pink"] { background: var(--tb-pink); }
+.milkdown .ProseMirror [data-bg="gray"] { background: var(--tb-gray); }
+.milkdown .ProseMirror [data-bg="brown"] { background: var(--tb-brown); }
+
+/* One transient full-text search target. This is a ProseMirror decoration,
+   never a document mark or browser selection, so it cannot alter Markdown or
+   move the caret. */
+.milkdown .ProseMirror .brain-search-match {
+  border-radius: var(--r-xs);
+  background: var(--selection);
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  animation: brain-search-match-in 180ms var(--ease-out);
+}
+@keyframes brain-search-match-in {
+  from {
+    background: transparent;
+  }
+}
+
+/* gap cursor — the caret landing spot between atom blocks (image / math /
+   embed). prosemirror-gapcursor ships no styles of its own. */
+.milkdown .ProseMirror-gapcursor {
+  display: none;
+  pointer-events: none;
+  position: absolute;
+}
+.milkdown .ProseMirror-gapcursor:after {
+  content: "";
+  display: block;
+  position: absolute;
+  top: -2px;
+  width: 20px;
+  border-top: 1px solid var(--ink);
+  animation: brain-gapcursor-blink 1.1s steps(2, start) infinite;
+}
+@keyframes brain-gapcursor-blink {
+  to {
+    visibility: hidden;
+  }
+}
+.milkdown .ProseMirror-focused .ProseMirror-gapcursor {
+  display: block;
+}

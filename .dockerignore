@@ -1,0 +1,5 @@
+*
+# Paired with ARG BRAIN_STAGE in ops/docker/Dockerfile: only this stage path
+# enters the context, so a BRAIN_STAGE override needs a matching line here.
+!.next/release-stage/**
+!ops/docker/**

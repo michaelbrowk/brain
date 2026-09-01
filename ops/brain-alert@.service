@@ -1,0 +1,31 @@
+[Unit]
+Description=Post a Telegram alert for a failed Brain unit (%i)
+# Fires via OnFailure= on brain.service, brain-mail.service,
+# brain-backup.service, and brain-deploy-puller.service. Without a configured
+# /etc/brain/alert.env it logs to the journal and exits 0 — the alert channel
+# must never turn a failed unit into a second failure loop.
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=-/etc/brain/alert.env
+ExecStart=/opt/brain/bin/brain-alert.sh %i
+TimeoutStartSec=30
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

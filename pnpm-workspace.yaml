@@ -1,0 +1,25 @@
+packages:
+  - "workers/*"
+
+allowBuilds:
+  "@tailwindcss/oxide": true
+  esbuild: true
+  sharp: true
+  unrs-resolver: true
+  workerd: true
+
+# Security floors (audit 2026-08-19): parents of these transitive deps pin
+# vulnerable ranges. Selectors are version-scoped so future majors are never
+# hijacked. postcss stays an exact pin (was 8.5.16 since the July reliability
+# rollout), bumped along the same 8.5.x line.
+overrides:
+  postcss: 8.5.26
+  "js-yaml@>=3.0.0 <3.15.1": 3.15.1
+  "js-yaml@>=4.0.0 <4.3.1": 4.3.1
+  "undici@>=7.0.0 <7.29.0": 7.29.0
+  "nanoid@>=3.0.0 <3.3.18": 3.3.18
+  "brace-expansion@>=1.0.0 <1.1.18": 1.1.18
+  "brace-expansion@>=5.0.0 <5.0.9": 5.0.9
+patchedDependencies:
+  '@zone-eu/mailsplit@5.4.14': patches/@zone-eu__mailsplit@5.4.14.patch
+  mailparser@3.9.14: patches/mailparser@3.9.14.patch

@@ -1,0 +1,18 @@
+[Unit]
+Description=Brain Mail one-message MIME parser socket
+Requires=systemd-tmpfiles-setup.service
+After=systemd-tmpfiles-setup.service
+
+[Socket]
+ListenStream=/run/brain-mail-mime/brain-mail-mime.sock
+Accept=yes
+SocketUser=brain-mail
+SocketGroup=brain-mail
+SocketMode=0600
+DirectoryMode=0710
+Backlog=1
+MaxConnections=1
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target

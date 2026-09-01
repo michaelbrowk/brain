@@ -1,0 +1,11 @@
+[Unit]
+Description=Nightly Brain notes backup
+
+[Timer]
+OnCalendar=*-*-* 04:00:00
+Persistent=true
+RandomizedDelaySec=5m
+Unit=brain-backup.service
+
+[Install]
+WantedBy=timers.target

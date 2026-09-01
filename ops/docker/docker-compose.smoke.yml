@@ -1,0 +1,42 @@
+# The sample used by scripts/smoke-compose.mjs. The onboarding compose file is
+# designed in B; this one exists to prove the image boots web and mail from one
+# image with a shared socket volume.
+services:
+  web:
+    image: ${BRAIN_SMOKE_IMAGE:?set BRAIN_SMOKE_IMAGE}
+    command: ["web"]
+    init: true
+    depends_on: [mail]
+    ports:
+      - "127.0.0.1:${BRAIN_SMOKE_PORT:-3023}:3020"
+    environment:
+      AUTH_SECRET: brain-compose-smoke-secret-not-for-production-0123456789
+      AUTH_PASSWORD_HASH: ${BRAIN_SMOKE_PASSWORD_HASH:?set BRAIN_SMOKE_PASSWORD_HASH}
+      MCP_TOKEN: brain-compose-smoke-mcp-token-not-for-production
+      BRAIN_READINESS_TOKEN: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      BRAIN_EDGE_RATE_SECRET: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      BRAIN_PUBLIC_ORIGIN: http://127.0.0.1:3020
+      OPENROUTER_API_KEY: ""
+      GIT_AUTHOR_NAME: Brain Smoke
+      GIT_AUTHOR_EMAIL: brain-smoke@example.invalid
+      GIT_COMMITTER_NAME: Brain Smoke
+      GIT_COMMITTER_EMAIL: brain-smoke@example.invalid
+    volumes:
+      - notes:/opt/brain/notes
+      - brain-state:/var/lib/brain
+      - mail-socket:/run/brain-mail
+  mail:
+    image: ${BRAIN_SMOKE_IMAGE:?set BRAIN_SMOKE_IMAGE}
+    command: ["mail"]
+    init: true
+    volumes:
+      - mail-state:/var/lib/brain-mail
+      - mail-credentials:/run/credentials/brain-mail
+      - mail-socket:/run/brain-mail
+
+volumes:
+  notes: {}
+  brain-state: {}
+  mail-state: {}
+  mail-credentials: {}
+  mail-socket: {}

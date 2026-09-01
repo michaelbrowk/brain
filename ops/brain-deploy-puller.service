@@ -1,0 +1,41 @@
+[Unit]
+Description=Poll GitHub for a verified Brain release
+After=network-online.target brain.service
+Wants=network-online.target
+OnFailure=brain-alert@%n.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+ExecStart=/opt/brain/bin/deploy-puller.sh
+UMask=0077
+TimeoutStartSec=20min
+Nice=10
+CPUWeight=20
+IOWeight=20
+MemoryMax=768M
+TasksMax=128
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictNamespaces=true
+LockPersonality=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=CAP_CHOWN CAP_DAC_OVERRIDE CAP_FOWNER
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/opt/brain
+ReadOnlyPaths=/opt/brain/bin /opt/brain/runtime /opt/brain/notes /opt/brain/backups

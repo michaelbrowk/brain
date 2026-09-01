@@ -1,0 +1,160 @@
+/* Dev stand only. The stand opts into the v2 ink (transitional tokens, see
+   globals.css) so every swatch and the contrast table use the values the
+   glass surfaces will ship with. */
+[data-glass-stand] {
+  --ink: var(--ink-v2);
+  --ink-2: var(--ink-2-v2);
+  --ink-3: var(--ink-3-v2);
+  --scrim: var(--scrim-v2);
+  font-family: var(--font-sf);
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* "photo" cover: a gradient with the dynamic range of a real picture */
+.stand-cover {
+  background:
+    radial-gradient(420px 260px at 18% 30%, oklch(0.86 0.12 75 / 0.9), transparent 70%),
+    radial-gradient(520px 320px at 78% 70%, oklch(0.55 0.16 260 / 0.9), transparent 70%),
+    radial-gradient(300px 240px at 55% 15%, oklch(0.92 0.05 95 / 0.8), transparent 65%),
+    linear-gradient(160deg, oklch(0.3 0.06 265) 0%, oklch(0.62 0.12 45) 55%, oklch(0.2 0.03 280) 100%);
+}
+
+/* dark mail block: what an HTML email in dark mode looks like under a pill */
+.stand-mail {
+  background: var(--stand-dark);
+  color: oklch(0.9 0.01 280);
+}
+
+/* lightest possible backdrop: paper with the strongest edge tint over it */
+.stand-light {
+  background-color: var(--paper);
+  background-image: radial-gradient(120% 120% at 0% 0%, var(--tint-sky), transparent 80%);
+}
+
+/* static hover for screenshots. Rest rows take the ink tint; a selected row
+   keeps its white capsule and takes the same tint layered over it (Phase 1:
+   the lighter .86 measured ΔL < .01 over paper). */
+.stand-row[data-hover]:not(.mat-fill-selected) {
+  background: var(--fill-glass-hover);
+}
+.stand-row[data-hover] .stand-row-more {
+  opacity: 1;
+}
+.stand-row:hover .stand-row-more {
+  opacity: 1;
+}
+.stand-row-more {
+  opacity: 0;
+  transition: opacity 80ms ease;
+}
+.stand-row {
+  transition: background-color 80ms ease;
+}
+.stand-row:hover {
+  transition-duration: 80ms;
+}
+.stand-row:not(:hover) {
+  transition-duration: 160ms;
+}
+
+.stand-pill-ib:hover {
+  background: var(--fill-glass-hover);
+}
+
+.stand-handle {
+  width: 20px;
+  height: 28px;
+  border-radius: 10px;
+}
+
+/* press: scale on pointer-down, 100ms ease-out */
+.stand-press:active {
+  transform: scale(0.97);
+  transition: transform 100ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  .stand-press:active {
+    transform: none;
+  }
+}
+
+.stand-table th {
+  background: oklch(0.232 0.004 286 / 0.045);
+  font-weight: 600;
+}
+.dark .stand-table th {
+  background: oklch(1 0 0 / 0.06);
+}
+.stand-table th,
+.stand-table td {
+  padding: 6px 10px;
+  border-right: 1px solid var(--hair-soft);
+  border-bottom: 1px solid var(--hair-soft);
+  text-align: left;
+}
+.stand-table th:last-child,
+.stand-table td:last-child {
+  border-right: 0;
+}
+.stand-table tr:last-child td {
+  border-bottom: 0;
+}
+.stand-table td:not(:first-child),
+.stand-table th:not(:first-child) {
+  text-align: right;
+}
+.stand-table tbody tr:hover td {
+  background: var(--blue-tint);
+}
+
+/* the one primary per surface: ink fill, paper glyph, no chrome of its own.
+   Hover shifts lightness by .08 (80ms in / 160ms out); press is .stand-press. */
+.stand-accent {
+  background: var(--accent);
+  color: var(--accent-ink);
+  transition: background-color 160ms ease;
+}
+.stand-accent:hover,
+.stand-accent[data-hover] {
+  background: var(--accent-hover);
+  transition-duration: 80ms;
+}
+
+.stand-kbd-glass {
+  background: var(--fill-kbd-glass);
+  box-shadow: 0 0 0 0.5px oklch(0.23 0.024 249 / 0.12);
+}
+.stand-kbd-paper {
+  background: var(--fill-kbd-paper);
+}
+.stand-field {
+  background: var(--fill-field-glass);
+  box-shadow: inset 0 0.5px 0 oklch(0.23 0.024 249 / 0.06);
+}
+
+/* ── §9 components ── */
+/* a soft photo-like backdrop for what floats on the canvas */
+.stand-cover-soft {
+  background:
+    radial-gradient(300px 160px at 20% 40%, oklch(0.86 0.1 75 / 0.55), transparent 70%),
+    radial-gradient(360px 200px at 80% 60%, oklch(0.6 0.14 260 / 0.5), transparent 70%),
+    linear-gradient(160deg, oklch(0.93 0.02 265) 0%, oklch(0.85 0.05 45) 100%);
+}
+.dark .stand-cover-soft {
+  background:
+    radial-gradient(300px 160px at 20% 40%, oklch(0.5 0.1 75 / 0.55), transparent 70%),
+    radial-gradient(360px 200px at 80% 60%, oklch(0.4 0.12 260 / 0.6), transparent 70%),
+    linear-gradient(160deg, oklch(0.3 0.02 265) 0%, oklch(0.35 0.05 45) 100%);
+}
+/* static focus-visible: the same ring html[data-kbd] :focus-visible draws.
+   Keyboard focus only — the active column never carries it (press is scale
+   + tint). A field's [data-focus] is its own :focus-within blue ring. */
+[data-focus]:not(.field) {
+  outline: 3px solid var(--blue-ring);
+  outline-offset: 2px;
+  border-radius: inherit;
+}
+.focus-inset[data-focus] {
+  outline-offset: -3px;
+}

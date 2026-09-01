@@ -1,0 +1,36 @@
+# Brain's secret scanner configuration. Extends the shipped rules; the
+# allowlist covers material that is deliberately in the tree and deliberately
+# worthless: a throwaway test CA whose leaves expire in 2126, and the fixed
+# development credentials the smokes boot with.
+title = "Brain"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Deliberate, worthless test material"
+paths = [
+  '''lib/mail/testing/smtp-fixtures\.ts''',
+]
+regexes = [
+  # No default rule fires on this suffix today, so this entry absorbs
+  # nothing yet. Keep it: it is free, and it is the one thing standing
+  # between a future rule set and every seeded credential in
+  # scripts/, ops/docker/ and the plans under docs/. It is not what
+  # covers the SMTP fixtures — the paths entry above does that.
+  '''-not-for-production''',
+  # Four invented literals that the generic-api-key rule reads as credentials.
+  # Each is pinned in full, so the entry can only ever absorb the exact string
+  # a test file already spells out.
+  # e2e/settings-content-shots.spec.ts, a screenshot fixture for the settings
+  # MCP panel; the endpoint beside it is https://brain.example.
+  '''brain_live_7f3c9a12d4e5''',
+  # lib/notion/brain-mcp-client.test.ts, the reservation id the mocked MCP
+  # tool results hand back.
+  '''synthetic_reservation_0001''',
+  # lib/mail/service/http-messages.test.ts, a Google-shaped token padded to
+  # 128 characters to prove the service refuses an oversized one.
+  '''ya29\.a0AfB4XvL2''',
+  # lib/store/store.test.ts, the losing side of a reservation race.
+  '''near_expiry_competitor_0001''',
+]

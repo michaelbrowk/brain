@@ -1,0 +1,63 @@
+# See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
+
+# dependencies
+/node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# testing
+/coverage
+/playwright-report/
+/test-results/
+__pycache__/
+*.py[cod]
+# SQLite write-ahead sidecars. A suite run opens the tracked data-version
+# fixtures in WAL mode and leaves these beside them; they are not the fixture.
+*.sqlite3-wal
+*.sqlite3-shm
+
+# next.js
+/.next/
+# A run under BRAIN_DIST_DIR (`.next-nav`, `.next/e2egm`, …) puts a build tree
+# somewhere git does not know about, and Tailwind v4 scans what git ignores —
+# so an un-ignored dist dir gets read as source and compiles a candidate out of
+# compiled JS: `Unexpected token in attribute selector` from globals.css, on the
+# SECOND run, once the tree exists. Ignore the shape rather than the one name.
+/.next-*/
+/out/
+
+# production
+/build
+
+# misc
+.DS_Store
+*.pem
+
+# debug
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# env files (can opt-in for committing if needed)
+.env*
+
+# vercel
+.vercel
+workers/*/.wrangler/
+workers/*/dist/
+
+# typescript
+*.tsbuildinfo
+next-env.d.ts
+v.mjs
+/*.mjs
+
+# design gate artifacts: lossless frames and traces stay local, the .webp review copies are committed
+docs/design/train/*.png
+docs/design/train/*.zip

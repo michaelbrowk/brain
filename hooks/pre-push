@@ -1,0 +1,4 @@
+#!/usr/bin/env sh
+# Blocks a push carrying a word from the local word list. No list, no opinion —
+# a checkout without one sees nothing.
+exec node scripts/word-scan.mjs "origin/main" "HEAD"

@@ -1,0 +1,53 @@
+[Unit]
+Description=Brain personal knowledge editor
+After=network-online.target
+Wants=network-online.target
+OnFailure=brain-alert@%n.service
+
+[Service]
+Type=simple
+User=brain
+Group=brain
+WorkingDirectory=/opt/brain/current
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/brain/brain.env
+Environment=HOSTNAME=127.0.0.1
+Environment=PORT=3020
+# Cap V8's old space below MemoryHigh so GC engages before the cgroup does.
+Environment=NODE_OPTIONS=--max-old-space-size=448
+ExecStart=/opt/brain/runtime/current/bin/node /opt/brain/current/server.js
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=20
+KillSignal=SIGTERM
+KillMode=mixed
+SuccessExitStatus=143
+UMask=0077
+MemoryHigh=512M
+MemoryMax=768M
+TasksMax=128
+LimitNOFILE=1024
+
+StateDirectory=brain
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/opt/brain/notes /var/lib/brain
+
+[Install]
+WantedBy=multi-user.target

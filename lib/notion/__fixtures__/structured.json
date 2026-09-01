@@ -1,0 +1,64 @@
+{
+  "notionId": "11111111111111111111111111111111",
+  "title": "Structured import fixture",
+  "blocks": [
+    {
+      "type": "markdown",
+      "markdown": "Opening **text**."
+    },
+    {
+      "type": "columns",
+      "columns": [
+        [
+          {
+            "type": "markdown",
+            "markdown": "## Left"
+          },
+          {
+            "type": "page_ref",
+            "notionId": "33333333-3333-3333-3333-333333333333",
+            "title": "Health",
+            "icon": "🩺"
+          }
+        ],
+        [
+          {
+            "type": "callout",
+            "icon": "💡",
+            "children": [
+              {
+                "type": "markdown",
+                "markdown": "Callout text"
+              }
+            ]
+          },
+          {
+            "type": "toggle",
+            "summary": "Details",
+            "children": [
+              {
+                "type": "markdown",
+                "markdown": "Hidden text"
+              }
+            ]
+          }
+        ]
+      ]
+    },
+    {
+      "type": "unknown",
+      "notionType": "synced_block",
+      "raw": "<synced_block id=\"abc\">source</synced_block>"
+    },
+    {
+      "type": "toggle",
+      "summary": "He said \"hi\" & it's \\ path\nnext",
+      "children": [
+        {
+          "type": "markdown",
+          "markdown": "Attribute fidelity"
+        }
+      ]
+    }
+  ]
+}

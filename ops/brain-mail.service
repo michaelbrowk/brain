@@ -1,0 +1,65 @@
+[Unit]
+Description=Brain Mail isolated service shell
+Requires=brain-mail.socket brain-mail-mime.socket
+After=brain-mail.socket brain-mail-mime.socket
+OnFailure=brain-alert@%n.service
+
+[Service]
+Type=simple
+User=brain-mail
+Group=brain-mail
+SupplementaryGroups=brain-mail-runtime
+WorkingDirectory=/run/brain-mail-runtime
+Environment=NODE_ENV=production
+# The public origin belongs to whoever runs this, so the unit takes it from
+# the operator rather than shipping a hostname. A leading "-" keeps the
+# service startable before the file exists; the drop-in directory
+# /etc/systemd/system/brain-mail.service.d/ overrides it either way.
+EnvironmentFile=-/etc/brain/brain-mail.env
+StateDirectory=brain-mail
+StateDirectoryMode=0700
+LoadCredential=account-wrapping-key:/etc/brain/brain-mail-account.key
+ExecStartPre=+/usr/bin/python3 /opt/brain/bin/project_mail_runtime.py
+ExecStart=/opt/brain/runtime/current/bin/node --disable-warning=ExperimentalWarning /run/brain-mail-runtime/current/service/main.js
+Sockets=brain-mail.socket
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15
+KillSignal=SIGTERM
+UMask=0077
+
+MemoryHigh=192M
+MemoryMax=256M
+CPUQuota=35%
+TasksMax=32
+LimitNOFILE=256
+LimitCORE=0
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+PrivateNetwork=false
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=/etc/brain /opt/brain/notes
+ReadWritePaths=/run/brain-mail-runtime /var/lib/brain-mail
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+ProcSubset=pid
+RestrictSUIDSGID=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=false
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SocketBindDeny=any
+RemoveIPC=true
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

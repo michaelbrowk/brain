@@ -1,0 +1,19 @@
+[Unit]
+Description=Brain Mail private HTTP socket
+Requires=systemd-tmpfiles-setup.service
+After=systemd-tmpfiles-setup.service
+
+[Socket]
+ListenStream=/run/brain-mail/brain-mail.sock
+FileDescriptorName=brain-mail
+Service=brain-mail.service
+Accept=no
+SocketUser=root
+SocketGroup=brain-mail-client
+SocketMode=0660
+DirectoryMode=0710
+Backlog=16
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target

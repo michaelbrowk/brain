@@ -1,0 +1,42 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": false,
+    "declaration": false,
+    "incremental": false,
+    "isolatedModules": false,
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "noEmit": false,
+    "outDir": ".next/standalone/mail-service",
+    "rootDir": "lib/mail",
+    "sourceMap": false,
+    "target": "ES2022"
+  },
+  "include": [
+    "lib/mail/message-codec.ts",
+    "lib/mail/search-query.ts",
+    "lib/mail/message-types.ts",
+    "lib/mail/ports.ts",
+    "lib/mail/security.ts",
+    "lib/mail/providers/gmail/access-token-port.ts",
+    "lib/mail/providers/gmail/api-client.ts",
+    "lib/mail/providers/gmail/api-types.ts",
+    "lib/mail/providers/gmail/contract.ts",
+    "lib/mail/providers/gmail/credentials.ts",
+    "lib/mail/providers/gmail/oauth.ts",
+    "lib/mail/providers/gmail/send-adapter.ts",
+    "lib/mail/providers/gmail/service-adapter.ts",
+    "lib/mail/providers/gmail/sync-adapter.ts",
+    "lib/mail/providers/gmail/token-envelope.ts",
+    "lib/mail/providers/imap/sync-adapter.ts",
+    "lib/mail/service/**/*.ts"
+  ],
+  "exclude": [
+    "lib/mail/**/*.test.ts",
+    "lib/mail/service/imap-sent-copy.ts",
+    "lib/mail/service/smtp-transport.ts",
+    "lib/mail/service/smtp-wire.ts",
+    "lib/mail/service/smtp-worker.ts"
+  ]
+}

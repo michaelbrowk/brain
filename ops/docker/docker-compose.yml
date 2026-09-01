@@ -1,0 +1,67 @@
+# The file the README's quickstart downloads. Two containers out of one image:
+# the web app, and the mail service it reaches over a Unix socket they share.
+#
+# Every credential is read from the .env file sitting beside this one, so a
+# copy of this file is never a copy of somebody's secrets. Its sibling
+# docker-compose.smoke.yml is not a substitute: that one seeds fixed test
+# credentials and boots a locally built image, on purpose.
+#
+# ${NAME} for a value Brain needs, ${NAME:-} for one it can do without. The
+# difference is deliberate: Compose warns about a bare name your .env does not
+# set, and that warning is the point — it names exactly what is still missing.
+services:
+  web:
+    # Pinned to the 0.9.0 release. Nothing here works until that release is
+    # published to ghcr.io — `docker compose up -d` fails on an unresolvable
+    # manifest, not on your configuration. Raise the tag and run it again to
+    # upgrade; both services move together.
+    image: ghcr.io/michaelbrowk/brain:0.9.0
+    command: ["web"]
+    init: true
+    restart: unless-stopped
+    depends_on: [mail]
+    ports:
+      # Loopback only. Put a TLS terminator in front before this answers a
+      # network, and give it BRAIN_PUBLIC_ORIGIN's hostname.
+      - "127.0.0.1:3020:3020"
+    environment:
+      AUTH_SECRET: ${AUTH_SECRET}
+      # Double every "$" of the bcrypt hash when you write it into .env.
+      # Compose substitutes .env values into this file, so an unescaped
+      # hash arrives shortened and no password ever works. README.md's
+      # install section has the one-liner that escapes it for you.
+      AUTH_PASSWORD_HASH: ${AUTH_PASSWORD_HASH}
+      # The static bearer an MCP client uses here. OAuth registration needs
+      # BRAIN_EDGE_RATE_SECRET and the nginx in docs/mcp-oauth.md, which this
+      # file does not set up: the secret's whole job is to prove a trusted edge
+      # is in front, so seeding one here would prove nothing.
+      MCP_TOKEN: ${MCP_TOKEN:-}
+      BRAIN_PUBLIC_ORIGIN: ${BRAIN_PUBLIC_ORIGIN}
+      # Optional. Left empty, inline assist and smart sort stay off, auto-emoji
+      # falls back to its keyword list, and the rest of Brain works.
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      OPENROUTER_MODEL: ${OPENROUTER_MODEL:-}
+    volumes:
+      # The notes are the source of truth and they outlive the container, so
+      # this is a bind to a folder you keep, not a Docker volume. The folder
+      # has to be writable by uid 1000, the unprivileged user the image runs
+      # as. Empty is fine: Brain makes it a git repository on the first save.
+      - ${NOTES_ROOT}:/opt/brain/notes
+      - brain-state:/var/lib/brain
+      - mail-socket:/run/brain-mail
+  mail:
+    # The same published release as web.
+    image: ghcr.io/michaelbrowk/brain:0.9.0
+    command: ["mail"]
+    init: true
+    restart: unless-stopped
+    volumes:
+      - mail-state:/var/lib/brain-mail
+      - mail-credentials:/run/credentials/brain-mail
+      - mail-socket:/run/brain-mail
+
+volumes:
+  brain-state: {}
+  mail-state: {}
+  mail-credentials: {}
+  mail-socket: {}

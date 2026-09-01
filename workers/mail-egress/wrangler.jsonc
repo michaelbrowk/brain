@@ -1,0 +1,14 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "brain-mail-egress-feasibility",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-13",
+  "workers_dev": false,
+  "preview_urls": true,
+  "vars": {
+    "MAIL_EGRESS_ENABLED": "false"
+  },
+  "observability": {
+    "enabled": false
+  }
+}

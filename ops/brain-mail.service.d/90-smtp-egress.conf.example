@@ -1,0 +1,10 @@
+# Copy this reviewed template to
+# /etc/systemd/system/brain-mail.service.d/90-smtp-egress.conf only for a
+# supervised canary. Replace the example.invalid hostname first.
+[Service]
+Environment=BRAIN_MAIL_SMTP_EGRESS_ENABLED=1
+Environment=BRAIN_MAIL_SMTP_EGRESS_URL=wss://smtp-egress.example.invalid/v1/tunnel
+Environment=BRAIN_MAIL_SMTP_EGRESS_ACCESS_ENABLED=1
+LoadCredential=smtp-egress-hmac-key:/etc/brain/brain-mail-smtp-egress-hmac.key
+LoadCredential=smtp-egress-access-client-id:/etc/brain/brain-mail-smtp-egress-access-client-id
+LoadCredential=smtp-egress-access-client-secret:/etc/brain/brain-mail-smtp-egress-access-client-secret

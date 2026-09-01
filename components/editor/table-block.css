@@ -1,0 +1,419 @@
+@import "@milkdown/kit/prose/tables/style/tables.css";
+/* Milkdown table-block (Notion-style) — crepe component CSS, remapped to our
+   monochrome ink tokens. Source: @milkdown/crepe theme/common/table.css. */
+.milkdown {
+  --crepe-color-primary: var(--ink);
+  --crepe-color-outline: var(--hair-soft);
+  --crepe-color-surface: var(--paper);
+  --crepe-color-hover: var(--blue-tint);
+  --crepe-color-selected: var(--blue-tint);
+  --crepe-shadow-1: var(--shadow-1);
+}
+
+.milkdown .milkdown-table-block {
+    display: block;
+    /* no block margin of its own (crepe's `margin: 4px 0` gave 4px above and
+       12px below once the next block's margin won the collapse): the
+       ProseMirror `* + *` 12px rule now spaces the table like a paragraph */
+  }
+
+.milkdown .milkdown-table-block th,
+    .milkdown .milkdown-table-block td {
+      border: 1px solid var(--crepe-color-outline);
+      padding: 4px 16px;
+      /* Table register: 14 / 400 / 1.35 / −0.15px, tabular numerals */
+      font-size: 14px;
+      line-height: 1.35;
+      letter-spacing: -0.15px;
+      font-variant-numeric: tabular-nums;
+    }
+
+.milkdown .milkdown-table-block th .ProseMirror-selectednode, .milkdown .milkdown-table-block td .ProseMirror-selectednode {
+        background-color: transparent !important;
+      }
+
+.milkdown .milkdown-table-block th:has(.ProseMirror-selectednode), .milkdown .milkdown-table-block td:has(.ProseMirror-selectednode) {
+        outline: 1px solid var(--crepe-color-primary);
+        outline-offset: -1px;
+      }
+
+.milkdown .milkdown-table-block .selectedCell::after {
+        background-color: var(--crepe-color-selected);
+        opacity: 1;
+      }
+
+.milkdown .milkdown-table-block .selectedCell ::-moz-selection {
+        background: transparent;
+      }
+
+.milkdown .milkdown-table-block .selectedCell ::selection {
+        background: transparent;
+      }
+
+.milkdown .milkdown-table-block .drag-preview {
+      background-color: var(--crepe-color-surface);
+      opacity: 0.4;
+      position: absolute;
+      z-index: 100;
+      display: flex;
+      flex-direction: column;
+      outline: 1px solid var(--crepe-color-primary);
+      outline-offset: -1px;
+    }
+
+.milkdown .milkdown-table-block .drag-preview[data-show='false'] {
+        display: none;
+      }
+
+.milkdown .milkdown-table-block .drag-preview th:has(.ProseMirror-selectednode), .milkdown .milkdown-table-block .drag-preview td:has(.ProseMirror-selectednode) {
+          outline: none;
+        }
+
+.milkdown .milkdown-table-block .handle {
+      position: absolute;
+      font-size: 14px;
+      transition: opacity 150ms var(--ease-out);
+    }
+
+.milkdown .milkdown-table-block .handle[data-show='false'] {
+      opacity: 0;
+    }
+
+.milkdown .milkdown-table-block svg {
+      fill: var(--crepe-color-outline);
+    }
+
+.milkdown .milkdown-table-block .cell-handle {
+      z-index: 50;
+      left: -999px;
+      top: -999px;
+      display: grid;
+      place-items: center;
+      line-height: 1;
+      cursor: grab;
+      background-color: var(--crepe-color-surface);
+      color: var(--crepe-color-outline);
+      border-radius: 100px;
+      box-shadow: var(--crepe-shadow-1);
+      transition: background-color 150ms var(--ease-out);
+    }
+
+.milkdown .milkdown-table-block .cell-handle > .milkdown-icon {
+      display: inline-flex;
+      width: 100%;
+      height: 100%;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+    }
+
+.milkdown .milkdown-table-block .cell-handle[data-role='row-drag-handle'] > .milkdown-icon {
+      transform: rotate(90deg);
+    }
+
+.milkdown .milkdown-table-block .cell-handle:hover {
+        background-color: var(--crepe-color-hover);
+      }
+
+.milkdown .milkdown-table-block .cell-handle:has(.button-group:hover) {
+        background-color: var(--crepe-color-surface);
+      }
+
+.milkdown .milkdown-table-block .cell-handle[data-role='col-drag-handle'] {
+        transform: translateY(50%);
+        padding: 0 6px;
+        width: 28px;
+        height: 16px;
+      }
+
+.milkdown .milkdown-table-block .cell-handle[data-role='row-drag-handle'] {
+        transform: translateX(50%);
+        padding: 6px 0;
+        width: 16px;
+        height: 28px;
+      }
+
+.milkdown .milkdown-table-block .cell-handle .button-group {
+        position: absolute;
+        transform: translateX(-50%);
+        left: 50%;
+        top: -52px;
+        display: flex;
+        background-color: var(--crepe-color-surface);
+        border-radius: 8px;
+        box-shadow: var(--crepe-shadow-1);
+      }
+
+.milkdown .milkdown-table-block .cell-handle .button-group::after {
+          content: '';
+          position: absolute;
+          bottom: -8px;
+          height: 8px;
+          background-color: transparent;
+          width: 100%;
+        }
+
+.milkdown .milkdown-table-block .cell-handle .button-group[data-show='false'] {
+          display: none;
+        }
+
+.milkdown .milkdown-table-block .cell-handle .button-group button {
+          cursor: pointer;
+          margin: 6px;
+          padding: 4px;
+          display: flex;
+          justify-content: center;
+          align-items: center;
+          border-radius: 4px;
+        }
+
+.milkdown .milkdown-table-block .cell-handle .button-group button svg {
+            width: 24px;
+            height: 24px;
+          }
+
+.milkdown .milkdown-table-block .cell-handle .button-group button:hover {
+            border-radius: 8px;
+            background-color: var(--crepe-color-hover);
+          }
+
+.milkdown .milkdown-table-block .cell-handle .button-group button:active {
+            background: var(--crepe-color-selected);
+          }
+
+.milkdown .milkdown-table-block .cell-handle:hover {
+        opacity: 1;
+      }
+
+.milkdown .milkdown-table-block .line-handle {
+      z-index: 20;
+      background-color: var(--crepe-color-primary);
+    }
+
+.milkdown .milkdown-table-block .line-handle:hover {
+        opacity: 1;
+      }
+
+.milkdown .milkdown-table-block .line-handle .add-button {
+        cursor: pointer;
+        /* center the glyph — the sibling .button-group buttons flex-center but
+           this one didn't, so the svg sat on the baseline, off-centre */
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background-color: var(--crepe-color-surface);
+        color: var(--crepe-color-outline);
+        border-radius: 100px;
+        box-shadow: var(--crepe-shadow-1);
+        transition: background-color 150ms var(--ease-out);
+      }
+
+.milkdown .milkdown-table-block .line-handle .add-button svg {
+          width: 16px;
+          height: 16px;
+        }
+
+.milkdown .milkdown-table-block .line-handle .add-button:hover {
+          background-color: var(--crepe-color-hover);
+        }
+
+.milkdown .milkdown-table-block .line-handle .add-button:active {
+          background: var(--crepe-color-selected);
+        }
+
+.milkdown .milkdown-table-block .line-handle[data-role='x-line-drag-handle'] {
+        height: 1px;
+        z-index: 2;
+      }
+
+.milkdown .milkdown-table-block .line-handle[data-role='x-line-drag-handle'] .add-button {
+          position: absolute;
+          transform: translateX(-50%) translateY(-50%);
+          padding: 6px 0;
+          width: 16px;
+          height: 28px;
+        }
+
+.milkdown .milkdown-table-block .line-handle[data-role='y-line-drag-handle'] {
+        width: 1px;
+        z-index: 1;
+      }
+
+.milkdown .milkdown-table-block .line-handle[data-role='y-line-drag-handle'] .add-button {
+          position: absolute;
+          transform: translateY(-50%) translateX(-50%);
+          padding: 0 6px;
+          width: 28px;
+          height: 16px;
+        }
+
+.milkdown .milkdown-table-block .line-handle[data-display-type='indicator'] .add-button {
+          display: none;
+        }
+
+.milkdown .milkdown-table-block.readonly .handle {
+      display: none;
+    }
+
+
+/* ── Brain overrides: visible handles + migrated table typography ── */
+/* Wide tables breathe past the 672px editor column, up to an 880px zone
+   centred on it (104px symmetric overhang), like Notion's wide tables. The
+   wrapper takes the overhang as negative inline margins; the table sits
+   inside it at least column-wide, centred, and wraps cell text up to the
+   zone. Only unwrappable content (more columns than fit, long tokens)
+   pushes the table past the zone, and then the wrapper scrolls.
+
+   Overhang budget per side = room between the 720px article (24px padding)
+   and the page canvas, which is the viewport minus the 264px sidebar (16px
+   of scrollbar slack), capped at 104px. Below ~900px that is 0: the wrapper
+   is the column again and scrolls internally. The share page has no
+   `.milkdown-table-block` wrapper, so milkdown.css's `width: 100%` base keeps
+   it contained. */
+.milkdown .milkdown-table-block {
+  --brain-table-overhang: clamp(0px, (100vw - 280px - 720px) / 2 + 24px, 104px);
+  overflow-x: auto;
+  margin-inline: calc(-1 * var(--brain-table-overhang));
+}
+/* full-width pages already give tables the whole article */
+.brain-page-article[data-full-width="true"] .milkdown .milkdown-table-block {
+  --brain-table-overhang: 0px;
+}
+.milkdown .milkdown-table-block table {
+  font-size: 14px;
+  width: max-content;
+  min-width: calc(100% - 2 * var(--brain-table-overhang));
+  max-width: 100%;
+  margin-inline: auto;
+}
+.milkdown .milkdown-table-block th {
+  font-weight: 600;
+  text-align: left;
+}
+
+/* ── v2 (DESIGN.md → Elevation, Hover, Colour): a table is paper inside
+   paper — a 1px hairline ring r10, no shadow; th ink .045; row hover the
+   blue tint; handles are yellow and transient (gone with the gesture);
+   numbers tabular. Separate borders so the ring can round. */
+.milkdown .milkdown-table-block table {
+  border-collapse: separate;
+  border-spacing: 0;
+  border: 1px solid var(--hair);
+  border-radius: var(--r-table);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.15px;
+}
+.milkdown .milkdown-table-block th,
+.milkdown .milkdown-table-block td {
+  border-width: 0 1px 1px 0;
+  border-color: var(--hair-soft);
+  padding: 5px 12px;
+  transition: background-color 80ms var(--ease-out);
+}
+.milkdown .milkdown-table-block th:last-child,
+.milkdown .milkdown-table-block td:last-child {
+  border-right-width: 0;
+}
+.milkdown .milkdown-table-block tr:last-child > td,
+.milkdown .milkdown-table-block tr:last-child > th {
+  border-bottom-width: 0;
+}
+.milkdown .milkdown-table-block tr:first-child > :first-child {
+  border-top-left-radius: calc(var(--r-table) - 1px);
+}
+.milkdown .milkdown-table-block tr:first-child > :last-child {
+  border-top-right-radius: calc(var(--r-table) - 1px);
+}
+.milkdown .milkdown-table-block tr:last-child > :first-child {
+  border-bottom-left-radius: calc(var(--r-table) - 1px);
+}
+.milkdown .milkdown-table-block tr:last-child > :last-child {
+  border-bottom-right-radius: calc(var(--r-table) - 1px);
+}
+.milkdown .milkdown-table-block th {
+  background: color-mix(in oklch, var(--ink) 4.5%, transparent);
+}
+@media (hover: hover) {
+  .milkdown .milkdown-table-block tbody tr:hover > td {
+    background: var(--blue-tint);
+  }
+}
+/* handles: yellow fill, yellow-ink glyph, a thin shadow — no ring */
+.milkdown .milkdown-table-block .cell-handle,
+.milkdown .milkdown-table-block .line-handle .add-button {
+  background-color: var(--yellow);
+  color: var(--yellow-ink);
+  box-shadow: var(--shadow-1);
+}
+.milkdown .milkdown-table-block .cell-handle::after,
+.milkdown .milkdown-table-block .line-handle .add-button::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: var(--hover-tint);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms var(--ease-out);
+}
+.milkdown .milkdown-table-block .cell-handle:hover,
+.milkdown .milkdown-table-block .line-handle .add-button:hover,
+.milkdown .milkdown-table-block .cell-handle:has(.button-group:hover) {
+  background-color: var(--yellow);
+}
+.milkdown .milkdown-table-block .cell-handle:hover::after,
+.milkdown .milkdown-table-block .cell-handle:active::after,
+.milkdown .milkdown-table-block .line-handle .add-button:hover::after,
+.milkdown .milkdown-table-block .line-handle .add-button:active::after {
+  opacity: 1;
+  transition-duration: 80ms;
+}
+.milkdown .milkdown-table-block .cell-handle:has(.button-group:hover)::after {
+  opacity: 0;
+}
+.milkdown .milkdown-table-block .line-handle {
+  background-color: var(--yellow);
+}
+.milkdown .milkdown-table-block svg,
+.milkdown .milkdown-table-block .cell-handle svg,
+.milkdown .milkdown-table-block .add-button svg {
+  fill: currentColor;
+}
+/* the action group over a handle is a regular-material popover r14; its
+   material lives in globals.css (the one place that blurs) */
+.milkdown .milkdown-table-block .cell-handle .button-group {
+  border-radius: var(--r-popover);
+  color: var(--ink);
+}
+.milkdown .milkdown-table-block .cell-handle .button-group button {
+  border-radius: var(--r-block);
+  color: var(--ink-2);
+  transition: background-color 80ms var(--ease-out), color 80ms var(--ease-out);
+}
+.milkdown .milkdown-table-block .cell-handle .button-group button:hover {
+  border-radius: var(--r-block);
+  background-color: var(--fill-glass-hover);
+  color: var(--ink);
+}
+.milkdown .milkdown-table-block .cell-handle .button-group button:active {
+  background: var(--fill-glass-hover);
+  transform: scale(0.9);
+}
+.milkdown .milkdown-table-block .cell-handle .button-group button svg {
+  fill: currentColor;
+}
+.milkdown .milkdown-table-block th:has(.ProseMirror-selectednode),
+.milkdown .milkdown-table-block td:has(.ProseMirror-selectednode) {
+  outline-color: var(--blue);
+}
+.milkdown .milkdown-table-block .drag-preview {
+  outline-color: var(--yellow);
+  background-color: var(--paper);
+}
+@media (prefers-reduced-motion: reduce) {
+  .milkdown .milkdown-table-block .handle,
+  .milkdown .milkdown-table-block .cell-handle,
+  .milkdown .milkdown-table-block .add-button {
+    transition: none;
+  }
+}

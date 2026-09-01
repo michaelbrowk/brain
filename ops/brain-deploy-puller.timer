@@ -1,0 +1,12 @@
+[Unit]
+Description=Check for a verified Brain release every two minutes
+
+[Timer]
+OnCalendar=*:0/2
+RandomizedDelaySec=15s
+AccuracySec=1s
+Persistent=true
+Unit=brain-deploy-puller.service
+
+[Install]
+WantedBy=timers.target

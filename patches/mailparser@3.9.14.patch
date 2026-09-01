@@ -1,0 +1,115 @@
+diff --git a/lib/mail-parser.js b/lib/mail-parser.js
+index 9736a26bc61bc205352ac5279bc3f71ea144f175..84d3c0b0e4f76da5cbd1777ac39005057e2cd577 100644
+--- a/lib/mail-parser.js
++++ b/lib/mail-parser.js
+@@ -15,6 +15,7 @@ const he = require('he');
+ const linkify = require('linkify-it')();
+ const tlds = require('tlds');
+ const encodingJapanese = require('encoding-japanese');
++const { StringDecoder } = require('string_decoder');
+ 
+ linkify
+     .tlds(tlds) // Reload with full tlds list
+@@ -159,6 +160,10 @@ class MailParser extends Transform {
+ 
+         this.attachmentList = [];
+ 
++        this.decodedBytes = 0;
++        this.textCharacters = 0;
++        this.htmlCharacters = 0;
++
+         this.boundaries = [];
+ 
+         this.textTypes = ['text/plain', 'text/html'].concat(!this.options.keepDeliveryStatus ? 'message/delivery-status' : []);
+@@ -221,6 +226,28 @@ class MailParser extends Transform {
+         }
+     }
+ 
++    trackDecodedBytes(byteLength) {
++        let maximum = this.options.maxDecodedBytes;
++        if (Number.isSafeInteger(maximum) && maximum > 0 && this.decodedBytes + byteLength > maximum) {
++            let err = new Error('Max aggregate decoded MIME size exceeded');
++            err.code = 'EMAXLEN';
++            throw err;
++        }
++        this.decodedBytes += byteLength;
++    }
++
++    trackTextCharacters(contentType, characterCount) {
++        let html = contentType === 'text/html';
++        let key = html ? 'htmlCharacters' : 'textCharacters';
++        let maximum = html ? this.options.maxHtmlCharacters : this.options.maxTextCharacters;
++        if (Number.isSafeInteger(maximum) && maximum > 0 && this[key] + characterCount > maximum) {
++            let err = new Error(html ? 'Max aggregate HTML character count exceeded' : 'Max aggregate text character count exceeded');
++            err.code = 'EMAXLEN';
++            throw err;
++        }
++        this[key] += characterCount;
++    }
++
+     readData() {
+         if (this.hasFailed) {
+             return false;
+@@ -276,7 +303,11 @@ class MailParser extends Transform {
+         if (this.finished) {
+             return this.cleanup(done);
+         }
+-        this.waitingEnd = () => {
++        this.waitingEnd = err => {
++            this.waitingEnd = false;
++            if (err) {
++                return done(err);
++            }
+             this.cleanup(() => {
+                 done();
+             });
+@@ -881,6 +912,14 @@ class MailParser extends Transform {
+                         let chunk;
+ 
+                         while ((chunk = node.decoder.read()) !== null) {
++                            try {
++                                this.trackDecodedBytes(chunk.length);
++                            } catch (err) {
++                                this.emit('error', err);
++                                hasher.destroy(err);
++                                node.decoder.destroy();
++                                return;
++                            }
+                             hasher.write(chunk);
+                         }
+                     });
+@@ -919,6 +958,7 @@ class MailParser extends Transform {
+                 } else if (node.disposition === 'inline') {
+                     let chunks = [];
+                     let chunklen = 0;
++                    let characterDecoder = new StringDecoder('utf8');
+                     node.contentStream = node.decoder;
+ 
+                     if (node.contentType === 'text/plain') {
+@@ -964,12 +1004,26 @@ class MailParser extends Transform {
+                             if (typeof chunk === 'string') {
+                                 chunk = Buffer.from(chunk);
+                             }
++                            try {
++                                this.trackDecodedBytes(chunk.length);
++                                this.trackTextCharacters(node.contentType, characterDecoder.write(chunk).length);
++                            } catch (err) {
++                                this.emit('error', err);
++                                node.contentStream.destroy(err);
++                                return;
++                            }
+                             chunks.push(chunk);
+                             chunklen += chunk.length;
+                         }
+                     });
+ 
+                     node.contentStream.once('end', () => {
++                        try {
++                            this.trackTextCharacters(node.contentType, characterDecoder.end().length);
++                        } catch (err) {
++                            this.emit('error', err);
++                            return;
++                        }
+                         node.textContent = Buffer.concat(chunks, chunklen).toString().replace(/\r?\n/g, '\n');
+                     });
+ 

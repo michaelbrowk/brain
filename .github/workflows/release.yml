@@ -1,0 +1,123 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  packages: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa # v4
+        with:
+          version: 11.0.4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.23.1
+          cache: pnpm
+      - name: Resolve the release version from the tag
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          node scripts/release-version.mjs assert "$version"
+          package_version="$(node -p 'require("./package.json").version')"
+          test "$package_version" = "$version"
+          {
+            echo "version=$version"
+            echo "prerelease=$(node scripts/release-version.mjs prerelease "$version")"
+          } >> "$GITHUB_OUTPUT"
+      - name: Install runtime search dependency
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+      - name: Install release verification dependencies
+        run: sudo apt-get install --yes acl shellcheck nginx
+      - run: pnpm install --frozen-lockfile
+      - name: Verify operational contracts
+        run: bash scripts/verify-ops.sh
+      - name: Check type safety, tests, round-trips, and worker
+        run: pnpm check
+      - name: Install release browser
+        run: pnpm exec playwright install --with-deps chromium
+      - name: Run compact release browser gate
+        run: pnpm test:e2e:release
+      - name: Set build provenance
+        run: |
+          echo "BRAIN_BUILD_SHA=$GITHUB_SHA" >> "$GITHUB_ENV"
+          echo "BRAIN_BUILD_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+      - run: pnpm build
+      - run: pnpm smoke:standalone
+      - run: pnpm smoke:mail-service
+      - name: Package the release tarball
+        env:
+          version: ${{ steps.version.outputs.version }}
+        run: |
+          node scripts/build-release.mjs \
+            --layout release \
+            --version "$version" \
+            --commit "$GITHUB_SHA" \
+            --built-at "$BRAIN_BUILD_TIME" \
+            --out "$GITHUB_WORKSPACE/artifacts" \
+            --stage "$GITHUB_WORKSPACE/.next/release-stage"
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Build the smoke image for the runner architecture
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ops/docker/Dockerfile
+          load: true
+          tags: brain-smoke:local
+      - name: Smoke the container
+        env:
+          BRAIN_SMOKE_IMAGE: brain-smoke:local
+          BRAIN_SMOKE_COMMIT: ${{ github.sha }}
+        run: node scripts/smoke-compose.mjs
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Compute image tags
+        id: tags
+        run: echo "tags=$(node scripts/release-version.mjs image-tags ghcr.io/michaelbrowk/brain "${{ steps.version.outputs.version }}")" >> "$GITHUB_OUTPUT"
+      - name: Push the multi-architecture image
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ops/docker/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/michaelbrowk/brain
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          version: ${{ steps.version.outputs.version }}
+          prerelease: ${{ steps.version.outputs.prerelease }}
+        run: |
+          previous="$(git tag --list 'v*' --sort=-v:refname | grep -v -x "$GITHUB_REF_NAME" | head -n 1 || true)"
+          args=(--draft --generate-notes --verify-tag --title "$GITHUB_REF_NAME")
+          if [[ -n "$previous" ]]; then
+            args+=(--notes-start-tag "$previous")
+          fi
+          if [[ "$prerelease" == "true" ]]; then
+            args+=(--prerelease --latest=false)
+          fi
+          gh release create "$GITHUB_REF_NAME" "${args[@]}" \
+            "artifacts/brain-$version-linux-x64.tar.gz" artifacts/SHA256SUMS

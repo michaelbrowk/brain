@@ -43,6 +43,9 @@ Every other step applies unchanged.
 - `/var/lib/brain/sender-icons` holds cached favicon bytes for the mail
   sender-icon proxy. The cache is fully reconstructible, exempt from backups,
   and safe to delete at any time; Brain recreates it on demand.
+- `/var/lib/brain/update` holds the update check's last answer from GitHub.
+  The file is fully reconstructible, exempt from backups, and safe to delete
+  at any time. Brain recreates it on the next check.
 - `/etc/brain/brain.env` contains runtime secrets and is readable only by `root` and the `brain` group.
 - `/etc/brain/deployer.env` contains the read-only GitHub token and merger
   allowlist. It is `root:root` mode `0600` and is never loaded by the app.

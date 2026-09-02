@@ -21,9 +21,10 @@ fast MCP for Claude, and a minimalist monochrome web UI (Mac + iPhone).
   Sorting and emoji send page titles and immutable ids, never note bodies.
 - **Updates:** once a day the server asks GitHub for the latest release and
   shows it in Settings → Account, with a link to what changed. The request
-  carries a user agent naming Brain and its version, nothing else.
-  `BRAIN_UPDATE_CHECK=off` turns it off. Upgrading stays what the Install
-  section says: change the image tag and pull.
+  carries nothing about your instance beyond a user agent naming Brain, its
+  version and the project URL. `BRAIN_UPDATE_CHECK=off` turns it off.
+  Upgrading stays what the Install section says: change the image tag and
+  pull.
 
 ## Install
 

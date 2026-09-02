@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { ThemeProvider } from "./providers";
 import { InputModality } from "@/components/input-modality";
+import { StaleChunkRecovery } from "@/components/stale-chunk-recovery";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -45,6 +46,7 @@ export default function RootLayout({
       <body className="min-h-full bg-paper text-ink">
         <ThemeProvider>
           <InputModality />
+          <StaleChunkRecovery />
           {children}
         </ThemeProvider>
       </body>

@@ -35,7 +35,8 @@ mkdir brain-notes
 curl -O https://raw.githubusercontent.com/michaelbrowk/brain/main/ops/docker/docker-compose.yml
 curl -o .env https://raw.githubusercontent.com/michaelbrowk/brain/main/.env.example
 # fill in the first block of .env — NOTES_ROOT (the absolute path of
-# brain-notes), AUTH_SECRET and AUTH_PASSWORD_HASH — then:
+# brain-notes), AUTH_SECRET, AUTH_PASSWORD_HASH and BRAIN_PUBLIC_ORIGIN —
+# then:
 docker compose up -d
 ```
 
@@ -79,13 +80,13 @@ dollar has to look like to survive Compose's own substitution when it reads
 symptom is a password that never works.
 
 `BRAIN_PUBLIC_ORIGIN` is the exact origin your browser shows — scheme, host,
-port, no path or trailing slash. `.env.example` ships it as
-`http://localhost:3020`, which is right for a trial on this machine: notes,
-login, share links and IMAP mail accounts all work with it. Two things wait
-for an `https://` origin — the MCP endpoint, whose route refuses to load under
-`http://` even with a static `MCP_TOKEN` (the MCP panel in Settings cannot
-load its details until then), and Gmail's Connect flow. The value also has to
-match the address bar exactly: set `http://localhost:3020`, open
+port, no path or trailing slash. `.env.example` ships a placeholder you have
+to edit. Trying Brain on this machine only: set `http://localhost:3020` —
+notes, login, share links and IMAP mail accounts all work with it. Two things
+wait for an `https://` origin — the MCP endpoint, whose route refuses to load
+under `http://` even with a static `MCP_TOKEN` (the MCP panel in Settings
+cannot load its details until then), and Gmail's Connect flow. The value also
+has to match the address bar exactly: set `http://localhost:3020`, open
 `http://127.0.0.1:3020`, and adding a mail account is refused.
 
 Everything else `.env.example` documents is optional, including the OpenRouter

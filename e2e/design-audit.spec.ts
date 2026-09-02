@@ -314,7 +314,9 @@ test("@release the live palette's results scroll under the fade atom", async ({ 
   await page.keyboard.press("Escape");
 });
 
-test("@release the shell keeps the backdrop budget on /p — ≤8 layers, none nested (DESIGN.md v2 → Scroll-edge, ban #1)", async ({ page }) => {
+/** The backdrop budget on a page: ≤ 8 layers in the viewport and none nested,
+ *  scrolled so every edge and pill the canvas can show is active. */
+async function auditBackdropBudget(page: Page) {
   await login(page);
   const created = await page.evaluate(async () => {
     const body = Array.from({ length: 60 }, (_, i) => `Paragraph ${i}: the paper is the window, the chrome floats over it.`).join("\n\n");
@@ -357,6 +359,17 @@ test("@release the shell keeps the backdrop budget on /p — ≤8 layers, none n
     audit.layers.length,
     `backdrop layers in the viewport: ${audit.layers.join(", ")}`,
   ).toBeLessThanOrEqual(8);
+}
+
+test("@release the shell keeps the backdrop budget on /p — ≤8 layers, none nested (DESIGN.md v2 → Scroll-edge, ban #1)", async ({ page }) => {
+  await auditBackdropBudget(page);
+});
+
+// At 390 the header row is the same absolute layer: its crumb and page pill
+// are two glass layers over the document and count against the budget.
+test("@release @mobile the shell keeps the backdrop budget on /p at 390", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await auditBackdropBudget(page);
 });
 
 test("@release truncated labels keep their descenders", async ({ page }) => {

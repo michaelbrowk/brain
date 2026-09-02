@@ -146,15 +146,42 @@ test("@release @mobile the header crumb follows the same rule at 390", async ({
   await openPage(page, rootId, "Spanish");
   const lone = crumb(page, "mobile");
   await expect(lone).toBeHidden();
-  // The header row keeps its height and the page pill keeps its place.
+  // The row floats over the scroller the way the desktop layer does — the
+  // page pill stands inside the scroller's box, not above it — and at rest
+  // the title sits clear below the pill.
   const pill = page.locator('.brain-topbar-mobile [aria-label="Page"]');
   const atRest = (await pill.boundingBox())!;
+  const scroller = (await page.locator(".brain-page-scroll").boundingBox())!;
+  expect(atRest.y).toBeGreaterThanOrEqual(scroller.y);
+  const title = (await page
+    .getByRole("textbox", { name: "Page title" })
+    .boundingBox())!;
+  expect(title.y).toBeGreaterThanOrEqual(atRest.y + atRest.height);
 
+  // Scrolled, the title has passed under the row, the crumb names the page,
+  // and the pill keeps its place.
   await scrollCanvas(page, 600);
   await expect(lone).toBeVisible();
   const revealed = (await pill.boundingBox())!;
   expect(revealed.x).toBeCloseTo(atRest.x, 0);
   expect(revealed.y).toBeCloseTo(atRest.y, 0);
+  // The document runs under the row: between the crumb and the pill the
+  // layer takes no pointer events, so what stands at that point is the
+  // scroller's own content.
+  const crumbBox = (await lone.boundingBox())!;
+  const between = {
+    x: (crumbBox.x + crumbBox.width + revealed.x) / 2,
+    y: revealed.y + revealed.height / 2,
+  };
+  expect(revealed.x - (crumbBox.x + crumbBox.width)).toBeGreaterThan(8);
+  expect(
+    await page.evaluate(
+      ({ x, y }) =>
+        document.elementFromPoint(x, y)?.closest(".brain-page-scroll") !==
+        null,
+      between,
+    ),
+  ).toBe(true);
 
   await openPage(page, childId, "Verbs");
   await expect(crumb(page, "mobile")).toBeVisible();

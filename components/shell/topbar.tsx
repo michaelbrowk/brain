@@ -2,14 +2,16 @@
 
 // The floating toolbar over the canvas (DESIGN.md v2 → Toolbar): the
 // breadcrumb pill on the left, the [Share] capsule and the [pin │ …] pill on
-// the right. Two variants share one prop surface — `desktop` is an absolute
-// layer at the 12px inset, a sibling of the scroller in a layer nothing
-// animates (B3: glass never sits inside the canvas presence wrapper), so
-// the cover and the document pass under it; `mobile` is the compact row in
-// flow at the top of the canvas with touch-sized hits. The save indicator
-// and the "Edited …" stamp live on paper in the title block, not here.
-// Presentational — every piece of state and every handler comes from
-// <Shell> as a prop.
+// the right. Two variants share one prop surface, and both are an absolute
+// layer at the inset, a sibling of the scroller in a layer nothing animates
+// (B3: glass never sits inside the canvas presence wrapper), so the cover
+// and the document pass under the self-blurring pills — `desktop` past the
+// sidebar with [Share] and [pin │ …] as two pills, `mobile` at the window's
+// edge with one pill and touch-sized hits. Mobile used to be a row in flow
+// at the top of the canvas: nothing passed under it, and the scroller's clip
+// drew a hard line beneath the row. The save indicator and the "Edited …"
+// stamp live on paper in the title block, not here. Presentational — every
+// piece of state and every handler comes from <Shell> as a prop.
 
 import type { ComponentProps } from "react";
 import type { TreeNode } from "@/lib/store/types";
@@ -236,11 +238,16 @@ export function ShellTopbar({
     // empty band above them was what made the canvas's top tint read as a
     // scroll edge over the strip below it.
     if (mailOpen) return null;
+    // The hub has no crumb and no page pill — nothing to float, the way the
+    // desktop layer already returns nothing there.
+    if (!path.length && !currentNode) return null;
+    // The crumb is a direct child of the layer, as on desktop: the layer lets
+    // pointer events through to the canvas and only its children take them,
+    // so a flex-1 box around the crumb would swallow taps on the paper
+    // between the two pills.
     return (
       <div className="brain-topbar brain-topbar-mobile">
-        <div className="min-w-0 flex-1">
-          <Breadcrumb path={path} onSelect={onSelect} />
-        </div>
+        <Breadcrumb path={path} onSelect={onSelect} />
         {currentNode && (
           <ToolbarPill aria-label="Page">
             {share}

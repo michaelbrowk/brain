@@ -193,9 +193,11 @@ test("desktop — plain, covered, and the nested control", async ({ page }) => {
   }
 });
 
-// Its own page, and no sidebar to show it twice: below 768 the header row is
-// in flow above the scroller and covers nothing, so the title leaves at the
-// scroller's own top.
+// Its own page, and no sidebar to show it twice: below 768 the header row
+// floats over the scroller the way the desktop layer does, the crumb at one
+// end of the window and the page pill at the other, so the title leaves at the
+// scroller's own top and the scrolled frame shows the paragraphs passing
+// under both pills.
 test("mobile — the header row keeps its place either way", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await login(page);

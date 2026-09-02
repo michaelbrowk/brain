@@ -2385,43 +2385,49 @@ html[data-kbd] [contenteditable]:focus-visible {
   background: transparent;
   scroll-padding-top: calc(var(--chrome-top) + 16px);
 }
-/* the document column starts below the pill band: the band + 28 (a page
-   without a cover); on mobile the header is in flow, so only the inset */
+/* The document column starts below the pill band on both breakpoints: the
+   band (--chrome-top: safe area + inset + the 36 pill) + 28, for a page
+   without a cover — 76 on desktop, 72 on a phone. Mobile used to reserve the
+   inset alone, because its header was a row in flow (the topbar block below). */
 .brain-shell {
-  --canvas-top: var(--inset);
-}
-@media (min-width: 768px) {
-  .brain-shell {
-    --canvas-top: calc(var(--inset) + 36px + 28px);
-  }
+  --canvas-top: calc(var(--chrome-top) + 28px);
 }
 .brain-page-top {
   padding-top: var(--canvas-top);
 }
 
-/* Toolbar pills — desktop: an absolute layer at the 12px inset, a sibling
-   of the scroller (nothing animates it, B3); the layer itself lets pointer
-   events through to the canvas, the pills take them. Mobile: the compact
-   row in flow. */
+/* Toolbar pills — an absolute layer at the inset on both breakpoints, a
+   sibling of the scroller (nothing animates it, B3), so the cover and the
+   document pass under the self-blurring pills and no edge band is drawn
+   (§7). The layer itself lets pointer events through to the canvas, the
+   pills take them. Mobile used to be a 52px row in flow above the scroller:
+   nothing ever passed under its pills, and the scroller's overflow clip drew
+   a hard horizontal line right beneath the row — a plate over the text, the
+   symptom .brain-mail-reader-head had. The two variants differ at their
+   sides only: desktop keeps the inset from the canvas's edge past the
+   sidebar, mobile from the window's, where the safe area wins on a phone
+   held sideways. */
 .brain-topbar {
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-}
-.brain-topbar-mobile {
-  display: flex;
-}
-.brain-topbar-desktop {
-  display: none;
   position: absolute;
   z-index: var(--z-toolbar);
   top: calc(var(--inset) + env(safe-area-inset-top, 0px));
-  left: calc(var(--canvas-offset) + var(--inset));
-  right: calc(var(--inset) + env(safe-area-inset-right, 0px));
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   pointer-events: none;
 }
-.brain-topbar-desktop > * {
+.brain-topbar > * {
   pointer-events: auto;
+}
+.brain-topbar-mobile {
+  display: flex;
+  left: max(var(--inset), env(safe-area-inset-left, 0px));
+  right: max(var(--inset), env(safe-area-inset-right, 0px));
+}
+.brain-topbar-desktop {
+  display: none;
+  left: calc(var(--canvas-offset) + var(--inset));
+  right: calc(var(--inset) + env(safe-area-inset-right, 0px));
 }
 @media (min-width: 768px) {
   .brain-topbar-desktop {
@@ -2430,13 +2436,6 @@ html[data-kbd] [contenteditable]:focus-visible {
   .brain-topbar-mobile {
     display: none;
   }
-}
-.brain-topbar-mobile {
-  flex-shrink: 0;
-  height: calc(52px + env(safe-area-inset-top, 0px));
-  padding: calc(var(--inset) + env(safe-area-inset-top, 0px))
-    max(var(--inset), env(safe-area-inset-right, 0px)) var(--inset)
-    max(var(--inset), env(safe-area-inset-left, 0px));
 }
 .brain-topbar-actions {
   display: flex;
@@ -4033,10 +4032,10 @@ html[data-kbd] [contenteditable]:focus-visible {
    take the article's 32 on both sides, which is symmetry borrowed from the
    left rule. Symmetry is not a reason, and it left the one pill in mail
    standing 20px further off the window than every other pill in the product.
-   `max()` rather than a bare --inset because this strip is in flow and
-   full-bleed to the window: on a phone held sideways the safe area is wider
-   than the inset and wins, which is the form `.brain-topbar-mobile` already
-   uses for the same situation. */
+   `max()` rather than a bare --inset because this strip is full-bleed to
+   the window: on a phone held sideways the safe area is wider than the inset
+   and wins, which is the form `.brain-topbar-mobile` already uses at the
+   window's edge for the same situation. */
 .brain-mail-reader-head {
   display: flex;
   align-items: center;

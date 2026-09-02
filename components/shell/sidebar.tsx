@@ -6,7 +6,8 @@
 // search capsule, the primary rows, the
 // pinned chips, the page tree under an edge-fade, and the foot (Settings /
 // Trash / theme). Presentational — every piece of state and every handler
-// comes from <Shell> as a prop. Focus mode moves the panel off-canvas on
+// comes from <Shell> as a prop, except the update dot on the Settings row,
+// which reads the shared update store. Focus mode moves the panel off-canvas on
 // SPRING_PANEL (transform only) and reports when the spring settles so the
 // shell reflows the canvas offset once (B5).
 
@@ -22,6 +23,7 @@ import {
   SETTINGS_SECTION_ORDER,
   type SettingsSection,
 } from "../settings/sections";
+import { useUpdateStatus } from "../settings/use-update-status";
 import { Icon } from "../ui/icon";
 import { Kbd } from "../ui/primitives";
 import { Button, IconButton } from "../ui/button";
@@ -125,6 +127,7 @@ export function ShellSidebar({
   onCollapsed,
 }: ShellSidebarProps) {
   const reduce = useReducedMotion();
+  const update = useUpdateStatus();
   const mailOpen = surface === "mail";
   const settingsOpen = surface === "settings";
   return (
@@ -300,6 +303,9 @@ export function ShellSidebar({
           label="Settings"
           selected={settingsOpen}
           capsule={false}
+          badge={
+            update.state.kind === "ready" && update.state.status.updateAvailable
+          }
           data-settings-trigger="desktop"
           onClick={() => onOpenSettings()}
         />
@@ -369,9 +375,12 @@ const NavRow = forwardRef<
      *  capsule lives on the active section above it). */
     capsule?: boolean;
     reduce?: boolean | null;
+    /** A dot at the row's end — the Settings row shows it while a newer
+     *  release is available. */
+    badge?: boolean;
   } & Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "className">
 >(function NavRow(
-  { icon, label, selected, capsule = true, reduce, ...button },
+  { icon, label, selected, capsule = true, reduce, badge = false, ...button },
   ref,
 ) {
   return (
@@ -395,6 +404,13 @@ const NavRow = forwardRef<
         <Icon name={icon} size={16} variant={selected ? "bold" : "linear"} />
       </span>
       <span className="tree-row-title">{label}</span>
+      {badge && (
+        <span
+          role="img"
+          aria-label="Update available"
+          className="ml-auto size-1.5 rounded-full bg-current"
+        />
+      )}
     </button>
   );
 });

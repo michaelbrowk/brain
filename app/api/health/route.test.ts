@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import type { ReleaseInfo } from "@/lib/release-info";
 
 const mocks = vi.hoisted(() => ({
   readiness: vi.fn<() => Promise<void>>(),
@@ -7,12 +8,16 @@ const mocks = vi.hoisted(() => ({
   searchReady: vi.fn<() => Promise<void>>(),
   getStore: vi.fn(),
   getOAuthStateStore: vi.fn(),
+  readReleaseInfo: vi.fn<() => Promise<ReleaseInfo>>(),
 }));
 
 vi.mock("@/lib/store", () => ({ getStore: mocks.getStore }));
 vi.mock("@/lib/search", () => ({ assertSearchReady: mocks.searchReady }));
 vi.mock("@/lib/oauth/state", () => ({
   getOAuthStateStore: mocks.getOAuthStateStore,
+}));
+vi.mock("@/lib/release-info", () => ({
+  readReleaseInfo: mocks.readReleaseInfo,
 }));
 
 import { GET } from "./route";
@@ -49,14 +54,33 @@ describe("health route", () => {
     mocks.getOAuthStateStore.mockReset().mockReturnValue({
       readiness: mocks.oauthReadiness,
     });
+    mocks.readReleaseInfo.mockReset().mockResolvedValue({
+      version: null,
+      commit: "unknown",
+      buildTime: null,
+    });
   });
 
   it("keeps the shallow liveness probe cheap", async () => {
     const response = await GET(request());
+    const body = await response.json();
 
     expect(response.status).toBe(200);
-    await expect(response.json()).resolves.toMatchObject({ status: "ok" });
+    expect(body).toMatchObject({ status: "ok" });
+    expect(body.version).toBeNull();
     expect(mocks.getStore).not.toHaveBeenCalled();
+  });
+
+  it("reports the release version when release.json is present", async () => {
+    mocks.readReleaseInfo.mockResolvedValueOnce({
+      version: "0.9.0",
+      commit: "c".repeat(40),
+      buildTime: "2026-09-01T18:00:00Z",
+    });
+
+    const body = await (await GET(request())).json();
+
+    expect(body.version).toBe("0.9.0");
   });
 
   it("checks configured auth, MCP, Git-backed store, and writes when ready=1", async () => {
@@ -79,6 +103,7 @@ describe("health route", () => {
     expect(response.status).toBe(401);
     await expect(response.json()).resolves.toMatchObject({
       status: "unauthorized",
+      version: null,
     });
     expect(mocks.getStore).not.toHaveBeenCalled();
     expect(mocks.readiness).not.toHaveBeenCalled();
@@ -153,6 +178,7 @@ describe("health route", () => {
         check: "notes_store_init",
         commit: "unknown",
         builtAt: "unknown",
+        version: null,
       });
       expect(mocks.readiness).not.toHaveBeenCalled();
     } finally {
@@ -196,6 +222,7 @@ describe("health route", () => {
         check: "oauth_state",
         commit: "unknown",
         builtAt: "unknown",
+        version: null,
       });
       expect(JSON.stringify(body)).not.toContain("/private/secret");
       expect(JSON.stringify(body)).not.toContain("0644");

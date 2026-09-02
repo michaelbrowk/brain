@@ -23,4 +23,9 @@ export async function register() {
     const message = error instanceof Error ? error.message : String(error);
     console.error(`[brain/store] ${message}`);
   });
+
+  // The daily release check. Off under NODE_ENV=test and BRAIN_UPDATE_CHECK=off;
+  // otherwise one request thirty seconds after boot, then once a day.
+  const { scheduleUpdateChecks } = await import("./lib/update-check");
+  scheduleUpdateChecks();
 }

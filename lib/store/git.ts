@@ -291,6 +291,28 @@ export function resumeGitSnapshotsAfterRecovery(root: string): void {
   if (wasDeferred || wasPending) scheduleCommit(root);
 }
 
+/** Debounce between the last save and the commit that records it. The README
+ *  and Settings → Data quote this number, so it lives in one place. */
+export const COMMIT_DELAY_MS = 4_000;
+
+export interface HeadCommit {
+  hash: string;
+  at: string; // ISO 8601, author time
+}
+
+/** HEAD of the notes repository: null when the folder is not a repository or
+ *  has no commit yet (a `git init` before the first save). Read-only, never
+ *  initialises anything. */
+export async function headCommit(root: string): Promise<HeadCommit | null> {
+  if (!fs.existsSync(path.join(root, ".git"))) return null;
+  // 128 = "does not have any commits yet" on an empty repository.
+  const log = await runGit(root, ["log", "-1", "--format=%H%x00%aI"], [0, 128]);
+  if (log.code !== 0) return null;
+  const [hash, at] = log.stdout.trim().split("\0");
+  if (!hash || !at || !/^[0-9a-f]{40}$/.test(hash)) return null;
+  return { hash, at };
+}
+
 export interface Version {
   sha: string;
   date: string;
@@ -402,7 +424,7 @@ export function scheduleCommit(root: string): void {
     setTimeout(() => {
       timers.delete(root);
       startCommit(root);
-    }, 4_000),
+    }, COMMIT_DELAY_MS),
   );
 }
 

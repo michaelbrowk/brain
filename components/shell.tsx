@@ -22,6 +22,7 @@ import { Button } from "./ui/button";
 import { Background } from "./ui/background";
 import { DUR, EASE_OUT, pageFade, pageTransition } from "@/lib/motion";
 import { isEditableEventTarget } from "@/lib/editable-target";
+import { serverBuildDiffers } from "@/lib/stale-chunk";
 import {
   type CSSProperties,
   type MouseEvent,
@@ -178,6 +179,10 @@ const TOAST_MS = 2200;
  * and nothing to be reached for.
  */
 const URGENT_TOAST_MS = 3200;
+/** Window of the "Brain was updated" pill: the undo length, since it too
+ *  carries a press the reader has to notice and reach. A pill with an
+ *  action holds the queue behind it, so it cannot stand without a window. */
+const REDEPLOY_TOAST_MS = 10_000;
 
 /** Body of a notes canvas: a `fallback` (skeleton or load error) while the
  *  page is cold, then the resolved page. The fallback exits in place
@@ -1187,13 +1192,45 @@ export function Shell({
       }
     };
 
+    // A reopen after the server restarted is the moment to ask which build it
+    // runs now. Once per effect lifetime, and the once is reserved BEFORE the
+    // awaits: a restart drops the stream more than once, so two reopens land
+    // close together and both would otherwise reach showToast. A "no", or an
+    // ask that fails (offline, nginx still answering 502), hands the
+    // reservation back so the next reopen asks again.
+    let redeployNoticed = false;
+    const noticeRedeploy = async () => {
+      if (redeployNoticed) return;
+      redeployNoticed = true;
+      let differs = false;
+      try {
+        const response = await fetch("/api/health", { cache: "no-store" });
+        if (response.ok) differs = serverBuildDiffers(await response.json());
+      } catch {
+        // offline: the stale-chunk recovery handles the next navigation
+      }
+      if (!differs) {
+        redeployNoticed = false;
+        return;
+      }
+      if (disposed) return;
+      showToast("Brain was updated", {
+        actionLabel: "Reload",
+        onAction: () => window.location.reload(),
+        durationMs: REDEPLOY_TOAST_MS,
+      });
+    };
+
     const connect = () => {
       if (disposed) return;
       const source = new EventSource("/api/events");
       es = source;
       source.onopen = () => {
         reconnectDelay = 1_000;
-        if (hasOpened) void reconcile();
+        if (hasOpened) {
+          void reconcile();
+          void noticeRedeploy();
+        }
         hasOpened = true;
       };
       // Listener registration happens after the initial RSC/page read. A first
@@ -1244,7 +1281,7 @@ export function Shell({
       clearTimeout(reconnectTimer);
       es?.close();
     };
-  }, [refreshTree, reloadCurrent]);
+  }, [refreshTree, reloadCurrent, showToast]);
 
   const select = useCallback((id: string, target?: SearchTextTarget) => {
     const requestId = ++searchHighlightRequestRef.current;

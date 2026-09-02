@@ -460,6 +460,9 @@ export function Hub({
               <span>start a new page</span>
             </li>
           </ul>
+          <p className="mt-4 text-[13px] text-ink-2">
+            Today thoughts opens a page for today. Mail is for a Gmail or IMAP account you connect in Settings.
+          </p>
           {/* no keyboard on a phone — point at the tab bar instead */}
           <p className="mt-4 hidden text-[13px] text-ink-2 [@media(hover:none)]:block">
             tap Search below to find any page, or New to start one.

@@ -391,7 +391,11 @@ describe("client reliability states", () => {
       }),
     ];
     const fetchMock = vi.fn().mockImplementation((input: RequestInfo | URL) => {
-      if (String(input) === "/api/settings/backup") {
+      // the two status panels above the import each fetch on mount
+      if (
+        String(input) === "/api/settings/backup" ||
+        String(input) === "/api/settings/notes"
+      ) {
         return Promise.resolve(response({ error: "unavailable" }, 503));
       }
       const next = portableResponses.shift();

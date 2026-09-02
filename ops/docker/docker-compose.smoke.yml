@@ -16,6 +16,7 @@ services:
       BRAIN_READINESS_TOKEN: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       BRAIN_EDGE_RATE_SECRET: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
       BRAIN_PUBLIC_ORIGIN: http://127.0.0.1:3020
+      BRAIN_UPDATE_CHECK: "off"
       OPENROUTER_API_KEY: ""
       GIT_AUTHOR_NAME: Brain Smoke
       GIT_AUTHOR_EMAIL: brain-smoke@example.invalid

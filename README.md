@@ -19,6 +19,12 @@ fast MCP for Claude, and a minimalist monochrome web UI (Mac + iPhone).
 - **AI:** inline writing assist, auto emoji, and smart-sort via OpenRouter.
   Inline assist sends only the selected text, capped at 12,000 characters.
   Sorting and emoji send page titles and immutable ids, never note bodies.
+- **Updates:** once a day the server asks GitHub for the latest release and
+  shows it in Settings → Account, with a link to what changed. The request
+  carries nothing about your instance beyond a user agent naming Brain, its
+  version and the project URL. `BRAIN_UPDATE_CHECK=off` turns it off.
+  Upgrading stays what the Install section says: change the image tag and
+  pull.
 
 ## Install
 
@@ -63,7 +69,9 @@ container side of that mount, not a value for `NOTES_ROOT`. Each page becomes
 a folder holding an `index.md`, and the folder is named from the title the
 page had when it was created (`untitled-2` when the name is taken) — a later
 rename changes `title:` in the frontmatter and leaves the folder as it was, so
-a page created as "Untitled" and renamed lives in `untitled/` for good.
+a page created as "Untitled" and renamed lives in `untitled/` for good. The +
+button in the sidebar offers templates — Meeting notes, Person, Project, Daily
+note, Reading notes — beside a blank page.
 
 On colima's default vz + virtiofs mount no `chown` on the Mac achieves that
 writability: the folder arrives inside the container owned by root whatever
@@ -204,6 +212,8 @@ unusual-looking pin is worth much less than a knowingly vulnerable parser.
 | `BRAIN_READINESS_TOKEN` | 256-bit internal token for the deep deploy health probe      |
 | `OPENROUTER_API_KEY` | OpenRouter key for AI features (emoji, smart-sort, assist) |
 | `OPENROUTER_MODEL`   | Optional model override (default `openai/gpt-4o-mini`)          |
+| `BRAIN_UPDATE_CHECK`  | `off` stops the daily release check (default: on)              |
+| `BRAIN_UPDATE_STATE_DIR` | Where the update check keeps its answer (default `/var/lib/brain/update`) |
 
 Human access = password → signed httpOnly cookie. MCP clients connect to
 `/api/mcp`, discover Brain OAuth automatically, and open a Brain consent screen.

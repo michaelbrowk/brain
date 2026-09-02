@@ -43,6 +43,9 @@ Every other step applies unchanged.
 - `/var/lib/brain/sender-icons` holds cached favicon bytes for the mail
   sender-icon proxy. The cache is fully reconstructible, exempt from backups,
   and safe to delete at any time; Brain recreates it on demand.
+- `/var/lib/brain/update` holds the update check's last answer from GitHub.
+  The file is fully reconstructible, exempt from backups, and safe to delete
+  at any time. Brain recreates it on the next check.
 - `/etc/brain/brain.env` contains runtime secrets and is readable only by `root` and the `brain` group.
 - `/etc/brain/deployer.env` contains the read-only GitHub token and merger
   allowlist. It is `root:root` mode `0600` and is never loaded by the app.
@@ -206,6 +209,15 @@ design, and gets that screen straight away; so does a tab that is offline,
 since the same error comes from a dropped connection. Next's `deploymentId` is
 deliberately not set: on a single server it only turns a router navigation
 into a hard reload, and the shell does not navigate through the router.
+
+Two more signals arrive with a release. Settings → Account shows the running
+version (from `release.json` at the app root) and, once a day, whether a newer
+release exists on GitHub — the check runs thirty seconds after boot and then
+daily, keeps its answer in `/var/lib/brain/update/update-check.json`, and is
+off with `BRAIN_UPDATE_CHECK=off`. And a tab that was open across a deploy
+learns about it when its event stream reconnects: the shell compares the
+server's commit from `/api/health` with its own build id and offers one
+"Brain was updated · Reload" line instead of waiting for a missing chunk.
 
 Journal removal commits the manual deployment only after its deployment-directory
 fsync returns successfully. If unlink succeeded but that fsync or command still

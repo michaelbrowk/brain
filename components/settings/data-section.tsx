@@ -1,10 +1,12 @@
 "use client";
 
-// Data: backup status, portable export, and the dry-run → apply import.
+// Data: where the notes live, backup status, portable export, and the
+// dry-run → apply import.
 
 import { useState } from "react";
 import { BackupStatusPanel } from "../backup-status";
 import { Button } from "../ui/button";
+import { NotesStatusPanel } from "./notes-status";
 import { SettingsGroup, SettingsRow, formatPortableBytes } from "./shared";
 
 type PortableSummary = {
@@ -76,7 +78,8 @@ export function DataSection({
 
   return (
     <div className="space-y-7">
-      {/* the panel renders its own group: header, refresh action, rows */}
+      {/* each panel renders its own group: header, refresh action, rows */}
+      <NotesStatusPanel onToast={onToast} />
       <BackupStatusPanel onToast={onToast} />
       <SettingsGroup title="Your notes">
         <SettingsRow

@@ -4282,6 +4282,30 @@ describe("MailSurface", () => {
     expect(document.body.textContent).not.toContain("SECRET");
   });
 
+  it("explains that the mail service is not running", async () => {
+    // Without the mail container every mail route answers 503 with this code.
+    // That is a missing service, not a broken one, so the page says what to
+    // add rather than that something failed.
+    const client = makeClient({
+      loadAccounts: vi
+        .fn()
+        .mockRejectedValue(new MailApiError(503, "mail_service_unavailable")),
+    });
+    await act(async () =>
+      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+    );
+    await settle();
+
+    expect(host.textContent).toContain("Mail isn’t running");
+    expect(host.textContent).toContain("second container");
+    expect(host.textContent).not.toContain("Mail couldn’t load");
+    expect(findButton("Try again")).toBeInstanceOf(HTMLButtonElement);
+    expect(
+      host.querySelector('a[href="https://github.com/michaelbrowk/brain#install"]')
+        ?.textContent,
+    ).toBe("How to add it");
+  });
+
   it("refuses locally to submit an address the service would reject", async () => {
     const client = makeClient();
     await act(async () =>

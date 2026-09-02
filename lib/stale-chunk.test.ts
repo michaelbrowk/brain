@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   chunkRecoveryState,
+  currentBuildId,
   isChunkLoadError,
   listenForStaleChunks,
   planChunkReload,
   recoverFromStaleChunk,
+  serverBuildDiffers,
   settleChunkReload,
   type ReloadMarkerStore,
 } from "./stale-chunk";
@@ -291,5 +293,26 @@ describe("listenForStaleChunks", () => {
       Object.assign(new Event("unhandledrejection"), { reason: chunkError() }),
     );
     expect(recover).not.toHaveBeenCalled();
+  });
+});
+
+describe("serverBuildDiffers", () => {
+  const a = "a".repeat(40);
+  const b = "b".repeat(40);
+
+  it("is true only for two different real commits", () => {
+    expect(serverBuildDiffers({ commit: b }, a)).toBe(true);
+    expect(serverBuildDiffers({ commit: a }, a)).toBe(false);
+    // a dev bundle, or a server that does not know its commit, never differs
+    expect(serverBuildDiffers({ commit: b }, "development")).toBe(false);
+    expect(serverBuildDiffers({ commit: "unknown" }, a)).toBe(false);
+    expect(serverBuildDiffers({}, a)).toBe(false);
+    expect(serverBuildDiffers(null, a)).toBe(false);
+  });
+
+  it("compares against this bundle's build by default", () => {
+    expect(serverBuildDiffers({ commit: b })).toBe(
+      serverBuildDiffers({ commit: b }, currentBuildId()),
+    );
   });
 });

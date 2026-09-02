@@ -1193,25 +1193,32 @@ export function Shell({
     };
 
     // A reopen after the server restarted is the moment to ask which build it
-    // runs now. Once per effect lifetime; an ask that fails (offline, nginx
-    // still answering 502) spends nothing, so the next reopen asks again.
+    // runs now. Once per effect lifetime, and the once is reserved BEFORE the
+    // awaits: a restart drops the stream more than once, so two reopens land
+    // close together and both would otherwise reach showToast. A "no", or an
+    // ask that fails (offline, nginx still answering 502), hands the
+    // reservation back so the next reopen asks again.
     let redeployNoticed = false;
     const noticeRedeploy = async () => {
       if (redeployNoticed) return;
+      redeployNoticed = true;
+      let differs = false;
       try {
         const response = await fetch("/api/health", { cache: "no-store" });
-        if (!response.ok) return;
-        const health: unknown = await response.json();
-        if (disposed || !serverBuildDiffers(health)) return;
-        redeployNoticed = true;
-        showToast("Brain was updated", {
-          actionLabel: "Reload",
-          onAction: () => window.location.reload(),
-          durationMs: REDEPLOY_TOAST_MS,
-        });
+        if (response.ok) differs = serverBuildDiffers(await response.json());
       } catch {
         // offline: the stale-chunk recovery handles the next navigation
       }
+      if (!differs) {
+        redeployNoticed = false;
+        return;
+      }
+      if (disposed) return;
+      showToast("Brain was updated", {
+        actionLabel: "Reload",
+        onAction: () => window.location.reload(),
+        durationMs: REDEPLOY_TOAST_MS,
+      });
     };
 
     const connect = () => {

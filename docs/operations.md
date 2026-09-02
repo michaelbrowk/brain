@@ -193,6 +193,20 @@ overlays files into the active release, rejects low disk headroom, removes
 abandoned incoming uploads after seven days, and retains a bounded release
 history.
 
+A tab that was open across the switch still holds the previous release's
+`/_next/static/chunks` URLs, which the new `current` no longer serves. The
+shell navigates in place and loads its surfaces on demand, so the first
+surface such a tab has not opened yet fails with a chunk-load error rather
+than a router navigation. The tab reloads itself once for that
+(`lib/stale-chunk.ts`, guarded per URL and build in `sessionStorage`), which
+fetches the new release; a second failure in the same build shows the error
+screen with a Reload button instead of looping. A tab that cannot write
+`sessionStorage` (private mode, a full quota) never reloads on its own, by
+design, and gets that screen straight away; so does a tab that is offline,
+since the same error comes from a dropped connection. Next's `deploymentId` is
+deliberately not set: on a single server it only turns a router navigation
+into a hard reload, and the shell does not navigate through the router.
+
 Journal removal commits the manual deployment only after its deployment-directory
 fsync returns successfully. If unlink succeeded but that fsync or command still
 fails, the in-process rollback trap retains the exact previous/candidate authority

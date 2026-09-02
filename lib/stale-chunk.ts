@@ -108,13 +108,20 @@ export function settleChunkReload(input: ReloadGuardInput): void {
   }
 }
 
-export interface RecoveryDeps extends ReloadGuardInput {
+export interface RecoveryInput extends ReloadGuardInput {
+  /** `navigator.onLine`. A dropped connection throws the same error as a
+   *  swapped release, and a reload then lands on the browser's network-error
+   *  page with the app gone; absent means online. */
+  online?: boolean;
+}
+
+export interface RecoveryDeps extends RecoveryInput {
   reload: () => void;
 }
 
 /** Stamped into every bundle by next.config's `env`; "development" under
  *  `next dev`, where there is no atomic swap to survive. */
-export const BUILD_ID: string = process.env.BRAIN_BUILD_SHA ?? "development";
+const BUILD_ID: string = process.env.BRAIN_BUILD_SHA ?? "development";
 
 function browserDeps(): RecoveryDeps {
   let storage: ReloadMarkerStore | null = null;
@@ -127,32 +134,38 @@ function browserDeps(): RecoveryDeps {
     url: window.location.pathname + window.location.search,
     build: BUILD_ID,
     storage,
+    online: typeof navigator === "undefined" || navigator.onLine !== false,
     reload: () => window.location.reload(),
   };
 }
 
 /** What a boundary paints for `error`, read during render without touching
- *  the marker: "none" for an ordinary error, "reload" when the effect is
- *  about to reload the document, "reloaded" when this build already spent
- *  its reload here, "unavailable" when nothing can guard one. */
+ *  the marker: "none" for an ordinary error, "offline" when a reload would
+ *  only strand the tab, "reload" when the effect is about to reload the
+ *  document, "reloaded" when this build already spent its reload here,
+ *  "unavailable" when nothing can guard one. */
 export function chunkRecoveryState(
   error: unknown,
-  deps?: ReloadGuardInput,
-): "none" | "reload" | "reloaded" | "unavailable" {
+  deps?: RecoveryInput,
+): "none" | "offline" | "reload" | "reloaded" | "unavailable" {
   if (!isChunkLoadError(error)) return "none";
   // a boundary rendered on the server has no document to reload
   if (!deps && typeof window === "undefined") return "unavailable";
-  return chunkReloadState(deps ?? browserDeps());
+  const input = deps ?? browserDeps();
+  if (input.online === false) return "offline";
+  return chunkReloadState(input);
 }
 
 /** The one entry point the boundaries and the window listener call. Reloads
  *  the document when `error` is a chunk failure the guard still allows, and
- *  reports what it did. */
+ *  reports what it did. Offline spends no marker: the failure was not the
+ *  deploy's, and the reload is owed once the connection is back. */
 export function recoverFromStaleChunk(
   error: unknown,
   deps: RecoveryDeps = browserDeps(),
-): "reload" | "give-up" | "not-chunk" {
+): "reload" | "give-up" | "offline" | "not-chunk" {
   if (!isChunkLoadError(error)) return "not-chunk";
+  if (deps.online === false) return "offline";
   const plan = planChunkReload(deps);
   if (plan === "reload") deps.reload();
   return plan;

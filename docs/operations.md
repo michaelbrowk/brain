@@ -200,7 +200,10 @@ surface such a tab has not opened yet fails with a chunk-load error rather
 than a router navigation. The tab reloads itself once for that
 (`lib/stale-chunk.ts`, guarded per URL and build in `sessionStorage`), which
 fetches the new release; a second failure in the same build shows the error
-screen with a Reload button instead of looping. Next's `deploymentId` is
+screen with a Reload button instead of looping. A tab that cannot write
+`sessionStorage` (private mode, a full quota) never reloads on its own, by
+design, and gets that screen straight away; so does a tab that is offline,
+since the same error comes from a dropped connection. Next's `deploymentId` is
 deliberately not set: on a single server it only turns a router navigation
 into a hard reload, and the shell does not navigate through the router.
 

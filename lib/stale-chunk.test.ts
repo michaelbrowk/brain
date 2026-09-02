@@ -20,6 +20,18 @@ function memoryStore(): ReloadMarkerStore & { data: Map<string, string> } {
   };
 }
 
+function readOnlyStore(): ReloadMarkerStore & { data: Map<string, string> } {
+  const data = new Map<string, string>();
+  return {
+    data,
+    getItem: (key) => data.get(key) ?? null,
+    setItem: () => {
+      throw new Error("QuotaExceededError: sessionStorage refused the write");
+    },
+    removeItem: (key) => void data.delete(key),
+  };
+}
+
 function throwingStore(): ReloadMarkerStore {
   const deny = () => {
     throw new Error("SecurityError: sessionStorage is disabled");
@@ -93,6 +105,8 @@ describe("planChunkReload", () => {
   it("gives up rather than loop when nothing can remember the attempt", () => {
     expect(planChunkReload({ url: "/p/abc", build: "b1", storage: null })).toBe("give-up");
     expect(planChunkReload({ url: "/p/abc", build: "b1", storage: throwingStore() })).toBe("give-up");
+    // reads fine, refuses the write: the attempt could not be remembered either
+    expect(planChunkReload({ url: "/p/abc", build: "b1", storage: readOnlyStore() })).toBe("give-up");
   });
 });
 
@@ -129,6 +143,21 @@ describe("chunkRecoveryState", () => {
     expect(chunkRecoveryState(chunkError(), { url: "/p/abc", build: "b2", storage })).toBe(
       "reload",
     );
+  });
+
+  it("is offline before anything else, so the screen can say so", () => {
+    const storage = memoryStore();
+    expect(
+      chunkRecoveryState(chunkError(), { url: "/p/abc", build: "b1", storage, online: false }),
+    ).toBe("offline");
+    expect(storage.data.size).toBe(0);
+  });
+
+  it("still plans a reload when the marker reads but cannot be written", () => {
+    // the write is the effect's problem; the render-time read cannot know
+    expect(
+      chunkRecoveryState(chunkError(), { url: "/p/abc", build: "b1", storage: readOnlyStore() }),
+    ).toBe("reload");
   });
 
   it("is unavailable without a storage to guard the reload", () => {
@@ -190,6 +219,37 @@ describe("recoverFromStaleChunk", () => {
       }),
     ).toBe("not-chunk");
     expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("gives up without reloading when the marker cannot be written", () => {
+    const reload = vi.fn();
+    expect(
+      recoverFromStaleChunk(chunkError(), {
+        url: "/p/abc",
+        build: "b1",
+        storage: readOnlyStore(),
+        reload,
+      }),
+    ).toBe("give-up");
+    expect(reload).not.toHaveBeenCalled();
+  });
+
+  it("does not reload an offline tab, and spends no marker on it", () => {
+    // the same error comes from a dropped connection; a reload then lands on
+    // the browser's network-error page with the app gone
+    const storage = memoryStore();
+    const reload = vi.fn();
+    expect(
+      recoverFromStaleChunk(chunkError(), {
+        url: "/p/abc",
+        build: "b1",
+        storage,
+        online: false,
+        reload,
+      }),
+    ).toBe("offline");
+    expect(reload).not.toHaveBeenCalled();
+    expect(storage.data.size).toBe(0);
   });
 });
 

@@ -123,6 +123,24 @@ export interface RecoveryDeps extends RecoveryInput {
  *  `next dev`, where there is no atomic swap to survive. */
 const BUILD_ID: string = process.env.BRAIN_BUILD_SHA ?? "development";
 
+const SHA = /^[0-9a-f]{40}$/;
+
+/** Identity of the build this bundle was stamped with. */
+export function currentBuildId(): string {
+  return BUILD_ID;
+}
+
+/** The server answered /api/health with a different commit than this bundle
+ *  was built from: a deploy happened under this tab. Placeholders
+ *  ("development", "unknown") never count. */
+export function serverBuildDiffers(health: unknown, buildId: string = BUILD_ID): boolean {
+  if (typeof health !== "object" || health === null) return false;
+  const commit = (health as { commit?: unknown }).commit;
+  if (typeof commit !== "string") return false;
+  if (!SHA.test(commit) || !SHA.test(buildId)) return false;
+  return commit !== buildId;
+}
+
 function browserDeps(): RecoveryDeps {
   let storage: ReloadMarkerStore | null = null;
   try {

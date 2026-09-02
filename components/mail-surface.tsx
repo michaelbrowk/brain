@@ -10,6 +10,7 @@ import {
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { DUR, EASE_OUT, pageTransition } from "@/lib/motion";
 import { isEditableEventTarget } from "@/lib/editable-target";
+import { PROJECT_URL } from "@/lib/project";
 import {
   MailComposer,
   type MailComposerDraft,
@@ -90,6 +91,7 @@ import {
 type AccountsState =
   | { readonly kind: "loading" }
   | { readonly kind: "ready"; readonly accounts: readonly PublicMailAccount[] }
+  | { readonly kind: "unavailable" }
   | { readonly kind: "error" };
 
 type ComposerState = {
@@ -1127,12 +1129,19 @@ export function MailSurface({
         const ready = { kind: "ready", accounts } as const;
         accountsStateRef.current = ready;
         setAccountsState(ready);
-      } catch {
+      } catch (error) {
         if (signal?.aborted || accountsRequestEpochRef.current !== requestEpoch) return;
         if (accountsStateRef.current.kind !== "ready") {
-          const error = { kind: "error" } as const;
-          accountsStateRef.current = error;
-          setAccountsState(error);
+          // The mail service is a second container. When it is absent every
+          // mail route answers 503 with this code, and that is a missing
+          // service to add, not a load that failed.
+          const unavailable =
+            error instanceof MailApiError && error.code === "mail_service_unavailable";
+          const next = unavailable
+            ? ({ kind: "unavailable" } as const)
+            : ({ kind: "error" } as const);
+          accountsStateRef.current = next;
+          setAccountsState(next);
         }
       }
     },
@@ -3933,6 +3942,32 @@ export function MailSurface({
 
   if (accountsState.kind === "loading") {
     return <MailSurfaceSkeleton />;
+  }
+
+  if (accountsState.kind === "unavailable") {
+    return (
+      <MailSurfaceMessage
+        title="Mail isn’t running"
+        body="Brain’s mail service is a second container. Add it to your compose file to connect Gmail or IMAP. Notes work without it."
+        actions={
+          <>
+            <Button type="button" onClick={() => void loadAccounts()}>
+              Try again
+            </Button>
+            {/* `Button` has no `asChild`, so the link carries the ghost
+                variant's classes from components/ui/button.tsx itself. */}
+            <a
+              href={`${PROJECT_URL}#install`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="brain-touch-min rounded-md px-3 py-1.5 text-[13px] text-ink-2 transition-colors hover:bg-fill-hover hover:text-ink"
+            >
+              How to add it
+            </a>
+          </>
+        }
+      />
+    );
   }
 
   if (accountsState.kind === "error") {

@@ -161,6 +161,7 @@ const startChild = ({ startupBarrierToken = "" } = {}) => {
     stdio: ["ignore", "pipe", "pipe", "ipc"],
     env: {
       ...childEnv,
+      BRAIN_UPDATE_CHECK: "off",
       ...(startupBarrierToken
         ? { BRAIN_STANDALONE_STARTUP_BARRIER_TOKEN: startupBarrierToken }
         : {}),

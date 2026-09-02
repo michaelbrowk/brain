@@ -26,6 +26,7 @@ const child = spawn(
       BRAIN_PUBLIC_ORIGIN: publicOrigin,
       MCP_TOKEN: "brain-e2e-mcp-token-not-for-production",
       OPENROUTER_API_KEY: "",
+      BRAIN_UPDATE_CHECK: "off",
       GIT_AUTHOR_NAME: "Brain E2E",
       GIT_AUTHOR_EMAIL: "brain-e2e@example.invalid",
       GIT_COMMITTER_NAME: "Brain E2E",

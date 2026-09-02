@@ -207,6 +207,15 @@ since the same error comes from a dropped connection. Next's `deploymentId` is
 deliberately not set: on a single server it only turns a router navigation
 into a hard reload, and the shell does not navigate through the router.
 
+Two more signals arrive with a release. Settings → Account shows the running
+version (from `release.json` at the app root) and, once a day, whether a newer
+release exists on GitHub — the check runs thirty seconds after boot and then
+daily, keeps its answer in `/var/lib/brain/update/update-check.json`, and is
+off with `BRAIN_UPDATE_CHECK=off`. And a tab that was open across a deploy
+learns about it when its event stream reconnects: the shell compares the
+server's commit from `/api/health` with its own build id and offers one
+"Brain was updated · Reload" line instead of waiting for a missing chunk.
+
 Journal removal commits the manual deployment only after its deployment-directory
 fsync returns successfully. If unlink succeeded but that fsync or command still
 fails, the in-process rollback trap retains the exact previous/candidate authority

@@ -4,12 +4,14 @@ import path from "node:path";
 import { getStore } from "@/lib/store";
 import { assertSearchReady } from "@/lib/search";
 import { getOAuthStateStore } from "@/lib/oauth/state";
+import { readReleaseInfo } from "@/lib/release-info";
 
 export const dynamic = "force-dynamic";
 
-const build = () => ({
+const build = async () => ({
   commit: process.env.BRAIN_BUILD_SHA ?? "unknown",
   builtAt: process.env.BRAIN_BUILD_TIME ?? "unknown",
+  version: (await readReleaseInfo()).version,
 });
 
 type ReadinessCheck =
@@ -100,7 +102,7 @@ export async function GET(request: Request) {
     // anonymous traffic would turn it into a denial-of-service primitive.
     if (!verifyReadinessToken(request.headers.get("x-brain-readiness"))) {
       return NextResponse.json(
-        { status: "unauthorized", ...build() },
+        { status: "unauthorized", ...(await build()) },
         {
           status: 401,
           headers: { "Cache-Control": "no-store" },
@@ -126,7 +128,7 @@ export async function GET(request: Request) {
       // endpoint deliberately exposes no secret, configured path, or cause.
       console.error("[brain/health] readiness failed", error);
       return NextResponse.json(
-        { status: "unready", check, ...build() },
+        { status: "unready", check, ...(await build()) },
         {
           status: 503,
           headers: { "Cache-Control": "no-store" },
@@ -138,7 +140,7 @@ export async function GET(request: Request) {
   return NextResponse.json(
     {
       status: "ok",
-      ...build(),
+      ...(await build()),
     },
     { headers: { "Cache-Control": "no-store" } },
   );

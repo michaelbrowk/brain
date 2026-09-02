@@ -802,8 +802,8 @@ done
 for reserved_metadata in \
   "$stage/release.json" "$stage/deploy-provenance.json"; do
   [[ -f "$reserved_metadata" && ! -L "$reserved_metadata" && \
-    "$(stat -c '%u:%a' "$reserved_metadata")" == "0:444" ]] || \
-    fail "release metadata was not created as an immutable root file"
+    "$(stat -c '%U:%G:%a' "$reserved_metadata")" == "root:brain:444" ]] || \
+    fail "release metadata was not created as an immutable root:brain file"
 done
 
 unsafe_entry="$(find "$stage" -xdev ! -type d ! -type f ! -type l -print -quit)"

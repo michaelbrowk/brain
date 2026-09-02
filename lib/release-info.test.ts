@@ -14,6 +14,7 @@ async function file(contents: string): Promise<string> {
 }
 afterEach(async () => {
   vi.unstubAllEnvs();
+  vi.restoreAllMocks();
   await Promise.all(dirs.splice(0).map((d) => fs.rm(d, { recursive: true, force: true })));
 });
 
@@ -50,5 +51,21 @@ describe("readReleaseInfo", () => {
     expect((await readReleaseInfo(p)).version).toBeNull();
     const q = await file("{not json");
     expect((await readReleaseInfo(q)).version).toBeNull();
+  });
+
+  it.skipIf(process.getuid?.() === 0)("retries a release.json the process could not read instead of caching the fallback", async () => {
+    vi.stubEnv("BRAIN_BUILD_SHA", COMMIT);
+    const p = await file(
+      JSON.stringify({ schema: 1, version: "0.9.1", commit: COMMIT, buildTime: "2026-09-01T18:00:00Z", minUpgradeFrom: "0.9.0" }),
+    );
+    vi.spyOn(process, "cwd").mockReturnValue(path.dirname(p));
+    // The shape of the v0.9.1 deploy: the file is there, but only root can read it.
+    await fs.chmod(p, 0o000);
+    expect((await readReleaseInfo()).version).toBeNull();
+    await fs.chmod(p, 0o444);
+    expect((await readReleaseInfo()).version).toBe("0.9.1");
+    // A parsed release stays cached for the life of the process.
+    await fs.rm(p);
+    expect((await readReleaseInfo()).version).toBe("0.9.1");
   });
 });

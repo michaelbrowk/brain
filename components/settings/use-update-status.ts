@@ -55,20 +55,34 @@ async function request(method: "GET" | "POST") {
   return body;
 }
 
-async function load(method: "GET" | "POST") {
+/** Resolves to whether the request landed. */
+async function load(method: "GET" | "POST"): Promise<boolean> {
   if (method === "POST") {
     refreshing = true;
     emit();
   }
   try {
     state = { kind: "ready", status: await request(method) };
+    return true;
   } catch {
-    // a failed refresh keeps the last good status on screen
-    if (state.kind !== "ready") state = { kind: "error" };
+    // a failed refresh keeps the last good status on screen; a failed first
+    // read lets the next mount, or a retry, ask again
+    if (state.kind !== "ready") {
+      state = { kind: "error" };
+      started = false;
+    }
+    return false;
   } finally {
     refreshing = false;
     emit();
   }
+}
+
+/** The one shared read: marks the store started so a second consumer, or a
+ *  mount while a retry is in flight, does not ask again. */
+function start(): Promise<boolean> {
+  started = true;
+  return load("GET");
 }
 
 function subscribe(listener: () => void) {
@@ -87,7 +101,8 @@ export function resetUpdateStatusForTests() {
 
 export function useUpdateStatus(): {
   state: UpdateLoadState;
-  refresh: () => Promise<void>;
+  refresh: () => Promise<boolean>;
+  retry: () => Promise<boolean>;
   refreshing: boolean;
 } {
   const current = useSyncExternalStore(
@@ -102,9 +117,9 @@ export function useUpdateStatus(): {
   );
   useEffect(() => {
     if (started) return;
-    started = true;
-    void load("GET");
+    void start();
   }, []);
   const refresh = useCallback(() => load("POST"), []);
-  return { state: current, refresh, refreshing: isRefreshing };
+  const retry = useCallback(() => start(), []);
+  return { state: current, refresh, retry, refreshing: isRefreshing };
 }

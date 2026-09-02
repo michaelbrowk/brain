@@ -20,9 +20,22 @@ async function dir(): Promise<string> {
 }
 afterEach(async () => {
   vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
   await Promise.all(dirs.splice(0).map((d) => fs.rm(d, { recursive: true, force: true })));
 });
+
+// Fake timers stop the clock but not the state file's I/O, so the scheduler
+// tests wait on the real clock for that I/O to land.
+const realSetTimeout = globalThis.setTimeout;
+const realTick = () => new Promise<void>((resolve) => realSetTimeout(resolve, 5));
+async function eventually(check: () => boolean): Promise<void> {
+  for (let i = 0; i < 400; i += 1) {
+    if (check()) return;
+    await realTick();
+  }
+  throw new Error("condition not met in time");
+}
 
 const NOW = () => new Date("2026-09-02T09:00:00Z");
 const release = (tag: string, extra: Record<string, unknown> = {}) =>
@@ -150,6 +163,45 @@ describe("scheduleUpdateChecks", () => {
     vi.useFakeTimers();
     const dispose = scheduleUpdateChecks({ initialDelayMs: 10, intervalMs: 20 });
     expect(vi.getTimerCount()).toBe(0);
+    dispose();
+  });
+
+  /** Boots the scheduler as the app would: nothing injected, the state dir
+   *  and NODE_ENV come from the environment, fetch is the global. */
+  async function boot(checkedAt: string) {
+    const d = await dir();
+    await fs.writeFile(
+      path.join(d, UPDATE_STATE_FILE),
+      JSON.stringify({ schema: 1, checkedAt, latest: null, error: null }),
+    );
+    vi.stubEnv("NODE_ENV", "development");
+    vi.stubEnv("BRAIN_UPDATE_CHECK", undefined);
+    vi.stubEnv("BRAIN_UPDATE_STATE_DIR", d);
+    const fetchMock = vi.fn(async () => release("v0.9.1"));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.useFakeTimers();
+    const dispose = scheduleUpdateChecks({ initialDelayMs: 10, intervalMs: 1_000_000 });
+    await vi.advanceTimersByTimeAsync(10);
+    // the daily interval is armed once the state file has been read
+    await eventually(() => vi.getTimerCount() >= 1);
+    return { fetchMock, dispose };
+  }
+
+  it("skips the boot check while the cached answer is fresh and still runs daily", async () => {
+    const { fetchMock, dispose } = await boot(new Date().toISOString());
+    // a boot check that had started would have reached fetch by now
+    for (let i = 0; i < 20; i += 1) await realTick();
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(1_000_000);
+    await eventually(() => fetchMock.mock.calls.length === 1);
+    dispose();
+  });
+
+  it("runs the boot check when the cached answer is stale", async () => {
+    const { fetchMock, dispose } = await boot(new Date(Date.now() - 2 * 86_400_000).toISOString());
+    await eventually(() => fetchMock.mock.calls.length === 1);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
     dispose();
   });
 });

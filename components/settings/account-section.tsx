@@ -20,8 +20,12 @@ function updateHint(state: UpdateLoadState): string {
     return "Off (BRAIN_UPDATE_CHECK=off). Remove the switch to check once a day.";
   }
   if (s.updateAvailable && s.latest) return `${s.latest.version} is available`;
-  if (!s.checkedAt) return "Not checked yet. The first check runs shortly after start";
+  if (!s.checkedAt) return "Not checked yet. The first check runs shortly after start.";
   if (s.error) return `Checked ${formatAgo(s.checkedAt)}, GitHub did not answer`;
+  if (s.version === null && s.latest) {
+    // a development build has no version to compare, so name the release
+    return `Latest release is ${s.latest.version} · checked ${formatAgo(s.checkedAt)}`;
+  }
   return `Up to date · checked ${formatAgo(s.checkedAt)}`;
 }
 
@@ -103,6 +107,11 @@ export function AccountSection({
           </span>
         </SettingsRow>
         <SettingsRow label="Updates" hint={updateHint(update.state)}>
+          {update.state.kind === "error" && (
+            <Button variant="quiet" onClick={() => void update.retry()}>
+              Try again
+            </Button>
+          )}
           {update.state.kind === "ready" &&
             update.state.status.latest &&
             update.state.status.updateAvailable && (
@@ -121,7 +130,11 @@ export function AccountSection({
                 size={28}
                 aria-label="Check for updates"
                 disabled={update.refreshing}
-                onClick={() => void update.refresh()}
+                onClick={() => {
+                  void update.refresh().then((ok) => {
+                    if (!ok) onToast("Could not check for updates");
+                  });
+                }}
               >
                 <Icon name="restart-linear" size={16} />
               </IconButton>

@@ -18,11 +18,12 @@ const status = {
 };
 
 function Probe({ label }: { label: string }) {
-  const { state, refresh, refreshing } = useUpdateStatus();
+  const { state, refresh, refreshing, retry } = useUpdateStatus();
   return (
     <span data-probe={label} data-refreshing={refreshing ? "" : undefined}>
       {state.kind === "ready" ? state.status.version : state.kind}
       <button type="button" data-refresh={label} onClick={() => void refresh()} />
+      <button type="button" data-retry={label} onClick={() => void retry()} />
     </span>
   );
 }
@@ -141,5 +142,49 @@ describe("useUpdateStatus", () => {
     await settle();
 
     expect(host.textContent).toBe("error");
+  });
+
+  it("a retry reads again after the first read fails", async () => {
+    const fetchMock = vi
+      .fn<(url: string, init?: RequestInit) => Promise<Response>>(
+        async () => new Response(JSON.stringify(status), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response("nope", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await act(async () => root.render(<Probe label="a" />));
+    await settle();
+    expect(host.textContent).toBe("error");
+
+    await act(async () => {
+      host.querySelector<HTMLButtonElement>('[data-retry="a"]')?.click();
+    });
+    await settle();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[1]?.method).toBe("GET");
+    expect(host.textContent).toBe("0.9.0");
+  });
+
+  it("a later mount reads again after the first read fails", async () => {
+    const fetchMock = vi
+      .fn<(url: string, init?: RequestInit) => Promise<Response>>(
+        async () => new Response(JSON.stringify(status), { status: 200 }),
+      )
+      .mockResolvedValueOnce(new Response("nope", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await act(async () => root.render(<Probe label="a" />));
+    await settle();
+    expect(host.textContent).toBe("error");
+
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    await act(async () => root.render(<Probe label="b" />));
+    await settle();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock.mock.calls[1]?.[1]?.method).toBe("GET");
+    expect(host.textContent).toBe("0.9.0");
   });
 });

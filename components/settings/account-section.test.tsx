@@ -115,7 +115,9 @@ describe("AccountSection · About", () => {
     await act(async () => root.render(<AccountSection onToast={() => {}} />));
     await settle();
 
-    expect(host.textContent).toContain("Not checked yet");
+    expect(host.textContent).toContain(
+      "Not checked yet. The first check runs shortly after start.",
+    );
   });
 
   it("says GitHub did not answer when the last check failed", async () => {
@@ -138,5 +140,70 @@ describe("AccountSection · About", () => {
 
     expect(host.textContent).toContain("Could not read the update status");
     expect(host.querySelector('[aria-label="Check for updates"]')).toBeNull();
+  });
+
+  it("offers a retry when the route fails and recovers on the next read", async () => {
+    const fetchMock = vi
+      .fn(async () => new Response(JSON.stringify(base), { status: 200 }))
+      .mockResolvedValueOnce(new Response("nope", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+    expect(host.textContent).toContain("Could not read the update status");
+    const retry = [...host.querySelectorAll("button")].find(
+      (button) => button.textContent === "Try again",
+    );
+    expect(retry).toBeDefined();
+
+    await act(async () => retry?.click());
+    await settle();
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(host.textContent).toContain("Brain 0.9.0");
+    expect(host.textContent).toContain("Up to date");
+    expect(host.textContent).not.toContain("Try again");
+  });
+
+  it("names the latest release on a development build", async () => {
+    const latest = {
+      version: "0.9.1",
+      url: "https://github.com/michaelbrowk/brain/releases/tag/v0.9.1",
+      publishedAt: "2026-09-02T08:00:00Z",
+    };
+    stubStatus({ ...base, version: null, latest });
+
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+
+    expect(host.textContent).toContain("Latest release is 0.9.1");
+    expect(host.textContent).toContain("checked 2h ago");
+    expect(host.textContent).not.toContain("Up to date");
+  });
+
+  it("toasts when a refresh fails and keeps the last status", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (_url: string, init?: RequestInit) =>
+        init?.method === "POST"
+          ? new Response("", { status: 503 })
+          : new Response(JSON.stringify(base), { status: 200 }),
+      ),
+    );
+    const onToast = vi.fn();
+
+    await act(async () => root.render(<AccountSection onToast={onToast} />));
+    await settle();
+    expect(host.textContent).toContain("Up to date");
+
+    await act(async () => {
+      host
+        .querySelector<HTMLButtonElement>('[aria-label="Check for updates"]')
+        ?.click();
+    });
+    await settle();
+
+    expect(onToast).toHaveBeenCalledWith("Could not check for updates");
+    expect(host.textContent).toContain("Up to date");
   });
 });

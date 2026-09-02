@@ -5,6 +5,7 @@
 // session-epoch file: env override → /var/lib/brain/update → tmpdir in dev,
 // dir 0700, file 0600, temp-then-rename.
 
+import { randomBytes } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -101,7 +102,7 @@ export async function readUpdateState(dir = updateStateDirectory()): Promise<Upd
 async function writeUpdateState(dir: string, state: UpdateState): Promise<void> {
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, UPDATE_STATE_FILE);
-  const temp = `${file}.tmp-${process.pid}`;
+  const temp = `${file}.tmp-${process.pid}-${randomBytes(4).toString("hex")}`;
   await fs.writeFile(temp, JSON.stringify(state) + "\n", { mode: 0o600 });
   await fs.rename(temp, file);
 }
@@ -157,8 +158,18 @@ export async function runUpdateCheck(options: {
   return state;
 }
 
-/** Boot-time scheduler: one check shortly after start, then daily. Timers are
- *  unref'd so they never hold the process open. Returns a disposer. */
+/** An answer younger than the cache TTL. A checkedAt in the future, or one
+ *  that does not parse, counts as stale so the next check settles it. */
+function isFresh(state: UpdateState | null, nowMs: number): boolean {
+  if (!state) return false;
+  const age = nowMs - Date.parse(state.checkedAt);
+  return age >= 0 && age < UPDATE_CACHE_TTL_MS;
+}
+
+/** Boot-time scheduler: one check shortly after start, then daily. The boot
+ *  check is skipped while the answer on disk is fresh, so a restart inside
+ *  the cache window does not ask GitHub again. Timers are unref'd so they
+ *  never hold the process open. Returns a disposer. */
 export function scheduleUpdateChecks(options: { initialDelayMs?: number; intervalMs?: number } = {}): () => void {
   if (!updateCheckEnabled()) return () => {};
   const initialDelayMs = options.initialDelayMs ?? 30_000;
@@ -168,14 +179,20 @@ export function scheduleUpdateChecks(options: { initialDelayMs?: number; interva
       console.warn(`[brain/update] check failed: ${cause instanceof Error ? cause.message : String(cause)}`);
     });
   };
+  let disposed = false;
   let interval: NodeJS.Timeout | null = null;
   const first = setTimeout(() => {
-    run();
-    interval = setInterval(run, intervalMs);
-    interval.unref();
+    // readUpdateState never rejects: a missing or corrupt file reads as null
+    void readUpdateState().then((previous) => {
+      if (disposed) return;
+      if (!isFresh(previous, Date.now())) run();
+      interval = setInterval(run, intervalMs);
+      interval.unref();
+    });
   }, initialDelayMs);
   first.unref();
   return () => {
+    disposed = true;
     clearTimeout(first);
     if (interval) clearInterval(interval);
   };

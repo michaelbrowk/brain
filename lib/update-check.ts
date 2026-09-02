@@ -1,6 +1,7 @@
 // Once a day the server asks GitHub for the latest release and remembers the
 // answer in a small state file. Nothing about the instance travels except a
-// user agent naming Brain and its version. Off with BRAIN_UPDATE_CHECK=off;
+// user agent naming Brain, its version and the project URL. Off with
+// BRAIN_UPDATE_CHECK=off;
 // never on under NODE_ENV=test. The cache file mirrors lib/auth.ts's
 // session-epoch file: env override → /var/lib/brain/update → tmpdir in dev,
 // dir 0700, file 0600, temp-then-rename.

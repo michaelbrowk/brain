@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -77,4 +77,20 @@ describe("Store.init on a notes root it cannot write", () => {
       }
     },
   );
+});
+
+it("treats a probe that was created but could not be removed as writable, and says where it is", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-root-"));
+  const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  const rmdir = vi.spyOn(fs, "rmdir").mockRejectedValueOnce(new Error("EBUSY: simulated"));
+  try {
+    await expect(ensureWritableNotesRoot(root)).resolves.toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn.mock.calls[0][0]).toContain(".brain-writable-");
+    expect(warn.mock.calls[0][0]).toContain("EBUSY: simulated");
+  } finally {
+    rmdir.mockRestore();
+    warn.mockRestore();
+    await fs.rm(root, { recursive: true, force: true });
+  }
 });

@@ -25,9 +25,21 @@ export async function ensureWritableNotesRoot(root: string): Promise<void> {
   );
   try {
     await fs.mkdir(probe, { recursive: false });
-    await fs.rmdir(probe);
   } catch (error) {
     throw new Error(await describeUnwritableRoot(root, error), { cause: error });
+  }
+  try {
+    await fs.rmdir(probe);
+  } catch (error) {
+    // The write succeeded — that is the question this probe asks — so a
+    // failed cleanup is not an unwritable root and must not be reported as
+    // one. The stray dot-directory is harmless: the tree walk skips
+    // dot-entries and git never records an empty directory. Say where it is.
+    console.warn(
+      `[brain/store] could not remove the writability probe ${probe}: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
   }
 }
 

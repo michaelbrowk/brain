@@ -9,6 +9,7 @@ import { generateKeyBetween, generateNKeysBetween } from "fractional-indexing";
 import { parsePage, serializePage } from "./frontmatter";
 import { atomicWrite, hashRev, syncDirectory } from "./atomic";
 import { slugify, assertInRoot, isReservedDir } from "./paths";
+import { ensureWritableNotesRoot } from "./notes-root";
 import {
   assertGitReady,
   assertGitSnapshotHealthy,
@@ -513,7 +514,7 @@ export class Store {
   }
 
   async init(): Promise<void> {
-    await fs.mkdir(this.root, { recursive: true });
+    await ensureWritableNotesRoot(this.root);
     await this.ensureNotionStagingRoot().catch(rethrowStagingFailure);
     await this.reconcileMoveIntent();
     await this.reconcileBoardIntent();

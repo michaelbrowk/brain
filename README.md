@@ -65,6 +65,15 @@ page had when it was created (`untitled-2` when the name is taken) — a later
 rename changes `title:` in the frontmatter and leaves the folder as it was, so
 a page created as "Untitled" and renamed lives in `untitled/` for good.
 
+On colima's default vz + virtiofs mount no `chown` on the Mac achieves that
+writability: the folder arrives inside the container owned by root whatever
+its host owner and mode. There, give the notes a Docker named volume instead
+of the bind — `brain-notes:/opt/brain/notes` in place of
+`${NOTES_ROOT}:/opt/brain/notes`, plus `brain-notes: {}` under `volumes:` —
+and accept that the notes then live in Docker's volume store inside the VM
+rather than in a Mac folder. Either way, Brain refuses a folder uid 1000
+cannot write at startup, and `docker compose logs web` names the fix.
+
 `AUTH_SECRET` wants 32 or more random bytes (`openssl rand -hex 32`).
 `AUTH_PASSWORD_HASH` takes a bcrypt hash of your login password, which the
 Docker you already have can produce:

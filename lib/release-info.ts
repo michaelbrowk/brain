@@ -40,18 +40,25 @@ function parse(text: string): ReleaseInfo | null {
   return { version: r.version, commit: r.commit, buildTime: r.buildTime };
 }
 
-async function read(file: string): Promise<ReleaseInfo> {
+async function read(file: string): Promise<ReleaseInfo | null> {
   try {
-    return parse(await fs.readFile(file, "utf8")) ?? fromEnv();
+    return parse(await fs.readFile(file, "utf8"));
   } catch {
-    return fromEnv();
+    return null;
   }
 }
 
-let cached: Promise<ReleaseInfo> | null = null;
+// Only a parsed release is kept. A read that fails (no file, or a file the
+// service user cannot read after a deploy) answers from the env and is retried
+// on the next call, so a corrected file shows up without a restart. Concurrent
+// callers still share one in-flight read.
+let cached: Promise<ReleaseInfo | null> | null = null;
 
-export function readReleaseInfo(file?: string): Promise<ReleaseInfo> {
-  if (file) return read(file);
-  cached ??= read(path.join(process.cwd(), "release.json"));
-  return cached;
+export async function readReleaseInfo(file?: string): Promise<ReleaseInfo> {
+  if (file) return (await read(file)) ?? fromEnv();
+  const pending = (cached ??= read(path.join(process.cwd(), "release.json")));
+  const info = await pending;
+  if (info) return info;
+  if (cached === pending) cached = null;
+  return fromEnv();
 }

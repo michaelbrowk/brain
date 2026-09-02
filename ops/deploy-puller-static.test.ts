@@ -801,7 +801,7 @@ describe("deploy puller operational boundaries", () => {
     );
     const writer = puller.indexOf('"$runtime" "$metadata_writer"', reservedGate);
     const immutableGate = puller.indexOf(
-      "release metadata was not created as an immutable root file",
+      "release metadata was not created as an immutable root:brain file",
       writer,
     );
     expect(reservedGate).toBeGreaterThan(-1);
@@ -810,6 +810,30 @@ describe("deploy puller operational boundaries", () => {
     expect(puller).not.toContain(
       'cp -- "$candidate" "$stage/deploy-provenance.json"',
     );
+  });
+
+  it("writes release metadata after the tree is root:brain and gates on the group before the mode pass", async () => {
+    // v0.9.1 shipped release.json as root:root 0440: the tree chown ran first,
+    // the root-run writer created the file with root's group, and the service
+    // user got EACCES. The writer now takes the directory's group; the gate
+    // proves it before the release is promoted.
+    const puller = await source("deploy-puller.sh");
+    const treeGroup = puller.indexOf(
+      'chown -R --no-dereference root:brain "$workspace"',
+    );
+    const writer = puller.indexOf('"$runtime" "$metadata_writer"', treeGroup);
+    const groupGate = puller.indexOf(
+      "\"$(stat -c '%U:%G:%a' \"$reserved_metadata\")\" == \"root:brain:444\"",
+      writer,
+    );
+    const fileMode = puller.indexOf(
+      'find "$stage" -xdev -type f -exec chmod 0440 {} +',
+      groupGate,
+    );
+    expect(treeGroup).toBeGreaterThan(-1);
+    expect(writer).toBeGreaterThan(treeGroup);
+    expect(groupGate).toBeGreaterThan(writer);
+    expect(fileMode).toBeGreaterThan(groupGate);
   });
 
   it("asks the resolver for the source's target and moves shipped metadata aside before the reserved gate", async () => {

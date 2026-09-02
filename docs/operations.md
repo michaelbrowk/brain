@@ -210,6 +210,15 @@ since the same error comes from a dropped connection. Next's `deploymentId` is
 deliberately not set: on a single server it only turns a router navigation
 into a hard reload, and the shell does not navigate through the router.
 
+The puller writes `release.json` and `deploy-provenance.json` after it has
+normalized the tree, so the writer gives them the release directory's group:
+they end up `root:brain`, readable by the service like every other release
+file, and the puller refuses to promote a release whose metadata is not. (The
+operator path writes them before upload, and the remote normalization above
+covers them.) A `version: null` from `/api/health` right after a deploy means
+the app user cannot read `release.json`; once the ownership is fixed the next
+health poll picks the file up without a restart.
+
 Two more signals arrive with a release. Settings → Account shows the running
 version (from `release.json` at the app root) and, once a day, whether a newer
 release exists on GitHub — the check runs thirty seconds after boot and then

@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { lstat, open, unlink } from "node:fs/promises";
+import { lstat, open, stat, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -90,6 +90,11 @@ async function readRegularNoFollow(path) {
 }
 
 async function exclusiveDurableWrite(path, contents) {
+  // The puller normalizes the release tree to root:brain before this file is
+  // created, and Linux gives a new file the writer's primary group, not the
+  // directory's. Take the directory's group (setgid semantics) so the service
+  // user can read the file like the rest of the tree.
+  const { gid } = await stat(dirname(path));
   const handle = await open(
     path,
     constants.O_WRONLY |
@@ -102,6 +107,7 @@ async function exclusiveDurableWrite(path, contents) {
   try {
     await handle.writeFile(contents);
     await handle.sync();
+    await handle.chown((await handle.stat()).uid, gid);
     await handle.chmod(0o444);
     await handle.sync();
   } catch (error) {

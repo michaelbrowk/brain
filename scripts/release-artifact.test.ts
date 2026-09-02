@@ -171,6 +171,40 @@ describe("release artifact provenance", () => {
     expect((await fs.stat(provenanceDestination)).mode & 0o777).toBe(0o444);
   });
 
+  const primaryGid = process.getgid?.();
+  const otherGid = process.getgroups?.().find((gid) => gid !== primaryGid);
+
+  it.skipIf(otherGid === undefined)("gives release metadata the group of the directory it lands in", async () => {
+    // The puller chowns the release tree to root:brain before the root-run
+    // writer creates these files. On Linux a new file gets the writer's
+    // primary group, so without an explicit chown the service user cannot
+    // read release.json (v0.9.1 shipped root:root). Stand in for that with a
+    // directory whose group is not this account's primary group.
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-release-group-"));
+    roots.push(root);
+    await fs.chown(root, process.getuid!(), otherGid!);
+    const destination = path.join(root, "release.json");
+    const provenance = path.join(root, "provenance.json");
+    const provenanceDestination = path.join(root, "deploy-provenance.json");
+    const commit = "a".repeat(40);
+    await fs.writeFile(provenance, `${JSON.stringify(deployCandidate(commit), null, 2)}\n`);
+
+    await execFileAsync(process.execPath, [
+      path.join(process.cwd(), "scripts/write-release-metadata.mjs"),
+      destination,
+      "aaaaaaaaaaaa-20260712T100000Z-deadbeef",
+      commit,
+      "2026-07-12T10:00:00Z",
+      provenance,
+      provenanceDestination,
+    ]);
+
+    expect((await fs.stat(destination)).gid).toBe(otherGid);
+    expect((await fs.stat(provenanceDestination)).gid).toBe(otherGid);
+    expect((await fs.stat(destination)).mode & 0o777).toBe(0o444);
+    expect((await fs.stat(provenanceDestination)).mode & 0o777).toBe(0o444);
+  });
+
   it("loads the validator from the installer's flat bin layout", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-release-flat-bin-"));
     roots.push(root);

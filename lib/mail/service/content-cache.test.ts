@@ -1384,6 +1384,18 @@ describe("active-message content metadata cache", () => {
     await expect(
       fixture.content.inspect("message-thread-a"),
     ).resolves.toMatchObject({ kind: "ready" });
+    const demand = new DatabaseSync(fixture.databasePath, { readOnly: true });
+    try {
+      expect(
+        demand
+          .prepare(
+            "SELECT provider_message_id FROM message_content_user_demand",
+          )
+          .all(),
+      ).toEqual([{ provider_message_id: "message-thread-a" }]);
+    } finally {
+      demand.close();
+    }
     const later = 1_000 + MAIL_RESOURCE_LIMITS.privacyPrefetchMaxAgeMs + 60_000;
     await expect(
       fixture.content.refreshBackgroundPrivacyCohort(later),

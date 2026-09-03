@@ -4482,9 +4482,7 @@ export class SqliteMailMessageCache {
         normalizeSortSender(thread.thread.participants),
         thread.thread.category,
       );
-    // Refresh message rows in place. Deleting and re-inserting them cascades
-    // into the owner-demand and privacy-cohort rows that keep a fetched body
-    // alive, so every thread refresh evicted the body the owner had just opened.
+    // Refresh message rows in place rather than replacing them.
     const insertMessage = database.prepare(
       `INSERT INTO messages(
          account_id, generation, message_id, thread_id, from_json, reply_to_json,
@@ -4538,6 +4536,11 @@ export class SqliteMailMessageCache {
         message.hasAttachments ? 1 : 0,
       );
     }
+    // Only the messages that left the thread go. Deleting and re-inserting the
+    // whole set cascades into the owner-demand and privacy-cohort rows that
+    // keep a fetched body alive, so every refresh of a thread — the
+    // incremental page right after it is marked read on open, mailbox
+    // hydration, a pending refresh — evicted the body just fetched for it.
     const keptMessageIds = thread.messages.map((message) => message.messageId);
     database
       .prepare(

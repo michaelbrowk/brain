@@ -10,7 +10,7 @@ Brain is a personal knowledge workspace you host yourself. You write and retriev
 
 ## Product Purpose
 
-Brain is a self-hosted minimalist editor whose plain Markdown files remain useful without the application. It should feel faster and quieter than Notion, preserve every edit without semantic loss, and give LLMs a controlled door into the same durable note tree.
+Brain is a self-hosted minimalist editor whose plain Markdown files remain useful without the application. It should feel fast and quiet next to the all-in-one workspaces, preserve every edit without semantic loss, and give LLMs a controlled door into the same durable note tree.
 
 ## Brand Personality
 
@@ -18,7 +18,7 @@ Quiet, exact, personal. The interface should feel alive through precise motion a
 
 ## Anti-references
 
-- Notion-style feature sprawl, databases, properties, collaboration chrome, and nested configuration.
+- Workspace-suite feature sprawl: databases, properties, collaboration chrome, and nested configuration.
 - Generic shadcn or SaaS surfaces, decorative card grids, and decorative colour or material. Glass, tint and hue exist in Brain only where they do a job, bounded by `DESIGN.md`.
 - An in-product AI chat that competes with the editor.
 - Any interaction or custom block that cannot round-trip to clean Markdown.

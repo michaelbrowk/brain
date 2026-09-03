@@ -47,10 +47,8 @@ curl -o .env https://raw.githubusercontent.com/michaelbrowk/brain/main/.env.exam
 docker compose up -d
 ```
 
-That compose file pins `ghcr.io/michaelbrowk/brain:0.9.0`, so it works only
-once the 0.9.0 release is published. An unresolvable-manifest error from
-`docker compose up -d` means the tag it names is not on ghcr.io yet — check
-it against the repository's releases.
+That compose file pins the current release. To upgrade, raise the tag and run
+`docker compose up -d` again.
 
 Open `http://localhost:3020`. The first screen is one password box — no
 username, no sign-up — because a Brain has one owner, and the hash you put in
@@ -146,7 +144,7 @@ grants, the sender-icon cache, the mail service's accounts and the key that
 wraps their credentials — and `docker compose down -v` deletes those, which
 forgets every connected app and every mail account and still leaves the notes
 folder alone. To remove Brain entirely: `docker compose down -v`, delete the
-compose file and `.env`, and `docker rmi ghcr.io/michaelbrowk/brain:0.9.0`.
+compose file and `.env`, and `docker rmi ghcr.io/michaelbrowk/brain:<tag>`.
 The notes folder is yours to keep.
 
 ## Develop

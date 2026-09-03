@@ -34,12 +34,17 @@ async function repository(): Promise<{ origin: string; clone: string }> {
     path.join(clone, "package.json"),
     `${JSON.stringify({ name: "brain", version: "0.1.0" }, null, 2)}\n`,
   );
+  await mkdir(path.join(clone, "ops", "docker"), { recursive: true });
+  await writeFile(
+    path.join(clone, "ops", "docker", "docker-compose.yml"),
+    "services:\n  web:\n    image: ghcr.io/michaelbrowk/brain:0.1.0\n  mail:\n    image: ghcr.io/michaelbrowk/brain:0.1.0\n",
+  );
   await mkdir(path.join(clone, "docs", "release-notes"), { recursive: true });
   await writeFile(
     path.join(clone, "docs", "release-notes", "0.9.0.md"),
     "- Opening a page no longer waits on the sidebar.\n",
   );
-  await git(clone, "add", "package.json", "docs");
+  await git(clone, "add", "package.json", "docs", "ops");
   await git(clone, "commit", "-q", "-m", "seed");
   await git(clone, "push", "-q", "origin", "main");
   return { origin, clone };
@@ -125,6 +130,26 @@ describe("pnpm release", () => {
     expect(await git(origin, "rev-parse", "refs/heads/main")).toBe(result.commit);
     expect(await git(origin, "rev-list", "-n", "1", "refs/tags/v0.9.0-rc.1")).toBe(result.commit);
     expect(await git(origin, "cat-file", "-t", "refs/tags/v0.9.0-rc.1")).toBe("tag");
+  });
+
+  it("moves the quickstart's image tag with a stable release, and not with a prerelease", async () => {
+    const { clone } = await repository();
+    const compose = path.join(clone, "ops", "docker", "docker-compose.yml");
+
+    await cutRelease({ cwd: clone, version: "0.9.0-rc.1", env });
+    expect(await readFile(compose, "utf8")).toContain("brain:0.1.0");
+
+    await writeFile(
+      path.join(clone, "docs", "release-notes", "0.9.0.md"),
+      "- The quickstart installs this one.\n",
+    );
+    await git(clone, "add", "docs");
+    await git(clone, "commit", "-q", "-m", "notes");
+    await cutRelease({ cwd: clone, version: "0.9.0", env });
+    const pinned = await readFile(compose, "utf8");
+    expect(pinned).not.toContain("brain:0.1.0");
+    expect(pinned.match(/image: ghcr\.io\/michaelbrowk\/brain:0\.9\.0/g)).toHaveLength(2);
+    expect(await git(clone, "status", "--porcelain")).toBe("");
   });
 
   it("names the local cleanup when the atomic push is rejected", async () => {

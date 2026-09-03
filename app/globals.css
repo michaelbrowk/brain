@@ -361,6 +361,13 @@
   --hover-tint: linear-gradient(var(--fill-glass-hover), var(--fill-glass-hover)); /* the same tint as a layer */
   --hover-tint-selected: var(--hover-tint); /* over the selected capsule; dark darkens instead (contrast) */
   --fill-glass-selected: oklch(1 0 0 / 0.78);
+  /* the sidebar capsule on paper: white .78 on the .58 material over paper
+     measured ΔL .006 — white on white — so the capsule carries an ink veil
+     (ΔL .02 against the panel) and a rim two steps above --fill-rim (the
+     edge measures ΔL .13 at 2×). Dark needs neither: white .14 on the dark
+     material is ΔL .12 on its own. */
+  --fill-selected-ink: color-mix(in oklch, var(--ink) 4%, transparent);
+  --fill-selected-rim: color-mix(in oklch, var(--ink) 14%, transparent);
   --fill-chip: oklch(1 0 0 / 0.5);
   --fill-field-glass: oklch(0.232 0.004 286 / 0.055); /* search capsule on glass */
   --fill-field-glass-hover: oklch(0.232 0.004 286 / 0.1); /* ΔL .034 over paper */
@@ -486,6 +493,8 @@
      material over the lightest dark backdrop; a dark tint keeps ΔL ≥ .04 and
      the text above 5:1 */
   --hover-tint-selected: linear-gradient(oklch(0 0 0 / 0.12), oklch(0 0 0 / 0.12));
+  --fill-selected-ink: transparent;
+  --fill-selected-rim: oklch(0 0 0 / 0.3);
   --fill-chip: oklch(1 0 0 / 0.08);
   --fill-field-glass: oklch(1 0 0 / 0.07);
   --fill-field-glass-hover: oklch(1 0 0 / 0.11);
@@ -1579,10 +1588,13 @@ html[data-kbd] [contenteditable]:focus-visible {
   inset: 0;
   border-radius: inherit;
   background-color: var(--fill-glass-selected);
+  /* the ink veil as a layer over the white fill, so a dark cover under the
+     sidebar still gets the white base and paper still gets an edge */
+  background-image: linear-gradient(var(--fill-selected-ink), var(--fill-selected-ink));
   box-shadow:
     inset 0 1px 0 var(--fill-highlight),
-    0 0 0 0.5px var(--fill-rim),
-    0 1px 2px var(--fill-rim);
+    0 0 0 0.5px var(--fill-selected-rim),
+    0 1px 2px var(--fill-selected-rim);
   pointer-events: none;
 }
 .tree-row > .tree-row-capsule::after {

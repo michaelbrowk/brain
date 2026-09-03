@@ -27,7 +27,14 @@ import { RowMenu, PageContextMenu } from "./row-menu";
 import { AnimatePresence, motion } from "framer-motion";
 import { SIDEBAR_SELECT_LAYOUT_ID } from "../shell/sidebar-select";
 import { DUR, EASE_OUT } from "@/lib/motion";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from "react";
 import type { TreeNode } from "@/lib/store/types";
 import { resolveDropZone, type DropZone } from "@/lib/drop-zone";
 import { resolveTreeDrop, type TreeDrop } from "./drop-intent";
@@ -130,6 +137,35 @@ export interface TreeHandlers {
   pageRefSourcePageId: string | null;
   /** warm the page cache when a row is hovered, so the click is instant */
   onPrefetch?: (id: string) => void;
+}
+
+/** The row's grow/shrink wrapper: expand/collapse and create/delete animate
+ *  its height, and it clips only while that height moves. A clip at rest
+ *  is exactly the row's box and cuts the selected capsule's rim and shadow
+ *  on all four sides; during a drag (`animated` false) it clips a row
+ *  dnd-kit translates (rows vanish). The first frame of a grow is opacity 0,
+ *  so the clip arriving with onAnimationStart is never seen. */
+function RowShell({
+  animated,
+  children,
+}: {
+  animated: boolean;
+  children: ReactNode;
+}) {
+  const [moving, setMoving] = useState(false);
+  return (
+    <motion.div
+      initial={animated ? { height: 0, opacity: 0 } : false}
+      animate={{ height: "auto", opacity: 1 }}
+      exit={animated ? { height: 0, opacity: 0 } : undefined}
+      transition={{ duration: DUR.base, ease: EASE_OUT }}
+      onAnimationStart={() => setMoving(true)}
+      onAnimationComplete={() => setMoving(false)}
+      style={{ overflow: moving && animated ? "hidden" : "visible" }}
+    >
+      {children}
+    </motion.div>
+  );
 }
 
 // memoized: the sidebar tree only depends on tree/selection/expanded + stable
@@ -258,18 +294,7 @@ export const SortableTree = memo(function SortableTree({
       <SortableContext items={itemIds} strategy={holdStill}>
         <AnimatePresence initial={false}>
           {items.map((it) => (
-            <motion.div
-              key={it.id}
-              // expand/collapse + create/delete grow and shrink rows;
-              // disabled during drag to not fight dnd-kit's transforms
-              initial={activeId ? false : { height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={activeId ? undefined : { height: 0, opacity: 0 }}
-              transition={{ duration: DUR.base, ease: EASE_OUT }}
-              // overflow-hidden clips a row when dnd-kit translates it during a
-              // drag (rows vanish); only clip when animating expand/collapse
-              className={activeId ? undefined : "overflow-hidden"}
-            >
+            <RowShell key={it.id} animated={!activeId}>
               <Row
                 flat={it}
                 tree={tree}
@@ -282,7 +307,7 @@ export const SortableTree = memo(function SortableTree({
                 dropDepth={drop?.depth ?? 0}
                 {...h}
               />
-            </motion.div>
+            </RowShell>
           ))}
         </AnimatePresence>
       </SortableContext>

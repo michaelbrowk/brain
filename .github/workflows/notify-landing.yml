@@ -1,0 +1,31 @@
+name: notify-landing
+
+# Tells michaelbrowk.com to refresh its Brain release feed as soon as a
+# release is published, instead of waiting for the landing's 6-hourly cron.
+# Needs a fine-grained PAT with "Contents: write" on michaelbrowk/michaelbrowk.com
+# stored as PORTFOLIO_DISPATCH_TOKEN; without it the job is a no-op.
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    env:
+      TOKEN: ${{ secrets.PORTFOLIO_DISPATCH_TOKEN }}
+      TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - name: Skip when no token is configured
+        if: env.TOKEN == ''
+        run: echo "PORTFOLIO_DISPATCH_TOKEN is not set; the landing will pick this release up on its cron."
+      - name: Dispatch brain-release to michaelbrowk.com
+        if: env.TOKEN != ''
+        run: |
+          curl -sS --fail-with-body -X POST \
+            -H "Authorization: Bearer $TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/michaelbrowk/michaelbrowk.com/dispatches \
+            -d "{\"event_type\":\"brain-release\",\"client_payload\":{\"tag\":\"$TAG\"}}"

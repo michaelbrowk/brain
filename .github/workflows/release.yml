@@ -112,9 +112,19 @@ jobs:
           prerelease: ${{ steps.version.outputs.prerelease }}
         run: |
           previous="$(git tag --list 'v*' --sort=-v:refname | grep -v -x "$GITHUB_REF_NAME" | head -n 1 || true)"
-          args=(--draft --generate-notes --verify-tag --title "$GITHUB_REF_NAME")
-          if [[ -n "$previous" ]]; then
-            args+=(--notes-start-tag "$previous")
+          args=(--draft --verify-tag --title "$GITHUB_REF_NAME")
+          # The body is read by strangers on the releases page and by the
+          # landing, which renders it as-is. Hand-written notes say what
+          # changed for the person using Brain; the generated commit list is
+          # the fallback for a tag cut without them.
+          notes="docs/release-notes/$version.md"
+          if [[ -f "$notes" ]]; then
+            args+=(--notes-file "$notes")
+          else
+            args+=(--generate-notes)
+            if [[ -n "$previous" ]]; then
+              args+=(--notes-start-tag "$previous")
+            fi
           fi
           if [[ "$prerelease" == "true" ]]; then
             args+=(--prerelease --latest=false)

@@ -30,7 +30,10 @@ Automated checks run in CI. The device checks below remain mandatory because bro
   on GitHub and the release list on michaelbrowk.com/brain both render this
   file as written, so it is product copy, not a commit log. `pnpm release`
   refuses a stable version without it; a pre-release may go without.
-- `pnpm release <version>` from a clean, current `main`. The `Release`
+- `pnpm release <version>` from a clean, current `main`. It moves the image
+  tag in `ops/docker/docker-compose.yml` for a stable version, because the
+  quickstart on the site downloads that file and installs whatever tag it
+  names. Check the release commit contains that change. The `Release`
   workflow for the tag is green: tarball, `SHA256SUMS`, two-architecture
   image, and the draft exist; the draft is published by hand. A red tag
   workflow produces no artifact and no draft. Publishing is the moment

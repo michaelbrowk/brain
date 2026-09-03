@@ -83,6 +83,23 @@ export async function cutRelease({
   pkg.version = version;
   await writeFile(packagePath, `${JSON.stringify(pkg, null, 2)}\n`);
   await git(["add", "package.json"], { cwd, env });
+  // The quickstart on the site downloads this compose file and installs
+  // whatever tag it names. Left to a human it drifts: it sat on 0.9.0 while
+  // three releases shipped, so every new install got the bugs those releases
+  // fixed. A prerelease is not what a stranger should land on, so it does not
+  // move the tag.
+  if (!isPrerelease(version)) {
+    const composePath = path.join(cwd, "ops", "docker", "docker-compose.yml");
+    const compose = await readFile(composePath, "utf8");
+    const pinned = compose.replace(
+      /image: ghcr\.io\/michaelbrowk\/brain:[^\s]+/g,
+      `image: ghcr.io/michaelbrowk/brain:${version}`,
+    );
+    if (pinned !== compose) {
+      await writeFile(composePath, pinned);
+      await git(["add", "ops/docker/docker-compose.yml"], { cwd, env });
+    }
+  }
   await git(["commit", "--quiet", "-m", `release: ${tag}`], { cwd, env });
   await git(["tag", "-a", tag, "-m", `release: ${tag}`], { cwd, env });
   try {

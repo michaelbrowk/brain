@@ -1,7 +1,8 @@
 # Brain
 
-A self-hosted "simple Notion" — plain Markdown files as the source of truth, a
-fast MCP for Claude, and a minimalist monochrome web UI (Mac + iPhone).
+A notes app you keep on your own server — plain Markdown files as the source
+of truth, a fast MCP for Claude, and a minimalist monochrome web UI (Mac +
+iPhone).
 
 - **Storage:** folders-as-pages, one `index.md` per page (YAML frontmatter +
   body). The `.md` tree is canonical; nothing is locked in a database. Saves

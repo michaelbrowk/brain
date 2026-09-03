@@ -1,6 +1,6 @@
 // scripts/release.test.ts
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -34,7 +34,12 @@ async function repository(): Promise<{ origin: string; clone: string }> {
     path.join(clone, "package.json"),
     `${JSON.stringify({ name: "brain", version: "0.1.0" }, null, 2)}\n`,
   );
-  await git(clone, "add", "package.json");
+  await mkdir(path.join(clone, "docs", "release-notes"), { recursive: true });
+  await writeFile(
+    path.join(clone, "docs", "release-notes", "0.9.0.md"),
+    "- Opening a page no longer waits on the sidebar.\n",
+  );
+  await git(clone, "add", "package.json", "docs");
   await git(clone, "commit", "-q", "-m", "seed");
   await git(clone, "push", "-q", "origin", "main");
   return { origin, clone };
@@ -78,6 +83,34 @@ describe("pnpm release", () => {
     await expect(assertReleasable({ cwd: clone, version: "0.9", env })).rejects.toThrow(
       "invalid release version",
     );
+  });
+
+  it("refuses a stable version with no hand-written notes, and lets a prerelease through", async () => {
+    const { clone } = await repository();
+    await expect(assertReleasable({ cwd: clone, version: "0.9.1", env })).rejects.toThrow(
+      "write docs/release-notes/0.9.1.md first",
+    );
+    // Committed, because a dirty tree is refused before the notes are read.
+    await writeFile(path.join(clone, "docs", "release-notes", "0.9.1.md"), "   \n");
+    await git(clone, "add", "docs");
+    await git(clone, "commit", "-q", "-m", "empty notes");
+    await git(clone, "push", "-q", "origin", "main");
+    await expect(assertReleasable({ cwd: clone, version: "0.9.1", env })).rejects.toThrow(
+      "write docs/release-notes/0.9.1.md first",
+    );
+    await writeFile(
+      path.join(clone, "docs", "release-notes", "0.9.1.md"),
+      "- Search finds a page by its title again.\n",
+    );
+    await git(clone, "add", "docs");
+    await git(clone, "commit", "-q", "-m", "notes");
+    await git(clone, "push", "-q", "origin", "main");
+    await expect(assertReleasable({ cwd: clone, version: "0.9.1", env })).resolves.toMatchObject({
+      tag: "v0.9.1",
+    });
+    await expect(
+      assertReleasable({ cwd: clone, version: "0.9.2-rc.1", env }),
+    ).resolves.toMatchObject({ tag: "v0.9.2-rc.1" });
   });
 
   it("writes the version, commits, tags, and pushes commit and tag atomically", async () => {

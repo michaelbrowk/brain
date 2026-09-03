@@ -24,6 +24,12 @@ Automated checks run in CI. The device checks below remain mandatory because bro
   while an authenticated partial `PUT` finishes after the signal with HTTP
   `200` and persisted Markdown. Both shutdown paths exit cleanly with code `143`
   in under three seconds.
+- `docs/release-notes/<version>.md` exists and says, in plain language, what
+  changed for the person using Brain: what was wrong before, what happens now.
+  No usernames, no pull-request numbers, no commit subjects. The releases page
+  on GitHub and the release list on michaelbrowk.com/brain both render this
+  file as written, so it is product copy, not a commit log. `pnpm release`
+  refuses a stable version without it; a pre-release may go without.
 - `pnpm release <version>` from a clean, current `main`. The `Release`
   workflow for the tag is green: tarball, `SHA256SUMS`, two-architecture
   image, and the draft exist; the draft is published by hand. A red tag

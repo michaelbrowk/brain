@@ -5,7 +5,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import { compareSemver, parseSemver } from "./release-version.mjs";
+import { compareSemver, isPrerelease, parseSemver } from "./release-version.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -53,6 +53,19 @@ export async function assertReleasable({
   const pkg = JSON.parse(await readFile(path.join(cwd, "package.json"), "utf8"));
   if (compareSemver(version, pkg.version) <= 0) {
     throw new Error(`refusing to release ${version}: package.json is already at ${pkg.version}`);
+  }
+  // A stable release is read by strangers on the releases page and by the
+  // landing, which renders the body as-is. The generated commit list is not
+  // that text, so the notes are written before the tag exists, not after.
+  if (!isPrerelease(version)) {
+    const notes = path.join(cwd, "docs", "release-notes", `${version}.md`);
+    const text = await readFile(notes, "utf8").catch(() => null);
+    if (text === null || text.trim().length === 0) {
+      throw new Error(
+        `refusing to release ${version}: write docs/release-notes/${version}.md first, ` +
+          "in plain language, saying what changed for the person using Brain",
+      );
+    }
   }
   return { head, tag, previousVersion: pkg.version };
 }

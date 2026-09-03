@@ -4,6 +4,12 @@ import { AnimatePresence, motion } from "framer-motion";
 import { DUR } from "@/lib/motion";
 import { LOCAL_RECOVERY_UNAVAILABLE, type SaveState } from "./helpers";
 
+/** The page head's word on saving — and it has one only when a save has
+ *  failed. A notes app keeps what is typed, so "Saving…" and "Saved" told the
+ *  reader nothing and flickered under every keystroke (shell.tsx flips the
+ *  state saving → saved on each debounced change; that machine is untouched,
+ *  other code reads it). `error` and `conflict` show at once and stay until
+ *  the state moves on. */
 export function SaveIndicator({
   state,
   recoveryUnavailable,
@@ -11,19 +17,10 @@ export function SaveIndicator({
   state: SaveState;
   recoveryUnavailable: boolean;
 }) {
-  const label =
-    state === "saving"
-      ? "Saving…"
-      : state === "saved"
-        ? "Saved"
-        : state === "conflict"
-          ? "Conflict"
-          : state === "error"
-            ? "Not saved"
-            : "";
+  const shown = state === "error" || state === "conflict";
   return (
     <AnimatePresence mode="wait">
-      {state !== "idle" && (
+      {shown && (
         <motion.span
           key={state}
           initial={{ opacity: 0, scale: 0.6 }}
@@ -31,27 +28,19 @@ export function SaveIndicator({
           exit={{ opacity: 0, scale: 0.6 }}
           transition={{ duration: DUR.base }}
           title={
-            state === "saving"
-              ? "Saving…"
-              : state === "conflict"
-                ? "Page changed elsewhere. Save a copy to keep both versions."
-                : state === "error"
-                ? recoveryUnavailable
-                  ? `Couldn’t save. ${LOCAL_RECOVERY_UNAVAILABLE}`
-                  : "Couldn’t save. Your local draft is safe."
-                : "Saved"
+            state === "conflict"
+              ? "Page changed elsewhere. Save a copy to keep both versions."
+              : recoveryUnavailable
+                ? `Couldn’t save. ${LOCAL_RECOVERY_UNAVAILABLE}`
+                : "Couldn’t save. Your local draft is safe."
           }
           role={state === "conflict" ? "alert" : "status"}
           aria-live={state === "conflict" ? "assertive" : "polite"}
           className="flex min-w-0 shrink-0 items-center gap-1 text-[11px] font-medium text-ink-3"
         >
-          <span
-            className={`size-1.5 rounded-full ${
-              state === "error" || state === "conflict" ? "bg-ink" : "bg-ink-3"
-            } ${state === "saving" ? "animate-pulse" : ""}`}
-          />
-          <span className={state === "error" || state === "conflict" ? "text-ink" : ""}>
-            {label}
+          <span className="size-1.5 rounded-full bg-ink" />
+          <span className="text-ink">
+            {state === "conflict" ? "Conflict" : "Not saved"}
           </span>
         </motion.span>
       )}

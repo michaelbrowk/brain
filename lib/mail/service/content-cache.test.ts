@@ -1338,6 +1338,73 @@ describe("active-message content metadata cache", () => {
     });
   });
 
+  it("keeps a ready body and its owner demand when incremental sync rewrites the thread", async () => {
+    const fixture = await createFixture({ active: true });
+    const lease = await claimLease(fixture.content, "message-thread-a", 100);
+    const raw = Buffer.from("raw MIME that must survive a thread refresh");
+    const html = Buffer.from("<p>Body thread-a</p>");
+    await stage(fixture, lease, raw, 101);
+    await stage(fixture, lease, html, 102);
+    await fixture.content.commitReady({
+      lease,
+      rawMime: descriptorFor(raw),
+      text: null,
+      sanitizedHtml: descriptorFor(html),
+      attachments: [],
+      remoteImages: [],
+      now: 103,
+    });
+    await fixture.content.recordUserContentDemand("message-thread-a", 104);
+
+    // Reading the thread flips its unread flag, so the next incremental page
+    // carries the same thread again. That refresh must not drop the body the
+    // owner just opened or the demand row that protects it from the cohort purge.
+    const refreshed = threadFixture("thread-a", 1_000);
+    fixture.messages.applyIncrementalPage({
+      expectedHistoryId: "100",
+      expectedPageToken: null,
+      changes: [
+        {
+          kind: "upsert",
+          value: {
+            ...refreshed,
+            thread: { ...refreshed.thread, unread: false },
+            messages: refreshed.messages.map((message) => ({
+              ...message,
+              unread: false,
+            })),
+          },
+        },
+      ],
+      nextPageToken: null,
+      resultingHistoryId: "101",
+      now: 105,
+    });
+
+    await expect(
+      fixture.content.inspect("message-thread-a"),
+    ).resolves.toMatchObject({ kind: "ready" });
+    const demand = new DatabaseSync(fixture.databasePath, { readOnly: true });
+    try {
+      expect(
+        demand
+          .prepare(
+            "SELECT provider_message_id FROM message_content_user_demand",
+          )
+          .all(),
+      ).toEqual([{ provider_message_id: "message-thread-a" }]);
+    } finally {
+      demand.close();
+    }
+    const later = 1_000 + MAIL_RESOURCE_LIMITS.privacyPrefetchMaxAgeMs + 60_000;
+    await expect(
+      fixture.content.refreshBackgroundPrivacyCohort(later),
+    ).resolves.toEqual({ selectedMessages: 0, purgedContent: false });
+    await expect(
+      fixture.content.inspect("message-thread-a"),
+    ).resolves.toMatchObject({ kind: "ready" });
+  });
+
   it("rejects decoded content beyond the global MIME budget", async () => {
     const fixture = await createFixture({ active: true });
     const lease = await claimLease(fixture.content, "message-thread-a", 100);

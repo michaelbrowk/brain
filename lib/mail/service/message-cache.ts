@@ -4482,18 +4482,31 @@ export class SqliteMailMessageCache {
         normalizeSortSender(thread.thread.participants),
         thread.thread.category,
       );
-    database
-      .prepare(
-        "DELETE FROM messages WHERE account_id = ? AND generation = ? AND thread_id = ?",
-      )
-      .run(this.accountId, generation, thread.thread.threadId);
+    // Refresh message rows in place rather than replacing them.
     const insertMessage = database.prepare(
       `INSERT INTO messages(
          account_id, generation, message_id, thread_id, from_json, reply_to_json,
          reply_to_complete, to_json, cc_json, subject, sent_at, unread, in_inbox,
          snippet, text_body, html_body, rfc_message_id, references_json,
          has_attachments
-       ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       ) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(account_id, generation, message_id) DO UPDATE SET
+         thread_id = excluded.thread_id,
+         from_json = excluded.from_json,
+         reply_to_json = excluded.reply_to_json,
+         reply_to_complete = excluded.reply_to_complete,
+         to_json = excluded.to_json,
+         cc_json = excluded.cc_json,
+         subject = excluded.subject,
+         sent_at = excluded.sent_at,
+         unread = excluded.unread,
+         in_inbox = excluded.in_inbox,
+         snippet = excluded.snippet,
+         text_body = excluded.text_body,
+         html_body = excluded.html_body,
+         rfc_message_id = excluded.rfc_message_id,
+         references_json = excluded.references_json,
+         has_attachments = excluded.has_attachments`,
     );
     for (const message of thread.messages) {
       insertMessage.run(
@@ -4523,6 +4536,19 @@ export class SqliteMailMessageCache {
         message.hasAttachments ? 1 : 0,
       );
     }
+    // Only the messages that left the thread go. Deleting and re-inserting the
+    // whole set cascades into the owner-demand and privacy-cohort rows that
+    // keep a fetched body alive, so every refresh of a thread — the
+    // incremental page right after it is marked read on open, mailbox
+    // hydration, a pending refresh — evicted the body just fetched for it.
+    const keptMessageIds = thread.messages.map((message) => message.messageId);
+    database
+      .prepare(
+        `DELETE FROM messages
+          WHERE account_id = ? AND generation = ? AND thread_id = ?
+            AND message_id NOT IN (${keptMessageIds.map(() => "?").join(", ")})`,
+      )
+      .run(this.accountId, generation, thread.thread.threadId, ...keptMessageIds);
     if (hydrationMailbox === null) {
       this.replaceThreadMailboxMemberships(generation, thread);
     } else {

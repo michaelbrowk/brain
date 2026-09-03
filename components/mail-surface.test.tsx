@@ -1016,6 +1016,71 @@ describe("MailSurface", () => {
     expect(document.body.textContent).toContain("Lunch at 12PM sounds great to me.");
   });
 
+  it("decodes the provider snippet it shows while the body is still loading", async () => {
+    const client = makeClient({
+      readThread: vi.fn().mockResolvedValue({
+        ...detail,
+        messages: [
+          {
+            ...detail.messages[0]!,
+            textBody: null,
+            snippet: "Don&#39;t forget [image] the 2pm &amp; the invoice",
+          },
+        ],
+      }),
+      requestMessageContent: vi.fn().mockReturnValue(new Promise(() => {})),
+    });
+    await act(async () =>
+      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+    );
+    await settle();
+    await enterSingleAccount();
+    await click(findButton("Lunch this Friday?"));
+
+    expect(document.body.textContent).toContain(
+      "Don't forget the 2pm & the invoice",
+    );
+    expect(document.body.textContent).not.toContain("&#39;");
+  });
+
+  it("asks again when the content entry is no longer being fetched", async () => {
+    vi.useFakeTimers();
+    const fetching = {
+      apiVersion: 1 as const,
+      accountId: accountA.accountId,
+      messageId: "message-1",
+      state: "fetching" as const,
+    };
+    const dropped = {
+      apiVersion: 1 as const,
+      accountId: accountA.accountId,
+      messageId: "message-1",
+      state: "not_requested" as const,
+    };
+    const requestMessageContent = vi
+      .fn()
+      .mockResolvedValueOnce(fetching)
+      .mockResolvedValue(readyContent);
+    const getMessageContent = vi.fn().mockResolvedValue(dropped);
+    const client = makeClient({ requestMessageContent, getMessageContent });
+    await act(async () =>
+      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+    );
+    await settle();
+    await enterSingleAccount();
+    await click(findButton("Lunch this Friday?"));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    await settle();
+
+    // Polling a dropped entry would have shown the preview until the 30s
+    // deadline; a second request enqueues the work that makes it ready.
+    expect(requestMessageContent).toHaveBeenCalledTimes(2);
+    expect(document.body.textContent).toContain("Lunch at 12PM sounds great to me.");
+    expect(document.body.textContent).not.toContain("Message content couldn’t load.");
+  });
+
   it("pauses content polling while the tab is hidden", async () => {
     vi.useFakeTimers();
     const visibility = vi

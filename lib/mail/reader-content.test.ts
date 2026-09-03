@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   readableMailBody,
   readableSanitizedMailHtml,
+  sanitizeSnippet,
 } from "./reader-content";
 
 describe("mail reader content fallback", () => {
@@ -33,5 +34,28 @@ describe("mail reader content fallback", () => {
         '<img data-brain-cid="logo@example.test" alt="">',
       ),
     ).not.toBeNull();
+  });
+});
+
+describe("sanitizeSnippet", () => {
+  it("expands entities, drops image markers and collapses whitespace", () => {
+    expect(
+      sanitizeSnippet("Your booking is confirmed. [image] Don&#39;t forget"),
+    ).toBe("Your booking is confirmed. Don't forget");
+    expect(sanitizeSnippet("[image] See what&#39;s trending")).toBe(
+      "See what's trending",
+    );
+    expect(sanitizeSnippet("a\n\n  b\tc")).toBe("a b c");
+    expect(sanitizeSnippet("[cid:logo@example] Hello")).toBe("Hello");
+  });
+
+  it("leaves a bracket that is not an image marker alone", () => {
+    expect(sanitizeSnippet("[Urgent] the lease")).toBe("[Urgent] the lease");
+  });
+
+  it("returns nothing when nothing survives — absence, not the word", () => {
+    expect(sanitizeSnippet("[image]")).toBe("");
+    expect(sanitizeSnippet("   ")).toBe("");
+    expect(sanitizeSnippet(null)).toBe("");
   });
 });

@@ -35,6 +35,7 @@ import {
 import {
   preferSanitizedHtmlAlternative,
   readableMailBody,
+  sanitizeSnippet,
   readableSanitizedMailHtml,
 } from "@/lib/mail/reader-content";
 import {
@@ -310,12 +311,11 @@ export function MailReader({
 }
 
 function MailHeaderPreview({ message }: { message: MailMessageDto }) {
+  const preview = sanitizeSnippet(message.snippet);
   return (
     <div className="brain-mail-sheet mx-auto mt-4 max-w-[76ch]">
-      {message.snippet && <MailTextBody text={message.snippet} />}
-      <p
-        className={`${message.snippet ? "mt-4" : ""} text-[12px] leading-relaxed text-ink-3`}
-      >
+      {preview && <MailTextBody text={preview} />}
+      <p className={`${preview ? "mt-4" : ""} text-[12px] leading-relaxed text-ink-3`}>
         Header preview only. Brain currently syncs the sender, subject, date, and
         attachment status for this account. The message body stays on your mail
         server.
@@ -468,6 +468,7 @@ type ContentViewState =
 export const CONTENT_POLL_DEADLINE_MS = 30_000;
 export const CONTENT_POLL_BASE_DELAY_MS = 300;
 export const CONTENT_POLL_MAX_DELAY_MS = 2_400;
+export const CONTENT_MAX_REQUESTS = 3;
 const MAIL_FRAME_MAX_AUTO_HEIGHT = 16_000;
 
 function SanitizedHtmlMessageFrame({ documentHtml }: { readonly documentHtml: string }) {
@@ -595,6 +596,7 @@ function MailMessageContentView({
             try {
               let content = await client.requestMessageContent(input, controller.signal);
               let pollAttempt = 0;
+              let requests = 1;
               while (!controller.signal.aborted) {
                 if (content.state === "ready") {
                   setState({ kind: "ready", content });
@@ -609,7 +611,21 @@ function MailMessageContentView({
                   pollDelayMs(pollAttempt),
                 );
                 if (!canPoll) return;
-                content = await client.getMessageContent(input, controller.signal);
+                // "fetching" and "transient" both mean the service still has
+                // work in hand. "not_requested" means the entry is gone — a
+                // dropped cache row never becomes ready on its own, and
+                // polling it just shows the preview until the deadline. Ask
+                // again, a bounded number of times: a request is what
+                // enqueues the work.
+                if (
+                  content.state === "not_requested" &&
+                  requests < CONTENT_MAX_REQUESTS
+                ) {
+                  requests += 1;
+                  content = await client.requestMessageContent(input, controller.signal);
+                } else {
+                  content = await client.getMessageContent(input, controller.signal);
+                }
                 pollAttempt += 1;
               }
             } finally {
@@ -1031,8 +1047,16 @@ function MailTextBody({ text }: { text: string }) {
   );
 }
 
+/**
+ * What the reader shows while the real body is still on its way. The plain
+ * text part wins when it is readable; otherwise the provider snippet stands
+ * in, under the same rule the list row applies — a snippet arrives escaped,
+ * so an unsanitised one shows the reader `&#39;` where the list shows `'`.
+ */
 function fallbackBody(message: MailMessageDto): string | null {
-  return readableMailBody(message.textBody) ?? (message.snippet || null);
+  const text = readableMailBody(message.textBody);
+  if (text !== null) return text;
+  return sanitizeSnippet(message.snippet) || null;
 }
 
 export function pollDelayMs(attempt: number): number {

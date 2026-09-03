@@ -3,6 +3,7 @@
 import { Icon } from "./ui/icon";
 import { Skeleton } from "./ui/primitives";
 import type { MailAddress, MailThreadListItem } from "@/lib/mail/message-types";
+import { sanitizeSnippet } from "@/lib/mail/reader-content";
 
 /**
  * The mail row — one object for both lists (DESIGN.md §13: a mode may drop a
@@ -12,75 +13,11 @@ import type { MailAddress, MailThreadListItem } from "@/lib/mail/message-types";
  * it. Everything else — the rails, the registers, the truncation, the two
  * lines — is identical in both.
  *
- * The pure rules under it (snippet sanitising, the bracketed-prefix strip)
- * are rules of the system applied at render, not per-provider patches, so
- * they live here beside the markup they serve and are unit-tested on their
+ * The row-specific rules under it (the bracketed-prefix strip, the sender
+ * words) are rules of the system applied at render, not per-provider patches,
+ * so they live here beside the markup they serve and are unit-tested on their
  * own.
  */
-
-/** Named entities worth expanding in a snippet: what providers actually send. */
-const ENTITIES: Readonly<Record<string, string>> = {
-  amp: "&",
-  lt: "<",
-  gt: ">",
-  quot: '"',
-  apos: "'",
-  nbsp: " ",
-  hellip: "…",
-  mdash: "—",
-  ndash: "–",
-  rsquo: "’",
-  lsquo: "‘",
-  rdquo: "”",
-  ldquo: "“",
-  middot: "·",
-  bull: "•",
-  shy: "",
-  zwnj: "",
-  zwj: "",
-};
-
-/**
- * Markers a mail client writes where a picture was — the text extractor's
- * leftovers, never something the sender typed. Bounded on purpose: a
- * bracketed run is only dropped when it opens with one of these words, so
- * "[Urgent] the lease" keeps its prefix and only the prefix rule may take it.
- */
-const IMAGE_MARKER =
-  /\[\s*(?:image|img|photo|picture|graphic|logo|banner|inline image|cid:[^\]]{0,120})[^\]]{0,40}\]/gi;
-
-/** Numeric and named entities, expanded once — the snippet is a text node. */
-function expandEntities(value: string): string {
-  return value
-    .replace(/&#(\d{1,7});/g, (match, code: string) => {
-      const point = Number.parseInt(code, 10);
-      return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : match;
-    })
-    .replace(/&#[xX]([0-9a-fA-F]{1,6});/g, (match, code: string) => {
-      const point = Number.parseInt(code, 16);
-      return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : match;
-    })
-    .replace(/&([a-zA-Z]{2,8});/g, (match, name: string) => {
-      const replacement = ENTITIES[name.toLowerCase()];
-      return replacement === undefined ? match : replacement;
-    });
-}
-
-/**
- * The snippet is a continuation of the subject, not a field of its own, so it
- * has to arrive clean or not at all: entities expanded, image markers
- * dropped, whitespace collapsed. When nothing survives, the line simply ends
- * — absence is shown by absence, never by the words "No preview".
- */
-export function sanitizeSnippet(raw: string | null | undefined): string {
-  if (!raw) return "";
-  return expandEntities(raw)
-    .replace(IMAGE_MARKER, " ")
-    .replace(/[\u200B-\u200D\uFEFF\u00AD]/g, "")
-    .replace(/\s+/gu, " ")
-    .replace(/^[\s.,;:·•\-–—|]+/u, "")
-    .trim();
-}
 
 /** The sender's own words: display name, and the domain it wrote from. */
 function senderTokens(participants: readonly MailAddress[]): readonly string[] {

@@ -18,11 +18,11 @@ const GRAIN =
 type Phase = "idle" | "busy" | "unlocked";
 
 // The page is four things on flat paper — the lockup at the top, one line of
-// title, one filled pill to type into, one ink pill to press — and nothing
-// else. The keyhole that used to sit above the title went with the vignette:
-// next to the wordmark it was a second mark, and the door opening is still
-// told, on the button, whose label turns to "Welcome" while the form
-// dissolves.
+// title, one pill to type into, one ink pill to press — and nothing else. The
+// keyhole that used to sit above the title went with the vignette: next to
+// the wordmark it was a second mark, and the door opening is told by the form
+// dissolving. The button is ink at all times: the submit handler is the guard
+// against an empty field, and a .4 plate on paper read louder than the press.
 export default function LoginPage() {
   const router = useRouter();
   const reduced = useReducedMotion();
@@ -44,7 +44,7 @@ export default function LoginPage() {
         body: JSON.stringify({ password }),
       });
       if (res.ok) {
-        // the door opens: the button says so, the form dissolves, then navigate
+        // the door opens: the form dissolves, then navigate
         setPhase("unlocked");
         setTimeout(
           () => {
@@ -92,7 +92,7 @@ export default function LoginPage() {
         };
 
   return (
-    <div className="relative grid min-h-dvh place-items-center overflow-hidden bg-paper px-6 pb-[12dvh]">
+    <div className="relative grid min-h-dvh place-items-center overflow-hidden bg-paper px-6 pb-[6dvh]">
       {/* paper grain — the one texture; the paper is otherwise flat */}
       <div
         className="pointer-events-none absolute inset-0 opacity-[0.035] dark:opacity-[0.05]"
@@ -128,19 +128,18 @@ export default function LoginPage() {
         }
         className="relative z-10 w-full max-w-[360px] text-center"
       >
-        {/* the title register, in the face the editor gives a page title
-            (SF, or Literata when the reader chose it in Settings) */}
-        <motion.h1
-          {...enter(0)}
-          style={{ fontFamily: "var(--font-headings)" }}
-          className="text-title text-balance text-ink"
-        >
+        {/* the title register in the system face — login is chrome, so it
+            does not follow the reader's Literata setting the way a page
+            title does; the wordmark beside it is SF too */}
+        <motion.h1 {...enter(0)} className="text-title text-balance text-ink">
           A quiet place to think
         </motion.h1>
 
-        {/* the field on glass, stood on paper: an ink fill at rest (no ring —
-            the pill is the boundary), a step darker on hover, the blue ring on
-            focus, and the same ladder in red while the password is wrong */}
+        {/* the field on paper (§12): the hairline ring at rest — the one
+            hairline held to 3:1, what says "type here" once focus leaves —
+            a step stronger on hover, the blue ring on focus, and the same
+            ladder in red while the password is wrong; the glass fill sits
+            under it so the capsule reads as a pill and not as an outline */}
         <motion.div {...enter(0.08)} className="mt-8">
           <motion.input
             key={shake}
@@ -156,18 +155,18 @@ export default function LoginPage() {
             placeholder="Password"
             autoFocus
             autoComplete="current-password"
-            className="h-12 w-full rounded-full bg-(--fill-field-glass) px-5 text-center text-body text-ink outline-none transition-[background-color,box-shadow] duration-[160ms] ease-(--ease-out) placeholder:text-ink-2 hover:bg-(--fill-field-glass-hover) hover:duration-[80ms] focus:bg-(--fill-field-glass) focus:shadow-[0_0_0_1.5px_var(--blue)] aria-[invalid=true]:shadow-[0_0_0_1px_var(--hair-field-invalid)] aria-[invalid=true]:hover:shadow-[0_0_0_1px_var(--red)] aria-[invalid=true]:focus:shadow-[0_0_0_1.5px_var(--red)]"
+            className="h-11 w-full rounded-full bg-(--fill-field-glass) px-5 text-center text-body text-ink shadow-[0_0_0_1px_var(--hair-field)] outline-none transition-[background-color,box-shadow] duration-[160ms] ease-(--ease-out) placeholder:text-ink-2 hover:bg-(--fill-field-glass-hover) hover:shadow-[0_0_0_1px_var(--hair-field-strong)] hover:duration-[80ms] focus:bg-(--fill-field-glass) focus:shadow-[0_0_0_1.5px_var(--blue)] aria-[invalid=true]:shadow-[0_0_0_1px_var(--hair-field-invalid)] aria-[invalid=true]:hover:shadow-[0_0_0_1px_var(--red)] aria-[invalid=true]:focus:shadow-[0_0_0_1.5px_var(--red)]"
           />
         </motion.div>
 
-        {/* the one ink-filled primary on this surface, the field's own height
-            and capsule (the .btn block is unlayered, hence the bangs) */}
+        {/* the one ink-filled primary on this surface: the field's own height,
+            capsule and Body register, so the two pills read as a pair (the
+            .btn block is unlayered, hence the bangs) */}
         <motion.div {...enter(0.16)} className="mt-3">
           <Button
             type="submit"
             variant="ink"
-            disabled={phase !== "idle" || !password}
-            className="h-12! w-full rounded-full!"
+            className="h-11! w-full rounded-full! text-body!"
           >
             <motion.span
               animate={
@@ -178,7 +177,7 @@ export default function LoginPage() {
               transition={{ duration: DUR.base, ease: EASE_OUT }}
               className="inline-block"
             >
-              {phase === "busy" ? "Signing in…" : phase === "unlocked" ? "Welcome" : "Sign in"}
+              {phase === "busy" ? "Signing in…" : "Sign in"}
             </motion.span>
           </Button>
         </motion.div>

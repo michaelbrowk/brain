@@ -27,6 +27,14 @@ const compose = (...args) =>
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// install.sh feeds the chosen password to this entrypoint on stdin and reads
+// the hash back. Only the image is needed, so it runs before the services.
+const hashPassword = (input) => {
+  const run = execFileAsync("docker", ["run", "--rm", "-i", image, "hash-password"]);
+  run.child.stdin.end(input);
+  return run;
+};
+
 async function expectJson(url, init, description) {
   const response = await fetch(url, init);
   if (!response.ok) throw new Error(`${description} returned ${response.status}`);
@@ -34,6 +42,15 @@ async function expectJson(url, init, description) {
 }
 
 try {
+  const { stdout: hash } = await hashPassword("smoke-password\n");
+  if (!/^\$2[aby]\$12\$/.test(hash)) throw new Error(`hash-password printed ${JSON.stringify(hash)}, expected a cost-12 bcrypt hash`);
+  if (!bcrypt.compareSync("smoke-password", hash.trim())) throw new Error("hash-password printed a hash the password does not verify against");
+  const empty = await hashPassword("").then(() => null, (error) => error);
+  if (!empty) throw new Error("hash-password accepted empty stdin");
+  if (empty.code !== 2 || empty.stderr !== "hash-password: read the password on stdin, nothing arrived\n") {
+    throw new Error(`hash-password on empty stdin exited ${empty.code} with ${JSON.stringify(empty.stderr)}, expected 2 and its one-line reason`);
+  }
+
   // --entrypoint bypasses brain-entrypoint.sh, whose argument dispatch would
   // reject `sh` with exit 64. Both seeds run before the services boot.
   await compose("run", "--rm", "--no-deps", "--entrypoint", "/bin/sh", "mail", "-c",

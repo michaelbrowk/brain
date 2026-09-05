@@ -31,9 +31,12 @@ Automated checks run in CI. The device checks below remain mandatory because bro
   file as written, so it is product copy, not a commit log. `pnpm release`
   refuses a stable version without it; a pre-release may go without.
 - `pnpm release <version>` from a clean, current `main`. It moves the image
-  tag in `ops/docker/docker-compose.yml` for a stable version, because the
-  quickstart on the site downloads that file and installs whatever tag it
-  names. Check the release commit contains that change. The `Release`
+  tag in `ops/docker/docker-compose.yml` for a stable version, because
+  `install.sh` downloads that file from the release tag and installs whatever
+  image tag it names. Check the release commit contains that change. A
+  release must keep `install.sh` on `main` working. The script is fetched from
+  `main` and reads `ops/docker/docker-compose.yml` at `v<version>`, so that
+  file stays at that path. The `Release`
   workflow for the tag is green: tarball, `SHA256SUMS`, two-architecture
   image, and the draft exist; the draft is published by hand. A red tag
   workflow produces no artifact and no draft. Publishing is the moment

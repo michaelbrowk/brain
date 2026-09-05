@@ -31,8 +31,12 @@ const nextConfig: NextConfig = {
   // it behind a generated `.next/node_modules/jsdom-*` alias, but Linux file
   // tracing otherwise copied only package.json into the standalone release.
   // Cold RSC page loads then failed before hydration with missing `lib/api.js`.
+  // Turbopack bundles bcryptjs into a server chunk, and
+  // ops/docker/brain-hash-password.mjs resolves it from the standalone tree
+  // at runtime, so the package must be traced in.
   outputFileTracingIncludes: {
     "/*": [
+      "./node_modules/bcryptjs/**/*",
       "./node_modules/.pnpm/jsdom@*/node_modules/**/*",
       "./node_modules/.pnpm/@asamuzakjp+css-color@*/node_modules/@asamuzakjp/css-color/**/*",
       "./node_modules/.pnpm/@csstools+css-syntax-patches-for-csstree@*/node_modules/@csstools/css-syntax-patches-for-csstree/**/*",

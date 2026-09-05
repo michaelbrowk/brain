@@ -21,7 +21,8 @@ bash -n \
   ops/rollback-brain-mail-install.sh \
   ops/install-deploy-puller.sh \
   ops/install-node-runtime.sh \
-  ops/docker/brain-entrypoint.sh
+  ops/docker/brain-entrypoint.sh \
+  install.sh
 shellcheck \
   scripts/verify-ops.sh \
   scripts/deploy-release.sh \
@@ -34,7 +35,8 @@ shellcheck \
   ops/rollback-brain-mail-install.sh \
   ops/install-deploy-puller.sh \
   ops/install-node-runtime.sh \
-  ops/docker/brain-entrypoint.sh
+  ops/docker/brain-entrypoint.sh \
+  install.sh
 ok scripts
 }
 

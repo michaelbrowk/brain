@@ -73,6 +73,60 @@ the onboarding compose file (B). Inside the image there is no per-message
 MIME worker yet: Mail reports `mail_mime_worker_unavailable` for bodies that
 need parsing until B designs supervision. A systemd install stays on systemd.
 
+## One-command install
+
+`install.sh` at the repository root is the container install for a fresh
+Ubuntu or Debian machine, and the README leads with it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/main/install.sh | sudo bash
+```
+
+It refuses to run without root, apt, an x86_64 or aarch64 CPU and 1.5 GB of
+RAM (and warns under 2 GB), installs Docker from Docker's apt repository for
+the distribution when `docker compose` is missing (`ID` and `ID_LIKE` in
+`/etc/os-release` pick the Ubuntu or the Debian repository, and an Ubuntu
+derivative takes the Ubuntu codename), asks GitHub's releases API for the latest
+release, asks for a password and a domain (or reads `BRAIN_PASSWORD` and
+`BRAIN_DOMAIN`, an empty `BRAIN_DOMAIN` meaning none), and hashes the password
+with the image's own `hash-password` entrypoint, so the hash comes from the
+bcrypt the app verifies with. It writes `/opt/brain/docker-compose.yml`,
+`/opt/brain/.env` (mode `0600`, holding `NOTES_ROOT`, `AUTH_SECRET`,
+`AUTH_PASSWORD_HASH` and `BRAIN_PUBLIC_ORIGIN`) and `/opt/brain/notes` (owned
+by uid 1000). It checks that port 3020 is free. With a domain it also checks
+80 and 443, refuses an IP address in place of a domain, compares the A record
+with the machine's public address, installs Caddy from its apt repository and
+copies `/opt/brain/Caddyfile` to `/etc/caddy/Caddyfile`, refusing when that
+file already holds another site. Then
+`docker compose pull`, `docker compose up -d`, and up to two minutes of waiting
+for `/api/health` on port 3020.
+
+The script is fetched from `main` on purpose, so a fix to the procedure
+reaches the next install without a release. The version it installs does not
+come from `main`. It is the tag GitHub's API reports as the latest release,
+and the compose file is `ops/docker/docker-compose.yml` at that tag, which
+names the release's own image. A release therefore keeps that file at that
+path with its image tag moved, which `pnpm release` does.
+
+Running the same command again upgrades in place. `.env` and the notes stay,
+the compose file is downloaded again from the new tag, and the containers are
+pulled and restarted. `--uninstall` takes the containers and their volumes
+down, removes `/etc/caddy/Caddyfile` if it is the one the script wrote (its
+first line, `# managed by Brain install.sh`, says so), and
+deletes every entry of `/opt/brain` except the notes directory that
+`NOTES_ROOT` in `.env` names, the directories above it, and `/opt/brain/notes`
+in any case:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/main/install.sh | sudo bash -s -- --uninstall
+```
+
+`BRAIN_INSTALL_DIR` moves the install directory, `.env` and notes included.
+The script refuses to run, with or without `--uninstall`, on a host that
+carries the systemd layout above (`current/` or `releases/` in the install
+directory): both use `/opt/brain` and port 3020, and `--uninstall` would
+remove everything under `/opt/brain` except the notes.
+
 ## One-time migration from root PM2
 
 Perform this in a maintenance window. Keep `/opt/brain/ecosystem.config.js` intact as the rollback source until the reboot check succeeds. PM2 and systemd cannot listen on port 3020 at the same time.

@@ -37,9 +37,13 @@ curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/main/install.sh 
 One command on a fresh machine: Ubuntu 22.04 or 24.04, or Debian, on x86_64 or
 arm64, with 2 GB of RAM. It installs Docker, pulls the latest Brain release,
 and, when you give it a domain, installs Caddy and gets the HTTPS certificate.
-Docker comes from Docker's own apt repository, which replaces Ubuntu's
-`docker.io` package if that is present. A Docker that already has Compose is
-left as it is. Everything lands in `/opt/brain`: the compose file, `.env` with
+It checks first that port 3020 is free, and 80 and 443 as well when there is
+a domain. A domain install writes `/etc/caddy/Caddyfile`; when another site
+already lives there, the script refuses and says what to add by hand. Docker
+comes from Docker's own apt repository for the distribution, Ubuntu's or
+Debian's, which replaces the distribution's `docker.io` package if that is
+present. A Docker that already has Compose is left as it is. Everything lands
+in `/opt/brain`: the compose file, `.env` with
 the password hash and secrets, the Caddyfile, and the notes in
 `/opt/brain/notes`, owned by uid 1000, the user the app runs as. The closing
 message names the address to open, the notes folder, and the upgrade and
@@ -61,6 +65,9 @@ variables go after `sudo`, which drops the ones set before it:
 curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/main/install.sh | sudo BRAIN_PASSWORD='your password' BRAIN_DOMAIN=notes.example.com bash
 ```
 
+That line, password included, lands in your shell history. Start it with a
+space to keep it out (bash with `HISTCONTROL=ignorespace`, zsh with
+`HIST_IGNORE_SPACE`), or delete the entry afterwards.
 `BRAIN_DOMAIN=` with nothing after it means no domain. Brain then listens on
 this machine only, at `http://localhost:3020`, and the closing message shows
 the ssh tunnel that reaches it from another computer.

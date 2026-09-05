@@ -83,17 +83,21 @@ curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/main/install.sh 
 ```
 
 It refuses to run without root, apt, an x86_64 or aarch64 CPU and 1.5 GB of
-RAM (and warns under 2 GB), installs Docker from Docker's apt repository when
-`docker compose` is missing, asks GitHub's releases API for the latest
+RAM (and warns under 2 GB), installs Docker from Docker's apt repository for
+the distribution when `docker compose` is missing (`ID` and `ID_LIKE` in
+`/etc/os-release` pick the Ubuntu or the Debian repository, and an Ubuntu
+derivative takes the Ubuntu codename), asks GitHub's releases API for the latest
 release, asks for a password and a domain (or reads `BRAIN_PASSWORD` and
 `BRAIN_DOMAIN`, an empty `BRAIN_DOMAIN` meaning none), and hashes the password
 with the image's own `hash-password` entrypoint, so the hash comes from the
 bcrypt the app verifies with. It writes `/opt/brain/docker-compose.yml`,
 `/opt/brain/.env` (mode `0600`, holding `NOTES_ROOT`, `AUTH_SECRET`,
 `AUTH_PASSWORD_HASH` and `BRAIN_PUBLIC_ORIGIN`) and `/opt/brain/notes` (owned
-by uid 1000). With a domain it checks that ports 80 and 443 are free, compares
-the A record with the machine's public address, installs Caddy from its apt
-repository and copies `/opt/brain/Caddyfile` to `/etc/caddy/Caddyfile`. Then
+by uid 1000). It checks that port 3020 is free. With a domain it also checks
+80 and 443, refuses an IP address in place of a domain, compares the A record
+with the machine's public address, installs Caddy from its apt repository and
+copies `/opt/brain/Caddyfile` to `/etc/caddy/Caddyfile`, refusing when that
+file already holds another site. Then
 `docker compose pull`, `docker compose up -d`, and up to two minutes of waiting
 for `/api/health` on port 3020.
 
@@ -109,16 +113,18 @@ the compose file is downloaded again from the new tag, and the containers are
 pulled and restarted. `--uninstall` takes the containers and their volumes
 down, removes `/etc/caddy/Caddyfile` if it is the one the script wrote, and
 deletes every entry of `/opt/brain` except the notes directory that
-`NOTES_ROOT` in `.env` names:
+`NOTES_ROOT` in `.env` names, the directories above it, and `/opt/brain/notes`
+in any case:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/main/install.sh | sudo bash -s -- --uninstall
 ```
 
 `BRAIN_INSTALL_DIR` moves the install directory, `.env` and notes included.
-Do not run the script on a host that carries the systemd layout above. Both
-use `/opt/brain` and port 3020, and `--uninstall` removes everything under
-`/opt/brain` except the notes.
+The script refuses to run, with or without `--uninstall`, on a host that
+carries the systemd layout above (`current/` or `releases/` in the install
+directory): both use `/opt/brain` and port 3020, and `--uninstall` would
+remove everything under `/opt/brain` except the notes.
 
 ## One-time migration from root PM2
 

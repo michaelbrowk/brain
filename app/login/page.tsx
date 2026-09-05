@@ -1,10 +1,10 @@
 "use client";
 
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { motion, useReducedMotion } from "framer-motion";
 import { useRouter } from "next/navigation";
 import { useRef, useState } from "react";
+import { Wordmark } from "@/components/shell/wordmark";
 import { Button } from "@/components/ui/button";
-import { Icon } from "@/components/ui/icon";
 import { DUR, EASE_OUT } from "@/lib/motion";
 import { safeOAuthReturnTo } from "@/lib/oauth/return-to";
 
@@ -17,6 +17,12 @@ const GRAIN =
 
 type Phase = "idle" | "busy" | "unlocked";
 
+// The page is four things on flat paper — the lockup at the top, one line of
+// title, one pill to type into, one ink pill to press — and nothing else. The
+// keyhole that used to sit above the title went with the vignette: next to
+// the wordmark it was a second mark, and the door opening is told by the form
+// dissolving. The button is ink at all times: the submit handler is the guard
+// against an empty field, and a .4 plate on paper read louder than the press.
 export default function LoginPage() {
   const router = useRouter();
   const reduced = useReducedMotion();
@@ -38,7 +44,7 @@ export default function LoginPage() {
         body: JSON.stringify({ password }),
       });
       if (res.ok) {
-        // the door opens: keyhole unlocks, the form dissolves, then navigate
+        // the door opens: the form dissolves, then navigate
         setPhase("unlocked");
         setTimeout(
           () => {
@@ -70,7 +76,8 @@ export default function LoginPage() {
     }
   };
 
-  // staggered entrance (decorative — typing works from frame one)
+  // staggered entrance (decorative — typing works from frame one): the title
+  // first, then the field, then the button
   const enter = (delay: number) =>
     reduced
       ? {
@@ -85,22 +92,25 @@ export default function LoginPage() {
         };
 
   return (
-    <div className="relative grid min-h-dvh place-items-center overflow-hidden bg-paper px-6 pb-[12dvh]">
-      {/* atmosphere: ink vignette (self-inverting via --ink) + paper grain */}
-      <motion.div
-        initial={{ opacity: reduced ? 1 : 0 }}
-        animate={{ opacity: 1 }}
-        transition={{ duration: 0.6 }}
-        className="pointer-events-none absolute inset-0"
-        style={{
-          background:
-            "radial-gradient(ellipse 640px 480px at 50% 38%, color-mix(in oklch, var(--ink) 4%, transparent), transparent 70%)",
-        }}
-      />
+    <div className="relative grid min-h-dvh place-items-center overflow-hidden bg-paper px-6 pb-[6dvh]">
+      {/* paper grain — the one texture; the paper is otherwise flat */}
       <div
         className="pointer-events-none absolute inset-0 opacity-[0.035] dark:opacity-[0.05]"
         style={{ backgroundImage: `url("${GRAIN}")` }}
       />
+
+      {/* the sidebar's own lockup, standing at the top of the paper — it is
+          the frame, not a step in the entrance, so it only fades */}
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ duration: reduced ? 0.2 : DUR.page + 0.1 }}
+        className="absolute inset-x-0 top-[calc(env(safe-area-inset-top,0px)+32px)] flex justify-center"
+      >
+        <span className="inline-flex items-center gap-2 text-ink">
+          <Wordmark />
+        </span>
+      </motion.div>
 
       <motion.form
         onSubmit={submit}
@@ -116,42 +126,21 @@ export default function LoginPage() {
                 }
             : {}
         }
-        className="relative z-10 w-full max-w-[320px] text-center"
+        className="relative z-10 w-full max-w-[360px] text-center"
       >
-        {/* identity: the keyhole — it unlocks on success */}
-        <motion.div {...enter(0.05)} className="grid place-items-center">
-          <AnimatePresence mode="wait" initial={false}>
-            <motion.span
-              key={phase === "unlocked" ? "open" : "closed"}
-              initial={{ opacity: 0, filter: "blur(2px)" }}
-              animate={{ opacity: 1, filter: "blur(0px)" }}
-              exit={{ opacity: 0, filter: "blur(2px)" }}
-              transition={{ duration: DUR.base }}
-              className="text-ink-2"
-            >
-              <Icon
-                name={
-                  phase === "unlocked"
-                    ? "lock-keyhole-minimalistic-unlocked-linear"
-                    : "lock-keyhole-minimalistic-linear"
-                }
-                size={22}
-              />
-            </motion.span>
-          </AnimatePresence>
-        </motion.div>
-
-        <motion.h1
-          {...enter(0.1)}
-          className="mt-5 text-[28px] font-semibold tracking-[-0.02em] text-ink"
-        >
-          Brain
-        </motion.h1>
-        <motion.p {...enter(0.16)} className="mt-2 text-[13px] text-ink-2">
+        {/* the title register in the system face — login is chrome, so it
+            does not follow the reader's Literata setting the way a page
+            title does; the wordmark beside it is SF too */}
+        <motion.h1 {...enter(0)} className="text-title text-balance text-ink">
           A quiet place to think
-        </motion.p>
+        </motion.h1>
 
-        <motion.div {...enter(0.24)}>
+        {/* the field on paper (§12): the hairline ring at rest — the one
+            hairline held to 3:1, what says "type here" once focus leaves —
+            a step stronger on hover, the blue ring on focus, and the same
+            ladder in red while the password is wrong; the glass fill sits
+            under it so the capsule reads as a pill and not as an outline */}
+        <motion.div {...enter(0.08)} className="mt-8">
           <motion.input
             key={shake}
             ref={inputRef}
@@ -166,17 +155,18 @@ export default function LoginPage() {
             placeholder="Password"
             autoFocus
             autoComplete="current-password"
-            className={`mt-10 h-12 w-full rounded-lg border bg-transparent px-4 text-center text-[15px] tracking-[0.08em] text-ink outline-none transition-[border-color,background-color] duration-200 placeholder:tracking-normal placeholder:text-ink-3 focus:border-ink-3 focus:bg-surface ${
-              error ? "border-ink-2" : "border-line"
-            }`}
+            className="h-11 w-full rounded-full bg-(--fill-field-glass) px-5 text-center text-body text-ink shadow-[0_0_0_1px_var(--hair-field)] outline-none transition-[background-color,box-shadow] duration-[160ms] ease-(--ease-out) placeholder:text-ink-2 hover:bg-(--fill-field-glass-hover) hover:shadow-[0_0_0_1px_var(--hair-field-strong)] hover:duration-[80ms] focus:bg-(--fill-field-glass) focus:shadow-[0_0_0_1.5px_var(--blue)] aria-[invalid=true]:shadow-[0_0_0_1px_var(--hair-field-invalid)] aria-[invalid=true]:hover:shadow-[0_0_0_1px_var(--red)] aria-[invalid=true]:focus:shadow-[0_0_0_1.5px_var(--red)]"
           />
         </motion.div>
 
-        <motion.div {...enter(0.3)}>
+        {/* the one ink-filled primary on this surface: the field's own height,
+            capsule and Body register, so the two pills read as a pair (the
+            .btn block is unlayered, hence the bangs) */}
+        <motion.div {...enter(0.16)} className="mt-3">
           <Button
             type="submit"
-            disabled={phase !== "idle" || !password}
-            className="mt-3 h-12 w-full rounded-lg text-[14px]"
+            variant="ink"
+            className="h-11! w-full rounded-full! text-body!"
           >
             <motion.span
               animate={
@@ -187,7 +177,7 @@ export default function LoginPage() {
               transition={{ duration: DUR.base, ease: EASE_OUT }}
               className="inline-block"
             >
-              {phase === "busy" ? "Signing in…" : phase === "unlocked" ? "Welcome" : "Sign in"}
+              {phase === "busy" ? "Signing in…" : "Sign in"}
             </motion.span>
           </Button>
         </motion.div>
@@ -198,7 +188,7 @@ export default function LoginPage() {
           aria-live="assertive"
           initial={false}
           animate={{ opacity: error ? 1 : 0, y: error ? 0 : -4 }}
-          className="mt-4 min-h-5 text-[13px] text-ink-2"
+          className="mt-4 min-h-5 text-table text-ink-2"
         >
           {error}
         </motion.p>

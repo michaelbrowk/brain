@@ -30,7 +30,6 @@ const WANT = [
   "hashtag-linear",
   "menu-dots-bold",
   "lock-keyhole-minimalistic-linear",
-  "lock-keyhole-minimalistic-unlocked-linear",
   "eye-linear",
   "eye-closed-linear",
   "share-linear",

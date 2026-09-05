@@ -215,7 +215,7 @@ describe("SharePopover redesign", () => {
       '[role="switch"][aria-label="Password protection"]',
     );
     expect(passwordToggle?.getAttribute("aria-checked")).toBe("false");
-    expect(document.body.querySelector('fieldset[aria-label="Link expiry"]')).toBeNull();
+    expect(document.body.querySelector('[role="radiogroup"][aria-label="Link expiry"]')).toBeNull();
     expect(document.body.querySelector("[data-share-confirmation]")).toBeNull();
   });
 
@@ -275,19 +275,27 @@ describe("SharePopover redesign", () => {
       'input[aria-label="Share password"]',
     ) as HTMLInputElement;
     expect(document.activeElement).toBe(input);
-    expect(document.body.querySelector('fieldset[aria-label="Link expiry"]')).not.toBeNull();
-    expect(
-      (document.body.querySelector('input[type="radio"]:checked') as HTMLInputElement).value,
-    ).toBe("never");
-    const firstExpiry = document.body.querySelector(
-      'input[type="radio"][value="1"]',
-    ) as HTMLInputElement;
-    expect(firstExpiry.className).toContain("sr-only");
-    // the checked segment carries the white-capsule box-shadow (a plain
-    // class), so the focus indicator is an outline — a ring would lose
-    expect(firstExpiry.closest("label")?.className).toContain(
-      "has-[:focus-visible]:outline-2",
-    );
+    // the expiry segments are the settings atom: a radiogroup of radio
+    // buttons, the chosen one carrying the raised thumb
+    const expiry = document.body.querySelector(
+      '[role="radiogroup"][aria-label="Link expiry"]',
+    ) as HTMLElement;
+    expect(expiry.className).toContain("brain-settings-segmented");
+    const segments = [...expiry.querySelectorAll('[role="radio"]')];
+    expect(segments.map((segment) => segment.textContent?.trim())).toEqual([
+      "Never",
+      "1 day",
+      "7 days",
+      "30 days",
+    ]);
+    for (const segment of segments) {
+      expect(segment.className).toContain("brain-settings-segment");
+      expect(segment.className).toContain("focus-inset");
+    }
+    const chosen = () =>
+      expiry.querySelector('[role="radio"][aria-checked="true"]') as HTMLElement;
+    expect(chosen().textContent?.trim()).toBe("Never");
+    expect(chosen().querySelector(".brain-settings-segment-thumb")).not.toBeNull();
     // the field takes the paper ladder (.field), never the glass fill
     const field = input.closest("label") as HTMLElement;
     expect(field.className).toContain("field");
@@ -303,9 +311,11 @@ describe("SharePopover redesign", () => {
       document.body.querySelector('[aria-label="Hide password"]')?.getAttribute("aria-pressed"),
     ).toBe("true");
 
+    expect(chosen().textContent?.trim()).toBe("7 days");
+
     await click(toggle);
     expect(document.body.querySelector('input[aria-label="Share password"]')).toBeNull();
-    expect(document.body.querySelector('fieldset[aria-label="Link expiry"]')).toBeNull();
+    expect(document.body.querySelector('[role="radiogroup"][aria-label="Link expiry"]')).toBeNull();
 
     await click(toggle);
     input = document.body.querySelector(
@@ -314,8 +324,8 @@ describe("SharePopover redesign", () => {
     expect(input.value).toBe("");
     expect(input.type).toBe("password");
     expect(
-      (document.body.querySelector('input[type="radio"]:checked') as HTMLInputElement).value,
-    ).toBe("never");
+      document.body.querySelector('[role="radio"][aria-checked="true"]')?.textContent?.trim(),
+    ).toBe("Never");
   });
 
   it("enables the disclosed exact scope with the chosen password and expiry", async () => {
@@ -477,24 +487,29 @@ describe("SharePopover redesign", () => {
       expect(row.className).not.toContain("border");
     }
     const link = surface.querySelector('[data-share-row="link"]') as HTMLElement;
-    // the address is a bare mono value on the row: no well, no field
+    // the address is a bare mono value on the row (no well, no field) and
+    // it is the link to the public page; copy is the row's one icon button
     expect(link.querySelector(".brain-share-url-well")).toBeNull();
     expect(document.body.querySelector(".brain-share-link-field")).toBeNull();
-    const url = link.querySelector("[data-share-url]") as HTMLElement;
-    expect(url.className).toBe("brain-share-url");
-    expect(url.title).toContain("/share/page-a");
+    const url = link.querySelector("[data-share-url]") as HTMLAnchorElement;
+    expect(url.tagName).toBe("A");
+    expect(url.className).toContain("brain-share-url");
+    expect(url.getAttribute("href")).toContain("/share/page-a");
+    expect(url.getAttribute("target")).toBe("_blank");
+    expect(url.getAttribute("rel")).toContain("noopener");
+    expect(url.getAttribute("aria-label")).toBe("Open public page");
+    expect(url.getAttribute("title")).toBe("Open public page");
+    expect(url.textContent).toBe("localhost:3000/share/page-a");
+    expect(link.querySelectorAll(".icon-btn")).toHaveLength(1);
     expect(document.body.querySelector('[aria-label="Copy link"]')?.getAttribute("title")).toBe(
       "Copy link",
-    );
-    expect(document.body.querySelector('[aria-label="Open public page"]')?.getAttribute("title")).toBe(
-      "Open public page",
     );
     const focusOrder = [...surface.querySelectorAll("button, a")].map(
       (node) => node.getAttribute("aria-label") ?? node.textContent?.trim(),
     );
     expect(focusOrder.slice(0, 4)).toEqual([
-      "Copy link",
       "Open public page",
+      "Copy link",
       "Password protection",
       "Stop sharing",
     ]);
@@ -517,7 +532,7 @@ describe("SharePopover redesign", () => {
       vi.advanceTimersByTime(200);
     });
     expect(link.querySelector('[role="status"]')).toBeNull();
-    expect(link.querySelector("[data-share-url]")?.textContent).toContain("/share/page-a");
+    expect(link.querySelector("a[data-share-url]")?.textContent).toContain("/share/page-a");
     expect(copy.getAttribute("aria-label")).toBe("Copy link");
     expect(copy.getAttribute("data-state")).toBeNull();
   });
@@ -713,7 +728,10 @@ describe("SharePopover redesign", () => {
     const confirm = surface.querySelector("[data-share-revoke-row]") as HTMLElement;
     expect(confirm.getAttribute("data-share-row")).toBe("action");
     expect(confirm.nextElementSibling).toBeNull();
+    expect(confirm.textContent).toContain("This page's own link stops working.");
     expect(confirm.textContent).toContain("Access through Parent root will remain.");
+    // the question is not asked three times: the statement, then the button
+    expect(confirm.textContent?.match(/Stop sharing/g)).toHaveLength(1);
     expect(surface.querySelector("[data-share-url]")?.textContent).toContain("/share/page-a");
     expect(
       (surface.querySelector('[aria-label="Password protection"]') as HTMLButtonElement).disabled,
@@ -801,6 +819,8 @@ describe("SharePopover redesign", () => {
       onDisableShare: vi.fn().mockReturnValue(pending.promise),
     });
     await click(button("Stop sharing"));
+    expect(document.body.textContent).toContain("Everyone with the link loses access.");
+    expect(document.body.textContent).toContain("The link will stop working.");
     await click(button("Stop sharing"));
     expect(document.body.textContent).toContain("Stopping sharing…");
     expect(document.body.textContent).toContain("Waiting for durable confirmation…");

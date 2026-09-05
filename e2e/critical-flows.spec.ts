@@ -4736,20 +4736,21 @@ test("share uses a viewport bottom sheet with 44px targets at 320px", async ({ p
   await page.getByRole("textbox", { name: "Share password" }).focus();
   await page.keyboard.press("Tab");
   await page.keyboard.press("Tab");
-  const focusedExpiryRadio = page.locator('input[type="radio"]:focus-visible');
-  await expect(focusedExpiryRadio).toHaveValue("never");
-  const focusedExpiryStyle = await focusedExpiryRadio.locator("..").evaluate((label) => {
-    const style = getComputedStyle(label);
-    return { boxShadow: style.boxShadow, outlineStyle: style.outlineStyle };
+  // the expiry segments are the settings atom: Tab lands on the chosen
+  // radio, which wears the keyboard ring, and the arrows move the choice
+  const focusedExpiry = page.locator('[role="radio"]:focus-visible');
+  await expect(focusedExpiry).toHaveAttribute("aria-checked", "true");
+  await expect(focusedExpiry).toHaveText("Never");
+  const focusedExpiryStyle = await focusedExpiry.evaluate((segment) => {
+    const style = getComputedStyle(segment);
+    return { outlineStyle: style.outlineStyle, outlineWidth: style.outlineWidth };
   });
-  expect(
-    focusedExpiryStyle.boxShadow !== "none" ||
-      (focusedExpiryStyle.outlineStyle !== "none" && focusedExpiryStyle.outlineStyle !== ""),
-  ).toBe(true);
+  expect(focusedExpiryStyle.outlineStyle).not.toBe("none");
+  expect(focusedExpiryStyle.outlineWidth).not.toBe("0px");
   await page.keyboard.press("ArrowRight");
-  await expect(page.locator('input[type="radio"][value="1"]')).toBeChecked();
+  await expect(page.getByRole("radio", { name: "1 day" })).toHaveAttribute("aria-checked", "true");
   await page.keyboard.press("ArrowRight");
-  await expect(page.locator('input[type="radio"][value="7"]')).toBeChecked();
+  await expect(page.getByRole("radio", { name: "7 days" })).toHaveAttribute("aria-checked", "true");
 
   const geometry = await page.evaluate(() => {
     const rect = (selector: string) => {
@@ -4766,7 +4767,7 @@ test("share uses a viewport bottom sheet with 44px targets at 320px", async ({ p
     };
     const panel = document.querySelector("[data-share-mobile-surface]") as HTMLElement;
     const targets = [
-      ...panel.querySelectorAll<HTMLElement>("button, input:not(.sr-only), label:has(input[type='radio'])"),
+      ...panel.querySelectorAll<HTMLElement>("button, input, [role='radio']"),
     ].map((node) => ({
       label: node.getAttribute("aria-label") ?? node.textContent?.trim(),
       height: node.getBoundingClientRect().height,
@@ -4920,12 +4921,17 @@ test("default active share is a ledger on paper inside the regular glass", async
         border: material.borderTopWidth,
       },
       copySize: size('[aria-label="Copy link"]'),
-      openSize: size('[aria-label="Open public page"]'),
+      iconButtons: node.querySelectorAll('[data-share-row="link"] .icon-btn').length,
+      open: {
+        tag: url.tagName,
+        href: url.getAttribute("href"),
+        rel: url.getAttribute("rel"),
+        target: url.getAttribute("target"),
+      },
       stopRight: action.getBoundingClientRect().right - stop.getBoundingClientRect().right,
       stopPadding: getComputedStyle(stop).paddingRight,
       stopIsLastRow: action.dataset.shareRow === "action" && action.nextElementSibling === null,
       focusOrder,
-      urlTitle: url.title,
       overflow: node.scrollWidth - node.clientWidth,
     };
   });
@@ -4942,8 +4948,9 @@ test("default active share is a ledger on paper inside the regular glass", async
   expect(geometry.plate.blur).toBe("none");
   expect(geometry.plate.background).not.toBe("rgba(0, 0, 0, 0)");
   expect(geometry.plate.radius).toBe("8px");
-  // one head sentence, then the rows in order, the action last
-  expect(geometry.head.size).toBe("15px");
+  // one head sentence in the Subheading register, then the rows in order,
+  // the action last
+  expect(geometry.head.size).toBe("17px");
   expect(geometry.head.weight).toBe("600");
   expect(geometry.rowNames).toEqual(["link", "read", "password", "action"]);
   expect(geometry.stopIsLastRow).toBe(true);
@@ -4973,20 +4980,24 @@ test("default active share is a ledger on paper inside the regular glass", async
   // the address is the one monospaced value
   expect(geometry.register.urlFamily).toMatch(/JetBrains Mono|monospace/);
   expect(geometry.register.urlSize).toBe("12px");
-  // copy and open are the 28 IconButton of rows and menus
+  // copy is the row's one 28 IconButton; the address itself is the link to
+  // the public page, so the slug keeps the width
   expect(geometry.copySize).toEqual([28, 28]);
-  expect(geometry.openSize).toEqual([28, 28]);
+  expect(geometry.iconButtons).toBe(1);
+  expect(geometry.open.tag).toBe("A");
+  expect(geometry.open.href).toContain(`/share/${created.id}`);
+  expect(geometry.open.target).toBe("_blank");
+  expect(geometry.open.rel).toContain("noopener");
   // the red capsule hangs 8 into the row's 12 and keeps 8 of padding, so the
   // label ends on the row's text rule, 12 from the plate's edge
   expect(geometry.stopRight).toBeCloseTo(4, 0);
   expect(geometry.stopPadding).toBe("8px");
   expect(geometry.focusOrder.slice(0, 4)).toEqual([
-    "Copy link",
     "Open public page",
+    "Copy link",
     "Password protection",
     "Stop sharing",
   ]);
-  expect(geometry.urlTitle).toContain(`/share/${created.id}`);
   expect(geometry.overflow).toBeLessThanOrEqual(1);
 
   await page.keyboard.press("Escape");
@@ -5061,7 +5072,9 @@ test("default active mobile utility keeps 44px targets separate without wrapping
   for (const height of geometry.rowHeights) expect(height).toBeGreaterThanOrEqual(44);
   for (const gap of geometry.gaps) expect(Math.abs(gap)).toBeLessThanOrEqual(1);
   expect(geometry.sizes.copy).toEqual([44, 44]);
-  expect(geometry.sizes.open).toEqual([44, 44]);
+  // the address is the open link: a 44 line so a finger lands on it
+  expect(geometry.sizes.open[1]).toBe(44);
+  expect(geometry.sizes.open[0]).toBeGreaterThanOrEqual(88);
   expect(geometry.sizes.password).toEqual([56, 44]);
   expect(geometry.sizes.stop[0]).toBeGreaterThanOrEqual(88);
   expect(geometry.sizes.stop[1]).toBe(44);

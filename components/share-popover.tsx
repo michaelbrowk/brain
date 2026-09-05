@@ -4,6 +4,7 @@ import * as Popover from "@radix-ui/react-popover";
 import * as Dialog from "@radix-ui/react-dialog";
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ShareScopeSnapshot } from "@/lib/store/types";
+import { Segmented } from "./settings/shared";
 import { Button } from "./ui/button";
 import { Field } from "./ui/field";
 import { Icon } from "./ui/icon";
@@ -16,6 +17,23 @@ type Grant = { id: string; title: string };
 type ExpiredGrant = Grant & { expiresAt?: string };
 type ExpiryChoice = "never" | "1" | "7" | "30";
 type Overlap = ShareScopeSnapshot["overlappingRoots"][number];
+
+/* The ledger's registers come from the utilities, so the guardrails keep
+   them on the ladder: the head is the Subheading (the dialog title's
+   register), a label and a value share Table at 500 and differ by colour,
+   a note is Caption in ink-3, which is legal on paper. */
+const HEAD = "brain-share-head text-subheading text-ink";
+const LABEL = "brain-share-row-label text-table font-medium text-ink-2";
+const VALUE = "brain-share-row-value text-table font-medium text-ink";
+const NOTE = "brain-share-row-note text-caption text-ink-3";
+const COPIED = "brain-share-copied text-table font-medium text-ink";
+
+const EXPIRY_OPTIONS: Array<{ value: ExpiryChoice; label: string }> = [
+  { value: "never", label: "Never" },
+  { value: "1", label: "1 day" },
+  { value: "7", label: "7 days" },
+  { value: "30", label: "30 days" },
+];
 
 /** The share card is a ledger on paper: one status sentence at the head,
  *  then a row per fact or setting with a hairline between them, and the
@@ -443,7 +461,7 @@ export function SharePopover({
 function LoadingView() {
   return (
     <div aria-busy="true" className="min-h-24">
-      <h2 className="brain-share-head">Checking which pages will be shared…</h2>
+      <h2 className={HEAD}>Checking which pages will be shared…</h2>
     </div>
   );
 }
@@ -482,7 +500,7 @@ function PrivateReview({
   const blocked = overlaps.length > 0;
   return (
     <div data-share-state="review">
-      <h2 className="brain-share-head">
+      <h2 className={HEAD}>
         {readerClause(passwordOn)} will be able to read {pagesClause(total)}.
       </h2>
 
@@ -492,26 +510,26 @@ function PrivateReview({
           data-share-row="overlap"
           className="brain-share-row brain-share-row-stack"
         >
-          <span className="brain-share-row-value brain-share-row-wrap">
+          <span className={`${VALUE} brain-share-row-wrap`}>
             This scope already overlaps{" "}
             {overlaps.length === 1 ? "another shared page" : "other shared pages"}.
           </span>
           <ul className="brain-share-row-list">
             {overlaps.map((overlap) => (
-              <li key={overlap.rootId} className="brain-share-row-note">
+              <li key={overlap.rootId} className={NOTE}>
                 {overlap.title} · {relationLabel(overlap)}
                 {isExpired(overlap.shareExpiresAt ?? undefined) ? " · expired" : ""}
               </li>
             ))}
           </ul>
-          <span className="brain-share-row-note">
+          <span className={NOTE}>
             Resolve the existing grant before creating this link.
           </span>
         </div>
       ) : (
         <>
           <Row id="read" label="Who can read">
-            <span className="brain-share-row-value">{readerValue(passwordOn)}</span>
+            <span className={VALUE}>{readerValue(passwordOn)}</span>
           </Row>
           {/* The "Who can edit" row lands with the editable-shares feature. */}
           <SwitchRow
@@ -667,18 +685,18 @@ function ManagementView({
 
   return (
     <div data-share-state={revokeConfirming ? "revoke" : "manage"}>
-      <h2 className="brain-share-head">{head}</h2>
+      <h2 className={HEAD}>{head}</h2>
 
       <LinkRow
         url={url}
         copied={copied}
         disabled={busy || checkingScope || !activeRootId || locked}
-        showOpen={!!activeRootId && !revokePending}
+        linked={!!activeRootId && !revokePending}
         onCopy={onCopy}
       />
 
       <Row id="read" label="Who can read">
-        <span className="brain-share-row-value">{readValue}</span>
+        <span className={VALUE}>{readValue}</span>
       </Row>
       {/* The "Who can edit" row lands with the editable-shares feature. */}
 
@@ -706,10 +724,10 @@ function ManagementView({
           data-share-row="overlaps"
           className="brain-share-row brain-share-row-stack"
         >
-          <span className="brain-share-row-label">Other public links</span>
+          <span className={LABEL}>Other public links</span>
           <ul className="brain-share-row-list">
             {activeSnapshot.overlappingRoots.map((overlap) => (
-              <li key={overlap.rootId} className="brain-share-row-note">
+              <li key={overlap.rootId} className={NOTE}>
                 {overlapLabel(overlap)}
               </li>
             ))}
@@ -768,28 +786,32 @@ function RevokeRow({
       className="brain-share-row brain-share-row-act brain-share-row-confirm"
     >
       <div className="brain-share-row-stack">
-        <span className="brain-share-row-value brain-share-row-wrap">
-          {pending ? "Stopping sharing…" : "Stop sharing?"}
+        <span className={`${VALUE} brain-share-row-wrap`}>
+          {pending
+            ? "Stopping sharing…"
+            : inheritedFrom
+              ? "This page's own link stops working."
+              : "Everyone with the link loses access."}
         </span>
-        <span className="brain-share-row-note">
+        <span className={NOTE}>
           {inheritedFrom
-            ? `This page's own link will stop. Access through ${inheritedFrom.title} will remain.`
-            : "The public link will stop working after the change is confirmed."}
+            ? `Access through ${inheritedFrom.title} will remain.`
+            : "The link will stop working."}
         </span>
         {activeParents > 0 && (
-          <span className="brain-share-row-note">{`Stopping this root link will leave ${activeParents} parent public ${activeParents === 1 ? "link" : "links"} active.`}</span>
+          <span className={NOTE}>{`Stopping this root link will leave ${activeParents} parent public ${activeParents === 1 ? "link" : "links"} active.`}</span>
         )}
         {activeChildren > 0 && (
-          <span className="brain-share-row-note">{`Stopping this root link will leave ${activeChildren} nested public ${activeChildren === 1 ? "link" : "links"} active.`}</span>
+          <span className={NOTE}>{`Stopping this root link will leave ${activeChildren} nested public ${activeChildren === 1 ? "link" : "links"} active.`}</span>
         )}
         {expiredParents > 0 && (
-          <span className="brain-share-row-note">{`The expired parent ${expiredParents === 1 ? "link remains" : "links remain"} recorded but ${expiredParents === 1 ? "does" : "do"} not provide access.`}</span>
+          <span className={NOTE}>{`The expired parent ${expiredParents === 1 ? "link remains" : "links remain"} recorded but ${expiredParents === 1 ? "does" : "do"} not provide access.`}</span>
         )}
         {expiredChildren > 0 && (
-          <span className="brain-share-row-note">{`The expired nested ${expiredChildren === 1 ? "link remains" : "links remain"} recorded but ${expiredChildren === 1 ? "does" : "do"} not provide access.`}</span>
+          <span className={NOTE}>{`The expired nested ${expiredChildren === 1 ? "link remains" : "links remain"} recorded but ${expiredChildren === 1 ? "does" : "do"} not provide access.`}</span>
         )}
         {pending && (
-          <span className="brain-share-row-note">Waiting for durable confirmation…</span>
+          <span className={NOTE}>Waiting for durable confirmation…</span>
         )}
       </div>
       <div className="brain-share-row-actions">
@@ -832,9 +854,9 @@ function Row({
 }) {
   return (
     <div data-share-row={id} className={`brain-share-row ${className}`}>
-      <span className="brain-share-row-label">
+      <span className={LABEL}>
         {label}
-        {note && <span className="brain-share-row-note">{note}</span>}
+        {note && <span className={NOTE}>{note}</span>}
       </span>
       {children}
     </div>
@@ -844,7 +866,7 @@ function Row({
 function NoteRow({ id, children }: { id: string; children: React.ReactNode }) {
   return (
     <div data-share-row={id} className="brain-share-row brain-share-row-stack">
-      <span className="brain-share-row-note brain-share-row-note-lone">{children}</span>
+      <span className={`${NOTE} brain-share-row-note-lone`}>{children}</span>
     </div>
   );
 }
@@ -881,26 +903,40 @@ function LinkRow({
   url,
   copied,
   disabled,
-  showOpen,
+  linked,
   onCopy,
 }: {
   url: string;
   copied: boolean;
   disabled: boolean;
-  showOpen: boolean;
+  linked: boolean;
   onCopy: () => void;
 }) {
+  const shown = url ? url.replace(/^https?:\/\//, "") : "No active public link";
   return (
     <div
       data-share-row="link"
       data-share-link-row
       className="brain-share-row brain-share-row-link"
     >
-      <span className="brain-share-row-label">Link</span>
+      <span className={LABEL}>Link</span>
       {copied ? (
-        <span role="status" className="brain-share-copied">
+        <span role="status" className={COPIED}>
           Copied
         </span>
+      ) : linked ? (
+        // the address is the way to the public page, so it keeps the width
+        <a
+          href={url}
+          target="_blank"
+          rel="noopener noreferrer"
+          data-share-url
+          aria-label="Open public page"
+          title="Open public page"
+          className="brain-share-url brain-touch-hit"
+        >
+          {shown}
+        </a>
       ) : (
         <span
           data-share-url
@@ -908,7 +944,7 @@ function LinkRow({
           aria-label={url ? `Public link: ${url}` : "No active public link"}
           className="brain-share-url"
         >
-          {url ? url.replace(/^https?:\/\//, "") : "No active public link"}
+          {shown}
         </span>
       )}
       <button
@@ -923,19 +959,6 @@ function LinkRow({
       >
         <Icon name={copied ? "check-linear" : "copy-linear"} size={16} />
       </button>
-      {showOpen && (
-        <a
-          href={url}
-          target="_blank"
-          rel="noreferrer"
-          data-size="28"
-          aria-label="Open public page"
-          title="Open public page"
-          className="icon-btn focus-inset brain-touch-hit brain-share-row-btn"
-        >
-          <Icon name="link-linear" size={16} />
-        </a>
-      )}
     </div>
   );
 }
@@ -971,7 +994,7 @@ function ParentRow({
           <span className="truncate">{grant.title}</span>
         </Button>
       ) : (
-        <span className="brain-share-row-value truncate">{grant.title}</span>
+        <span className={`${VALUE} truncate`}>{grant.title}</span>
       )}
     </Row>
   );
@@ -1034,7 +1057,7 @@ function SwitchRow({
 }) {
   return (
     <div data-share-row={id} data-share-setting-row className="brain-share-row">
-      <span className="brain-share-row-label">{label}</span>
+      <span className={LABEL}>{label}</span>
       <SwitchControl
         label={switchLabel}
         checked={checked}
@@ -1086,7 +1109,7 @@ function PasswordField({
           </button>
         }
       />
-      {hint && <p className="brain-share-row-note">{hint}</p>}
+      {hint && <p className={NOTE}>{hint}</p>}
     </div>
   );
 }
@@ -1100,37 +1123,16 @@ function ExpiryRow({
   disabled?: boolean;
   onChange: (value: ExpiryChoice) => void;
 }) {
-  const options: Array<{ value: ExpiryChoice; label: string }> = [
-    { value: "never", label: "Never" },
-    { value: "1", label: "1 day" },
-    { value: "7", label: "7 days" },
-    { value: "30", label: "30 days" },
-  ];
   return (
     <div data-share-row="expires" className="brain-share-row brain-share-row-expires">
-      <span className="brain-share-row-label">Expires</span>
-      <fieldset aria-label="Link expiry" className="brain-share-seg">
-        {options.map((option) => (
-          <label
-            key={option.value}
-            data-checked={value === option.value ? "" : undefined}
-            className={`brain-share-seg-option relative cursor-pointer has-[:focus-visible]:outline-solid has-[:focus-visible]:outline-2 has-[:focus-visible]:outline-blue/55 ${
-              disabled ? "cursor-default opacity-40" : ""
-            }`}
-          >
-            <input
-              type="radio"
-              name="share-expiry"
-              value={option.value}
-              checked={value === option.value}
-              disabled={disabled}
-              onChange={() => onChange(option.value)}
-              className="sr-only"
-            />
-            {option.label}
-          </label>
-        ))}
-      </fieldset>
+      <span className={LABEL}>Expires</span>
+      <Segmented
+        label="Link expiry"
+        value={value}
+        options={EXPIRY_OPTIONS}
+        disabled={disabled}
+        onChange={(next) => onChange(next as ExpiryChoice)}
+      />
     </div>
   );
 }
@@ -1283,13 +1285,13 @@ function ManagementSecurity({
       )}
       {!passwordOn && localLegacyExpiry && (
         <div data-legacy-expiry data-share-row="expires" className="brain-share-row">
-          <span className="brain-share-row-label">
+          <span className={LABEL}>
             Expires
-            <span className="brain-share-row-note">
+            <span className={NOTE}>
               Legacy expiry. It still applies without a password.
             </span>
           </span>
-          <span className="brain-share-row-value">
+          <span className={VALUE}>
             {formatShareExpiry(localLegacyExpiry)}
           </span>
           <Button

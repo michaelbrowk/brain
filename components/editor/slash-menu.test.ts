@@ -10,17 +10,25 @@ import { slashMenuItems } from "./slash-menu";
 const labels = (items: ReadonlyArray<{ label: string }>) => items.map((item) => item.label);
 
 describe("slashMenuItems", () => {
-  it("lists the AI and upload entries only when their capability is present", () => {
-    const owner = labels(slashMenuItems({ ai: true, upload: { endpoint: "/api/upload" } }));
-    expect(owner).toEqual(expect.arrayContaining(["Continue writing", "Image", "File"]));
+  const OWNER = { ai: true, upload: { endpoint: "/api/upload" }, createPage: true };
+
+  it("lists the AI, upload and new-page entries only when their capability is present", () => {
+    const owner = labels(slashMenuItems(OWNER));
+    expect(owner).toEqual(
+      expect.arrayContaining(["New page", "Continue writing", "Image", "File"]),
+    );
+    expect(labels(slashMenuItems({ ...OWNER, createPage: false }))).not.toContain("New page");
+    expect(labels(slashMenuItems({ ...OWNER, ai: false }))).not.toContain("Continue writing");
+    expect(labels(slashMenuItems({ ...OWNER, upload: undefined }))).not.toContain("Image");
   });
 
-  it("has no AI entry and no upload entry without them, and keeps everything else", () => {
+  it("has none of the four without them, and keeps everything else", () => {
     const visitor = labels(slashMenuItems({}));
+    expect(visitor).not.toContain("New page");
     expect(visitor).not.toContain("Continue writing");
     expect(visitor).not.toContain("Image");
     expect(visitor).not.toContain("File");
     expect(visitor).toEqual(expect.arrayContaining(["Text", "Heading 1", "Table", "Divider"]));
-    expect(visitor).toHaveLength(labels(slashMenuItems({ ai: true, upload: { endpoint: "/x" } })).length - 3);
+    expect(visitor).toHaveLength(labels(slashMenuItems(OWNER)).length - 4);
   });
 });

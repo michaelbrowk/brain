@@ -21,10 +21,12 @@ export interface AttachmentUploadTarget {
   fetcher?: typeof fetch;
   /** Sent by the progress upload in place of the owner's `x-brain-client`. */
   headers?: Record<string, string>;
+  /** Fired once the route has the file, before the caller inserts it. */
+  onUploaded?: (attachment: UploadedAttachment) => void;
 }
 
 export interface AttachmentUploadProgressOptions
-  extends Pick<AttachmentUploadTarget, "endpoint" | "headers"> {
+  extends Pick<AttachmentUploadTarget, "endpoint" | "headers" | "onUploaded"> {
   signal?: AbortSignal;
   onProgress?: (progress: number) => void;
 }
@@ -55,7 +57,9 @@ export async function uploadAttachment(
     body: fd,
   });
   if (!r.ok) return null;
-  return uploadedAttachment(await r.json(), file);
+  const attachment = uploadedAttachment(await r.json(), file);
+  if (attachment) target.onUploaded?.(attachment);
+  return attachment;
 }
 
 /** XMLHttpRequest is intentional here: fetch does not expose browser upload
@@ -111,6 +115,7 @@ export function uploadAttachmentWithProgress(
         return;
       }
       options.onProgress?.(100);
+      options.onUploaded?.(attachment);
       finish(() => resolve(attachment));
     });
     request.addEventListener("error", () => fail("Image upload failed"));

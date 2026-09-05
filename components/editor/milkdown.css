@@ -559,7 +559,8 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
 }
 
 .milkdown .ProseMirror a[href^="/_attachments/"],
-.milkdown .ProseMirror a[href^="/_attachments-v2/"] {
+.milkdown .ProseMirror a[href^="/_attachments-v2/"],
+.milkdown .ProseMirror a[href^="/api/media/"] {
   display: inline-flex;
   max-width: 100%;
   align-items: center;
@@ -572,7 +573,8 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
   overflow-wrap: anywhere;
 }
 .milkdown .ProseMirror a[href^="/_attachments/"]:hover,
-.milkdown .ProseMirror a[href^="/_attachments-v2/"]:hover {
+.milkdown .ProseMirror a[href^="/_attachments-v2/"]:hover,
+.milkdown .ProseMirror a[href^="/api/media/"]:hover {
   background: var(--fill-hover);
   text-decoration: none;
 }

@@ -655,6 +655,7 @@ export function imageUploadPlugin(target: AttachmentUploadTarget | null) {
                 ...options,
                 endpoint: target.endpoint,
                 headers: target.headers,
+                onUploaded: target.onUploaded,
               })
           : null,
       }).plugin,

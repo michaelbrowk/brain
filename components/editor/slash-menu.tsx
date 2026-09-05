@@ -100,13 +100,17 @@ export interface SlashMenuCapabilities {
   ai?: boolean;
   /** The "Image" and "File" entries, and where their picker posts. */
   upload?: AttachmentUploadTarget;
+  /** The "New page" entry. The handler that creates it is a separate prop;
+   *  without both the row is absent rather than a click that does nothing. */
+  createPage?: boolean;
 }
 
 /** Absent capability, absent entry. A visitor's menu is the owner's menu
  *  with the AI and upload rows missing, not the same rows refusing. */
-export function slashMenuItems({ ai, upload }: SlashMenuCapabilities) {
+export function slashMenuItems({ ai, upload, createPage }: SlashMenuCapabilities) {
   return ITEMS.filter(
     (item) =>
+      (item.newPage ? !!createPage : true) &&
       (item.aiMode ? !!ai : true) &&
       (item.fileAttachment || item.imageUpload ? !!upload : true),
   );
@@ -147,6 +151,7 @@ export function SlashMenu({
   onCreatePageAtCursor,
   ai,
   upload,
+  createPage,
 }: SlashMenuCapabilities & {
   container: React.RefObject<HTMLDivElement | null>;
   onCreatePageAtCursor?: (
@@ -227,7 +232,7 @@ export function SlashMenu({
   const results = useMemo(
     () =>
       state
-        ? slashMenuItems({ ai, upload }).filter(
+        ? slashMenuItems({ ai, upload, createPage }).filter(
             (i) =>
               (!state.inTable || i.command !== insertTableCommand) &&
               (state.query
@@ -236,7 +241,7 @@ export function SlashMenu({
                 : true),
           )
         : [],
-    [state, ai, upload],
+    [state, ai, upload, createPage],
   );
 
   const run = useCallback(

@@ -86,7 +86,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FloatingToolbar, type PageRef } from "./floating-toolbar";
 import { SlashMenu } from "./slash-menu";
 import { WikiLinkMenu } from "./wikilink-menu";
-import { attachmentMarkdown, isSpreadsheetFile, uploadAttachment } from "./attachments";
+import {
+  attachmentMarkdown,
+  isSpreadsheetFile,
+  uploadAttachment,
+  type UploadedAttachment,
+} from "./attachments";
+import { attachmentRefs } from "./attachment-refs";
+import { attachmentSrc } from "./attachment-src";
 import {
   classifyInternalPageLink,
   followEditorLink,
@@ -112,9 +119,15 @@ export interface EditorCapabilities {
     endpoint: string;
     fetcher?: typeof fetch;
     headers?: Record<string, string>;
+    /** The island saves at once on the change that follows, so the media
+     *  route sees the reference before the image is retried. */
+    onUploaded?: (attachment: UploadedAttachment) => void;
   };
   unfurl?: boolean;
   ai?: boolean;
+  /** The slash menu's "New page". `onCreatePageAtCursor` is the mechanism;
+   *  this is the permission, and the row needs both. */
+  createPage?: boolean;
 }
 
 interface EditorProps {
@@ -492,6 +505,8 @@ function Inner({
       })
       .use(commonmarkWithoutHeadingIdSync)
       .use(gfm)
+      // after the preset: the extended image and link schemas replace it
+      .use(attachmentRefs)
       .use(noNestedTables)
       .use(normalizeLegacy)
       .use(editingCore)
@@ -874,8 +889,11 @@ function Inner({
           (target && target !== "_self")
         )
           return;
+        // The view already resolved a local attachment href for display;
+        // resolving again is idempotent and covers an anchor that did not.
+        const href = anchor.getAttribute("href");
         const followed = followEditorLink(
-          anchor.getAttribute("href"),
+          href === null ? null : attachmentSrc(href),
           window.location.origin,
           onNavigate,
           (href) => window.open(href, "_blank", "noopener,noreferrer"),
@@ -892,6 +910,7 @@ function Inner({
         onCreatePageAtCursor={onCreatePageAtCursor}
         ai={!!capabilities.ai}
         upload={capabilities.upload}
+        createPage={!!capabilities.createPage}
       />
       <WikiLinkMenu container={wrap} pages={pages ?? []} />
       {calloutEmoji && (

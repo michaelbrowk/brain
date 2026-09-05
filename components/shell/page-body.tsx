@@ -45,6 +45,7 @@ const OWNER_CAPABILITIES: NonNullable<EditorProps["capabilities"]> = {
   upload: { endpoint: "/api/upload" },
   unfurl: true,
   ai: true,
+  createPage: true,
 };
 
 export interface PageBodyProps {

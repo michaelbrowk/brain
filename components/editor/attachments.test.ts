@@ -163,11 +163,14 @@ describe("upload targets", () => {
       );
     }) as unknown as typeof fetch;
     const file = new File(["pixels"], "photo.png", { type: "image/png" });
+    const onUploaded = vi.fn();
 
     const result = await uploadAttachment(file, {
       endpoint: "/api/share-edit/upload?root=root-1&v=2&page=page-9",
       fetcher,
+      onUploaded,
     });
+    expect(onUploaded).toHaveBeenCalledWith(result);
 
     expect(result).toEqual({
       url: "/_attachments-v2/abc123456789.png",
@@ -185,11 +188,13 @@ describe("upload targets", () => {
 
   it("uploadAttachmentWithProgress opens the endpoint it is given and sends the given headers", async () => {
     vi.stubGlobal("XMLHttpRequest", FakeXMLHttpRequest);
+    const onUploaded = vi.fn();
     const result = uploadAttachmentWithProgress(
       new File(["pixels"], "photo.png", { type: "image/png" }),
       {
         endpoint: "/api/share-edit/upload?root=root-1&v=2&page=page-9",
         headers: { "x-brain-share-vid": "vid123456789" },
+        onUploaded,
       },
     );
     const request = FakeXMLHttpRequest.current!;
@@ -207,5 +212,6 @@ describe("upload targets", () => {
     await expect(result).resolves.toMatchObject({
       url: "/_attachments-v2/abc123456789.png",
     });
+    expect(onUploaded).toHaveBeenCalledTimes(1);
   });
 });

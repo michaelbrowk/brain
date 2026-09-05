@@ -1190,6 +1190,8 @@ describe("mail security and resource contracts", () => {
       durationBucket: "under_1_second",
       messageCount: 4,
       rawMimeBytes: 512,
+      remoteImageCount: 3,
+      remoteImageAttemptCount: 2,
       errorCode: "imap_timeout",
       queueDepth: 9,
       nested: {
@@ -1206,6 +1208,8 @@ describe("mail security and resource contracts", () => {
       durationBucket: "under_1_second",
       messageCount: 4,
       rawMimeBytes: 512,
+      remoteImageCount: 3,
+      remoteImageAttemptCount: 2,
       errorCode: "imap_timeout",
     });
   });

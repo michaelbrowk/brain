@@ -173,6 +173,7 @@ export const SAFE_SERVICE_ERROR_CODES = new Set([
   "mail_content_message_not_found",
   "mail_content_attachment_not_found",
   "mail_content_remote_image_not_found",
+  "mail_content_remote_image_refused",
   "mail_content_unavailable",
   "mail_attachment_range_unsupported",
 ]);

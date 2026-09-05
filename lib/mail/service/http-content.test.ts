@@ -13,7 +13,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { MailSystemAdmissionPort } from "../ports";
 import { EMPTY_MAIL_SYSTEM_USAGE } from "./admission";
-import type { MailContentService } from "./content-coordinator";
+import {
+  type MailContentService,
+  MailContentServiceError,
+} from "./content-coordinator";
 import { createMailServiceHttpServer } from "./http";
 
 const ACCOUNT_ID = "account-a11111111111111111111111111111111";
@@ -162,6 +165,29 @@ describe("brain-mail content HTTP API", () => {
     });
     expect(JSON.stringify(result.headers)).not.toContain("images.example.com");
     expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers 410 for an image the cache has refused for good", async () => {
+    const content: MailContentService = {
+      getContent: vi.fn(),
+      requestContent: vi.fn(),
+      downloadAttachment: vi.fn(),
+      downloadRemoteImage: vi.fn(async () => {
+        throw new MailContentServiceError("mail_content_remote_image_refused");
+      }),
+    };
+    const socketPath = await startServer(content);
+    const refused = await request(
+      socketPath,
+      "GET",
+      `/v1/remote-images/${REMOTE_IMAGE_ID}?accountId=${ACCOUNT_ID}`,
+    );
+
+    expect(refused.status).toBe(410);
+    expect(JSON.parse(refused.body.toString("utf8"))).toEqual({
+      apiVersion: 1,
+      error: { code: "mail_content_remote_image_refused" },
+    });
   });
 
   it("holds one download permit until the streamed response finishes", async () => {

@@ -38,6 +38,7 @@ const SAFE_ERROR_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const DEFAULT_RETRY_BASE_MS = 1_000;
 const DEFAULT_RETRY_MAX_MS = 60_000;
 const DEFAULT_RETRY_ATTEMPTS = 4;
+const MAX_CONCURRENT_REMOTE_IMAGE_DRAINS = 2;
 
 export type MailContentServiceErrorCode =
   | "mail_content_request_invalid"
@@ -45,6 +46,7 @@ export type MailContentServiceErrorCode =
   | "mail_content_message_not_found"
   | "mail_content_attachment_not_found"
   | "mail_content_remote_image_not_found"
+  | "mail_content_remote_image_refused"
   | "mail_content_unavailable";
 
 export class MailContentServiceError extends Error {
@@ -156,22 +158,23 @@ export interface MailBackgroundContentPrefetchResult {
 
 /**
  * The image pipeline's own record, for the service's stdout stream. Payloads
- * stay inside the section 13 allowlist: a remote image reaches the reader
- * through the attachment download contract, so a drain counts its images as
- * `attachmentCount`; a fetched image reports the bytes it added to the cache
- * as `cacheBytes`; a transient refusal reports how far off its retry is as a
- * `durationBucket`. Nothing here names a URL, a host or an image id.
+ * stay inside the section 13 allowlist: a drain starts with the images it
+ * means to take and finishes with the ones it attempted, which differ when
+ * teardown cut it short or another path settled an image first; a fetched
+ * image reports the bytes it added to the cache. A transient retry is always
+ * one interval away, so the record does not repeat it. Nothing here names a
+ * URL, a host or an image id.
  */
 export type MailContentCoordinatorEvent =
   | Readonly<{
       event: "mail_remote_image_drain_started";
       accountId: string;
-      attachmentCount: number;
+      remoteImageCount: number;
     }>
   | Readonly<{
       event: "mail_remote_image_drain_finished";
       accountId: string;
-      attachmentCount: number;
+      remoteImageAttemptCount: number;
     }>
   | Readonly<{
       event: "mail_remote_image_settled";
@@ -190,7 +193,6 @@ export type MailContentCoordinatorEvent =
       accountId: string;
       phase: "transient";
       errorCode: string;
-      durationBucket: string;
     }>;
 
 interface QueueEntry {
@@ -483,6 +485,8 @@ export class MailContentCoordinator
   private readonly remoteImageFetches = new Map<string, Promise<void>>();
   private readonly remoteImageMessageTails = new Map<string, Promise<void>>();
   private readonly remoteImageDrains = new Map<string, Promise<void>>();
+  private readonly remoteImageDrainWaiters: Array<() => void> = [];
+  private activeRemoteImageDrains = 0;
   private readonly entries = new Map<string, RegistryEntry>();
   private readonly invalidatedAccounts = new Set<string>();
   private resolutionTail: Promise<void> = Promise.resolve();
@@ -689,9 +693,10 @@ export class MailContentCoordinator
       if (snapshot === null || snapshot.accountId !== accountId) {
         throw remoteImageNotFound();
       }
-      if (snapshot.state === "permanent_failure") {
-        throw remoteImageNotFound();
-      }
+      // A refusal is an answer of its own: the reader must be able to tell
+      // an image the cache gave up on from a row it does not have, since
+      // only the second is worth asking for again.
+      if (snapshot.state === "permanent_failure") throw remoteImageRefused();
       // The reader endpoint is cache-only. A cold read must never reveal open
       // time by initiating an origin request; only the background sync path
       // below may populate pending remote images.
@@ -802,7 +807,7 @@ export class MailContentCoordinator
         throw remoteImageNotFound();
       }
       if (liveSnapshot.state === "ready") return;
-      if (liveSnapshot.state === "permanent_failure") throw remoteImageNotFound();
+      if (liveSnapshot.state === "permanent_failure") throw remoteImageRefused();
       if (liveSnapshot.state === "transient_failure") throw unavailable();
       let result: Awaited<ReturnType<RemoteImageFetcherPort["fetch"]>> | null = null;
       try {
@@ -856,12 +861,16 @@ export class MailContentCoordinator
             ? error.code
             : "remote_image_fetch_failed";
         const now = this.readTime();
-        const retryAt = now + MAIL_RESOURCE_LIMITS.remoteImageTransientRetryMs;
         await entry.cache
           .markRemoteImageFailure({
             snapshot: liveSnapshot,
             kind,
-            ...(kind === "transient" ? { retryAt } : {}),
+            ...(kind === "transient"
+              ? {
+                  retryAt:
+                    now + MAIL_RESOURCE_LIMITS.remoteImageTransientRetryMs,
+                }
+              : {}),
             now,
           })
           .catch(() => undefined);
@@ -872,7 +881,6 @@ export class MailContentCoordinator
                 accountId: snapshot.accountId,
                 phase: "transient",
                 errorCode,
-                durationBucket: durationBucket(retryAt - now),
               }
             : {
                 event: "mail_remote_image_settled",
@@ -881,7 +889,7 @@ export class MailContentCoordinator
                 errorCode,
               },
         );
-        if (kind === "permanent") throw remoteImageNotFound();
+        if (kind === "permanent") throw remoteImageRefused();
         throw unavailable();
       } finally {
         result?.data.fill(0);
@@ -1201,16 +1209,48 @@ export class MailContentCoordinator
     if (this.closed) return;
     const key = contentWorkKey(accountId, messageId);
     if (this.remoteImageDrains.has(key)) return;
-    const drain = this.withEntry(accountId, (entry) =>
-      this.drainRemoteImages(entry, messageId),
-    )
+    const drain = this.acquireRemoteImageDrainSlot()
+      .then(() =>
+        this.withEntry(accountId, (entry) =>
+          this.drainRemoteImages(entry, messageId),
+        ),
+      )
       .catch(() => undefined)
       .finally(() => {
+        this.releaseRemoteImageDrainSlot();
         if (this.remoteImageDrains.get(key) === drain) {
           this.remoteImageDrains.delete(key);
         }
       });
     this.remoteImageDrains.set(key, drain);
+  }
+
+  /**
+   * Drains are per message and the reader opens a thread's messages
+   * together, so without a ceiling a long thread would dial that many
+   * origins at once, each able to buffer a message's whole image budget.
+   * Two: before the drain existed the process dialed one origin at a time,
+   * one more lets a slow origin hold up only itself, and it matches the
+   * parser and reader concurrency on either side of it. A freed slot passes
+   * straight to the next waiter, in arrival order.
+   */
+  private acquireRemoteImageDrainSlot(): Promise<void> {
+    if (this.activeRemoteImageDrains < MAX_CONCURRENT_REMOTE_IMAGE_DRAINS) {
+      this.activeRemoteImageDrains += 1;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      this.remoteImageDrainWaiters.push(resolve);
+    });
+  }
+
+  private releaseRemoteImageDrainSlot(): void {
+    const next = this.remoteImageDrainWaiters.shift();
+    if (next !== undefined) {
+      next();
+      return;
+    }
+    this.activeRemoteImageDrains -= 1;
   }
 
   private async drainRemoteImages(
@@ -1227,7 +1267,7 @@ export class MailContentCoordinator
     this.emit({
       event: "mail_remote_image_drain_started",
       accountId,
-      attachmentCount: pending.length,
+      remoteImageCount: pending.length,
     });
     let taken = 0;
     try {
@@ -1250,7 +1290,7 @@ export class MailContentCoordinator
       this.emit({
         event: "mail_remote_image_drain_finished",
         accountId,
-        attachmentCount: taken,
+        remoteImageAttemptCount: taken,
       });
     }
   }
@@ -1506,14 +1546,6 @@ function remoteImageRefusal(
   return "blocked";
 }
 
-/** Coarse enough that a retry time never dates a message. */
-function durationBucket(ms: number): string {
-  if (ms < 60_000) return "under_1m";
-  if (ms < 10 * 60_000) return "under_10m";
-  if (ms < 60 * 60_000) return "under_1h";
-  return "over_1h";
-}
-
 function contentAccountId(value: unknown): string {
   try {
     return validateMailContentAccountId(value);
@@ -1589,6 +1621,10 @@ function attachmentNotFound(): MailContentServiceError {
 
 function remoteImageNotFound(): MailContentServiceError {
   return new MailContentServiceError("mail_content_remote_image_not_found");
+}
+
+function remoteImageRefused(): MailContentServiceError {
+  return new MailContentServiceError("mail_content_remote_image_refused");
 }
 
 function unavailable(): MailContentServiceError {

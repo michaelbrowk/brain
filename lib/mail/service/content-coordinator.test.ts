@@ -497,7 +497,7 @@ describe("MailContentCoordinator", () => {
     const firstUrl = "https://images.example.com/first-on-demand.png";
     const secondUrl = "https://images.example.com/second-on-demand.png";
     const image = testPng(10, 10);
-    const fetch = vi.fn(async (_requestedUrl: string) => ({
+    const fetch = vi.fn<RemoteImageFetcherPort["fetch"]>(async () => ({
       mimeType: "image/png",
       data: Buffer.from(image),
       raster: { width: 10, height: 10, frames: 1 },
@@ -543,7 +543,7 @@ describe("MailContentCoordinator", () => {
       {
         event: "mail_remote_image_drain_started",
         accountId: ACCOUNT_ID,
-        attachmentCount: 2,
+        remoteImageCount: 2,
       },
       {
         event: "mail_remote_image_settled",
@@ -560,7 +560,7 @@ describe("MailContentCoordinator", () => {
       {
         event: "mail_remote_image_drain_finished",
         accountId: ACCOUNT_ID,
-        attachmentCount: 2,
+        remoteImageAttemptCount: 2,
       },
     ]);
   });
@@ -627,7 +627,7 @@ describe("MailContentCoordinator", () => {
       {
         event: "mail_remote_image_drain_started",
         accountId: ACCOUNT_ID,
-        attachmentCount: 2,
+        remoteImageCount: 2,
       },
       {
         event: "mail_remote_image_settled",
@@ -640,12 +640,11 @@ describe("MailContentCoordinator", () => {
         accountId: ACCOUNT_ID,
         phase: "transient",
         errorCode: "remote_image_origin_unavailable",
-        durationBucket: "under_10m",
       },
       {
         event: "mail_remote_image_drain_finished",
         accountId: ACCOUNT_ID,
-        attachmentCount: 2,
+        remoteImageAttemptCount: 2,
       },
     ]);
 
@@ -672,7 +671,7 @@ describe("MailContentCoordinator", () => {
     expect(fetch).toHaveBeenCalledTimes(3);
     await expect(
       coordinator.downloadRemoteImage({ accountId: ACCOUNT_ID, remoteImageId: blockedId }),
-    ).rejects.toMatchObject({ code: "mail_content_remote_image_not_found" });
+    ).rejects.toMatchObject({ code: "mail_content_remote_image_refused" });
     await vi.waitFor(() =>
       expect(events.at(-1)).toMatchObject({
         event: "mail_remote_image_drain_finished",
@@ -682,7 +681,7 @@ describe("MailContentCoordinator", () => {
       {
         event: "mail_remote_image_drain_started",
         accountId: ACCOUNT_ID,
-        attachmentCount: 1,
+        remoteImageCount: 1,
       },
       {
         event: "mail_remote_image_settled",
@@ -693,9 +692,93 @@ describe("MailContentCoordinator", () => {
       {
         event: "mail_remote_image_drain_finished",
         accountId: ACCOUNT_ID,
-        attachmentCount: 1,
+        remoteImageAttemptCount: 1,
       },
     ]);
+  });
+
+  it("runs at most two drains at once across a thread's worth of demands", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const cache = fixture.caches[0]!;
+    const others = ["b", "c", "d", "e"].map((letter, index) => ({
+      threadId: `thread-${letter}`,
+      messageId: `message-thread-${letter}`,
+      sentAt: 200 + index * 100,
+    }));
+    cache.applyIncrementalPage({
+      expectedHistoryId: "100",
+      expectedPageToken: null,
+      changes: others.map((candidate) => ({
+        kind: "upsert" as const,
+        value: threadFixture(ACCOUNT_ID, candidate),
+      })),
+      nextPageToken: null,
+      resultingHistoryId: "101",
+      now: 500,
+    });
+    const messageIds = [MESSAGE_ID, ...others.map((candidate) => candidate.messageId)];
+    const imageIds = messageIds.map(
+      (_messageId, index) =>
+        `remote-image-a${String(index + 1).padStart(32, "0")}`,
+    );
+    const parked: Array<() => void> = [];
+    let inFlight = 0;
+    let peak = 0;
+    const image = testPng(10, 10);
+    const fetch = vi.fn<RemoteImageFetcherPort["fetch"]>(async () => {
+      inFlight += 1;
+      peak = Math.max(peak, inFlight);
+      await new Promise<void>((resolve) => parked.push(resolve));
+      inFlight -= 1;
+      return {
+        mimeType: "image/png",
+        data: Buffer.from(image),
+        raster: { width: 10, height: 10, frames: 1 },
+      };
+    });
+    const step = (input: MailContentWorkInput) => {
+      const index = messageIds.indexOf(input.providerMessageId);
+      return publish(input, {
+        html: Buffer.from(`<img data-brain-remote-image="${imageIds[index]}">`),
+        remoteImages: [
+          {
+            remoteImageId: imageIds[index]!,
+            sourceUrl: `https://images.example.com/thread/${index}.png`,
+          },
+        ],
+      });
+    };
+    const runner = new FakeMailContentWorkRunner(messageIds.map(() => step));
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      { fetch } satisfies RemoteImageFetcherPort,
+    );
+
+    for (const messageId of messageIds) {
+      await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId });
+    }
+    // Two origins are dialed; the other three drains wait for a slot.
+    await vi.waitFor(() => expect(parked).toHaveLength(2));
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    for (let released = 1; released <= messageIds.length; released += 1) {
+      await vi.waitFor(() => expect(parked.length).toBeGreaterThan(0));
+      parked.shift()!();
+      await vi.waitFor(() =>
+        expect(fetch).toHaveBeenCalledTimes(
+          Math.min(messageIds.length, released + 2),
+        ),
+      );
+    }
+    for (const remoteImageId of imageIds) {
+      const cached = await vi.waitFor(() =>
+        coordinator.downloadRemoteImage({ accountId: ACCOUNT_ID, remoteImageId }),
+      );
+      await cached.dispose();
+    }
+    expect(peak).toBe(2);
+    expect(fetch).toHaveBeenCalledTimes(messageIds.length);
   });
 
   it("lets a scheduler pass that joined a demand-started fetch abort without waiting on the origin", async () => {
@@ -1185,7 +1268,7 @@ describe("MailContentCoordinator", () => {
           accountId: ACCOUNT_ID,
           remoteImageId: secondId,
         }),
-      ).rejects.toMatchObject({ code: "mail_content_remote_image_not_found" });
+      ).rejects.toMatchObject({ code: "mail_content_remote_image_refused" });
     });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch.mock.calls[0]?.[0]).toBe(firstUrl);

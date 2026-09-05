@@ -181,6 +181,7 @@ export const MAIL_SERVICE_ERROR_CODES = Object.freeze({
     "mail_content_message_not_found",
     "mail_content_attachment_not_found",
     "mail_content_remote_image_not_found",
+    "mail_content_remote_image_refused",
     "mail_content_unavailable",
     "mail_attachment_range_unsupported",
   ] as const),
@@ -1517,6 +1518,11 @@ function toHttpError(error: unknown): MailHttpError {
       error.code === "mail_content_remote_image_not_found"
     ) {
       return new MailHttpError(404, error.code);
+    }
+    if (error.code === "mail_content_remote_image_refused") {
+      // The cache has an answer for this image and it is no: a blocked
+      // tracker, a spent raster budget. Nothing a retry can change.
+      return new MailHttpError(410, error.code);
     }
     return new MailHttpError(503, error.code, true);
   }

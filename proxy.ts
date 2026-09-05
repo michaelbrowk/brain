@@ -24,6 +24,12 @@ export async function proxy(req: NextRequest) {
     pathname === "/login" ||
     pathname === "/api/auth" ||
     pathname === "/api/share-auth" ||
+    // The one write surface a link visitor can reach. Everything a visitor may
+    // do is under this prefix; everything they may not do has no route at all.
+    // The route itself enforces origin, the double submit, the buckets and the
+    // authority. This only stops the session wall from answering 401 first.
+    // The trailing slash is deliberate: the bare prefix stays behind the wall.
+    pathname.startsWith("/api/share-edit/") ||
     pathname === "/oauth/token" ||
     pathname === "/oauth/register" ||
     pathname === "/oauth/revoke" ||

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   isShareExpired,
   normalizeVisitorName,
+  normalizeVisitorTitle,
   parseShareExpiry,
 } from "./sharing";
 
@@ -44,5 +45,27 @@ describe("normalizeVisitorName", () => {
     expect(normalizeVisitorName("\u0000\u0007")).toBeNull();
     expect(normalizeVisitorName(42)).toBeNull();
     expect(normalizeVisitorName(undefined)).toBeNull();
+  });
+});
+
+describe("normalizeVisitorTitle", () => {
+  it("trims, strips control characters and cuts to 200 code points", () => {
+    expect(normalizeVisitorTitle("  Meeting notes  ")).toBe("Meeting notes");
+    expect(normalizeVisitorTitle("Notes \nfrom\u0000Ada")).toBe("Notes fromAda");
+    expect(normalizeVisitorTitle("a".repeat(250))).toBe("a".repeat(200));
+    // The cut counts code points, so it never leaves half a surrogate pair.
+    expect(normalizeVisitorTitle("\u{1F600}".repeat(201))).toBe(
+      "\u{1F600}".repeat(200),
+    );
+    expect(normalizeVisitorTitle(`${"a".repeat(199)} b`)).toBe("a".repeat(199));
+  });
+
+  it("falls back to Untitled once cleaned to nothing and refuses a non-string", () => {
+    expect(normalizeVisitorTitle("")).toBe("Untitled");
+    expect(normalizeVisitorTitle("   ")).toBe("Untitled");
+    expect(normalizeVisitorTitle("\u0000\u0007")).toBe("Untitled");
+    expect(normalizeVisitorTitle(42)).toBeNull();
+    expect(normalizeVisitorTitle(["x"])).toBeNull();
+    expect(normalizeVisitorTitle(undefined)).toBeNull();
   });
 });

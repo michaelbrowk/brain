@@ -609,10 +609,16 @@ describe("the /api/share-edit route rule", () => {
     ).toBe("does not go through withShareWrite");
   });
 
-  it("holds for every route already under app/api/share-edit/", async () => {
-    const files = await shareRouteFiles(
-      path.join(import.meta.dirname, "..", "app", "api", "share-edit"),
-    );
+  it("holds for exactly the three route files under app/api/share-edit/", async () => {
+    // Three files, four handlers: GET and PUT share one. A fourth file here
+    // is a new visitor surface and has to be argued for, not discovered.
+    const root = path.join(import.meta.dirname, "..", "app", "api", "share-edit");
+    const files = await shareRouteFiles(root);
+    expect(files.map((file) => path.relative(root, file)).sort()).toEqual([
+      path.join("page", "[id]", "route.ts"),
+      path.join("page", "route.ts"),
+      path.join("upload", "route.ts"),
+    ]);
     for (const file of files) {
       const source = await fs.readFile(file, "utf8");
       expect(violatesShareRouteRule(source), file).toBeNull();
@@ -620,9 +626,8 @@ describe("the /api/share-edit route rule", () => {
   });
 
   it("would catch a bare getStore in a nested route.ts under that prefix", async () => {
-    // The walk above passes vacuously until T6 creates the tree, so prove
-    // here, against a throwaway tree of the same shape, that the walk finds a
-    // nested route.ts and the rule rejects it.
+    // Against a throwaway tree of the same shape: the walk finds a nested
+    // route.ts, ignores every other file, and the rule rejects it.
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "share-edit-rule-"));
     try {
       const nested = path.join(dir, "page", "[id]");
@@ -643,16 +648,12 @@ describe("the /api/share-edit route rule", () => {
   });
 });
 
-/** Every `route.ts` under `root`, or none when the tree does not exist yet. */
+/** Every `route.ts` under `root`. A missing tree is a failure, not an empty
+ *  list: the exact-shape assertion above must never pass vacuously. */
 async function shareRouteFiles(root: string): Promise<string[]> {
   const files: string[] = [];
   const walk = async (dir: string) => {
-    let entries;
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return; // T6 creates the tree; until then there is nothing to check
-    }
+    const entries = await fs.readdir(dir, { withFileTypes: true });
     for (const entry of entries) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) await walk(full);

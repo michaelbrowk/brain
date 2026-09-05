@@ -41,3 +41,20 @@ export function normalizeVisitorName(value: unknown): string | null {
   if (!cleaned) return null;
   return cleaned.slice(0, VISITOR_NAME_MAX);
 }
+
+const VISITOR_TITLE_MAX = 200;
+
+/** A link visitor's title for a new subpage. Stripped of every Unicode
+ *  control character (the name's C0 set, DEL, and the C1 range too), trimmed,
+ *  and cut to 200 code points, counted so the cut never splits a surrogate
+ *  pair. A title is a line: the owner's quick-capture path allows 500, and
+ *  this one lands in a directory name, a frontmatter line and the owner's
+ *  sidebar, so it gets less. Nothing left after cleaning is "Untitled", the
+ *  owner's own default for a new page. Anything but a string is null. */
+export function normalizeVisitorTitle(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const cleaned = value.replace(/\p{Cc}/gu, "").trim();
+  return (
+    [...cleaned].slice(0, VISITOR_TITLE_MAX).join("").trim() || "Untitled"
+  );
+}

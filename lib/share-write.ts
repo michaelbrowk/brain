@@ -46,12 +46,20 @@ export type ShareWriteContext = {
 
 /** What a visitor route may reach on the Store: an allowlist, so a leaf added
  *  to the Store tomorrow is hidden from visitors until someone names it here.
- *  Today that is the four read-only lookups; T5 adds `writeSharedPage`,
- *  `createSharedSubpage` and `saveSharedAttachment` by name. `deletePage`,
- *  `purgePage`, `movePage`, `renamePage` and `updateMeta` never appear. */
+ *  The four read-only lookups and the three share-aware leaves, each of
+ *  which re-checks authority inside its own critical section. `deletePage`,
+ *  `purgePage`, `movePage`, `renamePage`, `updateMeta` and
+ *  `historicalMarkdownForRev` never appear: the last one would let a visitor
+ *  read a page's past bodies, which no link grants. */
 export type ShareStoreHandle = Pick<
   Store,
-  "readPage" | "readDirectChildren" | "isDeleted" | "isWithinSubtree"
+  | "readPage"
+  | "readDirectChildren"
+  | "isDeleted"
+  | "isWithinSubtree"
+  | "writeSharedPage"
+  | "createSharedSubpage"
+  | "saveSharedAttachment"
 >;
 
 const MINUTE = 60 * 1000;

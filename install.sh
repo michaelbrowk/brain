@@ -29,8 +29,10 @@ run() {
   "$@"
 }
 
+require_root() { [ "$(id -u)" = "0" ] || die "Run this with sudo: it installs Docker and needs root for that."; }
+
 preflight() {
-  [ "$(id -u)" = "0" ] || die "Run this with sudo: it installs Docker and needs root for that."
+  require_root
   command -v apt-get >/dev/null || die "This installer needs apt (Ubuntu or Debian); no apt-get here."
   case "$(uname -m)" in
     x86_64|aarch64) ;;
@@ -74,9 +76,10 @@ resolve_release() {
 
 # The install directory and the notes folder are made for real under dry run
 # too: they are the plan's output. Ownership and the download are side effects
-# and go through run.
+# and go through run. An upgrade has read the notes path out of .env by now;
+# a fresh install gets the default. Every step here is safe to repeat.
 layout() {
-  NOTES_DIR="$INSTALL_DIR/notes"
+  NOTES_DIR="${NOTES_DIR:-$INSTALL_DIR/notes}"
   mkdir -p "$INSTALL_DIR" "$NOTES_DIR"
   # The image runs as uid 1000, and Brain refuses a notes folder it cannot write.
   run chown 1000:1000 "$NOTES_DIR"
@@ -166,6 +169,7 @@ ensure_caddy() {
     run apt-get update
     run apt-get install -y caddy
   fi
+  mkdir -p "$INSTALL_DIR"
   printf '%s {\n\treverse_proxy 127.0.0.1:3020\n}\n' "$DOMAIN" > "$INSTALL_DIR/Caddyfile"
   run install -m 0644 "$INSTALL_DIR/Caddyfile" /etc/caddy/Caddyfile
   run systemctl reload caddy
@@ -192,39 +196,100 @@ AUTH_PASSWORD_HASH=$escaped
 BRAIN_PUBLIC_ORIGIN=$ORIGIN
 EOF
   )
-  # The umask shapes a new file only. A .env that already existed keeps its
-  # old mode through the rewrite, so tighten it either way.
-  chmod 600 "$INSTALL_DIR/.env"
 }
 
-# For a Brain without a domain: how to reach it from another computer. Printed
-# last, so it moves behind the run and verify steps once those land.
-local_access_hint() {
+# Every compose call names the file and the project directory, so it does not
+# depend on where the script was started from.
+compose() {
+  run docker compose -f "$INSTALL_DIR/docker-compose.yml" --project-directory "$INSTALL_DIR" "$@"
+}
+
+bring_up() {
+  compose pull
+  compose up -d
+}
+
+# Brain answers on 3020 once its store and search index are ready, which takes
+# a moment on the first start. The probe is a read and stays real under dry
+# run; the log tail on failure is a command and goes through run.
+verify() {
+  local tries=0 body
+  while :; do
+    if body="$(curl -fsS http://127.0.0.1:3020/api/health 2>/dev/null)"; then
+      VERSION="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' <<< "$body")"
+      # A release image reports its version. One without is still the tag
+      # that was asked for.
+      VERSION="${VERSION:-$TAG}"
+      return 0
+    fi
+    tries=$((tries + 1))
+    [ "$tries" -lt 120 ] || break
+    sleep 1
+  done
+  compose logs --tail 20
+  die "Brain did not answer on port 3020 within two minutes. The last log lines are above; please open an issue with them."
+}
+
+finish() {
+  say "Brain $VERSION is running."
+  say ""
+  say "Open:      $ORIGIN"
+  say "Notes:     $NOTES_DIR (they belong to the app's user, uid 1000)"
+  say "Upgrade:   curl -fsSL $RAW/main/install.sh | sudo bash"
+  say "Uninstall: curl -fsSL $RAW/main/install.sh | sudo bash -s -- --uninstall"
+  # Without a domain Brain listens on this machine only. The tunnel is how to
+  # reach it from another computer.
   [ "$ORIGIN" = "http://localhost:3020" ] || return 0
-  say "No domain, so Brain listens on this machine only. To open it from your computer:"
-  say "  ssh -L 3020:127.0.0.1:3020 ${SUDO_USER:-root}@$(hostname)"
-  say "  then browse to http://localhost:3020"
+  say "Tunnel:    ssh -L 3020:127.0.0.1:3020 ${SUDO_USER:-root}@$(hostname -f 2>/dev/null || hostname)"
 }
 
-# Placeholder until the uninstall task lands. It returns instead of calling
-# die so shellcheck sees the exit below as reachable. Under set -e a non-zero
-# return ends the script the same way.
+# Takes the containers and their volumes down, removes the Caddy site if it is
+# the one this script wrote, then every entry of the install directory except
+# the notes. Their path comes from .env, so notes moved elsewhere inside the
+# directory are spared as well.
 uninstall() {
-  printf '%s\n' "uninstall is not implemented yet" >&2
-  return 1
+  local notes=""
+  if [ -f "$INSTALL_DIR/.env" ]; then notes="$(sed -n 's/^NOTES_ROOT=//p' "$INSTALL_DIR/.env")"; fi
+  notes="${notes%/}"
+  NOTES_DIR="${notes:-$INSTALL_DIR/notes}"
+  if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then compose down -v; fi
+  if [ -f /etc/caddy/Caddyfile ] && grep -q 'reverse_proxy 127.0.0.1:3020' /etc/caddy/Caddyfile; then
+    run rm -f /etc/caddy/Caddyfile
+    run systemctl reload caddy
+  fi
+  local entry
+  for entry in "$INSTALL_DIR"/* "$INSTALL_DIR"/.env; do
+    [ -e "$entry" ] || continue
+    [ "$entry" != "$NOTES_DIR" ] || continue
+    run rm -rf -- "$entry"
+  done
+  say "Your notes are still in $NOTES_DIR."
 }
 
 main() {
-  if [ "${1:-}" = "--uninstall" ]; then uninstall; exit 0; fi
+  if [ "${1:-}" = "--uninstall" ]; then require_root; uninstall; exit 0; fi
   preflight
   ensure_docker
   resolve_release
-  layout
-  ask_password
-  ask_domain
-  if [ -n "$DOMAIN" ]; then check_ports; check_dns; ensure_caddy; fi
-  write_env
-  local_access_hint
-  say "install.sh: skeleton"    # replaced task by task
+  if [ -f "$INSTALL_DIR/.env" ]; then
+    say "Existing install found; upgrading to $TAG."
+    # The first install answered the questions into .env, which stays as it
+    # is apart from its mode: a loose one is tightened.
+    ORIGIN="$(sed -n 's/^BRAIN_PUBLIC_ORIGIN=//p' "$INSTALL_DIR/.env")"
+    NOTES_DIR="$(sed -n 's/^NOTES_ROOT=//p' "$INSTALL_DIR/.env")"
+    chmod 600 "$INSTALL_DIR/.env"
+    layout
+  else
+    # Questions and checks first, so a run that stops at one of them leaves
+    # an existing compose file as it was.
+    ask_password
+    ask_domain
+    if [ -n "$DOMAIN" ]; then check_ports; check_dns; ensure_caddy; fi
+    layout
+    write_env
+  fi
+  bring_up
+  verify
+  finish
 }
 main "$@"

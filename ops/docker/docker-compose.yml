@@ -15,7 +15,7 @@ services:
     # version, so the file the quickstart downloads always installs the newest
     # one. Raise the tag by hand and run `docker compose up -d` again to
     # upgrade; both services move together.
-    image: ghcr.io/michaelbrowk/brain:0.9.4
+    image: ghcr.io/michaelbrowk/brain:0.9.5
     command: ["web"]
     init: true
     restart: unless-stopped
@@ -51,7 +51,7 @@ services:
       - mail-socket:/run/brain-mail
   mail:
     # The same published release as web.
-    image: ghcr.io/michaelbrowk/brain:0.9.4
+    image: ghcr.io/michaelbrowk/brain:0.9.5
     command: ["mail"]
     init: true
     restart: unless-stopped

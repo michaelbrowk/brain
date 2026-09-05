@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { Store } from "./store";
 import { serializePage } from "./frontmatter";
 import {
+  AttachmentValidationError,
   RevConflictError,
   type AttachmentInput,
   type ReserveNotionImportInput,
@@ -26,6 +27,11 @@ import {
 } from "./git";
 import { standalonePageRefOccurrences } from "../page-ref-nesting";
 import { latestStoreEventSequence } from "./events";
+import {
+  resolveShareAccess,
+  ShareAccessNotFoundError,
+} from "../share-access";
+import { MAX_SHARE_SUBTREE_PAGES } from "./share-limits";
 
 const execFileAsync = promisify(execFile);
 const SOURCE_A = "a".repeat(64);
@@ -8784,5 +8790,426 @@ describe("editable share authority", () => {
         canEdit: true,
       }),
     ).rejects.toThrow("editable sharing needs BRAIN_PUBLIC_ORIGIN");
+  });
+});
+
+describe("share-aware Store leaves", () => {
+  const PNG = new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0,
+  ]);
+  const shot = (): AttachmentInput => ({
+    data: PNG,
+    originalName: "shot.png",
+    mimeType: "image/png",
+  });
+
+  async function editableRoot(shareExpiresAt?: string) {
+    const { s, root } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const page = await s.createPage(null, "Shared root");
+    const child = await s.createPage(page.id, "Child");
+    const before = await s.readShareScope(page.id);
+    await s.configureShare(page.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+      ...(shareExpiresAt === undefined ? {} : { shareExpiresAt }),
+    });
+    const version = (await s.readShareScope(page.id)).shareVersion;
+    return { s, root, rootId: page.id, childId: child.id, version };
+  }
+
+  /** The frontmatter as the file holds it. `resolve` is how every other test
+   *  in this file reaches a page folder. */
+  const readIndexRaw = (s: Store, id: string) =>
+    fs.readFile(path.join(s.resolve(id), "index.md"), "utf8");
+
+  /** What the lock-free guard hands a request: the version it authorised
+   *  against, read outside the writer queue. The race tests carry this value
+   *  into writes queued behind an owner action, which is the exact order the
+   *  leaves exist to refuse. */
+  async function authorisedVersion(
+    s: Store,
+    rootId: string,
+    targetId: string,
+  ): Promise<number> {
+    const access = await resolveShareAccess(s, { rootId, targetId });
+    if (access.kind !== "granted") throw new Error("expected a granted share");
+    return access.shareVersion;
+  }
+
+  it("writes the body and stamps the visitor and their name", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const written = await s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: "Corrected by a stranger",
+      visitorName: "Ada",
+    });
+
+    expect(written.markdown).toBe("Corrected by a stranger");
+    const meta = (await s.readPage(childId)).meta;
+    expect(meta.updatedBy).toBe("visitor");
+    expect(meta.updatedByName).toBe("Ada");
+    const raw = await readIndexRaw(s, childId);
+    expect(raw).toContain("updatedBy: visitor");
+    expect(raw).toContain("updatedByName: Ada");
+  });
+
+  it("keeps the rev contract: a stale rev conflicts, a matching body does not", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const first = await s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: "one",
+      visitorName: "Ada",
+    });
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: "two",
+        expectedRev: "0".repeat(12),
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(RevConflictError);
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: "two",
+        expectedRev: "0".repeat(12),
+        expectedMarkdown: "one",
+        visitorName: "Ada",
+      }),
+    ).resolves.toMatchObject({ markdown: "two" });
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: "three",
+        expectedRev: first.rev,
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(RevConflictError);
+  });
+
+  it("treats an unchanged body as no edit: no stamp, no new rev", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const owner = await s.writePage(
+      childId,
+      "as the owner left it",
+      undefined,
+      "me",
+    );
+    const again = await s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: "as the owner left it",
+      visitorName: "Ada",
+    });
+    expect(again.rev).toBe(owner.rev);
+    const meta = (await s.readPage(childId)).meta;
+    expect(meta.updatedBy).toBe("me");
+    expect(meta.updatedByName).toBeUndefined();
+  });
+
+  it("refuses a read-only link even though the root is public", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const page = await s.createPage(null, "Read only");
+    const child = await s.createPage(page.id, "Child");
+    const before = await s.readShareScope(page.id);
+    await s.configureShare(page.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: false,
+    });
+    const version = await authorisedVersion(s, page.id, child.id);
+    await expect(
+      s.writeSharedPage({
+        rootId: page.id,
+        targetId: child.id,
+        shareVersion: version,
+        markdown: "nope",
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+    expect((await s.readPage(child.id)).markdown).toBe("");
+  });
+
+  it(
+    "404s every write queued behind an owner action and lands the one queued ahead of it",
+    async () => {
+      type Ids = { rootId: string; childId: string; awayId: string };
+      const cases: { name: string; act: (s: Store, ids: Ids) => Promise<unknown> }[] = [
+        {
+          name: "configureShare({ enabled: false })",
+          act: (s, { rootId }) => s.configureShare(rootId, { enabled: false }),
+        },
+        {
+          name: "updateMeta({ public: false })",
+          act: (s, { rootId }) => s.updateMeta(rootId, { public: false }),
+        },
+        {
+          name: "deletePage(root)",
+          act: (s, { rootId }) => s.deletePage(rootId),
+        },
+        {
+          name: "deletePage(target)",
+          act: (s, { childId }) => s.deletePage(childId),
+        },
+        {
+          name: "movePage(target, out of the subtree)",
+          act: (s, { childId, awayId }) => s.movePage(childId, awayId),
+        },
+      ];
+      for (const { name, act } of cases) {
+        const { s, rootId, childId } = await editableRoot();
+        const away = await s.createPage(null, "Away");
+        const version = await authorisedVersion(s, rootId, childId);
+        const write = (n: number) =>
+          s.writeSharedPage({
+            rootId,
+            targetId: childId,
+            shareVersion: version,
+            markdown: `late ${n}`,
+            visitorName: "Ada",
+          });
+
+        // Queue position is the race. Nothing is awaited until every call is
+        // in the FIFO chain, so each write's place relative to the owner's
+        // action is fixed by construction, not by scheduler luck: one write
+        // sits ahead of the action, five sit behind it.
+        const ahead = write(0);
+        const acted = act(s, { rootId, childId, awayId: away.id });
+        const behind = Array.from({ length: 5 }, (_, n) => write(n + 1));
+
+        await expect(ahead, name).resolves.toMatchObject({ markdown: "late 0" });
+        await acted;
+        for (const late of behind) {
+          await expect(late, name).rejects.toBeInstanceOf(
+            ShareAccessNotFoundError,
+          );
+        }
+        const raw = await readIndexRaw(s, childId);
+        expect(raw, name).toContain("late 0");
+        expect(raw, name).not.toMatch(/late [1-5]/);
+      }
+    },
+    30_000,
+  );
+
+  it("404s a write authorised before the deadline that lands after it", async () => {
+    const start = Date.now();
+    const { s, rootId, childId } = await editableRoot(
+      new Date(start + 60_000).toISOString(),
+    );
+    const version = await authorisedVersion(s, rootId, childId);
+    const write = (markdown: string) =>
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown,
+        visitorName: "Ada",
+      });
+    await expect(write("on time")).resolves.toMatchObject({
+      markdown: "on time",
+    });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(start + 120_000);
+      await expect(write("too late")).rejects.toBeInstanceOf(
+        ShareAccessNotFoundError,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+    const raw = await readIndexRaw(s, childId);
+    expect(raw).toContain("on time");
+    expect(raw).not.toContain("too late");
+  });
+
+  it("404s a stale shareVersion, including the one a re-enable retires", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const write = (shareVersion: number, markdown: string) =>
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion,
+        markdown,
+        visitorName: "Ada",
+      });
+    for (const stale of [version - 1, version + 1]) {
+      await expect(write(stale, "nope")).rejects.toBeInstanceOf(
+        ShareAccessNotFoundError,
+      );
+    }
+    await s.configureShare(rootId, { enabled: false });
+    const scope = await s.readShareScope(rootId);
+    await s.configureShare(rootId, {
+      enabled: true,
+      expectedScopeToken: scope.scopeToken,
+      canEdit: true,
+    });
+    const fresh = (await s.readShareScope(rootId)).shareVersion;
+    expect(fresh).toBeGreaterThan(version);
+    await expect(write(version, "old link")).rejects.toBeInstanceOf(
+      ShareAccessNotFoundError,
+    );
+    await expect(write(fresh, "new link")).resolves.toMatchObject({
+      markdown: "new link",
+    });
+  });
+
+  it("creates a subpage that inherits the share and carries no share key", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const made = await s.createSharedSubpage({
+      rootId,
+      parentId: childId,
+      shareVersion: version,
+      title: "A note from a visitor",
+      visitorName: "Ada",
+    });
+
+    expect(made.public).toBeUndefined();
+    expect(made.shareEdit).toBeUndefined();
+    expect(made.updatedBy).toBe("visitor");
+    expect(made.updatedByName).toBe("Ada");
+    expect(s.isWithinSubtree(rootId, made.id)).toBe(true);
+    expect(s.readDirectChildren(childId).map((c) => c.id)).toEqual([made.id]);
+    const raw = await readIndexRaw(s, made.id);
+    expect(raw).toContain("updatedBy: visitor");
+    expect(raw).toContain("updatedByName: Ada");
+    expect(raw).not.toMatch(/^(public|shareEdit|shareVersion):/m);
+  });
+
+  it("refuses a subpage under a parent outside the subtree or in the trash", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const outside = await s.createPage(null, "Outside");
+    await expect(
+      s.createSharedSubpage({
+        rootId,
+        parentId: outside.id,
+        shareVersion: version,
+        title: "nope",
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+    await s.deletePage(childId);
+    await expect(
+      s.createSharedSubpage({
+        rootId,
+        parentId: childId,
+        shareVersion: version,
+        title: "nope",
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+  });
+
+  it(
+    "stops at the descendant ceiling and counts only live pages",
+    async () => {
+      const { s, rootId, childId, version } = await editableRoot();
+      const fillers: string[] = [];
+      for (let i = 0; i < MAX_SHARE_SUBTREE_PAGES - 2; i += 1) {
+        fillers.push((await s.createPage(rootId, `Filler ${i}`)).id);
+      }
+      const make = (title: string) =>
+        s.createSharedSubpage({
+          rootId,
+          parentId: childId,
+          shareVersion: version,
+          title,
+          visitorName: "Ada",
+        });
+      // child + 198 fillers = 199 live descendants: one seat left.
+      await expect(make("the last seat")).resolves.toMatchObject({
+        title: "the last seat",
+      });
+      await expect(make("one too many")).rejects.toThrow(
+        "shared subtree is full",
+      );
+      await s.deletePage(fillers[0]);
+      await expect(make("after a trash")).resolves.toMatchObject({
+        title: "after a trash",
+      });
+    },
+    60_000,
+  );
+
+  it("saves an attachment with nothing relaxed and refuses one on a revoked root", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const saved = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: shot(),
+    });
+    expect(saved.url).toMatch(/^\/_attachments-v2\/[A-Za-z0-9_-]{12}\.png$/);
+    expect(saved).toMatchObject({
+      name: "shot.png",
+      size: PNG.byteLength,
+      type: "image/png",
+    });
+    await expect(
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: {
+          data: new Uint8Array([1, 2, 3]),
+          originalName: "shot.png",
+          mimeType: "image/png",
+        },
+      }),
+    ).rejects.toBeInstanceOf(AttachmentValidationError);
+
+    await s.configureShare(rootId, { enabled: false });
+    await expect(
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: shot(),
+      }),
+    ).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+  });
+
+  it("404s a subpage and an upload queued behind a revoke and leaves nothing behind", async () => {
+    const { s, root, rootId, childId } = await editableRoot();
+    const version = await authorisedVersion(s, rootId, childId);
+
+    const revoked = s.configureShare(rootId, { enabled: false });
+    const create = s.createSharedSubpage({
+      rootId,
+      parentId: childId,
+      shareVersion: version,
+      title: "late note",
+      visitorName: "Ada",
+    });
+    const upload = s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: shot(),
+    });
+
+    await revoked;
+    await expect(create).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+    await expect(upload).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+    expect(s.readDirectChildren(childId)).toEqual([]);
+    await expect(
+      fs.readdir(path.join(s.resolve(childId))),
+    ).resolves.toEqual(["index.md"]);
+    await expect(
+      fs.readdir(path.join(root, "_attachments")).catch(() => []),
+    ).resolves.toEqual([]);
   });
 });

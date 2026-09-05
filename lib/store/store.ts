@@ -43,6 +43,9 @@ import {
   standalonePageRefOccurrences,
 } from "../page-ref-nesting";
 import { referencedPageIds } from "../derived-page-refs";
+import { ShareAccessNotFoundError } from "../share-access";
+import { isShareExpired } from "../sharing";
+import { MAX_SHARE_SUBTREE_PAGES } from "./share-limits";
 import {
   assertCollectionRowMatchesDefinition,
   collectionDefinitionSchema,
@@ -404,6 +407,13 @@ async function assertRealDirectory(
   } finally {
     await handle.close();
   }
+}
+
+/** Every authority failure inside a visitor leaf is the same 404 the guard
+ *  gives, so a refusal found inside the queue says nothing a refusal found
+ *  outside it did not already say. */
+function denyShareWrite(): never {
+  throw new ShareAccessNotFoundError();
 }
 
 function rethrowAttachmentStoreFailure(error: unknown): never {
@@ -3743,6 +3753,188 @@ export class Store {
         rethrowAttachmentStoreFailure,
       ),
     );
+  }
+
+  /**
+   * The second authority check, and the real one. `resolveShareAccess` runs
+   * lock-free outside the queue, so a request it authorised can still be
+   * waiting behind the owner's revoke when the revoke lands. This runs INSIDE
+   * the caller's own mutate(), against frontmatter re-read from disk, and it
+   * is what makes a revoke revoke, an expiry expire, and a page moved out of
+   * the subtree stop being writable for the requests already queued.
+   *
+   * mutate() is not reentrant (AGENTS.md invariant 4), so this uses only the
+   * synchronous index readers plus a direct read of the root's index.md.
+   * Caller owns mutate().
+   */
+  private async assertSharedWriteAuthorityUnlocked(
+    rootId: string,
+    targetId: string,
+    shareVersion: number,
+  ): Promise<void> {
+    // 1 existence, 2 root liveness
+    const rootEntry = this.index.get(rootId);
+    if (!rootEntry || this.isDeleted(rootId)) denyShareWrite();
+    const rootIndex = assertInRoot(
+      this.root,
+      path.join(rootEntry.dir, "index.md"),
+    );
+    let raw: string;
+    try {
+      raw = await fs.readFile(rootIndex, "utf8");
+    } catch {
+      denyShareWrite();
+    }
+    const meta = parsePage(raw).meta;
+    // 3 authority, 4 the edit capability, 5 expiry, 6 version
+    if (
+      meta.public !== true ||
+      meta.shareEdit !== true ||
+      isShareExpired(meta.shareExpiresAt) ||
+      (meta.shareVersion ?? 0) !== shareVersion
+    ) {
+      denyShareWrite();
+    }
+    // 7 subtree membership and target liveness
+    if (
+      !this.index.has(targetId) ||
+      !this.isWithinSubtree(rootId, targetId) ||
+      this.isDeleted(targetId)
+    ) {
+      denyShareWrite();
+    }
+  }
+
+  /** A link visitor's body write. Same rev contract as writePage, same atomic
+   *  write, same commit, and two extra frontmatter keys so the attribution is
+   *  in the file and shows up in the git diff of the edit. */
+  async writeSharedPage(input: {
+    rootId: string;
+    targetId: string;
+    shareVersion: number;
+    markdown: string;
+    expectedRev?: string;
+    expectedMarkdown?: string;
+    visitorName: string;
+    src?: string;
+  }): Promise<Page> {
+    return this.mutate(async () => {
+      await this.assertSharedWriteAuthorityUnlocked(
+        input.rootId,
+        input.targetId,
+        input.shareVersion,
+      );
+      const e = this.get(input.targetId);
+      const indexPath = assertInRoot(this.root, path.join(e.dir, "index.md"));
+      const currentRaw = await fs.readFile(indexPath, "utf8");
+      const currentRev = hashRev(currentRaw);
+      const parsed = parsePage(currentRaw);
+      const bodyStillMatches =
+        parsed.meta.structureWriteBarrier !== true &&
+        input.expectedMarkdown !== undefined &&
+        parsed.markdown === canonicalPageMarkdown(input.expectedMarkdown);
+      if (
+        input.expectedRev !== undefined &&
+        input.expectedRev !== currentRev &&
+        !bodyStillMatches
+      ) {
+        throw new RevConflictError(currentRev, input.expectedRev);
+      }
+      const fresh = parsed.meta;
+      e.meta = {
+        ...fresh,
+        id: fresh.id || e.meta.id,
+        title: fresh.title || e.meta.title,
+        order: fresh.order || e.meta.order,
+        created: fresh.created || e.meta.created,
+        updated: fresh.updated || e.meta.updated,
+      } as PageMeta;
+      const bodyChanged =
+        canonicalPageMarkdown(input.markdown) !== parsed.markdown;
+      // Same rule as writePage: an unchanged body is not an edit.
+      if (!bodyChanged) {
+        return { meta: e.meta, markdown: parsed.markdown, rev: currentRev };
+      }
+      e.meta.updated = now();
+      e.meta.updatedBy = "visitor";
+      e.meta.updatedByName = input.visitorName;
+      delete e.meta.structureWriteBarrier;
+      const content = serializePage(e.meta, input.markdown);
+      await atomicWrite(indexPath, content);
+      scheduleCommit(this.root);
+      const rev = hashRev(content);
+      emitStore({ type: "write", id: input.targetId, rev, src: input.src });
+      return { meta: e.meta, markdown: input.markdown.trimEnd(), rev };
+    });
+  }
+
+  /** A link visitor's new subpage. It inherits the share by construction and
+   *  carries no share key of its own: descendant sharing metadata is ignored
+   *  by resolveShareAccess, so writing one would be a second source of truth. */
+  async createSharedSubpage(input: {
+    rootId: string;
+    parentId: string;
+    shareVersion: number;
+    title: string;
+    visitorName: string;
+    src?: string;
+  }): Promise<PageMeta> {
+    return this.mutate(async () => {
+      await this.assertSharedWriteAuthorityUnlocked(
+        input.rootId,
+        input.parentId,
+        input.shareVersion,
+      );
+      const parent = this.get(input.parentId);
+      if (parent.meta.collection) denyShareWrite();
+      const live = [...this.index.values()].filter(
+        (entry) =>
+          entry.meta.id !== input.rootId &&
+          this.isWithinSubtree(input.rootId, entry.meta.id) &&
+          !this.isDeleted(entry.meta.id),
+      ).length;
+      if (live >= MAX_SHARE_SUBTREE_PAGES) {
+        throw new Error("shared subtree is full");
+      }
+      const dir = await uniqueDir(parent.dir, slugify(input.title));
+      const last = this.siblings(input.parentId).at(-1);
+      const meta: PageMeta = {
+        id: nanoid(),
+        title: input.title,
+        order: generateKeyBetween(last ? last.meta.order : null, null),
+        created: now(),
+        updated: now(),
+        updatedBy: "visitor",
+        updatedByName: input.visitorName,
+      };
+      await atomicWrite(path.join(dir, "index.md"), serializePage(meta, ""));
+      this.index.set(meta.id, { dir, parentId: input.parentId, meta });
+      scheduleCommit(this.root);
+      emitStore({ type: "create", id: meta.id, src: input.src });
+      return meta;
+    });
+  }
+
+  /** A link visitor's upload. Nothing is relaxed: the same size cap, the same
+   *  blocked MIME list, the same magic-byte checks, the same nanoid(12) name
+   *  and the same extension canonicalisation as the owner's route. */
+  async saveSharedAttachment(input: {
+    rootId: string;
+    targetId: string;
+    shareVersion: number;
+    file: AttachmentInput;
+    src?: string;
+  }): Promise<SavedAttachment> {
+    return this.mutate(async () => {
+      await this.assertSharedWriteAuthorityUnlocked(
+        input.rootId,
+        input.targetId,
+        input.shareVersion,
+      );
+      return this.saveAttachmentUnlocked(input.file, input.src).catch(
+        rethrowAttachmentStoreFailure,
+      );
+    });
   }
 
   /** Read one exact private attachment for an owner-requested portable export.

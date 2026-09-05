@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { MAIL_RESOURCE_LIMITS } from "@/lib/mail/security";
 
 const root = path.resolve(__dirname, "..");
 const read = (file: string) => readFileSync(path.join(root, file), "utf8");
@@ -39,7 +40,15 @@ describe("brain-mail MIME worker deployment contracts", () => {
       "ListenStream=/run/brain-mail-mime/brain-mail-mime.sock",
     );
     expect(socket).toContain("SocketMode=0600");
-    expect(socket).toContain("MaxConnections=1");
+    // systemd admits exactly as many parser connections as the coordinator
+    // pumps at once. A lower cap refuses the second one, and the client then
+    // waits out a transient retry for a worker that was never busy.
+    expect(socket).toContain(
+      `MaxConnections=${MAIL_RESOURCE_LIMITS.concurrentMimeParsers}`,
+    );
+    expect(socket).toContain(
+      `Backlog=${MAIL_RESOURCE_LIMITS.concurrentMimeParsers}`,
+    );
     expect(sysusers).toBe(
       'u brain-mail-mime - "Brain Mail MIME parser" /nonexistent /usr/sbin/nologin\n',
     );

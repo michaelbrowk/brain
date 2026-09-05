@@ -17,6 +17,7 @@ import type { TreeNode } from "@/lib/store/types";
 import type { Template } from "@/lib/templates";
 import { SPRING_PANEL, SPRING_SELECT } from "@/lib/motion";
 import { SIDEBAR_SELECT_LAYOUT_ID } from "./sidebar-select";
+import { Wordmark } from "./wordmark";
 import type { ShellSurface } from "./helpers";
 import {
   SETTINGS_SECTION_META,
@@ -151,13 +152,7 @@ export function ShellSidebar({
           className="brain-wordmark brain-touch-min focus-inset"
           aria-label="Home"
         >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src="/logo-small.png"
-            alt=""
-            className="size-[18px] rounded-[4px] object-cover"
-          />
-          <span className="text-h3">Brain</span>
+          <Wordmark />
         </button>
         {/* THE ACCENT CIRCLE MEANS ONE THING. It used to host mail's Compose
             while mail was open — same circle, same fill, same 34 slot, same

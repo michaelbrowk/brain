@@ -9,7 +9,22 @@ export interface UploadedAttachment {
   type: string;
 }
 
-export interface AttachmentUploadProgressOptions {
+/** Where an upload goes and what it carries. The owner posts to `/api/upload`
+ *  with the tab's client id; a link visitor posts to `/api/share-edit/upload`
+ *  with the access pair on the query and the `x-brain-share-vid` double
+ *  submit in the headers. `fetcher` wraps the fetch path; `headers` is the
+ *  same statement for the XMLHttpRequest path, which cannot take a fetcher. */
+export interface AttachmentUploadTarget {
+  /** Absolute path including any query the route needs. */
+  endpoint?: string;
+  /** A visitor upload adds `x-brain-share-vid`; the owner adds `x-brain-client`. */
+  fetcher?: typeof fetch;
+  /** Sent by the progress upload in place of the owner's `x-brain-client`. */
+  headers?: Record<string, string>;
+}
+
+export interface AttachmentUploadProgressOptions
+  extends Pick<AttachmentUploadTarget, "endpoint" | "headers"> {
   signal?: AbortSignal;
   onProgress?: (progress: number) => void;
 }
@@ -28,10 +43,17 @@ function uploadedAttachment(value: unknown, file: File): UploadedAttachment | nu
   };
 }
 
-export async function uploadAttachment(file: File): Promise<UploadedAttachment | null> {
+export async function uploadAttachment(
+  file: File,
+  target: AttachmentUploadTarget = {},
+): Promise<UploadedAttachment | null> {
   const fd = new FormData();
   fd.append("file", file);
-  const r = await apiFetch("/api/upload", { method: "POST", body: fd });
+  const send = target.fetcher ?? apiFetch;
+  const r = await send(target.endpoint ?? "/api/upload", {
+    method: "POST",
+    body: fd,
+  });
   if (!r.ok) return null;
   return uploadedAttachment(await r.json(), file);
 }
@@ -64,10 +86,14 @@ export function uploadAttachmentWithProgress(
       finish(() => reject(abortError()));
     };
 
-    request.open("POST", "/api/upload");
+    request.open("POST", options.endpoint ?? "/api/upload");
     request.responseType = "json";
     request.timeout = IMAGE_UPLOAD_TIMEOUT_MS;
-    request.setRequestHeader("x-brain-client", CLIENT_ID);
+    for (const [name, value] of Object.entries(
+      options.headers ?? { "x-brain-client": CLIENT_ID },
+    )) {
+      request.setRequestHeader(name, value);
+    }
     request.upload.addEventListener("progress", (event) => {
       if (!event.lengthComputable || event.total <= 0) return;
       options.onProgress?.(

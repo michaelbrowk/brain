@@ -182,9 +182,13 @@ export interface PageRef {
 export function FloatingToolbar({
   container,
   pages = [],
+  ai = false,
 }: {
   container: React.RefObject<HTMLDivElement | null>;
   pages?: PageRef[];
+  /** Renders the AI control. Without it the /api/ai call has no way in:
+   *  the button that opens the panel is not in the DOM. */
+  ai?: boolean;
 }) {
   const [linkOpen, setLinkOpen] = useState(false);
   const [colorOpen, setColorOpen] = useState(false);
@@ -588,23 +592,27 @@ export function FloatingToolbar({
                   : ""
               }`}
             >
-              <TB
-                label={aiLoading ? "AI writing" : "AI"}
-                active={aiOpen || !!aiLoading}
-                disabled={!!aiLoading}
-                onRun={() => {
-                  setLinkOpen(false);
-                  setColorOpen(false);
-                  setAiOpen(true);
-                }}
-              >
-                <Icon
-                  name="magic-stick-3-linear"
-                  size={15}
-                  className={aiLoading ? "animate-pulse" : undefined}
-                />
-              </TB>
-              <Sep />
+              {ai && (
+                <>
+                  <TB
+                    label={aiLoading ? "AI writing" : "AI"}
+                    active={aiOpen || !!aiLoading}
+                    disabled={!!aiLoading}
+                    onRun={() => {
+                      setLinkOpen(false);
+                      setColorOpen(false);
+                      setAiOpen(true);
+                    }}
+                  >
+                    <Icon
+                      name="magic-stick-3-linear"
+                      size={15}
+                      className={aiLoading ? "animate-pulse" : undefined}
+                    />
+                  </TB>
+                  <Sep />
+                </>
+              )}
               <TB label="Bold" onRun={() => run(toggleStrongCommand.key)}>
                 <Icon name="text-bold-linear" size={15} />
               </TB>

@@ -539,3 +539,66 @@ describe("image upload decorations", () => {
     expect(revoked).toEqual(["blob:pending.png"]);
   });
 });
+
+describe("without an upload target", () => {
+  function refusingView() {
+    const doc = schema.nodes.doc.create(null, [paragraph("alpha"), paragraph("omega")]);
+    const controller = createImageUploadController({
+      upload: null,
+      makeId: idFactory(),
+      createPreviewUrl: (file) => `blob:${file.name}`,
+      revokePreviewUrl: () => undefined,
+      errorDurationMs: 60_000,
+    });
+    const state = EditorState.create({
+      schema,
+      doc,
+      selection: TextSelection.create(doc, 2),
+      plugins: [controller.plugin],
+    });
+    const mount = document.createElement("div");
+    document.body.append(mount);
+    const view = new EditorView(mount, { state });
+    views.push(view);
+    return { controller, view, before: view.state.doc.toJSON() };
+  }
+
+  it("starts nothing: no placeholder, no document change, no id", () => {
+    const { controller, view, before } = refusingView();
+    const file = new File(["pixels"], "photo.png", { type: "image/png" });
+
+    expect(controller.start(view, [file], 2)).toEqual([]);
+    expect(imageUploadPluginKey.getState(view.state)?.find()).toEqual([]);
+    expect(view.state.doc.toJSON()).toEqual(before);
+  });
+
+  it("still owns the paste and the drop, so the browser never inserts the file itself", () => {
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: () => null,
+    });
+    const { controller, view, before } = refusingView();
+    const file = new File(["pixels"], "photo.png", { type: "image/png" });
+    const props = controller.plugin.props;
+
+    expect(
+      props.handlePaste!.call(
+        controller.plugin,
+        view,
+        { clipboardData: { files: [file] } } as unknown as ClipboardEvent,
+        view.state.doc.slice(0),
+      ),
+    ).toBe(true);
+    expect(
+      props.handleDrop!.call(
+        controller.plugin,
+        view,
+        { dataTransfer: { files: [file] }, clientX: 0, clientY: 0 } as unknown as DragEvent,
+        view.state.doc.slice(0),
+        false,
+      ),
+    ).toBe(true);
+    expect(imageUploadPluginKey.getState(view.state)?.find()).toEqual([]);
+    expect(view.state.doc.toJSON()).toEqual(before);
+  });
+});

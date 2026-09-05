@@ -13,6 +13,7 @@ import { $prose } from "@milkdown/kit/utils";
 import {
   uploadAttachmentWithProgress,
   type AttachmentUploadProgressOptions,
+  type AttachmentUploadTarget,
   type UploadedAttachment,
 } from "./attachments";
 
@@ -60,7 +61,10 @@ type StartUpload = (
 ) => string[];
 
 export interface ImageUploadControllerOptions {
-  upload?: Upload;
+  /** `null` refuses every image: no placeholder, no request. The paste and
+   *  the drop are still consumed, so the browser never inserts the file on
+   *  its own (as a data: URL) into a document that has no upload. */
+  upload: Upload | null;
   createPreviewUrl?: (file: File) => string;
   revokePreviewUrl?: (url: string) => void;
   makeId?: () => string;
@@ -271,9 +275,9 @@ export function handleWrapperImageDrop(
 }
 
 export function createImageUploadController(
-  options: ImageUploadControllerOptions = {},
+  options: ImageUploadControllerOptions,
 ) {
-  const upload = options.upload ?? uploadAttachmentWithProgress;
+  const upload = options.upload;
   const createPreviewUrl =
     options.createPreviewUrl ??
     ((file: File) =>
@@ -460,7 +464,7 @@ export function createImageUploadController(
 
   const start: StartUpload = (view, files, pos, range) => {
     const accepted = imageFiles(files);
-    if (!accepted.length || destroyed) return [];
+    if (!accepted.length || destroyed || !upload) return [];
 
     const batchId = makeId();
     const ids = accepted.map(() => makeId());
@@ -637,6 +641,22 @@ export function createImageUploadController(
   return { plugin, start };
 }
 
-export const imageUploadProgress = $prose(
-  () => createImageUploadController().plugin,
-);
+/** One plugin per editor mount, bound to that mount's upload target. The
+ *  owner's target is the owner upload route; a visitor's is the share-edit
+ *  route with the access pair on the query and the vid in the headers;
+ *  `null` is an editor with no upload capability at all. */
+export function imageUploadPlugin(target: AttachmentUploadTarget | null) {
+  return $prose(
+    () =>
+      createImageUploadController({
+        upload: target
+          ? (file, options) =>
+              uploadAttachmentWithProgress(file, {
+                ...options,
+                endpoint: target.endpoint,
+                headers: target.headers,
+              })
+          : null,
+      }).plugin,
+  );
+}

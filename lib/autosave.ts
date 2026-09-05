@@ -346,6 +346,10 @@ interface SaveMarkdownOptions {
   setBaseMarkdown?: (markdown: string) => void;
   wait?: (attempt: number) => Promise<void>;
   maxAttempts?: number;
+  /** Where this save goes. The owner writes to `/api/page/<id>`; a link
+   *  visitor writes to `/api/share-edit/page/<id>?root=…&v=…`. The conflict
+   *  GET uses the same URL, so both halves of the 409 dance stay on one route. */
+  endpoint?: (id: string) => string;
 }
 
 /** Persist one markdown body, refreshing the optimistic-concurrency revision on
@@ -361,13 +365,14 @@ export async function saveMarkdown({
   setBaseMarkdown,
   wait = () => new Promise((resolve) => setTimeout(resolve, 1500)),
   maxAttempts = 3,
+  endpoint = (pageId: string) => `/api/page/${pageId}`,
 }: SaveMarkdownOptions): Promise<string> {
   for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
     let response: Response;
     let attemptBaseMarkdown: string | undefined;
     try {
       attemptBaseMarkdown = getBaseMarkdown?.();
-      response = await fetcher(`/api/page/${id}`, {
+      response = await fetcher(endpoint(id), {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: encodeSaveRequest(markdown, getRevision(), attemptBaseMarkdown),
@@ -407,7 +412,7 @@ export async function saveMarkdown({
           // A malformed/missing conflict body simply keeps the safe 409 path.
         }
       }
-      const latest = await fetcher(`/api/page/${id}`);
+      const latest = await fetcher(endpoint(id));
       if (!latest.ok) {
         throw new SaveRequestError("Could not refresh the page revision", latest.status);
       }

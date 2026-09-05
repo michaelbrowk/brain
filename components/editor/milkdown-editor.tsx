@@ -59,9 +59,9 @@ import {
 } from "./search-highlight";
 import { toggle } from "./toggle";
 import { images } from "./image";
-import { handleWrapperImageDrop, imageUploadProgress } from "./image-upload";
+import { handleWrapperImageDrop, imageUploadPlugin } from "./image-upload";
 import { math } from "./math";
-import { linkPreview } from "./link-preview";
+import { linkPreviewPlugin } from "./link-preview";
 import { noNestedTables } from "./table-guard";
 import { EditorBoundary } from "./editor-boundary";
 import { EmojiPicker } from "../emoji-picker";
@@ -101,6 +101,22 @@ import type {
   SearchHighlightStatus,
 } from "@/lib/search-navigation";
 
+/** Absent capability, absent affordance. The visitor's editor is not the
+ *  owner's editor in a different mode; it is the owner's editor with four
+ *  capabilities missing, so a new call site added to a component the visitor
+ *  mounts is a test failure rather than a leak. */
+export interface EditorCapabilities {
+  /** Where attachments post. `fetcher` wraps the fetch path, `headers` is the
+   *  same statement for the XMLHttpRequest path (byte progress needs XHR). */
+  upload?: {
+    endpoint: string;
+    fetcher?: typeof fetch;
+    headers?: Record<string, string>;
+  };
+  unfurl?: boolean;
+  ai?: boolean;
+}
+
 interface EditorProps {
   value: string;
   onChange: (md: string) => void;
@@ -122,6 +138,9 @@ interface EditorProps {
   onCreatePageAtCursor?: (
     insertPageRef: (page: PageRef) => boolean,
   ) => Promise<void>;
+  /** Defaults to nothing: an editor that is not told what it may do may not
+   *  upload, unfurl or call AI. The owner shell passes its full set. */
+  capabilities?: EditorCapabilities;
 }
 
 type CalloutEmojiAnchor = CalloutEmojiEventDetail & { id: number };
@@ -335,6 +354,7 @@ function Inner({
   searchHighlight,
   onSearchHighlightStatus,
   onCreatePageAtCursor,
+  capabilities = {},
 }: EditorProps) {
   const lastEmitted = useRef(value);
   const [editorSession] = useState(
@@ -481,10 +501,10 @@ function Inner({
       .use(callout)
       .use(toggle)
       .use(images)
-      .use(imageUploadProgress)
+      .use(imageUploadPlugin(capabilities.upload ?? null))
       .use(math)
       .use(pageRef)
-      .use(linkPreview)
+      .use(linkPreviewPlugin(!!capabilities.unfurl))
       .use(tableBlock)
       .use(history)
       // markdown-aware copy/paste: pasted markdown text becomes real blocks
@@ -770,7 +790,10 @@ function Inner({
         if (!isSpreadsheetFile(f)) {
           e.preventDefault();
           e.stopPropagation();
-          uploadAttachment(f).then((file) => {
+          // No upload capability: the drop is refused, not sent elsewhere.
+          const upload = capabilities.upload;
+          if (!upload) return;
+          uploadAttachment(f, upload).then((file) => {
             if (file) get()?.action(insert(attachmentMarkdown(file)));
           });
           return;
@@ -805,7 +828,9 @@ function Inner({
         );
         if (file) {
           e.preventDefault();
-          uploadAttachment(file).then((uploaded) => {
+          const upload = capabilities.upload;
+          if (!upload) return;
+          uploadAttachment(file, upload).then((uploaded) => {
             if (uploaded) get()?.action(insert(attachmentMarkdown(uploaded)));
           });
           return;
@@ -861,10 +886,12 @@ function Inner({
       }}
     >
       <Milkdown />
-      <FloatingToolbar container={wrap} pages={pages} />
+      <FloatingToolbar container={wrap} pages={pages} ai={!!capabilities.ai} />
       <SlashMenu
         container={wrap}
         onCreatePageAtCursor={onCreatePageAtCursor}
+        ai={!!capabilities.ai}
+        upload={capabilities.upload}
       />
       <WikiLinkMenu container={wrap} pages={pages ?? []} />
       {calloutEmoji && (

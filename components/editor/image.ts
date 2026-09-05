@@ -12,6 +12,7 @@ import type {
 } from "@milkdown/kit/transformer";
 import { $nodeSchema, $remark, $view } from "@milkdown/kit/utils";
 import { SOLAR } from "@/components/ui/solar-icons.generated";
+import { attachmentSrc } from "./attachment-src";
 
 type ImageAlign = "left" | "center" | "right";
 
@@ -157,6 +158,9 @@ export const brainImageSchema = $nodeSchema("brain_image", () => ({
       },
     },
   ],
+  // Bare `src` on purpose: this DOM is what a copy puts on the clipboard, and
+  // parseDOM reads it back verbatim. The display-time rewrite lives in the
+  // NodeView's render below, where nothing is ever parsed from.
   toDOM: (node) => {
     const width = readWidth(node.attrs.width);
     const align = isImageAlign(node.attrs.align) ? node.attrs.align : null;
@@ -292,7 +296,9 @@ export const brainImageView = $view(brainImageSchema.node, () => ((
     const width = readWidth(node.attrs.width);
     const align = isImageAlign(node.attrs.align) ? node.attrs.align : null;
 
-    img.src = src;
+    // Display time only. A visitor's resolver adds the access triple here;
+    // `src` itself, and therefore the document, keeps the bare path.
+    img.src = attachmentSrc(src);
     img.alt = alt;
     caption.textContent = alt;
     caption.hidden = !alt;

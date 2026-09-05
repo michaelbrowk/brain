@@ -39,6 +39,14 @@ const MilkdownEditor = dynamic(
 type EditorProps = ComponentProps<typeof MilkdownEditor>;
 type BoardProps = ComponentProps<typeof Board>;
 
+/** Everything the editor can do, for the one person whose session
+ *  authorizes it. A share visitor's island passes a smaller set. */
+const OWNER_CAPABILITIES: NonNullable<EditorProps["capabilities"]> = {
+  upload: { endpoint: "/api/upload" },
+  unfurl: true,
+  ai: true,
+};
+
 export interface PageBodyProps {
   page: LoadedPage;
   /** The tree node of the open page. Null while the tree is catching up. */
@@ -170,6 +178,7 @@ export function PageBody({
               : undefined
           }
           onCreatePageAtCursor={onCreatePageAtCursor}
+          capabilities={OWNER_CAPABILITIES}
         />
         <Subpages
           pages={subpages}

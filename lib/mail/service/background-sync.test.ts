@@ -245,6 +245,78 @@ describe("Mail background sync scheduler", () => {
     await scheduler.stop();
   });
 
+  it("runs the privacy-cache step on every page, not only after the last one", async () => {
+    vi.useFakeTimers();
+    let providerCalls = 0;
+    let privacyCalls = 0;
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA],
+        runBackgroundSyncStep: async () => {
+          providerCalls += 1;
+          return syncResult(true);
+        },
+      },
+      {
+        privacyCache: {
+          async runBackgroundPrefetchStep() {
+            privacyCalls += 1;
+            return { hasMore: false };
+          },
+        },
+        initialDelayMs: 10,
+        intervalMs: 1_000,
+        continuationDelayMs: 25,
+      },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(providerCalls).toBe(6);
+    expect(privacyCalls).toBe(6);
+    await scheduler.stop();
+  });
+
+  it("keeps draining the privacy cache while the provider is failing", async () => {
+    vi.useFakeTimers();
+    let providerCalls = 0;
+    let privacyCalls = 0;
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA],
+        runBackgroundSyncStep: async () => {
+          providerCalls += 1;
+          throw new Error("provider unavailable");
+        },
+      },
+      {
+        privacyCache: {
+          async runBackgroundPrefetchStep() {
+            privacyCalls += 1;
+            return { hasMore: privacyCalls % 3 !== 0 };
+          },
+        },
+        initialDelayMs: 10,
+        intervalMs: 1_000,
+        continuationDelayMs: 25,
+      },
+    );
+
+    // The failing provider rests for the interval; the cache keeps draining
+    // in the same pass without dialing the provider again.
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(providerCalls).toBe(1);
+    expect(privacyCalls).toBe(3);
+    await vi.advanceTimersByTimeAsync(999);
+    expect(providerCalls).toBe(1);
+    expect(privacyCalls).toBe(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(providerCalls).toBe(2);
+    expect(privacyCalls).toBe(6);
+    await scheduler.stop();
+  });
+
   it("round-robins privacy-cache work across accounts", async () => {
     vi.useFakeTimers();
     const privacyCalls: string[] = [];

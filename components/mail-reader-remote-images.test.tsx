@@ -7,11 +7,15 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { MAIL_ATTACHMENT_CONTENT_SECURITY_POLICY } from "@/lib/mail/content-types";
 import type { MailMessageDto } from "@/lib/mail/message-types";
 import {
+  CONTENT_MAX_REQUESTS,
   CONTENT_POLL_BASE_DELAY_MS,
   CONTENT_POLL_DEADLINE_MS,
   CONTENT_POLL_MAX_DELAY_MS,
+  CONTENT_TRANSIENT_POLLS_BEFORE_REQUEST,
   MailReader,
   pollDelayMs,
+  REMOTE_IMAGE_LOAD_DEADLINE_MS,
+  remoteImagePollDelayMs,
 } from "./mail-reader";
 import type {
   MailAccountCapabilities,
@@ -270,6 +274,237 @@ describe("MailReader remote image lifecycle", () => {
       size: body.byteLength,
       type: "image/png",
     });
+  });
+});
+
+describe("MailReader remote image demand", () => {
+  let host: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (
+      globalThis as typeof globalThis & {
+        IS_REACT_ACT_ENVIRONMENT: boolean;
+      }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+    vi.useRealTimers();
+  });
+
+  const singleImage = {
+    apiVersion: 1 as const,
+    accountId: ACCOUNT_ID,
+    messageId: message.messageId,
+    state: "ready" as const,
+    textBody: null,
+    htmlBody: `<img data-brain-remote-image="${FIRST_REMOTE_ID}" alt="Remote">`,
+    attachments: [],
+  };
+
+  it("asks for the message again after a run of cache misses, a bounded number of times", async () => {
+    vi.useFakeTimers();
+    const signals: AbortSignal[] = [];
+    const fetchMock = vi.fn(async (_input: string, init?: RequestInit) => {
+      if (init?.signal) signals.push(init.signal);
+      return new Response(null, { status: 503 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const client = contentClient(singleImage);
+
+    await act(async () => root.render(reader(client)));
+    await settle();
+    // The body path made the first request. The image path re-asks after
+    // every run of consecutive misses until the shared budget is spent.
+    expect(client.requestMessageContent).toHaveBeenCalledTimes(1);
+    let polls = 1;
+    let attempt = 0;
+    const advanceOnePoll = async () => {
+      await act(async () =>
+        vi.advanceTimersByTimeAsync(remoteImagePollDelayMs(attempt)),
+      );
+      await settle();
+      attempt += 1;
+      polls += 1;
+      expect(fetchMock).toHaveBeenCalledTimes(polls);
+    };
+    // The first poll already counted as one miss.
+    for (let miss = 1; miss < CONTENT_TRANSIENT_POLLS_BEFORE_REQUEST; miss += 1) {
+      await advanceOnePoll();
+    }
+    expect(client.requestMessageContent).toHaveBeenCalledTimes(2);
+    for (let request = 3; request <= CONTENT_MAX_REQUESTS; request += 1) {
+      for (let miss = 0; miss < CONTENT_TRANSIENT_POLLS_BEFORE_REQUEST; miss += 1) {
+        await advanceOnePoll();
+      }
+      expect(client.requestMessageContent).toHaveBeenCalledTimes(request);
+    }
+    // One more run of misses with nothing left to ask: the image gives up
+    // instead of polling forever.
+    for (let miss = 0; miss < CONTENT_TRANSIENT_POLLS_BEFORE_REQUEST; miss += 1) {
+      await advanceOnePoll();
+    }
+    const finalPolls = fetchMock.mock.calls.length;
+    await act(async () => vi.advanceTimersByTimeAsync(10 * 60_000));
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(finalPolls);
+    expect(client.requestMessageContent).toHaveBeenCalledTimes(CONTENT_MAX_REQUESTS);
+    expect(signals.at(-1)?.aborted).toBe(false);
+  });
+
+  it("does not let the load deadline expire while the cache is still answering", async () => {
+    vi.useFakeTimers();
+    const answerDelayMs = 35_000;
+    const signals: AbortSignal[] = [];
+    const fetchMock = vi.fn(
+      (_input: string, init?: RequestInit) =>
+        new Promise<Response>((resolve) => {
+          if (init?.signal) signals.push(init.signal);
+          setTimeout(() => resolve(new Response(null, { status: 503 })), answerDelayMs);
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = contentClient(singleImage);
+
+    await act(async () => root.render(reader(client)));
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // Three slow answers straddle the 90-second deadline. A deadline armed
+    // once at the start would abort the third poll mid-flight; one that is
+    // re-armed by every answer lets the run finish and ask again.
+    let elapsed = 0;
+    for (let poll = 1; poll < CONTENT_TRANSIENT_POLLS_BEFORE_REQUEST; poll += 1) {
+      await act(async () => vi.advanceTimersByTimeAsync(answerDelayMs));
+      await settle();
+      await act(async () => vi.advanceTimersByTimeAsync(remoteImagePollDelayMs(poll - 1)));
+      await settle();
+      elapsed += answerDelayMs + remoteImagePollDelayMs(poll - 1);
+      expect(fetchMock).toHaveBeenCalledTimes(poll + 1);
+    }
+    expect(elapsed).toBeLessThan(REMOTE_IMAGE_LOAD_DEADLINE_MS);
+    await act(async () =>
+      vi.advanceTimersByTimeAsync(REMOTE_IMAGE_LOAD_DEADLINE_MS - elapsed + 1_000),
+    );
+    await settle();
+    expect(signals.at(-1)?.aborted).toBe(false);
+    expect(client.requestMessageContent).toHaveBeenCalledTimes(1);
+    await act(async () => vi.advanceTimersByTimeAsync(answerDelayMs));
+    await settle();
+    expect(client.requestMessageContent).toHaveBeenCalledTimes(2);
+    expect(signals.at(-1)?.aborted).toBe(false);
+  });
+
+  it("treats a missing image as one more ask, not a permanent stop", async () => {
+    vi.useFakeTimers();
+    const body = Buffer.from("verified remote image");
+    const createObjectURL = vi
+      .spyOn(URL, "createObjectURL")
+      .mockReturnValue("blob:https://brain.test/re-asked-remote");
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(new Response(null, { status: 404 }))
+      .mockResolvedValueOnce(verifiedRemoteResponse(body));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = contentClient(singleImage);
+
+    await act(async () => root.render(reader(client)));
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(client.requestMessageContent).toHaveBeenCalledTimes(2);
+
+    await act(async () => vi.advanceTimersByTimeAsync(remoteImagePollDelayMs(0)));
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(createObjectURL).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops on a refused image without spending an ask", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => new Response(null, { status: 410 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = contentClient(singleImage);
+
+    await act(async () => root.render(reader(client)));
+    await settle();
+    await act(async () => vi.advanceTimersByTimeAsync(10 * 60_000));
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(client.requestMessageContent).toHaveBeenCalledTimes(1);
+  });
+
+  it("draws the images' re-asks from the budget the body already spent on", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => new Response(null, { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = {
+      getMessageContent: vi.fn().mockResolvedValue(singleImage),
+      requestMessageContent: vi
+        .fn()
+        .mockResolvedValueOnce({
+          apiVersion: 1 as const,
+          accountId: ACCOUNT_ID,
+          messageId: message.messageId,
+          state: "not_requested" as const,
+        })
+        .mockResolvedValue(singleImage),
+    };
+
+    // The body's first answer is a dropped row, so the body asks a second
+    // time before it renders. That leaves the images one ask, not two.
+    await act(async () => root.render(reader(client)));
+    await settle();
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    await settle();
+    expect(client.requestMessageContent).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    let attempt = 0;
+    for (let miss = 1; miss < CONTENT_TRANSIENT_POLLS_BEFORE_REQUEST; miss += 1) {
+      await act(async () =>
+        vi.advanceTimersByTimeAsync(remoteImagePollDelayMs(attempt)),
+      );
+      await settle();
+      attempt += 1;
+    }
+    expect(client.requestMessageContent).toHaveBeenCalledTimes(CONTENT_MAX_REQUESTS);
+    for (let miss = 0; miss < CONTENT_TRANSIENT_POLLS_BEFORE_REQUEST; miss += 1) {
+      await act(async () =>
+        vi.advanceTimersByTimeAsync(remoteImagePollDelayMs(attempt)),
+      );
+      await settle();
+      attempt += 1;
+    }
+    const finalPolls = fetchMock.mock.calls.length;
+    await act(async () => vi.advanceTimersByTimeAsync(10 * 60_000));
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(finalPolls);
+    expect(finalPolls).toBe(2 * CONTENT_TRANSIENT_POLLS_BEFORE_REQUEST);
+    expect(client.requestMessageContent).toHaveBeenCalledTimes(CONTENT_MAX_REQUESTS);
+  });
+
+  it("stops after a second missing answer once the re-ask changed nothing", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => new Response(null, { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const client = contentClient(singleImage);
+
+    await act(async () => root.render(reader(client)));
+    await settle();
+    await act(async () => vi.advanceTimersByTimeAsync(remoteImagePollDelayMs(0)));
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(client.requestMessageContent).toHaveBeenCalledTimes(2);
+    await act(async () => vi.advanceTimersByTimeAsync(10 * 60_000));
+    await settle();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(client.requestMessageContent).toHaveBeenCalledTimes(2);
   });
 });
 

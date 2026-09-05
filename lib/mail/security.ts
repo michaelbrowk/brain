@@ -1511,6 +1511,8 @@ const MAIL_LOG_NUMERIC_FIELDS = Object.freeze([
   "cacheBytes",
   "temporaryBytes",
   "walBytes",
+  "remoteImageCount",
+  "remoteImageAttemptCount",
 ] as const);
 
 export type MailLogRecord = Readonly<Record<string, string | number>> & {

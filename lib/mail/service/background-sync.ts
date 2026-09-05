@@ -40,6 +40,7 @@ export class MailBackgroundSyncScheduler {
   private readonly privacyCache: MailBackgroundPrivacyCachePort | null;
   private readonly accountQueue: string[] = [];
   private readonly nextEligibleAt = new Map<string, number>();
+  private readonly syncBackoffUntil = new Map<string, number>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private controller: AbortController | null = null;
   private inFlight: Promise<void> | null = null;
@@ -89,6 +90,7 @@ export class MailBackgroundSyncScheduler {
     await this.inFlight?.catch(() => undefined);
     this.accountQueue.length = 0;
     this.nextEligibleAt.clear();
+    this.syncBackoffUntil.clear();
   }
 
   /**
@@ -171,6 +173,11 @@ export class MailBackgroundSyncScheduler {
           this.nextEligibleAt.delete(accountId);
         }
       }
+      for (const accountId of this.syncBackoffUntil.keys()) {
+        if (!active.has(accountId)) {
+          this.syncBackoffUntil.delete(accountId);
+        }
+      }
     }
 
     let pages = 0;
@@ -182,36 +189,43 @@ export class MailBackgroundSyncScheduler {
       const accountId = this.accountQueue.shift();
       if (accountId === undefined) return false;
       pages += 1;
-      try {
-        const syncHasMore = validateBackgroundSyncStep(
-          await this.port.runBackgroundSyncStep(
-            accountId,
-            { maxItems: this.maxItems },
-            signal,
-          ),
-        ).hasMore;
-        if (signal.aborted) return false;
-        if (syncHasMore) {
-          this.accountQueue.push(accountId);
-        } else {
-          let privacyHasMore = false;
-          if (this.privacyCache !== null) {
-            privacyHasMore = validatePrivacyCacheStep(
-              await this.privacyCache.runBackgroundPrefetchStep(
-                accountId,
-                signal,
-              ),
-            ).hasMore;
-          }
+      // The privacy cache runs on every page, whatever the provider said.
+      // A provider that is failing or has pages to spare must not starve
+      // it: a failure rests the provider for one interval while the cache
+      // keeps draining, and a busy provider interleaves with it.
+      let syncHasMore = false;
+      if ((this.syncBackoffUntil.get(accountId) ?? 0) <= Date.now()) {
+        try {
+          syncHasMore = validateBackgroundSyncStep(
+            await this.port.runBackgroundSyncStep(
+              accountId,
+              { maxItems: this.maxItems },
+              signal,
+            ),
+          ).hasMore;
+        } catch {
           if (signal.aborted) return false;
-          if (privacyHasMore) {
-            this.accountQueue.push(accountId);
-          } else {
-            this.nextEligibleAt.set(accountId, Date.now() + this.intervalMs);
-          }
+          this.syncBackoffUntil.set(accountId, Date.now() + this.intervalMs);
         }
-      } catch {
-        if (signal.aborted) return false;
+      }
+      if (signal.aborted) return false;
+      let privacyHasMore = false;
+      if (this.privacyCache !== null) {
+        try {
+          privacyHasMore = validatePrivacyCacheStep(
+            await this.privacyCache.runBackgroundPrefetchStep(
+              accountId,
+              signal,
+            ),
+          ).hasMore;
+        } catch {
+          if (signal.aborted) return false;
+        }
+      }
+      if (signal.aborted) return false;
+      if (syncHasMore || privacyHasMore) {
+        this.accountQueue.push(accountId);
+      } else {
         this.nextEligibleAt.set(accountId, Date.now() + this.intervalMs);
       }
     }

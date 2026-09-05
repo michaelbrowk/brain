@@ -24,7 +24,9 @@ function stubs(root: string, extra: Record<string, string> = {}) {
     curl: `echo "curl $*" >> "${log}"; case "$*" in *releases/latest*) printf '{"tag_name":"v0.9.3"}';; *docker-compose.yml*) printf 'services: {}\\n';; *api/health*) printf '{"version":"0.9.3"}';; *ifconfig.me*|*api.ipify*) printf '203.0.113.7';; esac`,
     getent: `echo "getent $*" >> "${log}"; echo "203.0.113.7 $2"`,
     ss: `echo "ss $*" >> "${log}"`,
-    openssl: `echo "openssl $*" >> "${log}"; echo 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef`,
+    // A low-entropy stand-in on purpose: a random-looking 64 hex string here
+    // reads as a real secret to the repository secret scanner.
+    openssl: `echo "openssl $*" >> "${log}"; echo deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef`,
     systemctl: `echo "systemctl $*" >> "${log}"`,
     id: `echo 0`,
     uname: `echo x86_64`,
@@ -212,7 +214,7 @@ describe("install.sh first install", () => {
     const envFile = path.join(r.installDir, ".env");
     const env = readFileSync(envFile, "utf8");
     expect(env).toContain(`NOTES_ROOT=${path.join(r.installDir, "notes")}`);
-    expect(env).toContain("AUTH_SECRET=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+    expect(env).toContain("AUTH_SECRET=deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
     expect(env).toContain("AUTH_PASSWORD_HASH=$$2a$$12$$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ012345678");
     expect(env).toContain("BRAIN_PUBLIC_ORIGIN=https://notes.example.com");
     expect(env).not.toContain("abc12345");

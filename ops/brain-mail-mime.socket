@@ -10,8 +10,9 @@ SocketUser=brain-mail
 SocketGroup=brain-mail
 SocketMode=0600
 DirectoryMode=0710
-Backlog=1
-MaxConnections=1
+# Matches concurrentMimeParsers in lib/mail/security.ts; the two move together.
+Backlog=2
+MaxConnections=2
 RemoveOnStop=true
 
 [Install]

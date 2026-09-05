@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TreeNode } from "@/lib/store/types";
 import { apiFetch } from "@/lib/client";
 import { MobilePagesView } from "./mobile-pages-view";
+import { resetUpdateStatusForTests } from "./settings/use-update-status";
 import { Shell } from "./shell";
 
 vi.mock("@/lib/client", () => ({
@@ -179,6 +180,7 @@ describe("mobile navigation surfaces", () => {
       }
     ).IS_REACT_ACT_ENVIRONMENT = true;
     localStorage.clear();
+    resetUpdateStatusForTests();
     apiFetchMock.mockReset();
     apiFetchMock.mockImplementation(async (input) => {
       const url = String(input);
@@ -372,6 +374,58 @@ describe("mobile navigation surfaces", () => {
     expect(
       document.querySelector('[data-testid="mobile-settings-root"]'),
     ).toBeNull();
+  });
+
+  it("marks the Pages drawer's Settings gear while a newer release is available", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        response({
+          apiVersion: 1,
+          version: "0.9.0",
+          commit: "a".repeat(40),
+          buildTime: "2026-09-01T18:00:00Z",
+          updateCheck: "on",
+          checkedAt: "2026-09-02T09:00:00Z",
+          latest: {
+            version: "0.9.1",
+            url: "https://github.com/michaelbrowk/brain/releases/tag/v0.9.1",
+            publishedAt: "2026-09-02T08:00:00Z",
+          },
+          updateAvailable: true,
+          error: null,
+        }),
+      ),
+    );
+
+    await act(async () =>
+      root.render(
+        <MobilePagesView
+          open
+          tree={[node("page", "Page")]}
+          selectedId={null}
+          footer={null}
+          returnFocusRef={createRef<HTMLButtonElement>()}
+          fallbackFocusRef={createRef<HTMLElement>()}
+          nestedModalOpen={false}
+          onClose={() => {}}
+          onOpenSettings={() => {}}
+          onSelect={() => {}}
+        />,
+      ),
+    );
+    await settle();
+
+    const gear = document.querySelector(
+      '[data-settings-trigger="mobile-pages"]',
+    ) as HTMLButtonElement;
+    expect(gear.getAttribute("aria-label")).toBe("Settings");
+    // the same dot the desktop Settings row wears, on the gear itself
+    const dot = await findLazy(
+      () => gear.querySelector('[aria-label="Update available"]'),
+      "update dot on the Settings gear",
+    );
+    expect(dot.className).toContain("size-1.5 rounded-full bg-current");
   });
 
   it("opens Settings from the Pages drawer and Back restores the drawer", async () => {

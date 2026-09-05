@@ -469,6 +469,11 @@ export const CONTENT_POLL_DEADLINE_MS = 30_000;
 export const CONTENT_POLL_BASE_DELAY_MS = 300;
 export const CONTENT_POLL_MAX_DELAY_MS = 2_400;
 export const CONTENT_MAX_REQUESTS = 3;
+/** Consecutive `transient` polls before the reader asks again instead of
+ *  watching: the service retries a transient failure four times, 1s, 2s,
+ *  4s apart, and after that nothing is queued, so a spent entry never
+ *  becomes ready by being polled. */
+export const CONTENT_TRANSIENT_POLLS_BEFORE_REQUEST = 3;
 const MAIL_FRAME_MAX_AUTO_HEIGHT = 16_000;
 
 function SanitizedHtmlMessageFrame({ documentHtml }: { readonly documentHtml: string }) {
@@ -597,6 +602,7 @@ function MailMessageContentView({
               let content = await client.requestMessageContent(input, controller.signal);
               let pollAttempt = 0;
               let requests = 1;
+              let transientPolls = 0;
               while (!controller.signal.aborted) {
                 if (content.state === "ready") {
                   setState({ kind: "ready", content });
@@ -611,20 +617,26 @@ function MailMessageContentView({
                   pollDelayMs(pollAttempt),
                 );
                 if (!canPoll) return;
-                // "fetching" and "transient" both mean the service still has
-                // work in hand. "not_requested" means the entry is gone — a
-                // dropped cache row never becomes ready on its own, and
-                // polling it just shows the preview until the deadline. Ask
-                // again, a bounded number of times: a request is what
-                // enqueues the work.
-                if (
-                  content.state === "not_requested" &&
-                  requests < CONTENT_MAX_REQUESTS
-                ) {
+                // "fetching" means the service still has work in hand.
+                // "not_requested" means the entry is gone — a dropped cache
+                // row never becomes ready on its own, and polling it just
+                // shows the preview until the deadline. "transient" means the
+                // service is between retries, and its budget is short: a run
+                // of transient polls is the sign it has been spent. In both
+                // cases ask again, a bounded number of times: a request is
+                // what enqueues the work, and on an entry still retrying the
+                // service answers "fetching" harmlessly.
+                const spent =
+                  content.state === "not_requested" ||
+                  transientPolls >= CONTENT_TRANSIENT_POLLS_BEFORE_REQUEST;
+                if (spent && requests < CONTENT_MAX_REQUESTS) {
                   requests += 1;
+                  transientPolls = 0;
                   content = await client.requestMessageContent(input, controller.signal);
                 } else {
                   content = await client.getMessageContent(input, controller.signal);
+                  transientPolls =
+                    content.state === "transient" ? transientPolls + 1 : 0;
                 }
                 pollAttempt += 1;
               }

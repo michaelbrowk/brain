@@ -40,6 +40,22 @@ run() {
 
 require_root() { [ "$(id -u)" = "0" ] || die "Run this with sudo: it installs Docker and needs root for that."; }
 
+# Every apt call goes through here, so none can miss the lock timeout: on a
+# machine that has just booted, cloud-init's own apt holds the dpkg lock for
+# a while, and without the timeout apt dies on it with its raw error. The
+# wait is announced once, before the first call, and only when the lock is
+# held at that moment and fuser is there to ask (psmisc is not required).
+APT_WAIT_ANNOUNCED=0
+apt_get() {
+  if [ "$APT_WAIT_ANNOUNCED" = 0 ]; then
+    APT_WAIT_ANNOUNCED=1
+    if command -v fuser >/dev/null && fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+      say "Waiting for other package managers to finish, if any..."
+    fi
+  fi
+  run apt-get -o DPkg::Lock::Timeout=300 "$@"
+}
+
 # The value of KEY in a KEY=value file (.env, os-release): the first such
 # line, without trailing blanks and without the single or double quotes
 # around it, which Compose and os-release both allow. Empty when absent.
@@ -78,8 +94,8 @@ preflight() {
   [ "$mb" -ge 1536 ] || die "Brain and its mail service want 2 GB of RAM; this machine has ${mb} MB."
   [ "$mb" -ge 2048 ] || say "Note: less than 2 GB of RAM; it runs, with little headroom."
   case "$INSTALL_DIR" in /*) ;; *) die "BRAIN_INSTALL_DIR must be an absolute path." ;; esac
-  command -v curl >/dev/null || run apt-get install -y curl
-  command -v openssl >/dev/null || run apt-get install -y openssl
+  command -v curl >/dev/null || apt_get install -y curl
+  command -v openssl >/dev/null || apt_get install -y openssl
 }
 
 # Docker's own apt repository, the one for this distribution: Ubuntu and its
@@ -100,14 +116,14 @@ ensure_docker() {
   # preflight has already limited the machine to these two.
   case "$(uname -m)" in x86_64) arch=amd64 ;; *) arch=arm64 ;; esac
   say "Docker: installing from Docker's apt repository for $distro $codename (this replaces the distribution's docker.io package if it is present)"
-  run apt-get update
-  run apt-get install -y ca-certificates curl gnupg
+  apt_get update
+  apt_get install -y ca-certificates curl gnupg
   run install -m 0755 -d /etc/apt/keyrings
   run curl -fsSL "https://download.docker.com/linux/$distro/gpg" -o /etc/apt/keyrings/docker.asc
   run chmod a+r /etc/apt/keyrings/docker.asc
   run bash -c "echo 'deb [arch=$arch signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$distro $codename stable' > /etc/apt/sources.list.d/docker.list"
-  run apt-get update
-  run apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  apt_get update
+  apt_get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
   run systemctl enable --now docker
 }
 
@@ -238,13 +254,13 @@ ensure_caddy() {
   fi
   if command -v caddy >/dev/null; then say "Caddy: present"; else
     say "Caddy: installing from its apt repository"
-    run apt-get update
-    run apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+    apt_get update
+    apt_get install -y debian-keyring debian-archive-keyring apt-transport-https curl
     run bash -c 'curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg'
     run bash -c 'curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt > /etc/apt/sources.list.d/caddy-stable.list'
     run chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list
-    run apt-get update
-    run apt-get install -y caddy
+    apt_get update
+    apt_get install -y caddy
   fi
   mkdir -p "$INSTALL_DIR"
   printf '%s\n%s {\n\treverse_proxy 127.0.0.1:3020\n}\n' "$CADDY_MARK" "$DOMAIN" > "$INSTALL_DIR/Caddyfile"

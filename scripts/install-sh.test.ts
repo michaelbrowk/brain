@@ -181,6 +181,11 @@ function osRelease(body: string) {
   };
 }
 
+/** Every apt call waits for the dpkg lock, which cloud-init holds for a while
+ *  on a machine that has just booted. */
+const APT = "apt-get -o DPkg::Lock::Timeout=300";
+const WAITING = "Waiting for other package managers to finish, if any...";
+
 /** Docker not installed yet: `compose version` fails. hash-password still
  *  answers, standing in for the image the plan has by then installed. */
 const DOCKER_ABSENT = `echo "docker $*" >> "__LOG__"; case "$*" in *"compose version"*) exit 1;; *hash-password*) cat >/dev/null; echo '$2a$12$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ012345678';; esac`;
@@ -191,10 +196,14 @@ describe("install.sh first install", () => {
     expect(r.status).toBe(0);
     const out = r.stdout;
     expect(out).toContain("Docker: installing from Docker's apt repository for ubuntu noble (this replaces the distribution's docker.io package if it is present)");
-    expect(out).toContain("would run: apt-get install -y ca-certificates curl gnupg");
+    expect(out).toContain(`would run: ${APT} install -y ca-certificates curl gnupg`);
+    // every apt call in the plan, Docker's and Caddy's, carries the lock timeout
+    const apt = out.match(/^would run: apt-get .*$/gm) ?? [];
+    expect(apt.length).toBeGreaterThan(4);
+    for (const line of apt) expect(line.startsWith(`would run: ${APT} `)).toBe(true);
     expect(out).toContain("would run: curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc");
     expect(out).toContain("would run: bash -c echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable' > /etc/apt/sources.list.d/docker.list");
-    expect(out).toContain("would run: apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin");
+    expect(out).toContain(`would run: ${APT} install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin`);
     expect(out).toContain("Latest release: 0.9.3");
     // downloaded next to the compose file and moved into place, so a dropped transfer cannot truncate an existing one
     const fresh = path.join(r.installDir, ".docker-compose.yml.new");
@@ -215,6 +224,21 @@ describe("install.sh first install", () => {
     expect(statSync(envFile).mode & 0o777).toBe(0o600);
     expect(existsSync(path.join(r.installDir, "notes"))).toBe(true);
     expect(existsSync(path.join(r.installDir, "docker-compose.yml"))).toBe(true);
+  });
+
+  it("says a wait is possible when another package manager holds the dpkg lock", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" }, [], { docker: DOCKER_ABSENT, fuser: "exit 0" }, undefined, osRelease(UBUNTU));
+    expect(r.status).toBe(0);
+    // once, right before the first apt call
+    expect(r.stdout.match(new RegExp(`^${WAITING.replace(/\./g, "\\.")}$`, "gm"))).toHaveLength(1);
+    expect(r.stdout.indexOf(WAITING)).toBeLessThan(r.stdout.indexOf(`would run: ${APT} update`));
+  });
+
+  it("says nothing about waiting when the dpkg lock is free", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" }, [], { docker: DOCKER_ABSENT, fuser: "exit 1" }, undefined, osRelease(UBUNTU));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(`would run: ${APT} update`);
+    expect(r.stdout).not.toContain(WAITING);
   });
 
   it("takes Docker's Debian repository on Debian, under the Debian codename", () => {
@@ -260,7 +284,7 @@ describe("install.sh first install", () => {
     const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("Docker: present");
-    expect(r.stdout).not.toContain("apt-get install -y docker-ce");
+    expect(r.stdout).not.toContain("install -y docker-ce");
   });
 
   it("keeps Brain local when no domain is given", () => {
@@ -368,8 +392,8 @@ describe("install.sh TLS", () => {
   it("installs Caddy from its apt repo and writes one site block when a domain is given", () => {
     const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "notes.example.com" });
     expect(r.status).toBe(0);
-    expect(r.stdout.indexOf("would run: apt-get update")).toBeLessThan(r.stdout.indexOf("would run: apt-get install -y debian-keyring"));
-    expect(r.stdout).toContain("would run: apt-get install -y caddy");
+    expect(r.stdout.indexOf(`would run: ${APT} update`)).toBeLessThan(r.stdout.indexOf(`would run: ${APT} install -y debian-keyring`));
+    expect(r.stdout).toContain(`would run: ${APT} install -y caddy`);
     expect(readFileSync(path.join(r.installDir, "Caddyfile"), "utf8")).toBe(OURS);
     // no Caddyfile on this machine yet, so the copy into place is planned
     expect(r.stdout).toContain(`would run: install -m 0644 ${path.join(r.installDir, "Caddyfile")} /etc/caddy/Caddyfile`);
@@ -422,7 +446,7 @@ describe("install.sh TLS", () => {
     const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "notes.example.com" }, [], { caddy: "exit 0" });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("Caddy: present");
-    expect(r.stdout).not.toContain("apt-get install -y caddy");
+    expect(r.stdout).not.toContain("install -y caddy");
     expect(r.stdout).toContain("would run: install -m 0644");
     expect(r.stdout).toContain("would run: systemctl reload caddy");
   });
@@ -466,7 +490,7 @@ describe("install.sh TLS", () => {
     const r = spawnSync("bash", [SCRIPT], { env: scriptEnv({ PATH, HOME: root, BRAIN_INSTALL_DRY_RUN: "1", BRAIN_INSTALL_DIR: path.join(root, "o"), BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "notes.example.com" }), encoding: "utf8" });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("notes.example.com resolves to 198.51.100.9 but this machine is 203.0.113.7. Point the A record here; Caddy keeps retrying until it can get a certificate.");
-    expect(r.stdout).toContain("would run: apt-get install -y caddy");
+    expect(r.stdout).toContain(`would run: ${APT} install -y caddy`);
   });
 
   it("notes when the public address cannot be read, and carries on", () => {
@@ -475,7 +499,7 @@ describe("install.sh TLS", () => {
     });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain("Note: could not compare DNS with this machine's address; Caddy keeps retrying until the record points here.");
-    expect(r.stdout).toContain("would run: apt-get install -y caddy");
+    expect(r.stdout).toContain(`would run: ${APT} install -y caddy`);
   });
 
   it("normalises a pasted URL down to the bare hostname", () => {

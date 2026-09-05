@@ -109,6 +109,29 @@ describe("shared-page password rate limiting", () => {
     expect(response.status).toBe(404);
     expect(compare).not.toHaveBeenCalled();
   });
+
+  it("answers 404 before bcrypt when the public link has no password", async () => {
+    const compare = vi.fn();
+    vi.doMock("bcryptjs", () => ({ default: { compare } }));
+    vi.doMock("@/lib/store", () => ({
+      getStore: async () => ({
+        readPage: async () => ({
+          meta: { id: "shared-page", public: true, shareVersion: 3 },
+        }),
+        isDeleted: () => false,
+      }),
+      isNotFound: () => false,
+    }));
+    vi.doMock("@/lib/auth", () => ({
+      createShareToken: vi.fn(),
+    }));
+    const { POST } = await import("./route");
+
+    const response = await POST(request("correct"));
+
+    expect(response.status).toBe(404);
+    expect(compare).not.toHaveBeenCalled();
+  });
 });
 
 describe("the edit mint", () => {
@@ -135,6 +158,14 @@ describe("the edit mint", () => {
     });
   }
 
+  function readRequest(password: string) {
+    return new NextRequest("https://brain.example/api/share-auth", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: "root-1", password }),
+    });
+  }
+
   function mockRoot(meta: Record<string, unknown>) {
     vi.doMock("@/lib/store", () => ({
       getStore: async () => ({
@@ -145,14 +176,14 @@ describe("the edit mint", () => {
     }));
   }
 
-  it("mints an edit cookie on an unlocked editable root without touching the read bucket", async () => {
+  it("mints an edit cookie on an unlocked editable root and sets no read cookie", async () => {
     mockRoot({ public: true, shareEdit: true, shareVersion: 2 });
     const { POST } = await import("./route");
 
     const res = await POST(editRequest({ id: "root-1", name: "  Ada  " }));
 
     expect(res.status).toBe(200);
-    const cookie = res.cookies.get("brain_share_edit_root-1");
+    const cookie = res.cookies.get("brain_edit_share_root-1");
     expect(cookie?.value).toBeTruthy();
     expect(cookie?.httpOnly).toBe(true);
     expect(cookie?.sameSite).toBe("lax");
@@ -207,11 +238,30 @@ describe("the edit mint", () => {
     );
 
     expect(res.status).toBe(200);
-    expect(res.cookies.get("brain_share_edit_root-1")?.value).toBeTruthy();
+    expect(res.cookies.get("brain_edit_share_root-1")?.value).toBeTruthy();
   });
 
-  it("sets both cookies when it verified the password itself", async () => {
-    vi.doMock("bcryptjs", () => ({ default: { compare: async () => true } }));
+  it("refuses a read cookie minted at an earlier shareVersion", async () => {
+    mockRoot({
+      public: true,
+      shareEdit: true,
+      sharePass: "bcrypt-hash",
+      shareVersion: 3,
+    });
+    const stale = await createShareToken("root-1", 2);
+    const { POST } = await import("./route");
+
+    const res = await POST(
+      editRequest({ id: "root-1", name: "Ada" }, `brain_share_root-1=${stale}`),
+    );
+
+    expect(res.status).toBe(401);
+    await expect(res.json()).resolves.toEqual({ error: "wrong password" });
+  });
+
+  it("sets both cookies when it verified the password itself, and resets the read bucket", async () => {
+    const compare = vi.fn().mockResolvedValue(false);
+    vi.doMock("bcryptjs", () => ({ default: { compare } }));
     mockRoot({
       public: true,
       shareEdit: true,
@@ -220,13 +270,28 @@ describe("the edit mint", () => {
     });
     const { POST } = await import("./route");
 
+    for (let i = 0; i < 4; i += 1) {
+      const miss = await POST(
+        editRequest({ id: "root-1", name: "Ada", password: "wrong" }),
+      );
+      expect(miss.status).toBe(401);
+    }
+    compare.mockResolvedValueOnce(true);
     const res = await POST(
       editRequest({ id: "root-1", name: "Ada", password: "hunter2" }),
     );
 
     expect(res.status).toBe(200);
-    expect(res.cookies.get("brain_share_edit_root-1")?.value).toBeTruthy();
+    expect(res.cookies.get("brain_edit_share_root-1")?.value).toBeTruthy();
     expect(res.cookies.get("brain_share_root-1")?.value).toBeTruthy();
+
+    // The success reset the shared bucket the way the read path does: five
+    // more guesses through the read path all reach bcrypt instead of a 429.
+    for (let i = 0; i < 5; i += 1) {
+      const miss = await POST(readRequest("wrong"));
+      expect(miss.status).toBe(401);
+    }
+    expect(compare).toHaveBeenCalledTimes(10);
   });
 
   it("spends the read path's bcrypt budget on a password guess, so the mint widens nothing", async () => {
@@ -254,13 +319,7 @@ describe("the edit mint", () => {
     expect(compare).toHaveBeenCalledTimes(5);
 
     // The same five guesses have locked the read path too: one budget per page.
-    const readBlocked = await POST(
-      new NextRequest("https://brain.example/api/share-auth", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ id: "root-1", password: "correct" }),
-      }),
-    );
+    const readBlocked = await POST(readRequest("correct"));
     expect(readBlocked.status).toBe(429);
     expect(compare).toHaveBeenCalledTimes(5);
   });

@@ -235,9 +235,12 @@ export async function verifyShareToken(
 
 /** The cookie a link visitor holds while they are allowed to write. Root-scoped
  *  and HttpOnly, so a cross-site page cannot read the `vid` inside it, which is
- *  what makes the `x-brain-share-vid` double submit worth anything. */
+ *  what makes the `x-brain-share-vid` double submit worth anything. The prefix
+ *  is `brain_edit_share_`, not `brain_share_edit_`: the read cookie is
+ *  `brain_share_<id>`, and with a shared prefix a page id starting with `edit_`
+ *  would name another page's edit cookie. */
 export function shareEditCookieName(rootId: string): string {
-  return `brain_share_edit_${rootId}`;
+  return `brain_edit_share_${rootId}`;
 }
 
 export async function createShareEditToken(

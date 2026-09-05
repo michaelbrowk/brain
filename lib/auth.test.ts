@@ -177,9 +177,11 @@ describe("the share-edit token domain", () => {
     // read <-> edit
     await expect(verifyShareEditToken(read, "root-1", 3)).resolves.toBeNull();
     await expect(verifyShareToken(edit, "root-1", 3)).resolves.toBe(false);
+    // version 0 is the only value that reaches the legacy raw-secret branch
+    await expect(verifyShareToken(edit, "root-1", 0)).resolves.toBe(false);
   });
 
   it("names the cookie after the root", () => {
-    expect(shareEditCookieName("root-1")).toBe("brain_share_edit_root-1");
+    expect(shareEditCookieName("root-1")).toBe("brain_edit_share_root-1");
   });
 });

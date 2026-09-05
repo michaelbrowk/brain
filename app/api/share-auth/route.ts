@@ -146,6 +146,9 @@ async function mintEditToken(
     const shareVersion = page.meta.shareVersion ?? 0;
     let verifiedPassword = false;
     if (page.meta.sharePass) {
+      // A valid read cookie already proves the password at this version, so a
+      // wrong password sent alongside a good cookie is accepted on purpose and
+      // a bcrypt comparison is saved.
       const reader = await verifyShareToken(
         req.cookies.get(`brain_share_${id}`)?.value,
         id,

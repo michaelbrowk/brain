@@ -359,13 +359,18 @@ describe("install.sh first install", () => {
   });
 });
 
+/** The site file the script writes, its first line marking it as the script's own. */
+const OURS = "# managed by Brain install.sh\nnotes.example.com {\n\treverse_proxy 127.0.0.1:3020\n}\n";
+/** Someone else's file, with the script's block added by hand after the refusal sentence. */
+const THEIRS_WITH_OURS = "example.org {\n\troot * /srv/example\n\tfile_server\n}\nnotes.example.com {\n\treverse_proxy 127.0.0.1:3020\n}\n";
+
 describe("install.sh TLS", () => {
   it("installs Caddy from its apt repo and writes one site block when a domain is given", () => {
     const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "notes.example.com" });
     expect(r.status).toBe(0);
     expect(r.stdout.indexOf("would run: apt-get update")).toBeLessThan(r.stdout.indexOf("would run: apt-get install -y debian-keyring"));
     expect(r.stdout).toContain("would run: apt-get install -y caddy");
-    expect(readFileSync(path.join(r.installDir, "Caddyfile"), "utf8")).toBe("notes.example.com {\n\treverse_proxy 127.0.0.1:3020\n}\n");
+    expect(readFileSync(path.join(r.installDir, "Caddyfile"), "utf8")).toBe(OURS);
     // no Caddyfile on this machine yet, so the copy into place is planned
     expect(r.stdout).toContain(`would run: install -m 0644 ${path.join(r.installDir, "Caddyfile")} /etc/caddy/Caddyfile`);
     expect(r.stdout).toContain("would run: systemctl reload caddy");
@@ -385,14 +390,25 @@ describe("install.sh TLS", () => {
     expect(existsSync(path.join(r.installDir, "Caddyfile"))).toBe(false);
   });
 
-  it("replaces its own Caddyfile on a re-run", () => {
+  it("replaces its own Caddyfile on a re-run, known by its first line", () => {
     const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "notes.example.com" }, [], { caddy: "exit 0" }, undefined, (dir) => {
       const file = path.join(dir, "..", "Caddyfile-etc");
-      writeFileSync(file, "notes.example.com {\n\treverse_proxy 127.0.0.1:3020\n}\n");
+      writeFileSync(file, OURS);
       return { BRAIN_CADDYFILE: file };
     });
     expect(r.status).toBe(0);
     expect(r.stdout).toContain(`would run: install -m 0644 ${path.join(r.installDir, "Caddyfile")} ${path.join(r.root, "Caddyfile-etc")}`);
+  });
+
+  it("refuses a file where the script's block was added by hand next to other sites", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "notes.example.com" }, [], { caddy: "exit 0" }, undefined, (dir) => {
+      const file = path.join(dir, "..", "Caddyfile-etc");
+      writeFileSync(file, THEIRS_WITH_OURS);
+      return { BRAIN_CADDYFILE: file };
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toBe(`${path.join(r.root, "Caddyfile-etc")} already has a site in it. Add notes.example.com { reverse_proxy 127.0.0.1:3020 } yourself, or install Brain without a domain.\n`);
+    expect(readFileSync(path.join(r.root, "Caddyfile-etc"), "utf8")).toBe(THEIRS_WITH_OURS);
   });
 
   it("skips Caddy entirely without a domain", () => {
@@ -466,7 +482,7 @@ describe("install.sh TLS", () => {
     const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "https://Notes.Example.com/" });
     expect(r.status).toBe(0);
     expect(readFileSync(path.join(r.installDir, ".env"), "utf8")).toContain("BRAIN_PUBLIC_ORIGIN=https://notes.example.com");
-    expect(readFileSync(path.join(r.installDir, "Caddyfile"), "utf8").startsWith("notes.example.com {")).toBe(true);
+    expect(readFileSync(path.join(r.installDir, "Caddyfile"), "utf8")).toBe(OURS);
   });
 
   it("refuses a domain that is not a hostname", () => {
@@ -512,6 +528,8 @@ describe("install.sh run, upgrade, uninstall", () => {
     expect(r.status).toBe(0);
     const tail = `${closing("http://localhost:3020", path.join(r.installDir, "notes"))}\nTunnel:    ssh -L 3020:127.0.0.1:3020 misha@203.0.113.7\n`;
     expect(r.stdout.endsWith(tail)).toBe(true);
+    // asked once, and never allowed to hang the run after the closing message
+    expect(r.calls().match(/^curl -fsSL --connect-timeout 2 --max-time 4 https:\/\/api\.ipify\.org$/gm)).toHaveLength(1);
   });
 
   it("falls back to the hostname in the tunnel line when the public address cannot be read", () => {
@@ -619,19 +637,22 @@ describe("install.sh run, upgrade, uninstall", () => {
     expect(r.stdout.trim().split("\n").at(-1)).toBe(`Your notes are still in ${notes}.`);
   });
 
-  it("uninstall removes the Caddy site it wrote and leaves another site alone", () => {
+  it("uninstall removes the Caddy site it wrote and leaves anyone else's alone, block or no block", () => {
     const first = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "notes.example.com" });
     const file = path.join(first.root, "Caddyfile-etc");
-    writeFileSync(file, "notes.example.com {\n\treverse_proxy 127.0.0.1:3020\n}\n");
+    writeFileSync(file, OURS);
     const ours = rerun(first, ["--uninstall"], {}, { BRAIN_CADDYFILE: file });
     expect(ours.status).toBe(0);
     expect(ours.stdout).toContain(`would run: rm -f ${file}`);
     expect(ours.stdout).toContain("would run: systemctl reload caddy");
-    writeFileSync(file, "example.org {\n\troot * /srv/example\n}\n");
-    const theirs = rerun(first, ["--uninstall"], {}, { BRAIN_CADDYFILE: file });
-    expect(theirs.status).toBe(0);
-    expect(theirs.stdout).not.toContain(`rm -f ${file}`);
-    expect(theirs.stdout).not.toContain("systemctl reload caddy");
+    for (const body of ["example.org {\n\troot * /srv/example\n}\n", THEIRS_WITH_OURS]) {
+      writeFileSync(file, body);
+      const theirs = rerun(first, ["--uninstall"], {}, { BRAIN_CADDYFILE: file });
+      expect(theirs.status).toBe(0);
+      expect(theirs.stdout).not.toContain(`rm -f ${file}`);
+      expect(theirs.stdout).not.toContain("caddy");
+      expect(readFileSync(file, "utf8")).toBe(body);
+    }
   });
 
   it("uninstall spares the directories above notes nested deeper in the install directory", () => {

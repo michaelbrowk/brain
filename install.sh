@@ -9,6 +9,10 @@ INSTALL_DIR="${BRAIN_INSTALL_DIR:-/opt/brain}"
 RELEASES_API="${BRAIN_RELEASES_API:-https://api.github.com/repos/michaelbrowk/brain/releases/latest}"
 RAW="https://raw.githubusercontent.com/michaelbrowk/brain"
 CADDYFILE="${BRAIN_CADDYFILE:-/etc/caddy/Caddyfile}"
+# The first line of the site file this script writes. Only a file that
+# starts with it is replaced or removed; anyone else's is left alone, even
+# one with the script's block added by hand.
+CADDY_MARK="# managed by Brain install.sh"
 OS_RELEASE="${BRAIN_OS_RELEASE:-/etc/os-release}"
 # This machine's public address, once asked for. Empty until then, and empty
 # when no service would say.
@@ -198,11 +202,12 @@ check_ports() {
   done
 }
 
-# Asked once, of a service that echoes the caller's address. Anything but an
-# address (a captive portal page, say) counts as no answer.
+# Asked once, of a service that echoes the caller's address, with a timeout
+# so that a blackholed 443 cannot hold the run. Anything but an address (a
+# captive portal page, say) counts as no answer.
 public_address() {
   [ -z "$PUBLIC" ] || return 0
-  PUBLIC="$(curl -fsSL https://api.ipify.org 2>/dev/null || curl -fsSL https://ifconfig.me 2>/dev/null)" || true
+  PUBLIC="$(curl -fsSL --connect-timeout 2 --max-time 4 https://api.ipify.org 2>/dev/null || curl -fsSL --connect-timeout 2 --max-time 4 https://ifconfig.me 2>/dev/null)" || true
   case "$PUBLIC" in *[!0-9a-f.:]*) PUBLIC="" ;; esac
 }
 
@@ -225,8 +230,10 @@ check_dns() {
 # enough on a fresh install as well as on a re-run. A site file that is not
 # this script's own would be replaced by the copy, so it is refused first,
 # before anything is installed.
+caddyfile_is_ours() { [ -f "$CADDYFILE" ] && [ "$(head -n 1 "$CADDYFILE")" = "$CADDY_MARK" ]; }
+
 ensure_caddy() {
-  if [ -f "$CADDYFILE" ] && ! grep -q 'reverse_proxy 127.0.0.1:3020' "$CADDYFILE"; then
+  if [ -f "$CADDYFILE" ] && ! caddyfile_is_ours; then
     die "$CADDYFILE already has a site in it. Add $DOMAIN { reverse_proxy 127.0.0.1:3020 } yourself, or install Brain without a domain."
   fi
   if command -v caddy >/dev/null; then say "Caddy: present"; else
@@ -240,7 +247,7 @@ ensure_caddy() {
     run apt-get install -y caddy
   fi
   mkdir -p "$INSTALL_DIR"
-  printf '%s {\n\treverse_proxy 127.0.0.1:3020\n}\n' "$DOMAIN" > "$INSTALL_DIR/Caddyfile"
+  printf '%s\n%s {\n\treverse_proxy 127.0.0.1:3020\n}\n' "$CADDY_MARK" "$DOMAIN" > "$INSTALL_DIR/Caddyfile"
   run install -m 0644 "$INSTALL_DIR/Caddyfile" "$CADDYFILE"
   run systemctl reload caddy
 }
@@ -323,16 +330,17 @@ finish() {
 # the notes directory and every directory that contains it. The notes path
 # comes from .env, so notes moved elsewhere inside the directory are spared as
 # well, and the default notes directory is spared whatever .env says. The
-# comparison is textual: a NOTES_ROOT spelled with a doubled slash or a
-# symlink is not recognised and not protected. Docker or Caddy already gone
-# is no reason to stop before the removal and the last sentence.
+# comparison is textual: a NOTES_ROOT spelled with a doubled slash, through a
+# symlink or as a relative path is not recognised and not protected. Docker
+# or Caddy already gone is no reason to stop before the removal and the last
+# sentence.
 uninstall() {
   local notes=""
   if [ -f "$INSTALL_DIR/.env" ]; then notes="$(file_value "$INSTALL_DIR/.env" NOTES_ROOT)"; fi
   notes="${notes%/}"
   NOTES_DIR="${notes:-$INSTALL_DIR/notes}"
   if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then compose down -v || true; fi
-  if [ -f "$CADDYFILE" ] && grep -q 'reverse_proxy 127.0.0.1:3020' "$CADDYFILE"; then
+  if caddyfile_is_ours; then
     run rm -f "$CADDYFILE"
     run systemctl reload caddy || true
   fi

@@ -111,7 +111,8 @@ path with its image tag moved, which `pnpm release` does.
 Running the same command again upgrades in place. `.env` and the notes stay,
 the compose file is downloaded again from the new tag, and the containers are
 pulled and restarted. `--uninstall` takes the containers and their volumes
-down, removes `/etc/caddy/Caddyfile` if it is the one the script wrote, and
+down, removes `/etc/caddy/Caddyfile` if it is the one the script wrote (its
+first line, `# managed by Brain install.sh`, says so), and
 deletes every entry of `/opt/brain` except the notes directory that
 `NOTES_ROOT` in `.env` names, the directories above it, and `/opt/brain/notes`
 in any case:

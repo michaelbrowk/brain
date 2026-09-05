@@ -68,6 +68,7 @@ curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/main/install.sh 
 That line, password included, lands in your shell history. Start it with a
 space to keep it out (bash with `HISTCONTROL=ignorespace`, zsh with
 `HIST_IGNORE_SPACE`), or delete the entry afterwards.
+
 `BRAIN_DOMAIN=` with nothing after it means no domain. Brain then listens on
 this machine only, at `http://localhost:3020`, and the closing message shows
 the ssh tunnel that reaches it from another computer.

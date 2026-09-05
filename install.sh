@@ -110,7 +110,65 @@ ask_domain() {
     printf 'Domain name for this Brain, or leave empty to keep it on this machine only: '
     read -r domain <&3 || no_terminal
   fi
-  if [ -n "$domain" ]; then ORIGIN="https://$domain"; else ORIGIN="http://localhost:3020"; fi
+  if [ -z "$domain" ]; then DOMAIN=""; ORIGIN="http://localhost:3020"; return 0; fi
+  # A pasted address is fine: lowercase it, drop the scheme and a trailing
+  # slash, then insist on a hostname. Labels of [a-z0-9-], no edge hyphen,
+  # at least one dot, 253 characters at most.
+  domain="$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')"
+  domain="${domain#http://}"; domain="${domain#https://}"; domain="${domain%/}"
+  local label='[a-z0-9]([a-z0-9-]*[a-z0-9])?'
+  [ "${#domain}" -le 253 ] && [[ $domain =~ ^($label\.)+$label$ ]] || die "Domain: use a bare hostname like notes.example.com."
+  DOMAIN="$domain"; ORIGIN="https://$domain"
+}
+
+# Caddy needs 80 and 443. Checked before anything for the domain is installed,
+# so a machine that already runs a web server is left as it was. Caddy's own
+# listeners are the expected state on a re-run and pass.
+check_ports() {
+  command -v ss >/dev/null || { say "Note: ss is not available, skipping the port check."; return 0; }
+  local listening port line name
+  listening="$(ss -ltnp 2>/dev/null || true)"
+  for port in 80 443; do
+    line="$(grep -m 1 -E ":${port}( |\$)" <<< "$listening" || true)"
+    [ -n "$line" ] || continue
+    name="$(sed -n 's/.*users:(("\([^"]*\)".*/\1/p' <<< "$line")"
+    [ "$name" = "caddy" ] && continue
+    die "Port $port is already taken by ${name:-another program}. Stop it, or install Brain without a domain and put it behind that proxy yourself."
+  done
+}
+
+# A wrong record is not fatal: Caddy keeps asking for the certificate on its
+# own, so the install goes on and the sentence names the record to fix.
+check_dns() {
+  local resolved public
+  resolved="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk '{print $1; exit}')" || true
+  public="$(curl -fsSL https://api.ipify.org 2>/dev/null || curl -fsSL https://ifconfig.me 2>/dev/null)" || true
+  # Anything but an address (a captive portal page, say) counts as no answer.
+  case "$public" in *[!0-9a-f.:]*) public="" ;; esac
+  if [ -z "$resolved" ] || [ -z "$public" ]; then
+    say "Note: could not compare DNS with this machine's address; Caddy keeps retrying until the record points here."
+    return 0
+  fi
+  [ "$resolved" = "$public" ] || say "$DOMAIN resolves to $resolved but this machine is $public. Point the A record here; Caddy keeps retrying until it can get a certificate."
+}
+
+# Caddy's documented apt steps. The Caddyfile in the install directory is the
+# plan's output and is written for real; copying it into place and the reload
+# are side effects. The caddy package starts the service, so a reload is
+# enough on a fresh install as well as on a re-run.
+ensure_caddy() {
+  if command -v caddy >/dev/null; then say "Caddy: present"; else
+    say "Caddy: installing from its apt repository"
+    run apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
+    run bash -c 'curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg'
+    run bash -c 'curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt > /etc/apt/sources.list.d/caddy-stable.list'
+    run chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list
+    run apt-get update
+    run apt-get install -y caddy
+  fi
+  printf '%s {\n\treverse_proxy 127.0.0.1:3020\n}\n' "$DOMAIN" > "$INSTALL_DIR/Caddyfile"
+  run install -m 0644 "$INSTALL_DIR/Caddyfile" /etc/caddy/Caddyfile
+  run systemctl reload caddy
 }
 
 # .env is written for real under dry run too, like the directories above: it
@@ -164,6 +222,7 @@ main() {
   layout
   ask_password
   ask_domain
+  if [ -n "$DOMAIN" ]; then check_ports; check_dns; ensure_caddy; fi
   write_env
   local_access_hint
   say "install.sh: skeleton"    # replaced task by task

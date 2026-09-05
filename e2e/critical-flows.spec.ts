@@ -4748,9 +4748,9 @@ test("share uses a viewport bottom sheet with 44px targets at 320px", async ({ p
   expect(focusedExpiryStyle.outlineStyle).not.toBe("none");
   expect(focusedExpiryStyle.outlineWidth).not.toBe("0px");
   await page.keyboard.press("ArrowRight");
-  await expect(page.getByRole("radio", { name: "1 day" })).toHaveAttribute("aria-checked", "true");
-  await page.keyboard.press("ArrowRight");
   await expect(page.getByRole("radio", { name: "7 days" })).toHaveAttribute("aria-checked", "true");
+  await page.keyboard.press("ArrowRight");
+  await expect(page.getByRole("radio", { name: "30 days" })).toHaveAttribute("aria-checked", "true");
 
   const geometry = await page.evaluate(() => {
     const rect = (selector: string) => {
@@ -4865,8 +4865,8 @@ test("default active share is a ledger on paper inside the regular glass", async
     });
     const head = node.querySelector("h2") as HTMLElement;
     const headStyle = getComputedStyle(head);
-    const label = node.querySelector('[data-share-row="read"] .brain-share-row-label') as HTMLElement;
-    const value = node.querySelector('[data-share-row="read"] .brain-share-row-value') as HTMLElement;
+    const label = node.querySelector('[data-share-row="access"] .brain-share-row-label') as HTMLElement;
+    const value = node.querySelector('[data-share-row="access"] .brain-share-row-value') as HTMLElement;
     const url = node.querySelector("[data-share-url]") as HTMLElement;
     const surfaceBounds = node.getBoundingClientRect();
     const plateBounds = plate.getBoundingClientRect();
@@ -4952,15 +4952,16 @@ test("default active share is a ledger on paper inside the regular glass", async
   // the action last
   expect(geometry.head.size).toBe("17px");
   expect(geometry.head.weight).toBe("600");
-  expect(geometry.rowNames).toEqual(["link", "read", "password", "action"]);
+  expect(geometry.rowNames).toEqual(["link", "access", "password", "expires", "action"]);
   expect(geometry.stopIsLastRow).toBe(true);
   // every row is its content on 10px of padding under a 1px hairline, never
   // under 44: the 28 icon buttons make 49, a text row rests on the 44 floor,
-  // the 24 switch makes 45, the 32 button in the action row makes 53
-  expect(geometry.rowHeights.map((height) => Math.round(height))).toEqual([49, 44, 45, 53]);
-  // a four-row card with a one-line head fits 252: the head's 44 plus the
+  // the 24 switch makes 45, the 30 segmented track makes 51, the 32 button
+  // in the action row makes 53
+  expect(geometry.rowHeights.map((height) => Math.round(height))).toEqual([49, 44, 45, 51, 53]);
+  // a five-row card with a one-line head fits 304: the head's 46 plus the
   // rows plus the 6px sleeve on both sides
-  expect(geometry.surfaceHeight).toBeLessThanOrEqual(252);
+  expect(geometry.surfaceHeight).toBeLessThanOrEqual(304);
   // rows are separated by one hairline each and nothing else: no fills, no
   // side borders, no gaps
   for (const gap of geometry.gaps) expect(Math.abs(gap)).toBeLessThanOrEqual(1);
@@ -4992,10 +4993,13 @@ test("default active share is a ledger on paper inside the regular glass", async
   // label ends on the row's text rule, 12 from the plate's edge
   expect(geometry.stopRight).toBeCloseTo(4, 0);
   expect(geometry.stopPadding).toBe("8px");
-  expect(geometry.focusOrder.slice(0, 4)).toEqual([
+  expect(geometry.focusOrder).toEqual([
     "Open public page",
     "Copy link",
     "Password protection",
+    "Never",
+    "7 days",
+    "30 days",
     "Stop sharing",
   ]);
   expect(geometry.overflow).toBeLessThanOrEqual(1);
@@ -5066,7 +5070,7 @@ test("default active mobile utility keeps 44px targets separate without wrapping
   });
   // the same ledger on the phone sheet: the plate is r10 at the sheet's 10
   // (sheet 20 = 10 + 10), every row and every control at the 44 minimum
-  expect(geometry.rowNames).toEqual(["link", "read", "password", "action"]);
+  expect(geometry.rowNames).toEqual(["link", "access", "password", "expires", "action"]);
   expect(geometry.plateRadius).toBe("10px");
   expect(geometry.plateInset).toEqual([10, 10]);
   for (const height of geometry.rowHeights) expect(height).toBeGreaterThanOrEqual(44);

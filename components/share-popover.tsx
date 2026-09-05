@@ -15,7 +15,7 @@ export type ShareEnableResult =
 
 type Grant = { id: string; title: string };
 type ExpiredGrant = Grant & { expiresAt?: string };
-type ExpiryChoice = "never" | "1" | "7" | "30";
+type ExpiryChoice = "never" | "7" | "30";
 type Overlap = ShareScopeSnapshot["overlappingRoots"][number];
 
 /* The ledger's registers come from the utilities, so the guardrails keep
@@ -30,7 +30,6 @@ const COPIED = "brain-share-copied text-table font-medium text-ink";
 
 const EXPIRY_OPTIONS: Array<{ value: ExpiryChoice; label: string }> = [
   { value: "never", label: "Never" },
-  { value: "1", label: "1 day" },
   { value: "7", label: "7 days" },
   { value: "30", label: "30 days" },
 ];
@@ -207,10 +206,7 @@ export function SharePopover({
       const result = await onEnableShare({
         expectedScopeToken: confirmation.scopeToken,
         password: enablePasswordOn ? password : null,
-        expiresAt:
-          enablePasswordOn && enableExpiry !== "never"
-            ? new Date(Date.now() + Number(enableExpiry) * DAY_MS).toISOString()
-            : null,
+        expiresAt: expiryDeadline(enableExpiry),
       });
       setVerified(result.snapshot);
       if (result.status === "conflict") {
@@ -320,11 +316,12 @@ export function SharePopover({
     }
   };
 
+  // the password and the expiry are two settings: turning the password off
+  // leaves the expiry where it stands
   const resetEnablePassword = () => {
     setEnablePasswordOn(false);
     setEnablePassword("");
     setEnablePasswordVisible(false);
-    setEnableExpiry("never");
   };
 
   const closeSurface = () => {
@@ -332,6 +329,7 @@ export function SharePopover({
     setRevokeConfirming(false);
     clearCopied();
     resetEnablePassword();
+    setEnableExpiry("never");
   };
 
   const view =
@@ -528,7 +526,7 @@ function PrivateReview({
         </div>
       ) : (
         <>
-          <Row id="read" label="Who can read">
+          <Row id="access" label="Access">
             <span className={VALUE}>{readerValue(passwordOn)}</span>
           </Row>
           {/* The "Who can edit" row lands with the editable-shares feature. */}
@@ -550,9 +548,9 @@ function PrivateReview({
                 onPasswordChange={onPasswordChange}
                 onVisibleChange={onPasswordVisibleChange}
               />
-              <ExpiryRow value={expiry} disabled={busy} onChange={onExpiryChange} />
             </Reveal>
           )}
+          <ExpiryRow value={expiry} disabled={busy} onChange={onExpiryChange} />
         </>
       )}
 
@@ -695,7 +693,7 @@ function ManagementView({
         onCopy={onCopy}
       />
 
-      <Row id="read" label="Who can read">
+      <Row id="access" label="Access">
         <span className={VALUE}>{readValue}</span>
       </Row>
       {/* The "Who can edit" row lands with the editable-shares feature. */}
@@ -912,7 +910,9 @@ function LinkRow({
   linked: boolean;
   onCopy: () => void;
 }) {
-  const shown = url ? url.replace(/^https?:\/\//, "") : "No active public link";
+  // the path alone: the origin is the same for every link and the slug is
+  // the part that has to be read whole
+  const shown = url ? url.replace(/^https?:\/\/[^/]+/, "") : "No active public link";
   return (
     <div
       data-share-row="link"
@@ -1116,16 +1116,21 @@ function PasswordField({
 
 function ExpiryRow({
   value,
+  note,
   disabled,
   onChange,
 }: {
   value: ExpiryChoice;
+  note?: string;
   disabled?: boolean;
   onChange: (value: ExpiryChoice) => void;
 }) {
   return (
     <div data-share-row="expires" className="brain-share-row brain-share-row-expires">
-      <span className={LABEL}>Expires</span>
+      <span className={LABEL}>
+        Expires
+        {note && <span className={NOTE}>{note}</span>}
+      </span>
       <Segmented
         label="Link expiry"
         value={value}
@@ -1157,8 +1162,8 @@ function ManagementSecurity({
   const [draft, setDraft] = useState("");
   const [visible, setVisible] = useState(false);
   const [expiry, setExpiry] = useState<ExpiryChoice>(expiryPreset(expiresAt));
-  const [expiryDirty, setExpiryDirty] = useState(false);
-  const [localLegacyExpiry, setLocalLegacyExpiry] = useState(expiresAt);
+  // the deadline the share stands at, kept in step with what was saved here
+  const [deadline, setDeadline] = useState(expiresAt);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -1174,59 +1179,49 @@ function ManagementSecurity({
     setError(null);
     setDraft("");
     setVisible(false);
-    setExpiry("never");
-    setExpiryDirty(true);
     try {
-      await onSetProtection({ password: null, expiresAt: null });
+      await onSetProtection({ password: null });
       setPasswordOn(false);
-      setLocalLegacyExpiry(undefined);
     } catch {
       setPasswordOn(hasPassword);
-      setExpiry(expiryPreset(expiresAt));
-      setExpiryDirty(false);
-      setLocalLegacyExpiry(expiresAt);
       setError("Couldn't remove password protection. The previous settings may still apply.");
     } finally {
       setBusy(false);
     }
   };
 
-  const save = async () => {
+  const savePassword = async () => {
     if (busy || (!hasPassword && !draft.trim())) return;
     setBusy(true);
     setError(null);
     try {
-      await onSetProtection({
-        password: draft.trim() || undefined,
-        expiresAt:
-          !expiryDirty
-            ? undefined
-            : expiry === "never"
-              ? null
-              : new Date(Date.now() + Number(expiry) * DAY_MS).toISOString(),
-      });
+      await onSetProtection({ password: draft.trim() || undefined });
       setPasswordOn(true);
       setDraft("");
       setVisible(false);
-      setLocalLegacyExpiry(undefined);
-      setExpiryDirty(false);
     } catch {
-      setError("Couldn't save password protection. The previous settings may still apply.");
+      setError("Couldn't save the password. The previous settings may still apply.");
     } finally {
       setBusy(false);
     }
   };
 
-  const clearLegacyExpiry = async () => {
-    if (busy) return;
+  // an expiry saves on the press: it is one fact with three values
+  const chooseExpiry = async (next: ExpiryChoice) => {
+    if (busy || next === expiry) return;
+    const previous = expiry;
+    const previousDeadline = deadline;
+    const nextDeadline = expiryDeadline(next);
+    setExpiry(next);
+    setDeadline(nextDeadline ?? undefined);
     setBusy(true);
     setError(null);
     try {
-      await onSetProtection({ password: null, expiresAt: null });
-      setLocalLegacyExpiry(undefined);
-      setExpiry("never");
+      await onSetProtection({ expiresAt: nextDeadline });
     } catch {
-      setError("Couldn't remove the legacy expiry.");
+      setExpiry(previous);
+      setDeadline(previousDeadline);
+      setError("Couldn't save the expiry. The previous settings may still apply.");
     } finally {
       setBusy(false);
     }
@@ -1245,8 +1240,6 @@ function ManagementSecurity({
             setPasswordOn(true);
             setDraft("");
             setVisible(false);
-            setExpiry("never");
-            setExpiryDirty(true);
           } else {
             void turnOff();
           }
@@ -1263,47 +1256,24 @@ function ManagementSecurity({
             onPasswordChange={setDraft}
             onVisibleChange={setVisible}
           />
-          <ExpiryRow
-            value={expiry}
-            disabled={disabled}
-            onChange={(value) => {
-              setExpiry(value);
-              setExpiryDirty(true);
-            }}
-          />
-          <div className="brain-share-reveal-foot">
+          <div data-share-row="save-password" className="brain-share-row brain-share-row-act">
             <Button
               variant="ink"
               disabled={disabled || (!hasPassword && !draft.trim())}
-              onClick={() => void save()}
+              onClick={() => void savePassword()}
               className="max-sm:min-h-11"
             >
-              {busy ? "Saving…" : "Save protection"}
+              {busy ? "Saving…" : "Save password"}
             </Button>
           </div>
         </Reveal>
       )}
-      {!passwordOn && localLegacyExpiry && (
-        <div data-legacy-expiry data-share-row="expires" className="brain-share-row">
-          <span className={LABEL}>
-            Expires
-            <span className={NOTE}>
-              Legacy expiry. It still applies without a password.
-            </span>
-          </span>
-          <span className={VALUE}>
-            {formatShareExpiry(localLegacyExpiry)}
-          </span>
-          <Button
-            variant="quiet"
-            disabled={disabled}
-            onClick={() => void clearLegacyExpiry()}
-            className="max-sm:min-h-11"
-          >
-            Remove expiry
-          </Button>
-        </div>
-      )}
+      <ExpiryRow
+        value={expiry}
+        note={deadlineNote(deadline)}
+        disabled={disabled}
+        onChange={(next) => void chooseExpiry(next)}
+      />
       {error && <AlertRow>{error}</AlertRow>}
       {renderAction(busy)}
     </>
@@ -1383,11 +1353,24 @@ function overlapLabel(overlap: Overlap): string {
   return `${overlap.title} · ${relationLabel(overlap)} · ${status}`;
 }
 
+/** The nearest of the three presets to a deadline the share already has. */
 function expiryPreset(value?: string): ExpiryChoice {
   if (!value) return "never";
   const remaining = Date.parse(value) - Date.now();
   if (!Number.isFinite(remaining) || remaining <= 0) return "never";
-  if (remaining <= 2 * DAY_MS) return "1";
   if (remaining <= 14 * DAY_MS) return "7";
   return "30";
+}
+
+/** The ISO deadline a preset stands for; null is no deadline. */
+function expiryDeadline(choice: ExpiryChoice): string | null {
+  return choice === "never"
+    ? null
+    : new Date(Date.now() + Number(choice) * DAY_MS).toISOString();
+}
+
+/** The day a deadline lands on, under the Expires label. */
+function deadlineNote(value?: string): string | undefined {
+  if (!value) return undefined;
+  return isExpired(value) ? `Expired ${formatShareExpiry(value)}` : `Ends ${formatShareExpiry(value)}`;
 }

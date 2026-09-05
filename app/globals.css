@@ -2122,11 +2122,6 @@ a.brain-share-url:hover {
   opacity: 0.4;
   pointer-events: none;
 }
-.brain-share-reveal-foot {
-  display: flex;
-  justify-content: flex-end;
-  padding: 0 12px 12px;
-}
 
 /* The action row: the last line of the ledger. */
 .brain-share-row-act {
@@ -2171,7 +2166,7 @@ a.brain-share-url:hover {
 
 /* On the phone sheet every control grows to the 44 touch minimum, and the
    expiry segments (the settings atom) take a row of their own under the
-   label so four of them fit a 320 window. */
+   label, three equal cells across a 320 window. */
 @media (max-width: 639px) {
   .brain-share-row .icon-btn[data-size="28"] {
     width: 44px;
@@ -2186,7 +2181,7 @@ a.brain-share-url:hover {
   .brain-share-row-expires .brain-settings-segmented {
     display: grid;
     flex: 1 0 100%;
-    grid-template-columns: repeat(4, 1fr);
+    grid-template-columns: repeat(3, 1fr);
   }
   .brain-share-row-expires .brain-settings-segment {
     height: 44px;

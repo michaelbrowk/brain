@@ -9,8 +9,16 @@ INSTALL_DIR="${BRAIN_INSTALL_DIR:-/opt/brain}"
 RELEASES_API="${BRAIN_RELEASES_API:-https://api.github.com/repos/michaelbrowk/brain/releases/latest}"
 RAW="https://raw.githubusercontent.com/michaelbrowk/brain"
 
+# Under `curl … | sudo bash` stdin is the script itself, so questions go to
+# the terminal when there is one; the tests have no terminal and answer on stdin.
+# Fd 3 is that source. It is a dup of stdin, not a reopen of /dev/stdin, which
+# is refused on a socket and restarts a file from the top on Linux.
+if { : < /dev/tty; } 2>/dev/null; then exec 3</dev/tty; else exec 3<&0; fi
+
 say() { printf '%s\n' "$*"; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
+# A read on fd 3 that hit end of input: nothing to ask on.
+no_terminal() { die "No terminal to ask on. Set BRAIN_PASSWORD and BRAIN_DOMAIN to install without prompts."; }
 # Every side effect passes through here. Under dry run it prints the plan.
 run() {
   if [ "$DRY" = "1" ]; then say "would run: $*"; return 0; fi
@@ -59,7 +67,8 @@ resolve_release() {
 layout() {
   NOTES_DIR="$INSTALL_DIR/notes"
   mkdir -p "$INSTALL_DIR" "$NOTES_DIR"
-  run chown "${SUDO_USER:-root}" "$NOTES_DIR"
+  # The image runs as uid 1000, and Brain refuses a notes folder it cannot write.
+  run chown 1000:1000 "$NOTES_DIR"
   run curl -fsSL "$RAW/v$TAG/ops/docker/docker-compose.yml" -o "$INSTALL_DIR/docker-compose.yml"
   # Under dry run the download above is only announced, so a placeholder
   # stands in and the later steps still have a compose file to read.
@@ -71,8 +80,8 @@ layout() {
 ask_password() {
   local p1 p2
   if [ -n "${BRAIN_PASSWORD:-}" ]; then p1="$BRAIN_PASSWORD"; else
-    printf 'Choose the Brain password: '; read -rs p1; printf '\n'
-    printf 'Once more: '; read -rs p2; printf '\n'
+    printf 'Choose the Brain password: '; read -rs p1 <&3 || no_terminal; printf '\n'
+    printf 'Once more: '; read -rs p2 <&3 || no_terminal; printf '\n'
     [ "$p1" = "$p2" ] || die "Password: the two entries differ."
   fi
   [ "${#p1}" -ge 8 ] || die "Password: at least 8 characters."
@@ -88,7 +97,7 @@ ask_domain() {
   # say so without a terminal.
   if [ -n "${BRAIN_DOMAIN+set}" ]; then domain="$BRAIN_DOMAIN"; else
     printf 'Domain name for this Brain, or leave empty to keep it on this machine only: '
-    read -r domain
+    read -r domain <&3 || no_terminal
   fi
   if [ -n "$domain" ]; then ORIGIN="https://$domain"; else ORIGIN="http://localhost:3020"; fi
 }

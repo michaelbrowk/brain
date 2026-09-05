@@ -1,7 +1,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, chmodSync, readFileSync, existsSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawnSync, type SpawnOptions, type SpawnSyncOptionsWithStringEncoding } from "node:child_process";
 import { afterAll, describe, expect, it } from "vitest";
 
 const SCRIPT = path.join(import.meta.dirname, "..", "install.sh");
@@ -47,16 +47,23 @@ function scriptEnv(vars: Record<string, string>): NodeJS.ProcessEnv {
   return { NODE_ENV: "test", ...vars };
 }
 
-/** `input` is what the script reads on stdin when it asks its questions. */
+/** `input` is what the script reads on stdin when it asks its questions.
+ *  `detached` puts the script in its own session with no controlling terminal,
+ *  so it answers on stdin here even when vitest itself runs from a terminal;
+ *  without it the questions would go to that terminal and wait. spawnSync
+ *  honours the flag (it shares spawn's option parser) though @types/node lists
+ *  it only on the async SpawnOptions. */
 function runInstall(env: Record<string, string>, args: string[] = [], extra: Record<string, string> = {}, input?: string) {
   const root = mkdtempSync(path.join(tmpdir(), "brain-install-"));
   const { PATH, log } = stubs(root, extra);
   const installDir = path.join(root, "opt-brain");
-  const r = spawnSync("bash", [SCRIPT, ...args], {
+  const options: SpawnSyncOptionsWithStringEncoding & Pick<SpawnOptions, "detached"> = {
     env: scriptEnv({ PATH, HOME: root, BRAIN_INSTALL_DIR: installDir, BRAIN_INSTALL_DRY_RUN: "1", ...env }),
     encoding: "utf8",
     input,
-  });
+    detached: true,
+  };
+  const r = spawnSync("bash", [SCRIPT, ...args], options);
   return { ...r, root, installDir, calls: () => (existsSync(log) ? readFileSync(log, "utf8") : "") };
 }
 
@@ -123,6 +130,7 @@ describe("install.sh first install", () => {
     expect(env).not.toContain("abc12345");
     expect(r.calls()).not.toContain("abc12345"); // the password never becomes an argument
     expect(r.calls()).toContain("docker run --rm -i ghcr.io/michaelbrowk/brain:0.9.3 hash-password");
+    expect(r.stdout).toContain(`would run: chown 1000:1000 ${path.join(r.installDir, "notes")}`);
     expect(statSync(envFile).mode & 0o777).toBe(0o600);
     expect(existsSync(path.join(r.installDir, "notes"))).toBe(true);
     expect(existsSync(path.join(r.installDir, "docker-compose.yml"))).toBe(true);
@@ -155,6 +163,18 @@ describe("install.sh first install", () => {
     const r = runInstall({ BRAIN_DOMAIN: "" }, [], {}, "abc12345\nabc12346\n");
     expect(r.status).toBe(1);
     expect(r.stderr).toBe("Password: the two entries differ.\n");
+  });
+
+  it("stops with one sentence when there is nothing to ask the password on", () => {
+    const r = runInstall({ BRAIN_DOMAIN: "" }, [], {}, "");
+    expect(r.status).toBe(1);
+    expect(r.stderr).toBe("No terminal to ask on. Set BRAIN_PASSWORD and BRAIN_DOMAIN to install without prompts.\n");
+  });
+
+  it("stops with the same sentence when only the domain is left to ask", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345" }, [], {}, "");
+    expect(r.status).toBe(1);
+    expect(r.stderr).toBe("No terminal to ask on. Set BRAIN_PASSWORD and BRAIN_DOMAIN to install without prompts.\n");
   });
 
   it("stops when the image cannot hash the password", () => {

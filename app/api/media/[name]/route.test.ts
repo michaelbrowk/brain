@@ -4,6 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import { NextRequest } from "next/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  writeAttachmentScope,
+  type AttachmentScope,
+} from "@/lib/store/attachment-scope";
 
 const NAME = "abcdef123456.png";
 const SAFE_BYTES = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
@@ -688,5 +692,206 @@ describe("attachment access", () => {
         params: Promise.resolve({ name: NAME }),
       }),
     ).rejects.toBe(ioError);
+  });
+});
+
+describe("attachment scope for editable roots", () => {
+  const EMPTY_SCOPE: AttachmentScope = { roots: [], uploads: {}, baseline: {} };
+
+  afterEach(async () => {
+    vi.doUnmock("@/lib/store");
+    vi.doUnmock("@/lib/auth");
+    vi.doUnmock("@/lib/share-access");
+    vi.resetModules();
+    await Promise.all(
+      roots.splice(0).map((root) => fs.rm(root, { recursive: true, force: true })),
+    );
+  });
+
+  /** One attachment on disk, one granted share whose root carries the
+   *  shareEdit flag as given and whose target names the attachment (or not),
+   *  and the scope index as the notes folder would hold it. The owner variant
+   *  has a session and nothing else. */
+  async function getMedia(
+    name: string,
+    options:
+      | { owner: true }
+      | {
+          root: string;
+          page: string;
+          v: string;
+          markdown: string;
+          shareEdit: boolean;
+          scope: AttachmentScope;
+        },
+  ) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-media-scope-"));
+    roots.push(root);
+    await fs.mkdir(path.join(root, "_attachments"));
+    await fs.writeFile(path.join(root, "_attachments", name), SAFE_BYTES);
+    if (!("owner" in options)) await writeAttachmentScope(root, options.scope);
+
+    vi.doMock("@/lib/store", () => ({
+      NOTES_ROOT: root,
+      getStore: async () => ({}),
+      isNotFound: (error: unknown) =>
+        error instanceof Error && error.name === "NotFoundError",
+    }));
+    vi.doMock("@/lib/auth", () => ({
+      SESSION_COOKIE: "brain_session",
+      verifySession: async (token?: string) => token === "owner-token",
+    }));
+    vi.doMock("@/lib/share-access", async () => {
+      const actual = await vi.importActual<typeof import("@/lib/share-access")>(
+        "@/lib/share-access",
+      );
+      const resolveShareAccess = async () => {
+        if ("owner" in options) throw new Error("owner never resolves a share");
+        return {
+          kind: "granted" as const,
+          root: {
+            meta: {
+              id: options.root,
+              public: true,
+              shareEdit: options.shareEdit,
+              shareVersion: Number(options.v),
+            },
+          },
+          target: { meta: { id: options.page }, markdown: options.markdown },
+          shareVersion: Number(options.v),
+          directChildren: [],
+        };
+      };
+      return { ...actual, resolveShareAccess };
+    });
+    const { GET } = await import("./route");
+    const query =
+      "owner" in options
+        ? ""
+        : `?root=${options.root}&page=${options.page}&v=${options.v}`;
+    return GET(
+      request(query, "owner" in options ? "brain_session=owner-token" : undefined, name),
+      { params: Promise.resolve({ name }) },
+    );
+  }
+
+  it("404s a private page's attachment named by hand-written visitor Markdown", async () => {
+    // root-1 is editable; the visitor's page names an attachment that belongs
+    // to no root the index knows.
+    const res = await getMedia("private00001.png", {
+      root: "root-1",
+      page: "page-9",
+      v: "2",
+      markdown: "![](/_attachments-v2/private00001.png)",
+      shareEdit: true,
+      scope: { roots: ["root-1"], uploads: {}, baseline: {} },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("serves a visitor upload through its own root and 404s it through a second editable root", async () => {
+    const scope: AttachmentScope = {
+      roots: ["root-1", "root-2"],
+      uploads: {
+        "up0000000001.png": {
+          root: "root-1",
+          bytes: 10,
+          at: "2026-09-05T10:00:00.000Z",
+        },
+      },
+      baseline: {},
+    };
+    const mine = await getMedia("up0000000001.png", {
+      root: "root-1",
+      page: "page-9",
+      v: "2",
+      markdown: "![](/_attachments-v2/up0000000001.png)",
+      shareEdit: true,
+      scope,
+    });
+    const theirs = await getMedia("up0000000001.png", {
+      root: "root-2",
+      page: "page-8",
+      v: "2",
+      markdown: "![](/_attachments-v2/up0000000001.png)",
+      shareEdit: true,
+      scope,
+    });
+    expect(mine.status).toBe(200);
+    expect(theirs.status).toBe(404);
+  });
+
+  it("serves a baseline attachment to the root that referenced it before editing began", async () => {
+    const res = await getMedia("old000000001.png", {
+      root: "root-1",
+      page: "page-9",
+      v: "2",
+      markdown: "![](/_attachments-v2/old000000001.png)",
+      shareEdit: true,
+      scope: {
+        roots: ["root-1"],
+        uploads: {},
+        baseline: { "old000000001.png": ["root-1"] },
+      },
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("keeps the index rule on a root whose editing was switched off again", async () => {
+    // shareEdit is off now, but root-1 is in the index: while it was on, a
+    // visitor could have written any name into these pages.
+    const res = await getMedia("private00001.png", {
+      root: "root-1",
+      page: "page-9",
+      v: "3",
+      markdown: "![](/_attachments-v2/private00001.png)",
+      shareEdit: false,
+      scope: { roots: ["root-1"], uploads: {}, baseline: {} },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("still requires the page to reference an upload the index grants", async () => {
+    const res = await getMedia("up0000000001.png", {
+      root: "root-1",
+      page: "page-9",
+      v: "2",
+      markdown: "no attachment here",
+      shareEdit: true,
+      scope: {
+        roots: ["root-1"],
+        uploads: {
+          "up0000000001.png": {
+            root: "root-1",
+            bytes: 10,
+            at: "2026-09-05T10:00:00.000Z",
+          },
+        },
+        baseline: {},
+      },
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it("leaves every existing read-only share serving every image", async () => {
+    const res = await getMedia("old000000001.png", {
+      root: "root-9",
+      page: "root-9",
+      v: "1",
+      markdown: "![](/_attachments-v2/old000000001.png)",
+      shareEdit: false,
+      scope: EMPTY_SCOPE,
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("leaves the owner unaffected", async () => {
+    const res = await getMedia("anything0001.png", { owner: true });
+    expect(res.status).toBe(200);
+  });
+
+  it("never serves the index file itself", async () => {
+    const res = await getMedia("scope.json", { owner: true });
+    expect(res.status).toBe(404);
   });
 });

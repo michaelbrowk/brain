@@ -11,12 +11,22 @@ import {
   AttachmentStoreUnavailableError,
   AttachmentValidationError,
   RevConflictError,
+  ShareAttachmentScopeError,
   ShareSubtreeFullError,
+  ShareUploadQuotaError,
   type AttachmentInput,
   type ReserveNotionImportInput,
   type PageMeta,
   type TreeNode,
 } from "./types";
+import {
+  attachmentGrantsRoot,
+  readAttachmentScope,
+  recordBaseline,
+  recordUpload,
+  rootIsScoped,
+  writeAttachmentScope,
+} from "./attachment-scope";
 import {
   canonicalizeNotionImportTarget,
   notionConversionHash,
@@ -33,7 +43,10 @@ import {
   resolveShareAccess,
   ShareAccessNotFoundError,
 } from "../share-access";
-import { MAX_SHARE_SUBTREE_PAGES } from "./share-limits";
+import {
+  MAX_SHARE_SUBTREE_PAGES,
+  SHARE_ROOT_UPLOAD_BYTES,
+} from "./share-limits";
 
 const execFileAsync = promisify(execFile);
 const SOURCE_A = "a".repeat(64);
@@ -9351,5 +9364,182 @@ describe("share-aware Store leaves", () => {
     await visitorWrite("from Ada once more");
     await s.updateMeta(childId, { title: "Renamed", by: "me" });
     await expectOwner("me");
+  });
+
+  const attachmentName = (url: string) => url.split("/").pop()!;
+
+  it("refuses a write that names an attachment this root does not own", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const mine = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: { ...shot(), originalName: "mine.png" },
+    });
+    const foreign = await s.saveAttachment({
+      ...shot(),
+      originalName: "private.png",
+    });
+
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${mine.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
+
+    const refused = s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: `![](${mine.url})\n\n![](${foreign.url})`,
+      visitorName: "Ada",
+    });
+    await expect(refused).rejects.toBeInstanceOf(ShareAttachmentScopeError);
+    await expect(refused).rejects.toMatchObject({
+      attachment: attachmentName(foreign.url),
+    });
+    expect((await s.readPage(childId)).markdown).toBe(`![](${mine.url})`);
+  });
+
+  it("diffs against index.md, not the visitor's baseMarkdown", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const foreign = await s.saveAttachment({
+      ...shot(),
+      originalName: "private.png",
+    });
+    const current = await s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: "plain text",
+      visitorName: "Ada",
+    });
+
+    // A fabricated baseMarkdown claiming the reference was already there, with
+    // a rev that matches. writePage ignores expectedMarkdown when the rev is
+    // current, and so must the diff.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${foreign.url})`,
+        expectedRev: current.rev,
+        expectedMarkdown: `![](${foreign.url})`,
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(ShareAttachmentScopeError);
+    expect((await s.readPage(childId)).markdown).toBe("plain text");
+  });
+
+  it("keeps a reference the page already held, wherever it came from", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    await s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: "first visit builds the baseline",
+      visitorName: "Ada",
+    });
+    // The owner adds an attachment after the baseline exists. A visitor who
+    // edits around it introduces nothing, so the diff has nothing to refuse.
+    const later = await s.saveAttachment({
+      ...shot(),
+      originalName: "later.png",
+    });
+    await s.writePage(childId, `![](${later.url})`, undefined, "me");
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${later.url})\n\nand a caption`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toMatchObject({ markdown: `![](${later.url})\n\nand a caption` });
+  });
+
+  it("refuses an upload past the per-root quota and allows one that lands on it", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const scope = await readAttachmentScope(root);
+    // Pre-load the ledger instead of uploading 200 MiB: one filler entry
+    // leaves exactly one PNG of room.
+    await writeAttachmentScope(
+      root,
+      recordUpload(
+        recordBaseline(scope, rootId, []),
+        "filler000001.bin",
+        rootId,
+        SHARE_ROOT_UPLOAD_BYTES - PNG.byteLength,
+        "2026-09-05T10:00:00.000Z",
+      ),
+    );
+    const upload = () =>
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: shot(),
+      });
+    const landed = await upload();
+    await expect(upload()).rejects.toBeInstanceOf(ShareUploadQuotaError);
+
+    const after = await readAttachmentScope(root);
+    expect(Object.keys(after.uploads).sort()).toEqual(
+      ["filler000001.bin", attachmentName(landed.url)].sort(),
+    );
+    await expect(fs.readdir(path.join(root, "_attachments"))).resolves.toEqual(
+      [attachmentName(landed.url), "scope.json"].sort(),
+    );
+  });
+
+  it("builds the baseline once, on the first visitor write, and grants nothing else", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const inBody = await s.saveAttachment({
+      ...shot(),
+      originalName: "already-here.png",
+    });
+    const asCover = await s.saveAttachment({
+      ...shot(),
+      originalName: "cover.png",
+    });
+    const inTrash = await s.saveAttachment({
+      ...shot(),
+      originalName: "trashed.png",
+    });
+    await s.writePage(childId, `![](${inBody.url})`, undefined, "me");
+    await s.updateMeta(rootId, { cover: asCover.url, by: "me" });
+    const trashed = await s.createPage(rootId, "Trashed", {
+      markdown: `![](${inTrash.url})`,
+    });
+    await s.deletePage(trashed.id);
+    expect(rootIsScoped(await readAttachmentScope(root), rootId)).toBe(false);
+
+    await s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: `![](${inBody.url})\n\nand a note`,
+      visitorName: "Ada",
+    });
+
+    const scope = await readAttachmentScope(root);
+    expect(rootIsScoped(scope, rootId)).toBe(true);
+    for (const url of [inBody.url, asCover.url]) {
+      expect(attachmentGrantsRoot(scope, attachmentName(url), rootId)).toBe(true);
+      expect(
+        attachmentGrantsRoot(scope, attachmentName(url), "some-other-root"),
+      ).toBe(false);
+    }
+    // A trashed descendant is not shown by the link, so a visitor cannot
+    // resurface its image by naming it in a live page.
+    expect(attachmentGrantsRoot(scope, attachmentName(inTrash.url), rootId)).toBe(
+      false,
+    );
+    expect(attachmentGrantsRoot(scope, "unknown00001.png", rootId)).toBe(false);
   });
 });

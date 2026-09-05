@@ -45,7 +45,19 @@ import {
 import { referencedPageIds } from "../derived-page-refs";
 import { ShareAccessNotFoundError } from "../share-access";
 import { isShareExpired } from "../sharing";
-import { MAX_SHARE_SUBTREE_PAGES } from "./share-limits";
+import {
+  MAX_SHARE_SUBTREE_PAGES,
+  SHARE_ROOT_UPLOAD_BYTES,
+} from "./share-limits";
+import {
+  attachmentGrantsRoot,
+  readAttachmentScope,
+  recordBaseline,
+  recordUpload,
+  rootUploadBytes,
+  writeAttachmentScope,
+  type AttachmentScope,
+} from "./attachment-scope";
 import {
   assertCollectionRowMatchesDefinition,
   collectionDefinitionSchema,
@@ -78,9 +90,11 @@ import {
   AttachmentValidationError,
   NotFoundError,
   MetadataConflictError,
+  ShareAttachmentScopeError,
   ShareEditOriginError,
   ShareScopeConflictError,
   ShareSubtreeFullError,
+  ShareUploadQuotaError,
   NotionImportConflictError,
   PageRefNestValidationError,
   QuickCaptureConflictError,
@@ -3822,6 +3836,60 @@ export class Store {
     }
   }
 
+  /** The attachment scope index with this root in it. The first visitor write
+   *  to a root builds the root's baseline from every attachment its live
+   *  subtree names today, one O(subtree) walk that runs inside that write's
+   *  own mutate() and never inside configureShare, where it would hold the
+   *  queue during the owner's confirmation click. Every later call is one
+   *  small file read. `built` tells the caller whether the index changed and
+   *  has to be persisted. Caller owns mutate(). */
+  private async scopedAttachmentIndexUnlocked(
+    rootId: string,
+  ): Promise<{ scope: AttachmentScope; built: boolean }> {
+    const scope = await readAttachmentScope(this.root);
+    if (scope.roots.includes(rootId)) return { scope, built: false };
+    return {
+      scope: recordBaseline(
+        scope,
+        rootId,
+        await this.subtreeAttachmentNamesUnlocked(rootId),
+      ),
+      built: true,
+    };
+  }
+
+  /** Every attachment name the root's live subtree references today, in a
+   *  body or as a cover. A trashed descendant is not part of what the link
+   *  shows, so what it names is not part of what the link grants. Caller
+   *  owns mutate(). */
+  private async subtreeAttachmentNamesUnlocked(
+    rootId: string,
+  ): Promise<string[]> {
+    const names = new Set<string>();
+    for (const entry of this.index.values()) {
+      if (
+        !this.isWithinSubtree(rootId, entry.meta.id) ||
+        this.isDeleted(entry.meta.id)
+      ) {
+        continue;
+      }
+      const cover = entry.meta.cover
+        ? localAttachmentName(entry.meta.cover)
+        : null;
+      if (cover) names.add(cover);
+      let raw: string;
+      try {
+        raw = await fs.readFile(path.join(entry.dir, "index.md"), "utf8");
+      } catch {
+        continue;
+      }
+      for (const name of referencedAttachmentNames(parsePage(raw).markdown)) {
+        names.add(name);
+      }
+    }
+    return [...names];
+  }
+
   /** A link visitor's body write. Same rev contract as writePage, same atomic
    *  write, same commit, and two extra frontmatter keys so the attribution is
    *  in the file and shows up in the git diff of the edit. */
@@ -3872,6 +3940,23 @@ export class Store {
       if (!bodyChanged) {
         return { meta: e.meta, markdown: parsed.markdown, rev: currentRev };
       }
+      // The reference diff runs inside this critical section, against the
+      // body just read from index.md, never against the visitor's
+      // expectedMarkdown, which the rev rule above ignores when the rev
+      // matches. A reference the page already holds is not the visitor's
+      // to introduce and passes; a new one passes only if the index grants
+      // it to this root.
+      const { scope, built } = await this.scopedAttachmentIndexUnlocked(
+        input.rootId,
+      );
+      const held = referencedAttachmentNames(parsed.markdown);
+      for (const name of referencedAttachmentNames(input.markdown)) {
+        if (held.has(name)) continue;
+        if (!attachmentGrantsRoot(scope, name, input.rootId)) {
+          throw new ShareAttachmentScopeError(name);
+        }
+      }
+      if (built) await writeAttachmentScope(this.root, scope);
       e.meta.updated = now();
       e.meta.updatedBy = "visitor";
       e.meta.updatedByName = input.visitorName;
@@ -3946,9 +4031,33 @@ export class Store {
         input.targetId,
         input.shareVersion,
       );
-      return this.saveAttachmentUnlocked(input.file, input.src).catch(
-        rethrowSharedAttachmentFailure,
-      );
+      const { scope } = await this.scopedAttachmentIndexUnlocked(input.rootId);
+      // Checked before a byte is written: the quota is about what lands on
+      // the disk and in git history, not about what was attempted.
+      if (
+        rootUploadBytes(scope, input.rootId) + input.file.data.byteLength >
+        SHARE_ROOT_UPLOAD_BYTES
+      ) {
+        throw new ShareUploadQuotaError();
+      }
+      const saved = await this.saveAttachmentUnlocked(
+        input.file,
+        input.src,
+      ).catch(rethrowSharedAttachmentFailure);
+      const name = localAttachmentName(saved.url);
+      if (name) {
+        await writeAttachmentScope(
+          this.root,
+          recordUpload(
+            scope,
+            name,
+            input.rootId,
+            saved.size,
+            new Date().toISOString(),
+          ),
+        );
+      }
+      return saved;
     });
   }
 

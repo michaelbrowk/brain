@@ -8,6 +8,11 @@ import { SESSION_COOKIE, verifySession } from "@/lib/auth";
 import { referencedAttachmentNames } from "@/lib/attachments";
 import { getStore, isNotFound, NOTES_ROOT } from "@/lib/store";
 import {
+  attachmentGrantsRoot,
+  readAttachmentScope,
+  rootIsScoped,
+} from "@/lib/store/attachment-scope";
+import {
   resolveShareAccess,
   ShareAccessBusyError,
   ShareAccessNotFoundError,
@@ -253,10 +258,18 @@ async function canReadAttachment(
       requestedVersion,
       token: req.cookies.get(`brain_share_${rootId}`)?.value,
     });
-    return (
-      access.kind === "granted" &&
-      referencesAttachment(access.target.markdown, name)
-    );
+    if (access.kind !== "granted") return false;
+    if (!referencesAttachment(access.target.markdown, name)) return false;
+    // The reference check alone stopped being sufficient the moment visitors
+    // could write Markdown: naming any existing _attachments filename in a
+    // shared page would otherwise make a private page's image readable. For
+    // a root that has ever been editable, the persisted index decides. No
+    // root that has only ever been read-only changes behaviour.
+    const scope = await readAttachmentScope(NOTES_ROOT);
+    if (!access.root.meta.shareEdit && !rootIsScoped(scope, rootId)) {
+      return true;
+    }
+    return attachmentGrantsRoot(scope, name, rootId);
   } catch (error) {
     if (
       isNotFound(error) ||

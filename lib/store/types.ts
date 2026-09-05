@@ -481,6 +481,25 @@ export class AttachmentStoreUnavailableError extends Error {
   }
 }
 
+/** A link visitor's upload would take the root past SHARE_ROOT_UPLOAD_BYTES.
+ * Nothing was written. The visitor route answers 413 root_quota. */
+export class ShareUploadQuotaError extends Error {
+  constructor() {
+    super("shared root upload quota exceeded");
+    this.name = "ShareUploadQuotaError";
+  }
+}
+
+/** A link visitor's write introduces a reference to an attachment this root
+ * does not own. Nothing was written. The visitor route answers 422
+ * attachment_not_yours. */
+export class ShareAttachmentScopeError extends Error {
+  constructor(readonly attachment: string) {
+    super("attachment is not in this shared root");
+    this.name = "ShareAttachmentScopeError";
+  }
+}
+
 export class QuickCaptureConflictError extends Error {
   constructor() {
     super("quick capture payload conflict");
@@ -597,4 +616,24 @@ export function isAttachmentValidation(
   e: unknown,
 ): e is AttachmentValidationError {
   return e instanceof Error && e.name === "AttachmentValidationError";
+}
+
+export function isShareSubtreeFull(e: unknown): e is ShareSubtreeFullError {
+  return e instanceof Error && e.name === "ShareSubtreeFullError";
+}
+
+export function isAttachmentStoreUnavailable(
+  e: unknown,
+): e is AttachmentStoreUnavailableError {
+  return e instanceof Error && e.name === "AttachmentStoreUnavailableError";
+}
+
+export function isShareUploadQuota(e: unknown): e is ShareUploadQuotaError {
+  return e instanceof Error && e.name === "ShareUploadQuotaError";
+}
+
+export function isShareAttachmentScope(
+  e: unknown,
+): e is ShareAttachmentScopeError {
+  return e instanceof Error && e.name === "ShareAttachmentScopeError";
 }

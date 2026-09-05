@@ -972,6 +972,40 @@ describe("MailSurface", () => {
     expect(document.body.textContent).toContain("Lunch at 12PM sounds great to me.");
   });
 
+  it("asks again after a run of transient polls instead of waiting out the deadline", async () => {
+    vi.useFakeTimers();
+    const fetching = {
+      apiVersion: 1 as const,
+      accountId: accountA.accountId,
+      messageId: "message-1",
+      state: "fetching" as const,
+    };
+    const transient = { ...fetching, state: "transient" as const };
+    const retried = { ...readyContent, textBody: "Full body after the retry." };
+    const requestMessageContent = vi
+      .fn()
+      .mockResolvedValueOnce(fetching)
+      .mockResolvedValueOnce(retried);
+    const getMessageContent = vi.fn().mockResolvedValue(transient);
+    const client = makeClient({ requestMessageContent, getMessageContent });
+    await act(async () =>
+      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+    );
+    await settle();
+    await enterSingleAccount();
+    await click(findButton("Lunch this Friday?"));
+    // three transient polls at 0, 300 and 900ms, then the re-ask at 2.1s
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3_000);
+    });
+    await settle();
+
+    expect(requestMessageContent).toHaveBeenCalledTimes(2);
+    expect(getMessageContent).toHaveBeenCalledTimes(3);
+    expect(document.body.textContent).toContain("Full body after the retry.");
+    expect(document.body.textContent).not.toContain("Message content couldn’t load.");
+  });
+
   it("polls until the content deadline and leaves a retryable safe preview", async () => {
     vi.useFakeTimers();
     const fetching = {

@@ -91,9 +91,18 @@ for (const dependency of [
   "@asamuzakjp/css-color",
   "@csstools/css-syntax-patches-for-csstree",
   "css-tree",
+  // css-color imports this one at call time, so a tree that resolves the
+  // package can still fail on first use without it.
+  "lru-cache",
 ]) {
   try {
-    requireFromJsdom.resolve(dependency);
+    // The standalone tree sits inside the repository, so a resolution that
+    // walked up into the repo's own node_modules would pass here and fail in
+    // the image. The resolved path has to stay inside the tree.
+    const resolved = requireFromJsdom.resolve(dependency);
+    if (!resolved.startsWith(standalone + path.sep)) {
+      throw new Error(`resolved outside the standalone tree: ${resolved}`);
+    }
     requireFromJsdom(dependency);
   } catch (cause) {
     throw new Error(

@@ -50,6 +50,7 @@ const nextConfig: NextConfig = {
       "./node_modules/.pnpm/node_modules/@csstools/css-tokenizer/**/*",
       "./node_modules/.pnpm/node_modules/bidi-js/**/*",
       "./node_modules/.pnpm/node_modules/entities/**/*",
+      "./node_modules/.pnpm/node_modules/lru-cache/**/*",
       "./node_modules/.pnpm/node_modules/mdn-data/**/*",
       "./node_modules/.pnpm/node_modules/punycode/**/*",
       "./node_modules/.pnpm/node_modules/require-from-string/**/*",

@@ -44,11 +44,21 @@ function button(name: string) {
   );
 }
 
-/** The review's confirm button: the verb alone, the count lives in the title. */
+/** The ledger's last row in review: the verb with the count ("Share 3 pages"). */
 function shareButton() {
   return [
     ...document.body.querySelectorAll('[data-share-state="review"] button'),
-  ].find((candidate) => candidate.textContent?.trim() === "Share");
+  ].find((candidate) => /^Share (this page|\d+\u00A0pages)$/.test(candidate.textContent?.trim() ?? ""));
+}
+
+/** The count is held to its noun with a no-break space, so "15" and "pages"
+ *  never split across a line. */
+const NB = "\u00A0";
+
+function rows(surface: Element) {
+  return [...surface.querySelectorAll("[data-share-row]")].map((row) =>
+    row.getAttribute("data-share-row"),
+  );
 }
 
 function snapshot(
@@ -183,12 +193,19 @@ describe("SharePopover redesign", () => {
     );
     expect(dialog).not.toBeNull();
     expect(dialog?.contains(document.activeElement)).toBe(true);
-    // the count is said once, in the title: the button is the verb and the
-    // description does not restate the scope
-    expect(document.body.querySelector("h2")?.textContent).toBe("Share 3 pages");
-    expect(document.body.textContent?.match(/Share 3 pages/g)).toHaveLength(1);
-    expect(shareButton()).not.toBeUndefined();
-    expect(document.body.textContent).toContain("Anyone with the link can read them.");
+    // the head is one status sentence with the exact count, and the action
+    // row repeats the count with the verb; nothing else restates the scope
+    expect(document.body.querySelector("h2")?.textContent).toBe(
+      `Anyone with the link will be able to read 3${NB}pages.`,
+    );
+    expect(shareButton()?.textContent).toBe(`Share 3${NB}pages`);
+    expect(document.body.textContent?.match(/3\u00A0pages/g)).toHaveLength(2);
+    const surface = document.body.querySelector("[data-share-surface]") as HTMLElement;
+    // the rows in order, the action last; the edit row is not built yet
+    expect(rows(surface)).toEqual(["access", "password", "expires", "action"]);
+    expect(surface.querySelector('[data-share-row="access"]')?.textContent).toBe(
+      "AccessAnyone with the link",
+    );
     expect(document.body.textContent).not.toContain("its subpages");
     expect(document.body.textContent).not.toContain(
       "Pages added to or moved into this page later will also be shared automatically.",
@@ -198,7 +215,12 @@ describe("SharePopover redesign", () => {
       '[role="switch"][aria-label="Password protection"]',
     );
     expect(passwordToggle?.getAttribute("aria-checked")).toBe("false");
-    expect(document.body.querySelector('fieldset[aria-label="Link expiry"]')).toBeNull();
+    // the expiry stands on its own row, at Never, whether or not there is a password
+    expect(
+      document.body
+        .querySelector('[role="radiogroup"][aria-label="Link expiry"] [role="radio"][aria-checked="true"]')
+        ?.textContent?.trim(),
+    ).toBe("Never");
     expect(document.body.querySelector("[data-share-confirmation]")).toBeNull();
   });
 
@@ -218,6 +240,10 @@ describe("SharePopover redesign", () => {
     // transform-origin comes from the class (the Radix CSS variable), never
     // an inline style
     expect(surface.style.transformOrigin).toBe("");
+    // the glass is a sleeve: everything readable stands on the paper plate
+    const plate = surface.firstElementChild as HTMLElement;
+    expect(plate.className).toBe("brain-share-plate");
+    expect(plate.contains(document.body.querySelector("h2"))).toBe(true);
     await act(async () => {
       document.dispatchEvent(
         new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
@@ -227,7 +253,7 @@ describe("SharePopover redesign", () => {
     expect(document.body.querySelector("[data-share-surface]")).toBeNull();
   });
 
-  it("reveals and focuses password settings, then clears draft and expiry when off", async () => {
+  it("reveals and focuses the password field, and keeps the expiry when it goes off", async () => {
     await renderAndOpen(false);
     const toggle = document.body.querySelector(
       '[role="switch"][aria-label="Password protection"]',
@@ -254,27 +280,50 @@ describe("SharePopover redesign", () => {
       'input[aria-label="Share password"]',
     ) as HTMLInputElement;
     expect(document.activeElement).toBe(input);
-    expect(document.body.querySelector('fieldset[aria-label="Link expiry"]')).not.toBeNull();
-    expect(
-      (document.body.querySelector('input[type="radio"]:checked') as HTMLInputElement).value,
-    ).toBe("never");
-    const firstExpiry = document.body.querySelector(
-      'input[type="radio"][value="1"]',
-    ) as HTMLInputElement;
-    expect(firstExpiry.className).toContain("sr-only");
-    // the checked segment carries the white-capsule box-shadow (a plain
-    // class), so the focus indicator is an outline — a ring would lose
-    expect(firstExpiry.closest("label")?.className).toContain(
-      "has-[:focus-visible]:outline-2",
-    );
+    // the expiry is its own row after the password's, the settings atom: a
+    // radiogroup of three radio buttons, the chosen one carrying the thumb
+    const surface = document.body.querySelector("[data-share-surface]") as HTMLElement;
+    expect(rows(surface)).toEqual(["access", "password", "expires", "action"]);
+    const expiry = document.body.querySelector(
+      '[role="radiogroup"][aria-label="Link expiry"]',
+    ) as HTMLElement;
+    expect(expiry.className).toContain("brain-settings-segmented");
+    const segments = [...expiry.querySelectorAll('[role="radio"]')];
+    expect(segments.map((segment) => segment.textContent?.trim())).toEqual([
+      "Never",
+      "7 days",
+      "30 days",
+    ]);
+    for (const segment of segments) {
+      expect(segment.className).toContain("brain-settings-segment");
+      expect(segment.className).toContain("focus-inset");
+    }
+    const chosen = () =>
+      expiry.querySelector('[role="radio"][aria-checked="true"]') as HTMLElement;
+    expect(chosen().textContent?.trim()).toBe("Never");
+    expect(chosen().querySelector(".brain-settings-segment-thumb")).not.toBeNull();
+    // the field takes the paper ladder (.field), never the glass fill
+    const field = input.closest("label") as HTMLElement;
+    expect(field.className).toContain("field");
+    expect(field.className).not.toContain("field-glass");
+    expect(field.className).toContain("brain-share-password-field");
+    // the expiry segments are a row of the ledger, revealed with the field
+    expect(document.body.querySelector('[data-share-row="expires"]')).not.toBeNull();
     await act(async () => inputValue(input, "plain draft"));
     await click(button("7 days"));
     await click(document.body.querySelector('[aria-label="Show password"]'));
     expect(input.type).toBe("text");
+    expect(
+      document.body.querySelector('[aria-label="Hide password"]')?.getAttribute("aria-pressed"),
+    ).toBe("true");
 
+    expect(chosen().textContent?.trim()).toBe("7 days");
+
+    // turning the password off clears the draft and leaves the expiry alone
     await click(toggle);
     expect(document.body.querySelector('input[aria-label="Share password"]')).toBeNull();
-    expect(document.body.querySelector('fieldset[aria-label="Link expiry"]')).toBeNull();
+    expect(rows(surface)).toEqual(["access", "password", "expires", "action"]);
+    expect(chosen().textContent?.trim()).toBe("7 days");
 
     await click(toggle);
     input = document.body.querySelector(
@@ -282,9 +331,7 @@ describe("SharePopover redesign", () => {
     ) as HTMLInputElement;
     expect(input.value).toBe("");
     expect(input.type).toBe("password");
-    expect(
-      (document.body.querySelector('input[type="radio"]:checked') as HTMLInputElement).value,
-    ).toBe("never");
+    expect(chosen().textContent?.trim()).toBe("7 days");
   });
 
   it("enables the disclosed exact scope with the chosen password and expiry", async () => {
@@ -330,7 +377,12 @@ describe("SharePopover redesign", () => {
       password: "secret",
       expiresAt: "2026-08-20T12:00:00.000Z",
     });
-    expect(document.body.textContent).toContain("Shared to web");
+    expect(document.body.querySelector("h2")?.textContent).toBe(
+      `Anyone with the link and the password can read 2${NB}pages.`,
+    );
+    expect(document.body.querySelector('[data-share-row="access"]')?.textContent).toBe(
+      "AccessLink and password",
+    );
   });
 
   it("keeps the updated exact scope in review after a conflict", async () => {
@@ -351,10 +403,33 @@ describe("SharePopover redesign", () => {
       password: null,
       expiresAt: null,
     });
-    expect(document.body.querySelector("h2")?.textContent).toBe("Share 4 pages");
+    expect(document.body.querySelector("h2")?.textContent).toBe(
+      `Anyone with the link will be able to read 4${NB}pages.`,
+    );
+    expect(shareButton()?.textContent).toBe(`Share 4${NB}pages`);
     expect(document.body.querySelector('[role="alert"]')?.textContent).toContain(
       "Review the updated count and confirm again",
     );
+  });
+
+  it("enables with an expiry and no password", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-13T12:00:00.000Z"));
+    const onEnableShare = vi.fn().mockResolvedValue({
+      status: "enabled",
+      snapshot: snapshot({ public: true, shareExpiresAt: "2026-09-12T12:00:00.000Z" }),
+    });
+    await renderAndOpen(false, {
+      onPrepareShare: vi.fn().mockResolvedValue(snapshot()),
+      onEnableShare,
+    });
+    await click(button("30 days"));
+    await click(shareButton());
+    expect(onEnableShare).toHaveBeenCalledWith({
+      expectedScopeToken: "a".repeat(64),
+      password: null,
+      expiresAt: "2026-09-12T12:00:00.000Z",
+    });
   });
 
   it("blocks a new overlapping nested grant using the authoritative scope read", async () => {
@@ -397,10 +472,14 @@ describe("SharePopover redesign", () => {
     expect(document.body.textContent).not.toContain("Only you can see this page");
     await act(async () => pending.resolve(snapshot()));
     await settle();
-    expect(document.body.textContent).toContain("Anyone with the link can read this page.");
+    expect(document.body.querySelector("h2")?.textContent).toBe(
+      "Anyone with the link will be able to read this page.",
+    );
+    expect(shareButton()?.textContent).toBe("Share this page");
   });
 
-  it("renders the active share as a header, the link well, and one controls row", async () => {
+  it("renders the active share as a ledger: the sentence, then link, access, password, expiry and the action", async () => {
+    vi.useFakeTimers();
     const onCopyLink = vi.fn();
     await renderAndOpen(true, {
       onPrepareShare: vi
@@ -409,49 +488,85 @@ describe("SharePopover redesign", () => {
       onCopyLink,
     });
     const surface = document.body.querySelector("[data-share-surface]") as HTMLElement;
-    const rows = [...surface.querySelectorAll("[data-share-primary-row]")];
-    expect(rows).toHaveLength(3);
-    expect(rows.map((row) => row.getAttribute("data-share-primary-row"))).toEqual([
-      "status",
-      "link",
-      "controls",
-    ]);
-    // the header block says the state once and the exact scope under it
-    expect(rows[0].querySelector("h2")?.textContent).toBe("Shared to web");
-    expect(rows[0].textContent).toContain("This page + 2 subpages");
-    expect(document.body.querySelector(".brain-share-link-field")).toBeNull();
+    expect(rows(surface)).toEqual(["link", "access", "password", "expires", "action"]);
+    // the head says what the link does, with the exact count
+    expect(surface.querySelector("h2")?.textContent).toBe(
+      `Anyone with the link can read 3${NB}pages.`,
+    );
+    expect(surface.querySelector('[data-share-row="access"]')?.textContent).toBe(
+      "AccessAnyone with the link",
+    );
+    // the action is the last row, red text and never a red fill
+    const action = surface.querySelector('[data-share-row="action"]') as HTMLElement;
+    expect(action.nextElementSibling).toBeNull();
+    const stop = action.querySelector("[data-share-stop-row]") as HTMLElement;
+    expect(stop.textContent).toBe("Stop sharing");
+    expect(stop.className).toContain("btn-destructive");
     // the Radix Content IS the material (regular glass r14, materialize on
-    // data-state) — no framer wrapper, no inline transform-origin
+    // data-state): no framer wrapper, no inline transform-origin
     expect(surface.className).toContain("brain-share-popover");
     expect(surface.getAttribute("role")).toBe("dialog");
     expect(surface.className).not.toContain("transition-opacity");
     expect(surface.style.transformOrigin).toBe("");
-    for (const row of rows) {
+    for (const row of surface.querySelectorAll("[data-share-row]")) {
       expect(row.className).not.toContain("bg-");
       expect(row.className).not.toContain("border");
     }
-    const link = rows[1] as HTMLElement;
-    // the URL sits in the quiet field-like well, a fill — never a material
-    expect(link.querySelector(".brain-share-url-well")).not.toBeNull();
-    const url = link.querySelector("[data-share-url]") as HTMLElement;
-    expect(url.title).toContain("/share/page-a");
+    const link = surface.querySelector('[data-share-row="link"]') as HTMLElement;
+    // the address is a bare mono value on the row (no well, no field) and
+    // it is the link to the public page; copy is the row's one icon button
+    expect(link.querySelector(".brain-share-url-well")).toBeNull();
+    expect(document.body.querySelector(".brain-share-link-field")).toBeNull();
+    const url = link.querySelector("[data-share-url]") as HTMLAnchorElement;
+    expect(url.tagName).toBe("A");
+    expect(url.className).toContain("brain-share-url");
+    expect(url.getAttribute("href")).toContain("/share/page-a");
+    expect(url.getAttribute("target")).toBe("_blank");
+    expect(url.getAttribute("rel")).toContain("noopener");
+    expect(url.getAttribute("aria-label")).toBe("Open public page");
+    expect(url.getAttribute("title")).toBe("Open public page");
+    // the path alone, the slug whole
+    expect(url.textContent).toBe("/share/page-a");
+    expect(link.querySelectorAll(".icon-btn")).toHaveLength(1);
     expect(document.body.querySelector('[aria-label="Copy link"]')?.getAttribute("title")).toBe(
       "Copy link",
-    );
-    expect(document.body.querySelector('[aria-label="Open public page"]')?.getAttribute("title")).toBe(
-      "Open public page",
     );
     const focusOrder = [...surface.querySelectorAll("button, a")].map(
       (node) => node.getAttribute("aria-label") ?? node.textContent?.trim(),
     );
-    expect(focusOrder.slice(0, 4)).toEqual([
-      "Copy link",
+    // the tab order is the ledger's reading order: the link, its copy, the
+    // switch, the three expiry segments, the action
+    expect(focusOrder).toEqual([
       "Open public page",
+      "Copy link",
       "Password protection",
+      "Never",
+      "7 days",
+      "30 days",
       "Stop sharing",
     ]);
-    await click(document.body.querySelector('[aria-label="Copy link"]'));
+    const copy = document.body.querySelector('[aria-label="Copy link"]') as HTMLElement;
+    // copy and open are the 28 IconButton of rows and menus
+    expect(copy.getAttribute("data-size")).toBe("28");
+    expect(copy.className).toContain("icon-btn");
+    await click(copy);
     expect(onCopyLink).toHaveBeenCalledWith("page-a");
+    // "Copied" takes the address's place with a bare check, for two seconds
+    expect(link.querySelector('[role="status"]')?.textContent).toBe("Copied");
+    expect(link.querySelector("[data-share-url]")).toBeNull();
+    expect(copy.getAttribute("aria-label")).toBe("Link copied");
+    expect(copy.getAttribute("data-state")).toBe("done");
+    await act(async () => {
+      vi.advanceTimersByTime(1900);
+    });
+    expect(link.querySelector('[role="status"]')).not.toBeNull();
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    expect(link.querySelector('[role="status"]')).toBeNull();
+    expect(link.querySelector("a[data-share-url]")?.textContent).toContain("/share/page-a");
+    expect(copy.getAttribute("aria-label")).toBe("Copy link");
+    expect(copy.getAttribute("data-state")).toBeNull();
   });
 
   it("uses singular and page-only scope labels for active direct shares", async () => {
@@ -460,12 +575,16 @@ describe("SharePopover redesign", () => {
       .mockResolvedValueOnce(snapshot({ public: true, descendantCount: 0 }))
       .mockResolvedValueOnce(snapshot({ public: true, descendantCount: 1 }));
     await renderAndOpen(true, { scopeRevision: "zero", onPrepareShare });
-    expect(document.body.textContent).toContain("This page only");
+    expect(document.body.querySelector("h2")?.textContent).toBe(
+      "Anyone with the link can read this page.",
+    );
     await act(async () => {
       root.render(popover(true, { scopeRevision: "one", onPrepareShare }));
     });
     await settle();
-    expect(document.body.textContent).toContain("This page + 1 subpage");
+    expect(document.body.querySelector("h2")?.textContent).toBe(
+      `Anyone with the link can read 2${NB}pages.`,
+    );
   });
 
   it("refreshes the exact active count when the scope revision changes", async () => {
@@ -480,43 +599,60 @@ describe("SharePopover redesign", () => {
       .mockResolvedValueOnce(first)
       .mockResolvedValueOnce(second);
     await renderAndOpen(true, { scopeRevision: "tree-1", onPrepareShare });
-    expect(document.body.textContent).toContain("This page + 1 subpage");
+    expect(document.body.querySelector("h2")?.textContent).toBe(
+      `Anyone with the link can read 2${NB}pages.`,
+    );
 
     await act(async () => {
       root.render(popover(true, { scopeRevision: "tree-2", onPrepareShare }));
     });
     await settle();
-    expect(document.body.textContent).toContain("This page + 2 subpages");
+    expect(document.body.querySelector("h2")?.textContent).toBe(
+      `Anyone with the link can read 3${NB}pages.`,
+    );
     expect(onPrepareShare).toHaveBeenCalledTimes(2);
     expect(document.body.querySelector("[data-share-surface]")).not.toBeNull();
   });
 
-  it("saves active password settings and turning them off clears password and expiry", async () => {
+  it("saves the password on its own row, the expiry on the press, and turning the password off leaves the expiry", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-08-13T12:00:00.000Z"));
     const onSetProtection = vi.fn();
     await renderAndOpen(true, { onSetProtection });
+    const surface = document.body.querySelector("[data-share-surface]") as HTMLElement;
     const toggle = document.body.querySelector(
       '[role="switch"][aria-label="Password protection"]',
     );
     await click(toggle);
+    // the save is a row of the reveal, under the field, before the expiry
+    expect(rows(surface)).toEqual(["link", "access", "password", "save-password", "expires", "action"]);
+    const save = button("Save password") as HTMLButtonElement;
+    expect(save.className).toContain("btn-ink");
+    expect(save.closest('[data-share-row="save-password"]')?.className).toContain(
+      "brain-share-row-act",
+    );
+    expect(save.disabled).toBe(true);
     const input = document.body.querySelector(
       'input[aria-label="Share password"]',
     ) as HTMLInputElement;
     await act(async () => inputValue(input, "active secret"));
-    await click(button("1 day"));
-    await click(button("Save protection"));
-    expect(onSetProtection).toHaveBeenCalledWith({
-      password: "active secret",
-      expiresAt: "2026-08-14T12:00:00.000Z",
+    await click(button("Save password"));
+    expect(onSetProtection).toHaveBeenLastCalledWith({ password: "active secret" });
+
+    await click(button("7 days"));
+    expect(onSetProtection).toHaveBeenLastCalledWith({
+      expiresAt: "2026-08-20T12:00:00.000Z",
     });
+    expect(
+      document.body.querySelector('[data-share-row="expires"] .brain-share-row-note')?.textContent,
+    ).toBe("Ends 2026-08-20");
 
     await click(toggle);
-    expect(onSetProtection).toHaveBeenLastCalledWith({
-      password: null,
-      expiresAt: null,
-    });
+    expect(onSetProtection).toHaveBeenLastCalledWith({ password: null });
     expect(document.body.querySelector('input[aria-label="Share password"]')).toBeNull();
+    expect(
+      document.body.querySelector('[role="radio"][aria-checked="true"]')?.textContent?.trim(),
+    ).toBe("7 days");
     // compact switch: 3px pin, 16px travel (19 − 3), transform-driven
     const knob = toggle?.querySelector("span > span") as HTMLElement;
     expect(knob.className).toContain("left-[3px]");
@@ -525,6 +661,8 @@ describe("SharePopover redesign", () => {
   });
 
   it("preserves configured password and exact expiry unless the owner replaces them", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-13T12:00:00.000Z"));
     const onSetProtection = vi.fn();
     await renderAndOpen(true, {
       hasPassword: true,
@@ -539,14 +677,17 @@ describe("SharePopover redesign", () => {
       onSetProtection,
     });
     expect(document.body.textContent).toContain("Leave blank to keep the current password.");
-    await click(button("Save protection"));
-    expect(onSetProtection).toHaveBeenCalledWith({
-      password: undefined,
-      expiresAt: undefined,
-    });
+    // the deadline stands under the label; the segments hold the nearest preset
+    expect(
+      document.body.querySelector('[data-share-row="expires"] .brain-share-row-note')?.textContent,
+    ).toBe("Ends 2026-09-01");
+    await click(button("Save password"));
+    expect(onSetProtection).toHaveBeenCalledWith({ password: undefined });
   });
 
-  it("keeps a legacy expiry visible when no password exists", async () => {
+  it("shows an expiry without a password on the Expires row and clears it on Never", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-08-13T12:00:00.000Z"));
     const onSetProtection = vi.fn();
     await renderAndOpen(true, {
       expiresAt: "2026-09-01T00:00:00.000Z",
@@ -559,13 +700,23 @@ describe("SharePopover redesign", () => {
       ),
       onSetProtection,
     });
-    expect(document.body.textContent).toContain("Legacy link expiry: 2026-09-01");
-    expect(document.body.textContent).toContain("It still applies without a password.");
-    await click(button("Remove expiry"));
-    expect(onSetProtection).toHaveBeenCalledWith({
-      password: null,
-      expiresAt: null,
-    });
+    const surface = document.body.querySelector("[data-share-surface]") as HTMLElement;
+    expect(rows(surface)).toEqual(["link", "access", "password", "expires", "action"]);
+    expect(document.body.textContent).not.toContain("Legacy");
+    expect(button("Remove expiry")).toBeUndefined();
+    const expires = surface.querySelector('[data-share-row="expires"]') as HTMLElement;
+    expect(expires.querySelector(".brain-share-row-note")?.textContent).toBe("Ends 2026-09-01");
+    expect(
+      expires.querySelector('[role="radio"][aria-checked="true"]')?.textContent?.trim(),
+    ).toBe("30 days");
+    expect(
+      document.body
+        .querySelector('[role="switch"][aria-label="Password protection"]')
+        ?.getAttribute("aria-checked"),
+    ).toBe("false");
+    await click(button("Never"));
+    expect(onSetProtection).toHaveBeenCalledWith({ expiresAt: null });
+    expect(expires.querySelector(".brain-share-row-note")).toBeNull();
   });
 
   it("shows inherited access status-first without a disabled sharing switch", async () => {
@@ -579,12 +730,22 @@ describe("SharePopover redesign", () => {
       onCopyLink,
       onOpenShareSettings,
     });
-    expect(document.body.textContent).toContain("Shared through Shared root");
-    expect(document.body.textContent).toContain("Parent share: 4 descendants");
+    // the head counts the parent's whole scope; the parent is a row whose
+    // value is the way there
+    expect(document.body.querySelector("h2")?.textContent).toBe(
+      `Anyone with the link can read 5${NB}pages.`,
+    );
+    const surface = document.body.querySelector("[data-share-surface]") as HTMLElement;
+    expect(rows(surface)).toEqual(["link", "access", "through"]);
+    const through = surface.querySelector('[data-share-row="through"]') as HTMLElement;
+    expect(through.querySelector(".brain-share-row-label")?.textContent).toBe("Shared through");
     expect(document.body.querySelector('[role="switch"]')).toBeNull();
+    expect(surface.querySelector("[data-share-stop-row]")).toBeNull();
     await click(document.body.querySelector('[aria-label="Copy link"]'));
     expect(onCopyLink).toHaveBeenCalledWith("root");
-    await click(button("Go to shared parent"));
+    const parent = through.querySelector('[aria-label="Go to shared parent"]') as HTMLElement;
+    expect(parent.textContent).toBe("Shared root");
+    await click(parent);
     expect(onOpenShareSettings).toHaveBeenCalledTimes(1);
   });
 
@@ -601,15 +762,46 @@ describe("SharePopover redesign", () => {
         ),
       onDisableShare,
     });
-    expect(document.body.textContent).toContain("Also shared through Parent root");
+    const surface = document.body.querySelector("[data-share-surface]") as HTMLElement;
+    expect(rows(surface)).toEqual(["link", "access", "through", "password", "expires", "action"]);
+    const through = surface.querySelector('[data-share-row="through"]') as HTMLElement;
+    expect(through.textContent).toContain("Also shared through");
+    expect(through.textContent).toContain("Parent root");
+    expect(through.textContent).toContain(
+      "Stopping this page's own link will not make it private.",
+    );
     await click(button("Stop sharing"));
+    // the confirmation takes the last row: the ledger above it stays
     expect(document.body.querySelector('[data-share-state="manage"]')).toBeNull();
     expect(document.body.querySelector('[data-share-state="revoke"]')).not.toBeNull();
-    expect(document.body.textContent).toContain("Access through Parent root will remain.");
+    expect(rows(surface)).toEqual(["link", "access", "through", "password", "expires", "action"]);
+    const confirm = surface.querySelector("[data-share-revoke-row]") as HTMLElement;
+    expect(confirm.getAttribute("data-share-row")).toBe("action");
+    expect(confirm.nextElementSibling).toBeNull();
+    expect(confirm.textContent).toContain("This page's own link stops working.");
+    expect(confirm.textContent).toContain("Access through Parent root will remain.");
+    // the question is not asked three times: the statement, then the button
+    expect(confirm.textContent?.match(/Stop sharing/g)).toHaveLength(1);
+    expect(surface.querySelector("[data-share-url]")?.textContent).toContain("/share/page-a");
+    expect(
+      (surface.querySelector('[aria-label="Password protection"]') as HTMLButtonElement).disabled,
+    ).toBe(true);
+    await click(button("Cancel"));
+    expect(document.body.querySelector('[data-share-state="manage"]')).not.toBeNull();
+    await click(button("Stop sharing"));
     await click(button("Stop sharing"));
     expect(onDisableShare).toHaveBeenCalledTimes(1);
-    expect(document.body.textContent).toContain("Shared through Parent root");
-    expect(document.body.textContent).toContain("Parent share: 5 descendants");
+    expect(document.body.querySelector("h2")?.textContent).toBe(
+      `Anyone with the link can read 6${NB}pages.`,
+    );
+    expect(rows(surface)).toEqual(["link", "access", "through"]);
+    expect(
+      surface.querySelector('[data-share-row="through"] .brain-share-row-label')?.textContent,
+    ).toBe("Shared through");
+    // no navigation was offered here, so the parent is a plain value
+    expect(
+      surface.querySelector('[data-share-row="through"] .brain-share-row-value')?.textContent,
+    ).toBe("Parent root");
   });
 
   it("lists every legacy parent and child overlap and names the active residual links", async () => {
@@ -677,12 +869,15 @@ describe("SharePopover redesign", () => {
       onDisableShare: vi.fn().mockReturnValue(pending.promise),
     });
     await click(button("Stop sharing"));
+    expect(document.body.textContent).toContain("Everyone with the link loses access.");
+    expect(document.body.textContent).toContain("The link will stop working.");
     await click(button("Stop sharing"));
     expect(document.body.textContent).toContain("Stopping sharing…");
     expect(document.body.textContent).toContain("Waiting for durable confirmation…");
+    expect(document.body.textContent).toContain("/share/page-a");
     await act(async () => pending.reject(new Error("offline")));
     await settle();
-    expect(document.body.textContent).toContain("localhost:3000/share/page-a");
+    expect(document.body.textContent).toContain("/share/page-a");
     expect(document.body.querySelector('[role="alert"]')?.textContent).toContain(
       "still shown as active",
     );
@@ -705,7 +900,12 @@ describe("SharePopover redesign", () => {
       ),
       onCopyLink,
     });
-    expect(document.body.textContent).toContain("Link expired");
+    expect(document.body.querySelector("h2")?.textContent).toBe(
+      "Parent share through Expired parent is expired.",
+    );
+    expect(document.body.querySelector('[data-share-row="access"]')?.textContent).toBe(
+      "AccessLink expired",
+    );
     expect(document.body.textContent).toContain("No active public link");
     const copy = document.body.querySelector('[aria-label="Copy link"]') as HTMLButtonElement;
     expect(copy.disabled).toBe(true);
@@ -745,6 +945,9 @@ describe("SharePopover redesign", () => {
     // thick-material sheet: .brain-dialog carries the material, .brain-sheet
     // the slide keyframes (zeroed by the global reduced-motion block)
     expect(surface.className).toContain("brain-dialog");
+    // the sheet's 20 is the plate's 10 plus the sheet's own 10
+    expect(surface.className).toContain("p-2.5");
+    expect(surface.firstElementChild?.className).toBe("brain-share-plate");
     const toggle = document.body.querySelector(
       '[aria-label="Password protection"]',
     ) as HTMLElement;

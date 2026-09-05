@@ -24,10 +24,48 @@ iPhone).
   shows it in Settings → Account, with a link to what changed. The request
   carries nothing about your instance beyond a user agent naming Brain, its
   version and the project URL. `BRAIN_UPDATE_CHECK=off` turns it off.
-  Upgrading stays what the Install section says: change the image tag and
-  pull.
+  Upgrading stays what the Install section says: run the install command
+  again, or change the image tag and pull.
 
 ## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/main/install.sh | sudo bash
+# asks for a password and, optionally, a domain; then opens the door
+```
+
+One command on a fresh machine: Ubuntu 22.04 or 24.04, or Debian, on x86_64 or
+arm64, with 2 GB of RAM. It installs Docker, pulls the latest Brain release,
+and, when you give it a domain, installs Caddy and gets the HTTPS certificate.
+Docker comes from Docker's own apt repository, which replaces Ubuntu's
+`docker.io` package if that is present. A Docker that already has Compose is
+left as it is. Everything lands in `/opt/brain`: the compose file, `.env` with
+the password hash and secrets, the Caddyfile, and the notes in
+`/opt/brain/notes`, owned by uid 1000, the user the app runs as. The closing
+message names the address to open, the notes folder, and the upgrade and
+uninstall commands.
+
+Running the same command again upgrades in place and keeps `.env` and the
+notes. `--uninstall` takes the containers and their volumes down, removes the
+Caddy site and the files under `/opt/brain`, and leaves the notes where they
+are:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/main/install.sh | sudo bash -s -- --uninstall
+```
+
+Without a terminal, answer the two questions in the environment. The
+variables go after `sudo`, which drops the ones set before it:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/main/install.sh | sudo BRAIN_PASSWORD='your password' BRAIN_DOMAIN=notes.example.com bash
+```
+
+`BRAIN_DOMAIN=` with nothing after it means no domain. Brain then listens on
+this machine only, at `http://localhost:3020`, and the closing message shows
+the ssh tunnel that reaches it from another computer.
+
+### Or by hand
 
 Brain runs as two containers — the web app and the mail service — against a
 folder of Markdown files you keep. You need Docker with Compose v2 (the
@@ -82,8 +120,18 @@ rather than in a Mac folder. Either way, Brain refuses a folder uid 1000
 cannot write at startup, and `docker compose logs web` names the fix.
 
 `AUTH_SECRET` wants 32 or more random bytes (`openssl rand -hex 32`).
-`AUTH_PASSWORD_HASH` takes a bcrypt hash of your login password, which the
-Docker you already have can produce:
+`AUTH_PASSWORD_HASH` takes a bcrypt hash of your login password. The Brain
+image makes one from a password on stdin, with the same bcrypt the app
+verifies against, and the `sed` escapes it for Compose. `<tag>` is the tag
+the compose file names:
+
+```bash
+printf '%s\n' 'your password' \
+  | docker run --rm -i ghcr.io/michaelbrowk/brain:<tag> hash-password \
+  | sed 's/\$/$$/g'
+```
+
+Without the Brain image, `htpasswd` from the httpd image does the same:
 
 ```bash
 docker run --rm httpd:2.4-alpine htpasswd -nbBC 12 "" 'your password' \
@@ -133,6 +181,10 @@ and give the client that. Everything else, including the whole web app, works
 without either.
 
 ### Stop, upgrade, remove
+
+The one-command install keeps its compose file and `.env` in `/opt/brain`, so
+run these there. Its upgrade is the install command again, and `--uninstall`
+is the whole removal below in one step.
 
 `docker compose stop` pauses Brain and `docker compose down` removes the
 containers, and neither touches the notes: `NOTES_ROOT` is a bind mount, so
@@ -264,8 +316,9 @@ failure behavior are documented in `docs/portable-archives.md`.
 
 ## Upgrade and deploy
 
-Most installs are the Compose one above: raise the image tag in the
-`docker-compose.yml` you downloaded and run `docker compose up -d` again.
+Most installs are the one command above, and running it again upgrades them.
+A Compose install made by hand raises the image tag in the
+`docker-compose.yml` it downloaded and runs `docker compose up -d` again.
 Nothing below is needed for that, and stopping or removing that install is in
 [Stop, upgrade, remove](#stop-upgrade-remove).
 

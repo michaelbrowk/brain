@@ -102,6 +102,23 @@ for (const dependency of [
     );
   }
 }
+// The image's hash-password entrypoint loads bcryptjs from the release tree
+// next to server.js. The standalone tree sits inside the repo, so a lookup
+// that escaped to the repo's node_modules would pass here and fail in the
+// image; the resolved path has to stay inside the tree.
+try {
+  const requireFromServer = createRequire(serverTarget);
+  const resolved = requireFromServer.resolve("bcryptjs");
+  if (!resolved.startsWith(standalone + path.sep)) {
+    throw new Error(`resolved outside the standalone tree: ${resolved}`);
+  }
+  const standaloneBcrypt = requireFromServer("bcryptjs");
+  if (!standaloneBcrypt.compareSync("smoke", standaloneBcrypt.hashSync("smoke", 4))) {
+    throw new Error("hashSync/compareSync round-trip failed");
+  }
+} catch (cause) {
+  throw new Error("standalone tree cannot resolve bcryptjs for hash-password", { cause });
+}
 
 const notesRoot = await mkdtemp(path.join(tmpdir(), "brain-standalone-notes-"));
 const oauthStateRoot = await mkdtemp(

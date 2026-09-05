@@ -5,35 +5,39 @@ import { isShareSubtreeFull } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
-/** The parent id is the guard's target, and the guard needs it before it
- *  runs, so this route reads its body first. Capped at 4 KiB: an id and a
- *  title, two orders of magnitude under anything worth buffering for a
- *  request nothing has vouched for yet. */
+/** A title is all the body carries. 4 KiB is two orders of magnitude over
+ *  the longest one the route will keep. */
 const MAX_CREATE_BODY_BYTES = 4 * 1024;
 
+/** The parent rides on the URL as `?parent=`, the way the upload's page does,
+ *  so the guard has its target before a byte of body is read: the cookie,
+ *  the CSRF header, both rate limiters and the concurrency ceiling all answer
+ *  before an unauthenticated request gets to allocate anything. */
 export async function POST(req: NextRequest) {
-  if (Number(req.headers.get("content-length") ?? 0) > MAX_CREATE_BODY_BYTES) {
-    return tooLarge();
-  }
-  const raw = await req.text();
-  if (Buffer.byteLength(raw, "utf8") > MAX_CREATE_BODY_BYTES) {
-    return tooLarge();
-  }
-  const body = parseBody(raw);
-  if (!body) {
-    return NextResponse.json({ error: "bad request" }, { status: 400 });
-  }
-
+  const parentId = req.nextUrl.searchParams.get("parent") ?? "";
   return withShareWrite(
     req,
-    { targetId: body.parentId, bucket: "create" },
+    { targetId: parentId, bucket: "create" },
     async (ctx, store) => {
+      // Decided from Content-Length before the body is buffered. The count
+      // after the read covers a request that declared nothing.
+      if (Number(req.headers.get("content-length") ?? 0) > MAX_CREATE_BODY_BYTES) {
+        return tooLarge();
+      }
+      const raw = await req.text();
+      if (Buffer.byteLength(raw, "utf8") > MAX_CREATE_BODY_BYTES) {
+        return tooLarge();
+      }
+      const title = parseTitle(raw);
+      if (title === null) {
+        return NextResponse.json({ error: "bad request" }, { status: 400 });
+      }
       try {
         const meta = await store.createSharedSubpage({
           rootId: ctx.rootId,
           parentId: ctx.targetId,
           shareVersion: ctx.shareVersion,
-          title: body.title,
+          title,
           visitorName: ctx.name,
           src: `share-edit:${ctx.vid}`,
         });
@@ -48,7 +52,7 @@ export async function POST(req: NextRequest) {
   );
 }
 
-function parseBody(raw: string): { parentId: string; title: string } | null {
+function parseTitle(raw: string): string | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
@@ -58,11 +62,7 @@ function parseBody(raw: string): { parentId: string; title: string } | null {
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     return null;
   }
-  const { parentId, title } = parsed as Record<string, unknown>;
-  if (typeof parentId !== "string") return null;
-  const cleanTitle = normalizeVisitorTitle(title);
-  if (cleanTitle === null) return null;
-  return { parentId, title: cleanTitle };
+  return normalizeVisitorTitle((parsed as Record<string, unknown>).title);
 }
 
 function tooLarge() {

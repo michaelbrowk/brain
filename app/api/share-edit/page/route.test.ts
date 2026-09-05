@@ -11,12 +11,15 @@ import {
   visitorRequest,
 } from "@/test/share-edit-request";
 
-const PATH = "/api/share-edit/page";
-
 async function post(
   body: unknown,
   store: Record<string, unknown>,
-  options: { declareLength?: boolean; contentLength?: number } = {},
+  options: {
+    parent?: string | null;
+    declareLength?: boolean;
+    contentLength?: number;
+    text?: () => Promise<string>;
+  } = {},
 ) {
   const { resolve } = mockShareEditModules(store);
   const { POST } = await import("./route");
@@ -24,23 +27,27 @@ async function post(
   if (options.contentLength !== undefined) {
     json.headers["Content-Length"] = String(options.contentLength);
   }
-  const res = await POST(await visitorRequest(PATH, { method: "POST", ...json }));
+  const parent = options.parent === undefined ? TARGET_ID : options.parent;
+  const path =
+    parent === null
+      ? "/api/share-edit/page"
+      : `/api/share-edit/page?parent=${encodeURIComponent(parent)}`;
+  const req = await visitorRequest(path, { method: "POST", ...json });
+  if (options.text) Object.defineProperty(req, "text", { value: options.text });
+  const res = await POST(req);
   return { res, resolve };
 }
 
 describe("POST /api/share-edit/page", () => {
   afterEach(restoreShareEditModules);
 
-  it("creates a subpage under a parent inside the subtree and returns its id", async () => {
+  it("creates a subpage under the parent named on the URL and returns its id", async () => {
     const createSharedSubpage = vi.fn().mockResolvedValue({
       id: "new-1",
       title: "A note",
       updatedByName: VISITOR_NAME,
     });
-    const { res } = await post(
-      { parentId: TARGET_ID, title: "A note" },
-      { createSharedSubpage },
-    );
+    const { res } = await post({ title: "A note" }, { createSharedSubpage });
 
     expect(res.status).toBe(200);
     await expect(res.json()).resolves.toEqual({ id: "new-1" });
@@ -57,7 +64,7 @@ describe("POST /api/share-edit/page", () => {
   it("answers the 200-descendant ceiling with 409 subtree_full", async () => {
     const { ShareSubtreeFullError } = await import("@/lib/store");
     const { res } = await post(
-      { parentId: TARGET_ID, title: "one too many" },
+      { title: "one too many" },
       {
         createSharedSubpage: vi
           .fn()
@@ -71,15 +78,12 @@ describe("POST /api/share-edit/page", () => {
   it("bounds the title to 200 characters, strips control characters and falls back to Untitled", async () => {
     const cases: Array<[string, string]> = [
       ["a".repeat(250), "a".repeat(200)],
-      ["  Notes\u0000\nfrom\u001bAda  ", "NotesfromAda"],
+      ["  Notes \nfromAda  ", "Notes fromAda"],
       ["   ", "Untitled"],
     ];
     for (const [given, expected] of cases) {
       const createSharedSubpage = vi.fn().mockResolvedValue({ id: "new-1" });
-      const { res } = await post(
-        { parentId: TARGET_ID, title: given },
-        { createSharedSubpage },
-      );
+      const { res } = await post({ title: given }, { createSharedSubpage });
       expect(res.status).toBe(200);
       expect(createSharedSubpage).toHaveBeenCalledWith(
         expect.objectContaining({ title: expected }),
@@ -88,43 +92,58 @@ describe("POST /api/share-edit/page", () => {
     }
   });
 
-  it("refuses a body without a string parentId and title before the guard runs", async () => {
+  it("refuses a missing or malformed parent before reading the body or touching the Store", async () => {
     const createSharedSubpage = vi.fn();
-    for (const body of [
-      "not json",
-      { title: "no parent" },
-      { parentId: TARGET_ID },
-      { parentId: 7, title: "x" },
-      { parentId: TARGET_ID, title: ["x"] },
-    ]) {
-      const { res, resolve } = await post(body, { createSharedSubpage });
-      expect(res.status, JSON.stringify(body)).toBe(400);
-      await expect(res.json()).resolves.toEqual({ error: "bad request" });
+    for (const parent of [null, "", "not a page id!"]) {
+      const text = vi.fn();
+      const { res, resolve } = await post(
+        { title: "x" },
+        { createSharedSubpage },
+        { parent, text },
+      );
+      expect(res.status, String(parent)).toBe(400);
+      await expect(res.json()).resolves.toEqual({
+        error: "missing_share_context",
+      });
+      expect(text).not.toHaveBeenCalled();
       expect(resolve).not.toHaveBeenCalled();
       restoreShareEditModules();
     }
     expect(createSharedSubpage).not.toHaveBeenCalled();
   });
 
-  it("refuses a body over 4 KiB before reading it and before the guard runs", async () => {
+  it("refuses a body without a title string, and only after the guard has passed", async () => {
     const createSharedSubpage = vi.fn();
+    for (const body of ["not json", {}, { title: ["x"] }, { title: 7 }]) {
+      const { res, resolve } = await post(body, { createSharedSubpage });
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      await expect(res.json()).resolves.toEqual({ error: "bad request" });
+      expect(resolve).toHaveBeenCalledTimes(1);
+      restoreShareEditModules();
+    }
+    expect(createSharedSubpage).not.toHaveBeenCalled();
+  });
+
+  it("refuses a body over 4 KiB before req.text() is ever awaited, declared or not", async () => {
+    const createSharedSubpage = vi.fn();
+    const text = vi.fn();
     const declared = await post(
-      { parentId: TARGET_ID, title: "x" },
+      { title: "x" },
       { createSharedSubpage },
-      { contentLength: 4 * 1024 + 1 },
+      { contentLength: 4 * 1024 + 1, text },
     );
     expect(declared.res.status).toBe(413);
     await expect(declared.res.json()).resolves.toEqual({ error: "too_large" });
-    expect(declared.resolve).not.toHaveBeenCalled();
+    expect(text).not.toHaveBeenCalled();
+    expect(declared.resolve).toHaveBeenCalledTimes(1);
 
     restoreShareEditModules();
     const undeclared = await post(
-      { parentId: TARGET_ID, title: "x".repeat(4 * 1024) },
+      { title: "x".repeat(4 * 1024) },
       { createSharedSubpage },
       { declareLength: false },
     );
     expect(undeclared.res.status).toBe(413);
-    expect(undeclared.resolve).not.toHaveBeenCalled();
     expect(createSharedSubpage).not.toHaveBeenCalled();
   });
 

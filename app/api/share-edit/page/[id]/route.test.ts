@@ -24,14 +24,21 @@ async function get(store: Record<string, unknown>) {
 async function put(
   body: unknown,
   store: Record<string, unknown> | (() => Promise<Record<string, unknown>>),
-  options: { declareLength?: boolean } = {},
+  options: {
+    declareLength?: boolean;
+    contentLength?: number;
+    text?: () => Promise<string>;
+  } = {},
 ) {
   mockShareEditModules(store);
   const { PUT } = await import("./route");
-  return PUT(
-    await visitorRequest(PATH, { method: "PUT", ...jsonBody(body, options) }),
-    ctx,
-  );
+  const json = jsonBody(body, options);
+  if (options.contentLength !== undefined) {
+    json.headers["Content-Length"] = String(options.contentLength);
+  }
+  const req = await visitorRequest(PATH, { method: "PUT", ...json });
+  if (options.text) Object.defineProperty(req, "text", { value: options.text });
+  return PUT(req, ctx);
 }
 
 describe("GET /api/share-edit/page/[id]", () => {
@@ -165,6 +172,20 @@ describe("PUT /api/share-edit/page/[id]", () => {
     expect(undeclared.status).toBe(413);
     await expect(undeclared.json()).resolves.toEqual({ error: "too_large" });
 
+    expect(writeSharedPage).not.toHaveBeenCalled();
+  });
+
+  it("refuses on Content-Length before req.text() is ever awaited", async () => {
+    const text = vi.fn();
+    const writeSharedPage = vi.fn();
+    const res = await put(
+      { markdown: "small" },
+      { writeSharedPage },
+      { contentLength: MAX_SHARE_WRITE_BYTES + 1, text },
+    );
+    expect(res.status).toBe(413);
+    await expect(res.json()).resolves.toEqual({ error: "too_large" });
+    expect(text).not.toHaveBeenCalled();
     expect(writeSharedPage).not.toHaveBeenCalled();
   });
 

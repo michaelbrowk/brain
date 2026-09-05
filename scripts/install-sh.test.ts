@@ -58,15 +58,17 @@ function runInstall(
   args: string[] = [],
   extra: Record<string, string> = {},
   input?: string,
-  /** Runs before the script, for a case that starts from an existing install dir. */
-  prepare?: (installDir: string) => void,
+  /** Runs before the script, for a case that starts from an existing install dir.
+   *  It may return environment for the script, such as the path of a file it made
+   *  next to the install dir. */
+  prepare?: (installDir: string) => void | Record<string, string>,
 ) {
   const root = mkdtempSync(path.join(tmpdir(), "brain-install-"));
   const { PATH, log } = stubs(root, extra);
   const installDir = path.join(root, "opt-brain");
-  prepare?.(installDir);
+  const more = prepare?.(installDir) ?? {};
   const options: SpawnSyncOptionsWithStringEncoding & Pick<SpawnOptions, "detached"> = {
-    env: scriptEnv({ PATH, HOME: root, BRAIN_INSTALL_DIR: installDir, BRAIN_INSTALL_DRY_RUN: "1", ...env }),
+    env: scriptEnv({ PATH, HOME: root, BRAIN_INSTALL_DIR: installDir, BRAIN_INSTALL_DRY_RUN: "1", ...env, ...more }),
     encoding: "utf8",
     input,
     cwd: root,
@@ -108,6 +110,7 @@ describe("install.sh preflight", () => {
 
   it("warns, but continues, between 1.5 and 2 GB of RAM", () => {
     const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" });
+    expect(r.status).toBe(0);
     // stub reports 2048 MB: no warning
     expect(r.stdout).not.toContain("less than 2 GB");
   });
@@ -135,7 +138,48 @@ describe("install.sh preflight", () => {
     expect(r.status).toBe(1);
     expect(r.stderr).toBe("BRAIN_INSTALL_DIR must be an absolute path.\n");
   });
+
+  it.each<[string, string[]]>([
+    ["current", []],
+    ["releases", []],
+    ["current", ["--uninstall"]],
+    ["releases", ["--uninstall"]],
+  ])("refuses a directory that holds a systemd install (%s, %j) before doing anything", (entry, args) => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" }, args, {}, undefined, (dir) => {
+      mkdirSync(path.join(dir, entry), { recursive: true });
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toBe(`${r.installDir} already holds a systemd install of Brain, with current/ and releases/ in it. This installer manages only its own Docker install and would overwrite that one. Move it, or point BRAIN_INSTALL_DIR somewhere else.\n`);
+    expect(r.stdout).toBe("");
+    expect(r.calls()).toBe("");
+  });
+
+  it("refuses an unknown option instead of installing", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" }, ["--help"]);
+    expect(r.status).toBe(1);
+    expect(r.stderr).toBe("Unknown option --help. This script takes no arguments, or --uninstall.\n");
+    expect(r.stdout).toBe("");
+    expect(r.calls()).toBe("");
+  });
+
+  it("ends with main, which the questions under curl | bash depend on", () => {
+    const lines = readFileSync(SCRIPT, "utf8").trimEnd().split("\n");
+    expect(lines.at(-1)).toBe('main "$@"');
+  });
 });
+
+const UBUNTU = 'PRETTY_NAME="Ubuntu 24.04.1 LTS"\nNAME="Ubuntu"\nID=ubuntu\nID_LIKE=debian\nVERSION_CODENAME=noble\nUBUNTU_CODENAME=noble\n';
+const DEBIAN = 'PRETTY_NAME="Debian GNU/Linux 12 (bookworm)"\nNAME="Debian GNU/Linux"\nID=debian\nVERSION_CODENAME=bookworm\n';
+const MINT = 'NAME="Linux Mint"\nID=linuxmint\nID_LIKE="ubuntu debian"\nVERSION_CODENAME=wilma\nUBUNTU_CODENAME=noble\n';
+
+/** An os-release next to the install dir, and the environment that points the script at it. */
+function osRelease(body: string) {
+  return (installDir: string) => {
+    const file = path.join(installDir, "..", "os-release");
+    writeFileSync(file, body);
+    return { BRAIN_OS_RELEASE: file };
+  };
+}
 
 /** Docker not installed yet: `compose version` fails. hash-password still
  *  answers, standing in for the image the plan has by then installed. */
@@ -143,14 +187,19 @@ const DOCKER_ABSENT = `echo "docker $*" >> "__LOG__"; case "$*" in *"compose ver
 
 describe("install.sh first install", () => {
   it("plans Docker from its apt repo, resolves the latest tag, writes .env with a doubled-dollar hash", () => {
-    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "notes.example.com" }, [], { docker: DOCKER_ABSENT });
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "notes.example.com" }, [], { docker: DOCKER_ABSENT }, undefined, osRelease(UBUNTU));
     expect(r.status).toBe(0);
     const out = r.stdout;
-    expect(out).toContain("Docker: installing from Docker's apt repository (this replaces Ubuntu's docker.io package if it is present)");
+    expect(out).toContain("Docker: installing from Docker's apt repository for ubuntu noble (this replaces the distribution's docker.io package if it is present)");
     expect(out).toContain("would run: apt-get install -y ca-certificates curl gnupg");
+    expect(out).toContain("would run: curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc");
+    expect(out).toContain("would run: bash -c echo 'deb [arch=amd64 signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu noble stable' > /etc/apt/sources.list.d/docker.list");
     expect(out).toContain("would run: apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin");
     expect(out).toContain("Latest release: 0.9.3");
-    expect(out).toContain(`would run: curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/v0.9.3/ops/docker/docker-compose.yml`);
+    // downloaded next to the compose file and moved into place, so a dropped transfer cannot truncate an existing one
+    const fresh = path.join(r.installDir, ".docker-compose.yml.new");
+    expect(out).toContain(`would run: curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/v0.9.3/ops/docker/docker-compose.yml -o ${fresh}`);
+    expect(out).toContain(`would run: mv ${fresh} ${path.join(r.installDir, "docker-compose.yml")}`);
     const envFile = path.join(r.installDir, ".env");
     const env = readFileSync(envFile, "utf8");
     expect(env).toContain(`NOTES_ROOT=${path.join(r.installDir, "notes")}`);
@@ -168,6 +217,45 @@ describe("install.sh first install", () => {
     expect(existsSync(path.join(r.installDir, "docker-compose.yml"))).toBe(true);
   });
 
+  it("takes Docker's Debian repository on Debian, under the Debian codename", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" }, [], { docker: DOCKER_ABSENT }, undefined, osRelease(DEBIAN));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("Docker: installing from Docker's apt repository for debian bookworm");
+    expect(r.stdout).toContain("would run: curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc");
+    expect(r.stdout).toContain("https://download.docker.com/linux/debian bookworm stable");
+  });
+
+  it("takes the Ubuntu repository under the Ubuntu codename on an Ubuntu derivative", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" }, [], { docker: DOCKER_ABSENT, uname: "echo aarch64" }, undefined, osRelease(MINT));
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain("https://download.docker.com/linux/ubuntu noble stable");
+    expect(r.stdout).toContain("[arch=arm64 ");
+  });
+
+  it("refuses a distribution Docker's apt repository does not cover", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" }, [], { docker: DOCKER_ABSENT }, undefined, osRelease('ID=fedora\nVERSION_ID=41\n'));
+    expect(r.status).toBe(1);
+    expect(r.stderr).toBe(`Docker's apt repository covers Ubuntu and Debian; this machine reports ID=fedora in ${path.join(r.root, "os-release")}.\n`);
+  });
+
+  it("stops when os-release cannot be read", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" }, [], { docker: DOCKER_ABSENT }, undefined, (dir) => ({ BRAIN_OS_RELEASE: path.join(dir, "..", "missing") }));
+    expect(r.status).toBe(1);
+    expect(r.stderr).toBe(`Could not read ${path.join(r.root, "missing")} to pick Docker's apt repository.\n`);
+  });
+
+  it("stops with one sentence when the compose file cannot be downloaded, leaving no half file", () => {
+    // a real run, with every side effect on its way to the download stubbed
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "", BRAIN_INSTALL_DRY_RUN: "0" }, [], {
+      curl: `case "$*" in *releases/latest*) printf '{"tag_name":"v0.9.3"}';; *) exit 22;; esac`,
+      chown: "",
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toBe("Could not download the compose file for 0.9.3. Check the network and try again.\n");
+    expect(existsSync(path.join(r.installDir, "docker-compose.yml"))).toBe(false);
+    expect(existsSync(path.join(r.installDir, ".docker-compose.yml.new"))).toBe(false);
+  });
+
   it("finds Docker already present and leaves apt alone", () => {
     const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" });
     expect(r.status).toBe(0);
@@ -177,6 +265,7 @@ describe("install.sh first install", () => {
 
   it("keeps Brain local when no domain is given", () => {
     const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" });
+    expect(r.status).toBe(0);
     expect(readFileSync(path.join(r.installDir, ".env"), "utf8")).toContain("BRAIN_PUBLIC_ORIGIN=http://localhost:3020");
     expect(r.stdout).toContain("ssh -L 3020:127.0.0.1:3020");
   });
@@ -230,7 +319,31 @@ describe("install.sh first install", () => {
       docker: `case "$*" in *"compose version"*) exit 0;; *) cat >/dev/null; exit 1;; esac`,
     });
     expect(r.status).toBe(1);
-    expect(r.stderr).toBe("Could not hash the password with the Brain image.\n");
+    expect(r.stderr).toBe("Could not hash the password with the Brain image 0.9.3. This installer needs a release that ships hash-password; a newer one may be needed.\n");
+  });
+
+  it("drops BRAIN_PASSWORD from the environment once it has been read", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" }, [], {
+      docker: `echo "docker $* env-password=\${BRAIN_PASSWORD:-unset}" >> "__LOG__"; case "$*" in *"compose version"*) exit 0;; *hash-password*) cat >/dev/null; echo '$2a$12$abcdefghijklmnopqrstuuABCDEFGHIJKLMNOPQRSTUVWXYZ012345678';; esac`,
+    });
+    expect(r.status).toBe(0);
+    expect(r.calls()).toContain("hash-password env-password=unset");
+  });
+
+  it("refuses an IP address as the domain", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "203.0.113.7" });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toBe("That is an IP address, not a domain name. Caddy cannot get a certificate for one; leave the answer empty to keep Brain on this machine.\n");
+  });
+
+  it("refuses when 3020 is taken, with or without a domain", () => {
+    const ss = 'echo "LISTEN 0 4096 127.0.0.1:3020 0.0.0.0:* users:((\\"node\\",pid=5,fd=3))"';
+    for (const domain of ["", "notes.example.com"]) {
+      const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: domain }, [], { ss });
+      expect(r.status).toBe(1);
+      expect(r.stderr).toBe("Port 3020 is already taken by node. Stop it first, since Brain listens there.\n");
+      expect(r.stdout).not.toContain("caddy");
+    }
   });
 
   it("stops when the releases API does not answer", () => {
@@ -250,16 +363,41 @@ describe("install.sh TLS", () => {
   it("installs Caddy from its apt repo and writes one site block when a domain is given", () => {
     const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "notes.example.com" });
     expect(r.status).toBe(0);
+    expect(r.stdout.indexOf("would run: apt-get update")).toBeLessThan(r.stdout.indexOf("would run: apt-get install -y debian-keyring"));
     expect(r.stdout).toContain("would run: apt-get install -y caddy");
     expect(readFileSync(path.join(r.installDir, "Caddyfile"), "utf8")).toBe("notes.example.com {\n\treverse_proxy 127.0.0.1:3020\n}\n");
-    expect(r.stdout).toContain("would run: install -m 0644");
+    // no Caddyfile on this machine yet, so the copy into place is planned
+    expect(r.stdout).toContain(`would run: install -m 0644 ${path.join(r.installDir, "Caddyfile")} /etc/caddy/Caddyfile`);
     expect(r.stdout).toContain("would run: systemctl reload caddy");
     // the default stubs resolve the domain to this machine's own address
     expect(r.stdout).not.toContain("resolves to");
   });
 
+  it("refuses to replace a Caddyfile that has another site in it", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "notes.example.com" }, [], { caddy: "exit 0" }, undefined, (dir) => {
+      const file = path.join(dir, "..", "Caddyfile-etc");
+      writeFileSync(file, "example.org {\n\troot * /srv/example\n\tfile_server\n}\n");
+      return { BRAIN_CADDYFILE: file };
+    });
+    expect(r.status).toBe(1);
+    expect(r.stderr).toBe(`${path.join(r.root, "Caddyfile-etc")} already has a site in it. Add notes.example.com { reverse_proxy 127.0.0.1:3020 } yourself, or install Brain without a domain.\n`);
+    expect(r.stdout).not.toContain("install -m 0644");
+    expect(existsSync(path.join(r.installDir, "Caddyfile"))).toBe(false);
+  });
+
+  it("replaces its own Caddyfile on a re-run", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "notes.example.com" }, [], { caddy: "exit 0" }, undefined, (dir) => {
+      const file = path.join(dir, "..", "Caddyfile-etc");
+      writeFileSync(file, "notes.example.com {\n\treverse_proxy 127.0.0.1:3020\n}\n");
+      return { BRAIN_CADDYFILE: file };
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain(`would run: install -m 0644 ${path.join(r.installDir, "Caddyfile")} ${path.join(r.root, "Caddyfile-etc")}`);
+  });
+
   it("skips Caddy entirely without a domain", () => {
     const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" });
+    expect(r.status).toBe(0);
     expect(r.stdout).not.toContain("caddy");
     expect(existsSync(path.join(r.installDir, "Caddyfile"))).toBe(false);
   });
@@ -364,15 +502,25 @@ describe("install.sh run, upgrade, uninstall", () => {
     // the compose file was written before compose is asked to read it
     expect(r.stdout.indexOf("ops/docker/docker-compose.yml")).toBeLessThan(pull);
     expect(r.calls()).toContain("curl -fsS --max-time 2 http://127.0.0.1:3020/api/health");
+    expect(r.stdout.indexOf("Waiting for Brain to answer on port 3020...")).toBeGreaterThan(up);
     // the closing message is the last thing said, and there is no tunnel line with a domain
     expect(r.stdout.endsWith(`${closing("https://notes.example.com", path.join(r.installDir, "notes"))}\n`)).toBe(true);
   });
 
-  it("adds the tunnel line, and only then, when there is no domain", () => {
-    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "", SUDO_USER: "misha" }, [], { hostname: "echo brain-box" });
+  it("adds the tunnel line, to this machine's public address, only when there is no domain", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "", SUDO_USER: "misha" });
     expect(r.status).toBe(0);
-    const tail = `${closing("http://localhost:3020", path.join(r.installDir, "notes"))}\nTunnel:    ssh -L 3020:127.0.0.1:3020 misha@brain-box\n`;
+    const tail = `${closing("http://localhost:3020", path.join(r.installDir, "notes"))}\nTunnel:    ssh -L 3020:127.0.0.1:3020 misha@203.0.113.7\n`;
     expect(r.stdout.endsWith(tail)).toBe(true);
+  });
+
+  it("falls back to the hostname in the tunnel line when the public address cannot be read", () => {
+    const r = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "", SUDO_USER: "misha" }, [], {
+      curl: `case "$*" in *releases/latest*) printf '{"tag_name":"v0.9.3"}';; *api/health*) printf '{"version":"0.9.3"}';; *ifconfig.me*|*api.ipify*) exit 22;; esac`,
+      hostname: "echo brain-box",
+    });
+    expect(r.status).toBe(0);
+    expect(r.stdout.endsWith("Tunnel:    ssh -L 3020:127.0.0.1:3020 misha@brain-box\n")).toBe(true);
   });
 
   it("gives up after two minutes of probing with the log tail and one sentence", () => {
@@ -410,7 +558,7 @@ describe("install.sh run, upgrade, uninstall", () => {
   });
 
   it("reads the notes path and origin out of an existing .env, and tightens a loose one to 600", () => {
-    const r = runInstall({ BRAIN_DOMAIN: "", SUDO_USER: "misha" }, [], { hostname: "echo brain-box" }, undefined, (dir) => {
+    const r = runInstall({ BRAIN_DOMAIN: "", SUDO_USER: "misha" }, [], {}, undefined, (dir) => {
       mkdirSync(dir, { recursive: true });
       writeFileSync(path.join(dir, ".env"), `NOTES_ROOT=${path.join(dir, "..", "elsewhere")}\nAUTH_SECRET=old\nAUTH_PASSWORD_HASH=old\nBRAIN_PUBLIC_ORIGIN=http://localhost:3020\n`);
       chmodSync(path.join(dir, ".env"), 0o644);
@@ -420,7 +568,7 @@ describe("install.sh run, upgrade, uninstall", () => {
     const notes = path.join(r.root, "elsewhere");
     expect(existsSync(notes)).toBe(true);
     expect(r.stdout).toContain(`would run: chown 1000:1000 ${notes}`);
-    expect(r.stdout.endsWith(`${closing("http://localhost:3020", notes)}\nTunnel:    ssh -L 3020:127.0.0.1:3020 misha@brain-box\n`)).toBe(true);
+    expect(r.stdout.endsWith(`${closing("http://localhost:3020", notes)}\nTunnel:    ssh -L 3020:127.0.0.1:3020 misha@203.0.113.7\n`)).toBe(true);
     const envFile = path.join(r.installDir, ".env");
     expect(statSync(envFile).mode & 0o777).toBe(0o600);
     expect(readFileSync(envFile, "utf8")).toContain("AUTH_SECRET=old");
@@ -449,8 +597,41 @@ describe("install.sh run, upgrade, uninstall", () => {
     const r = rerun(first, ["--uninstall"]);
     expect(r.status).toBe(0);
     expect(r.stdout).not.toMatch(/would run: rm .*my-notes/);
-    expect(r.stdout).toContain(`would run: rm -rf -- ${path.join(first.installDir, "notes")}`);
+    // the default notes directory is spared whatever .env says
+    expect(r.stdout).not.toMatch(/would run: rm .*\/notes$/m);
     expect(r.stdout.trim().split("\n").at(-1)).toBe(`Your notes are still in ${notes}.`);
+  });
+
+  it.each<[string, (notes: string) => string]>([
+    ["double quotes", (notes) => `NOTES_ROOT="${notes}"\n`],
+    ["single quotes", (notes) => `NOTES_ROOT='${notes}'\n`],
+    ["a trailing space", (notes) => `NOTES_ROOT=${notes} \n`],
+    ["a duplicated key", (notes) => `NOTES_ROOT=${notes}\nNOTES_ROOT=/nowhere\n`],
+  ])("uninstall still spares the notes when .env writes NOTES_ROOT with %s", (_case, line) => {
+    const first = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" });
+    const notes = path.join(first.installDir, "my-notes");
+    mkdirSync(notes);
+    writeFileSync(path.join(first.installDir, ".env"), `${line(notes)}BRAIN_PUBLIC_ORIGIN=http://localhost:3020\n`);
+    const r = rerun(first, ["--uninstall"]);
+    expect(r.status).toBe(0);
+    expect(r.stdout).not.toMatch(/would run: rm .*my-notes/);
+    expect(r.stdout).toContain(`would run: rm -rf -- ${path.join(first.installDir, ".env")}`);
+    expect(r.stdout.trim().split("\n").at(-1)).toBe(`Your notes are still in ${notes}.`);
+  });
+
+  it("uninstall removes the Caddy site it wrote and leaves another site alone", () => {
+    const first = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "notes.example.com" });
+    const file = path.join(first.root, "Caddyfile-etc");
+    writeFileSync(file, "notes.example.com {\n\treverse_proxy 127.0.0.1:3020\n}\n");
+    const ours = rerun(first, ["--uninstall"], {}, { BRAIN_CADDYFILE: file });
+    expect(ours.status).toBe(0);
+    expect(ours.stdout).toContain(`would run: rm -f ${file}`);
+    expect(ours.stdout).toContain("would run: systemctl reload caddy");
+    writeFileSync(file, "example.org {\n\troot * /srv/example\n}\n");
+    const theirs = rerun(first, ["--uninstall"], {}, { BRAIN_CADDYFILE: file });
+    expect(theirs.status).toBe(0);
+    expect(theirs.stdout).not.toContain(`rm -f ${file}`);
+    expect(theirs.stdout).not.toContain("systemctl reload caddy");
   });
 
   it("uninstall spares the directories above notes nested deeper in the install directory", () => {
@@ -477,12 +658,13 @@ describe("install.sh run, upgrade, uninstall", () => {
     expect(r.stdout).toBe("");
   });
 
-  it("uninstall with nothing installed only says where the notes would be", () => {
+  it("uninstall with nothing installed says nothing, since no notes directory exists to name", () => {
     const root = mkdtempSync(path.join(tmpdir(), "brain-install-"));
     const { PATH } = stubs(root);
     const installDir = path.join(root, "o");
     const r = spawnSync("bash", [SCRIPT, "--uninstall"], { env: scriptEnv({ PATH, HOME: root, BRAIN_INSTALL_DRY_RUN: "1", BRAIN_INSTALL_DIR: installDir }), encoding: "utf8" });
     expect(r.status).toBe(0);
-    expect(r.stdout).toBe(`Your notes are still in ${path.join(installDir, "notes")}.\n`);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toBe("");
   });
 });

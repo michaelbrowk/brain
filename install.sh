@@ -8,6 +8,11 @@ DRY="${BRAIN_INSTALL_DRY_RUN:-0}"
 INSTALL_DIR="${BRAIN_INSTALL_DIR:-/opt/brain}"
 RELEASES_API="${BRAIN_RELEASES_API:-https://api.github.com/repos/michaelbrowk/brain/releases/latest}"
 RAW="https://raw.githubusercontent.com/michaelbrowk/brain"
+CADDYFILE="${BRAIN_CADDYFILE:-/etc/caddy/Caddyfile}"
+OS_RELEASE="${BRAIN_OS_RELEASE:-/etc/os-release}"
+# This machine's public address, once asked for. Empty until then, and empty
+# when no service would say.
+PUBLIC=""
 
 # Under `curl ... | sudo bash` stdin is the script itself, so questions go to
 # the terminal when there is one; the tests have no terminal and answer on stdin.
@@ -31,8 +36,32 @@ run() {
 
 require_root() { [ "$(id -u)" = "0" ] || die "Run this with sudo: it installs Docker and needs root for that."; }
 
+# The value of KEY in a KEY=value file (.env, os-release): the first such
+# line, without trailing blanks and without the single or double quotes
+# around it, which Compose and os-release both allow. Empty when absent.
+file_value() {
+  local value
+  value="$(sed -n "/^$2=/{s/^$2=//p;q;}" "$1")"
+  value="${value%"${value##*[![:space:]]}"}"
+  case "$value" in
+    \"*\") value="${value#\"}"; value="${value%\"}" ;;
+    \'*\') value="${value#\'}"; value="${value%\'}" ;;
+  esac
+  printf '%s' "$value"
+}
+
+# The systemd install of Brain (docs/operations.md) lives in the same
+# directory and on the same port. Checked before either path touches anything.
+refuse_systemd_layout() {
+  local entry
+  for entry in "$INSTALL_DIR/current" "$INSTALL_DIR/releases"; do
+    if [ -e "$entry" ] || [ -L "$entry" ]; then
+      die "$INSTALL_DIR already holds a systemd install of Brain, with current/ and releases/ in it. This installer manages only its own Docker install and would overwrite that one. Move it, or point BRAIN_INSTALL_DIR somewhere else."
+    fi
+  done
+}
+
 preflight() {
-  require_root
   command -v apt-get >/dev/null || die "This installer needs apt (Ubuntu or Debian); no apt-get here."
   case "$(uname -m)" in
     x86_64|aarch64) ;;
@@ -49,15 +78,30 @@ preflight() {
   command -v openssl >/dev/null || run apt-get install -y openssl
 }
 
+# Docker's own apt repository, the one for this distribution: Ubuntu and its
+# derivatives take the Ubuntu one under the Ubuntu codename, Debian and its
+# derivatives the Debian one. ID and ID_LIKE in os-release tell them apart.
 ensure_docker() {
   if docker compose version >/dev/null 2>&1; then say "Docker: present"; return; fi
-  say "Docker: installing from Docker's apt repository (this replaces Ubuntu's docker.io package if it is present)"
+  [ -r "$OS_RELEASE" ] || die "Could not read $OS_RELEASE to pick Docker's apt repository."
+  local id like distro codename="" arch
+  id="$(file_value "$OS_RELEASE" ID)"; like="$(file_value "$OS_RELEASE" ID_LIKE)"
+  case " $id $like " in
+    *" ubuntu "*) distro=ubuntu; codename="$(file_value "$OS_RELEASE" UBUNTU_CODENAME)" ;;
+    *" debian "*) distro=debian ;;
+    *) die "Docker's apt repository covers Ubuntu and Debian; this machine reports ID=${id:-unknown} in $OS_RELEASE." ;;
+  esac
+  [ -n "$codename" ] || codename="$(file_value "$OS_RELEASE" VERSION_CODENAME)"
+  [ -n "$codename" ] || die "Could not read a release codename from $OS_RELEASE to pick Docker's apt repository."
+  # preflight has already limited the machine to these two.
+  case "$(uname -m)" in x86_64) arch=amd64 ;; *) arch=arm64 ;; esac
+  say "Docker: installing from Docker's apt repository for $distro $codename (this replaces the distribution's docker.io package if it is present)"
   run apt-get update
   run apt-get install -y ca-certificates curl gnupg
   run install -m 0755 -d /etc/apt/keyrings
-  run bash -c 'curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc'
+  run curl -fsSL "https://download.docker.com/linux/$distro/gpg" -o /etc/apt/keyrings/docker.asc
   run chmod a+r /etc/apt/keyrings/docker.asc
-  run bash -c 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list'
+  run bash -c "echo 'deb [arch=$arch signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/$distro $codename stable' > /etc/apt/sources.list.d/docker.list"
   run apt-get update
   run apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
   run systemctl enable --now docker
@@ -83,7 +127,14 @@ layout() {
   mkdir -p "$INSTALL_DIR" "$NOTES_DIR"
   # The image runs as uid 1000, and Brain refuses a notes folder it cannot write.
   run chown 1000:1000 "$NOTES_DIR"
-  run curl -fsSL "$RAW/v$TAG/ops/docker/docker-compose.yml" -o "$INSTALL_DIR/docker-compose.yml"
+  # Downloaded next to the compose file and moved into place, so a transfer
+  # that drops cannot leave a truncated file where a whole one was.
+  local fresh="$INSTALL_DIR/.docker-compose.yml.new"
+  run curl -fsSL "$RAW/v$TAG/ops/docker/docker-compose.yml" -o "$fresh" || {
+    run rm -f "$fresh"
+    die "Could not download the compose file for $TAG. Check the network and try again."
+  }
+  run mv "$fresh" "$INSTALL_DIR/docker-compose.yml"
   # Under dry run the download above is only announced, so a placeholder
   # stands in and the later steps still have a compose file to read.
   if [ "$DRY" = "1" ] && [ ! -e "$INSTALL_DIR/docker-compose.yml" ]; then
@@ -93,7 +144,8 @@ layout() {
 
 ask_password() {
   local p1 p2
-  if [ -n "${BRAIN_PASSWORD:-}" ]; then p1="$BRAIN_PASSWORD"; else
+  # Read once and dropped, so no later command inherits it.
+  if [ -n "${BRAIN_PASSWORD:-}" ]; then p1="$BRAIN_PASSWORD"; unset BRAIN_PASSWORD; else
     printf 'Choose the Brain password: '; read -rs p1 <&3 || no_terminal; printf '\n'
     printf 'Once more: '; read -rs p2 <&3 || no_terminal; printf '\n'
     [ "$p1" = "$p2" ] || die "Password: the two entries differ."
@@ -102,7 +154,7 @@ ask_password() {
   # The password reaches the image on stdin only. It is never an argument and
   # never in the log, so this call is real under dry run as well.
   HASH="$(printf '%s\n' "$p1" | docker run --rm -i "ghcr.io/michaelbrowk/brain:$TAG" hash-password)" || HASH=""
-  [ -n "$HASH" ] || die "Could not hash the password with the Brain image."
+  [ -n "$HASH" ] || die "Could not hash the password with the Brain image $TAG. This installer needs a release that ships hash-password; a newer one may be needed."
 }
 
 ask_domain() {
@@ -121,47 +173,65 @@ ask_domain() {
   domain="${domain#http://}"; domain="${domain#https://}"; domain="${domain%/}"
   local label='[a-z0-9]([a-z0-9-]*[a-z0-9])?'
   [ "${#domain}" -le 253 ] && [[ $domain =~ ^($label\.)+$label$ ]] || die "Domain: use a bare hostname like notes.example.com."
+  # A last label of digits only is an address, which passes the shape above.
+  case "${domain##*.}" in *[!0-9]*) ;; *) die "That is an IP address, not a domain name. Caddy cannot get a certificate for one; leave the answer empty to keep Brain on this machine." ;; esac
   DOMAIN="$domain"; ORIGIN="https://$domain"
 }
 
-# Caddy needs 80 and 443. Checked before anything for the domain is installed,
-# so a machine that already runs a web server is left as it was. Caddy's own
-# listeners are the expected state on a re-run and pass.
+# Brain publishes 3020, and Caddy needs 80 and 443. Checked before anything
+# is installed, so a machine that already runs a web server is left as it
+# was. Caddy's own listeners are the expected state on a re-run and pass.
 check_ports() {
   command -v ss >/dev/null || { say "Note: ss is not available, skipping the port check."; return 0; }
-  local listening port line name
+  local listening ports port line name
   listening="$(ss -ltnp 2>/dev/null || true)"
-  for port in 80 443; do
+  ports=(3020); [ -z "$DOMAIN" ] || ports=(80 443 3020)
+  for port in "${ports[@]}"; do
     line="$(grep -m 1 -E ":${port}( |\$)" <<< "$listening" || true)"
     [ -n "$line" ] || continue
     name="$(sed -n 's/.*users:(("\([^"]*\)".*/\1/p' <<< "$line")"
-    [ "$name" = "caddy" ] && continue
-    die "Port $port is already taken by ${name:-another program}. Stop it, or install Brain without a domain and put it behind that proxy yourself."
+    case "$port" in
+      3020) die "Port 3020 is already taken by ${name:-another program}. Stop it first, since Brain listens there." ;;
+      *) [ "$name" = "caddy" ] && continue
+         die "Port $port is already taken by ${name:-another program}. Stop it, or install Brain without a domain and put it behind that proxy yourself." ;;
+    esac
   done
+}
+
+# Asked once, of a service that echoes the caller's address. Anything but an
+# address (a captive portal page, say) counts as no answer.
+public_address() {
+  [ -z "$PUBLIC" ] || return 0
+  PUBLIC="$(curl -fsSL https://api.ipify.org 2>/dev/null || curl -fsSL https://ifconfig.me 2>/dev/null)" || true
+  case "$PUBLIC" in *[!0-9a-f.:]*) PUBLIC="" ;; esac
 }
 
 # A wrong record is not fatal: Caddy keeps asking for the certificate on its
 # own, so the install goes on and the sentence names the record to fix.
 check_dns() {
-  local resolved public
+  local resolved
   resolved="$(getent ahostsv4 "$DOMAIN" 2>/dev/null | awk '{print $1; exit}')" || true
-  public="$(curl -fsSL https://api.ipify.org 2>/dev/null || curl -fsSL https://ifconfig.me 2>/dev/null)" || true
-  # Anything but an address (a captive portal page, say) counts as no answer.
-  case "$public" in *[!0-9a-f.:]*) public="" ;; esac
-  if [ -z "$resolved" ] || [ -z "$public" ]; then
+  public_address
+  if [ -z "$resolved" ] || [ -z "$PUBLIC" ]; then
     say "Note: could not compare DNS with this machine's address; Caddy keeps retrying until the record points here."
     return 0
   fi
-  [ "$resolved" = "$public" ] || say "$DOMAIN resolves to $resolved but this machine is $public. Point the A record here; Caddy keeps retrying until it can get a certificate."
+  [ "$resolved" = "$PUBLIC" ] || say "$DOMAIN resolves to $resolved but this machine is $PUBLIC. Point the A record here; Caddy keeps retrying until it can get a certificate."
 }
 
 # Caddy's documented apt steps. The Caddyfile in the install directory is the
 # plan's output and is written for real; copying it into place and the reload
 # are side effects. The caddy package starts the service, so a reload is
-# enough on a fresh install as well as on a re-run.
+# enough on a fresh install as well as on a re-run. A site file that is not
+# this script's own would be replaced by the copy, so it is refused first,
+# before anything is installed.
 ensure_caddy() {
+  if [ -f "$CADDYFILE" ] && ! grep -q 'reverse_proxy 127.0.0.1:3020' "$CADDYFILE"; then
+    die "$CADDYFILE already has a site in it. Add $DOMAIN { reverse_proxy 127.0.0.1:3020 } yourself, or install Brain without a domain."
+  fi
   if command -v caddy >/dev/null; then say "Caddy: present"; else
     say "Caddy: installing from its apt repository"
+    run apt-get update
     run apt-get install -y debian-keyring debian-archive-keyring apt-transport-https curl
     run bash -c 'curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg'
     run bash -c 'curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt > /etc/apt/sources.list.d/caddy-stable.list'
@@ -171,7 +241,7 @@ ensure_caddy() {
   fi
   mkdir -p "$INSTALL_DIR"
   printf '%s {\n\treverse_proxy 127.0.0.1:3020\n}\n' "$DOMAIN" > "$INSTALL_DIR/Caddyfile"
-  run install -m 0644 "$INSTALL_DIR/Caddyfile" /etc/caddy/Caddyfile
+  run install -m 0644 "$INSTALL_DIR/Caddyfile" "$CADDYFILE"
   run systemctl reload caddy
 }
 
@@ -216,6 +286,7 @@ bring_up() {
 # and stays real under dry run; the log tail on failure is a command and goes
 # through run.
 verify() {
+  say "Waiting for Brain to answer on port 3020..."
   local tries=0 body
   while :; do
     if body="$(curl -fsS --max-time 2 http://127.0.0.1:3020/api/health 2>/dev/null)"; then
@@ -229,7 +300,7 @@ verify() {
     [ "$tries" -lt 40 ] || break
     sleep 1
   done
-  compose logs --tail 20
+  compose logs --tail 20 || true
   die "Brain did not answer on port 3020 within two minutes. The last log lines are above; please open an issue with them."
 }
 
@@ -241,40 +312,50 @@ finish() {
   say "Upgrade:   curl -fsSL $RAW/main/install.sh | sudo bash"
   say "Uninstall: curl -fsSL $RAW/main/install.sh | sudo bash -s -- --uninstall"
   # Without a domain Brain listens on this machine only. The tunnel is how to
-  # reach it from another computer.
+  # reach it from another computer, by public address when one can be read.
   [ "$ORIGIN" = "http://localhost:3020" ] || return 0
-  say "Tunnel:    ssh -L 3020:127.0.0.1:3020 ${SUDO_USER:-root}@$(hostname -f 2>/dev/null || hostname)"
+  public_address
+  say "Tunnel:    ssh -L 3020:127.0.0.1:3020 ${SUDO_USER:-root}@${PUBLIC:-$(hostname -f 2>/dev/null || hostname)}"
 }
 
 # Takes the containers and their volumes down, removes the Caddy site if it is
 # the one this script wrote, then every entry of the install directory except
 # the notes directory and every directory that contains it. The notes path
 # comes from .env, so notes moved elsewhere inside the directory are spared as
-# well. The comparison is textual: a hand-edited NOTES_ROOT that is quoted or
-# has a doubled slash is not recognised and not protected. Docker or Caddy
-# already gone is no reason to stop before the removal and the last sentence.
+# well, and the default notes directory is spared whatever .env says. The
+# comparison is textual: a NOTES_ROOT spelled with a doubled slash or a
+# symlink is not recognised and not protected. Docker or Caddy already gone
+# is no reason to stop before the removal and the last sentence.
 uninstall() {
   local notes=""
-  if [ -f "$INSTALL_DIR/.env" ]; then notes="$(sed -n 's/^NOTES_ROOT=//p' "$INSTALL_DIR/.env")"; fi
+  if [ -f "$INSTALL_DIR/.env" ]; then notes="$(file_value "$INSTALL_DIR/.env" NOTES_ROOT)"; fi
   notes="${notes%/}"
   NOTES_DIR="${notes:-$INSTALL_DIR/notes}"
   if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then compose down -v || true; fi
-  if [ -f /etc/caddy/Caddyfile ] && grep -q 'reverse_proxy 127.0.0.1:3020' /etc/caddy/Caddyfile; then
-    run rm -f /etc/caddy/Caddyfile
+  if [ -f "$CADDYFILE" ] && grep -q 'reverse_proxy 127.0.0.1:3020' "$CADDYFILE"; then
+    run rm -f "$CADDYFILE"
     run systemctl reload caddy || true
   fi
   local entry
-  for entry in "$INSTALL_DIR"/* "$INSTALL_DIR"/.env; do
+  for entry in "$INSTALL_DIR"/* "$INSTALL_DIR"/.env "$INSTALL_DIR"/.docker-compose.yml.new; do
     [ -e "$entry" ] || continue
-    # The notes directory itself, or one of its ancestors.
+    # The notes directory itself or one of its ancestors, and the default
+    # notes directory: a misread .env must not cost the notes.
     case "$NOTES_DIR/" in "$entry"/*) continue ;; esac
+    case "$INSTALL_DIR/notes/" in "$entry"/*) continue ;; esac
     run rm -rf -- "$entry"
   done
-  say "Your notes are still in $NOTES_DIR."
+  if [ -d "$NOTES_DIR" ]; then say "Your notes are still in $NOTES_DIR."; fi
 }
 
 main() {
-  if [ "${1:-}" = "--uninstall" ]; then require_root; uninstall; exit 0; fi
+  require_root
+  refuse_systemd_layout
+  case "${1:-}" in
+    "") ;;
+    --uninstall) uninstall; exit 0 ;;
+    *) die "Unknown option $1. This script takes no arguments, or --uninstall." ;;
+  esac
   preflight
   ensure_docker
   resolve_release
@@ -282,8 +363,8 @@ main() {
     say "Existing install found; upgrading to $TAG."
     # The first install answered the questions into .env, which stays as it
     # is apart from its mode: a loose one is tightened.
-    ORIGIN="$(sed -n 's/^BRAIN_PUBLIC_ORIGIN=//p' "$INSTALL_DIR/.env")"
-    NOTES_DIR="$(sed -n 's/^NOTES_ROOT=//p' "$INSTALL_DIR/.env")"
+    ORIGIN="$(file_value "$INSTALL_DIR/.env" BRAIN_PUBLIC_ORIGIN)"
+    NOTES_DIR="$(file_value "$INSTALL_DIR/.env" NOTES_ROOT)"; NOTES_DIR="${NOTES_DIR%/}"
     chmod 600 "$INSTALL_DIR/.env"
     layout
   else
@@ -291,7 +372,8 @@ main() {
     # an existing compose file as it was.
     ask_password
     ask_domain
-    if [ -n "$DOMAIN" ]; then check_ports; check_dns; ensure_caddy; fi
+    check_ports
+    if [ -n "$DOMAIN" ]; then check_dns; ensure_caddy; fi
     layout
     write_env
   fi

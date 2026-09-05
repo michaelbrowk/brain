@@ -1299,6 +1299,68 @@ export class SqliteMailContentCache {
     });
   }
 
+  /**
+   * Every origin image one message still owes, for the drain that an owner
+   * demand or a ready commit starts at once. Eligibility is the scheduler's:
+   * content ready at the active generation, and the message either in the
+   * started background cohort or under a live owner demand. Ordinal order
+   * keeps the drain in document order.
+   */
+  async listPendingRemoteImages(
+    providerMessageId: string,
+    now: number,
+  ): Promise<readonly string[]> {
+    const messageId = validateProviderId(providerMessageId);
+    const inspectedAt = validateTimestamp(now);
+    return this.serialized(async () => {
+      const rows = this.requireDatabase()
+        .prepare(
+          `SELECT remote.remote_image_id
+             FROM message_content_remote_images AS remote
+             JOIN message_content AS content
+               ON content.account_id = remote.account_id
+              AND content.provider_message_id = remote.provider_message_id
+             JOIN sync_state AS sync ON sync.account_id = content.account_id
+             JOIN messages AS message
+               ON message.account_id = content.account_id
+              AND message.generation = content.source_generation
+              AND message.message_id = content.provider_message_id
+              AND message.thread_id = content.source_thread_id
+             LEFT JOIN message_content_privacy_cohort AS cohort
+               ON cohort.account_id = remote.account_id
+              AND cohort.provider_message_id = remote.provider_message_id
+              AND cohort.source_generation = content.source_generation
+             LEFT JOIN message_content_user_demand AS demand
+               ON demand.account_id = remote.account_id
+              AND demand.provider_message_id = remote.provider_message_id
+              AND demand.source_generation = content.source_generation
+            WHERE remote.account_id = ? AND remote.provider_message_id = ?
+              AND content.state = 'ready'
+              AND content.source_generation = sync.active_generation
+              AND content.content_format_version = ?
+              AND (cohort.content_prefetch_started_at IS NOT NULL OR
+                demand.provider_message_id IS NOT NULL)
+              AND (
+                (remote.state = 'pending' AND remote.bytes IS NULL) OR
+                (remote.state = 'transient_failure' AND remote.retry_at <= ?)
+              )
+            ORDER BY remote.ordinal ASC`,
+        )
+        .all(this.accountId, messageId, this.contentFormatVersion, inspectedAt);
+      return Object.freeze(
+        rows.map((row) => {
+          if (
+            typeof row.remote_image_id !== "string" ||
+            !SAFE_REMOTE_IMAGE_ID.test(row.remote_image_id)
+          ) {
+            throw integrityFailed();
+          }
+          return row.remote_image_id;
+        }),
+      );
+    });
+  }
+
   async readAttachment(
     attachmentId: string,
   ): Promise<CachedMailAttachmentSnapshot | null> {

@@ -230,6 +230,82 @@ describe("active-message content metadata cache", () => {
     ).resolves.toEqual(attachment);
   });
 
+  it("lists one message's pending remote images for a demand-started drain", async () => {
+    const fixture = await createFixture({ active: true });
+    const lease = await claimLease(fixture.content, "message-thread-a", 100);
+    const raw = Buffer.from("raw MIME with several remote images");
+    const ids = ["1", "2", "3", "4"].map(
+      (digit) => `remote-image-a${digit.repeat(32)}`,
+    );
+    const html = Buffer.from(
+      ids.map((id) => `<img data-brain-remote-image="${id}">`).join(""),
+    );
+    await stage(fixture, lease, raw, 101);
+    await stage(fixture, lease, html, 102);
+    await fixture.content.commitReady({
+      lease,
+      rawMime: descriptorFor(raw),
+      text: null,
+      sanitizedHtml: descriptorFor(html),
+      attachments: [],
+      remoteImages: ids.map((remoteImageId, ordinal) => ({
+        remoteImageId,
+        sourceUrl: `https://cdn.example.net/${ordinal}.png`,
+      })),
+      now: 103,
+    });
+
+    // Neither a cohort start nor an owner demand: nothing is approved yet.
+    await expect(
+      fixture.content.listPendingRemoteImages("message-thread-a", 104),
+    ).resolves.toEqual([]);
+    await fixture.content.recordUserContentDemand("message-thread-a", 104);
+    await expect(
+      fixture.content.listPendingRemoteImages("message-thread-a", 104),
+    ).resolves.toEqual(ids);
+    await expect(
+      fixture.content.listPendingRemoteImages("message-thread-b", 104),
+    ).resolves.toEqual([]);
+
+    const [first, second, third] = await Promise.all(
+      ids.slice(0, 3).map((id) => fixture.content.inspectRemoteImage(id, 105)),
+    );
+    if (
+      first?.state !== "pending" ||
+      second?.state !== "pending" ||
+      third?.state !== "pending"
+    ) {
+      throw new Error("expected pending remote images");
+    }
+    await fixture.content.storeRemoteImage({
+      snapshot: first,
+      mimeType: "image/png",
+      data: testPng(3, 2),
+      raster: { width: 3, height: 2, frames: 1 },
+      now: 106,
+    });
+    await fixture.content.markRemoteImageFailure({
+      snapshot: second,
+      kind: "transient",
+      retryAt: 500,
+      now: 107,
+    });
+    await fixture.content.markRemoteImageFailure({
+      snapshot: third,
+      kind: "permanent",
+      now: 108,
+    });
+
+    // Ready, unexpired transient and permanent rows drop out. An expired
+    // transient row comes back in its ordinal place.
+    await expect(
+      fixture.content.listPendingRemoteImages("message-thread-a", 499),
+    ).resolves.toEqual([ids[3]]);
+    await expect(
+      fixture.content.listPendingRemoteImages("message-thread-a", 500),
+    ).resolves.toEqual([ids[1], ids[3]]);
+  });
+
   it("keeps remote origins behind opaque IDs and caches verified image bytes", async () => {
     const fixture = await createFixture({ active: true });
     const lease = await claimLease(fixture.content, "message-thread-a", 100);

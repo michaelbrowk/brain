@@ -581,7 +581,7 @@ function MailMessageContentView({
     readyContent,
     renderedHtml,
   );
-  const remoteSources = useRemoteImageSources(message, renderedHtml);
+  const remoteSources = useRemoteImageSources(message, renderedHtml, client);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -842,6 +842,7 @@ function useInlineCidSources(
 function useRemoteImageSources(
   message: MailMessageDto,
   sanitizedHtml: string | null,
+  client: Pick<MailSurfaceClient, "requestMessageContent">,
 ): ReadonlyMap<string, string> {
   const remoteImageIds = sanitizedHtml === null
     ? []
@@ -862,6 +863,16 @@ function useRemoteImageSources(
       window.clearTimeout(deadline);
       deadline = null;
     };
+    // The deadline is for a cache that has gone quiet, not one that is
+    // still answering: every answer re-arms it. The request budget below is
+    // what bounds a cache that keeps answering "not yet".
+    const armDeadline = () => {
+      clearDeadline();
+      deadline = window.setTimeout(
+        () => controller.abort(),
+        REMOTE_IMAGE_LOAD_DEADLINE_MS,
+      );
+    };
     const revokeAll = () => {
       for (const source of objectUrls) URL.revokeObjectURL(source);
       objectUrls.clear();
@@ -876,14 +887,37 @@ function useRemoteImageSources(
         revokeAll();
       };
     }
-    deadline = window.setTimeout(
-      () => controller.abort(),
-      REMOTE_IMAGE_LOAD_DEADLINE_MS,
-    );
+    armDeadline();
+    // The cache fills these images on the server's own schedule, and the
+    // reader endpoint only ever reads it. A message-content POST re-records
+    // the owner's demand and starts that fill again. The body path already
+    // made the first request, so the images share what is left of the same
+    // budget, and runs that arrive together fold into one request.
+    const input = { accountId: message.accountId, messageId: message.messageId };
+    let asks = 1;
+    let asking: Promise<boolean> | null = null;
+    const askAgain = (): Promise<boolean> => {
+      if (asking !== null) return asking;
+      if (asks >= CONTENT_MAX_REQUESTS) return Promise.resolve(false);
+      asks += 1;
+      asking = client
+        .requestMessageContent(input, controller.signal)
+        .then(
+          () => true,
+          () => false,
+        )
+        .finally(() => {
+          asking = null;
+        });
+      return asking;
+    };
     const loadOne = async (
       remoteImageId: string,
     ): Promise<readonly [string, string] | null> => {
       let attempt = 0;
+      let misses = 0;
+      let seenAsks = asks;
+      let askedForMissing = false;
       while (!disposed && !controller.signal.aborted) {
         try {
           const result = await mailCidFetchGate.run(
@@ -905,6 +939,9 @@ function useRemoteImageSources(
                 if (response.status === 503) {
                   return Object.freeze({ kind: "retry" as const });
                 }
+                if (response.status === 404) {
+                  return Object.freeze({ kind: "missing" as const });
+                }
                 return Object.freeze({ kind: "stop" as const });
               }
               const candidate = await response.blob();
@@ -915,7 +952,26 @@ function useRemoteImageSources(
             },
           );
           if (result.kind === "stop") return null;
-          if (result.kind === "retry") {
+          if (result.kind === "retry" || result.kind === "missing") {
+            armDeadline();
+            if (result.kind === "missing") {
+              // A 404 is an image the cache has no live row for, or one it
+              // has given up on. One re-ask covers a row that was dropped
+              // and re-created; a second 404 after it is the final answer.
+              if (askedForMissing) return null;
+              askedForMissing = true;
+            } else {
+              misses += 1;
+            }
+            if (
+              result.kind === "missing" ||
+              misses >= CONTENT_TRANSIENT_POLLS_BEFORE_REQUEST
+            ) {
+              // An ask by another image since this run began counts here.
+              if (asks === seenAsks && !(await askAgain())) return null;
+              seenAsks = asks;
+              misses = 0;
+            }
             const canRetry = await waitForContentPoll(
               controller.signal,
               remoteImagePollDelayMs(attempt),
@@ -965,7 +1021,7 @@ function useRemoteImageSources(
       controller.abort();
       revokeAll();
     };
-  }, [key, message.accountId, sanitizedHtml]);
+  }, [client, key, message.accountId, message.messageId, sanitizedHtml]);
 
   return state.key === key ? state.sources : EMPTY_REMOTE_SOURCES;
 }
@@ -1022,7 +1078,8 @@ function isVerifiedInlineResponse(
 
 const EMPTY_CID_SOURCES: ReadonlyMap<string, string> = new Map();
 const EMPTY_REMOTE_SOURCES: ReadonlyMap<string, string> = new Map();
-const REMOTE_IMAGE_LOAD_DEADLINE_MS = 90_000;
+/** Silence, not waiting: it runs from the last answer, not from the open. */
+export const REMOTE_IMAGE_LOAD_DEADLINE_MS = 90_000;
 
 function inlineCidContentKey(
   message: MailMessageDto,
@@ -1079,7 +1136,7 @@ export function pollDelayMs(attempt: number): number {
   );
 }
 
-function remoteImagePollDelayMs(attempt: number): number {
+export function remoteImagePollDelayMs(attempt: number): number {
   return Math.min(500 * 2 ** attempt, 10_000);
 }
 

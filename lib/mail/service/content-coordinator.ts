@@ -154,6 +154,45 @@ export interface MailBackgroundContentPrefetchResult {
   readonly hasMore: boolean;
 }
 
+/**
+ * The image pipeline's own record, for the service's stdout stream. Payloads
+ * stay inside the section 13 allowlist: a remote image reaches the reader
+ * through the attachment download contract, so a drain counts its images as
+ * `attachmentCount`; a fetched image reports the bytes it added to the cache
+ * as `cacheBytes`; a transient refusal reports how far off its retry is as a
+ * `durationBucket`. Nothing here names a URL, a host or an image id.
+ */
+export type MailContentCoordinatorEvent =
+  | Readonly<{
+      event: "mail_remote_image_drain_started";
+      accountId: string;
+      attachmentCount: number;
+    }>
+  | Readonly<{
+      event: "mail_remote_image_drain_finished";
+      accountId: string;
+      attachmentCount: number;
+    }>
+  | Readonly<{
+      event: "mail_remote_image_settled";
+      accountId: string;
+      phase: "fetched";
+      cacheBytes: number;
+    }>
+  | Readonly<{
+      event: "mail_remote_image_settled";
+      accountId: string;
+      phase: "blocked" | "origin_refused" | "budget_exhausted";
+      errorCode: string;
+    }>
+  | Readonly<{
+      event: "mail_remote_image_settled";
+      accountId: string;
+      phase: "transient";
+      errorCode: string;
+      durationBucket: string;
+    }>;
+
 interface QueueEntry {
   readonly key: string;
   readonly task: MailContentQueueTask;
@@ -437,11 +476,13 @@ export class MailContentCoordinator
   private readonly queue: MailContentWorkQueuePort;
   private readonly retryPolicy: MailContentRetryPolicyPort;
   private readonly onBackgroundWorkAvailable: (() => void) | null;
+  private readonly onEvent: ((event: MailContentCoordinatorEvent) => void) | null;
   private readonly clock: () => number;
   private readonly capacityReclaimer: MailContentCapacityReclaimer;
   private readonly remoteImageFetcher: RemoteImageFetcherPort;
   private readonly remoteImageFetches = new Map<string, Promise<void>>();
   private readonly remoteImageMessageTails = new Map<string, Promise<void>>();
+  private readonly remoteImageDrains = new Map<string, Promise<void>>();
   private readonly entries = new Map<string, RegistryEntry>();
   private readonly invalidatedAccounts = new Set<string>();
   private resolutionTail: Promise<void> = Promise.resolve();
@@ -455,6 +496,7 @@ export class MailContentCoordinator
     readonly retryPolicy?: MailContentRetryPolicyPort;
     readonly remoteImageFetcher?: RemoteImageFetcherPort;
     readonly onBackgroundWorkAvailable?: () => void;
+    readonly onEvent?: (event: MailContentCoordinatorEvent) => void;
     readonly clock?: () => number;
   }) {
     if (
@@ -464,7 +506,8 @@ export class MailContentCoordinator
       (options.remoteImageFetcher !== undefined &&
         typeof options.remoteImageFetcher.fetch !== "function") ||
       (options.onBackgroundWorkAvailable !== undefined &&
-        typeof options.onBackgroundWorkAvailable !== "function")
+        typeof options.onBackgroundWorkAvailable !== "function") ||
+      (options.onEvent !== undefined && typeof options.onEvent !== "function")
     ) {
       throw new MailContentServiceError("mail_content_request_invalid");
     }
@@ -475,6 +518,7 @@ export class MailContentCoordinator
     this.queue = options.queue ?? new InMemoryMailContentWorkQueue({ clock: this.clock });
     this.retryPolicy = options.retryPolicy ?? new ExponentialMailContentRetryPolicy();
     this.onBackgroundWorkAvailable = options.onBackgroundWorkAvailable ?? null;
+    this.onEvent = options.onEvent ?? null;
     this.remoteImageFetcher =
       options.remoteImageFetcher ?? new PinnedRemoteImageFetcher();
     this.capacityReclaimer = new GlobalMailContentCapacityReclaimer({
@@ -504,15 +548,23 @@ export class MailContentCoordinator
     return this.withEntry(accountId, async (entry) => {
       await entry.cache.recordUserContentDemand(messageId, this.readTime());
       this.signalBackgroundWork();
-      if (await entry.cache.isBackgroundContentPrefetchStarted(messageId)) {
-        const snapshot = await entry.cache.inspect(messageId);
-        // Only work in flight or already done short-circuits. A background
-        // start whose content never landed (transient failure waiting out its
-        // retry window, a row invalidated by a format or generation change)
-        // must not strand the owner's explicit demand: it re-claims now.
-        if (snapshot.kind === "fetching" || snapshot.kind === "ready") {
-          return this.projectSnapshot(entry, messageId, snapshot);
-        }
+      const snapshot = await entry.cache.inspect(messageId);
+      if (snapshot.kind === "ready") {
+        // The body is cached but its images may not be. Opening the message
+        // is the owner's approval to fetch them, so the drain starts now
+        // rather than when the scheduler next reaches this account.
+        this.startRemoteImageDrain(accountId, messageId);
+        return this.projectSnapshot(entry, messageId, snapshot);
+      }
+      // Only work in flight short-circuits. A background start whose content
+      // never landed (transient failure waiting out its retry window, a row
+      // invalidated by a format or generation change) must not strand the
+      // owner's explicit demand: it re-claims now.
+      if (
+        snapshot.kind === "fetching" &&
+        (await entry.cache.isBackgroundContentPrefetchStarted(messageId))
+      ) {
+        return this.projectSnapshot(entry, messageId, snapshot);
       }
       return this.requestContentForEntry(entry, accountId, messageId);
     });
@@ -737,7 +789,7 @@ export class MailContentCoordinator
   ): Promise<void> {
     const key = `${snapshot.accountId}:${snapshot.remoteImageId}`;
     const existing = this.remoteImageFetches.get(key);
-    if (existing !== undefined) return existing;
+    if (existing !== undefined) return joinAbortable(existing, signal);
     const messageKey = `${snapshot.accountId}:${snapshot.providerMessageId}`;
     const previous = this.remoteImageMessageTails.get(messageKey) ?? Promise.resolve();
     const run = previous.catch(() => undefined).then(async () => {
@@ -777,6 +829,12 @@ export class MailContentCoordinator
           raster: result.raster,
           now: this.readTime(),
         });
+        this.emit({
+          event: "mail_remote_image_settled",
+          accountId: snapshot.accountId,
+          phase: "fetched",
+          cacheBytes: result.data.byteLength,
+        });
       } catch (error) {
         if (
           signal?.aborted ||
@@ -792,20 +850,37 @@ export class MailContentCoordinator
                 error.code === "mail_content_remote_image_budget_exhausted"
               ? "permanent"
               : "transient";
+        const errorCode =
+          error instanceof RemoteImageFetchError ||
+          error instanceof MailContentCacheError
+            ? error.code
+            : "remote_image_fetch_failed";
         const now = this.readTime();
+        const retryAt = now + MAIL_RESOURCE_LIMITS.remoteImageTransientRetryMs;
         await entry.cache
           .markRemoteImageFailure({
             snapshot: liveSnapshot,
             kind,
-            ...(kind === "transient"
-              ? {
-                  retryAt:
-                    now + MAIL_RESOURCE_LIMITS.remoteImageTransientRetryMs,
-                }
-              : {}),
+            ...(kind === "transient" ? { retryAt } : {}),
             now,
           })
           .catch(() => undefined);
+        this.emit(
+          kind === "transient"
+            ? {
+                event: "mail_remote_image_settled",
+                accountId: snapshot.accountId,
+                phase: "transient",
+                errorCode,
+                durationBucket: durationBucket(retryAt - now),
+              }
+            : {
+                event: "mail_remote_image_settled",
+                accountId: snapshot.accountId,
+                phase: remoteImageRefusal(errorCode),
+                errorCode,
+              },
+        );
         if (kind === "permanent") throw remoteImageNotFound();
         throw unavailable();
       } finally {
@@ -934,8 +1009,10 @@ export class MailContentCoordinator
               "content_worker_incomplete",
             );
           }
-          // Freshly committed content may reference pending remote images;
-          // let the background scheduler pick them up without a full tick.
+          // Freshly committed content may reference pending remote images.
+          // Their drain starts here, detached from this attempt; the
+          // scheduler still hears about it for whatever the drain leaves.
+          this.startRemoteImageDrain(input.accountId, input.messageId);
           this.signalBackgroundWork();
           return complete();
         } catch (error) {
@@ -1108,6 +1185,83 @@ export class MailContentCoordinator
       await cache.close().catch(() => undefined);
       await blobStore.close().catch(() => undefined);
       throw contentServiceError(error);
+    }
+  }
+
+  /**
+   * Opening a message is the owner's approval to fetch its images, and a
+   * ready commit is the moment they become fetchable. Either starts the drain
+   * now, detached from the response that noticed it, instead of leaving the
+   * images to whichever scheduler pass next reaches this account. The drain
+   * takes its own registry lease, so account teardown waits for it and the
+   * entry's lifecycle abort stops it. One drain per message at a time: a
+   * second open while it runs has nothing to add.
+   */
+  private startRemoteImageDrain(accountId: string, messageId: string): void {
+    if (this.closed) return;
+    const key = contentWorkKey(accountId, messageId);
+    if (this.remoteImageDrains.has(key)) return;
+    const drain = this.withEntry(accountId, (entry) =>
+      this.drainRemoteImages(entry, messageId),
+    )
+      .catch(() => undefined)
+      .finally(() => {
+        if (this.remoteImageDrains.get(key) === drain) {
+          this.remoteImageDrains.delete(key);
+        }
+      });
+    this.remoteImageDrains.set(key, drain);
+  }
+
+  private async drainRemoteImages(
+    entry: RegistryEntry,
+    messageId: string,
+  ): Promise<void> {
+    const accountId = entry.cache.accountId;
+    const signal = entry.lifecycle.signal;
+    const pending = await entry.cache.listPendingRemoteImages(
+      messageId,
+      this.readTime(),
+    );
+    if (pending.length === 0) return;
+    this.emit({
+      event: "mail_remote_image_drain_started",
+      accountId,
+      attachmentCount: pending.length,
+    });
+    let taken = 0;
+    try {
+      for (const remoteImageId of pending) {
+        if (signal.aborted || this.closed) break;
+        const snapshot = await entry.cache.inspectRemoteImage(
+          remoteImageId,
+          this.readTime(),
+        );
+        if (snapshot === null || snapshot.state !== "pending") continue;
+        taken += 1;
+        try {
+          await this.loadRemoteImage(entry, snapshot, signal);
+        } catch {
+          // The outcome is durable and already on record. One refused image
+          // must not stop the rest of the message.
+        }
+      }
+    } finally {
+      this.emit({
+        event: "mail_remote_image_drain_finished",
+        accountId,
+        attachmentCount: taken,
+      });
+    }
+  }
+
+  /** Observability must never change what the cache does. */
+  private emit(event: MailContentCoordinatorEvent): void {
+    if (this.onEvent === null) return;
+    try {
+      this.onEvent(event);
+    } catch {
+      // A failing observer is the observer's problem.
     }
   }
 
@@ -1321,6 +1475,43 @@ function contentServiceError(error: unknown): MailContentServiceError {
 
 function contentWorkKey(accountId: string, providerMessageId: string): string {
   return `${accountId}:${providerMessageId}`;
+}
+
+/** A caller joining a fetch it does not own still leaves when told to. */
+function joinAbortable(
+  work: Promise<void>,
+  signal: AbortSignal | undefined,
+): Promise<void> {
+  if (signal === undefined) return work;
+  if (signal.aborted) return Promise.reject(unavailable());
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => reject(unavailable());
+    signal.addEventListener("abort", onAbort, { once: true });
+    work.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
+}
+
+function remoteImageRefusal(
+  errorCode: string,
+): "blocked" | "origin_refused" | "budget_exhausted" {
+  if (errorCode === "remote_image_origin_rejected") return "origin_refused";
+  if (
+    errorCode === "remote_image_budget_exceeded" ||
+    errorCode === "mail_content_remote_image_budget_exhausted"
+  ) {
+    return "budget_exhausted";
+  }
+  return "blocked";
+}
+
+/** Coarse enough that a retry time never dates a message. */
+function durationBucket(ms: number): string {
+  if (ms < 60_000) return "under_1m";
+  if (ms < 10 * 60_000) return "under_10m";
+  if (ms < 60 * 60_000) return "under_1h";
+  return "over_1h";
 }
 
 function contentAccountId(value: unknown): string {

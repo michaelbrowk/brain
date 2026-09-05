@@ -107,6 +107,7 @@ async function main(): Promise<void> {
       parser: new UnixSocketMailMimeParser(),
     }),
     onBackgroundWorkAvailable: () => kickBackgroundSync(),
+    onEvent: writeServiceLog,
   });
   const sendAccounts = {
     async readSendAccount(accountId: string) {

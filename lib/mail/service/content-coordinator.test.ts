@@ -21,6 +21,7 @@ import {
   ExponentialMailContentRetryPolicy,
   InMemoryMailContentWorkQueue,
   MailContentCoordinator,
+  type MailContentCoordinatorEvent,
   MailContentServiceError,
   MailContentWorkError,
   type MailContentWorkInput,
@@ -413,7 +414,7 @@ describe("MailContentCoordinator", () => {
     );
   });
 
-  it("keeps reader downloads cache-only and fills opaque images only in background", async () => {
+  it("keeps reader downloads cache-only while the demand-started fetch is in flight", async () => {
     const fixture = await createFixture([ACCOUNT_ID]);
     const remoteImageId = `remote-image-a${"9".repeat(32)}`;
     const sourceUrl = "https://images.example.com/campaign.png?private=origin";
@@ -453,16 +454,9 @@ describe("MailContentCoordinator", () => {
       ).resolves.toMatchObject({ state: "ready" });
     });
 
-    await expect(
-      coordinator.downloadRemoteImage({ accountId: ACCOUNT_ID, remoteImageId }),
-    ).rejects.toMatchObject({ code: "mail_content_unavailable" });
-    expect(fetch).not.toHaveBeenCalled();
-
-    const backgroundController = new AbortController();
-    const background = coordinator.runBackgroundPrefetchStep(
-      ACCOUNT_ID,
-      backgroundController.signal,
-    );
+    // The ready commit dialed the origin on its own. The reader endpoint
+    // still answers from the cache alone: it neither starts a fetch nor
+    // waits for the one in flight.
     await started.promise;
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch).toHaveBeenCalledWith(
@@ -474,13 +468,282 @@ describe("MailContentCoordinator", () => {
       },
       expect.any(AbortSignal),
     );
-    release.resolve();
-    await expect(background).resolves.toEqual({ hasMore: true });
+    await expect(
+      coordinator.downloadRemoteImage({ accountId: ACCOUNT_ID, remoteImageId }),
+    ).rejects.toMatchObject({ code: "mail_content_unavailable" });
+    expect(fetch).toHaveBeenCalledTimes(1);
 
-    const cached = await coordinator.downloadRemoteImage({
-      accountId: ACCOUNT_ID,
-      remoteImageId,
+    release.resolve();
+    const cached = await vi.waitFor(() =>
+      coordinator.downloadRemoteImage({ accountId: ACCOUNT_ID, remoteImageId }),
+    );
+    await expect(collectBytes(cached.body)).resolves.toEqual(image);
+    await cached.dispose();
+
+    // Scheduler passes afterwards add no second dial.
+    for (let pass = 0; pass < 2; pass += 1) {
+      await coordinator.runBackgroundPrefetchStep(
+        ACCOUNT_ID,
+        new AbortController().signal,
+      );
+    }
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("fetches an opened message's images on demand without a scheduler pass", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const firstId = `remote-image-a${"d".repeat(32)}`;
+    const secondId = `remote-image-a${"e".repeat(32)}`;
+    const firstUrl = "https://images.example.com/first-on-demand.png";
+    const secondUrl = "https://images.example.com/second-on-demand.png";
+    const image = testPng(10, 10);
+    const fetch = vi.fn(async (_requestedUrl: string) => ({
+      mimeType: "image/png",
+      data: Buffer.from(image),
+      raster: { width: 10, height: 10, frames: 1 },
+    }));
+    const runner = new FakeMailContentWorkRunner([
+      (input) =>
+        publish(input, {
+          html: Buffer.from(
+            `<img data-brain-remote-image="${firstId}"><img data-brain-remote-image="${secondId}">`,
+          ),
+          remoteImages: [
+            { remoteImageId: firstId, sourceUrl: firstUrl },
+            { remoteImageId: secondId, sourceUrl: secondUrl },
+          ],
+        }),
+    ]);
+    const events: MailContentCoordinatorEvent[] = [];
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      { fetch } satisfies RemoteImageFetcherPort,
+      undefined,
+      undefined,
+      (event) => events.push(event),
+    );
+
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    // No scheduler pass ever runs: the owner's demand alone fills the cache.
+    for (const remoteImageId of [firstId, secondId]) {
+      const cached = await vi.waitFor(() =>
+        coordinator.downloadRemoteImage({ accountId: ACCOUNT_ID, remoteImageId }),
+      );
+      await expect(collectBytes(cached.body)).resolves.toEqual(image);
+      await cached.dispose();
+    }
+    expect(fetch.mock.calls.map((call) => call[0])).toEqual([firstUrl, secondUrl]);
+    await vi.waitFor(() =>
+      expect(events.at(-1)).toMatchObject({
+        event: "mail_remote_image_drain_finished",
+      }),
+    );
+    expect(events).toEqual([
+      {
+        event: "mail_remote_image_drain_started",
+        accountId: ACCOUNT_ID,
+        attachmentCount: 2,
+      },
+      {
+        event: "mail_remote_image_settled",
+        accountId: ACCOUNT_ID,
+        phase: "fetched",
+        cacheBytes: image.byteLength,
+      },
+      {
+        event: "mail_remote_image_settled",
+        accountId: ACCOUNT_ID,
+        phase: "fetched",
+        cacheBytes: image.byteLength,
+      },
+      {
+        event: "mail_remote_image_drain_finished",
+        accountId: ACCOUNT_ID,
+        attachmentCount: 2,
+      },
+    ]);
+  });
+
+  it("retries an expired transient image when the message is opened again and logs each refusal", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const now = { value: 1_000 };
+    const blockedId = `remote-image-a${"f".repeat(32)}`;
+    const flakyId = `remote-image-a${"0".repeat(32)}`;
+    const blockedUrl = "https://images.example.com/pixel.gif";
+    const flakyUrl = "https://images.example.com/flaky.png";
+    const image = testPng(10, 10);
+    let flakyDials = 0;
+    const fetch = vi.fn(async (requestedUrl: string) => {
+      if (requestedUrl === blockedUrl) {
+        throw new RemoteImageFetchError(
+          "permanent",
+          "remote_image_tracking_pixel_blocked",
+        );
+      }
+      flakyDials += 1;
+      if (flakyDials === 1) {
+        throw new RemoteImageFetchError(
+          "transient",
+          "remote_image_origin_unavailable",
+        );
+      }
+      return {
+        mimeType: "image/png",
+        data: Buffer.from(image),
+        raster: { width: 10, height: 10, frames: 1 },
+      };
     });
+    const runner = new FakeMailContentWorkRunner([
+      (input) =>
+        publish(input, {
+          html: Buffer.from(
+            `<img data-brain-remote-image="${blockedId}"><img data-brain-remote-image="${flakyId}">`,
+          ),
+          remoteImages: [
+            { remoteImageId: blockedId, sourceUrl: blockedUrl },
+            { remoteImageId: flakyId, sourceUrl: flakyUrl },
+          ],
+        }),
+    ]);
+    const events: MailContentCoordinatorEvent[] = [];
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      { fetch } satisfies RemoteImageFetcherPort,
+      () => now.value,
+      undefined,
+      (event) => events.push(event),
+    );
+
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    await vi.waitFor(() =>
+      expect(events.at(-1)).toMatchObject({
+        event: "mail_remote_image_drain_finished",
+      }),
+    );
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(events).toEqual([
+      {
+        event: "mail_remote_image_drain_started",
+        accountId: ACCOUNT_ID,
+        attachmentCount: 2,
+      },
+      {
+        event: "mail_remote_image_settled",
+        accountId: ACCOUNT_ID,
+        phase: "blocked",
+        errorCode: "remote_image_tracking_pixel_blocked",
+      },
+      {
+        event: "mail_remote_image_settled",
+        accountId: ACCOUNT_ID,
+        phase: "transient",
+        errorCode: "remote_image_origin_unavailable",
+        durationBucket: "under_10m",
+      },
+      {
+        event: "mail_remote_image_drain_finished",
+        accountId: ACCOUNT_ID,
+        attachmentCount: 2,
+      },
+    ]);
+
+    // Inside the retry window a re-open has nothing to take.
+    events.length = 0;
+    await expect(
+      coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
+    ).resolves.toMatchObject({ state: "ready" });
+    await expect(
+      coordinator.downloadRemoteImage({ accountId: ACCOUNT_ID, remoteImageId: flakyId }),
+    ).rejects.toMatchObject({ code: "mail_content_unavailable" });
+
+    // Once it has passed, opening the message again retries the flaky image
+    // at once and leaves the blocked one alone.
+    now.value += MAIL_RESOURCE_LIMITS.remoteImageTransientRetryMs;
+    await expect(
+      coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
+    ).resolves.toMatchObject({ state: "ready" });
+    const cached = await vi.waitFor(() =>
+      coordinator.downloadRemoteImage({ accountId: ACCOUNT_ID, remoteImageId: flakyId }),
+    );
+    await expect(collectBytes(cached.body)).resolves.toEqual(image);
+    await cached.dispose();
+    expect(fetch).toHaveBeenCalledTimes(3);
+    await expect(
+      coordinator.downloadRemoteImage({ accountId: ACCOUNT_ID, remoteImageId: blockedId }),
+    ).rejects.toMatchObject({ code: "mail_content_remote_image_not_found" });
+    await vi.waitFor(() =>
+      expect(events.at(-1)).toMatchObject({
+        event: "mail_remote_image_drain_finished",
+      }),
+    );
+    expect(events).toEqual([
+      {
+        event: "mail_remote_image_drain_started",
+        accountId: ACCOUNT_ID,
+        attachmentCount: 1,
+      },
+      {
+        event: "mail_remote_image_settled",
+        accountId: ACCOUNT_ID,
+        phase: "fetched",
+        cacheBytes: image.byteLength,
+      },
+      {
+        event: "mail_remote_image_drain_finished",
+        accountId: ACCOUNT_ID,
+        attachmentCount: 1,
+      },
+    ]);
+  });
+
+  it("lets a scheduler pass that joined a demand-started fetch abort without waiting on the origin", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const remoteImageId = `remote-image-a${"1".repeat(32)}`;
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const image = testPng(10, 10);
+    const fetch = vi.fn(async () => {
+      started.resolve();
+      await release.promise;
+      return {
+        mimeType: "image/png",
+        data: Buffer.from(image),
+        raster: { width: 10, height: 10, frames: 1 },
+      };
+    });
+    const runner = new FakeMailContentWorkRunner([
+      (input) =>
+        publish(input, {
+          html: Buffer.from(`<img data-brain-remote-image="${remoteImageId}">`),
+          remoteImages: [
+            {
+              remoteImageId,
+              sourceUrl: "https://images.example.com/joined.png",
+            },
+          ],
+        }),
+    ]);
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      { fetch } satisfies RemoteImageFetcherPort,
+    );
+    await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
+    await started.promise;
+
+    const controller = new AbortController();
+    const joined = coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, controller.signal);
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    controller.abort();
+    await expect(joined).rejects.toMatchObject({ code: "mail_content_unavailable" });
+
+    // The demand-started fetch itself is untouched by the scheduler's abort.
+    release.resolve();
+    const cached = await vi.waitFor(() =>
+      coordinator.downloadRemoteImage({ accountId: ACCOUNT_ID, remoteImageId }),
+    );
     await expect(collectBytes(cached.body)).resolves.toEqual(image);
     await cached.dispose();
     expect(fetch).toHaveBeenCalledTimes(1);
@@ -526,20 +789,21 @@ describe("MailContentCoordinator", () => {
         coordinator.getContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
       ).resolves.toMatchObject({ state: "ready" });
     });
-    expect(fetch).not.toHaveBeenCalled();
 
+    // The ready commit drains the cohort message's images itself, so the
+    // next scheduler pass finds nothing left for this account.
+    const cached = await vi.waitFor(() =>
+      coordinator.downloadRemoteImage({ accountId: ACCOUNT_ID, remoteImageId }),
+    );
+    await cached.dispose();
+    expect(fetch).toHaveBeenCalledTimes(1);
     await expect(
       coordinator.runBackgroundPrefetchStep(
         ACCOUNT_ID,
         new AbortController().signal,
       ),
-    ).resolves.toEqual({ hasMore: true });
+    ).resolves.toEqual({ hasMore: false });
     expect(fetch).toHaveBeenCalledTimes(1);
-    const cached = await coordinator.downloadRemoteImage({
-      accountId: ACCOUNT_ID,
-      remoteImageId,
-    });
-    await cached.dispose();
   });
 
   it("loads an old out-of-cohort message's remote images after the reader opens it", async () => {
@@ -581,8 +845,9 @@ describe("MailContentCoordinator", () => {
     ).resolves.toEqual({ hasMore: false });
     expect(fetch).not.toHaveBeenCalled();
 
-    // Opening the message records an owner demand; the next background step
-    // fills its images even though the message never joins the cohort.
+    // Opening the message records an owner demand and fills its images at
+    // once, even though the message never joins the cohort; the scheduler
+    // pass afterwards has nothing left to take.
     await coordinator.requestContent({
       accountId: ACCOUNT_ID,
       messageId: MESSAGE_ID,
@@ -592,12 +857,11 @@ describe("MailContentCoordinator", () => {
         coordinator.getContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
       ).resolves.toMatchObject({ state: "ready" });
     });
-    await expect(
-      coordinator.runBackgroundPrefetchStep(
-        ACCOUNT_ID,
-        new AbortController().signal,
-      ),
-    ).resolves.toEqual({ hasMore: true });
+    const cached = await vi.waitFor(() =>
+      coordinator.downloadRemoteImage({ accountId: ACCOUNT_ID, remoteImageId }),
+    );
+    await expect(collectBytes(cached.body)).resolves.toEqual(image);
+    await cached.dispose();
     expect(fetch).toHaveBeenCalledTimes(1);
     await expect(
       coordinator.runBackgroundPrefetchStep(
@@ -606,12 +870,6 @@ describe("MailContentCoordinator", () => {
       ),
     ).resolves.toEqual({ hasMore: false });
     expect(fetch).toHaveBeenCalledTimes(1);
-    const cached = await coordinator.downloadRemoteImage({
-      accountId: ACCOUNT_ID,
-      remoteImageId,
-    });
-    await expect(collectBytes(cached.body)).resolves.toEqual(image);
-    await cached.dispose();
   });
 
   it("lets a reader retry re-claim failed background content work immediately", async () => {
@@ -670,7 +928,9 @@ describe("MailContentCoordinator", () => {
       ).resolves.toMatchObject({ state: "ready" });
     });
     expect(runner.calls).toHaveLength(2);
-    expect(fetch).not.toHaveBeenCalled();
+    // The re-claimed commit drains its own images; a scheduler pass
+    // afterwards adds no second dial.
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
     await coordinator.runBackgroundPrefetchStep(
       ACCOUNT_ID,
       new AbortController().signal,
@@ -826,14 +1086,15 @@ describe("MailContentCoordinator", () => {
       ).resolves.toMatchObject({ state: "ready" });
     });
 
-    // The opened N+1 message's image loads first through its demand row, but
-    // the message itself never displaces the stable top-N content cohort.
-    await expect(
-      coordinator.runBackgroundPrefetchStep(
-        ACCOUNT_ID,
-        new AbortController().signal,
-      ),
-    ).resolves.toEqual({ hasMore: true });
+    // The opened N+1 message's image loads at once through its demand row,
+    // but the message itself never displaces the stable top-N content cohort.
+    const opened = await vi.waitFor(() =>
+      coordinator.downloadRemoteImage({
+        accountId: ACCOUNT_ID,
+        remoteImageId: oldRemoteImageId,
+      }),
+    );
+    await opened.dispose();
     expect(fetch).toHaveBeenCalledTimes(1);
     for (const candidate of expectedBackgroundOrder) {
       await expect(
@@ -896,10 +1157,14 @@ describe("MailContentCoordinator", () => {
           ],
         }),
     ]);
+    const events: MailContentCoordinatorEvent[] = [];
     const coordinator = fixture.coordinator(
       runner,
       undefined,
       { fetch } satisfies RemoteImageFetcherPort,
+      undefined,
+      undefined,
+      (event) => events.push(event),
     );
     await coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID });
     await vi.waitFor(async () => {
@@ -908,37 +1173,28 @@ describe("MailContentCoordinator", () => {
       ).resolves.toMatchObject({ state: "ready" });
     });
 
-    await expect(
-      coordinator.runBackgroundPrefetchStep(
-        ACCOUNT_ID,
-        new AbortController().signal,
-      ),
-    ).resolves.toEqual({ hasMore: true });
-    const first = await coordinator.downloadRemoteImage({
-      accountId: ACCOUNT_ID,
-      remoteImageId: firstId,
-    });
+    // The demand-started drain takes the first image and refuses the second
+    // against the spent raster budget without dialing for it.
+    const first = await vi.waitFor(() =>
+      coordinator.downloadRemoteImage({ accountId: ACCOUNT_ID, remoteImageId: firstId }),
+    );
     await first.dispose();
-    await expect(
-      coordinator.runBackgroundPrefetchStep(
-        ACCOUNT_ID,
-        new AbortController().signal,
-      ),
-    ).resolves.toEqual({ hasMore: true });
-    await expect(
-      coordinator.downloadRemoteImage({
-        accountId: ACCOUNT_ID,
-        remoteImageId: secondId,
-      }),
-    ).rejects.toMatchObject({ code: "mail_content_remote_image_not_found" });
-    await expect(
-      coordinator.downloadRemoteImage({
-        accountId: ACCOUNT_ID,
-        remoteImageId: secondId,
-      }),
-    ).rejects.toMatchObject({ code: "mail_content_remote_image_not_found" });
+    await vi.waitFor(async () => {
+      await expect(
+        coordinator.downloadRemoteImage({
+          accountId: ACCOUNT_ID,
+          remoteImageId: secondId,
+        }),
+      ).rejects.toMatchObject({ code: "mail_content_remote_image_not_found" });
+    });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(fetch.mock.calls[0]?.[0]).toBe(firstUrl);
+    expect(events).toContainEqual({
+      event: "mail_remote_image_settled",
+      accountId: ACCOUNT_ID,
+      phase: "budget_exhausted",
+      errorCode: "remote_image_budget_exceeded",
+    });
   });
 
   it("aborts detached image work without caching it as an image failure", async () => {
@@ -997,25 +1253,18 @@ describe("MailContentCoordinator", () => {
       ).resolves.toMatchObject({ state: "ready" });
     });
 
-    const controller = new AbortController();
-    const aborted = coordinator.runBackgroundPrefetchStep(
-      ACCOUNT_ID,
-      controller.signal,
-    );
+    // The ready commit started the fetch; tearing the account down aborts
+    // it, and the abort leaves the row pending rather than failed.
     await started.promise;
-    controller.abort();
-    await expect(aborted).rejects.toMatchObject({ code: "mail_content_unavailable" });
+    await coordinator.invalidateAccount(ACCOUNT_ID);
+    coordinator.restoreInvalidatedAccount(ACCOUNT_ID);
 
     await expect(
-      coordinator.runBackgroundPrefetchStep(
-        ACCOUNT_ID,
-        new AbortController().signal,
-      ),
-    ).resolves.toEqual({ hasMore: true });
-    const retried = await coordinator.downloadRemoteImage({
-      accountId: ACCOUNT_ID,
-      remoteImageId,
-    });
+      coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
+    ).resolves.toMatchObject({ state: "ready" });
+    const retried = await vi.waitFor(() =>
+      coordinator.downloadRemoteImage({ accountId: ACCOUNT_ID, remoteImageId }),
+    );
     await expect(collectBytes(retried.body)).resolves.toEqual(image);
     await retried.dispose();
     expect(fetch).toHaveBeenCalledTimes(2);
@@ -1103,6 +1352,7 @@ async function createFixture(accountIds: readonly string[]): Promise<{
     remoteImageFetcher?: RemoteImageFetcherPort,
     clock?: () => number,
     onBackgroundWorkAvailable?: () => void,
+    onEvent?: (event: MailContentCoordinatorEvent) => void,
   ): MailContentCoordinator;
 }> {
   const root = await mkdtemp(path.join(tmpdir(), "brain-mail-content-coordinator-"));
@@ -1129,7 +1379,14 @@ async function createFixture(accountIds: readonly string[]): Promise<{
   return {
     root,
     caches,
-    coordinator(runner, retryPolicy, remoteImageFetcher, clock, onBackgroundWorkAvailable) {
+    coordinator(
+      runner,
+      retryPolicy,
+      remoteImageFetcher,
+      clock,
+      onBackgroundWorkAvailable,
+      onEvent,
+    ) {
       const coordinator = new MailContentCoordinator({
         stateDirectory: root,
         store,
@@ -1139,6 +1396,7 @@ async function createFixture(accountIds: readonly string[]): Promise<{
         ...(onBackgroundWorkAvailable === undefined
           ? {}
           : { onBackgroundWorkAvailable }),
+        ...(onEvent === undefined ? {} : { onEvent }),
         clock: clock ?? (() => 1_000),
       });
       coordinators.push(coordinator);

@@ -458,6 +458,29 @@ export function isShareEditOrigin(e: unknown): e is ShareEditOriginError {
   return e instanceof ShareEditOriginError;
 }
 
+/** A link visitor asked for one more subpage than MAX_SHARE_SUBTREE_PAGES
+ * allows under this root. The share is untouched and still writable; only the
+ * creation is refused, so the visitor route can say so without a 404 or a
+ * 500. */
+export class ShareSubtreeFullError extends Error {
+  constructor() {
+    super("shared subtree is full");
+    this.name = "ShareSubtreeFullError";
+  }
+}
+
+/** The attachment directory could not be made, opened or trusted during a
+ * link visitor's upload. Nothing was written and the share is unchanged. The
+ * owner's route reports this condition in the Notion importer's vocabulary
+ * because it shares a client with the importer; a visitor route has no
+ * importer, so it gets a name of its own. */
+export class AttachmentStoreUnavailableError extends Error {
+  constructor() {
+    super("attachment store is unavailable");
+    this.name = "AttachmentStoreUnavailableError";
+  }
+}
+
 export class QuickCaptureConflictError extends Error {
   constructor() {
     super("quick capture payload conflict");

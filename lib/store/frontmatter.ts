@@ -90,7 +90,18 @@ export function serializePage(meta: PageMeta, markdown: string): string {
   ordered.created = meta.created;
   ordered.updated = meta.updated;
   if (meta.updatedBy) ordered.updatedBy = meta.updatedBy;
-  if (meta.updatedByName) ordered.updatedByName = meta.updatedByName;
+  // updatedByName is a link visitor's label and only ever travels beside
+  // updatedBy: "visitor". An owner or Claude write that follows a visitor's
+  // sets updatedBy and nothing else, so the stale name is dropped here, at
+  // the one point every writer passes through, instead of by each writer.
+  // It is dropped from the handed-in meta as well: that object is the Store's
+  // live entry and the tree projection reads it, so memory and disk have to
+  // agree on the key.
+  if (meta.updatedBy === "visitor" && meta.updatedByName) {
+    ordered.updatedByName = meta.updatedByName;
+  } else {
+    delete meta.updatedByName;
+  }
   if (meta.structureWriteBarrier) ordered.structureWriteBarrier = true;
   if (meta.status) ordered.status = meta.status;
   if (meta.view) ordered.view = meta.view;

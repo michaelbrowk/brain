@@ -8,8 +8,10 @@ import { promisify } from "node:util";
 import { Store } from "./store";
 import { serializePage } from "./frontmatter";
 import {
+  AttachmentStoreUnavailableError,
   AttachmentValidationError,
   RevConflictError,
+  ShareSubtreeFullError,
   type AttachmentInput,
   type ReserveNotionImportInput,
   type PageMeta,
@@ -8827,6 +8829,16 @@ describe("share-aware Store leaves", () => {
    *  against, read outside the writer queue. The race tests carry this value
    *  into writes queued behind an owner action, which is the exact order the
    *  leaves exist to refuse. */
+  /** A write parked in the queue rejects whenever the queue reaches it, which
+   *  can be before the test has attached its assertion. Node would report that
+   *  as an unhandled rejection. This marks the rejection as expected and
+   *  hands back the same promise, so every assertion below still sees the
+   *  real settled state. */
+  const queued = <T,>(p: Promise<T>): Promise<T> => {
+    p.catch(() => undefined);
+    return p;
+  };
+
   async function authorisedVersion(
     s: Store,
     rootId: string,
@@ -8945,11 +8957,32 @@ describe("share-aware Store leaves", () => {
   it(
     "404s every write queued behind an owner action and lands the one queued ahead of it",
     async () => {
-      type Ids = { rootId: string; childId: string; awayId: string };
-      const cases: { name: string; act: (s: Store, ids: Ids) => Promise<unknown> }[] = [
+      type Ids = {
+        rootId: string;
+        childId: string;
+        awayId: string;
+        scopeToken: string;
+      };
+      const cases: {
+        name: string;
+        act: (s: Store, ids: Ids) => Promise<unknown>;
+        /** The action leaves the root public and readable, so a re-check that
+         *  looked at `public` alone would wave the queued writes through. */
+        stillReadable?: true;
+      }[] = [
         {
           name: "configureShare({ enabled: false })",
           act: (s, { rootId }) => s.configureShare(rootId, { enabled: false }),
+        },
+        {
+          name: "configureShare({ canEdit: false })",
+          act: (s, { rootId, scopeToken }) =>
+            s.configureShare(rootId, {
+              enabled: true,
+              expectedScopeToken: scopeToken,
+              canEdit: false,
+            }),
+          stillReadable: true,
         },
         {
           name: "updateMeta({ public: false })",
@@ -8968,9 +9001,10 @@ describe("share-aware Store leaves", () => {
           act: (s, { childId, awayId }) => s.movePage(childId, awayId),
         },
       ];
-      for (const { name, act } of cases) {
+      for (const { name, act, stillReadable } of cases) {
         const { s, rootId, childId } = await editableRoot();
         const away = await s.createPage(null, "Away");
+        const scopeToken = (await s.readShareScope(rootId)).scopeToken;
         const version = await authorisedVersion(s, rootId, childId);
         const write = (n: number) =>
           s.writeSharedPage({
@@ -8985,12 +9019,20 @@ describe("share-aware Store leaves", () => {
         // in the FIFO chain, so each write's place relative to the owner's
         // action is fixed by construction, not by scheduler luck: one write
         // sits ahead of the action, five sit behind it.
-        const ahead = write(0);
-        const acted = act(s, { rootId, childId, awayId: away.id });
-        const behind = Array.from({ length: 5 }, (_, n) => write(n + 1));
+        const ahead = queued(write(0));
+        const acted = queued(
+          act(s, { rootId, childId, awayId: away.id, scopeToken }),
+        );
+        const behind = Array.from({ length: 5 }, (_, n) =>
+          queued(write(n + 1)),
+        );
 
         await expect(ahead, name).resolves.toMatchObject({ markdown: "late 0" });
         await acted;
+        if (stillReadable) {
+          const read = await resolveShareAccess(s, { rootId, targetId: childId });
+          expect(read.kind, name).toBe("granted");
+        }
         for (const late of behind) {
           await expect(late, name).rejects.toBeInstanceOf(
             ShareAccessNotFoundError,
@@ -9133,8 +9175,8 @@ describe("share-aware Store leaves", () => {
       await expect(make("the last seat")).resolves.toMatchObject({
         title: "the last seat",
       });
-      await expect(make("one too many")).rejects.toThrow(
-        "shared subtree is full",
+      await expect(make("one too many")).rejects.toBeInstanceOf(
+        ShareSubtreeFullError,
       );
       await s.deletePage(fillers[0]);
       await expect(make("after a trash")).resolves.toMatchObject({
@@ -9186,20 +9228,24 @@ describe("share-aware Store leaves", () => {
     const { s, root, rootId, childId } = await editableRoot();
     const version = await authorisedVersion(s, rootId, childId);
 
-    const revoked = s.configureShare(rootId, { enabled: false });
-    const create = s.createSharedSubpage({
-      rootId,
-      parentId: childId,
-      shareVersion: version,
-      title: "late note",
-      visitorName: "Ada",
-    });
-    const upload = s.saveSharedAttachment({
-      rootId,
-      targetId: childId,
-      shareVersion: version,
-      file: shot(),
-    });
+    const revoked = queued(s.configureShare(rootId, { enabled: false }));
+    const create = queued(
+      s.createSharedSubpage({
+        rootId,
+        parentId: childId,
+        shareVersion: version,
+        title: "late note",
+        visitorName: "Ada",
+      }),
+    );
+    const upload = queued(
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: shot(),
+      }),
+    );
 
     await revoked;
     await expect(create).rejects.toBeInstanceOf(ShareAccessNotFoundError);
@@ -9211,5 +9257,99 @@ describe("share-aware Store leaves", () => {
     await expect(
       fs.readdir(path.join(root, "_attachments")).catch(() => []),
     ).resolves.toEqual([]);
+  });
+
+  it("names a store failure on a visitor upload without the importer's vocabulary", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const attachments = path.join(root, "_attachments");
+    await fs.rm(attachments, { recursive: true, force: true });
+    await fs.writeFile(attachments, "not a directory");
+    await expect(
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: shot(),
+      }),
+    ).rejects.toBeInstanceOf(AttachmentStoreUnavailableError);
+    await expect(
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: {
+          data: new Uint8Array([1, 2, 3]),
+          originalName: "shot.png",
+          mimeType: "image/png",
+        },
+      }),
+    ).rejects.toBeInstanceOf(AttachmentValidationError);
+  });
+
+  it("serializes updatedByName only beside updatedBy: visitor", () => {
+    const base = {
+      id: "p1",
+      title: "T",
+      order: "a0",
+      created: "2026-01-01T00:00:00.000Z",
+      updated: "2026-01-01T00:00:00.000Z",
+    };
+    expect(
+      serializePage({ ...base, updatedBy: "visitor", updatedByName: "Ada" }, ""),
+    ).toContain("updatedByName: Ada");
+    for (const updatedBy of ["me", "claude", undefined] as const) {
+      const meta: PageMeta = { ...base, updatedBy, updatedByName: "Ada" };
+      expect(serializePage(meta, "")).not.toContain("updatedByName");
+      expect(meta.updatedByName).toBeUndefined();
+    }
+  });
+
+  it("drops the visitor name when an owner writes next, in the file and in the tree", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const visitorWrite = (markdown: string) =>
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown,
+        visitorName: "Ada",
+      });
+    const childNode = (): TreeNode => {
+      const find = (nodes: TreeNode[]): TreeNode | undefined => {
+        for (const node of nodes) {
+          if (node.id === childId) return node;
+          const nested = find(node.children);
+          if (nested) return nested;
+        }
+        return undefined;
+      };
+      const node = find(s.getTree());
+      if (!node) throw new Error("child missing from tree");
+      return node;
+    };
+    const expectOwner = async (by: "me" | "claude") => {
+      const raw = await readIndexRaw(s, childId);
+      expect(raw).toContain(`updatedBy: ${by}`);
+      expect(raw).not.toContain("updatedByName");
+      expect(childNode().updatedBy).toBe(by);
+      expect(childNode().updatedByName).toBeUndefined();
+      expect((await s.readPage(childId)).meta.updatedByName).toBeUndefined();
+    };
+
+    await visitorWrite("from Ada");
+    expect(childNode()).toMatchObject({
+      updatedBy: "visitor",
+      updatedByName: "Ada",
+    });
+    await s.writePage(childId, "owner rewrite", undefined, "me");
+    await expectOwner("me");
+
+    await visitorWrite("from Ada again");
+    await s.appendPage(childId, "owner appendix", "claude");
+    await expectOwner("claude");
+
+    await visitorWrite("from Ada once more");
+    await s.updateMeta(childId, { title: "Renamed", by: "me" });
+    await expectOwner("me");
   });
 });

@@ -74,11 +74,13 @@ import {
   type VerifiedNotionAttachment,
   type VerifyFinalizedNotionAttachmentInput,
   type VerifyNotionAttachmentInput,
+  AttachmentStoreUnavailableError,
   AttachmentValidationError,
   NotFoundError,
   MetadataConflictError,
   ShareEditOriginError,
   ShareScopeConflictError,
+  ShareSubtreeFullError,
   NotionImportConflictError,
   PageRefNestValidationError,
   QuickCaptureConflictError,
@@ -427,6 +429,17 @@ function rethrowAttachmentStoreFailure(error: unknown): never {
     "attachment_store_unavailable",
     "Attachment store is unavailable",
   );
+}
+
+/** The visitor upload's failure vocabulary. A validation refusal passes
+ *  through with its code; anything else the attachment store threw is a
+ *  store failure and is named as one. The owner's wrapper above speaks the
+ *  Notion importer's vocabulary because that route shares a client with the
+ *  importer; a visitor route has no importer, and a Notion-named conflict on
+ *  it would be wrong. */
+function rethrowSharedAttachmentFailure(error: unknown): never {
+  if (error instanceof AttachmentValidationError) throw error;
+  throw new AttachmentStoreUnavailableError();
 }
 
 export class Store {
@@ -3783,6 +3796,10 @@ export class Store {
     try {
       raw = await fs.readFile(rootIndex, "utf8");
     } catch {
+      // An I/O failure on the root's index.md becomes the same 404 as a
+      // revoke. Right for the visitor, who must not learn the difference.
+      // Worth knowing on the owner side: a visitor 404 here can be a disk
+      // fault, not a revoke.
       denyShareWrite();
     }
     const meta = parsePage(raw).meta;
@@ -3893,9 +3910,7 @@ export class Store {
           this.isWithinSubtree(input.rootId, entry.meta.id) &&
           !this.isDeleted(entry.meta.id),
       ).length;
-      if (live >= MAX_SHARE_SUBTREE_PAGES) {
-        throw new Error("shared subtree is full");
-      }
+      if (live >= MAX_SHARE_SUBTREE_PAGES) throw new ShareSubtreeFullError();
       const dir = await uniqueDir(parent.dir, slugify(input.title));
       const last = this.siblings(input.parentId).at(-1);
       const meta: PageMeta = {
@@ -3932,7 +3947,7 @@ export class Store {
         input.shareVersion,
       );
       return this.saveAttachmentUnlocked(input.file, input.src).catch(
-        rethrowAttachmentStoreFailure,
+        rethrowSharedAttachmentFailure,
       );
     });
   }

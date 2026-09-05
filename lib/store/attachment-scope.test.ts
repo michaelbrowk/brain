@@ -6,6 +6,7 @@ import { localAttachmentName } from "../attachments";
 import {
   attachmentGrantsRoot,
   attachmentScopePath,
+  forgetUploads,
   readAttachmentScope,
   recordBaseline,
   recordUpload,
@@ -81,6 +82,44 @@ describe("attachment scope index", () => {
     expect(attachmentGrantsRoot(two, "shared000001.png", "root-2")).toBe(true);
     expect(attachmentGrantsRoot(two, "only2000001.png", "root-1")).toBe(false);
     expect(attachmentGrantsRoot(two, "only2000001.png", "root-2")).toBe(true);
+  });
+
+  it("forgets swept uploads and hands back the same object when there is nothing to forget", () => {
+    let scope = recordUpload(EMPTY, "a00000000001.png", "root-1", 100, AT);
+    scope = recordUpload(scope, "b00000000002.png", "root-1", 250, AT);
+    const after = forgetUploads(scope, ["a00000000001.png", "never000001.png"]);
+    expect(Object.keys(after.uploads)).toEqual(["b00000000002.png"]);
+    expect(rootUploadBytes(after, "root-1")).toBe(250);
+    expect(after.roots).toEqual(scope.roots);
+    expect(forgetUploads(after, ["never000001.png"])).toBe(after);
+  });
+
+  it("refuses to write the index through a symlinked _attachments directory", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-scope-"));
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "brain-scope-outside-"));
+    await fs.symlink(outside, path.join(root, "_attachments"), "dir");
+    await expect(
+      writeAttachmentScope(root, recordBaseline(EMPTY, "root-1", [])),
+    ).rejects.toThrow();
+    await expect(fs.readdir(outside)).resolves.toEqual([]);
+  });
+
+  it("reads an empty scope through a symlinked index file or directory", async () => {
+    const granted = recordBaseline(EMPTY, "root-1", ["old000000001.png"]);
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), "brain-scope-outside-"));
+    await fs.writeFile(path.join(outside, "scope.json"), JSON.stringify(granted));
+
+    const linkedFile = await fs.mkdtemp(path.join(os.tmpdir(), "brain-scope-"));
+    await fs.mkdir(path.join(linkedFile, "_attachments"));
+    await fs.symlink(
+      path.join(outside, "scope.json"),
+      attachmentScopePath(linkedFile),
+    );
+    await expect(readAttachmentScope(linkedFile)).resolves.toEqual(EMPTY);
+
+    const linkedDir = await fs.mkdtemp(path.join(os.tmpdir(), "brain-scope-"));
+    await fs.symlink(outside, path.join(linkedDir, "_attachments"), "dir");
+    await expect(readAttachmentScope(linkedDir)).resolves.toEqual(EMPTY);
   });
 
   it("keeps the index file out of the attachment namespace", () => {

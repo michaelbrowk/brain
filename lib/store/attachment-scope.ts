@@ -1,6 +1,9 @@
 import fs from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import path from "node:path";
 import { atomicWrite } from "./atomic";
+import { assertInRoot } from "./paths";
+import { assertRealDirectory, ensureRealDirectory } from "./real-directory";
 
 /**
  * Which root each attachment belongs to.
@@ -10,7 +13,8 @@ import { atomicWrite } from "./atomic";
  * page's image readable. This file decides instead, and it lives in the notes
  * folder so it is written by the same atomicWrite, inside the same mutate(),
  * and committed by the same scheduleCommit as the bytes it authorizes. A
- * restore of the notes folder restores it with them.
+ * restore of the notes folder restores it with them. It is reached the way
+ * the bytes are: through the path jail, never through a symlink.
  */
 export interface AttachmentScope {
   /** Roots that have ever had `shareEdit` on. The new rule applies to these
@@ -24,24 +28,35 @@ export interface AttachmentScope {
 
 const EMPTY: AttachmentScope = { roots: [], uploads: {}, baseline: {} };
 
-export function attachmentScopePath(notesRoot: string): string {
-  return path.join(
-    /* turbopackIgnore: true */ notesRoot,
-    "_attachments",
-    "scope.json",
+/** Five characters: one short of the six the attachment-name rule demands,
+ *  which is what keeps the index from being served by /api/media or swept
+ *  by the Store. A test pins that. */
+const SCOPE_FILE = "scope.json";
+
+function attachmentDirectory(notesRoot: string): string {
+  return assertInRoot(
+    notesRoot,
+    path.join(/* turbopackIgnore: true */ notesRoot, "_attachments"),
   );
 }
 
-/** A missing or malformed file is an empty scope, never a throw: a corrupted
- *  index must degrade to "no visitor attachment is readable", not to a 500 on
- *  every image on the site. Each section is validated on its own, so one bad
- *  entry cannot turn a byte total into NaN or a grant into a crash. */
+export function attachmentScopePath(notesRoot: string): string {
+  const dir = attachmentDirectory(notesRoot);
+  return assertInRoot(dir, path.join(dir, SCOPE_FILE));
+}
+
+/** A missing, malformed, symlinked or otherwise untrustworthy file is an
+ *  empty scope, never a throw: a corrupted index must degrade to "no visitor
+ *  attachment is readable", not to a 500 on every image on the site. Each
+ *  section is validated on its own, so one bad entry cannot turn a byte
+ *  total into NaN or a grant into a crash. */
 export async function readAttachmentScope(
   notesRoot: string,
 ): Promise<AttachmentScope> {
   let raw: string;
   try {
-    raw = await fs.readFile(attachmentScopePath(notesRoot), "utf8");
+    await assertRealDirectory(attachmentDirectory(notesRoot));
+    raw = await readRegularFileNoFollow(attachmentScopePath(notesRoot));
   } catch {
     return { ...EMPTY };
   }
@@ -59,6 +74,22 @@ export async function readAttachmentScope(
     uploads: readUploads(parsed.uploads),
     baseline: readBaseline(parsed.baseline),
   };
+}
+
+async function readRegularFileNoFollow(file: string): Promise<string> {
+  const handle = await fs.open(
+    file,
+    fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW,
+  );
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) {
+      throw new Error("attachment scope index is not a regular file");
+    }
+    return await handle.readFile("utf8");
+  } finally {
+    await handle.close();
+  }
 }
 
 function readUploads(value: unknown): AttachmentScope["uploads"] {
@@ -95,15 +126,18 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Caller owns mutate(). */
+/** The same steps saveAttachmentUnlocked takes for the bytes: the directory
+ *  is made if missing and proven real before the write, and proven the same
+ *  directory after it. Caller owns mutate(). */
 export async function writeAttachmentScope(
   notesRoot: string,
   scope: AttachmentScope,
 ): Promise<void> {
-  await atomicWrite(
-    attachmentScopePath(notesRoot),
-    `${JSON.stringify(scope, null, 2)}\n`,
-  );
+  const dir = attachmentDirectory(notesRoot);
+  const file = assertInRoot(dir, path.join(dir, SCOPE_FILE));
+  const identity = await ensureRealDirectory(dir);
+  await atomicWrite(file, `${JSON.stringify(scope, null, 2)}\n`);
+  await assertRealDirectory(dir, identity);
 }
 
 export function recordUpload(
@@ -118,6 +152,26 @@ export function recordUpload(
     uploads: { ...scope.uploads, [name]: { root, bytes, at } },
     baseline: scope.baseline,
   };
+}
+
+/** The sweep removed these files, so their bytes stop counting against
+ *  their roots. Returns the same object when none of the names was an
+ *  upload, so a caller can tell by identity whether there is anything to
+ *  persist. */
+export function forgetUploads(
+  scope: AttachmentScope,
+  names: readonly string[],
+): AttachmentScope {
+  const uploads = { ...scope.uploads };
+  let changed = false;
+  for (const name of names) {
+    if (name in uploads) {
+      delete uploads[name];
+      changed = true;
+    }
+  }
+  if (!changed) return scope;
+  return { roots: scope.roots, uploads, baseline: scope.baseline };
 }
 
 /** Built once, on the first visitor write to a root, never inside

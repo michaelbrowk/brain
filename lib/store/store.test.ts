@@ -25,6 +25,7 @@ import {
   recordBaseline,
   recordUpload,
   rootIsScoped,
+  rootUploadBytes,
   writeAttachmentScope,
 } from "./attachment-scope";
 import {
@@ -9495,6 +9496,49 @@ describe("share-aware Store leaves", () => {
     await expect(fs.readdir(path.join(root, "_attachments"))).resolves.toEqual(
       [attachmentName(landed.url), "scope.json"].sort(),
     );
+  });
+
+  it("frees a root's quota when the sweep collects an unreferenced visitor upload", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const upload = () =>
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: shot(),
+      });
+    const orphan = await upload();
+    // Pre-load the ledger so the orphan's bytes are the only room there was.
+    await writeAttachmentScope(
+      root,
+      recordUpload(
+        await readAttachmentScope(root),
+        "filler000001.bin",
+        rootId,
+        SHARE_ROOT_UPLOAD_BYTES - PNG.byteLength,
+        "2026-09-05T10:00:00.000Z",
+      ),
+    );
+    await expect(upload()).rejects.toBeInstanceOf(ShareUploadQuotaError);
+
+    // Nobody referenced the orphan. Age it past the grace window and purge
+    // something, which is what runs the sweep.
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await fs.utimes(
+      path.join(root, "_attachments", attachmentName(orphan.url)),
+      old,
+      old,
+    );
+    const doomed = await s.createPage(null, "Doomed");
+    await s.deletePage(doomed.id);
+    await s.purgePage(doomed.id);
+
+    const after = await readAttachmentScope(root);
+    expect(after.uploads[attachmentName(orphan.url)]).toBeUndefined();
+    expect(rootUploadBytes(after, rootId)).toBe(
+      SHARE_ROOT_UPLOAD_BYTES - PNG.byteLength,
+    );
+    await expect(upload()).resolves.toMatchObject({ size: PNG.byteLength });
   });
 
   it("builds the baseline once, on the first visitor write, and grants nothing else", async () => {

@@ -11,6 +11,11 @@ import { atomicWrite, hashRev, syncDirectory } from "./atomic";
 import { slugify, assertInRoot, isReservedDir } from "./paths";
 import { ensureWritableNotesRoot } from "./notes-root";
 import {
+  assertRealDirectory,
+  ensureRealDirectory,
+  type DirectoryIdentity,
+} from "./real-directory";
+import {
   assertGitReady,
   assertGitSnapshotHealthy,
   beginGitSnapshotBarrier,
@@ -51,6 +56,7 @@ import {
 } from "./share-limits";
 import {
   attachmentGrantsRoot,
+  forgetUploads,
   readAttachmentScope,
   recordBaseline,
   recordUpload,
@@ -209,11 +215,6 @@ interface NotionAbortReceipt {
   status: "detached" | "aborted";
   stagingRemoved: boolean;
   completedAt: string;
-}
-
-interface DirectoryIdentity {
-  dev: number;
-  ino: number;
 }
 
 const now = () => new Date().toISOString();
@@ -378,51 +379,6 @@ function rethrowStagingFailure(error: unknown): never {
     "staging_unavailable",
     "Notion attachment staging is unavailable",
   );
-}
-
-async function ensureRealDirectory(
-  directory: string,
-): Promise<DirectoryIdentity> {
-  try {
-    await fs.mkdir(directory);
-    await syncDirectory(path.dirname(directory));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  }
-  return assertRealDirectory(directory);
-}
-
-async function assertRealDirectory(
-  directory: string,
-  expected?: DirectoryIdentity,
-): Promise<DirectoryIdentity> {
-  const before = await fs.lstat(directory);
-  if (before.isSymbolicLink() || !before.isDirectory()) {
-    throw new Error("attachment store must be a real directory");
-  }
-  const handle = await fs.open(
-    directory,
-    fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
-  );
-  try {
-    const opened = await handle.stat();
-    const after = await fs.lstat(directory);
-    const identity = { dev: opened.dev, ino: opened.ino };
-    if (
-      !opened.isDirectory() ||
-      after.isSymbolicLink() ||
-      !after.isDirectory() ||
-      after.dev !== opened.dev ||
-      after.ino !== opened.ino ||
-      (expected &&
-        (expected.dev !== identity.dev || expected.ino !== identity.ino))
-    ) {
-      throw new Error("attachment store directory identity changed");
-    }
-    return identity;
-  } finally {
-    await handle.close();
-  }
 }
 
 /** Every authority failure inside a visitor leaf is the same 404 the guard
@@ -6039,7 +5995,7 @@ export class Store {
       }
     }
     const cutoff = Date.now() - graceMs;
-    let removed = 0;
+    const removed: string[] = [];
     for (const name of names) {
       if (referenced.has(name)) continue;
       // Only well-formed attachment names are ever considered.
@@ -6054,13 +6010,19 @@ export class Store {
       }
       if (!stat.isFile() || stat.mtimeMs > cutoff) continue;
       await fs.rm(file, { force: true });
-      removed += 1;
+      removed.push(name);
     }
-    if (removed > 0) {
+    if (removed.length > 0) {
       await syncDirectory(directory);
+      // A visitor upload counts against its root's quota until the file is
+      // gone, so the ledger has to hear that it is: otherwise a root fills
+      // up with bytes that no longer exist and never drains.
+      const scope = await readAttachmentScope(this.root);
+      const forgotten = forgetUploads(scope, removed);
+      if (forgotten !== scope) await writeAttachmentScope(this.root, forgotten);
       scheduleCommit(this.root);
     }
-    return removed;
+    return removed.length;
   }
 
   // ── version history (git) ───────────────────────────

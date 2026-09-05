@@ -9,10 +9,14 @@ INSTALL_DIR="${BRAIN_INSTALL_DIR:-/opt/brain}"
 RELEASES_API="${BRAIN_RELEASES_API:-https://api.github.com/repos/michaelbrowk/brain/releases/latest}"
 RAW="https://raw.githubusercontent.com/michaelbrowk/brain"
 
-# Under `curl … | sudo bash` stdin is the script itself, so questions go to
+# Under `curl ... | sudo bash` stdin is the script itself, so questions go to
 # the terminal when there is one; the tests have no terminal and answer on stdin.
 # Fd 3 is that source. It is a dup of stdin, not a reopen of /dev/stdin, which
 # is refused on a socket and restarts a file from the top on Linux.
+# With no terminal, fd 3 is the script's own stdin. Under `curl ... | bash` that
+# pipe is already at end of input by the time main runs, bash having read the
+# script up to its last line, so a question there ends in the no-terminal
+# sentence instead of eating script text. Keep main the last line.
 if { : < /dev/tty; } 2>/dev/null; then exec 3</dev/tty; else exec 3<&0; fi
 
 say() { printf '%s\n' "$*"; }
@@ -38,12 +42,16 @@ preflight() {
   case "$mb" in ''|*[!0-9]*) mb=0 ;; esac
   [ "$mb" -ge 1536 ] || die "Brain and its mail service want 2 GB of RAM; this machine has ${mb} MB."
   [ "$mb" -ge 2048 ] || say "Note: less than 2 GB of RAM; it runs, with little headroom."
+  case "$INSTALL_DIR" in /*) ;; *) die "BRAIN_INSTALL_DIR must be an absolute path." ;; esac
   command -v curl >/dev/null || run apt-get install -y curl
+  command -v openssl >/dev/null || run apt-get install -y openssl
 }
 
 ensure_docker() {
   if docker compose version >/dev/null 2>&1; then say "Docker: present"; return; fi
-  say "Docker: installing from Docker's apt repository"
+  say "Docker: installing from Docker's apt repository (this replaces Ubuntu's docker.io package if it is present)"
+  run apt-get update
+  run apt-get install -y ca-certificates curl gnupg
   run install -m 0755 -d /etc/apt/keyrings
   run bash -c 'curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc'
   run chmod a+r /etc/apt/keyrings/docker.asc
@@ -56,7 +64,10 @@ ensure_docker() {
 resolve_release() {
   local json
   json="$(curl -fsSL "$RELEASES_API" 2>/dev/null)" || die "Could not read the latest release from GitHub. Check the network and try again."
-  TAG="$(printf '%s' "$json" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)"
+  # Quits at the first tag_name line. The here-string, a temp file, leaves no
+  # writer for that early quit to kill, so a huge payload cannot end the run
+  # through SIGPIPE under pipefail with no sentence.
+  TAG="$(sed -n '/tag_name/{s/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p;q;}' <<< "$json")"
   [ -n "$TAG" ] || die "Could not read the latest release from GitHub. Check the network and try again."
   say "Latest release: $TAG"
 }
@@ -111,15 +122,21 @@ ask_domain() {
 # The umask lives in a subshell so that only this file comes out as 600.
 write_env() {
   local escaped; escaped="$(printf '%s' "$HASH" | sed 's/\$/$$/g')"
+  # Made before the file is opened, so a failing openssl stops the run under
+  # set -e instead of leaving an empty AUTH_SECRET behind.
+  local secret; secret="$(openssl rand -hex 32)"
   (
     umask 077
     cat > "$INSTALL_DIR/.env" <<EOF
 NOTES_ROOT=$NOTES_DIR
-AUTH_SECRET=$(openssl rand -hex 32)
+AUTH_SECRET=$secret
 AUTH_PASSWORD_HASH=$escaped
 BRAIN_PUBLIC_ORIGIN=$ORIGIN
 EOF
   )
+  # The umask shapes a new file only. A .env that already existed keeps its
+  # old mode through the rewrite, so tighten it either way.
+  chmod 600 "$INSTALL_DIR/.env"
 }
 
 # For a Brain without a domain: how to reach it from another computer. Printed

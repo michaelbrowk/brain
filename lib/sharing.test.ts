@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { isShareExpired, parseShareExpiry } from "./sharing";
+import {
+  isShareExpired,
+  normalizeVisitorName,
+  parseShareExpiry,
+} from "./sharing";
 
 describe("share expiry", () => {
   const now = Date.parse("2026-07-26T12:00:00.000Z");
@@ -24,5 +28,21 @@ describe("share expiry", () => {
     expect(() => parseShareExpiry("2026-07-26T11:59:59.999Z", now)).toThrow();
     expect(() => parseShareExpiry("2028-07-26T12:00:00.000Z", now)).toThrow();
     expect(() => parseShareExpiry("2026-08-02", now)).toThrow();
+  });
+});
+
+describe("normalizeVisitorName", () => {
+  it("trims, strips control characters and truncates to 40", () => {
+    expect(normalizeVisitorName("  Ada Lovelace  ")).toBe("Ada Lovelace");
+    expect(normalizeVisitorName("Ada\u0000\u001bLovelace")).toBe("AdaLovelace");
+    expect(normalizeVisitorName("a".repeat(60))).toBe("a".repeat(40));
+  });
+
+  it("refuses anything that is empty once cleaned", () => {
+    expect(normalizeVisitorName("")).toBeNull();
+    expect(normalizeVisitorName("   ")).toBeNull();
+    expect(normalizeVisitorName("\u0000\u0007")).toBeNull();
+    expect(normalizeVisitorName(42)).toBeNull();
+    expect(normalizeVisitorName(undefined)).toBeNull();
   });
 });

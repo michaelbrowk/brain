@@ -60,6 +60,25 @@ describe("normalizeVisitorTitle", () => {
     expect(normalizeVisitorTitle(`${"a".repeat(199)} b`)).toBe("a".repeat(199));
   });
 
+  it("strips format characters that reorder or hide text, and keeps the joiners", () => {
+    const rlo = String.fromCodePoint(0x202e);
+    const isolate = String.fromCodePoint(0x2067);
+    const bom = String.fromCodePoint(0xfeff);
+    const zwsp = String.fromCodePoint(0x200b);
+    expect(normalizeVisitorTitle(`${bom}Invoice${rlo}fdp.exe`)).toBe(
+      "Invoicefdp.exe",
+    );
+    expect(normalizeVisitorTitle(`a${isolate}b${zwsp}c`)).toBe("abc");
+    // ZWJ builds emoji sequences and ZWNJ shapes Persian and Arabic words.
+    // Neither reorders text, so a title keeps them.
+    const zwj = String.fromCodePoint(0x200d);
+    const zwnj = String.fromCodePoint(0x200c);
+    const family = `\u{1F468}${zwj}\u{1F469}${zwj}\u{1F467}`;
+    expect(normalizeVisitorTitle(family)).toBe(family);
+    const persian = `\u{0645}\u{06CC}${zwnj}\u{062E}\u{0648}\u{0627}\u{0647}\u{0645}`;
+    expect(normalizeVisitorTitle(persian)).toBe(persian);
+  });
+
   it("falls back to Untitled once cleaned to nothing and refuses a non-string", () => {
     expect(normalizeVisitorTitle("")).toBe("Untitled");
     expect(normalizeVisitorTitle("   ")).toBe("Untitled");

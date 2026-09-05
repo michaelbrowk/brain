@@ -363,7 +363,7 @@ describe("install.sh run, upgrade, uninstall", () => {
     expect(up).toBeGreaterThan(pull);
     // the compose file was written before compose is asked to read it
     expect(r.stdout.indexOf("ops/docker/docker-compose.yml")).toBeLessThan(pull);
-    expect(r.calls()).toContain("curl -fsS http://127.0.0.1:3020/api/health");
+    expect(r.calls()).toContain("curl -fsS --max-time 2 http://127.0.0.1:3020/api/health");
     // the closing message is the last thing said, and there is no tunnel line with a domain
     expect(r.stdout.endsWith(`${closing("https://notes.example.com", path.join(r.installDir, "notes"))}\n`)).toBe(true);
   });
@@ -384,9 +384,9 @@ describe("install.sh run, upgrade, uninstall", () => {
     expect(r.stderr).toBe("Brain did not answer on port 3020 within two minutes. The last log lines are above; please open an issue with them.\n");
     expect(r.stdout).toMatch(/^would run: docker compose .*\blogs --tail 20$/m);
     expect(r.stdout).not.toContain("is running");
-    // a probe every second for two minutes, the first one right away
-    expect(r.calls().match(/^curl -fsS http:\/\/127\.0\.0\.1:3020\/api\/health$/gm)).toHaveLength(120);
-    expect(r.calls().match(/^sleep 1$/gm)).toHaveLength(119);
+    // 40 probes of at most 2 s with 1 s between them: under two minutes at worst, the first one right away
+    expect(r.calls().match(/^curl -fsS --max-time 2 http:\/\/127\.0\.0\.1:3020\/api\/health$/gm)).toHaveLength(40);
+    expect(r.calls().match(/^sleep 1$/gm)).toHaveLength(39);
   });
 
   it("upgrades in place when .env exists: keeps .env and notes, replaces compose, asks nothing", () => {
@@ -450,6 +450,21 @@ describe("install.sh run, upgrade, uninstall", () => {
     expect(r.status).toBe(0);
     expect(r.stdout).not.toMatch(/would run: rm .*my-notes/);
     expect(r.stdout).toContain(`would run: rm -rf -- ${path.join(first.installDir, "notes")}`);
+    expect(r.stdout.trim().split("\n").at(-1)).toBe(`Your notes are still in ${notes}.`);
+  });
+
+  it("uninstall spares the directories above notes nested deeper in the install directory", () => {
+    const first = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "" });
+    const notes = path.join(first.installDir, "data", "notes");
+    mkdirSync(notes, { recursive: true });
+    // the default notes folder of the first run is empty and no longer in use
+    rmSync(path.join(first.installDir, "notes"), { recursive: true });
+    writeFileSync(path.join(first.installDir, ".env"), `NOTES_ROOT=${notes}\nBRAIN_PUBLIC_ORIGIN=http://localhost:3020\n`);
+    const r = rerun(first, ["--uninstall"]);
+    expect(r.status).toBe(0);
+    const removed = (r.stdout.match(/^would run: rm .*$/gm) ?? []).map((line) => line.slice(`would run: rm -rf -- ${first.installDir}`.length));
+    expect(removed).toContain("/.env");
+    for (const entry of removed) expect(entry).not.toMatch(/^\/(data|notes)(\/|$)/);
     expect(r.stdout.trim().split("\n").at(-1)).toBe(`Your notes are still in ${notes}.`);
   });
 

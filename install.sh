@@ -210,12 +210,15 @@ bring_up() {
 }
 
 # Brain answers on 3020 once its store and search index are ready, which takes
-# a moment on the first start. The probe is a read and stays real under dry
-# run; the log tail on failure is a command and goes through run.
+# a moment on the first start. Each probe gives up after 2 s, so a connection
+# that stalls instead of being refused cannot eat the budget: 40 probes with a
+# second between them come to under two minutes at worst. The probe is a read
+# and stays real under dry run; the log tail on failure is a command and goes
+# through run.
 verify() {
   local tries=0 body
   while :; do
-    if body="$(curl -fsS http://127.0.0.1:3020/api/health 2>/dev/null)"; then
+    if body="$(curl -fsS --max-time 2 http://127.0.0.1:3020/api/health 2>/dev/null)"; then
       VERSION="$(sed -n 's/.*"version": *"\([^"]*\)".*/\1/p' <<< "$body")"
       # A release image reports its version. One without is still the tag
       # that was asked for.
@@ -223,7 +226,7 @@ verify() {
       return 0
     fi
     tries=$((tries + 1))
-    [ "$tries" -lt 120 ] || break
+    [ "$tries" -lt 40 ] || break
     sleep 1
   done
   compose logs --tail 20
@@ -245,22 +248,26 @@ finish() {
 
 # Takes the containers and their volumes down, removes the Caddy site if it is
 # the one this script wrote, then every entry of the install directory except
-# the notes. Their path comes from .env, so notes moved elsewhere inside the
-# directory are spared as well.
+# the notes directory and every directory that contains it. The notes path
+# comes from .env, so notes moved elsewhere inside the directory are spared as
+# well. The comparison is textual: a hand-edited NOTES_ROOT that is quoted or
+# has a doubled slash is not recognised and not protected. Docker or Caddy
+# already gone is no reason to stop before the removal and the last sentence.
 uninstall() {
   local notes=""
   if [ -f "$INSTALL_DIR/.env" ]; then notes="$(sed -n 's/^NOTES_ROOT=//p' "$INSTALL_DIR/.env")"; fi
   notes="${notes%/}"
   NOTES_DIR="${notes:-$INSTALL_DIR/notes}"
-  if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then compose down -v; fi
+  if [ -f "$INSTALL_DIR/docker-compose.yml" ]; then compose down -v || true; fi
   if [ -f /etc/caddy/Caddyfile ] && grep -q 'reverse_proxy 127.0.0.1:3020' /etc/caddy/Caddyfile; then
     run rm -f /etc/caddy/Caddyfile
-    run systemctl reload caddy
+    run systemctl reload caddy || true
   fi
   local entry
   for entry in "$INSTALL_DIR"/* "$INSTALL_DIR"/.env; do
     [ -e "$entry" ] || continue
-    [ "$entry" != "$NOTES_DIR" ] || continue
+    # The notes directory itself, or one of its ancestors.
+    case "$NOTES_DIR/" in "$entry"/*) continue ;; esac
     run rm -rf -- "$entry"
   done
   say "Your notes are still in $NOTES_DIR."

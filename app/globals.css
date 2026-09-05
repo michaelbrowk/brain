@@ -1928,17 +1928,19 @@ html[data-kbd] [contenteditable]:focus-visible {
   letter-spacing: 0.06px;
   color: var(--ink-2);
 }
-/* Share popover — the regular material r14 anchored to the Share pill
-   (DESIGN.md v2 → §12 Menu / popover; plan row P3-c). Same materialize canon
-   as .brain-menu: Radix data-state drives the keyframes, the edge-light rides
-   ::before and arrives at 60%, exit retraces in 120ms. Everything inside is
-   a fill — never a second material. */
+/* Share popover: the share card as a ledger on paper (DESIGN.md v2, §12
+   Menu / popover). The regular material survives as a 6px sleeve (popover
+   14 = plate 8 + padding 6) around an opaque paper plate, so the sentence,
+   the rows and the field stand on paper and never on a backdrop layer
+   (ban #2). Same materialize canon as .brain-menu: Radix data-state drives
+   the keyframes, the edge-light rides ::before and arrives at 60%, exit
+   retraces in 120ms. */
 .brain-share-popover {
   position: relative;
   isolation: isolate;
-  width: 352px;
+  width: 360px;
   max-width: calc(100vw - 24px);
-  padding: 14px;
+  padding: 6px;
   border-radius: var(--r-popover);
   background: var(--glass-reg);
   -webkit-backdrop-filter: var(--blur-reg);
@@ -1971,66 +1973,168 @@ html[data-kbd] [contenteditable]:focus-visible {
   animation: materialize-out 120ms ease-in both;
 }
 
-/* The public-link well: a quiet field-like fill for the URL (a fill, not a
-   second material — the search-capsule rule). */
-.brain-share-url-well {
+/* The paper plate: r8 concentric inside the r14 sleeve, with the rim a
+   small paper object takes. Inside the phone sheet it is r10, the control
+   radius the sheet's 20 is derived from (10 + padding 10). */
+.brain-share-plate {
+  overflow: hidden;
+  border-radius: var(--r-block);
+  background: var(--paper);
+  box-shadow: 0 0 0 0.5px var(--fill-rim);
+  color: var(--ink);
+  --kbd-fill: var(--fill-kbd-paper);
+  --kbd-rim: none;
+  --skeleton-fill: var(--fill-skeleton-paper);
+}
+[data-share-mobile-surface] .brain-share-plate {
+  border-radius: var(--r-control);
+}
+
+/* The head of the ledger: one status sentence, H3 15/600. */
+.brain-share-head {
+  margin: 0;
+  padding: 12px;
+  font-family: var(--font-sf);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  letter-spacing: -0.01em;
+  color: var(--ink);
+}
+
+/* A row: the label at the left, the fact or the control at the right, a
+   hairline above. 44 tall so a finger lands on it. Label and value are one
+   register (Table 14/500); the hierarchy is colour, ink-2 against ink. */
+.brain-share-row {
   display: flex;
   align-items: center;
-  min-width: 0;
+  gap: 12px;
+  min-height: 44px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--hair);
+}
+.brain-share-row-stack {
+  display: block;
+}
+.brain-share-row-label {
   flex: 1;
-  height: 32px;
-  padding: 0 10px;
-  border-radius: var(--r-block);
-  background: var(--fill-field-glass);
-  box-shadow: inset 0 0.5px 0 var(--fill-rim);
-}
-
-/* Copy / open beside the well — the icon-button register at 32, grown to
-   the 44px touch minimum on the phone sheet. */
-.brain-share-icon-btn {
-  display: grid;
-  place-items: center;
-  flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-  border-radius: 9999px;
+  min-width: 0;
+  font-family: var(--font-sf);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.35;
+  letter-spacing: -0.15px;
   color: var(--ink-2);
-  cursor: pointer;
-  transition:
-    background-color 160ms var(--ease-out),
-    color 160ms var(--ease-out),
-    transform 100ms ease-out;
+  font-variant-numeric: tabular-nums;
 }
-.brain-share-icon-btn:hover {
-  background-color: var(--fill-glass-hover);
+.brain-share-row-value {
+  font-family: var(--font-sf);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.35;
+  letter-spacing: -0.15px;
   color: var(--ink);
-  transition-duration: 80ms, 80ms, 100ms;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
-.brain-share-icon-btn:active {
-  transform: scale(0.9);
+.brain-share-row-wrap {
+  white-space: normal;
 }
-.brain-share-icon-btn:disabled {
-  opacity: 0.4;
-  pointer-events: none;
+/* Caption 12/400 in ink-3, which is legal on paper. */
+.brain-share-row-note {
+  display: block;
+  margin-top: 3px;
+  font-family: var(--font-sf);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.35;
+  letter-spacing: 0;
+  color: var(--ink-3);
+}
+.brain-share-row-note-lone {
+  margin-top: 0;
+}
+.brain-share-row-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* A quiet button or the lone destructive one closes on the row's text
+   rule: 8 of its padding stays inside the capsule, the capsule hangs 8 into
+   the row's padding, so the label ends where the values end. */
+.brain-share-row > .btn-quiet,
+.brain-share-row-act > .btn-destructive {
+  padding-right: 8px;
+  margin-right: -8px;
+}
+.brain-share-row-parent {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 60%;
+}
+.brain-share-row-parent > .truncate {
+  min-width: 0;
 }
 
-/* Expiry segments — native radios in a glass-field well; the checked label
-   is the white selected capsule (the palette's selected-row fill). */
+/* The link row: the label stops claiming half the row, the address is the
+   value that needs the width, mono 12/400. Copy and open are the 28
+   IconButton; the last hangs 4 into the padding so its glyph's optical edge
+   lands on the value rule. */
+.brain-share-row-link {
+  gap: 8px;
+}
+.brain-share-row-link .brain-share-row-label {
+  flex: 0 0 auto;
+}
+.brain-share-url {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  font-family: var(--font-mono-code);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+.brain-share-copied {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  font-family: var(--font-sf);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.35;
+  letter-spacing: -0.15px;
+  color: var(--ink);
+}
+.brain-share-row-btn:last-child {
+  margin-right: -4px;
+}
+.brain-share-row-btn[data-state="done"] {
+  color: var(--ink);
+}
+
+/* Expiry segments: native radios on a --fill-tint track r10, the checked
+   label a paper capsule r8 (option 8 + padding 2 = 10). */
 .brain-share-seg {
-  display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  display: inline-flex;
+  flex-shrink: 0;
   gap: 2px;
+  margin: 0;
   padding: 2px;
   border: 0;
   border-radius: var(--r-control);
-  background: var(--fill-field-glass);
+  background: var(--fill-tint);
 }
 .brain-share-seg-option {
   display: flex;
   align-items: center;
   justify-content: center;
   min-height: 26px;
-  padding: 0 4px;
+  padding: 0 9px;
   border-radius: var(--r-block);
   font-family: var(--font-sf);
   font-size: 13px;
@@ -2038,6 +2142,8 @@ html[data-kbd] [contenteditable]:focus-visible {
   line-height: 1.25;
   letter-spacing: -0.08px;
   color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
   transition:
     color 160ms var(--ease-out),
     background-color 160ms var(--ease-out);
@@ -2047,7 +2153,7 @@ html[data-kbd] [contenteditable]:focus-visible {
   transition-duration: 80ms;
 }
 .brain-share-seg-option[data-checked] {
-  background-color: var(--fill-glass-selected);
+  background-color: var(--paper);
   box-shadow:
     inset 0 1px 0 var(--fill-highlight),
     0 0 0 0.5px var(--fill-rim),
@@ -2056,7 +2162,56 @@ html[data-kbd] [contenteditable]:focus-visible {
   font-weight: 600;
 }
 
-/* Password settings reveal — height through the grid-rows trick, one fade.
+/* The password field under its row: the paper Field ladder (.field), sized
+   to the row. The eye is a bare glyph box, ink-2 to ink. */
+.brain-share-reveal-field {
+  padding: 0 12px 12px;
+}
+.brain-share-password-field {
+  width: 100%;
+}
+.brain-share-eye {
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: var(--r-sm);
+  color: var(--ink-2);
+  cursor: pointer;
+  transition: color 160ms var(--ease-out);
+}
+.brain-share-eye:hover {
+  color: var(--ink);
+  transition-duration: 80ms;
+}
+.brain-share-eye:disabled {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.brain-share-reveal-foot {
+  display: flex;
+  justify-content: flex-end;
+  padding: 0 12px 12px;
+}
+
+/* The action row: the last line of the ledger. */
+.brain-share-row-act {
+  justify-content: flex-end;
+  min-height: 52px;
+}
+.brain-share-row-confirm {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 10px;
+}
+.brain-share-row-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Password settings reveal: height through the grid-rows trick, one fade.
    The inner pane trades a 6px margin for padding so focus rings survive its
    overflow clip; the global reduced-motion block zeroes the animation. */
 .brain-share-reveal {
@@ -2081,16 +2236,33 @@ html[data-kbd] [contenteditable]:focus-visible {
   }
 }
 
+/* On the phone sheet every control grows to the 44 touch minimum, and the
+   expiry segments take a row of their own under the label so four of them
+   fit a 320 window. */
 @media (max-width: 639px) {
-  .brain-share-url-well {
-    height: 44px;
-  }
-  .brain-share-icon-btn {
+  .brain-share-row .icon-btn[data-size="28"] {
     width: 44px;
     height: 44px;
   }
+  .brain-share-row-expires {
+    flex-wrap: wrap;
+  }
+  .brain-share-seg {
+    display: grid;
+    flex: 1 0 100%;
+    grid-template-columns: repeat(4, 1fr);
+  }
   .brain-share-seg-option {
     min-height: 44px;
+    padding: 0 4px;
+  }
+  .brain-share-password-field {
+    min-height: 44px;
+  }
+  .brain-share-eye {
+    width: 44px;
+    height: 44px;
+    margin-right: -10px;
   }
 }
 

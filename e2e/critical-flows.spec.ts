@@ -4697,7 +4697,12 @@ test("share desktop popover is named and owns keyboard focus", async ({ page }) 
   const dialog = page.getByRole("dialog", { name: "Share settings" });
   await expect(dialog).toBeVisible();
   await expect(dialog).toBeFocused();
-  await expect(page.getByText("Password protection")).toBeVisible();
+  // the head is the status sentence; the first control after it is the
+  // password switch on its row
+  await expect(dialog.getByRole("heading")).toHaveText(
+    "Anyone with the link will be able to read this page.",
+  );
+  await expect(page.getByRole("switch", { name: "Password protection" })).toBeVisible();
   await page.keyboard.press("Tab");
   await expect(
     page.getByRole("switch", { name: "Password protection" }),
@@ -4724,7 +4729,7 @@ test("share uses a viewport bottom sheet with 44px targets at 320px", async ({ p
   const surface = page.locator("[data-share-mobile-surface]");
   await expect(surface).toBeVisible();
   await settleShareSurface(surface);
-  await expect(page.getByText("Password protection")).toBeVisible();
+  await expect(page.getByRole("switch", { name: "Password protection" })).toBeVisible();
   await page.getByRole("switch", { name: "Password protection" }).click();
   await expect(page.locator(".brain-share-password-field")).toBeVisible();
   await settleShareSurface(surface);
@@ -4805,7 +4810,7 @@ test("share uses a viewport bottom sheet with 44px targets at 320px", async ({ p
   expect(Math.abs(bottomGeometry.bottom - 800)).toBeLessThanOrEqual(1);
 });
 
-test("default active share is a glass header, link well, and controls under 180px", async ({ page }) => {
+test("default active share is a ledger on paper inside the regular glass", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await login(page);
 
@@ -4833,53 +4838,92 @@ test("default active share is a glass header, link well, and controls under 180p
   const surface = page.locator("[data-share-surface]");
   await expect(surface).toBeVisible();
   await settleShareSurface(surface);
-  await expect(surface.getByText("Shared to web", { exact: true })).toBeVisible();
-  await expect(surface.getByText("This page only", { exact: true })).toBeVisible();
+  await expect(surface.getByRole("heading")).toHaveText(
+    "Anyone with the link can read this page.",
+  );
   await expect(surface.getByRole("button", { name: "Copy link" })).toHaveAttribute("title", "Copy link");
   await expect(surface.getByRole("link", { name: "Open public page" })).toHaveAttribute(
     "title",
     "Open public page",
   );
   await expect(surface.locator(".brain-share-link-field")).toHaveCount(0);
+  await expect(surface.locator(".brain-share-url-well")).toHaveCount(0);
 
   const geometry = await surface.evaluate((node) => {
-    const rows = [...node.querySelectorAll<HTMLElement>("[data-share-primary-row]")];
+    const plate = node.firstElementChild as HTMLElement;
+    const rows = [...node.querySelectorAll<HTMLElement>("[data-share-row]")];
     const rowRects = rows.map((row) => row.getBoundingClientRect());
     const rowStyles = rows.map((row) => {
       const style = getComputedStyle(row);
       return {
         background: style.backgroundColor,
-        borders: [style.borderTopWidth, style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth],
+        hairline: style.borderTopWidth,
+        hairlineColor: style.borderTopColor,
+        sides: [style.borderRightWidth, style.borderBottomWidth, style.borderLeftWidth],
       };
     });
+    const head = node.querySelector("h2") as HTMLElement;
+    const headStyle = getComputedStyle(head);
+    const label = node.querySelector('[data-share-row="read"] .brain-share-row-label') as HTMLElement;
+    const value = node.querySelector('[data-share-row="read"] .brain-share-row-value') as HTMLElement;
     const url = node.querySelector("[data-share-url]") as HTMLElement;
-    const well = node.querySelector(".brain-share-url-well") as HTMLElement;
     const surfaceBounds = node.getBoundingClientRect();
+    const plateBounds = plate.getBoundingClientRect();
+    const plateStyle = getComputedStyle(plate);
     const focusOrder = [...node.querySelectorAll<HTMLElement>("button, a")].map(
       (target) => target.getAttribute("aria-label") ?? target.textContent?.trim(),
     );
     const material = getComputedStyle(node);
+    const size = (selector: string) => {
+      const rect = (node.querySelector(selector) as HTMLElement).getBoundingClientRect();
+      return [rect.width, rect.height];
+    };
+    const action = rows[rows.length - 1];
+    const stop = action.querySelector("[data-share-stop-row]") as HTMLElement;
     return {
       surfaceHeight: surfaceBounds.height,
-      rowNames: rows.map((row) => row.dataset.sharePrimaryRow),
+      sleeve: [
+        plateBounds.left - surfaceBounds.left,
+        surfaceBounds.right - plateBounds.right,
+        plateBounds.top - surfaceBounds.top,
+        surfaceBounds.bottom - plateBounds.bottom,
+      ],
+      plate: {
+        background: plateStyle.backgroundColor,
+        blur: plateStyle.backdropFilter,
+        radius: plateStyle.borderTopLeftRadius,
+      },
+      rowNames: rows.map((row) => row.dataset.shareRow),
       rowHeights: rowRects.map((rect) => rect.height),
       gaps: rowRects.slice(1).map((rect, index) => rect.top - rowRects[index].bottom),
       rowStyles,
+      head: {
+        size: headStyle.fontSize,
+        weight: headStyle.fontWeight,
+        bottom: head.getBoundingClientRect().bottom,
+        firstRowTop: rowRects[0].top,
+      },
+      register: {
+        labelSize: getComputedStyle(label).fontSize,
+        valueSize: getComputedStyle(value).fontSize,
+        labelWeight: getComputedStyle(label).fontWeight,
+        valueWeight: getComputedStyle(value).fontWeight,
+        labelColor: getComputedStyle(label).color,
+        valueColor: getComputedStyle(value).color,
+        urlFamily: getComputedStyle(url).fontFamily,
+        urlSize: getComputedStyle(url).fontSize,
+      },
       material: {
         blur: material.backdropFilter !== "none",
         radius: material.borderTopLeftRadius,
         animation: material.animationName,
         border: material.borderTopWidth,
       },
-      wellHeight: well.getBoundingClientRect().height,
-      copySize: (() => {
-        const rect = (node.querySelector('[aria-label="Copy link"]') as HTMLElement).getBoundingClientRect();
-        return [rect.width, rect.height];
-      })(),
-      openSize: (() => {
-        const rect = (node.querySelector('[aria-label="Open public page"]') as HTMLElement).getBoundingClientRect();
-        return [rect.width, rect.height];
-      })(),
+      copySize: size('[aria-label="Copy link"]'),
+      openSize: size('[aria-label="Open public page"]'),
+      stopRight: action.getBoundingClientRect().right - stop.getBoundingClientRect().right,
+      stopPadding: getComputedStyle(stop).paddingRight,
+      stopIsLastRow: action.dataset.shareRow === "action" && action.nextElementSibling === null,
       focusOrder,
       urlTitle: url.title,
       overflow: node.scrollWidth - node.clientWidth,
@@ -4892,24 +4936,50 @@ test("default active share is a glass header, link well, and controls under 180p
     animation: "materialize-in",
     border: "0px",
   });
-  expect(geometry.surfaceHeight).toBeLessThanOrEqual(180);
-  expect(geometry.rowNames).toEqual(["status", "link", "controls"]);
-  // link well and controls sit on the 32px control register; the header
-  // block is subheading + caption, so only its ceiling is pinned
-  expect(geometry.rowHeights[0]).toBeLessThanOrEqual(48);
-  expect(geometry.rowHeights[1]).toBe(32);
-  expect(geometry.rowHeights[2]).toBe(32);
-  for (const gap of geometry.gaps) {
-    expect(gap).toBeGreaterThanOrEqual(4);
-    expect(gap).toBeLessThanOrEqual(16);
-  }
+  // the glass is a 6px sleeve around an opaque paper plate (r8 inside r14),
+  // so nothing readable stands on a backdrop layer
+  for (const side of geometry.sleeve) expect(side).toBeCloseTo(6, 0);
+  expect(geometry.plate.blur).toBe("none");
+  expect(geometry.plate.background).not.toBe("rgba(0, 0, 0, 0)");
+  expect(geometry.plate.radius).toBe("8px");
+  // one head sentence, then the rows in order, the action last
+  expect(geometry.head.size).toBe("15px");
+  expect(geometry.head.weight).toBe("600");
+  expect(geometry.rowNames).toEqual(["link", "read", "password", "action"]);
+  expect(geometry.stopIsLastRow).toBe(true);
+  // every row is its content on 10px of padding under a 1px hairline, never
+  // under 44: the 28 icon buttons make 49, a text row rests on the 44 floor,
+  // the 24 switch makes 45, the 32 button in the action row makes 53
+  expect(geometry.rowHeights.map((height) => Math.round(height))).toEqual([49, 44, 45, 53]);
+  // a four-row card with a one-line head fits 252: the head's 44 plus the
+  // rows plus the 6px sleeve on both sides
+  expect(geometry.surfaceHeight).toBeLessThanOrEqual(252);
+  // rows are separated by one hairline each and nothing else: no fills, no
+  // side borders, no gaps
+  for (const gap of geometry.gaps) expect(Math.abs(gap)).toBeLessThanOrEqual(1);
   for (const style of geometry.rowStyles) {
     expect(style.background).toBe("rgba(0, 0, 0, 0)");
-    expect(style.borders).toEqual(["0px", "0px", "0px", "0px"]);
+    expect(style.hairline).toBe("1px");
+    expect(style.hairlineColor).not.toBe("rgba(0, 0, 0, 0)");
+    expect(style.sides).toEqual(["0px", "0px", "0px"]);
   }
-  expect(geometry.wellHeight).toBe(32);
-  expect(geometry.copySize).toEqual([32, 32]);
-  expect(geometry.openSize).toEqual([32, 32]);
+  expect(Math.abs(geometry.head.bottom - geometry.head.firstRowTop)).toBeLessThanOrEqual(1);
+  // label and value share one register (Table 14/500); the hierarchy is colour
+  expect(geometry.register.labelSize).toBe("14px");
+  expect(geometry.register.valueSize).toBe("14px");
+  expect(geometry.register.labelWeight).toBe("500");
+  expect(geometry.register.valueWeight).toBe("500");
+  expect(geometry.register.labelColor).not.toBe(geometry.register.valueColor);
+  // the address is the one monospaced value
+  expect(geometry.register.urlFamily).toMatch(/JetBrains Mono|monospace/);
+  expect(geometry.register.urlSize).toBe("12px");
+  // copy and open are the 28 IconButton of rows and menus
+  expect(geometry.copySize).toEqual([28, 28]);
+  expect(geometry.openSize).toEqual([28, 28]);
+  // the red capsule hangs 8 into the row's 12 and keeps 8 of padding, so the
+  // label ends on the row's text rule, 12 from the plate's edge
+  expect(geometry.stopRight).toBeCloseTo(4, 0);
+  expect(geometry.stopPadding).toBe("8px");
   expect(geometry.focusOrder.slice(0, 4)).toEqual([
     "Copy link",
     "Open public page",
@@ -4955,43 +5025,46 @@ test("default active mobile utility keeps 44px targets separate without wrapping
   const geometry = await surface.evaluate((node) => {
     const rect = (selector: string) =>
       (node.querySelector(selector) as HTMLElement).getBoundingClientRect();
-    const rows = [...node.querySelectorAll<HTMLElement>("[data-share-primary-row]")].map(
-      (row) => row.getBoundingClientRect(),
-    );
+    const rows = [...node.querySelectorAll<HTMLElement>("[data-share-row]")];
+    const rowRects = rows.map((row) => row.getBoundingClientRect());
+    const plate = node.firstElementChild as HTMLElement;
     const copy = rect('[aria-label="Copy link"]');
     const open = rect('[aria-label="Open public page"]');
     const password = rect('[aria-label="Password protection"]');
     const stop = rect("[data-share-stop-row]");
     const intersects = (a: DOMRect, b: DOMRect) =>
       a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+    const sheetBounds = node.getBoundingClientRect();
+    const plateBounds = plate.getBoundingClientRect();
     return {
-      rowHeights: rows.map((row) => row.height),
-      gaps: rows.slice(1).map((row, index) => row.top - rows[index].bottom),
+      rowNames: rows.map((row) => row.dataset.shareRow),
+      rowHeights: rowRects.map((row) => row.height),
+      gaps: rowRects.slice(1).map((row, index) => row.top - rowRects[index].bottom),
+      plateRadius: getComputedStyle(plate).borderTopLeftRadius,
+      plateInset: [plateBounds.left - sheetBounds.left, sheetBounds.right - plateBounds.right],
       sizes: {
         copy: [copy.width, copy.height],
         open: [open.width, open.height],
         password: [password.width, password.height],
         stop: [stop.width, stop.height],
       },
-      controlGap: stop.left - password.right,
       overlap: intersects(copy, open) || intersects(password, stop),
       overflow: node.scrollWidth - node.clientWidth,
       linkWrap: Math.abs(copy.top - open.top),
     };
   });
-  // header block + 44px link and controls rows on the phone sheet
-  expect(geometry.rowHeights[1]).toBe(44);
-  expect(geometry.rowHeights[2]).toBe(44);
-  for (const gap of geometry.gaps) {
-    expect(gap).toBeGreaterThanOrEqual(4);
-    expect(gap).toBeLessThanOrEqual(16);
-  }
+  // the same ledger on the phone sheet: the plate is r10 at the sheet's 10
+  // (sheet 20 = 10 + 10), every row and every control at the 44 minimum
+  expect(geometry.rowNames).toEqual(["link", "read", "password", "action"]);
+  expect(geometry.plateRadius).toBe("10px");
+  expect(geometry.plateInset).toEqual([10, 10]);
+  for (const height of geometry.rowHeights) expect(height).toBeGreaterThanOrEqual(44);
+  for (const gap of geometry.gaps) expect(Math.abs(gap)).toBeLessThanOrEqual(1);
   expect(geometry.sizes.copy).toEqual([44, 44]);
   expect(geometry.sizes.open).toEqual([44, 44]);
   expect(geometry.sizes.password).toEqual([56, 44]);
   expect(geometry.sizes.stop[0]).toBeGreaterThanOrEqual(88);
   expect(geometry.sizes.stop[1]).toBe(44);
-  expect(geometry.controlGap).toBeGreaterThanOrEqual(8);
   expect(geometry.overlap).toBe(false);
   expect(geometry.linkWrap).toBeLessThanOrEqual(1);
   expect(geometry.overflow).toBeLessThanOrEqual(1);

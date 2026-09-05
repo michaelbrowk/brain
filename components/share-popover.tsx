@@ -15,8 +15,12 @@ export type ShareEnableResult =
 type Grant = { id: string; title: string };
 type ExpiredGrant = Grant & { expiresAt?: string };
 type ExpiryChoice = "never" | "1" | "7" | "30";
+type Overlap = ShareScopeSnapshot["overlappingRoots"][number];
 
-/** A single flat surface that moves from exact-scope review to management. */
+/** The share card is a ledger on paper: one status sentence at the head,
+ *  then a row per fact or setting with a hairline between them, and the
+ *  action as the last row. One surface moves from the private review to
+ *  management, and the revoke confirmation takes the last row's place. */
 export function SharePopover({
   isPublic,
   pageId,
@@ -63,6 +67,7 @@ export function SharePopover({
   const [revokeConfirming, setRevokeConfirming] = useState(false);
   const [revokePending, setRevokePending] = useState(false);
   const [shareError, setShareError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
   const [enablePasswordOn, setEnablePasswordOn] = useState(false);
   const [enablePassword, setEnablePassword] = useState("");
   const [enablePasswordVisible, setEnablePasswordVisible] = useState(false);
@@ -77,6 +82,7 @@ export function SharePopover({
     getServerMobileViewportSnapshot,
   );
   const enablePasswordRef = useRef<HTMLInputElement>(null);
+  const copiedTimer = useRef<number | null>(null);
 
   const verifiedDirectPublic = verified?.rootId === pageId ? verified.public : null;
   const effectiveDirectPublic =
@@ -85,7 +91,6 @@ export function SharePopover({
       : verifiedDirectPublic ?? isPublic;
   const directExpiry = effectiveExpiryValue(verified, pageId, expiresAt);
   const directExpired = effectiveDirectPublic && isExpired(directExpiry);
-  const inheritedOnly = !!inheritedFrom && !effectiveDirectPublic;
   const expiredInheritedOnly =
     !effectiveDirectPublic && !inheritedFrom && !!expiredInheritedFrom;
   const directActive = effectiveDirectPublic && !directExpired;
@@ -112,6 +117,13 @@ export function SharePopover({
     if (!enablePasswordOn) return;
     enablePasswordRef.current?.focus();
   }, [enablePasswordOn]);
+
+  useEffect(
+    () => () => {
+      if (copiedTimer.current !== null) window.clearTimeout(copiedTimer.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!open) return;
@@ -259,12 +271,28 @@ export function SharePopover({
     }
   };
 
+  const clearCopied = () => {
+    if (copiedTimer.current !== null) {
+      window.clearTimeout(copiedTimer.current);
+      copiedTimer.current = null;
+    }
+    setCopied(false);
+  };
+
   const copyLink = async () => {
     if (busy || checkingScope || !activeRootId) return;
     setBusy(true);
     setShareError(null);
     try {
       await onCopyLink(activeRootId);
+      // the Link row says "Copied" with a bare check for two seconds, then
+      // shows the address again; the shell's toast is unchanged
+      if (copiedTimer.current !== null) window.clearTimeout(copiedTimer.current);
+      setCopied(true);
+      copiedTimer.current = window.setTimeout(() => {
+        copiedTimer.current = null;
+        setCopied(false);
+      }, COPIED_MS);
     } catch {
       setShareError(
         "Couldn't verify and copy the public link. Check the current state and try again.",
@@ -284,71 +312,67 @@ export function SharePopover({
   const closeSurface = () => {
     setOpen(false);
     setRevokeConfirming(false);
+    clearCopied();
     resetEnablePassword();
   };
 
+  const view =
+    confirmation && !effectiveDirectPublic ? (
+      <PrivateReview
+        snapshot={confirmation}
+        busy={busy}
+        passwordOn={enablePasswordOn}
+        password={enablePassword}
+        passwordVisible={enablePasswordVisible}
+        expiry={enableExpiry}
+        passwordRef={enablePasswordRef}
+        onPasswordToggle={(nextOn) => {
+          if (nextOn) {
+            setEnablePasswordOn(true);
+            return;
+          }
+          resetEnablePassword();
+        }}
+        onPasswordChange={setEnablePassword}
+        onPasswordVisibleChange={setEnablePasswordVisible}
+        onExpiryChange={setEnableExpiry}
+        onShare={() => void enableShare()}
+        onOpenShareSettings={onOpenShareSettings}
+      />
+    ) : checkingScope && !effectiveDirectPublic && !inheritedFrom && !expiredInheritedFrom ? (
+      <LoadingView />
+    ) : (
+      <ManagementView
+        activeRootId={activeRootId}
+        activeSnapshot={activeSnapshot}
+        checkingScope={checkingScope}
+        directPublic={effectiveDirectPublic}
+        directExpired={directExpired}
+        expiredInheritedOnly={expiredInheritedOnly}
+        inheritedFrom={inheritedFrom}
+        expiredInheritedFrom={expiredInheritedFrom}
+        url={url}
+        busy={busy}
+        copied={copied}
+        revokeConfirming={revokeConfirming}
+        revokePending={revokePending}
+        hasPassword={effectiveLocked}
+        expiresAt={effectiveExpiry}
+        onCopy={() => void copyLink()}
+        onOpenShareSettings={onOpenShareSettings}
+        onSetProtection={onSetProtection}
+        onStopSharing={() => setRevokeConfirming(true)}
+        onCancelRevoke={() => setRevokeConfirming(false)}
+        onConfirmRevoke={() => void stopSharing()}
+      />
+    );
+
+  // the paper plate: everything readable stands on it, never on the glass
   const surfaceBody = (
-    <>
-      {revokeConfirming ? (
-        <RevokeView
-          pending={revokePending}
-          inheritedFrom={inheritedFrom}
-          overlaps={activeSnapshot?.overlappingRoots ?? []}
-          onCancel={() => setRevokeConfirming(false)}
-          onConfirm={() => void stopSharing()}
-        />
-      ) : confirmation && !effectiveDirectPublic ? (
-        <PrivateReview
-          snapshot={confirmation}
-          busy={busy}
-          passwordOn={enablePasswordOn}
-          password={enablePassword}
-          passwordVisible={enablePasswordVisible}
-          expiry={enableExpiry}
-          passwordRef={enablePasswordRef}
-          onPasswordToggle={(nextOn) => {
-            if (nextOn) {
-              setEnablePasswordOn(true);
-              return;
-            }
-            resetEnablePassword();
-          }}
-          onPasswordChange={setEnablePassword}
-          onPasswordVisibleChange={setEnablePasswordVisible}
-          onExpiryChange={setEnableExpiry}
-          onShare={() => void enableShare()}
-          onOpenShareSettings={onOpenShareSettings}
-        />
-      ) : checkingScope && !effectiveDirectPublic && !inheritedFrom && !expiredInheritedFrom ? (
-        <LoadingView />
-      ) : (
-        <ManagementView
-          activeRootId={activeRootId}
-          activeSnapshot={activeSnapshot}
-          checkingScope={checkingScope}
-          directPublic={effectiveDirectPublic}
-          directExpired={directExpired}
-          inheritedOnly={inheritedOnly}
-          expiredInheritedOnly={expiredInheritedOnly}
-          inheritedFrom={inheritedFrom}
-          expiredInheritedFrom={expiredInheritedFrom}
-          url={url}
-          busy={busy}
-          revokePending={revokePending}
-          hasPassword={effectiveLocked}
-          expiresAt={effectiveExpiry}
-          onCopy={() => void copyLink()}
-          onOpenShareSettings={onOpenShareSettings}
-          onSetProtection={onSetProtection}
-          onStopSharing={() => setRevokeConfirming(true)}
-        />
-      )}
-      {shareError && (
-        <p role="alert" className="mt-3 text-caption font-medium text-red">
-          {shareError}
-        </p>
-      )}
-    </>
+    <div className="brain-share-plate">
+      {view}
+      {shareError && <AlertRow>{shareError}</AlertRow>}
+    </div>
   );
 
   if (mobile) {
@@ -369,12 +393,13 @@ export function SharePopover({
             className="brain-dialog-overlay fixed inset-0 z-[var(--z-modal)]"
           />
           {/* thick material bottom sheet: .brain-dialog carries the material,
-              .brain-sheet the top radius and the slide keyframes */}
+              .brain-sheet the top radius and the slide keyframes. The sheet's
+              20 is the plate's 10 plus this 10 of padding. */}
           <Dialog.Content
             aria-label="Share settings"
             aria-describedby={undefined}
             data-share-mobile-surface
-            className="brain-dialog brain-sheet font-system fixed inset-x-0 bottom-0 z-[calc(var(--z-modal)+1)] w-screen overflow-y-auto px-4 pt-4 pb-[max(16px,env(safe-area-inset-bottom))] outline-none"
+            className="brain-dialog brain-sheet font-system fixed inset-x-0 bottom-0 z-[calc(var(--z-modal)+1)] w-screen overflow-y-auto p-2.5 pb-[max(10px,env(safe-area-inset-bottom))] outline-none"
           >
             {surfaceBody}
           </Dialog.Content>
@@ -406,7 +431,7 @@ export function SharePopover({
           sideOffset={6}
           collisionPadding={12}
           data-share-surface
-          className="brain-share-popover z-[var(--z-modal)] outline-none max-sm:hidden"
+          className="brain-share-popover z-[var(--z-popover)] outline-none max-sm:hidden"
         >
           {surfaceBody}
         </Popover.Content>
@@ -418,10 +443,7 @@ export function SharePopover({
 function LoadingView() {
   return (
     <div aria-busy="true" className="min-h-24">
-      <h2 className="text-subheading text-ink">Share page</h2>
-      <p className="mt-1.5 text-caption font-medium text-ink-2">
-        Checking which pages will be shared…
-      </p>
+      <h2 className="brain-share-head">Checking which pages will be shared…</h2>
     </div>
   );
 }
@@ -456,82 +478,90 @@ function PrivateReview({
   onOpenShareSettings?: () => void;
 }) {
   const total = snapshot.descendantCount + 1;
-  const label = total === 1 ? "Share page" : `Share ${total} pages`;
   const overlaps = snapshot.overlappingRoots;
+  const blocked = overlaps.length > 0;
   return (
     <div data-share-state="review">
-      <h2 className="text-subheading text-ink">{label}</h2>
-      <p className="mt-1.5 text-caption font-medium text-ink-2">
-        {snapshot.descendantCount === 0
-          ? "Anyone with the link can read this page."
-          : "Anyone with the link can read them."}
-      </p>
+      <h2 className="brain-share-head">
+        {readerClause(passwordOn)} will be able to read {pagesClause(total)}.
+      </h2>
 
-      {overlaps.length > 0 && (
-        <div data-share-overlap-blocker className="mt-3">
-          <p className="text-caption font-medium text-ink">
-            This scope already overlaps {overlaps.length === 1 ? "another shared page" : "other shared pages"}.
-          </p>
-          <ul className="mt-1 space-y-0.5 text-caption font-medium text-ink-2">
+      {blocked ? (
+        <div
+          data-share-overlap-blocker
+          data-share-row="overlap"
+          className="brain-share-row brain-share-row-stack"
+        >
+          <span className="brain-share-row-value brain-share-row-wrap">
+            This scope already overlaps{" "}
+            {overlaps.length === 1 ? "another shared page" : "other shared pages"}.
+          </span>
+          <ul className="brain-share-row-list">
             {overlaps.map((overlap) => (
-              <li key={overlap.rootId}>
-                {overlap.title} · {overlap.relation === "ancestor" ? "shared parent" : "shared nested page"}
+              <li key={overlap.rootId} className="brain-share-row-note">
+                {overlap.title} · {relationLabel(overlap)}
                 {isExpired(overlap.shareExpiresAt ?? undefined) ? " · expired" : ""}
               </li>
             ))}
           </ul>
-          <p className="mt-1.5 text-caption font-medium text-ink-2">
+          <span className="brain-share-row-note">
             Resolve the existing grant before creating this link.
-          </p>
-          {onOpenShareSettings && (
-            <button
-              type="button"
-              onClick={onOpenShareSettings}
-              className="mt-1 min-h-8 text-caption font-medium text-ink-2 transition-colors hover:text-ink max-sm:min-h-11"
-            >
-              Review shared links
-            </button>
-          )}
+          </span>
         </div>
-      )}
-
-      {overlaps.length === 0 && <div className="mt-4">
-        <SettingToggle
-          label="Password protection"
-          checked={passwordOn}
-          disabled={busy}
-          onChange={onPasswordToggle}
-        />
-        {passwordOn && (
-          <div className="brain-share-reveal mt-2">
-            <div>
-              <PasswordFields
+      ) : (
+        <>
+          <Row id="read" label="Who can read">
+            <span className="brain-share-row-value">{readerValue(passwordOn)}</span>
+          </Row>
+          {/* The "Who can edit" row lands with the editable-shares feature. */}
+          <SwitchRow
+            id="password"
+            label="Password"
+            switchLabel="Password protection"
+            checked={passwordOn}
+            disabled={busy}
+            onChange={onPasswordToggle}
+          />
+          {passwordOn && (
+            <Reveal>
+              <PasswordField
                 inputRef={passwordRef}
                 password={password}
                 visible={passwordVisible}
-                expiry={expiry}
                 disabled={busy}
                 onPasswordChange={onPasswordChange}
                 onVisibleChange={onPasswordVisibleChange}
-                onExpiryChange={onExpiryChange}
               />
-            </div>
-          </div>
-        )}
-      </div>}
-
-      {overlaps.length === 0 && (
-        <div className="mt-4 flex justify-end">
-          <Button
-            variant="ink"
-            disabled={busy || (passwordOn && !password.trim())}
-            onClick={onShare}
-            className="max-sm:min-h-11"
-          >
-            {busy ? "Sharing…" : "Share"}
-          </Button>
-        </div>
+              <ExpiryRow value={expiry} disabled={busy} onChange={onExpiryChange} />
+            </Reveal>
+          )}
+        </>
       )}
+
+      {blocked
+        ? onOpenShareSettings && (
+            <ActionRow>
+              <Button
+                variant="quiet"
+                onClick={onOpenShareSettings}
+                className="max-sm:min-h-11"
+              >
+                Review shared links
+              </Button>
+            </ActionRow>
+          )
+        : (
+            <ActionRow>
+              <Button
+                variant="ink"
+                disabled={busy || (passwordOn && !password.trim())}
+                onClick={onShare}
+                className="max-sm:min-h-11"
+              >
+                {busy ? "Sharing…" : `Share ${pagesClause(total)}`}
+              </Button>
+            </ActionRow>
+          )}
     </div>
   );
 }
@@ -542,12 +572,13 @@ function ManagementView({
   checkingScope,
   directPublic,
   directExpired,
-  inheritedOnly,
   expiredInheritedOnly,
   inheritedFrom,
   expiredInheritedFrom,
   url,
   busy,
+  copied,
+  revokeConfirming,
   revokePending,
   hasPassword,
   expiresAt,
@@ -555,18 +586,21 @@ function ManagementView({
   onOpenShareSettings,
   onSetProtection,
   onStopSharing,
+  onCancelRevoke,
+  onConfirmRevoke,
 }: {
   activeRootId: string | null;
   activeSnapshot: ShareScopeSnapshot | null;
   checkingScope: boolean;
   directPublic: boolean;
   directExpired: boolean;
-  inheritedOnly: boolean;
   expiredInheritedOnly: boolean;
   inheritedFrom?: Grant;
   expiredInheritedFrom?: ExpiredGrant;
   url: string;
   busy: boolean;
+  copied: boolean;
+  revokeConfirming: boolean;
   revokePending: boolean;
   hasPassword: boolean;
   expiresAt?: string;
@@ -577,140 +611,130 @@ function ManagementView({
     expiresAt?: string | null;
   }) => void | Promise<void>;
   onStopSharing: () => void;
+  onCancelRevoke: () => void;
+  onConfirmRevoke: () => void;
 }) {
-  const title = expiredInheritedOnly
+  // the head states what the active link does; the active link is the
+  // page's own while it works, and the parent's where the page is reached
+  // through one
+  const activeLocked = activeSnapshot?.shareLocked ?? hasPassword;
+  const head = expiredInheritedOnly
+    ? `Parent share through ${expiredInheritedFrom?.title} is expired.`
+    : directExpired && !inheritedFrom
+      ? "This page's own link is expired."
+      : activeSnapshot
+        ? `${readerClause(activeLocked)} can read ${pagesClause(activeSnapshot.descendantCount + 1)}.`
+        : checkingScope
+          ? "Refreshing shared page count…"
+          : directExpired
+            ? "This page's own link is expired."
+            : "Shared. The exact page count is unavailable.";
+  const readValue = expiredInheritedOnly
     ? "Link expired"
-    : inheritedOnly
-      ? `Shared through ${inheritedFrom?.title}`
-      : directExpired && inheritedFrom
-        ? `Shared through ${inheritedFrom.title}`
-        : directExpired
-          ? "Link expired"
-          : "Shared to web";
-  return (
-    <div data-share-state="manage">
-      <div data-share-primary-row="status">
-        <h2 className="text-subheading text-ink">{title}</h2>
-        <p className="mt-1 text-caption font-medium text-ink-2">
-          {checkingScope
-            ? "Refreshing shared page count…"
-            : activeSnapshot
-              ? activeScopeLabel(activeSnapshot.descendantCount, inheritedOnly || !!inheritedFrom)
-              : expiredInheritedOnly
-                ? `Parent share through ${expiredInheritedFrom?.title} is expired.`
-                : directExpired
-                  ? "This page's own link is expired."
-                  : "Shared; exact count unavailable"}
-        </p>
-      </div>
+    : directPublic && directExpired && !inheritedFrom
+      ? "Link expired"
+      : readerValue(activeLocked);
+  const throughNote =
+    inheritedFrom && directPublic
+      ? directExpired
+        ? `This page's own link is expired. Active access comes through ${inheritedFrom.title}.`
+        : "Stopping this page's own link will not make it private."
+      : undefined;
+  const locked = revokeConfirming || revokePending;
 
-      <div
-        data-share-primary-row="link"
-        data-share-link-row
-        className="mt-3 flex items-center gap-1"
-      >
-        <span className="brain-share-url-well">
-          <span
-            data-share-url
-            title={url || "No active public link"}
-            aria-label={url ? `Public link: ${url}` : "No active public link"}
-            className="min-w-0 flex-1 truncate font-mono text-[12px] font-medium leading-4 text-ink-2"
-          >
-            {url ? url.replace(/^https?:\/\//, "") : "No active public link"}
-          </span>
-        </span>
-        <button
-          type="button"
-          disabled={busy || checkingScope || !activeRootId}
-          onClick={onCopy}
-          aria-label="Copy link"
-          title="Copy link"
-          className="brain-share-icon-btn brain-touch-hit focus-inset"
+  const action = (securityBusy: boolean) =>
+    revokeConfirming ? (
+      <RevokeRow
+        pending={revokePending}
+        inheritedFrom={inheritedFrom}
+        overlaps={activeSnapshot?.overlappingRoots ?? []}
+        onCancel={onCancelRevoke}
+        onConfirm={onConfirmRevoke}
+      />
+    ) : (
+      <ActionRow>
+        <Button
+          variant="destructive"
+          data-share-stop-row
+          disabled={revokePending || securityBusy}
+          onClick={onStopSharing}
+          className="max-sm:min-h-11"
         >
-          <Icon name="copy-linear" size={16} />
-        </button>
-        {activeRootId && !revokePending && (
-          <a
-            href={url}
-            target="_blank"
-            rel="noreferrer"
-            aria-label="Open public page"
-            title="Open public page"
-            className="brain-share-icon-btn brain-touch-hit focus-inset"
-          >
-            <Icon name="link-linear" size={16} />
-          </a>
+          Stop sharing
+        </Button>
+      </ActionRow>
+    );
+
+  return (
+    <div data-share-state={revokeConfirming ? "revoke" : "manage"}>
+      <h2 className="brain-share-head">{head}</h2>
+
+      <LinkRow
+        url={url}
+        copied={copied}
+        disabled={busy || checkingScope || !activeRootId || locked}
+        showOpen={!!activeRootId && !revokePending}
+        onCopy={onCopy}
+      />
+
+      <Row id="read" label="Who can read">
+        <span className="brain-share-row-value">{readValue}</span>
+      </Row>
+      {/* The "Who can edit" row lands with the editable-shares feature. */}
+
+      {(inheritedFrom || expiredInheritedOnly) && (
+        <ParentRow
+          grant={inheritedFrom ?? expiredInheritedFrom}
+          note={throughNote}
+          multiple={!!inheritedFrom && directPublic}
+          onOpen={onOpenShareSettings}
+        />
+      )}
+
+      {expiredInheritedFrom &&
+        !expiredInheritedOnly &&
+        (!inheritedFrom || expiredInheritedFrom.id !== inheritedFrom.id) && (
+          <NoteRow id="expired-parent">
+            Parent share through {expiredInheritedFrom.title} is expired.
+            {inheritedFrom ? ` Active access comes through ${inheritedFrom.title}.` : ""}
+          </NoteRow>
         )}
-      </div>
 
       {activeSnapshot && activeSnapshot.overlappingRoots.length > 0 && (
-        <div data-existing-share-overlaps className="mt-3">
-          <p className="text-caption font-medium text-ink">Other recorded public links</p>
-          <ul className="mt-1 space-y-0.5 text-caption font-medium text-ink-2">
+        <div
+          data-existing-share-overlaps
+          data-share-row="overlaps"
+          className="brain-share-row brain-share-row-stack"
+        >
+          <span className="brain-share-row-label">Other public links</span>
+          <ul className="brain-share-row-list">
             {activeSnapshot.overlappingRoots.map((overlap) => (
-              <li key={overlap.rootId}>{overlapLabel(overlap)}</li>
+              <li key={overlap.rootId} className="brain-share-row-note">
+                {overlapLabel(overlap)}
+              </li>
             ))}
           </ul>
         </div>
       )}
 
-      {inheritedFrom && directPublic && (
-        <div data-multiple-share-grants className="mt-2">
-          <p className="text-caption font-medium text-ink-2">
-            {directExpired
-              ? `Active access comes through ${inheritedFrom.title}.`
-              : `Also shared through ${inheritedFrom.title}. Stopping this page's own link will not make it private.`}
-          </p>
-          {onOpenShareSettings && (
-            <button
-              type="button"
-              onClick={onOpenShareSettings}
-              className="mt-1 min-h-8 text-left text-caption font-medium text-ink-2 transition-colors hover:text-ink max-sm:min-h-11"
-            >
-              Go to shared parent
-            </button>
-          )}
-        </div>
-      )}
-
-      {expiredInheritedFrom &&
-        (!inheritedFrom || expiredInheritedFrom.id !== inheritedFrom.id) && (
-          <p className="mt-2 text-caption font-medium text-ink-2">
-            Parent share through {expiredInheritedFrom.title} is expired.
-            {inheritedFrom ? ` Active access comes through ${inheritedFrom.title}.` : ""}
-          </p>
-        )}
-
       {directPublic && (
-        <fieldset disabled={revokePending} className="mt-2 disabled:opacity-60">
-          <ManagementSecurity
-            key={`${hasPassword}:${expiresAt ?? "never"}`}
-            hasPassword={hasPassword}
-            expiresAt={expiresAt}
-            onSetProtection={onSetProtection}
-            onStopSharing={onStopSharing}
-            revokePending={revokePending}
-          />
-        </fieldset>
-      )}
-
-      {(inheritedOnly || expiredInheritedOnly) && onOpenShareSettings && (
-        <div className="mt-4 flex justify-end">
-          <Button
-            variant="quiet"
-            onClick={onOpenShareSettings}
-            className="max-sm:min-h-11"
-          >
-            Go to shared parent
-          </Button>
-        </div>
+        <ManagementSecurity
+          key={`${hasPassword}:${expiresAt ?? "never"}`}
+          hasPassword={hasPassword}
+          expiresAt={expiresAt}
+          locked={locked}
+          onSetProtection={onSetProtection}
+          renderAction={action}
+        />
       )}
 
     </div>
   );
 }
 
-function RevokeView({
+/** The last row while a stop is being confirmed: the question, what stays
+ *  reachable after it, and the two answers. */
+function RevokeRow({
   pending,
   inheritedFrom,
   overlaps,
@@ -719,54 +743,56 @@ function RevokeView({
 }: {
   pending: boolean;
   inheritedFrom?: Grant;
-  overlaps: ShareScopeSnapshot["overlappingRoots"];
+  overlaps: Overlap[];
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const activeParents = overlaps.filter(
-    (overlap) => overlap.relation === "ancestor" && !isExpired(overlap.shareExpiresAt ?? undefined),
-  ).length;
-  const activeChildren = overlaps.filter(
-    (overlap) => overlap.relation === "descendant" && !isExpired(overlap.shareExpiresAt ?? undefined),
-  ).length;
-  const expiredParents = overlaps.filter(
-    (overlap) => overlap.relation === "ancestor" && isExpired(overlap.shareExpiresAt ?? undefined),
-  ).length;
-  const expiredChildren = overlaps.filter(
-    (overlap) => overlap.relation === "descendant" && isExpired(overlap.shareExpiresAt ?? undefined),
-  ).length;
+  const active = (relation: Overlap["relation"]) =>
+    overlaps.filter(
+      (overlap) =>
+        overlap.relation === relation && !isExpired(overlap.shareExpiresAt ?? undefined),
+    ).length;
+  const expired = (relation: Overlap["relation"]) =>
+    overlaps.filter(
+      (overlap) =>
+        overlap.relation === relation && isExpired(overlap.shareExpiresAt ?? undefined),
+    ).length;
+  const activeParents = active("ancestor");
+  const activeChildren = active("descendant");
+  const expiredParents = expired("ancestor");
+  const expiredChildren = expired("descendant");
   return (
-    <div data-share-state="revoke">
-      <h2 className="text-subheading text-ink">
-        {pending ? "Stopping sharing…" : "Stop sharing?"}
-      </h2>
-      <p className="mt-1.5 text-caption font-medium text-ink-2">
-        {inheritedFrom
-          ? `This page's own link will stop. Access through ${inheritedFrom.title} will remain.`
-          : "The public link will stop working after the change is confirmed."}
-      </p>
-      {(activeParents > 0 || activeChildren > 0 || expiredParents > 0 || expiredChildren > 0) && (
-        <div className="mt-2 space-y-1 text-caption font-medium text-ink-2">
-          {activeParents > 0 && (
-            <p>{`Stopping this root link will leave ${activeParents} parent public ${activeParents === 1 ? "link" : "links"} active.`}</p>
-          )}
-          {activeChildren > 0 && (
-            <p>{`Stopping this root link will leave ${activeChildren} nested public ${activeChildren === 1 ? "link" : "links"} active.`}</p>
-          )}
-          {expiredParents > 0 && (
-            <p>{`The expired parent ${expiredParents === 1 ? "link remains" : "links remain"} recorded but ${expiredParents === 1 ? "does" : "do"} not provide access.`}</p>
-          )}
-          {expiredChildren > 0 && (
-            <p>{`The expired nested ${expiredChildren === 1 ? "link remains" : "links remain"} recorded but ${expiredChildren === 1 ? "does" : "do"} not provide access.`}</p>
-          )}
-        </div>
-      )}
-      {pending && (
-        <p className="mt-1 text-caption font-medium text-ink-2">
-          Waiting for durable confirmation…
-        </p>
-      )}
-      <div className="mt-4 flex justify-end gap-2">
+    <div
+      data-share-row="action"
+      data-share-revoke-row
+      className="brain-share-row brain-share-row-act brain-share-row-confirm"
+    >
+      <div className="brain-share-row-stack">
+        <span className="brain-share-row-value brain-share-row-wrap">
+          {pending ? "Stopping sharing…" : "Stop sharing?"}
+        </span>
+        <span className="brain-share-row-note">
+          {inheritedFrom
+            ? `This page's own link will stop. Access through ${inheritedFrom.title} will remain.`
+            : "The public link will stop working after the change is confirmed."}
+        </span>
+        {activeParents > 0 && (
+          <span className="brain-share-row-note">{`Stopping this root link will leave ${activeParents} parent public ${activeParents === 1 ? "link" : "links"} active.`}</span>
+        )}
+        {activeChildren > 0 && (
+          <span className="brain-share-row-note">{`Stopping this root link will leave ${activeChildren} nested public ${activeChildren === 1 ? "link" : "links"} active.`}</span>
+        )}
+        {expiredParents > 0 && (
+          <span className="brain-share-row-note">{`The expired parent ${expiredParents === 1 ? "link remains" : "links remain"} recorded but ${expiredParents === 1 ? "does" : "do"} not provide access.`}</span>
+        )}
+        {expiredChildren > 0 && (
+          <span className="brain-share-row-note">{`The expired nested ${expiredChildren === 1 ? "link remains" : "links remain"} recorded but ${expiredChildren === 1 ? "does" : "do"} not provide access.`}</span>
+        )}
+        {pending && (
+          <span className="brain-share-row-note">Waiting for durable confirmation…</span>
+        )}
+      </div>
+      <div className="brain-share-row-actions">
         <Button
           variant="quiet"
           disabled={pending}
@@ -788,9 +814,172 @@ function RevokeView({
   );
 }
 
-/** The v2 switch: blue track when on, an ink-3 track when off (≥3:1 against
- *  paper and the regular glass — WCAG 1.4.11), the knob pinned at 3px and
- *  travelling 16px on transform (compositor), never `left`. */
+/* The ledger's parts. Rows are plain divs on a hairline; the head is the one
+   sentence above them; the action row closes the plate. */
+
+function Row({
+  id,
+  label,
+  note,
+  className = "",
+  children,
+}: {
+  id: string;
+  label: string;
+  note?: string;
+  className?: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div data-share-row={id} className={`brain-share-row ${className}`}>
+      <span className="brain-share-row-label">
+        {label}
+        {note && <span className="brain-share-row-note">{note}</span>}
+      </span>
+      {children}
+    </div>
+  );
+}
+
+function NoteRow({ id, children }: { id: string; children: React.ReactNode }) {
+  return (
+    <div data-share-row={id} className="brain-share-row brain-share-row-stack">
+      <span className="brain-share-row-note brain-share-row-note-lone">{children}</span>
+    </div>
+  );
+}
+
+function AlertRow({ children }: { children: React.ReactNode }) {
+  return (
+    <p
+      role="alert"
+      data-share-row="alert"
+      className="brain-share-row brain-share-row-stack text-caption font-medium text-red"
+    >
+      {children}
+    </p>
+  );
+}
+
+function ActionRow({ children }: { children: React.ReactNode }) {
+  return (
+    <div data-share-row="action" className="brain-share-row brain-share-row-act">
+      {children}
+    </div>
+  );
+}
+
+function Reveal({ children }: { children: React.ReactNode }) {
+  return (
+    <div className="brain-share-reveal">
+      <div>{children}</div>
+    </div>
+  );
+}
+
+function LinkRow({
+  url,
+  copied,
+  disabled,
+  showOpen,
+  onCopy,
+}: {
+  url: string;
+  copied: boolean;
+  disabled: boolean;
+  showOpen: boolean;
+  onCopy: () => void;
+}) {
+  return (
+    <div
+      data-share-row="link"
+      data-share-link-row
+      className="brain-share-row brain-share-row-link"
+    >
+      <span className="brain-share-row-label">Link</span>
+      {copied ? (
+        <span role="status" className="brain-share-copied">
+          Copied
+        </span>
+      ) : (
+        <span
+          data-share-url
+          title={url || "No active public link"}
+          aria-label={url ? `Public link: ${url}` : "No active public link"}
+          className="brain-share-url"
+        >
+          {url ? url.replace(/^https?:\/\//, "") : "No active public link"}
+        </span>
+      )}
+      <button
+        type="button"
+        data-size="28"
+        data-state={copied ? "done" : undefined}
+        disabled={disabled}
+        onClick={onCopy}
+        aria-label={copied ? "Link copied" : "Copy link"}
+        title="Copy link"
+        className="icon-btn focus-inset brain-touch-hit brain-share-row-btn"
+      >
+        <Icon name={copied ? "check-linear" : "copy-linear"} size={16} />
+      </button>
+      {showOpen && (
+        <a
+          href={url}
+          target="_blank"
+          rel="noreferrer"
+          data-size="28"
+          aria-label="Open public page"
+          title="Open public page"
+          className="icon-btn focus-inset brain-touch-hit brain-share-row-btn"
+        >
+          <Icon name="link-linear" size={16} />
+        </a>
+      )}
+    </div>
+  );
+}
+
+/** The parent a page is reached through. Its title is the way there. */
+function ParentRow({
+  grant,
+  note,
+  multiple,
+  onOpen,
+}: {
+  grant?: Grant;
+  note?: string;
+  multiple: boolean;
+  onOpen?: () => void;
+}) {
+  if (!grant) return null;
+  return (
+    <Row
+      id="through"
+      label={multiple ? "Also shared through" : "Shared through"}
+      note={note}
+      className={multiple ? "brain-share-row-multiple" : ""}
+    >
+      {onOpen ? (
+        <Button
+          variant="quiet"
+          aria-label="Go to shared parent"
+          title="Go to shared parent"
+          onClick={onOpen}
+          className="brain-share-row-parent max-sm:min-h-11"
+        >
+          <span className="truncate">{grant.title}</span>
+        </Button>
+      ) : (
+        <span className="brain-share-row-value truncate">{grant.title}</span>
+      )}
+    </Row>
+  );
+}
+
+/** The v2 switch: blue track when on, an ink-3 track when off (at least
+ *  3:1 against paper and the regular glass, WCAG 1.4.11), the knob pinned at
+ *  3px and travelling 16px on transform (compositor), never `left`. */
 function SwitchControl({
   label,
   checked,
@@ -828,25 +1017,26 @@ function SwitchControl({
   );
 }
 
-function SettingToggle({
+function SwitchRow({
+  id,
   label,
+  switchLabel,
   checked,
   disabled,
   onChange,
 }: {
+  id: string;
   label: string;
+  switchLabel: string;
   checked: boolean;
   disabled?: boolean;
   onChange: (checked: boolean) => void;
 }) {
   return (
-    <div
-      data-share-setting-row
-      className="flex min-h-9 items-center justify-between gap-3 max-sm:min-h-11"
-    >
-      <span className="text-control text-ink">{label}</span>
+    <div data-share-row={id} data-share-setting-row className="brain-share-row">
+      <span className="brain-share-row-label">{label}</span>
       <SwitchControl
-        label={label}
+        label={switchLabel}
         checked={checked}
         disabled={disabled}
         onChange={onChange}
@@ -855,40 +1045,34 @@ function SettingToggle({
   );
 }
 
-function PasswordFields({
+function PasswordField({
   inputRef,
   password,
   visible,
-  expiry,
   disabled,
+  hint,
   onPasswordChange,
   onVisibleChange,
-  onExpiryChange,
 }: {
   inputRef?: React.RefObject<HTMLInputElement | null>;
   password: string;
   visible: boolean;
-  expiry: ExpiryChoice;
   disabled?: boolean;
+  hint?: string;
   onPasswordChange: (value: string) => void;
   onVisibleChange: (visible: boolean) => void;
-  onExpiryChange: (value: ExpiryChoice) => void;
 }) {
   return (
-    <div>
-      <label htmlFor="share-password" className="block text-label text-ink-2">
-        Password
-      </label>
+    <div className="brain-share-reveal-field">
       <Field
         ref={inputRef}
-        on="glass"
         id="share-password"
         type={visible ? "text" : "password"}
         aria-label="Share password"
         value={password}
         disabled={disabled}
         onChange={(event) => onPasswordChange(event.target.value)}
-        className="brain-share-password-field mt-1.5 max-sm:min-h-11"
+        className="brain-share-password-field max-sm:min-h-11"
         trailing={
           <button
             type="button"
@@ -896,18 +1080,18 @@ function PasswordFields({
             aria-pressed={visible}
             disabled={disabled}
             onClick={() => onVisibleChange(!visible)}
-            className="shrink-0 text-caption font-medium text-ink-2 transition-colors hover:text-ink disabled:opacity-40 max-sm:min-h-11"
+            className="brain-share-eye brain-touch-hit"
           >
-            {visible ? "Hide" : "Show"}
+            <Icon name={visible ? "eye-closed-linear" : "eye-linear"} size={16} />
           </button>
         }
       />
-      <ExpiryRadios value={expiry} disabled={disabled} onChange={onExpiryChange} />
+      {hint && <p className="brain-share-row-note">{hint}</p>}
     </div>
   );
 }
 
-function ExpiryRadios({
+function ExpiryRow({
   value,
   disabled,
   onChange,
@@ -917,15 +1101,15 @@ function ExpiryRadios({
   onChange: (value: ExpiryChoice) => void;
 }) {
   const options: Array<{ value: ExpiryChoice; label: string }> = [
+    { value: "never", label: "Never" },
     { value: "1", label: "1 day" },
     { value: "7", label: "7 days" },
     { value: "30", label: "30 days" },
-    { value: "never", label: "Never" },
   ];
   return (
-    <div className="mt-3">
-      <p className="text-label text-ink-2">Expiry</p>
-      <fieldset aria-label="Link expiry" className="brain-share-seg mt-1.5">
+    <div data-share-row="expires" className="brain-share-row brain-share-row-expires">
+      <span className="brain-share-row-label">Expires</span>
+      <fieldset aria-label="Link expiry" className="brain-share-seg">
         {options.map((option) => (
           <label
             key={option.value}
@@ -954,18 +1138,18 @@ function ExpiryRadios({
 function ManagementSecurity({
   hasPassword,
   expiresAt,
+  locked,
   onSetProtection,
-  onStopSharing,
-  revokePending,
+  renderAction,
 }: {
   hasPassword: boolean;
   expiresAt?: string;
+  locked: boolean;
   onSetProtection: (input: {
     password?: string | null;
     expiresAt?: string | null;
   }) => void | Promise<void>;
-  onStopSharing: () => void;
-  revokePending: boolean;
+  renderAction: (busy: boolean) => React.ReactNode;
 }) {
   const [passwordOn, setPasswordOn] = useState(hasPassword);
   const [draft, setDraft] = useState("");
@@ -976,6 +1160,7 @@ function ManagementSecurity({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const disabled = busy || locked;
 
   useEffect(() => {
     if (passwordOn) inputRef.current?.focus();
@@ -1046,103 +1231,85 @@ function ManagementSecurity({
   };
 
   return (
-    <div>
-      <div
-        data-share-primary-row="controls"
-        data-share-controls-pair
-        className="flex min-h-8 min-w-0 items-center justify-between gap-2 max-sm:min-h-11"
-      >
-        <div className="flex min-w-0 items-center gap-3">
-          <span className="min-w-0 truncate text-[13px] font-medium leading-[1.25] tracking-[-0.08px] text-ink">
-            <span className="max-sm:hidden">Password protection</span>
-            <span className="sm:hidden">Password</span>
-          </span>
-          <SwitchControl
-            label="Password protection"
-            checked={passwordOn}
-            disabled={busy}
-            onChange={(nextOn) => {
-              if (nextOn) {
-                setPasswordOn(true);
-                setDraft("");
-                setVisible(false);
-                setExpiry("never");
-                setExpiryDirty(true);
-              } else {
-                void turnOff();
-              }
+    <>
+      <SwitchRow
+        id="password"
+        label="Password"
+        switchLabel="Password protection"
+        checked={passwordOn}
+        disabled={disabled}
+        onChange={(nextOn) => {
+          if (nextOn) {
+            setPasswordOn(true);
+            setDraft("");
+            setVisible(false);
+            setExpiry("never");
+            setExpiryDirty(true);
+          } else {
+            void turnOff();
+          }
+        }}
+      />
+      {passwordOn && (
+        <Reveal>
+          <PasswordField
+            inputRef={inputRef}
+            password={draft}
+            visible={visible}
+            disabled={disabled}
+            hint={hasPassword && !draft ? "Leave blank to keep the current password." : undefined}
+            onPasswordChange={setDraft}
+            onVisibleChange={setVisible}
+          />
+          <ExpiryRow
+            value={expiry}
+            disabled={disabled}
+            onChange={(value) => {
+              setExpiry(value);
+              setExpiryDirty(true);
             }}
           />
-        </div>
-        <Button
-          variant="destructive"
-          data-share-stop-row
-          disabled={revokePending || busy}
-          onClick={onStopSharing}
-          className="max-sm:min-h-11"
-        >
-          Stop sharing
-        </Button>
-      </div>
-      {passwordOn && (
-        <div className="brain-share-reveal mt-2">
-          <div>
-            <PasswordFields
-              inputRef={inputRef}
-              password={draft}
-              visible={visible}
-              expiry={expiry}
-              disabled={busy}
-              onPasswordChange={setDraft}
-              onVisibleChange={setVisible}
-              onExpiryChange={(value) => {
-                setExpiry(value);
-                setExpiryDirty(true);
-              }}
-            />
-            {hasPassword && !draft && (
-              <p className="mt-1.5 text-caption font-medium text-ink-2">
-                Leave blank to keep the current password.
-              </p>
-            )}
-            <div className="mt-3 flex justify-end">
-              <Button
-                variant="ink"
-                disabled={busy || (!hasPassword && !draft.trim())}
-                onClick={() => void save()}
-                className="max-sm:min-h-11"
-              >
-                {busy ? "Saving…" : "Save protection"}
-              </Button>
-            </div>
+          <div className="brain-share-reveal-foot">
+            <Button
+              variant="ink"
+              disabled={disabled || (!hasPassword && !draft.trim())}
+              onClick={() => void save()}
+              className="max-sm:min-h-11"
+            >
+              {busy ? "Saving…" : "Save protection"}
+            </Button>
           </div>
-        </div>
+        </Reveal>
       )}
       {!passwordOn && localLegacyExpiry && (
-        <div data-legacy-expiry className="mt-2 flex items-center gap-2">
-          <p className="min-w-0 flex-1 text-caption font-medium text-ink-2">
-            Legacy link expiry: {formatShareExpiry(localLegacyExpiry)}. It still applies without a password.
-          </p>
-          <button
-            type="button"
-            disabled={busy}
+        <div data-legacy-expiry data-share-row="expires" className="brain-share-row">
+          <span className="brain-share-row-label">
+            Expires
+            <span className="brain-share-row-note">
+              Legacy expiry. It still applies without a password.
+            </span>
+          </span>
+          <span className="brain-share-row-value">
+            {formatShareExpiry(localLegacyExpiry)}
+          </span>
+          <Button
+            variant="quiet"
+            disabled={disabled}
             onClick={() => void clearLegacyExpiry()}
-            className="min-h-8 shrink-0 text-caption font-medium text-ink-2 transition-colors hover:text-ink max-sm:min-h-11"
+            className="max-sm:min-h-11"
           >
             Remove expiry
-          </button>
+          </Button>
         </div>
       )}
-      {error && (
-        <p role="alert" className="mt-2 text-caption font-medium text-red">
-          {error}
-        </p>
-      )}
-    </div>
+      {error && <AlertRow>{error}</AlertRow>}
+      {renderAction(busy)}
+    </>
   );
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+const COPIED_MS = 2000;
 const MOBILE_VIEWPORT_QUERY = "(max-width: 639px)";
 
 function subscribeMobileViewport(onChange: () => void): () => void {
@@ -1184,19 +1351,19 @@ function formatShareExpiry(expiresAt: string): string {
   return expiresAt.slice(0, 10);
 }
 
-function activeScopeLabel(descendantCount: number, inherited: boolean): string {
-  if (inherited) {
-    return descendantCount === 0
-      ? "Parent share: root page only"
-      : `Parent share: ${descendantCount} ${
-          descendantCount === 1 ? "descendant" : "descendants"
-        }`;
-  }
-  return descendantCount === 0
-    ? "This page only"
-    : `This page + ${descendantCount} ${
-        descendantCount === 1 ? "subpage" : "subpages"
-      }`;
+/** Who the link admits, as the head sentence's subject. */
+function readerClause(locked: boolean): string {
+  return locked ? "Anyone with the link and the password" : "Anyone with the link";
+}
+
+/** The same fact as the "Who can read" row's value. */
+function readerValue(locked: boolean): string {
+  return locked ? "Link and password" : "Anyone with the link";
+}
+
+/** "this page" or "15 pages", the count held to its noun. */
+function pagesClause(total: number): string {
+  return total === 1 ? "this page" : `${total} pages`;
 }
 
 function isExpired(value?: string): boolean {
@@ -1205,12 +1372,13 @@ function isExpired(value?: string): boolean {
   return !Number.isFinite(deadline) || deadline <= Date.now();
 }
 
-function overlapLabel(
-  overlap: ShareScopeSnapshot["overlappingRoots"][number],
-): string {
-  const relation = overlap.relation === "ancestor" ? "shared parent" : "shared nested page";
+function relationLabel(overlap: Overlap): string {
+  return overlap.relation === "ancestor" ? "shared parent" : "shared nested page";
+}
+
+function overlapLabel(overlap: Overlap): string {
   const status = isExpired(overlap.shareExpiresAt ?? undefined) ? "expired" : "active";
-  return `${overlap.title} · ${relation} · ${status}`;
+  return `${overlap.title} · ${relationLabel(overlap)} · ${status}`;
 }
 
 function expiryPreset(value?: string): ExpiryChoice {

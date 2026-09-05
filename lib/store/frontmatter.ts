@@ -33,6 +33,7 @@ const MANAGED_PAGE_META_KEYS = new Set([
   "created",
   "updated",
   "updatedBy",
+  "updatedByName",
   "structureWriteBarrier",
   "status",
   "view",
@@ -48,6 +49,7 @@ const MANAGED_PAGE_META_KEYS = new Set([
   "sharePass",
   "shareVersion",
   "shareExpiresAt",
+  "shareEdit",
   "category",
   "pinned",
   "quickCaptureFingerprint",
@@ -88,6 +90,7 @@ export function serializePage(meta: PageMeta, markdown: string): string {
   ordered.created = meta.created;
   ordered.updated = meta.updated;
   if (meta.updatedBy) ordered.updatedBy = meta.updatedBy;
+  if (meta.updatedByName) ordered.updatedByName = meta.updatedByName;
   if (meta.structureWriteBarrier) ordered.structureWriteBarrier = true;
   if (meta.status) ordered.status = meta.status;
   if (meta.view) ordered.view = meta.view;
@@ -105,6 +108,7 @@ export function serializePage(meta: PageMeta, markdown: string): string {
   if (meta.sharePass) ordered.sharePass = meta.sharePass;
   if (meta.shareVersion !== undefined) ordered.shareVersion = meta.shareVersion;
   if (meta.shareExpiresAt) ordered.shareExpiresAt = meta.shareExpiresAt;
+  if (meta.shareEdit) ordered.shareEdit = true;
   if (meta.category) ordered.category = meta.category;
   if (meta.pinned) ordered.pinned = true;
   if (meta.quickCaptureFingerprint)

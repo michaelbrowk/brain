@@ -298,3 +298,22 @@ describe("page PATCH appearance", () => {
     );
   });
 });
+
+describe("PATCH refuses share authority", () => {
+  beforeEach(() => {
+    mocks.updateMeta.mockReset().mockResolvedValue({ id: PAGE_ID });
+    mocks.getStore.mockReset().mockResolvedValue({
+      updateMeta: mocks.updateMeta,
+    });
+  });
+
+  it("rejects shareEdit before it reaches the Store", async () => {
+    const response = await patch({ shareEdit: true });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "use share configuration endpoint",
+    });
+    expect(mocks.updateMeta).not.toHaveBeenCalled();
+  });
+});

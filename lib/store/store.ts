@@ -74,6 +74,7 @@ import {
   AttachmentValidationError,
   NotFoundError,
   MetadataConflictError,
+  ShareEditOriginError,
   ShareScopeConflictError,
   NotionImportConflictError,
   PageRefNestValidationError,
@@ -1757,11 +1758,13 @@ export class Store {
           public: e.meta.public,
           shareLocked: e.meta.sharePass ? true : undefined,
           shareExpiresAt: e.meta.shareExpiresAt,
+          shareEdit: e.meta.shareEdit,
           category: e.meta.category,
           pinned: e.meta.pinned,
           created: e.meta.created,
           updated: e.meta.updated,
           updatedBy: e.meta.updatedBy,
+          updatedByName: e.meta.updatedByName,
           status: e.meta.status,
           tags: e.meta.tags,
           view: e.meta.view,
@@ -1854,6 +1857,7 @@ export class Store {
           sharePass: root.meta.sharePass ?? null,
           shareExpiresAt: root.meta.shareExpiresAt ?? null,
           shareVersion: root.meta.shareVersion ?? 0,
+          shareEdit: !!root.meta.shareEdit,
         }),
       )
       .digest("hex");
@@ -1864,6 +1868,7 @@ export class Store {
       scopeToken,
       public: !!root.meta.public,
       shareLocked: !!root.meta.sharePass,
+      shareEdit: !!root.meta.shareEdit,
       shareExpiresAt: root.meta.shareExpiresAt ?? null,
       shareVersion: root.meta.shareVersion ?? 0,
     };
@@ -4103,10 +4108,16 @@ export class Store {
         patch.shareExpiresAt === undefined
           ? e.meta.shareExpiresAt
           : patch.shareExpiresAt || undefined;
+      // An edit grant is a capability, not a stored credential: the legacy
+      // `{"public": false}` revoke takes it away and does not hand it back on
+      // the next enable.
+      const nextShareEdit =
+        patch.public === false ? undefined : e.meta.shareEdit;
       const rotateShare =
         nextPublic !== e.meta.public ||
         nextSharePass !== e.meta.sharePass ||
-        nextShareExpiresAt !== e.meta.shareExpiresAt;
+        nextShareExpiresAt !== e.meta.shareExpiresAt ||
+        nextShareEdit !== e.meta.shareEdit;
       if (patch.title !== undefined) e.meta.title = patch.title;
       if (patch.icon !== undefined) e.meta.icon = patch.icon || undefined;
       if (patch.cover !== undefined) e.meta.cover = patch.cover || undefined;
@@ -4115,6 +4126,7 @@ export class Store {
         e.meta.sharePass = patch.sharePass || undefined;
       if (patch.shareExpiresAt !== undefined)
         e.meta.shareExpiresAt = patch.shareExpiresAt || undefined;
+      e.meta.shareEdit = nextShareEdit;
       if (rotateShare)
         e.meta.shareVersion = (e.meta.shareVersion ?? 0) + 1;
       if (patch.category !== undefined)
@@ -4156,6 +4168,9 @@ export class Store {
       | {
           enabled: true;
           expectedScopeToken: string;
+          /** Required and explicitly boolean on every enable. Never preserved
+           *  from a previous value: see the comment on nextShareEdit below. */
+          canEdit: boolean;
           /** undefined preserves the disabled root's existing credential. */
           sharePass?: string | null;
           /** undefined preserves the disabled root's existing deadline. */
@@ -4168,6 +4183,12 @@ export class Store {
         },
   ): Promise<void> {
     return this.mutate(async () => {
+      if (input.enabled && typeof input.canEdit !== "boolean") {
+        throw new Error("share enable requires an explicit canEdit");
+      }
+      if (input.enabled && input.canEdit && !this.publicOrigin) {
+        throw new ShareEditOriginError();
+      }
       const before = this.shareScopeSnapshot(id);
       if (
         input.enabled &&
@@ -4194,13 +4215,19 @@ export class Store {
           ? entry.meta.shareExpiresAt
           : input.shareExpiresAt || undefined
         : entry.meta.shareExpiresAt;
+      // Disable clears it, unlike sharePass and shareExpiresAt above.
+      const nextShareEdit = input.enabled
+        ? input.canEdit || undefined
+        : undefined;
       const rotateShare =
         nextPublic !== entry.meta.public ||
         nextSharePass !== entry.meta.sharePass ||
-        nextShareExpiresAt !== entry.meta.shareExpiresAt;
+        nextShareExpiresAt !== entry.meta.shareExpiresAt ||
+        nextShareEdit !== entry.meta.shareEdit;
       entry.meta.public = nextPublic;
       entry.meta.sharePass = nextSharePass;
       entry.meta.shareExpiresAt = nextShareExpiresAt;
+      entry.meta.shareEdit = nextShareEdit;
       if (rotateShare) {
         entry.meta.shareVersion = (entry.meta.shareVersion ?? 0) + 1;
       }

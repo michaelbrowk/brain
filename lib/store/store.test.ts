@@ -132,9 +132,9 @@ async function waitForHeadChange(
   return currentHead;
 }
 
-async function tmpStore() {
+async function tmpStore(options: { publicOrigin?: string | null } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-"));
-  const s = new Store(root);
+  const s = new Store(root, options);
   await s.init();
   return { s, root };
 }
@@ -1183,6 +1183,7 @@ describe("Store", () => {
       s.configureShare(root.id, {
         enabled: true,
         expectedScopeToken: disclosed.scopeToken,
+        canEdit: false,
         sharePass: "hash",
         shareExpiresAt: "2026-08-03T12:00:00.000Z",
       }),
@@ -1249,6 +1250,7 @@ describe("Store", () => {
       s.configureShare(root.id, {
         enabled: true,
         expectedScopeToken: snapshot.scopeToken,
+        canEdit: false,
       }),
     ).rejects.toMatchObject({
       name: "ShareScopeConflictError",
@@ -1268,6 +1270,7 @@ describe("Store", () => {
       s.configureShare(root.id, {
         enabled: true,
         expectedScopeToken: blocked.scopeToken,
+        canEdit: false,
       }),
     ).rejects.toMatchObject({
       name: "ShareScopeConflictError",
@@ -1290,6 +1293,7 @@ describe("Store", () => {
       s.configureShare(root.id, {
         enabled: true,
         expectedScopeToken: existing.scopeToken,
+        canEdit: false,
         sharePass: "replacement-hash",
       }),
     ).resolves.toBeUndefined();
@@ -1313,10 +1317,12 @@ describe("Store", () => {
       s.configureShare(ancestor.id, {
         enabled: true,
         expectedScopeToken: ancestorScope.scopeToken,
+        canEdit: false,
       }),
       s.configureShare(descendant.id, {
         enabled: true,
         expectedScopeToken: descendantScope.scopeToken,
+        canEdit: false,
       }),
     ]);
 
@@ -1347,6 +1353,7 @@ describe("Store", () => {
     await s.configureShare(page.id, {
       enabled: true,
       expectedScopeToken: disclosed.scopeToken,
+      canEdit: false,
       sharePass: "protected-hash",
       shareExpiresAt: "2026-08-03T12:00:00.000Z",
     });
@@ -1376,6 +1383,7 @@ describe("Store", () => {
     await s.configureShare(page.id, {
       enabled: true,
       expectedScopeToken: disclosed.scopeToken,
+      canEdit: false,
     });
 
     await expect(s.readPage(page.id)).resolves.toMatchObject({
@@ -1394,6 +1402,7 @@ describe("Store", () => {
     await s.configureShare(root.id, {
       enabled: true,
       expectedScopeToken: disclosed.scopeToken,
+      canEdit: false,
       sharePass: null,
       shareExpiresAt: null,
     });
@@ -8656,5 +8665,97 @@ describe("move a page with children", () => {
     const aNode = bNode.children.find((c) => c.title === "A")!;
     expect(aNode.children[0].title).toBe("Child");
     expect(aNode.children[0].children[0].title).toBe("Grand");
+  });
+});
+
+describe("editable share authority", () => {
+  it("persists shareEdit, exposes it on the snapshot and the tree, and rotates on the flip", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const root = await s.createPage(null, "Shared root");
+    const before = await s.readShareScope(root.id);
+    await s.configureShare(root.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+    });
+
+    const enabled = await s.readShareScope(root.id);
+    expect(enabled.shareEdit).toBe(true);
+    expect(enabled.public).toBe(true);
+    expect(enabled.shareVersion).toBe(1);
+    expect((await s.readPage(root.id)).meta.shareEdit).toBe(true);
+
+    const node = s.getTree().find((n: TreeNode) => n.id === root.id);
+    expect(node?.shareEdit).toBe(true);
+
+    await s.configureShare(root.id, {
+      enabled: true,
+      expectedScopeToken: enabled.scopeToken,
+      canEdit: false,
+    });
+    const off = await s.readShareScope(root.id);
+    expect(off.shareEdit).toBe(false);
+    expect(off.shareVersion).toBe(2);
+    expect(off.public).toBe(true);
+  });
+
+  it("clears shareEdit on disable, unlike the password and the deadline", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const root = await s.createPage(null, "Shared root");
+    const before = await s.readShareScope(root.id);
+    await s.configureShare(root.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+      sharePass: "bcrypt-hash-stand-in",
+    });
+    await s.configureShare(root.id, { enabled: false });
+
+    const meta = (await s.readPage(root.id)).meta;
+    expect(meta.shareEdit).toBeUndefined();
+    expect(meta.sharePass).toBe("bcrypt-hash-stand-in");
+    expect(meta.public).toBeUndefined();
+  });
+
+  it("refuses an enable that does not state canEdit", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const root = await s.createPage(null, "Shared root");
+    const before = await s.readShareScope(root.id);
+    await expect(
+      s.configureShare(root.id, {
+        enabled: true,
+        expectedScopeToken: before.scopeToken,
+      } as unknown as Parameters<typeof s.configureShare>[1]),
+    ).rejects.toThrow("share enable requires an explicit canEdit");
+  });
+
+  it("clears shareEdit through the legacy public:false revoke and rotates", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const root = await s.createPage(null, "Shared root");
+    const before = await s.readShareScope(root.id);
+    await s.configureShare(root.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+    });
+    await s.updateMeta(root.id, { public: false });
+
+    const meta = (await s.readPage(root.id)).meta;
+    expect(meta.shareEdit).toBeUndefined();
+    expect(meta.public).toBeUndefined();
+    expect(meta.shareVersion).toBe(2);
+  });
+
+  it("refuses to grant editing without a configured public origin", async () => {
+    const { s } = await tmpStore(); // tmpStore builds a Store with no publicOrigin
+    const root = await s.createPage(null, "Shared root");
+    const before = await s.readShareScope(root.id);
+    await expect(
+      s.configureShare(root.id, {
+        enabled: true,
+        expectedScopeToken: before.scopeToken,
+        canEdit: true,
+      }),
+    ).rejects.toThrow("editable sharing needs BRAIN_PUBLIC_ORIGIN");
   });
 });

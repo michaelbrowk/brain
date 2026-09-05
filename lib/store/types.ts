@@ -62,9 +62,11 @@ export interface PageMeta {
   sharePass?: string; // bcrypt hash — the shared page asks for this password
   shareVersion?: number; // invalidates already-issued share cookies on rotation
   shareExpiresAt?: string; // optional ISO deadline; elapsed/malformed fails closed
+  shareEdit?: boolean; // root-only: the link may be written through as well as read
   category?: string; // free-text label, suggested from existing ones
   pinned?: boolean; // shown in the sidebar's Pinned section
-  updatedBy?: "me" | "claude"; // who wrote last (hub feed); absent on old pages
+  updatedBy?: "me" | "claude" | "visitor"; // who wrote last (hub feed); absent on old pages
+  updatedByName?: string; // display name a link visitor gave; only ever with updatedBy: "visitor"
   /** Internal stale-write fence. A synthesized structural move does not change
    *  Markdown, so body-only conflict merging stays disabled until a real body
    *  write establishes a new textual baseline. */
@@ -375,11 +377,13 @@ export interface TreeNode {
   public?: boolean;
   shareLocked?: boolean; // sharePass is set (the hash itself never leaves the server)
   shareExpiresAt?: string;
+  shareEdit?: boolean; // the link admits writes as well as reads
   category?: string;
   pinned?: boolean;
   created: string;
   updated: string;
-  updatedBy?: "me" | "claude";
+  updatedBy?: "me" | "claude" | "visitor";
+  updatedByName?: string;
   status?: string;
   view?: "board" | "sections";
   font?: "sans" | "serif" | "mono";
@@ -409,6 +413,7 @@ export interface ShareScopeSnapshot {
   scopeToken: string;
   public: boolean;
   shareLocked: boolean;
+  shareEdit: boolean;
   shareExpiresAt: string | null;
   shareVersion: number;
 }
@@ -435,6 +440,21 @@ export class ShareScopeConflictError extends Error {
     super("share scope conflict");
     this.name = "ShareScopeConflictError";
   }
+}
+
+/** Editable sharing signs a link that only makes sense against one exact
+ * origin: the CSRF check compares `Origin` to it, and without one every
+ * visitor write would be refused after the grant was already made. Refuse the
+ * grant instead, where the owner can see the refusal. */
+export class ShareEditOriginError extends Error {
+  constructor() {
+    super("editable sharing needs BRAIN_PUBLIC_ORIGIN");
+    this.name = "ShareEditOriginError";
+  }
+}
+
+export function isShareEditOrigin(e: unknown): e is ShareEditOriginError {
+  return e instanceof ShareEditOriginError;
 }
 
 export class QuickCaptureConflictError extends Error {

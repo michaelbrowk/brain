@@ -161,6 +161,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
     public: pub,
     sharePassword,
     shareExpiresAt: rawShareExpiresAt,
+    shareEdit,
     category,
     pinned,
     status,
@@ -186,7 +187,8 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
   if (
     (pub !== undefined && pub !== false) ||
     sharePassword !== undefined ||
-    rawShareExpiresAt !== undefined
+    rawShareExpiresAt !== undefined ||
+    shareEdit !== undefined
   ) {
     return NextResponse.json(
       { error: "use share configuration endpoint" },

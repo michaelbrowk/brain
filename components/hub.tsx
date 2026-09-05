@@ -177,7 +177,7 @@ interface FlatPage {
   icon?: string;
   created: string;
   updated: string;
-  updatedBy?: "me" | "claude";
+  updatedBy?: TreeNode["updatedBy"];
   public?: boolean;
 }
 

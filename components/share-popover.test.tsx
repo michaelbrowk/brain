@@ -71,6 +71,7 @@ function snapshot(
     scopeToken: "a".repeat(64),
     public: false,
     shareLocked: false,
+    shareEdit: false,
     shareExpiresAt: null,
     shareVersion: 0,
     ...values,
@@ -374,6 +375,7 @@ describe("SharePopover redesign", () => {
 
     expect(onEnableShare).toHaveBeenCalledWith({
       expectedScopeToken: disclosed.scopeToken,
+      canEdit: false,
       password: "secret",
       expiresAt: "2026-08-20T12:00:00.000Z",
     });
@@ -400,6 +402,7 @@ describe("SharePopover redesign", () => {
 
     expect(onEnableShare).toHaveBeenCalledWith({
       expectedScopeToken: initial.scopeToken,
+      canEdit: false,
       password: null,
       expiresAt: null,
     });
@@ -427,6 +430,7 @@ describe("SharePopover redesign", () => {
     await click(shareButton());
     expect(onEnableShare).toHaveBeenCalledWith({
       expectedScopeToken: "a".repeat(64),
+      canEdit: false,
       password: null,
       expiresAt: "2026-09-12T12:00:00.000Z",
     });

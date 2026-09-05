@@ -64,6 +64,7 @@ export function SharePopover({
   onPrepareShare: (rootId: string) => Promise<ShareScopeSnapshot>;
   onEnableShare: (input: {
     expectedScopeToken: string;
+    canEdit: boolean;
     password?: string | null;
     expiresAt?: string | null;
   }) => Promise<ShareEnableResult>;
@@ -205,6 +206,7 @@ export function SharePopover({
     try {
       const result = await onEnableShare({
         expectedScopeToken: confirmation.scopeToken,
+        canEdit: false,
         password: enablePasswordOn ? password : null,
         expiresAt: expiryDeadline(enableExpiry),
       });

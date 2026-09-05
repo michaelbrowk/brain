@@ -4366,9 +4366,11 @@ export function Shell({
     async ({
       password,
       expiresAt,
+      canEdit,
     }: {
       password?: string | null;
       expiresAt?: string | null;
+      canEdit?: boolean;
     }) => {
       if (!selectedId) throw new Error("no page selected");
       const rootId = selectedId;
@@ -4376,6 +4378,7 @@ export function Shell({
       if (!disclosed.public) {
         throw new Error("share settings require an active direct grant");
       }
+      const nextCanEdit = canEdit ?? disclosed.shareEdit;
 
       const response = await apiFetch(`/api/page/${rootId}/share`, {
         method: "POST",
@@ -4383,6 +4386,7 @@ export function Shell({
         body: JSON.stringify({
           enabled: true,
           expectedScopeToken: disclosed.scopeToken,
+          canEdit: nextCanEdit,
           ...(password !== undefined ? { password } : {}),
           ...(expiresAt !== undefined ? { expiresAt } : {}),
         }),
@@ -4402,6 +4406,7 @@ export function Shell({
       const readBack = await readShareScope(rootId);
       if (
         !readBack.public ||
+        readBack.shareEdit !== nextCanEdit ||
         (password !== undefined && readBack.shareLocked !== !!password) ||
         (expiresAt !== undefined && readBack.shareExpiresAt !== expiresAt)
       ) {
@@ -4432,10 +4437,12 @@ export function Shell({
   const onEnableShare = useCallback(
     async ({
       expectedScopeToken,
+      canEdit,
       password,
       expiresAt,
     }: {
       expectedScopeToken: string;
+      canEdit: boolean;
       password?: string | null;
       expiresAt?: string | null;
     }): Promise<ShareEnableResult> => {
@@ -4447,6 +4454,7 @@ export function Shell({
         body: JSON.stringify({
           enabled: true,
           expectedScopeToken,
+          canEdit,
           password,
           expiresAt,
         }),

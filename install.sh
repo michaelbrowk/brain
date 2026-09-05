@@ -192,7 +192,9 @@ ask_domain() {
   domain="$(printf '%s' "$domain" | tr '[:upper:]' '[:lower:]')"
   domain="${domain#http://}"; domain="${domain#https://}"; domain="${domain%/}"
   local label='[a-z0-9]([a-z0-9-]*[a-z0-9])?'
-  [ "${#domain}" -le 253 ] && [[ $domain =~ ^($label\.)+$label$ ]] || die "Domain: use a bare hostname like notes.example.com."
+  if [ "${#domain}" -gt 253 ] || ! [[ $domain =~ ^($label\.)+$label$ ]]; then
+    die "Domain: use a bare hostname like notes.example.com."
+  fi
   # A last label of digits only is an address, which passes the shape above.
   case "${domain##*.}" in *[!0-9]*) ;; *) die "That is an IP address, not a domain name. Caddy cannot get a certificate for one; leave the answer empty to keep Brain on this machine." ;; esac
   DOMAIN="$domain"; ORIGIN="https://$domain"

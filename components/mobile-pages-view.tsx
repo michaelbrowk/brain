@@ -16,6 +16,7 @@ import { SPRING_SHEET } from "@/lib/motion";
 import { Icon } from "./ui/icon";
 import { IconButton } from "./ui/button";
 import { ScrollEdge } from "./ui/scroll-edge";
+import { useUpdateStatus } from "./settings/use-update-status";
 
 type SearchPage = {
   node: TreeNode;
@@ -215,6 +216,9 @@ function MobilePagesSurface({
 }) {
   const [query, setQuery] = useState("");
   const searchId = useId();
+  const update = useUpdateStatus();
+  const updateAvailable =
+    update.state.kind === "ready" && update.state.status.updateAvailable;
   const [expanded, setExpanded] = useState<Set<string>>(
     () => new Set(ancestorIds(tree, selectedId)),
   );
@@ -259,9 +263,19 @@ function MobilePagesSurface({
           data-settings-trigger="mobile-pages"
           aria-label="Settings"
           onClick={(event) => onOpenSettings(event.currentTarget)}
-          className="brain-touch-hit justify-self-end"
+          className="brain-touch-hit relative justify-self-end"
         >
           <Icon name="settings" size={18} />
+          {/* The sidebar's Settings row wears this dot on the desktop. The
+              phone never shows that row, so the gear carries the same dot at
+              the glyph's corner — out of the grid, so the glyph stays put. */}
+          {updateAvailable && (
+            <span
+              role="img"
+              aria-label="Update available"
+              className="absolute top-1.5 right-1.5 size-1.5 rounded-full bg-current"
+            />
+          )}
         </IconButton>
       </header>
 

@@ -43,6 +43,7 @@ async function request(
     origin?: string | null;
     cookie?: string;
     vid?: string | null;
+    fetchSite?: string;
   } = {},
 ) {
   const url = new URL("https://brain.test/api/share-edit/page/page-9");
@@ -50,6 +51,7 @@ async function request(
   url.searchParams.set("v", overrides.v ?? "2");
   const headers = new Headers({ "Content-Type": "application/json" });
   if (overrides.origin !== null) headers.set("Origin", overrides.origin ?? ORIGIN);
+  if (overrides.fetchSite) headers.set("Sec-Fetch-Site", overrides.fetchSite);
   const cookie =
     overrides.cookie ??
     `${shareEditCookieName("root-1")}=${await createShareEditToken("root-1", 2, VID, "Ada")}`;
@@ -60,9 +62,10 @@ async function request(
 
 /** A request whose edit cookie and double submit carry the given `vid`, the
  *  way a visitor who re-minted their cookie would arrive. */
-async function requestAs(vid: string) {
+async function requestAs(vid: string, root = "root-1") {
   return request({
-    cookie: `${shareEditCookieName("root-1")}=${await createShareEditToken("root-1", 2, vid, "Ada")}`,
+    root,
+    cookie: `${shareEditCookieName(root)}=${await createShareEditToken(root, 2, vid, "Ada")}`,
     vid,
   });
 }
@@ -94,6 +97,7 @@ describe("share-write refusal order", () => {
     );
     expect(res.status).toBe(400);
     await expect(res.json()).resolves.toEqual({ error: "missing_share_context" });
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(getStore).not.toHaveBeenCalled();
     expect(run).not.toHaveBeenCalled();
   });
@@ -108,6 +112,62 @@ describe("share-write refusal order", () => {
     );
     expect(res.status).toBe(403);
     await expect(res.json()).resolves.toEqual({ error: "bad_origin" });
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(getStore).not.toHaveBeenCalled();
+  });
+
+  it("lets a same-origin read through without an Origin header", async () => {
+    // A same-origin GET carries no Origin at all, and a script cannot add one
+    // (it is a forbidden header name), so a read leans on the browser's
+    // fetch-metadata attestation instead.
+    const { getStore } = storeMock();
+    const { withShareWrite: guard } = await import("./share-write");
+    const res = await guard(
+      await request({ origin: null, fetchSite: "same-origin" }),
+      { targetId: "page-9", bucket: "read" },
+      run,
+    );
+    expect(res.status).toBe(200);
+    expect(getStore).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a read with no Origin and no same-origin attestation, and a foreign Origin whatever the attestation says", async () => {
+    const { getStore } = storeMock();
+    const { withShareWrite: guard } = await import("./share-write");
+    const bare = await guard(
+      await request({ origin: null }),
+      { targetId: "page-9", bucket: "read" },
+      run,
+    );
+    const crossSite = await guard(
+      await request({ origin: null, fetchSite: "cross-site" }),
+      { targetId: "page-9", bucket: "read" },
+      run,
+    );
+    const foreign = await guard(
+      await request({ origin: "https://evil.test", fetchSite: "same-origin" }),
+      { targetId: "page-9", bucket: "read" },
+      run,
+    );
+    for (const res of [bare, crossSite, foreign]) {
+      expect(res.status).toBe(403);
+      await expect(res.json()).resolves.toEqual({ error: "bad_origin" });
+    }
+    expect(getStore).not.toHaveBeenCalled();
+  });
+
+  it("keeps the strict Origin check on every mutating bucket", async () => {
+    const { getStore } = storeMock();
+    const { withShareWrite: guard } = await import("./share-write");
+    for (const bucket of ["write", "upload", "create"] as const) {
+      const res = await guard(
+        await request({ origin: null, fetchSite: "same-origin" }),
+        { targetId: "page-9", bucket },
+        run,
+      );
+      expect(res.status, bucket).toBe(403);
+      await expect(res.json()).resolves.toEqual({ error: "bad_origin" });
+    }
     expect(getStore).not.toHaveBeenCalled();
   });
 
@@ -144,6 +204,7 @@ describe("share-write refusal order", () => {
     );
     expect(res.status).toBe(403);
     await expect(res.json()).resolves.toEqual({ error: "vid_mismatch" });
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
     expect(getStore).not.toHaveBeenCalled();
   });
 
@@ -157,6 +218,7 @@ describe("share-write refusal order", () => {
     expect(last!.status).toBe(429);
     await expect(last!.json()).resolves.toEqual({ error: "share_edit_rate" });
     expect(last!.headers.get("Retry-After")).toBeTruthy();
+    expect(last!.headers.get("Cache-Control")).toBe("private, no-store");
     expect(getStore).toHaveBeenCalledTimes(60);
   });
 
@@ -195,6 +257,32 @@ describe("share-write refusal order", () => {
     expect(statuses.slice(0, 30)).toEqual(Array(30).fill(200));
     expect(statuses[30]).toBe(429);
     expect(getStore).toHaveBeenCalledTimes(30);
+  });
+
+  it("does not let two abused roots lock a third root's visitor out of the read map", async () => {
+    // Root-first accounting caps new visitor entries at the root limit per
+    // root per window, so two roots driven to their read ceiling with a fresh
+    // vid each time put 1,200 entries in the visitor map. A map that fails
+    // closed at 1,024 would answer a third root's first visitor 429.
+    const { getStore } = storeMock();
+    const { withShareWrite: guard } = await import("./share-write");
+    for (const root of ["root-a", "root-b"]) {
+      for (let i = 0; i < 600; i += 1) {
+        const res = await guard(
+          await requestAs(`vid-${i}`, root),
+          { targetId: "page-9", bucket: "read" },
+          run,
+        );
+        expect(res.status, `${root} #${i}`).toBe(200);
+      }
+    }
+    const third = await guard(
+      await requestAs("vid-c", "root-c"),
+      { targetId: "page-9", bucket: "read" },
+      run,
+    );
+    expect(third.status).toBe(200);
+    expect(getStore).toHaveBeenCalledTimes(1201);
   });
 
   it("spends the root bucket first, so a visitor past their own limit still drains the root", async () => {
@@ -316,6 +404,7 @@ describe("share-write refusal order", () => {
     const res = await guard(await request(), { targetId: "page-9", bucket: "write" }, run);
     expect(res.status).toBe(503);
     expect(res.headers.get("Retry-After")).toBe("1");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
   it("hands the run callback the context and the store, and passes its response through", async () => {
@@ -342,6 +431,34 @@ describe("share-write refusal order", () => {
     expect(seen[1]).toEqual({ marker: "store" });
   });
 
+  it("hands the run callback a handle without the raw mutators", async () => {
+    storeMock();
+    const { withShareWrite: guard } = await import("./share-write");
+    const res = await guard(
+      await request(),
+      { targetId: "page-9", bucket: "write" },
+      async (_ctx, store) => {
+        // Checked by tsc, never run: each directive fails the typecheck the
+        // day one of these reappears on the handle.
+        const unreachable = () => {
+          // @ts-expect-error: a visitor route cannot delete
+          void store.deletePage;
+          // @ts-expect-error: a visitor route cannot purge
+          void store.purgePage;
+          // @ts-expect-error: a visitor route cannot move
+          void store.movePage;
+          // @ts-expect-error: a visitor route cannot rename
+          void store.renamePage;
+          // @ts-expect-error: a visitor route cannot touch metadata
+          void store.updateMeta;
+        };
+        void unreachable;
+        return new Response("{}", { status: 200 });
+      },
+    );
+    expect(res.status).toBe(200);
+  });
+
   it("refuses a fifth simultaneous write with 503 and lets it through once one finishes", async () => {
     storeMock();
     const { withShareWrite: guard } = await import("./share-write");
@@ -349,15 +466,21 @@ describe("share-write refusal order", () => {
     const held = new Promise<void>((resolve) => {
       release = resolve;
     });
+    let started = 0;
+    let allStarted!: () => void;
+    const fourStarted = new Promise<void>((resolve) => {
+      allStarted = resolve;
+    });
     const slow = async () => {
+      started += 1;
+      if (started === 4) allStarted();
       await held;
       return new Response("{}", { status: 200 });
     };
     const four = Array.from({ length: 4 }, async () =>
       guard(await request(), { targetId: "page-9", bucket: "write" }, slow),
     );
-    await Promise.resolve();
-    await new Promise((r) => setTimeout(r, 0));
+    await fourStarted;
     const fifth = await guard(
       await request(),
       { targetId: "page-9", bucket: "write" },
@@ -441,6 +564,48 @@ describe("the /api/share-edit route rule", () => {
     ).toBe("exports a PATCH handler");
     expect(
       violatesShareRouteRule("export async function PUT() {}\n"),
+    ).toBe("does not go through withShareWrite");
+  });
+
+  it("flags every shape a DELETE or PATCH export can take", () => {
+    const ok = 'import { withShareWrite } from "@/lib/share-write";\n';
+    for (const line of [
+      "export const DELETE = handler;",
+      "export let PATCH = handler;",
+      "export var PATCH = handler;",
+      "export function DELETE() {}",
+      "export async function PATCH() {}",
+      "export { del as DELETE };",
+      "export { PUT, patch as PATCH };",
+      "export { DELETE };",
+      "export {\n  del as DELETE,\n};",
+    ]) {
+      const verb = line.includes("DELETE") ? "DELETE" : "PATCH";
+      expect(violatesShareRouteRule(`${ok}${line}\n`), line).toBe(
+        `exports a ${verb} handler`,
+      );
+    }
+    expect(violatesShareRouteRule(`${ok}export * from "./handlers";\n`)).toBe(
+      "re-exports with export *",
+    );
+    expect(
+      violatesShareRouteRule(`${ok}export { DELETE as remove };\nexport async function PUT() {}\n`),
+    ).toBeNull();
+  });
+
+  it("reads getStore and withShareWrite in code, not in comments", () => {
+    const ok =
+      'import { withShareWrite } from "@/lib/share-write";\nexport async function PUT() {}\n';
+    expect(violatesShareRouteRule(`// never call getStore here\n${ok}`)).toBeNull();
+    expect(violatesShareRouteRule(`/* getStore is\n   off limits */\n${ok}`)).toBeNull();
+    expect(
+      violatesShareRouteRule(`${ok}const u = "https://x.test"; getStore();\n`),
+    ).toBe("imports getStore instead of going through lib/share-write.ts");
+    expect(
+      violatesShareRouteRule(`${ok}const s = "// not a comment"; getStore();\n`),
+    ).toBe("imports getStore instead of going through lib/share-write.ts");
+    expect(
+      violatesShareRouteRule("// withShareWrite\nexport async function PUT() {}\n"),
     ).toBe("does not go through withShareWrite");
   });
 

@@ -5,6 +5,9 @@
 set -euo pipefail
 
 DRY="${BRAIN_INSTALL_DRY_RUN:-0}"
+INSTALL_DIR="${BRAIN_INSTALL_DIR:-/opt/brain}"
+RELEASES_API="${BRAIN_RELEASES_API:-https://api.github.com/repos/michaelbrowk/brain/releases/latest}"
+RAW="https://raw.githubusercontent.com/michaelbrowk/brain"
 
 say() { printf '%s\n' "$*"; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
@@ -22,9 +25,101 @@ preflight() {
     *) die "Brain ships for x86_64 and aarch64; this machine is $(uname -m)." ;;
   esac
   local mb; mb="$(free -m | awk '/^Mem:/ {print $2}')"
+  # An odd free output counts as no memory, so the refusal below names 0 MB
+  # instead of bash choking on a non-number.
+  case "$mb" in ''|*[!0-9]*) mb=0 ;; esac
   [ "$mb" -ge 1536 ] || die "Brain and its mail service want 2 GB of RAM; this machine has ${mb} MB."
   [ "$mb" -ge 2048 ] || say "Note: less than 2 GB of RAM; it runs, with little headroom."
   command -v curl >/dev/null || run apt-get install -y curl
+}
+
+ensure_docker() {
+  if docker compose version >/dev/null 2>&1; then say "Docker: present"; return; fi
+  say "Docker: installing from Docker's apt repository"
+  run install -m 0755 -d /etc/apt/keyrings
+  run bash -c 'curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc'
+  run chmod a+r /etc/apt/keyrings/docker.asc
+  run bash -c 'echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu $(. /etc/os-release && echo "$VERSION_CODENAME") stable" > /etc/apt/sources.list.d/docker.list'
+  run apt-get update
+  run apt-get install -y docker-ce docker-ce-cli containerd.io docker-compose-plugin
+  run systemctl enable --now docker
+}
+
+resolve_release() {
+  local json
+  json="$(curl -fsSL "$RELEASES_API" 2>/dev/null)" || die "Could not read the latest release from GitHub. Check the network and try again."
+  TAG="$(printf '%s' "$json" | sed -n 's/.*"tag_name": *"v\{0,1\}\([^"]*\)".*/\1/p' | head -n1)"
+  [ -n "$TAG" ] || die "Could not read the latest release from GitHub. Check the network and try again."
+  say "Latest release: $TAG"
+}
+
+# The install directory and the notes folder are made for real under dry run
+# too: they are the plan's output. Ownership and the download are side effects
+# and go through run.
+layout() {
+  NOTES_DIR="$INSTALL_DIR/notes"
+  mkdir -p "$INSTALL_DIR" "$NOTES_DIR"
+  run chown "${SUDO_USER:-root}" "$NOTES_DIR"
+  run curl -fsSL "$RAW/v$TAG/ops/docker/docker-compose.yml" -o "$INSTALL_DIR/docker-compose.yml"
+  # Under dry run the download above is only announced, so a placeholder
+  # stands in and the later steps still have a compose file to read.
+  if [ "$DRY" = "1" ] && [ ! -e "$INSTALL_DIR/docker-compose.yml" ]; then
+    printf 'services: {}\n' > "$INSTALL_DIR/docker-compose.yml"
+  fi
+}
+
+ask_password() {
+  local p1 p2
+  if [ -n "${BRAIN_PASSWORD:-}" ]; then p1="$BRAIN_PASSWORD"; else
+    printf 'Choose the Brain password: '; read -rs p1; printf '\n'
+    printf 'Once more: '; read -rs p2; printf '\n'
+    [ "$p1" = "$p2" ] || die "Password: the two entries differ."
+  fi
+  [ "${#p1}" -ge 8 ] || die "Password: at least 8 characters."
+  # The password reaches the image on stdin only. It is never an argument and
+  # never in the log, so this call is real under dry run as well.
+  HASH="$(printf '%s\n' "$p1" | docker run --rm -i "ghcr.io/michaelbrowk/brain:$TAG" hash-password)" || HASH=""
+  [ -n "$HASH" ] || die "Could not hash the password with the Brain image."
+}
+
+ask_domain() {
+  local domain
+  # Set but empty means no domain and no question, so a scripted install can
+  # say so without a terminal.
+  if [ -n "${BRAIN_DOMAIN+set}" ]; then domain="$BRAIN_DOMAIN"; else
+    printf 'Domain name for this Brain, or leave empty to keep it on this machine only: '
+    read -r domain
+  fi
+  if [ -n "$domain" ]; then ORIGIN="https://$domain"; else ORIGIN="http://localhost:3020"; fi
+}
+
+# .env is written for real under dry run too, like the directories above: it
+# is the plan's output, and the tests read it. Only apt, Docker, systemctl and
+# the compose download pass through run.
+#
+# Compose reads .env itself and treats "$" as interpolation, so each "$" in
+# the bcrypt hash is doubled, exactly as README.md says for the manual path.
+# The umask lives in a subshell so that only this file comes out as 600.
+write_env() {
+  local escaped; escaped="$(printf '%s' "$HASH" | sed 's/\$/$$/g')"
+  (
+    umask 077
+    cat > "$INSTALL_DIR/.env" <<EOF
+NOTES_ROOT=$NOTES_DIR
+AUTH_SECRET=$(openssl rand -hex 32)
+AUTH_PASSWORD_HASH=$escaped
+BRAIN_PUBLIC_ORIGIN=$ORIGIN
+EOF
+  )
+}
+
+# For a Brain without a domain: how to reach it from another computer. Printed
+# last, so it moves behind the run and verify steps once those land.
+local_access_hint() {
+  [ "$ORIGIN" = "http://localhost:3020" ] || return 0
+  say "No domain, so Brain listens on this machine only. To open it from your computer:"
+  say "  ssh -L 3020:127.0.0.1:3020 ${SUDO_USER:-root}@$(hostname)"
+  say "  then browse to http://localhost:3020"
 }
 
 # Placeholder until the uninstall task lands. It returns instead of calling
@@ -38,6 +133,13 @@ uninstall() {
 main() {
   if [ "${1:-}" = "--uninstall" ]; then uninstall; exit 0; fi
   preflight
+  ensure_docker
+  resolve_release
+  layout
+  ask_password
+  ask_domain
+  write_env
+  local_access_hint
   say "install.sh: skeleton"    # replaced task by task
 }
 main "$@"

@@ -31,6 +31,7 @@ const EXPECTED_STRING_FIELDS = new Set([
 ]);
 const EXPECTED_BOOLEAN_FIELDS = new Set([
   "public",
+  "shareEdit",
   "pinned",
   "smallText",
   "fullWidth",

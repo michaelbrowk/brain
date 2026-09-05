@@ -5520,12 +5520,16 @@ export class Store {
         const hadSharing = Boolean(
           entry.meta.public ||
             entry.meta.sharePass ||
-            entry.meta.shareExpiresAt,
+            entry.meta.shareExpiresAt ||
+            entry.meta.shareEdit,
         );
         if (hadSharing) {
           entry.meta.public = undefined;
           entry.meta.sharePass = undefined;
           entry.meta.shareExpiresAt = undefined;
+          // The edit grant is a capability and must not survive into the
+          // trash: a restored page comes back unshared and unwritable.
+          entry.meta.shareEdit = undefined;
           entry.meta.shareVersion = (entry.meta.shareVersion ?? 0) + 1;
           entry.meta.updated = deletedAt;
           await this.persist(entry);

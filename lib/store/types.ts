@@ -15,6 +15,7 @@ export type MetadataExpected = Partial<{
   icon: string | null;
   cover: string | null;
   public: boolean | null;
+  shareEdit: boolean | null;
   shareLocked: boolean;
   shareExpiresAt: string | null;
   category: string | null;

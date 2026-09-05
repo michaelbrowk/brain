@@ -1444,6 +1444,33 @@ describe("Store", () => {
     expect((await s.readPage(child.id)).meta.shareExpiresAt).toBeUndefined();
   });
 
+  it("clears the edit grant when a shared subtree is deleted, and restore does not bring it back", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const parent = await s.createPage(null, "Parent");
+    await s.createPage(parent.id, "Child");
+    const disclosed = await s.readShareScope(parent.id);
+    await s.configureShare(parent.id, {
+      enabled: true,
+      expectedScopeToken: disclosed.scopeToken,
+      canEdit: true,
+    });
+    expect((await s.readPage(parent.id)).meta.shareEdit).toBe(true);
+
+    await s.deletePage(parent.id);
+
+    const deleted = (await s.readPage(parent.id)).meta;
+    expect(deleted.public).toBeUndefined();
+    expect(deleted.shareEdit).toBeUndefined();
+    expect(deleted.shareVersion).toBe(2);
+
+    await s.restorePage(parent.id);
+
+    const restored = (await s.readPage(parent.id)).meta;
+    expect(restored.public).toBeUndefined();
+    expect(restored.shareEdit).toBeUndefined();
+    expect((await s.readShareScope(parent.id)).shareEdit).toBe(false);
+  });
+
   it("checks subtree membership without exposing mutable tree state", async () => {
     const { s } = await tmpStore();
     const root = await s.createPage(null, "Root");

@@ -3485,6 +3485,11 @@ test("Smart sort writes a dated section in the order it previewed", async ({
   await page.goto(`/p/${parent.id}`);
   await page.getByRole("button", { name: "Smart sort" }).click();
   const dialog = page.getByRole("dialog", { name: "Smart sort" });
+  // The dialog now opens on the press, holding the pile in tree order, so
+  // wait for the answer before reading the order off it: the heap would
+  // satisfy a bare title assertion while saying nothing about the grouping.
+  await expect(dialog.getByText("1 section")).toBeVisible();
+  await expect(dialog.getByText("Записи · 4")).toBeVisible();
   await expect(dialog.getByText("Запись 23 июня")).toBeVisible();
   await dialog.getByRole("button", { name: "Apply" }).click();
   await expect(page.getByRole("dialog", { name: "Smart sort" })).toHaveCount(0);
@@ -3498,6 +3503,101 @@ test("Smart sort writes a dated section in the order it previewed", async ({
       );
     })
     .toEqual(newestFirst);
+});
+
+async function smartSortParent(page: Page, title: string) {
+  const parentResponse = await browserJson(page, "/api/page", {
+    method: "POST",
+    body: { title, markdown: "Body" },
+  });
+  expect(parentResponse.ok).toBeTruthy();
+  const parent = parentResponse.body as { id: string };
+  const children: string[] = [];
+  for (const child of ["Alpha", "Beta", "Gamma", "Delta"]) {
+    const childResponse = await browserJson(page, "/api/page", {
+      method: "POST",
+      body: { parentId: parent.id, title: child },
+    });
+    expect(childResponse.ok).toBeTruthy();
+    children.push((childResponse.body as { id: string }).id);
+  }
+  return { parent, children };
+}
+
+test("Smart sort opens on the press and Cancel takes the request with it", async ({
+  page,
+}) => {
+  await login(page);
+  const { parent, children } = await smartSortParent(page, "Cancel parent");
+  await page.route("**/api/smart-sort", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 4000));
+    try {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          sections: ["Keep"],
+          assignments: Object.fromEntries(children.map((id) => [id, "Keep"])),
+          order: children,
+          count: children.length,
+        }),
+      });
+    } catch {
+      // the client aborted; there is nobody left to answer
+    }
+  });
+
+  await page.goto(`/p/${parent.id}`);
+  await page.getByRole("button", { name: "Smart sort" }).click();
+  // The dialog is the wait, not a report of it: the client already holds the
+  // titles the answer rearranges, so the pile is on screen from the press.
+  const dialog = page.getByRole("dialog", { name: "Smart sort" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("Reading 4 pages")).toBeVisible();
+  await expect(dialog.getByText("Alpha")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Apply" })).toBeDisabled();
+
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expectDialogLayerReleased(page);
+});
+
+test("an answer that lands after Cancel does not reopen Smart sort", async ({
+  page,
+}) => {
+  await login(page);
+  const { parent, children } = await smartSortParent(page, "Late answer parent");
+  await page.route("**/api/smart-sort", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    try {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          sections: ["Keep"],
+          assignments: Object.fromEntries(children.map((id) => [id, "Keep"])),
+          order: children,
+          count: children.length,
+        }),
+      });
+    } catch {
+      // the client aborted; there is nobody left to answer
+    }
+  });
+
+  await page.goto(`/p/${parent.id}`);
+  await page.getByRole("button", { name: "Smart sort" }).click();
+  const dialog = page.getByRole("dialog", { name: "Smart sort" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expectDialogLayerReleased(page);
+
+  // Past the stub's window: a cancelled session cannot be filled in behind
+  // the reader, and leaving is not a failure, so nothing is said either.
+  await page.waitForTimeout(2000);
+  await expect(page.getByRole("dialog", { name: "Smart sort" })).toHaveCount(0);
+  await expect(
+    page.getByText("Couldn't sort these pages. Try again."),
+  ).toHaveCount(0);
 });
 
 test("a failed Apply holds Smart sort up and says what happened", async ({

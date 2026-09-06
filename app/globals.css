@@ -1564,6 +1564,46 @@ html[data-kbd] [contenteditable]:focus-visible {
   color: var(--ink);
 }
 
+/* Smart sort's heap, and the band that reads it. One layer for the whole
+   pile rather than sixty-one animations: the pages are being read in the
+   order they are stacked, and a single 96px gradient sweeping down says that
+   with one compositor transform and no React state. The paint is
+   `--skeleton-fill`, which is what this app already puts where work is in
+   progress and which each surface and each fallback remaps for itself; the
+   hover tint is 4% ink, and under a chip's own white .50 fill that lands at
+   2%, below the floor §8 sets for a change a reader can see. The band is not
+   rendered at all under reduced motion, so it needs no flattening rule. */
+.smart-heap {
+  position: relative;
+  isolation: isolate;
+}
+.smart-heap-band {
+  position: absolute;
+  inset: -6px -8px;
+  z-index: -1;
+  overflow: hidden;
+  border-radius: var(--r-block);
+  pointer-events: none;
+}
+.smart-heap-band::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, transparent, var(--skeleton-fill), transparent) 0 0 /
+    100% 96px no-repeat;
+  animation: smart-reading-band var(--smart-sweep, 2s) linear infinite;
+}
+/* The layer is the heap's own height, so `100%` carries the band from just
+   above the pile to just below it. */
+@keyframes smart-reading-band {
+  from {
+    transform: translateY(-96px);
+  }
+  to {
+    transform: translateY(100%);
+  }
+}
+
 /* Tree row — 28px capsule r14 on glass. Rest is transparent, hover the ink
    tint + the "…" button, selected a white capsule (600) that flows between
    rows on SPRING_SELECT (the capsule is a layoutId sibling behind the

@@ -42,8 +42,6 @@ type SmartSortPreviewProps = ComponentProps<typeof SmartSortPreview>;
 export interface ShellOverlaysProps {
   tree: TreeNode[];
   selectedId: string | null;
-  /** The open page: Smart Sort previews its direct children. */
-  currentNode: TreeNode | null;
   save: SaveState;
   localRecoveryUnavailable: boolean;
   /** Focus lease shared by the owner-keyed dialogs (remove / rename / move
@@ -60,7 +58,7 @@ export interface ShellOverlaysProps {
   moveTarget: FocusPageDialogTarget | null;
   setMoveTarget: Dispatch<SetStateAction<FocusPageDialogTarget | null>>;
   onMoveDialogMove: ComponentProps<typeof PageMoveDialog>["onMove"];
-  smartPreview: SmartSortPreviewProps["preview"];
+  smartSort: SmartSortPreviewProps["session"];
   smartApplying: boolean;
   smartApplyError: string | null;
   onApplySmartSort: () => Promise<void>;
@@ -108,7 +106,6 @@ export interface ShellOverlaysProps {
 export function ShellOverlays({
   tree,
   selectedId,
-  currentNode,
   save,
   localRecoveryUnavailable,
   dialogReturnFocusRef,
@@ -123,7 +120,7 @@ export function ShellOverlays({
   moveTarget,
   setMoveTarget,
   onMoveDialogMove,
-  smartPreview,
+  smartSort,
   smartApplying,
   smartApplyError,
   onApplySmartSort,
@@ -248,8 +245,7 @@ export function ShellOverlays({
       )}
 
       <SmartSortPreview
-        preview={smartPreview}
-        pages={currentNode?.children ?? []}
+        session={smartSort}
         applying={smartApplying}
         applyError={smartApplyError}
         onApply={onApplySmartSort}

@@ -75,6 +75,12 @@ export const PRESS = { scale: 0.97, duration: 0.1 } as const;
 export const PRESS_ICON = { scale: 0.9, duration: 0.1 } as const;
 export const HOVER = { in: 0.08, out: 0.16 } as const;
 
+/** The spring `materialize()` runs on, for a surface that has to give its own
+ *  elements the same arrival rather than take the whole preset (Smart sort's
+ *  chips, which enter staggered and with no transform origin of their own).
+ *  1.0 / 0.22 */
+export const SPRING_MATERIALIZE = { type: "spring", bounce: 0, duration: 0.22 } as const;
+
 /** Menus, popovers, palette, dialogs: opacity + scale .96→1 from the trigger.
  *  Exit retraces the path in 120ms ease-in. Blur is never animated — the
  *  "glass arrived" feel comes from the material's edge-light, not a filter
@@ -84,7 +90,7 @@ export function materialize(transformOrigin = "top left") {
     initial: { opacity: 0, scale: 0.96 },
     animate: { opacity: 1, scale: 1 },
     exit: { opacity: 0, scale: 0.96, transition: { duration: DUR.fast, ease: "easeIn" } },
-    transition: { type: "spring", bounce: 0, duration: 0.22 },
+    transition: SPRING_MATERIALIZE,
     style: { transformOrigin },
   } as const;
 }

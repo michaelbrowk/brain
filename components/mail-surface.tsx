@@ -88,6 +88,78 @@ import {
   forwardedSubject,
 } from "@/lib/mail/reply-forward";
 
+/**
+ * How many per-account requests the unified inbox keeps in flight at once.
+ *
+ * The merge is generic in the number of streams, so the account cap can rise
+ * without it noticing. The machine underneath cannot: the mail service holds
+ * one shared vCPU beside the rest of Brain, and every page-1 request is a
+ * cache read, a JSON encode and a parse on that core. Unbounded, opening All
+ * inboxes on seven accounts would ask for all seven in the same instant, so
+ * raising the account cap meant bounding this first.
+ *
+ * Three is the concurrency the surface already ran at the old three-account
+ * cap, on the box that has been carrying it. Raising the number of accounts a
+ * reader may connect is not a reason to raise the peak load their inbox makes,
+ * so the peak stays where it has been measured and the seventh account waits
+ * a turn instead.
+ */
+export const UNIFIED_FANOUT_LIMIT = 3;
+
+/**
+ * `Promise.allSettled(inputs.map(run))` with at most `limit` of them running
+ * at a time. Results come back in input order, so every caller can keep
+ * pairing result `i` with input `i`, and a rejection settles its own slot and
+ * releases it: one account failing hands its turn to the next in the queue
+ * rather than holding the queue behind it.
+ */
+export function settleWithLimit<T, R>(
+  inputs: readonly T[],
+  limit: number,
+  run: (input: T) => Promise<R>,
+): Promise<readonly PromiseSettledResult<R>[]> {
+  const width = Math.max(limit, 1);
+  if (inputs.length <= width) {
+    // Nothing to queue, so hand back the same promise an unbounded fan-out
+    // would have made. Not an optimization: an extra async frame here would
+    // resolve a microtask later than before, and a surface under the limit
+    // must settle exactly when it used to.
+    return Promise.allSettled(
+      inputs.map((input) => {
+        try {
+          return run(input);
+        } catch (reason) {
+          return Promise.reject<R>(reason);
+        }
+      }),
+    );
+  }
+  return drainWithLimit(inputs, width, run);
+}
+
+async function drainWithLimit<T, R>(
+  inputs: readonly T[],
+  width: number,
+  run: (input: T) => Promise<R>,
+): Promise<readonly PromiseSettledResult<R>[]> {
+  const results = new Array<PromiseSettledResult<R>>(inputs.length);
+  let next = 0;
+  const worker = async () => {
+    for (let index = next++; index < inputs.length; index = next++) {
+      try {
+        results[index] = {
+          status: "fulfilled",
+          value: await run(inputs[index]!),
+        };
+      } catch (reason) {
+        results[index] = { status: "rejected", reason };
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: width }, worker));
+  return results;
+}
+
 type AccountsState =
   | { readonly kind: "loading" }
   | { readonly kind: "ready"; readonly accounts: readonly PublicMailAccount[] }
@@ -1438,10 +1510,18 @@ export function MailSurface({
   }, [refreshAfterRun, threadState]);
 
   /**
-   * Page-1 loads for every eligible account in parallel. One account failing
-   * degrades to a per-stream notice — the rest still merge. The first-sync
-   * kick is deliberately skipped in unified mode: background sync owns
-   * freshness for non-focused accounts.
+   * Page-1 loads for every eligible account, `UNIFIED_FANOUT_LIMIT` at a time.
+   * One account failing degrades to a per-stream notice — the rest still
+   * merge. The first-sync kick is deliberately skipped in unified mode:
+   * background sync owns freshness for non-focused accounts.
+   *
+   * The merged state is still committed once, after the last stream settles.
+   * The safe horizon in `mergedDisplayItems` is only sound over a settled set:
+   * a stream that has not answered imposes no horizon, so committing the
+   * queue's early answers would emit rows that a later account then inserts
+   * above, moving the column under the reader and re-arming the load-more
+   * sentinel. Until then every account reads as pending through the list's
+   * own loading state, which is what a reader with seven of them should see.
    */
   const loadUnified = useCallback(
     async (signal?: AbortSignal) => {
@@ -1452,13 +1532,14 @@ export function MailSurface({
       const connected = eligible.filter(
         (account) => account.status === "connected",
       );
-      const results = await Promise.allSettled(
-        connected.map((account) =>
+      const results = await settleWithLimit(
+        connected,
+        UNIFIED_FANOUT_LIMIT,
+        (account) =>
           client.listThreads(
             { accountId: account.accountId, limit: UNIFIED_PAGE_SIZE },
             signal,
           ),
-        ),
       );
       if (
         signal?.aborted ||
@@ -1497,7 +1578,8 @@ export function MailSurface({
     [client, commitUnifiedState],
   );
 
-  /** Fetch the next page of exactly the streams that starve the horizon. */
+  /** Fetch the next page of exactly the streams that starve the horizon,
+   *  under the same fan-out bound the first load runs at. */
   const loadMoreUnified = useCallback(async () => {
     if (mutationLockRef.current) return;
     if (selectedAccountIdRef.current !== UNIFIED_ACCOUNT_ID) return;
@@ -1511,14 +1593,15 @@ export function MailSurface({
     );
     if (starved.length === 0) return;
     const listEpoch = ++listEpochRef.current;
-    const results = await Promise.allSettled(
-      starved.map((stream) =>
+    const results = await settleWithLimit(
+      starved,
+      UNIFIED_FANOUT_LIMIT,
+      (stream) =>
         client.listThreads({
           accountId: stream.accountId,
           cursor: stream.nextCursor as string,
           limit: UNIFIED_PAGE_SIZE,
         }),
-      ),
     );
     if (
       listEpochRef.current !== listEpoch ||
@@ -1563,7 +1646,9 @@ export function MailSurface({
    * The 60s tick in unified mode refreshes page-1 windows per account and
    * reconciles, never rebuilding: a rebuild would discard loaded depth and
    * scroll position every minute for no correctness gain — new mail sorts to
-   * the top, so page 1 captures arrivals.
+   * the top, so page 1 captures arrivals. This is the fan-out that runs
+   * forever rather than once, so it takes the same bound: at seven accounts
+   * the tick is three short waves a minute, not seven requests at once.
    */
   const refreshUnifiedSilently = useCallback(
     async (signal: AbortSignal) => {
@@ -1581,13 +1666,14 @@ export function MailSurface({
       );
       if (refreshable.length === 0) return;
       const listEpoch = ++listEpochRef.current;
-      const results = await Promise.allSettled(
-        refreshable.map((stream) =>
+      const results = await settleWithLimit(
+        refreshable,
+        UNIFIED_FANOUT_LIMIT,
+        (stream) =>
           client.listThreads(
             { accountId: stream.accountId, limit: UNIFIED_PAGE_SIZE },
             signal,
           ),
-        ),
       );
       if (
         signal.aborted ||

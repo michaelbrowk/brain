@@ -188,3 +188,69 @@ describe("remoteMediaReference", () => {
     );
   });
 });
+
+describe("a backslash where the authority starts", () => {
+  // A browser reads a backslash as a forward slash in the authority position,
+  // and `new URL` agrees: "/\\host", "\\\\host" and "\\/host" all resolve to
+  // "//host" and fetch cross-origin. Neither surface the owner reads carries
+  // an img-src, so the write path is the only thing standing here.
+  const BS = String.fromCharCode(92);
+
+  it("refuses the raw-HTML spellings, which reach the history preview verbatim", () => {
+    for (const src of [
+      "/" + BS + "evil.test/x.gif",
+      BS + BS + "evil.test/x.gif",
+      BS + "/evil.test/x.gif",
+    ]) {
+      expect(remoteMediaReference(`<img src="${src}">`), src).toBe(src);
+    }
+  });
+
+  it("refuses the Markdown spelling CommonMark leaves alone", () => {
+    // Only this one survives the tokenizer as written: "\\e" is not an escape,
+    // because `e` is not ASCII punctuation.
+    const href = "/" + BS + "evil.test/x.gif";
+    expect(remoteMediaReference(`![](${href})`)).toBe(href);
+  });
+
+  it("is not fooled by a character reference standing in for the backslash", () => {
+    // The history preview emits the entity into HTML, where the parser decodes
+    // it back to a backslash before the fetch.
+    const href = "/&#92;evil.test/x.gif";
+    expect(remoteMediaReference(`![](${href})`)).toBe(href);
+    expect(remoteMediaReference(`<img src="${href}">`)).toBe(href);
+  });
+
+  it("refuses a third slash, which resolves cross-origin the same way", () => {
+    expect(remoteMediaReference("![](///evil.test/x.gif)")).toBe(
+      "///evil.test/x.gif",
+    );
+  });
+
+  it("leaves a reference that stays on this origin alone", () => {
+    // One leading backslash is a path, not an authority: `new URL` resolves
+    // it against the page. Folding it to a forward slash keeps it a path, so
+    // normalizing costs a legitimate reference nothing.
+    for (const src of [
+      BS + "evil.test/x.gif",
+      "/_attachments-v2/a" + BS + "b.png",
+      "/_attachments-v2/aBcDeF012345.png",
+    ]) {
+      expect(remoteMediaReference(`<img src="${src}">`), src).toBeNull();
+    }
+  });
+
+  it("changes no verdict on the scheme test, where a slash cannot start one", () => {
+    // Folding can never create a scheme, because `/` is not a scheme
+    // character, and it ends a match exactly where the backslash already did.
+    for (const href of [
+      "/" + BS + "evil.test/x.gif",
+      BS + BS + "evil.test/x.gif",
+      "https://brain.test/a" + BS + "b",
+    ]) {
+      expect(linkSchemeAllowed(href), href).toBe(true);
+    }
+    expect(linkSchemeAllowed("java" + BS + "script:alert(1)")).toBe(true);
+    expect(linkSchemeAllowed("javascript:alert(1)")).toBe(false);
+  });
+});

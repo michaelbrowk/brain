@@ -9529,6 +9529,34 @@ describe("share-aware Store leaves", () => {
     ).resolves.toBeTruthy();
   });
 
+  it("refuses a backslash standing in for the slash that starts an authority", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const BS = String.fromCharCode(92);
+    // A browser reads these as //evil.test and fetches from it. Only the
+    // Markdown form below survives CommonMark unescaped; the other two reach
+    // the owner through raw HTML, which the history preview renders as markup.
+    for (const body of [
+      `![](/${BS}evil.test/x.gif)`,
+      `<img src="/${BS}evil.test/x.gif">`,
+      `<img src="${BS}${BS}evil.test/x.gif">`,
+      `<img src="${BS}/evil.test/x.gif">`,
+      "![](///evil.test/x.gif)",
+      "![](/&#92;evil.test/x.gif)",
+    ]) {
+      await expect(
+        s.writeSharedPage({
+          rootId,
+          targetId: childId,
+          shareVersion: version,
+          markdown: body,
+          visitorName: "Ada",
+        }),
+        body,
+      ).rejects.toBeInstanceOf(ShareRemoteMediaError);
+    }
+    expect((await s.readPage(childId)).markdown).toBe("");
+  });
+
   it("keeps a visitor's own upload usable when they move it between pages", async () => {
     const { s, rootId, childId, version } = await editableRoot();
     const second = await s.createPage(rootId, "Second");

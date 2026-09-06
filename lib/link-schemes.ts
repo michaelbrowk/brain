@@ -61,25 +61,51 @@ function decodeReferences(value: string): string {
   );
 }
 
-/** The scheme a browser would read. ASCII whitespace and the C0 controls go
- *  first, because a browser drops them: a tab inside `javascript:` and a
- *  leading NUL both leave the same URL behind by the time a click happens. */
+/** ASCII whitespace and the C0 controls go first, because a browser drops
+ *  them: a tab inside `javascript:` and a leading NUL both leave the same URL
+ *  behind by the time a click happens. */
 function withoutIgnorableCharacters(value: string): string {
   return value.replace(/[\u0000-\u0020\u007f]/g, "");
 }
 
-function bareScheme(value: string): string | null {
-  const match = SCHEME.exec(withoutIgnorableCharacters(value));
-  return match ? match[1].toLowerCase() : null;
+/** A browser reads a backslash as a forward slash where the authority would
+ *  start, and `new URL` agrees: `/\host`, `\\host` and `\/host` all resolve
+ *  to `//host` and fetch from that host.
+ *
+ *  Folding costs a legitimate destination nothing here. An attachment name is
+ *  `[A-Za-z0-9_-]` plus an extension and a page ref is `/p/<id>` over the same
+ *  alphabet, so nothing this app writes carries a backslash at all; and were
+ *  one to arrive inside a path, folding leaves it a path. One leading
+ *  backslash is the case to be careful about, and it is safe for the same
+ *  reason: `\host` resolves against the page, and folded it is `/host`, which
+ *  is still a path rather than an authority. */
+function withForwardSlashes(value: string): string {
+  return value.replace(/\\/g, "/");
 }
 
-/** True when the destination is relative or carries an allowed scheme. Both
- *  the raw form and the decoded form have to pass: over-decoding can only
- *  refuse a link that would have been fine, never admit one that would not. */
+/** Every spelling of one destination that a browser might end up resolving:
+ *  as written, with character references decoded, and each of those with
+ *  backslashes folded. Testing all of them can only refuse a destination that
+ *  would have been fine, never admit one that would not. */
+function candidateForms(value: string): string[] {
+  const forms = new Set<string>();
+  for (const decoded of [value, decodeReferences(value)]) {
+    forms.add(decoded);
+    forms.add(withForwardSlashes(decoded));
+  }
+  return [...forms].map(withoutIgnorableCharacters);
+}
+
+/** True when the destination is relative or carries an allowed scheme.
+ *
+ *  Folding is on this test for one definition of "the forms a browser might
+ *  see" rather than for correctness: `/` is not a scheme character, so folding
+ *  can never create a scheme, and it ends a match exactly where the backslash
+ *  already did. It is load-bearing on the authority test below. */
 export function linkSchemeAllowed(destination: string): boolean {
-  for (const form of [destination, decodeReferences(destination)]) {
-    const scheme = bareScheme(form);
-    if (scheme !== null && !ALLOWED_SCHEMES.has(scheme)) return false;
+  for (const form of candidateForms(destination)) {
+    const match = SCHEME.exec(form);
+    if (match && !ALLOWED_SCHEMES.has(match[1].toLowerCase())) return false;
   }
   return true;
 }
@@ -141,13 +167,14 @@ export function unsafeLinkDestination(
 const FETCHING_ATTRIBUTE =
   /\b(?:src|srcset|poster|background|data|href|xlink:href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'`=<>]+))/gi;
 
-/** Absolute by scheme, or protocol-relative, which a browser resolves against
- *  the page's own scheme and fetches from the named host just the same. */
+/** Absolute by scheme, or authority-relative, which a browser resolves against
+ *  the page's own scheme and fetches from the named host just the same. Two
+ *  slashes, three slashes, or any spelling a folded backslash makes into two.
+ */
 function isRemoteReference(value: string): boolean {
-  for (const form of [value, decodeReferences(value)]) {
-    const stripped = withoutIgnorableCharacters(form);
-    if (stripped.startsWith("//")) return true;
-    if (SCHEME.test(stripped)) return true;
+  for (const form of candidateForms(value)) {
+    if (form.startsWith("//")) return true;
+    if (SCHEME.test(form)) return true;
   }
   return false;
 }

@@ -107,6 +107,7 @@ import {
   adoptPrefetch,
   applyMove,
   canvasPresenceKey,
+  COVER_GRADIENTS,
   DAILY_PARENT_TEMPLATE,
   dailyTemplateFor,
   dialogFocusFallback,
@@ -5218,7 +5219,23 @@ export function Shell({
                             the title doesn't jump down when a covered page
                             resolves), then a title line + paragraph lines */}
                         {currentNode?.cover && (
-                          <Skeleton className="-mx-5 mb-6 h-[180px] rounded-none md:-mx-6 md:h-[220px]" />
+                          <>
+                            {/* The banner itself cannot mount until GET
+                                /api/page resolves, but the tree already holds
+                                the cover URL here. Preloading it starts the
+                                download at navigation instead of one round
+                                trip later. Gradient covers are CSS, so they
+                                have nothing to fetch. */}
+                            {!COVER_GRADIENTS[currentNode.cover] && (
+                              <link
+                                rel="preload"
+                                as="image"
+                                href={currentNode.cover}
+                                fetchPriority="high"
+                              />
+                            )}
+                            <Skeleton className="-mx-5 mb-6 h-[180px] rounded-none md:-mx-6 md:h-[220px]" />
+                          </>
                         )}
                         <Skeleton className="h-9 w-1/2 md:h-10" />
                         <div className="mt-6 space-y-3">

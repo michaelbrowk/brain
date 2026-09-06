@@ -432,11 +432,24 @@ function readOpening(keys: SlotKeys, initialMarkdown: string, initialRev: string
 const NO_PAGES: readonly string[] = [];
 const assignLocation = (href: string) => location.assign(href);
 
+/** The one line the visitor gets on mount. The owner's editor says nothing
+ *  about saving on purpose: a notes app keeps what is typed, and "Saved"
+ *  under every keystroke told the owner nothing. A stranger typing into
+ *  someone else's page through a link that can be revoked under them has no
+ *  account, no history and no reason to trust silence, and until this line
+ *  the first signal they ever got was a failure. It also confirms the name
+ *  was taken, which nothing else does. */
+export function shareEditingCopy(name: string): string {
+  return `Editing as ${name}. Changes save as you type.`;
+}
+
 export interface ShareEditorProps {
   rootId: string;
   pageId: string;
   shareVersion: number;
   vid: string;
+  /** The name the mint took, shown back to the visitor. */
+  visitorName: string;
   initialMarkdown: string;
   initialRev: string;
   /** The pages this body links that the share reaches, decided by the server
@@ -466,6 +479,7 @@ function ShareEditorForPage({
   pageId,
   shareVersion,
   vid,
+  visitorName,
   initialMarkdown,
   initialRev,
   linkablePageIds = NO_PAGES,
@@ -984,6 +998,9 @@ function ShareEditorForPage({
 
   return (
     <div data-share-editor>
+      <p data-share-editing-as className="mb-4 text-caption text-ink-3">
+        {shareEditingCopy(visitorName)}
+      </p>
       {/* Both regions are in the DOM from mount and empty. A live region a
           screen reader first meets together with its content is not reliably
           announced, and the visitor has no other save feedback to fall back

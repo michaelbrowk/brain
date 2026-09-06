@@ -308,7 +308,7 @@ describe("shared subtree page", () => {
     expect(resolveShareAccess).not.toHaveBeenCalled();
   });
 
-  it("answers a busy store with a one-second self-refresh, never a 500", async () => {
+  it("answers a busy store with a retry it can stop, never a 500", async () => {
     const { default: SharePage } = await loadPage({ kind: "busy" });
 
     const result = await SharePage({
@@ -318,10 +318,13 @@ describe("shared subtree page", () => {
     const markup = renderToStaticMarkup(result);
 
     expect(markup).toContain("data-share-busy");
-    expect(markup).toMatch(/<meta http-equiv="refresh" content="1"\/?>/);
+    // A refresh every second cannot be stopped and reloads under a screen
+    // reader mid-sentence. The retry counts down where it can be seen and
+    // stopped, and the page keeps a link a browser with no scripts can press.
+    expect(markup).not.toContain("http-equiv=\"refresh\"");
+    expect(markup).toContain("data-share-busy-countdown");
+    expect(markup).toContain("Stop");
     expect(markup).toContain("This page is busy. It will come back in a moment.");
-    // A refresh the reader cannot stop is not a way out, so the page carries
-    // one: the same address, pressable now.
     expect(markup).toContain("data-share-busy-retry");
     expect(markup).toContain('href="/share/root"');
     expect(markup).toContain("Try now");
@@ -368,7 +371,10 @@ describe("shared subtree page", () => {
 
       expect(verifyShareEditToken).toHaveBeenCalledWith(undefined, "root", 7);
       expect(markup).toContain("data-share-name-dialog");
-      expect(markup).toContain("Who is editing?");
+      // One control, not a form: a reader who only wants to read is asked
+      // nothing.
+      expect(markup).toContain("Edit this page");
+      expect(markup).not.toContain("Your name");
       expect(markup).toContain("<p>rendered</p>");
       expect(findDialog(result)?.props).toEqual({ id: "root" });
       expect(mount).not.toHaveBeenCalled();
@@ -405,6 +411,9 @@ describe("shared subtree page", () => {
         pageId: "root",
         shareVersion: 7,
         vid: "vid-1",
+        // The name the mint took, so the island can say it back: nothing
+        // else confirms it was accepted.
+        visitorName: "Ann",
         initialMarkdown: editableRoot.markdown,
         initialRev: "root-rev",
         // Only the linked pages the share reaches: the island renders a ref

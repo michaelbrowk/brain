@@ -14,6 +14,7 @@ export function ShareEditorMount(props: {
   pageId: string;
   shareVersion: number;
   vid: string;
+  visitorName: string;
   initialMarkdown: string;
   initialRev: string;
   linkablePageIds: readonly string[];

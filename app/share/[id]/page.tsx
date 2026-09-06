@@ -13,6 +13,7 @@ import {
 } from "@/lib/share-access";
 import { shareEditCookieName, verifyShareEditToken } from "@/lib/auth";
 import { ShareGate } from "@/components/share-gate";
+import { ShareBusyRetry } from "@/components/share-busy-retry";
 import { ShareNameDialog } from "@/components/share-name-dialog";
 import { ShareEditorMount } from "@/components/editor/share-editor-mount";
 import { Icon } from "@/components/ui/icon";
@@ -166,6 +167,7 @@ export default async function SharePage({
               pageId={page.meta.id}
               shareVersion={access.shareVersion}
               vid={editing.vid}
+              visitorName={editing.name}
               initialMarkdown={page.markdown}
               initialRev={page.rev}
               linkablePageIds={linkablePageIds}
@@ -211,21 +213,22 @@ function sharePageHref(rootId: string, pageId: string): string {
   return pageId === rootId ? root : `${root}?page=${encodeURIComponent(pageId)}`;
 }
 
-/** The busy interstitial. Retry-After: 1, expressed the only way a page can,
- *  plus the link the meta refresh takes away: a reader who does not want to
- *  wait out the second, or whose browser ignores the refresh, has the page
- *  itself to press. */
+/** The busy interstitial. Retry-After: 1, expressed the only way a page can.
+ *  The retry is an island rather than a meta refresh: a refresh every second
+ *  cannot be stopped and reloads under a screen reader before it has finished
+ *  the sentence. The link stays for a browser running no scripts, and for a
+ *  reader who does not want to wait at all. */
 function ShareBusy({ href }: { href: string }) {
   return (
     <div
       data-share-busy
       className="grid min-h-dvh place-items-center bg-paper px-6 pb-[12dvh]"
     >
-      <meta httpEquiv="refresh" content="1" />
       <div className="flex flex-col items-center gap-3 text-center">
         <p className="text-table text-ink-3">
           This page is busy. It will come back in a moment.
         </p>
+        <ShareBusyRetry href={href} />
         <a
           href={href}
           data-share-busy-retry

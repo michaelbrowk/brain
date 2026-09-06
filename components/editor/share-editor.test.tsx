@@ -62,6 +62,7 @@ import ShareEditor, {
   SHARE_STORAGE_FULL_COPY,
   SHARE_UNSAVED_COPY,
   shareAliveKey,
+  shareEditingCopy,
   shareRecoveryCopy,
   shareDraftKey,
   shareDraftPrefix,
@@ -166,6 +167,7 @@ async function mount(
         pageId={page.pageId ?? "page-9"}
         shareVersion={2}
         vid={VID}
+        visitorName="Ada"
         initialMarkdown={initialMarkdown}
         initialRev={page.initialRev ?? REV}
         onReload={onReload}
@@ -255,6 +257,7 @@ function secondHost() {
             pageId="page-9"
             shareVersion={2}
             vid={VID}
+            visitorName="Ada"
             initialMarkdown={initialMarkdown}
             initialRev={REV}
           />,
@@ -700,6 +703,17 @@ describe("the visitor editor", () => {
       expect(banner()?.querySelector("button")).toBeNull();
       expect(editorText()).toBe("mine, edited");
     });
+  });
+
+  it("says who is editing and that typing saves", async () => {
+    // The read-only body and the editable body are identical, so without this
+    // there is no moment at which the page says the state changed, and the
+    // first signal the visitor gets is a failure.
+    await mount("mine");
+
+    expect(host.querySelector("[data-share-editing-as]")?.textContent).toBe(
+      shareEditingCopy("Ada"),
+    );
   });
 
   describe("what a screen reader is told", () => {

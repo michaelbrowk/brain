@@ -44,9 +44,20 @@ function recordFetch(answers: Array<() => Response | Promise<Response>>) {
 const json = (body: unknown, status: number) => () =>
   new Response(JSON.stringify(body), { status });
 
-async function mount(props: { onMinted?: () => void } = {}) {
+async function render(props: { onMinted?: () => void } = {}) {
   await act(async () => {
     root.render(<ShareNameDialog id="root-1" {...props} />);
+  });
+}
+
+/** The form is behind one control, so every test that is about the form
+ *  presses it first. A reader who never presses it never meets the form. */
+async function mount(props: { onMinted?: () => void } = {}) {
+  await render(props);
+  await act(async () => {
+    [...host.querySelectorAll("button")]
+      .find((candidate) => candidate.textContent === "Edit this page")!
+      .click();
   });
 }
 
@@ -84,8 +95,9 @@ describe("the name dialog", () => {
     const onMinted = vi.fn();
     await mount({ onMinted });
 
-    expect(host.textContent).toContain("Who is editing?");
-    expect(host.textContent).toContain("Your name shows on the pages you edit.");
+    expect(host.textContent).toContain(
+      "Add your name and you can edit. You can read the page without one.",
+    );
     expect(button().disabled).toBe(true);
     await submit();
     expect(seen).toEqual([]);
@@ -194,12 +206,40 @@ describe("the name dialog", () => {
     // The owner closed editing while this page stood open: trying again
     // cannot fix that, so the message does not ask for it.
     await submit();
-    expect(alertText()).toBe("This page is no longer open for editing.");
+    expect(alertText()).toBe(
+      "This page is no longer open for editing. You can still read it.",
+    );
     await submit();
     expect(alertText()).toBe("Couldn't start editing. Try again.");
     await submit();
     expect(alertText()).toBe("Couldn't connect. Try again.");
     expect(onMinted).not.toHaveBeenCalled();
     expect(button().disabled).toBe(false);
+  });
+
+  it("asks for nothing until someone says they want to edit", async () => {
+    // Every reader of an editable link meets this, and most of them only
+    // want to read. One control, no form, no obligation.
+    await render();
+
+    expect(host.querySelector("form")).toBeNull();
+    expect(host.textContent).toContain("Edit this page");
+    expect(host.textContent).not.toContain("Your name");
+  });
+
+  it("hides the control and says why where scripts do not run", async () => {
+    // The submit is gated on React state that starts empty and the form has
+    // no action, so without scripts it can never be pressed. The rule sits
+    // outside the element it hides, so the sentence survives it.
+    await render();
+
+    const noscript = host.querySelector("noscript")!;
+    expect(noscript.textContent).toContain(
+      "[data-share-name-dialog]{display:none}",
+    );
+    expect(noscript.textContent).toContain(
+      "Editing this page needs JavaScript. You can read the page as it is.",
+    );
+    expect(host.querySelector("[data-share-name-dialog]")).not.toBeNull();
   });
 });

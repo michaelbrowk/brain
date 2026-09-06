@@ -3,7 +3,7 @@
 import * as Dialog from "@radix-ui/react-dialog";
 import { Command } from "cmdk";
 import { motion, useReducedMotion } from "framer-motion";
-import { SPRING_SHEET } from "@/lib/motion";
+import { pageFade, pageTransition } from "@/lib/motion";
 import { IconButton } from "./ui/button";
 import { Icon } from "./ui/icon";
 import { Kbd } from "./ui/primitives";
@@ -729,9 +729,9 @@ export function CommandPalette({
 
   // The phone's search is the same surface as the desktop palette, built the
   // way the Pages sheet is: the Radix content is the transparent full-screen
-  // focus scope and the thick sheet is its child (`.brain-palette-sheet` in
-  // globals.css), on the 8px inset over the safe area, rising on
-  // SPRING_SHEET. Headings and rows take the desktop panel's rules.
+  // focus scope and the sheet is its child (`.brain-palette-sheet` in
+  // globals.css), holding the whole screen on the canvas ground and arriving
+  // on `pageTransition`. Headings and rows take the desktop panel's rules.
   if (mobile) {
     return (
       <Dialog.Root open={open} onOpenChange={handleOpenChange}>
@@ -772,21 +772,11 @@ export function CommandPalette({
                 className="flex min-h-0 flex-1 flex-col"
               >
                 <header className="brain-palette-sheet-head">
-                  {/* The way back is the word the sidebar slot and the mobile
-                      settings header use (DESIGN.md §12, SlotBackRow): a
-                      place-name would be wrong here too — search opens over
-                      Mail and the hub as well as over a page. */}
-                  <button
-                    type="button"
-                    onClick={() => handleOpenChange(false)}
-                    aria-label="Back"
-                    className="tree-row focus-inset brain-touch-hit w-auto justify-self-start"
-                  >
-                    <span className="tree-row-glyph" aria-hidden>
-                      <Icon name="alt-arrow-left" size={16} />
-                    </span>
-                    <span className="tree-row-title">Back</span>
-                  </button>
+                  {/* No Back row. The surface has a history entry of its own,
+                      so the phone's Back gesture and the Home tab both leave
+                      it, and the head keeps the title centred between two
+                      empty cells. */}
+                  <span aria-hidden="true" />
                   <h1 className="text-h3 text-ink">Search</h1>
                   <span aria-hidden="true" />
                 </header>
@@ -820,10 +810,17 @@ export function CommandPalette({
 
                 <PaletteList className="overscroll-contain px-2 pb-2 pt-1 [&_[cmdk-item]]:min-h-11">
                   {paletteItems}
+                  {/* the floating tab bar's height, kept as content so the
+                      last row can be scrolled clear of it */}
+                  <div aria-hidden className="brain-mobile-tabbar-reserve" />
                 </PaletteList>
               </Command>
-              {mobileFooter}
             </PaletteSheet>
+            {/* The tab bar is a sibling of the sheet, not a passenger inside
+                it: one bar, in one place, whichever of the five tabs is up.
+                It stays inside the Radix content so the focus trap can reach
+                it. */}
+            {mobileFooter}
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
@@ -896,18 +893,19 @@ function PaletteList({
   );
 }
 
-/** The phone's sheet: a thick material with the 8px inset over the safe
- *  area, rising on SPRING_SHEET from below (a fade under reduced motion).
- *  Entrance only — Radix unmounts on close, so the tab bar underneath can
- *  take focus the moment the search is dismissed. The Pages sheet's twin. */
+/** The phone's sheet: the canvas ground over the whole screen, arriving on
+ *  the canvas's own `pageTransition` (a crossfade under reduced motion), so a
+ *  tap on Search moves the way a tap on Mail does. Entrance only — Radix
+ *  unmounts on close. The Pages sheet's twin. */
 function PaletteSheet({ children }: { children: ReactNode }) {
   const reduce = useReducedMotion();
+  const preset = reduce ? pageFade : pageTransition;
   return (
     <motion.div
-      className="brain-palette-sheet mat-thick"
-      initial={reduce ? { opacity: 0 } : { opacity: 0, y: 48 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={reduce ? { duration: 0.12 } : SPRING_SHEET}
+      className="brain-palette-sheet"
+      initial={preset.initial}
+      animate={preset.animate}
+      transition={preset.transition}
     >
       {children}
     </motion.div>

@@ -12,7 +12,7 @@ import {
 } from "react";
 import { DEFAULT_PAGE_ICON } from "@/lib/constants";
 import type { TreeNode } from "@/lib/store/types";
-import { SPRING_SHEET } from "@/lib/motion";
+import { pageFade, pageTransition } from "@/lib/motion";
 import { Icon } from "./ui/icon";
 import { IconButton } from "./ui/button";
 import { ScrollEdge } from "./ui/scroll-edge";
@@ -144,12 +144,22 @@ export function MobilePagesView({
                     surface !== closingSurface && isVisibleFocusTarget(surface),
                 );
                 if (replacementPagesSurface) return;
+                // The tab that is current owns focus. Pages is no longer it
+                // once the surface has gone: closing lands on the page or the
+                // hub, and Home owns both, so returning focus to the Pages
+                // tab would name a place the reader is not in.
+                const currentTab = Array.from(
+                  document.querySelectorAll<HTMLButtonElement>(
+                    '[data-mobile-tab][aria-current="page"]',
+                  ),
+                ).find(isVisibleFocusTarget);
                 const currentPagesTab = Array.from(
                   document.querySelectorAll<HTMLButtonElement>(
                     '[data-mobile-tab="pages"]',
                   ),
                 ).find(isVisibleFocusTarget);
-                const target = currentPagesTab ?? returnFocusRef.current;
+                const target =
+                  currentTab ?? currentPagesTab ?? returnFocusRef.current;
                 if (isVisibleFocusTarget(target)) {
                   target.focus({ preventScroll: true });
                   return;
@@ -170,12 +180,14 @@ export function MobilePagesView({
             <MobilePagesSurface
               tree={tree}
               selectedId={selectedId}
-              onClose={onClose}
               onOpenSettings={onOpenSettings}
               onSelect={onSelect}
             />
-            {footer}
           </PagesSheet>
+          {/* The tab bar is a sibling of the sheet, not a passenger inside
+              it: one bar, in one place, whichever of the five tabs is up. It
+              stays inside the Radix content so the focus trap can reach it. */}
+          {footer}
           {nestedOverlay}
         </Dialog.Content>
       </Dialog.Portal>
@@ -183,18 +195,19 @@ export function MobilePagesView({
   );
 }
 
-/** The sheet itself: a thick material with the 8px inset over the safe
- *  area, rising on SPRING_SHEET from below (a fade under reduced motion).
- *  Entrance only — Radix unmounts on close, so the tab bar underneath can
- *  take focus the moment Pages is dismissed. */
+/** The sheet itself: the canvas ground over the whole screen, arriving on
+ *  the canvas's own `pageTransition` (a crossfade under reduced motion). A
+ *  tap on Pages then moves the way a tap on Mail does, because it is the
+ *  same preset. Entrance only — Radix unmounts on close. */
 function PagesSheet({ children }: { children: ReactNode }) {
   const reduce = useReducedMotion();
+  const preset = reduce ? pageFade : pageTransition;
   return (
     <motion.div
-      className="brain-mobile-pages-sheet mat-thick"
-      initial={reduce ? { opacity: 0 } : { opacity: 0, y: 48 }}
-      animate={{ opacity: 1, y: 0 }}
-      transition={reduce ? { duration: 0.12 } : SPRING_SHEET}
+      className="brain-mobile-pages-sheet"
+      initial={preset.initial}
+      animate={preset.animate}
+      transition={preset.transition}
     >
       {children}
     </motion.div>
@@ -204,13 +217,11 @@ function PagesSheet({ children }: { children: ReactNode }) {
 function MobilePagesSurface({
   tree,
   selectedId,
-  onClose,
   onOpenSettings,
   onSelect,
 }: {
   tree: TreeNode[];
   selectedId: string | null;
-  onClose: () => void;
   onOpenSettings: (invoker: HTMLElement) => void;
   onSelect: (id: string) => void;
 }) {
@@ -249,14 +260,10 @@ function MobilePagesSurface({
       className="flex min-h-0 flex-1 flex-col"
     >
       <header className="brain-mobile-pages-head">
-        <button
-          type="button"
-          onClick={onClose}
-          className="tree-row focus-inset brain-touch-hit w-auto justify-self-start"
-        >
-          <Icon name="alt-arrow-left" size={16} className="text-ink-2" />
-          <span className="tree-row-title">Editor</span>
-        </button>
+        {/* No Back row. The surface has a history entry of its own, so the
+            phone's Back gesture and the Home tab both leave it, and the head
+            keeps the title centred over an empty first cell. */}
+        <span aria-hidden="true" />
         <h1 className="text-h3 text-ink">Pages</h1>
         <IconButton
           size={36}
@@ -356,6 +363,9 @@ function MobilePagesSurface({
             )}
           </nav>
         )}
+        {/* the floating tab bar's height, kept as content so the last row can
+            be scrolled clear of it */}
+        <div aria-hidden className="brain-mobile-tabbar-reserve" />
       </ScrollEdge>
     </section>
   );

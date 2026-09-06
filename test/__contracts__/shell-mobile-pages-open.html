@@ -253,16 +253,11 @@
 <div role="dialog" id="radix-_r_id_" aria-describedby="radix-_r_id_" aria-labelledby="radix-_r_id_" data-state="open" data-testid="mobile-pages-view" aria-modal="true" class="brain-mobile-pages fixed inset-0 z-[calc(var(--z-drawer)-21)] outline-none md:hidden" tabindex="-1" style="pointer-events: auto;">
 <h2 id="radix-_r_id_" class="sr-only">Pages</h2>
 <p id="radix-_r_id_" class="sr-only">Browse, search, and open your pages.</p>
-<div class="brain-mobile-pages-sheet mat-thick">
+<div class="brain-mobile-pages-sheet">
 <section aria-label="Pages" class="flex min-h-0 flex-1 flex-col">
 <header class="brain-mobile-pages-head">
-<button type="button" class="tree-row focus-inset brain-touch-hit w-auto justify-self-start">
-<svg width="16" height="16" viewBox="0 0 24 24" class="text-ink-2" aria-hidden="true">
-<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="m15 5l-6 7l6 7">
-</path>
-</svg>
-<span class="tree-row-title">Editor</span>
-</button>
+<span aria-hidden="true">
+</span>
 <h1 class="text-h3 text-ink">Pages</h1>
 <button data-size="36" class="brain-touch-min icon-btn focus-inset brain-touch-hit relative justify-self-end" data-settings-trigger="mobile-pages" aria-label="Settings">
 <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
@@ -328,11 +323,14 @@
 </button>
 </div>
 </nav>
+<div aria-hidden="true" class="brain-mobile-tabbar-reserve">
+</div>
 <div aria-hidden="true" class="-mt-px h-px w-full shrink-0">
 </div>
 </div>
 </section>
-<nav aria-label="Primary" data-contained="" class="brain-mobile-tabbar">
+</div>
+<nav aria-label="Primary" class="brain-mobile-tabbar mat-thick">
 <div class="brain-mobile-tabbar-items">
 <button data-mobile-tab="home" type="button" class="brain-mobile-tab brain-touch-min focus-inset">
 <svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
@@ -388,7 +386,6 @@
 </button>
 </div>
 </nav>
-</div>
 </div>
 <span data-radix-focus-guard="" tabindex="0" style="outline: none; opacity: 0; position: fixed; pointer-events: none;" data-aria-hidden="true" aria-hidden="true">
 </span>

@@ -9,7 +9,6 @@ interface MobileTabBarProps {
   pagesActive: boolean;
   mailActive: boolean;
   hidden?: boolean;
-  contained?: boolean;
   searchRef?: RefObject<HTMLButtonElement | null>;
   pagesRef?: RefObject<HTMLButtonElement | null>;
   onHome: () => void;
@@ -44,15 +43,16 @@ const items = [
  *  safe area, sized by its five slots rather than by the window and never
  *  nearer to it than the 8px inset (DESIGN.md v2 → Geometry: nothing floating
  *  touches the window edge). The canvas passes under it and the material
- *  blurs on its own — no hairline, no edge band. Pages can contain this bar
- *  inside its modal focus scope; desktop keeps its sidebar. */
+ *  blurs on its own — no hairline, no edge band. Search and Pages render
+ *  their own copy inside their focus scope, with the same position and the
+ *  same material, so the bar looks and sits identically whichever of the
+ *  five tabs is up; desktop keeps its sidebar. */
 export function MobileTabBar({
   homeActive,
   searchActive,
   pagesActive,
   mailActive,
   hidden = false,
-  contained = false,
   searchRef,
   pagesRef,
   onHome,
@@ -65,12 +65,8 @@ export function MobileTabBar({
     <nav
       aria-label="Primary"
       aria-hidden={hidden || undefined}
-      data-contained={contained ? "" : undefined}
       data-hidden={hidden ? "" : undefined}
-      // contained inside the Pages sheet or the search view the bar is a
-      // plain row of that surface — a second material inside a material is
-      // glass on glass (ban #1)
-      className={contained ? "brain-mobile-tabbar" : "brain-mobile-tabbar mat-thick"}
+      className="brain-mobile-tabbar mat-thick"
     >
       <div className="brain-mobile-tabbar-items">
         {items.map((item) => {

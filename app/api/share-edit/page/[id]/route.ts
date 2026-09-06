@@ -4,6 +4,7 @@ import {
   resolvePageWrite,
   type PageWriteHistory,
 } from "@/lib/api/page-write";
+import { readBoundedText } from "@/lib/bounded-body";
 import { shareWriteNotFound, withShareWrite } from "@/lib/share-write";
 import {
   isNotFound,
@@ -53,15 +54,10 @@ export async function PUT(req: NextRequest, { params }: Ctx) {
     req,
     { targetId: id, bucket: "write" },
     async (ctx, store) => {
-      // Decided from Content-Length before the body is buffered. The count
-      // after the read covers a request that declared nothing.
-      if (Number(req.headers.get("content-length") ?? 0) > MAX_SHARE_WRITE_BYTES) {
-        return tooLarge();
-      }
-      const raw = await req.text();
-      if (Buffer.byteLength(raw, "utf8") > MAX_SHARE_WRITE_BYTES) {
-        return tooLarge();
-      }
+      // Bounded by what is actually read, not by a header a chunked request
+      // is free to omit.
+      const raw = await readBoundedText(req, MAX_SHARE_WRITE_BYTES);
+      if (raw === null) return tooLarge();
       const body = parseBody(raw);
       if (!body) {
         return NextResponse.json({ error: "bad request" }, { status: 400 });

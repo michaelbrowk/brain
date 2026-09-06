@@ -9621,6 +9621,30 @@ describe("share-aware Store leaves", () => {
     await expect(upload()).resolves.toMatchObject({ size: PNG.byteLength });
   });
 
+  it("says so at startup when a root allows edits and no public origin is configured", async () => {
+    const { s, root, rootId } = await editableRoot();
+    expect((await s.readPage(rootId)).meta.shareEdit).toBe(true);
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // The same notes folder, opened by a process whose BRAIN_PUBLIC_ORIGIN
+    // was removed or given a trailing slash after the grant. configureShare
+    // cannot see that happen; every visitor write from here is a 403 the
+    // owner is given no reason for.
+    const reopened = new Store(root, { publicOrigin: null });
+    await reopened.init();
+
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(String(logged.mock.calls[0]?.[0])).toContain("BRAIN_PUBLIC_ORIGIN");
+
+    // A folder with no editable share says nothing.
+    logged.mockClear();
+    await reopened.updateMeta(rootId, { public: false, by: "me" });
+    const quiet = new Store(root, { publicOrigin: null });
+    await quiet.init();
+    expect(logged).not.toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
   it("gives a full root its bytes back without waiting for an owner action", async () => {
     const { s, root, rootId, childId, version } = await editableRoot();
     const upload = () =>

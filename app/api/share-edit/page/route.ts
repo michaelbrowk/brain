@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { readBoundedText } from "@/lib/bounded-body";
 import { withShareWrite } from "@/lib/share-write";
 import { normalizeVisitorTitle } from "@/lib/sharing";
 import { isShareSubtreeFull } from "@/lib/store";
@@ -19,15 +20,10 @@ export async function POST(req: NextRequest) {
     req,
     { targetId: parentId, bucket: "create" },
     async (ctx, store) => {
-      // Decided from Content-Length before the body is buffered. The count
-      // after the read covers a request that declared nothing.
-      if (Number(req.headers.get("content-length") ?? 0) > MAX_CREATE_BODY_BYTES) {
-        return tooLarge();
-      }
-      const raw = await req.text();
-      if (Buffer.byteLength(raw, "utf8") > MAX_CREATE_BODY_BYTES) {
-        return tooLarge();
-      }
+      // Bounded by what is actually read, not by a header a chunked request
+      // is free to omit.
+      const raw = await readBoundedText(req, MAX_CREATE_BODY_BYTES);
+      if (raw === null) return tooLarge();
       const title = parseTitle(raw);
       if (title === null) {
         return NextResponse.json({ error: "bad request" }, { status: 400 });

@@ -528,6 +528,29 @@ export class Store {
     );
     resumeGitSnapshotsAfterRecovery(this.root);
     await scheduleDirtyCommit(this.root);
+    this.warnIfShareEditHasNoOrigin();
+  }
+
+  /** BRAIN_PUBLIC_ORIGIN is what every visitor write is checked against, and
+   *  configureShare already refuses to grant editing without it. That gate is
+   *  the better place to refuse: it does not take the whole app down for a
+   *  feature nobody has turned on, and it puts the error where the owner is
+   *  looking. What it cannot see is the variable being removed, or given a
+   *  trailing slash, after a root is already editable. From then on every
+   *  visitor write is a 403 bad_origin with nothing on the server saying why,
+   *  and the owner's own pages look fine.
+   *
+   *  So: one line once the index exists, and not a throw. Refusing to boot
+   *  would take the notes down over one share. */
+  private warnIfShareEditHasNoOrigin(): void {
+    if (this.publicOrigin !== null) return;
+    const editable = [...this.index.values()].filter(
+      (entry) => entry.meta.shareEdit === true && !entry.meta.deleted,
+    ).length;
+    if (editable === 0) return;
+    console.error(
+      `[brain/store] ${editable} shared page(s) allow visitor edits and BRAIN_PUBLIC_ORIGIN is unset or is not an exact origin, so every visitor write will be refused. Set it to the scheme and host the share links use, with no trailing slash and no path.`,
+    );
   }
 
   /** Walk the folder tree from disk, self-heal missing metadata. */

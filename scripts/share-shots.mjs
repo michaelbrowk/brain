@@ -117,6 +117,7 @@ const disclosure = await api(desktopPage, `/api/page/${pageId}/share`);
 const enabled = await api(desktopPage, `/api/page/${pageId}/share`, {
   enabled: true,
   expectedScopeToken: disclosure.body?.scopeToken,
+  canEdit: false,
   password: "orchid-paper-14",
   expiresAt: null,
 });

@@ -730,6 +730,7 @@ try {
         body: JSON.stringify({
           enabled: true,
           expectedScopeToken: disclosure.scopeToken,
+          canEdit: false,
           password: null,
           expiresAt: null,
         }),

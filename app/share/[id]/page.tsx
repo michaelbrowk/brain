@@ -75,7 +75,9 @@ export default async function SharePage({
     // gives it. A Server Component cannot set a status — notFound() is the only
     // one Next exposes — so rather than a 500 page, a shared page that is busy
     // says so and comes back by itself in a second.
-    if (error instanceof ShareAccessBusyError) return <ShareBusy />;
+    if (error instanceof ShareAccessBusyError) {
+      return <ShareBusy href={sharePageHref(id, targetId)} />;
+    }
     throw error;
   }
   if (access.kind === "password-required") return <ShareGate id={id} />;
@@ -117,7 +119,7 @@ export default async function SharePage({
   const linkablePageIds = editing
     ? [...referencedPageIds(page.markdown, origin)].filter(isAllowedPage)
     : [];
-  const shareRootHref = `/share/${encodeURIComponent(id)}`;
+  const shareRootHref = sharePageHref(id, id);
 
   return (
     <div className="min-h-dvh bg-paper">
@@ -131,7 +133,7 @@ export default async function SharePage({
       >
         {targetId !== id && (
           <a
-            href={`/share/${encodeURIComponent(id)}`}
+            href={shareRootHref}
             data-share-root-link
             aria-label={`Back to ${access.root.meta.title}`}
             className="brain-touch-hit mb-7 inline-flex min-w-0 max-w-full items-center gap-1 rounded-sm text-[12px] text-ink-3 transition-colors hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-line"
@@ -155,14 +157,9 @@ export default async function SharePage({
         >
           {page.meta.title}
         </h1>
-        {needsName && (
-          <ShareNameDialog id={id} locked={!!access.root.meta.sharePass} />
-        )}
+        {needsName && <ShareNameDialog id={id} />}
         {/* reuse the editor typography for a faithful read-only render */}
-        <div
-          className="milkdown"
-          data-share-editable={editing ? "true" : undefined}
-        >
+        <div className="milkdown">
           {editing && (
             <ShareEditorMount
               rootId={id}
@@ -191,7 +188,7 @@ export default async function SharePage({
                 className="brain-page-ref-only min-w-0 max-w-full"
               >
                 <a
-                  href={`${shareRootHref}?page=${encodeURIComponent(child.id)}`}
+                  href={sharePageHref(id, child.id)}
                   data-page-ref={child.id}
                   className="brain-page-ref"
                 >
@@ -207,17 +204,36 @@ export default async function SharePage({
   );
 }
 
-/** The busy interstitial. Retry-After: 1, expressed the only way a page can. */
-function ShareBusy() {
+/** The address of one page of a share, the one form both the read-only render
+ *  and the visitor's island link to. */
+function sharePageHref(rootId: string, pageId: string): string {
+  const root = `/share/${encodeURIComponent(rootId)}`;
+  return pageId === rootId ? root : `${root}?page=${encodeURIComponent(pageId)}`;
+}
+
+/** The busy interstitial. Retry-After: 1, expressed the only way a page can,
+ *  plus the link the meta refresh takes away: a reader who does not want to
+ *  wait out the second, or whose browser ignores the refresh, has the page
+ *  itself to press. */
+function ShareBusy({ href }: { href: string }) {
   return (
     <div
       data-share-busy
       className="grid min-h-dvh place-items-center bg-paper px-6 pb-[12dvh]"
     >
       <meta httpEquiv="refresh" content="1" />
-      <p className="text-table text-ink-3">
-        This page is busy. It will come back in a moment.
-      </p>
+      <div className="flex flex-col items-center gap-3 text-center">
+        <p className="text-table text-ink-3">
+          This page is busy. It will come back in a moment.
+        </p>
+        <a
+          href={href}
+          data-share-busy-retry
+          className="brain-touch-hit rounded-sm text-control text-ink-2 underline underline-offset-2 transition-colors hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-line"
+        >
+          Try now
+        </a>
+      </div>
     </div>
   );
 }

@@ -892,6 +892,9 @@ function Inner({
         // A page ref goes by its id, every other anchor by its href. The
         // view already resolved a local attachment href for display;
         // resolving again is idempotent and covers an anchor that did not.
+        // A host that decides where a page id may point decides for a link
+        // mark holding the owner's `/p/` address too, which the anchor step
+        // reads off the page-ref resolver itself.
         const followed = followEditorAnchor(
           anchor,
           window.location.origin,

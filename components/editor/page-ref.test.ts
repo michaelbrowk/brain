@@ -11,6 +11,7 @@ import { gfm } from "@milkdown/kit/preset/gfm";
 import { getMarkdown } from "@milkdown/kit/utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  hasPageRefHrefResolver,
   pageRef,
   pageRefHref,
   setPageRefHrefResolver,
@@ -196,6 +197,16 @@ describe("page references", () => {
     } finally {
       await editor.destroy();
     }
+  });
+
+  it("says whether a host is placing page ids, which the click handler asks", () => {
+    // The same answer covers every link into the owner's page namespace, not
+    // only the refs: a surface that places ids is a surface /p/ cannot leave.
+    expect(hasPageRefHrefResolver()).toBe(false);
+    setPageRefHrefResolver(() => null);
+    expect(hasPageRefHrefResolver()).toBe(true);
+    setPageRefHrefResolver(null);
+    expect(hasPageRefHrefResolver()).toBe(false);
   });
 
   it("lets a host decide where a ref points at display time, and keeps /p/<id> on disk", async () => {

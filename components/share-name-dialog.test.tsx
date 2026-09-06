@@ -44,16 +44,20 @@ function recordFetch(answers: Array<() => Response | Promise<Response>>) {
 const json = (body: unknown, status: number) => () =>
   new Response(JSON.stringify(body), { status });
 
-async function mount(props: { locked: boolean; onMinted?: () => void }) {
+async function mount(props: { onMinted?: () => void } = {}) {
   await act(async () => {
     root.render(<ShareNameDialog id="root-1" {...props} />);
   });
 }
 
-const input = (label: string) =>
-  host.querySelector<HTMLInputElement>(`input[aria-label="${label}"]`);
+const input = (name: string) =>
+  host.querySelector<HTMLInputElement>(`input[name="${name}"]`);
 const button = () => host.querySelector<HTMLButtonElement>('button[type="submit"]')!;
-const alert = () => host.querySelector('[role="alert"]')?.textContent ?? null;
+const alert = () => host.querySelector('[role="alert"]');
+const alertText = () => alert()?.textContent ?? null;
+/** The visible text of the <label> that owns an input, through htmlFor. */
+const labelOf = (field: HTMLInputElement) =>
+  host.querySelector(`label[for="${field.id}"]`)?.textContent ?? null;
 
 async function type(field: HTMLInputElement, value: string) {
   await act(async () => {
@@ -78,7 +82,7 @@ describe("the name dialog", () => {
   it("mints the edit cookie with the name and hands over on success", async () => {
     const seen = recordFetch([json({ ok: true }, 200)]);
     const onMinted = vi.fn();
-    await mount({ locked: false, onMinted });
+    await mount({ onMinted });
 
     expect(host.textContent).toContain("Who is editing?");
     expect(host.textContent).toContain("Your name shows on the pages you edit.");
@@ -86,7 +90,7 @@ describe("the name dialog", () => {
     await submit();
     expect(seen).toEqual([]);
 
-    await type(input("Your name")!, "  Ann  ");
+    await type(input("name")!, "  Ann  ");
     expect(button().disabled).toBe(false);
     await submit();
 
@@ -98,27 +102,31 @@ describe("the name dialog", () => {
       },
     ]);
     expect(onMinted).toHaveBeenCalledTimes(1);
-    expect(alert()).toBeNull();
+    expect(alertText()).toBeNull();
   });
 
-  it("asks for the password on a locked root only once the read cookie no longer counts", async () => {
+  // Locked or open, the server renders the same form. Any 401 is the mint
+  // saying a password is wanted now -- the read cookie expired, the share was
+  // re-issued, or the owner added a password under an open page -- and the
+  // field appears for all three rather than for a prop read at render.
+  it("draws the password field on any 401, and only then", async () => {
     const seen = recordFetch([
       json({ error: "wrong password" }, 401),
       json({ error: "wrong password" }, 401),
       json({ ok: true }, 200),
     ]);
     const onMinted = vi.fn();
-    await mount({ locked: true, onMinted });
-    expect(input("Password")).toBeNull();
+    await mount({ onMinted });
+    expect(input("password")).toBeNull();
 
-    await type(input("Your name")!, "Ann");
+    await type(input("name")!, "Ann");
     await submit();
     expect(seen[0]!.body).toEqual({ intent: "edit", id: "root-1", name: "Ann" });
-    expect(alert()).toBe("Enter the password to edit.");
-    expect(input("Password")).not.toBeNull();
+    expect(alertText()).toBe("Enter the password to edit.");
+    expect(input("password")).not.toBeNull();
     expect(onMinted).not.toHaveBeenCalled();
 
-    await type(input("Password")!, "nope");
+    await type(input("password")!, "nope");
     await submit();
     expect(seen[1]!.body).toEqual({
       intent: "edit",
@@ -126,14 +134,48 @@ describe("the name dialog", () => {
       name: "Ann",
       password: "nope",
     });
-    expect(alert()).toBe("Wrong password");
-    expect(input("Password")!.value).toBe("");
-    expect(input("Password")!.getAttribute("aria-invalid")).toBe("true");
+    expect(alertText()).toBe("Wrong password");
+    expect(input("password")!.value).toBe("");
+    expect(input("password")!.getAttribute("aria-invalid")).toBe("true");
 
-    await type(input("Password")!, "right");
+    await type(input("password")!, "right");
     await submit();
     expect(seen[2]!.body).toMatchObject({ password: "right" });
     expect(onMinted).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a name the server would refuse from ever being sent", async () => {
+    const seen = recordFetch([json({ ok: true }, 200)]);
+    await mount();
+
+    // Control characters are what normalizeVisitorName strips, so a name made
+    // only of them is empty to the server while trim() still sees length.
+    await type(input("name")!, "\u0001\u0002\u007f");
+    expect(button().disabled).toBe(true);
+    await submit();
+    expect(seen).toEqual([]);
+
+    await type(input("name")!, "\u0001Ann");
+    expect(button().disabled).toBe(false);
+  });
+
+  it("names its fields visibly and points the alert at them", async () => {
+    recordFetch([json({ error: "wrong password" }, 401)]);
+    await mount();
+
+    const nameField = input("name")!;
+    expect(labelOf(nameField)).toBe("Your name");
+    expect(nameField.getAttribute("aria-describedby")).toBeNull();
+
+    await type(nameField, "Ann");
+    await submit();
+
+    const passwordField = input("password")!;
+    expect(labelOf(passwordField)).toBe("Password");
+    const errorId = alert()!.id;
+    expect(errorId).not.toBe("");
+    expect(input("name")!.getAttribute("aria-describedby")).toBe(errorId);
+    expect(passwordField.getAttribute("aria-describedby")).toBe(errorId);
   });
 
   it("says why when the mint is refused or unreachable", async () => {
@@ -144,19 +186,19 @@ describe("the name dialog", () => {
       () => Promise.reject(new TypeError("Failed to fetch")),
     ]);
     const onMinted = vi.fn();
-    await mount({ locked: false, onMinted });
-    await type(input("Your name")!, "Ann");
+    await mount({ onMinted });
+    await type(input("name")!, "Ann");
 
     await submit();
-    expect(alert()).toBe("Too many attempts. Wait a bit.");
+    expect(alertText()).toBe("Too many attempts. Wait a bit.");
     // The owner closed editing while this page stood open: trying again
     // cannot fix that, so the message does not ask for it.
     await submit();
-    expect(alert()).toBe("This page is no longer open for editing.");
+    expect(alertText()).toBe("This page is no longer open for editing.");
     await submit();
-    expect(alert()).toBe("Couldn't start editing. Try again.");
+    expect(alertText()).toBe("Couldn't start editing. Try again.");
     await submit();
-    expect(alert()).toBe("Couldn't connect. Try again.");
+    expect(alertText()).toBe("Couldn't connect. Try again.");
     expect(onMinted).not.toHaveBeenCalled();
     expect(button().disabled).toBe(false);
   });

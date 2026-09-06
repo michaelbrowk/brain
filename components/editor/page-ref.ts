@@ -45,6 +45,14 @@ export function pageRefHref(id: string): string | null {
   return livePageInfo.has(id) ? `/p/${id}` : null;
 }
 
+/** Whether a host has taken over where a page id may point. A surface that
+ *  has says so for every link into the owner's page namespace, not only for
+ *  the refs the editor placed, so the click handler asks this before it lets
+ *  an ordinary link mark address `/p/`. */
+export function hasPageRefHrefResolver(): boolean {
+  return pageRefHrefResolver !== null;
+}
+
 /** Replace the shared directory and refresh mounted page-ref DOM directly.
  * This deliberately does not dispatch a ProseMirror transaction: a rename,
  * icon update, or newly resolved page is live display state, not a note edit. */

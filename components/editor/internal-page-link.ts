@@ -2,6 +2,7 @@ import {
   classifyInternalPageLink,
   INTERNAL_PAGE_LINK_CLASS,
 } from "@/lib/internal-page-link";
+import { hasPageRefHrefResolver } from "./page-ref";
 
 export {
   classifyInternalPageLink,
@@ -65,6 +66,35 @@ export function followEditorLink(
   return true;
 }
 
+/** Does this href address the owner's page namespace at all? `/p/<id>` exactly
+ *  is a page link everywhere (`classifyInternalPageLink`); the near misses --
+ *  a query, a fragment, a trailing slash, an encoded id, a backslash -- are
+ *  ordinary links, because canonicalizing them away would change where they
+ *  go. This answers for both, so a surface that may not reach `/p/` at all can
+ *  ask one question. Whitespace and backslashes are normalized by the URL
+ *  parser here on purpose: every form that could reach the namespace answers
+ *  yes. */
+function addressesPageNamespace(
+  rawHref: string | null | undefined,
+  currentOrigin: string,
+): boolean {
+  if (!rawHref) return false;
+  let base: URL;
+  try {
+    base = new URL(currentOrigin);
+  } catch {
+    return false;
+  }
+  let url: URL;
+  try {
+    url = new URL(rawHref, base);
+  } catch {
+    return false;
+  }
+  if (url.origin !== base.origin) return false;
+  return url.pathname === "/p" || url.pathname.startsWith("/p/");
+}
+
 /** A click on an anchor inside the editor. A page ref goes by its id and
  *  never by its href: the owner's shell moves to the page, a link visitor's
  *  island moves within the share, and the href, which only the display
@@ -85,13 +115,25 @@ export function followEditorAnchor(
     navigateInternal(pageRefId);
     return true;
   }
-  const href = anchor.getAttribute("href");
-  return followEditorLink(
-    href === null ? null : resolveHref(href),
-    currentOrigin,
-    navigateInternal,
-    openExternal,
-  );
+  const raw = anchor.getAttribute("href");
+  const href = raw === null ? null : resolveHref(raw);
+  // A surface that decides for itself where a page id may point -- a link
+  // visitor's island, which installs a page-ref resolver -- decides for a
+  // plain link mark holding the owner's `/p/` address too, or the address
+  // would be a way off it. The exact `/p/<id>` form falls through and reaches
+  // `navigateInternal`, which answers for the id; a near miss (a query, a
+  // fragment, a trailing slash) has no id to answer for, and the read-only
+  // render of the same body flattens it, so nothing follows it here either.
+  // Taken, not declined: declining leaves the click to the browser, and
+  // following the href is the navigation this refuses.
+  if (
+    hasPageRefHrefResolver() &&
+    addressesPageNamespace(href, currentOrigin) &&
+    !classifyInternalPageLink(href, currentOrigin)
+  ) {
+    return true;
+  }
+  return followEditorLink(href, currentOrigin, navigateInternal, openExternal);
 }
 
 function syncMarker(anchor: HTMLAnchorElement, currentOrigin: string) {

@@ -305,7 +305,25 @@ describe("shared subtree page", () => {
     expect(markup).toContain("data-share-busy");
     expect(markup).toMatch(/<meta http-equiv="refresh" content="1"\/?>/);
     expect(markup).toContain("This page is busy. It will come back in a moment.");
+    // A refresh the reader cannot stop is not a way out, so the page carries
+    // one: the same address, pressable now.
+    expect(markup).toContain("data-share-busy-retry");
+    expect(markup).toContain('href="/share/root"');
+    expect(markup).toContain("Try now");
     expect(markup).not.toContain("data-share-name-dialog");
+  });
+
+  it("points the busy page's own link at the page that was asked for", async () => {
+    const { default: SharePage } = await loadPage({ kind: "busy" });
+
+    const result = await SharePage({
+      params: Promise.resolve({ id: "root" }),
+      searchParams: Promise.resolve({ page: "child" }),
+    });
+
+    expect(renderToStaticMarkup(result)).toContain(
+      'href="/share/root?page=child"',
+    );
   });
 
   describe("an editable share", () => {
@@ -337,7 +355,7 @@ describe("shared subtree page", () => {
       expect(markup).toContain("data-share-name-dialog");
       expect(markup).toContain("Who is editing?");
       expect(markup).toContain("<p>rendered</p>");
-      expect(markup).not.toContain('aria-label="Password"');
+      expect(findDialog(result)?.props).toEqual({ id: "root" });
       expect(mount).not.toHaveBeenCalled();
     });
 
@@ -382,15 +400,18 @@ describe("shared subtree page", () => {
       expect(markup).toContain("data-share-editor-mount");
       // The read-only render stays underneath: a script-blocked browser and
       // the moment before the chunk arrives both see the page as it is. The
-      // pair of markers is what the stylesheet reads to drop the fallback
-      // once the island is in the DOM, so both have to be on the markup.
-      expect(markup).toContain('data-share-editable="true"');
+      // marker is what app/globals.css reads to drop it once the island is a
+      // sibling of it in the DOM.
       expect(markup).toContain('data-share-fallback="true"');
       expect(markup).toContain("<p>rendered</p>");
       expect(markup).not.toContain("data-share-name-dialog");
     });
 
-    it("offers the password field only on a locked root", async () => {
+    it("asks a locked root for a name the same way, and no password", async () => {
+      // The visitor came through the gate, so the read cookie stands in for
+      // the password and the server has nothing extra to ask. Whether the
+      // mint still accepts that cookie is the mint's answer, not the page's,
+      // so the dialog is handed the same one prop either way.
       const lockedRoot = {
         ...editableRoot,
         meta: { ...editableRoot.meta, sharePass: "$2a$10$hash" },
@@ -406,8 +427,8 @@ describe("shared subtree page", () => {
         params: Promise.resolve({ id: "root" }),
         searchParams: Promise.resolve({}),
       });
-      const dialog = findDialog(result);
-      expect(dialog?.props).toMatchObject({ id: "root", locked: true });
+      expect(findDialog(result)?.props).toEqual({ id: "root" });
+      expect(renderToStaticMarkup(result)).not.toContain("Password");
     });
   });
 

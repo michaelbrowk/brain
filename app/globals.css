@@ -2243,14 +2243,23 @@ a.brain-share-url:hover {
 .brain-share-name-fields {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 12px;
   align-self: stretch;
+}
+.brain-share-name-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 /* The visitor's editor mounts over the read-only render. The server always
    draws the render, so a browser without scripts reads the page as it is
    and the moment before the chunk arrives shows the same, and it goes the
-   instant the island is in the DOM. */
-[data-share-editable]:has([data-share-editor]) > [data-share-fallback] {
+   instant the island is in the DOM. A sibling combinator, not :has(): the
+   editor root is drawn immediately before the fallback, so the two say the
+   same thing, and share links get opened in old webviews and in Firefox ESR
+   where :has() is not there and the body would be drawn twice. Pinned by
+   app/globals-share.test.ts. */
+[data-share-editor] ~ [data-share-fallback] {
   display: none;
 }
 

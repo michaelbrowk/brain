@@ -64,7 +64,8 @@ describe("Hub", () => {
     expect(host.textContent).toContain("Mail is for a Gmail or IMAP account");
   });
 
-  /** A page the feed will show: written just now, so the week filter keeps it. */
+  /** A page the feed will show: written at this moment, so the week filter
+   *  keeps it. */
   function recent(values: Partial<TreeNode> & { id: string; title: string }): TreeNode {
     const updated = new Date().toISOString();
     return {
@@ -98,6 +99,37 @@ describe("Hub", () => {
     expect(host.textContent).toContain("Brain AI");
     // the owner's own writes stay unlabelled
     expect(host.textContent).not.toContain("edited by a visitor");
+  });
+
+  it("holds a hostile name inside the row instead of pushing it wide", async () => {
+    // 40 is the cap normalizeVisitorName applies, and the name is the
+    // visitor's own text. The badge takes the same treatment as the title
+    // beside it rather than a width rule of its own.
+    await act(async () =>
+      root.render(
+        <Hub
+          tree={[
+            recent({
+              id: "p1",
+              title: "A page with a long title of its own",
+              updatedBy: "visitor",
+              updatedByName: "A".repeat(40),
+            }),
+          ]}
+          onSelect={() => {}}
+          onCreate={async () => null}
+        />,
+      ),
+    );
+    await settle();
+
+    const badge = [...host.querySelectorAll("span")].find((candidate) =>
+      candidate.textContent?.startsWith("edited by A"),
+    );
+    expect(badge).toBeDefined();
+    expect(badge!.className).toContain("truncate");
+    expect(badge!.className).toContain("min-w-0");
+    expect(badge!.className).not.toContain("shrink-0");
   });
 
   it("says a visitor without falling back on a name the mint cannot omit", async () => {

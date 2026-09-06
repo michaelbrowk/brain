@@ -46,6 +46,25 @@ describe("normalizeVisitorName", () => {
     expect(normalizeVisitorName(42)).toBeNull();
     expect(normalizeVisitorName(undefined)).toBeNull();
   });
+
+  // The name reaches the owner's Hub as a badge, so it takes the title's
+  // policy: every format character goes, the two joiners stay. A name is
+  // signed into a claim and written to frontmatter without a second pass, so
+  // this function is where an override is stopped or not at all.
+  it("strips format characters that reorder or hide text, and keeps the joiners", () => {
+    const rlo = String.fromCodePoint(0x202e);
+    const isolate = String.fromCodePoint(0x2067);
+    const bom = String.fromCodePoint(0xfeff);
+    const zwsp = String.fromCodePoint(0x200b);
+    const zwj = String.fromCodePoint(0x200d);
+    const zwnj = String.fromCodePoint(0x200c);
+    expect(normalizeVisitorName(`${bom}Ada${rlo}Lovelace`)).toBe("AdaLovelace");
+    expect(normalizeVisitorName(`A${isolate}d${zwsp}a`)).toBe("Ada");
+    expect(normalizeVisitorName(`Ada${zwj}${zwnj}L`)).toBe(`Ada${zwj}${zwnj}L`);
+    // C1 too, not only the C0 range and DEL
+    expect(normalizeVisitorName("Ada\u0085Lovelace")).toBe("AdaLovelace");
+    expect(normalizeVisitorName(rlo)).toBeNull();
+  });
 });
 
 describe("normalizeVisitorTitle", () => {

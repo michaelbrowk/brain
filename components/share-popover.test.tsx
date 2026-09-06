@@ -152,6 +152,7 @@ describe("SharePopover redesign", () => {
         isPublic={isPublic}
         pageId="page-a"
         hasPassword={!!options.hasPassword}
+        hasEdit={!!options.hasEdit}
         expiresAt={options.expiresAt}
         inheritedFrom={options.inheritedFrom}
         expiredInheritedFrom={options.expiredInheritedFrom}
@@ -1136,20 +1137,47 @@ describe("SharePopover redesign", () => {
       );
     });
 
+    it("keeps the page's own answer where there is no active snapshot to read", async () => {
+      // The page's own link is expired under a live parent share: the row is
+      // still drawn, because the grant it writes is still there, but the
+      // active snapshot is the parent's and never lands here. A hard false
+      // would tell the owner the grant is read-only when it is not, the way
+      // the Password switch beside it falls back to the page's own value.
+      await renderAndOpen(true, {
+        hasEdit: true,
+        expiresAt: "2020-01-01T00:00:00.000Z",
+        inheritedFrom: { id: "root", title: "Shared root" },
+        onPrepareShare: vi.fn().mockImplementation((rootId: string) =>
+          Promise.resolve(
+            snapshot({
+              rootId,
+              public: true,
+              shareEdit: true,
+              shareExpiresAt: "2020-01-01T00:00:00.000Z",
+            }),
+          ),
+        ),
+      });
+      expect(head()).toBe("This page's own link is expired.");
+      expect(document.body.querySelector('[data-share-row="edit"]')).not.toBeNull();
+      expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-checked")).toBe("true");
+    });
+
     it("takes the snapshot's answer when it arrives after the first paint", async () => {
-      // The management view is drawn from the `isPublic` prop before the exact
-      // scope is read, so the switch has to follow the snapshot rather than
-      // the value it was first mounted with.
+      // The management view is drawn from the tree's own answer before the
+      // exact scope is read, so the switch starts there and follows the
+      // snapshot when it corrects it.
       const pending = deferred<ShareScopeSnapshot>();
       await renderAndOpen(true, {
+        hasEdit: true,
         onPrepareShare: vi.fn().mockReturnValue(pending.promise),
       });
-      expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-checked")).toBe("false");
+      expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-checked")).toBe("true");
       await act(async () =>
-        pending.resolve(snapshot({ public: true, shareEdit: true })),
+        pending.resolve(snapshot({ public: true, shareEdit: false })),
       );
       await settle();
-      expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-checked")).toBe("true");
+      expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-checked")).toBe("false");
     });
 
     it("is absent where the page is only reached through a parent", async () => {

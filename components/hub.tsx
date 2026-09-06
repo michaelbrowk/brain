@@ -575,9 +575,11 @@ function Row({
         </span>
       )}
       {/* A page carrying updatedBy: "visitor" with no name is something the
-          mint cannot produce and a hand-edited file can. */}
+          mint cannot produce and a hand-edited file can. The name is the
+          visitor's own text up to 40 characters, so the badge takes the
+          title's treatment and shrinks rather than pushing the row wide. */}
       {actor === "visitor" && (
-        <span className="shrink-0 rounded-xs border border-line px-1.5 py-0.5 text-[10px] text-ink-2">
+        <span className="min-w-0 truncate rounded-xs border border-line px-1.5 py-0.5 text-[10px] text-ink-2">
           {actorName ? `edited by ${actorName}` : "edited by a visitor"}
         </span>
       )}

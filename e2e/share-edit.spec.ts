@@ -88,7 +88,7 @@ test("a stranger with the link edits a page, and a revoke ends it mid-session", 
   ).toBeTruthy();
   const created = createdResponse.body as { id: string };
 
-  // owner: share it with editing on, through the card the owner really uses
+  // owner: share it with editing on, through the card and not the API
   await page.goto(`/p/${created.id}`);
   await expect(page.getByRole("textbox", { name: "Page title" })).toHaveValue(
     "Guest chapter",

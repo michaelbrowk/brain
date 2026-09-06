@@ -42,6 +42,7 @@ export function SharePopover({
   isPublic,
   pageId,
   hasPassword,
+  hasEdit,
   expiresAt,
   inheritedFrom,
   expiredInheritedFrom,
@@ -58,6 +59,10 @@ export function SharePopover({
   isPublic: boolean;
   pageId: string;
   hasPassword: boolean;
+  /** The page's own grant, off the tree, for the window before the exact
+   *  scope is read and for every state the active snapshot is not this
+   *  page's. The switch writes this root, so it reads this root. */
+  hasEdit: boolean;
   expiresAt?: string;
   inheritedFrom?: Grant;
   expiredInheritedFrom?: ExpiredGrant;
@@ -123,6 +128,8 @@ export function SharePopover({
     verified?.rootId === activeRootId && verified.public ? verified : null;
   const effectiveLocked =
     verified?.rootId === pageId && verified.public ? verified.shareLocked : hasPassword;
+  const effectiveEdit =
+    verified?.rootId === pageId && verified.public ? verified.shareEdit : hasEdit;
   const effectiveExpiry =
     verified?.rootId === pageId && verified.public
       ? verified.shareExpiresAt ?? undefined
@@ -383,6 +390,7 @@ export function SharePopover({
         revokeConfirming={revokeConfirming}
         revokePending={revokePending}
         hasPassword={effectiveLocked}
+        hasEdit={effectiveEdit}
         expiresAt={effectiveExpiry}
         onCopy={() => void copyLink()}
         onOpenShareSettings={onOpenShareSettings}
@@ -621,6 +629,7 @@ function ManagementView({
   revokeConfirming,
   revokePending,
   hasPassword,
+  hasEdit,
   expiresAt,
   onCopy,
   onOpenShareSettings,
@@ -644,6 +653,7 @@ function ManagementView({
   revokeConfirming: boolean;
   revokePending: boolean;
   hasPassword: boolean;
+  hasEdit: boolean;
   expiresAt?: string;
   onCopy: () => void;
   onOpenShareSettings?: () => void;
@@ -660,7 +670,7 @@ function ManagementView({
   // page's own while it works, and the parent's where the page is reached
   // through one
   const activeLocked = activeSnapshot?.shareLocked ?? hasPassword;
-  const activeEdit = activeSnapshot?.shareEdit ?? false;
+  const activeEdit = activeSnapshot?.shareEdit ?? hasEdit;
   const head = expiredInheritedOnly
     ? `Parent share through ${expiredInheritedFrom?.title} is expired.`
     : directExpired && !inheritedFrom
@@ -725,8 +735,8 @@ function ManagementView({
       </Row>
       {directPublic && (
         <EditSetting
-          key={String(activeEdit)}
-          editable={activeEdit}
+          key={String(hasEdit)}
+          editable={hasEdit}
           locked={activeLocked}
           disabled={busy || locked}
           onSetEditable={onSetEditable}
@@ -1150,11 +1160,11 @@ function EditRow({
   );
 }
 
-/** The live grant's edit row. Keyed on the snapshot's answer where it is used,
- *  the way ManagementSecurity is keyed on the password and the deadline: the
- *  management view is drawn from the `isPublic` prop before the exact scope
- *  has been read, so the switch has to take the snapshot's value when it
- *  arrives rather than the one it first mounted with. */
+/** The live grant's edit row. Keyed on the page's own answer, the way
+ *  ManagementSecurity is keyed on the password and the deadline: the surface
+ *  opens on the tree's value and the exact scope arrives after it, so the
+ *  switch has to take the corrected value rather than the one it first
+ *  mounted with. */
 function EditSetting({
   editable,
   locked,

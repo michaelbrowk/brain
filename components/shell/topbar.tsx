@@ -140,6 +140,7 @@ export function ShellTopbar({
       isPublic={!!currentNode.public}
       pageId={currentNode.id}
       hasPassword={!!activeShareRoot?.shareLocked}
+      hasEdit={!!currentNode.shareEdit}
       expiresAt={activeShareRoot?.shareExpiresAt}
       inheritedFrom={
         inheritedShareRoot

@@ -723,13 +723,24 @@ describe("attachment scope for editable roots", () => {
           markdown: string;
           shareEdit: boolean;
           scope: AttachmentScope;
+          /** Raw bytes to leave in place of the index, for the corruption
+           *  cases where a well-formed scope cannot express the state. */
+          scopeRaw?: string;
         },
   ) {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-media-scope-"));
     roots.push(root);
     await fs.mkdir(path.join(root, "_attachments"));
     await fs.writeFile(path.join(root, "_attachments", name), SAFE_BYTES);
-    if (!("owner" in options)) await writeAttachmentScope(root, options.scope);
+    if (!("owner" in options)) {
+      await writeAttachmentScope(root, options.scope);
+      if (options.scopeRaw !== undefined) {
+        await fs.writeFile(
+          path.join(root, "_attachments", "scope.json"),
+          options.scopeRaw,
+        );
+      }
+    }
 
     vi.doMock("@/lib/store", () => ({
       NOTES_ROOT: root,
@@ -848,6 +859,24 @@ describe("attachment scope for editable roots", () => {
       scope: { roots: ["root-1"], uploads: {}, baseline: {} },
     });
     expect(res.status).toBe(404);
+  });
+
+  it("falls back to the reference check when the index is unreadable", async () => {
+    // The ruling, asserted rather than described: an index that cannot be
+    // parsed holds no root, so an editable root is judged the way a read-only
+    // share has always been judged. A visitor gains nothing by it, because
+    // writeSharedPage rebuilds a lost root's baseline from the live subtree
+    // before it admits any reference. lib/store/store.test.ts pins that half.
+    const res = await getMedia("old000000001.png", {
+      root: "root-1",
+      page: "page-9",
+      v: "2",
+      markdown: "![](/_attachments-v2/old000000001.png)",
+      shareEdit: true,
+      scope: { roots: ["root-1"], uploads: {}, baseline: {} },
+      scopeRaw: "{ this is not the index",
+    });
+    expect(res.status).toBe(200);
   });
 
   it("serves a baseline attachment to the root that referenced it before editing began", async () => {

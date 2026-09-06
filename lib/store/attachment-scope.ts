@@ -46,10 +46,14 @@ export function attachmentScopePath(notesRoot: string): string {
 }
 
 /** A missing, malformed, symlinked or otherwise untrustworthy file is an
- *  empty scope, never a throw: a corrupted index must degrade to "no visitor
- *  attachment is readable", not to a 500 on every image on the site. Each
- *  section is validated on its own, so one bad entry cannot turn a byte
- *  total into NaN or a grant into a crash. */
+ *  empty scope, never a throw: a corrupted index must not turn every image on
+ *  the site into a 500. An empty scope holds no root, so the reference check
+ *  decides again, which is what a read-only share has always done, and a
+ *  visitor gains nothing by it: the write boundary rebuilds a lost root's
+ *  baseline from the live subtree before it admits any reference, so no page
+ *  can name an attachment the subtree does not already show. Each section is
+ *  validated on its own, so one bad entry cannot turn a byte total into NaN
+ *  or a grant into a crash. */
 export async function readAttachmentScope(
   notesRoot: string,
 ): Promise<AttachmentScope> {
@@ -191,6 +195,32 @@ export function recordBaseline(
     if (!roots.includes(root)) baseline[name] = [...roots, root];
   }
   return { roots: [...scope.roots, root], uploads: scope.uploads, baseline };
+}
+
+/** The owner names an attachment in a page the link already shows. The owner
+ *  has authority over the whole notes folder, so this is the owner choosing to
+ *  expose that file, which is what the first baseline walk assumes about every
+ *  reference it finds. A visitor's reference still grants nothing: only an
+ *  owner write reaches here. An upload is left alone, because the ledger
+ *  already gave it the one root it belongs to. Returns the same object when
+ *  the root is unscoped or every name is already in its baseline, so a caller
+ *  can tell by identity whether there is anything to persist. */
+export function extendBaseline(
+  scope: AttachmentScope,
+  root: string,
+  names: readonly string[],
+): AttachmentScope {
+  if (!scope.roots.includes(root)) return scope;
+  let baseline: AttachmentScope["baseline"] | undefined;
+  for (const name of names) {
+    if (name in scope.uploads) continue;
+    const roots = scope.baseline[name] ?? [];
+    if (roots.includes(root)) continue;
+    baseline ??= { ...scope.baseline };
+    baseline[name] = [...roots, root];
+  }
+  if (!baseline) return scope;
+  return { roots: scope.roots, uploads: scope.uploads, baseline };
 }
 
 export function rootIsScoped(scope: AttachmentScope, root: string): boolean {

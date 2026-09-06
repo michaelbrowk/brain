@@ -821,6 +821,35 @@ describe("attachment scope for editable roots", () => {
     expect(theirs.status).toBe(404);
   });
 
+  it("serves an image the shared page already shows while its root is not in the index", async () => {
+    // The owner has turned editing on, and no visitor has written yet, so the
+    // index has never heard of root-1. Nothing in the subtree came from a
+    // visitor, so the reference check alone still decides.
+    const res = await getMedia("old000000001.png", {
+      root: "root-1",
+      page: "page-9",
+      v: "2",
+      markdown: "![](/_attachments-v2/old000000001.png)",
+      shareEdit: true,
+      scope: EMPTY_SCOPE,
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("stops serving that same image once the root is in the index", async () => {
+    // The first visitor write put root-1 in the index and recorded what the
+    // subtree named. A name the index does not grant is a 404 from then on.
+    const res = await getMedia("old000000001.png", {
+      root: "root-1",
+      page: "page-9",
+      v: "2",
+      markdown: "![](/_attachments-v2/old000000001.png)",
+      shareEdit: true,
+      scope: { roots: ["root-1"], uploads: {}, baseline: {} },
+    });
+    expect(res.status).toBe(404);
+  });
+
   it("serves a baseline attachment to the root that referenced it before editing began", async () => {
     const res = await getMedia("old000000001.png", {
       root: "root-1",

@@ -262,13 +262,15 @@ async function canReadAttachment(
     if (!referencesAttachment(access.target.markdown, name)) return false;
     // The reference check alone stopped being sufficient the moment visitors
     // could write Markdown: naming any existing _attachments filename in a
-    // shared page would otherwise make a private page's image readable. For
-    // a root that has ever been editable, the persisted index decides. No
-    // root that has only ever been read-only changes behaviour.
+    // shared page would otherwise make a private page's image readable. The
+    // index decides for a root it holds, and it holds every root a visitor
+    // has ever written to: each of the three visitor writes records the root
+    // and its baseline before the visitor's bytes land. Until then no line of
+    // Markdown in the subtree came from a visitor, so the reference check is
+    // as safe as it has always been for a read-only share. Turning editing on
+    // therefore keeps serving the images the page already showed.
     const scope = await readAttachmentScope(NOTES_ROOT);
-    if (!access.root.meta.shareEdit && !rootIsScoped(scope, rootId)) {
-      return true;
-    }
+    if (!rootIsScoped(scope, rootId)) return true;
     return attachmentGrantsRoot(scope, name, rootId);
   } catch (error) {
     if (

@@ -1733,9 +1733,10 @@ test.describe("mail on a phone", () => {
 // canvas on each side reads as an object standing on the screen or as a
 // control that has come loose from it.
 //
-// `[data-contained]` changed with it and had no frame at all: inside the Pages
-// sheet and the search view the same bar is a plain row at the foot of that
-// surface, so `fit-content` centres it in a modal instead of in the window.
+// Search and Pages used to carry a contained copy of the bar as a plain row at
+// their own foot. They are sections now: one bar, floating in one place with
+// one material, whichever of the five tabs is up. The two frames below stand
+// over those surfaces and answer whether it really is the same object.
 //
 // The block also writes `docs/design/mail/tabbar.md` — the label widths, the
 // track width at each of four viewports and the gap between every adjacent
@@ -1752,7 +1753,7 @@ test.describe("the mobile tab bar", () => {
   const measure = (page: Page) =>
     page.evaluate(() => {
       const bar = document.querySelector<HTMLElement>(
-        ".brain-mobile-tabbar:not([data-contained]):not([data-hidden])",
+        ".brain-mobile-tabbar:not([data-hidden])",
       );
       const items = bar?.querySelector<HTMLElement>(".brain-mobile-tabbar-items");
       if (!bar || !items) throw new Error("no floating tab bar on this screen");
@@ -1800,7 +1801,7 @@ test.describe("the mobile tab bar", () => {
       };
     });
 
-  test("capture the tab bar above 390, contained, and its measurements", async ({
+  test("capture the tab bar above 390, over both sheets, and its measurements", async ({
     page,
   }) => {
     test.setTimeout(240_000);
@@ -1835,37 +1836,38 @@ test.describe("the mobile tab bar", () => {
         if (scheme === "light") readings.push(await measure(page));
       }
 
-      // Contained, at the width the rest of the set uses. The Pages sheet
-      // first: the bar is in flow at the foot of a modal surface, so it takes
-      // that surface's width and not the window's.
+      // Over the two sections, at the width the rest of the set uses. The bar
+      // is the same floating capsule with the same material it wears on the
+      // canvas, and there is only ever one of it in the tree.
       await page.setViewportSize({ width: 390, height: 844 });
       await page.goto(`/p/${childId}`);
       await expect(page.getByRole("textbox", { name: "Page title" })).toHaveValue(
         "Seed Orders",
       );
+      const onCanvas = await measure(page);
+
       await page.locator('[data-mobile-tab="pages"]').click();
-      await expect(
-        page.locator(".brain-mobile-tabbar[data-contained]"),
-      ).toBeVisible();
+      await expect(page.getByTestId("mobile-pages-view")).toBeVisible();
+      await expect(page.locator(".brain-mobile-tabbar")).toHaveCount(1);
+      await expect(page.locator(".brain-mobile-tabbar")).toHaveClass(
+        /mat-thick/,
+      );
       await page.waitForTimeout(600);
+      expect((await measure(page)).barWidth).toBe(onCanvas.barWidth);
       await page.screenshot({
-        path: path.join(OUT, `tabbar-contained-pages-${scheme}.png`),
+        path: path.join(OUT, `tabbar-over-pages-${scheme}.png`),
       });
 
-      // and the search view, the other host. Escape leaves the sheet first so
-      // the palette opens over the page rather than over the sheet.
+      // and the search view, the other host. Escape leaves Pages first so the
+      // palette opens over the page rather than over that surface.
       await page.keyboard.press("Escape");
-      await expect(
-        page.locator(".brain-mobile-tabbar[data-contained]"),
-      ).toHaveCount(0);
+      await expect(page.getByTestId("mobile-pages-view")).toHaveCount(0);
       await page.locator('[data-mobile-tab="search"]').click();
       await expect(page.locator(".brain-palette-mobile")).toBeVisible();
-      await expect(
-        page.locator(".brain-mobile-tabbar[data-contained]"),
-      ).toBeVisible();
+      await expect(page.locator(".brain-mobile-tabbar")).toHaveCount(1);
       await page.waitForTimeout(600);
       await page.screenshot({
-        path: path.join(OUT, `tabbar-contained-search-${scheme}.png`),
+        path: path.join(OUT, `tabbar-over-search-${scheme}.png`),
       });
       await page.keyboard.press("Escape");
     }

@@ -193,6 +193,30 @@ const SORTED_IN_MS = 900;
 /** The undo pill waits for the document to settle before it rises. */
 const SMART_UNDO_RISE_MS = 400;
 
+/** Search and Pages are layers over a canvas that stays mounted, so they own
+ *  no URL of their own. They do own a history entry, at the URL underneath:
+ *  that is what makes the phone's Back gesture and the iOS edge swipe leave
+ *  them, and it is the affordance whose absence used to force a Back row into
+ *  each header. */
+type MobileOverlay = "pages" | "search";
+
+function currentOverlayEntry(): MobileOverlay | null {
+  const state = window.history.state as { brainMobileOverlay?: unknown } | null;
+  const overlay = state?.brainMobileOverlay;
+  return overlay === "pages" || overlay === "search" ? overlay : null;
+}
+
+/** One entry serves both layers: opening Search over Pages replaces the
+ *  entry rather than stacking a second one, so a single Back leaves. */
+function pushOverlayEntry(overlay: MobileOverlay) {
+  const state = { brainMobileOverlay: overlay };
+  if (currentOverlayEntry()) {
+    window.history.replaceState(state, "", window.location.href);
+    return;
+  }
+  window.history.pushState(state, "", window.location.href);
+}
+
 /** Body of a notes canvas: a `fallback` (skeleton or load error) while the
  *  page is cold, then the resolved page. The fallback exits in place
  *  (absolute skeleton, fast fade) while the body fades in, so the canvas is
@@ -332,10 +356,6 @@ export function Shell({
   const [localRecoveryUnavailableIds, setLocalRecoveryUnavailableIds] =
     useState<Set<string>>(new Set());
   const [mobilePagesOpen, setMobilePagesOpen] = useState(false);
-  const mobilePagesOpenRef = useRef(false);
-  useLayoutEffect(() => {
-    mobilePagesOpenRef.current = mobilePagesOpen;
-  }, [mobilePagesOpen]);
   const [mobileViewport, setMobileViewport] = useState(false);
   const mobileSearchTabRef = useRef<HTMLButtonElement | null>(null);
   const mobilePagesTabRef = useRef<HTMLButtonElement | null>(null);
@@ -380,9 +400,13 @@ export function Shell({
   // its Back pops history; a deep link straight into a section rewrites in
   // place instead (no synthetic history).
   const settingsDrilledFromRootRef = useRef(false);
-  // Settings opened from the mobile Pages drawer: leaving settings restores
-  // the drawer and focuses its gear.
-  const settingsOpenedFromPagesRef = useRef(false);
+  /** A command that navigates out of a layer spends that layer's history
+   *  entry through the navigation itself, and a create runs a request before
+   *  it navigates. The flag tells the close that follows not to pop the same
+   *  entry a second time; a command that ends without navigating spends it on
+   *  the way out instead. */
+  const overlayNavigationRef = useRef(false);
+
   const dialogFocusOwnerRef = useRef(0);
   const historyOpenRequestRef = useRef(0);
   const dialogReturnFocusRef = useRef<DialogFocusLease | null>(null);
@@ -540,7 +564,10 @@ export function Shell({
     (invoker?: HTMLElement) => {
       clearSearchHighlightIntent();
       rememberPaletteInvoker(invoker);
-      if (mobileViewport) setMobilePagesOpen(false);
+      if (mobileViewport) {
+        setMobilePagesOpen(false);
+        pushOverlayEntry("search");
+      }
       setPaletteOpen(true);
     },
     [
@@ -558,6 +585,13 @@ export function Shell({
     const target = paletteReturnFocusRef.current;
     paletteReturnFocusRef.current = null;
     setPaletteOpen(false);
+    // Spend the entry the phone's Search rode in on, unless a command is
+    // already navigating out of it and will rewrite the same entry.
+    const navigating = overlayNavigationRef.current;
+    overlayNavigationRef.current = false;
+    if (!navigating && currentOverlayEntry() === "search") {
+      window.history.back();
+    }
     // The desktop palette is a modal that stays mounted through its exit
     // tween, so the app is still aria-hidden for a few frames after close.
     // Poll (bounded) until a visible target exists instead of assuming two.
@@ -1328,6 +1362,30 @@ export function Shell({
     };
   }, [refreshTree, reloadCurrent, showToast]);
 
+  /** A navigation entry, or the layer's own entry rewritten as the
+   *  destination when one is on the stack. Leaving Search or Pages for a page
+   *  must not leave a closed sheet behind for Back to land on. */
+  const pushNavigationEntry = useCallback((url: string) => {
+    if (currentOverlayEntry()) {
+      overlayNavigationRef.current = false;
+      window.history.replaceState({}, "", url);
+      return;
+    }
+    window.history.pushState({}, "", url);
+  }, []);
+
+  const runOverlayNavigation = useCallback(async (run: () => unknown) => {
+    overlayNavigationRef.current = true;
+    try {
+      await run();
+    } finally {
+      if (overlayNavigationRef.current) {
+        overlayNavigationRef.current = false;
+        if (currentOverlayEntry()) window.history.back();
+      }
+    }
+  }, []);
+
   const select = useCallback((id: string, target?: SearchTextTarget) => {
     const requestId = ++searchHighlightRequestRef.current;
     const nextSearchHighlight = target
@@ -1347,8 +1405,14 @@ export function Shell({
     setEditorContextPageRef(null);
     setMobilePagesOpen(false);
     rememberRecent(id);
-    window.history.pushState({}, "", `/p/${id}`);
-  }, [discardSmartSort, rememberRecent, setMailOpen, setSelectedId]);
+    pushNavigationEntry(`/p/${id}`);
+  }, [
+    discardSmartSort,
+    pushNavigationEntry,
+    rememberRecent,
+    setMailOpen,
+    setSelectedId,
+  ]);
 
   // The page the reader had open last, written wherever it changes rather
   // than only where `select` runs — a deep link and a reload set it too, and
@@ -1385,8 +1449,14 @@ export function Shell({
     editorContextPageRefRef.current = null;
     setEditorContextPageRef(null);
     setMobilePagesOpen(false);
-    window.history.pushState({}, "", "/");
-  }, [clearSearchHighlightIntent, discardSmartSort, setMailOpen, setSelectedId]);
+    pushNavigationEntry("/");
+  }, [
+    clearSearchHighlightIntent,
+    discardSmartSort,
+    pushNavigationEntry,
+    setMailOpen,
+    setSelectedId,
+  ]);
 
   const openMail = useCallback(() => {
     clearSearchHighlightIntent();
@@ -1401,10 +1471,16 @@ export function Shell({
     editorContextPageRefRef.current = null;
     setEditorContextPageRef(null);
     setMobilePagesOpen(false);
-    if (window.location.pathname !== "/mail") {
-      window.history.pushState({}, "", "/mail");
+    if (currentOverlayEntry() || window.location.pathname !== "/mail") {
+      pushNavigationEntry("/mail");
     }
-  }, [clearSearchHighlightIntent, discardSmartSort, setMailOpen, setSelectedId]);
+  }, [
+    clearSearchHighlightIntent,
+    discardSmartSort,
+    pushNavigationEntry,
+    setMailOpen,
+    setSelectedId,
+  ]);
 
   // browser back/forward moves between pages, mail, and settings
   useEffect(() => {
@@ -1414,6 +1490,8 @@ export function Shell({
       editorFlushRef.current();
       flushPendingRef.current();
       discardSmartSort();
+      const overlay = currentOverlayEntry();
+      overlayNavigationRef.current = false;
       const wasSettings = surfaceRef.current === "settings";
       const settingsTarget = parseSettingsPath(location.pathname);
       if (settingsTarget !== undefined) {
@@ -1430,9 +1508,6 @@ export function Shell({
         // a forward-revisit re-enters over an in-app entry, so Back keeps
         // working as "leave settings"
         settingsEnteredInAppRef.current = true;
-        if (!wasSettings) {
-          settingsOpenedFromPagesRef.current = mobilePagesOpenRef.current;
-        }
         setMailSettingsAccountId(
           nextSection === "mail"
             ? new URLSearchParams(location.search).get("account")
@@ -1450,15 +1525,23 @@ export function Shell({
       const nextMailOpen = location.pathname === "/mail";
       const m = location.pathname.match(/^\/p\/([\w-]+)/);
       const nextSelectedId = !nextMailOpen && m ? m[1] : null;
-      const pageChanged = nextSelectedId !== selectedIdRef.current;
       setSelectedId(nextSelectedId);
       setMailOpen(nextMailOpen);
+      // The entry we landed on says whether a layer belongs on this screen,
+      // so Back leaves Search and Pages and Forward brings them back.
+      setMobilePagesOpen(overlay === "pages");
+      if (overlay === "search") {
+        setPaletteOpen(true);
+      } else if (window.matchMedia("(max-width: 767px)").matches) {
+        paletteReturnFocusRef.current = null;
+        setPaletteOpen(false);
+      }
       if (wasSettings) {
         settingsDrilledFromRootRef.current = false;
-        const restorePages = settingsOpenedFromPagesRef.current;
-        settingsOpenedFromPagesRef.current = false;
-        if (restorePages) {
-          setMobilePagesOpen(true);
+        if (overlay === "pages") {
+          // Settings was opened out of the Pages sheet and stacked on top of
+          // the sheet's own entry. Landing back on it restores the sheet, and
+          // the gear that opened Settings owns focus again.
           window.requestAnimationFrame(() => {
             window.requestAnimationFrame(() => {
               const gear = Array.from(
@@ -1497,7 +1580,6 @@ export function Shell({
         window.requestAnimationFrame(focusReturnTarget);
         return;
       }
-      if (pageChanged) setMobilePagesOpen(false);
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
@@ -4805,7 +4887,6 @@ export function Shell({
         paletteReturnFocusRef.current = null;
         setPaletteOpen(false);
       }
-      settingsOpenedFromPagesRef.current = mobilePagesOpen;
       settingsEnteredInAppRef.current = true;
       settingsDrilledFromRootRef.current = false;
       const mobile = window.matchMedia("(max-width: 767px)").matches;
@@ -4825,6 +4906,10 @@ export function Shell({
       editorContextPageRefRef.current = null;
       setEditorContextPageRef(null);
       setMobilePagesOpen(false);
+      // A plain push, not pushNavigationEntry: Settings opened out of the
+      // Pages sheet stacks ON TOP of the sheet's entry, so Back lands on it
+      // and the sheet comes back. That used to be a ref and a hand-rolled
+      // restore.
       window.history.pushState(
         {},
         "",
@@ -4944,9 +5029,39 @@ export function Shell({
     trashOpen,
   ]);
 
-  const closeMobilePages = useCallback(() => {
-    setMobilePagesOpen(false);
+  /** Focus the tab that is current once a layer has gone. The bar the reader
+   *  pressed lived inside that layer's focus scope, so its node leaves with
+   *  it; the replacement arrives within a few frames. */
+  const focusCurrentMobileTab = useCallback(() => {
+    let attemptsLeft = 24;
+    const attempt = () => {
+      const tab = Array.from(
+        document.querySelectorAll<HTMLButtonElement>(
+          '[data-mobile-tab][aria-current="page"]',
+        ),
+      ).find(isVisibleFocusTarget);
+      if (tab) {
+        tab.focus({ preventScroll: true });
+        return;
+      }
+      attemptsLeft -= 1;
+      if (attemptsLeft > 0) window.requestAnimationFrame(attempt);
+    };
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(attempt);
+    });
   }, []);
+
+  /** Leave Search or Pages without navigating. The canvas underneath is still
+   *  mounted, so this is the whole move, and the entry the layer pushed is
+   *  spent here the way the phone's own Back gesture spends it. */
+  const leaveMobileOverlay = useCallback(() => {
+    paletteReturnFocusRef.current = null;
+    setPaletteOpen(false);
+    setMobilePagesOpen(false);
+    if (currentOverlayEntry()) window.history.back();
+    focusCurrentMobileTab();
+  }, [focusCurrentMobileTab]);
 
   const closePaletteForNavigation = useCallback(() => {
     // Mobile tab changes own their destination focus. Skip the palette's
@@ -4974,6 +5089,7 @@ export function Shell({
   const openMobilePages = useCallback((invoker: HTMLElement) => {
     if (invoker instanceof HTMLButtonElement) mobilePagesTabRef.current = invoker;
     if (paletteOpen) closePaletteForNavigation();
+    pushOverlayEntry("pages");
     setMobilePagesOpen(true);
   }, [closePaletteForNavigation, paletteOpen]);
 
@@ -5014,8 +5130,7 @@ export function Shell({
       // A layer over the notes surface leaves the page or the hub mounted
       // underneath, so closing it is the whole move.
       if ((mobilePagesOpen || mobileSearchOpen) && surface === "notes") {
-        closePaletteForNavigation();
-        setMobilePagesOpen(false);
+        leaveMobileOverlay();
         return;
       }
       if (paletteOpen) closePaletteForNavigation();
@@ -5036,7 +5151,7 @@ export function Shell({
     onNew: () => {
       if (paletteOpen) closePaletteForNavigation();
       setMobilePagesOpen(false);
-      void createPage(null);
+      void runOverlayNavigation(() => createPage(null));
     },
     onPages: openMobilePages,
     onMail: () => {
@@ -5065,18 +5180,16 @@ export function Shell({
       }}
       hasCurrent={!!currentNode && !isCollection}
       recentIds={recentIds}
-      onNewPage={async () => {
-        await createPage(null);
-      }}
-      onNewChild={createChildPage}
-      onToday={() => openDailyPage()}
+      onNewPage={() => runOverlayNavigation(() => createPage(null))}
+      onNewChild={() => void runOverlayNavigation(createChildPage)}
+      onToday={() => void runOverlayNavigation(() => openDailyPage())}
       onHome={goHome}
       onOpenMail={openMail}
       onOpenTrash={() => setTrashOpen(true)}
       onOpenSettings={openSettings}
       onToggleTheme={toggleTheme}
       mobile={mobileViewport}
-      mobileFooter={<MobileTabBar {...mobileTabBarProps} contained />}
+      mobileFooter={<MobileTabBar {...mobileTabBarProps} />}
     />
   );
 
@@ -5515,11 +5628,11 @@ export function Shell({
         open={mobilePagesOpen}
         tree={tree}
         selectedId={selectedId}
-        footer={<MobileTabBar {...mobileTabBarProps} contained />}
+        footer={<MobileTabBar {...mobileTabBarProps} />}
         returnFocusRef={mobilePagesTabRef}
         fallbackFocusRef={mainRef}
         nestedModalOpen={paletteOpen}
-        onClose={closeMobilePages}
+        onClose={leaveMobileOverlay}
         onOpenSettings={() => openSettings()}
         onSelect={select}
       />

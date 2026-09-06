@@ -6094,24 +6094,52 @@ test("@mobile Pages and Search are accessible mobile-only surfaces", async ({
       false,
     );
     await expect(
-      tabbar.getByRole("button", { name: "Pages", exact: true }),
+      tabbar.getByRole("button", { name: "Home", exact: true }),
     ).toBeFocused();
 
+    // Neither surface draws a Back row any more. Each rides a history entry
+    // at the URL underneath, so the phone's Back gesture leaves it and the
+    // page it opened over stays exactly where it was.
     await tabbar.getByRole("button", { name: "Pages", exact: true }).click();
     await expect(pagesView).toBeVisible();
-    await pagesView.getByRole("button", { name: "Editor", exact: true }).click();
+    await expect(pagesView.getByRole("button", { name: "Editor" })).toHaveCount(
+      0,
+    );
+    await expect(page).toHaveURL(`/p/${created.id}`);
+    await page.goBack();
     await expect(pagesView).toBeHidden();
-    await expect(
-      tabbar.getByRole("button", { name: "Pages", exact: true }),
-    ).toBeFocused();
+    await expect(page).toHaveURL(`/p/${created.id}`);
 
+    await searchTab.click();
+    await expect(searchView).toBeVisible();
+    await expect(searchView.getByRole("button", { name: "Back" })).toHaveCount(
+      0,
+    );
+    await page.goBack();
+    await expect(searchView).toBeHidden();
+    await expect(page).toHaveURL(`/p/${created.id}`);
+
+    // Escape leaves the same way, and focus lands on the tab that is current
+    // — Home, which owns the page underneath.
     await tabbar.getByRole("button", { name: "Pages", exact: true }).click();
     await expect(pagesView).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(pagesView).toBeHidden();
     await expect(
-      tabbar.getByRole("button", { name: "Pages", exact: true }),
+      tabbar.getByRole("button", { name: "Home", exact: true }),
     ).toBeFocused();
+
+    // Home is the way back to the page from a surface opened over it
+    await tabbar.getByRole("button", { name: "Pages", exact: true }).click();
+    await expect(pagesView).toBeVisible();
+    await tabbar
+      .getByRole("button", { name: "Home", exact: true })
+      .dispatchEvent("click");
+    await expect(pagesView).toBeHidden();
+    await expect(page).toHaveURL(`/p/${created.id}`);
+    await expect(
+      tabbar.getByRole("button", { name: "Home", exact: true }),
+    ).toHaveAttribute("aria-current", "page");
   };
 
   await assertMobileNavigation(390);
@@ -6147,17 +6175,22 @@ test("@mobile Search hands focus to Home and a newly created page", async ({
 
   // Next's dev badge overlaps the bottom-left tab; production has no such
   // portal, so dispatch to the semantic control itself.
+  // Home owns the page the search opened over, so the first tap returns to it
+  // and lights up; a second tap pops to the hub.
   await searchView
     .getByRole("button", { name: "Home", exact: true })
     .dispatchEvent("click");
   await expect(searchView).toBeHidden();
-  await expect(page).toHaveURL("/");
+  await expect(page).toHaveURL(`/p/${source.id}`);
   const outerHome = tabbar.getByRole("button", { name: "Home", exact: true });
   await expect(outerHome).toHaveAttribute("aria-current", "page");
   await expect(outerHome).toBeFocused();
   expect(await page.evaluate(() => document.activeElement === document.body)).toBe(
     false,
   );
+  await outerHome.dispatchEvent("click");
+  await expect(page).toHaveURL("/");
+  await expect(outerHome).toHaveAttribute("aria-current", "page");
 
   await tabbar.getByRole("button", { name: "Search", exact: true }).click();
   await expect(searchView).toBeVisible();

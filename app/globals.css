@@ -3313,14 +3313,19 @@ a.brain-share-url:hover {
     transform 200ms var(--ease-out),
     opacity 200ms var(--ease-out);
 }
-.brain-mobile-tabbar[data-contained] {
-  position: relative;
-  left: auto;
-  right: auto;
-  bottom: auto;
-  max-width: calc(100% - var(--inset) * 2);
-  margin: 0 auto calc(var(--inset) + env(safe-area-inset-bottom, 0px));
-  flex-shrink: 0;
+/* The bar floats over the foot of the Search and Pages surfaces the same way
+   it floats over the canvas, so their lists reserve its height at their end —
+   a list whose last row you cannot reach has no end. The figure is the mail
+   column's (`.brain-mail-scrollfoot`), and the reserve belongs to the rows,
+   not to the scroller, so the bottom edge-blur can still reach the foot of a
+   short list. */
+.brain-mobile-tabbar-reserve {
+  height: calc(54px + var(--inset) * 2 + env(safe-area-inset-bottom, 0px));
+}
+@media (min-width: 768px) {
+  .brain-mobile-tabbar-reserve {
+    height: 0;
+  }
 }
 .brain-mobile-tabbar[data-hidden] {
   pointer-events: none;
@@ -3617,23 +3622,34 @@ a.brain-share-url:hover {
   }
 }
 
-/* Mobile Pages sheet — the drawer of the mobile viewport: a thick sheet
-   with the 8px inset over the safe area (r20), rising on SPRING_SHEET
-   (framer, from the current value; a fade under reduced motion). The Radix
-   content is the transparent full-screen focus scope; the sheet is its
-   child. Rows are tree rows at a touch height. */
+/* Mobile Pages — a section of the mobile viewport, not a panel over it. It
+   holds the whole screen on the canvas ground and arrives on the canvas's own
+   `pageTransition` (framer; a crossfade under reduced motion), so a tap on
+   Pages moves the way a tap on Mail does. It was a thick sheet on the 8px
+   inset at r20, rising from below on SPRING_SHEET, with the app showing
+   through the gutter on all four sides — which was the loudest thing saying
+   "panel" — and with the tab bar riding inside it as a passenger.
+
+   The ground is the canvas rather than a material for two reasons: the bar
+   now floats over it with a material of its own, and a second backdrop-filter
+   under that one is glass on glass (§10 ban 1); and a page tree is a long
+   list of text, which §10 ban 2 keeps off a blurred layer. The Radix content
+   is still the transparent full-screen focus scope; the surface is its child.
+   Rows are tree rows at a touch height. */
 .brain-mobile-pages {
   background: transparent;
 }
 .brain-mobile-pages-sheet {
   position: absolute;
-  top: calc(var(--inset) + env(safe-area-inset-top, 0px));
-  right: calc(var(--inset) + env(safe-area-inset-right, 0px));
-  bottom: calc(var(--inset) + env(safe-area-inset-bottom, 0px));
-  left: calc(var(--inset) + env(safe-area-inset-left, 0px));
+  inset: 0;
   display: flex;
   flex-direction: column;
-  border-radius: var(--r-sheet);
+  /* the surface holds the whole window, so the safe area is its own padding
+     rather than an inset it stands inside */
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  background: var(--paper);
   overflow: hidden;
 }
 .brain-mobile-pages-head {
@@ -3658,10 +3674,6 @@ a.brain-share-url:hover {
 .brain-mobile-pages-sheet .tree-row-toggle {
   width: 28px;
   height: 28px;
-}
-.brain-mobile-pages-sheet .brain-mobile-tabbar[data-contained] {
-  max-width: calc(100% - 8px);
-  margin: 0 auto 4px;
 }
 
 /* ── Mail surfaces (v3, P5 — bundles) ────────────────────────────────────────
@@ -4890,27 +4902,30 @@ a.brain-share-url:hover {
 .brain-palette[data-state="closed"] {
   animation: materialize-out 120ms ease-in both;
 }
-/* The phone's search: the palette as a thick sheet on the 8px inset over the
-   safe area, r20 — the Pages sheet's construction (.brain-mobile-pages-sheet).
-   The Radix content is the transparent full-screen focus scope; the sheet is
-   its child and rises on SPRING_SHEET (framer, from the current value; a fade
-   under reduced motion), entrance only — Radix unmounts on close so the tab
-   bar underneath can take focus at once. The tab bar rides inside it as a
-   plain row (data-contained, no material of its own — ban #1). It used to be
-   a paper page of its own, with uppercase 11/500 labels and r6 rows on an ink
-   tint, under a "← Editor" that no other surface on the phone says. */
+/* The phone's search: the palette as a section of the mobile viewport — the
+   Pages surface's construction (.brain-mobile-pages-sheet), on the canvas
+   ground over the whole screen, arriving on `pageTransition`, entrance only
+   (Radix unmounts on close). The Radix content is the transparent full-screen
+   focus scope; the surface is its child, and the tab bar floats over it with
+   the position and material it has on every other tab. It was a thick sheet
+   on the 8px inset at r20 rising from below, with the bar riding inside it as
+   a plain row; before that it was a paper page of its own with uppercase
+   11/500 labels and r6 rows on an ink tint, under a "← Editor" that no other
+   surface on the phone said. */
 .brain-palette-mobile {
   background: transparent;
 }
 .brain-palette-sheet {
   position: absolute;
-  top: calc(var(--inset) + env(safe-area-inset-top, 0px));
-  right: calc(var(--inset) + env(safe-area-inset-right, 0px));
-  bottom: calc(var(--inset) + env(safe-area-inset-bottom, 0px));
-  left: calc(var(--inset) + env(safe-area-inset-left, 0px));
+  inset: 0;
   display: flex;
   flex-direction: column;
-  border-radius: var(--r-sheet);
+  /* the surface holds the whole window, so the safe area is its own padding
+     rather than an inset it stands inside */
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-right: env(safe-area-inset-right, 0px);
+  padding-left: env(safe-area-inset-left, 0px);
+  background: var(--paper);
   overflow: hidden;
 }
 .brain-palette-sheet-head {
@@ -4926,10 +4941,6 @@ a.brain-share-url:hover {
 .brain-palette-sheet .field > input {
   /* iOS zooms a focused control below 16px */
   font-size: 16px;
-}
-.brain-palette-sheet .brain-mobile-tabbar[data-contained] {
-  max-width: calc(100% - 8px);
-  margin: 0 auto 4px;
 }
 /* group headings: Label 11, sentence case; the selected row a white capsule.
    One rule set for the desktop panel and the phone's sheet: the two are one

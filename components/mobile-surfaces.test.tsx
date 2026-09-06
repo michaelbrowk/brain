@@ -199,6 +199,14 @@ describe("mobile navigation surfaces", () => {
     }));
     vi.stubGlobal("EventSource", FakeEventSource);
     vi.stubGlobal("PointerEvent", MouseEvent);
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
     Object.defineProperty(HTMLElement.prototype, "setPointerCapture", {
       configurable: true,
       value: () => undefined,
@@ -520,6 +528,128 @@ describe("mobile navigation surfaces", () => {
     expect(tab("home").getAttribute("aria-current")).toBe("page");
   });
 
+  it("rides a history entry so the phone's Back gesture leaves the sheets", async () => {
+    const tree = [node("page", "Page")];
+    window.history.replaceState({}, "", "/p/page");
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/tree") return response({ tree });
+      if (url === "/api/page/page") {
+        return response({
+          id: "page",
+          meta: { title: "Page", icon: null, cover: null, stickers: [] },
+          markdown: "# Page\n",
+          rev: "rev-page",
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    await act(async () =>
+      root.render(<Shell tree={tree} initialSelectedId="page" />),
+    );
+    await settle();
+
+    const tab = (key: string) =>
+      document.querySelector(
+        `.brain-mobile-tabbar [data-mobile-tab="${key}"]`,
+      ) as HTMLButtonElement;
+    const pushState = vi.spyOn(window.history, "pushState");
+    const back = vi.spyOn(window.history, "back").mockImplementation(() => {});
+
+    await act(async () => tab("pages").click());
+    expect(
+      document.querySelector('[data-testid="mobile-pages-view"]'),
+    ).not.toBeNull();
+    // the entry sits at the URL underneath: opening Pages moves nothing
+    expect(pushState).toHaveBeenCalledWith(
+      { brainMobileOverlay: "pages" },
+      "",
+      window.location.href,
+    );
+    expect(window.location.pathname).toBe("/p/page");
+
+    // Search replaces the entry rather than stacking a second one
+    pushState.mockClear();
+    await act(async () => tab("search").click());
+    expect(
+      document.querySelector('[data-testid="mobile-search-view"]'),
+    ).not.toBeNull();
+    expect(pushState).not.toHaveBeenCalled();
+    expect(window.history.state).toEqual({ brainMobileOverlay: "search" });
+
+    // a Back gesture pops that entry, and the pop closes the sheet without
+    // navigating the page away
+    await act(async () => {
+      window.history.replaceState({}, "", "/p/page");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await settle();
+    expect(
+      document.querySelector('[data-testid="mobile-search-view"]'),
+    ).toBeNull();
+    expect(window.location.pathname).toBe("/p/page");
+
+    // Escape spends the entry the same way, through history
+    await act(async () => tab("pages").click());
+    back.mockClear();
+    await act(async () =>
+      document.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      ),
+    );
+    expect(back).toHaveBeenCalledTimes(1);
+  });
+
+  it("spends the sheet's entry on the way to a page instead of stacking one", async () => {
+    const tree = [node("page", "Page"), node("other", "Other")];
+    window.history.replaceState({}, "", "/p/page");
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/tree") return response({ tree });
+      const match = /^\/api\/page\/(\w+)$/.exec(url);
+      if (match) {
+        return response({
+          id: match[1],
+          meta: { title: match[1], icon: null, cover: null, stickers: [] },
+          markdown: "# Page\n",
+          rev: `rev-${match[1]}`,
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    await act(async () =>
+      root.render(<Shell tree={tree} initialSelectedId="page" />),
+    );
+    await settle();
+
+    const pagesTab = document.querySelector(
+      '.brain-mobile-tabbar [data-mobile-tab="pages"]',
+    ) as HTMLButtonElement;
+    await act(async () => pagesTab.click());
+
+    const pushState = vi.spyOn(window.history, "pushState");
+    const replaceState = vi.spyOn(window.history, "replaceState");
+    await act(async () => {
+      (
+        document.querySelector(
+          '[aria-label="Open Other"]',
+        ) as HTMLButtonElement
+      ).click();
+    });
+    await settle();
+
+    // the sheet's own entry becomes the page's, so one Back returns to the
+    // page the reader started on rather than to a closed sheet
+    expect(pushState).not.toHaveBeenCalled();
+    expect(replaceState).toHaveBeenCalledWith({}, "", "/p/other");
+    expect(window.location.pathname).toBe("/p/other");
+    expect(
+      document.querySelector('[data-testid="mobile-pages-view"]'),
+    ).toBeNull();
+  });
+
   it("opens Settings from the Pages drawer and Back restores the drawer", async () => {
     stubFetch();
     window.history.replaceState({}, "", "/");
@@ -550,9 +680,10 @@ describe("mobile navigation surfaces", () => {
       document.querySelector('[data-testid="mobile-pages-view"]'),
     ).toBeNull();
 
-    // browser Back: the previous URL restores the drawer and its gear
+    // browser Back: Settings stacked on top of the drawer's own entry, so the
+    // pop lands on that entry and the drawer and its gear come back
     await act(async () => {
-      window.history.replaceState({}, "", "/");
+      window.history.replaceState({ brainMobileOverlay: "pages" }, "", "/");
       window.dispatchEvent(new PopStateEvent("popstate"));
     });
     await settle();

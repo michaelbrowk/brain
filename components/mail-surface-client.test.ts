@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { MAIL_RESOURCE_LIMITS } from "@/lib/mail/security";
 import {
   defaultMailSurfaceClient,
   isDeletableDraft,
@@ -7,6 +8,7 @@ import {
   isMailMutationTimeout,
   isResumableDraft,
   MAIL_MUTATION_TIMEOUT_MS,
+  MAX_MAIL_ACCOUNTS,
   MailApiError,
   type MailDraftState,
   type MailDraftSummary,
@@ -1083,6 +1085,42 @@ describe("defaultMailSurfaceClient account capabilities", () => {
 
     await expect(defaultMailSurfaceClient.loadAccounts()).rejects.toThrow(
       "invalid mail account",
+    );
+  });
+
+  /** The browser cannot import the service module that owns the cap, so the
+   *  mirror below is what the wire check reads. It has to be the same number. */
+  it("mirrors the account cap the mail service enforces", () => {
+    expect(MAX_MAIL_ACCOUNTS).toBe(MAIL_RESOURCE_LIMITS.maxAccounts);
+  });
+
+  function accountList(count: number): unknown {
+    return {
+      apiVersion: 3,
+      accounts: Array.from({ length: count }, (_, index) =>
+        imapAccount({
+          accountId: `account-a${String(index + 1).repeat(32)}`,
+          emailAddress: `person-${index + 1}@custom.test`,
+        }),
+      ),
+    };
+  }
+
+  it("reads a full account list and refuses one past the cap", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(response(accountList(MAX_MAIL_ACCOUNTS))),
+    );
+    await expect(defaultMailSurfaceClient.loadAccounts()).resolves.toHaveLength(
+      MAX_MAIL_ACCOUNTS,
+    );
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(response(accountList(MAX_MAIL_ACCOUNTS + 1))),
+    );
+    await expect(defaultMailSurfaceClient.loadAccounts()).rejects.toThrow(
+      "invalid mail accounts",
     );
   });
 });

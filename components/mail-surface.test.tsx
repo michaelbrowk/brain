@@ -5,7 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { emitMailCommand } from "./mail-commands";
 import { accountWords } from "./mail-row";
-import { MailSurface } from "./mail-surface";
+import { MailSurface, UNIFIED_FANOUT_LIMIT } from "./mail-surface";
 import type { ToastOptions } from "./ui/primitives";
 
 // Animation playback is not under test — assert structure and props. The real
@@ -5618,6 +5618,145 @@ describe("MailSurface", () => {
       // Seen stays collapsed: the count shows, the row does not.
       expect(list.textContent).toContain("Seen");
       expect(list.textContent).not.toContain("Seen from A");
+    });
+
+    /** Seven connected accounts, each with one thread of its own. */
+    function manyAccounts(): readonly PublicMailAccount[] {
+      return Array.from({ length: 7 }, (_, index) => ({
+        ...accountA,
+        accountId: `account-a${String(index + 1).repeat(32)}`,
+        emailAddress: `person-${index + 1}@example.test`,
+      }));
+    }
+
+    /* The threads spread over the three sections so none of them bundles and
+       every row is on screen as itself. Expanding a section instead would be
+       an assertion that writes to sessionStorage, and the next test would
+       mount into it. */
+    const MANY_CATEGORIES = ["people", "notification", "newsletter"] as const;
+
+    /** A listThreads that hands back its resolver instead of settling. */
+    function heldPages(
+      many: readonly PublicMailAccount[],
+      held: Array<() => void>,
+      counts: { inFlight: number; peak: number },
+    ) {
+      return vi.fn().mockImplementation(({ accountId }: { accountId: string }) => {
+        counts.inFlight += 1;
+        counts.peak = Math.max(counts.peak, counts.inFlight);
+        const seat = many.findIndex((account) => account.accountId === accountId);
+        return new Promise((resolve) => {
+          held.push(() => {
+            counts.inFlight -= 1;
+            resolve(
+              pageOf([
+                unifiedThread({
+                  accountId,
+                  threadId: `thread ${accountId}`,
+                  category: MANY_CATEGORIES[seat % MANY_CATEGORIES.length]!,
+                }),
+              ]),
+            );
+          });
+        });
+      });
+    }
+
+    /* THE MERGE IS GENERIC IN THE ACCOUNT COUNT, THE MACHINE IS NOT. Opening
+       All inboxes on seven accounts would put seven page-1 requests on one
+       shared vCPU in the same instant, and every one of them lands in the same
+       mail service. The queue holds the peak where three accounts held it,
+       and the accounts waiting their turn read as pending, never as empty and
+       never as failed. */
+    it("bounds the page-1 fan-out and still merges every account", async () => {
+      const many = manyAccounts();
+      // Without more accounts than slots there is no queue to assert on.
+      expect(many.length).toBeGreaterThan(UNIFIED_FANOUT_LIMIT);
+      const held: Array<() => void> = [];
+      const counts = { inFlight: 0, peak: 0 };
+      const listThreads = heldPages(many, held, counts);
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue(many),
+        listThreads,
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+
+      expect(listThreads).toHaveBeenCalledTimes(UNIFIED_FANOUT_LIMIT);
+      expect(
+        document.body.querySelector('[aria-label="Loading all inboxes"]'),
+      ).not.toBeNull();
+      expect(document.body.textContent).not.toContain("couldn’t load");
+      expect(document.body.textContent).not.toContain("Inbox zero");
+
+      while (held.length > 0) {
+        const wave = held.splice(0);
+        await act(async () => wave.forEach((release) => release()));
+        await settle();
+      }
+
+      expect(counts.peak).toBe(UNIFIED_FANOUT_LIMIT);
+      expect(listThreads).toHaveBeenCalledTimes(many.length);
+      const list = document.body.querySelector(
+        '[aria-label="All inboxes threads"]',
+      ) as HTMLElement;
+      for (const account of many) {
+        expect(list.textContent).toContain(`thread ${account.accountId}`);
+      }
+    });
+
+    /* A queued request is a request that has not been made yet, so a failure
+       in the wave ahead of it has to free its slot rather than hold it. */
+    it("gives a failed account's slot to the next one in the queue", async () => {
+      const many = manyAccounts();
+      expect(many.length).toBeGreaterThan(UNIFIED_FANOUT_LIMIT);
+      const held: Array<() => void> = [];
+      const counts = { inFlight: 0, peak: 0 };
+      const pages = heldPages(many, held, counts);
+      const listThreads = vi
+        .fn()
+        .mockImplementation((input: { accountId: string }) => {
+          if (input.accountId === many[0]!.accountId) {
+            counts.inFlight += 1;
+            counts.peak = Math.max(counts.peak, counts.inFlight);
+            counts.inFlight -= 1;
+            return Promise.reject(new Error("outage"));
+          }
+          return pages(input);
+        });
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue(many),
+        listThreads,
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+
+      // The first wave is three; the failure released one of them, so a fourth
+      // account is already asking while the other two are still out.
+      expect(listThreads).toHaveBeenCalledTimes(UNIFIED_FANOUT_LIMIT + 1);
+
+      while (held.length > 0) {
+        const wave = held.splice(0);
+        await act(async () => wave.forEach((release) => release()));
+        await settle();
+      }
+
+      expect(counts.peak).toBe(UNIFIED_FANOUT_LIMIT);
+      expect(listThreads).toHaveBeenCalledTimes(many.length);
+      expect(document.body.textContent).toContain(
+        `${many[0]!.emailAddress} couldn’t load`,
+      );
+      const list = document.body.querySelector(
+        '[aria-label="All inboxes threads"]',
+      ) as HTMLElement;
+      for (const account of many.slice(1)) {
+        expect(list.textContent).toContain(`thread ${account.accountId}`);
+      }
+      expect(list.textContent).not.toContain(`thread ${many[0]!.accountId}`);
     });
 
     it("degrades one failing account to an inline notice with per-account retry", async () => {

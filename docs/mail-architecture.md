@@ -6,7 +6,7 @@
 
 Implementation status (2026-07-20): the account-connect and local
 multi-account slices are staged in the repository, but are not installed or
-enabled in production. The service supports up to three custom-domain IMAP
+enabled in production. The service supports up to seven custom-domain IMAP
 accounts through a redacted `/v2/accounts` API, encrypted per-account
 credentials in `local.sqlite3`, verified TLS/STARTTLS provisioning, scoped
 disconnect, and the Brain Settings and `/mail` surfaces. A legacy encrypted
@@ -287,7 +287,7 @@ one-account compatibility path and adds `GET`/`POST /v2/accounts` plus
 `PATCH`/`DELETE /v2/accounts/:accountId`. Account responses are redacted: they
 contain provider and endpoint metadata but never a password, token,
 ciphertext, wrapping-key state, Google identifier, or raw provider response.
-The v2 list is capped at three accounts, email uniqueness is global after
+The v2 list is capped at seven accounts, email uniqueness is global after
 normalization, and IMAP `POST` still validates DNS, verified implicit TLS or
 mandatory STARTTLS, observed peer equality, and authentication before saving.
 An edit may omit the password to keep the saved secret; first setup may not.
@@ -693,7 +693,7 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 
 | Resource | Limit |
 | --- | ---: |
-| Accounts | 3 |
+| Accounts | 7 |
 | Incoming raw message | 40 MiB |
 | Outgoing raw message, MVP | 1 MiB |
 | Relay frame | 16 KiB |
@@ -731,6 +731,8 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 | Process CPU/tasks | 35% CPU quota / 32 tasks contract |
 | Parser memory | `MemoryHigh=128 MiB`, `MemoryMax=192 MiB` contract |
 | Parser CPU/tasks/FDs | 20% CPU quota / 8 tasks / 64 file descriptors contract |
+
+One bound sits outside that file because it belongs to the browser rather than the service. `UNIFIED_FANOUT_LIMIT` in [`components/mail-surface.tsx`](../components/mail-surface.tsx) caps how many per-account requests the merged inbox has in flight at once, across its first load, its load-more, and its 60-second refresh. The merge itself is generic in the number of accounts, so the account cap can rise without it noticing, and the merged inbox is the one surface that asks every account at the same moment. The peak it makes stays at three however many accounts are connected, and the accounts waiting a turn read as pending rather than as empty or as failed.
 
 [`MailSystemAdmissionPort`](../lib/mail/ports.ts) atomically reserves aggregate capacity before each connection, fetch, parse, SMTP submission, queue, temp blob, or WAL-growing operation. Its exact delta validator rejects unknown, negative, fractional, non-finite, accessor-backed, or individually oversized counters before arithmetic. [`admitMailSystemUsage`](../lib/mail/security.ts) rejects a snapshot above any quota, including the explicit fetch/parser/SMTP concurrency fields. Per-account limits cannot substitute for these global limits.
 
@@ -848,7 +850,7 @@ No step receives production credentials until its security tests and the full Br
 
 These do not block PR0:
 
-- which three accounts enter the first canary
+- which accounts enter the first canary
 - cache retention and offline body pinning
 - manual actions for `delivery_unknown`, `sent_copy_unknown`, `sent_copy_failed`, and rejected recipients in a partial delivery
 - deletion, archive, snooze, and undo timing

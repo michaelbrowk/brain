@@ -1,6 +1,6 @@
 import type { MailEndpoint, MailTlsMode } from "../ports";
 import type { MailSystemMailbox } from "../message-types";
-import { validateMailEndpoint } from "../security";
+import { MAIL_RESOURCE_LIMITS, validateMailEndpoint } from "../security";
 
 const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
 const SAFE_CREDENTIAL_REF = /^credential-r[0-9a-f]{32}$/;
@@ -11,7 +11,8 @@ const MAX_USERNAME_BYTES = 512;
 const MAX_PASSWORD_BYTES = 4 * 1024;
 const MAX_DISPLAY_NAME_BYTES = 256;
 
-export const MAX_MAIL_ACCOUNTS = 3;
+/** The account cap, under the name the account service and its callers use. */
+export const MAX_MAIL_ACCOUNTS = MAIL_RESOURCE_LIMITS.maxAccounts;
 
 export const MAIL_ACCOUNT_CAPABILITIES_CONTRACT_HEADER =
   "x-brain-mail-account-capabilities";

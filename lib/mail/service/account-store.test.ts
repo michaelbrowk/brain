@@ -29,6 +29,7 @@ import {
 } from "./account-store";
 import {
   MailAccountError,
+  MAX_MAIL_ACCOUNTS,
   type StoredImapMailAccount,
 } from "./account-types";
 
@@ -377,11 +378,12 @@ describe("SQLite multi-account store", () => {
     reopened.close();
   });
 
-  it("enforces three accounts and normalized provider-email uniqueness", async () => {
+  it("enforces the account cap and normalized provider-email uniqueness", async () => {
     const fixture = await createStore();
     const store = new SqliteMailAccountStore(fixture);
     await store.initialize();
-    for (let index = 1; index <= 3; index += 1) {
+    const overCap = MAX_MAIL_ACCOUNTS + 1;
+    for (let index = 1; index <= MAX_MAIL_ACCOUNTS; index += 1) {
       await store.save(
         storedFixture(index),
         Buffer.from(`password-${index}`),
@@ -390,19 +392,19 @@ describe("SQLite multi-account store", () => {
     }
     await expect(
       store.save(
-        storedFixture(4),
-        Buffer.from("password-4"),
+        storedFixture(overCap),
+        Buffer.from(`password-${overCap}`),
         new AbortController().signal,
       ),
     ).rejects.toMatchObject({ code: "account_limit_reached" });
 
-    await store.deleteAccount(storedFixture(3).account.accountId);
+    await store.deleteAccount(storedFixture(MAX_MAIL_ACCOUNTS).account.accountId);
     await expect(
       store.save(
         {
-          ...storedFixture(4),
+          ...storedFixture(overCap),
           account: {
-            ...storedFixture(4).account,
+            ...storedFixture(overCap).account,
             emailAddress: "PERSON@EXAMPLE.TEST",
           },
         },
@@ -410,7 +412,7 @@ describe("SQLite multi-account store", () => {
         new AbortController().signal,
       ),
     ).rejects.toMatchObject({ code: "account_already_exists" });
-    expect(await store.listAccounts()).toHaveLength(2);
+    expect(await store.listAccounts()).toHaveLength(MAX_MAIL_ACCOUNTS - 1);
     store.close();
   });
 
@@ -784,12 +786,12 @@ describe("SQLite multi-account store", () => {
     store.close();
   });
 
-  it("enforces one global email namespace and the raw three-account cap", async () => {
+  it("enforces one global email namespace and the raw account cap", async () => {
     const fixture = await createStore();
     const now = 1_800_000_000_000;
     const store = new SqliteMailAccountStore({ ...fixture, now: () => now });
     await store.initialize();
-    for (const index of [1, 2, 3]) {
+    for (let index = 1; index <= MAX_MAIL_ACCOUNTS; index += 1) {
       await store.save(
         storedFixture(index),
         Buffer.from(`password-${index}`),
@@ -797,13 +799,13 @@ describe("SQLite multi-account store", () => {
       );
     }
     const overCap = gmailGrantFixture({
-      emailAddress: "fourth@gmail.com",
+      emailAddress: "over-cap@gmail.com",
       grantedAt: now,
     });
     await expect(
       store.persistGrant(overCap, null, new AbortController().signal),
     ).rejects.toMatchObject({ code: "account_limit_reached" });
-    await store.deleteAccount(storedFixture(3).account.accountId);
+    await store.deleteAccount(storedFixture(MAX_MAIL_ACCOUNTS).account.accountId);
     const duplicate = gmailGrantFixture({
       emailAddress: "PERSON@EXAMPLE.TEST",
       grantedAt: now,
@@ -811,7 +813,7 @@ describe("SQLite multi-account store", () => {
     await expect(
       store.persistGrant(duplicate, null, new AbortController().signal),
     ).rejects.toMatchObject({ code: "account_already_exists" });
-    expect(await store.countAccounts()).toBe(2);
+    expect(await store.countAccounts()).toBe(MAX_MAIL_ACCOUNTS - 1);
     for (const value of [overCap, duplicate]) {
       value.accessToken.fill(0);
       value.refreshToken.fill(0);

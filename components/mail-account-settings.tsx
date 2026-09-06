@@ -40,7 +40,18 @@ type View = "list" | "providers" | "details" | "imap-form";
 type FormField = "email" | "hostname" | "username" | "password" | "port";
 type FieldErrors = Partial<Record<FormField, string>>;
 
-const MAX_ACCOUNTS = 3;
+/**
+ * Mirror of `MAIL_RESOURCE_LIMITS.maxAccounts`. That module reaches node:crypto
+ * and node:net, which cannot enter a browser bundle, and this manager is loaded
+ * on its own chunk with no dependency on the mail API client, so the number is
+ * repeated here. `mirrors the account cap the mail service enforces` fails the
+ * build if the two ever differ. Every count the reader sees is written from it,
+ * so the copy stays true at whatever the cap becomes.
+ */
+export const MAX_MAIL_ACCOUNTS = 7;
+
+const ACCOUNT_LIMIT_BADGE = `${MAX_MAIL_ACCOUNTS} account limit`;
+const ACCOUNT_LIMIT_COPY = `Brain supports up to ${MAX_MAIL_ACCOUNTS} mail accounts.`;
 const NAVROW_CLASS =
   "brain-settings-row brain-settings-rootrow brain-settings-navrow brain-touch-min focus-inset";
 const FORM_FIELD_ORDER: FormField[] = [
@@ -839,7 +850,7 @@ export function MailAccountSettings({
         title="Mail accounts"
         description="Gmail, Google Workspace, or any IMAP mailbox."
         action={
-          accounts.length > 0 && accounts.length < MAX_ACCOUNTS ? (
+          accounts.length > 0 && accounts.length < MAX_MAIL_ACCOUNTS ? (
             <Button
               type="button"
               variant="quiet"
@@ -851,8 +862,10 @@ export function MailAccountSettings({
               <Icon name="add-linear" size={16} />
               Add account
             </Button>
-          ) : accounts.length >= MAX_ACCOUNTS ? (
-            <span className="pt-1 text-caption text-ink-3">3 account limit</span>
+          ) : accounts.length >= MAX_MAIL_ACCOUNTS ? (
+            <span className="pt-1 text-caption text-ink-3">
+              {ACCOUNT_LIMIT_BADGE}
+            </span>
           ) : null
         }
       >
@@ -922,10 +935,8 @@ export function MailAccountSettings({
         )}
       </SettingsGroup>
 
-      {accounts.length >= MAX_ACCOUNTS && (
-        <p className="text-caption text-ink-3">
-          Brain supports up to three mail accounts.
-        </p>
+      {accounts.length >= MAX_MAIL_ACCOUNTS && (
+        <p className="text-caption text-ink-3">{ACCOUNT_LIMIT_COPY}</p>
       )}
     </motion.div>
   );
@@ -1184,7 +1195,7 @@ function messageForError(error: unknown): string {
     case "account_already_exists":
       return "This mail account is already connected.";
     case "account_limit_reached":
-      return "Brain supports up to three mail accounts.";
+      return ACCOUNT_LIMIT_COPY;
     case "account_not_found":
       return "This account no longer exists. Reload Mail settings.";
     case "imap_dns_failed":

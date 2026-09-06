@@ -6,7 +6,7 @@ must be verified separately before applying the gate.
 
 ## What this slice contains
 
-- up to three custom-domain IMAP accounts over port `993` implicit TLS or port
+- up to seven custom-domain IMAP accounts over port `993` implicit TLS or port
   `143` mandatory STARTTLS;
 - compatibility `GET`, `POST`, and `DELETE /v1/account`, plus account-scoped
   `GET`/`POST /v2/accounts` and `PATCH`/`DELETE
@@ -50,7 +50,7 @@ With no account, health reports `receiveReadiness` and `sendReadiness` as
 Gmail canary proves readiness. Neither state may be presented as proof that the
 local Gmail message path is production-ready.
 
-The v2 API caps the list at three accounts and rejects a normalized email that
+The v2 API caps the list at seven accounts and rejects a normalized email that
 already belongs to any provider. It returns redacted account metadata only.
 When more than one account exists, legacy v1 `POST` and `DELETE` fail with
 `409 account_selection_required`; callers must select an account through v2.

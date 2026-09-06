@@ -3,7 +3,8 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MailAccountSettings } from "./mail-account-settings";
+import { MAIL_RESOURCE_LIMITS } from "@/lib/mail/security";
+import { MAX_MAIL_ACCOUNTS, MailAccountSettings } from "./mail-account-settings";
 
 function imapAccount(
   accountId = "account-a0123456789abcdef0123456789abcdef",
@@ -155,34 +156,32 @@ describe("MailAccountSettings", () => {
     expect(button("Other emailConnect with IMAP")).not.toBeNull();
   });
 
+  it("mirrors the account cap the mail service enforces", () => {
+    expect(MAX_MAIL_ACCOUNTS).toBe(MAIL_RESOURCE_LIMITS.maxAccounts);
+  });
+
   it("replaces the add action with a clear account-limit state", async () => {
+    const full = Array.from({ length: MAX_MAIL_ACCOUNTS }, (_, index) =>
+      imapAccount(
+        `account-a${String(index + 1).repeat(32)}`,
+        `person-${index + 1}@example.test`,
+      ),
+    );
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValue(
-        response(
-          accounts(
-            imapAccount(
-              "account-a11111111111111111111111111111111",
-              "one@example.test",
-            ),
-            imapAccount(
-              "account-a22222222222222222222222222222222",
-              "two@example.test",
-            ),
-            imapAccount(
-              "account-a33333333333333333333333333333333",
-              "three@example.test",
-            ),
-          ),
-        ),
-      ),
+      vi.fn().mockResolvedValue(response(accounts(...full))),
     );
     await act(async () =>
       root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
     );
     await settle();
 
-    expect(document.body.textContent).toContain("3 account limit");
+    expect(document.body.textContent).toContain(
+      `${MAX_MAIL_ACCOUNTS} account limit`,
+    );
+    expect(document.body.textContent).toContain(
+      `Brain supports up to ${MAX_MAIL_ACCOUNTS} mail accounts.`,
+    );
     expect(document.body.textContent).not.toContain("Add account");
   });
 

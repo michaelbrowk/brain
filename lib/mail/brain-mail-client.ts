@@ -1113,7 +1113,7 @@ export function validateMailAccountsStatus(value: unknown): MailAccountsStatus {
     !isExactRecord(value, ["apiVersion", "accounts"]) ||
     value.apiVersion !== 2 ||
     !Array.isArray(value.accounts) ||
-    value.accounts.length > 3
+    value.accounts.length > MAIL_RESOURCE_LIMITS.maxAccounts
   ) {
     throw invalidResponse();
   }
@@ -1148,7 +1148,7 @@ export function validateMailAccountsCapabilitiesStatus(
     !isExactRecord(value, ["apiVersion", "accounts"]) ||
     value.apiVersion !== 3 ||
     !Array.isArray(value.accounts) ||
-    value.accounts.length > 3
+    value.accounts.length > MAIL_RESOURCE_LIMITS.maxAccounts
   ) {
     throw invalidResponse();
   }

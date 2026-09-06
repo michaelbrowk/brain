@@ -1,12 +1,12 @@
 import { validateMailSyncResult } from "../message-codec";
 import type { MailSyncResult } from "../message-types";
+import { MAX_MAIL_ACCOUNTS } from "./account-types";
 import type { MailBackgroundSyncStep } from "./message-service";
 
 const DEFAULT_INITIAL_DELAY_MS = 5_000;
 const DEFAULT_INTERVAL_MS = 60_000;
 const DEFAULT_CONTINUATION_DELAY_MS = 250;
 const DEFAULT_MAX_ITEMS = 5;
-const MAX_ACCOUNTS = 3;
 const MAX_PROVIDER_PAGES_PER_BURST = 6;
 const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
 
@@ -283,7 +283,7 @@ function validateSyncResult(value: MailSyncResult): MailSyncResult {
 function validateAccountIds(value: readonly string[]): readonly string[] {
   if (
     !Array.isArray(value) ||
-    value.length > MAX_ACCOUNTS ||
+    value.length > MAX_MAIL_ACCOUNTS ||
     value.some((accountId) => typeof accountId !== "string" || !SAFE_ACCOUNT_ID.test(accountId)) ||
     new Set(value).size !== value.length
   ) {

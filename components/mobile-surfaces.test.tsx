@@ -429,6 +429,97 @@ describe("mobile navigation surfaces", () => {
     expect(dot.className).toContain("size-1.5 rounded-full bg-current");
   });
 
+  it("keeps Home current on an open page and returns to it from Mail", async () => {
+    const tree = [node("page", "Page")];
+    window.history.replaceState({}, "", "/p/page");
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/tree") return response({ tree });
+      if (url === "/api/page/page") {
+        return response({
+          id: "page",
+          meta: { title: "Page", icon: null, cover: null, stickers: [] },
+          markdown: "# Page\n",
+          rev: "rev-page",
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    await act(async () =>
+      root.render(<Shell tree={tree} initialSelectedId="page" />),
+    );
+    await settle();
+
+    const tab = (key: string) =>
+      document.querySelector(`[data-mobile-tab="${key}"]`) as HTMLButtonElement;
+
+    // Home owns the whole notes surface. The open page used to belong to no
+    // slot at all, which is why each sheet had to draw its own way back.
+    expect(tab("home").getAttribute("aria-current")).toBe("page");
+
+    await act(async () => tab("mail").click());
+    expect(window.location.pathname).toBe("/mail");
+    expect(tab("mail").getAttribute("aria-current")).toBe("page");
+    expect(tab("home").getAttribute("aria-current")).toBeNull();
+
+    // Home is not current, so it returns to the page that was open there
+    await act(async () => tab("home").click());
+    await settle();
+    expect(window.location.pathname).toBe("/p/page");
+    expect(tab("home").getAttribute("aria-current")).toBe("page");
+
+    // current already: a second tap pops to the hub
+    await act(async () => tab("home").click());
+    await settle();
+    expect(window.location.pathname).toBe("/");
+    expect(tab("home").getAttribute("aria-current")).toBe("page");
+  });
+
+  it("returns to the open page when Home is tapped over the Pages sheet", async () => {
+    const tree = [node("page", "Page")];
+    window.history.replaceState({}, "", "/p/page");
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/tree") return response({ tree });
+      if (url === "/api/page/page") {
+        return response({
+          id: "page",
+          meta: { title: "Page", icon: null, cover: null, stickers: [] },
+          markdown: "# Page\n",
+          rev: "rev-page",
+        });
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    await act(async () =>
+      root.render(<Shell tree={tree} initialSelectedId="page" />),
+    );
+    await settle();
+
+    const tab = (key: string) =>
+      document.querySelector(
+        `.brain-mobile-tabbar [data-mobile-tab="${key}"]`,
+      ) as HTMLButtonElement;
+
+    await act(async () => tab("pages").click());
+    expect(
+      document.querySelector('[data-testid="mobile-pages-view"]'),
+    ).not.toBeNull();
+    expect(tab("pages").getAttribute("aria-current")).toBe("page");
+
+    // the editor is still mounted behind the sheet, so Home is the way out
+    // and the page stays open
+    await act(async () => tab("home").click());
+    await settle();
+    expect(
+      document.querySelector('[data-testid="mobile-pages-view"]'),
+    ).toBeNull();
+    expect(window.location.pathname).toBe("/p/page");
+    expect(tab("home").getAttribute("aria-current")).toBe("page");
+  });
+
   it("opens Settings from the Pages drawer and Back restores the drawer", async () => {
     stubFetch();
     window.history.replaceState({}, "", "/");

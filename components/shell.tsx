@@ -1348,10 +1348,29 @@ export function Shell({
     setMobilePagesOpen(false);
     rememberRecent(id);
     window.history.pushState({}, "", `/p/${id}`);
-    try {
-      localStorage.setItem("brain-last-opened", id);
-    } catch {}
   }, [discardSmartSort, rememberRecent, setMailOpen, setSelectedId]);
+
+  // The page the reader had open last, written wherever it changes rather
+  // than only where `select` runs — a deep link and a reload set it too, and
+  // the phone's Home tab reads it to return to the page it owns.
+  useEffect(() => {
+    if (!selectedId) return;
+    try {
+      localStorage.setItem("brain-last-opened", selectedId);
+    } catch {}
+  }, [selectedId]);
+
+  /** The page Home returns to. Home owns the whole notes surface, so a tap
+   *  from Mail or Settings goes back to the page that was open there instead
+   *  of to the hub. An id that has left the tree falls through to the hub. */
+  const lastOpenedPageId = useCallback(() => {
+    let id: string | null = null;
+    try {
+      id = localStorage.getItem("brain-last-opened");
+    } catch {}
+    if (!id || findPath(treeRef.current, id).length === 0) return null;
+    return id;
+  }, []);
 
   const goHome = useCallback(() => {
     clearSearchHighlightIntent();
@@ -4980,12 +4999,11 @@ export function Shell({
     !!smartSort;
 
   const mobileTabBarProps = {
-    homeActive:
-      !mailOpen &&
-      !settingsActive &&
-      !selectedId &&
-      !mobilePagesOpen &&
-      !mobileSearchOpen,
+    // Home owns the whole notes surface, hub and open page both. It used to
+    // exclude an open page, which left the place the reader spends the day in
+    // none of the five slots — and that is why each sheet had to draw a way
+    // back of its own.
+    homeActive: surface === "notes" && !mobilePagesOpen && !mobileSearchOpen,
     searchActive: mobileSearchOpen,
     pagesActive: mobilePagesOpen,
     mailActive: mailOpen && !mobilePagesOpen && !mobileSearchOpen,
@@ -4993,7 +5011,24 @@ export function Shell({
     searchRef: mobileSearchTabRef,
     pagesRef: mobilePagesTabRef,
     onHome: () => {
+      // A layer over the notes surface leaves the page or the hub mounted
+      // underneath, so closing it is the whole move.
+      if ((mobilePagesOpen || mobileSearchOpen) && surface === "notes") {
+        closePaletteForNavigation();
+        setMobilePagesOpen(false);
+        return;
+      }
       if (paletteOpen) closePaletteForNavigation();
+      // Not current: return to the page that was open on this surface. Tapped
+      // again on that page, Home pops to the hub, the way a phone's own tab
+      // bar does.
+      if (surface !== "notes") {
+        const lastOpened = lastOpenedPageId();
+        if (lastOpened) {
+          select(lastOpened);
+          return;
+        }
+      }
       goHome();
       if (mobileViewport) focusMobileHomeAfterTransition();
     },

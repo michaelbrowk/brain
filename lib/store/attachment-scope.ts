@@ -205,10 +205,18 @@ export function recordBaseline(
  *  has authority over the whole notes folder, so this is the owner choosing to
  *  expose that file, which is what the first baseline walk assumes about every
  *  reference it finds. A visitor's reference still grants nothing: only an
- *  owner write reaches here. An upload is left alone, because the ledger
- *  already gave it the one root it belongs to. Returns the same object when
- *  the root is unscoped or every name is already in its baseline, so a caller
- *  can tell by identity whether there is anything to persist. */
+ *  owner write reaches here.
+ *
+ *  An upload comes here too. It has a home root in the ledger, which is where
+ *  its bytes are charged and the one root that may name it before any page
+ *  shows it. That is not the same question as which roots may show it: an
+ *  owner who moves the page carrying a visitor's image into a second shared
+ *  root used to get a broken picture there, permanently, with no signal and
+ *  no action that repaired it. The baseline is how the second root learns.
+ *
+ *  Returns the same object when the root is unscoped or every name is already
+ *  in its baseline, so a caller can tell by identity whether there is anything
+ *  to persist. */
 export function extendBaseline(
   scope: AttachmentScope,
   root: string,
@@ -217,7 +225,6 @@ export function extendBaseline(
   if (!scope.roots.includes(root)) return scope;
   let baseline: AttachmentScope["baseline"] | undefined;
   for (const name of names) {
-    if (name in scope.uploads) continue;
     const roots = scope.baseline[name] ?? [];
     if (roots.includes(root)) continue;
     baseline ??= { ...scope.baseline };
@@ -239,14 +246,31 @@ export function rootUploadBytes(scope: AttachmentScope, root: string): number {
   return total;
 }
 
-/** An upload belongs to exactly one root. A name the index has never heard of
- *  belongs to none, which is a 404 at the read boundary. */
+/** Where a visitor uploaded the file. The one grant that stands with no live
+ *  page behind it: the upload is the reason the write naming it exists, and
+ *  nothing shows it yet. Its bytes are charged to this root and no other, so
+ *  an owner move never re-charges a quota. */
+export function rootOwnsUpload(
+  scope: AttachmentScope,
+  name: string,
+  root: string,
+): boolean {
+  return scope.uploads[name]?.root === root;
+}
+
+/** Whether the index puts this attachment on this root's link at all. A name
+ *  the index has never heard of belongs to no root, which is a 404 at the read
+ *  boundary. An upload's home root grants it, and so does any root the owner
+ *  has since shown it under. The write boundary asks a second, live question
+ *  on top of this one, so a baseline entry alone does not let a visitor put
+ *  back a picture the owner has moved out. */
 export function attachmentGrantsRoot(
   scope: AttachmentScope,
   name: string,
   root: string,
 ): boolean {
-  const upload = scope.uploads[name];
-  if (upload) return upload.root === root;
-  return (scope.baseline[name] ?? []).includes(root);
+  return (
+    rootOwnsUpload(scope, name, root) ||
+    (scope.baseline[name] ?? []).includes(root)
+  );
 }

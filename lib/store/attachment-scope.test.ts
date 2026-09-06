@@ -12,6 +12,7 @@ import {
   recordBaseline,
   recordUpload,
   rootIsScoped,
+  rootOwnsUpload,
   rootUploadBytes,
   writeAttachmentScope,
 } from "./attachment-scope";
@@ -91,7 +92,7 @@ describe("attachment scope index", () => {
     expect(extendBaseline(scope, "root-2", ["later0000001.png"])).toBe(scope);
   });
 
-  it("leaves an upload with the one root the ledger gave it", () => {
+  it("lets an owner's move widen an upload to a second root, and charges the bytes to one", () => {
     const uploaded = recordUpload(
       recordBaseline(EMPTY, "root-2", []),
       "up0000000001.png",
@@ -99,9 +100,19 @@ describe("attachment scope index", () => {
       10,
       AT,
     );
+    // The home root is where the bytes are charged and the one root that may
+    // name the file before any page shows it. Which roots may show it is a
+    // different question, and only an owner action answers it: an upload that
+    // belonged to one root forever went dark the moment the owner moved its
+    // page into a second share.
+    expect(attachmentGrantsRoot(uploaded, "up0000000001.png", "root-2")).toBe(false);
     const after = extendBaseline(uploaded, "root-2", ["up0000000001.png"]);
-    expect(after).toBe(uploaded);
-    expect(attachmentGrantsRoot(after, "up0000000001.png", "root-2")).toBe(false);
+    expect(after).not.toBe(uploaded);
+    expect(attachmentGrantsRoot(after, "up0000000001.png", "root-2")).toBe(true);
+    expect(rootOwnsUpload(after, "up0000000001.png", "root-2")).toBe(false);
+    expect(rootOwnsUpload(after, "up0000000001.png", "root-1")).toBe(true);
+    expect(rootUploadBytes(after, "root-1")).toBe(10);
+    expect(rootUploadBytes(after, "root-2")).toBe(0);
   });
 
   it("lets two roots share one baseline name without either widening the other", () => {

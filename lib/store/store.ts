@@ -63,6 +63,7 @@ import {
   recordBaseline,
   recordUpload,
   rootIsScoped,
+  rootOwnsUpload,
   rootUploadBytes,
   writeAttachmentScope,
   type AttachmentScope,
@@ -3808,26 +3809,78 @@ export class Store {
     }
   }
 
-  /** The attachment scope index with this root in it. The first visitor write
-   *  to a root builds the root's baseline from every attachment its live
-   *  subtree names today, one O(subtree) walk that runs inside that write's
-   *  own mutate() and never inside configureShare, where it would hold the
-   *  queue during the owner's confirmation click. Every later call is one
-   *  small file read. `built` tells the caller whether the index changed and
-   *  has to be persisted. Caller owns mutate(). */
+  /** The attachment scope index with every shared root that contains this
+   *  page in it. The first visitor write to a root builds that root's baseline
+   *  from every attachment its live subtree names today, one O(subtree) walk
+   *  that runs inside that write's own mutate() and never inside
+   *  configureShare, where it would hold the queue during the owner's
+   *  confirmation click. Every later call is one small file read.
+   *
+   *  Every shared root containing the page, not only the one the visitor came
+   *  through: two shares can overlap, and the moment a visitor's Markdown
+   *  lands in a page the narrower share also shows, that share's subtree stops
+   *  being all owner-authored. Its baseline has to be the snapshot from before
+   *  that, which is now. Without it the read boundary kept falling back to the
+   *  bare reference check for the narrower root, and a visitor of the wider
+   *  share could widen what the narrower link served.
+   *
+   *  `built` tells the caller whether the index changed and has to be
+   *  persisted. Caller owns mutate(). */
   private async scopedAttachmentIndexUnlocked(
     rootId: string,
+    targetId: string,
   ): Promise<{ scope: AttachmentScope; built: boolean }> {
-    const scope = await readAttachmentScope(this.root);
-    if (scope.roots.includes(rootId)) return { scope, built: false };
-    return {
-      scope: recordBaseline(
+    let scope = await readAttachmentScope(this.root);
+    let built = false;
+    for (const id of this.sharedRootsContainingUnlocked(rootId, targetId)) {
+      if (scope.roots.includes(id)) continue;
+      scope = recordBaseline(
         scope,
-        rootId,
-        await this.subtreeAttachmentNamesUnlocked(rootId),
-      ),
-      built: true,
-    };
+        id,
+        await this.subtreeAttachmentNamesUnlocked(id),
+      );
+      built = true;
+    }
+    return { scope, built };
+  }
+
+  /** The root the visitor came through, plus every live public page from the
+   *  target up to the folder root. Public is the only flag that makes a page a
+   *  share root; a descendant's own sharing metadata is ignored by
+   *  resolveShareAccess, but a public ancestor is a link somebody may hold.
+   *  Caller owns mutate(). */
+  private sharedRootsContainingUnlocked(
+    rootId: string,
+    targetId: string,
+  ): string[] {
+    const roots = new Set<string>([rootId]);
+    const seen = new Set<string>();
+    let current = this.index.get(targetId);
+    while (current && !seen.has(current.meta.id)) {
+      seen.add(current.meta.id);
+      if (current.meta.public === true && !this.isDeleted(current.meta.id)) {
+        roots.add(current.meta.id);
+      }
+      current = current.parentId ? this.index.get(current.parentId) : undefined;
+    }
+    return [...roots];
+  }
+
+  /** A page becoming public while a scoped root already sits inside it takes
+   *  its baseline now, before anyone can read through the new link. Every
+   *  other new share can skip the walk: an unscoped subtree holds no visitor
+   *  Markdown, so the reference check still decides for it, which is what a
+   *  read-only share has always done. Caller owns mutate(). */
+  private async scopeNewShareRootUnlocked(id: string): Promise<void> {
+    const scope = await readAttachmentScope(this.root);
+    if (scope.roots.includes(id)) return;
+    if (!scope.roots.some((scoped) => this.isWithinSubtree(id, scoped))) return;
+    const next = recordBaseline(
+      scope,
+      id,
+      await this.subtreeAttachmentNamesUnlocked(id),
+    );
+    if (next !== scope) await writeAttachmentScope(this.root, next);
   }
 
   /** An owner action that puts an attachment reference inside a scoped
@@ -4006,13 +4059,32 @@ export class Store {
       // it to this root.
       const { scope, built } = await this.scopedAttachmentIndexUnlocked(
         input.rootId,
+        input.targetId,
       );
       const held = referencedAttachmentNames(parsed.markdown);
+      // The subtree walk, computed once and only if a name gets this far.
+      // Introducing a reference is the rare path: typing text introduces
+      // nothing, and a body that only rearranges what it already holds
+      // introduces nothing either.
+      let liveNames: ReadonlySet<string> | null = null;
       for (const name of referencedAttachmentNames(input.markdown)) {
         if (held.has(name)) continue;
         if (!attachmentGrantsRoot(scope, name, input.rootId)) {
           throw new ShareAttachmentScopeError(name);
         }
+        // An index entry is not by itself a grant. A baseline entry says the
+        // subtree showed this file when the walk ran; the owner may have moved
+        // the page that showed it out since, and a visitor who saw it then
+        // must not be able to put it back on the link. The live question
+        // cannot darken a page that shows the file, by construction: the page
+        // holding it is the thing the walk looks for. An upload's home root is
+        // exempt, because nothing shows those bytes yet and the visitor is the
+        // one who put them there.
+        if (rootOwnsUpload(scope, name, input.rootId)) continue;
+        liveNames ??= new Set(
+          await this.subtreeAttachmentNamesUnlocked(input.rootId),
+        );
+        if (!liveNames.has(name)) throw new ShareAttachmentScopeError(name);
       }
       if (built) await writeAttachmentScope(this.root, scope);
       e.meta.updated = now();
@@ -4089,7 +4161,10 @@ export class Store {
         input.targetId,
         input.shareVersion,
       );
-      const { scope } = await this.scopedAttachmentIndexUnlocked(input.rootId);
+      const { scope, built } = await this.scopedAttachmentIndexUnlocked(
+        input.rootId,
+        input.targetId,
+      );
       // Checked before a byte is written: the quota is about what lands on
       // the disk and in git history, not about what was attempted.
       if (
@@ -4103,17 +4178,30 @@ export class Store {
         input.src,
       ).catch(rethrowSharedAttachmentFailure);
       const name = localAttachmentName(saved.url);
-      if (name) {
-        await writeAttachmentScope(
-          this.root,
-          recordUpload(
+      const next = name
+        ? recordUpload(
             scope,
             name,
             input.rootId,
             saved.size,
             new Date().toISOString(),
-          ),
-        );
+          )
+        : scope;
+      if (next !== scope || built) {
+        // The bytes are on the disk by now. A ledger write that fails after
+        // them must not answer 500 for an upload that landed: the client
+        // retries and lands a second copy, and the first sits unreferenced
+        // against the same quota until a sweep. Report what happened, leave
+        // the cause in the log where the owner can act on it, and let the
+        // next write to this root read the ledger again. The cost of failing
+        // this way is that the file is ungranted until then, so naming it is
+        // a 422 rather than a broken picture.
+        await writeAttachmentScope(this.root, next).catch((error: unknown) => {
+          console.error(
+            `[brain/store] attachment scope index write failed after the upload ${saved.name} landed:`,
+            error,
+          );
+        });
       }
       return saved;
     });
@@ -4492,6 +4580,13 @@ export class Store {
         nextSharePass !== e.meta.sharePass ||
         nextShareExpiresAt !== e.meta.shareExpiresAt ||
         nextShareEdit !== e.meta.shareEdit;
+      // The legacy enable, which has no overlap guard of its own, so this is
+      // the path by which a page becomes a link with a scoped root already
+      // inside it. Same rule as configureShare: take the baseline before the
+      // flag lands.
+      if (nextPublic === true && e.meta.public !== true) {
+        await this.scopeNewShareRootUnlocked(id);
+      }
       if (patch.title !== undefined) e.meta.title = patch.title;
       if (patch.icon !== undefined) e.meta.icon = patch.icon || undefined;
       if (patch.cover !== undefined) e.meta.cover = patch.cover || undefined;
@@ -4598,6 +4693,12 @@ export class Store {
         nextSharePass !== entry.meta.sharePass ||
         nextShareExpiresAt !== entry.meta.shareExpiresAt ||
         nextShareEdit !== entry.meta.shareEdit;
+      // Before the flag lands, so the snapshot is what the subtree showed
+      // while nobody could hold this link. Skipped, at the cost of one small
+      // file read, unless a scoped root already sits inside this one.
+      if (input.enabled && !entry.meta.public) {
+        await this.scopeNewShareRootUnlocked(id);
+      }
       entry.meta.public = nextPublic;
       entry.meta.sharePass = nextSharePass;
       entry.meta.shareExpiresAt = nextShareExpiresAt;

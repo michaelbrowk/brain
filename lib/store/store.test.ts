@@ -9867,7 +9867,7 @@ describe("share-aware Store leaves", () => {
     }
   });
 
-  it("keeps a grant when the owner moves the page back out again", async () => {
+  it("stops letting a visitor name an image the owner has moved out of the root", async () => {
     const { s, root, rootId, childId, version } = await editableRoot();
     const image = await s.saveAttachment({
       ...shot(),
@@ -9878,6 +9878,79 @@ describe("share-aware Store leaves", () => {
       by: "me",
     });
     await scopeTheRoot(s, rootId, childId, version);
+    // While the page is inside, a visitor may put the image on another page.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${image.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
+    await s.writePage(childId, "", undefined, "me");
+
+    // A move out costs nothing: the index is not walked and the entry stays,
+    // because introducing a reference is the rare path and a move is not.
+    await s.movePage(inside.id, null, null, undefined, "me");
+    const scope = await readAttachmentScope(root);
+    expect(attachmentGrantsRoot(scope, attachmentName(image.url), rootId)).toBe(
+      true,
+    );
+    expect(scope.roots).toEqual([rootId]);
+
+    // What the entry no longer buys is a new reference. Nothing live under the
+    // root shows this image now, so a visitor who saw it while the page was
+    // inside cannot put it back on the link.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${image.url})`,
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(ShareAttachmentScopeError);
+  });
+
+  it("leaves a page that still shows the image able to keep showing it", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "shared.png",
+    });
+    const staying = await s.createPage(childId, "Staying", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    const leaving = await s.createPage(childId, "Leaving", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    await scopeTheRoot(s, rootId, childId, version);
+    await s.movePage(leaving.id, null, null, undefined, "me");
+
+    // The live-reference test cannot darken a page that references the image,
+    // by construction: the page holding it is the thing the test looks for.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: staying.id,
+        shareVersion: version,
+        markdown: `![](${image.url})\n\nplus a caption`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
+    // And another page under the root may still name it, because it is live.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${image.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
     expect(
       attachmentGrantsRoot(
         await readAttachmentScope(root),
@@ -9885,16 +9958,107 @@ describe("share-aware Store leaves", () => {
         rootId,
       ),
     ).toBe(true);
+  });
 
-    // Moving out grants no new root anything, and takes nothing back: a page
-    // left behind that still shows the image would otherwise go dark.
-    await s.movePage(inside.id, null, null, undefined, "me");
+  it("lets a visitor name the image they just uploaded, which no page shows yet", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const mine = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: { ...shot(), originalName: "mine.png" },
+    });
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${mine.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("follows an owner's move of a visitor's upload into a second shared root", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const mine = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: { ...shot(), originalName: "mine.png" },
+    });
+    await s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: `![](${mine.url})`,
+      visitorName: "Ada",
+    });
+
+    // A second editable share elsewhere in the folder, scoped by its own
+    // first visitor write.
+    const second = await s.createPage(null, "Second root");
+    const secondChild = await s.createPage(second.id, "Second child");
+    const before = await s.readShareScope(second.id);
+    await s.configureShare(second.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+    });
+    const secondVersion = (await s.readShareScope(second.id)).shareVersion;
+    await s.writeSharedPage({
+      rootId: second.id,
+      targetId: secondChild.id,
+      shareVersion: secondVersion,
+      markdown: "first visit builds the baseline",
+      visitorName: "Bob",
+    });
+
+    // The owner moves the page carrying the upload into the second share. An
+    // upload that belonged to exactly one root forever went dark here, with
+    // no owner-visible signal and no action that repaired it.
+    await s.movePage(childId, secondChild.id, null, undefined, "me");
+
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(mine.url),
+        second.id,
+      ),
+    ).toBe(true);
+  });
+
+  it("scopes every shared ancestor of the page a visitor writes, not only the root they wrote through", async () => {
+    // Two overlapping shares, the narrower one read-only. Before this, the
+    // narrower root stayed unscoped, so the read boundary fell back to the
+    // reference check for a page that by then held visitor Markdown, and a
+    // visitor of the wider share could widen what the narrower link served.
+    const { s, root } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const wide = await s.createPage(null, "Wide");
+    const narrow = await s.createPage(wide.id, "Narrow");
+    const leaf = await s.createPage(narrow.id, "Leaf");
+    const before = await s.readShareScope(wide.id);
+    await s.configureShare(wide.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+    });
+    // configureShare and movePage both refuse to nest one share inside
+    // another, so the legacy metadata patch is the path that reaches the
+    // overlap. It has no such guard.
+    await s.updateMeta(narrow.id, { public: true, by: "me" });
+    const wideVersion = (await s.readShareScope(wide.id)).shareVersion;
+
+    await s.writeSharedPage({
+      rootId: wide.id,
+      targetId: leaf.id,
+      shareVersion: wideVersion,
+      markdown: "a visitor was here",
+      visitorName: "Ada",
+    });
 
     const scope = await readAttachmentScope(root);
-    expect(attachmentGrantsRoot(scope, attachmentName(image.url), rootId)).toBe(
-      true,
-    );
-    expect(scope.roots).toEqual([rootId]);
+    expect([...scope.roots].sort()).toEqual([wide.id, narrow.id].sort());
   });
 
   it("grants an image again when the owner restores a page into a scoped subtree", async () => {
@@ -10095,33 +10259,70 @@ describe("share-aware Store leaves", () => {
     ).toBe(false);
   });
 
-  it("admits a visitor naming a picture the owner moved out of the root", async () => {
-    const { s, rootId, childId, version } = await editableRoot();
+  it("does not fail an upload whose bytes landed because the ledger write did not", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    // A scope.json that cannot be written: the atomic rename lands on a
+    // directory. Standing in for a full disk, or an _attachments whose
+    // identity changed under the write.
+    await fs.mkdir(path.join(root, "_attachments", "scope.json"), {
+      recursive: true,
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const saved = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: { ...shot(), originalName: "landed.png" },
+    });
+
+    // The bytes are on the disk, so the caller hears that and not a 500 that
+    // would make it retry and land a second copy against the same quota.
+    expect(saved.url).toContain("/_attachments-v2/");
+    await expect(
+      fs.stat(path.join(root, "_attachments", attachmentName(saved.url))),
+    ).resolves.toBeTruthy();
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it("takes a baseline when a page becomes public with a scoped root already inside it", async () => {
+    // The other half of the overlap. A visitor writes first, scoping the inner
+    // root; the owner shares an ancestor afterwards. The new link's subtree
+    // already holds visitor Markdown, so the reference check alone must not
+    // decide for it.
+    const { s, root } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const outer = await s.createPage(null, "Outer");
+    const inner = await s.createPage(outer.id, "Inner");
+    const child = await s.createPage(inner.id, "Child");
     const image = await s.saveAttachment({
       ...shot(),
-      originalName: "moved-out.png",
+      originalName: "owned.png",
     });
-    const inside = await s.createPage(childId, "Inside", {
-      markdown: `![](${image.url})`,
-      by: "me",
+    await s.writePage(child.id, `![](${image.url})`, undefined, "me");
+    const before = await s.readShareScope(inner.id);
+    await s.configureShare(inner.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
     });
-    await scopeTheRoot(s, rootId, childId, version);
-    await s.movePage(inside.id, null, null, undefined, "me");
+    const version = (await s.readShareScope(inner.id)).shareVersion;
+    await s.writeSharedPage({
+      rootId: inner.id,
+      targetId: child.id,
+      shareVersion: version,
+      markdown: `![](${image.url})\n\na visitor was here`,
+      visitorName: "Ada",
+    });
+    expect((await readAttachmentScope(root)).roots).toEqual([inner.id]);
 
-    // The ruling, asserted: a move out does not revoke. The visitor writes
-    // the Markdown, so the grant the write boundary consults is the stale
-    // one, and the reference is admitted. The ceiling is what this link
-    // already showed, and an owner who wants the picture out of the share
-    // removes the file or turns editing off.
-    await expect(
-      s.writeSharedPage({
-        rootId,
-        targetId: childId,
-        shareVersion: version,
-        markdown: `![](${image.url})`,
-        visitorName: "Ada",
-      }),
-    ).resolves.toBeTruthy();
+    await s.updateMeta(outer.id, { public: true, by: "me" });
+
+    const scope = await readAttachmentScope(root);
+    expect([...scope.roots].sort()).toEqual([inner.id, outer.id].sort());
+    expect(
+      attachmentGrantsRoot(scope, attachmentName(image.url), outer.id),
+    ).toBe(true);
   });
 
   it("leaves the index unwritten on create, duplicate, move and restore when no root has ever been editable", async () => {

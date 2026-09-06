@@ -266,13 +266,20 @@ async function canReadAttachment(
     // index decides for a root it holds. For a root it does not hold, the
     // property that makes the reference check as safe as it has always been
     // for a read-only share is this: no attachment reference in an unscoped
-    // root's subtree came from a visitor. writeSharedPage persists the root
-    // and its baseline before its Markdown lands. saveSharedAttachment
-    // persists after the bytes, which is safe because no page names the
-    // upload until a writeSharedPage that scopes the root first.
-    // createSharedSubpage records nothing, and needs not to: it lands an
-    // empty body and keeps the visitor's text as a title, which neither this
-    // route nor the baseline walk tokenizes.
+    // root's subtree came from a visitor.
+    //
+    // Two writers keep that true. writeSharedPage persists the baseline of
+    // EVERY shared root containing the page, not only the one the visitor
+    // came through, before its Markdown lands: a page can sit inside two
+    // overlapping shares, and a visitor of the wider one could otherwise
+    // widen what the narrower link served. configureShare and the legacy
+    // public patch take the baseline of a page that becomes a link with a
+    // scoped root already inside it, which is the same overlap arriving in
+    // the other order. saveSharedAttachment persists after the bytes, which
+    // is safe because no page names the upload until a writeSharedPage that
+    // scopes the roots first. createSharedSubpage records nothing, and needs
+    // not to: it lands an empty body and keeps the visitor's text as a title,
+    // which neither this route nor the baseline walk tokenizes.
     const scope = await readAttachmentScope(NOTES_ROOT);
     if (!rootIsScoped(scope, rootId)) return true;
     return attachmentGrantsRoot(scope, name, rootId);

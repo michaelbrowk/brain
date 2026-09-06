@@ -22,6 +22,7 @@ import { ConnectionsSection } from "./connections-section";
 import { SharingSection } from "./sharing-section";
 import { DataSection } from "./data-section";
 import { AccountSection } from "./account-section";
+import { DonateSection } from "./donate-section";
 
 export interface SettingsSurfaceProps {
   /** The open section; null renders the mobile root list. */
@@ -113,6 +114,7 @@ export function SettingsSurface({
         )}
         {section === "data" && <DataSection onToast={onToast} />}
         {section === "account" && <AccountSection onToast={onToast} />}
+        {section === "donate" && <DonateSection onToast={onToast} />}
       </div>
     </div>
   );

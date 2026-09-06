@@ -1244,6 +1244,7 @@ test("@mobile coarse targets, Settings, and editor chrome fit at 390 and 320", a
     "Sharing",
     "Data",
     "Account",
+    "Donate",
   ]) {
     await expect(settingsRoot.getByRole("button", { name: label, exact: true })).toBeVisible();
   }

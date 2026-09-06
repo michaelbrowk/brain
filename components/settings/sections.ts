@@ -1,7 +1,11 @@
-// The settings surface's section registry: the six sections in their fixed
+// The settings surface's section registry: the seven sections in their fixed
 // order, the URL slug of each (it IS the id), and the sidebar row metadata.
 // Server routes validate against SETTINGS_SECTION_ORDER; the shell reducer
 // stores a SettingsSection (or null for the mobile root list).
+//
+// The order runs from what an owner changes to what an owner only reads.
+// Donate sits last, past Account: it configures nothing about this instance,
+// and it belongs beside the About group that already names the project.
 
 export type SettingsSection =
   | "appearance"
@@ -9,7 +13,8 @@ export type SettingsSection =
   | "connections"
   | "sharing"
   | "data"
-  | "account";
+  | "account"
+  | "donate";
 
 export const SETTINGS_SECTION_ORDER: SettingsSection[] = [
   "appearance",
@@ -18,6 +23,7 @@ export const SETTINGS_SECTION_ORDER: SettingsSection[] = [
   "sharing",
   "data",
   "account",
+  "donate",
 ];
 
 export const SETTINGS_SECTION_META: Record<
@@ -30,6 +36,7 @@ export const SETTINGS_SECTION_META: Record<
   sharing: { label: "Sharing", icon: "earth" },
   data: { label: "Data", icon: "document-text" },
   account: { label: "Account", icon: "user-circle" },
+  donate: { label: "Donate", icon: "heart" },
 };
 
 export function isSettingsSection(value: unknown): value is SettingsSection {

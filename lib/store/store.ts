@@ -3109,6 +3109,9 @@ export class Store {
         nextMeta,
         finalizedMarkdown,
       );
+      await this.extendScopedBaselinesUnlocked(entry.meta.id, () => [
+        ...referencedAttachmentNames(finalizedMarkdown),
+      ]);
       const content = serializePage(nextMeta, finalizedMarkdown);
       let durabilityError: unknown;
       try {
@@ -3582,7 +3585,9 @@ export class Store {
       e.meta.updated = now();
       if (by) e.meta.updatedBy = by;
       delete e.meta.structureWriteBarrier;
-      await this.extendScopedBaselinesUnlocked(id, markdown);
+      await this.extendScopedBaselinesUnlocked(id, () => [
+        ...referencedAttachmentNames(markdown),
+      ]);
       const content = serializePage(e.meta, markdown);
       await atomicWrite(indexPath, content);
       scheduleCommit(this.root);
@@ -3618,7 +3623,9 @@ export class Store {
       const base = currentMarkdown.trimEnd();
       const addition = markdown.trimStart();
       const joined = base ? `${base}\n\n${addition}` : addition;
-      await this.extendScopedBaselinesUnlocked(id, joined);
+      await this.extendScopedBaselinesUnlocked(id, () => [
+        ...referencedAttachmentNames(joined),
+      ]);
       const content = serializePage(e.meta, joined);
       await atomicWrite(indexPath, content);
       scheduleCommit(this.root);
@@ -3697,6 +3704,9 @@ export class Store {
           "notion page already has an active binding or abort receipt",
         );
       }
+      await this.extendScopedBaselinesUnlocked(parentId, () => [
+        ...referencedAttachmentNames(opts.markdown || ""),
+      ]);
       const parentDir = parentId ? this.get(parentId).dir : this.root;
       const dir = await uniqueDir(parentDir, slugify(title));
       const last = this.siblings(parentId).at(-1);
@@ -3817,30 +3827,38 @@ export class Store {
     };
   }
 
-  /** An owner body write into a scoped subtree adds what it names to that
-   *  root's baseline. Without this the baseline stays the snapshot the first
-   *  visitor write took, and every image the owner adds afterwards is a
-   *  broken image on a page the owner is working on. A page can sit inside
-   *  more than one scoped root, so every scoped ancestor gets the names.
-   *  Nothing is walked and nothing is written while no root has ever been
-   *  editable, which is the state almost every notes folder is in. Caller
-   *  owns mutate(). */
+  /** An owner action that puts an attachment reference inside a scoped
+   *  subtree adds what it names to that root's baseline. Without this the
+   *  baseline stays the snapshot the first visitor write took, and every
+   *  picture the owner adds afterwards is a broken picture on a page the
+   *  owner is working on. Every owner path that can introduce a reference
+   *  comes here: the body writes, a create, a move in, a restore and the
+   *  Notion import.
+   *
+   *  `fromId` is where the ancestor walk starts, which is the page itself for
+   *  a body write and the destination parent for a create or a move: a page
+   *  can sit inside more than one scoped root, so every scoped ancestor gets
+   *  the names. `names` is a thunk because producing them can cost a subtree
+   *  walk, and no notes folder should pay that while no root has ever been
+   *  editable, which is almost every one of them. Nothing is tokenized,
+   *  walked or written in that case. Caller owns mutate(). */
   private async extendScopedBaselinesUnlocked(
-    pageId: string,
-    markdown: string,
+    fromId: string | null,
+    names: () => readonly string[] | Promise<readonly string[]>,
   ): Promise<void> {
+    if (fromId === null) return;
     const scope = await readAttachmentScope(this.root);
-    if (scope.roots.length === 0) return;
-    const names = [...referencedAttachmentNames(markdown)];
     // A trashed page is not part of what the link shows, the same rule the
     // first baseline walk follows.
-    if (names.length === 0 || this.isDeleted(pageId)) return;
+    if (scope.roots.length === 0 || this.isDeleted(fromId)) return;
+    const introduced = await names();
+    if (introduced.length === 0) return;
     let next = scope;
     const seen = new Set<string>();
-    let current = this.index.get(pageId);
+    let current = this.index.get(fromId);
     while (current && !seen.has(current.meta.id)) {
       seen.add(current.meta.id);
-      next = extendBaseline(next, current.meta.id, names);
+      next = extendBaseline(next, current.meta.id, introduced);
       current = current.parentId ? this.index.get(current.parentId) : undefined;
     }
     if (next !== scope) await writeAttachmentScope(this.root, next);
@@ -5641,6 +5659,15 @@ export class Store {
       preparedIntent?.nextOrder ??
       this.orderForPlacement(newParentId, beforeId, id);
     const originalParentId = e.parentId;
+    if (originalParentId !== newParentId) {
+      // The moved subtree brings its pictures with it, so the destination's
+      // scoped roots learn what it names. A move out takes nothing back: a
+      // name already granted stays granted, because a page the root still
+      // shows could be showing it.
+      await this.extendScopedBaselinesUnlocked(newParentId, () =>
+        this.subtreeAttachmentNamesUnlocked(id),
+      );
+    }
     const originalDir = e.dir;
     const originalMeta = { ...e.meta };
     const originalRaw = await fs.readFile(
@@ -5869,6 +5896,11 @@ export class Store {
           ? this.index.get(current.parentId)
           : undefined;
       }
+      // The first baseline walk skipped this subtree because the link did
+      // not show it. The link shows it again now.
+      await this.extendScopedBaselinesUnlocked(id, () =>
+        this.subtreeAttachmentNamesUnlocked(id),
+      );
       scheduleCommit(this.root);
       emitStore({ type: "create", id, src });
       for (const restoredId of restoredIds) {

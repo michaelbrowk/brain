@@ -9767,6 +9767,196 @@ describe("share-aware Store leaves", () => {
     ).rejects.toBeInstanceOf(ShareAttachmentScopeError);
   });
 
+  it("grants an image on a page the owner creates inside a scoped subtree", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "created.png",
+    });
+    const made = await s.createPage(childId, "Made", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+
+    const scope = await readAttachmentScope(root);
+    expect(attachmentGrantsRoot(scope, attachmentName(image.url), rootId)).toBe(
+      true,
+    );
+    // A duplicate goes through createPage, so the copy is granted too.
+    await s.duplicatePage(made.id);
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(true);
+  });
+
+  it("grants the whole moved subtree when the owner drags a page into a scoped one", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const onParent = await s.saveAttachment({
+      ...shot(),
+      originalName: "parent.png",
+    });
+    const onDescendant = await s.saveAttachment({
+      ...shot(),
+      originalName: "descendant.png",
+    });
+    const outside = await s.createPage(null, "Outside", {
+      markdown: `![](${onParent.url})`,
+      by: "me",
+    });
+    const nested = await s.createPage(outside.id, "Nested", {
+      markdown: `![](${onDescendant.url})`,
+      by: "me",
+    });
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(onParent.url),
+        rootId,
+      ),
+    ).toBe(false);
+
+    await s.movePage(outside.id, childId, null, undefined, "me");
+
+    const scope = await readAttachmentScope(root);
+    for (const url of [onParent.url, onDescendant.url]) {
+      expect(attachmentGrantsRoot(scope, attachmentName(url), rootId)).toBe(
+        true,
+      );
+    }
+    expect(nested.id).toBeTruthy();
+  });
+
+  it("keeps a grant when the owner moves the page back out again", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "leaving.png",
+    });
+    const inside = await s.createPage(childId, "Inside", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    await scopeTheRoot(s, rootId, childId, version);
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(true);
+
+    // Moving out grants no new root anything, and takes nothing back: a page
+    // left behind that still shows the image would otherwise go dark.
+    await s.movePage(inside.id, null, null, undefined, "me");
+
+    const scope = await readAttachmentScope(root);
+    expect(attachmentGrantsRoot(scope, attachmentName(image.url), rootId)).toBe(
+      true,
+    );
+    expect(scope.roots).toEqual([rootId]);
+  });
+
+  it("grants an image again when the owner restores a page into a scoped subtree", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "restored.png",
+    });
+    const trashed = await s.createPage(childId, "Trashed", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    await s.deletePage(trashed.id);
+    await scopeTheRoot(s, rootId, childId, version);
+    // The first walk skipped it, because the link did not show it.
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(false);
+
+    await s.restorePage(trashed.id);
+
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(true);
+  });
+
+  it("grants an image a Notion import lands inside a scoped subtree", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const reserved = await reserveNotionImport(s, {
+      notionId: NOTION_PAGE,
+      sourceHash: SOURCE_A,
+      parentId: childId,
+      title: "Imported",
+    });
+    if (reserved.status !== "reserved") throw new Error("expected reservation");
+    const saved = await saveNotionAttachment(
+      s,
+      NOTION_PAGE,
+      SOURCE_A,
+      reserved.reservationToken,
+      shot(),
+    );
+    const markdown = `![](${saved.url})`;
+    await s.finalizeNotionImport({
+      notionId: NOTION_PAGE,
+      sourceHash: SOURCE_A,
+      conversionHash: conversionHash(
+        SOURCE_A,
+        "Imported",
+        markdown,
+        undefined,
+        undefined,
+        childId,
+      ),
+      reservationToken: reserved.reservationToken,
+      markdown,
+    });
+
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(saved.url),
+        rootId,
+      ),
+    ).toBe(true);
+  });
+
+  it("leaves the index unwritten on create, duplicate, move and restore when no root has ever been editable", async () => {
+    const { s, root } = await tmpStore();
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "own.png",
+    });
+    const home = await s.createPage(null, "Home");
+    const page = await s.createPage(home.id, "Page", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    await s.duplicatePage(page.id);
+    await s.movePage(page.id, null, null, undefined, "me");
+    await s.deletePage(page.id);
+    await s.restorePage(page.id);
+
+    await expect(
+      fs.access(path.join(root, "_attachments", "scope.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("hands a visitor no new reference of their own after an owner extends the baseline", async () => {
     const { s, root, rootId, childId, version } = await editableRoot();
     await scopeTheRoot(s, rootId, childId, version);

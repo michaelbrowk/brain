@@ -156,7 +156,11 @@ describe("PUT /api/share-edit/page/[id]", () => {
       },
     );
     expect(res.status).toBe(422);
-    await expect(res.json()).resolves.toEqual({ error: "attachment_not_yours" });
+    // The visitor is told what to do about it, not only that it failed.
+    await expect(res.json()).resolves.toEqual({
+      error: "attachment_not_yours",
+      message: expect.stringContaining("Upload it again"),
+    });
   });
 
   it("answers a link scheme the owner's editor would run with 422", async () => {
@@ -170,7 +174,29 @@ describe("PUT /api/share-edit/page/[id]", () => {
       },
     );
     expect(res.status).toBe(422);
-    await expect(res.json()).resolves.toEqual({ error: "unsafe_link" });
+    await expect(res.json()).resolves.toEqual({
+      error: "unsafe_link",
+      message: expect.stringContaining("link"),
+    });
+  });
+
+  it("answers media on another site with 422 and tells the visitor to upload it", async () => {
+    const { ShareRemoteMediaError } = await import("@/lib/store");
+    const res = await put(
+      { markdown: "![](https://example.invalid/x.png)" },
+      {
+        writeSharedPage: vi
+          .fn()
+          .mockRejectedValue(
+            new ShareRemoteMediaError("https://example.invalid/x.png"),
+          ),
+      },
+    );
+    expect(res.status).toBe(422);
+    await expect(res.json()).resolves.toEqual({
+      error: "remote_media",
+      message: expect.stringContaining("uploaded"),
+    });
   });
 
   it("refuses a body over the cap without calling the Store, declared or not", async () => {

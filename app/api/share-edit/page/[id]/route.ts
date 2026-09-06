@@ -10,6 +10,7 @@ import {
   isNotFound,
   isShareAttachmentScope,
   isShareLinkScheme,
+  isShareRemoteMedia,
 } from "@/lib/store";
 import { MAX_SHARE_WRITE_BYTES } from "@/lib/store/share-limits";
 
@@ -84,15 +85,13 @@ export async function PUT(req: NextRequest, { params }: Ctx) {
         if (outcome.status === "not-found") return shareWriteNotFound();
         return NextResponse.json({ rev: outcome.page.rev });
       } catch (error) {
-        if (isShareAttachmentScope(error)) {
-          return NextResponse.json(
-            { error: "attachment_not_yours" },
-            { status: 422 },
-          );
-        }
-        if (isShareLinkScheme(error)) {
-          return NextResponse.json({ error: "unsafe_link" }, { status: 422 });
-        }
+        // The three refusals a visitor can act on. Each carries its own
+        // reason code and a sentence the editor can show as written: a bare
+        // code leaves the visitor with a save that stopped working and no way
+        // to tell what to do about it.
+        if (isShareAttachmentScope(error)) return refused("attachment_not_yours");
+        if (isShareLinkScheme(error)) return refused("unsafe_link");
+        if (isShareRemoteMedia(error)) return refused("remote_media");
         throw error;
       }
     },
@@ -121,6 +120,25 @@ function parseBody(
     rev: typeof rev === "string" ? rev : undefined,
     baseMarkdown: typeof baseMarkdown === "string" ? baseMarkdown : undefined,
   };
+}
+
+/** What a visitor may be told about their own write, and what to do next.
+ *  These three codes and messages are the contract the editor renders; the
+ *  authority denials stay the one uniform 404 and say nothing. */
+const REFUSALS: Record<string, string> = {
+  attachment_not_yours:
+    "That image is not part of this shared page any more. Upload it again to use it here.",
+  unsafe_link:
+    "A link here can point to a web address, an email address, or another page in this share.",
+  remote_media:
+    "An image has to be uploaded here. One loaded from another site cannot be used.",
+};
+
+function refused(error: keyof typeof REFUSALS) {
+  return NextResponse.json(
+    { error, message: REFUSALS[error] },
+    { status: 422 },
+  );
 }
 
 function tooLarge() {

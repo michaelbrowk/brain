@@ -64,9 +64,12 @@ function decodeReferences(value: string): string {
 /** The scheme a browser would read. ASCII whitespace and the C0 controls go
  *  first, because a browser drops them: a tab inside `javascript:` and a
  *  leading NUL both leave the same URL behind by the time a click happens. */
+function withoutIgnorableCharacters(value: string): string {
+  return value.replace(/[\u0000-\u0020\u007f]/g, "");
+}
+
 function bareScheme(value: string): string | null {
-  const stripped = value.replace(/[\u0000-\u0020\u007f]/g, "");
-  const match = SCHEME.exec(stripped);
+  const match = SCHEME.exec(withoutIgnorableCharacters(value));
   return match ? match[1].toLowerCase() : null;
 }
 
@@ -109,6 +112,98 @@ export function unsafeLinkDestination(
   for (const destination of linkDestinations(markdown)) {
     if (held.has(destination)) continue;
     if (!linkSchemeAllowed(destination)) return destination;
+  }
+  return null;
+}
+
+/**
+ * Where the visitor write path stops a beacon the /share policy cannot reach.
+ *
+ * That policy carries `img-src 'self' data:` and `media-src 'self'`, and the
+ * owner reads the same body on two surfaces that do not carry it: the editor
+ * at `/p/`, where `inlineImageView` puts the visitor's `src` on a real
+ * `<img>`, and the version-history preview, which renders `renderReadOnly`
+ * output into the page. A visitor writes an image on another site, the owner
+ * opens their own page, and a third party learns the owner's IP, the time and
+ * the user agent.
+ *
+ * A policy on `/p/` is the wrong fix: the owner may reference remote media in
+ * their own notes and blocking `img-src` there would break that. This is the
+ * visitor write path, so it costs the owner's own content nothing. A visitor
+ * has no need for a remote image either, because uploading is the supported
+ * path and an upload is same-origin.
+ */
+
+/** Attributes a browser fetches from. `href` is here for `<svg><image href>`
+ *  and `<link href>` rather than for anchors, and refusing an anchor's href
+ *  inside raw HTML with it is an over-refusal I accept: a visitor writes links
+ *  in Markdown, where they are still allowed. */
+const FETCHING_ATTRIBUTE =
+  /\b(?:src|srcset|poster|background|data|href|xlink:href)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'`=<>]+))/gi;
+
+/** Absolute by scheme, or protocol-relative, which a browser resolves against
+ *  the page's own scheme and fetches from the named host just the same. */
+function isRemoteReference(value: string): boolean {
+  for (const form of [value, decodeReferences(value)]) {
+    const stripped = withoutIgnorableCharacters(form);
+    if (stripped.startsWith("//")) return true;
+    if (SCHEME.test(stripped)) return true;
+  }
+  return false;
+}
+
+/** One `srcset` carries several candidates, each a URL and an optional
+ *  descriptor. What counts is everything before the first space of each
+ *  comma-separated part. */
+function referencesIn(value: string): string[] {
+  return value
+    .split(",")
+    .map((part) => part.trim().split(/\s+/, 1)[0])
+    .filter((part) => part !== "");
+}
+
+/** Every reference in this body a browser would fetch from another origin: a
+ *  Markdown image destination, and any fetching attribute inside raw HTML.
+ *  Tokenized the way the rest of this file tokenizes, so prose, inline code
+ *  and fenced code name nothing.
+ *
+ *  Not covered because a visitor cannot produce them: `meta.cover` and
+ *  `meta.icon`, which no visitor leaf writes, and the editor's container
+ *  directives, whose only attribute that reaches the screen is the callout
+ *  icon, rendered as a text child rather than as a source. */
+export function remoteMediaReferences(markdown: string): Set<string> {
+  const found = new Set<string>();
+  const tokens = marked.lexer(stripEditorDirectiveFences(markdown), {
+    gfm: true,
+  });
+  marked.walkTokens(tokens, (token: Token) => {
+    if (token.type === "image") {
+      const href = typeof token.href === "string" ? token.href : "";
+      if (isRemoteReference(href)) found.add(href);
+      return;
+    }
+    if (token.type !== "html") return;
+    const raw = typeof token.raw === "string" ? token.raw : "";
+    for (const match of raw.matchAll(FETCHING_ATTRIBUTE)) {
+      const value = match[1] ?? match[2] ?? match[3] ?? "";
+      for (const reference of referencesIn(value)) {
+        if (isRemoteReference(reference)) found.add(reference);
+      }
+    }
+  });
+  return found;
+}
+
+/** The first remote reference this body introduces, or null. `held` is what
+ *  the page already carries: the same rule the link and attachment checks
+ *  follow, so an owner's own remote image never makes a page unwritable for
+ *  the people the owner invited. */
+export function remoteMediaReference(
+  markdown: string,
+  held: ReadonlySet<string> = new Set(),
+): string | null {
+  for (const reference of remoteMediaReferences(markdown)) {
+    if (!held.has(reference)) return reference;
   }
   return null;
 }

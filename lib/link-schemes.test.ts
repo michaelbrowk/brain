@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 import {
   linkDestinations,
   linkSchemeAllowed,
+  remoteMediaReference,
+  remoteMediaReferences,
   unsafeLinkDestination,
 } from "./link-schemes";
 
@@ -120,5 +122,69 @@ describe("unsafeLinkDestination", () => {
     expect(
       unsafeLinkDestination("[x](javascript:alert(2))", held),
     ).toBe("javascript:alert(2)");
+  });
+});
+
+describe("remoteMediaReference", () => {
+  it("refuses a Markdown image on another site, however it is spelled", () => {
+    for (const href of [
+      "https://evil.test/x.png",
+      "http://evil.test/x.png",
+      "//evil.test/x.png",
+      "data:image/png;base64,iVBORw0KGgo=",
+      "HTTPS://evil.test/x.png",
+    ]) {
+      expect(remoteMediaReference(`![](${href})`), href).toBe(href);
+    }
+  });
+
+  it("takes a local image, which is the only kind a visitor has a way to add", () => {
+    expect(
+      remoteMediaReference(
+        "![](/_attachments-v2/aBcDeF012345.png) and ![](/api/media/aBcDeF012345.png)",
+      ),
+    ).toBeNull();
+  });
+
+  it("leaves a link to another site alone, because a link is not a fetch", () => {
+    expect(remoteMediaReference("[read this](https://example.test/page)")).toBeNull();
+  });
+
+  it("refuses raw HTML that names a subresource on another site", () => {
+    for (const html of [
+      '<img src="https://evil.test/x.png">',
+      '<video src="https://evil.test/v.mp4"></video>',
+      '<audio src="https://evil.test/a.mp3"></audio>',
+      '<picture><source srcset="https://evil.test/s.png"></picture>',
+      '<table background="https://evil.test/t.png"><tr><td>x</td></tr></table>',
+      '<svg><image href="https://evil.test/s.svg"/></svg>',
+      "<img src=//evil.test/x.png>",
+      '<img src="https&#58;//evil.test/x.png">',
+    ]) {
+      expect(remoteMediaReference(html), html).not.toBeNull();
+    }
+  });
+
+  it("takes raw HTML that stays on this origin", () => {
+    expect(
+      remoteMediaReference('<img src="/_attachments-v2/aBcDeF012345.png">'),
+    ).toBeNull();
+  });
+
+  it("ignores a URL that is only prose or fenced code", () => {
+    expect(
+      remoteMediaReference(
+        "Paste https://evil.test/x.png here.\n\n```\n![](https://evil.test/x.png)\n```\n",
+      ),
+    ).toBeNull();
+  });
+
+  it("leaves a reference the page already held alone", () => {
+    const body = "![](https://evil.test/x.png)";
+    const held = remoteMediaReferences(body);
+    expect(remoteMediaReference(`${body}\n\nplus a caption`, held)).toBeNull();
+    expect(remoteMediaReference("![](https://evil.test/y.png)", held)).toBe(
+      "https://evil.test/y.png",
+    );
   });
 });

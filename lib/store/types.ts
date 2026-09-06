@@ -512,6 +512,18 @@ export class ShareLinkSchemeError extends Error {
   }
 }
 
+/** A link visitor's write introduces an image, video or other subresource on
+ * another origin. The owner reads the same body in their own editor and in the
+ * version-history preview, neither of which carries the /share policy, so the
+ * third party would learn the owner's IP, the time and the user agent. Nothing
+ * was written. The visitor route answers 422 remote_media. */
+export class ShareRemoteMediaError extends Error {
+  constructor(readonly reference: string) {
+    super("media from another site cannot be used in a shared page");
+    this.name = "ShareRemoteMediaError";
+  }
+}
+
 export class QuickCaptureConflictError extends Error {
   constructor() {
     super("quick capture payload conflict");
@@ -642,6 +654,10 @@ export function isAttachmentStoreUnavailable(
 
 export function isShareUploadQuota(e: unknown): e is ShareUploadQuotaError {
   return e instanceof Error && e.name === "ShareUploadQuotaError";
+}
+
+export function isShareRemoteMedia(e: unknown): e is ShareRemoteMediaError {
+  return e instanceof Error && e.name === "ShareRemoteMediaError";
 }
 
 export function isShareLinkScheme(e: unknown): e is ShareLinkSchemeError {

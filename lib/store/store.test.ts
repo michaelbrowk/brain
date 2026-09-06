@@ -13,6 +13,7 @@ import {
   RevConflictError,
   ShareAttachmentScopeError,
   ShareLinkSchemeError,
+  ShareRemoteMediaError,
   ShareSubtreeFullError,
   ShareUploadQuotaError,
   type AttachmentInput,
@@ -9484,6 +9485,75 @@ describe("share-aware Store leaves", () => {
         visitorName: "Ada",
       }),
     ).resolves.toBeTruthy();
+  });
+
+  it("refuses a write that names media on another site, which would beacon the owner", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    // The /share policy blocks a remote image for other visitors. The owner
+    // reads the same body in their own editor and in the history preview,
+    // neither of which carries that policy, so the refusal has to be here.
+    for (const reference of [
+      "![](https://example.invalid/x.png)",
+      "![](//example.invalid/x.png)",
+      '<img src="https://example.invalid/x.png">',
+      '<video src="https://example.invalid/v.mp4"></video>',
+    ]) {
+      const refused = s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: reference,
+        visitorName: "Ada",
+      });
+      await expect(refused, reference).rejects.toBeInstanceOf(
+        ShareRemoteMediaError,
+      );
+    }
+    expect((await s.readPage(childId)).markdown).toBe("");
+
+    // A link to another site is not a fetch, and an uploaded image is local.
+    const mine = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: { ...shot(), originalName: "mine.png" },
+    });
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `[read this](https://example.invalid/page)\n\n![](${mine.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("keeps a visitor's own upload usable when they move it between pages", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const second = await s.createPage(rootId, "Second");
+    const mine = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: { ...shot(), originalName: "mine.png" },
+    });
+    const write = (targetId: string, markdown: string) =>
+      s.writeSharedPage({
+        rootId,
+        targetId,
+        shareVersion: version,
+        markdown,
+        visitorName: "Ada",
+      });
+
+    await write(childId, `![](${mine.url})`);
+    // The cut, saved on its own: nothing under the root shows the image now.
+    await write(childId, "moved it");
+    // The paste. An upload's home root grants it with no live page behind it,
+    // so the live-reference rule that bites an owner's image does not bite
+    // the visitor's own upload.
+    await expect(write(second.id, `![](${mine.url})`)).resolves.toBeTruthy();
   });
 
   it("diffs against index.md, not the visitor's baseMarkdown", async () => {

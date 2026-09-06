@@ -35,7 +35,12 @@ import {
   referencedAttachmentNames,
   referencedAttachmentUrls,
 } from "../attachments";
-import { linkDestinations, unsafeLinkDestination } from "../link-schemes";
+import {
+  linkDestinations,
+  remoteMediaReference,
+  remoteMediaReferences,
+  unsafeLinkDestination,
+} from "../link-schemes";
 import {
   isBrainCompatibleNotionCover,
   isBrainCompatibleNotionIcon,
@@ -104,6 +109,7 @@ import {
   ShareAttachmentScopeError,
   ShareEditOriginError,
   ShareLinkSchemeError,
+  ShareRemoteMediaError,
   ShareScopeConflictError,
   ShareSubtreeFullError,
   ShareUploadQuotaError,
@@ -4078,6 +4084,17 @@ export class Store {
         linkDestinations(parsed.markdown),
       );
       if (unsafeLink !== null) throw new ShareLinkSchemeError(unsafeLink);
+      // And a subresource on another origin, for the same reason one step
+      // further on. The /share policy blocks those for other visitors, but the
+      // owner reads this body in their own editor and in the history preview,
+      // neither of which carries that policy, and a policy there would break
+      // the owner's own remote media. A visitor has no need for one: uploading
+      // is the supported path and an upload is same-origin.
+      const remote = remoteMediaReference(
+        input.markdown,
+        remoteMediaReferences(parsed.markdown),
+      );
+      if (remote !== null) throw new ShareRemoteMediaError(remote);
       // The reference diff runs inside this critical section, against the
       // body just read from index.md, never against the visitor's
       // expectedMarkdown, which the rev rule above ignores when the rev

@@ -5,13 +5,17 @@ import { DEFAULT_PAGE_ICON } from "@/lib/constants";
 import { sectionPageIds } from "@/lib/dated-sections";
 import type { TreeNode } from "@/lib/store/types";
 import { Button } from "./ui/button";
+import { Chip } from "./ui/chip";
 import { DialogBody, DialogHeader } from "./ui/dialog-header";
 
-/** Preview of the AI grouping before it's applied. Shows the "N of N placed"
- *  invariant so a lost page is visibly impossible. */
+/** Preview of the AI grouping before it's applied. Nothing is written until
+ *  Apply, and the dialog stays up through that write: a failed save answers
+ *  in the footer rather than closing on a document that never changed. */
 export function SmartSortPreview({
   preview,
   pages,
+  applying = false,
+  applyError = null,
   onApply,
   onCancel,
 }: {
@@ -22,6 +26,10 @@ export function SmartSortPreview({
     count: number;
   } | null;
   pages: TreeNode[];
+  /** The Apply write is in flight: the dialog holds, and both ways out close. */
+  applying?: boolean;
+  /** What the failed write left the reader with, said where they pressed. */
+  applyError?: string | null;
   onApply: () => void;
   onCancel: () => void;
 }) {
@@ -30,7 +38,12 @@ export function SmartSortPreview({
   const placed = preview ? Object.keys(preview.assignments).length : 0;
 
   return (
-    <Dialog.Root open={open} onOpenChange={(o) => !o && onCancel()}>
+    <Dialog.Root
+      open={open}
+      onOpenChange={(next) => {
+        if (!next && !applying) onCancel();
+      }}
+    >
       <Dialog.Portal>
         <Dialog.Overlay className="brain-dialog-overlay fixed inset-0 z-[var(--z-modal)]" />
         <Dialog.Content
@@ -53,67 +66,68 @@ export function SmartSortPreview({
               </>
             }
             closeLabel="Close smart sort"
+            closeDisabled={applying}
           />
 
-          <DialogBody className="space-y-4 px-5 py-4">
-            {preview?.sections.map((label) => {
-              const ids = sectionPageIds(preview, label);
-              return (
-                <div key={label}>
-                  <p className="pb-1 text-[11px] font-medium uppercase tracking-[0.06em] text-ink-3">
-                    {label} · {ids.length}
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {ids.map((id) => {
-                      const c = byId.get(id);
-                      return (
-                        <span
-                          key={id}
-                          className="flex items-center gap-1.5 rounded-md border border-line bg-surface px-2 py-1 text-[12px]"
-                        >
-                          <span className="text-[13px] leading-none">
-                            {c?.icon ?? DEFAULT_PAGE_ICON}
-                          </span>
-                          <span className="max-w-[220px] truncate text-ink">{c?.title ?? id}</span>
-                        </span>
-                      );
-                    })}
-                  </div>
-                </div>
-              );
-            })}
-            {preview &&
-              (() => {
-                const unplaced = pages.filter((c) => !preview.assignments[c.id]);
-                if (!unplaced.length) return null;
+          {/* `data-edge="chips"`: a wrapped tile flow ends in a partial row,
+              so the bottom fade carries a whole chip and its gap. Twenty
+              pixels under a 28px chip read as one chip dimming, which is how
+              a cut section came to look like the end of the list. */}
+          <DialogBody className="px-5 py-4" data-edge="chips">
+            <div className="space-y-4">
+              {preview?.sections.map((label) => {
+                const ids = sectionPageIds(preview, label);
                 return (
-                  <div>
-                    <p className="pb-1 text-[11px] font-medium uppercase tracking-[0.06em] text-ink-3">
-                      Unplaced · {unplaced.length}
+                  <div key={label}>
+                    <p className="text-label pb-1.5 text-ink-3">
+                      {label} · {ids.length}
                     </p>
                     <div className="flex flex-wrap gap-1.5">
-                      {unplaced.map((c) => (
-                        <span
-                          key={c.id}
-                          className="flex items-center gap-1.5 rounded-md border border-line bg-surface px-2 py-1 text-[12px] text-ink"
-                        >
-                          <span className="text-[13px] leading-none">
-                            {c.icon ?? DEFAULT_PAGE_ICON}
-                          </span>
-                          <span className="max-w-[220px] truncate">{c.title}</span>
-                        </span>
-                      ))}
+                      {ids.map((id) => {
+                        const c = byId.get(id);
+                        return (
+                          <Chip
+                            key={id}
+                            emoji={c?.icon ?? DEFAULT_PAGE_ICON}
+                            className="max-w-[220px]"
+                          >
+                            {c?.title ?? "Untitled page"}
+                          </Chip>
+                        );
+                      })}
                     </div>
                   </div>
                 );
-              })()}
+              })}
+            </div>
           </DialogBody>
 
-          <div className="flex items-center justify-end gap-2 border-t border-line px-5 py-3">
-            <Button variant="ghost" onClick={onCancel}>
-              Cancel
-            </Button>
-            <Button onClick={onApply}>Apply</Button>
+          {/* Footer of the twin (page-move-dialog): no hairline over the fade
+              scroller, quiet beside ink, and the refusal above both. */}
+          <div className="px-5 pb-4 pt-3">
+            {applyError && (
+              <p role="alert" className="mb-2 text-[12px] text-ink-2">
+                {applyError}
+              </p>
+            )}
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="quiet"
+                disabled={applying}
+                onClick={onCancel}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                variant="ink"
+                disabled={applying}
+                onClick={onApply}
+              >
+                {applying ? "Applying…" : "Apply"}
+              </Button>
+            </div>
           </div>
         </Dialog.Content>
       </Dialog.Portal>

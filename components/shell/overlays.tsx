@@ -28,6 +28,7 @@ import { PageRenameDialog } from "../page-rename-dialog";
 import { PageRefRemoveDialog } from "../page-ref-remove-dialog";
 import {
   LOCAL_RECOVERY_UNAVAILABLE,
+  SMART_UNDO_SEC,
   type FocusDialogSession,
   type FocusPageDialogTarget,
   type PageRefRemoveTarget,
@@ -60,10 +61,14 @@ export interface ShellOverlaysProps {
   setMoveTarget: Dispatch<SetStateAction<FocusPageDialogTarget | null>>;
   onMoveDialogMove: ComponentProps<typeof PageMoveDialog>["onMove"];
   smartPreview: SmartSortPreviewProps["preview"];
+  smartApplying: boolean;
+  smartApplyError: string | null;
   onApplySmartSort: () => Promise<void>;
   onCancelSmartSort: () => void;
   smartUndoOpen: boolean;
   smartUndoPageId: string | null;
+  onPauseSmartUndo: () => void;
+  onResumeSmartUndo: () => void;
   onUndoSmartSort: () => void;
   pageRefUndo: PageRefUndo | null;
   onRestoreRemovedPageRef: () => Promise<void>;
@@ -119,10 +124,14 @@ export function ShellOverlays({
   setMoveTarget,
   onMoveDialogMove,
   smartPreview,
+  smartApplying,
+  smartApplyError,
   onApplySmartSort,
   onCancelSmartSort,
   smartUndoOpen,
   smartUndoPageId,
+  onPauseSmartUndo,
+  onResumeSmartUndo,
   onUndoSmartSort,
   pageRefUndo,
   onRestoreRemovedPageRef,
@@ -241,6 +250,8 @@ export function ShellOverlays({
       <SmartSortPreview
         preview={smartPreview}
         pages={currentNode?.children ?? []}
+        applying={smartApplying}
+        applyError={smartApplyError}
         onApply={onApplySmartSort}
         onCancel={onCancelSmartSort}
       />
@@ -302,6 +313,9 @@ export function ShellOverlays({
           subtitle="Edit the headings and links freely"
           actionLabel="Undo"
           onAction={onUndoSmartSort}
+          durationSec={SMART_UNDO_SEC}
+          onHoverStart={onPauseSmartUndo}
+          onHoverEnd={onResumeSmartUndo}
         />
         <Snackbar
           open={

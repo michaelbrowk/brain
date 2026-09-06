@@ -131,6 +131,7 @@ import {
   removeNode,
   saveOperationKey,
   shareTreeRevision,
+  SMART_UNDO_MS,
   smartChildSignature,
   STRUCTURE_MUTATION_TIMEOUT_MS,
   captureThought,
@@ -424,9 +425,16 @@ export function Shell({
     count: number;
   } | null>(null);
   const [smartLoading, setSmartLoading] = useState(false);
+  /** The Apply write is in flight. The dialog holds through it, so a save
+   *  that fails can answer where the reader pressed instead of leaving a
+   *  closed dialog over an unchanged document. */
+  const [smartApplying, setSmartApplying] = useState(false);
+  const [smartApplyError, setSmartApplyError] = useState<string | null>(null);
   const [smartUndoOpen, setSmartUndoOpen] = useState(false);
   const [smartUndoPageId, setSmartUndoPageId] = useState<string | null>(null);
   const smartUndoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const smartUndoEndsAt = useRef(0);
+  const smartUndoLeftMs = useRef(0);
 
   const updateMailConfiguredFromSettings = useCallback(
     () => {
@@ -4163,6 +4171,30 @@ export function Shell({
     [mutate],
   );
 
+  /** Arms the Smart sort undo window, `ms` from now. */
+  const armSmartUndo = useCallback((ms: number) => {
+    if (smartUndoTimer.current) clearTimeout(smartUndoTimer.current);
+    smartUndoEndsAt.current = Date.now() + ms;
+    smartUndoLeftMs.current = ms;
+    smartUndoTimer.current = setTimeout(() => {
+      smartUndoTimer.current = null;
+      setSmartUndoOpen(false);
+    }, ms);
+  }, []);
+  /** Hover holds the way back. The ring pauses under the pointer on its own
+   *  `animation-play-state`, so the timer pauses with it or the two disagree
+   *  and the pill leaves from under the hand reaching for Undo. */
+  const pauseSmartUndo = useCallback(() => {
+    if (!smartUndoTimer.current) return;
+    clearTimeout(smartUndoTimer.current);
+    smartUndoTimer.current = null;
+    smartUndoLeftMs.current = Math.max(0, smartUndoEndsAt.current - Date.now());
+  }, []);
+  const resumeSmartUndo = useCallback(() => {
+    if (smartUndoTimer.current || smartUndoLeftMs.current <= 0) return;
+    armSmartUndo(smartUndoLeftMs.current);
+  }, [armSmartUndo]);
+
   const runSmartSort = useCallback(async () => {
     if (!selectedId) return;
     const targetId = selectedId;
@@ -4175,6 +4207,7 @@ export function Shell({
       return;
     const expectedChildren = smartChildSignature(curChildrenRef.current);
     setSmartLoading(true);
+    setSmartApplyError(null);
     setSmartPreview(null);
     try {
       const r = await apiFetch("/api/smart-sort", {
@@ -4269,7 +4302,8 @@ export function Shell({
         ? pendingRef.current.md
         : target.markdown;
     const visibleRevision = revisionsRef.current.get(target.id) ?? target.rev;
-    setSmartPreview(null);
+    setSmartApplyError(null);
+    setSmartApplying(true);
     smartUndo.current = {
       id: target.id,
       markdown: visibleBody,
@@ -4298,7 +4332,19 @@ export function Shell({
     }
     // replace the body with the fresh layout (re-running the broom re-organizes,
     // it doesn't stack). Undo restores the prior body verbatim.
-    if (!(await writeBody(target, organized))) return;
+    // The dialog is still up. A write that fails says so in its own footer and
+    // takes the undo ref back with it: closing first left the reader with a
+    // pressed button, an unchanged document, no word, and a way back that
+    // pointed at a body nothing had replaced.
+    const written = await writeBody(target, organized);
+    setSmartApplying(false);
+    if (!written) {
+      smartUndo.current = null;
+      setSmartUndoPageId(null);
+      setSmartApplyError("Couldn't save the sorted page. Try again.");
+      return;
+    }
+    setSmartPreview(null);
     // it's a plain doc now — drop any legacy sections-view state
     await patchParentSections(target.id, [], null);
     await refreshTree();
@@ -4308,13 +4354,13 @@ export function Shell({
       return;
     }
     setSmartUndoOpen(true);
-    if (smartUndoTimer.current) clearTimeout(smartUndoTimer.current);
-    smartUndoTimer.current = setTimeout(() => setSmartUndoOpen(false), 9000);
+    armSmartUndo(SMART_UNDO_MS);
   }, [
     smartPreview,
     currentNode,
     page,
     ordinaryChildren,
+    armSmartUndo,
     blockConflictMutation,
     showToast,
     writeBody,
@@ -5378,10 +5424,17 @@ export function Shell({
           }
         }}
         smartPreview={smartPreview}
+        smartApplying={smartApplying}
+        smartApplyError={smartApplyError}
         onApplySmartSort={applySmartSort}
-        onCancelSmartSort={() => setSmartPreview(null)}
+        onCancelSmartSort={() => {
+          setSmartPreview(null);
+          setSmartApplyError(null);
+        }}
         smartUndoOpen={smartUndoOpen}
         smartUndoPageId={smartUndoPageId}
+        onPauseSmartUndo={pauseSmartUndo}
+        onResumeSmartUndo={resumeSmartUndo}
         onUndoSmartSort={() => {
           setSmartUndoOpen(false);
           undoSmartSort();

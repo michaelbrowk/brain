@@ -1185,6 +1185,13 @@ html[data-kbd] [contenteditable]:focus-visible {
 .edge-fade[data-scroll-more] {
   --edge-bottom: 20px;
 }
+/* A wrapped tile flow is not a band of repeating rows: it ends wherever the
+   fold falls, mid-chip. Twenty pixels of mask under a 28px chip read as one
+   chip dimming rather than as a list that continues, so a chip scroller
+   carries a whole chip and its gap. */
+.edge-fade[data-edge="chips"][data-scroll-more] {
+  --edge-bottom: 34px;
+}
 @media (prefers-reduced-motion: reduce) {
   .edge > i,
   .edge-fade {

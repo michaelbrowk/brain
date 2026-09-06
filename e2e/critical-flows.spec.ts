@@ -3500,6 +3500,65 @@ test("Smart sort writes a dated section in the order it previewed", async ({
     .toEqual(newestFirst);
 });
 
+test("a failed Apply holds Smart sort up and says what happened", async ({
+  page,
+}) => {
+  await login(page);
+
+  const parentResponse = await browserJson(page, "/api/page", {
+    method: "POST",
+    body: { title: "Apply failure parent", markdown: "Body" },
+  });
+  expect(parentResponse.ok).toBeTruthy();
+  const parent = parentResponse.body as { id: string };
+  const children: string[] = [];
+  for (const title of ["Alpha", "Beta", "Gamma", "Delta"]) {
+    const childResponse = await browserJson(page, "/api/page", {
+      method: "POST",
+      body: { parentId: parent.id, title },
+    });
+    expect(childResponse.ok).toBeTruthy();
+    children.push((childResponse.body as { id: string }).id);
+  }
+  await page.route("**/api/smart-sort", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sections: ["Keep"],
+        assignments: Object.fromEntries(children.map((id) => [id, "Keep"])),
+        order: children,
+        count: children.length,
+      }),
+    });
+  });
+  // The body write is the commit. Refuse it, and the reader has to be told
+  // where they pressed: closing first left a pressed button over a document
+  // nothing had changed.
+  await page.route(`**/api/page/${parent.id}`, async (route) => {
+    if (route.request().method() !== "PUT") return route.continue();
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "write refused" }),
+    });
+  });
+
+  await page.goto(`/p/${parent.id}`);
+  await page.getByRole("button", { name: "Smart sort" }).click();
+  const dialog = page.getByRole("dialog", { name: "Smart sort" });
+  await dialog.getByRole("button", { name: "Apply" }).click();
+  await expect(dialog.getByRole("alert")).toHaveText(
+    "Couldn't save the sorted page. Try again.",
+    { timeout: 20_000 },
+  );
+  await expect(dialog).toBeVisible();
+  await expect(page.getByRole("button", { name: "Undo" })).toHaveCount(0);
+
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expectDialogLayerReleased(page);
+});
+
 test("a delayed History open cannot replace a newer Move dialog", async ({
   page,
 }) => {

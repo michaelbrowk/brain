@@ -9626,4 +9626,184 @@ describe("share-aware Store leaves", () => {
     );
     expect(attachmentGrantsRoot(scope, "unknown00001.png", rootId)).toBe(false);
   });
+
+  /** The first visitor write, which is what puts the root in the index. */
+  const scopeTheRoot = (
+    s: Store,
+    rootId: string,
+    childId: string,
+    version: number,
+  ) =>
+    s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: "first visit builds the baseline",
+      visitorName: "Ada",
+    });
+
+  it("grants an image the owner adds after the baseline was taken", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const later = await s.saveAttachment({
+      ...shot(),
+      originalName: "later.png",
+    });
+    await s.writePage(childId, `![](${later.url})`, undefined, "me");
+
+    const scope = await readAttachmentScope(root);
+    expect(attachmentGrantsRoot(scope, attachmentName(later.url), rootId)).toBe(
+      true,
+    );
+    expect(
+      attachmentGrantsRoot(scope, attachmentName(later.url), "some-other-root"),
+    ).toBe(false);
+  });
+
+  it("grants an image the owner appends after the baseline was taken", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const later = await s.saveAttachment({
+      ...shot(),
+      originalName: "appended.png",
+    });
+    await s.appendPage(childId, `![](${later.url})`, "claude");
+
+    const scope = await readAttachmentScope(root);
+    expect(attachmentGrantsRoot(scope, attachmentName(later.url), rootId)).toBe(
+      true,
+    );
+  });
+
+  it("leaves the index unwritten when no root has ever been editable", async () => {
+    const { s, root } = await tmpStore();
+    const page = await s.createPage(null, "Private");
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "own.png",
+    });
+    await s.writePage(page.id, `![](${image.url})`, undefined, "me");
+
+    // Almost every owner write is this one, so it costs no ancestor walk and
+    // no file write.
+    await expect(
+      fs.access(path.join(root, "_attachments", "scope.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readAttachmentScope(root)).toEqual({
+      roots: [],
+      uploads: {},
+      baseline: {},
+    });
+  });
+
+  it("grants an owner's image to every scoped root the page sits inside", async () => {
+    const { s, root } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const outer = await s.createPage(null, "Outer");
+    const inner = await s.createPage(outer.id, "Inner");
+    const leaf = await s.createPage(inner.id, "Leaf");
+    // A move can nest one editable root inside another after both were
+    // enabled, which readShareScope reports as an overlap. The index can
+    // hold an ancestor and a descendant of the same page at once.
+    await writeAttachmentScope(root, {
+      roots: [outer.id, inner.id],
+      uploads: {},
+      baseline: {},
+    });
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "leaf.png",
+    });
+    await s.writePage(leaf.id, `![](${image.url})`, undefined, "me");
+
+    const scope = await readAttachmentScope(root);
+    const name = attachmentName(image.url);
+    expect(attachmentGrantsRoot(scope, name, outer.id)).toBe(true);
+    expect(attachmentGrantsRoot(scope, name, inner.id)).toBe(true);
+    expect(attachmentGrantsRoot(scope, name, leaf.id)).toBe(false);
+  });
+
+  it("grants nothing for an owner write into a trashed page", async () => {
+    // A trashed page is not part of what the link shows, which is the rule
+    // the first baseline walk already follows.
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const trashed = await s.createPage(rootId, "Trashed");
+    await scopeTheRoot(s, rootId, childId, version);
+    await s.deletePage(trashed.id);
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "trashed.png",
+    });
+    await s.writePage(trashed.id, `![](${image.url})`, undefined, "me");
+
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(false);
+  });
+
+  it("refuses a visitor a private attachment after the index is lost", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const hidden = await s.saveAttachment({
+      ...shot(),
+      originalName: "hidden.png",
+    });
+    // A restore from before the index existed, or a corrupted file, reads as
+    // an empty scope. The write boundary rebuilds the root's baseline from
+    // the live subtree, so a name the subtree does not show is still refused.
+    // The read boundary leans on this, which is why it is pinned here.
+    await fs.rm(path.join(root, "_attachments", "scope.json"));
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${hidden.url})`,
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(ShareAttachmentScopeError);
+  });
+
+  it("hands a visitor no new reference of their own after an owner extends the baseline", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const shown = await s.saveAttachment({
+      ...shot(),
+      originalName: "shown.png",
+    });
+    const hidden = await s.saveAttachment({
+      ...shot(),
+      originalName: "hidden.png",
+    });
+    await s.writePage(childId, `![](${shown.url})`, undefined, "me");
+
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${shown.url})\n\nand a caption`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${shown.url})\n\n![](${hidden.url})`,
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(ShareAttachmentScopeError);
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(hidden.url),
+        rootId,
+      ),
+    ).toBe(false);
+  });
 });

@@ -56,6 +56,7 @@ import {
 } from "./share-limits";
 import {
   attachmentGrantsRoot,
+  extendBaseline,
   forgetUploads,
   readAttachmentScope,
   recordBaseline,
@@ -3581,6 +3582,7 @@ export class Store {
       e.meta.updated = now();
       if (by) e.meta.updatedBy = by;
       delete e.meta.structureWriteBarrier;
+      await this.extendScopedBaselinesUnlocked(id, markdown);
       const content = serializePage(e.meta, markdown);
       await atomicWrite(indexPath, content);
       scheduleCommit(this.root);
@@ -3616,6 +3618,7 @@ export class Store {
       const base = currentMarkdown.trimEnd();
       const addition = markdown.trimStart();
       const joined = base ? `${base}\n\n${addition}` : addition;
+      await this.extendScopedBaselinesUnlocked(id, joined);
       const content = serializePage(e.meta, joined);
       await atomicWrite(indexPath, content);
       scheduleCommit(this.root);
@@ -3812,6 +3815,35 @@ export class Store {
       ),
       built: true,
     };
+  }
+
+  /** An owner body write into a scoped subtree adds what it names to that
+   *  root's baseline. Without this the baseline stays the snapshot the first
+   *  visitor write took, and every image the owner adds afterwards is a
+   *  broken image on a page the owner is working on. A page can sit inside
+   *  more than one scoped root, so every scoped ancestor gets the names.
+   *  Nothing is walked and nothing is written while no root has ever been
+   *  editable, which is the state almost every notes folder is in. Caller
+   *  owns mutate(). */
+  private async extendScopedBaselinesUnlocked(
+    pageId: string,
+    markdown: string,
+  ): Promise<void> {
+    const scope = await readAttachmentScope(this.root);
+    if (scope.roots.length === 0) return;
+    const names = [...referencedAttachmentNames(markdown)];
+    // A trashed page is not part of what the link shows, the same rule the
+    // first baseline walk follows.
+    if (names.length === 0 || this.isDeleted(pageId)) return;
+    let next = scope;
+    const seen = new Set<string>();
+    let current = this.index.get(pageId);
+    while (current && !seen.has(current.meta.id)) {
+      seen.add(current.meta.id);
+      next = extendBaseline(next, current.meta.id, names);
+      current = current.parentId ? this.index.get(current.parentId) : undefined;
+    }
+    if (next !== scope) await writeAttachmentScope(this.root, next);
   }
 
   /** Every attachment name the root's live subtree references today, in a

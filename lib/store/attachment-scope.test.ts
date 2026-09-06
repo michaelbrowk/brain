@@ -6,6 +6,7 @@ import { localAttachmentName } from "../attachments";
 import {
   attachmentGrantsRoot,
   attachmentScopePath,
+  extendBaseline,
   forgetUploads,
   readAttachmentScope,
   recordBaseline,
@@ -73,6 +74,34 @@ describe("attachment scope index", () => {
     const first = recordBaseline(EMPTY, "root-1", ["old000000001.png"]);
     const second = recordBaseline(first, "root-1", ["different0001.png"]);
     expect(second).toBe(first);
+  });
+
+  it("extends a scoped root's baseline and hands back the same object with nothing to add", () => {
+    const first = recordBaseline(EMPTY, "root-1", ["old000000001.png"]);
+    const wider = extendBaseline(first, "root-1", ["later0000001.png"]);
+    expect(attachmentGrantsRoot(wider, "later0000001.png", "root-1")).toBe(true);
+    expect(attachmentGrantsRoot(wider, "later0000001.png", "root-2")).toBe(false);
+    expect(attachmentGrantsRoot(wider, "old000000001.png", "root-1")).toBe(true);
+    expect(extendBaseline(wider, "root-1", ["later0000001.png"])).toBe(wider);
+    expect(extendBaseline(wider, "root-1", [])).toBe(wider);
+  });
+
+  it("extends nothing for a root the index has never scoped", () => {
+    const scope = recordBaseline(EMPTY, "root-1", []);
+    expect(extendBaseline(scope, "root-2", ["later0000001.png"])).toBe(scope);
+  });
+
+  it("leaves an upload with the one root the ledger gave it", () => {
+    const uploaded = recordUpload(
+      recordBaseline(EMPTY, "root-2", []),
+      "up0000000001.png",
+      "root-1",
+      10,
+      AT,
+    );
+    const after = extendBaseline(uploaded, "root-2", ["up0000000001.png"]);
+    expect(after).toBe(uploaded);
+    expect(attachmentGrantsRoot(after, "up0000000001.png", "root-2")).toBe(false);
   });
 
   it("lets two roots share one baseline name without either widening the other", () => {

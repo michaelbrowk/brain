@@ -60,19 +60,26 @@ export function referencedPageIds(
   return ids;
 }
 
-/** Direct children the body does not link yet. Without an origin (server
- *  render, hydration pass) no link can be classified, so the answer is "none"
- *  rather than "all": painting every child as a derived ref and collapsing
- *  the list once the browser origin arrives shows anchors that never belonged
- *  on the page. The list appears with the first client render. */
+/** Direct children the body does not link yet.
+ *
+ *  Three states, not two. A string is the origin. `null` is "no origin is
+ *  configured", which is a real answer: only the relative `/p/<id>` form is a
+ *  page link, and the list is correct. `undefined` is "not known yet", which
+ *  is the client component's server snapshot, and the answer there is "none"
+ *  rather than "all": painting every child as a derived ref and collapsing the
+ *  list once the browser origin arrives shows anchors that never belonged on
+ *  the page. That list appears with the first client render.
+ *
+ *  Collapsing the two used to take the subpage links off every shared page on
+ *  an install with no BRAIN_PUBLIC_ORIGIN, read-only shares included. */
 export function unreferencedDirectChildren<
   T extends { id: string; collectionRow?: unknown },
 >(
   pages: readonly T[],
   markdown: string,
-  currentOrigin: string | null,
+  currentOrigin: string | null | undefined,
 ): T[] {
-  if (!currentOrigin) return [];
+  if (currentOrigin === undefined) return [];
   const referencedIds = referencedPageIds(markdown, currentOrigin);
   return pages.filter(
     (child) => !child.collectionRow && !referencedIds.has(child.id),

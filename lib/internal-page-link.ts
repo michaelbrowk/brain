@@ -17,11 +17,23 @@ const ABSOLUTE_HTTP_URL_RE = /^https?:\/\//;
  */
 export function classifyInternalPageLink(
   rawHref: string | null | undefined,
-  currentOrigin: string,
+  currentOrigin: string | null,
 ): InternalPageLink | null {
   if (!rawHref || rawHref !== rawHref.trim()) return null;
   if (rawHref.includes("?") || rawHref.includes("#") || rawHref.includes("\\")) {
     return null;
+  }
+
+  // No configured origin. The relative form is still a page link, because it
+  // means the same thing on every host. An absolute URL is not, because there
+  // is nothing to compare it to, and the answer this used to fall back to was
+  // a hard-coded example origin nobody configured.
+  if (currentOrigin === null) {
+    if (!rawHref.startsWith("/") || rawHref.startsWith("//")) return null;
+    const relative = /^\/p\/([^/]+)$/.exec(rawHref);
+    const bare = relative?.[1];
+    if (!bare || !PAGE_ID_RE.test(bare)) return null;
+    return { id: bare, href: `/p/${bare}` };
   }
 
   let base: URL;

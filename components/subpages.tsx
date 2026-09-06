@@ -32,7 +32,9 @@ import { Icon } from "./ui/icon";
 
 const subscribeToOrigin = () => () => {};
 const getBrowserOrigin = () => window.location.origin;
-const getServerOrigin = () => null;
+// Not "no origin", but "not known yet": the browser has one and this render
+// cannot see it. unreferencedDirectChildren reads the difference.
+const getServerOrigin = () => undefined;
 
 export { referencedPageIds } from "@/lib/derived-page-refs";
 

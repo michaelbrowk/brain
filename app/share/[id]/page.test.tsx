@@ -220,14 +220,22 @@ describe("shared subtree page", () => {
     expect(markup).not.toContain('data-page-ref="child"');
   });
 
-  it("classifies links against the configured origin only, never an invented one", async () => {
+  it("classifies links against the configured origin only, never an invented one, and still lists subpages without one", async () => {
+    const noOriginRoot = {
+      ...root,
+      markdown:
+        "[Child](/p/child)\n\n[Derived](https://brain.example.com/p/derived)",
+    };
     const { default: SharePage } = await loadPage(
       {
         kind: "granted",
-        root,
-        target: root as unknown as typeof child,
+        root: noOriginRoot,
+        target: noOriginRoot as unknown as typeof child,
         shareVersion: 7,
-        directChildren: [{ id: "derived", title: "Derived", icon: "🧭" }],
+        directChildren: [
+          { id: "child", title: "Child", icon: "📄" },
+          { id: "derived", title: "Derived", icon: "🧭" },
+        ],
       },
       { origin: null },
     );
@@ -238,7 +246,14 @@ describe("shared subtree page", () => {
     });
     const markup = renderToStaticMarkup(result);
 
-    expect(markup).not.toContain("data-derived-page-refs");
+    // The relative form means the same thing on every host, so the child it
+    // names is linked already and stays out of the derived list.
+    expect(markup).not.toContain('data-page-ref="child"');
+    // The absolute one is not a page link: there is no origin to compare it
+    // to, and the default this used to fall back to was an origin nobody
+    // configured.
+    expect(markup).toContain('data-derived-page-refs="true"');
+    expect(markup).toContain('data-page-ref="derived"');
     expect(markup).not.toContain("brain.example.com");
   });
 

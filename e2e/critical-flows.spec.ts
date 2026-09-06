@@ -3683,6 +3683,56 @@ test("an answer that lands after Cancel does not reopen Smart sort", async ({
   ).toHaveCount(0);
 });
 
+test("Apply commits, and the page takes the sort from there", async ({
+  page,
+}) => {
+  await login(page);
+  const { parent, children } = await smartSortParent(page, "Aftermath parent");
+  const sections = ["Keep", "Later"];
+  await page.route("**/api/smart-sort", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sections,
+        assignments: Object.fromEntries(
+          children.map((id, index) => [id, sections[index % 2]]),
+        ),
+        order: children,
+        count: children.length,
+      }),
+    });
+  });
+  // Hold the write open long enough to read the dialog while it commits.
+  await page.route(`**/api/page/${parent.id}`, async (route) => {
+    if (route.request().method() !== "PUT") return route.continue();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await route.continue();
+  });
+
+  await page.goto(`/p/${parent.id}`);
+  // The four children are unmentioned by the body, so the tail is standing.
+  await expect(page.locator("[data-derived-page-refs]")).toBeVisible();
+
+  await page.getByRole("button", { name: "Smart sort" }).click();
+  const dialog = page.getByRole("dialog", { name: "Smart sort" });
+  await expect(dialog.getByText("2 sections")).toBeVisible();
+  expect(await dialog.getAttribute("data-commit")).toBeNull();
+
+  await dialog.getByRole("button", { name: "Apply" }).click();
+  // A dialog that committed lets go rather than retreating: the flag is what
+  // picks the exit, and Cancel never carries it.
+  await expect(dialog).toHaveAttribute("data-commit", "");
+  await expect(page.getByRole("dialog", { name: "Smart sort" })).toHaveCount(0);
+  await expectDialogLayerReleased(page);
+
+  // The body now names every child, so the tail leaves; the way back rises
+  // with its deadline drawn on it.
+  await expect(page.locator("[data-derived-page-refs]")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Undo" })).toBeVisible();
+  await expect(page.locator("[data-toast-ring]")).toBeVisible();
+});
+
 test("a failed Apply holds Smart sort up and says what happened", async ({
   page,
 }) => {

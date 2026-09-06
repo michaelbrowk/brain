@@ -1,7 +1,9 @@
 "use client";
 
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { unreferencedDirectChildren } from "@/lib/derived-page-refs";
+import { DUR, EASE_OUT } from "@/lib/motion";
 import {
   BRAIN_FILE_PAGE_EVENT,
   BRAIN_FILE_PAGE_RESULT_EVENT,
@@ -193,6 +195,11 @@ export function Subpages({
     [pages, markdown, currentOrigin],
   );
 
+  const reduce = useReducedMotion();
+  // The tail has to outlive its own contents for as long as it takes to
+  // leave, and go back to rendering nothing at all once it has: a page that
+  // never had one, and the server, still render an empty string.
+  const [tailStanding, setTailStanding] = useState(false);
   const [status, setStatus] = useState("");
   const asked = useRef<{ id: string; title: string } | null>(null);
   const answer = useRef<FilePageRefResult | null>(null);
@@ -275,7 +282,8 @@ export function Subpages({
     return result?.id === child.id && result.refused === null;
   }, []);
 
-  if (visibleChildren.length === 0 && !status) return null;
+  if (visibleChildren.length > 0 && !tailStanding) setTailStanding(true);
+  if (visibleChildren.length === 0 && !status && !tailStanding) return null;
 
   return (
     <>
@@ -290,10 +298,32 @@ export function Subpages({
       >
         {status}
       </span>
+      {/* When the body starts naming every child, this whole block would
+          otherwise be deleted in the frame the document arrives. It leaves
+          instead, a beat behind the sections it was absorbed into — the app's
+          one sanctioned height animation, from the tree's own row exit. */}
+      <AnimatePresence
+        initial={false}
+        onExitComplete={() => setTailStanding(false)}
+      >
       {visibleChildren.length > 0 && (
-        <div
+        <motion.div
           data-derived-page-refs
-          className="mt-6 min-w-0 max-w-full border-t border-hair pt-3"
+          /* The resting spacing stays in the class list: only the exit needs
+             to collapse it, and framer reads the computed values to leave
+             from. `overflow-hidden` is what a height going to zero needs. */
+          className="mt-6 min-w-0 max-w-full overflow-hidden border-t border-hair pt-3"
+          initial={false}
+          exit={
+            reduce
+              ? { opacity: 0 }
+              : { height: 0, opacity: 0, marginTop: 0, paddingTop: 0 }
+          }
+          transition={
+            reduce
+              ? { duration: DUR.fast }
+              : { duration: DUR.base, ease: EASE_OUT, delay: 0.12 }
+          }
         >
           {/* The rows below are children of this page that the page does not
               mention. Without the rule and the name they read as document
@@ -330,8 +360,9 @@ export function Subpages({
               />
             </p>
           ))}
-        </div>
+        </motion.div>
       )}
+      </AnimatePresence>
     </>
   );
 }

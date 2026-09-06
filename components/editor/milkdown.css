@@ -188,6 +188,86 @@
   }
 }
 
+/* Smart sort's document arriving. The blocks it just wrote assemble in the
+   order the markdown was built in rather than the page appearing whole: the
+   reader has been watching chips land in sections, and this is the same
+   event one surface down. Thirty milliseconds a block, capped at the tenth
+   so a long column does not take three quarters of a second, and the right
+   column carries a flat sixty behind the left, which is the reading order
+   `applySmartSort` splits on. `both` leaves every block at its `to` state,
+   so the global reduced-motion flattening disables this on its own with no
+   second rule. */
+@keyframes sorted-block-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+[data-sorted-in] .milkdown .ProseMirror > :not(.brain-cols),
+[data-sorted-in] .milkdown .ProseMirror .brain-col > * {
+  --sorted-step: 270ms;
+  --sorted-column: 0ms;
+  animation: sorted-block-in 260ms var(--ease-out) both;
+  animation-delay: calc(var(--sorted-step) + var(--sorted-column));
+}
+[data-sorted-in] .milkdown .ProseMirror > :nth-child(1),
+[data-sorted-in] .milkdown .ProseMirror .brain-col > :nth-child(1) {
+  --sorted-step: 0ms;
+}
+[data-sorted-in] .milkdown .ProseMirror > :nth-child(2),
+[data-sorted-in] .milkdown .ProseMirror .brain-col > :nth-child(2) {
+  --sorted-step: 30ms;
+}
+[data-sorted-in] .milkdown .ProseMirror > :nth-child(3),
+[data-sorted-in] .milkdown .ProseMirror .brain-col > :nth-child(3) {
+  --sorted-step: 60ms;
+}
+[data-sorted-in] .milkdown .ProseMirror > :nth-child(4),
+[data-sorted-in] .milkdown .ProseMirror .brain-col > :nth-child(4) {
+  --sorted-step: 90ms;
+}
+[data-sorted-in] .milkdown .ProseMirror > :nth-child(5),
+[data-sorted-in] .milkdown .ProseMirror .brain-col > :nth-child(5) {
+  --sorted-step: 120ms;
+}
+[data-sorted-in] .milkdown .ProseMirror > :nth-child(6),
+[data-sorted-in] .milkdown .ProseMirror .brain-col > :nth-child(6) {
+  --sorted-step: 150ms;
+}
+[data-sorted-in] .milkdown .ProseMirror > :nth-child(7),
+[data-sorted-in] .milkdown .ProseMirror .brain-col > :nth-child(7) {
+  --sorted-step: 180ms;
+}
+[data-sorted-in] .milkdown .ProseMirror > :nth-child(8),
+[data-sorted-in] .milkdown .ProseMirror .brain-col > :nth-child(8) {
+  --sorted-step: 210ms;
+}
+[data-sorted-in] .milkdown .ProseMirror > :nth-child(9),
+[data-sorted-in] .milkdown .ProseMirror .brain-col > :nth-child(9) {
+  --sorted-step: 240ms;
+}
+[data-sorted-in] .milkdown .ProseMirror .brain-cols > .brain-col:nth-child(2) > * {
+  --sorted-column: 60ms;
+}
+
+/* The global reduced-motion block flattens every animation's DURATION and
+   nothing else, so a ladder built out of delays would leave the last block
+   holding its `from` state for a third of a second and then pop it in. The
+   delay itself goes, not the steps behind it: the per-index rules carry a
+   pseudo-class and would outrank a rule that only reset the custom
+   properties. */
+@media (prefers-reduced-motion: reduce) {
+  [data-sorted-in] .milkdown .ProseMirror > :not(.brain-cols),
+  [data-sorted-in] .milkdown .ProseMirror .brain-col > * {
+    animation-delay: 0s;
+  }
+}
+
 /* block drag handle (Notion-style) — grab any block to reorder it. The
    BlockProvider positions this and toggles data-show on block hover. */
 .brain-block-handle {

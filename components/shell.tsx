@@ -186,6 +186,12 @@ const URGENT_TOAST_MS = 3200;
  *  action holds the queue behind it, so it cannot stand without a window. */
 const REDEPLOY_TOAST_MS = 10_000;
 
+/** How long the sorted body keeps its arrival flag. Long enough for the
+ *  ladder to finish, short enough that a later re-render cannot replay it. */
+const SORTED_IN_MS = 900;
+/** The undo pill waits for the document to settle before it rises. */
+const SMART_UNDO_RISE_MS = 400;
+
 /** Body of a notes canvas: a `fallback` (skeleton or load error) while the
  *  page is cold, then the resolved page. The fallback exits in place
  *  (absolute skeleton, fast fade) while the body fades in, so the canvas is
@@ -194,10 +200,14 @@ const REDEPLOY_TOAST_MS = 10_000;
  *  second fade. */
 function NotesCanvasBody({
   ready,
+  /** The body was just written by Smart sort: its blocks assemble in reading
+   *  order rather than the document appearing whole (`milkdown.css`). */
+  sortedIn = false,
   fallback,
   children,
 }: {
   ready: boolean;
+  sortedIn?: boolean;
   fallback: ReactNode;
   children: ReactNode;
 }) {
@@ -208,6 +218,7 @@ function NotesCanvasBody({
       {ready && (
         <motion.div
           className="brain-page-body"
+          data-sorted-in={sortedIn ? "" : undefined}
           initial={readyAtMount ? false : { opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: DUR.base, ease: EASE_OUT }}
@@ -435,6 +446,12 @@ export function Shell({
    *  closed dialog over an unchanged document. */
   const [smartApplying, setSmartApplying] = useState(false);
   const [smartApplyError, setSmartApplyError] = useState<string | null>(null);
+  /** Set on the frame the sorted body mounts, so the document assembles
+   *  instead of appearing whole. Dropped again once the run is over, or a
+   *  later re-render would replay it. */
+  const [sortedIn, setSortedIn] = useState(false);
+  const sortedInTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const smartUndoOpenTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [smartUndoOpen, setSmartUndoOpen] = useState(false);
   const [smartUndoPageId, setSmartUndoPageId] = useState<string | null>(null);
   const smartUndoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -448,6 +465,7 @@ export function Shell({
     smartAbort.current?.abort();
     smartAbort.current = null;
     setSmartSort(null);
+    setSmartApplying(false);
     setSmartApplyError(null);
   }, []);
 
@@ -746,6 +764,8 @@ export function Shell({
     () => () => {
       if (toastTimer.current) clearTimeout(toastTimer.current);
       if (urgentTimer.current) clearTimeout(urgentTimer.current);
+      if (sortedInTimer.current) clearTimeout(sortedInTimer.current);
+      if (smartUndoOpenTimer.current) clearTimeout(smartUndoOpenTimer.current);
     },
     [],
   );
@@ -4229,6 +4249,7 @@ export function Shell({
     const request = new AbortController();
     smartAbort.current = request;
     setSmartLoading(true);
+    setSmartApplying(false);
     setSmartApplyError(null);
     setSmartSort({
       pageId: targetId,
@@ -4376,14 +4397,24 @@ export function Shell({
     // pressed button, an unchanged document, no word, and a way back that
     // pointed at a body nothing had replaced.
     const written = await writeBody(target, organized);
-    setSmartApplying(false);
     if (!written) {
+      setSmartApplying(false);
       smartUndo.current = null;
       setSmartUndoPageId(null);
       setSmartApplyError("Couldn't save the sorted page. Try again.");
       return;
     }
+    // `smartApplying` stays true through the close: it is what puts
+    // `data-commit` on the dialog, and the closed-state keyframe reads that
+    // attribute at the moment it starts. The next run clears it.
     setSmartSort(null);
+    if (selectedIdRef.current === target.id) {
+      // The editor has just remounted on the new body (writeBody bumped the
+      // epoch in the same batch), so the document assembles from this frame.
+      setSortedIn(true);
+      if (sortedInTimer.current) clearTimeout(sortedInTimer.current);
+      sortedInTimer.current = setTimeout(() => setSortedIn(false), SORTED_IN_MS);
+    }
     // it's a plain doc now — drop any legacy sections-view state
     await patchParentSections(target.id, [], null);
     await refreshTree();
@@ -4392,8 +4423,16 @@ export function Shell({
       setSmartUndoPageId(null);
       return;
     }
-    setSmartUndoOpen(true);
-    armSmartUndo(SMART_UNDO_MS);
+    // The way back rises after the document has settled, not over the top of
+    // it: at the press the eye is on the sections assembling, and a pill in
+    // the corner would take it off them.
+    if (smartUndoOpenTimer.current) clearTimeout(smartUndoOpenTimer.current);
+    smartUndoOpenTimer.current = setTimeout(() => {
+      smartUndoOpenTimer.current = null;
+      if (selectedIdRef.current !== target.id) return;
+      setSmartUndoOpen(true);
+      armSmartUndo(SMART_UNDO_MS);
+    }, SMART_UNDO_RISE_MS);
   }, [
     smartSort,
     currentNode,
@@ -5257,6 +5296,7 @@ export function Shell({
             ) : selectedId ? (
               <NotesCanvasBody
                 ready={!!page && page.id === selectedId}
+                sortedIn={sortedIn}
                 fallback={
                   pageLoadError?.id === selectedId ? (
                     <motion.div

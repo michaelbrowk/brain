@@ -4619,6 +4619,26 @@ a.brain-share-url:hover {
   }
 }
 
+/* A dialog that COMMITTED does not retreat, it lets go: the content it was
+   holding has just been put on the page underneath, so it expands as it
+   dissolves rather than shrinking back to nothing the way Cancel does. The
+   two gestures used to look identical. `[data-commit]` is set by the surface
+   before it closes. */
+@keyframes dialog-commit {
+  from {
+    opacity: 1;
+    transform: translate(-50%, -54%) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, -54%) scale(1.02);
+  }
+}
+
+.brain-dialog[data-state="closed"][data-commit] {
+  animation: dialog-commit 200ms var(--ease-out) forwards;
+}
+
 @keyframes sheet-slide-up {
   from {
     opacity: 0;
@@ -4955,7 +4975,8 @@ a.brain-share-url:hover {
     animation: sheet-slide-up 180ms var(--ease-drawer) forwards;
   }
 
-  .brain-sheet[data-state="closed"] {
+  .brain-sheet[data-state="closed"],
+  .brain-sheet[data-state="closed"][data-commit] {
     animation: sheet-slide-down 130ms ease-in forwards;
   }
 
@@ -5020,6 +5041,9 @@ a.brain-share-url:hover {
   }
 
   .brain-dialog[data-state="closed"],
+  /* the commit keyframe is a second closed state on the same class, and a
+     rule it outranks cannot flatten it */
+  .brain-dialog[data-state="closed"][data-commit],
   .brain-sheet[data-state="closed"],
   .brain-palette[data-state="closed"] {
     animation-name: dialog-fade-out;

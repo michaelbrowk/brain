@@ -161,6 +161,12 @@ export function SmartSortPreview({
       <Dialog.Portal>
         <Dialog.Overlay className="brain-dialog-overlay fixed inset-0 z-[var(--z-modal)]" />
         <Dialog.Content
+          /* Apply commits: the dialog expands as it dissolves, because what
+             it was holding has just been put on the page underneath. Cancel
+             keeps `dialog-pop-out` and retreats, because nothing happened.
+             The flag outlives the write on purpose — it has to still be on
+             the element when the closed-state keyframe starts. */
+          data-commit={applying ? "" : undefined}
           className="brain-dialog brain-sheet fixed left-1/2 top-1/2 z-[var(--z-modal)] flex max-h-[80dvh] w-[min(calc(100vw-2rem),560px)] flex-col overflow-hidden outline-none"
         >
           <DialogHeader

@@ -1544,6 +1544,15 @@ html[data-kbd] [contenteditable]:focus-visible {
 .chip[data-active] {
   transform: scale(0.97);
 }
+/* A chip that is only a name. Smart sort's proposal is read, not operated,
+   so those chips take the treatment without the affordances: no pointer, no
+   press, and no focus ring, because there is nothing behind them. */
+.chip[data-static] {
+  cursor: default;
+}
+.chip[data-static]:active {
+  transform: none;
+}
 .chip:disabled,
 .chip[aria-disabled="true"] {
   opacity: 0.4;

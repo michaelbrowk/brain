@@ -2,13 +2,12 @@
 
 import * as Dialog from "@radix-ui/react-dialog";
 import { motion, useReducedMotion } from "framer-motion";
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useId, useMemo, useState, type CSSProperties } from "react";
 import { DEFAULT_PAGE_ICON } from "@/lib/constants";
 import { sectionPageIds } from "@/lib/dated-sections";
 import { DUR, SPRING_MATERIALIZE } from "@/lib/motion";
 import type { TreeNode } from "@/lib/store/types";
 import { Button } from "./ui/button";
-import { Chip } from "./ui/chip";
 import { DialogBody, DialogHeader } from "./ui/dialog-header";
 
 export interface SmartSortResult {
@@ -50,6 +49,7 @@ export function SmartSortPreview({
   const result = session?.result ?? null;
   const reduce = useReducedMotion();
   const compact = useCompactViewport();
+  const labelBase = useId();
   /* The deal is a desktop gesture. Below 768 this dialog is `.brain-sheet`,
      where the sections stack and a heap-to-sections reshuffle happens mostly
      off screen, so the phone takes the crossfade the reduced-motion reader
@@ -113,12 +113,21 @@ export function SmartSortPreview({
           <DialogBody className="px-5 py-4" data-edge="chips">
             {dealt ? (
               <div className="space-y-4">
-                {dealt.map((section) => (
+                {dealt.map((section, sectionIndex) => (
                   <div key={section.label}>
-                    <p className="text-label pb-1.5 text-ink-3">
+                    <p
+                      id={`${labelBase}-${sectionIndex}`}
+                      className="text-label pb-1.5 text-ink-3"
+                    >
                       {section.label} · {section.chips.length}
                     </p>
-                    <div className="flex flex-wrap gap-1.5">
+                    {/* The sections are the structure, so they are the thing a
+                        reader hears: one labelled list per section and its
+                        count, rather than sixty-one names in a row. */}
+                    <ul
+                      aria-labelledby={`${labelBase}-${sectionIndex}`}
+                      className="flex flex-wrap gap-1.5"
+                    >
                       {section.chips.map(({ page, arrival }) => (
                         <SortChip
                           key={page.id}
@@ -127,12 +136,13 @@ export function SmartSortPreview({
                           still={still}
                         />
                       ))}
-                    </div>
+                    </ul>
                   </div>
                 ))}
               </div>
             ) : (
-              <div
+              <ul
+                aria-label="Child pages"
                 className="smart-heap flex flex-wrap gap-1.5"
                 style={
                   { "--smart-sweep": `${pages.length * 24 + 600}ms` } as CSSProperties
@@ -147,7 +157,7 @@ export function SmartSortPreview({
                     still={still}
                   />
                 ))}
-              </div>
+              </ul>
             )}
           </DialogBody>
 
@@ -187,12 +197,20 @@ export function SmartSortPreview({
   );
 }
 
-/** One page as a tile. The entrance is `materialize`'s own spring with no
- *  `y`: a vertical offset inside a wrapped flow reads as jitter rather than
- *  as a row falling in, and scale from a tile's own centre is what a tile
- *  arrives on. The stagger is capped in time, not at an index — sixty-one
- *  chips with the mail list's `index >= 8 ? 0` would deal eight and dump the
- *  rest in one frame. */
+/** One page as a tile, and only that. This proposal is read, not operated —
+ *  a page that landed wrong is fixed in the document afterwards, where drag
+ *  already works — so the chips take the `.chip` treatment from globals.css
+ *  without the atom's button semantics: sixty-one controls with nothing
+ *  behind them would be sixty-one dead tab stops and sixty-one announcements
+ *  for a keyboard path that leads nowhere. `components/ui/chip.tsx` is
+ *  untouched; the visual contract is the class, and `data-static` drops the
+ *  pointer and the press that only a control should have.
+ *
+ *  The entrance is `materialize`'s own spring with no `y`: a vertical offset
+ *  inside a wrapped flow reads as jitter rather than as a row falling in, and
+ *  scale from a tile's own centre is what a tile arrives on. The stagger is
+ *  capped in time, not at an index — sixty-one chips with the mail list's
+ *  `index >= 8 ? 0` would deal eight and dump the rest in one frame. */
 function SortChip({
   page,
   index,
@@ -203,7 +221,7 @@ function SortChip({
   still: boolean;
 }) {
   return (
-    <motion.div
+    <motion.li
       className="min-w-0"
       initial={still ? { opacity: 0 } : { opacity: 0, scale: 0.96 }}
       animate={still ? { opacity: 1 } : { opacity: 1, scale: 1 }}
@@ -213,10 +231,13 @@ function SortChip({
           : { ...SPRING_MATERIALIZE, delay: Math.min(index * 0.012, 0.42) }
       }
     >
-      <Chip emoji={page.icon ?? DEFAULT_PAGE_ICON} className="max-w-[220px]">
-        {page.title || "Untitled page"}
-      </Chip>
-    </motion.div>
+      <span className="chip max-w-[220px]" data-static>
+        <span className="chip-glyph" aria-hidden>
+          {page.icon ?? DEFAULT_PAGE_ICON}
+        </span>
+        <span className="truncate">{page.title || "Untitled page"}</span>
+      </span>
+    </motion.li>
   );
 }
 

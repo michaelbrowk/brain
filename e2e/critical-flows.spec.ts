@@ -3490,6 +3490,7 @@ test("Smart sort writes a dated section in the order it previewed", async ({
   // satisfy a bare title assertion while saying nothing about the grouping.
   await expect(dialog.getByText("1 section")).toBeVisible();
   await expect(dialog.getByText("Записи · 4")).toBeVisible();
+  await expect(dialog.getByRole("list", { name: "Записи · 4" })).toBeVisible();
   await expect(dialog.getByText("Запись 23 июня")).toBeVisible();
   await dialog.getByRole("button", { name: "Apply" }).click();
   await expect(page.getByRole("dialog", { name: "Smart sort" })).toHaveCount(0);
@@ -3556,6 +3557,10 @@ test("Smart sort opens on the press and Cancel takes the request with it", async
   await expect(dialog.getByText("Reading 4 pages")).toBeVisible();
   await expect(dialog.getByText("Alpha")).toBeVisible();
   await expect(dialog.getByRole("button", { name: "Apply" })).toBeDisabled();
+  // The proposal is read, not operated: the only controls in it are the way
+  // out, the way back and the way forward. A chip is a name, not a button.
+  await expect(dialog.getByRole("button")).toHaveCount(3);
+  await expect(dialog.getByRole("listitem")).toHaveCount(4);
 
   await dialog.getByRole("button", { name: "Cancel" }).click();
   await expectDialogLayerReleased(page);

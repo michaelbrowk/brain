@@ -61,6 +61,7 @@ import {
   readAttachmentScope,
   recordBaseline,
   recordUpload,
+  rootIsScoped,
   rootUploadBytes,
   writeAttachmentScope,
   type AttachmentScope,
@@ -3838,10 +3839,12 @@ export class Store {
    *  `fromId` is where the ancestor walk starts, which is the page itself for
    *  a body write and the destination parent for a create or a move: a page
    *  can sit inside more than one scoped root, so every scoped ancestor gets
-   *  the names. `names` is a thunk because producing them can cost a subtree
-   *  walk, and no notes folder should pay that while no root has ever been
-   *  editable, which is almost every one of them. Nothing is tokenized,
-   *  walked or written in that case. Caller owns mutate(). */
+   *  the names. The scoped ancestors are resolved first, from the in-memory
+   *  index, and `names` is a thunk so that a page under no scoped root pays
+   *  nothing for the answer. That matters past the first editable share in
+   *  the folder: a move would otherwise walk its whole subtree, and read one
+   *  file per page in it, to feed grants that all no-op. Caller owns
+   *  mutate(). */
   private async extendScopedBaselinesUnlocked(
     fromId: string | null,
     names: () => readonly string[] | Promise<readonly string[]>,
@@ -3851,17 +3854,32 @@ export class Store {
     // A trashed page is not part of what the link shows, the same rule the
     // first baseline walk follows.
     if (scope.roots.length === 0 || this.isDeleted(fromId)) return;
+    const scoped = this.scopedAncestorsUnlocked(fromId, scope);
+    if (scoped.length === 0) return;
     const introduced = await names();
     if (introduced.length === 0) return;
     let next = scope;
+    for (const root of scoped) next = extendBaseline(next, root, introduced);
+    if (next !== scope) await writeAttachmentScope(this.root, next);
+  }
+
+  /** The scoped roots this page sits inside, nearest first. The parent chain
+   *  is the same one isWithinSubtree walks, so every id it returns contains
+   *  the page by construction, and the seen set guards a cyclic index the
+   *  way that reader does. Caller owns mutate(). */
+  private scopedAncestorsUnlocked(
+    fromId: string,
+    scope: AttachmentScope,
+  ): string[] {
+    const roots: string[] = [];
     const seen = new Set<string>();
     let current = this.index.get(fromId);
     while (current && !seen.has(current.meta.id)) {
       seen.add(current.meta.id);
-      next = extendBaseline(next, current.meta.id, introduced);
+      if (rootIsScoped(scope, current.meta.id)) roots.push(current.meta.id);
       current = current.parentId ? this.index.get(current.parentId) : undefined;
     }
-    if (next !== scope) await writeAttachmentScope(this.root, next);
+    return roots;
   }
 
   /** Every attachment name the root's live subtree references today, in a
@@ -3894,6 +3912,27 @@ export class Store {
       }
     }
     return [...names];
+  }
+
+  /** The moved subtree brings its pictures with it, so the destination's
+   *  scoped roots learn what it names. It runs where the move is acknowledged
+   *  and not before: every step up to that point can still put the page back,
+   *  and a grant for a subtree that never arrived would be a grant for files
+   *  the link never showed. What can still fail after it is the index write
+   *  itself, which leaves the move done and the grant missing. That is the
+   *  broken picture this rule exists to prevent rather than a grant nobody
+   *  asked for, and it is the safe direction to fail in.
+   *
+   *  A move out grants nothing and takes nothing back. Caller owns mutate(). */
+  private async grantMovedSubtreeUnlocked(
+    id: string,
+    originalParentId: string | null,
+    newParentId: string | null,
+  ): Promise<void> {
+    if (originalParentId === newParentId) return;
+    await this.extendScopedBaselinesUnlocked(newParentId, () =>
+      this.subtreeAttachmentNamesUnlocked(id),
+    );
   }
 
   /** A link visitor's body write. Same rev contract as writePage, same atomic
@@ -5153,6 +5192,9 @@ export class Store {
       }
       scheduleCommit(this.root);
       releaseSafe = true;
+      // Past the barrier release, so a failure to write the index cannot
+      // strand the Git snapshot barrier as well.
+      await this.grantMovedSubtreeUnlocked(id, originParentId, newParentId);
       return { meta: moved, unlinkedFrom: originRef ? originParentId : null };
     } finally {
       if (releaseSafe) releaseGitBarrier();
@@ -5618,6 +5660,7 @@ export class Store {
         if (!targetAlreadyReferencesSource) {
           emitStore({ type: "write", id: targetId, rev: nextTargetRev, src });
         }
+        await this.grantMovedSubtreeUnlocked(sourceId, parentPageId, targetId);
         return {
           moved,
           removed: removal.removed,
@@ -5659,15 +5702,6 @@ export class Store {
       preparedIntent?.nextOrder ??
       this.orderForPlacement(newParentId, beforeId, id);
     const originalParentId = e.parentId;
-    if (originalParentId !== newParentId) {
-      // The moved subtree brings its pictures with it, so the destination's
-      // scoped roots learn what it names. A move out takes nothing back: a
-      // name already granted stays granted, because a page the root still
-      // shows could be showing it.
-      await this.extendScopedBaselinesUnlocked(newParentId, () =>
-        this.subtreeAttachmentNamesUnlocked(id),
-      );
-    }
     const originalDir = e.dir;
     const originalMeta = { ...e.meta };
     const originalRaw = await fs.readFile(
@@ -5824,6 +5858,7 @@ export class Store {
     if (!isCompositeMoveIntent(moveIntent)) {
       scheduleCommit(this.root);
       emitStore({ type: "move", id, src });
+      await this.grantMovedSubtreeUnlocked(id, originalParentId, newParentId);
     }
     return e.meta;
   }
@@ -5897,10 +5932,18 @@ export class Store {
           : undefined;
       }
       // The first baseline walk skipped this subtree because the link did
-      // not show it. The link shows it again now.
-      await this.extendScopedBaselinesUnlocked(id, () =>
-        this.subtreeAttachmentNamesUnlocked(id),
-      );
+      // not show it. The link shows it again now, and it shows all of the
+      // outermost node the loop above un-trashed, not only the page asked
+      // for: a sibling of it is back on the link too. Both the names and the
+      // roots that receive them come from that node. Starting the ancestor
+      // walk lower would hand a scoped root between here and there names
+      // from outside its own subtree.
+      const outermost = restoredIds.at(-1);
+      if (outermost !== undefined) {
+        await this.extendScopedBaselinesUnlocked(outermost, () =>
+          this.subtreeAttachmentNamesUnlocked(outermost),
+        );
+      }
       scheduleCommit(this.root);
       emitStore({ type: "create", id, src });
       for (const restoredId of restoredIds) {

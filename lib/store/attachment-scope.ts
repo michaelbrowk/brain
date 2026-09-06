@@ -17,8 +17,11 @@ import { assertRealDirectory, ensureRealDirectory } from "./real-directory";
  * the bytes are: through the path jail, never through a symlink.
  */
 export interface AttachmentScope {
-  /** Roots that have ever had `shareEdit` on. The new rule applies to these
-   *  and to no others, so no existing read-only share changes behaviour. */
+  /** Roots a visitor has written to. Not the roots that have `shareEdit` on,
+   *  which is the whole of the difference at the read boundary: a root nobody
+   *  has written to yet holds no visitor Markdown, so the reference check
+   *  still decides for it. The new rule applies to these and to no others, so
+   *  no existing read-only share changes behaviour. */
   roots: string[];
   /** Uploaded by a visitor: name → the one root it belongs to. */
   uploads: Record<string, { root: string; bytes: number; at: string }>;

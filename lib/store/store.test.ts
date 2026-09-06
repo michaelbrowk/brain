@@ -9809,7 +9809,7 @@ describe("share-aware Store leaves", () => {
       markdown: `![](${onParent.url})`,
       by: "me",
     });
-    const nested = await s.createPage(outside.id, "Nested", {
+    await s.createPage(outside.id, "Nested", {
       markdown: `![](${onDescendant.url})`,
       by: "me",
     });
@@ -9829,7 +9829,6 @@ describe("share-aware Store leaves", () => {
         true,
       );
     }
-    expect(nested.id).toBeTruthy();
   });
 
   it("keeps a grant when the owner moves the page back out again", async () => {
@@ -9934,6 +9933,159 @@ describe("share-aware Store leaves", () => {
         rootId,
       ),
     ).toBe(true);
+  });
+
+  it("grants the pictures of a sibling that a restore makes visible again", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "sibling.png",
+    });
+    const folder = await s.createPage(childId, "Folder");
+    const restored = await s.createPage(folder.id, "Restored");
+    await s.createPage(folder.id, "Sibling", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    await s.deletePage(folder.id);
+    await scopeTheRoot(s, rootId, childId, version);
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(false);
+
+    // Restoring one page clears the deleted flag on the folder above it, so
+    // the sibling is back on the link too.
+    await s.restorePage(restored.id);
+
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(true);
+  });
+
+  it("hands a scoped root inside the restored folder nothing from outside it", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "beside.png",
+    });
+    const folder = await s.createPage(childId, "Folder");
+    const inner = await s.createPage(folder.id, "Inner");
+    const deep = await s.createPage(inner.id, "Deep");
+    await s.createPage(folder.id, "Beside", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    // A second scoped root, inside the folder that is about to be trashed.
+    const seeded = await readAttachmentScope(root);
+    await writeAttachmentScope(root, { ...seeded, roots: [rootId, inner.id] });
+    await s.deletePage(folder.id);
+
+    await s.restorePage(deep.id);
+
+    const scope = await readAttachmentScope(root);
+    const name = attachmentName(image.url);
+    expect(attachmentGrantsRoot(scope, name, rootId)).toBe(true);
+    // Beside sits outside inner, so inner's link never showed it.
+    expect(attachmentGrantsRoot(scope, name, inner.id)).toBe(false);
+  });
+
+  it("grants nothing when the move that would carry the pictures in fails", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "failed.png",
+    });
+    const outside = await s.createPage(null, "Outside");
+    await s.createPage(outside.id, "Carried", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    // The move reads the moved page's own index.md. Without it the move
+    // fails and the subtree never enters the share.
+    await fs.rm(path.join(s.resolve(outside.id), "index.md"));
+
+    await expect(
+      s.movePage(outside.id, childId, null, undefined, "me"),
+    ).rejects.toThrow();
+
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(false);
+  });
+
+  it("walks no subtree for a move under no scoped root while another root is scoped", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "elsewhere.png",
+    });
+    const away = await s.createPage(null, "Away", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    const other = await s.createPage(null, "Other");
+    const walk = vi.spyOn(
+      s as unknown as {
+        subtreeAttachmentNamesUnlocked: (id: string) => Promise<string[]>;
+      },
+      "subtreeAttachmentNamesUnlocked",
+    );
+
+    await s.movePage(away.id, other.id, null, undefined, "me");
+
+    expect(walk).not.toHaveBeenCalled();
+    walk.mockRestore();
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(false);
+  });
+
+  it("admits a visitor naming a picture the owner moved out of the root", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "moved-out.png",
+    });
+    const inside = await s.createPage(childId, "Inside", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    await scopeTheRoot(s, rootId, childId, version);
+    await s.movePage(inside.id, null, null, undefined, "me");
+
+    // The ruling, asserted: a move out does not revoke. The visitor writes
+    // the Markdown, so the grant the write boundary consults is the stale
+    // one, and the reference is admitted. The ceiling is what this link
+    // already showed, and an owner who wants the picture out of the share
+    // removes the file or turns editing off.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${image.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
   });
 
   it("leaves the index unwritten on create, duplicate, move and restore when no root has ever been editable", async () => {

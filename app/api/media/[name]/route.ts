@@ -263,12 +263,16 @@ async function canReadAttachment(
     // The reference check alone stopped being sufficient the moment visitors
     // could write Markdown: naming any existing _attachments filename in a
     // shared page would otherwise make a private page's image readable. The
-    // index decides for a root it holds, and it holds every root a visitor
-    // has ever written to: each of the three visitor writes records the root
-    // and its baseline before the visitor's bytes land. Until then no line of
-    // Markdown in the subtree came from a visitor, so the reference check is
-    // as safe as it has always been for a read-only share. Turning editing on
-    // therefore keeps serving the images the page already showed.
+    // index decides for a root it holds. For a root it does not hold, the
+    // property that makes the reference check as safe as it has always been
+    // for a read-only share is this: no attachment reference in an unscoped
+    // root's subtree came from a visitor. writeSharedPage persists the root
+    // and its baseline before its Markdown lands. saveSharedAttachment
+    // persists after the bytes, which is safe because no page names the
+    // upload until a writeSharedPage that scopes the root first.
+    // createSharedSubpage records nothing, and needs not to: it lands an
+    // empty body and keeps the visitor's text as a title, which neither this
+    // route nor the baseline walk tokenizes.
     const scope = await readAttachmentScope(NOTES_ROOT);
     if (!rootIsScoped(scope, rootId)) return true;
     return attachmentGrantsRoot(scope, name, rootId);

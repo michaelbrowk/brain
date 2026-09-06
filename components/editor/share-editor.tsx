@@ -31,6 +31,14 @@ export const SHARE_AUTOSAVE_DEBOUNCE_MS = 2000;
  *  The rev check still gates every write; this bounds the surprise. */
 export const SHARE_DRAFT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
+/** How often a mounted island says it is alive, and how long a silence
+ *  means it is not. Three missed beats: a foreground tab beats on time and
+ *  on every keystroke, and a tab that went hidden has already flushed its
+ *  pending save, so a slot that is both silent for 30 s and still holding a
+ *  draft belongs to a tab that is gone or whose save never landed. */
+export const SHARE_HEARTBEAT_MS = 10_000;
+export const SHARE_HEARTBEAT_STALE_MS = 30_000;
+
 /** The double submit `lib/share-write.ts` checks against the edit cookie.
  *  Named here rather than imported: that module is server-only. */
 const VID_HEADER = "x-brain-share-vid";
@@ -41,6 +49,7 @@ const KEEPALIVE_BODY_BYTES = 60 * 1024;
 
 const DRAFT_NAMESPACE = "brain-share-draft:";
 const RECOVERY_NAMESPACE = "brain-share-recovery:";
+const ALIVE_NAMESPACE = "brain-share-alive:";
 
 export const SHARE_CONFLICT_COPY =
   "Someone else saved this page while you were writing. Your text is still here. Reload to see their version.";
@@ -51,13 +60,17 @@ export const SHARE_GONE_COPY =
 export const SHARE_RECOVERY_COPY =
   "Your text from before the reload is kept. Put it back in place of what is here, or dismiss it.";
 
-/** One draft slot per share version, per page, per tab. The version is in
- *  the key because every rotation bumps it (unshare and re-share, a password,
- *  an expiry, toggling edit): a draft from a revoked link must not be saved
- *  through the re-issued one. The tab is in the key so two tabs stop sharing
- *  one slot; a later visit scans the prefix and takes the newest. */
+/** Every visitor slot has the same shape: namespace, root, share version,
+ *  page, tab. The version is there because every rotation bumps it (unshare
+ *  and re-share, a password, an expiry, toggling edit): nothing written under
+ *  a revoked link is offered under the re-issued one. The tab is there so
+ *  two tabs never share a slot; a later visit scans the prefix instead. */
+function slotPrefix(namespace: string, rootId: string, shareVersion: number, pageId: string) {
+  return `${namespace}${rootId}:${shareVersion}:${pageId}:`;
+}
+
 export function shareDraftPrefix(rootId: string, shareVersion: number, pageId: string): string {
-  return `${DRAFT_NAMESPACE}${rootId}:${shareVersion}:${pageId}:`;
+  return slotPrefix(DRAFT_NAMESPACE, rootId, shareVersion, pageId);
 }
 
 export function shareDraftKey(
@@ -71,24 +84,50 @@ export function shareDraftKey(
 
 /** Where the text goes when the visitor presses Reload on a conflict: the one
  *  state where it has nowhere else to live, because every later save 409s.
- *  The next mount offers it back. */
-export function shareRecoveryKey(rootId: string, pageId: string): string {
-  return `${RECOVERY_NAMESPACE}${rootId}:${pageId}`;
+ *  A slot holds a list, appended to and never overwritten, and the next mount
+ *  offers every parked body under the page's prefix back, newest first. */
+export function shareRecoveryPrefix(rootId: string, shareVersion: number, pageId: string): string {
+  return slotPrefix(RECOVERY_NAMESPACE, rootId, shareVersion, pageId);
+}
+
+export function shareRecoveryKey(
+  rootId: string,
+  shareVersion: number,
+  pageId: string,
+  tabId: string = CLIENT_ID,
+): string {
+  return `${shareRecoveryPrefix(rootId, shareVersion, pageId)}${tabId}`;
+}
+
+/** The heartbeat a mounted island keeps for its own draft slot, so a sibling
+ *  tab can tell in-flight keystrokes from an abandoned draft. */
+export function shareAlivePrefix(rootId: string, shareVersion: number, pageId: string): string {
+  return slotPrefix(ALIVE_NAMESPACE, rootId, shareVersion, pageId);
+}
+
+export function shareAliveKey(
+  rootId: string,
+  shareVersion: number,
+  pageId: string,
+  tabId: string = CLIENT_ID,
+): string {
+  return `${shareAlivePrefix(rootId, shareVersion, pageId)}${tabId}`;
 }
 
 type SaveState = "ok" | "unsaved" | "gone" | "conflict";
 type Pending = { markdown: string; operationId: string };
 type Parked = { markdown: string; updatedAt: number };
+type Recovered = Parked & { key: string };
 
 /** The per-edit identity `StoredDraft.operationId` documents: what stops an
  *  older same-body save response from deleting a newer draft. Unique across
  *  mounts and tabs, never a counter. */
-function newOperationId(): string {
+function newOperationId(tabId: string): string {
   const unique =
     typeof crypto !== "undefined" && "randomUUID" in crypto
       ? crypto.randomUUID()
       : Math.random().toString(36).slice(2);
-  return `${CLIENT_ID}:${unique}`;
+  return `${tabId}:${unique}`;
 }
 
 function storage(): Storage | null {
@@ -99,28 +138,62 @@ function storage(): Storage | null {
   }
 }
 
-function readParked(raw: string | null | undefined): Parked | null {
-  if (typeof raw !== "string") return null;
+function readParkedSlot(raw: string | null | undefined): Parked[] {
+  if (typeof raw !== "string") return [];
   try {
-    const value = JSON.parse(raw) as Partial<Parked> | null;
-    if (!value || typeof value.markdown !== "string" || typeof value.updatedAt !== "number") {
-      return null;
-    }
-    return { markdown: value.markdown, updatedAt: value.updatedAt };
+    const value = JSON.parse(raw) as unknown;
+    if (!Array.isArray(value)) return [];
+    return value.flatMap((entry) => {
+      const parked = entry as Partial<Parked> | null;
+      return parked &&
+        typeof parked.markdown === "string" &&
+        typeof parked.updatedAt === "number"
+        ? [{ markdown: parked.markdown, updatedAt: parked.updatedAt }]
+        : [];
+    });
   } catch {
-    return null;
+    return [];
   }
+}
+
+function writeParkedSlot(store: Storage, key: string, entries: Parked[]): void {
+  if (entries.length === 0) store.removeItem(key);
+  else store.setItem(key, JSON.stringify(entries));
+}
+
+/** Read and merge, never a blind write: a body already parked under this
+ *  slot stays beside the new one. The same text twice is one entry. */
+function parkBody(store: Storage, key: string, markdown: string, now: number): void {
+  const entries = readParkedSlot(store.getItem(key));
+  const same = entries.find((entry) => entry.markdown === markdown);
+  if (same) same.updatedAt = now;
+  else entries.push({ markdown, updatedAt: now });
+  writeParkedSlot(store, key, entries);
+}
+
+function dropParked(store: Storage, recovered: Recovered): void {
+  const entries = readParkedSlot(store.getItem(recovered.key)).filter(
+    (entry) =>
+      entry.markdown !== recovered.markdown || entry.updatedAt !== recovered.updatedAt,
+  );
+  writeParkedSlot(store, recovered.key, entries);
 }
 
 function expired(updatedAt: number | null, now: number): boolean {
   return updatedAt === null || now - updatedAt > SHARE_DRAFT_MAX_AGE_MS;
 }
 
-/** Everything in the two visitor namespaces past the bound, whatever page or
- *  version it belongs to. A draft orphaned by a rotation would otherwise stay
+function tabLooksAlive(store: Storage, aliveKey: string, now: number): boolean {
+  const beat = Number(store.getItem(aliveKey));
+  return Number.isFinite(beat) && beat > 0 && now - beat < SHARE_HEARTBEAT_STALE_MS;
+}
+
+/** Everything in the visitor namespaces past its bound, whatever page or
+ *  version it belongs to. A slot orphaned by a rotation would otherwise stay
  *  in the browser for good. */
 function sweepExpired(store: Storage, now: number): void {
   const gone: string[] = [];
+  const rewrite: Array<[string, Parked[]]> = [];
   for (let i = 0; i < store.length; i += 1) {
     const key = store.key(i);
     if (!key) continue;
@@ -128,20 +201,33 @@ function sweepExpired(store: Storage, now: number): void {
       const raw = store.getItem(key);
       if (raw === null || expired(decodeDraft(raw).updatedAt, now)) gone.push(key);
     } else if (key.startsWith(RECOVERY_NAMESPACE)) {
-      const parked = readParked(store.getItem(key));
-      if (!parked || expired(parked.updatedAt, now)) gone.push(key);
+      const entries = readParkedSlot(store.getItem(key));
+      const kept = entries.filter((entry) => !expired(entry.updatedAt, now));
+      if (kept.length === 0) gone.push(key);
+      else if (kept.length !== entries.length) rewrite.push([key, kept]);
+    } else if (key.startsWith(ALIVE_NAMESPACE)) {
+      if (!tabLooksAlive(store, key, now)) gone.push(key);
     }
   }
   for (const key of gone) store.removeItem(key);
+  for (const [key, entries] of rewrite) writeParkedSlot(store, key, entries);
 }
 
+type SlotKeys = {
+  tabId: string;
+  draftPrefix: string;
+  recoveryPrefix: string;
+  alivePrefix: string;
+};
+
 /** What the editor opens with, decided before it mounts because it reads its
- *  value once. The newest draft under this page's prefix is one of three
- *  things: already what the server holds (drop it), ours to save because the
- *  body did not move meanwhile (save it now, on the current rev), or behind
- *  someone else's newer body (show it behind the conflict banner with its
- *  stale rev, so a later edit cannot overwrite theirs by accident). A parked
- *  body from a Reload is offered back beside any of the three. */
+ *  value once. The newest draft under this page's prefix whose tab is not
+ *  alive is one of three things: already what the server holds (drop it),
+ *  ours to save because the body did not move meanwhile (save it now, on the
+ *  current rev), or behind someone else's newer body (show it behind the
+ *  conflict banner with its stale rev, so a later edit cannot overwrite
+ *  theirs by accident). Every parked body under the page's prefix is offered
+ *  back beside any of the three, and before them. */
 type Opening = {
   markdown: string;
   revision: string;
@@ -152,15 +238,10 @@ type Opening = {
   source: DraftSource | null;
   saveState: SaveState;
   action: "none" | "discard" | "save";
-  recovery: string | null;
+  recoveries: Recovered[];
 };
 
-function readOpening(
-  prefix: string,
-  recoveryKey: string,
-  initialMarkdown: string,
-  initialRev: string,
-): Opening {
+function readOpening(keys: SlotKeys, initialMarkdown: string, initialRev: string): Opening {
   const plain: Opening = {
     markdown: initialMarkdown,
     revision: initialRev,
@@ -169,41 +250,56 @@ function readOpening(
     source: null,
     saveState: "ok",
     action: "none",
-    recovery: null,
+    recoveries: [],
   };
   const store = storage();
   if (!store) return plain;
   try {
-    sweepExpired(store, Date.now());
-    const recovery = readParked(store.getItem(recoveryKey))?.markdown ?? null;
+    const now = Date.now();
+    sweepExpired(store, now);
+    const recoveries: Recovered[] = [];
     const candidates: Array<{ key: string; draft: ReturnType<typeof decodeDraft> }> = [];
     for (let i = 0; i < store.length; i += 1) {
       const key = store.key(i);
-      if (!key?.startsWith(prefix)) continue;
-      const raw = store.getItem(key);
-      if (raw !== null) candidates.push({ key, draft: decodeDraft(raw) });
+      if (!key) continue;
+      if (key.startsWith(keys.recoveryPrefix)) {
+        for (const parked of readParkedSlot(store.getItem(key))) {
+          recoveries.push({ ...parked, key });
+        }
+      } else if (key.startsWith(keys.draftPrefix)) {
+        const tab = key.slice(keys.draftPrefix.length);
+        // A sibling tab that is still alive is mid-edit, not abandoned. Its
+        // text is its own to save; taking it would hand it a conflict with
+        // itself.
+        if (tab !== keys.tabId && tabLooksAlive(store, `${keys.alivePrefix}${tab}`, now)) {
+          continue;
+        }
+        const raw = store.getItem(key);
+        if (raw !== null) candidates.push({ key, draft: decodeDraft(raw) });
+      }
     }
+    recoveries.sort((a, b) => b.updatedAt - a.updatedAt);
     candidates.sort((a, b) => (b.draft.updatedAt ?? 0) - (a.draft.updatedAt ?? 0));
     const newest = candidates[0];
-    if (!newest) return { ...plain, recovery };
+    if (!newest) return { ...plain, recoveries };
     const { key, draft } = newest;
     if (canonicalPageMarkdown(draft.markdown) === canonicalPageMarkdown(initialMarkdown)) {
       return {
         ...plain,
-        recovery,
+        recoveries,
         source: { key, operationId: draft.operationId ?? "" },
         action: "discard",
       };
     }
     const pending: Pending = {
       markdown: draft.markdown,
-      operationId: draft.operationId ?? newOperationId(),
+      operationId: draft.operationId ?? newOperationId(keys.tabId),
     };
     const source: DraftSource = { key, operationId: pending.operationId };
     // The rev alone is not the test: a rename or an icon bumps it with the
     // body untouched, and that is not a stranger's edit.
     if (draft.revision === initialRev || canResumeConflictedDraft(draft, initialMarkdown)) {
-      return { ...plain, recovery, markdown: draft.markdown, pending, source, action: "save" };
+      return { ...plain, recoveries, markdown: draft.markdown, pending, source, action: "save" };
     }
     return {
       markdown: draft.markdown,
@@ -213,7 +309,7 @@ function readOpening(
       source,
       saveState: "conflict",
       action: "none",
-      recovery,
+      recoveries,
     };
   } catch {
     return plain;
@@ -251,17 +347,27 @@ function ShareEditorForPage({
   initialRev,
   onReload = () => location.reload(),
 }: ShareEditorProps) {
-  const prefix = shareDraftPrefix(rootId, shareVersion, pageId);
-  const draftKey = shareDraftKey(rootId, shareVersion, pageId);
-  const recoveryKey = shareRecoveryKey(rootId, pageId);
-  const [opening] = useState(() =>
-    readOpening(prefix, recoveryKey, initialMarkdown, initialRev),
+  // This island's identity for the life of the mount: the slots it writes
+  // and the beat it keeps are its own, whatever the module says later.
+  const [tabId] = useState(() => CLIENT_ID);
+  const keys = useMemo<SlotKeys>(
+    () => ({
+      tabId,
+      draftPrefix: shareDraftPrefix(rootId, shareVersion, pageId),
+      recoveryPrefix: shareRecoveryPrefix(rootId, shareVersion, pageId),
+      alivePrefix: shareAlivePrefix(rootId, shareVersion, pageId),
+    }),
+    [pageId, rootId, shareVersion, tabId],
   );
+  const draftKey = `${keys.draftPrefix}${tabId}`;
+  const recoveryKey = `${keys.recoveryPrefix}${tabId}`;
+  const aliveKey = `${keys.alivePrefix}${tabId}`;
+  const [opening] = useState(() => readOpening(keys, initialMarkdown, initialRev));
   const [markdown, setMarkdown] = useState(opening.markdown);
   // The editor reads its value once; putting a parked body back remounts it.
   const [editorEpoch, setEditorEpoch] = useState(0);
   const [saveState, setSaveState] = useState<SaveState>(opening.saveState);
-  const [recovery, setRecovery] = useState<string | null>(opening.recovery);
+  const [recoveries, setRecoveries] = useState<Recovered[]>(opening.recoveries);
   const revision = useRef(opening.revision);
   const base = useRef(opening.base);
   const latest = useRef(opening.markdown);
@@ -300,6 +406,43 @@ function ShareEditorForPage({
     });
     return () => setAttachmentSrcResolver(null);
   }, [pageId, rootId, shareVersion]);
+
+  const beat = useCallback(() => {
+    try {
+      storage()?.setItem(aliveKey, String(Date.now()));
+    } catch {
+      // Without storage there is no draft to guard either.
+    }
+  }, [aliveKey]);
+
+  // Alive while mounted: on mount, every SHARE_HEARTBEAT_MS, on every change
+  // (below), on coming back into view or out of the back-forward cache. The
+  // beat is taken down on pagehide and on unmount, so a closed tab reads as
+  // gone at once and a crashed one after the staleness window.
+  useEffect(() => {
+    const stop = () => {
+      try {
+        storage()?.removeItem(aliveKey);
+      } catch {
+        // Same as above.
+      }
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") beat();
+    };
+    beat();
+    const interval = setInterval(beat, SHARE_HEARTBEAT_MS);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener("pageshow", beat);
+    window.addEventListener("pagehide", stop);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener("pageshow", beat);
+      window.removeEventListener("pagehide", stop);
+      stop();
+    };
+  }, [aliveKey, beat]);
 
   /** The slot a restored body came from goes only while it still holds that
    *  edit; another tab may have written a newer body there since. */
@@ -414,7 +557,8 @@ function ShareEditorForPage({
     (next: string) => {
       setMarkdown(next);
       latest.current = next;
-      const entry: Pending = { markdown: next, operationId: newOperationId() };
+      beat();
+      const entry: Pending = { markdown: next, operationId: newOperationId(tabId) };
       pending.current = entry;
       // Every change is a draft first. The 2000 ms below is exactly the
       // window a closed tab would otherwise lose.
@@ -431,7 +575,7 @@ function ShareEditorForPage({
         runPending();
       }, SHARE_AUTOSAVE_DEBOUNCE_MS);
     },
-    [persist, runPending],
+    [beat, persist, runPending, tabId],
   );
 
   // The one write `readOpening` decided on. `opening` never changes.
@@ -511,15 +655,14 @@ function ShareEditorForPage({
     [fetcher, pageId, query, vidHeaders],
   );
 
-  /** "Show me their version." The text is parked first, so the sentence in
-   *  the banner stays true; the draft goes, or the reload would bring this
-   *  same banner straight back. */
+  /** "Show me their version." The text is parked first, beside anything
+   *  already parked, so the sentence in the banner stays true; the draft
+   *  goes, or the reload would bring this same banner straight back. */
   const reloadIntoTheirs = () => {
     try {
       const store = storage();
       if (store) {
-        const parked: Parked = { markdown: latest.current, updatedAt: Date.now() };
-        store.setItem(recoveryKey, JSON.stringify(parked));
+        parkBody(store, recoveryKey, latest.current, Date.now());
         store.removeItem(draftKey);
       }
     } catch {
@@ -529,23 +672,27 @@ function ShareEditorForPage({
     onReload();
   };
 
-  const forgetParked = () => {
+  const offered = recoveries[0] ?? null;
+
+  const settleOffered = () => {
+    if (!offered) return null;
     try {
-      storage()?.removeItem(recoveryKey);
+      const store = storage();
+      if (store) dropParked(store, offered);
     } catch {
       // Nothing to keep.
     }
-    setRecovery(null);
+    setRecoveries((rest) => rest.filter((entry) => entry !== offered));
+    return offered;
   };
 
   const putParkedBack = () => {
-    const text = recovery;
-    if (text === null) return;
-    forgetParked();
-    setMarkdown(text);
-    latest.current = text;
+    const taken = settleOffered();
+    if (!taken) return;
+    setMarkdown(taken.markdown);
+    latest.current = taken.markdown;
     setEditorEpoch((epoch) => epoch + 1);
-    const entry: Pending = { markdown: text, operationId: newOperationId() };
+    const entry: Pending = { markdown: taken.markdown, operationId: newOperationId(tabId) };
     pending.current = entry;
     persist(entry);
     runPending();
@@ -564,32 +711,35 @@ function ShareEditorForPage({
 
   return (
     <div data-share-editor>
-      {notice && (
-        <div
-          data-share-save-state={saveState}
-          role="status"
-          className={`${bannerClass} ${saveState === "conflict" ? "pr-2" : "pr-4"}`}
-        >
-          <span className="min-w-0 flex-1">{notice}</span>
-          {saveState === "conflict" && (
-            <Button type="button" variant="quiet" onClick={reloadIntoTheirs}>
-              Reload
-            </Button>
-          )}
-        </div>
-      )}
-      {recovery !== null && (
+      {/* One banner at a time. A parked body needs a decision before any
+          other state makes sense, so it comes first. */}
+      {offered ? (
         <div data-share-recovery role="status" className={`${bannerClass} pr-2`}>
           <span className="min-w-0 flex-1">{SHARE_RECOVERY_COPY}</span>
           <span className="flex items-center gap-1">
             <Button type="button" variant="quiet" onClick={putParkedBack}>
               Put it back
             </Button>
-            <Button type="button" variant="quiet" onClick={forgetParked}>
+            <Button type="button" variant="quiet" onClick={() => void settleOffered()}>
               Dismiss
             </Button>
           </span>
         </div>
+      ) : (
+        notice && (
+          <div
+            data-share-save-state={saveState}
+            role="status"
+            className={`${bannerClass} ${saveState === "conflict" ? "pr-2" : "pr-4"}`}
+          >
+            <span className="min-w-0 flex-1">{notice}</span>
+            {saveState === "conflict" && (
+              <Button type="button" variant="quiet" onClick={reloadIntoTheirs}>
+                Reload
+              </Button>
+            )}
+          </div>
+        )
       )}
       <MilkdownEditor
         key={editorEpoch}

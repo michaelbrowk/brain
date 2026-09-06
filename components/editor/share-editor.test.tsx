@@ -6,7 +6,6 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encodeDraft } from "@/lib/autosave";
-import { CLIENT_ID } from "@/lib/client";
 
 // The editor itself is not under test here. The stub records what the island
 // hands it, so a test can drive one change, register a flush and read the
@@ -28,7 +27,17 @@ type StubProps = {
   };
 };
 const editorProps = vi.hoisted(() => ({ current: null as null | StubProps }));
+/** The per-tab identity, faked: `@/lib/client` is process-wide, so the mock
+ *  answers `CLIENT_ID` from here and a test changes it between mounts to
+ *  play a second tab. An island captures the id once, on its first render. */
+const tab = vi.hoisted(() => ({ id: "tab-main" }));
 
+vi.mock("@/lib/client", () => ({
+  get CLIENT_ID() {
+    return tab.id;
+  },
+  apiFetch: (input: RequestInfo | URL, init?: RequestInit) => fetch(input, init),
+}));
 vi.mock("framer-motion", () => import("@/test/framer-motion-mock"));
 vi.mock("./milkdown-editor", () => ({
   MilkdownEditor: (props: StubProps) => {
@@ -42,11 +51,15 @@ import ShareEditor, {
   SHARE_CONFLICT_COPY,
   SHARE_DRAFT_MAX_AGE_MS,
   SHARE_GONE_COPY,
+  SHARE_HEARTBEAT_MS,
+  SHARE_HEARTBEAT_STALE_MS,
   SHARE_RECOVERY_COPY,
   SHARE_UNSAVED_COPY,
+  shareAliveKey,
   shareDraftKey,
   shareDraftPrefix,
   shareRecoveryKey,
+  shareRecoveryPrefix,
 } from "./share-editor";
 import { attachmentSrc, noteAttachmentLoadFailure } from "./attachment-src";
 
@@ -54,8 +67,9 @@ const VID = "vid123456789";
 const REV = "abcdefabcdef";
 const PAGE_URL = "/api/share-edit/page/page-9?root=root-1&v=2";
 const PREFIX = shareDraftPrefix("root-1", 2, "page-9");
-const OWN_KEY = shareDraftKey("root-1", 2, "page-9");
-const RECOVERY_KEY = shareRecoveryKey("root-1", "page-9");
+const RECOVERY_PREFIX = shareRecoveryPrefix("root-1", 2, "page-9");
+const ownKey = () => shareDraftKey("root-1", 2, "page-9", tab.id);
+const recoveryKey = (id = tab.id) => shareRecoveryKey("root-1", 2, "page-9", id);
 const DAY = 24 * 60 * 60 * 1000;
 
 type Seen = {
@@ -74,6 +88,7 @@ beforeEach(() => {
     true;
   vi.useFakeTimers();
   vi.setSystemTime(new Date("2026-09-06T10:00:00Z"));
+  tab.id = "tab-main";
   localStorage.clear();
   host = document.createElement("div");
   document.body.append(host);
@@ -190,6 +205,53 @@ function draftsUnder(prefix: string) {
   return found;
 }
 
+function parkedUnder(prefix: string) {
+  const found: Array<{ key: string; markdown: string }> = [];
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i)!;
+    if (!key.startsWith(prefix)) continue;
+    for (const entry of JSON.parse(localStorage.getItem(key)!) as Array<{ markdown: string }>) {
+      found.push({ key, markdown: entry.markdown });
+    }
+  }
+  return found;
+}
+
+function seedParked(id: string, bodies: string[], updatedAt = Date.now(), prefix = RECOVERY_PREFIX) {
+  localStorage.setItem(
+    `${prefix}${id}`,
+    JSON.stringify(bodies.map((markdown, i) => ({ markdown, updatedAt: updatedAt + i }))),
+  );
+}
+
+/** Mounts a second island beside the first, as another tab would. */
+function secondHost() {
+  const other = document.createElement("div");
+  document.body.append(other);
+  const otherRoot = createRoot(other);
+  return {
+    async mount(initialMarkdown: string) {
+      await act(async () => {
+        otherRoot.render(
+          <ShareEditor
+            rootId="root-1"
+            pageId="page-9"
+            shareVersion={2}
+            vid={VID}
+            initialMarkdown={initialMarkdown}
+            initialRev={REV}
+          />,
+        );
+      });
+    },
+    text: () => other.querySelector("[data-editor]")?.textContent,
+    async unmount() {
+      await act(async () => otherRoot.unmount());
+      other.remove();
+    },
+  };
+}
+
 function seedDraft(
   tab: string,
   markdown: string,
@@ -280,17 +342,30 @@ describe("the visitor editor", () => {
       expect(editorText()).toBe("mine, edited");
     });
 
-    it("parks the text under the recovery key on Reload, so the sentence stays true", async () => {
+    it("parks the text under this tab's recovery slot on Reload, so the sentence stays true", async () => {
       await intoConflict(vi.fn());
       expect(draftsUnder(PREFIX).map((d) => d.markdown)).toEqual(["mine, edited"]);
 
       await press("Reload");
-      expect(JSON.parse(localStorage.getItem(RECOVERY_KEY)!)).toMatchObject({
-        markdown: "mine, edited",
-      });
+      expect(parkedUnder(RECOVERY_PREFIX)).toEqual([{ key: recoveryKey(), markdown: "mine, edited" }]);
+      expect(recoveryKey().endsWith(":tab-main")).toBe(true);
       // The draft would otherwise be restored on the reload and put the same
       // banner straight back.
       expect(draftsUnder(PREFIX)).toEqual([]);
+    });
+
+    it("keeps an earlier parked body when the same tab parks again", async () => {
+      // A host whose onReload does not reload: the second press must not
+      // overwrite what the first one parked.
+      await intoConflict(vi.fn());
+      await press("Reload");
+      await change("mine, edited, then more");
+      await press("Reload");
+
+      expect(parkedUnder(RECOVERY_PREFIX).map((p) => p.markdown)).toEqual([
+        "mine, edited",
+        "mine, edited, then more",
+      ]);
     });
 
     it("stops saving: a later edit is kept as a draft, sent by neither the debounce nor pagehide", async () => {
@@ -311,7 +386,7 @@ describe("the visitor editor", () => {
 
   describe("the parked text", () => {
     it("is offered back on the next mount and put back on the press, then saved", async () => {
-      localStorage.setItem(RECOVERY_KEY, JSON.stringify({ markdown: "parked", updatedAt: Date.now() }));
+      seedParked("tab-gone", ["parked"]);
       const seen = recordFetch({ put: [json({ rev: "b" }, 200)] });
       await mount("theirs");
 
@@ -324,13 +399,13 @@ describe("the visitor editor", () => {
       expect(editorText()).toBe("parked");
       expect(putBodies(seen)).toEqual([{ markdown: "parked", rev: REV }]);
       expect(recoveryBanner()).toBeNull();
-      expect(localStorage.getItem(RECOVERY_KEY)).toBeNull();
+      expect(parkedUnder(RECOVERY_PREFIX)).toEqual([]);
       await elapse(0);
       expect(draftsUnder(PREFIX)).toEqual([]);
     });
 
     it("is dropped on Dismiss and nothing is sent", async () => {
-      localStorage.setItem(RECOVERY_KEY, JSON.stringify({ markdown: "parked", updatedAt: Date.now() }));
+      seedParked("tab-gone", ["parked"]);
       const seen = recordFetch({ put: [json({ rev: "b" }, 200)] });
       await mount("theirs");
       await press("Dismiss");
@@ -338,19 +413,58 @@ describe("the visitor editor", () => {
 
       expect(editorText()).toBe("theirs");
       expect(recoveryBanner()).toBeNull();
-      expect(localStorage.getItem(RECOVERY_KEY)).toBeNull();
+      expect(parkedUnder(RECOVERY_PREFIX)).toEqual([]);
       expect(seen).toEqual([]);
     });
 
-    it("is not offered once it is older than the bound", async () => {
-      localStorage.setItem(
-        RECOVERY_KEY,
-        JSON.stringify({ markdown: "parked", updatedAt: Date.now() - SHARE_DRAFT_MAX_AGE_MS - DAY }),
-      );
+    it("offers every parked body from every tab, newest first, one at a time", async () => {
+      // Two tabs each reloaded out of a conflict; a third visit meets both.
+      seedParked("tab-a", ["from a"], Date.now() - 60_000);
+      seedParked("tab-b", ["from b"], Date.now() - 1_000);
+      const seen = recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("theirs");
+
+      expect(recoveryBanner()).not.toBeNull();
+      await press("Put it back");
+      await elapse(0);
+      expect(editorText()).toBe("from b");
+      expect(putBodies(seen).map((b) => b.markdown)).toEqual(["from b"]);
+
+      expect(recoveryBanner()).not.toBeNull();
+      await press("Dismiss");
+      expect(recoveryBanner()).toBeNull();
+      expect(parkedUnder(RECOVERY_PREFIX)).toEqual([]);
+    });
+
+    it("belongs to one share version: a body parked under an earlier link is not offered", async () => {
+      seedParked("tab-a", ["old link"], Date.now(), shareRecoveryPrefix("root-1", 1, "page-9"));
       recordFetch({ put: [json({ rev: "b" }, 200)] });
       await mount("theirs");
       expect(recoveryBanner()).toBeNull();
-      expect(localStorage.getItem(RECOVERY_KEY)).toBeNull();
+      expect(editorText()).toBe("theirs");
+    });
+
+    it("is not offered once it is older than the bound", async () => {
+      seedParked("tab-a", ["parked"], Date.now() - SHARE_DRAFT_MAX_AGE_MS - DAY);
+      recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("theirs");
+      expect(recoveryBanner()).toBeNull();
+      expect(parkedUnder(RECOVERY_PREFIX)).toEqual([]);
+    });
+
+    it("comes before a resumed conflict: one banner at a time, the decision first", async () => {
+      seedDraft("tab-a", "draft text", "olderrev0000", "older body");
+      seedParked("tab-b", ["parked"]);
+      recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("theirs");
+
+      expect(editorText()).toBe("draft text");
+      expect(recoveryBanner()).not.toBeNull();
+      expect(banner()).toBeNull();
+
+      await press("Dismiss");
+      expect(recoveryBanner()).toBeNull();
+      expect(banner()?.dataset.shareSaveState).toBe("conflict");
     });
   });
 
@@ -390,9 +504,9 @@ describe("the visitor editor", () => {
       await mount("hello");
       await change("hello, edited");
 
-      const raw = localStorage.getItem(OWN_KEY);
+      const raw = localStorage.getItem(ownKey());
       expect(raw).not.toBeNull();
-      expect(OWN_KEY.endsWith(`:${CLIENT_ID}`)).toBe(true);
+      expect(ownKey().endsWith(":tab-main")).toBe(true);
       expect(JSON.parse(raw!)).toMatchObject({
         markdown: "hello, edited",
         revision: REV,
@@ -522,7 +636,7 @@ describe("the visitor editor", () => {
         put.release();
         await vi.advanceTimersByTimeAsync(0);
       });
-      expect(draftsUnder(PREFIX)).toEqual([{ key: OWN_KEY, markdown: "draft text, newer" }]);
+      expect(draftsUnder(PREFIX)).toEqual([{ key: ownKey(), markdown: "draft text, newer" }]);
 
       await elapse(SHARE_AUTOSAVE_DEBOUNCE_MS + 50);
       expect(putBodies(seen).map((b) => b.markdown)).toEqual(["draft text", "draft text, newer"]);
@@ -556,7 +670,7 @@ describe("the visitor editor", () => {
       await press("Reload");
       expect(reload).toHaveBeenCalledTimes(1);
       expect(draftsUnder(PREFIX)).toEqual([]);
-      expect(JSON.parse(localStorage.getItem(RECOVERY_KEY)!)).toMatchObject({ markdown: "draft text" });
+      expect(parkedUnder(RECOVERY_PREFIX).map((p) => p.markdown)).toEqual(["draft text"]);
     });
 
     it("is dropped when it is already what the server holds", async () => {
@@ -568,6 +682,73 @@ describe("the visitor editor", () => {
       expect(editorText()).toBe("hello");
       expect(seen).toEqual([]);
       expect(draftsUnder(PREFIX)).toEqual([]);
+    });
+
+    it("is not taken while the tab that holds it is still alive, and is once it stops", async () => {
+      // Tab A is mid-edit and its own save hangs, so its draft stays. Tab B
+      // opens the same link and must not pick up A's in-flight text: that
+      // would save it and hand A a conflict with itself.
+      const hanging = deferred({ rev: "b" }, 200);
+      const seen = recordFetch({ put: [hanging.answer, json({ rev: "b" }, 200)] });
+      tab.id = "tab-a";
+      await mount("hello");
+      await type("hello, a is typing");
+      expect(puts(seen)).toHaveLength(1);
+      expect(draftsUnder(PREFIX).map((d) => d.markdown)).toEqual(["hello, a is typing"]);
+      expect(localStorage.getItem(shareAliveKey("root-1", 2, "page-9", "tab-a"))).not.toBeNull();
+
+      tab.id = "tab-b";
+      const b = secondHost();
+      await b.mount("hello");
+      expect(b.text()).toBe("hello");
+      await elapse(SHARE_HEARTBEAT_STALE_MS * 2);
+      expect(puts(seen)).toHaveLength(1); // B sent nothing
+      await b.unmount();
+
+      // A goes away without its save landing: its beat stops. The next tab
+      // takes the draft and saves it.
+      await act(async () => root.unmount());
+      root = createRoot(host);
+      expect(localStorage.getItem(shareAliveKey("root-1", 2, "page-9", "tab-a"))).toBeNull();
+      tab.id = "tab-c";
+      await mount("hello");
+      await elapse(0);
+      expect(editorText()).toBe("hello, a is typing");
+      expect(putBodies(seen).map((b) => b.markdown)).toEqual(["hello, a is typing", "hello, a is typing"]);
+    });
+
+    it("judges liveness by the beat's age, so a crashed tab's draft is taken and a fresh one is not", async () => {
+      seedDraft("tab-x", "x text", REV, "hello");
+      localStorage.setItem(
+        shareAliveKey("root-1", 2, "page-9", "tab-x"),
+        String(Date.now() - SHARE_HEARTBEAT_STALE_MS + 1_000),
+      );
+      recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("hello");
+      expect(editorText()).toBe("hello");
+
+      await act(async () => root.unmount());
+      root = createRoot(host);
+      localStorage.setItem(
+        shareAliveKey("root-1", 2, "page-9", "tab-x"),
+        String(Date.now() - SHARE_HEARTBEAT_STALE_MS - 1_000),
+      );
+      await mount("hello");
+      expect(editorText()).toBe("x text");
+    });
+
+    it("beats while mounted and refreshes on every change", async () => {
+      recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("hello");
+      const key = shareAliveKey("root-1", 2, "page-9", "tab-main");
+      const first = Number(localStorage.getItem(key));
+      expect(Number.isFinite(first)).toBe(true);
+      await elapse(SHARE_HEARTBEAT_MS + 10);
+      expect(Number(localStorage.getItem(key))).toBeGreaterThan(first);
+      const beforeChange = Number(localStorage.getItem(key));
+      await elapse(1_000);
+      await change("hello, edited");
+      expect(Number(localStorage.getItem(key))).toBeGreaterThan(beforeChange);
     });
 
     it("takes the newest of several tabs' drafts", async () => {

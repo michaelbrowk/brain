@@ -39,6 +39,12 @@ export const SHARE_DRAFT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 export const SHARE_HEARTBEAT_MS = 10_000;
 export const SHARE_HEARTBEAT_STALE_MS = 30_000;
 
+/** How many parked bodies a page keeps, across every tab's slot. The newest
+ *  is the one the visitor is most likely to want back; beyond this the
+ *  oldest go. Five is a conflict a day for a working week, and well under
+ *  what a full quota could refuse. */
+export const SHARE_PARKED_MAX = 5;
+
 /** The double submit `lib/share-write.ts` checks against the edit cookie.
  *  Named here rather than imported: that module is server-only. */
 const VID_HEADER = "x-brain-share-vid";
@@ -59,6 +65,8 @@ export const SHARE_GONE_COPY =
   "This page can no longer be edited through this link. Your text is still here, but it will not be saved.";
 export const SHARE_RECOVERY_COPY =
   "Your text from before the reload is kept. Put it back in place of what is here, or dismiss it.";
+export const SHARE_STORAGE_FULL_COPY =
+  "This browser's storage is full, so your text cannot be kept through a reload. Copy it somewhere first. Reloading now would lose it.";
 
 /** Every visitor slot has the same shape: namespace, root, share version,
  *  page, tab. The version is there because every rotation bumps it (unshare
@@ -114,7 +122,9 @@ export function shareAliveKey(
   return `${shareAlivePrefix(rootId, shareVersion, pageId)}${tabId}`;
 }
 
-type SaveState = "ok" | "unsaved" | "gone" | "conflict";
+/** `storage` is not a save outcome: it is the one press that could not be
+ *  honoured, a Reload with nowhere to keep the text. */
+type SaveState = "ok" | "unsaved" | "gone" | "conflict" | "storage";
 type Pending = { markdown: string; operationId: string };
 type Parked = { markdown: string; updatedAt: number };
 type Recovered = Parked & { key: string };
@@ -161,14 +171,76 @@ function writeParkedSlot(store: Storage, key: string, entries: Parked[]): void {
   else store.setItem(key, JSON.stringify(entries));
 }
 
+function parkedSlotsUnder(store: Storage, prefix: string): Array<[string, Parked[]]> {
+  const slots: Array<[string, Parked[]]> = [];
+  for (let i = 0; i < store.length; i += 1) {
+    const key = store.key(i);
+    if (key?.startsWith(prefix)) slots.push([key, readParkedSlot(store.getItem(key))]);
+  }
+  return slots;
+}
+
+/** The page-wide cap: across every slot under the prefix the newest
+ *  SHARE_PARKED_MAX stay and the oldest go, `keep` always among the stayers.
+ *  Only shrinking writes, each on its own so one refusal does not stop the
+ *  rest. Returns the entries the slot at `own` should now hold. */
+function trimParked(
+  store: Storage,
+  prefix: string,
+  own: [string, Parked[]] | null,
+  keep: Parked | null,
+): Parked[] {
+  const slots = parkedSlotsUnder(store, prefix).filter(([key]) => key !== own?.[0]);
+  if (own) slots.push(own);
+  const all = slots.flatMap(([key, entries]) => entries.map((entry) => ({ key, entry })));
+  all.sort((a, b) => b.entry.updatedAt - a.entry.updatedAt);
+  const dropped = new Set(all.slice(SHARE_PARKED_MAX).map((item) => item.entry));
+  if (keep) dropped.delete(keep);
+  let ownKept: Parked[] = [];
+  for (const [key, entries] of slots) {
+    const kept = entries.filter((entry) => !dropped.has(entry));
+    if (key === own?.[0]) {
+      ownKept = kept;
+      continue;
+    }
+    if (kept.length === entries.length) continue;
+    try {
+      writeParkedSlot(store, key, kept);
+    } catch {
+      // A slot that cannot shrink keeps what it had; the sweep tries again.
+    }
+  }
+  return ownKept;
+}
+
 /** Read and merge, never a blind write: a body already parked under this
- *  slot stays beside the new one. The same text twice is one entry. */
-function parkBody(store: Storage, key: string, markdown: string, now: number): void {
+ *  slot stays beside the new one, the same text twice is one entry, and the
+ *  page's cap drops the oldest first. When storage refuses the write, the
+ *  slot is retried smaller, oldest out first, down to the body being parked
+ *  alone. Returns whether that body is on disk. */
+function parkBody(
+  store: Storage,
+  prefix: string,
+  key: string,
+  markdown: string,
+  now: number,
+): boolean {
   const entries = readParkedSlot(store.getItem(key));
   const same = entries.find((entry) => entry.markdown === markdown);
-  if (same) same.updatedAt = now;
-  else entries.push({ markdown, updatedAt: now });
-  writeParkedSlot(store, key, entries);
+  const fresh: Parked = same ?? { markdown, updatedAt: now };
+  fresh.updatedAt = now;
+  if (!same) entries.push(fresh);
+  let own = trimParked(store, prefix, [key, entries], fresh);
+  for (;;) {
+    try {
+      writeParkedSlot(store, key, own);
+      return true;
+    } catch {
+      if (own.length <= 1) return false;
+      const oldest = own.reduce((a, b) => (a.updatedAt <= b.updatedAt && a !== fresh ? a : b));
+      own = own.filter((entry) => entry !== oldest);
+    }
+  }
 }
 
 function dropParked(store: Storage, recovered: Recovered): void {
@@ -183,9 +255,24 @@ function expired(updatedAt: number | null, now: number): boolean {
   return updatedAt === null || now - updatedAt > SHARE_DRAFT_MAX_AGE_MS;
 }
 
+/** A beat is alive inside the staleness window and no more than one
+ *  interval ahead of now. Further ahead is a clock glitch or a restored
+ *  snapshot, and a beat that reads as fresh forever would lock its slot
+ *  away from every future tab; it is stale, and swept. */
 function tabLooksAlive(store: Storage, aliveKey: string, now: number): boolean {
   const beat = Number(store.getItem(aliveKey));
-  return Number.isFinite(beat) && beat > 0 && now - beat < SHARE_HEARTBEAT_STALE_MS;
+  if (!Number.isFinite(beat) || beat <= 0) return false;
+  const age = now - beat;
+  return age >= -SHARE_HEARTBEAT_MS && age < SHARE_HEARTBEAT_STALE_MS;
+}
+
+/** The draft slot holds this exact body, canonically. */
+function draftHolds(store: Storage, key: string, markdown: string): boolean {
+  const raw = store.getItem(key);
+  return (
+    typeof raw === "string" &&
+    canonicalPageMarkdown(decodeDraft(raw).markdown) === canonicalPageMarkdown(markdown)
+  );
 }
 
 /** Everything in the visitor namespaces past its bound, whatever page or
@@ -211,6 +298,13 @@ function sweepExpired(store: Storage, now: number): void {
   }
   for (const key of gone) store.removeItem(key);
   for (const [key, entries] of rewrite) writeParkedSlot(store, key, entries);
+  // The cap, per page: an older client may have parked past it.
+  const prefixes = new Set<string>();
+  for (let i = 0; i < store.length; i += 1) {
+    const key = store.key(i);
+    if (key?.startsWith(RECOVERY_NAMESPACE)) prefixes.add(key.slice(0, key.lastIndexOf(":") + 1));
+  }
+  for (const prefix of prefixes) trimParked(store, prefix, null, null);
 }
 
 type SlotKeys = {
@@ -462,10 +556,10 @@ function ShareEditorForPage({
   }, []);
 
   const persist = useCallback(
-    (entry: Pending) => {
+    (entry: Pending): boolean => {
       const store = storage();
-      if (!store) return;
-      persistDraft(
+      if (!store) return false;
+      return persistDraft(
         store,
         draftKey,
         entry.markdown,
@@ -656,20 +750,46 @@ function ShareEditorForPage({
   );
 
   /** "Show me their version." The text is parked first, beside anything
-   *  already parked, so the sentence in the banner stays true; the draft
-   *  goes, or the reload would bring this same banner straight back. */
+   *  already parked, so the sentence in the banner stays true; then the
+   *  draft goes, or the reload would bring this same banner straight back.
+   *  Parking can fail: storage is full, or missing. Then the draft is the
+   *  other place the text can live, and the reload brings it back behind
+   *  this banner. When neither holds it, the reload is what would destroy
+   *  it, so it does not happen: the visitor is told, and a deliberate
+   *  second press is theirs to make. */
   const reloadIntoTheirs = () => {
+    const text = latest.current;
+    const store = storage();
+    let parked = false;
     try {
-      const store = storage();
-      if (store) {
-        parkBody(store, recoveryKey, latest.current, Date.now());
-        store.removeItem(draftKey);
-      }
+      if (store) parked = parkBody(store, keys.recoveryPrefix, recoveryKey, text, Date.now());
     } catch {
-      // The reload still happens; the text is at least in the editor now.
+      parked = false;
     }
-    dropSource();
-    onReload();
+    if (parked) {
+      try {
+        store?.removeItem(draftKey);
+      } catch {
+        // A draft that stays comes back as this banner; nothing is lost.
+      }
+      dropSource();
+      onReload();
+      return;
+    }
+    let drafted = false;
+    try {
+      drafted =
+        !!store &&
+        (draftHolds(store, draftKey, text) ||
+          persist({ markdown: text, operationId: newOperationId(tabId) }));
+    } catch {
+      drafted = false;
+    }
+    if (drafted) {
+      onReload();
+      return;
+    }
+    setSaveState("storage");
   };
 
   const offered = recoveries[0] ?? null;
@@ -701,11 +821,13 @@ function ShareEditorForPage({
   const notice =
     saveState === "conflict"
       ? SHARE_CONFLICT_COPY
-      : saveState === "gone"
-        ? SHARE_GONE_COPY
-        : saveState === "unsaved"
-          ? SHARE_UNSAVED_COPY
-          : null;
+      : saveState === "storage"
+        ? SHARE_STORAGE_FULL_COPY
+        : saveState === "gone"
+          ? SHARE_GONE_COPY
+          : saveState === "unsaved"
+            ? SHARE_UNSAVED_COPY
+            : null;
   const bannerClass =
     "mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg bg-[var(--fill-tint)] py-2 pl-4 text-table text-ink";
 
@@ -730,12 +852,19 @@ function ShareEditorForPage({
           <div
             data-share-save-state={saveState}
             role="status"
-            className={`${bannerClass} ${saveState === "conflict" ? "pr-2" : "pr-4"}`}
+            className={`${bannerClass} ${
+              saveState === "conflict" || saveState === "storage" ? "pr-2" : "pr-4"
+            }`}
           >
             <span className="min-w-0 flex-1">{notice}</span>
             {saveState === "conflict" && (
               <Button type="button" variant="quiet" onClick={reloadIntoTheirs}>
                 Reload
+              </Button>
+            )}
+            {saveState === "storage" && (
+              <Button type="button" variant="quiet" onClick={onReload}>
+                Reload anyway
               </Button>
             )}
           </div>

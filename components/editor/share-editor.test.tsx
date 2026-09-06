@@ -53,7 +53,9 @@ import ShareEditor, {
   SHARE_GONE_COPY,
   SHARE_HEARTBEAT_MS,
   SHARE_HEARTBEAT_STALE_MS,
+  SHARE_PARKED_MAX,
   SHARE_RECOVERY_COPY,
+  SHARE_STORAGE_FULL_COPY,
   SHARE_UNSAVED_COPY,
   shareAliveKey,
   shareDraftKey,
@@ -252,6 +254,19 @@ function secondHost() {
   };
 }
 
+/** Storage that refuses some writes, the way a full quota does. */
+function refuseWrites(when: (key: string, value: string) => boolean) {
+  const real = Storage.prototype.setItem;
+  vi.spyOn(Storage.prototype, "setItem").mockImplementation(function (
+    this: Storage,
+    key: string,
+    value: string,
+  ) {
+    if (when(key, value)) throw new DOMException("quota", "QuotaExceededError");
+    real.call(this, key, value);
+  });
+}
+
 function seedDraft(
   tab: string,
   markdown: string,
@@ -352,6 +367,67 @@ describe("the visitor editor", () => {
       // The draft would otherwise be restored on the reload and put the same
       // banner straight back.
       expect(draftsUnder(PREFIX)).toEqual([]);
+    });
+
+    it("keeps at most SHARE_PARKED_MAX parked bodies for the page, the oldest going first", async () => {
+      const older = Array.from({ length: SHARE_PARKED_MAX }, (_, i) => `older ${i}`);
+      await intoConflict(vi.fn());
+      // Other tabs parked these earlier; they are read at park time.
+      seedParked("tab-a", older.slice(0, 2), Date.now() - 100_000);
+      seedParked("tab-b", older.slice(2), Date.now() - 50_000);
+      await press("Reload");
+
+      const kept = parkedUnder(RECOVERY_PREFIX).map((p) => p.markdown);
+      expect(kept).toHaveLength(SHARE_PARKED_MAX);
+      expect(kept).toContain("mine, edited");
+      expect(kept).not.toContain("older 0");
+      expect(kept).toEqual(expect.arrayContaining(older.slice(1)));
+    });
+
+    it("retries the slot smaller when storage refuses the write, down to the body being parked", async () => {
+      const reload = vi.fn();
+      await intoConflict(reload);
+      await press("Reload"); // parks "mine, edited"; this host does not reload
+      await change("mine, edited, and a good deal more text");
+      // Room for one parked body under this slot, not two.
+      refuseWrites((key, value) => key.startsWith(RECOVERY_PREFIX) && value.length > 100);
+      await press("Reload");
+
+      expect(parkedUnder(RECOVERY_PREFIX).map((p) => p.markdown)).toEqual([
+        "mine, edited, and a good deal more text",
+      ]);
+      expect(reload).toHaveBeenCalledTimes(2);
+      expect(draftsUnder(PREFIX)).toEqual([]);
+    });
+
+    it("still reloads when parking fails but the draft holds the text, and keeps that draft", async () => {
+      const reload = vi.fn();
+      await intoConflict(reload);
+      refuseWrites((key) => key.startsWith(RECOVERY_PREFIX));
+      await press("Reload");
+
+      expect(reload).toHaveBeenCalledTimes(1);
+      expect(parkedUnder(RECOVERY_PREFIX)).toEqual([]);
+      expect(draftsUnder(PREFIX).map((d) => d.markdown)).toEqual(["mine, edited"]);
+    });
+
+    it("tells the visitor and does not reload when neither the park nor the draft can be written", async () => {
+      const reload = vi.fn();
+      await intoConflict(reload);
+      refuseWrites(() => true);
+      await change("mine, edited, and more");
+      await press("Reload");
+
+      expect(reload).not.toHaveBeenCalled();
+      expect(banner()?.dataset.shareSaveState).toBe("storage");
+      expect(banner()?.textContent).toBe(`${SHARE_STORAGE_FULL_COPY}Reload anyway`);
+      expect(editorText()).toBe("mine, edited, and more");
+      expect(parkedUnder(RECOVERY_PREFIX)).toEqual([]);
+      expect(draftsUnder(PREFIX).map((d) => d.markdown)).toEqual(["mine, edited"]);
+
+      // A deliberate second press, after copying the text out, does reload.
+      await press("Reload anyway");
+      expect(reload).toHaveBeenCalledTimes(1);
     });
 
     it("keeps an earlier parked body when the same tab parks again", async () => {
@@ -735,6 +811,28 @@ describe("the visitor editor", () => {
       );
       await mount("hello");
       expect(editorText()).toBe("x text");
+    });
+
+    it("treats a beat from the future as stale, and sweeps it", async () => {
+      // A clock glitch or a restored snapshot must not lock a slot forever.
+      seedDraft("tab-x", "x text", REV, "hello");
+      const aliveKey = shareAliveKey("root-1", 2, "page-9", "tab-x");
+      localStorage.setItem(aliveKey, String(Date.now() + SHARE_HEARTBEAT_MS * 2));
+      recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("hello");
+      expect(editorText()).toBe("x text");
+      expect(localStorage.getItem(aliveKey)).toBeNull();
+
+      // Within one interval ahead is clock skew, not a glitch: still alive.
+      await act(async () => root.unmount());
+      root = createRoot(host);
+      seedDraft("tab-y", "y text", REV, "hello");
+      localStorage.setItem(
+        shareAliveKey("root-1", 2, "page-9", "tab-y"),
+        String(Date.now() + SHARE_HEARTBEAT_MS / 2),
+      );
+      await mount("hello");
+      expect(editorText()).not.toBe("y text");
     });
 
     it("beats while mounted and refreshes on every change", async () => {

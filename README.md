@@ -366,6 +366,44 @@ secrets stay outside every release.
   `scripts/verify-*-roundtrip.mjs` harness.
 - `components/shell.tsx` — the app shell (sidebar tree, editor host, dialogs).
 
+## Donate
+
+I wrote Brain and I run it myself. Donations go into the work on it, the fixes
+and the features that come next.
+
+[**Sponsor on GitHub**](https://github.com/sponsors/michaelbrowk), monthly or
+one time.
+
+Or send crypto. Each address sits alone in a code block, so GitHub's copy
+button on a desktop and a tap and hold on a phone both take the whole string.
+
+**USDT · TRC20 (Tron)**
+
+```
+TPWv2npwnpnZE4UsnRLFDDP6biqoeDBDqp
+```
+
+**USDT · ERC20 (Ethereum)**
+
+```
+0xBd795A33e95331118dFB91D922545ead648d2a3F
+```
+
+**Ethereum · ETH**
+
+```
+0xBd795A33e95331118dFB91D922545ead648d2a3F
+```
+
+Those two are one address on purpose. The same Ethereum account receives ETH
+and ERC20 USDT.
+
+**Bitcoin**
+
+```
+bc1qcd2qwp2jltgmc368sezn36su334j368tf8d7hk
+```
+
 ## Licence
 
 MIT, in `LICENSE`. `CONTRIBUTING.md` has the local loop, what CI runs on a pull

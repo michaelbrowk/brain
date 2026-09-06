@@ -502,7 +502,16 @@
   --fill-kbd-paper: oklch(1 0 0 / 0.08);
   --fill-skeleton-paper: oklch(1 0 0 / 0.06);
   --fill-skeleton-glass: oklch(1 0 0 / 0.1);
-  --fill-highlight: oklch(1 0 0 / 0.12);
+  /* The lit top edge of a fill, and in dark the brightest pixel any surface
+     draws. It was white .12, set by analogy with light's .90 without the dark
+     value being measured: on the selected plate that hairline alone carries
+     ΔL .075, the whole of §8's documented hover range, on an object already
+     several times §8's .03 floor — which is what made a chosen row read as
+     raised and catching light. Lighter is the loud direction in dark, so the
+     analogy runs the wrong way. At .04 the edge is a hairline again (ΔL .025
+     over its own plate) and no state collapses: every one of its seven
+     consumers pairs it with a fill change. */
+  --fill-highlight: oklch(1 0 0 / 0.04);
   --fill-rim: oklch(0 0 0 / 0.3);
   --fill-tint: oklch(1 0 0 / 0.1);
   /* white .36 = 3.36:1 against the dark paper, .50 = 5.26:1 on hover */

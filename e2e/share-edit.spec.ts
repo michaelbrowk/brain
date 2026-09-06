@@ -106,7 +106,7 @@ test("a stranger with the link edits a page, and a revoke ends it mid-session", 
     "Anyone with the link will be able to read and edit this page.",
   );
   await expect(card.locator('[data-share-row="edit"]')).toContainText(
-    "They can change the text, upload images and make subpages. They cannot delete, move or rename anything.",
+    "They can change the text and upload images. They cannot delete, move or rename anything.",
   );
   await page.getByRole("button", { name: "Share this page" }).click();
 
@@ -187,7 +187,7 @@ test("a stranger with the link edits a page, and a revoke ends it mid-session", 
       page.getByRole("dialog", { name: "Share settings" }).locator(
         '[data-share-row="edit"]',
       ),
-    ).toContainText("Everyone using the link will be signed out.");
+    ).toContainText("They can change the text and upload images.");
     await liveSwitch.click();
     await expect(page.locator("body")).toContainText("Editing turned off", {
       timeout: 20_000,

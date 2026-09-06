@@ -140,7 +140,13 @@ export function ShellTopbar({
       isPublic={!!currentNode.public}
       pageId={currentNode.id}
       hasPassword={!!activeShareRoot?.shareLocked}
-      hasEdit={!!currentNode.shareEdit}
+      // The active root, the same answer the password and the deadline give.
+      // The head sentence states what the active link does, and where a page
+      // is reached through a parent's link that is the parent's grant: the
+      // page's own flag reads false there and understated an editable share
+      // as read-only. Where the page has its own link the two are the
+      // same node.
+      hasEdit={!!activeShareRoot?.shareEdit}
       expiresAt={activeShareRoot?.shareExpiresAt}
       inheritedFrom={
         inheritedShareRoot

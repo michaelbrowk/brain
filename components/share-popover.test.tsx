@@ -1063,7 +1063,7 @@ describe("SharePopover redesign", () => {
       expect(order.indexOf("edit")).toBeLessThan(order.indexOf("password"));
     });
 
-    it("captions what an editor may and may not do, and warns about the sign-out", async () => {
+    it("carries one note at a time: the cost of the press, then what it granted", async () => {
       await renderAndOpen(true, {
         onPrepareShare: vi
           .fn()
@@ -1073,16 +1073,58 @@ describe("SharePopover redesign", () => {
       });
       const row = () =>
         document.body.querySelector('[data-share-row="edit"]') as HTMLElement;
-      // the caption states the capability, so it is there only while the
-      // capability is
-      expect(row().textContent).not.toContain("They can change the text");
+      const notes = () => row().querySelectorAll(".brain-share-row-note");
+
+      // Off, the owner is deciding, and what the press costs is the fact they
+      // do not have. One note, so the row keeps its neighbours' rhythm.
+      expect(notes()).toHaveLength(1);
+      expect(notes()[0].textContent).toBe(
+        "Changing this signs everyone out of the link.",
+      );
+
       await click(switchFor(EDIT_SWITCH));
-      expect(row().textContent).toContain(
-        "They can change the text, upload images and make subpages. They cannot delete, move or rename anything.",
+      // On, the grant exists and what it grants is the fact that matters.
+      expect(notes()).toHaveLength(1);
+      expect(notes()[0].textContent).toBe(
+        "They can change the text and upload images. They cannot delete, move or rename anything.",
       );
-      expect(row().textContent).toContain(
-        "Everyone using the link will be signed out.",
+    });
+
+    it("reads the note out with the switch", async () => {
+      await renderAndOpen(true, {
+        onPrepareShare: vi
+          .fn()
+          .mockResolvedValue(
+            snapshot({ descendantCount: 2, public: true, shareEdit: false }),
+          ),
+      });
+      const row = document.body.querySelector('[data-share-row="edit"]') as HTMLElement;
+      const note = row.querySelector(".brain-share-row-note") as HTMLElement;
+      expect(note.id).not.toBe("");
+      expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-describedby")).toBe(note.id);
+    });
+
+    it("keeps the switch focused when the corrected answer arrives", async () => {
+      // The row used to be keyed on the answer, so every correction — the
+      // snapshot landing, or the tree refreshing after a flip — unmounted the
+      // button holding focus. Focus fell to the body inside an open popover
+      // and the next Tab restarted from the document.
+      const pending = deferred<ShareScopeSnapshot>();
+      await renderAndOpen(true, {
+        hasEdit: true,
+        onPrepareShare: vi.fn().mockReturnValue(pending.promise),
+      });
+      const before = switchFor(EDIT_SWITCH) as HTMLButtonElement;
+      before.focus();
+
+      await act(async () =>
+        pending.resolve(snapshot({ public: true, shareEdit: false })),
       );
+      await settle();
+
+      expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-checked")).toBe("false");
+      expect(switchFor(EDIT_SWITCH)).toBe(before);
+      expect(document.activeElement).toBe(before);
     });
 
     it("says the password will be needed again when the root has one", async () => {
@@ -1096,14 +1138,17 @@ describe("SharePopover redesign", () => {
       });
       const row = document.body.querySelector('[data-share-row="edit"]') as HTMLElement;
       expect(row.textContent).toContain(
-        "Everyone using the link will be signed out, and will need the password again.",
+        "Changing this signs everyone out of the link. They will need the password again.",
       );
     });
 
     it("does not promise a sign-out in the review, where there is nobody to sign out", async () => {
       await renderAndOpen(false);
       const row = document.body.querySelector('[data-share-row="edit"]') as HTMLElement;
-      expect(row.textContent).not.toContain("will be signed out");
+      expect(row.textContent).not.toContain("signs everyone out");
+      expect(row.textContent).toContain(
+        "Turning this on lets them change the text and upload images.",
+      );
     });
 
     it("carries the flag into the grant the review creates", async () => {
@@ -1133,7 +1178,7 @@ describe("SharePopover redesign", () => {
       expect(onSetEditable).toHaveBeenCalledWith(true);
       expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-checked")).toBe("false");
       expect(document.body.textContent).toContain(
-        "Couldn't change who can edit. The previous settings may still apply.",
+        "Couldn't change who can edit. Reopen this card to see where it stands.",
       );
     });
 

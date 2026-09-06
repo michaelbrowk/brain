@@ -2,7 +2,7 @@
 
 import * as Popover from "@radix-ui/react-popover";
 import * as Dialog from "@radix-ui/react-dialog";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import type { ShareScopeSnapshot } from "@/lib/store/types";
 import { Segmented } from "./settings/shared";
 import { Button } from "./ui/button";
@@ -735,7 +735,6 @@ function ManagementView({
       </Row>
       {directPublic && (
         <EditSetting
-          key={String(hasEdit)}
           editable={hasEdit}
           locked={activeLocked}
           disabled={busy || locked}
@@ -1050,11 +1049,15 @@ function ParentRow({
  *  3px and travelling 16px on transform (compositor), never `left`. */
 function SwitchControl({
   label,
+  describedBy,
   checked,
   disabled,
   onChange,
 }: {
   label: string;
+  /** The row's note, so the consequence of the press is read out with the
+   *  control rather than left somewhere on the card. */
+  describedBy?: string;
   checked: boolean;
   disabled?: boolean;
   onChange: (checked: boolean) => void;
@@ -1064,6 +1067,7 @@ function SwitchControl({
       type="button"
       role="switch"
       aria-label={label}
+      aria-describedby={describedBy}
       aria-checked={checked}
       disabled={disabled}
       onClick={() => onChange(!checked)}
@@ -1113,8 +1117,29 @@ function SwitchRow({
   );
 }
 
-/** Two settings rows already exist; this one is the first with something to
- *  say underneath, so it stacks instead of sitting on one line. */
+/** What the row says under its label, one sentence set at a time. Each is
+ *  true in the state that shows it and stays true after the press. */
+const EDIT_GRANTS =
+  "They can change the text and upload images. They cannot delete, move or rename anything.";
+const EDIT_OFFERS =
+  "Turning this on lets them change the text and upload images. They still cannot delete, move or rename anything.";
+const EDIT_SIGN_OUT = "Changing this signs everyone out of the link.";
+const EDIT_SIGN_OUT_LOCKED =
+  "Changing this signs everyone out of the link. They will need the password again.";
+
+/** The edit row. Every other row on the card is a label and a control on one
+ *  line, so this one is too: its note stacks under the label the way the
+ *  expiry row's does, and the switch stays where the eye already looks for a
+ *  control. There is always exactly one note, so the row keeps its height
+ *  when the switch is pressed, the ledger's rhythm does not break on a
+ *  setting most links never turn on, and the switch's description never
+ *  disappears from under it.
+ *
+ *  Which note: with the link live, off is the state where the owner is
+ *  deciding, and the cost of the press is what they do not have; on, the
+ *  grant exists and what it grants is the fact that matters. In the review
+ *  there is no link yet, so nobody to sign out, and the note describes the
+ *  grant the press would create. */
 function EditRow({
   checked,
   disabled,
@@ -1128,43 +1153,39 @@ function EditRow({
   showSignOut: boolean;
   onChange: (checked: boolean) => void;
 }) {
+  const noteId = useId();
+  const note = checked
+    ? EDIT_GRANTS
+    : showSignOut
+      ? locked
+        ? EDIT_SIGN_OUT_LOCKED
+        : EDIT_SIGN_OUT
+      : EDIT_OFFERS;
   return (
-    <div
-      data-share-row="edit"
-      data-share-setting-row
-      className="brain-share-row brain-share-row-stack"
-    >
-      <div className="brain-share-row-line">
-        <span className={LABEL}>Who can edit</span>
-        <SwitchControl
-          label="Anyone with the link can edit"
-          checked={checked}
-          disabled={disabled}
-          onChange={onChange}
-        />
-      </div>
-      {checked && (
-        <span className={NOTE}>
-          They can change the text, upload images and make subpages. They cannot
-          delete, move or rename anything.
+    <div data-share-row="edit" data-share-setting-row className="brain-share-row">
+      <span className={LABEL}>
+        Who can edit
+        <span id={noteId} className={NOTE}>
+          {note}
         </span>
-      )}
-      {showSignOut && (
-        <span className={NOTE}>
-          {locked
-            ? "Everyone using the link will be signed out, and will need the password again."
-            : "Everyone using the link will be signed out."}
-        </span>
-      )}
+      </span>
+      <SwitchControl
+        label="Anyone with the link can edit"
+        describedBy={noteId}
+        checked={checked}
+        disabled={disabled}
+        onChange={onChange}
+      />
     </div>
   );
 }
 
-/** The live grant's edit row. Keyed on the page's own answer, the way
- *  ManagementSecurity is keyed on the password and the deadline: the surface
- *  opens on the tree's value and the exact scope arrives after it, so the
- *  switch has to take the corrected value rather than the one it first
- *  mounted with. */
+/** The live grant's edit row. The surface opens on the tree's value and the
+ *  exact scope arrives after it, so the switch has to take the corrected
+ *  value rather than the one it first mounted with. That used to be a key on
+ *  the prop, which took the corrected value by unmounting the switch: after a
+ *  flip from the keyboard, focus fell to the body inside an open popover. An
+ *  effect on the same prop adopts the same values and moves nothing. */
 function EditSetting({
   editable,
   locked,
@@ -1180,6 +1201,12 @@ function EditSetting({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // Only when the answer itself changes, which is what the key did. An
+  // optimistic flip stands until the tree or the snapshot corrects it.
+  useEffect(() => {
+    setEditing(editable);
+  }, [editable]);
+
   // Any flip rotates shareVersion, which is why the row says so before it is
   // pressed rather than after.
   const flipEditing = async (next: boolean) => {
@@ -1191,9 +1218,11 @@ function EditSetting({
       await onSetEditable(next);
     } catch {
       setEditing(!next);
-      setError(
-        "Couldn't change who can edit. The previous settings may still apply.",
-      );
+      // The three failures beside this one all end "the previous settings may
+      // still apply". This one leaves the owner not knowing whether strangers
+      // can write to the page right now, which is the question the row is
+      // there to answer, so it names the next move instead.
+      setError("Couldn't change who can edit. Reopen this card to see where it stands.");
     } finally {
       setBusy(false);
     }

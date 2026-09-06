@@ -728,7 +728,13 @@ function ManagementView({
       {directPublic && (
         <EditSetting
           editable={hasEdit}
-          disabled={busy || locked}
+          // checkingScope for the same reason LinkRow above carries it: the
+          // card opens on the tree's answer, and until the exact scope is read
+          // that answer can be stale, or the parent's where the page's own
+          // link is expired under a live editable ancestor. A press in that
+          // window writes this page's grant from a value nothing has
+          // confirmed.
+          disabled={busy || checkingScope || locked}
           onSetEditable={onSetEditable}
         />
       )}
@@ -1166,8 +1172,11 @@ function EditRow({
  *  exact scope arrives after it, so the switch has to take the corrected
  *  value rather than the one it first mounted with. That used to be a key on
  *  the prop, which took the corrected value by unmounting the switch: after a
- *  flip from the keyboard, focus fell to the body inside an open popover. An
- *  effect on the same prop adopts the same values and moves nothing. */
+ *  flip from the keyboard, focus fell to the body inside an open popover. The
+ *  adjustment happens during render instead, on the same prop, and moves
+ *  nothing. Until that corrected value lands the row is disabled, so the
+ *  switch is never pressable while it is showing an answer the card has not
+ *  confirmed. */
 function EditSetting({
   editable,
   disabled,

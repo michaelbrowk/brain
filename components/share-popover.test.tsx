@@ -1107,18 +1107,58 @@ describe("SharePopover redesign", () => {
       expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-describedby")).toBe(note.id);
     });
 
-    it("keeps the switch focused when the corrected answer arrives", async () => {
+    it("takes no press while the exact scope is still being read", async () => {
+      // The card opens on the tree's answer. Where the page's own link is
+      // expired under a live editable ancestor that answer is the ancestor's,
+      // and any stale answer would be written to this page's own grant by a
+      // press landing before the snapshot corrects it.
+      const pending = deferred<ShareScopeSnapshot>();
+      const onSetEditable = vi.fn();
+      await renderAndOpen(true, {
+        hasEdit: true,
+        expiresAt: "2020-01-01T00:00:00.000Z",
+        inheritedFrom: { id: "root", title: "Shared root" },
+        onPrepareShare: vi.fn().mockReturnValue(pending.promise),
+        onSetEditable,
+      });
+
+      const control = switchFor(EDIT_SWITCH) as HTMLButtonElement;
+      expect(control.getAttribute("aria-checked")).toBe("true");
+      expect(control.disabled).toBe(true);
+      await click(control);
+      expect(onSetEditable).not.toHaveBeenCalled();
+
+      await act(async () =>
+        pending.resolve(
+          snapshot({
+            rootId: "page-a",
+            public: true,
+            shareEdit: false,
+            shareExpiresAt: "2020-01-01T00:00:00.000Z",
+          }),
+        ),
+      );
+      await settle();
+
+      const settled = switchFor(EDIT_SWITCH) as HTMLButtonElement;
+      expect(settled.getAttribute("aria-checked")).toBe("false");
+      expect(settled.disabled).toBe(false);
+    });
+
+    it("keeps the switch itself when the corrected answer arrives", async () => {
       // The row used to be keyed on the answer, so every correction — the
-      // snapshot landing, or the tree refreshing after a flip — unmounted the
+      // snapshot landing, or the tree refreshing after a flip — replaced the
       // button holding focus. Focus fell to the body inside an open popover
-      // and the next Tab restarted from the document.
+      // and the next Tab restarted from the document. What is pinned is that
+      // the correction does not replace the node: the row is disabled while
+      // the scope is being read, and no browser lets a disabled control hold
+      // focus, so the node surviving is what makes focus survivable at all.
       const pending = deferred<ShareScopeSnapshot>();
       await renderAndOpen(true, {
         hasEdit: true,
         onPrepareShare: vi.fn().mockReturnValue(pending.promise),
       });
       const before = switchFor(EDIT_SWITCH) as HTMLButtonElement;
-      before.focus();
 
       await act(async () =>
         pending.resolve(snapshot({ public: true, shareEdit: false })),
@@ -1127,6 +1167,9 @@ describe("SharePopover redesign", () => {
 
       expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-checked")).toBe("false");
       expect(switchFor(EDIT_SWITCH)).toBe(before);
+
+      // and with the answer in, it takes and holds focus like any live control
+      before.focus();
       expect(document.activeElement).toBe(before);
     });
 

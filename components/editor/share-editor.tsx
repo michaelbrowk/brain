@@ -17,6 +17,7 @@ import {
 } from "@/lib/autosave";
 import { localAttachmentName } from "@/lib/attachments";
 import { CLIENT_ID } from "@/lib/client";
+import { formatAgo } from "@/lib/format-ago";
 import { canonicalPageMarkdown } from "@/lib/page-markdown";
 import { Button } from "../ui/button";
 
@@ -64,8 +65,19 @@ export const SHARE_UNSAVED_COPY =
   "Your last change was not saved. Your text is still here. Keep typing and it will try again.";
 export const SHARE_GONE_COPY =
   "This page can no longer be edited through this link. Nothing more will be saved. Copy your text somewhere before you close this tab.";
-export const SHARE_RECOVERY_COPY =
-  "Your text from before the reload is kept. Put it back in place of what is here, or dismiss it.";
+/** The offer of one parked body. It names when the text was written and how
+ *  many are queued behind it, because up to SHARE_PARKED_MAX are offered one
+ *  at a time with the same sentence and a visitor cannot otherwise tell one
+ *  from another. The count is left off when this is the only one. */
+export function shareRecoveryCopy(updatedAt: number, remaining: number): string {
+  const when = formatAgo(new Date(updatedAt).toISOString());
+  const count = remaining > 1 ? ` (1 of ${remaining})` : "";
+  return `Your text from ${when} is kept${count}. Put it back in place of what is here, or discard it for good.`;
+}
+/** The second press. Discarding removes the only copy: the draft went when
+ *  the conflicted reload parked this body, so nothing else holds it. */
+export const SHARE_DISCARD_CONFIRM_COPY =
+  "This is the only copy of that text. Discard it for good?";
 export const SHARE_STORAGE_FULL_COPY =
   "This browser's storage is full, so your text cannot be kept through a reload. Copy it somewhere first. Reloading now would lose it.";
 
@@ -475,6 +487,8 @@ function ShareEditorForPage({
   const [editorEpoch, setEditorEpoch] = useState(0);
   const [saveState, setSaveState] = useState<SaveState>(opening.saveState);
   const [recoveries, setRecoveries] = useState<Recovered[]>(opening.recoveries);
+  // Discarding is the one press here that destroys text, so it asks first.
+  const [discardConfirming, setDiscardConfirming] = useState(false);
   const revision = useRef(opening.revision);
   const base = useRef(opening.base);
   const latest = useRef(opening.markdown);
@@ -840,6 +854,7 @@ function ShareEditorForPage({
     } catch {
       // Nothing to keep.
     }
+    setDiscardConfirming(false);
     setRecoveries((rest) => rest.filter((entry) => entry !== offered));
     return offered;
   };
@@ -873,14 +888,43 @@ function ShareEditorForPage({
    *  state makes sense, so it comes first. */
   const banner = offered ? (
     <div data-share-recovery className={`${bannerClass} pr-2`}>
-      <span className="min-w-0 flex-1">{SHARE_RECOVERY_COPY}</span>
+      <span className="min-w-0 flex-1">
+        {discardConfirming
+          ? SHARE_DISCARD_CONFIRM_COPY
+          : shareRecoveryCopy(offered.updatedAt, recoveries.length)}
+      </span>
       <span className="flex items-center gap-1">
-        <Button type="button" variant="quiet" onClick={putParkedBack}>
-          Put it back
-        </Button>
-        <Button type="button" variant="quiet" onClick={() => void settleOffered()}>
-          Dismiss
-        </Button>
+        {discardConfirming ? (
+          <>
+            <Button
+              type="button"
+              variant="quiet"
+              onClick={() => setDiscardConfirming(false)}
+            >
+              Keep it
+            </Button>
+            <Button
+              type="button"
+              variant="destructive"
+              onClick={() => void settleOffered()}
+            >
+              Discard for good
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button type="button" variant="quiet" onClick={putParkedBack}>
+              Put it back
+            </Button>
+            <Button
+              type="button"
+              variant="quiet"
+              onClick={() => setDiscardConfirming(true)}
+            >
+              Discard
+            </Button>
+          </>
+        )}
       </span>
     </div>
   ) : notice ? (

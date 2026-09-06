@@ -56,10 +56,11 @@ import ShareEditor, {
   SHARE_HEARTBEAT_MS,
   SHARE_HEARTBEAT_STALE_MS,
   SHARE_PARKED_MAX,
-  SHARE_RECOVERY_COPY,
+  SHARE_DISCARD_CONFIRM_COPY,
   SHARE_STORAGE_FULL_COPY,
   SHARE_UNSAVED_COPY,
   shareAliveKey,
+  shareRecoveryCopy,
   shareDraftKey,
   shareDraftPrefix,
   shareRecoveryKey,
@@ -500,7 +501,9 @@ describe("the visitor editor", () => {
       await mount("theirs");
 
       expect(editorText()).toBe("theirs");
-      expect(recoveryBanner()?.textContent).toBe(`${SHARE_RECOVERY_COPY}Put it backDismiss`);
+      expect(recoveryBanner()?.textContent).toBe(
+        `${shareRecoveryCopy(Date.now(), 1)}Put it backDiscard`,
+      );
       expect(seen).toEqual([]);
 
       await press("Put it back");
@@ -513,17 +516,49 @@ describe("the visitor editor", () => {
       expect(draftsUnder(PREFIX)).toEqual([]);
     });
 
-    it("is dropped on Dismiss and nothing is sent", async () => {
+    it("keeps the text on the first Discard and asks before removing it", async () => {
+      // The draft went when the conflicted reload parked this body, so the
+      // parked entry is the only copy. One press must not destroy it.
       seedParked("tab-gone", ["parked"]);
       const seen = recordFetch({ put: [json({ rev: "b" }, 200)] });
       await mount("theirs");
-      await press("Dismiss");
+
+      await press("Discard");
+      expect(recoveryBanner()?.textContent).toBe(
+        `${SHARE_DISCARD_CONFIRM_COPY}Keep itDiscard for good`,
+      );
+      expect(parkedUnder(RECOVERY_PREFIX).map((p) => p.markdown)).toEqual(["parked"]);
+
+      // Backing out leaves the offer as it was.
+      await press("Keep it");
+      expect(recoveryBanner()?.textContent).toBe(
+        `${shareRecoveryCopy(Date.now(), 1)}Put it backDiscard`,
+      );
+      expect(parkedUnder(RECOVERY_PREFIX).map((p) => p.markdown)).toEqual(["parked"]);
+
+      await press("Discard");
+      await press("Discard for good");
       await elapse(SHARE_AUTOSAVE_DEBOUNCE_MS + 50);
 
       expect(editorText()).toBe("theirs");
       expect(recoveryBanner()).toBeNull();
       expect(parkedUnder(RECOVERY_PREFIX)).toEqual([]);
       expect(seen).toEqual([]);
+    });
+
+    it("says how old the text is and how many are queued behind it", async () => {
+      // Up to SHARE_PARKED_MAX are offered one at a time with the same
+      // sentence; without the age and the count both buttons are a guess.
+      seedParked("tab-a", ["from a"], Date.now() - 20 * 60_000);
+      seedParked("tab-b", ["from b"], Date.now() - 5 * 60_000);
+      recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("theirs");
+
+      expect(recoveryBanner()?.textContent).toContain("Your text from 5m ago is kept (1 of 2).");
+
+      await press("Discard");
+      await press("Discard for good");
+      expect(recoveryBanner()?.textContent).toContain("Your text from 20m ago is kept.");
     });
 
     it("offers every parked body from every tab, newest first, one at a time", async () => {
@@ -540,7 +575,8 @@ describe("the visitor editor", () => {
       expect(putBodies(seen).map((b) => b.markdown)).toEqual(["from b"]);
 
       expect(recoveryBanner()).not.toBeNull();
-      await press("Dismiss");
+      await press("Discard");
+      await press("Discard for good");
       expect(recoveryBanner()).toBeNull();
       expect(parkedUnder(RECOVERY_PREFIX)).toEqual([]);
     });
@@ -571,7 +607,8 @@ describe("the visitor editor", () => {
       expect(recoveryBanner()).not.toBeNull();
       expect(banner()).toBeNull();
 
-      await press("Dismiss");
+      await press("Discard");
+      await press("Discard for good");
       expect(recoveryBanner()).toBeNull();
       expect(banner()?.dataset.shareSaveState).toBe("conflict");
     });

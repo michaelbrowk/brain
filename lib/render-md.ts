@@ -43,6 +43,19 @@ export function renderReadOnly(
       gfm: true,
       renderer: new ReadOnlyRenderer(options.shareNavigation),
     }),
+    {
+      // A body a link visitor wrote is loaded by other visitors and by the
+      // owner. `<style>` elements were already stripped, but the inline
+      // style attribute was not, and it carries a remote `url()` plus enough
+      // positioning to lay arbitrary chrome over the page. No CSP directive
+      // covers it: style-src governs stylesheets, style-src-attr governs
+      // this, and neither is on the /share policy. Drop the attribute.
+      FORBID_ATTR: ["style"],
+      // A form renders. form-action 'none' blocks the submission and there
+      // is no script to read the field, so this is a phishing surface rather
+      // than a credential leak, and a note has no reason to carry one.
+      FORBID_TAGS: ["form", "input", "button"],
+    },
   );
 }
 

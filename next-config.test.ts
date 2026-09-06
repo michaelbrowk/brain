@@ -48,7 +48,7 @@ describe("Next response headers", () => {
 });
 
 const SHARE_CSP =
-  "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; connect-src 'self'; form-action 'none'; frame-src 'none'";
+  "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; connect-src 'self'; form-action 'none'; frame-src 'none'; img-src 'self' data:; media-src 'self'";
 
 describe("the /share surface", () => {
   it("carries exactly one CSP, after the catch-all, with connect-src 'self'", async () => {
@@ -62,6 +62,19 @@ describe("the /share surface", () => {
     );
     expect(csp).toHaveLength(1);
     expect(csp[0]!.value).toBe(SHARE_CSP);
+  });
+
+  it("gives a visitor-authored body no way to fetch a remote subresource", async () => {
+    // A visitor writes the body other visitors and the owner then load. With
+    // no img-src and no media-src, a remote <img>, <video> or <audio> logs
+    // every reader's IP, User-Agent and read time to whoever wrote it.
+    const rules = await nextConfig.headers?.();
+    const share = rules!.find((rule) => rule.source === "/share/:path*")!;
+    const csp = share.headers.find(
+      (header) => header.key === "Content-Security-Policy",
+    )!.value;
+    expect(csp).toContain("img-src 'self' data:");
+    expect(csp).toContain("media-src 'self'");
   });
 
   it("keeps a shared page out of search results and out of every cache", async () => {

@@ -132,6 +132,7 @@ const PAIRS = [
   "plug-circle",
   "earth",
   "user-circle",
+  "heart",
 ];
 
 const names = [...new Set([...WANT, ...PAIRS.flatMap((b) => [`${b}-linear`, `${b}-bold`])])];

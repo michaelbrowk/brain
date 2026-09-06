@@ -356,6 +356,7 @@ describe("mobile navigation surfaces", () => {
       "Sharing",
       "Data",
       "Account",
+      "Donate",
     ]) {
       expect(rootScreen.textContent).toContain(label);
     }

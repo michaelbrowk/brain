@@ -162,23 +162,31 @@ export function Segmented({
   );
 }
 
+/** `wrap` is for a value whose every character has to be readable — a wallet
+ *  address, where an ellipsis hides the part a reader would check against
+ *  their own screen. It breaks anywhere (the string has no words) instead of
+ *  truncating, the way the OAuth consent screen already shows a long
+ *  machine value. Everything else truncates: an endpoint or a token is
+ *  identified by its head and read through the copy button. */
 export function CopyRow({
   label,
   value,
   onCopy,
   disabled = false,
   mono = true,
+  wrap = false,
 }: {
   label: string;
   value: string;
   onCopy: () => void;
   disabled?: boolean;
   mono?: boolean;
+  wrap?: boolean;
 }) {
   return (
     <div className="brain-settings-copyrow">
       <span
-        className={`min-w-0 flex-1 truncate text-caption text-ink-2 ${mono ? "font-mono" : ""}`}
+        className={`min-w-0 flex-1 ${wrap ? "break-all leading-relaxed" : "truncate"} text-caption text-ink-2 ${mono ? "font-mono" : ""}`}
       >
         {value}
       </span>

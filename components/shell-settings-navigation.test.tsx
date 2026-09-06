@@ -181,7 +181,7 @@ describe("settings surface navigation (desktop)", () => {
     );
     expect(detail.textContent).toContain("MCP server");
 
-    // the sidebar slot lists the six sections; the active row is current
+    // the sidebar slot lists the seven sections; the active row is current
     const active = sidebarSectionRow("Connections");
     expect(active).not.toBeNull();
     expect(active?.getAttribute("aria-current")).toBe("page");

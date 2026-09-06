@@ -1,3 +1,5 @@
-# GitHub Sponsors, once enabled on the account, puts a Sponsor button on
-# the repository; Discussions are the place to talk.
+# GitHub Sponsors puts a Sponsor button on the repository; Discussions are
+# the place to talk. This schema has no field for a wallet, so the custom
+# link goes to the README's Donate list, which carries the crypto addresses.
 github: michaelbrowk
+custom: ["https://github.com/michaelbrowk/brain#donate"]

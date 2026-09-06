@@ -25,7 +25,8 @@ export interface AttachmentScope {
   roots: string[];
   /** Uploaded by a visitor: name → the one root it belongs to. */
   uploads: Record<string, { root: string; bytes: number; at: string }>;
-  /** Named by the subtree before the root first became editable: name → roots. */
+  /** Named by the subtree before the first visitor write to the root, which
+   *  is when the walk that builds this runs: name → roots. */
   baseline: Record<string, string[]>;
 }
 

@@ -3841,7 +3841,7 @@ export class Store {
    *  can sit inside more than one scoped root, so every scoped ancestor gets
    *  the names. The scoped ancestors are resolved first, from the in-memory
    *  index, and `names` is a thunk so that a page under no scoped root pays
-   *  nothing for the answer. That matters past the first editable share in
+   *  nothing for the answer. That matters past the first visitor write in
    *  the folder: a move would otherwise walk its whole subtree, and read one
    *  file per page in it, to feed grants that all no-op. Caller owns
    *  mutate(). */

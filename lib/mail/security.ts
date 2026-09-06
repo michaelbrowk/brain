@@ -31,6 +31,11 @@ export const MAIL_MAX_DNS_GENERATION_AGE_MS = 5 * 60_000;
 export const SMTP_EGRESS_RELAY_AUDIENCE = "brain-mail-smtp-egress-v1" as const;
 export const SMTP_EGRESS_RELAY_CHALLENGE_TTL_MS = 5_000;
 
+/** The account cap, lifted out so the connection quotas below can be written
+ *  as what they are, a count per account, rather than as numbers that have to
+ *  be remembered when the cap moves. */
+const MAX_ACCOUNTS = 7;
+
 export const MAIL_RESOURCE_LIMITS = Object.freeze({
   /**
    * How many mail accounts one Brain may hold. Every other statement of the
@@ -45,7 +50,7 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
    * is generic in the account count, while the service runs on one shared
    * vCPU where each account is another mailbox the poller walks.
    */
-  maxAccounts: 7,
+  maxAccounts: MAX_ACCOUNTS,
   rawMessageBytes: 40 * 1024 * 1024,
   headerBytes: 256 * 1024,
   htmlCharacters: 1024 * 1024,
@@ -66,8 +71,15 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
   maxFlagsPerMessage: 64,
   maxVanishedUidsPerPage: 2_000,
   maxMailboxesPerAccount: 256,
-  maxActiveImapConnections: 5,
-  maxIdleSessions: 3,
+  /* Both were fixed numbers set when the cap was three, with no recorded
+   * reasoning, and both ended up under the cap when it moved. Nothing produces
+   * against these quotas yet, so the old values broke nothing, but an IDLE
+   * session is one per account by definition and four of seven accounts would
+   * have silently gone without one. Written per account so they cannot fall
+   * behind the cap again: an IDLE session each, plus one working connection
+   * each alongside it. */
+  maxActiveImapConnections: MAX_ACCOUNTS * 2,
+  maxIdleSessions: MAX_ACCOUNTS,
   maxQueuedSubmissions: 100,
   maxCacheBytes: 2 * 1024 * 1024 * 1024,
   maxCacheMessages: 100_000,

@@ -199,6 +199,8 @@ async function press(label: string) {
 const editorText = () => host.querySelector("[data-editor]")?.textContent;
 const banner = () => host.querySelector<HTMLElement>("[data-share-save-state]");
 const recoveryBanner = () => host.querySelector<HTMLElement>("[data-share-recovery]");
+const live = (which: "polite" | "assertive") =>
+  host.querySelector<HTMLElement>(`[data-share-live="${which}"]`);
 const puts = (seen: Seen[]) => seen.filter((s) => s.method === "PUT");
 /** The two fields a test reasons about; the body also carries the base. */
 const putBodies = (seen: Seen[]) =>
@@ -378,7 +380,7 @@ describe("the visitor editor", () => {
       const reload = vi.fn();
       await intoConflict(reload);
 
-      expect(banner()?.getAttribute("role")).toBe("status");
+      expect(live("assertive")?.textContent).toBe(`${SHARE_CONFLICT_COPY}Reload`);
       expect(banner()?.textContent).toBe(`${SHARE_CONFLICT_COPY}Reload`);
       expect(editorText()).toBe("mine, edited");
       expect(reload).not.toHaveBeenCalled();
@@ -602,6 +604,50 @@ describe("the visitor editor", () => {
       expect(banner()?.textContent).toBe(SHARE_GONE_COPY);
       expect(banner()?.querySelector("button")).toBeNull();
       expect(editorText()).toBe("mine, edited");
+    });
+  });
+
+  describe("what a screen reader is told", () => {
+    it("holds both regions in the DOM from mount, empty", async () => {
+      // A region created together with its first content is not reliably
+      // announced, and this island has no other save feedback to fall back
+      // on. The regions exist before there is anything to say.
+      await mount("mine");
+
+      expect(live("polite")?.getAttribute("role")).toBe("status");
+      expect(live("polite")?.getAttribute("aria-live")).toBe("polite");
+      expect(live("polite")?.textContent).toBe("");
+      expect(live("assertive")?.getAttribute("role")).toBe("alert");
+      expect(live("assertive")?.getAttribute("aria-live")).toBe("assertive");
+      expect(live("assertive")?.textContent).toBe("");
+    });
+
+    it("interrupts for a revoked link and waits its turn for a failed save", async () => {
+      recordFetch({ put: [json({ error: "not found" }, 404)] });
+      await mount("mine");
+      await type("mine, edited");
+
+      expect(live("assertive")?.textContent).toBe(SHARE_GONE_COPY);
+      expect(live("polite")?.textContent).toBe("");
+    });
+
+    it("keeps an ordinary failed save polite", async () => {
+      recordFetch({ put: [json({ error: "server" }, 500)] });
+      await mount("mine");
+      await type("mine, edited");
+      await elapse(5000); // saveMarkdown's own retries on 429 and 5xx
+
+      expect(live("polite")?.textContent).toBe(SHARE_UNSAVED_COPY);
+      expect(live("assertive")?.textContent).toBe("");
+    });
+
+    it("keeps a parked body's offer polite: it is a decision, not a failure", async () => {
+      seedParked("tab-gone", ["parked"]);
+      recordFetch({ put: [json({ rev: "r2" }, 200)] });
+      await mount("mine");
+
+      expect(live("polite")?.textContent).toContain("Put it back");
+      expect(live("assertive")?.textContent).toBe("");
     });
   });
 

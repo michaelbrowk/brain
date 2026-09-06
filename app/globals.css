@@ -2235,6 +2235,19 @@ a.brain-share-url:hover {
   }
 }
 
+/* The visitor editor's banner: the conflict, the failed save, the refused
+   save, the revoked link. It is drawn inside .milkdown, in the same ink and
+   the same column as the visitor's own prose, so it needs an edge to read as
+   an object rather than as a paragraph of their text. The 5% tint on its own
+   measures 1.10:1 against paper, well under the 3:1 WCAG 1.4.11 asks of a
+   boundary that identifies a component; the rim and the panel fill are what
+   draw it, and they are the pair every other plate in the app uses
+   (components/oauth-consent.tsx). Layout stays on the element. */
+.brain-share-notice {
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
 /* The name a link visitor gives before their first edit, on /share: a short
    form on the page's own paper between the title and the text, beside the
    password gate in the server render so it needs no editor bundle. Column

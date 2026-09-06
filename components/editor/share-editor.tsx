@@ -61,9 +61,9 @@ const ALIVE_NAMESPACE = "brain-share-alive:";
 export const SHARE_CONFLICT_COPY =
   "Someone else saved this page while you were writing. Your text is still here. Reload to see their version.";
 export const SHARE_UNSAVED_COPY =
-  "Your last change was not saved. Your text is still here. The next edit will try again.";
+  "Your last change was not saved. Your text is still here. Keep typing and it will try again.";
 export const SHARE_GONE_COPY =
-  "This page can no longer be edited through this link. Your text is still here, but it will not be saved.";
+  "This page can no longer be edited through this link. Nothing more will be saved. Copy your text somewhere before you close this tab.";
 export const SHARE_RECOVERY_COPY =
   "Your text from before the reload is kept. Put it back in place of what is here, or dismiss it.";
 export const SHARE_STORAGE_FULL_COPY =
@@ -867,47 +867,65 @@ function ShareEditorForPage({
             ? SHARE_UNSAVED_COPY
             : null;
   const bannerClass =
-    "mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg bg-[var(--fill-tint)] py-2 pl-4 text-table text-ink";
+    "brain-share-notice mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg py-2 pl-4 text-table text-ink";
+
+  /** One banner at a time. A parked body needs a decision before any other
+   *  state makes sense, so it comes first. */
+  const banner = offered ? (
+    <div data-share-recovery className={`${bannerClass} pr-2`}>
+      <span className="min-w-0 flex-1">{SHARE_RECOVERY_COPY}</span>
+      <span className="flex items-center gap-1">
+        <Button type="button" variant="quiet" onClick={putParkedBack}>
+          Put it back
+        </Button>
+        <Button type="button" variant="quiet" onClick={() => void settleOffered()}>
+          Dismiss
+        </Button>
+      </span>
+    </div>
+  ) : notice ? (
+    <div
+      data-share-save-state={saveState}
+      className={`${bannerClass} ${
+        saveState === "conflict" || saveState === "storage" ? "pr-2" : "pr-4"
+      }`}
+    >
+      <span className="min-w-0 flex-1">{notice}</span>
+      {saveState === "conflict" && (
+        <Button type="button" variant="quiet" onClick={reloadIntoTheirs}>
+          Reload
+        </Button>
+      )}
+      {saveState === "storage" && (
+        <Button type="button" variant="quiet" onClick={onReload}>
+          Reload anyway
+        </Button>
+      )}
+    </div>
+  ) : null;
+
+  /** Which region the banner is written into. `conflict`, `gone` and
+   *  `storage` are the states where the visitor's text has stopped going
+   *  anywhere, so they interrupt; `unsaved` retries on the next keystroke
+   *  and waits its turn. The owner's head decides the same way
+   *  (components/shell/save-indicator.tsx): conflict asserts, an ordinary
+   *  failure is polite. A parked body is an offer, not a failure. */
+  const interrupts =
+    !offered &&
+    (saveState === "conflict" || saveState === "gone" || saveState === "storage");
 
   return (
     <div data-share-editor>
-      {/* One banner at a time. A parked body needs a decision before any
-          other state makes sense, so it comes first. */}
-      {offered ? (
-        <div data-share-recovery role="status" className={`${bannerClass} pr-2`}>
-          <span className="min-w-0 flex-1">{SHARE_RECOVERY_COPY}</span>
-          <span className="flex items-center gap-1">
-            <Button type="button" variant="quiet" onClick={putParkedBack}>
-              Put it back
-            </Button>
-            <Button type="button" variant="quiet" onClick={() => void settleOffered()}>
-              Dismiss
-            </Button>
-          </span>
-        </div>
-      ) : (
-        notice && (
-          <div
-            data-share-save-state={saveState}
-            role="status"
-            className={`${bannerClass} ${
-              saveState === "conflict" || saveState === "storage" ? "pr-2" : "pr-4"
-            }`}
-          >
-            <span className="min-w-0 flex-1">{notice}</span>
-            {saveState === "conflict" && (
-              <Button type="button" variant="quiet" onClick={reloadIntoTheirs}>
-                Reload
-              </Button>
-            )}
-            {saveState === "storage" && (
-              <Button type="button" variant="quiet" onClick={onReload}>
-                Reload anyway
-              </Button>
-            )}
-          </div>
-        )
-      )}
+      {/* Both regions are in the DOM from mount and empty. A live region a
+          screen reader first meets together with its content is not reliably
+          announced, and the visitor has no other save feedback to fall back
+          on. Exactly one of them ever holds the banner. */}
+      <div data-share-live="assertive" role="alert" aria-live="assertive">
+        {interrupts ? banner : null}
+      </div>
+      <div data-share-live="polite" role="status" aria-live="polite">
+        {interrupts ? null : banner}
+      </div>
       <MilkdownEditor
         key={editorEpoch}
         value={markdown}

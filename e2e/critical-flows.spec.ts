@@ -3488,7 +3488,9 @@ test("Smart sort writes a dated section in the order it previewed", async ({
   // The dialog now opens on the press, holding the pile in tree order, so
   // wait for the answer before reading the order off it: the heap would
   // satisfy a bare title assertion while saying nothing about the grouping.
-  await expect(dialog.getByText("1 section")).toBeVisible();
+  await expect(dialog.getByRole("status")).toHaveText(
+    "1 section proposed. Nothing saved yet.",
+  );
   await expect(dialog.getByText("Записи · 4")).toBeVisible();
   await expect(dialog.getByRole("list", { name: "Записи · 4" })).toBeVisible();
   await expect(dialog.getByText("Запись 23 июня")).toBeVisible();
@@ -3563,29 +3565,26 @@ test("the preview stands in the columns Apply is about to write", async ({
   await page.goto(`/p/${parent.id}`);
   await page.getByRole("button", { name: "Smart sort" }).click();
   const dialog = page.getByRole("dialog", { name: "Smart sort" });
-  await expect(dialog.getByText("3 sections")).toBeVisible();
+  // The subtitle is a Dialog.Description, spoken once when the dialog opens,
+  // and the dialog now opens on the press, before there is an answer. So the
+  // answer says itself, and that line is also how a test waits for it.
+  await expect(dialog.getByRole("status")).toHaveText(
+    "3 sections proposed. Nothing saved yet.",
+  );
 
   // Three sections split at ceil(3/2): two on the left, one on the right.
   // The dialog is a small picture of the document, which is what gives the
   // chips a structure to land in rather than a list to be re-ordered into.
-  await expect
-    .poll(() =>
-      dialog
-        .locator("p.text-label")
-        .evaluateAll((elements) =>
-          elements.map((element) =>
-            Math.round(element.getBoundingClientRect().left),
-          ),
-        ),
-    )
-    .toHaveLength(3);
-  const lefts = await dialog
-    .locator("p.text-label")
-    .evaluateAll((elements) =>
-      elements.map((element) =>
-        Math.round(element.getBoundingClientRect().left),
-      ),
-    );
+  // Located by the name each section's list carries, not by a utility class.
+  const columnLeft = async (name: string) =>
+    dialog
+      .getByRole("list", { name })
+      .evaluate((element) => Math.round(element.getBoundingClientRect().left));
+  const lefts = [
+    await columnLeft("First · 2"),
+    await columnLeft("Second · 2"),
+    await columnLeft("Third · 2"),
+  ];
   expect(lefts[0]).toBe(lefts[1]);
   expect(lefts[2]).toBeGreaterThan(lefts[0]);
 
@@ -3716,7 +3715,9 @@ test("Apply commits, and the page takes the sort from there", async ({
 
   await page.getByRole("button", { name: "Smart sort" }).click();
   const dialog = page.getByRole("dialog", { name: "Smart sort" });
-  await expect(dialog.getByText("2 sections")).toBeVisible();
+  await expect(dialog.getByRole("status")).toHaveText(
+    "2 sections proposed. Nothing saved yet.",
+  );
   expect(await dialog.getAttribute("data-commit")).toBeNull();
 
   await dialog.getByRole("button", { name: "Apply" }).click();
@@ -3724,6 +3725,29 @@ test("Apply commits, and the page takes the sort from there", async ({
   // picks the exit, and Cancel never carries it.
   await expect(dialog).toHaveAttribute("data-commit", "");
   await expect(page.getByRole("dialog", { name: "Smart sort" })).toHaveCount(0);
+
+  // The document assembles rather than appearing whole: the body carries the
+  // flag for the frame the sorted markdown mounts, and the blocks walk the
+  // order the markdown was built in — 30ms a block, the right column a flat
+  // 60 behind the left.
+  await expect(page.locator(".brain-page-body")).toHaveAttribute(
+    "data-sorted-in",
+    "",
+  );
+  await expect
+    .poll(() =>
+      page
+        .locator("[data-sorted-in] .brain-cols > .brain-col")
+        .evaluateAll((columns) =>
+          columns.map((column) =>
+            [...column.children]
+              .slice(0, 2)
+              .map((block) => getComputedStyle(block).animationDelay)
+              .join(","),
+          ),
+        ),
+    )
+    .toEqual(["0s,0.03s", "0.06s,0.09s"]);
   await expectDialogLayerReleased(page);
 
   // The body now names every child, so the tail leaves; the way back rises

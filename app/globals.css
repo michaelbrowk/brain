@@ -5042,9 +5042,10 @@ a.brain-share-url:hover {
 
   .brain-dialog[data-state="closed"],
   /* the commit keyframe is a second closed state on the same class, and a
-     rule it outranks cannot flatten it */
+     rule it outranks cannot flatten it — on the sheet as well as the dialog */
   .brain-dialog[data-state="closed"][data-commit],
   .brain-sheet[data-state="closed"],
+  .brain-sheet[data-state="closed"][data-commit],
   .brain-palette[data-state="closed"] {
     animation-name: dialog-fade-out;
   }

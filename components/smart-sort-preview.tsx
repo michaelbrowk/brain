@@ -17,6 +17,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type CSSProperties,
 } from "react";
 import { DEFAULT_PAGE_ICON } from "@/lib/constants";
@@ -54,6 +55,11 @@ const DEAL_MS = (0.36 + SPRING_DEAL.duration) * 1000;
 const ARC_LIMIT = 40;
 /** Under this the box has not changed shape, it has settled. */
 const GROWTH_FLOOR = 12;
+/** The width this dialog becomes `.brain-sheet` (app/globals.css). */
+const SHEET_QUERY = "(max-width: 767px)";
+/** The width `.brain-cols` stacks at (components/editor/milkdown.css), which
+ *  is what the preview's own columns have to agree with. */
+const STACKED_COLUMNS_QUERY = "(max-width: 640px)";
 
 /** The proposal, from the press to the answer.
  *
@@ -89,11 +95,12 @@ export function SmartSortPreview({
   const pages = useMemo(() => session?.pages ?? [], [session]);
   const result = session?.result ?? null;
   const reduce = useReducedMotion();
-  const compact = useCompactViewport();
+  const compact = useMediaQuery(SHEET_QUERY);
+  const stacked = useMediaQuery(STACKED_COLUMNS_QUERY);
   /* The deal is a desktop gesture. Below 768 this dialog is `.brain-sheet`,
-     where the sections stack and a heap-to-sections reshuffle happens mostly
-     off screen, so the phone takes the crossfade the reduced-motion reader
-     takes. One flag, and everything that moves reads it. */
+     where a heap-to-sections reshuffle is a tall vertical move that happens
+     mostly off screen, so the phone takes the crossfade the reduced-motion
+     reader takes. One flag, and everything that moves reads it. */
   const still = !!reduce || compact;
   const labelBase = useId();
 
@@ -135,20 +142,37 @@ export function SmartSortPreview({
       .filter((section) => section.chips.length > 0)
       .map((section, index) => ({ ...section, index }));
   }, [dealArmed, pages, result]);
+  /* An answer can come back with nothing in it: a malformed grouping, or
+     every page gone between the press and the response. The pile stays
+     standing rather than the box emptying out, and the header says so. */
+  const sections = dealt && dealt.length > 0 ? dealt : null;
+  const emptyAnswer = !!dealt && dealt.length === 0;
 
   /* Two columns whenever Apply will write two, split where Apply splits
      them, reading order left first (`applySmartSort`). The dialog's resting
      frame is then a small true picture of the document, which is the whole
-     reason the chips have somewhere legible to land. The sheet takes one
-     column, because below 640 the document's own columns stack too. */
+     reason the chips have somewhere legible to land. It drops to one column
+     at exactly the width `.brain-cols` stacks at, not at the sheet's, so the
+     picture stays true in the band between the two. */
   const columns = useMemo(() => {
-    if (!dealt) return null;
-    if (dealt.length < 2 || compact) return [dealt];
-    const mid = Math.ceil(dealt.length / 2);
-    return [dealt.slice(0, mid), dealt.slice(mid)];
-  }, [compact, dealt]);
+    if (!sections) return null;
+    if (sections.length < 2 || stacked) return [sections];
+    const mid = Math.ceil(sections.length / 2);
+    return [sections.slice(0, mid), sections.slice(mid)];
+  }, [sections, stacked]);
 
-  const counts = useSectionCounts(dealt, still);
+  const counts = useSectionCounts(sections, still);
+  /* A standing refusal speaks for itself in the footer, so this holds its
+     tongue rather than reading the old result over the top of it. */
+  const announcement = applyError
+    ? ""
+    : applying
+      ? "Saving the sorted page."
+      : emptyAnswer
+        ? "No sections came back. Try again."
+        : sections
+          ? `${sectionCount(sections.length)} proposed. Nothing saved yet.`
+          : "";
   const bodyRef = useBodyHeight(still);
 
   return (
@@ -172,13 +196,15 @@ export function SmartSortPreview({
           <DialogHeader
             title="Smart sort"
             subtitle={
-              dealt ? (
+              sections ? (
                 <>
                   <span className="font-medium text-ink">
-                    {dealt.length === 1 ? "1 section" : `${dealt.length} sections`}
+                    {sectionCount(sections.length)}
                   </span>
                   <span className="text-ink-3"> · Nothing saved yet</span>
                 </>
+              ) : emptyAnswer ? (
+                <span className="font-medium text-ink">No sections came back</span>
               ) : (
                 <>Reading {pages.length === 1 ? "1 page" : `${pages.length} pages`}</>
               )
@@ -187,6 +213,23 @@ export function SmartSortPreview({
             closeDisabled={applying}
           />
 
+          {/* The dialog's own subtitle is a `Dialog.Description`, which is
+              spoken once, when the dialog opens. It used to open WITH the
+              answer, so the open was the announcement; it now opens on the
+              press, and the sections landing, the subtitle changing and Apply
+              coming alive would all be silent. So the result is spoken here,
+              the way the failure below speaks in its own line. `status`
+              rather than `alert`: `alert` is this codebase's mark for the
+              refusal inside a form or a dialog. */}
+          <span
+            className="sr-only"
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+          >
+            {announcement}
+          </span>
+
           {/* `data-edge="chips"`: a wrapped tile flow ends in a partial row,
               so the bottom fade carries a whole chip and its gap. Twenty
               pixels under a 28px chip read as one chip dimming, which is how
@@ -194,7 +237,7 @@ export function SmartSortPreview({
           <DialogBody className="px-5 py-4" data-edge="chips">
             <div className="smart-body" ref={bodyRef}>
               <AnimatePresence>
-                {!dealt && !reduce && (
+                {!dealt && !still && (
                   <motion.span
                     key="band"
                     aria-hidden
@@ -270,7 +313,7 @@ export function SmartSortPreview({
                 /* An answer with nothing in it (a page whose children went
                    between the press and the response) would write an empty
                    body, so there is nothing to press. */
-                disabled={applying || !dealt?.length}
+                disabled={applying || !sections}
                 onClick={onApply}
               >
                 {applying ? "Applying…" : "Apply"}
@@ -461,14 +504,20 @@ function DealtChip({
   );
 }
 
+function sectionCount(count: number) {
+  return count === 1 ? "1 section" : `${count} sections`;
+}
+
 function chipLayoutId(pageId: string) {
   return `smart-sort-chip-${pageId}`;
 }
 
-/** Every section's count off one clock. The numbers are written straight to
- *  the DOM — three writes a frame rather than sixty-one re-renders — and each
- *  section's number races up and stops as its own chips land, which is what
- *  punctuates the deal. */
+/** Every section's count off one clock, written straight to the DOM: three
+ *  writes a frame rather than sixty-one re-renders. The clock runs the deal's
+ *  own length and the sections take their turns off it in reading order, so
+ *  each number races up and stops and the next one starts. It is a race
+ *  alongside the chips, not a readout of them: it does not wait for a tile to
+ *  land, and at sixty-one it is ahead of the first one. */
 function useSectionCounts(dealt: DealtSection[] | null, still: boolean) {
   const arrived = useMotionValue(0);
   const spans = useRef<(HTMLSpanElement | null)[]>([]);
@@ -584,16 +633,26 @@ function useBodyHeight(still: boolean) {
   return ref;
 }
 
-/** True on the sheet form of this dialog (the `.brain-sheet` breakpoint). */
-function useCompactViewport() {
-  const [compact, setCompact] = useState(false);
-  useEffect(() => {
-    if (typeof window.matchMedia !== "function") return;
-    const phone = window.matchMedia("(max-width: 767px)");
-    const read = () => setCompact(phone.matches);
-    read();
-    phone.addEventListener("change", read);
-    return () => phone.removeEventListener("change", read);
-  }, []);
-  return compact;
+/** A media query read on the first render, not corrected on the second: the
+ *  frame this dialog opens on is the one that decides whether the pile deals
+ *  in or crossfades, and a phone must not paint the desktop entrance once
+ *  before settling. */
+function useMediaQuery(query: string) {
+  const subscribe = useCallback(
+    (onChange: () => void) => {
+      if (typeof window.matchMedia !== "function") return () => {};
+      const media = window.matchMedia(query);
+      media.addEventListener("change", onChange);
+      return () => media.removeEventListener("change", onChange);
+    },
+    [query],
+  );
+  const read = useCallback(
+    () =>
+      typeof window.matchMedia === "function"
+        ? window.matchMedia(query).matches
+        : false,
+    [query],
+  );
+  return useSyncExternalStore(subscribe, read, () => false);
 }

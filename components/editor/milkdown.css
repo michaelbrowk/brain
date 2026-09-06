@@ -258,9 +258,8 @@
 /* The global reduced-motion block flattens every animation's DURATION and
    nothing else, so a ladder built out of delays would leave the last block
    holding its `from` state for a third of a second and then pop it in. The
-   delay itself goes, not the steps behind it: the per-index rules carry a
-   pseudo-class and would outrank a rule that only reset the custom
-   properties. */
+   delay itself goes rather than the steps behind it: one declaration that
+   cannot be reached around, whatever a later per-index rule sets. */
 @media (prefers-reduced-motion: reduce) {
   [data-sorted-in] .milkdown .ProseMirror > :not(.brain-cols),
   [data-sorted-in] .milkdown .ProseMirror .brain-col > * {

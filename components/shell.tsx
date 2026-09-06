@@ -446,10 +446,11 @@ export function Shell({
    *  closed dialog over an unchanged document. */
   const [smartApplying, setSmartApplying] = useState(false);
   const [smartApplyError, setSmartApplyError] = useState<string | null>(null);
-  /** Set on the frame the sorted body mounts, so the document assembles
-   *  instead of appearing whole. Dropped again once the run is over, or a
-   *  later re-render would replay it. */
-  const [sortedIn, setSortedIn] = useState(false);
+  /** The page whose body was just written by Smart sort, so the document
+   *  assembles instead of appearing whole. It is a page id and not a flag:
+   *  the window is 900ms, and a reader who leaves inside it would otherwise
+   *  watch the NEXT page ladder in as though it had been sorted. */
+  const [sortedIn, setSortedIn] = useState<string | null>(null);
   const sortedInTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const smartUndoOpenTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [smartUndoOpen, setSmartUndoOpen] = useState(false);
@@ -4285,8 +4286,13 @@ export function Shell({
         showToast("Couldn't sort these pages. Try again.");
       }
     } finally {
-      if (smartAbort.current === request) smartAbort.current = null;
-      setSmartLoading(false);
+      // Only the run that is still the current one may put the trigger back:
+      // a superseded request clearing the flag would take "Sorting…" off a
+      // page head that is still waiting on the newer one.
+      if (smartAbort.current === request) {
+        smartAbort.current = null;
+        setSmartLoading(false);
+      }
     }
   }, [blockConflictMutation, selectedId, showToast]);
 
@@ -4411,9 +4417,9 @@ export function Shell({
     if (selectedIdRef.current === target.id) {
       // The editor has just remounted on the new body (writeBody bumped the
       // epoch in the same batch), so the document assembles from this frame.
-      setSortedIn(true);
+      setSortedIn(target.id);
       if (sortedInTimer.current) clearTimeout(sortedInTimer.current);
-      sortedInTimer.current = setTimeout(() => setSortedIn(false), SORTED_IN_MS);
+      sortedInTimer.current = setTimeout(() => setSortedIn(null), SORTED_IN_MS);
     }
     // it's a plain doc now — drop any legacy sections-view state
     await patchParentSections(target.id, [], null);
@@ -5296,7 +5302,7 @@ export function Shell({
             ) : selectedId ? (
               <NotesCanvasBody
                 ready={!!page && page.id === selectedId}
-                sortedIn={sortedIn}
+                sortedIn={!!selectedId && sortedIn === selectedId}
                 fallback={
                   pageLoadError?.id === selectedId ? (
                     <motion.div

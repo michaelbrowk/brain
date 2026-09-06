@@ -10,6 +10,12 @@
 !.yarn/releases
 !.yarn/versions
 
+# agent scratch: reports and review artefacts written beside the tree, never
+# part of it. `.superpowers/` is on the publication denylist and one `git add
+# -A` already swept it into a commit.
+/.superpowers/
+/.review/
+
 # testing
 /coverage
 /playwright-report/

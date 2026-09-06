@@ -68,6 +68,9 @@ export interface AnimatePresenceProps {
   children?: ReactNode;
   mode?: string;
   initial?: boolean;
+  /** Never fired by the passthrough — a test that needs the callback supplies
+   *  its own `AnimatePresence` and calls it. */
+  onExitComplete?: () => void;
 }
 
 export interface FramerMotionMockOptions {

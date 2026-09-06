@@ -137,6 +137,30 @@ const nextConfig: NextConfig = {
           },
         ],
       },
+      // A route block REPLACES the catch-all rather than merging with it — the
+      // three mail overrides above are the proof — so this restates the global
+      // directives and then narrows. connect-src 'self' is the one that matters
+      // here: the editor island may talk to this origin and to nothing else.
+      // A nonce-based script-src is separate work and not a gate on this.
+      {
+        source: "/share/:path*",
+        headers: [
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          {
+            key: "Strict-Transport-Security",
+            value: "max-age=31536000; includeSubDomains",
+          },
+          {
+            key: "Content-Security-Policy",
+            value:
+              "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; connect-src 'self'; form-action 'none'; frame-src 'none'",
+          },
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+          { key: "Cache-Control", value: "private, no-store" },
+        ],
+      },
     ];
   },
 };

@@ -14,6 +14,8 @@ type StubProps = {
   value: string;
   onChange: (md: string) => void;
   registerFlush?: (flush: () => void) => () => void;
+  onNavigate?: (id: string) => void;
+  pages?: unknown;
   capabilities?: {
     upload?: {
       endpoint: string;
@@ -64,6 +66,7 @@ import ShareEditor, {
   shareRecoveryPrefix,
 } from "./share-editor";
 import { attachmentSrc, noteAttachmentLoadFailure } from "./attachment-src";
+import { pageRefHref } from "./page-ref";
 
 const VID = "vid123456789";
 const REV = "abcdefabcdef";
@@ -146,7 +149,12 @@ function deferred(body: unknown, status: number) {
 async function mount(
   initialMarkdown: string,
   onReload?: () => void,
-  page: { pageId?: string; initialRev?: string } = {},
+  page: {
+    pageId?: string;
+    initialRev?: string;
+    linkablePageIds?: readonly string[];
+    onNavigate?: (href: string) => void;
+  } = {},
 ) {
   await act(async () => {
     root.render(
@@ -158,6 +166,8 @@ async function mount(
         initialMarkdown={initialMarkdown}
         initialRev={page.initialRev ?? REV}
         onReload={onReload}
+        linkablePageIds={page.linkablePageIds}
+        onNavigate={page.onNavigate}
       />,
     );
   });
@@ -326,6 +336,27 @@ describe("the visitor editor", () => {
     expect(attachmentSrc("/_attachments-v2/abc123456789.png")).toBe(
       "/_attachments-v2/abc123456789.png",
     );
+    root = createRoot(host); // afterEach unmounts again harmlessly
+  });
+
+  it("points a page ref at the share for a page inside it, and nowhere for one outside", async () => {
+    const moved: string[] = [];
+    await mount("", undefined, {
+      linkablePageIds: ["page-3", "root-1"],
+      onNavigate: (href) => moved.push(href),
+    });
+    // The editor gets no page directory: titles come from the baked labels.
+    expect(editorProps.current!.pages).toBeUndefined();
+    expect(pageRefHref("page-3")).toBe("/share/root-1?page=page-3");
+    expect(pageRefHref("root-1")).toBe("/share/root-1");
+    expect(pageRefHref("elsewhere")).toBeNull();
+
+    editorProps.current!.onNavigate!("page-3");
+    editorProps.current!.onNavigate!("elsewhere");
+    expect(moved).toEqual(["/share/root-1?page=page-3"]);
+
+    await act(async () => root.unmount());
+    expect(pageRefHref("page-3")).toBeNull();
     root = createRoot(host); // afterEach unmounts again harmlessly
   });
 

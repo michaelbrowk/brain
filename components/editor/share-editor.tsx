@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { MilkdownEditor, type EditorCapabilities } from "./milkdown-editor";
 import { retryFailedAttachmentImages, setAttachmentSrcResolver } from "./attachment-src";
+import { setPageRefHrefResolver } from "./page-ref";
 import {
   canResumeConflictedDraft,
   createKeyedQueue,
@@ -410,14 +411,24 @@ function readOpening(keys: SlotKeys, initialMarkdown: string, initialRev: string
   }
 }
 
-interface ShareEditorProps {
+const NO_PAGES: readonly string[] = [];
+const assignLocation = (href: string) => location.assign(href);
+
+export interface ShareEditorProps {
   rootId: string;
   pageId: string;
   shareVersion: number;
   vid: string;
   initialMarkdown: string;
   initialRev: string;
+  /** The pages this body links that the share reaches, decided by the server
+   *  at render. A ref to any of them is a link into the share; a ref to any
+   *  other page is unavailable, which is what the read-only page does with
+   *  the same links. */
+  linkablePageIds?: readonly string[];
   onReload?: () => void;
+  /** Where a page ref inside the share takes the visitor. */
+  onNavigate?: (href: string) => void;
 }
 
 /** Everything the island captures (the opening, the rev, the base, the
@@ -439,7 +450,9 @@ function ShareEditorForPage({
   vid,
   initialMarkdown,
   initialRev,
+  linkablePageIds = NO_PAGES,
   onReload = () => location.reload(),
+  onNavigate = assignLocation,
 }: ShareEditorProps) {
   // This island's identity for the life of the mount: the slots it writes
   // and the beat it keeps are its own, whatever the module says later.
@@ -500,6 +513,31 @@ function ShareEditorForPage({
     });
     return () => setAttachmentSrcResolver(null);
   }, [pageId, rootId, shareVersion]);
+
+  // The same statement for page refs: a ref the share reaches links into the
+  // share, every other ref is unavailable, and the owner's /p/ address never
+  // shows through. The editor gets no page directory, so a ref keeps the
+  // label the owner baked into it, as on the read-only page.
+  const linkable = useMemo(() => new Set(linkablePageIds), [linkablePageIds]);
+  const hrefFor = useCallback(
+    (id: string): string | null => {
+      if (!linkable.has(id)) return null;
+      const rootHref = `/share/${encodeURIComponent(rootId)}`;
+      return id === rootId ? rootHref : `${rootHref}?page=${encodeURIComponent(id)}`;
+    },
+    [linkable, rootId],
+  );
+  useEffect(() => {
+    setPageRefHrefResolver(hrefFor);
+    return () => setPageRefHrefResolver(null);
+  }, [hrefFor]);
+  const navigateToPage = useCallback(
+    (id: string) => {
+      const href = hrefFor(id);
+      if (href) onNavigate(href);
+    },
+    [hrefFor, onNavigate],
+  );
 
   const beat = useCallback(() => {
     try {
@@ -874,6 +912,7 @@ function ShareEditorForPage({
         key={editorEpoch}
         value={markdown}
         onChange={onChange}
+        onNavigate={navigateToPage}
         registerFlush={registerFlush}
         capabilities={capabilities}
       />

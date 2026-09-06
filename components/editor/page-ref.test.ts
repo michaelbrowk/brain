@@ -12,6 +12,8 @@ import { getMarkdown } from "@milkdown/kit/utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   pageRef,
+  pageRefHref,
+  setPageRefHrefResolver,
   setPageRefOrigin,
   syncLivePageInfo,
 } from "./page-ref";
@@ -20,6 +22,7 @@ const ORIGIN = "https://brain.example";
 
 afterEach(() => {
   syncLivePageInfo();
+  setPageRefHrefResolver(null);
   setPageRefOrigin("");
   document.body.replaceChildren();
 });
@@ -190,6 +193,62 @@ describe("page references", () => {
       const serialized = editor.action(getMarkdown());
       expect(serialized).toContain("[🪄 After rename](/p/known)");
       expect(serialized).toContain("[🌱 Now resolved](/p/missing)");
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("lets a host decide where a ref points at display time, and keeps /p/<id> on disk", async () => {
+    setPageRefOrigin(ORIGIN);
+    // No live directory: a link visitor's island hands the editor none.
+    const root = document.createElement("div");
+    document.body.append(root);
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(
+          defaultValueCtx,
+          "[Inside stale](/p/inside)\n\n[Outside stale](/p/outside)",
+        );
+      })
+      .use(commonmark)
+      .use(gfm)
+      .use(pageRef)
+      .create();
+
+    try {
+      const view = editor.action((ctx) => ctx.get(editorViewCtx));
+      const dispatch = vi.spyOn(view, "dispatch");
+      const inside = root.querySelector<HTMLAnchorElement>('[data-page-ref="inside"]')!;
+      const outside = root.querySelector<HTMLAnchorElement>('[data-page-ref="outside"]')!;
+      expect(inside.hasAttribute("href")).toBe(false);
+      expect(pageRefHref("inside")).toBeNull();
+
+      setPageRefHrefResolver((id) =>
+        id === "inside" ? "/share/root?page=inside" : null,
+      );
+
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(pageRefHref("inside")).toBe("/share/root?page=inside");
+      expect(inside.getAttribute("href")).toBe("/share/root?page=inside");
+      expect(inside.classList.contains("brain-page-ref-missing")).toBe(false);
+      expect(inside.hasAttribute("aria-disabled")).toBe(false);
+      expect(inside.textContent).toBe("Inside stale");
+      expect(outside.hasAttribute("href")).toBe(false);
+      expect(outside.classList.contains("brain-page-ref-missing")).toBe(true);
+      expect(outside.getAttribute("aria-disabled")).toBe("true");
+      // The resolver decides the href alone: live info still names the page
+      // but never lets the owner's /p/ address through.
+      syncLivePageInfo([{ id: "outside", title: "Live", icon: "🌱" }]);
+      expect(outside.hasAttribute("href")).toBe(false);
+      expect(outside.textContent).toBe("🌱 Live");
+      const serialized = editor.action(getMarkdown());
+      expect(serialized).toContain("[Inside stale](/p/inside)");
+      expect(serialized).toContain("[🌱 Live](/p/outside)");
+
+      setPageRefHrefResolver(null);
+      expect(outside.getAttribute("href")).toBe("/p/outside");
+      expect(inside.hasAttribute("href")).toBe(false);
     } finally {
       await editor.destroy();
     }

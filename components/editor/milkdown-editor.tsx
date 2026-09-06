@@ -96,7 +96,7 @@ import { attachmentRefs } from "./attachment-refs";
 import { attachmentSrc } from "./attachment-src";
 import {
   classifyInternalPageLink,
-  followEditorLink,
+  followEditorAnchor,
   observeInternalPageLinks,
 } from "./internal-page-link";
 import "./milkdown.css";
@@ -889,14 +889,15 @@ function Inner({
           (target && target !== "_self")
         )
           return;
-        // The view already resolved a local attachment href for display;
+        // A page ref goes by its id, every other anchor by its href. The
+        // view already resolved a local attachment href for display;
         // resolving again is idempotent and covers an anchor that did not.
-        const href = anchor.getAttribute("href");
-        const followed = followEditorLink(
-          href === null ? null : attachmentSrc(href),
+        const followed = followEditorAnchor(
+          anchor,
           window.location.origin,
           onNavigate,
           (href) => window.open(href, "_blank", "noopener,noreferrer"),
+          attachmentSrc,
         );
         if (!followed) return;
         e.preventDefault();

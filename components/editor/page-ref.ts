@@ -22,6 +22,29 @@ export function setPageRefOrigin(origin: string) {
   pageRefOrigin = origin;
 }
 
+/** Where a ref points at display time. Unset, the owner's rule: a page the
+ *  live directory knows links at `/p/<id>`, one it does not is unavailable.
+ *  A link visitor's island sets one instead: the share URL for a page inside
+ *  the shared subtree, null for every other, which renders as unavailable the
+ *  way the read-only page flattens it. Display only, like `attachmentSrc`:
+ *  `toMarkdown` still writes `/p/<id>`, and `toDOM`, which feeds the
+ *  clipboard, stays on the owner's address, so the stored document never
+ *  learns the share URL. Module-scoped for the same reason as that resolver:
+ *  a NodeView is plain DOM with no React context, and Brain never mounts two
+ *  editors at once. */
+type PageRefHrefResolver = (id: string) => string | null;
+let pageRefHrefResolver: PageRefHrefResolver | null = null;
+
+export function setPageRefHrefResolver(resolver: PageRefHrefResolver | null) {
+  pageRefHrefResolver = resolver;
+  mountedPageRefViews.forEach((refresh) => refresh());
+}
+
+export function pageRefHref(id: string): string | null {
+  if (pageRefHrefResolver) return pageRefHrefResolver(id);
+  return livePageInfo.has(id) ? `/p/${id}` : null;
+}
+
 /** Replace the shared directory and refresh mounted page-ref DOM directly.
  * This deliberately does not dispatch a ProseMirror transaction: a rename,
  * icon update, or newly resolved page is live display state, not a note edit. */
@@ -186,21 +209,22 @@ export const pageRefSchema = $nodeSchema("page_ref", () => ({
 }));
 
 /** NodeView renders the LIVE title + icon, falling back to the baked label
- * when the page is unknown. Unknown references have no href, so they cannot
- * navigate; resolving the id later refreshes this DOM without a transaction. */
+ * when the page is unknown. A reference `pageRefHref` cannot place has no
+ * href, so it cannot navigate; resolving the id later, or a host installing
+ * a resolver, refreshes this DOM without a transaction. */
 export const pageRefView = $view(pageRefSchema.node, () => ((initial: ProseNode): NodeView => {
   const dom = document.createElement("a");
   dom.setAttribute("contenteditable", "false");
   let current = initial;
   const render = (node: ProseNode) => {
     const { id, label } = pageRefAttrs(node);
-    const info = livePageInfo.get(id);
+    const href = pageRefHref(id);
     const text = pageRefVisibleText(node);
-    dom.className = info
+    dom.className = href
       ? "brain-page-ref"
       : "brain-page-ref brain-page-ref-missing";
-    if (info) {
-      dom.setAttribute("href", `/p/${id}`);
+    if (href) {
+      dom.setAttribute("href", href);
       dom.removeAttribute("aria-disabled");
       dom.removeAttribute("aria-label");
     } else {

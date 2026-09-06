@@ -65,6 +65,35 @@ export function followEditorLink(
   return true;
 }
 
+/** A click on an anchor inside the editor. A page ref goes by its id and
+ *  never by its href: the owner's shell moves to the page, a link visitor's
+ *  island moves within the share, and the href, which only the display
+ *  decides, is never what a click reads. A ref with no href is one the editor
+ *  could not place, and nothing happens. Every other anchor goes through its
+ *  href, resolved first (a bare attachment path becomes the URL the browser
+ *  may fetch). Returns whether the click was taken. */
+export function followEditorAnchor(
+  anchor: HTMLAnchorElement,
+  currentOrigin: string,
+  navigateInternal: ((id: string) => void) | undefined,
+  openExternal: (href: string) => void,
+  resolveHref: (href: string) => string = (href) => href,
+): boolean {
+  const pageRefId = anchor.dataset.pageRef;
+  if (pageRefId !== undefined) {
+    if (!navigateInternal || !anchor.hasAttribute("href")) return false;
+    navigateInternal(pageRefId);
+    return true;
+  }
+  const href = anchor.getAttribute("href");
+  return followEditorLink(
+    href === null ? null : resolveHref(href),
+    currentOrigin,
+    navigateInternal,
+    openExternal,
+  );
+}
+
 function syncMarker(anchor: HTMLAnchorElement, currentOrigin: string) {
   const internal =
     !anchor.classList.contains("brain-page-ref") &&

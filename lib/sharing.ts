@@ -29,7 +29,7 @@ export function parseShareExpiry(
   return value;
 }
 
-const VISITOR_NAME_MAX = 40;
+export const VISITOR_NAME_MAX = 40;
 
 /** The one thing a link visitor tells us about themselves. Trimmed, stripped of
  *  control characters so it cannot break a frontmatter line or a log, and cut to

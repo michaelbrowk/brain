@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   classifyEditorLinkNavigation,
   classifyInternalPageLink,
+  followEditorAnchor,
   followEditorLink,
   INTERNAL_PAGE_LINK_CLASS,
   observeInternalPageLinks,
@@ -145,5 +146,54 @@ describe("observeInternalPageLinks", () => {
     root.append(afterStop);
     await mutationsDelivered();
     expect(afterStop.classList.contains(INTERNAL_PAGE_LINK_CLASS)).toBe(false);
+  });
+});
+
+describe("followEditorAnchor", () => {
+  function anchor(attrs: Record<string, string>) {
+    const a = document.createElement("a");
+    for (const [key, value] of Object.entries(attrs)) a.setAttribute(key, value);
+    return a;
+  }
+
+  it("navigates a page ref by its id and never by its href", () => {
+    const navigate = vi.fn();
+    const open = vi.fn();
+    const ref = anchor({ "data-page-ref": "inside", href: "/share/root?page=inside" });
+    expect(followEditorAnchor(ref, ORIGIN, navigate, open)).toBe(true);
+    expect(navigate).toHaveBeenCalledWith("inside");
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("leaves a page ref the editor could not place inert", () => {
+    const navigate = vi.fn();
+    const open = vi.fn();
+    const ref = anchor({ "data-page-ref": "gone", "aria-disabled": "true" });
+    expect(followEditorAnchor(ref, ORIGIN, navigate, open)).toBe(false);
+    expect(navigate).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("does not open a page ref anywhere when nothing takes the id", () => {
+    const open = vi.fn();
+    const ref = anchor({ "data-page-ref": "inside", href: "/share/root?page=inside" });
+    expect(followEditorAnchor(ref, ORIGIN, undefined, open)).toBe(false);
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("follows an ordinary anchor through its href, resolved first", () => {
+    const navigate = vi.fn();
+    const open = vi.fn();
+    const resolve = (href: string) =>
+      href === "/_attachments-v2/a.png" ? "/api/media/a.png?root=r" : href;
+    expect(
+      followEditorAnchor(anchor({ href: "/_attachments-v2/a.png" }), ORIGIN, navigate, open, resolve),
+    ).toBe(true);
+    expect(open).toHaveBeenCalledWith("https://brain.example/api/media/a.png?root=r");
+    expect(
+      followEditorAnchor(anchor({ href: "/p/abc" }), ORIGIN, navigate, open, resolve),
+    ).toBe(true);
+    expect(navigate).toHaveBeenCalledWith("abc");
+    expect(followEditorAnchor(anchor({}), ORIGIN, navigate, open, resolve)).toBe(false);
   });
 });

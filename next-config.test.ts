@@ -46,3 +46,34 @@ describe("Next response headers", () => {
     }
   });
 });
+
+const SHARE_CSP =
+  "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; connect-src 'self'; form-action 'none'; frame-src 'none'";
+
+describe("the /share surface", () => {
+  it("carries exactly one CSP, after the catch-all, with connect-src 'self'", async () => {
+    const rules = await nextConfig.headers?.();
+    const catchAllIndex = rules!.findIndex((rule) => rule.source === "/:path*");
+    const shareIndex = rules!.findIndex((rule) => rule.source === "/share/:path*");
+
+    expect(shareIndex).toBeGreaterThan(catchAllIndex);
+    const csp = rules![shareIndex]!.headers.filter(
+      (header) => header.key === "Content-Security-Policy",
+    );
+    expect(csp).toHaveLength(1);
+    expect(csp[0]!.value).toBe(SHARE_CSP);
+  });
+
+  it("keeps a shared page out of search results and out of every cache", async () => {
+    const rules = await nextConfig.headers?.();
+    const share = rules!.find((rule) => rule.source === "/share/:path*")!;
+    expect(share.headers).toContainEqual({
+      key: "X-Robots-Tag",
+      value: "noindex, nofollow",
+    });
+    expect(share.headers).toContainEqual({
+      key: "Cache-Control",
+      value: "private, no-store",
+    });
+  });
+});

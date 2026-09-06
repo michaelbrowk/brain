@@ -5,7 +5,11 @@ import {
   type PageWriteHistory,
 } from "@/lib/api/page-write";
 import { shareWriteNotFound, withShareWrite } from "@/lib/share-write";
-import { isNotFound, isShareAttachmentScope } from "@/lib/store";
+import {
+  isNotFound,
+  isShareAttachmentScope,
+  isShareLinkScheme,
+} from "@/lib/store";
 import { MAX_SHARE_WRITE_BYTES } from "@/lib/store/share-limits";
 
 export const dynamic = "force-dynamic";
@@ -89,6 +93,9 @@ export async function PUT(req: NextRequest, { params }: Ctx) {
             { error: "attachment_not_yours" },
             { status: 422 },
           );
+        }
+        if (isShareLinkScheme(error)) {
+          return NextResponse.json({ error: "unsafe_link" }, { status: 422 });
         }
         throw error;
       }

@@ -12,6 +12,7 @@ import {
   AttachmentValidationError,
   RevConflictError,
   ShareAttachmentScopeError,
+  ShareLinkSchemeError,
   ShareSubtreeFullError,
   ShareUploadQuotaError,
   type AttachmentInput,
@@ -9444,6 +9445,41 @@ describe("share-aware Store leaves", () => {
       attachment: attachmentName(foreign.url),
     });
     expect((await s.readPage(childId)).markdown).toBe(`![](${mine.url})`);
+  });
+
+  it("refuses a write whose link carries a scheme the owner's editor would run", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    // The owner's editor is not sanitized, so a visitor's javascript: href
+    // becomes a live anchor in the owner's DOM at /p/. Refused, not stripped:
+    // a silent rewrite would hand the visitor back a body they did not write
+    // and put the editor's draft out of step with the file.
+    for (const href of [
+      "javascript:alert(1)",
+      "data:text/html,<script>alert(1)</script>",
+      "javascript&#58;alert(1)",
+    ]) {
+      const refused = s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `[read this](${href})`,
+        visitorName: "Ada",
+      });
+      await expect(refused, href).rejects.toBeInstanceOf(ShareLinkSchemeError);
+      await expect(refused, href).rejects.toMatchObject({ destination: href });
+    }
+    expect((await s.readPage(childId)).markdown).toBe("");
+
+    // The three a note has a reason to carry still land.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: "[a](https://brain.test) [b](mailto:ada@brain.test) [c](/p/x)",
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
   });
 
   it("diffs against index.md, not the visitor's baseMarkdown", async () => {

@@ -500,6 +500,18 @@ export class ShareAttachmentScopeError extends Error {
   }
 }
 
+/** A link visitor's write introduces a link or image destination whose scheme
+ * is not http, https or mailto. The owner's editor renders a visitor's href
+ * onto a real anchor, so `javascript:` and `data:` are refused before the
+ * bytes land rather than stripped afterwards. Nothing was written. The visitor
+ * route answers 422 unsafe_link. */
+export class ShareLinkSchemeError extends Error {
+  constructor(readonly destination: string) {
+    super("link scheme is not allowed in a shared page");
+    this.name = "ShareLinkSchemeError";
+  }
+}
+
 export class QuickCaptureConflictError extends Error {
   constructor() {
     super("quick capture payload conflict");
@@ -630,6 +642,10 @@ export function isAttachmentStoreUnavailable(
 
 export function isShareUploadQuota(e: unknown): e is ShareUploadQuotaError {
   return e instanceof Error && e.name === "ShareUploadQuotaError";
+}
+
+export function isShareLinkScheme(e: unknown): e is ShareLinkSchemeError {
+  return e instanceof Error && e.name === "ShareLinkSchemeError";
 }
 
 export function isShareAttachmentScope(

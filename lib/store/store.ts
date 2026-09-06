@@ -35,6 +35,7 @@ import {
   referencedAttachmentNames,
   referencedAttachmentUrls,
 } from "../attachments";
+import { linkDestinations, unsafeLinkDestination } from "../link-schemes";
 import {
   isBrainCompatibleNotionCover,
   isBrainCompatibleNotionIcon,
@@ -100,6 +101,7 @@ import {
   MetadataConflictError,
   ShareAttachmentScopeError,
   ShareEditOriginError,
+  ShareLinkSchemeError,
   ShareScopeConflictError,
   ShareSubtreeFullError,
   ShareUploadQuotaError,
@@ -3985,6 +3987,17 @@ export class Store {
       if (!bodyChanged) {
         return { meta: e.meta, markdown: parsed.markdown, rev: currentRev };
       }
+      // A link scheme the owner's editor would put on a live anchor is
+      // refused here, where the visitor's text still has somewhere to go
+      // back to. Refused rather than stripped: a silent rewrite would hand
+      // the visitor a body they did not write and leave their draft out of
+      // step with the file, which is a conflict loop rather than a message.
+      // Same held rule as the references below.
+      const unsafeLink = unsafeLinkDestination(
+        input.markdown,
+        linkDestinations(parsed.markdown),
+      );
+      if (unsafeLink !== null) throw new ShareLinkSchemeError(unsafeLink);
       // The reference diff runs inside this critical section, against the
       // body just read from index.md, never against the visitor's
       // expectedMarkdown, which the rev rule above ignores when the rev

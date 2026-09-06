@@ -159,6 +159,20 @@ describe("PUT /api/share-edit/page/[id]", () => {
     await expect(res.json()).resolves.toEqual({ error: "attachment_not_yours" });
   });
 
+  it("answers a link scheme the owner's editor would run with 422", async () => {
+    const { ShareLinkSchemeError } = await import("@/lib/store");
+    const res = await put(
+      { markdown: "[read this](javascript:alert(1))" },
+      {
+        writeSharedPage: vi
+          .fn()
+          .mockRejectedValue(new ShareLinkSchemeError("javascript:alert(1)")),
+      },
+    );
+    expect(res.status).toBe(422);
+    await expect(res.json()).resolves.toEqual({ error: "unsafe_link" });
+  });
+
   it("refuses a body over the cap without calling the Store, declared or not", async () => {
     const writeSharedPage = vi.fn();
     const body = { markdown: "x".repeat(MAX_SHARE_WRITE_BYTES + 1) };

@@ -12,6 +12,11 @@ import type {
 } from "@milkdown/kit/transformer";
 import { $nodeSchema, $remark, $view } from "@milkdown/kit/utils";
 import { SOLAR } from "@/components/ui/solar-icons.generated";
+import {
+  attachmentSrc,
+  bareAttachmentSrc,
+  noteAttachmentLoadFailure,
+} from "./attachment-src";
 
 type ImageAlign = "left" | "center" | "right";
 
@@ -134,7 +139,9 @@ export const brainImageSchema = $nodeSchema("brain_image", () => ({
         const width = Number(dom.getAttribute("data-width"));
         const align = dom.getAttribute("data-align");
         return {
-          src: img?.getAttribute("src") || "",
+          // The inverse of the display-time resolver: live DOM carries the
+          // resolved URL, the document must not.
+          src: bareAttachmentSrc(img?.getAttribute("src") || ""),
           alt: dom.querySelector("figcaption")?.textContent || img?.getAttribute("alt") || "",
           width: readWidth(width),
           align: isImageAlign(align) ? align : null,
@@ -148,7 +155,7 @@ export const brainImageSchema = $nodeSchema("brain_image", () => ({
         if (!(dom instanceof HTMLElement)) return false;
         const layout = parseLayoutTitle(dom.getAttribute("title"));
         return {
-          src: dom.getAttribute("src") || "",
+          src: bareAttachmentSrc(dom.getAttribute("src") || ""),
           alt: dom.getAttribute("alt") || "",
           width: layout.width,
           align: layout.align,
@@ -157,6 +164,9 @@ export const brainImageSchema = $nodeSchema("brain_image", () => ({
       },
     },
   ],
+  // Bare `src` on purpose: this DOM is what a copy puts on the clipboard, and
+  // parseDOM reads it back verbatim. The display-time rewrite lives in the
+  // NodeView's render below, where nothing is ever parsed from.
   toDOM: (node) => {
     const width = readWidth(node.attrs.width);
     const align = isImageAlign(node.attrs.align) ? node.attrs.align : null;
@@ -213,6 +223,8 @@ export const brainImageView = $view(brainImageSchema.node, () => ((
   frame.className = "brain-image-frame";
 
   const img = document.createElement("img");
+  let liveSrc = "";
+  img.addEventListener("error", () => noteAttachmentLoadFailure(img, liveSrc));
   img.draggable = true;
 
   const alignControls = document.createElement("div");
@@ -292,7 +304,10 @@ export const brainImageView = $view(brainImageSchema.node, () => ((
     const width = readWidth(node.attrs.width);
     const align = isImageAlign(node.attrs.align) ? node.attrs.align : null;
 
-    img.src = src;
+    // Display time only. A visitor's resolver adds the access triple here;
+    // `src` itself, and therefore the document, keeps the bare path.
+    liveSrc = src;
+    img.src = attachmentSrc(src);
     img.alt = alt;
     caption.textContent = alt;
     caption.hidden = !alt;

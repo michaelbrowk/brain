@@ -14,6 +14,8 @@ vi.mock("@/lib/store", () => ({
     error instanceof Error && error.name === "NotFoundError",
   isShareScopeConflict: (error: unknown) =>
     error instanceof Error && error.name === "ShareScopeConflictError",
+  isShareEditOrigin: (error: unknown) =>
+    error instanceof Error && error.name === "ShareEditOriginError",
 }));
 vi.mock("bcryptjs", () => ({
   default: { hash: mocks.hash },
@@ -81,6 +83,7 @@ describe("atomic subtree sharing route", () => {
       request("POST", {
         enabled: true,
         expectedScopeToken: TOKEN,
+        canEdit: false,
         password: "secret",
         expiresAt,
       }),
@@ -92,6 +95,7 @@ describe("atomic subtree sharing route", () => {
     expect(mocks.configureShare).toHaveBeenCalledWith(PAGE_ID, {
       enabled: true,
       expectedScopeToken: TOKEN,
+      canEdit: false,
       sharePass: "bcrypt-hash",
       shareExpiresAt: expiresAt,
       src: "client-a",
@@ -113,6 +117,7 @@ describe("atomic subtree sharing route", () => {
       request("POST", {
         enabled: true,
         expectedScopeToken: TOKEN,
+        canEdit: false,
       }),
       { params: Promise.resolve({ id: PAGE_ID }) },
     );
@@ -122,6 +127,7 @@ describe("atomic subtree sharing route", () => {
     expect(mocks.configureShare).toHaveBeenCalledWith(PAGE_ID, {
       enabled: true,
       expectedScopeToken: TOKEN,
+      canEdit: false,
       sharePass: undefined,
       shareExpiresAt: undefined,
       src: "client-a",
@@ -142,6 +148,7 @@ describe("atomic subtree sharing route", () => {
       request("POST", {
         enabled: true,
         expectedScopeToken: TOKEN,
+        canEdit: false,
         password: null,
         expiresAt: null,
       }),
@@ -171,15 +178,49 @@ describe("atomic subtree sharing route", () => {
     await expect(response.json()).resolves.toEqual(disclosed);
   });
 
+  it("forwards canEdit and maps a missing public origin to a 400", async () => {
+    mocks.configureShare.mockRejectedValueOnce(
+      Object.assign(new Error("editable sharing needs BRAIN_PUBLIC_ORIGIN"), {
+        name: "ShareEditOriginError",
+      }),
+    );
+
+    const response = await POST(
+      request("POST", {
+        enabled: true,
+        expectedScopeToken: TOKEN,
+        canEdit: true,
+      }),
+      { params: Promise.resolve({ id: PAGE_ID }) },
+    );
+
+    expect(mocks.configureShare).toHaveBeenCalledWith(PAGE_ID, {
+      enabled: true,
+      expectedScopeToken: TOKEN,
+      canEdit: true,
+      sharePass: undefined,
+      shareExpiresAt: undefined,
+      src: "client-a",
+    });
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toEqual({
+      error: "editable sharing needs a public origin",
+    });
+    expect(mocks.readShareScope).not.toHaveBeenCalled();
+  });
+
   it.each([
     ["missing enable flag", { expectedScopeToken: TOKEN }],
-    ["missing scope token", { enabled: true }],
-    ["short scope token", { enabled: true, expectedScopeToken: "abc" }],
+    ["missing scope token", { enabled: true, canEdit: false }],
+    ["short scope token", { enabled: true, expectedScopeToken: "abc", canEdit: false }],
+    ["missing canEdit", { enabled: true, expectedScopeToken: TOKEN }],
+    ["non-boolean canEdit", { enabled: true, expectedScopeToken: TOKEN, canEdit: "yes" }],
     [
       "oversize password",
       {
         enabled: true,
         expectedScopeToken: TOKEN,
+        canEdit: false,
         password: "🙂".repeat(19),
       },
     ],

@@ -2,10 +2,13 @@ import { SignJWT } from "jose";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   createSession,
+  createShareEditToken,
   createShareToken,
   LEGACY_OWNER_SUBJECT,
   OWNER_SUBJECT,
+  shareEditCookieName,
   verifySession,
+  verifyShareEditToken,
   verifyShareToken,
 } from "./auth";
 
@@ -138,5 +141,47 @@ describe("session epoch revocation", () => {
     await expect(currentSessionEpoch()).resolves.toBe(0);
     const session = await createSession();
     await expect(verifySession(session)).resolves.toBe(true);
+  });
+});
+
+describe("the share-edit token domain", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("verifies only in its own domain, at its own version", async () => {
+    vi.stubEnv("AUTH_SECRET", "three-domain-secret");
+    const edit = await createShareEditToken("root-1", 3, "vid123456789", "Ada");
+
+    await expect(verifyShareEditToken(edit, "root-1", 3)).resolves.toEqual({
+      vid: "vid123456789",
+      name: "Ada",
+    });
+    await expect(verifyShareEditToken(edit, "root-1", 4)).resolves.toBeNull();
+    await expect(verifyShareEditToken(edit, "root-2", 3)).resolves.toBeNull();
+    await expect(verifyShareEditToken(undefined, "root-1", 3)).resolves.toBeNull();
+  });
+
+  it("does not cross any of the six directions between the three domains", async () => {
+    vi.stubEnv("AUTH_SECRET", "three-domain-secret");
+    const session = await createSession();
+    const read = await createShareToken("root-1", 3);
+    const edit = await createShareEditToken("root-1", 3, "vid123456789", "Ada");
+
+    // session <-> read
+    await expect(verifyShareToken(session, "root-1", 3)).resolves.toBe(false);
+    await expect(verifySession(read)).resolves.toBe(false);
+    // session <-> edit
+    await expect(verifyShareEditToken(session, "root-1", 3)).resolves.toBeNull();
+    await expect(verifySession(edit)).resolves.toBe(false);
+    // read <-> edit
+    await expect(verifyShareEditToken(read, "root-1", 3)).resolves.toBeNull();
+    await expect(verifyShareToken(edit, "root-1", 3)).resolves.toBe(false);
+    // version 0 is the only value that reaches the legacy raw-secret branch
+    await expect(verifyShareToken(edit, "root-1", 0)).resolves.toBe(false);
+  });
+
+  it("names the cookie after the root", () => {
+    expect(shareEditCookieName("root-1")).toBe("brain_edit_share_root-1");
   });
 });

@@ -1,10 +1,13 @@
 import { NextRequest, NextResponse } from "next/server";
+import {
+  pageWriteConflictResponse,
+  resolvePageWrite,
+} from "@/lib/api/page-write";
 import { DEFAULT_PAGE_ICON } from "@/lib/constants";
 import {
   getStore,
   isMetadataConflict,
   isNotFound,
-  isRevConflict,
   redactPage,
   redactPageMeta,
 } from "@/lib/store";
@@ -18,7 +21,6 @@ type Ctx = { params: Promise<{ id: string }> };
  *  echo can be ignored client-side. */
 const src = (req: NextRequest) =>
   req.headers.get("x-brain-client") ?? undefined;
-const REV_TOKEN_RE = /^[0-9a-f]{12}$/;
 const EXPECTED_STRING_FIELDS = new Set([
   "title",
   "icon",
@@ -31,6 +33,7 @@ const EXPECTED_STRING_FIELDS = new Set([
 ]);
 const EXPECTED_BOOLEAN_FIELDS = new Set([
   "public",
+  "shareEdit",
   "pinned",
   "smallText",
   "fullWidth",
@@ -105,49 +108,23 @@ export async function PUT(
   const { id } = await params;
   const { markdown, rev, baseMarkdown } = await req.json();
   const store = await getStore();
-  try {
-    return NextResponse.json(
-      redactPage(
-        await store.writePage(
-          id,
-          markdown ?? "",
-          rev,
-          "me",
-          src(req),
-          typeof baseMarkdown === "string" ? baseMarkdown : undefined,
-        ),
+  const outcome = await resolvePageWrite(
+    store,
+    { id, rev, baseMarkdown },
+    () =>
+      store.writePage(
+        id,
+        markdown ?? "",
+        rev,
+        "me",
+        src(req),
+        typeof baseMarkdown === "string" ? baseMarkdown : undefined,
       ),
-    );
-  } catch (e) {
-    if (isRevConflict(e)) {
-      // Schema-v2 crash drafts predate baseMarkdown. Resolve their exact old
-      // 12-hex revision only through this page's id-bound, capped Git history.
-      // Any missing/uncommitted/ambiguous revision stays a normal safe 409.
-      let historicalBase: string | null = null;
-      if (
-        typeof baseMarkdown !== "string" &&
-        typeof rev === "string" &&
-        REV_TOKEN_RE.test(rev)
-      ) {
-        historicalBase = await store
-          .historicalMarkdownForRev(id, rev)
-          .catch(() => null);
-      }
-      return NextResponse.json(
-        {
-          error: "conflict",
-          currentRev: e.currentRev,
-          ...(historicalBase !== null
-            ? { baseMarkdown: historicalBase }
-            : {}),
-        },
-        { status: 409 },
-      );
-    }
-    if (isNotFound(e))
-      return NextResponse.json({ error: "not found" }, { status: 404 });
-    throw e;
-  }
+  );
+  if (outcome.status === "conflict") return pageWriteConflictResponse(outcome);
+  if (outcome.status === "not-found")
+    return NextResponse.json({ error: "not found" }, { status: 404 });
+  return NextResponse.json(redactPage(outcome.page));
 }
 
 // update meta: title / icon / public / …  (a manually-set icon wins)
@@ -161,6 +138,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
     public: pub,
     sharePassword,
     shareExpiresAt: rawShareExpiresAt,
+    shareEdit,
     category,
     pinned,
     status,
@@ -186,7 +164,8 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
   if (
     (pub !== undefined && pub !== false) ||
     sharePassword !== undefined ||
-    rawShareExpiresAt !== undefined
+    rawShareExpiresAt !== undefined ||
+    shareEdit !== undefined
   ) {
     return NextResponse.json(
       { error: "use share configuration endpoint" },

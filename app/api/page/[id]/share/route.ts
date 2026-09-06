@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import {
   getStore,
   isNotFound,
+  isShareEditOrigin,
   isShareScopeConflict,
 } from "@/lib/store";
 import { parseShareExpiry } from "@/lib/sharing";
@@ -54,6 +55,7 @@ export async function POST(req: NextRequest, { params }: Ctx) {
   if (
     typeof body.expectedScopeToken !== "string" ||
     !SCOPE_TOKEN_RE.test(body.expectedScopeToken) ||
+    typeof body.canEdit !== "boolean" ||
     (body.password !== undefined &&
       body.password !== null &&
       (typeof body.password !== "string" ||
@@ -86,6 +88,7 @@ export async function POST(req: NextRequest, { params }: Ctx) {
     await store.configureShare(id, {
       enabled: true,
       expectedScopeToken: body.expectedScopeToken,
+      canEdit: body.canEdit,
       sharePass: password,
       shareExpiresAt: expiresAt,
       src: src(req),
@@ -97,6 +100,12 @@ export async function POST(req: NextRequest, { params }: Ctx) {
       return NextResponse.json(
         { error: "scope changed", snapshot: error.snapshot },
         { status: 409 },
+      );
+    }
+    if (isShareEditOrigin(error)) {
+      return NextResponse.json(
+        { error: "editable sharing needs a public origin" },
+        { status: 400 },
       );
     }
     if (isNotFound(error)) {

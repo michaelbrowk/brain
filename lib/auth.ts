@@ -35,6 +35,10 @@ export function isOwnerSubject(subject: unknown): boolean {
 }
 const SESSION_KIND = "session";
 const SHARE_KIND = "share";
+const SHARE_EDIT_KIND = "share-edit";
+/** 12 hours against the read cookie's 30 days: an edit grant is a capability,
+ *  and a capability held open on a stranger's laptop is the wrong default. */
+export const SHARE_EDIT_MAX_AGE_SECONDS = 12 * 60 * 60;
 
 // ── session epoch: server-side revocation for the 90-day cookie ────────
 // Cookies embed the epoch they were minted under; "log out everywhere" bumps
@@ -122,7 +126,7 @@ function authSecret(): string {
 
 /** New human and share tokens use separate signing domains. The raw key is
  *  retained only to verify already-issued legacy cookies during migration. */
-function secret(scope?: "session" | "share"): Uint8Array {
+function secret(scope?: "session" | "share" | "share-edit"): Uint8Array {
   const raw = authSecret();
   return new TextEncoder().encode(scope ? `${raw}\0brain:${scope}:v1` : raw);
 }
@@ -226,6 +230,61 @@ export async function verifyShareToken(
     );
   } catch {
     return false;
+  }
+}
+
+/** The cookie a link visitor holds while they are allowed to write. Root-scoped
+ *  and HttpOnly, so a cross-site page cannot read the `vid` inside it, which is
+ *  what makes the `x-brain-share-vid` double submit worth anything. The prefix
+ *  is `brain_edit_share_`, not `brain_share_edit_`: the read cookie is
+ *  `brain_share_<id>`, and with a shared prefix a page id starting with `edit_`
+ *  would name another page's edit cookie. */
+export function shareEditCookieName(rootId: string): string {
+  return `brain_edit_share_${rootId}`;
+}
+
+export async function createShareEditToken(
+  rootId: string,
+  shareVersion: number,
+  vid: string,
+  name: string,
+): Promise<string> {
+  return new SignJWT({ kind: SHARE_EDIT_KIND, shareVersion, vid, name })
+    .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+    .setIssuer(ISSUER)
+    .setAudience(`brain:share-edit:${rootId}`)
+    .setSubject(`share-edit:${rootId}`)
+    .setIssuedAt()
+    .setExpirationTime(`${SHARE_EDIT_MAX_AGE_SECONDS}s`)
+    .sign(secret("share-edit"));
+}
+
+/** No legacy acceptance path: this domain is new, so there is no raw-secret
+ *  cookie to migrate and nothing to widen. */
+export async function verifyShareEditToken(
+  token: string | undefined,
+  rootId: string,
+  shareVersion: number,
+): Promise<{ vid: string; name: string } | null> {
+  if (!token) return null;
+  try {
+    const { payload } = await jwtVerify(token, secret("share-edit"), {
+      algorithms: ["HS256"],
+      issuer: ISSUER,
+      audience: `brain:share-edit:${rootId}`,
+    });
+    if (
+      payload.sub !== `share-edit:${rootId}` ||
+      payload.kind !== SHARE_EDIT_KIND ||
+      payload.shareVersion !== shareVersion ||
+      typeof payload.vid !== "string" ||
+      typeof payload.name !== "string"
+    ) {
+      return null;
+    }
+    return { vid: payload.vid, name: payload.name };
+  } catch {
+    return null;
   }
 }
 

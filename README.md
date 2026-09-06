@@ -97,11 +97,12 @@ That compose file pins the current release. To upgrade, raise the tag and run
 `docker compose up -d` again.
 
 Open `http://localhost:3020`. The first screen is one password box — no
-username, no sign-up — because a Brain has one owner, and the hash you put in
-`.env` is the whole account. Log in with the password you hashed. The session
-cookie is `Secure`, which Chrome, Firefox and Edge honour over
-`http://localhost`; Safari does not, so on Safari put Brain behind HTTPS
-before logging in.
+username, no sign-up — because a Brain has one account, and the hash you put in
+`.env` is all of it. Everyone else reaches Brain through a share link, which
+grants exactly one subtree, read-only unless you turn "Who can edit" on, and
+never a login. Log in with the password you hashed. The session cookie is
+`Secure`, which Chrome, Firefox and Edge honour over `http://localhost`; Safari
+does not, so on Safari put Brain behind HTTPS before logging in.
 
 `NOTES_ROOT` is the absolute path of the folder on the host that holds the
 notes — the `mkdir` above. An empty one is fine — Brain makes it a git

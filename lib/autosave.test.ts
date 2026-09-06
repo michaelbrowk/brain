@@ -786,3 +786,54 @@ describe("createKeyedQueue", () => {
     expect(queue.has("page-a")).toBe(false);
   });
 });
+
+describe("saveMarkdown endpoint option", () => {
+  it("sends the PUT and the conflict GET to the endpoint it is given", async () => {
+    const calls: string[] = [];
+    const fetcher = vi.fn(async (url: string) => {
+      calls.push(url);
+      if (calls.length === 1) {
+        return new Response(JSON.stringify({ error: "conflict", currentRev: "b" }), {
+          status: 409,
+        });
+      }
+      return new Response(JSON.stringify({ markdown: "one", rev: "b" }), {
+        status: 200,
+      });
+    }) as unknown as typeof fetch;
+
+    await saveMarkdown({
+      fetcher,
+      id: "page-9",
+      markdown: "one",
+      getRevision: () => "a",
+      setRevision: () => {},
+      endpoint: (id) => `/api/share-edit/page/${id}?root=root-1&v=2`,
+      wait: async () => {},
+      maxAttempts: 1,
+    }).catch(() => undefined);
+
+    expect(calls).toEqual([
+      "/api/share-edit/page/page-9?root=root-1&v=2",
+      "/api/share-edit/page/page-9?root=root-1&v=2",
+    ]);
+  });
+
+  it("still defaults to the owner path when no endpoint is given", async () => {
+    const calls: string[] = [];
+    const fetcher = vi.fn(async (url: string) => {
+      calls.push(url);
+      return new Response(JSON.stringify({ rev: "b" }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    await saveMarkdown({
+      fetcher,
+      id: "page-9",
+      markdown: "one",
+      getRevision: () => "a",
+      setRevision: () => {},
+    });
+
+    expect(calls).toEqual(["/api/page/page-9"]);
+  });
+});

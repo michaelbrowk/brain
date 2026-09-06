@@ -448,6 +448,7 @@ describe("Shell page transitions", () => {
       scopeToken: "a".repeat(64),
       public: false,
       shareLocked: false,
+      shareEdit: false,
       shareExpiresAt: null,
       shareVersion: 2,
     };

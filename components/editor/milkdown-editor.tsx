@@ -59,9 +59,9 @@ import {
 } from "./search-highlight";
 import { toggle } from "./toggle";
 import { images } from "./image";
-import { handleWrapperImageDrop, imageUploadProgress } from "./image-upload";
+import { handleWrapperImageDrop, imageUploadPlugin } from "./image-upload";
 import { math } from "./math";
-import { linkPreview } from "./link-preview";
+import { linkPreviewPlugin } from "./link-preview";
 import { noNestedTables } from "./table-guard";
 import { EditorBoundary } from "./editor-boundary";
 import { EmojiPicker } from "../emoji-picker";
@@ -86,10 +86,17 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FloatingToolbar, type PageRef } from "./floating-toolbar";
 import { SlashMenu } from "./slash-menu";
 import { WikiLinkMenu } from "./wikilink-menu";
-import { attachmentMarkdown, isSpreadsheetFile, uploadAttachment } from "./attachments";
+import {
+  attachmentMarkdown,
+  isSpreadsheetFile,
+  uploadAttachment,
+  type UploadedAttachment,
+} from "./attachments";
+import { attachmentRefs } from "./attachment-refs";
+import { attachmentSrc } from "./attachment-src";
 import {
   classifyInternalPageLink,
-  followEditorLink,
+  followEditorAnchor,
   observeInternalPageLinks,
 } from "./internal-page-link";
 import "./milkdown.css";
@@ -100,6 +107,28 @@ import type {
   SearchHighlightRequest,
   SearchHighlightStatus,
 } from "@/lib/search-navigation";
+
+/** Absent capability, absent affordance. The visitor's editor is not the
+ *  owner's editor in a different mode; it is the owner's editor with four
+ *  capabilities missing, so a new call site added to a component the visitor
+ *  mounts is a test failure rather than a leak. */
+export interface EditorCapabilities {
+  /** Where attachments post. `fetcher` wraps the fetch path, `headers` is the
+   *  same statement for the XMLHttpRequest path (byte progress needs XHR). */
+  upload?: {
+    endpoint: string;
+    fetcher?: typeof fetch;
+    headers?: Record<string, string>;
+    /** The island saves at once on the change that follows, so the media
+     *  route sees the reference before the image is retried. */
+    onUploaded?: (attachment: UploadedAttachment) => void;
+  };
+  unfurl?: boolean;
+  ai?: boolean;
+  /** The slash menu's "New page". `onCreatePageAtCursor` is the mechanism;
+   *  this is the permission, and the row needs both. */
+  createPage?: boolean;
+}
 
 interface EditorProps {
   value: string;
@@ -122,6 +151,9 @@ interface EditorProps {
   onCreatePageAtCursor?: (
     insertPageRef: (page: PageRef) => boolean,
   ) => Promise<void>;
+  /** Defaults to nothing: an editor that is not told what it may do may not
+   *  upload, unfurl or call AI. The owner shell passes its full set. */
+  capabilities?: EditorCapabilities;
 }
 
 type CalloutEmojiAnchor = CalloutEmojiEventDetail & { id: number };
@@ -335,6 +367,7 @@ function Inner({
   searchHighlight,
   onSearchHighlightStatus,
   onCreatePageAtCursor,
+  capabilities = {},
 }: EditorProps) {
   const lastEmitted = useRef(value);
   const [editorSession] = useState(
@@ -472,6 +505,8 @@ function Inner({
       })
       .use(commonmarkWithoutHeadingIdSync)
       .use(gfm)
+      // after the preset: the extended image and link schemas replace it
+      .use(attachmentRefs)
       .use(noNestedTables)
       .use(normalizeLegacy)
       .use(editingCore)
@@ -481,10 +516,10 @@ function Inner({
       .use(callout)
       .use(toggle)
       .use(images)
-      .use(imageUploadProgress)
+      .use(imageUploadPlugin(capabilities.upload ?? null))
       .use(math)
       .use(pageRef)
-      .use(linkPreview)
+      .use(linkPreviewPlugin(!!capabilities.unfurl))
       .use(tableBlock)
       .use(history)
       // markdown-aware copy/paste: pasted markdown text becomes real blocks
@@ -770,7 +805,10 @@ function Inner({
         if (!isSpreadsheetFile(f)) {
           e.preventDefault();
           e.stopPropagation();
-          uploadAttachment(f).then((file) => {
+          // No upload capability: the drop is refused, not sent elsewhere.
+          const upload = capabilities.upload;
+          if (!upload) return;
+          uploadAttachment(f, upload).then((file) => {
             if (file) get()?.action(insert(attachmentMarkdown(file)));
           });
           return;
@@ -805,7 +843,9 @@ function Inner({
         );
         if (file) {
           e.preventDefault();
-          uploadAttachment(file).then((uploaded) => {
+          const upload = capabilities.upload;
+          if (!upload) return;
+          uploadAttachment(file, upload).then((uploaded) => {
             if (uploaded) get()?.action(insert(attachmentMarkdown(uploaded)));
           });
           return;
@@ -849,11 +889,18 @@ function Inner({
           (target && target !== "_self")
         )
           return;
-        const followed = followEditorLink(
-          anchor.getAttribute("href"),
+        // A page ref goes by its id, every other anchor by its href. The
+        // view already resolved a local attachment href for display;
+        // resolving again is idempotent and covers an anchor that did not.
+        // A host that decides where a page id may point decides for a link
+        // mark holding the owner's `/p/` address too, which the anchor step
+        // reads off the page-ref resolver itself.
+        const followed = followEditorAnchor(
+          anchor,
           window.location.origin,
           onNavigate,
           (href) => window.open(href, "_blank", "noopener,noreferrer"),
+          attachmentSrc,
         );
         if (!followed) return;
         e.preventDefault();
@@ -861,10 +908,13 @@ function Inner({
       }}
     >
       <Milkdown />
-      <FloatingToolbar container={wrap} pages={pages} />
+      <FloatingToolbar container={wrap} pages={pages} ai={!!capabilities.ai} />
       <SlashMenu
         container={wrap}
         onCreatePageAtCursor={onCreatePageAtCursor}
+        ai={!!capabilities.ai}
+        upload={capabilities.upload}
+        createPage={!!capabilities.createPage}
       />
       <WikiLinkMenu container={wrap} pages={pages ?? []} />
       {calloutEmoji && (

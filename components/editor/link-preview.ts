@@ -223,12 +223,20 @@ function decorations(doc: ProseNode) {
   return DecorationSet.create(doc, found);
 }
 
-export const linkPreview = $prose(
-  () =>
-    new Plugin({
-      key: linkPreviewKey,
-      props: {
-        decorations: (state) => decorations(state.doc),
-      },
-    }),
-);
+/** Absent capability, absent affordance: without `unfurl` a bare link stays a
+ *  bare link. No card, no source class, and no request to /api/unfurl. */
+export function createLinkPreviewPlugin(enabled: boolean) {
+  return new Plugin({
+    key: linkPreviewKey,
+    props: {
+      decorations: enabled ? (state) => decorations(state.doc) : () => null,
+    },
+  });
+}
+
+export function linkPreviewPlugin(enabled: boolean) {
+  return $prose(() => createLinkPreviewPlugin(enabled));
+}
+
+/** The owner's plugin, as `scripts/verify-embed-roundtrip.mjs` loads it. */
+export const linkPreview = linkPreviewPlugin(true);

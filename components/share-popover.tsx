@@ -2,7 +2,7 @@
 
 import * as Popover from "@radix-ui/react-popover";
 import * as Dialog from "@radix-ui/react-dialog";
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import type { ShareScopeSnapshot } from "@/lib/store/types";
 import { Segmented } from "./settings/shared";
 import { Button } from "./ui/button";
@@ -42,6 +42,7 @@ export function SharePopover({
   isPublic,
   pageId,
   hasPassword,
+  hasEdit,
   expiresAt,
   inheritedFrom,
   expiredInheritedFrom,
@@ -52,11 +53,16 @@ export function SharePopover({
   onCopyLink,
   onOpenShareSettings,
   onSetProtection,
+  onSetEditable,
   children,
 }: {
   isPublic: boolean;
   pageId: string;
   hasPassword: boolean;
+  /** The page's own grant, off the tree, for the window before the exact
+   *  scope is read and for every state the active snapshot is not this
+   *  page's. The switch writes this root, so it reads this root. */
+  hasEdit: boolean;
   expiresAt?: string;
   inheritedFrom?: Grant;
   expiredInheritedFrom?: ExpiredGrant;
@@ -64,6 +70,7 @@ export function SharePopover({
   onPrepareShare: (rootId: string) => Promise<ShareScopeSnapshot>;
   onEnableShare: (input: {
     expectedScopeToken: string;
+    canEdit: boolean;
     password?: string | null;
     expiresAt?: string | null;
   }) => Promise<ShareEnableResult>;
@@ -74,6 +81,7 @@ export function SharePopover({
     password?: string | null;
     expiresAt?: string | null;
   }) => void | Promise<void>;
+  onSetEditable: (next: boolean) => void | Promise<void>;
   children: React.ReactNode;
 }) {
   const [open, setOpen] = useState(false);
@@ -85,6 +93,7 @@ export function SharePopover({
   const [revokePending, setRevokePending] = useState(false);
   const [shareError, setShareError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [enableEditOn, setEnableEditOn] = useState(false);
   const [enablePasswordOn, setEnablePasswordOn] = useState(false);
   const [enablePassword, setEnablePassword] = useState("");
   const [enablePasswordVisible, setEnablePasswordVisible] = useState(false);
@@ -119,6 +128,8 @@ export function SharePopover({
     verified?.rootId === activeRootId && verified.public ? verified : null;
   const effectiveLocked =
     verified?.rootId === pageId && verified.public ? verified.shareLocked : hasPassword;
+  const effectiveEdit =
+    verified?.rootId === pageId && verified.public ? verified.shareEdit : hasEdit;
   const effectiveExpiry =
     verified?.rootId === pageId && verified.public
       ? verified.shareExpiresAt ?? undefined
@@ -162,6 +173,7 @@ export function SharePopover({
           !expiredInheritedFrom
         ) {
           setConfirmation(snapshot);
+          setEnableEditOn(false);
           setEnablePasswordOn(false);
           setEnablePassword("");
           setEnablePasswordVisible(false);
@@ -205,6 +217,7 @@ export function SharePopover({
     try {
       const result = await onEnableShare({
         expectedScopeToken: confirmation.scopeToken,
+        canEdit: enableEditOn,
         password: enablePasswordOn ? password : null,
         expiresAt: expiryDeadline(enableExpiry),
       });
@@ -221,6 +234,7 @@ export function SharePopover({
       setConfirmation(null);
       setEnablePassword("");
       setEnablePasswordVisible(false);
+      setEnableEditOn(false);
       setEnableExpiry("never");
     } catch {
       setShareError(
@@ -329,6 +343,7 @@ export function SharePopover({
     setRevokeConfirming(false);
     clearCopied();
     resetEnablePassword();
+    setEnableEditOn(false);
     setEnableExpiry("never");
   };
 
@@ -337,11 +352,13 @@ export function SharePopover({
       <PrivateReview
         snapshot={confirmation}
         busy={busy}
+        editOn={enableEditOn}
         passwordOn={enablePasswordOn}
         password={enablePassword}
         passwordVisible={enablePasswordVisible}
         expiry={enableExpiry}
         passwordRef={enablePasswordRef}
+        onEditToggle={setEnableEditOn}
         onPasswordToggle={(nextOn) => {
           if (nextOn) {
             setEnablePasswordOn(true);
@@ -373,10 +390,12 @@ export function SharePopover({
         revokeConfirming={revokeConfirming}
         revokePending={revokePending}
         hasPassword={effectiveLocked}
+        hasEdit={effectiveEdit}
         expiresAt={effectiveExpiry}
         onCopy={() => void copyLink()}
         onOpenShareSettings={onOpenShareSettings}
         onSetProtection={onSetProtection}
+        onSetEditable={onSetEditable}
         onStopSharing={() => setRevokeConfirming(true)}
         onCancelRevoke={() => setRevokeConfirming(false)}
         onConfirmRevoke={() => void stopSharing()}
@@ -467,11 +486,13 @@ function LoadingView() {
 function PrivateReview({
   snapshot,
   busy,
+  editOn,
   passwordOn,
   password,
   passwordVisible,
   expiry,
   passwordRef,
+  onEditToggle,
   onPasswordToggle,
   onPasswordChange,
   onPasswordVisibleChange,
@@ -481,11 +502,13 @@ function PrivateReview({
 }: {
   snapshot: ShareScopeSnapshot;
   busy: boolean;
+  editOn: boolean;
   passwordOn: boolean;
   password: string;
   passwordVisible: boolean;
   expiry: ExpiryChoice;
   passwordRef: React.RefObject<HTMLInputElement | null>;
+  onEditToggle: (next: boolean) => void;
   onPasswordToggle: (nextOn: boolean) => void;
   onPasswordChange: (value: string) => void;
   onPasswordVisibleChange: (visible: boolean) => void;
@@ -499,7 +522,8 @@ function PrivateReview({
   return (
     <div data-share-state="review">
       <h2 className={HEAD}>
-        {readerClause(passwordOn)} will be able to read {pagesClause(total)}.
+        {readerClause(passwordOn)} will be able to {verbClause(editOn)}{" "}
+        {pagesClause(total)}.
       </h2>
 
       {blocked ? (
@@ -529,7 +553,7 @@ function PrivateReview({
           <Row id="access" label="Access">
             <span className={VALUE}>{readerValue(passwordOn)}</span>
           </Row>
-          {/* The "Who can edit" row lands with the editable-shares feature. */}
+          <EditRow checked={editOn} disabled={busy} onChange={onEditToggle} />
           <SwitchRow
             id="password"
             label="Password"
@@ -597,10 +621,12 @@ function ManagementView({
   revokeConfirming,
   revokePending,
   hasPassword,
+  hasEdit,
   expiresAt,
   onCopy,
   onOpenShareSettings,
   onSetProtection,
+  onSetEditable,
   onStopSharing,
   onCancelRevoke,
   onConfirmRevoke,
@@ -619,6 +645,7 @@ function ManagementView({
   revokeConfirming: boolean;
   revokePending: boolean;
   hasPassword: boolean;
+  hasEdit: boolean;
   expiresAt?: string;
   onCopy: () => void;
   onOpenShareSettings?: () => void;
@@ -626,6 +653,7 @@ function ManagementView({
     password?: string | null;
     expiresAt?: string | null;
   }) => void | Promise<void>;
+  onSetEditable: (next: boolean) => void | Promise<void>;
   onStopSharing: () => void;
   onCancelRevoke: () => void;
   onConfirmRevoke: () => void;
@@ -634,12 +662,13 @@ function ManagementView({
   // page's own while it works, and the parent's where the page is reached
   // through one
   const activeLocked = activeSnapshot?.shareLocked ?? hasPassword;
+  const activeEdit = activeSnapshot?.shareEdit ?? hasEdit;
   const head = expiredInheritedOnly
     ? `Parent share through ${expiredInheritedFrom?.title} is expired.`
     : directExpired && !inheritedFrom
       ? "This page's own link is expired."
       : activeSnapshot
-        ? `${readerClause(activeLocked)} can read ${pagesClause(activeSnapshot.descendantCount + 1)}.`
+        ? `${readerClause(activeLocked)} can ${verbClause(activeEdit)} ${pagesClause(activeSnapshot.descendantCount + 1)}.`
         : checkingScope
           ? "Refreshing shared page count…"
           : directExpired
@@ -696,7 +725,19 @@ function ManagementView({
       <Row id="access" label="Access">
         <span className={VALUE}>{readValue}</span>
       </Row>
-      {/* The "Who can edit" row lands with the editable-shares feature. */}
+      {directPublic && (
+        <EditSetting
+          editable={hasEdit}
+          // checkingScope for the same reason LinkRow above carries it: the
+          // card opens on the tree's answer, and until the exact scope is read
+          // that answer can be stale, or the parent's where the page's own
+          // link is expired under a live editable ancestor. A press in that
+          // window writes this page's grant from a value nothing has
+          // confirmed.
+          disabled={busy || checkingScope || locked}
+          onSetEditable={onSetEditable}
+        />
+      )}
 
       {(inheritedFrom || expiredInheritedOnly) && (
         <ParentRow
@@ -1005,11 +1046,15 @@ function ParentRow({
  *  3px and travelling 16px on transform (compositor), never `left`. */
 function SwitchControl({
   label,
+  describedBy,
   checked,
   disabled,
   onChange,
 }: {
   label: string;
+  /** The row's note, so the consequence of the press is read out with the
+   *  control rather than left somewhere on the card. */
+  describedBy?: string;
   checked: boolean;
   disabled?: boolean;
   onChange: (checked: boolean) => void;
@@ -1019,6 +1064,7 @@ function SwitchControl({
       type="button"
       role="switch"
       aria-label={label}
+      aria-describedby={describedBy}
       aria-checked={checked}
       disabled={disabled}
       onClick={() => onChange(!checked)}
@@ -1065,6 +1111,124 @@ function SwitchRow({
         onChange={onChange}
       />
     </div>
+  );
+}
+
+/** What the row says under its label: the grant, in whichever direction the
+ *  switch is pointing. Both are true in the state that shows them and stay
+ *  true after the press. */
+const EDIT_GRANTS =
+  "They can change text and images, never delete, move or rename.";
+const EDIT_OFFERS =
+  "Turning this on lets them change text and images, never delete, move or rename.";
+
+/** The edit row. Every other row on the card is a label and a control on one
+ *  line, so this one is too: its note stacks under the label the way the
+ *  expiry row's does, and the switch stays where the eye already looks for a
+ *  control. There is always exactly one note, so the row keeps its height
+ *  when the switch is pressed, the ledger's rhythm does not break on a
+ *  setting most links never turn on, and the switch's description never
+ *  disappears from under it.
+ *
+ *  The note is always the grant. Letting strangers write in the owner's notes
+ *  is the consequential decision on this card, and "they cannot delete, move
+ *  or rename anything" is the sentence that decides it, so it has to be under
+ *  the switch before the press rather than after it. The flip also signs
+ *  everyone out of the link, which is recoverable in one press and reads as
+ *  ordinary for a settings change; that fact is stated by the toast after a
+ *  flip that actually happened (components/shell.tsx), where it is a result
+ *  rather than a prophecy about a card nobody has touched. */
+function EditRow({
+  checked,
+  disabled,
+  onChange,
+}: {
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (checked: boolean) => void;
+}) {
+  const noteId = useId();
+  const note = checked ? EDIT_GRANTS : EDIT_OFFERS;
+  return (
+    <div data-share-row="edit" data-share-setting-row className="brain-share-row">
+      <span className={LABEL}>
+        Who can edit
+        <span id={noteId} className={NOTE}>
+          {note}
+        </span>
+      </span>
+      <SwitchControl
+        label="Anyone with the link can edit"
+        describedBy={noteId}
+        checked={checked}
+        disabled={disabled}
+        onChange={onChange}
+      />
+    </div>
+  );
+}
+
+/** The live grant's edit row. The surface opens on the tree's value and the
+ *  exact scope arrives after it, so the switch has to take the corrected
+ *  value rather than the one it first mounted with. That used to be a key on
+ *  the prop, which took the corrected value by unmounting the switch: after a
+ *  flip from the keyboard, focus fell to the body inside an open popover. The
+ *  adjustment happens during render instead, on the same prop, and moves
+ *  nothing. Until that corrected value lands the row is disabled, so the
+ *  switch is never pressable while it is showing an answer the card has not
+ *  confirmed. */
+function EditSetting({
+  editable,
+  disabled,
+  onSetEditable,
+}: {
+  editable: boolean;
+  disabled: boolean;
+  onSetEditable: (next: boolean) => void | Promise<void>;
+}) {
+  const [editing, setEditing] = useState(editable);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Adjusted while rendering, not in an effect: the answer only moves when
+  // the prop moves, which is exactly what the key did, and an optimistic flip
+  // stands until the tree or the snapshot corrects it.
+  const [adopted, setAdopted] = useState(editable);
+  if (adopted !== editable) {
+    setAdopted(editable);
+    setEditing(editable);
+  }
+
+  // Any flip rotates shareVersion, so everyone using the link is signed out.
+  // The toast that follows a flip that landed says so.
+  const flipEditing = async (next: boolean) => {
+    if (busy) return;
+    setEditing(next);
+    setBusy(true);
+    setError(null);
+    try {
+      await onSetEditable(next);
+    } catch {
+      setEditing(!next);
+      // The three failures beside this one all end "the previous settings may
+      // still apply". This one leaves the owner not knowing whether strangers
+      // can write to the page right now, which is the question the row is
+      // there to answer, so it names the next move instead.
+      setError("Couldn't change who can edit. Reopen this card to see where it stands.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <EditRow
+        checked={editing}
+        disabled={disabled || busy}
+        onChange={(next) => void flipEditing(next)}
+      />
+      {error && <AlertRow>{error}</AlertRow>}
+    </>
   );
 }
 
@@ -1331,6 +1495,11 @@ function readerClause(locked: boolean): string {
 /** The same fact as the "Who can read" row's value. */
 function readerValue(locked: boolean): string {
   return locked ? "Link and password" : "Anyone with the link";
+}
+
+/** "read" or "read and edit" — the verb the head sentence takes. */
+function verbClause(canEdit: boolean): string {
+  return canEdit ? "read and edit" : "read";
 }
 
 /** "this page" or "15 pages", the count held to its noun. */

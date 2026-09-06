@@ -177,7 +177,8 @@ interface FlatPage {
   icon?: string;
   created: string;
   updated: string;
-  updatedBy?: "me" | "claude";
+  updatedBy?: TreeNode["updatedBy"];
+  updatedByName?: string;
   public?: boolean;
 }
 
@@ -192,6 +193,7 @@ function flatten(tree: TreeNode[]): FlatPage[] {
         created: n.created,
         updated: n.updated,
         updatedBy: n.updatedBy,
+        updatedByName: n.updatedByName,
         public: n.public,
       });
       walk(n.children);
@@ -495,7 +497,8 @@ export function Hub({
               page={p}
               onSelect={onSelect}
               isNew={lastVisit != null && new Date(p.created).getTime() > lastVisit}
-              byClaude={p.updatedBy === "claude"}
+              actor={p.updatedBy}
+              actorName={p.updatedByName}
               trailing={fmtAgo(p.updated)}
             />
           </div>
@@ -541,13 +544,15 @@ function Row({
   onSelect,
   trailing,
   isNew = false,
-  byClaude = false,
+  actor,
+  actorName,
 }: {
   page: FlatPage;
   onSelect: (id: string) => void;
   trailing?: string;
   isNew?: boolean;
-  byClaude?: boolean;
+  actor?: "me" | "claude" | "visitor";
+  actorName?: string;
 }) {
   return (
     <button
@@ -564,9 +569,25 @@ function Row({
         />
       )}
       <span className="min-w-0 flex-1 truncate text-[14px] text-ink">{page.title}</span>
-      {byClaude && (
+      {actor === "claude" && (
         <span className="shrink-0 rounded-xs border border-line px-1.5 py-0.5 font-mono text-[10px] text-ink-2">
           Brain AI
+        </span>
+      )}
+      {/* A page carrying updatedBy: "visitor" with no name is something the
+          mint cannot produce and a hand-edited file can. The name is the
+          visitor's own text up to 40 characters, so the badge takes the
+          title's treatment and shrinks rather than pushing the row wide.
+          It is also capped: the title's flex basis is 0, which gives it a
+          shrink weight of 0, so without a cap the badge absorbs the whole
+          overflow and the title renders at zero width. The row's job is to
+          name the page; the name is the annotation. */}
+      {actor === "visitor" && (
+        <span
+          title={actorName ? `edited by ${actorName}` : undefined}
+          className="min-w-0 max-w-[45%] truncate rounded-xs border border-line px-1.5 py-0.5 text-[10px] text-ink-2"
+        >
+          {actorName ? `edited by ${actorName}` : "edited by a visitor"}
         </span>
       )}
       {trailing && <span className="shrink-0 text-[12px] text-ink-3">{trailing}</span>}

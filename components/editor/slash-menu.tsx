@@ -22,7 +22,11 @@ import { insertCalloutCommand } from "./callout";
 import { notifyNestedTableBlocked } from "@/lib/editor-events";
 import { insertToggleCommand } from "./toggle";
 import { insertMathBlockCommand } from "./math";
-import { attachmentMarkdown, uploadAttachment } from "./attachments";
+import {
+  attachmentMarkdown,
+  uploadAttachment,
+  type AttachmentUploadTarget,
+} from "./attachments";
 import type { PageRef } from "./floating-toolbar";
 import { clampMenuLeft, shouldFlipAbove } from "./menu-position";
 
@@ -91,6 +95,27 @@ const ITEMS: Item[] = [
   { label: "Divider", icon: "text-cross-linear", keywords: "divider hr line rule", command: insertHrCommand },
 ];
 
+export interface SlashMenuCapabilities {
+  /** The "Continue writing" entry, and with it the /api/ai call. */
+  ai?: boolean;
+  /** The "Image" and "File" entries, and where their picker posts. */
+  upload?: AttachmentUploadTarget;
+  /** The "New page" entry. The handler that creates it is a separate prop;
+   *  without both the row is absent rather than a click that does nothing. */
+  createPage?: boolean;
+}
+
+/** Absent capability, absent entry. A visitor's menu is the owner's menu
+ *  with the AI and upload rows missing, not the same rows refusing. */
+export function slashMenuItems({ ai, upload, createPage }: SlashMenuCapabilities) {
+  return ITEMS.filter(
+    (item) =>
+      (item.newPage ? !!createPage : true) &&
+      (item.aiMode ? !!ai : true) &&
+      (item.fileAttachment || item.imageUpload ? !!upload : true),
+  );
+}
+
 async function askAi(mode: "continue", text: string): Promise<string> {
   try {
     const res = await apiFetch("/api/ai", {
@@ -124,7 +149,10 @@ const MENU_H = 300;
 export function SlashMenu({
   container,
   onCreatePageAtCursor,
-}: {
+  ai,
+  upload,
+  createPage,
+}: SlashMenuCapabilities & {
   container: React.RefObject<HTMLDivElement | null>;
   onCreatePageAtCursor?: (
     insertPageRef: (page: PageRef) => boolean,
@@ -204,7 +232,7 @@ export function SlashMenu({
   const results = useMemo(
     () =>
       state
-        ? ITEMS.filter(
+        ? slashMenuItems({ ai, upload, createPage }).filter(
             (i) =>
               (!state.inTable || i.command !== insertTableCommand) &&
               (state.query
@@ -213,7 +241,7 @@ export function SlashMenu({
                 : true),
           )
         : [],
-    [state],
+    [state, ai, upload, createPage],
   );
 
   const run = useCallback(
@@ -406,9 +434,9 @@ export function SlashMenu({
 
   const pickFile = useCallback(
     (file?: File) => {
-      if (!file) return;
+      if (!file || !upload) return;
       const asImage = imagePick.current && file.type.startsWith("image/");
-      void uploadAttachment(file).then((uploaded) => {
+      void uploadAttachment(file, upload).then((uploaded) => {
         if (!uploaded) return;
         const ed = getEditor();
         ed?.action((ctx) => {
@@ -417,7 +445,7 @@ export function SlashMenu({
         ed?.action(insert(asImage ? `![](${uploaded.url})` : attachmentMarkdown(uploaded)));
       });
     },
-    [getEditor],
+    [getEditor, upload],
   );
 
   // keyboard nav
@@ -452,15 +480,17 @@ export function SlashMenu({
 
   return (
     <>
-      <input
-        ref={fileInput}
-        type="file"
-        className="hidden"
-        onChange={(e) => {
-          pickFile(e.currentTarget.files?.[0]);
-          e.currentTarget.value = "";
-        }}
-      />
+      {upload && (
+        <input
+          ref={fileInput}
+          type="file"
+          className="hidden"
+          onChange={(e) => {
+            pickFile(e.currentTarget.files?.[0]);
+            e.currentTarget.value = "";
+          }}
+        />
+      )}
       <AnimatePresence>
         {state && results.length > 0 && (
           <motion.div

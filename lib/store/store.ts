@@ -6,10 +6,15 @@ import os from "node:os";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { nanoid } from "nanoid";
 import { generateKeyBetween, generateNKeysBetween } from "fractional-indexing";
-import { parsePage, serializePage } from "./frontmatter";
+import { parsePage, serializeLivePage, serializePage } from "./frontmatter";
 import { atomicWrite, hashRev, syncDirectory } from "./atomic";
 import { slugify, assertInRoot, isReservedDir } from "./paths";
 import { ensureWritableNotesRoot } from "./notes-root";
+import {
+  assertRealDirectory,
+  ensureRealDirectory,
+  type DirectoryIdentity,
+} from "./real-directory";
 import {
   assertGitReady,
   assertGitSnapshotHealthy,
@@ -31,6 +36,12 @@ import {
   referencedAttachmentUrls,
 } from "../attachments";
 import {
+  linkDestinations,
+  remoteMediaReference,
+  remoteMediaReferences,
+  unsafeLinkDestination,
+} from "../link-schemes";
+import {
   isBrainCompatibleNotionCover,
   isBrainCompatibleNotionIcon,
   notionConversionHash,
@@ -43,6 +54,26 @@ import {
   standalonePageRefOccurrences,
 } from "../page-ref-nesting";
 import { referencedPageIds } from "../derived-page-refs";
+import { ShareAccessNotFoundError } from "../share-access";
+import { isShareExpired } from "../sharing";
+import {
+  MAX_SHARE_SUBTREE_PAGES,
+  SHARE_ROOT_UPLOAD_BYTES,
+  SHARE_UPLOAD_RECLAIM_INTERVAL_MS,
+} from "./share-limits";
+import {
+  attachmentGrantsRoot,
+  extendBaseline,
+  forgetUploads,
+  readAttachmentScope,
+  recordBaseline,
+  recordUpload,
+  rootIsScoped,
+  rootOwnsUpload,
+  rootUploadBytes,
+  writeAttachmentScope,
+  type AttachmentScope,
+} from "./attachment-scope";
 import {
   assertCollectionRowMatchesDefinition,
   collectionDefinitionSchema,
@@ -71,10 +102,17 @@ import {
   type VerifiedNotionAttachment,
   type VerifyFinalizedNotionAttachmentInput,
   type VerifyNotionAttachmentInput,
+  AttachmentStoreUnavailableError,
   AttachmentValidationError,
   NotFoundError,
   MetadataConflictError,
+  ShareAttachmentScopeError,
+  ShareEditOriginError,
+  ShareLinkSchemeError,
+  ShareRemoteMediaError,
   ShareScopeConflictError,
+  ShareSubtreeFullError,
+  ShareUploadQuotaError,
   NotionImportConflictError,
   PageRefNestValidationError,
   QuickCaptureConflictError,
@@ -189,11 +227,6 @@ interface NotionAbortReceipt {
   status: "detached" | "aborted";
   stagingRemoved: boolean;
   completedAt: string;
-}
-
-interface DirectoryIdentity {
-  dev: number;
-  ino: number;
 }
 
 const now = () => new Date().toISOString();
@@ -360,49 +393,11 @@ function rethrowStagingFailure(error: unknown): never {
   );
 }
 
-async function ensureRealDirectory(
-  directory: string,
-): Promise<DirectoryIdentity> {
-  try {
-    await fs.mkdir(directory);
-    await syncDirectory(path.dirname(directory));
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  }
-  return assertRealDirectory(directory);
-}
-
-async function assertRealDirectory(
-  directory: string,
-  expected?: DirectoryIdentity,
-): Promise<DirectoryIdentity> {
-  const before = await fs.lstat(directory);
-  if (before.isSymbolicLink() || !before.isDirectory()) {
-    throw new Error("attachment store must be a real directory");
-  }
-  const handle = await fs.open(
-    directory,
-    fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW,
-  );
-  try {
-    const opened = await handle.stat();
-    const after = await fs.lstat(directory);
-    const identity = { dev: opened.dev, ino: opened.ino };
-    if (
-      !opened.isDirectory() ||
-      after.isSymbolicLink() ||
-      !after.isDirectory() ||
-      after.dev !== opened.dev ||
-      after.ino !== opened.ino ||
-      (expected &&
-        (expected.dev !== identity.dev || expected.ino !== identity.ino))
-    ) {
-      throw new Error("attachment store directory identity changed");
-    }
-    return identity;
-  } finally {
-    await handle.close();
-  }
+/** Every authority failure inside a visitor leaf is the same 404 the guard
+ *  gives, so a refusal found inside the queue says nothing a refusal found
+ *  outside it did not already say. */
+function denyShareWrite(): never {
+  throw new ShareAccessNotFoundError();
 }
 
 function rethrowAttachmentStoreFailure(error: unknown): never {
@@ -418,6 +413,17 @@ function rethrowAttachmentStoreFailure(error: unknown): never {
   );
 }
 
+/** The visitor upload's failure vocabulary. A validation refusal passes
+ *  through with its code; anything else the attachment store threw is a
+ *  store failure and is named as one. The owner's wrapper above speaks the
+ *  Notion importer's vocabulary because that route shares a client with the
+ *  importer; a visitor route has no importer, and a Notion-named conflict on
+ *  it would be wrong. */
+function rethrowSharedAttachmentFailure(error: unknown): never {
+  if (error instanceof AttachmentValidationError) throw error;
+  throw new AttachmentStoreUnavailableError();
+}
+
 export class Store {
   readonly root: string;
   private readonly publicOrigin: string | null;
@@ -427,6 +433,9 @@ export class Store {
   private notionIndex = new Map<string, string>();
   private abortReceiptIndex = new Map<string, string>();
   private mutationPoison: Error | undefined;
+  /** When the last quota-triggered attachment sweep ran. Per process, which is
+   *  what a single-writer Store is. */
+  private lastUploadReclaimAt = 0;
   private mutationGeneration = 0;
   private mutationActive = false;
 
@@ -525,6 +534,29 @@ export class Store {
     );
     resumeGitSnapshotsAfterRecovery(this.root);
     await scheduleDirtyCommit(this.root);
+    this.warnIfShareEditHasNoOrigin();
+  }
+
+  /** BRAIN_PUBLIC_ORIGIN is what every visitor write is checked against, and
+   *  configureShare already refuses to grant editing without it. That gate is
+   *  the better place to refuse: it does not take the whole app down for a
+   *  feature nobody has turned on, and it puts the error where the owner is
+   *  looking. What it cannot see is the variable being removed, or given a
+   *  trailing slash, after a root is already editable. From then on every
+   *  visitor write is a 403 bad_origin with nothing on the server saying why,
+   *  and the owner's own pages look fine.
+   *
+   *  So: one line once the index exists, and not a throw. Refusing to boot
+   *  would take the notes down over one share. */
+  private warnIfShareEditHasNoOrigin(): void {
+    if (this.publicOrigin !== null) return;
+    const editable = [...this.index.values()].filter(
+      (entry) => entry.meta.shareEdit === true && !entry.meta.deleted,
+    ).length;
+    if (editable === 0) return;
+    console.error(
+      `[brain/store] ${editable} shared page(s) allow visitor edits and BRAIN_PUBLIC_ORIGIN is unset or is not an exact origin, so every visitor write will be refused. Set it to the scheme and host the share links use, with no trailing slash and no path.`,
+    );
   }
 
   /** Walk the folder tree from disk, self-heal missing metadata. */
@@ -629,7 +661,7 @@ export class Store {
         }
         // self-heal id/title/created if they were missing
         if (partial.id === undefined || !partial.title || !partial.created) {
-          await atomicWrite(indexPath, serializePage(meta, markdown));
+          await atomicWrite(indexPath, serializeLivePage(meta, markdown));
         }
         await this.walk(pageDir, meta.id);
       }),
@@ -666,7 +698,7 @@ export class Store {
   private async persist(entry: Entry): Promise<void> {
     const indexPath = path.join(entry.dir, "index.md");
     const { markdown } = parsePage(await fs.readFile(indexPath, "utf8"));
-    await atomicWrite(indexPath, serializePage(entry.meta, markdown));
+    await atomicWrite(indexPath, serializeLivePage(entry.meta, markdown));
   }
 
   private moveIntentPath(): string {
@@ -874,7 +906,7 @@ export class Store {
         order: intent.nextOrder,
         updated: intent.updated,
       } as PageMeta;
-      await atomicWrite(targetIndex, serializePage(nextMeta, current.markdown));
+      await atomicWrite(targetIndex, serializeLivePage(nextMeta, current.markdown));
       if (nest && parentIndex && parentRaw !== nest.nextParentRaw) {
         await atomicWrite(parentIndex, nest.nextParentRaw);
       }
@@ -1158,7 +1190,7 @@ export class Store {
       ...loadedMeta,
       notionImportStarted: now(),
     };
-    const content = serializePage(nextMeta, current.markdown);
+    const content = serializeLivePage(nextMeta, current.markdown);
     let durabilityError: unknown;
     try {
       await atomicWrite(indexPath, content);
@@ -1757,11 +1789,13 @@ export class Store {
           public: e.meta.public,
           shareLocked: e.meta.sharePass ? true : undefined,
           shareExpiresAt: e.meta.shareExpiresAt,
+          shareEdit: e.meta.shareEdit,
           category: e.meta.category,
           pinned: e.meta.pinned,
           created: e.meta.created,
           updated: e.meta.updated,
           updatedBy: e.meta.updatedBy,
+          updatedByName: e.meta.updatedByName,
           status: e.meta.status,
           tags: e.meta.tags,
           view: e.meta.view,
@@ -1854,6 +1888,7 @@ export class Store {
           sharePass: root.meta.sharePass ?? null,
           shareExpiresAt: root.meta.shareExpiresAt ?? null,
           shareVersion: root.meta.shareVersion ?? 0,
+          shareEdit: !!root.meta.shareEdit,
         }),
       )
       .digest("hex");
@@ -1864,6 +1899,7 @@ export class Store {
       scopeToken,
       public: !!root.meta.public,
       shareLocked: !!root.meta.sharePass,
+      shareEdit: !!root.meta.shareEdit,
       shareExpiresAt: root.meta.shareExpiresAt ?? null,
       shareVersion: root.meta.shareVersion ?? 0,
     };
@@ -2235,7 +2271,7 @@ export class Store {
         notionTargetBeforeId: this.beforeIdFor(entry),
         notionTargetOrder: loadedMeta.order,
       };
-      const content = serializePage(nextMeta, canonicalMarkdown);
+      const content = serializeLivePage(nextMeta, canonicalMarkdown);
       let durabilityError: unknown;
       try {
         await atomicWrite(indexPath, content);
@@ -2356,7 +2392,7 @@ export class Store {
         };
         meta.notionImportBaseRev = notionImportBaseRev(meta, "");
         const indexPath = path.join(dir, "index.md");
-        const serialized = serializePage(meta, "");
+        const serialized = serializeLivePage(meta, "");
         let durabilityError: unknown;
         try {
           await atomicWrite(indexPath, serialized);
@@ -2466,7 +2502,7 @@ export class Store {
             ).markdown;
             await atomicWrite(
               path.join(entry.dir, "index.md"),
-              serializePage(nextMeta, currentMarkdown),
+              serializeLivePage(nextMeta, currentMarkdown),
             );
             entry.meta = nextMeta;
             scheduleCommit(this.root);
@@ -2602,7 +2638,7 @@ export class Store {
         await this.removeNotionStaging(supersededToken);
       }
       const indexPath = path.join(entry.dir, "index.md");
-      const content = serializePage(nextMeta, markdown);
+      const content = serializeLivePage(nextMeta, markdown);
       let durabilityError: unknown;
       try {
         await atomicWrite(indexPath, content);
@@ -2750,7 +2786,7 @@ export class Store {
       notionImportBaseOrder: loadedMeta.order,
       updated: started,
     };
-    const content = serializePage(nextMeta, current.markdown);
+    const content = serializeLivePage(nextMeta, current.markdown);
     let durabilityError: unknown;
     try {
       await atomicWrite(indexPath, content);
@@ -3110,7 +3146,10 @@ export class Store {
         nextMeta,
         finalizedMarkdown,
       );
-      const content = serializePage(nextMeta, finalizedMarkdown);
+      await this.extendScopedBaselinesUnlocked(entry.meta.id, () => [
+        ...referencedAttachmentNames(finalizedMarkdown),
+      ]);
+      const content = serializeLivePage(nextMeta, finalizedMarkdown);
       let durabilityError: unknown;
       try {
         await atomicWrite(indexPath, content);
@@ -3331,7 +3370,7 @@ export class Store {
               }
             }
             return {
-              content: serializePage(nextMeta, latest.markdown),
+              content: serializeLivePage(nextMeta, latest.markdown),
               value: nextMeta,
             };
           },
@@ -3479,7 +3518,7 @@ export class Store {
                 );
               }
               return {
-                content: serializePage(nextMeta, latest.markdown),
+                content: serializeLivePage(nextMeta, latest.markdown),
                 value: nextMeta,
               };
             },
@@ -3583,7 +3622,10 @@ export class Store {
       e.meta.updated = now();
       if (by) e.meta.updatedBy = by;
       delete e.meta.structureWriteBarrier;
-      const content = serializePage(e.meta, markdown);
+      await this.extendScopedBaselinesUnlocked(id, () => [
+        ...referencedAttachmentNames(markdown),
+      ]);
+      const content = serializeLivePage(e.meta, markdown);
       await atomicWrite(indexPath, content);
       scheduleCommit(this.root);
       const rev = hashRev(content);
@@ -3618,7 +3660,10 @@ export class Store {
       const base = currentMarkdown.trimEnd();
       const addition = markdown.trimStart();
       const joined = base ? `${base}\n\n${addition}` : addition;
-      const content = serializePage(e.meta, joined);
+      await this.extendScopedBaselinesUnlocked(id, () => [
+        ...referencedAttachmentNames(joined),
+      ]);
+      const content = serializeLivePage(e.meta, joined);
       await atomicWrite(indexPath, content);
       scheduleCommit(this.root);
       const rev = hashRev(content);
@@ -3696,6 +3741,9 @@ export class Store {
           "notion page already has an active binding or abort receipt",
         );
       }
+      await this.extendScopedBaselinesUnlocked(parentId, () => [
+        ...referencedAttachmentNames(opts.markdown || ""),
+      ]);
       const parentDir = parentId ? this.get(parentId).dir : this.root;
       const dir = await uniqueDir(parentDir, slugify(title));
       const last = this.siblings(parentId).at(-1);
@@ -3717,7 +3765,7 @@ export class Store {
       };
       await atomicWrite(
         path.join(dir, "index.md"),
-        serializePage(meta, opts.markdown || ""),
+        serializeLivePage(meta, opts.markdown || ""),
       );
       this.index.set(meta.id, { dir, parentId, meta });
       if (notionId) this.notionIndex.set(notionId, meta.id);
@@ -3738,6 +3786,496 @@ export class Store {
         rethrowAttachmentStoreFailure,
       ),
     );
+  }
+
+  /**
+   * The second authority check, and the real one. `resolveShareAccess` runs
+   * lock-free outside the queue, so a request it authorised can still be
+   * waiting behind the owner's revoke when the revoke lands. This runs INSIDE
+   * the caller's own mutate(), against frontmatter re-read from disk, and it
+   * is what makes a revoke revoke, an expiry expire, and a page moved out of
+   * the subtree stop being writable for the requests already queued.
+   *
+   * mutate() is not reentrant (AGENTS.md invariant 4), so this uses only the
+   * synchronous index readers plus a direct read of the root's index.md.
+   * Caller owns mutate().
+   */
+  private async assertSharedWriteAuthorityUnlocked(
+    rootId: string,
+    targetId: string,
+    shareVersion: number,
+  ): Promise<void> {
+    // 1 existence, 2 root liveness
+    const rootEntry = this.index.get(rootId);
+    if (!rootEntry || this.isDeleted(rootId)) denyShareWrite();
+    const rootIndex = assertInRoot(
+      this.root,
+      path.join(rootEntry.dir, "index.md"),
+    );
+    let raw: string;
+    try {
+      raw = await fs.readFile(rootIndex, "utf8");
+    } catch {
+      // An I/O failure on the root's index.md becomes the same 404 as a
+      // revoke. Right for the visitor, who must not learn the difference.
+      // Worth knowing on the owner side: a visitor 404 here can be a disk
+      // fault, not a revoke.
+      denyShareWrite();
+    }
+    const meta = parsePage(raw).meta;
+    // 3 authority, 4 the edit capability, 5 expiry, 6 version
+    if (
+      meta.public !== true ||
+      meta.shareEdit !== true ||
+      isShareExpired(meta.shareExpiresAt) ||
+      (meta.shareVersion ?? 0) !== shareVersion
+    ) {
+      denyShareWrite();
+    }
+    // 7 subtree membership and target liveness
+    if (
+      !this.index.has(targetId) ||
+      !this.isWithinSubtree(rootId, targetId) ||
+      this.isDeleted(targetId)
+    ) {
+      denyShareWrite();
+    }
+  }
+
+  /** The attachment scope index with every shared root that contains this
+   *  page in it. The first visitor write to a root builds that root's baseline
+   *  from every attachment its live subtree names today, one O(subtree) walk
+   *  that runs inside that write's own mutate() and never inside
+   *  configureShare, where it would hold the queue during the owner's
+   *  confirmation click. Every later call is one small file read.
+   *
+   *  Every shared root containing the page, not only the one the visitor came
+   *  through: two shares can overlap, and the moment a visitor's Markdown
+   *  lands in a page the narrower share also shows, that share's subtree stops
+   *  being all owner-authored. Its baseline has to be the snapshot from before
+   *  that, which is now. Without it the read boundary kept falling back to the
+   *  bare reference check for the narrower root, and a visitor of the wider
+   *  share could widen what the narrower link served.
+   *
+   *  `built` tells the caller whether the index changed and has to be
+   *  persisted. Caller owns mutate(). */
+  private async scopedAttachmentIndexUnlocked(
+    rootId: string,
+    targetId: string,
+  ): Promise<{ scope: AttachmentScope; built: boolean }> {
+    let scope = await readAttachmentScope(this.root);
+    let built = false;
+    for (const id of this.sharedRootsContainingUnlocked(rootId, targetId)) {
+      if (scope.roots.includes(id)) continue;
+      scope = recordBaseline(
+        scope,
+        id,
+        await this.subtreeAttachmentNamesUnlocked(id),
+      );
+      built = true;
+    }
+    return { scope, built };
+  }
+
+  /** The root the visitor came through, plus every live public page from the
+   *  target up to the folder root. Public is the only flag that makes a page a
+   *  share root; a descendant's own sharing metadata is ignored by
+   *  resolveShareAccess, but a public ancestor is a link somebody may hold.
+   *  Caller owns mutate(). */
+  private sharedRootsContainingUnlocked(
+    rootId: string,
+    targetId: string,
+  ): string[] {
+    const roots = new Set<string>([rootId]);
+    const seen = new Set<string>();
+    let current = this.index.get(targetId);
+    while (current && !seen.has(current.meta.id)) {
+      seen.add(current.meta.id);
+      if (current.meta.public === true && !this.isDeleted(current.meta.id)) {
+        roots.add(current.meta.id);
+      }
+      current = current.parentId ? this.index.get(current.parentId) : undefined;
+    }
+    return [...roots];
+  }
+
+  /** A page becoming public while a scoped root already sits inside it takes
+   *  its baseline now, before anyone can read through the new link. Every
+   *  other new share can skip the walk: an unscoped subtree holds no visitor
+   *  Markdown, so the reference check still decides for it, which is what a
+   *  read-only share has always done. Caller owns mutate(). */
+  private async scopeNewShareRootUnlocked(id: string): Promise<void> {
+    const scope = await readAttachmentScope(this.root);
+    if (scope.roots.includes(id)) return;
+    if (!scope.roots.some((scoped) => this.isWithinSubtree(id, scoped))) return;
+    const next = recordBaseline(
+      scope,
+      id,
+      await this.subtreeAttachmentNamesUnlocked(id),
+    );
+    if (next !== scope) await writeAttachmentScope(this.root, next);
+  }
+
+  /** An owner action that puts an attachment reference inside a scoped
+   *  subtree adds what it names to that root's baseline. Without this the
+   *  baseline stays the snapshot the first visitor write took, and every
+   *  picture the owner adds afterwards is a broken picture on a page the
+   *  owner is working on. Every owner path that can introduce a reference
+   *  comes here: the body writes, a create, a move in, a restore and the
+   *  Notion import.
+   *
+   *  `fromId` is where the ancestor walk starts, which is the page itself for
+   *  a body write and the destination parent for a create or a move: a page
+   *  can sit inside more than one scoped root, so every scoped ancestor gets
+   *  the names. The scoped ancestors are resolved first, from the in-memory
+   *  index, and `names` is a thunk so that a page under no scoped root pays
+   *  nothing for the answer. That matters past the first visitor write in
+   *  the folder: a move would otherwise walk its whole subtree, and read one
+   *  file per page in it, to feed grants that all no-op. Caller owns
+   *  mutate(). */
+  private async extendScopedBaselinesUnlocked(
+    fromId: string | null,
+    names: () => readonly string[] | Promise<readonly string[]>,
+  ): Promise<void> {
+    if (fromId === null) return;
+    const scope = await readAttachmentScope(this.root);
+    // A trashed page is not part of what the link shows, the same rule the
+    // first baseline walk follows.
+    if (scope.roots.length === 0 || this.isDeleted(fromId)) return;
+    const scoped = this.scopedAncestorsUnlocked(fromId, scope);
+    if (scoped.length === 0) return;
+    const introduced = await names();
+    if (introduced.length === 0) return;
+    let next = scope;
+    for (const root of scoped) next = extendBaseline(next, root, introduced);
+    if (next !== scope) await writeAttachmentScope(this.root, next);
+  }
+
+  /** The scoped roots this page sits inside, nearest first. The parent chain
+   *  is the same one isWithinSubtree walks, so every id it returns contains
+   *  the page by construction, and the seen set guards a cyclic index the
+   *  way that reader does. Caller owns mutate(). */
+  private scopedAncestorsUnlocked(
+    fromId: string,
+    scope: AttachmentScope,
+  ): string[] {
+    const roots: string[] = [];
+    const seen = new Set<string>();
+    let current = this.index.get(fromId);
+    while (current && !seen.has(current.meta.id)) {
+      seen.add(current.meta.id);
+      if (rootIsScoped(scope, current.meta.id)) roots.push(current.meta.id);
+      current = current.parentId ? this.index.get(current.parentId) : undefined;
+    }
+    return roots;
+  }
+
+  /** Every attachment name the root's live subtree references today, in a
+   *  body or as a cover. A trashed descendant is not part of what the link
+   *  shows, so what it names is not part of what the link grants. Caller
+   *  owns mutate(). */
+  private async subtreeAttachmentNamesUnlocked(
+    rootId: string,
+  ): Promise<string[]> {
+    const names = new Set<string>();
+    for (const entry of this.index.values()) {
+      if (
+        !this.isWithinSubtree(rootId, entry.meta.id) ||
+        this.isDeleted(entry.meta.id)
+      ) {
+        continue;
+      }
+      const cover = entry.meta.cover
+        ? localAttachmentName(entry.meta.cover)
+        : null;
+      if (cover) names.add(cover);
+      let raw: string;
+      try {
+        raw = await fs.readFile(path.join(entry.dir, "index.md"), "utf8");
+      } catch {
+        continue;
+      }
+      for (const name of referencedAttachmentNames(parsePage(raw).markdown)) {
+        names.add(name);
+      }
+    }
+    return [...names];
+  }
+
+  /** The moved subtree brings its pictures with it, so the destination's
+   *  scoped roots learn what it names. It runs where the move is acknowledged
+   *  and not before: every step up to that point can still put the page back,
+   *  and a grant for a subtree that never arrived would be a grant for files
+   *  the link never showed. What can still fail after it is the index write
+   *  itself, which leaves the move done and the grant missing. That is the
+   *  broken picture this rule exists to prevent rather than a grant nobody
+   *  asked for, and it is the safe direction to fail in.
+   *
+   *  A move out grants nothing and takes nothing back. Caller owns mutate(). */
+  private async grantMovedSubtreeUnlocked(
+    id: string,
+    originalParentId: string | null,
+    newParentId: string | null,
+  ): Promise<void> {
+    if (originalParentId === newParentId) return;
+    await this.extendScopedBaselinesUnlocked(newParentId, () =>
+      this.subtreeAttachmentNamesUnlocked(id),
+    );
+  }
+
+  /** A link visitor's body write. Same rev contract as writePage, same atomic
+   *  write, same commit, and two extra frontmatter keys so the attribution is
+   *  in the file and shows up in the git diff of the edit. */
+  async writeSharedPage(input: {
+    rootId: string;
+    targetId: string;
+    shareVersion: number;
+    markdown: string;
+    expectedRev?: string;
+    expectedMarkdown?: string;
+    visitorName: string;
+    src?: string;
+  }): Promise<Page> {
+    return this.mutate(async () => {
+      await this.assertSharedWriteAuthorityUnlocked(
+        input.rootId,
+        input.targetId,
+        input.shareVersion,
+      );
+      const e = this.get(input.targetId);
+      const indexPath = assertInRoot(this.root, path.join(e.dir, "index.md"));
+      const currentRaw = await fs.readFile(indexPath, "utf8");
+      const currentRev = hashRev(currentRaw);
+      const parsed = parsePage(currentRaw);
+      const bodyStillMatches =
+        parsed.meta.structureWriteBarrier !== true &&
+        input.expectedMarkdown !== undefined &&
+        parsed.markdown === canonicalPageMarkdown(input.expectedMarkdown);
+      if (
+        input.expectedRev !== undefined &&
+        input.expectedRev !== currentRev &&
+        !bodyStillMatches
+      ) {
+        throw new RevConflictError(currentRev, input.expectedRev);
+      }
+      const fresh = parsed.meta;
+      e.meta = {
+        ...fresh,
+        id: fresh.id || e.meta.id,
+        title: fresh.title || e.meta.title,
+        order: fresh.order || e.meta.order,
+        created: fresh.created || e.meta.created,
+        updated: fresh.updated || e.meta.updated,
+      } as PageMeta;
+      const bodyChanged =
+        canonicalPageMarkdown(input.markdown) !== parsed.markdown;
+      // Same rule as writePage: an unchanged body is not an edit.
+      if (!bodyChanged) {
+        return { meta: e.meta, markdown: parsed.markdown, rev: currentRev };
+      }
+      // A link scheme the owner's editor would put on a live anchor is
+      // refused here, where the visitor's text still has somewhere to go
+      // back to. Refused rather than stripped: a silent rewrite would hand
+      // the visitor a body they did not write and leave their draft out of
+      // step with the file, which is a conflict loop rather than a message.
+      // Same held rule as the references below.
+      const unsafeLink = unsafeLinkDestination(
+        input.markdown,
+        linkDestinations(parsed.markdown),
+      );
+      if (unsafeLink !== null) throw new ShareLinkSchemeError(unsafeLink);
+      // And a subresource on another origin, for the same reason one step
+      // further on. The /share policy blocks those for other visitors, but the
+      // owner reads this body in their own editor and in the history preview,
+      // neither of which carries that policy, and a policy there would break
+      // the owner's own remote media. A visitor has no need for one: uploading
+      // is the supported path and an upload is same-origin.
+      const remote = remoteMediaReference(
+        input.markdown,
+        remoteMediaReferences(parsed.markdown),
+      );
+      if (remote !== null) throw new ShareRemoteMediaError(remote);
+      // The reference diff runs inside this critical section, against the
+      // body just read from index.md, never against the visitor's
+      // expectedMarkdown, which the rev rule above ignores when the rev
+      // matches. A reference the page already holds is not the visitor's
+      // to introduce and passes; a new one passes only if the index grants
+      // it to this root.
+      const { scope, built } = await this.scopedAttachmentIndexUnlocked(
+        input.rootId,
+        input.targetId,
+      );
+      const held = referencedAttachmentNames(parsed.markdown);
+      // The subtree walk, computed once and only if a name gets this far.
+      // Introducing a reference is the rare path: typing text introduces
+      // nothing, and a body that only rearranges what it already holds
+      // introduces nothing either.
+      let liveNames: ReadonlySet<string> | null = null;
+      for (const name of referencedAttachmentNames(input.markdown)) {
+        if (held.has(name)) continue;
+        if (!attachmentGrantsRoot(scope, name, input.rootId)) {
+          throw new ShareAttachmentScopeError(name);
+        }
+        // An index entry is not by itself a grant. A baseline entry says the
+        // subtree showed this file when the walk ran; the owner may have moved
+        // the page that showed it out since, and a visitor who saw it then
+        // must not be able to put it back on the link. The live question
+        // cannot darken a page that shows the file, by construction: the page
+        // holding it is the thing the walk looks for. An upload's home root is
+        // exempt, because nothing shows those bytes yet and the visitor is the
+        // one who put them there.
+        if (rootOwnsUpload(scope, name, input.rootId)) continue;
+        liveNames ??= new Set(
+          await this.subtreeAttachmentNamesUnlocked(input.rootId),
+        );
+        if (!liveNames.has(name)) throw new ShareAttachmentScopeError(name);
+      }
+      if (built) await writeAttachmentScope(this.root, scope);
+      e.meta.updated = now();
+      e.meta.updatedBy = "visitor";
+      e.meta.updatedByName = input.visitorName;
+      delete e.meta.structureWriteBarrier;
+      const content = serializeLivePage(e.meta, input.markdown);
+      await atomicWrite(indexPath, content);
+      scheduleCommit(this.root);
+      const rev = hashRev(content);
+      emitStore({ type: "write", id: input.targetId, rev, src: input.src });
+      return { meta: e.meta, markdown: input.markdown.trimEnd(), rev };
+    });
+  }
+
+  /** A link visitor's new subpage. It inherits the share by construction and
+   *  carries no share key of its own: descendant sharing metadata is ignored
+   *  by resolveShareAccess, so writing one would be a second source of truth. */
+  async createSharedSubpage(input: {
+    rootId: string;
+    parentId: string;
+    shareVersion: number;
+    title: string;
+    visitorName: string;
+    src?: string;
+  }): Promise<PageMeta> {
+    return this.mutate(async () => {
+      await this.assertSharedWriteAuthorityUnlocked(
+        input.rootId,
+        input.parentId,
+        input.shareVersion,
+      );
+      const parent = this.get(input.parentId);
+      if (parent.meta.collection) denyShareWrite();
+      const live = [...this.index.values()].filter(
+        (entry) =>
+          entry.meta.id !== input.rootId &&
+          this.isWithinSubtree(input.rootId, entry.meta.id) &&
+          !this.isDeleted(entry.meta.id),
+      ).length;
+      if (live >= MAX_SHARE_SUBTREE_PAGES) throw new ShareSubtreeFullError();
+      const dir = await uniqueDir(parent.dir, slugify(input.title));
+      const last = this.siblings(input.parentId).at(-1);
+      const meta: PageMeta = {
+        id: nanoid(),
+        title: input.title,
+        order: generateKeyBetween(last ? last.meta.order : null, null),
+        created: now(),
+        updated: now(),
+        updatedBy: "visitor",
+        updatedByName: input.visitorName,
+      };
+      await atomicWrite(path.join(dir, "index.md"), serializeLivePage(meta, ""));
+      this.index.set(meta.id, { dir, parentId: input.parentId, meta });
+      scheduleCommit(this.root);
+      emitStore({ type: "create", id: meta.id, src: input.src });
+      return meta;
+    });
+  }
+
+  /** A link visitor's upload. Nothing is relaxed: the same size cap, the same
+   *  blocked MIME list, the same magic-byte checks, the same nanoid(12) name
+   *  and the same extension canonicalisation as the owner's route. */
+  async saveSharedAttachment(input: {
+    rootId: string;
+    targetId: string;
+    shareVersion: number;
+    file: AttachmentInput;
+    src?: string;
+  }): Promise<SavedAttachment> {
+    return this.mutate(async () => {
+      await this.assertSharedWriteAuthorityUnlocked(
+        input.rootId,
+        input.targetId,
+        input.shareVersion,
+      );
+      let { scope, built } = await this.scopedAttachmentIndexUnlocked(
+        input.rootId,
+        input.targetId,
+      );
+      // Checked before a byte is written: the quota is about what lands on
+      // the disk and in git history, not about what was attempted.
+      const overQuota = (index: AttachmentScope) =>
+        rootUploadBytes(index, input.rootId) + input.file.data.byteLength >
+        SHARE_ROOT_UPLOAD_BYTES;
+      if (overQuota(scope)) {
+        // The sweep used to run only on an owner purge and on empty-trash, so
+        // a visitor who uploaded and then closed the tab left bytes charged
+        // against the root with nothing referencing them, and no visitor
+        // action and no owner action short of purging some other page could
+        // clear them. A root could reach a permanent 413. The request that
+        // the quota refuses is the one with a reason to pay for the walk.
+        if (built) {
+          await writeAttachmentScope(this.root, scope);
+          built = false;
+        }
+        if (await this.reclaimAbandonedUploadsUnlocked()) {
+          scope = await readAttachmentScope(this.root);
+        }
+        if (overQuota(scope)) throw new ShareUploadQuotaError();
+      }
+      const saved = await this.saveAttachmentUnlocked(
+        input.file,
+        input.src,
+      ).catch(rethrowSharedAttachmentFailure);
+      const name = localAttachmentName(saved.url);
+      const next = name
+        ? recordUpload(
+            scope,
+            name,
+            input.rootId,
+            saved.size,
+            new Date().toISOString(),
+          )
+        : scope;
+      if (next !== scope || built) {
+        // The bytes are on the disk by now. A ledger write that fails after
+        // them must not answer 500 for an upload that landed: the client
+        // retries and lands a second copy, and the first sits unreferenced
+        // against the same quota until a sweep. Report what happened, leave
+        // the cause in the log where the owner can act on it, and let the
+        // next write to this root read the ledger again. The cost of failing
+        // this way is that the file is ungranted until then, so naming it is
+        // a 422 rather than a broken picture.
+        await writeAttachmentScope(this.root, next).catch((error: unknown) => {
+          console.error(
+            `[brain/store] attachment scope index write failed after the upload ${saved.name} landed:`,
+            error,
+          );
+        });
+      }
+      return saved;
+    });
+  }
+
+  /** The sweep, at most once every SHARE_UPLOAD_RECLAIM_INTERVAL_MS, for a
+   *  root whose quota is full. It reads one index.md per page, so it cannot
+   *  run on every refusal; and the sweep's own 24 h grace means a second run
+   *  a minute later would find exactly what the first one did. Returns
+   *  whether anything came back. Caller owns mutate(). */
+  private async reclaimAbandonedUploadsUnlocked(): Promise<boolean> {
+    const at = Date.now();
+    if (at - this.lastUploadReclaimAt < SHARE_UPLOAD_RECLAIM_INTERVAL_MS) {
+      return false;
+    }
+    this.lastUploadReclaimAt = at;
+    return (await this.sweepUnreferencedAttachmentsUnlocked()) > 0;
   }
 
   /** Read one exact private attachment for an owner-requested portable export.
@@ -4103,10 +4641,23 @@ export class Store {
         patch.shareExpiresAt === undefined
           ? e.meta.shareExpiresAt
           : patch.shareExpiresAt || undefined;
+      // An edit grant is a capability, not a stored credential: the legacy
+      // `{"public": false}` revoke takes it away and does not hand it back on
+      // the next enable.
+      const nextShareEdit =
+        patch.public === false ? undefined : e.meta.shareEdit;
       const rotateShare =
         nextPublic !== e.meta.public ||
         nextSharePass !== e.meta.sharePass ||
-        nextShareExpiresAt !== e.meta.shareExpiresAt;
+        nextShareExpiresAt !== e.meta.shareExpiresAt ||
+        nextShareEdit !== e.meta.shareEdit;
+      // The legacy enable, which has no overlap guard of its own, so this is
+      // the path by which a page becomes a link with a scoped root already
+      // inside it. Same rule as configureShare: take the baseline before the
+      // flag lands.
+      if (nextPublic === true && e.meta.public !== true) {
+        await this.scopeNewShareRootUnlocked(id);
+      }
       if (patch.title !== undefined) e.meta.title = patch.title;
       if (patch.icon !== undefined) e.meta.icon = patch.icon || undefined;
       if (patch.cover !== undefined) e.meta.cover = patch.cover || undefined;
@@ -4115,6 +4666,7 @@ export class Store {
         e.meta.sharePass = patch.sharePass || undefined;
       if (patch.shareExpiresAt !== undefined)
         e.meta.shareExpiresAt = patch.shareExpiresAt || undefined;
+      e.meta.shareEdit = nextShareEdit;
       if (rotateShare)
         e.meta.shareVersion = (e.meta.shareVersion ?? 0) + 1;
       if (patch.category !== undefined)
@@ -4156,6 +4708,9 @@ export class Store {
       | {
           enabled: true;
           expectedScopeToken: string;
+          /** Required and explicitly boolean on every enable. Never preserved
+           *  from a previous value: see the comment on nextShareEdit below. */
+          canEdit: boolean;
           /** undefined preserves the disabled root's existing credential. */
           sharePass?: string | null;
           /** undefined preserves the disabled root's existing deadline. */
@@ -4168,6 +4723,12 @@ export class Store {
         },
   ): Promise<void> {
     return this.mutate(async () => {
+      if (input.enabled && typeof input.canEdit !== "boolean") {
+        throw new Error("share enable requires an explicit canEdit");
+      }
+      if (input.enabled && input.canEdit && !this.publicOrigin) {
+        throw new ShareEditOriginError();
+      }
       const before = this.shareScopeSnapshot(id);
       if (
         input.enabled &&
@@ -4194,13 +4755,25 @@ export class Store {
           ? entry.meta.shareExpiresAt
           : input.shareExpiresAt || undefined
         : entry.meta.shareExpiresAt;
+      // Disable clears it, unlike sharePass and shareExpiresAt above.
+      const nextShareEdit = input.enabled
+        ? input.canEdit || undefined
+        : undefined;
       const rotateShare =
         nextPublic !== entry.meta.public ||
         nextSharePass !== entry.meta.sharePass ||
-        nextShareExpiresAt !== entry.meta.shareExpiresAt;
+        nextShareExpiresAt !== entry.meta.shareExpiresAt ||
+        nextShareEdit !== entry.meta.shareEdit;
+      // Before the flag lands, so the snapshot is what the subtree showed
+      // while nobody could hold this link. Skipped, at the cost of one small
+      // file read, unless a scoped root already sits inside this one.
+      if (input.enabled && !entry.meta.public) {
+        await this.scopeNewShareRootUnlocked(id);
+      }
       entry.meta.public = nextPublic;
       entry.meta.sharePass = nextSharePass;
       entry.meta.shareExpiresAt = nextShareExpiresAt;
+      entry.meta.shareEdit = nextShareEdit;
       if (rotateShare) {
         entry.meta.shareVersion = (entry.meta.shareVersion ?? 0) + 1;
       }
@@ -4453,7 +5026,7 @@ export class Store {
         if (patch.sections === undefined && pageId === input.boardId) {
           delete afterMeta.sections;
         }
-        const afterRaw = serializePage(afterMeta, parsed.markdown);
+        const afterRaw = serializeLivePage(afterMeta, parsed.markdown);
         pages.push({
           pageId,
           indexFile: path.relative(this.root, indexFile),
@@ -4681,7 +5254,7 @@ export class Store {
         this.publicOrigin,
       );
       nextDestinationMeta = freshMeta(parsedDestination!, destinationPage);
-      const afterRaw = serializePage(nextDestinationMeta, nextMarkdown);
+      const afterRaw = serializeLivePage(nextDestinationMeta, nextMarkdown);
       destinationRef = {
         pageId: newParentId!,
         indexFile: path.relative(this.root, destinationIndex),
@@ -4696,7 +5269,7 @@ export class Store {
     let nextOriginMeta: PageMeta | null = null;
     if (writesOrigin && originPage && originIndex) {
       nextOriginMeta = freshMeta(parsedOrigin!, originPage);
-      const afterRaw = serializePage(nextOriginMeta, originSweep!.markdown);
+      const afterRaw = serializeLivePage(nextOriginMeta, originSweep!.markdown);
       originRef = {
         pageId: originParentId!,
         indexFile: path.relative(this.root, originIndex),
@@ -4804,6 +5377,9 @@ export class Store {
       }
       scheduleCommit(this.root);
       releaseSafe = true;
+      // Past the barrier release, so a failure to write the index cannot
+      // strand the Git snapshot barrier as well.
+      await this.grantMovedSubtreeUnlocked(id, originParentId, newParentId);
       return { meta: moved, unlinkedFrom: originRef ? originParentId : null };
     } finally {
       if (releaseSafe) releaseGitBarrier();
@@ -5023,7 +5599,7 @@ export class Store {
         updatedBy: "me",
         structureWriteBarrier: removal.removed ? undefined : true,
       };
-      const nextParentRaw = serializePage(nextParentMeta, removal.markdown);
+      const nextParentRaw = serializeLivePage(nextParentMeta, removal.markdown);
       const nextParentRev = hashRev(nextParentRaw);
       const originalTargetRev = hashRev(originalTargetRaw);
       const nextTargetMeta: PageMeta = targetAlreadyReferencesSource
@@ -5035,7 +5611,7 @@ export class Store {
           };
       const nextTargetRaw = targetAlreadyReferencesSource
         ? originalTargetRaw
-        : serializePage(nextTargetMeta, nextTargetMarkdown);
+        : serializeLivePage(nextTargetMeta, nextTargetMarkdown);
       const nextTargetRev = hashRev(nextTargetRaw);
       if (nextParentRev === currentRev) {
         throw new Error("page-ref nesting did not advance the parent revision");
@@ -5269,6 +5845,7 @@ export class Store {
         if (!targetAlreadyReferencesSource) {
           emitStore({ type: "write", id: targetId, rev: nextTargetRev, src });
         }
+        await this.grantMovedSubtreeUnlocked(sourceId, parentPageId, targetId);
         return {
           moved,
           removed: removal.removed,
@@ -5400,7 +5977,7 @@ export class Store {
       order: nextOrder,
       updated: moveUpdated,
     };
-    const nextContent = serializePage(nextMeta, parsePage(originalRaw).markdown);
+    const nextContent = serializeLivePage(nextMeta, parsePage(originalRaw).markdown);
     try {
       if (moved) {
         await syncDirectory(oldParentDir!);
@@ -5466,6 +6043,7 @@ export class Store {
     if (!isCompositeMoveIntent(moveIntent)) {
       scheduleCommit(this.root);
       emitStore({ type: "move", id, src });
+      await this.grantMovedSubtreeUnlocked(id, originalParentId, newParentId);
     }
     return e.meta;
   }
@@ -5493,12 +6071,16 @@ export class Store {
         const hadSharing = Boolean(
           entry.meta.public ||
             entry.meta.sharePass ||
-            entry.meta.shareExpiresAt,
+            entry.meta.shareExpiresAt ||
+            entry.meta.shareEdit,
         );
         if (hadSharing) {
           entry.meta.public = undefined;
           entry.meta.sharePass = undefined;
           entry.meta.shareExpiresAt = undefined;
+          // The edit grant is a capability and must not survive into the
+          // trash: a restored page comes back unshared and unwritable.
+          entry.meta.shareEdit = undefined;
           entry.meta.shareVersion = (entry.meta.shareVersion ?? 0) + 1;
           entry.meta.updated = deletedAt;
           await this.persist(entry);
@@ -5533,6 +6115,19 @@ export class Store {
         current = current.parentId
           ? this.index.get(current.parentId)
           : undefined;
+      }
+      // The first baseline walk skipped this subtree because the link did
+      // not show it. The link shows it again now, and it shows all of the
+      // outermost node the loop above un-trashed, not only the page asked
+      // for: a sibling of it is back on the link too. Both the names and the
+      // roots that receive them come from that node. Starting the ancestor
+      // walk lower would hand a scoped root between here and there names
+      // from outside its own subtree.
+      const outermost = restoredIds.at(-1);
+      if (outermost !== undefined) {
+        await this.extendScopedBaselinesUnlocked(outermost, () =>
+          this.subtreeAttachmentNamesUnlocked(outermost),
+        );
       }
       scheduleCommit(this.root);
       emitStore({ type: "create", id, src });
@@ -5692,7 +6287,7 @@ export class Store {
       }
     }
     const cutoff = Date.now() - graceMs;
-    let removed = 0;
+    const removed: string[] = [];
     for (const name of names) {
       if (referenced.has(name)) continue;
       // Only well-formed attachment names are ever considered.
@@ -5707,13 +6302,19 @@ export class Store {
       }
       if (!stat.isFile() || stat.mtimeMs > cutoff) continue;
       await fs.rm(file, { force: true });
-      removed += 1;
+      removed.push(name);
     }
-    if (removed > 0) {
+    if (removed.length > 0) {
       await syncDirectory(directory);
+      // A visitor upload counts against its root's quota until the file is
+      // gone, so the ledger has to hear that it is: otherwise a root fills
+      // up with bytes that no longer exist and never drains.
+      const scope = await readAttachmentScope(this.root);
+      const forgotten = forgetUploads(scope, removed);
+      if (forgotten !== scope) await writeAttachmentScope(this.root, forgotten);
       scheduleCommit(this.root);
     }
-    return removed;
+    return removed.length;
   }
 
   // ── version history (git) ───────────────────────────

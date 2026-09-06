@@ -359,6 +359,12 @@ If you are upgrading such an install, do all of this in one rollout:
    with the matching `page` and `v` query. Verify a locked share also needs its
    page-scoped cookie.
 
+   On an editable share, verify additionally that an image a visitor uploaded
+   loads through that root and 404s through any other shared root, and that an
+   attachment name typed by hand into a shared page — one the root never
+   referenced before it became editable — 404s. `_attachments/scope.json` is
+   what decides both; it is committed with the notes and restored with them.
+
 Do not start an attachment import until steps 1–3 pass. A browser that already
 downloaded bytes cannot be made to forget them; the purge is what stops a new
 unauthenticated request from being handed the old cached response.

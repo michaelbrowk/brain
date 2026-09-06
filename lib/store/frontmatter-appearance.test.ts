@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { parsePage, serializePage } from "./frontmatter";
+import {
+  parsePage,
+  serializeLivePage,
+  serializePage,
+} from "./frontmatter";
 import type { PageMeta } from "./types";
 
 const baseMeta: PageMeta = {
@@ -58,5 +62,34 @@ describe("page appearance frontmatter", () => {
 
     expect(raw).toMatch(/^font: sans$/m);
     expect(raw).not.toMatch(/^(smallText|fullWidth):/m);
+  });
+});
+
+describe("the visitor label", () => {
+  const meta = (updatedBy: "me" | "visitor"): PageMeta => ({
+    id: "p1",
+    title: "Page",
+    order: "a0",
+    created: "2026-09-05T10:00:00.000Z",
+    updated: "2026-09-05T10:00:00.000Z",
+    updatedBy,
+    updatedByName: "Ada",
+  });
+
+  it("leaves the caller's object alone, because two Notion paths hash with it", () => {
+    const owner = meta("me");
+    const raw = serializePage(owner, "body");
+    expect(raw).not.toContain("updatedByName");
+    expect(owner.updatedByName).toBe("Ada");
+  });
+
+  it("takes the stale name out of a live entry the writer is about to persist", () => {
+    const owner = meta("me");
+    expect(serializeLivePage(owner, "body")).not.toContain("updatedByName");
+    expect(owner.updatedByName).toBeUndefined();
+
+    const visitor = meta("visitor");
+    expect(serializeLivePage(visitor, "body")).toContain("updatedByName: Ada");
+    expect(visitor.updatedByName).toBe("Ada");
   });
 });

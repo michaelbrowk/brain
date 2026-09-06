@@ -61,6 +61,18 @@ function rows(surface: Element) {
   );
 }
 
+/** The ledger's one status sentence. */
+function head() {
+  return document.body.querySelector(".brain-share-head")?.textContent;
+}
+
+/** A setting's switch, by the sentence its aria-label states. */
+function switchFor(label: string) {
+  return document.body.querySelector(`[role="switch"][aria-label="${label}"]`);
+}
+
+const EDIT_SWITCH = "Anyone with the link can edit";
+
 function snapshot(
   values: Partial<ShareScopeSnapshot> = {},
 ): ShareScopeSnapshot {
@@ -71,6 +83,7 @@ function snapshot(
     scopeToken: "a".repeat(64),
     public: false,
     shareLocked: false,
+    shareEdit: false,
     shareExpiresAt: null,
     shareVersion: 0,
     ...values,
@@ -139,6 +152,7 @@ describe("SharePopover redesign", () => {
         isPublic={isPublic}
         pageId="page-a"
         hasPassword={!!options.hasPassword}
+        hasEdit={!!options.hasEdit}
         expiresAt={options.expiresAt}
         inheritedFrom={options.inheritedFrom}
         expiredInheritedFrom={options.expiredInheritedFrom}
@@ -167,6 +181,7 @@ describe("SharePopover redesign", () => {
         onCopyLink={options.onCopyLink ?? (() => {})}
         onOpenShareSettings={options.onOpenShareSettings}
         onSetProtection={options.onSetProtection ?? (() => {})}
+        onSetEditable={options.onSetEditable ?? (() => {})}
       >
         <button aria-label="Share trigger">Share</button>
       </SharePopover>
@@ -201,8 +216,8 @@ describe("SharePopover redesign", () => {
     expect(shareButton()?.textContent).toBe(`Share 3${NB}pages`);
     expect(document.body.textContent?.match(/3\u00A0pages/g)).toHaveLength(2);
     const surface = document.body.querySelector("[data-share-surface]") as HTMLElement;
-    // the rows in order, the action last; the edit row is not built yet
-    expect(rows(surface)).toEqual(["access", "password", "expires", "action"]);
+    // the rows in order, the action last
+    expect(rows(surface)).toEqual(["access", "edit", "password", "expires", "action"]);
     expect(surface.querySelector('[data-share-row="access"]')?.textContent).toBe(
       "AccessAnyone with the link",
     );
@@ -283,7 +298,7 @@ describe("SharePopover redesign", () => {
     // the expiry is its own row after the password's, the settings atom: a
     // radiogroup of three radio buttons, the chosen one carrying the thumb
     const surface = document.body.querySelector("[data-share-surface]") as HTMLElement;
-    expect(rows(surface)).toEqual(["access", "password", "expires", "action"]);
+    expect(rows(surface)).toEqual(["access", "edit", "password", "expires", "action"]);
     const expiry = document.body.querySelector(
       '[role="radiogroup"][aria-label="Link expiry"]',
     ) as HTMLElement;
@@ -322,7 +337,7 @@ describe("SharePopover redesign", () => {
     // turning the password off clears the draft and leaves the expiry alone
     await click(toggle);
     expect(document.body.querySelector('input[aria-label="Share password"]')).toBeNull();
-    expect(rows(surface)).toEqual(["access", "password", "expires", "action"]);
+    expect(rows(surface)).toEqual(["access", "edit", "password", "expires", "action"]);
     expect(chosen().textContent?.trim()).toBe("7 days");
 
     await click(toggle);
@@ -374,6 +389,7 @@ describe("SharePopover redesign", () => {
 
     expect(onEnableShare).toHaveBeenCalledWith({
       expectedScopeToken: disclosed.scopeToken,
+      canEdit: false,
       password: "secret",
       expiresAt: "2026-08-20T12:00:00.000Z",
     });
@@ -400,6 +416,7 @@ describe("SharePopover redesign", () => {
 
     expect(onEnableShare).toHaveBeenCalledWith({
       expectedScopeToken: initial.scopeToken,
+      canEdit: false,
       password: null,
       expiresAt: null,
     });
@@ -427,6 +444,7 @@ describe("SharePopover redesign", () => {
     await click(shareButton());
     expect(onEnableShare).toHaveBeenCalledWith({
       expectedScopeToken: "a".repeat(64),
+      canEdit: false,
       password: null,
       expiresAt: "2026-09-12T12:00:00.000Z",
     });
@@ -488,7 +506,7 @@ describe("SharePopover redesign", () => {
       onCopyLink,
     });
     const surface = document.body.querySelector("[data-share-surface]") as HTMLElement;
-    expect(rows(surface)).toEqual(["link", "access", "password", "expires", "action"]);
+    expect(rows(surface)).toEqual(["link", "access", "edit", "password", "expires", "action"]);
     // the head says what the link does, with the exact count
     expect(surface.querySelector("h2")?.textContent).toBe(
       `Anyone with the link can read 3${NB}pages.`,
@@ -535,10 +553,11 @@ describe("SharePopover redesign", () => {
       (node) => node.getAttribute("aria-label") ?? node.textContent?.trim(),
     );
     // the tab order is the ledger's reading order: the link, its copy, the
-    // switch, the three expiry segments, the action
+    // two switches, the three expiry segments, the action
     expect(focusOrder).toEqual([
       "Open public page",
       "Copy link",
+      "Anyone with the link can edit",
       "Password protection",
       "Never",
       "7 days",
@@ -625,7 +644,7 @@ describe("SharePopover redesign", () => {
     );
     await click(toggle);
     // the save is a row of the reveal, under the field, before the expiry
-    expect(rows(surface)).toEqual(["link", "access", "password", "save-password", "expires", "action"]);
+    expect(rows(surface)).toEqual(["link", "access", "edit", "password", "save-password", "expires", "action"]);
     const save = button("Save password") as HTMLButtonElement;
     expect(save.className).toContain("btn-ink");
     expect(save.closest('[data-share-row="save-password"]')?.className).toContain(
@@ -701,7 +720,7 @@ describe("SharePopover redesign", () => {
       onSetProtection,
     });
     const surface = document.body.querySelector("[data-share-surface]") as HTMLElement;
-    expect(rows(surface)).toEqual(["link", "access", "password", "expires", "action"]);
+    expect(rows(surface)).toEqual(["link", "access", "edit", "password", "expires", "action"]);
     expect(document.body.textContent).not.toContain("Legacy");
     expect(button("Remove expiry")).toBeUndefined();
     const expires = surface.querySelector('[data-share-row="expires"]') as HTMLElement;
@@ -763,7 +782,7 @@ describe("SharePopover redesign", () => {
       onDisableShare,
     });
     const surface = document.body.querySelector("[data-share-surface]") as HTMLElement;
-    expect(rows(surface)).toEqual(["link", "access", "through", "password", "expires", "action"]);
+    expect(rows(surface)).toEqual(["link", "access", "edit", "through", "password", "expires", "action"]);
     const through = surface.querySelector('[data-share-row="through"]') as HTMLElement;
     expect(through.textContent).toContain("Also shared through");
     expect(through.textContent).toContain("Parent root");
@@ -774,7 +793,7 @@ describe("SharePopover redesign", () => {
     // the confirmation takes the last row: the ledger above it stays
     expect(document.body.querySelector('[data-share-state="manage"]')).toBeNull();
     expect(document.body.querySelector('[data-share-state="revoke"]')).not.toBeNull();
-    expect(rows(surface)).toEqual(["link", "access", "through", "password", "expires", "action"]);
+    expect(rows(surface)).toEqual(["link", "access", "edit", "through", "password", "expires", "action"]);
     const confirm = surface.querySelector("[data-share-revoke-row]") as HTMLElement;
     expect(confirm.getAttribute("data-share-row")).toBe("action");
     expect(confirm.nextElementSibling).toBeNull();
@@ -991,5 +1010,276 @@ describe("SharePopover redesign", () => {
     await act(async () => hydratedRoot?.unmount());
     consoleError.mockRestore();
     hydrationHost.remove();
+  });
+  describe("the Who can edit row", () => {
+    it("states the verb in the private review's head, with and without a password", async () => {
+      await renderAndOpen(false, {
+        onPrepareShare: vi.fn().mockResolvedValue(snapshot({ descendantCount: 14 })),
+      });
+      await click(switchFor(EDIT_SWITCH));
+      expect(head()).toBe(
+        `Anyone with the link will be able to read and edit 15${NB}pages.`,
+      );
+      await click(switchFor("Password protection"));
+      expect(head()).toBe(
+        `Anyone with the link and the password will be able to read and edit 15${NB}pages.`,
+      );
+    });
+
+    it("states it with 'can' once the link exists", async () => {
+      await renderAndOpen(true, {
+        onPrepareShare: vi
+          .fn()
+          .mockResolvedValue(
+            snapshot({ descendantCount: 14, public: true, shareEdit: true }),
+          ),
+      });
+      expect(head()).toBe(`Anyone with the link can read and edit 15${NB}pages.`);
+      expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-checked")).toBe("true");
+    });
+
+    it("keeps 'this page' for a single page", async () => {
+      await renderAndOpen(false, {
+        onPrepareShare: vi.fn().mockResolvedValue(snapshot({ descendantCount: 0 })),
+      });
+      await click(switchFor(EDIT_SWITCH));
+      expect(head()).toBe(
+        "Anyone with the link will be able to read and edit this page.",
+      );
+    });
+
+    it("sits between Access and Password in both views", async () => {
+      await renderAndOpen(false);
+      let surface = document.body.querySelector("[data-share-surface]") as HTMLElement;
+      let order = rows(surface);
+      expect(order.indexOf("edit")).toBeGreaterThan(order.indexOf("access"));
+      expect(order.indexOf("edit")).toBeLessThan(order.indexOf("password"));
+
+      await act(async () => root.render(popover(true)));
+      await settle();
+      surface = document.body.querySelector("[data-share-surface]") as HTMLElement;
+      order = rows(surface);
+      expect(order.indexOf("edit")).toBeGreaterThan(order.indexOf("access"));
+      expect(order.indexOf("edit")).toBeLessThan(order.indexOf("password"));
+    });
+
+    it("carries one note at a time, and it is always the grant", async () => {
+      await renderAndOpen(true, {
+        onPrepareShare: vi
+          .fn()
+          .mockResolvedValue(
+            snapshot({ descendantCount: 2, public: true, shareEdit: false }),
+          ),
+      });
+      const row = () =>
+        document.body.querySelector('[data-share-row="edit"]') as HTMLElement;
+      const notes = () => row().querySelectorAll(".brain-share-row-note");
+
+      // Off, the note describes what the press would grant. Letting strangers
+      // write in the owner's notes is the hard-to-take-back decision, and what
+      // they cannot do is the sentence that decides it, so it is under the
+      // switch before the press. One note, so the row keeps its neighbours'
+      // rhythm.
+      expect(notes()).toHaveLength(1);
+      expect(notes()[0].textContent).toBe(
+        "Turning this on lets them change text and images, never delete, move or rename.",
+      );
+
+      await click(switchFor(EDIT_SWITCH));
+      // On, the same fact stated of the grant that now exists.
+      expect(notes()).toHaveLength(1);
+      expect(notes()[0].textContent).toBe(
+        "They can change text and images, never delete, move or rename.",
+      );
+    });
+
+    it("reads the note out with the switch", async () => {
+      await renderAndOpen(true, {
+        onPrepareShare: vi
+          .fn()
+          .mockResolvedValue(
+            snapshot({ descendantCount: 2, public: true, shareEdit: false }),
+          ),
+      });
+      const row = document.body.querySelector('[data-share-row="edit"]') as HTMLElement;
+      const note = row.querySelector(".brain-share-row-note") as HTMLElement;
+      expect(note.id).not.toBe("");
+      expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-describedby")).toBe(note.id);
+    });
+
+    it("takes no press while the exact scope is still being read", async () => {
+      // The card opens on the tree's answer. Where the page's own link is
+      // expired under a live editable ancestor that answer is the ancestor's,
+      // and any stale answer would be written to this page's own grant by a
+      // press landing before the snapshot corrects it.
+      const pending = deferred<ShareScopeSnapshot>();
+      const onSetEditable = vi.fn();
+      await renderAndOpen(true, {
+        hasEdit: true,
+        expiresAt: "2020-01-01T00:00:00.000Z",
+        inheritedFrom: { id: "root", title: "Shared root" },
+        onPrepareShare: vi.fn().mockReturnValue(pending.promise),
+        onSetEditable,
+      });
+
+      const control = switchFor(EDIT_SWITCH) as HTMLButtonElement;
+      expect(control.getAttribute("aria-checked")).toBe("true");
+      expect(control.disabled).toBe(true);
+      await click(control);
+      expect(onSetEditable).not.toHaveBeenCalled();
+
+      await act(async () =>
+        pending.resolve(
+          snapshot({
+            rootId: "page-a",
+            public: true,
+            shareEdit: false,
+            shareExpiresAt: "2020-01-01T00:00:00.000Z",
+          }),
+        ),
+      );
+      await settle();
+
+      const settled = switchFor(EDIT_SWITCH) as HTMLButtonElement;
+      expect(settled.getAttribute("aria-checked")).toBe("false");
+      expect(settled.disabled).toBe(false);
+    });
+
+    it("keeps the switch itself when the corrected answer arrives", async () => {
+      // The row used to be keyed on the answer, so every correction — the
+      // snapshot landing, or the tree refreshing after a flip — replaced the
+      // button holding focus. Focus fell to the body inside an open popover
+      // and the next Tab restarted from the document. What is pinned is that
+      // the correction does not replace the node: the row is disabled while
+      // the scope is being read, and no browser lets a disabled control hold
+      // focus, so the node surviving is what makes focus survivable at all.
+      const pending = deferred<ShareScopeSnapshot>();
+      await renderAndOpen(true, {
+        hasEdit: true,
+        onPrepareShare: vi.fn().mockReturnValue(pending.promise),
+      });
+      const before = switchFor(EDIT_SWITCH) as HTMLButtonElement;
+
+      await act(async () =>
+        pending.resolve(snapshot({ public: true, shareEdit: false })),
+      );
+      await settle();
+
+      expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-checked")).toBe("false");
+      expect(switchFor(EDIT_SWITCH)).toBe(before);
+
+      // and with the answer in, it takes and holds focus like any live control
+      before.focus();
+      expect(document.activeElement).toBe(before);
+    });
+
+    it("never promises a sign-out, in either view", async () => {
+      // The flip does sign everyone out, but the row cannot say so before it
+      // is pressed without asserting it of a card nobody has touched. The
+      // toast after a flip that landed says it as a result.
+      await renderAndOpen(true, {
+        hasPassword: true,
+        onPrepareShare: vi
+          .fn()
+          .mockResolvedValue(
+            snapshot({ descendantCount: 2, public: true, shareLocked: true }),
+          ),
+      });
+      let row = document.body.querySelector('[data-share-row="edit"]') as HTMLElement;
+      expect(row.textContent).not.toContain("signed out");
+      expect(row.textContent).not.toContain("password");
+
+      await act(async () => root.render(popover(false)));
+      await settle();
+      row = document.body.querySelector('[data-share-row="edit"]') as HTMLElement;
+      expect(row.textContent).not.toContain("signed out");
+      expect(row.textContent).toContain(
+        "Turning this on lets them change text and images, never delete, move or rename.",
+      );
+    });
+
+    it("carries the flag into the grant the review creates", async () => {
+      const onEnableShare = vi.fn().mockResolvedValue({
+        status: "enabled",
+        snapshot: snapshot({ rootId: "page-a", public: true, shareEdit: true }),
+      });
+      await renderAndOpen(false, { onEnableShare });
+      await click(switchFor(EDIT_SWITCH));
+      await click(shareButton());
+      expect(onEnableShare).toHaveBeenCalledWith(
+        expect.objectContaining({ canEdit: true }),
+      );
+    });
+
+    it("reverts the switch when the save fails and says so", async () => {
+      const onSetEditable = vi.fn().mockRejectedValue(new Error("nope"));
+      await renderAndOpen(true, {
+        onPrepareShare: vi
+          .fn()
+          .mockResolvedValue(
+            snapshot({ descendantCount: 2, public: true, shareEdit: false }),
+          ),
+        onSetEditable,
+      });
+      await click(switchFor(EDIT_SWITCH));
+      expect(onSetEditable).toHaveBeenCalledWith(true);
+      expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-checked")).toBe("false");
+      expect(document.body.textContent).toContain(
+        "Couldn't change who can edit. Reopen this card to see where it stands.",
+      );
+    });
+
+    it("keeps the page's own answer where there is no active snapshot to read", async () => {
+      // The page's own link is expired under a live parent share: the row is
+      // still drawn, because the grant it writes is still there, but the
+      // active snapshot is the parent's and never lands here. A hard false
+      // would tell the owner the grant is read-only when it is not, the way
+      // the Password switch beside it falls back to the page's own value.
+      await renderAndOpen(true, {
+        hasEdit: true,
+        expiresAt: "2020-01-01T00:00:00.000Z",
+        inheritedFrom: { id: "root", title: "Shared root" },
+        onPrepareShare: vi.fn().mockImplementation((rootId: string) =>
+          Promise.resolve(
+            snapshot({
+              rootId,
+              public: true,
+              shareEdit: true,
+              shareExpiresAt: "2020-01-01T00:00:00.000Z",
+            }),
+          ),
+        ),
+      });
+      expect(head()).toBe("This page's own link is expired.");
+      expect(document.body.querySelector('[data-share-row="edit"]')).not.toBeNull();
+      expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-checked")).toBe("true");
+    });
+
+    it("takes the snapshot's answer when it arrives after the first paint", async () => {
+      // The management view is drawn from the tree's own answer before the
+      // exact scope is read, so the switch starts there and follows the
+      // snapshot when it corrects it.
+      const pending = deferred<ShareScopeSnapshot>();
+      await renderAndOpen(true, {
+        hasEdit: true,
+        onPrepareShare: vi.fn().mockReturnValue(pending.promise),
+      });
+      expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-checked")).toBe("true");
+      await act(async () =>
+        pending.resolve(snapshot({ public: true, shareEdit: false })),
+      );
+      await settle();
+      expect(switchFor(EDIT_SWITCH)?.getAttribute("aria-checked")).toBe("false");
+    });
+
+    it("is absent where the page is only reached through a parent", async () => {
+      await renderAndOpen(false, {
+        inheritedFrom: { id: "root", title: "Shared root" },
+        onPrepareShare: vi
+          .fn()
+          .mockResolvedValue(snapshot({ rootId: "root", public: true })),
+      });
+      expect(document.body.querySelector('[data-share-row="edit"]')).toBeNull();
+    });
   });
 });

@@ -141,7 +141,7 @@ describe("FloatingToolbar", () => {
     vi.unstubAllGlobals();
   });
 
-  async function renderWithSelection(inTable: boolean) {
+  async function renderWithSelection(inTable: boolean, ai = false) {
     view.state = editorState(inTable);
     const range = document.createRange();
     range.setStart(editorRoot.firstChild as Text, 0);
@@ -152,13 +152,13 @@ describe("FloatingToolbar", () => {
 
     const container = createRef<HTMLDivElement>();
     container.current = editorRoot;
-    await act(async () => root.render(<FloatingToolbar container={container} />));
+    await act(async () => root.render(<FloatingToolbar container={container} ai={ai} />));
     await act(async () => document.dispatchEvent(new Event("selectionchange")));
     await settle();
   }
 
   it("uses the compact table-safe controls and closes AI with Escape or outside click", async () => {
-    await renderWithSelection(true);
+    await renderWithSelection(true, true);
     const toolbar = document.body.querySelector('[role="toolbar"]') as HTMLDivElement;
     expect(toolbar).not.toBeNull();
     expect(toolbar.getAttribute("aria-label")).toBe("Text formatting");
@@ -195,6 +195,18 @@ describe("FloatingToolbar", () => {
       document.body.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true }));
     });
     await settle();
+    expect(document.body.textContent).not.toContain("Improve");
+  });
+
+  it("renders no AI control at all without the capability", async () => {
+    await renderWithSelection(false);
+    const toolbar = document.body.querySelector('[role="toolbar"]') as HTMLDivElement;
+    expect(toolbar).not.toBeNull();
+    const labels = [...toolbar.querySelectorAll("button")].map((button) =>
+      button.getAttribute("aria-label"),
+    );
+    expect(labels).not.toContain("AI");
+    expect(labels[0]).toBe("Bold");
     expect(document.body.textContent).not.toContain("Improve");
   });
 

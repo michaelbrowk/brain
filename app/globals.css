@@ -2227,6 +2227,55 @@ a.brain-share-url:hover {
   }
 }
 
+/* The visitor editor's banner: the conflict, the failed save, the refused
+   save, the revoked link. It is drawn inside .milkdown, in the same ink and
+   the same column as the visitor's own prose, so it needs an edge to read as
+   an object rather than as a paragraph of their text. The 5% tint on its own
+   measures 1.10:1 against paper, well under the 3:1 WCAG 1.4.11 asks of a
+   boundary that identifies a component; the rim and the panel fill are what
+   draw it, and they are the pair every other plate in the app uses
+   (components/oauth-consent.tsx). Layout stays on the element. */
+.brain-share-notice {
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+/* The name a link visitor gives before their first edit, on /share: a short
+   form on the page's own paper between the title and the text, beside the
+   password gate in the server render so it needs no editor bundle. Column
+   width and rhythm only; the registers, the field and the button are the
+   atoms they are everywhere else. */
+.brain-share-name {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 320px;
+  margin-bottom: 40px;
+}
+.brain-share-name-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  align-self: stretch;
+}
+.brain-share-name-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+/* The visitor's editor mounts over the read-only render. The server always
+   draws the render, so a browser without scripts reads the page as it is
+   and the moment before the chunk arrives shows the same, and it goes the
+   instant the island is in the DOM. A sibling combinator, not :has(): the
+   editor root is drawn immediately before the fallback, so the two say the
+   same thing, and share links get opened in old webviews and in Firefox ESR
+   where :has() is not there and the body would be drawn twice. Pinned by
+   app/globals-share.test.ts. */
+[data-share-editor] ~ [data-share-fallback] {
+  display: none;
+}
+
 /* Table handle actions (milkdown-generated DOM, styled from
    editor/table-block.css): the popover over a yellow handle is the regular
    material. Declared here because the material layer is the one place that

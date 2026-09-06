@@ -86,6 +86,15 @@ file:
 7. **One reading of a body.** `lib/internal-page-link.ts` is the only rule for
    what counts as a page link, for the editor and the store alike. Do not add
    a second parser or a second link regex.
+8. **No route under `/api/share-edit/` calls a raw Store leaf.** Every handler
+   there is written inside `withShareWrite` from `lib/share-write.ts`, which
+   owns the refusal order, and it reaches the Store only through the
+   share-aware leaves (`writeSharedPage`, `createSharedSubpage`,
+   `saveSharedAttachment`). A file under that prefix that imports `getStore`,
+   or exports a `DELETE` or `PATCH` handler, fails `lib/share-write.test.ts`.
+   Delete, move, rename, retitle, re-icon and reorder are absent for visitors,
+   not refused. Absence is the only form of that guarantee a refactor cannot
+   quietly undo.
 
 ## Conventions
 

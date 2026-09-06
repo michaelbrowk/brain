@@ -4366,9 +4366,11 @@ export function Shell({
     async ({
       password,
       expiresAt,
+      canEdit,
     }: {
       password?: string | null;
       expiresAt?: string | null;
+      canEdit?: boolean;
     }) => {
       if (!selectedId) throw new Error("no page selected");
       const rootId = selectedId;
@@ -4376,6 +4378,7 @@ export function Shell({
       if (!disclosed.public) {
         throw new Error("share settings require an active direct grant");
       }
+      const nextCanEdit = canEdit ?? disclosed.shareEdit;
 
       const response = await apiFetch(`/api/page/${rootId}/share`, {
         method: "POST",
@@ -4383,6 +4386,7 @@ export function Shell({
         body: JSON.stringify({
           enabled: true,
           expectedScopeToken: disclosed.scopeToken,
+          canEdit: nextCanEdit,
           ...(password !== undefined ? { password } : {}),
           ...(expiresAt !== undefined ? { expiresAt } : {}),
         }),
@@ -4402,6 +4406,7 @@ export function Shell({
       const readBack = await readShareScope(rootId);
       if (
         !readBack.public ||
+        readBack.shareEdit !== nextCanEdit ||
         (password !== undefined && readBack.shareLocked !== !!password) ||
         (expiresAt !== undefined && readBack.shareExpiresAt !== expiresAt)
       ) {
@@ -4424,6 +4429,24 @@ export function Shell({
     [showToast, updateShareSettings],
   );
 
+  const onSetShareEditable = useCallback(
+    async (canEdit: boolean) => {
+      // Either direction rotates shareVersion, so every visitor's cookie dies
+      // with the flip. The card cannot say this before the press without
+      // asserting it of a card nobody has touched, so it is said here, once
+      // the read-back has confirmed the flip landed, and it reads the password
+      // off that same authority rather than off the tree.
+      const readBack = await updateShareSettings({ canEdit });
+      showToast(
+        `${canEdit ? "Editing turned on" : "Editing turned off"}. Everyone ` +
+          `using the link will need to open it again${
+            readBack.shareLocked ? " with the password" : ""
+          }.`,
+      );
+    },
+    [showToast, updateShareSettings],
+  );
+
   const onPrepareShare = useCallback(
     async (rootId: string) => readShareScope(rootId),
     [readShareScope],
@@ -4432,10 +4455,12 @@ export function Shell({
   const onEnableShare = useCallback(
     async ({
       expectedScopeToken,
+      canEdit,
       password,
       expiresAt,
     }: {
       expectedScopeToken: string;
+      canEdit: boolean;
       password?: string | null;
       expiresAt?: string | null;
     }): Promise<ShareEnableResult> => {
@@ -4447,6 +4472,7 @@ export function Shell({
         body: JSON.stringify({
           enabled: true,
           expectedScopeToken,
+          canEdit,
           password,
           expiresAt,
         }),
@@ -4478,6 +4504,7 @@ export function Shell({
       const readBack = await readShareScope(rootId);
       if (
         !readBack.public ||
+        readBack.shareEdit !== !!canEdit ||
         (password !== undefined &&
           readBack.shareLocked !== !!password) ||
         (expiresAt !== undefined &&
@@ -4909,6 +4936,7 @@ export function Shell({
     onDisableShare,
     onCopyShareLink,
     onSetShareProtection,
+    onSetShareEditable,
     onOpenSharingSettings: () => openSettings("sharing"),
     onSetPageAppearance: setPageAppearance,
     onTogglePin,

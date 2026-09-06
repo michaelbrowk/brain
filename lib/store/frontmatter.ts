@@ -33,6 +33,7 @@ const MANAGED_PAGE_META_KEYS = new Set([
   "created",
   "updated",
   "updatedBy",
+  "updatedByName",
   "structureWriteBarrier",
   "status",
   "view",
@@ -48,6 +49,7 @@ const MANAGED_PAGE_META_KEYS = new Set([
   "sharePass",
   "shareVersion",
   "shareExpiresAt",
+  "shareEdit",
   "category",
   "pinned",
   "quickCaptureFingerprint",
@@ -79,7 +81,9 @@ const MANAGED_PAGE_META_KEYS = new Set([
 ]);
 
 /** Serialize metadata + markdown into an index.md with a stable key order
- *  (stable order keeps git diffs clean). */
+ *  (stable order keeps git diffs clean). Pure: the object handed in is read
+ *  and never written. Two Notion paths call this only to compute a canonical
+ *  body for a hash, on a meta they loaded from disk. */
 export function serializePage(meta: PageMeta, markdown: string): string {
   const ordered: Record<string, unknown> = { id: meta.id, title: meta.title };
   if (meta.icon) ordered.icon = meta.icon;
@@ -88,6 +92,16 @@ export function serializePage(meta: PageMeta, markdown: string): string {
   ordered.created = meta.created;
   ordered.updated = meta.updated;
   if (meta.updatedBy) ordered.updatedBy = meta.updatedBy;
+  // updatedByName is a link visitor's label and only ever travels beside
+  // updatedBy: "visitor". An owner or Claude write that follows a visitor's
+  // sets updatedBy and nothing else, so the stale name is left out of the
+  // file here, at the one point every writer passes through. Taking it out of
+  // the caller's object is a separate step, serializeLivePage below: this
+  // function is also called purely to compute a canonical body for a hash,
+  // and a hash helper must not reach into a meta somebody else is holding.
+  if (meta.updatedBy === "visitor" && meta.updatedByName) {
+    ordered.updatedByName = meta.updatedByName;
+  }
   if (meta.structureWriteBarrier) ordered.structureWriteBarrier = true;
   if (meta.status) ordered.status = meta.status;
   if (meta.view) ordered.view = meta.view;
@@ -105,6 +119,7 @@ export function serializePage(meta: PageMeta, markdown: string): string {
   if (meta.sharePass) ordered.sharePass = meta.sharePass;
   if (meta.shareVersion !== undefined) ordered.shareVersion = meta.shareVersion;
   if (meta.shareExpiresAt) ordered.shareExpiresAt = meta.shareExpiresAt;
+  if (meta.shareEdit) ordered.shareEdit = true;
   if (meta.category) ordered.category = meta.category;
   if (meta.pinned) ordered.pinned = true;
   if (meta.quickCaptureFingerprint)
@@ -162,4 +177,16 @@ export function serializePage(meta: PageMeta, markdown: string): string {
   }
   const body = canonicalPageMarkdown(markdown);
   return matter.stringify(body ? body + "\n" : "", ordered);
+}
+
+/** serializePage for a caller that is about to write the file and holds the
+ *  Store's live entry. The stale visitor label goes out of the object as well
+ *  as out of the file: the tree projection reads that object, so memory and
+ *  disk have to agree on the key. Every writer goes through this; the two
+ *  hash helpers do not, and must not. */
+export function serializeLivePage(meta: PageMeta, markdown: string): string {
+  if (meta.updatedBy !== "visitor" && meta.updatedByName !== undefined) {
+    delete meta.updatedByName;
+  }
+  return serializePage(meta, markdown);
 }

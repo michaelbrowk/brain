@@ -134,3 +134,33 @@ describe("read-only attachment rendering", () => {
     );
   });
 });
+
+describe("what a visitor-authored body may draw", () => {
+  it("drops the inline style attribute, which carries a remote url() the CSP style directives do not govern", () => {
+    const html = renderReadOnly(
+      '<div style="background:url(https://evil.test/x)">y</div>',
+    );
+    expect(html).not.toContain("style=");
+    expect(html).not.toContain("evil.test");
+  });
+
+  it("drops form, input and button, so no visitor can draw a credential prompt on a page other people load", () => {
+    const html = renderReadOnly(
+      '<form action="https://evil.test"><input name="p"><button>go</button></form>',
+    );
+    expect(html).not.toContain("<form");
+    expect(html).not.toContain("<input");
+    expect(html).not.toContain("<button");
+  });
+
+  it("leaves the owner's own formatting alone", () => {
+    const html = renderReadOnly(
+      "# Title\n\n**bold** and `code`\n\n- one\n- two\n\n| a | b |\n| - | - |\n| 1 | 2 |\n",
+    );
+    expect(html).toContain("<h1>");
+    expect(html).toContain("<strong>bold</strong>");
+    expect(html).toContain("<code>code</code>");
+    expect(html).toContain("<li>one</li>");
+    expect(html).toContain("<table>");
+  });
+});

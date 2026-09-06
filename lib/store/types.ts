@@ -15,6 +15,7 @@ export type MetadataExpected = Partial<{
   icon: string | null;
   cover: string | null;
   public: boolean | null;
+  shareEdit: boolean | null;
   shareLocked: boolean;
   shareExpiresAt: string | null;
   category: string | null;
@@ -62,9 +63,11 @@ export interface PageMeta {
   sharePass?: string; // bcrypt hash — the shared page asks for this password
   shareVersion?: number; // invalidates already-issued share cookies on rotation
   shareExpiresAt?: string; // optional ISO deadline; elapsed/malformed fails closed
+  shareEdit?: boolean; // root-only: the link may be written through as well as read
   category?: string; // free-text label, suggested from existing ones
   pinned?: boolean; // shown in the sidebar's Pinned section
-  updatedBy?: "me" | "claude"; // who wrote last (hub feed); absent on old pages
+  updatedBy?: "me" | "claude" | "visitor"; // who wrote last (hub feed); absent on old pages
+  updatedByName?: string; // display name a link visitor gave; only ever with updatedBy: "visitor"
   /** Internal stale-write fence. A synthesized structural move does not change
    *  Markdown, so body-only conflict merging stays disabled until a real body
    *  write establishes a new textual baseline. */
@@ -375,11 +378,13 @@ export interface TreeNode {
   public?: boolean;
   shareLocked?: boolean; // sharePass is set (the hash itself never leaves the server)
   shareExpiresAt?: string;
+  shareEdit?: boolean; // the link admits writes as well as reads
   category?: string;
   pinned?: boolean;
   created: string;
   updated: string;
-  updatedBy?: "me" | "claude";
+  updatedBy?: "me" | "claude" | "visitor";
+  updatedByName?: string;
   status?: string;
   view?: "board" | "sections";
   font?: "sans" | "serif" | "mono";
@@ -409,6 +414,7 @@ export interface ShareScopeSnapshot {
   scopeToken: string;
   public: boolean;
   shareLocked: boolean;
+  shareEdit: boolean;
   shareExpiresAt: string | null;
   shareVersion: number;
 }
@@ -434,6 +440,87 @@ export class ShareScopeConflictError extends Error {
   constructor(public snapshot: ShareScopeSnapshot) {
     super("share scope conflict");
     this.name = "ShareScopeConflictError";
+  }
+}
+
+/** Editable sharing signs a link that only makes sense against one exact
+ * origin: the CSRF check compares `Origin` to it, and without one every
+ * visitor write would be refused after the grant was already made. Refuse the
+ * grant instead, where the owner can see the refusal. */
+export class ShareEditOriginError extends Error {
+  constructor() {
+    super("editable sharing needs BRAIN_PUBLIC_ORIGIN");
+    this.name = "ShareEditOriginError";
+  }
+}
+
+export function isShareEditOrigin(e: unknown): e is ShareEditOriginError {
+  return e instanceof ShareEditOriginError;
+}
+
+/** A link visitor asked for one more subpage than MAX_SHARE_SUBTREE_PAGES
+ * allows under this root. The share is untouched and still writable; only the
+ * creation is refused, so the visitor route can say so without a 404 or a
+ * 500. */
+export class ShareSubtreeFullError extends Error {
+  constructor() {
+    super("shared subtree is full");
+    this.name = "ShareSubtreeFullError";
+  }
+}
+
+/** The attachment directory could not be made, opened or trusted during a
+ * link visitor's upload. Nothing was written and the share is unchanged. The
+ * owner's route reports this condition in the Notion importer's vocabulary
+ * because it shares a client with the importer; a visitor route has no
+ * importer, so it gets a name of its own. */
+export class AttachmentStoreUnavailableError extends Error {
+  constructor() {
+    super("attachment store is unavailable");
+    this.name = "AttachmentStoreUnavailableError";
+  }
+}
+
+/** A link visitor's upload would take the root past SHARE_ROOT_UPLOAD_BYTES.
+ * Nothing was written. The visitor route answers 413 root_quota. */
+export class ShareUploadQuotaError extends Error {
+  constructor() {
+    super("shared root upload quota exceeded");
+    this.name = "ShareUploadQuotaError";
+  }
+}
+
+/** A link visitor's write introduces a reference to an attachment this root
+ * does not own. Nothing was written. The visitor route answers 422
+ * attachment_not_yours. */
+export class ShareAttachmentScopeError extends Error {
+  constructor(readonly attachment: string) {
+    super("attachment is not in this shared root");
+    this.name = "ShareAttachmentScopeError";
+  }
+}
+
+/** A link visitor's write introduces a link or image destination whose scheme
+ * is not http, https or mailto. The owner's editor renders a visitor's href
+ * onto a real anchor, so `javascript:` and `data:` are refused before the
+ * bytes land rather than stripped afterwards. Nothing was written. The visitor
+ * route answers 422 unsafe_link. */
+export class ShareLinkSchemeError extends Error {
+  constructor(readonly destination: string) {
+    super("link scheme is not allowed in a shared page");
+    this.name = "ShareLinkSchemeError";
+  }
+}
+
+/** A link visitor's write introduces an image, video or other subresource on
+ * another origin. The owner reads the same body in their own editor and in the
+ * version-history preview, neither of which carries the /share policy, so the
+ * third party would learn the owner's IP, the time and the user agent. Nothing
+ * was written. The visitor route answers 422 remote_media. */
+export class ShareRemoteMediaError extends Error {
+  constructor(readonly reference: string) {
+    super("media from another site cannot be used in a shared page");
+    this.name = "ShareRemoteMediaError";
   }
 }
 
@@ -553,4 +640,32 @@ export function isAttachmentValidation(
   e: unknown,
 ): e is AttachmentValidationError {
   return e instanceof Error && e.name === "AttachmentValidationError";
+}
+
+export function isShareSubtreeFull(e: unknown): e is ShareSubtreeFullError {
+  return e instanceof Error && e.name === "ShareSubtreeFullError";
+}
+
+export function isAttachmentStoreUnavailable(
+  e: unknown,
+): e is AttachmentStoreUnavailableError {
+  return e instanceof Error && e.name === "AttachmentStoreUnavailableError";
+}
+
+export function isShareUploadQuota(e: unknown): e is ShareUploadQuotaError {
+  return e instanceof Error && e.name === "ShareUploadQuotaError";
+}
+
+export function isShareRemoteMedia(e: unknown): e is ShareRemoteMediaError {
+  return e instanceof Error && e.name === "ShareRemoteMediaError";
+}
+
+export function isShareLinkScheme(e: unknown): e is ShareLinkSchemeError {
+  return e instanceof Error && e.name === "ShareLinkSchemeError";
+}
+
+export function isShareAttachmentScope(
+  e: unknown,
+): e is ShareAttachmentScopeError {
+  return e instanceof Error && e.name === "ShareAttachmentScopeError";
 }

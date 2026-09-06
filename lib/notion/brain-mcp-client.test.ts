@@ -306,6 +306,41 @@ describe("Brain MCP pilot client", () => {
     await client.readPage("brain-page");
   });
 
+  it("decodes a page a link visitor wrote through an editable share", async () => {
+    const toolResult = (id: number, value: unknown) =>
+      json({
+        jsonrpc: "2.0",
+        id,
+        result: { content: [{ type: "text", text: JSON.stringify(value) }] },
+      });
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(initialized()[0])
+      .mockResolvedValueOnce(initialized()[1])
+      .mockResolvedValueOnce(
+        toolResult(2, {
+          meta: {
+            id: "brain-page",
+            title: "Synthetic",
+            order: "a0",
+            created: "2026-01-01T00:00:00.000Z",
+            updated: "2026-01-01T00:00:00.000Z",
+            public: true,
+            shareVersion: 2,
+            shareEdit: true,
+            updatedBy: "visitor",
+            updatedByName: "Ada",
+          },
+          markdown: "body",
+          rev: "rev-visitor",
+        }),
+      );
+    const client = new BrainMcpClient(clientOptions(fetchImpl));
+    await expect(client.readPage("brain-page")).resolves.toMatchObject({
+      meta: { shareEdit: true, updatedBy: "visitor", updatedByName: "Ada" },
+    });
+  });
+
   it("accepts legacy uppercase hyphenated Notion ids and canonicalizes them", async () => {
     const legacy = "11111111-1111-1111-1111-1111111111AA";
     const canonical = legacy.replaceAll("-", "").toLowerCase();

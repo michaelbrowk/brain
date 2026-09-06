@@ -6,14 +6,30 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Store } from "./store";
-import { serializePage } from "./frontmatter";
+import { serializeLivePage, serializePage } from "./frontmatter";
 import {
+  AttachmentStoreUnavailableError,
+  AttachmentValidationError,
   RevConflictError,
+  ShareAttachmentScopeError,
+  ShareLinkSchemeError,
+  ShareRemoteMediaError,
+  ShareSubtreeFullError,
+  ShareUploadQuotaError,
   type AttachmentInput,
   type ReserveNotionImportInput,
   type PageMeta,
   type TreeNode,
 } from "./types";
+import {
+  attachmentGrantsRoot,
+  readAttachmentScope,
+  recordBaseline,
+  recordUpload,
+  rootIsScoped,
+  rootUploadBytes,
+  writeAttachmentScope,
+} from "./attachment-scope";
 import {
   canonicalizeNotionImportTarget,
   notionConversionHash,
@@ -26,6 +42,14 @@ import {
 } from "./git";
 import { standalonePageRefOccurrences } from "../page-ref-nesting";
 import { latestStoreEventSequence } from "./events";
+import {
+  resolveShareAccess,
+  ShareAccessNotFoundError,
+} from "../share-access";
+import {
+  MAX_SHARE_SUBTREE_PAGES,
+  SHARE_ROOT_UPLOAD_BYTES,
+} from "./share-limits";
 
 const execFileAsync = promisify(execFile);
 const SOURCE_A = "a".repeat(64);
@@ -132,9 +156,9 @@ async function waitForHeadChange(
   return currentHead;
 }
 
-async function tmpStore() {
+async function tmpStore(options: { publicOrigin?: string | null } = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-"));
-  const s = new Store(root);
+  const s = new Store(root, options);
   await s.init();
   return { s, root };
 }
@@ -1183,6 +1207,7 @@ describe("Store", () => {
       s.configureShare(root.id, {
         enabled: true,
         expectedScopeToken: disclosed.scopeToken,
+        canEdit: false,
         sharePass: "hash",
         shareExpiresAt: "2026-08-03T12:00:00.000Z",
       }),
@@ -1249,6 +1274,7 @@ describe("Store", () => {
       s.configureShare(root.id, {
         enabled: true,
         expectedScopeToken: snapshot.scopeToken,
+        canEdit: false,
       }),
     ).rejects.toMatchObject({
       name: "ShareScopeConflictError",
@@ -1268,6 +1294,7 @@ describe("Store", () => {
       s.configureShare(root.id, {
         enabled: true,
         expectedScopeToken: blocked.scopeToken,
+        canEdit: false,
       }),
     ).rejects.toMatchObject({
       name: "ShareScopeConflictError",
@@ -1290,6 +1317,7 @@ describe("Store", () => {
       s.configureShare(root.id, {
         enabled: true,
         expectedScopeToken: existing.scopeToken,
+        canEdit: false,
         sharePass: "replacement-hash",
       }),
     ).resolves.toBeUndefined();
@@ -1313,10 +1341,12 @@ describe("Store", () => {
       s.configureShare(ancestor.id, {
         enabled: true,
         expectedScopeToken: ancestorScope.scopeToken,
+        canEdit: false,
       }),
       s.configureShare(descendant.id, {
         enabled: true,
         expectedScopeToken: descendantScope.scopeToken,
+        canEdit: false,
       }),
     ]);
 
@@ -1347,6 +1377,7 @@ describe("Store", () => {
     await s.configureShare(page.id, {
       enabled: true,
       expectedScopeToken: disclosed.scopeToken,
+      canEdit: false,
       sharePass: "protected-hash",
       shareExpiresAt: "2026-08-03T12:00:00.000Z",
     });
@@ -1376,6 +1407,7 @@ describe("Store", () => {
     await s.configureShare(page.id, {
       enabled: true,
       expectedScopeToken: disclosed.scopeToken,
+      canEdit: false,
     });
 
     await expect(s.readPage(page.id)).resolves.toMatchObject({
@@ -1394,6 +1426,7 @@ describe("Store", () => {
     await s.configureShare(root.id, {
       enabled: true,
       expectedScopeToken: disclosed.scopeToken,
+      canEdit: false,
       sharePass: null,
       shareExpiresAt: null,
     });
@@ -1433,6 +1466,33 @@ describe("Store", () => {
     expect((await s.readPage(child.id)).meta.public).toBeUndefined();
     expect((await s.readPage(child.id)).meta.sharePass).toBeUndefined();
     expect((await s.readPage(child.id)).meta.shareExpiresAt).toBeUndefined();
+  });
+
+  it("clears the edit grant when a shared subtree is deleted, and restore does not bring it back", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const parent = await s.createPage(null, "Parent");
+    await s.createPage(parent.id, "Child");
+    const disclosed = await s.readShareScope(parent.id);
+    await s.configureShare(parent.id, {
+      enabled: true,
+      expectedScopeToken: disclosed.scopeToken,
+      canEdit: true,
+    });
+    expect((await s.readPage(parent.id)).meta.shareEdit).toBe(true);
+
+    await s.deletePage(parent.id);
+
+    const deleted = (await s.readPage(parent.id)).meta;
+    expect(deleted.public).toBeUndefined();
+    expect(deleted.shareEdit).toBeUndefined();
+    expect(deleted.shareVersion).toBe(2);
+
+    await s.restorePage(parent.id);
+
+    const restored = (await s.readPage(parent.id)).meta;
+    expect(restored.public).toBeUndefined();
+    expect(restored.shareEdit).toBeUndefined();
+    expect((await s.readShareScope(parent.id)).shareEdit).toBe(false);
   });
 
   it("checks subtree membership without exposing mutable tree state", async () => {
@@ -8656,5 +8716,1835 @@ describe("move a page with children", () => {
     const aNode = bNode.children.find((c) => c.title === "A")!;
     expect(aNode.children[0].title).toBe("Child");
     expect(aNode.children[0].children[0].title).toBe("Grand");
+  });
+});
+
+describe("editable share authority", () => {
+  it("persists shareEdit, exposes it on the snapshot and the tree, and rotates on the flip", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const root = await s.createPage(null, "Shared root");
+    const before = await s.readShareScope(root.id);
+    await s.configureShare(root.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+    });
+
+    const enabled = await s.readShareScope(root.id);
+    expect(enabled.shareEdit).toBe(true);
+    expect(enabled.public).toBe(true);
+    expect(enabled.shareVersion).toBe(1);
+    expect((await s.readPage(root.id)).meta.shareEdit).toBe(true);
+
+    const node = s.getTree().find((n: TreeNode) => n.id === root.id);
+    expect(node?.shareEdit).toBe(true);
+
+    await s.configureShare(root.id, {
+      enabled: true,
+      expectedScopeToken: enabled.scopeToken,
+      canEdit: false,
+    });
+    const off = await s.readShareScope(root.id);
+    expect(off.shareEdit).toBe(false);
+    expect(off.shareVersion).toBe(2);
+    expect(off.public).toBe(true);
+  });
+
+  it("clears shareEdit on disable, unlike the password and the deadline", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const root = await s.createPage(null, "Shared root");
+    const before = await s.readShareScope(root.id);
+    await s.configureShare(root.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+      sharePass: "bcrypt-hash-stand-in",
+    });
+    await s.configureShare(root.id, { enabled: false });
+
+    const meta = (await s.readPage(root.id)).meta;
+    expect(meta.shareEdit).toBeUndefined();
+    expect(meta.sharePass).toBe("bcrypt-hash-stand-in");
+    expect(meta.public).toBeUndefined();
+  });
+
+  it("refuses an enable that does not state canEdit", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const root = await s.createPage(null, "Shared root");
+    const before = await s.readShareScope(root.id);
+    await expect(
+      s.configureShare(root.id, {
+        enabled: true,
+        expectedScopeToken: before.scopeToken,
+      } as unknown as Parameters<typeof s.configureShare>[1]),
+    ).rejects.toThrow("share enable requires an explicit canEdit");
+  });
+
+  it("clears shareEdit through the legacy public:false revoke and rotates", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const root = await s.createPage(null, "Shared root");
+    const before = await s.readShareScope(root.id);
+    await s.configureShare(root.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+    });
+    await s.updateMeta(root.id, { public: false });
+
+    const meta = (await s.readPage(root.id)).meta;
+    expect(meta.shareEdit).toBeUndefined();
+    expect(meta.public).toBeUndefined();
+    expect(meta.shareVersion).toBe(2);
+  });
+
+  it("refuses to grant editing without a configured public origin", async () => {
+    const { s } = await tmpStore(); // tmpStore builds a Store with no publicOrigin
+    const root = await s.createPage(null, "Shared root");
+    const before = await s.readShareScope(root.id);
+    await expect(
+      s.configureShare(root.id, {
+        enabled: true,
+        expectedScopeToken: before.scopeToken,
+        canEdit: true,
+      }),
+    ).rejects.toThrow("editable sharing needs BRAIN_PUBLIC_ORIGIN");
+  });
+});
+
+describe("share-aware Store leaves", () => {
+  const PNG = new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0,
+  ]);
+  const shot = (): AttachmentInput => ({
+    data: PNG,
+    originalName: "shot.png",
+    mimeType: "image/png",
+  });
+
+  async function editableRoot(shareExpiresAt?: string) {
+    const { s, root } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const page = await s.createPage(null, "Shared root");
+    const child = await s.createPage(page.id, "Child");
+    const before = await s.readShareScope(page.id);
+    await s.configureShare(page.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+      ...(shareExpiresAt === undefined ? {} : { shareExpiresAt }),
+    });
+    const version = (await s.readShareScope(page.id)).shareVersion;
+    return { s, root, rootId: page.id, childId: child.id, version };
+  }
+
+  /** The frontmatter as the file holds it. `resolve` is how every other test
+   *  in this file reaches a page folder. */
+  const readIndexRaw = (s: Store, id: string) =>
+    fs.readFile(path.join(s.resolve(id), "index.md"), "utf8");
+
+  /** What the lock-free guard hands a request: the version it authorised
+   *  against, read outside the writer queue. The race tests carry this value
+   *  into writes queued behind an owner action, which is the exact order the
+   *  leaves exist to refuse. */
+  /** A write parked in the queue rejects whenever the queue reaches it, which
+   *  can be before the test has attached its assertion. Node would report that
+   *  as an unhandled rejection. This marks the rejection as expected and
+   *  hands back the same promise, so every assertion below still sees the
+   *  real settled state. */
+  const queued = <T,>(p: Promise<T>): Promise<T> => {
+    p.catch(() => undefined);
+    return p;
+  };
+
+  async function authorisedVersion(
+    s: Store,
+    rootId: string,
+    targetId: string,
+  ): Promise<number> {
+    const access = await resolveShareAccess(s, { rootId, targetId });
+    if (access.kind !== "granted") throw new Error("expected a granted share");
+    return access.shareVersion;
+  }
+
+  it("writes the body and stamps the visitor and their name", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const written = await s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: "Corrected by a stranger",
+      visitorName: "Ada",
+    });
+
+    expect(written.markdown).toBe("Corrected by a stranger");
+    const meta = (await s.readPage(childId)).meta;
+    expect(meta.updatedBy).toBe("visitor");
+    expect(meta.updatedByName).toBe("Ada");
+    const raw = await readIndexRaw(s, childId);
+    expect(raw).toContain("updatedBy: visitor");
+    expect(raw).toContain("updatedByName: Ada");
+  });
+
+  it("keeps the rev contract: a stale rev conflicts, a matching body does not", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const first = await s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: "one",
+      visitorName: "Ada",
+    });
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: "two",
+        expectedRev: "0".repeat(12),
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(RevConflictError);
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: "two",
+        expectedRev: "0".repeat(12),
+        expectedMarkdown: "one",
+        visitorName: "Ada",
+      }),
+    ).resolves.toMatchObject({ markdown: "two" });
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: "three",
+        expectedRev: first.rev,
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(RevConflictError);
+  });
+
+  it("treats an unchanged body as no edit: no stamp, no new rev", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const owner = await s.writePage(
+      childId,
+      "as the owner left it",
+      undefined,
+      "me",
+    );
+    const again = await s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: "as the owner left it",
+      visitorName: "Ada",
+    });
+    expect(again.rev).toBe(owner.rev);
+    const meta = (await s.readPage(childId)).meta;
+    expect(meta.updatedBy).toBe("me");
+    expect(meta.updatedByName).toBeUndefined();
+  });
+
+  it("refuses a read-only link even though the root is public", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const page = await s.createPage(null, "Read only");
+    const child = await s.createPage(page.id, "Child");
+    const before = await s.readShareScope(page.id);
+    await s.configureShare(page.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: false,
+    });
+    const version = await authorisedVersion(s, page.id, child.id);
+    await expect(
+      s.writeSharedPage({
+        rootId: page.id,
+        targetId: child.id,
+        shareVersion: version,
+        markdown: "nope",
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+    expect((await s.readPage(child.id)).markdown).toBe("");
+  });
+
+  it(
+    "404s every write queued behind an owner action and lands the one queued ahead of it",
+    async () => {
+      type Ids = {
+        rootId: string;
+        childId: string;
+        awayId: string;
+        scopeToken: string;
+      };
+      const cases: {
+        name: string;
+        act: (s: Store, ids: Ids) => Promise<unknown>;
+        /** The action leaves the root public and readable, so a re-check that
+         *  looked at `public` alone would wave the queued writes through. */
+        stillReadable?: true;
+      }[] = [
+        {
+          name: "configureShare({ enabled: false })",
+          act: (s, { rootId }) => s.configureShare(rootId, { enabled: false }),
+        },
+        {
+          name: "configureShare({ canEdit: false })",
+          act: (s, { rootId, scopeToken }) =>
+            s.configureShare(rootId, {
+              enabled: true,
+              expectedScopeToken: scopeToken,
+              canEdit: false,
+            }),
+          stillReadable: true,
+        },
+        {
+          name: "updateMeta({ public: false })",
+          act: (s, { rootId }) => s.updateMeta(rootId, { public: false }),
+        },
+        {
+          name: "deletePage(root)",
+          act: (s, { rootId }) => s.deletePage(rootId),
+        },
+        {
+          name: "deletePage(target)",
+          act: (s, { childId }) => s.deletePage(childId),
+        },
+        {
+          name: "movePage(target, out of the subtree)",
+          act: (s, { childId, awayId }) => s.movePage(childId, awayId),
+        },
+      ];
+      for (const { name, act, stillReadable } of cases) {
+        const { s, rootId, childId } = await editableRoot();
+        const away = await s.createPage(null, "Away");
+        const scopeToken = (await s.readShareScope(rootId)).scopeToken;
+        const version = await authorisedVersion(s, rootId, childId);
+        const write = (n: number) =>
+          s.writeSharedPage({
+            rootId,
+            targetId: childId,
+            shareVersion: version,
+            markdown: `late ${n}`,
+            visitorName: "Ada",
+          });
+
+        // Queue position is the race. Nothing is awaited until every call is
+        // in the FIFO chain, so each write's place relative to the owner's
+        // action is fixed by construction, not by scheduler luck: one write
+        // sits ahead of the action, five sit behind it.
+        const ahead = queued(write(0));
+        const acted = queued(
+          act(s, { rootId, childId, awayId: away.id, scopeToken }),
+        );
+        const behind = Array.from({ length: 5 }, (_, n) =>
+          queued(write(n + 1)),
+        );
+
+        await expect(ahead, name).resolves.toMatchObject({ markdown: "late 0" });
+        await acted;
+        if (stillReadable) {
+          const read = await resolveShareAccess(s, { rootId, targetId: childId });
+          expect(read.kind, name).toBe("granted");
+        }
+        for (const late of behind) {
+          await expect(late, name).rejects.toBeInstanceOf(
+            ShareAccessNotFoundError,
+          );
+        }
+        const raw = await readIndexRaw(s, childId);
+        expect(raw, name).toContain("late 0");
+        expect(raw, name).not.toMatch(/late [1-5]/);
+      }
+    },
+    30_000,
+  );
+
+  it("404s a write authorised before the deadline that lands after it", async () => {
+    const start = Date.now();
+    const { s, rootId, childId } = await editableRoot(
+      new Date(start + 60_000).toISOString(),
+    );
+    const version = await authorisedVersion(s, rootId, childId);
+    const write = (markdown: string) =>
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown,
+        visitorName: "Ada",
+      });
+    await expect(write("on time")).resolves.toMatchObject({
+      markdown: "on time",
+    });
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(start + 120_000);
+      await expect(write("too late")).rejects.toBeInstanceOf(
+        ShareAccessNotFoundError,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+    const raw = await readIndexRaw(s, childId);
+    expect(raw).toContain("on time");
+    expect(raw).not.toContain("too late");
+  });
+
+  it("404s a stale shareVersion, including the one a re-enable retires", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const write = (shareVersion: number, markdown: string) =>
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion,
+        markdown,
+        visitorName: "Ada",
+      });
+    for (const stale of [version - 1, version + 1]) {
+      await expect(write(stale, "nope")).rejects.toBeInstanceOf(
+        ShareAccessNotFoundError,
+      );
+    }
+    await s.configureShare(rootId, { enabled: false });
+    const scope = await s.readShareScope(rootId);
+    await s.configureShare(rootId, {
+      enabled: true,
+      expectedScopeToken: scope.scopeToken,
+      canEdit: true,
+    });
+    const fresh = (await s.readShareScope(rootId)).shareVersion;
+    expect(fresh).toBeGreaterThan(version);
+    await expect(write(version, "old link")).rejects.toBeInstanceOf(
+      ShareAccessNotFoundError,
+    );
+    await expect(write(fresh, "new link")).resolves.toMatchObject({
+      markdown: "new link",
+    });
+  });
+
+  /** The authority re-check reads `public`, `shareEdit`, the expiry and the
+   *  version. It never reads `sharePass`, so a share that gains a password is
+   *  protected by the version alone: `configureShare` rotates whenever the
+   *  password changes, and the rotation is what retires the tokens minted
+   *  while the root was open. Take the rotation out of that predicate and
+   *  this test is the one that says so. */
+  it("retires an edit token through the version when the root gains a password", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const write = (shareVersion: number, markdown: string) =>
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion,
+        markdown,
+        visitorName: "Ada",
+      });
+    await expect(write(version, "before the lock")).resolves.toMatchObject({
+      markdown: "before the lock",
+    });
+
+    const scope = await s.readShareScope(rootId);
+    await s.configureShare(rootId, {
+      enabled: true,
+      expectedScopeToken: scope.scopeToken,
+      canEdit: true,
+      sharePass: "a-hash-that-is-not-a-secret",
+    });
+
+    const locked = await s.readShareScope(rootId);
+    expect(locked.shareLocked).toBe(true);
+    expect(locked.shareEdit).toBe(true);
+    expect(locked.shareVersion).toBeGreaterThan(version);
+    await expect(write(version, "after the lock")).rejects.toBeInstanceOf(
+      ShareAccessNotFoundError,
+    );
+    const raw = await readIndexRaw(s, childId);
+    expect(raw).toContain("before the lock");
+    expect(raw).not.toContain("after the lock");
+  });
+
+  it("creates a subpage that inherits the share and carries no share key", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const made = await s.createSharedSubpage({
+      rootId,
+      parentId: childId,
+      shareVersion: version,
+      title: "A note from a visitor",
+      visitorName: "Ada",
+    });
+
+    expect(made.public).toBeUndefined();
+    expect(made.shareEdit).toBeUndefined();
+    expect(made.updatedBy).toBe("visitor");
+    expect(made.updatedByName).toBe("Ada");
+    expect(s.isWithinSubtree(rootId, made.id)).toBe(true);
+    expect(s.readDirectChildren(childId).map((c) => c.id)).toEqual([made.id]);
+    const raw = await readIndexRaw(s, made.id);
+    expect(raw).toContain("updatedBy: visitor");
+    expect(raw).toContain("updatedByName: Ada");
+    expect(raw).not.toMatch(/^(public|shareEdit|shareVersion):/m);
+  });
+
+  it("refuses a subpage under a parent outside the subtree or in the trash", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const outside = await s.createPage(null, "Outside");
+    await expect(
+      s.createSharedSubpage({
+        rootId,
+        parentId: outside.id,
+        shareVersion: version,
+        title: "nope",
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+    await s.deletePage(childId);
+    await expect(
+      s.createSharedSubpage({
+        rootId,
+        parentId: childId,
+        shareVersion: version,
+        title: "nope",
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+  });
+
+  it(
+    "stops at the descendant ceiling and counts only live pages",
+    async () => {
+      const { s, rootId, childId, version } = await editableRoot();
+      const fillers: string[] = [];
+      for (let i = 0; i < MAX_SHARE_SUBTREE_PAGES - 2; i += 1) {
+        fillers.push((await s.createPage(rootId, `Filler ${i}`)).id);
+      }
+      const make = (title: string) =>
+        s.createSharedSubpage({
+          rootId,
+          parentId: childId,
+          shareVersion: version,
+          title,
+          visitorName: "Ada",
+        });
+      // child + 198 fillers = 199 live descendants: one seat left.
+      await expect(make("the last seat")).resolves.toMatchObject({
+        title: "the last seat",
+      });
+      await expect(make("one too many")).rejects.toBeInstanceOf(
+        ShareSubtreeFullError,
+      );
+      await s.deletePage(fillers[0]);
+      await expect(make("after a trash")).resolves.toMatchObject({
+        title: "after a trash",
+      });
+    },
+    60_000,
+  );
+
+  it("saves an attachment with nothing relaxed and refuses one on a revoked root", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const saved = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: shot(),
+    });
+    expect(saved.url).toMatch(/^\/_attachments-v2\/[A-Za-z0-9_-]{12}\.png$/);
+    expect(saved).toMatchObject({
+      name: "shot.png",
+      size: PNG.byteLength,
+      type: "image/png",
+    });
+    await expect(
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: {
+          data: new Uint8Array([1, 2, 3]),
+          originalName: "shot.png",
+          mimeType: "image/png",
+        },
+      }),
+    ).rejects.toBeInstanceOf(AttachmentValidationError);
+
+    await s.configureShare(rootId, { enabled: false });
+    await expect(
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: shot(),
+      }),
+    ).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+  });
+
+  it("404s a subpage and an upload queued behind a revoke and leaves nothing behind", async () => {
+    const { s, root, rootId, childId } = await editableRoot();
+    const version = await authorisedVersion(s, rootId, childId);
+
+    const revoked = queued(s.configureShare(rootId, { enabled: false }));
+    const create = queued(
+      s.createSharedSubpage({
+        rootId,
+        parentId: childId,
+        shareVersion: version,
+        title: "late note",
+        visitorName: "Ada",
+      }),
+    );
+    const upload = queued(
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: shot(),
+      }),
+    );
+
+    await revoked;
+    await expect(create).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+    await expect(upload).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+    expect(s.readDirectChildren(childId)).toEqual([]);
+    await expect(
+      fs.readdir(path.join(s.resolve(childId))),
+    ).resolves.toEqual(["index.md"]);
+    await expect(
+      fs.readdir(path.join(root, "_attachments")).catch(() => []),
+    ).resolves.toEqual([]);
+  });
+
+  it("names a store failure on a visitor upload without the importer's vocabulary", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const attachments = path.join(root, "_attachments");
+    await fs.rm(attachments, { recursive: true, force: true });
+    await fs.writeFile(attachments, "not a directory");
+    await expect(
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: shot(),
+      }),
+    ).rejects.toBeInstanceOf(AttachmentStoreUnavailableError);
+    await expect(
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: {
+          data: new Uint8Array([1, 2, 3]),
+          originalName: "shot.png",
+          mimeType: "image/png",
+        },
+      }),
+    ).rejects.toBeInstanceOf(AttachmentValidationError);
+  });
+
+  it("serializes updatedByName only beside updatedBy: visitor", () => {
+    const base = {
+      id: "p1",
+      title: "T",
+      order: "a0",
+      created: "2026-01-01T00:00:00.000Z",
+      updated: "2026-01-01T00:00:00.000Z",
+    };
+    expect(
+      serializePage({ ...base, updatedBy: "visitor", updatedByName: "Ada" }, ""),
+    ).toContain("updatedByName: Ada");
+    for (const updatedBy of ["me", "claude", undefined] as const) {
+      const meta: PageMeta = { ...base, updatedBy, updatedByName: "Ada" };
+      expect(serializePage(meta, "")).not.toContain("updatedByName");
+      // serializePage is pure; taking the stale name out of the live entry is
+      // serializeLivePage's job, which every writer goes through.
+      expect(meta.updatedByName).toBe("Ada");
+      expect(serializeLivePage(meta, "")).not.toContain("updatedByName");
+      expect(meta.updatedByName).toBeUndefined();
+    }
+  });
+
+  it("drops the visitor name when an owner writes next, in the file and in the tree", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const visitorWrite = (markdown: string) =>
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown,
+        visitorName: "Ada",
+      });
+    const childNode = (): TreeNode => {
+      const find = (nodes: TreeNode[]): TreeNode | undefined => {
+        for (const node of nodes) {
+          if (node.id === childId) return node;
+          const nested = find(node.children);
+          if (nested) return nested;
+        }
+        return undefined;
+      };
+      const node = find(s.getTree());
+      if (!node) throw new Error("child missing from tree");
+      return node;
+    };
+    const expectOwner = async (by: "me" | "claude") => {
+      const raw = await readIndexRaw(s, childId);
+      expect(raw).toContain(`updatedBy: ${by}`);
+      expect(raw).not.toContain("updatedByName");
+      expect(childNode().updatedBy).toBe(by);
+      expect(childNode().updatedByName).toBeUndefined();
+      expect((await s.readPage(childId)).meta.updatedByName).toBeUndefined();
+    };
+
+    await visitorWrite("from Ada");
+    expect(childNode()).toMatchObject({
+      updatedBy: "visitor",
+      updatedByName: "Ada",
+    });
+    await s.writePage(childId, "owner rewrite", undefined, "me");
+    await expectOwner("me");
+
+    await visitorWrite("from Ada again");
+    await s.appendPage(childId, "owner appendix", "claude");
+    await expectOwner("claude");
+
+    await visitorWrite("from Ada once more");
+    await s.updateMeta(childId, { title: "Renamed", by: "me" });
+    await expectOwner("me");
+  });
+
+  const attachmentName = (url: string) => url.split("/").pop()!;
+
+  it("refuses a write that names an attachment this root does not own", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const mine = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: { ...shot(), originalName: "mine.png" },
+    });
+    const foreign = await s.saveAttachment({
+      ...shot(),
+      originalName: "private.png",
+    });
+
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${mine.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
+
+    const refused = s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: `![](${mine.url})\n\n![](${foreign.url})`,
+      visitorName: "Ada",
+    });
+    await expect(refused).rejects.toBeInstanceOf(ShareAttachmentScopeError);
+    await expect(refused).rejects.toMatchObject({
+      attachment: attachmentName(foreign.url),
+    });
+    expect((await s.readPage(childId)).markdown).toBe(`![](${mine.url})`);
+  });
+
+  it("refuses a write whose link carries a scheme the owner's editor would run", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    // The owner's editor is not sanitized, so a visitor's javascript: href
+    // becomes a live anchor in the owner's DOM at /p/. Refused, not stripped:
+    // a silent rewrite would hand the visitor back a body they did not write
+    // and put the editor's draft out of step with the file.
+    for (const href of [
+      "javascript:alert(1)",
+      "data:text/html,<script>alert(1)</script>",
+      "javascript&#58;alert(1)",
+    ]) {
+      const refused = s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `[read this](${href})`,
+        visitorName: "Ada",
+      });
+      await expect(refused, href).rejects.toBeInstanceOf(ShareLinkSchemeError);
+      await expect(refused, href).rejects.toMatchObject({ destination: href });
+    }
+    expect((await s.readPage(childId)).markdown).toBe("");
+
+    // The three a note has a reason to carry still land.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: "[a](https://brain.test) [b](mailto:ada@brain.test) [c](/p/x)",
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("refuses a write that names media on another site, which would beacon the owner", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    // The /share policy blocks a remote image for other visitors. The owner
+    // reads the same body in their own editor and in the history preview,
+    // neither of which carries that policy, so the refusal has to be here.
+    for (const reference of [
+      "![](https://example.invalid/x.png)",
+      "![](//example.invalid/x.png)",
+      '<img src="https://example.invalid/x.png">',
+      '<video src="https://example.invalid/v.mp4"></video>',
+    ]) {
+      const refused = s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: reference,
+        visitorName: "Ada",
+      });
+      await expect(refused, reference).rejects.toBeInstanceOf(
+        ShareRemoteMediaError,
+      );
+    }
+    expect((await s.readPage(childId)).markdown).toBe("");
+
+    // A link to another site is not a fetch, and an uploaded image is local.
+    const mine = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: { ...shot(), originalName: "mine.png" },
+    });
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `[read this](https://example.invalid/page)\n\n![](${mine.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("refuses a backslash standing in for the slash that starts an authority", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const BS = String.fromCharCode(92);
+    // A browser reads these as //evil.test and fetches from it. Only the
+    // Markdown form below survives CommonMark unescaped; the other two reach
+    // the owner through raw HTML, which the history preview renders as markup.
+    for (const body of [
+      `![](/${BS}evil.test/x.gif)`,
+      `<img src="/${BS}evil.test/x.gif">`,
+      `<img src="${BS}${BS}evil.test/x.gif">`,
+      `<img src="${BS}/evil.test/x.gif">`,
+      "![](///evil.test/x.gif)",
+      "![](/&#92;evil.test/x.gif)",
+    ]) {
+      await expect(
+        s.writeSharedPage({
+          rootId,
+          targetId: childId,
+          shareVersion: version,
+          markdown: body,
+          visitorName: "Ada",
+        }),
+        body,
+      ).rejects.toBeInstanceOf(ShareRemoteMediaError);
+    }
+    expect((await s.readPage(childId)).markdown).toBe("");
+  });
+
+  it("keeps a visitor's own upload usable when they move it between pages", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const second = await s.createPage(rootId, "Second");
+    const mine = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: { ...shot(), originalName: "mine.png" },
+    });
+    const write = (targetId: string, markdown: string) =>
+      s.writeSharedPage({
+        rootId,
+        targetId,
+        shareVersion: version,
+        markdown,
+        visitorName: "Ada",
+      });
+
+    await write(childId, `![](${mine.url})`);
+    // The cut, saved on its own: nothing under the root shows the image now.
+    await write(childId, "moved it");
+    // The paste. An upload's home root grants it with no live page behind it,
+    // so the live-reference rule that bites an owner's image does not bite
+    // the visitor's own upload.
+    await expect(write(second.id, `![](${mine.url})`)).resolves.toBeTruthy();
+  });
+
+  it("diffs against index.md, not the visitor's baseMarkdown", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const foreign = await s.saveAttachment({
+      ...shot(),
+      originalName: "private.png",
+    });
+    const current = await s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: "plain text",
+      visitorName: "Ada",
+    });
+
+    // A fabricated baseMarkdown claiming the reference was already there, with
+    // a rev that matches. writePage ignores expectedMarkdown when the rev is
+    // current, and so must the diff.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${foreign.url})`,
+        expectedRev: current.rev,
+        expectedMarkdown: `![](${foreign.url})`,
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(ShareAttachmentScopeError);
+    expect((await s.readPage(childId)).markdown).toBe("plain text");
+  });
+
+  it("keeps a reference the page already held, wherever it came from", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    await s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: "first visit builds the baseline",
+      visitorName: "Ada",
+    });
+    // The owner adds an attachment after the baseline exists. A visitor who
+    // edits around it introduces nothing, so the diff has nothing to refuse.
+    const later = await s.saveAttachment({
+      ...shot(),
+      originalName: "later.png",
+    });
+    await s.writePage(childId, `![](${later.url})`, undefined, "me");
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${later.url})\n\nand a caption`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toMatchObject({ markdown: `![](${later.url})\n\nand a caption` });
+  });
+
+  it("refuses an upload past the per-root quota and allows one that lands on it", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const scope = await readAttachmentScope(root);
+    // Pre-load the ledger instead of uploading 200 MiB: one filler entry
+    // leaves exactly one PNG of room.
+    await writeAttachmentScope(
+      root,
+      recordUpload(
+        recordBaseline(scope, rootId, []),
+        "filler000001.bin",
+        rootId,
+        SHARE_ROOT_UPLOAD_BYTES - PNG.byteLength,
+        "2026-09-05T10:00:00.000Z",
+      ),
+    );
+    const upload = () =>
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: shot(),
+      });
+    const landed = await upload();
+    await expect(upload()).rejects.toBeInstanceOf(ShareUploadQuotaError);
+
+    const after = await readAttachmentScope(root);
+    expect(Object.keys(after.uploads).sort()).toEqual(
+      ["filler000001.bin", attachmentName(landed.url)].sort(),
+    );
+    await expect(fs.readdir(path.join(root, "_attachments"))).resolves.toEqual(
+      [attachmentName(landed.url), "scope.json"].sort(),
+    );
+  });
+
+  it("frees a root's quota when the sweep collects an unreferenced visitor upload", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const upload = () =>
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: shot(),
+      });
+    const orphan = await upload();
+    // Pre-load the ledger so the orphan's bytes are the only room there was.
+    await writeAttachmentScope(
+      root,
+      recordUpload(
+        await readAttachmentScope(root),
+        "filler000001.bin",
+        rootId,
+        SHARE_ROOT_UPLOAD_BYTES - PNG.byteLength,
+        "2026-09-05T10:00:00.000Z",
+      ),
+    );
+    await expect(upload()).rejects.toBeInstanceOf(ShareUploadQuotaError);
+
+    // Nobody referenced the orphan. Age it past the grace window and purge
+    // something, which is what runs the sweep.
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await fs.utimes(
+      path.join(root, "_attachments", attachmentName(orphan.url)),
+      old,
+      old,
+    );
+    const doomed = await s.createPage(null, "Doomed");
+    await s.deletePage(doomed.id);
+    await s.purgePage(doomed.id);
+
+    const after = await readAttachmentScope(root);
+    expect(after.uploads[attachmentName(orphan.url)]).toBeUndefined();
+    expect(rootUploadBytes(after, rootId)).toBe(
+      SHARE_ROOT_UPLOAD_BYTES - PNG.byteLength,
+    );
+    await expect(upload()).resolves.toMatchObject({ size: PNG.byteLength });
+  });
+
+  it("says so at startup when a root allows edits and no public origin is configured", async () => {
+    const { s, root, rootId } = await editableRoot();
+    expect((await s.readPage(rootId)).meta.shareEdit).toBe(true);
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    // The same notes folder, opened by a process whose BRAIN_PUBLIC_ORIGIN
+    // was removed or given a trailing slash after the grant. configureShare
+    // cannot see that happen; every visitor write from here is a 403 the
+    // owner is given no reason for.
+    const reopened = new Store(root, { publicOrigin: null });
+    await reopened.init();
+
+    expect(logged).toHaveBeenCalledTimes(1);
+    expect(String(logged.mock.calls[0]?.[0])).toContain("BRAIN_PUBLIC_ORIGIN");
+
+    // A folder with no editable share says nothing.
+    logged.mockClear();
+    await reopened.updateMeta(rootId, { public: false, by: "me" });
+    const quiet = new Store(root, { publicOrigin: null });
+    await quiet.init();
+    expect(logged).not.toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it("gives a full root its bytes back without waiting for an owner action", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const upload = () =>
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: shot(),
+      });
+    const orphan = await upload();
+    await writeAttachmentScope(
+      root,
+      recordUpload(
+        await readAttachmentScope(root),
+        "filler000001.bin",
+        rootId,
+        SHARE_ROOT_UPLOAD_BYTES - PNG.byteLength,
+        "2026-09-05T10:00:00.000Z",
+      ),
+    );
+    // Nobody referenced the orphan, and nobody is going to: the visitor who
+    // uploaded it closed the tab. Age it past the sweep's grace.
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await fs.utimes(
+      path.join(root, "_attachments", attachmentName(orphan.url)),
+      old,
+      old,
+    );
+
+    // No purge, no empty-trash, no owner at all. The refusal itself pays for
+    // the walk, once, and the next visitor's upload lands.
+    await expect(upload()).resolves.toMatchObject({ size: PNG.byteLength });
+    const after = await readAttachmentScope(root);
+    expect(after.uploads[attachmentName(orphan.url)]).toBeUndefined();
+  });
+
+  it("builds the baseline once, on the first visitor write, and grants nothing else", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const inBody = await s.saveAttachment({
+      ...shot(),
+      originalName: "already-here.png",
+    });
+    const asCover = await s.saveAttachment({
+      ...shot(),
+      originalName: "cover.png",
+    });
+    const inTrash = await s.saveAttachment({
+      ...shot(),
+      originalName: "trashed.png",
+    });
+    await s.writePage(childId, `![](${inBody.url})`, undefined, "me");
+    await s.updateMeta(rootId, { cover: asCover.url, by: "me" });
+    const trashed = await s.createPage(rootId, "Trashed", {
+      markdown: `![](${inTrash.url})`,
+    });
+    await s.deletePage(trashed.id);
+    expect(rootIsScoped(await readAttachmentScope(root), rootId)).toBe(false);
+
+    await s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: `![](${inBody.url})\n\nand a note`,
+      visitorName: "Ada",
+    });
+
+    const scope = await readAttachmentScope(root);
+    expect(rootIsScoped(scope, rootId)).toBe(true);
+    for (const url of [inBody.url, asCover.url]) {
+      expect(attachmentGrantsRoot(scope, attachmentName(url), rootId)).toBe(true);
+      expect(
+        attachmentGrantsRoot(scope, attachmentName(url), "some-other-root"),
+      ).toBe(false);
+    }
+    // A trashed descendant is not shown by the link, so a visitor cannot
+    // resurface its image by naming it in a live page.
+    expect(attachmentGrantsRoot(scope, attachmentName(inTrash.url), rootId)).toBe(
+      false,
+    );
+    expect(attachmentGrantsRoot(scope, "unknown00001.png", rootId)).toBe(false);
+  });
+
+  /** The first visitor write, which is what puts the root in the index. */
+  const scopeTheRoot = (
+    s: Store,
+    rootId: string,
+    childId: string,
+    version: number,
+  ) =>
+    s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: "first visit builds the baseline",
+      visitorName: "Ada",
+    });
+
+  it("grants an image the owner adds after the baseline was taken", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const later = await s.saveAttachment({
+      ...shot(),
+      originalName: "later.png",
+    });
+    await s.writePage(childId, `![](${later.url})`, undefined, "me");
+
+    const scope = await readAttachmentScope(root);
+    expect(attachmentGrantsRoot(scope, attachmentName(later.url), rootId)).toBe(
+      true,
+    );
+    expect(
+      attachmentGrantsRoot(scope, attachmentName(later.url), "some-other-root"),
+    ).toBe(false);
+  });
+
+  it("grants an image the owner appends after the baseline was taken", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const later = await s.saveAttachment({
+      ...shot(),
+      originalName: "appended.png",
+    });
+    await s.appendPage(childId, `![](${later.url})`, "claude");
+
+    const scope = await readAttachmentScope(root);
+    expect(attachmentGrantsRoot(scope, attachmentName(later.url), rootId)).toBe(
+      true,
+    );
+  });
+
+  it("leaves the index unwritten when no root has ever been editable", async () => {
+    const { s, root } = await tmpStore();
+    const page = await s.createPage(null, "Private");
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "own.png",
+    });
+    await s.writePage(page.id, `![](${image.url})`, undefined, "me");
+
+    // Almost every owner write is this one, so it costs no ancestor walk and
+    // no file write.
+    await expect(
+      fs.access(path.join(root, "_attachments", "scope.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    expect(await readAttachmentScope(root)).toEqual({
+      roots: [],
+      uploads: {},
+      baseline: {},
+    });
+  });
+
+  it("grants an owner's image to every scoped root the page sits inside", async () => {
+    const { s, root } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const outer = await s.createPage(null, "Outer");
+    const inner = await s.createPage(outer.id, "Inner");
+    const leaf = await s.createPage(inner.id, "Leaf");
+    // A move can nest one editable root inside another after both were
+    // enabled, which readShareScope reports as an overlap. The index can
+    // hold an ancestor and a descendant of the same page at once.
+    await writeAttachmentScope(root, {
+      roots: [outer.id, inner.id],
+      uploads: {},
+      baseline: {},
+    });
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "leaf.png",
+    });
+    await s.writePage(leaf.id, `![](${image.url})`, undefined, "me");
+
+    const scope = await readAttachmentScope(root);
+    const name = attachmentName(image.url);
+    expect(attachmentGrantsRoot(scope, name, outer.id)).toBe(true);
+    expect(attachmentGrantsRoot(scope, name, inner.id)).toBe(true);
+    expect(attachmentGrantsRoot(scope, name, leaf.id)).toBe(false);
+  });
+
+  it("grants nothing for an owner write into a trashed page", async () => {
+    // A trashed page is not part of what the link shows, which is the rule
+    // the first baseline walk already follows.
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const trashed = await s.createPage(rootId, "Trashed");
+    await scopeTheRoot(s, rootId, childId, version);
+    await s.deletePage(trashed.id);
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "trashed.png",
+    });
+    await s.writePage(trashed.id, `![](${image.url})`, undefined, "me");
+
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(false);
+  });
+
+  it("refuses a visitor a private attachment after the index is lost", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const hidden = await s.saveAttachment({
+      ...shot(),
+      originalName: "hidden.png",
+    });
+    // A restore from before the index existed, or a corrupted file, reads as
+    // an empty scope. The write boundary rebuilds the root's baseline from
+    // the live subtree, so a name the subtree does not show is still refused.
+    // The read boundary leans on this, which is why it is pinned here.
+    await fs.rm(path.join(root, "_attachments", "scope.json"));
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${hidden.url})`,
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(ShareAttachmentScopeError);
+  });
+
+  it("grants an image on a page the owner creates inside a scoped subtree", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "created.png",
+    });
+    const made = await s.createPage(childId, "Made", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+
+    const scope = await readAttachmentScope(root);
+    expect(attachmentGrantsRoot(scope, attachmentName(image.url), rootId)).toBe(
+      true,
+    );
+    // A duplicate goes through createPage, so the copy is granted too.
+    await s.duplicatePage(made.id);
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(true);
+  });
+
+  it("grants the whole moved subtree when the owner drags a page into a scoped one", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const onParent = await s.saveAttachment({
+      ...shot(),
+      originalName: "parent.png",
+    });
+    const onDescendant = await s.saveAttachment({
+      ...shot(),
+      originalName: "descendant.png",
+    });
+    const outside = await s.createPage(null, "Outside", {
+      markdown: `![](${onParent.url})`,
+      by: "me",
+    });
+    await s.createPage(outside.id, "Nested", {
+      markdown: `![](${onDescendant.url})`,
+      by: "me",
+    });
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(onParent.url),
+        rootId,
+      ),
+    ).toBe(false);
+
+    await s.movePage(outside.id, childId, null, undefined, "me");
+
+    const scope = await readAttachmentScope(root);
+    for (const url of [onParent.url, onDescendant.url]) {
+      expect(attachmentGrantsRoot(scope, attachmentName(url), rootId)).toBe(
+        true,
+      );
+    }
+  });
+
+  it("stops letting a visitor name an image the owner has moved out of the root", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "leaving.png",
+    });
+    const inside = await s.createPage(childId, "Inside", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    await scopeTheRoot(s, rootId, childId, version);
+    // While the page is inside, a visitor may put the image on another page.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${image.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
+    await s.writePage(childId, "", undefined, "me");
+
+    // A move out costs nothing: the index is not walked and the entry stays,
+    // because introducing a reference is the rare path and a move is not.
+    await s.movePage(inside.id, null, null, undefined, "me");
+    const scope = await readAttachmentScope(root);
+    expect(attachmentGrantsRoot(scope, attachmentName(image.url), rootId)).toBe(
+      true,
+    );
+    expect(scope.roots).toEqual([rootId]);
+
+    // What the entry no longer buys is a new reference. Nothing live under the
+    // root shows this image now, so a visitor who saw it while the page was
+    // inside cannot put it back on the link.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${image.url})`,
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(ShareAttachmentScopeError);
+  });
+
+  it("leaves a page that still shows the image able to keep showing it", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "shared.png",
+    });
+    const staying = await s.createPage(childId, "Staying", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    const leaving = await s.createPage(childId, "Leaving", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    await scopeTheRoot(s, rootId, childId, version);
+    await s.movePage(leaving.id, null, null, undefined, "me");
+
+    // The live-reference test cannot darken a page that references the image,
+    // by construction: the page holding it is the thing the test looks for.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: staying.id,
+        shareVersion: version,
+        markdown: `![](${image.url})\n\nplus a caption`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
+    // And another page under the root may still name it, because it is live.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${image.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(true);
+  });
+
+  it("lets a visitor name the image they just uploaded, which no page shows yet", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const mine = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: { ...shot(), originalName: "mine.png" },
+    });
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${mine.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
+  });
+
+  it("follows an owner's move of a visitor's upload into a second shared root", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const mine = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: { ...shot(), originalName: "mine.png" },
+    });
+    await s.writeSharedPage({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      markdown: `![](${mine.url})`,
+      visitorName: "Ada",
+    });
+
+    // A second editable share elsewhere in the folder, scoped by its own
+    // first visitor write.
+    const second = await s.createPage(null, "Second root");
+    const secondChild = await s.createPage(second.id, "Second child");
+    const before = await s.readShareScope(second.id);
+    await s.configureShare(second.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+    });
+    const secondVersion = (await s.readShareScope(second.id)).shareVersion;
+    await s.writeSharedPage({
+      rootId: second.id,
+      targetId: secondChild.id,
+      shareVersion: secondVersion,
+      markdown: "first visit builds the baseline",
+      visitorName: "Bob",
+    });
+
+    // The owner moves the page carrying the upload into the second share. An
+    // upload that belonged to exactly one root forever went dark here, with
+    // no owner-visible signal and no action that repaired it.
+    await s.movePage(childId, secondChild.id, null, undefined, "me");
+
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(mine.url),
+        second.id,
+      ),
+    ).toBe(true);
+  });
+
+  it("scopes every shared ancestor of the page a visitor writes, not only the root they wrote through", async () => {
+    // Two overlapping shares, the narrower one read-only. Before this, the
+    // narrower root stayed unscoped, so the read boundary fell back to the
+    // reference check for a page that by then held visitor Markdown, and a
+    // visitor of the wider share could widen what the narrower link served.
+    const { s, root } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const wide = await s.createPage(null, "Wide");
+    const narrow = await s.createPage(wide.id, "Narrow");
+    const leaf = await s.createPage(narrow.id, "Leaf");
+    const before = await s.readShareScope(wide.id);
+    await s.configureShare(wide.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+    });
+    // configureShare and movePage both refuse to nest one share inside
+    // another, so the legacy metadata patch is the path that reaches the
+    // overlap. It has no such guard.
+    await s.updateMeta(narrow.id, { public: true, by: "me" });
+    const wideVersion = (await s.readShareScope(wide.id)).shareVersion;
+
+    await s.writeSharedPage({
+      rootId: wide.id,
+      targetId: leaf.id,
+      shareVersion: wideVersion,
+      markdown: "a visitor was here",
+      visitorName: "Ada",
+    });
+
+    const scope = await readAttachmentScope(root);
+    expect([...scope.roots].sort()).toEqual([wide.id, narrow.id].sort());
+  });
+
+  it("grants an image again when the owner restores a page into a scoped subtree", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "restored.png",
+    });
+    const trashed = await s.createPage(childId, "Trashed", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    await s.deletePage(trashed.id);
+    await scopeTheRoot(s, rootId, childId, version);
+    // The first walk skipped it, because the link did not show it.
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(false);
+
+    await s.restorePage(trashed.id);
+
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(true);
+  });
+
+  it("grants an image a Notion import lands inside a scoped subtree", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const reserved = await reserveNotionImport(s, {
+      notionId: NOTION_PAGE,
+      sourceHash: SOURCE_A,
+      parentId: childId,
+      title: "Imported",
+    });
+    if (reserved.status !== "reserved") throw new Error("expected reservation");
+    const saved = await saveNotionAttachment(
+      s,
+      NOTION_PAGE,
+      SOURCE_A,
+      reserved.reservationToken,
+      shot(),
+    );
+    const markdown = `![](${saved.url})`;
+    await s.finalizeNotionImport({
+      notionId: NOTION_PAGE,
+      sourceHash: SOURCE_A,
+      conversionHash: conversionHash(
+        SOURCE_A,
+        "Imported",
+        markdown,
+        undefined,
+        undefined,
+        childId,
+      ),
+      reservationToken: reserved.reservationToken,
+      markdown,
+    });
+
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(saved.url),
+        rootId,
+      ),
+    ).toBe(true);
+  });
+
+  it("grants the pictures of a sibling that a restore makes visible again", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "sibling.png",
+    });
+    const folder = await s.createPage(childId, "Folder");
+    const restored = await s.createPage(folder.id, "Restored");
+    await s.createPage(folder.id, "Sibling", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    await s.deletePage(folder.id);
+    await scopeTheRoot(s, rootId, childId, version);
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(false);
+
+    // Restoring one page clears the deleted flag on the folder above it, so
+    // the sibling is back on the link too.
+    await s.restorePage(restored.id);
+
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(true);
+  });
+
+  it("hands a scoped root inside the restored folder nothing from outside it", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "beside.png",
+    });
+    const folder = await s.createPage(childId, "Folder");
+    const inner = await s.createPage(folder.id, "Inner");
+    const deep = await s.createPage(inner.id, "Deep");
+    await s.createPage(folder.id, "Beside", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    // A second scoped root, inside the folder that is about to be trashed.
+    const seeded = await readAttachmentScope(root);
+    await writeAttachmentScope(root, { ...seeded, roots: [rootId, inner.id] });
+    await s.deletePage(folder.id);
+
+    await s.restorePage(deep.id);
+
+    const scope = await readAttachmentScope(root);
+    const name = attachmentName(image.url);
+    expect(attachmentGrantsRoot(scope, name, rootId)).toBe(true);
+    // Beside sits outside inner, so inner's link never showed it.
+    expect(attachmentGrantsRoot(scope, name, inner.id)).toBe(false);
+  });
+
+  it("grants nothing when the move that would carry the pictures in fails", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "failed.png",
+    });
+    const outside = await s.createPage(null, "Outside");
+    await s.createPage(outside.id, "Carried", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    // The move reads the moved page's own index.md. Without it the move
+    // fails and the subtree never enters the share.
+    await fs.rm(path.join(s.resolve(outside.id), "index.md"));
+
+    await expect(
+      s.movePage(outside.id, childId, null, undefined, "me"),
+    ).rejects.toThrow();
+
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(false);
+  });
+
+  it("walks no subtree for a move under no scoped root while another root is scoped", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "elsewhere.png",
+    });
+    const away = await s.createPage(null, "Away", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    const other = await s.createPage(null, "Other");
+    const walk = vi.spyOn(
+      s as unknown as {
+        subtreeAttachmentNamesUnlocked: (id: string) => Promise<string[]>;
+      },
+      "subtreeAttachmentNamesUnlocked",
+    );
+
+    await s.movePage(away.id, other.id, null, undefined, "me");
+
+    expect(walk).not.toHaveBeenCalled();
+    walk.mockRestore();
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(image.url),
+        rootId,
+      ),
+    ).toBe(false);
+  });
+
+  it("does not fail an upload whose bytes landed because the ledger write did not", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    // A scope.json that cannot be written: the atomic rename lands on a
+    // directory. Standing in for a full disk, or an _attachments whose
+    // identity changed under the write.
+    await fs.mkdir(path.join(root, "_attachments", "scope.json"), {
+      recursive: true,
+    });
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+
+    const saved = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: { ...shot(), originalName: "landed.png" },
+    });
+
+    // The bytes are on the disk, so the caller hears that and not a 500 that
+    // would make it retry and land a second copy against the same quota.
+    expect(saved.url).toContain("/_attachments-v2/");
+    await expect(
+      fs.stat(path.join(root, "_attachments", attachmentName(saved.url))),
+    ).resolves.toBeTruthy();
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
+  it("takes a baseline when a page becomes public with a scoped root already inside it", async () => {
+    // The other half of the overlap. A visitor writes first, scoping the inner
+    // root; the owner shares an ancestor afterwards. The new link's subtree
+    // already holds visitor Markdown, so the reference check alone must not
+    // decide for it.
+    const { s, root } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const outer = await s.createPage(null, "Outer");
+    const inner = await s.createPage(outer.id, "Inner");
+    const child = await s.createPage(inner.id, "Child");
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "owned.png",
+    });
+    await s.writePage(child.id, `![](${image.url})`, undefined, "me");
+    const before = await s.readShareScope(inner.id);
+    await s.configureShare(inner.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+    });
+    const version = (await s.readShareScope(inner.id)).shareVersion;
+    await s.writeSharedPage({
+      rootId: inner.id,
+      targetId: child.id,
+      shareVersion: version,
+      markdown: `![](${image.url})\n\na visitor was here`,
+      visitorName: "Ada",
+    });
+    expect((await readAttachmentScope(root)).roots).toEqual([inner.id]);
+
+    await s.updateMeta(outer.id, { public: true, by: "me" });
+
+    const scope = await readAttachmentScope(root);
+    expect([...scope.roots].sort()).toEqual([inner.id, outer.id].sort());
+    expect(
+      attachmentGrantsRoot(scope, attachmentName(image.url), outer.id),
+    ).toBe(true);
+  });
+
+  it("leaves the index unwritten on create, duplicate, move and restore when no root has ever been editable", async () => {
+    const { s, root } = await tmpStore();
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "own.png",
+    });
+    const home = await s.createPage(null, "Home");
+    const page = await s.createPage(home.id, "Page", {
+      markdown: `![](${image.url})`,
+      by: "me",
+    });
+    await s.duplicatePage(page.id);
+    await s.movePage(page.id, null, null, undefined, "me");
+    await s.deletePage(page.id);
+    await s.restorePage(page.id);
+
+    await expect(
+      fs.access(path.join(root, "_attachments", "scope.json")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("hands a visitor no new reference of their own after an owner extends the baseline", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    await scopeTheRoot(s, rootId, childId, version);
+    const shown = await s.saveAttachment({
+      ...shot(),
+      originalName: "shown.png",
+    });
+    const hidden = await s.saveAttachment({
+      ...shot(),
+      originalName: "hidden.png",
+    });
+    await s.writePage(childId, `![](${shown.url})`, undefined, "me");
+
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${shown.url})\n\nand a caption`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toBeTruthy();
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${shown.url})\n\n![](${hidden.url})`,
+        visitorName: "Ada",
+      }),
+    ).rejects.toBeInstanceOf(ShareAttachmentScopeError);
+    expect(
+      attachmentGrantsRoot(
+        await readAttachmentScope(root),
+        attachmentName(hidden.url),
+        rootId,
+      ),
+    ).toBe(false);
   });
 });

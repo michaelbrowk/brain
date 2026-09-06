@@ -307,6 +307,34 @@ describe("Notion MCP route validation", () => {
     });
   });
 
+  it("drops shareEdit from update_meta before it reaches the Store", async () => {
+    const updateMeta = vi.fn().mockResolvedValue({ id: "page-a" });
+    mocks.getStore.mockResolvedValue({ updateMeta });
+
+    const response = await callTool(
+      "update_meta",
+      {
+        id: "page-a",
+        title: "Renamed with a smuggled grant",
+        shareEdit: true,
+      },
+      49,
+    );
+
+    expect(response.status).toBe(200);
+    // Consume the stream first: the handler runs while the body is produced.
+    await expect(toolPayload(response)).resolves.toEqual({
+      payload: { id: "page-a" },
+      isError: false,
+    });
+    expect(updateMeta).toHaveBeenCalledTimes(1);
+    expect(updateMeta).toHaveBeenCalledWith("page-a", {
+      title: "Renamed with a smuggled grant",
+      by: "claude",
+    });
+    expect(updateMeta.mock.calls[0][1]).not.toHaveProperty("shareEdit");
+  });
+
   it("moves as claude and reports the body the move unlinked", async () => {
     const movePageWithBodyReport = vi.fn().mockResolvedValue({
       meta: { id: "page-a", parentId: "page-c", updatedBy: "claude" },

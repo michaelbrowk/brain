@@ -137,6 +137,43 @@ const nextConfig: NextConfig = {
           },
         ],
       },
+      // A route block REPLACES the catch-all rather than merging with it — the
+      // three mail overrides above are the proof — so this restates the global
+      // directives and then narrows. connect-src 'self' is the one that matters
+      // here: the editor island may talk to this origin and to nothing else.
+      //
+      // img-src and media-src matter for the same reason once a link visitor
+      // authors the body: without them a remote <img>, <video> or <audio> in
+      // a visitor's Markdown logs the IP, User-Agent and read time of every
+      // other visitor and of the owner, who opens the page to review the
+      // edit. `data:` stays for inline images; a visitor's own upload is
+      // same-origin. `<source srcset>`, `<svg><image>` and a legacy table
+      // `background` are all governed by img-src, so the whole set closes
+      // together.
+      //
+      // A nonce-based script-src is separate work and not a gate on this.
+      // Nothing a visitor writes survives the sanitizer as script, so what is
+      // still open is defence in depth for the app's own bundle rather than a
+      // channel a visitor can reach.
+      {
+        source: "/share/:path*",
+        headers: [
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          {
+            key: "Strict-Transport-Security",
+            value: "max-age=31536000; includeSubDomains",
+          },
+          {
+            key: "Content-Security-Policy",
+            value:
+              "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; connect-src 'self'; form-action 'none'; frame-src 'none'; img-src 'self' data:; media-src 'self'",
+          },
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+          { key: "Cache-Control", value: "private, no-store" },
+        ],
+      },
     ];
   },
 };

@@ -3,6 +3,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   IMAGE_UPLOAD_TIMEOUT_MS,
+  uploadAttachment,
   uploadAttachmentWithProgress,
 } from "./attachments";
 
@@ -144,5 +145,73 @@ describe("uploadAttachmentWithProgress", () => {
 
     await expect(result).rejects.toMatchObject({ name: "AbortError" });
     expect(request.aborted).toBe(true);
+  });
+});
+
+describe("upload targets", () => {
+  it("uploadAttachment posts to the endpoint it is given, through the fetcher it is given", async () => {
+    const seen: Array<{ url: string; method?: string; headers: Headers }> = [];
+    const fetcher = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      seen.push({
+        url: String(input),
+        method: init?.method,
+        headers: new Headers(init?.headers),
+      });
+      return new Response(
+        JSON.stringify({ url: "/_attachments-v2/abc123456789.png", name: "photo.png" }),
+        { status: 201 },
+      );
+    }) as unknown as typeof fetch;
+    const file = new File(["pixels"], "photo.png", { type: "image/png" });
+    const onUploaded = vi.fn();
+
+    const result = await uploadAttachment(file, {
+      endpoint: "/api/share-edit/upload?root=root-1&v=2&page=page-9",
+      fetcher,
+      onUploaded,
+    });
+    expect(onUploaded).toHaveBeenCalledWith(result);
+
+    expect(result).toEqual({
+      url: "/_attachments-v2/abc123456789.png",
+      name: "photo.png",
+      size: file.size,
+      type: "image/png",
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0].url).toBe("/api/share-edit/upload?root=root-1&v=2&page=page-9");
+    expect(seen[0].method).toBe("POST");
+    // The visitor's fetcher decides the headers; the owner's client id is
+    // not added on its behalf.
+    expect(seen[0].headers.get("x-brain-client")).toBeNull();
+  });
+
+  it("uploadAttachmentWithProgress opens the endpoint it is given and sends the given headers", async () => {
+    vi.stubGlobal("XMLHttpRequest", FakeXMLHttpRequest);
+    const onUploaded = vi.fn();
+    const result = uploadAttachmentWithProgress(
+      new File(["pixels"], "photo.png", { type: "image/png" }),
+      {
+        endpoint: "/api/share-edit/upload?root=root-1&v=2&page=page-9",
+        headers: { "x-brain-share-vid": "vid123456789" },
+        onUploaded,
+      },
+    );
+    const request = FakeXMLHttpRequest.current!;
+
+    expect([request.method, request.url]).toEqual([
+      "POST",
+      "/api/share-edit/upload?root=root-1&v=2&page=page-9",
+    ]);
+    expect(request.headers.get("x-brain-share-vid")).toBe("vid123456789");
+    expect(request.headers.get("x-brain-client")).toBeUndefined();
+
+    request.status = 201;
+    request.response = { url: "/_attachments-v2/abc123456789.png", name: "photo.png" };
+    request.dispatchEvent(new Event("load"));
+    await expect(result).resolves.toMatchObject({
+      url: "/_attachments-v2/abc123456789.png",
+    });
+    expect(onUploaded).toHaveBeenCalledTimes(1);
   });
 });

@@ -193,3 +193,50 @@ describe("proxy authentication boundaries", () => {
     );
   });
 });
+
+describe("the /api/share-edit prefix", () => {
+  beforeEach(() => {
+    vi.stubEnv("AUTH_SECRET", "middleware-test-secret");
+  });
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("lets /api/share-edit/* through unauthenticated", async () => {
+    for (const [path, method] of [
+      ["/api/share-edit/page/p1?root=r1&v=1", "GET"],
+      ["/api/share-edit/page/p1?root=r1&v=1", "PUT"],
+      ["/api/share-edit/page?root=r1&v=1", "POST"],
+      ["/api/share-edit/upload?root=r1&v=1", "POST"],
+    ] as const) {
+      const res = await proxy(
+        new NextRequest(`https://brain.test${path}`, { method }),
+      );
+      expect(res.status, `${method} ${path}`).toBe(200);
+    }
+  });
+
+  it("keeps the bare prefix and every owner route behind the session", async () => {
+    const paths: Array<[string, string]> = [
+      ["/api/share-edit", "POST"],
+      ["/api/page/p1", "GET"],
+      ["/api/page/p1", "PUT"],
+      ["/api/page/p1", "PATCH"],
+      ["/api/page/p1", "DELETE"],
+      ["/api/upload", "POST"],
+      ["/api/events", "GET"],
+      ["/api/tree", "GET"],
+      ["/api/search", "GET"],
+      ["/api/move", "POST"],
+      ["/api/trash", "GET"],
+      ["/api/unfurl", "GET"],
+      ["/api/ai", "POST"],
+    ];
+    for (const [path, method] of paths) {
+      const res = await proxy(
+        new NextRequest(`https://brain.test${path}`, { method }),
+      );
+      expect(res.status, `${method} ${path}`).toBe(401);
+    }
+  });
+});

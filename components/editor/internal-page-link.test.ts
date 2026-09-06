@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   classifyEditorLinkNavigation,
   classifyInternalPageLink,
+  followEditorAnchor,
   followEditorLink,
   INTERNAL_PAGE_LINK_CLASS,
   observeInternalPageLinks,
 } from "./internal-page-link";
+import { setPageRefHrefResolver } from "./page-ref";
 
 const ORIGIN = "https://brain.example";
 
@@ -145,5 +147,108 @@ describe("observeInternalPageLinks", () => {
     root.append(afterStop);
     await mutationsDelivered();
     expect(afterStop.classList.contains(INTERNAL_PAGE_LINK_CLASS)).toBe(false);
+  });
+});
+
+describe("followEditorAnchor", () => {
+  function anchor(attrs: Record<string, string>) {
+    const a = document.createElement("a");
+    for (const [key, value] of Object.entries(attrs)) a.setAttribute(key, value);
+    return a;
+  }
+
+  it("navigates a page ref by its id and never by its href", () => {
+    const navigate = vi.fn();
+    const open = vi.fn();
+    const ref = anchor({ "data-page-ref": "inside", href: "/share/root?page=inside" });
+    expect(followEditorAnchor(ref, ORIGIN, navigate, open)).toBe(true);
+    expect(navigate).toHaveBeenCalledWith("inside");
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("leaves a page ref the editor could not place inert", () => {
+    const navigate = vi.fn();
+    const open = vi.fn();
+    const ref = anchor({ "data-page-ref": "gone", "aria-disabled": "true" });
+    expect(followEditorAnchor(ref, ORIGIN, navigate, open)).toBe(false);
+    expect(navigate).not.toHaveBeenCalled();
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("does not open a page ref anywhere when nothing takes the id", () => {
+    const open = vi.fn();
+    const ref = anchor({ "data-page-ref": "inside", href: "/share/root?page=inside" });
+    expect(followEditorAnchor(ref, ORIGIN, undefined, open)).toBe(false);
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("follows an ordinary anchor through its href, resolved first", () => {
+    const navigate = vi.fn();
+    const open = vi.fn();
+    const resolve = (href: string) =>
+      href === "/_attachments-v2/a.png" ? "/api/media/a.png?root=r" : href;
+    expect(
+      followEditorAnchor(anchor({ href: "/_attachments-v2/a.png" }), ORIGIN, navigate, open, resolve),
+    ).toBe(true);
+    expect(open).toHaveBeenCalledWith("https://brain.example/api/media/a.png?root=r");
+    expect(
+      followEditorAnchor(anchor({ href: "/p/abc" }), ORIGIN, navigate, open, resolve),
+    ).toBe(true);
+    expect(navigate).toHaveBeenCalledWith("abc");
+    expect(followEditorAnchor(anchor({}), ORIGIN, navigate, open, resolve)).toBe(false);
+  });
+
+  // The read-only render of the same body flattens every /p/ link it cannot
+  // point inside the share, so the editor over it must not open one either.
+  // A near miss is a link mark, not a page ref, and it carries a real href:
+  // declining the click would let the browser follow it, so the click is
+  // taken and nothing follows.
+  const NEAR_MISSES = [
+    "/p/abc?from=mail",
+    "/p/abc#section",
+    "/p/abc/",
+    `${ORIGIN}/p/abc?from=mail`,
+  ];
+  // What the island installs: a share places page ids itself.
+  const placesPageIds = () =>
+    setPageRefHrefResolver((id) => (id === "abc" ? "/share/root?page=abc" : null));
+
+  afterEach(() => setPageRefHrefResolver(null));
+
+  it("takes and refuses a near-miss page address where a host places page ids", () => {
+    placesPageIds();
+    for (const href of NEAR_MISSES) {
+      const navigate = vi.fn();
+      const open = vi.fn();
+      expect(followEditorAnchor(anchor({ href }), ORIGIN, navigate, open)).toBe(true);
+      expect(navigate).not.toHaveBeenCalled();
+      expect(open).not.toHaveBeenCalled();
+    }
+  });
+
+  it("still hands the exact page address to the host, which answers for the id", () => {
+    placesPageIds();
+    const navigate = vi.fn();
+    const open = vi.fn();
+    expect(followEditorAnchor(anchor({ href: "/p/abc" }), ORIGIN, navigate, open)).toBe(true);
+    expect(navigate).toHaveBeenCalledWith("abc");
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("refuses nothing else, and nothing at all on the owner's editor", () => {
+    placesPageIds();
+    const navigate = vi.fn();
+    const open = vi.fn();
+    expect(
+      followEditorAnchor(anchor({ href: "/pages/abc?x=1" }), ORIGIN, navigate, open),
+    ).toBe(true);
+    expect(open).toHaveBeenCalledWith(`${ORIGIN}/pages/abc?x=1`);
+
+    setPageRefHrefResolver(null);
+    for (const href of NEAR_MISSES) {
+      const ownerOpen = vi.fn();
+      expect(followEditorAnchor(anchor({ href }), ORIGIN, navigate, ownerOpen)).toBe(true);
+      expect(ownerOpen).toHaveBeenCalledTimes(1);
+    }
   });
 });

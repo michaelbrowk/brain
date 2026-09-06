@@ -78,6 +78,12 @@ export function shareRecoveryCopy(updatedAt: number, remaining: number): string 
  *  the conflicted reload parked this body, so nothing else holds it. */
 export const SHARE_DISCARD_CONFIRM_COPY =
   "This is the only copy of that text. Discard it for good?";
+/** The tail every refusal carries. The route writes nothing on a 422, so the
+ *  visitor's text is still in their draft and a corrected save lands. */
+export const SHARE_REFUSED_TAIL = "Your text is still here.";
+/** A 422 whose body could not be read. The visitor still needs to know their
+ *  last change is the thing standing in the way. */
+export const SHARE_REFUSED_COPY = "That change cannot be saved here.";
 export const SHARE_STORAGE_FULL_COPY =
   "This browser's storage is full, so your text cannot be kept through a reload. Copy it somewhere first. Reloading now would lose it.";
 
@@ -137,7 +143,7 @@ export function shareAliveKey(
 
 /** `storage` is not a save outcome: it is the one press that could not be
  *  honoured, a Reload with nowhere to keep the text. */
-type SaveState = "ok" | "unsaved" | "gone" | "conflict" | "storage";
+type SaveState = "ok" | "unsaved" | "gone" | "conflict" | "storage" | "refused";
 type Pending = { markdown: string; operationId: string };
 type Parked = { markdown: string; updatedAt: number };
 type Recovered = Parked & { key: string };
@@ -486,6 +492,9 @@ function ShareEditorForPage({
   // The editor reads its value once; putting a parked body back remounts it.
   const [editorEpoch, setEditorEpoch] = useState(0);
   const [saveState, setSaveState] = useState<SaveState>(opening.saveState);
+  // What the route said about the last refusal, written to be shown as it
+  // stands. Only a 422 carries one.
+  const [refused, setRefused] = useState<string | null>(null);
   const [recoveries, setRecoveries] = useState<Recovered[]>(opening.recoveries);
   // Discarding is the one press here that destroys text, so it asks first.
   const [discardConfirming, setDiscardConfirming] = useState(false);
@@ -670,6 +679,14 @@ function ShareEditorForPage({
           // Reload is a press, never something that happens to them.
           conflicted.current = true;
           setSaveState("conflict");
+        } else if (status === 422) {
+          // The three refusals the write route names: an attachment this
+          // share is not granted, a link scheme it will not carry, media on
+          // another site. Each arrives with a sentence for the visitor and
+          // nothing was written, so the text is theirs to correct.
+          const refusal = error instanceof SaveRequestError ? error.refusal : undefined;
+          setRefused(refusal?.message ?? SHARE_REFUSED_COPY);
+          setSaveState("refused");
         } else if (status === 404) {
           // The guard's one answer for a link that no longer grants a write:
           // revoked, expired, rotated, or the page is gone. Nothing the
@@ -878,9 +895,11 @@ function ShareEditorForPage({
         ? SHARE_STORAGE_FULL_COPY
         : saveState === "gone"
           ? SHARE_GONE_COPY
-          : saveState === "unsaved"
-            ? SHARE_UNSAVED_COPY
-            : null;
+          : saveState === "refused"
+            ? `${refused ?? SHARE_REFUSED_COPY} ${SHARE_REFUSED_TAIL}`
+            : saveState === "unsaved"
+              ? SHARE_UNSAVED_COPY
+              : null;
   const bannerClass =
     "brain-share-notice mb-4 flex flex-wrap items-center justify-between gap-x-4 gap-y-2 rounded-lg py-2 pl-4 text-table text-ink";
 
@@ -953,10 +972,15 @@ function ShareEditorForPage({
    *  anywhere, so they interrupt; `unsaved` retries on the next keystroke
    *  and waits its turn. The owner's head decides the same way
    *  (components/shell/save-indicator.tsx): conflict asserts, an ordinary
-   *  failure is polite. A parked body is an offer, not a failure. */
+   *  failure is polite. `refused` asserts for a different reason: typing more
+   *  will not clear it, so waiting for a pause would let the visitor write for
+   *  minutes with nothing landing. A parked body is an offer, not a failure. */
   const interrupts =
     !offered &&
-    (saveState === "conflict" || saveState === "gone" || saveState === "storage");
+    (saveState === "conflict" ||
+      saveState === "gone" ||
+      saveState === "storage" ||
+      saveState === "refused");
 
   return (
     <div data-share-editor>

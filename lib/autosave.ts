@@ -2,14 +2,36 @@ import { canonicalPageMarkdown } from "./page-markdown";
 
 export type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
 
+/** A refusal a route wrote for the person to read: a reason code and a
+ *  sentence to show as it stands. Only a 422 carries one. */
+export interface SaveRefusal {
+  error: string;
+  message: string;
+}
+
 export class SaveRequestError extends Error {
   constructor(
     message: string,
     readonly status?: number,
+    readonly refusal?: SaveRefusal,
   ) {
     super(message);
     this.name = "SaveRequestError";
   }
+}
+
+/** The body of a 422. A refusal with no readable body is still a refusal, so
+ *  the caller keeps a sentence of its own for that case. */
+async function readRefusal(response: Response): Promise<SaveRefusal | undefined> {
+  try {
+    const body = (await response.json()) as { error?: unknown; message?: unknown };
+    if (typeof body.error === "string" && typeof body.message === "string") {
+      return { error: body.error, message: body.message };
+    }
+  } catch {
+    // Fall through: the status is what the caller acts on.
+  }
+  return undefined;
 }
 
 export interface DraftSource {
@@ -414,7 +436,14 @@ export async function saveMarkdown({
       }
       const latest = await fetcher(endpoint(id));
       if (!latest.ok) {
-        throw new SaveRequestError("Could not refresh the page revision", latest.status);
+        // The PUT was refused as a conflict. Failing to read the other
+        // version does not make it something else, so the conflict is what
+        // the caller is told about; a page that has gone keeps its own
+        // status, which callers answer differently.
+        throw new SaveRequestError(
+          "Could not refresh the page revision",
+          latest.status === 404 ? 404 : 409,
+        );
       }
       const payload = (await latest.json()) as {
         markdown?: unknown;
@@ -425,7 +454,7 @@ export async function saveMarkdown({
         typeof payload.rev !== "string" ||
         !payload.rev
       ) {
-        throw new SaveRequestError("Revision response was invalid", latest.status);
+        throw new SaveRequestError("Revision response was invalid", 409);
       }
       const liveBase = getBaseMarkdown?.();
       const baselineStillCurrent =
@@ -465,7 +494,11 @@ export async function saveMarkdown({
       await wait(attempt + 1);
       continue;
     }
-    throw new SaveRequestError(`Save request returned ${response.status}`, response.status);
+    throw new SaveRequestError(
+      `Save request returned ${response.status}`,
+      response.status,
+      response.status === 422 ? await readRefusal(response) : undefined,
+    );
   }
 
   throw new SaveRequestError("Save attempts exhausted");

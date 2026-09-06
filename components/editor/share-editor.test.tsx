@@ -56,6 +56,8 @@ import ShareEditor, {
   SHARE_HEARTBEAT_MS,
   SHARE_HEARTBEAT_STALE_MS,
   SHARE_PARKED_MAX,
+  SHARE_REFUSED_COPY,
+  SHARE_REFUSED_TAIL,
   SHARE_DISCARD_CONFIRM_COPY,
   SHARE_STORAGE_FULL_COPY,
   SHARE_UNSAVED_COPY,
@@ -630,6 +632,62 @@ describe("the visitor editor", () => {
 
       await type("mine, edited more");
       expect(banner()).toBeNull();
+    });
+
+    it("shows what the route refused and what to do about it", async () => {
+      // The write route names three refusals a visitor can act on and writes
+      // the sentence for each. Nothing was written, so their text is theirs
+      // to correct and a corrected save lands.
+      recordFetch({
+        put: [
+          json(
+            {
+              error: "remote_media",
+              message:
+                "An image has to be uploaded here. One loaded from another site cannot be used.",
+            },
+            422,
+          ),
+          json({ rev: "b" }, 200),
+        ],
+      });
+      await mount("mine");
+      await type("mine, with a picture from elsewhere");
+
+      expect(banner()?.dataset.shareSaveState).toBe("refused");
+      expect(banner()?.textContent).toBe(
+        `An image has to be uploaded here. One loaded from another site cannot be used. ${SHARE_REFUSED_TAIL}`,
+      );
+      // Typing will not clear this one, so it interrupts.
+      expect(live("assertive")?.textContent).toContain("An image has to be uploaded here.");
+      expect(editorText()).toBe("mine, with a picture from elsewhere");
+
+      await type("mine, corrected");
+      expect(banner()).toBeNull();
+    });
+
+    it("still says something when a refusal arrives with no message", async () => {
+      recordFetch({ put: [json({ error: "bad request" }, 422)] });
+      await mount("mine");
+      await type("mine, edited");
+
+      expect(banner()?.textContent).toBe(`${SHARE_REFUSED_COPY} ${SHARE_REFUSED_TAIL}`);
+    });
+
+    it("calls a conflict a conflict when their version cannot be read", async () => {
+      // The PUT was refused as a conflict; a refresh GET that fails for any
+      // other reason does not make it an ordinary failed save, and "keep
+      // typing" would be the wrong instruction.
+      recordFetch({
+        put: [json({ error: "conflict" }, 409)],
+        get: json({ error: "rate" }, 429),
+      });
+      await mount("mine");
+      await type("mine, edited");
+
+      expect(banner()?.dataset.shareSaveState).toBe("conflict");
+      expect(banner()?.textContent).toBe(`${SHARE_CONFLICT_COPY}Reload`);
+      expect(editorText()).toBe("mine, edited");
     });
 
     it("tells the visitor the link no longer edits on the guard's 404", async () => {

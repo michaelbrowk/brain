@@ -7,6 +7,7 @@ import {
   ShareAccessNotFoundError,
 } from "@/lib/share-access";
 import { FixedWindowRateLimiter } from "@/lib/rate-limit";
+import { shareOriginAllowed } from "@/lib/share-origin";
 import { SHARE_WRITE_CONCURRENCY } from "@/lib/store/share-limits";
 
 /**
@@ -164,19 +165,13 @@ export function shareWriteBusy(): NextResponse {
   return refuse(503, "temporarily unavailable", { "Retry-After": "1" });
 }
 
-/** Origin decides for every request that carries one, and a mutating request
- *  must carry one: that is the rule lib/mail/providers/gmail/public-proxy.ts
- *  applies to its POST. A same-origin GET carries no Origin at all. Browsers
- *  omit it, and a script cannot add it, Origin being a forbidden header name.
- *  So a read, and only a read, may lean on the fetch-metadata attestation
- *  instead, and only when Origin is absent. */
+/** A read, and only a read, may be decided by the browser's fetch-metadata
+ *  attestation when Origin is absent. See lib/share-origin.ts for why an
+ *  absent attestation is not a refusal on that one bucket. */
 function originAllowed(req: NextRequest, bucket: ShareWriteBucket): boolean {
-  const expected = configuredPublicOrigin();
-  const sent = req.headers.get("origin");
-  if (sent !== null) return expected !== null && sent === expected;
-  return (
-    bucket === "read" && req.headers.get("sec-fetch-site") === "same-origin"
-  );
+  return shareOriginAllowed(req.headers, configuredPublicOrigin(), {
+    attestationMayDecide: bucket === "read",
+  });
 }
 
 /** The static rule AGENTS.md invariant 8 states, as a predicate a test can
@@ -252,7 +247,7 @@ function stripComments(source: string): string {
  * The pinned refusal order. Nothing below a line may run before it.
  *
  *   1. 400 missing_share_context: `root` or `v` absent or malformed
- *   2. 403 bad_origin: see originAllowed
+ *   2. 403 bad_origin: see lib/share-origin.ts
  *   3. 404: the edit cookie is absent or does not verify
  *   4. 403 vid_mismatch: the double submit disagrees with the cookie
  *   5. 429 share_edit_rate: the root bucket, then the visitor bucket

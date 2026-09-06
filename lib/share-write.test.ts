@@ -162,14 +162,41 @@ describe("share-write refusal order", () => {
     expect(getStore).toHaveBeenCalledTimes(1);
   });
 
-  it("refuses a read with no Origin and no same-origin attestation, and a foreign Origin whatever the attestation says", async () => {
+  it("lets a read through when neither Origin nor the attestation arrived, because the double submit already proves it", async () => {
+    // The conflict refresh is a same-origin fetch() GET, which carries no
+    // Origin at all: the Fetch spec appends one only for a CORS-tainted or a
+    // non-GET request, and a script cannot add it. So the whole refusal rested
+    // on Sec-Fetch-Site, and behind a proxy that strips it the 409 became a
+    // 403, which the editor reads as "unsaved" with no conflict banner and no
+    // Reload. What still refuses a stranger here is step 4: a cross-site page
+    // cannot read the HttpOnly edit cookie, so it cannot echo the vid.
     const { getStore } = storeMock();
     const { withShareWrite: guard } = await import("./share-write");
-    const bare = await guard(
+    const res = await guard(
       await request({ origin: null }),
       { targetId: "page-9", bucket: "read" },
       run,
     );
+    expect(res.status).toBe(200);
+    expect(getStore).toHaveBeenCalledTimes(1);
+  });
+
+  it("still refuses a read whose double submit is missing, however it arrived", async () => {
+    const { getStore } = storeMock();
+    const { withShareWrite: guard } = await import("./share-write");
+    const res = await guard(
+      await request({ origin: null, vid: null }),
+      { targetId: "page-9", bucket: "read" },
+      run,
+    );
+    expect(res.status).toBe(403);
+    await expect(res.json()).resolves.toEqual({ error: "vid_mismatch" });
+    expect(getStore).not.toHaveBeenCalled();
+  });
+
+  it("refuses a read the browser attests is cross-site, and a foreign Origin whatever the attestation says", async () => {
+    const { getStore } = storeMock();
+    const { withShareWrite: guard } = await import("./share-write");
     const crossSite = await guard(
       await request({ origin: null, fetchSite: "cross-site" }),
       { targetId: "page-9", bucket: "read" },
@@ -180,7 +207,7 @@ describe("share-write refusal order", () => {
       { targetId: "page-9", bucket: "read" },
       run,
     );
-    for (const res of [bare, crossSite, foreign]) {
+    for (const res of [crossSite, foreign]) {
       expect(res.status).toBe(403);
       await expect(res.json()).resolves.toEqual({ error: "bad_origin" });
     }

@@ -49,7 +49,8 @@ export function bareAttachmentSrc(url: string): string {
 /** Images that failed to load, by the bare path they were rendered from. A
  *  freshly uploaded image is refused by the media route until the page's
  *  stored markdown references it, which the next save does; the island then
- *  asks for one retry. */
+ *  asks for one retry per successful save. An image that fails again is
+ *  noted again and retried after the save after that. */
 const failed = new Map<HTMLImageElement, string>();
 let retries = 0;
 
@@ -58,8 +59,8 @@ export function noteAttachmentLoadFailure(img: HTMLImageElement, src: string): v
   failed.set(img, src);
 }
 
-/** Re-requests every noted image once, under a fresh URL so the browser does
- *  not answer from the failed load. Returns how many it touched. */
+/** Re-requests every noted image, once per call, under a fresh URL so the
+ *  browser does not answer from the failed load. Returns how many it touched. */
 export function retryFailedAttachmentImages(): number {
   let retried = 0;
   for (const [img, src] of failed) {

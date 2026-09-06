@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { encodeDraft } from "@/lib/autosave";
+import { CLIENT_ID } from "@/lib/client";
 
 // The editor itself is not under test here. The stub records what the island
 // hands it, so a test can drive one change, register a flush and read the
@@ -39,16 +40,23 @@ vi.mock("./milkdown-editor", () => ({
 import ShareEditor, {
   SHARE_AUTOSAVE_DEBOUNCE_MS,
   SHARE_CONFLICT_COPY,
+  SHARE_DRAFT_MAX_AGE_MS,
   SHARE_GONE_COPY,
+  SHARE_RECOVERY_COPY,
   SHARE_UNSAVED_COPY,
   shareDraftKey,
+  shareDraftPrefix,
+  shareRecoveryKey,
 } from "./share-editor";
 import { attachmentSrc, noteAttachmentLoadFailure } from "./attachment-src";
 
 const VID = "vid123456789";
 const REV = "abcdefabcdef";
 const PAGE_URL = "/api/share-edit/page/page-9?root=root-1&v=2";
-const DRAFT_KEY = shareDraftKey("root-1", "page-9");
+const PREFIX = shareDraftPrefix("root-1", 2, "page-9");
+const OWN_KEY = shareDraftKey("root-1", 2, "page-9");
+const RECOVERY_KEY = shareRecoveryKey("root-1", "page-9");
+const DAY = 24 * 60 * 60 * 1000;
 
 type Seen = {
   url: string;
@@ -65,6 +73,7 @@ beforeEach(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
     true;
   vi.useFakeTimers();
+  vi.setSystemTime(new Date("2026-09-06T10:00:00Z"));
   localStorage.clear();
   host = document.createElement("div");
   document.body.append(host);
@@ -79,9 +88,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+type Answer = () => Response | Promise<Response>;
+
 /** Records every request and answers by method: `put` is consulted per PUT
  *  in order (the last one repeats), the GET answers the conflict re-read. */
-function recordFetch(answers: { put: Array<() => Response>; get?: () => Response }) {
+function recordFetch(answers: { put: Answer[]; get?: Answer }) {
   const seen: Seen[] = [];
   let puts = 0;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
@@ -105,16 +116,30 @@ function recordFetch(answers: { put: Array<() => Response>; get?: () => Response
 const json = (body: unknown, status: number) => () =>
   new Response(JSON.stringify(body), { status });
 
-async function mount(initialMarkdown: string, onReload?: () => void) {
+/** A PUT that answers only when the test says so. */
+function deferred(body: unknown, status: number) {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  const answer: Answer = () => gate.then(() => new Response(JSON.stringify(body), { status }));
+  return { answer, release };
+}
+
+async function mount(
+  initialMarkdown: string,
+  onReload?: () => void,
+  page: { pageId?: string; initialRev?: string } = {},
+) {
   await act(async () => {
     root.render(
       <ShareEditor
         rootId="root-1"
-        pageId="page-9"
+        pageId={page.pageId ?? "page-9"}
         shareVersion={2}
         vid={VID}
         initialMarkdown={initialMarkdown}
-        initialRev={REV}
+        initialRev={page.initialRev ?? REV}
         onReload={onReload}
       />,
     );
@@ -138,8 +163,43 @@ async function type(markdown: string) {
   await elapse(SHARE_AUTOSAVE_DEBOUNCE_MS + 50);
 }
 
+async function press(label: string) {
+  await act(async () => {
+    [...host.querySelectorAll("button")].find((b) => b.textContent === label)!.click();
+  });
+}
+
 const editorText = () => host.querySelector("[data-editor]")?.textContent;
 const banner = () => host.querySelector<HTMLElement>("[data-share-save-state]");
+const recoveryBanner = () => host.querySelector<HTMLElement>("[data-share-recovery]");
+const puts = (seen: Seen[]) => seen.filter((s) => s.method === "PUT");
+/** The two fields a test reasons about; the body also carries the base. */
+const putBodies = (seen: Seen[]) =>
+  puts(seen).map((s) => {
+    const { markdown, rev } = JSON.parse(s.body!) as { markdown: string; rev: string };
+    return { markdown, rev };
+  });
+
+function draftsUnder(prefix: string) {
+  const found: Array<{ key: string; markdown: string }> = [];
+  for (let i = 0; i < localStorage.length; i += 1) {
+    const key = localStorage.key(i)!;
+    if (!key.startsWith(prefix)) continue;
+    found.push({ key, markdown: JSON.parse(localStorage.getItem(key)!).markdown });
+  }
+  return found;
+}
+
+function seedDraft(
+  tab: string,
+  markdown: string,
+  revision: string,
+  base: string,
+  updatedAt = Date.now(),
+  prefix = PREFIX,
+) {
+  localStorage.setItem(`${prefix}${tab}`, encodeDraft(markdown, revision, `op-${tab}`, updatedAt, base));
+}
 
 describe("the visitor editor", () => {
   it("sends every request it makes to /api/share-edit/, with the vid header", async () => {
@@ -192,32 +252,106 @@ describe("the visitor editor", () => {
     root = createRoot(host); // afterEach unmounts again harmlessly
   });
 
-  it("shows the visitor's conflict banner, keeps the text, and reloads only on the press", async () => {
-    // A stranger's body is on the server: the PUT is stale and the re-read
-    // is neither the visitor's text nor their baseline.
-    recordFetch({
-      put: [json({ error: "conflict", currentRev: "f" }, 409)],
-      get: json({ markdown: "theirs", rev: "f", title: "T" }, 200),
-    });
-    const reload = vi.fn();
-    await mount("mine", reload);
-    await type("mine, edited");
+  describe("a conflict", () => {
+    async function intoConflict(onReload?: () => void) {
+      // A stranger's body is on the server: the PUT is stale and the re-read
+      // is neither the visitor's text nor their baseline.
+      const seen = recordFetch({
+        put: [json({ error: "conflict", currentRev: "f" }, 409)],
+        get: json({ markdown: "theirs", rev: "f", title: "T" }, 200),
+      });
+      await mount("mine", onReload);
+      await type("mine, edited");
+      expect(banner()?.dataset.shareSaveState).toBe("conflict");
+      return seen;
+    }
 
-    expect(banner()?.dataset.shareSaveState).toBe("conflict");
-    expect(banner()?.getAttribute("role")).toBe("status");
-    expect(banner()?.textContent).toBe(`${SHARE_CONFLICT_COPY}Reload`);
-    expect(editorText()).toBe("mine, edited");
-    expect(reload).not.toHaveBeenCalled();
-    expect(localStorage.getItem(DRAFT_KEY)).not.toBeNull();
+    it("shows the banner, keeps the text, and reloads only on the press", async () => {
+      const reload = vi.fn();
+      await intoConflict(reload);
 
-    await act(async () => {
-      [...host.querySelectorAll("button")].find((b) => b.textContent === "Reload")!.click();
+      expect(banner()?.getAttribute("role")).toBe("status");
+      expect(banner()?.textContent).toBe(`${SHARE_CONFLICT_COPY}Reload`);
+      expect(editorText()).toBe("mine, edited");
+      expect(reload).not.toHaveBeenCalled();
+
+      await press("Reload");
+      expect(reload).toHaveBeenCalledTimes(1);
+      expect(editorText()).toBe("mine, edited");
     });
-    expect(reload).toHaveBeenCalledTimes(1);
-    expect(editorText()).toBe("mine, edited");
-    // The press means "show me their version": the draft would otherwise be
-    // restored on the reload and put the same conflict straight back.
-    expect(localStorage.getItem(DRAFT_KEY)).toBeNull();
+
+    it("parks the text under the recovery key on Reload, so the sentence stays true", async () => {
+      await intoConflict(vi.fn());
+      expect(draftsUnder(PREFIX).map((d) => d.markdown)).toEqual(["mine, edited"]);
+
+      await press("Reload");
+      expect(JSON.parse(localStorage.getItem(RECOVERY_KEY)!)).toMatchObject({
+        markdown: "mine, edited",
+      });
+      // The draft would otherwise be restored on the reload and put the same
+      // banner straight back.
+      expect(draftsUnder(PREFIX)).toEqual([]);
+    });
+
+    it("stops saving: a later edit is kept as a draft, sent by neither the debounce nor pagehide", async () => {
+      const seen = await intoConflict();
+      const before = seen.length;
+
+      await type("mine, edited again");
+      await act(async () => {
+        window.dispatchEvent(new Event("pagehide"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(seen).toHaveLength(before);
+      expect(draftsUnder(PREFIX).map((d) => d.markdown)).toEqual(["mine, edited again"]);
+      expect(editorText()).toBe("mine, edited again");
+    });
+  });
+
+  describe("the parked text", () => {
+    it("is offered back on the next mount and put back on the press, then saved", async () => {
+      localStorage.setItem(RECOVERY_KEY, JSON.stringify({ markdown: "parked", updatedAt: Date.now() }));
+      const seen = recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("theirs");
+
+      expect(editorText()).toBe("theirs");
+      expect(recoveryBanner()?.textContent).toBe(`${SHARE_RECOVERY_COPY}Put it backDismiss`);
+      expect(seen).toEqual([]);
+
+      await press("Put it back");
+      await elapse(0);
+      expect(editorText()).toBe("parked");
+      expect(putBodies(seen)).toEqual([{ markdown: "parked", rev: REV }]);
+      expect(recoveryBanner()).toBeNull();
+      expect(localStorage.getItem(RECOVERY_KEY)).toBeNull();
+      await elapse(0);
+      expect(draftsUnder(PREFIX)).toEqual([]);
+    });
+
+    it("is dropped on Dismiss and nothing is sent", async () => {
+      localStorage.setItem(RECOVERY_KEY, JSON.stringify({ markdown: "parked", updatedAt: Date.now() }));
+      const seen = recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("theirs");
+      await press("Dismiss");
+      await elapse(SHARE_AUTOSAVE_DEBOUNCE_MS + 50);
+
+      expect(editorText()).toBe("theirs");
+      expect(recoveryBanner()).toBeNull();
+      expect(localStorage.getItem(RECOVERY_KEY)).toBeNull();
+      expect(seen).toEqual([]);
+    });
+
+    it("is not offered once it is older than the bound", async () => {
+      localStorage.setItem(
+        RECOVERY_KEY,
+        JSON.stringify({ markdown: "parked", updatedAt: Date.now() - SHARE_DRAFT_MAX_AGE_MS - DAY }),
+      );
+      recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("theirs");
+      expect(recoveryBanner()).toBeNull();
+      expect(localStorage.getItem(RECOVERY_KEY)).toBeNull();
+    });
   });
 
   describe("a save that fails for any other reason", () => {
@@ -251,21 +385,23 @@ describe("the visitor editor", () => {
   });
 
   describe("the pending save", () => {
-    it("is written to a local draft on every change and removed once the server confirms it", async () => {
+    it("is written to this tab's draft on every change and removed once the server confirms it", async () => {
       recordFetch({ put: [json({ rev: "b" }, 200)] });
       await mount("hello");
       await change("hello, edited");
 
-      const raw = localStorage.getItem(DRAFT_KEY);
+      const raw = localStorage.getItem(OWN_KEY);
       expect(raw).not.toBeNull();
+      expect(OWN_KEY.endsWith(`:${CLIENT_ID}`)).toBe(true);
       expect(JSON.parse(raw!)).toMatchObject({
         markdown: "hello, edited",
         revision: REV,
         baseMarkdown: "hello",
       });
+      expect(JSON.parse(raw!).operationId).toMatch(/^[^:]+:[0-9a-f-]{36}$/);
 
       await elapse(SHARE_AUTOSAVE_DEBOUNCE_MS + 50);
-      expect(localStorage.getItem(DRAFT_KEY)).toBeNull();
+      expect(draftsUnder(PREFIX)).toEqual([]);
     });
 
     it("keeps the draft when the save did not land", async () => {
@@ -273,9 +409,7 @@ describe("the visitor editor", () => {
       await mount("hello");
       await type("hello, edited");
       await elapse(5000);
-      expect(JSON.parse(localStorage.getItem(DRAFT_KEY)!)).toMatchObject({
-        markdown: "hello, edited",
-      });
+      expect(draftsUnder(PREFIX).map((d) => d.markdown)).toEqual(["hello, edited"]);
     });
 
     it("is flushed through the editor the moment the tab hides, ahead of the debounce", async () => {
@@ -298,7 +432,29 @@ describe("the visitor editor", () => {
       expect(JSON.parse(seen[0].body!)).toMatchObject({ markdown: "hello, edited", rev: REV });
       await elapse(SHARE_AUTOSAVE_DEBOUNCE_MS + 50);
       expect(seen).toHaveLength(1); // the debounced save was the one flushed
-      expect(localStorage.getItem(DRAFT_KEY)).toBeNull();
+      expect(draftsUnder(PREFIX)).toEqual([]);
+    });
+
+    it("is not enqueued twice when the tab hides during the request", async () => {
+      const put = deferred({ rev: "b" }, 200);
+      const seen = recordFetch({ put: [put.answer] });
+      await mount("hello");
+      await type("hello, edited");
+      expect(puts(seen)).toHaveLength(1);
+
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "hidden",
+      });
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange"));
+        put.release();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      await elapse(SHARE_AUTOSAVE_DEBOUNCE_MS + 50);
+
+      expect(puts(seen)).toHaveLength(1);
+      expect(draftsUnder(PREFIX)).toEqual([]);
     });
 
     it("is sent with keepalive on pagehide and the draft stays until confirmed", async () => {
@@ -313,7 +469,7 @@ describe("the visitor editor", () => {
       expect(seen.map((s) => [s.method, s.url, s.keepalive])).toEqual([["PUT", PAGE_URL, true]]);
       expect(seen[0].vid).toBe(VID);
       expect(JSON.parse(seen[0].body!)).toMatchObject({ markdown: "hello, edited", rev: REV });
-      expect(localStorage.getItem(DRAFT_KEY)).not.toBeNull();
+      expect(draftsUnder(PREFIX).map((d) => d.markdown)).toEqual(["hello, edited"]);
     });
 
     it("is flushed on the next change after an upload, and a failed image is retried once the save lands", async () => {
@@ -340,20 +496,54 @@ describe("the visitor editor", () => {
 
   describe("a draft left by an earlier visit", () => {
     it("is put back and saved at once when the server has not moved", async () => {
-      localStorage.setItem(DRAFT_KEY, encodeDraft("draft text", REV, "op-1", 1, "hello"));
+      seedDraft("tab-a", "draft text", REV, "hello");
       const seen = recordFetch({ put: [json({ rev: "b" }, 200)] });
       await mount("hello");
       await elapse(0);
 
       expect(editorText()).toBe("draft text");
-      expect(seen.map((s) => s.method)).toEqual(["PUT"]);
-      expect(JSON.parse(seen[0].body!)).toMatchObject({ markdown: "draft text", rev: REV });
+      expect(putBodies(seen)).toEqual([{ markdown: "draft text", rev: REV }]);
       expect(banner()).toBeNull();
-      expect(localStorage.getItem(DRAFT_KEY)).toBeNull();
+      expect(draftsUnder(PREFIX)).toEqual([]);
+    });
+
+    it("keeps a newer edit's draft and pending when the restore save lands during it", async () => {
+      // The restore PUT is in flight when the visitor types. The edit gets
+      // its own id, so the response for the restore removes nothing of it.
+      seedDraft("tab-a", "draft text", REV, "hello");
+      const put = deferred({ rev: "b" }, 200);
+      const seen = recordFetch({ put: [put.answer, json({ rev: "c" }, 200)] });
+      await mount("hello");
+      await elapse(0);
+      expect(puts(seen)).toHaveLength(1);
+
+      await change("draft text, newer");
+      await act(async () => {
+        put.release();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(draftsUnder(PREFIX)).toEqual([{ key: OWN_KEY, markdown: "draft text, newer" }]);
+
+      await elapse(SHARE_AUTOSAVE_DEBOUNCE_MS + 50);
+      expect(putBodies(seen).map((b) => b.markdown)).toEqual(["draft text", "draft text, newer"]);
+      expect(putBodies(seen)[1].rev).toBe("b");
+      expect(draftsUnder(PREFIX)).toEqual([]);
+    });
+
+    it("is put back and saved when only the revision moved and the body did not", async () => {
+      // A metadata-only rev bump (a rename, an icon) is not a stranger's edit.
+      seedDraft("tab-a", "draft text", "olderrev0000", "hello");
+      const seen = recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("hello");
+      await elapse(0);
+
+      expect(editorText()).toBe("draft text");
+      expect(banner()).toBeNull();
+      expect(putBodies(seen)).toEqual([{ markdown: "draft text", rev: REV }]);
     });
 
     it("is put back behind the conflict banner when someone else saved meanwhile", async () => {
-      localStorage.setItem(DRAFT_KEY, encodeDraft("draft text", "olderrev0000", "op-1", 1, "older body"));
+      seedDraft("tab-a", "draft text", "olderrev0000", "older body");
       const seen = recordFetch({ put: [json({ rev: "b" }, 200)] });
       const reload = vi.fn();
       await mount("theirs", reload);
@@ -363,23 +553,74 @@ describe("the visitor editor", () => {
       expect(banner()?.dataset.shareSaveState).toBe("conflict");
       expect(seen).toEqual([]);
 
-      await act(async () => {
-        [...host.querySelectorAll("button")].find((b) => b.textContent === "Reload")!.click();
-      });
+      await press("Reload");
       expect(reload).toHaveBeenCalledTimes(1);
-      expect(localStorage.getItem(DRAFT_KEY)).toBeNull();
+      expect(draftsUnder(PREFIX)).toEqual([]);
+      expect(JSON.parse(localStorage.getItem(RECOVERY_KEY)!)).toMatchObject({ markdown: "draft text" });
     });
 
     it("is dropped when it is already what the server holds", async () => {
-      localStorage.setItem(DRAFT_KEY, encodeDraft("hello\n", REV, "op-1", 1, "hello"));
+      seedDraft("tab-a", "hello\n", REV, "hello");
       const seen = recordFetch({ put: [json({ rev: "b" }, 200)] });
       await mount("hello");
       await elapse(SHARE_AUTOSAVE_DEBOUNCE_MS + 50);
 
       expect(editorText()).toBe("hello");
       expect(seen).toEqual([]);
-      expect(localStorage.getItem(DRAFT_KEY)).toBeNull();
+      expect(draftsUnder(PREFIX)).toEqual([]);
     });
+
+    it("takes the newest of several tabs' drafts", async () => {
+      seedDraft("tab-a", "older tab", REV, "hello", Date.now() - 60_000);
+      seedDraft("tab-b", "newer tab", REV, "hello", Date.now() - 1_000);
+      recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("hello");
+      expect(editorText()).toBe("newer tab");
+    });
+
+    it("belongs to one share version: a draft from before a rotation is not touched", async () => {
+      seedDraft("tab-a", "old link text", REV, "hello", Date.now(), shareDraftPrefix("root-1", 1, "page-9"));
+      const seen = recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("hello");
+      await elapse(SHARE_AUTOSAVE_DEBOUNCE_MS + 50);
+
+      expect(editorText()).toBe("hello");
+      expect(seen).toEqual([]);
+    });
+
+    it("is ignored and removed past the age bound, and kept inside it", async () => {
+      seedDraft("tab-old", "stale", REV, "hello", Date.now() - SHARE_DRAFT_MAX_AGE_MS - DAY);
+      const seen = recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("hello");
+      await elapse(SHARE_AUTOSAVE_DEBOUNCE_MS + 50);
+      expect(editorText()).toBe("hello");
+      expect(seen).toEqual([]);
+      expect(draftsUnder(PREFIX)).toEqual([]);
+
+      await act(async () => root.unmount());
+      root = createRoot(host);
+      seedDraft("tab-recent", "recent", REV, "hello", Date.now() - SHARE_DRAFT_MAX_AGE_MS + DAY);
+      await mount("hello");
+      expect(editorText()).toBe("recent");
+    });
+  });
+
+  it("starts over when the page changes: nothing captured for one page reaches another", async () => {
+    const seen = recordFetch({ put: [json({ rev: "b" }, 200)] });
+    await mount("nine");
+    await change("nine, edited");
+
+    await mount("three", undefined, { pageId: "page-3", initialRev: "rev3rev3rev3" });
+    expect(editorText()).toBe("three");
+    await type("three, edited");
+
+    expect(puts(seen).map((s) => s.url)).toEqual(["/api/share-edit/page/page-3?root=root-1&v=2"]);
+    expect(putBodies(seen)).toEqual([{ markdown: "three, edited", rev: "rev3rev3rev3" }]);
+    expect(attachmentSrc("/_attachments-v2/abc123456789.png")).toBe(
+      "/api/media/abc123456789.png?root=root-1&page=page-3&v=2",
+    );
+    // Page 9's edit is not lost: it is its draft, for the next visit there.
+    expect(draftsUnder(PREFIX).map((d) => d.markdown)).toEqual(["nine, edited"]);
   });
 
   it("has no owner-only path literal anywhere in the editor's own modules", async () => {

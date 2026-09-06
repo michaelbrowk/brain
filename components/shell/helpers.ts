@@ -17,6 +17,11 @@ import type { SettingsSection } from "../settings/sections";
 import type { PageRefEffectReceipt } from "./page-ref-reconcile";
 import type { ToastOptions } from "../ui/primitives";
 
+/** Window of the Smart sort undo. The pill draws it as a ring, so the shell's
+ *  timer and the ring have to be the same deadline — hover holds both. */
+export const SMART_UNDO_MS = 9000;
+export const SMART_UNDO_SEC = SMART_UNDO_MS / 1000;
+
 export type SaveState = "idle" | "saving" | "saved" | "error" | "conflict";
 
 /**

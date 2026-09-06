@@ -65,6 +65,11 @@ export const slideUp = {
 export const SPRING_PANEL = { type: "spring", bounce: 0, duration: 0.3 } as const;
 /** Selection capsule flowing between rows (`layoutId`), segmented control. 1.0 / 0.25 */
 export const SPRING_SELECT = { type: "spring", bounce: 0, duration: 0.25 } as const;
+/** Smart sort's chips crossing the dialog into their sections (`layoutId`).
+ *  1.0 / 0.42 — `SPRING_SELECT`'s 0.25 was tuned for a capsule crossing one
+ *  row height, and over the 400px these travel it reads as a whipcrack.
+ *  `bounce: 0` is not negotiable: bounce exists only after a real drag. */
+export const SPRING_DEAL = { type: "spring", bounce: 0, duration: 0.42 } as const;
 /** Sheets and drawers when opened/closed by a button. 1.0 / 0.30 */
 export const SPRING_SHEET = { type: "spring", bounce: 0, duration: 0.3 } as const;
 /** Sheets released from a drag — the only preset with bounce. 0.8 / 0.30 */
@@ -75,6 +80,12 @@ export const PRESS = { scale: 0.97, duration: 0.1 } as const;
 export const PRESS_ICON = { scale: 0.9, duration: 0.1 } as const;
 export const HOVER = { in: 0.08, out: 0.16 } as const;
 
+/** The spring `materialize()` runs on, for a surface that has to give its own
+ *  elements the same arrival rather than take the whole preset (Smart sort's
+ *  chips, which enter staggered and with no transform origin of their own).
+ *  1.0 / 0.22 */
+export const SPRING_MATERIALIZE = { type: "spring", bounce: 0, duration: 0.22 } as const;
+
 /** Menus, popovers, palette, dialogs: opacity + scale .96→1 from the trigger.
  *  Exit retraces the path in 120ms ease-in. Blur is never animated — the
  *  "glass arrived" feel comes from the material's edge-light, not a filter
@@ -84,7 +95,7 @@ export function materialize(transformOrigin = "top left") {
     initial: { opacity: 0, scale: 0.96 },
     animate: { opacity: 1, scale: 1 },
     exit: { opacity: 0, scale: 0.96, transition: { duration: DUR.fast, ease: "easeIn" } },
-    transition: { type: "spring", bounce: 0, duration: 0.22 },
+    transition: SPRING_MATERIALIZE,
     style: { transformOrigin },
   } as const;
 }

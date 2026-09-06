@@ -75,6 +75,9 @@ export function DialogBody({
 }: Omit<HTMLAttributes<HTMLDivElement>, "className"> & {
   className?: string;
   children: ReactNode;
+  /** The `data-*` handles the scroller is styled or looked up by — React's
+   *  own `HTMLAttributes` does not model them. */
+  readonly [key: `data-${string}`]: string | undefined;
 }) {
   return (
     <ScrollEdge variant="fade" className={`min-h-0 flex-1 ${className}`} scrollerProps={scroller}>

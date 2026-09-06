@@ -1185,6 +1185,13 @@ html[data-kbd] [contenteditable]:focus-visible {
 .edge-fade[data-scroll-more] {
   --edge-bottom: 20px;
 }
+/* A wrapped tile flow is not a band of repeating rows: it ends wherever the
+   fold falls, mid-chip. Twenty pixels of mask under a 28px chip read as one
+   chip dimming rather than as a list that continues, so a chip scroller
+   carries a whole chip and its gap. */
+.edge-fade[data-edge="chips"][data-scroll-more] {
+  --edge-bottom: 34px;
+}
 @media (prefers-reduced-motion: reduce) {
   .edge > i,
   .edge-fade {
@@ -1537,6 +1544,15 @@ html[data-kbd] [contenteditable]:focus-visible {
 .chip[data-active] {
   transform: scale(0.97);
 }
+/* A chip that is only a name. Smart sort's proposal is read, not operated,
+   so those chips take the treatment without the affordances: no pointer, no
+   press, and no focus ring, because there is nothing behind them. */
+.chip[data-static] {
+  cursor: default;
+}
+.chip[data-static]:active {
+  transform: none;
+}
 .chip:disabled,
 .chip[aria-disabled="true"] {
   opacity: 0.4;
@@ -1555,6 +1571,49 @@ html[data-kbd] [contenteditable]:focus-visible {
 }
 .chip[data-active-state] .chip-glyph > svg {
   color: var(--ink);
+}
+
+/* Smart sort's heap, and the band that reads it. One layer for the whole
+   pile rather than sixty-one animations: the pages are being read in the
+   order they are stacked, and a single 96px gradient sweeping down says that
+   with one compositor transform and no React state. The paint is
+   `--skeleton-fill`, which is what this app already puts where work is in
+   progress and which each surface and each fallback remaps for itself; the
+   hover tint is 4% ink, and under a chip's own white .50 fill that lands at
+   2%, below the floor §8 sets for a change a reader can see. The band is not
+   rendered at all under reduced motion, so it needs no flattening rule. */
+.smart-body {
+  position: relative;
+  isolation: isolate;
+  /* Only ever driven from the component, and only across the one frame the
+     pile becomes the answer; the global reduced-motion block flattens it. */
+  transition: height 220ms var(--ease-out); /* DUR.page */
+}
+.smart-heap-band {
+  position: absolute;
+  inset: -6px -8px;
+  z-index: -1;
+  overflow: hidden;
+  border-radius: var(--r-block);
+  pointer-events: none;
+}
+.smart-heap-band::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(to bottom, transparent, var(--skeleton-fill), transparent) 0 0 /
+    100% 96px no-repeat;
+  animation: smart-reading-band var(--smart-sweep, 2s) linear infinite;
+}
+/* The layer is the heap's own height, so `100%` carries the band from just
+   above the pile to just below it. */
+@keyframes smart-reading-band {
+  from {
+    transform: translateY(-96px);
+  }
+  to {
+    transform: translateY(100%);
+  }
 }
 
 /* Tree row — 28px capsule r14 on glass. Rest is transparent, hover the ink
@@ -4560,6 +4619,26 @@ a.brain-share-url:hover {
   }
 }
 
+/* A dialog that COMMITTED does not retreat, it lets go: the content it was
+   holding has just been put on the page underneath, so it expands as it
+   dissolves rather than shrinking back to nothing the way Cancel does. The
+   two gestures used to look identical. `[data-commit]` is set by the surface
+   before it closes. */
+@keyframes dialog-commit {
+  from {
+    opacity: 1;
+    transform: translate(-50%, -54%) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translate(-50%, -54%) scale(1.02);
+  }
+}
+
+.brain-dialog[data-state="closed"][data-commit] {
+  animation: dialog-commit 200ms var(--ease-out) forwards;
+}
+
 @keyframes sheet-slide-up {
   from {
     opacity: 0;
@@ -4896,7 +4975,8 @@ a.brain-share-url:hover {
     animation: sheet-slide-up 180ms var(--ease-drawer) forwards;
   }
 
-  .brain-sheet[data-state="closed"] {
+  .brain-sheet[data-state="closed"],
+  .brain-sheet[data-state="closed"][data-commit] {
     animation: sheet-slide-down 130ms ease-in forwards;
   }
 
@@ -4961,7 +5041,11 @@ a.brain-share-url:hover {
   }
 
   .brain-dialog[data-state="closed"],
+  /* the commit keyframe is a second closed state on the same class, and a
+     rule it outranks cannot flatten it — on the sheet as well as the dialog */
+  .brain-dialog[data-state="closed"][data-commit],
   .brain-sheet[data-state="closed"],
+  .brain-sheet[data-state="closed"][data-commit],
   .brain-palette[data-state="closed"] {
     animation-name: dialog-fade-out;
   }

@@ -37,6 +37,7 @@ import {
   type SetStateAction,
 } from "react";
 import type { TreeNode } from "@/lib/store/types";
+import type { SmartSortResult } from "./smart-sort-preview";
 import dynamic from "next/dynamic";
 import { useTheme } from "next-themes";
 import type { PageMenuHandlers } from "./tree/row-menu";
@@ -132,6 +133,7 @@ import {
   removeNode,
   saveOperationKey,
   shareTreeRevision,
+  SMART_UNDO_MS,
   smartChildSignature,
   STRUCTURE_MUTATION_TIMEOUT_MS,
   captureThought,
@@ -185,6 +187,12 @@ const URGENT_TOAST_MS = 3200;
  *  action holds the queue behind it, so it cannot stand without a window. */
 const REDEPLOY_TOAST_MS = 10_000;
 
+/** How long the sorted body keeps its arrival flag. Long enough for the
+ *  ladder to finish, short enough that a later re-render cannot replay it. */
+const SORTED_IN_MS = 900;
+/** The undo pill waits for the document to settle before it rises. */
+const SMART_UNDO_RISE_MS = 400;
+
 /** Body of a notes canvas: a `fallback` (skeleton or load error) while the
  *  page is cold, then the resolved page. The fallback exits in place
  *  (absolute skeleton, fast fade) while the body fades in, so the canvas is
@@ -193,10 +201,14 @@ const REDEPLOY_TOAST_MS = 10_000;
  *  second fade. */
 function NotesCanvasBody({
   ready,
+  /** The body was just written by Smart sort: its blocks assemble in reading
+   *  order rather than the document appearing whole (`milkdown.css`). */
+  sortedIn = false,
   fallback,
   children,
 }: {
   ready: boolean;
+  sortedIn?: boolean;
   fallback: ReactNode;
   children: ReactNode;
 }) {
@@ -207,6 +219,7 @@ function NotesCanvasBody({
       {ready && (
         <motion.div
           className="brain-page-body"
+          data-sorted-in={sortedIn ? "" : undefined}
           initial={readyAtMount ? false : { opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: DUR.base, ease: EASE_OUT }}
@@ -415,19 +428,48 @@ export function Shell({
   const toastEndsAt = useRef(0);
   const toastLeftMs = useRef(0);
   const presentToastRef = useRef<(next: ShellToast | null) => void>(() => {});
-  const [smartPreview, setSmartPreview] = useState<{
+  /** One Smart sort, from the press to Apply or Cancel. It exists from the
+   *  click, holding the children it will rearrange, and `result` is the
+   *  arrangement when it lands: the client already has the titles and icons,
+   *  so the wait can show the pile rather than a skeleton of it. */
+  const [smartSort, setSmartSort] = useState<{
     pageId: string;
     childSig: string;
-    sections: string[];
-    assignments: Record<string, string>;
-    /** Reading order across all sections. A dated one reads newest first. */
-    order?: string[];
-    count: number;
+    pages: TreeNode[];
+    result: SmartSortResult | null;
   } | null>(null);
+  /** Cancel's abort, and the guard that keeps a late answer out of a dialog
+   *  the reader has already closed. */
+  const smartAbort = useRef<AbortController | null>(null);
   const [smartLoading, setSmartLoading] = useState(false);
+  /** The Apply write is in flight. The dialog holds through it, so a save
+   *  that fails can answer where the reader pressed instead of leaving a
+   *  closed dialog over an unchanged document. */
+  const [smartApplying, setSmartApplying] = useState(false);
+  const [smartApplyError, setSmartApplyError] = useState<string | null>(null);
+  /** The page whose body was just written by Smart sort, so the document
+   *  assembles instead of appearing whole. It is a page id and not a flag:
+   *  the window is 900ms, and a reader who leaves inside it would otherwise
+   *  watch the NEXT page ladder in as though it had been sorted. */
+  const [sortedIn, setSortedIn] = useState<string | null>(null);
+  const sortedInTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const smartUndoOpenTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [smartUndoOpen, setSmartUndoOpen] = useState(false);
   const [smartUndoPageId, setSmartUndoPageId] = useState<string | null>(null);
   const smartUndoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const smartUndoEndsAt = useRef(0);
+  const smartUndoLeftMs = useRef(0);
+  /** Drops the open Smart sort and the request behind it. Cancel is this
+   *  with a button on it, and navigation is this on the way out — the dialog
+   *  now exists while the model is working, so leaving has something to
+   *  abort rather than letting the call run on to its own 25s ceiling. */
+  const discardSmartSort = useCallback(() => {
+    smartAbort.current?.abort();
+    smartAbort.current = null;
+    setSmartSort(null);
+    setSmartApplying(false);
+    setSmartApplyError(null);
+  }, []);
 
   const updateMailConfiguredFromSettings = useCallback(
     () => {
@@ -724,6 +766,8 @@ export function Shell({
     () => () => {
       if (toastTimer.current) clearTimeout(toastTimer.current);
       if (urgentTimer.current) clearTimeout(urgentTimer.current);
+      if (sortedInTimer.current) clearTimeout(sortedInTimer.current);
+      if (smartUndoOpenTimer.current) clearTimeout(smartUndoOpenTimer.current);
     },
     [],
   );
@@ -1296,7 +1340,7 @@ export function Shell({
     flushPendingRef.current();
     setSelectedId(id);
     setMailOpen(false);
-    setSmartPreview(null);
+    discardSmartSort();
     editorContextTargetRef.current = null;
     setEditorContextTargetId(null);
     editorContextPageRefRef.current = null;
@@ -1307,7 +1351,7 @@ export function Shell({
     try {
       localStorage.setItem("brain-last-opened", id);
     } catch {}
-  }, [rememberRecent, setMailOpen, setSelectedId]);
+  }, [discardSmartSort, rememberRecent, setMailOpen, setSelectedId]);
 
   const goHome = useCallback(() => {
     clearSearchHighlightIntent();
@@ -1316,14 +1360,14 @@ export function Shell({
     flushPendingRef.current();
     setSelectedId(null);
     setMailOpen(false);
-    setSmartPreview(null);
+    discardSmartSort();
     editorContextTargetRef.current = null;
     setEditorContextTargetId(null);
     editorContextPageRefRef.current = null;
     setEditorContextPageRef(null);
     setMobilePagesOpen(false);
     window.history.pushState({}, "", "/");
-  }, [clearSearchHighlightIntent, setMailOpen, setSelectedId]);
+  }, [clearSearchHighlightIntent, discardSmartSort, setMailOpen, setSelectedId]);
 
   const openMail = useCallback(() => {
     clearSearchHighlightIntent();
@@ -1332,7 +1376,7 @@ export function Shell({
     flushPendingRef.current();
     setSelectedId(null);
     setMailOpen(true);
-    setSmartPreview(null);
+    discardSmartSort();
     editorContextTargetRef.current = null;
     setEditorContextTargetId(null);
     editorContextPageRefRef.current = null;
@@ -1341,7 +1385,7 @@ export function Shell({
     if (window.location.pathname !== "/mail") {
       window.history.pushState({}, "", "/mail");
     }
-  }, [clearSearchHighlightIntent, setMailOpen, setSelectedId]);
+  }, [clearSearchHighlightIntent, discardSmartSort, setMailOpen, setSelectedId]);
 
   // browser back/forward moves between pages, mail, and settings
   useEffect(() => {
@@ -1350,7 +1394,7 @@ export function Shell({
       historyOpenRequestRef.current += 1;
       editorFlushRef.current();
       flushPendingRef.current();
-      setSmartPreview(null);
+      discardSmartSort();
       const wasSettings = surfaceRef.current === "settings";
       const settingsTarget = parseSettingsPath(location.pathname);
       if (settingsTarget !== undefined) {
@@ -1438,7 +1482,7 @@ export function Shell({
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [clearSearchHighlightIntent, setMailOpen, setSelectedId]);
+  }, [clearSearchHighlightIntent, discardSmartSort, setMailOpen, setSelectedId]);
 
   const toggleExpand = useCallback((id: string) => {
     setExpanded((s) => {
@@ -4164,6 +4208,30 @@ export function Shell({
     [mutate],
   );
 
+  /** Arms the Smart sort undo window, `ms` from now. */
+  const armSmartUndo = useCallback((ms: number) => {
+    if (smartUndoTimer.current) clearTimeout(smartUndoTimer.current);
+    smartUndoEndsAt.current = Date.now() + ms;
+    smartUndoLeftMs.current = ms;
+    smartUndoTimer.current = setTimeout(() => {
+      smartUndoTimer.current = null;
+      setSmartUndoOpen(false);
+    }, ms);
+  }, []);
+  /** Hover holds the way back. The ring pauses under the pointer on its own
+   *  `animation-play-state`, so the timer pauses with it or the two disagree
+   *  and the pill leaves from under the hand reaching for Undo. */
+  const pauseSmartUndo = useCallback(() => {
+    if (!smartUndoTimer.current) return;
+    clearTimeout(smartUndoTimer.current);
+    smartUndoTimer.current = null;
+    smartUndoLeftMs.current = Math.max(0, smartUndoEndsAt.current - Date.now());
+  }, []);
+  const resumeSmartUndo = useCallback(() => {
+    if (smartUndoTimer.current || smartUndoLeftMs.current <= 0) return;
+    armSmartUndo(smartUndoLeftMs.current);
+  }, [armSmartUndo]);
+
   const runSmartSort = useCallback(async () => {
     if (!selectedId) return;
     const targetId = selectedId;
@@ -4174,30 +4242,58 @@ export function Shell({
       )
     )
       return;
-    const expectedChildren = smartChildSignature(curChildrenRef.current);
+    // The heap comes from `ordinaryChildren`, the same set the staleness
+    // guard is computed from, so what the reader is shown before the answer
+    // and what Apply checks against are one list.
+    const pages = curChildrenRef.current;
+    const expectedChildren = smartChildSignature(pages);
+    smartAbort.current?.abort();
+    const request = new AbortController();
+    smartAbort.current = request;
     setSmartLoading(true);
-    setSmartPreview(null);
+    setSmartApplying(false);
+    setSmartApplyError(null);
+    setSmartSort({
+      pageId: targetId,
+      childSig: expectedChildren,
+      pages,
+      result: null,
+    });
     try {
       const r = await apiFetch("/api/smart-sort", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ parentId: targetId }),
+        signal: request.signal,
       });
       if (!r.ok) throw new Error(String(r.status));
-      const preview = await r.json();
-      if (selectedIdRef.current === targetId) {
-        setSmartPreview({
-          ...preview,
-          pageId: targetId,
-          childSig: expectedChildren,
-        });
-      }
+      const result = (await r.json()) as SmartSortResult;
+      if (request.signal.aborted) return;
+      // The session the answer belongs to may already be gone — cancelled,
+      // or replaced by a later run. `selectedIdRef` guards a page switch and
+      // does not guard either of those.
+      setSmartSort((current) =>
+        current && current.pageId === targetId && !current.result
+          ? { ...current, result }
+          : current,
+      );
     } catch {
+      // An abort is the reader leaving, not a failure. It says nothing.
+      if (request.signal.aborted) return;
+      setSmartSort((current) =>
+        current?.pageId === targetId && !current.result ? null : current,
+      );
       if (selectedIdRef.current === targetId) {
         showToast("Couldn't sort these pages. Try again.");
       }
     } finally {
-      setSmartLoading(false);
+      // Only the run that is still the current one may put the trigger back:
+      // a superseded request clearing the flag would take "Sorting…" off a
+      // page head that is still waiting on the newer one.
+      if (smartAbort.current === request) {
+        smartAbort.current = null;
+        setSmartLoading(false);
+      }
     }
   }, [blockConflictMutation, selectedId, showToast]);
 
@@ -4245,8 +4341,9 @@ export function Shell({
   );
 
   const applySmartSort = useCallback(async () => {
-    const p = smartPreview;
-    if (!p || !currentNode || !page) return;
+    const session = smartSort;
+    const p = session?.result;
+    if (!session || !p || !currentNode || !page) return;
     if (
       blockConflictMutation(
         page.id,
@@ -4255,8 +4352,8 @@ export function Shell({
     )
       return;
     const liveChildSig = smartChildSignature(ordinaryChildren);
-    if (p.pageId !== page.id || p.childSig !== liveChildSig) {
-      setSmartPreview(null);
+    if (session.pageId !== page.id || session.childSig !== liveChildSig) {
+      setSmartSort(null);
       showToast("Pages changed — run Smart sort again");
       return;
     }
@@ -4270,14 +4367,17 @@ export function Shell({
         ? pendingRef.current.md
         : target.markdown;
     const visibleRevision = revisionsRef.current.get(target.id) ?? target.rev;
-    setSmartPreview(null);
+    setSmartApplyError(null);
+    setSmartApplying(true);
     smartUndo.current = {
       id: target.id,
       markdown: visibleBody,
       rev: visibleRevision,
     };
     setSmartUndoPageId(target.id);
-    const byId = new Map(currentNode.children.map((c) => [c.id, c] as const));
+    // The pages the reader was shown, which the childSig check has just
+    // confirmed are still the page's children.
+    const byId = new Map(session.pages.map((c) => [c.id, c] as const));
     const blocks: string[] = [];
     for (const section of p.sections) {
       const links = sectionPageIds(p, section)
@@ -4299,7 +4399,29 @@ export function Shell({
     }
     // replace the body with the fresh layout (re-running the broom re-organizes,
     // it doesn't stack). Undo restores the prior body verbatim.
-    if (!(await writeBody(target, organized))) return;
+    // The dialog is still up. A write that fails says so in its own footer and
+    // takes the undo ref back with it: closing first left the reader with a
+    // pressed button, an unchanged document, no word, and a way back that
+    // pointed at a body nothing had replaced.
+    const written = await writeBody(target, organized);
+    if (!written) {
+      setSmartApplying(false);
+      smartUndo.current = null;
+      setSmartUndoPageId(null);
+      setSmartApplyError("Couldn't save the sorted page. Try again.");
+      return;
+    }
+    // `smartApplying` stays true through the close: it is what puts
+    // `data-commit` on the dialog, and the closed-state keyframe reads that
+    // attribute at the moment it starts. The next run clears it.
+    setSmartSort(null);
+    if (selectedIdRef.current === target.id) {
+      // The editor has just remounted on the new body (writeBody bumped the
+      // epoch in the same batch), so the document assembles from this frame.
+      setSortedIn(target.id);
+      if (sortedInTimer.current) clearTimeout(sortedInTimer.current);
+      sortedInTimer.current = setTimeout(() => setSortedIn(null), SORTED_IN_MS);
+    }
     // it's a plain doc now — drop any legacy sections-view state
     await patchParentSections(target.id, [], null);
     await refreshTree();
@@ -4308,14 +4430,22 @@ export function Shell({
       setSmartUndoPageId(null);
       return;
     }
-    setSmartUndoOpen(true);
-    if (smartUndoTimer.current) clearTimeout(smartUndoTimer.current);
-    smartUndoTimer.current = setTimeout(() => setSmartUndoOpen(false), 9000);
+    // The way back rises after the document has settled, not over the top of
+    // it: at the press the eye is on the sections assembling, and a pill in
+    // the corner would take it off them.
+    if (smartUndoOpenTimer.current) clearTimeout(smartUndoOpenTimer.current);
+    smartUndoOpenTimer.current = setTimeout(() => {
+      smartUndoOpenTimer.current = null;
+      if (selectedIdRef.current !== target.id) return;
+      setSmartUndoOpen(true);
+      armSmartUndo(SMART_UNDO_MS);
+    }, SMART_UNDO_RISE_MS);
   }, [
-    smartPreview,
+    smartSort,
     currentNode,
     page,
     ordinaryChildren,
+    armSmartUndo,
     blockConflictMutation,
     showToast,
     writeBody,
@@ -4670,7 +4800,7 @@ export function Shell({
         settingsSection: target,
       });
       setSelectedId(null);
-      setSmartPreview(null);
+      discardSmartSort();
       editorContextTargetRef.current = null;
       setEditorContextTargetId(null);
       editorContextPageRefRef.current = null;
@@ -4685,6 +4815,7 @@ export function Shell({
     },
     [
       clearSearchHighlightIntent,
+      discardSmartSort,
       mobilePagesOpen,
       paletteOpen,
       setSelectedId,
@@ -4846,7 +4977,7 @@ export function Shell({
     historyOpen ||
     !!renameTarget ||
     !!moveTarget ||
-    !!smartPreview;
+    !!smartSort;
 
   const mobileTabBarProps = {
     homeActive:
@@ -5172,6 +5303,7 @@ export function Shell({
             ) : selectedId ? (
               <NotesCanvasBody
                 ready={!!page && page.id === selectedId}
+                sortedIn={!!selectedId && sortedIn === selectedId}
                 fallback={
                   pageLoadError?.id === selectedId ? (
                     <motion.div
@@ -5363,7 +5495,6 @@ export function Shell({
       <ShellOverlays
         tree={tree}
         selectedId={selectedId}
-        currentNode={currentNode}
         save={save}
         localRecoveryUnavailable={localRecoveryUnavailable}
         dialogReturnFocusRef={dialogReturnFocusRef}
@@ -5394,11 +5525,15 @@ export function Shell({
             throw new Error("move failed");
           }
         }}
-        smartPreview={smartPreview}
+        smartSort={smartSort}
+        smartApplying={smartApplying}
+        smartApplyError={smartApplyError}
         onApplySmartSort={applySmartSort}
-        onCancelSmartSort={() => setSmartPreview(null)}
+        onCancelSmartSort={discardSmartSort}
         smartUndoOpen={smartUndoOpen}
         smartUndoPageId={smartUndoPageId}
+        onPauseSmartUndo={pauseSmartUndo}
+        onResumeSmartUndo={resumeSmartUndo}
         onUndoSmartSort={() => {
           setSmartUndoOpen(false);
           undoSmartSort();

@@ -3486,6 +3486,14 @@ test("Smart sort writes a dated section in the order it previewed", async ({
   await page.goto(`/p/${parent.id}`);
   await page.getByRole("button", { name: "Smart sort" }).click();
   const dialog = page.getByRole("dialog", { name: "Smart sort" });
+  // The dialog now opens on the press, holding the pile in tree order, so
+  // wait for the answer before reading the order off it: the heap would
+  // satisfy a bare title assertion while saying nothing about the grouping.
+  await expect(dialog.getByRole("status")).toHaveText(
+    "1 section proposed. Nothing saved yet.",
+  );
+  await expect(dialog.getByText("Записи · 4")).toBeVisible();
+  await expect(dialog.getByRole("list", { name: "Записи · 4" })).toBeVisible();
   await expect(dialog.getByText("Запись 23 июня")).toBeVisible();
   await dialog.getByRole("button", { name: "Apply" }).click();
   await expect(page.getByRole("dialog", { name: "Smart sort" })).toHaveCount(0);
@@ -3499,6 +3507,314 @@ test("Smart sort writes a dated section in the order it previewed", async ({
       );
     })
     .toEqual(newestFirst);
+});
+
+async function smartSortParent(page: Page, title: string) {
+  const parentResponse = await browserJson(page, "/api/page", {
+    method: "POST",
+    body: { title, markdown: "Body" },
+  });
+  expect(parentResponse.ok).toBeTruthy();
+  const parent = parentResponse.body as { id: string };
+  const children: string[] = [];
+  for (const child of ["Alpha", "Beta", "Gamma", "Delta"]) {
+    const childResponse = await browserJson(page, "/api/page", {
+      method: "POST",
+      body: { parentId: parent.id, title: child },
+    });
+    expect(childResponse.ok).toBeTruthy();
+    children.push((childResponse.body as { id: string }).id);
+  }
+  return { parent, children };
+}
+
+test("the preview stands in the columns Apply is about to write", async ({
+  page,
+}) => {
+  await login(page);
+  const parentResponse = await browserJson(page, "/api/page", {
+    method: "POST",
+    body: { title: "Column parent", markdown: "Body" },
+  });
+  expect(parentResponse.ok).toBeTruthy();
+  const parent = parentResponse.body as { id: string };
+  const children: string[] = [];
+  for (const title of ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta"]) {
+    const childResponse = await browserJson(page, "/api/page", {
+      method: "POST",
+      body: { parentId: parent.id, title },
+    });
+    expect(childResponse.ok).toBeTruthy();
+    children.push((childResponse.body as { id: string }).id);
+  }
+  const sections = ["First", "Second", "Third"];
+  await page.route("**/api/smart-sort", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sections,
+        assignments: Object.fromEntries(
+          children.map((id, index) => [id, sections[index % 3]]),
+        ),
+        order: children,
+        count: children.length,
+      }),
+    });
+  });
+
+  await page.goto(`/p/${parent.id}`);
+  await page.getByRole("button", { name: "Smart sort" }).click();
+  const dialog = page.getByRole("dialog", { name: "Smart sort" });
+  // The subtitle is a Dialog.Description, spoken once when the dialog opens,
+  // and the dialog now opens on the press, before there is an answer. So the
+  // answer says itself, and that line is also how a test waits for it.
+  await expect(dialog.getByRole("status")).toHaveText(
+    "3 sections proposed. Nothing saved yet.",
+  );
+
+  // Three sections split at ceil(3/2): two on the left, one on the right.
+  // The dialog is a small picture of the document, which is what gives the
+  // chips a structure to land in rather than a list to be re-ordered into.
+  // Located by the name each section's list carries, not by a utility class.
+  const columnLeft = async (name: string) =>
+    dialog
+      .getByRole("list", { name })
+      .evaluate((element) => Math.round(element.getBoundingClientRect().left));
+  const lefts = [
+    await columnLeft("First · 2"),
+    await columnLeft("Second · 2"),
+    await columnLeft("Third · 2"),
+  ];
+  expect(lefts[0]).toBe(lefts[1]);
+  expect(lefts[2]).toBeGreaterThan(lefts[0]);
+
+  await dialog.getByRole("button", { name: "Apply" }).click();
+  await expect(page.getByRole("dialog", { name: "Smart sort" })).toHaveCount(0);
+  await expect
+    .poll(async () => {
+      const read = await browserJson(page, `/api/page/${parent.id}`);
+      const markdown = (read.body as { markdown?: string }).markdown ?? "";
+      const columns = markdown.split("\n:::col\n").slice(1);
+      return columns.map((column) =>
+        [...column.matchAll(/^## (.+)$/gm)].map((match) => match[1]),
+      );
+    })
+    .toEqual([["First", "Second"], ["Third"]]);
+});
+
+test("Smart sort opens on the press and Cancel takes the request with it", async ({
+  page,
+}) => {
+  await login(page);
+  const { parent, children } = await smartSortParent(page, "Cancel parent");
+  await page.route("**/api/smart-sort", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 4000));
+    try {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          sections: ["Keep"],
+          assignments: Object.fromEntries(children.map((id) => [id, "Keep"])),
+          order: children,
+          count: children.length,
+        }),
+      });
+    } catch {
+      // the client aborted; there is nobody left to answer
+    }
+  });
+
+  await page.goto(`/p/${parent.id}`);
+  await page.getByRole("button", { name: "Smart sort" }).click();
+  // The dialog is the wait, not a report of it: the client already holds the
+  // titles the answer rearranges, so the pile is on screen from the press.
+  const dialog = page.getByRole("dialog", { name: "Smart sort" });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByText("Reading 4 pages")).toBeVisible();
+  await expect(dialog.getByText("Alpha")).toBeVisible();
+  await expect(dialog.getByRole("button", { name: "Apply" })).toBeDisabled();
+  // The proposal is read, not operated: the only controls in it are the way
+  // out, the way back and the way forward. A chip is a name, not a button.
+  await expect(dialog.getByRole("button")).toHaveCount(3);
+  await expect(dialog.getByRole("listitem")).toHaveCount(4);
+
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expectDialogLayerReleased(page);
+});
+
+test("an answer that lands after Cancel does not reopen Smart sort", async ({
+  page,
+}) => {
+  await login(page);
+  const { parent, children } = await smartSortParent(page, "Late answer parent");
+  await page.route("**/api/smart-sort", async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    try {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          sections: ["Keep"],
+          assignments: Object.fromEntries(children.map((id) => [id, "Keep"])),
+          order: children,
+          count: children.length,
+        }),
+      });
+    } catch {
+      // the client aborted; there is nobody left to answer
+    }
+  });
+
+  await page.goto(`/p/${parent.id}`);
+  await page.getByRole("button", { name: "Smart sort" }).click();
+  const dialog = page.getByRole("dialog", { name: "Smart sort" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expectDialogLayerReleased(page);
+
+  // Past the stub's window: a cancelled session cannot be filled in behind
+  // the reader, and leaving is not a failure, so nothing is said either.
+  await page.waitForTimeout(2000);
+  await expect(page.getByRole("dialog", { name: "Smart sort" })).toHaveCount(0);
+  await expect(
+    page.getByText("Couldn't sort these pages. Try again."),
+  ).toHaveCount(0);
+});
+
+test("Apply commits, and the page takes the sort from there", async ({
+  page,
+}) => {
+  await login(page);
+  const { parent, children } = await smartSortParent(page, "Aftermath parent");
+  const sections = ["Keep", "Later"];
+  await page.route("**/api/smart-sort", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sections,
+        assignments: Object.fromEntries(
+          children.map((id, index) => [id, sections[index % 2]]),
+        ),
+        order: children,
+        count: children.length,
+      }),
+    });
+  });
+  // Hold the write open long enough to read the dialog while it commits.
+  await page.route(`**/api/page/${parent.id}`, async (route) => {
+    if (route.request().method() !== "PUT") return route.continue();
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    await route.continue();
+  });
+
+  await page.goto(`/p/${parent.id}`);
+  // The four children are unmentioned by the body, so the tail is standing.
+  await expect(page.locator("[data-derived-page-refs]")).toBeVisible();
+
+  await page.getByRole("button", { name: "Smart sort" }).click();
+  const dialog = page.getByRole("dialog", { name: "Smart sort" });
+  await expect(dialog.getByRole("status")).toHaveText(
+    "2 sections proposed. Nothing saved yet.",
+  );
+  expect(await dialog.getAttribute("data-commit")).toBeNull();
+
+  await dialog.getByRole("button", { name: "Apply" }).click();
+  // A dialog that committed lets go rather than retreating: the flag is what
+  // picks the exit, and Cancel never carries it.
+  await expect(dialog).toHaveAttribute("data-commit", "");
+  await expect(page.getByRole("dialog", { name: "Smart sort" })).toHaveCount(0);
+
+  // The document assembles rather than appearing whole: the body carries the
+  // flag for the frame the sorted markdown mounts, and the blocks walk the
+  // order the markdown was built in — 30ms a block, the right column a flat
+  // 60 behind the left.
+  await expect(page.locator(".brain-page-body")).toHaveAttribute(
+    "data-sorted-in",
+    "",
+  );
+  await expect
+    .poll(() =>
+      page
+        .locator("[data-sorted-in] .brain-cols > .brain-col")
+        .evaluateAll((columns) =>
+          columns.map((column) =>
+            [...column.children]
+              .slice(0, 2)
+              .map((block) => getComputedStyle(block).animationDelay)
+              .join(","),
+          ),
+        ),
+    )
+    .toEqual(["0s,0.03s", "0.06s,0.09s"]);
+  await expectDialogLayerReleased(page);
+
+  // The body now names every child, so the tail leaves; the way back rises
+  // with its deadline drawn on it.
+  await expect(page.locator("[data-derived-page-refs]")).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "Undo" })).toBeVisible();
+  await expect(page.locator("[data-toast-ring]")).toBeVisible();
+});
+
+test("a failed Apply holds Smart sort up and says what happened", async ({
+  page,
+}) => {
+  await login(page);
+
+  const parentResponse = await browserJson(page, "/api/page", {
+    method: "POST",
+    body: { title: "Apply failure parent", markdown: "Body" },
+  });
+  expect(parentResponse.ok).toBeTruthy();
+  const parent = parentResponse.body as { id: string };
+  const children: string[] = [];
+  for (const title of ["Alpha", "Beta", "Gamma", "Delta"]) {
+    const childResponse = await browserJson(page, "/api/page", {
+      method: "POST",
+      body: { parentId: parent.id, title },
+    });
+    expect(childResponse.ok).toBeTruthy();
+    children.push((childResponse.body as { id: string }).id);
+  }
+  await page.route("**/api/smart-sort", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sections: ["Keep"],
+        assignments: Object.fromEntries(children.map((id) => [id, "Keep"])),
+        order: children,
+        count: children.length,
+      }),
+    });
+  });
+  // The body write is the commit. Refuse it, and the reader has to be told
+  // where they pressed: closing first left a pressed button over a document
+  // nothing had changed.
+  await page.route(`**/api/page/${parent.id}`, async (route) => {
+    if (route.request().method() !== "PUT") return route.continue();
+    await route.fulfill({
+      status: 500,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "write refused" }),
+    });
+  });
+
+  await page.goto(`/p/${parent.id}`);
+  await page.getByRole("button", { name: "Smart sort" }).click();
+  const dialog = page.getByRole("dialog", { name: "Smart sort" });
+  await dialog.getByRole("button", { name: "Apply" }).click();
+  await expect(dialog.getByRole("alert")).toHaveText(
+    "Couldn't save the sorted page. Try again.",
+    { timeout: 20_000 },
+  );
+  await expect(dialog).toBeVisible();
+  await expect(page.getByRole("button", { name: "Undo" })).toHaveCount(0);
+
+  await dialog.getByRole("button", { name: "Cancel" }).click();
+  await expectDialogLayerReleased(page);
 });
 
 test("a delayed History open cannot replace a newer Move dialog", async ({

@@ -550,6 +550,7 @@ export function isShareScopeSnapshot(value: unknown): value is ShareScopeSnapsho
     /^[0-9a-f]{64}$/.test(snapshot.scopeToken) &&
     typeof snapshot.public === "boolean" &&
     typeof snapshot.shareLocked === "boolean" &&
+    typeof snapshot.shareEdit === "boolean" &&
     (snapshot.shareExpiresAt === null ||
       typeof snapshot.shareExpiresAt === "string") &&
     typeof snapshot.shareVersion === "number" &&

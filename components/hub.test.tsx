@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { TreeNode } from "@/lib/store/types";
 import { Hub } from "./hub";
 
 vi.mock("framer-motion", () => import("@/test/framer-motion-mock"));
@@ -14,7 +15,7 @@ async function settle() {
   });
 }
 
-describe("Hub empty state", () => {
+describe("Hub", () => {
   let host: HTMLDivElement;
   let root: Root;
 
@@ -61,5 +62,56 @@ describe("Hub empty state", () => {
     expect(host.textContent).toContain("Your notebook is empty");
     expect(host.textContent).toContain("Today thoughts opens a page for today");
     expect(host.textContent).toContain("Mail is for a Gmail or IMAP account");
+  });
+
+  /** A page the feed will show: written just now, so the week filter keeps it. */
+  function recent(values: Partial<TreeNode> & { id: string; title: string }): TreeNode {
+    const updated = new Date().toISOString();
+    return {
+      parentId: null,
+      order: values.id,
+      created: updated,
+      updated,
+      hasChildren: false,
+      children: [],
+      ...values,
+    };
+  }
+
+  it("names the visitor who wrote a page last, and keeps Brain AI as it is", async () => {
+    await act(async () =>
+      root.render(
+        <Hub
+          tree={[
+            recent({ id: "p1", title: "Edited page", updatedBy: "visitor", updatedByName: "Ada" }),
+            recent({ id: "p2", title: "Claude page", updatedBy: "claude" }),
+            recent({ id: "p3", title: "My page", updatedBy: "me" }),
+          ]}
+          onSelect={() => {}}
+          onCreate={async () => null}
+        />,
+      ),
+    );
+    await settle();
+
+    expect(host.textContent).toContain("edited by Ada");
+    expect(host.textContent).toContain("Brain AI");
+    // the owner's own writes stay unlabelled
+    expect(host.textContent).not.toContain("edited by a visitor");
+  });
+
+  it("says a visitor without falling back on a name the mint cannot omit", async () => {
+    await act(async () =>
+      root.render(
+        <Hub
+          tree={[recent({ id: "p1", title: "Hand edited", updatedBy: "visitor" })]}
+          onSelect={() => {}}
+          onCreate={async () => null}
+        />,
+      ),
+    );
+    await settle();
+
+    expect(host.textContent).toContain("edited by a visitor");
   });
 });

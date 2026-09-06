@@ -4429,6 +4429,14 @@ export function Shell({
     [showToast, updateShareSettings],
   );
 
+  const onSetShareEditable = useCallback(
+    async (canEdit: boolean) => {
+      await updateShareSettings({ canEdit });
+      showToast(canEdit ? "Editing turned on" : "Editing turned off");
+    },
+    [showToast, updateShareSettings],
+  );
+
   const onPrepareShare = useCallback(
     async (rootId: string) => readShareScope(rootId),
     [readShareScope],
@@ -4486,6 +4494,7 @@ export function Shell({
       const readBack = await readShareScope(rootId);
       if (
         !readBack.public ||
+        readBack.shareEdit !== !!canEdit ||
         (password !== undefined &&
           readBack.shareLocked !== !!password) ||
         (expiresAt !== undefined &&
@@ -4917,6 +4926,7 @@ export function Shell({
     onDisableShare,
     onCopyShareLink,
     onSetShareProtection,
+    onSetShareEditable,
     onOpenSharingSettings: () => openSettings("sharing"),
     onSetPageAppearance: setPageAppearance,
     onTogglePin,

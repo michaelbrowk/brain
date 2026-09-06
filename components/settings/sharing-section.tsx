@@ -64,6 +64,11 @@ export function SharingSection({
                 Expired
               </span>
             )}
+            {p.shareEdit && (
+              <span className="brain-settings-badge text-table text-ink-2">
+                Editable
+              </span>
+            )}
             <Button
               variant="quiet"
               disabled={

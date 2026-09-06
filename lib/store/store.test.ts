@@ -9123,6 +9123,46 @@ describe("share-aware Store leaves", () => {
     });
   });
 
+  /** The authority re-check reads `public`, `shareEdit`, the expiry and the
+   *  version. It never reads `sharePass`, so a share that gains a password is
+   *  protected by the version alone: `configureShare` rotates whenever the
+   *  password changes, and the rotation is what retires the tokens minted
+   *  while the root was open. Take the rotation out of that predicate and
+   *  this test is the one that says so. */
+  it("retires an edit token through the version when the root gains a password", async () => {
+    const { s, rootId, childId, version } = await editableRoot();
+    const write = (shareVersion: number, markdown: string) =>
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion,
+        markdown,
+        visitorName: "Ada",
+      });
+    await expect(write(version, "before the lock")).resolves.toMatchObject({
+      markdown: "before the lock",
+    });
+
+    const scope = await s.readShareScope(rootId);
+    await s.configureShare(rootId, {
+      enabled: true,
+      expectedScopeToken: scope.scopeToken,
+      canEdit: true,
+      sharePass: "a-hash-that-is-not-a-secret",
+    });
+
+    const locked = await s.readShareScope(rootId);
+    expect(locked.shareLocked).toBe(true);
+    expect(locked.shareEdit).toBe(true);
+    expect(locked.shareVersion).toBeGreaterThan(version);
+    await expect(write(version, "after the lock")).rejects.toBeInstanceOf(
+      ShareAccessNotFoundError,
+    );
+    const raw = await readIndexRaw(s, childId);
+    expect(raw).toContain("before the lock");
+    expect(raw).not.toContain("after the lock");
+  });
+
   it("creates a subpage that inherits the share and carries no share key", async () => {
     const { s, rootId, childId, version } = await editableRoot();
     const made = await s.createSharedSubpage({

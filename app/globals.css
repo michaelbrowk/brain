@@ -2014,6 +2014,14 @@ html[data-kbd] [contenteditable]:focus-visible {
 .brain-share-row-stack {
   display: block;
 }
+/* A stacked row whose first line still reads as a row: the label at the
+   left, the control at the right, the notes underneath. */
+.brain-share-row-line {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
 .brain-share-row-label {
   flex: 1;
   min-width: 0;

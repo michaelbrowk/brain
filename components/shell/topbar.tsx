@@ -59,6 +59,7 @@ export interface ShellTopbarProps {
   onDisableShare: SharePopoverProps["onDisableShare"];
   onCopyShareLink: SharePopoverProps["onCopyLink"];
   onSetShareProtection: SharePopoverProps["onSetProtection"];
+  onSetShareEditable: SharePopoverProps["onSetEditable"];
   onOpenSharingSettings: (invoker?: HTMLElement) => void;
   onSetPageAppearance: (
     patch: Partial<Pick<TreeNode, "font" | "smallText" | "fullWidth">>,
@@ -100,6 +101,7 @@ export function ShellTopbar({
   onDisableShare,
   onCopyShareLink,
   onSetShareProtection,
+  onSetShareEditable,
   onOpenSharingSettings,
   onSetPageAppearance,
   onTogglePin,
@@ -167,6 +169,7 @@ export function ShellTopbar({
           : onOpenSharingSettings
       }
       onSetProtection={onSetShareProtection}
+      onSetEditable={onSetShareEditable}
     >
       <Button
         variant="quiet"

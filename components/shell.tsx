@@ -4917,13 +4917,7 @@ export function Shell({
           (accountId ? `?account=${encodeURIComponent(accountId)}` : ""),
       );
     },
-    [
-      clearSearchHighlightIntent,
-      discardSmartSort,
-      mobilePagesOpen,
-      paletteOpen,
-      setSelectedId,
-    ],
+    [clearSearchHighlightIntent, discardSmartSort, paletteOpen, setSelectedId],
   );
 
   /** A section change inside the surface. The mobile root list drills down

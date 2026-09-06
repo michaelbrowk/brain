@@ -4431,8 +4431,18 @@ export function Shell({
 
   const onSetShareEditable = useCallback(
     async (canEdit: boolean) => {
-      await updateShareSettings({ canEdit });
-      showToast(canEdit ? "Editing turned on" : "Editing turned off");
+      // Either direction rotates shareVersion, so every visitor's cookie dies
+      // with the flip. The card cannot say this before the press without
+      // asserting it of a card nobody has touched, so it is said here, once
+      // the read-back has confirmed the flip landed, and it reads the password
+      // off that same authority rather than off the tree.
+      const readBack = await updateShareSettings({ canEdit });
+      showToast(
+        `${canEdit ? "Editing turned on" : "Editing turned off"}. Everyone ` +
+          `using the link will need to open it again${
+            readBack.shareLocked ? " with the password" : ""
+          }.`,
+      );
     },
     [showToast, updateShareSettings],
   );

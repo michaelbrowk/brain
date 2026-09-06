@@ -553,15 +553,7 @@ function PrivateReview({
           <Row id="access" label="Access">
             <span className={VALUE}>{readerValue(passwordOn)}</span>
           </Row>
-          {/* No sign-out line here: the link does not exist yet, so there is
-              nobody to sign out and the sentence would be false. */}
-          <EditRow
-            checked={editOn}
-            disabled={busy}
-            locked={passwordOn}
-            showSignOut={false}
-            onChange={onEditToggle}
-          />
+          <EditRow checked={editOn} disabled={busy} onChange={onEditToggle} />
           <SwitchRow
             id="password"
             label="Password"
@@ -736,7 +728,6 @@ function ManagementView({
       {directPublic && (
         <EditSetting
           editable={hasEdit}
-          locked={activeLocked}
           disabled={busy || locked}
           onSetEditable={onSetEditable}
         />
@@ -1117,15 +1108,13 @@ function SwitchRow({
   );
 }
 
-/** What the row says under its label, one sentence set at a time. Each is
- *  true in the state that shows it and stays true after the press. */
+/** What the row says under its label: the grant, in whichever direction the
+ *  switch is pointing. Both are true in the state that shows them and stay
+ *  true after the press. */
 const EDIT_GRANTS =
-  "They can change the text and upload images. They cannot delete, move or rename anything.";
+  "They can change text and images, never delete, move or rename.";
 const EDIT_OFFERS =
-  "Turning this on lets them change the text and upload images. They still cannot delete, move or rename anything.";
-const EDIT_SIGN_OUT = "Changing this signs everyone out of the link.";
-const EDIT_SIGN_OUT_LOCKED =
-  "Changing this signs everyone out of the link. They will need the password again.";
+  "Turning this on lets them change text and images, never delete, move or rename.";
 
 /** The edit row. Every other row on the card is a label and a control on one
  *  line, so this one is too: its note stacks under the label the way the
@@ -1135,32 +1124,25 @@ const EDIT_SIGN_OUT_LOCKED =
  *  setting most links never turn on, and the switch's description never
  *  disappears from under it.
  *
- *  Which note: with the link live, off is the state where the owner is
- *  deciding, and the cost of the press is what they do not have; on, the
- *  grant exists and what it grants is the fact that matters. In the review
- *  there is no link yet, so nobody to sign out, and the note describes the
- *  grant the press would create. */
+ *  The note is always the grant. Letting strangers write in the owner's notes
+ *  is the consequential decision on this card, and "they cannot delete, move
+ *  or rename anything" is the sentence that decides it, so it has to be under
+ *  the switch before the press rather than after it. The flip also signs
+ *  everyone out of the link, which is recoverable in one press and reads as
+ *  ordinary for a settings change; that fact is stated by the toast after a
+ *  flip that actually happened (components/shell.tsx), where it is a result
+ *  rather than a prophecy about a card nobody has touched. */
 function EditRow({
   checked,
   disabled,
-  locked,
-  showSignOut,
   onChange,
 }: {
   checked: boolean;
   disabled?: boolean;
-  locked: boolean;
-  showSignOut: boolean;
   onChange: (checked: boolean) => void;
 }) {
   const noteId = useId();
-  const note = checked
-    ? EDIT_GRANTS
-    : showSignOut
-      ? locked
-        ? EDIT_SIGN_OUT_LOCKED
-        : EDIT_SIGN_OUT
-      : EDIT_OFFERS;
+  const note = checked ? EDIT_GRANTS : EDIT_OFFERS;
   return (
     <div data-share-row="edit" data-share-setting-row className="brain-share-row">
       <span className={LABEL}>
@@ -1188,12 +1170,10 @@ function EditRow({
  *  effect on the same prop adopts the same values and moves nothing. */
 function EditSetting({
   editable,
-  locked,
   disabled,
   onSetEditable,
 }: {
   editable: boolean;
-  locked: boolean;
   disabled: boolean;
   onSetEditable: (next: boolean) => void | Promise<void>;
 }) {
@@ -1210,8 +1190,8 @@ function EditSetting({
     setEditing(editable);
   }
 
-  // Any flip rotates shareVersion, which is why the row says so before it is
-  // pressed rather than after.
+  // Any flip rotates shareVersion, so everyone using the link is signed out.
+  // The toast that follows a flip that landed says so.
   const flipEditing = async (next: boolean) => {
     if (busy) return;
     setEditing(next);
@@ -1236,8 +1216,6 @@ function EditSetting({
       <EditRow
         checked={editing}
         disabled={disabled || busy}
-        locked={locked}
-        showSignOut
         onChange={(next) => void flipEditing(next)}
       />
       {error && <AlertRow>{error}</AlertRow>}

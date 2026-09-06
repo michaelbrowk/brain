@@ -106,7 +106,7 @@ test("a stranger with the link edits a page, and a revoke ends it mid-session", 
     "Anyone with the link will be able to read and edit this page.",
   );
   await expect(card.locator('[data-share-row="edit"]')).toContainText(
-    "They can change the text and upload images. They cannot delete, move or rename anything.",
+    "They can change text and images, never delete, move or rename.",
   );
   await page.getByRole("button", { name: "Share this page" }).click();
 
@@ -193,11 +193,14 @@ test("a stranger with the link edits a page, and a revoke ends it mid-session", 
       page.getByRole("dialog", { name: "Share settings" }).locator(
         '[data-share-row="edit"]',
       ),
-    ).toContainText("They can change the text and upload images.");
+    ).toContainText("They can change text and images, never delete, move or rename.");
     await liveSwitch.click();
-    await expect(page.locator("body")).toContainText("Editing turned off", {
-      timeout: 20_000,
-    });
+    // the toast is where the sign-out is stated, as a result of a flip that
+    // landed rather than a prophecy on a card nobody has touched
+    await expect(page.locator("body")).toContainText(
+      "Editing turned off. Everyone using the link will need to open it again.",
+      { timeout: 20_000 },
+    );
 
     // visitor: the next save is refused, and the page says so without losing
     // the text

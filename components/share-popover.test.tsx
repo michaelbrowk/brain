@@ -1063,7 +1063,7 @@ describe("SharePopover redesign", () => {
       expect(order.indexOf("edit")).toBeLessThan(order.indexOf("password"));
     });
 
-    it("carries one note at a time: the cost of the press, then what it granted", async () => {
+    it("carries one note at a time, and it is always the grant", async () => {
       await renderAndOpen(true, {
         onPrepareShare: vi
           .fn()
@@ -1075,18 +1075,21 @@ describe("SharePopover redesign", () => {
         document.body.querySelector('[data-share-row="edit"]') as HTMLElement;
       const notes = () => row().querySelectorAll(".brain-share-row-note");
 
-      // Off, the owner is deciding, and what the press costs is the fact they
-      // do not have. One note, so the row keeps its neighbours' rhythm.
+      // Off, the note describes what the press would grant. Letting strangers
+      // write in the owner's notes is the hard-to-take-back decision, and what
+      // they cannot do is the sentence that decides it, so it is under the
+      // switch before the press. One note, so the row keeps its neighbours'
+      // rhythm.
       expect(notes()).toHaveLength(1);
       expect(notes()[0].textContent).toBe(
-        "Changing this signs everyone out of the link.",
+        "Turning this on lets them change text and images, never delete, move or rename.",
       );
 
       await click(switchFor(EDIT_SWITCH));
-      // On, the grant exists and what it grants is the fact that matters.
+      // On, the same fact stated of the grant that now exists.
       expect(notes()).toHaveLength(1);
       expect(notes()[0].textContent).toBe(
-        "They can change the text and upload images. They cannot delete, move or rename anything.",
+        "They can change text and images, never delete, move or rename.",
       );
     });
 
@@ -1127,7 +1130,10 @@ describe("SharePopover redesign", () => {
       expect(document.activeElement).toBe(before);
     });
 
-    it("says the password will be needed again when the root has one", async () => {
+    it("never promises a sign-out, in either view", async () => {
+      // The flip does sign everyone out, but the row cannot say so before it
+      // is pressed without asserting it of a card nobody has touched. The
+      // toast after a flip that landed says it as a result.
       await renderAndOpen(true, {
         hasPassword: true,
         onPrepareShare: vi
@@ -1136,18 +1142,16 @@ describe("SharePopover redesign", () => {
             snapshot({ descendantCount: 2, public: true, shareLocked: true }),
           ),
       });
-      const row = document.body.querySelector('[data-share-row="edit"]') as HTMLElement;
-      expect(row.textContent).toContain(
-        "Changing this signs everyone out of the link. They will need the password again.",
-      );
-    });
+      let row = document.body.querySelector('[data-share-row="edit"]') as HTMLElement;
+      expect(row.textContent).not.toContain("signed out");
+      expect(row.textContent).not.toContain("password");
 
-    it("does not promise a sign-out in the review, where there is nobody to sign out", async () => {
-      await renderAndOpen(false);
-      const row = document.body.querySelector('[data-share-row="edit"]') as HTMLElement;
-      expect(row.textContent).not.toContain("signs everyone out");
+      await act(async () => root.render(popover(false)));
+      await settle();
+      row = document.body.querySelector('[data-share-row="edit"]') as HTMLElement;
+      expect(row.textContent).not.toContain("signed out");
       expect(row.textContent).toContain(
-        "Turning this on lets them change the text and upload images.",
+        "Turning this on lets them change text and images, never delete, move or rename.",
       );
     });
 

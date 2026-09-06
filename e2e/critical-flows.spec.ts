@@ -4968,17 +4968,19 @@ test("default active share is a ledger on paper inside the regular glass", async
   expect(geometry.stopIsLastRow).toBe(true);
   // every row is its content on 10px of padding under a 1px hairline, never
   // under 44: the 28 icon buttons make 49, a text row rests on the 44 floor,
-  // the 24 switch makes 45, the edit row's label with its one note beside the
-  // switch makes 59, the 30 segmented track makes 51, the 32 button in the
+  // the 24 switch makes 45, the edit row's label with its two-line note beside
+  // the switch makes 75, the 30 segmented track makes 51, the 32 button in the
   // action row makes 53. The edit row is the tallest and has to stay in the
-  // ledger's rhythm: it was 64 stacked with one note and about 98 with two,
-  // which broke the rhythm on a setting most links never turn on.
+  // ledger's rhythm: it was 64 stacked with one note and about 98 with two.
+  // 75 is now its height in both switch positions, so nothing in the ledger
+  // moves under the press.
   expect(geometry.rowHeights.map((height) => Math.round(height))).toEqual([
-    49, 44, 59, 45, 51, 53,
+    49, 44, 75, 45, 51, 53,
   ]);
-  // a six-row card with a one-line head fits 368: the head's 46 plus the
-  // rows plus the 6px sleeve on both sides
-  expect(geometry.surfaceHeight).toBeLessThanOrEqual(368);
+  // a six-row card with a one-line head fits 376: the head's 46 plus the six
+  // rows above (317) plus the 6px sleeve on both sides. The number is that sum
+  // and moves only when a row does, which is the point of pinning it.
+  expect(geometry.surfaceHeight).toBeLessThanOrEqual(376);
   // rows are separated by one hairline each and nothing else: no fills, no
   // side borders, no gaps
   for (const gap of geometry.gaps) expect(Math.abs(gap)).toBeLessThanOrEqual(1);

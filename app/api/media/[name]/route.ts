@@ -35,6 +35,20 @@ const MIME: Record<string, string> = {
   json: "application/json",
   zip: "application/zip",
 };
+/** Which authorization served the request. The owner and a link visitor get
+ *  the same bytes under different revocation rules, and the caching split
+ *  below is the only place that difference shows. */
+type AttachmentAccess = "owner" | "share";
+
+/** An attachment URL is immutable by construction: an owner upload is named
+ *  by a fresh nanoid and a Notion import by the sha256 of its own bytes, so a
+ *  name is never reused for different bytes. The owner's browser may keep the
+ *  response and stop re-downloading a cover on every mount. A share is
+ *  revocable and a cache is not, so that branch stays no-store. See
+ *  docs/operations.md, "Attachment privacy cache cutover". */
+const OWNER_CACHE_CONTROL = "private, max-age=31536000, immutable";
+const SHARE_CACHE_CONTROL = "private, no-store";
+
 const IMAGE_EXT = new Set([
   "png",
   "jpg",
@@ -56,10 +70,10 @@ export async function GET(
   const { name } = await params;
   if (!/^[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9][A-Za-z0-9_-]{0,31})?$/.test(name))
     return missing();
+  let access: AttachmentAccess | null;
   try {
-    if (!(await canReadAttachment(req, name))) {
-      return missing();
-    }
+    access = await canReadAttachment(req, name);
+    if (!access) return missing();
   } catch (error) {
     if (error instanceof ShareAccessBusyError) return busy();
     throw error;
@@ -75,7 +89,8 @@ export async function GET(
     const ext = name.split(".").pop()!.toLowerCase();
     const headers: Record<string, string> = {
       "Content-Type": MIME[ext] ?? "application/octet-stream",
-      "Cache-Control": "private, no-store",
+      "Cache-Control":
+        access === "owner" ? OWNER_CACHE_CONTROL : SHARE_CACHE_CONTROL,
       "X-Content-Type-Options": "nosniff",
       "Accept-Ranges": "bytes",
     };
@@ -239,16 +254,20 @@ function busy() {
   );
 }
 
+/** The authorization that let the request through, or null for none. The
+ *  owner branch answers before the store is touched, exactly as it always
+ *  has; naming it lets the handler tell the two apart. */
 async function canReadAttachment(
   req: NextRequest,
   name: string,
-): Promise<boolean> {
-  if (await verifySession(req.cookies.get(SESSION_COOKIE)?.value)) return true;
+): Promise<AttachmentAccess | null> {
+  if (await verifySession(req.cookies.get(SESSION_COOKIE)?.value))
+    return "owner";
 
   const pageId = req.nextUrl.searchParams.get("page");
   const rootId = req.nextUrl.searchParams.get("root") ?? pageId;
   const requestedVersion = req.nextUrl.searchParams.get("v");
-  if (!rootId || !pageId || requestedVersion === null) return false;
+  if (!rootId || !pageId || requestedVersion === null) return null;
 
   try {
     const store = await getStore();
@@ -258,8 +277,8 @@ async function canReadAttachment(
       requestedVersion,
       token: req.cookies.get(`brain_share_${rootId}`)?.value,
     });
-    if (access.kind !== "granted") return false;
-    if (!referencesAttachment(access.target.markdown, name)) return false;
+    if (access.kind !== "granted") return null;
+    if (!referencesAttachment(access.target.markdown, name)) return null;
     // The reference check alone stopped being sufficient the moment visitors
     // could write Markdown: naming any existing _attachments filename in a
     // shared page would otherwise make a private page's image readable. The
@@ -281,14 +300,14 @@ async function canReadAttachment(
     // not to: it lands an empty body and keeps the visitor's text as a title,
     // which neither this route nor the baseline walk tokenizes.
     const scope = await readAttachmentScope(NOTES_ROOT);
-    if (!rootIsScoped(scope, rootId)) return true;
-    return attachmentGrantsRoot(scope, name, rootId);
+    if (!rootIsScoped(scope, rootId)) return "share";
+    return attachmentGrantsRoot(scope, name, rootId) ? "share" : null;
   } catch (error) {
     if (
       isNotFound(error) ||
       error instanceof ShareAccessNotFoundError
     )
-      return false;
+      return null;
     throw error;
   }
 }

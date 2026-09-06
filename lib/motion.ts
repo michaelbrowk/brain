@@ -65,6 +65,11 @@ export const slideUp = {
 export const SPRING_PANEL = { type: "spring", bounce: 0, duration: 0.3 } as const;
 /** Selection capsule flowing between rows (`layoutId`), segmented control. 1.0 / 0.25 */
 export const SPRING_SELECT = { type: "spring", bounce: 0, duration: 0.25 } as const;
+/** Smart sort's chips crossing the dialog into their sections (`layoutId`).
+ *  1.0 / 0.42 — `SPRING_SELECT`'s 0.25 was tuned for a capsule crossing one
+ *  row height, and over the 400px these travel it reads as a whipcrack.
+ *  `bounce: 0` is not negotiable: bounce exists only after a real drag. */
+export const SPRING_DEAL = { type: "spring", bounce: 0, duration: 0.42 } as const;
 /** Sheets and drawers when opened/closed by a button. 1.0 / 0.30 */
 export const SPRING_SHEET = { type: "spring", bounce: 0, duration: 0.3 } as const;
 /** Sheets released from a drag — the only preset with bounce. 0.8 / 0.30 */

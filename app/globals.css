@@ -1582,9 +1582,12 @@ html[data-kbd] [contenteditable]:focus-visible {
    hover tint is 4% ink, and under a chip's own white .50 fill that lands at
    2%, below the floor §8 sets for a change a reader can see. The band is not
    rendered at all under reduced motion, so it needs no flattening rule. */
-.smart-heap {
+.smart-body {
   position: relative;
   isolation: isolate;
+  /* Only ever driven from the component, and only across the one frame the
+     pile becomes the answer; the global reduced-motion block flattens it. */
+  transition: height 220ms var(--ease-out); /* DUR.page */
 }
 .smart-heap-band {
   position: absolute;

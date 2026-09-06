@@ -93,6 +93,13 @@ export interface FramerMotionMock {
   useReducedMotion: () => boolean;
   useDragControls: () => DragControlsStub;
   useMotionValue: <T>(initial: T) => MotionValueStub<T>;
+  /** Playback is never under test, so a subscription is a no-op: a component
+   *  that also paints its final value synchronously still reads correctly. */
+  useMotionValueEvent: <T>(
+    value: MotionValueStub<T>,
+    event: string,
+    handler: (next: T) => void,
+  ) => void;
   animate: (...args: unknown[]) => { stop: () => void };
 }
 
@@ -174,6 +181,7 @@ export function createFramerMotionMock(
       typeof reducedMotion === "function" ? reducedMotion : () => reducedMotion,
     useDragControls: () => dragControlsStub,
     useMotionValue: motionValueStub,
+    useMotionValueEvent: () => {},
     animate: animateStub,
   };
 }
@@ -185,4 +193,5 @@ export const AnimatePresence = defaultMock.AnimatePresence;
 export const useReducedMotion = defaultMock.useReducedMotion;
 export const useDragControls = defaultMock.useDragControls;
 export const useMotionValue = defaultMock.useMotionValue;
+export const useMotionValueEvent = defaultMock.useMotionValueEvent;
 export const animate = defaultMock.animate;

@@ -3525,6 +3525,84 @@ async function smartSortParent(page: Page, title: string) {
   return { parent, children };
 }
 
+test("the preview stands in the columns Apply is about to write", async ({
+  page,
+}) => {
+  await login(page);
+  const parentResponse = await browserJson(page, "/api/page", {
+    method: "POST",
+    body: { title: "Column parent", markdown: "Body" },
+  });
+  expect(parentResponse.ok).toBeTruthy();
+  const parent = parentResponse.body as { id: string };
+  const children: string[] = [];
+  for (const title of ["Alpha", "Beta", "Gamma", "Delta", "Epsilon", "Zeta"]) {
+    const childResponse = await browserJson(page, "/api/page", {
+      method: "POST",
+      body: { parentId: parent.id, title },
+    });
+    expect(childResponse.ok).toBeTruthy();
+    children.push((childResponse.body as { id: string }).id);
+  }
+  const sections = ["First", "Second", "Third"];
+  await page.route("**/api/smart-sort", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        sections,
+        assignments: Object.fromEntries(
+          children.map((id, index) => [id, sections[index % 3]]),
+        ),
+        order: children,
+        count: children.length,
+      }),
+    });
+  });
+
+  await page.goto(`/p/${parent.id}`);
+  await page.getByRole("button", { name: "Smart sort" }).click();
+  const dialog = page.getByRole("dialog", { name: "Smart sort" });
+  await expect(dialog.getByText("3 sections")).toBeVisible();
+
+  // Three sections split at ceil(3/2): two on the left, one on the right.
+  // The dialog is a small picture of the document, which is what gives the
+  // chips a structure to land in rather than a list to be re-ordered into.
+  await expect
+    .poll(() =>
+      dialog
+        .locator("p.text-label")
+        .evaluateAll((elements) =>
+          elements.map((element) =>
+            Math.round(element.getBoundingClientRect().left),
+          ),
+        ),
+    )
+    .toHaveLength(3);
+  const lefts = await dialog
+    .locator("p.text-label")
+    .evaluateAll((elements) =>
+      elements.map((element) =>
+        Math.round(element.getBoundingClientRect().left),
+      ),
+    );
+  expect(lefts[0]).toBe(lefts[1]);
+  expect(lefts[2]).toBeGreaterThan(lefts[0]);
+
+  await dialog.getByRole("button", { name: "Apply" }).click();
+  await expect(page.getByRole("dialog", { name: "Smart sort" })).toHaveCount(0);
+  await expect
+    .poll(async () => {
+      const read = await browserJson(page, `/api/page/${parent.id}`);
+      const markdown = (read.body as { markdown?: string }).markdown ?? "";
+      const columns = markdown.split("\n:::col\n").slice(1);
+      return columns.map((column) =>
+        [...column.matchAll(/^## (.+)$/gm)].map((match) => match[1]),
+      );
+    })
+    .toEqual([["First", "Second"], ["Third"]]);
+});
+
 test("Smart sort opens on the press and Cancel takes the request with it", async ({
   page,
 }) => {

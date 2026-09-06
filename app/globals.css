@@ -3284,8 +3284,10 @@ a.brain-share-url:hover {
 
 /* Mobile tab bar — a floating thick capsule over the safe area; the canvas
    passes under it and it blurs on its own (no edge band, no hairline).
-   `contained` (inside the Pages sheet and the search view) sits in flow at
-   the bottom of that surface.
+   Search and Pages render their own copy inside their focus scope, with this
+   same position and material, so the bar looks and sits identically whichever
+   of the five tabs is up. It used to go `contained` in those two: a plain
+   row in flow at the foot of a sheet, which is what a section does not do.
 
    IT IS SIZED BY ITS CONTENT, NOT BY THE WINDOW. It used to stretch edge to
    edge on the 8px inset and divide that into five equal parts: 73px slots

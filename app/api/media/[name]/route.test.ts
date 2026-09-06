@@ -154,14 +154,16 @@ describe("attachment access", () => {
     expect(response.headers.get("Retry-After")).toBe("1");
   });
 
-  it("serves the owner with private no-store caching", async () => {
+  it("serves the owner with an immutable private cache lifetime", async () => {
     const { GET } = await loadRoute({});
     const response = await GET(request("", "brain_session=owner-token"), {
       params: Promise.resolve({ name: NAME }),
     });
 
     expect(response.status).toBe(200);
-    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(response.headers.get("Cache-Control")).toBe(
+      "private, max-age=31536000, immutable",
+    );
     expect(response.headers.get("Content-Type")).toBe("image/png");
     expect(response.headers.get("Accept-Ranges")).toBe("bytes");
     expect(new Uint8Array(await response.arrayBuffer())).toEqual(
@@ -370,6 +372,25 @@ describe("attachment access", () => {
     expect(allowed.status).toBe(200);
     expect(stale.status).toBe(404);
     expect(unrelated.status).toBe(404);
+  });
+
+  it("never caches an attachment served through a share", async () => {
+    // The owner's own branch may cache, because a session is revoked at the
+    // origin and the owner's cache holds only the owner's own bytes. A share
+    // is revocable, and neither a CDN nor a visitor's browser can be told to
+    // forget a response it already stores. This branch stays no-store.
+    const { GET } = await loadRoute({
+      page: {
+        meta: { public: true, shareVersion: 3 },
+        markdown: `![](/_attachments-v2/${NAME})`,
+      },
+    });
+    const response = await GET(request("?page=shared&v=3"), {
+      params: Promise.resolve({ name: NAME }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("Cache-Control")).toBe("private, no-store");
   });
 
   it("does not serve attachments after a public link expires", async () => {

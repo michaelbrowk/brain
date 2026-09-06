@@ -371,6 +371,20 @@ unauthenticated request from being handed the old cached response.
 
 A fresh install has nothing to purge — it never served the v1 namespace.
 
+The owner branch of the media route now differs from the rest. A request that
+carries a valid session is answered with `Cache-Control: private,
+max-age=31536000, immutable`. Every other branch keeps `private, no-store`:
+the share-scoped read, the `404`, and the `503`. What the cutover protects
+stays protected, because the unauthenticated case and anything a CDN could
+hold are still uncacheable, and because an attachment URL is immutable by
+construction. An owner upload is named by a fresh nanoid and a Notion import
+by the sha256 of its own bytes, so a name never comes to mean different bytes.
+The cost is that an owner's own browser can keep the bytes of a cover from a
+page they have since deleted, for up to a year, and no change at the origin
+evicts it. Clearing site data in that browser is what drops it early. That
+tradeoff was accepted so a cover stops being re-downloaded in full on every
+navigation, reload, and back or forward.
+
 Notion imports send files larger than 1 MiB as raw bytes to
 `POST /api/mcp/notion-upload`; send the UTF-8 filename as base64 in
 `x-file-name-b64` and the frozen descriptor hash in `x-expected-sha256`. Both

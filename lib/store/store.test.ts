@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { Store } from "./store";
-import { serializePage } from "./frontmatter";
+import { serializeLivePage, serializePage } from "./frontmatter";
 import {
   AttachmentStoreUnavailableError,
   AttachmentValidationError,
@@ -9355,6 +9355,10 @@ describe("share-aware Store leaves", () => {
     for (const updatedBy of ["me", "claude", undefined] as const) {
       const meta: PageMeta = { ...base, updatedBy, updatedByName: "Ada" };
       expect(serializePage(meta, "")).not.toContain("updatedByName");
+      // serializePage is pure; taking the stale name out of the live entry is
+      // serializeLivePage's job, which every writer goes through.
+      expect(meta.updatedByName).toBe("Ada");
+      expect(serializeLivePage(meta, "")).not.toContain("updatedByName");
       expect(meta.updatedByName).toBeUndefined();
     }
   });
@@ -9615,6 +9619,42 @@ describe("share-aware Store leaves", () => {
       SHARE_ROOT_UPLOAD_BYTES - PNG.byteLength,
     );
     await expect(upload()).resolves.toMatchObject({ size: PNG.byteLength });
+  });
+
+  it("gives a full root its bytes back without waiting for an owner action", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const upload = () =>
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: shot(),
+      });
+    const orphan = await upload();
+    await writeAttachmentScope(
+      root,
+      recordUpload(
+        await readAttachmentScope(root),
+        "filler000001.bin",
+        rootId,
+        SHARE_ROOT_UPLOAD_BYTES - PNG.byteLength,
+        "2026-09-05T10:00:00.000Z",
+      ),
+    );
+    // Nobody referenced the orphan, and nobody is going to: the visitor who
+    // uploaded it closed the tab. Age it past the sweep's grace.
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await fs.utimes(
+      path.join(root, "_attachments", attachmentName(orphan.url)),
+      old,
+      old,
+    );
+
+    // No purge, no empty-trash, no owner at all. The refusal itself pays for
+    // the walk, once, and the next visitor's upload lands.
+    await expect(upload()).resolves.toMatchObject({ size: PNG.byteLength });
+    const after = await readAttachmentScope(root);
+    expect(after.uploads[attachmentName(orphan.url)]).toBeUndefined();
   });
 
   it("builds the baseline once, on the first visitor write, and grants nothing else", async () => {

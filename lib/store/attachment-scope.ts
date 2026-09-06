@@ -65,16 +65,26 @@ export async function readAttachmentScope(
   try {
     await assertRealDirectory(attachmentDirectory(notesRoot));
     raw = await readRegularFileNoFollow(attachmentScopePath(notesRoot));
-  } catch {
+  } catch (error) {
+    // An install with no _attachments folder yet, or one with no index in it,
+    // is the ordinary state and says nothing. Every other failure is a file
+    // that exists and could not be read.
+    if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+      warnScopeUnreadable(error);
+    }
     return { ...EMPTY };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
-  } catch {
+  } catch (error) {
+    warnScopeUnreadable(error);
     return { ...EMPTY };
   }
-  if (!isRecord(parsed)) return { ...EMPTY };
+  if (!isRecord(parsed)) {
+    warnScopeUnreadable(new Error("the index is not a JSON object"));
+    return { ...EMPTY };
+  }
   return {
     roots: Array.isArray(parsed.roots)
       ? parsed.roots.filter((root): root is string => typeof root === "string")
@@ -82,6 +92,25 @@ export async function readAttachmentScope(
     uploads: readUploads(parsed.uploads),
     baseline: readBaseline(parsed.baseline),
   };
+}
+
+/** The degradation above is deliberate: a corrupted index must not turn every
+ *  image on the site into a 500. It is also the whole index control going
+ *  quiet for every root at once, which the operator has to hear about. This
+ *  runs on the media read path, so a broken index would log on every request
+ *  for an image; one line a minute is enough to be found in `docker compose
+ *  logs` and little enough not to bury the rest. */
+const SCOPE_WARN_INTERVAL_MS = 60_000;
+let lastScopeWarnAt = 0;
+
+function warnScopeUnreadable(error: unknown): void {
+  const at = Date.now();
+  if (at - lastScopeWarnAt < SCOPE_WARN_INTERVAL_MS) return;
+  lastScopeWarnAt = at;
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(
+    `[brain/store] the attachment scope index could not be read, so attachment scoping is off for every shared root until it is fixed: ${message}`,
+  );
 }
 
 async function readRegularFileNoFollow(file: string): Promise<string> {

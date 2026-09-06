@@ -14,6 +14,12 @@ export const MAX_SHARE_SUBTREE_PAGES = 200;
  *  a sum, so the sum is capped here. */
 export const SHARE_ROOT_UPLOAD_BYTES = 200 * 1024 * 1024;
 
+/** How often a blocked upload may pay for the sweep that gives a root's bytes
+ *  a way back. The sweep reads every page's index.md, so it cannot run on
+ *  every 413, and the 24 h grace means running it more often would find the
+ *  same nothing. */
+export const SHARE_UPLOAD_RECLAIM_INTERVAL_MS = 5 * 60 * 1000;
+
 /** Visitor writes queued on Store.mutate() starve resolveShareAccess for every
  *  other share on the box. Four at once is the ceiling across all roots. */
 export const SHARE_WRITE_CONCURRENCY = 4;

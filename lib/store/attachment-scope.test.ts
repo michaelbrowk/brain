@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { localAttachmentName } from "../attachments";
 import {
   attachmentGrantsRoot,
@@ -21,16 +21,45 @@ const EMPTY = { roots: [], uploads: {}, baseline: {} };
 const AT = "2026-09-05T10:00:00.000Z";
 
 describe("attachment scope index", () => {
-  it("reads an empty scope from a missing or malformed file", async () => {
-    const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-scope-"));
-    await expect(readAttachmentScope(root)).resolves.toEqual(EMPTY);
+  beforeEach(() => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
+
+  it("reads an empty scope from a missing or malformed file, and says so when the file is there", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-scope-"));
+    const logged = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.setSystemTime(new Date("2026-09-05T10:00:00.000Z"));
+
+    // A fresh install with no _attachments folder yet. Ordinary, and silent.
+    await expect(readAttachmentScope(root)).resolves.toEqual(EMPTY);
+    expect(logged).not.toHaveBeenCalled();
+
+    // A file that exists and cannot be read turns the index control off for
+    // every root at once. Deliberate, and the operator has to hear it.
     await fs.mkdir(path.dirname(attachmentScopePath(root)), { recursive: true });
     await fs.writeFile(attachmentScopePath(root), "not json at all");
     await expect(readAttachmentScope(root)).resolves.toEqual(EMPTY);
+    expect(logged).toHaveBeenCalledTimes(1);
+
+    // One line a minute: this runs on the media read path.
+    await expect(readAttachmentScope(root)).resolves.toEqual(EMPTY);
+    expect(logged).toHaveBeenCalledTimes(1);
+    vi.setSystemTime(new Date("2026-09-05T10:02:00.000Z"));
 
     await fs.writeFile(attachmentScopePath(root), '{"roots":"x","uploads":3}');
     await expect(readAttachmentScope(root)).resolves.toEqual(EMPTY);
+    expect(logged).toHaveBeenCalledTimes(1);
+
+    await fs.writeFile(attachmentScopePath(root), "[]");
+    await expect(readAttachmentScope(root)).resolves.toEqual(EMPTY);
+    expect(logged).toHaveBeenCalledTimes(2);
+
+    vi.useRealTimers();
+    logged.mockRestore();
   });
 
   it("round-trips through the notes folder", async () => {

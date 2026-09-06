@@ -6,7 +6,7 @@ import os from "node:os";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { nanoid } from "nanoid";
 import { generateKeyBetween, generateNKeysBetween } from "fractional-indexing";
-import { parsePage, serializePage } from "./frontmatter";
+import { parsePage, serializeLivePage, serializePage } from "./frontmatter";
 import { atomicWrite, hashRev, syncDirectory } from "./atomic";
 import { slugify, assertInRoot, isReservedDir } from "./paths";
 import { ensureWritableNotesRoot } from "./notes-root";
@@ -54,6 +54,7 @@ import { isShareExpired } from "../sharing";
 import {
   MAX_SHARE_SUBTREE_PAGES,
   SHARE_ROOT_UPLOAD_BYTES,
+  SHARE_UPLOAD_RECLAIM_INTERVAL_MS,
 } from "./share-limits";
 import {
   attachmentGrantsRoot,
@@ -426,6 +427,9 @@ export class Store {
   private notionIndex = new Map<string, string>();
   private abortReceiptIndex = new Map<string, string>();
   private mutationPoison: Error | undefined;
+  /** When the last quota-triggered attachment sweep ran. Per process, which is
+   *  what a single-writer Store is. */
+  private lastUploadReclaimAt = 0;
   private mutationGeneration = 0;
   private mutationActive = false;
 
@@ -628,7 +632,7 @@ export class Store {
         }
         // self-heal id/title/created if they were missing
         if (partial.id === undefined || !partial.title || !partial.created) {
-          await atomicWrite(indexPath, serializePage(meta, markdown));
+          await atomicWrite(indexPath, serializeLivePage(meta, markdown));
         }
         await this.walk(pageDir, meta.id);
       }),
@@ -665,7 +669,7 @@ export class Store {
   private async persist(entry: Entry): Promise<void> {
     const indexPath = path.join(entry.dir, "index.md");
     const { markdown } = parsePage(await fs.readFile(indexPath, "utf8"));
-    await atomicWrite(indexPath, serializePage(entry.meta, markdown));
+    await atomicWrite(indexPath, serializeLivePage(entry.meta, markdown));
   }
 
   private moveIntentPath(): string {
@@ -873,7 +877,7 @@ export class Store {
         order: intent.nextOrder,
         updated: intent.updated,
       } as PageMeta;
-      await atomicWrite(targetIndex, serializePage(nextMeta, current.markdown));
+      await atomicWrite(targetIndex, serializeLivePage(nextMeta, current.markdown));
       if (nest && parentIndex && parentRaw !== nest.nextParentRaw) {
         await atomicWrite(parentIndex, nest.nextParentRaw);
       }
@@ -1157,7 +1161,7 @@ export class Store {
       ...loadedMeta,
       notionImportStarted: now(),
     };
-    const content = serializePage(nextMeta, current.markdown);
+    const content = serializeLivePage(nextMeta, current.markdown);
     let durabilityError: unknown;
     try {
       await atomicWrite(indexPath, content);
@@ -2238,7 +2242,7 @@ export class Store {
         notionTargetBeforeId: this.beforeIdFor(entry),
         notionTargetOrder: loadedMeta.order,
       };
-      const content = serializePage(nextMeta, canonicalMarkdown);
+      const content = serializeLivePage(nextMeta, canonicalMarkdown);
       let durabilityError: unknown;
       try {
         await atomicWrite(indexPath, content);
@@ -2359,7 +2363,7 @@ export class Store {
         };
         meta.notionImportBaseRev = notionImportBaseRev(meta, "");
         const indexPath = path.join(dir, "index.md");
-        const serialized = serializePage(meta, "");
+        const serialized = serializeLivePage(meta, "");
         let durabilityError: unknown;
         try {
           await atomicWrite(indexPath, serialized);
@@ -2469,7 +2473,7 @@ export class Store {
             ).markdown;
             await atomicWrite(
               path.join(entry.dir, "index.md"),
-              serializePage(nextMeta, currentMarkdown),
+              serializeLivePage(nextMeta, currentMarkdown),
             );
             entry.meta = nextMeta;
             scheduleCommit(this.root);
@@ -2605,7 +2609,7 @@ export class Store {
         await this.removeNotionStaging(supersededToken);
       }
       const indexPath = path.join(entry.dir, "index.md");
-      const content = serializePage(nextMeta, markdown);
+      const content = serializeLivePage(nextMeta, markdown);
       let durabilityError: unknown;
       try {
         await atomicWrite(indexPath, content);
@@ -2753,7 +2757,7 @@ export class Store {
       notionImportBaseOrder: loadedMeta.order,
       updated: started,
     };
-    const content = serializePage(nextMeta, current.markdown);
+    const content = serializeLivePage(nextMeta, current.markdown);
     let durabilityError: unknown;
     try {
       await atomicWrite(indexPath, content);
@@ -3116,7 +3120,7 @@ export class Store {
       await this.extendScopedBaselinesUnlocked(entry.meta.id, () => [
         ...referencedAttachmentNames(finalizedMarkdown),
       ]);
-      const content = serializePage(nextMeta, finalizedMarkdown);
+      const content = serializeLivePage(nextMeta, finalizedMarkdown);
       let durabilityError: unknown;
       try {
         await atomicWrite(indexPath, content);
@@ -3337,7 +3341,7 @@ export class Store {
               }
             }
             return {
-              content: serializePage(nextMeta, latest.markdown),
+              content: serializeLivePage(nextMeta, latest.markdown),
               value: nextMeta,
             };
           },
@@ -3485,7 +3489,7 @@ export class Store {
                 );
               }
               return {
-                content: serializePage(nextMeta, latest.markdown),
+                content: serializeLivePage(nextMeta, latest.markdown),
                 value: nextMeta,
               };
             },
@@ -3592,7 +3596,7 @@ export class Store {
       await this.extendScopedBaselinesUnlocked(id, () => [
         ...referencedAttachmentNames(markdown),
       ]);
-      const content = serializePage(e.meta, markdown);
+      const content = serializeLivePage(e.meta, markdown);
       await atomicWrite(indexPath, content);
       scheduleCommit(this.root);
       const rev = hashRev(content);
@@ -3630,7 +3634,7 @@ export class Store {
       await this.extendScopedBaselinesUnlocked(id, () => [
         ...referencedAttachmentNames(joined),
       ]);
-      const content = serializePage(e.meta, joined);
+      const content = serializeLivePage(e.meta, joined);
       await atomicWrite(indexPath, content);
       scheduleCommit(this.root);
       const rev = hashRev(content);
@@ -3732,7 +3736,7 @@ export class Store {
       };
       await atomicWrite(
         path.join(dir, "index.md"),
-        serializePage(meta, opts.markdown || ""),
+        serializeLivePage(meta, opts.markdown || ""),
       );
       this.index.set(meta.id, { dir, parentId, meta });
       if (notionId) this.notionIndex.set(notionId, meta.id);
@@ -4091,7 +4095,7 @@ export class Store {
       e.meta.updatedBy = "visitor";
       e.meta.updatedByName = input.visitorName;
       delete e.meta.structureWriteBarrier;
-      const content = serializePage(e.meta, input.markdown);
+      const content = serializeLivePage(e.meta, input.markdown);
       await atomicWrite(indexPath, content);
       scheduleCommit(this.root);
       const rev = hashRev(content);
@@ -4137,7 +4141,7 @@ export class Store {
         updatedBy: "visitor",
         updatedByName: input.visitorName,
       };
-      await atomicWrite(path.join(dir, "index.md"), serializePage(meta, ""));
+      await atomicWrite(path.join(dir, "index.md"), serializeLivePage(meta, ""));
       this.index.set(meta.id, { dir, parentId: input.parentId, meta });
       scheduleCommit(this.root);
       emitStore({ type: "create", id: meta.id, src: input.src });
@@ -4161,17 +4165,30 @@ export class Store {
         input.targetId,
         input.shareVersion,
       );
-      const { scope, built } = await this.scopedAttachmentIndexUnlocked(
+      let { scope, built } = await this.scopedAttachmentIndexUnlocked(
         input.rootId,
         input.targetId,
       );
       // Checked before a byte is written: the quota is about what lands on
       // the disk and in git history, not about what was attempted.
-      if (
-        rootUploadBytes(scope, input.rootId) + input.file.data.byteLength >
-        SHARE_ROOT_UPLOAD_BYTES
-      ) {
-        throw new ShareUploadQuotaError();
+      const overQuota = (index: AttachmentScope) =>
+        rootUploadBytes(index, input.rootId) + input.file.data.byteLength >
+        SHARE_ROOT_UPLOAD_BYTES;
+      if (overQuota(scope)) {
+        // The sweep used to run only on an owner purge and on empty-trash, so
+        // a visitor who uploaded and then closed the tab left bytes charged
+        // against the root with nothing referencing them, and no visitor
+        // action and no owner action short of purging some other page could
+        // clear them. A root could reach a permanent 413. The request that
+        // the quota refuses is the one with a reason to pay for the walk.
+        if (built) {
+          await writeAttachmentScope(this.root, scope);
+          built = false;
+        }
+        if (await this.reclaimAbandonedUploadsUnlocked()) {
+          scope = await readAttachmentScope(this.root);
+        }
+        if (overQuota(scope)) throw new ShareUploadQuotaError();
       }
       const saved = await this.saveAttachmentUnlocked(
         input.file,
@@ -4205,6 +4222,20 @@ export class Store {
       }
       return saved;
     });
+  }
+
+  /** The sweep, at most once every SHARE_UPLOAD_RECLAIM_INTERVAL_MS, for a
+   *  root whose quota is full. It reads one index.md per page, so it cannot
+   *  run on every refusal; and the sweep's own 24 h grace means a second run
+   *  a minute later would find exactly what the first one did. Returns
+   *  whether anything came back. Caller owns mutate(). */
+  private async reclaimAbandonedUploadsUnlocked(): Promise<boolean> {
+    const at = Date.now();
+    if (at - this.lastUploadReclaimAt < SHARE_UPLOAD_RECLAIM_INTERVAL_MS) {
+      return false;
+    }
+    this.lastUploadReclaimAt = at;
+    return (await this.sweepUnreferencedAttachmentsUnlocked()) > 0;
   }
 
   /** Read one exact private attachment for an owner-requested portable export.
@@ -4955,7 +4986,7 @@ export class Store {
         if (patch.sections === undefined && pageId === input.boardId) {
           delete afterMeta.sections;
         }
-        const afterRaw = serializePage(afterMeta, parsed.markdown);
+        const afterRaw = serializeLivePage(afterMeta, parsed.markdown);
         pages.push({
           pageId,
           indexFile: path.relative(this.root, indexFile),
@@ -5183,7 +5214,7 @@ export class Store {
         this.publicOrigin,
       );
       nextDestinationMeta = freshMeta(parsedDestination!, destinationPage);
-      const afterRaw = serializePage(nextDestinationMeta, nextMarkdown);
+      const afterRaw = serializeLivePage(nextDestinationMeta, nextMarkdown);
       destinationRef = {
         pageId: newParentId!,
         indexFile: path.relative(this.root, destinationIndex),
@@ -5198,7 +5229,7 @@ export class Store {
     let nextOriginMeta: PageMeta | null = null;
     if (writesOrigin && originPage && originIndex) {
       nextOriginMeta = freshMeta(parsedOrigin!, originPage);
-      const afterRaw = serializePage(nextOriginMeta, originSweep!.markdown);
+      const afterRaw = serializeLivePage(nextOriginMeta, originSweep!.markdown);
       originRef = {
         pageId: originParentId!,
         indexFile: path.relative(this.root, originIndex),
@@ -5528,7 +5559,7 @@ export class Store {
         updatedBy: "me",
         structureWriteBarrier: removal.removed ? undefined : true,
       };
-      const nextParentRaw = serializePage(nextParentMeta, removal.markdown);
+      const nextParentRaw = serializeLivePage(nextParentMeta, removal.markdown);
       const nextParentRev = hashRev(nextParentRaw);
       const originalTargetRev = hashRev(originalTargetRaw);
       const nextTargetMeta: PageMeta = targetAlreadyReferencesSource
@@ -5540,7 +5571,7 @@ export class Store {
           };
       const nextTargetRaw = targetAlreadyReferencesSource
         ? originalTargetRaw
-        : serializePage(nextTargetMeta, nextTargetMarkdown);
+        : serializeLivePage(nextTargetMeta, nextTargetMarkdown);
       const nextTargetRev = hashRev(nextTargetRaw);
       if (nextParentRev === currentRev) {
         throw new Error("page-ref nesting did not advance the parent revision");
@@ -5906,7 +5937,7 @@ export class Store {
       order: nextOrder,
       updated: moveUpdated,
     };
-    const nextContent = serializePage(nextMeta, parsePage(originalRaw).markdown);
+    const nextContent = serializeLivePage(nextMeta, parsePage(originalRaw).markdown);
     try {
       if (moved) {
         await syncDirectory(oldParentDir!);

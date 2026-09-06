@@ -39,6 +39,7 @@ const props = {
   pageId: "page-3",
   shareVersion: 7,
   vid: "vid123456789",
+  visitorName: "Ada",
   initialMarkdown: "# Hello",
   initialRev: "abcdefabcdef",
   linkablePageIds: ["page-3"],

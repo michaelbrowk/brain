@@ -1201,11 +1201,14 @@ function EditSetting({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // Only when the answer itself changes, which is what the key did. An
-  // optimistic flip stands until the tree or the snapshot corrects it.
-  useEffect(() => {
+  // Adjusted while rendering, not in an effect: the answer only moves when
+  // the prop moves, which is exactly what the key did, and an optimistic flip
+  // stands until the tree or the snapshot corrects it.
+  const [adopted, setAdopted] = useState(editable);
+  if (adopted !== editable) {
+    setAdopted(editable);
     setEditing(editable);
-  }, [editable]);
+  }
 
   // Any flip rotates shareVersion, which is why the row says so before it is
   // pressed rather than after.

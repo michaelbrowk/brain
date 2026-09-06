@@ -131,12 +131,18 @@ test("a stranger with the link edits a page, and a revoke ends it mid-session", 
     await expect(shared.locator("[data-share-editor]")).toHaveCount(0);
     expect(await timesOnPage(shared, "The owner's first line")).toBe(1);
 
+    // the form is behind one control: a reader who only reads is asked nothing
+    await shared.getByRole("button", { name: "Edit this page" }).click();
     await shared.getByLabel("Your name").fill("Ada");
     await shared.getByRole("button", { name: "Start editing" }).click();
 
     const body = shared.locator("[data-share-editor] .ProseMirror");
     await expect(body).toBeVisible({ timeout: 20_000 });
     await expect(shared.locator("[data-share-name-dialog]")).toHaveCount(0);
+    // the name was taken, and the page says the state changed
+    await expect(shared.locator("[data-share-editing-as]")).toHaveText(
+      "Editing as Ada. Changes save as you type.",
+    );
     // the fallback is behind the sibling rule, so the render is not doubled
     await expect(shared.locator("[data-share-fallback]")).toBeHidden();
     expect(await timesOnPage(shared, "The owner's first line")).toBe(1);

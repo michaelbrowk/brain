@@ -19,10 +19,41 @@ function granted() {
   };
 }
 
+/** The seven leaves a visitor route may reach, and six it may not. The live
+ *  Store carries both sets, so a guard that hands `run` the instance hands it
+ *  the second set too. */
+const ALLOWED_LEAVES = [
+  "readPage",
+  "readDirectChildren",
+  "isDeleted",
+  "isWithinSubtree",
+  "writeSharedPage",
+  "createSharedSubpage",
+  "saveSharedAttachment",
+] as const;
+
+const FORBIDDEN_LEAVES = [
+  "deletePage",
+  "purgePage",
+  "movePage",
+  "renamePage",
+  "updateMeta",
+  "historicalMarkdownForRev",
+] as const;
+
+function liveStoreMock(): Record<string, ReturnType<typeof vi.fn>> {
+  const store: Record<string, ReturnType<typeof vi.fn>> = {};
+  for (const name of [...ALLOWED_LEAVES, ...FORBIDDEN_LEAVES]) {
+    store[name] = vi.fn(() => `${name} ran`);
+  }
+  return store;
+}
+
 /** Every store method is a spy, so "the store was never touched" is provable. */
 function storeMock(access: unknown = granted()) {
   const resolve = vi.fn().mockResolvedValue(access);
-  const getStore = vi.fn().mockResolvedValue({ marker: "store" });
+  const live = liveStoreMock();
+  const getStore = vi.fn().mockResolvedValue(live);
   vi.doMock("@/lib/store", () => ({
     getStore,
     configuredPublicOrigin: () => ORIGIN,
@@ -33,7 +64,7 @@ function storeMock(access: unknown = granted()) {
     );
     return { ...actual, resolveShareAccess: resolve };
   });
-  return { resolve, getStore };
+  return { resolve, getStore, live };
 }
 
 async function request(
@@ -408,14 +439,15 @@ describe("share-write refusal order", () => {
   });
 
   it("hands the run callback the context and the store, and passes its response through", async () => {
-    storeMock();
+    const { live } = storeMock();
     const { withShareWrite: guard } = await import("./share-write");
     const seen: unknown[] = [];
     const res = await guard(
       await request(),
       { targetId: "page-9", bucket: "write" },
       async (ctx, store) => {
-        seen.push(ctx, store);
+        seen.push(ctx);
+        store.isDeleted("page-9");
         return new Response(JSON.stringify({ rev: "abc" }), { status: 200 });
       },
     );
@@ -428,16 +460,20 @@ describe("share-write refusal order", () => {
       vid: VID,
       name: "Ada",
     });
-    expect(seen[1]).toEqual({ marker: "store" });
+    // The handle is not the Store, so what proves it reached the Store is the
+    // call landing on the live spy.
+    expect(live.isDeleted).toHaveBeenCalledWith("page-9");
   });
 
   it("hands the run callback a handle without the raw mutators", async () => {
     storeMock();
     const { withShareWrite: guard } = await import("./share-write");
+    let handle: object | null = null;
     const res = await guard(
       await request(),
       { targetId: "page-9", bucket: "write" },
       async (_ctx, store) => {
+        handle = store;
         // Checked by tsc, never run: each directive fails the typecheck the
         // day one of these reappears on the handle.
         const unreachable = () => {
@@ -457,6 +493,17 @@ describe("share-write refusal order", () => {
       },
     );
     expect(res.status).toBe(200);
+    // The runtime half. A Pick<> is erased at build time, so the type
+    // directives above say nothing about the value: this does. A cast is all
+    // it costs a future route to reach a forbidden leaf on a handle that is
+    // the live Store.
+    expect(handle).not.toBeNull();
+    const value = handle as unknown as Record<string, unknown>;
+    for (const leaf of FORBIDDEN_LEAVES) {
+      expect(leaf in value, leaf).toBe(false);
+      expect(value[leaf], leaf).toBeUndefined();
+    }
+    expect(Object.keys(value).sort()).toEqual([...ALLOWED_LEAVES].sort());
   });
 
   it("refuses a fifth simultaneous write with 503 and lets it through once one finishes", async () => {

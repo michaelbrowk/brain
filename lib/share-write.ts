@@ -62,6 +62,27 @@ export type ShareStoreHandle = Pick<
   | "saveSharedAttachment"
 >;
 
+/** The allowlist as a value, not only as a type. A `Pick<>` is erased at build
+ *  time, so a `run` that receives the live Store receives `deletePage` and
+ *  `movePage` with it, one cast away, and the property the type describes does
+ *  not exist where it matters. This builds the seven leaves into a fresh
+ *  object, so a leaf added to the Store tomorrow is absent from the value as
+ *  well as from the type. The methods are wrapped rather than bound because a
+ *  wrapper keeps the Store's own `this` without putting the instance itself
+ *  anywhere the callback can reach. */
+function narrowStore(store: Store): ShareStoreHandle {
+  return {
+    readPage: (id) => store.readPage(id),
+    readDirectChildren: (parentId) => store.readDirectChildren(parentId),
+    isDeleted: (id) => store.isDeleted(id),
+    isWithinSubtree: (rootId, targetId) =>
+      store.isWithinSubtree(rootId, targetId),
+    writeSharedPage: (input) => store.writeSharedPage(input),
+    createSharedSubpage: (input) => store.createSharedSubpage(input),
+    saveSharedAttachment: (input) => store.saveSharedAttachment(input),
+  };
+}
+
 const MINUTE = 60 * 1000;
 const FIVE_MINUTES = 5 * MINUTE;
 
@@ -309,7 +330,7 @@ export async function withShareWrite(
         vid: claims.vid,
         name: claims.name,
       },
-      store,
+      narrowStore(store),
     );
   } catch (error) {
     if (error instanceof ShareAccessNotFoundError) return shareWriteNotFound();

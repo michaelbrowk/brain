@@ -1292,7 +1292,10 @@ test("@mobile coarse targets, Settings, and editor chrome fit at 390 and 320", a
   await expect(settingsRoot).toBeHidden();
   await expect(mobilePages).toBeVisible();
   await page.emulateMedia({ reducedMotion: "no-preference" });
-  await mobilePages.getByRole("button", { name: "Editor", exact: true }).click();
+  // Pages draws no Back row: it rides a history entry, so the phone's Back
+  // gesture is the way out.
+  await page.goBack();
+  await expect(mobilePages).toBeHidden();
 
   const documentResponse = await browserJson(page, "/api/page", {
     method: "POST",
@@ -6102,9 +6105,9 @@ test("@mobile Pages and Search are accessible mobile-only surfaces", async ({
     // page it opened over stays exactly where it was.
     await tabbar.getByRole("button", { name: "Pages", exact: true }).click();
     await expect(pagesView).toBeVisible();
-    await expect(pagesView.getByRole("button", { name: "Editor" })).toHaveCount(
-      0,
-    );
+    await expect(
+      pagesView.getByRole("button", { name: "Editor", exact: true }),
+    ).toHaveCount(0);
     await expect(page).toHaveURL(`/p/${created.id}`);
     await page.goBack();
     await expect(pagesView).toBeHidden();
@@ -6112,9 +6115,9 @@ test("@mobile Pages and Search are accessible mobile-only surfaces", async ({
 
     await searchTab.click();
     await expect(searchView).toBeVisible();
-    await expect(searchView.getByRole("button", { name: "Back" })).toHaveCount(
-      0,
-    );
+    await expect(
+      searchView.getByRole("button", { name: "Back", exact: true }),
+    ).toHaveCount(0);
     await page.goBack();
     await expect(searchView).toBeHidden();
     await expect(page).toHaveURL(`/p/${created.id}`);

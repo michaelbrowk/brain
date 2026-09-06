@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import { nanoid } from "nanoid";
-import { getStore, isNotFound } from "@/lib/store";
+import { configuredPublicOrigin, getStore, isNotFound } from "@/lib/store";
 import {
   createShareEditToken,
   createShareToken,
@@ -11,6 +11,7 @@ import {
 } from "@/lib/auth";
 import { isShareExpired, normalizeVisitorName } from "@/lib/sharing";
 import { FixedWindowRateLimiter } from "@/lib/rate-limit";
+import { shareOriginAllowed } from "@/lib/share-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -32,6 +33,15 @@ const editLimiter = new FixedWindowRateLimiter({
   windowMs: 60 * 1000,
   maxEntries: 1_024,
 });
+
+/** The read path predates this branch and is left byte for byte as it was, so
+ *  this is asked only where the new capability is minted. A cross-site form
+ *  can declare application/x-www-form-urlencoded, multipart/form-data or
+ *  text/plain, and nothing else. */
+function declaresJson(req: NextRequest): boolean {
+  const type = req.headers.get("content-type");
+  return type !== null && type.split(";", 1)[0].trim().toLowerCase() === "application/json";
+}
 
 const badRequest = () =>
   NextResponse.json({ error: "bad request" }, { status: 400 });
@@ -116,6 +126,22 @@ async function mintEditToken(
   rawName: unknown,
   password: unknown,
 ): Promise<NextResponse> {
+  // The same refusal the write guard gives, on the route that hands out the
+  // capability the guard checks. Without it a cross-site
+  // <form enctype="text/plain"> POST plants brain_edit_share_<root> in a
+  // stranger's browser, carrying an attacker-chosen display name, for any
+  // unlocked editable root whose id the attacker knows: the victim then skips
+  // the name dialog and edits under that label. No read or write capability
+  // is gained, but the attribution in the file and in the Hub is the
+  // attacker's. Login-CSRF, and it costs one header to close.
+  //
+  // A form POST does send Origin, so that check alone answers it. The
+  // Content-Type is belt and braces: req.json() ignores the header, and the
+  // three enctypes a form can declare are not this one.
+  if (!shareOriginAllowed(req.headers, configuredPublicOrigin())) {
+    return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  }
+  if (!declaresJson(req)) return badRequest();
   if (typeof id !== "string") return badRequest();
   // The mint carries no root/version context of its own, so an empty name is
   // the route's ordinary 400, not a share denial.

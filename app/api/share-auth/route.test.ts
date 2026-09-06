@@ -2,6 +2,8 @@ import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createShareToken, verifyShareEditToken } from "@/lib/auth";
 
+const ORIGIN = "https://brain.example";
+
 function request(password: string): NextRequest {
   return new NextRequest("https://brain.example/api/share-auth", {
     method: "POST",
@@ -137,6 +139,7 @@ describe("shared-page password rate limiting", () => {
 describe("the edit mint", () => {
   beforeEach(() => {
     vi.stubEnv("AUTH_SECRET", "mint-secret");
+    vi.stubEnv("BRAIN_PUBLIC_ORIGIN", ORIGIN);
   });
 
   afterEach(() => {
@@ -147,12 +150,18 @@ describe("the edit mint", () => {
     vi.resetModules();
   });
 
-  function editRequest(body: Record<string, unknown>, cookie?: string) {
+  function editRequest(
+    body: Record<string, unknown>,
+    cookie?: string,
+    headers: Record<string, string> = {},
+  ) {
     return new NextRequest("https://brain.example/api/share-auth", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
+        Origin: ORIGIN,
         ...(cookie ? { cookie } : {}),
+        ...headers,
       },
       body: JSON.stringify({ intent: "edit", ...body }),
     });
@@ -173,8 +182,40 @@ describe("the edit mint", () => {
         isDeleted: () => false,
       }),
       isNotFound: () => false,
+      configuredPublicOrigin: () => ORIGIN,
     }));
   }
+
+  it("refuses a cross-site mint, so no page can plant an edit cookie in a stranger's browser", async () => {
+    // A cross-site <form enctype="text/plain"> POST is a request a browser
+    // will make with the victim's cookies and no script. Without this the
+    // mint set brain_edit_share_<root> carrying an attacker-chosen display
+    // name, and the victim skipped the name dialog and edited under it.
+    mockRoot({ public: true, shareEdit: true, shareVersion: 2 });
+    const { POST } = await import("./route");
+
+    for (const origin of ["https://evil.test", "null"]) {
+      const res = await POST(
+        editRequest({ id: "root-1", name: "Ada" }, undefined, { Origin: origin }),
+      );
+      expect(res.status, origin).toBe(403);
+      await expect(res.json()).resolves.toEqual({ error: "bad_origin" });
+      expect(res.cookies.get("brain_edit_share_root-1")).toBeUndefined();
+    }
+  });
+
+  it("refuses a mint that did not declare JSON, which is what a cross-site form cannot declare", async () => {
+    mockRoot({ public: true, shareEdit: true, shareVersion: 2 });
+    const { POST } = await import("./route");
+    const res = await POST(
+      editRequest({ id: "root-1", name: "Ada" }, undefined, {
+        "Content-Type": "text/plain;charset=UTF-8",
+      }),
+    );
+    expect(res.status).toBe(400);
+    await expect(res.json()).resolves.toEqual({ error: "bad request" });
+    expect(res.cookies.get("brain_edit_share_root-1")).toBeUndefined();
+  });
 
   it("mints an edit cookie on an unlocked editable root and sets no read cookie", async () => {
     mockRoot({ public: true, shareEdit: true, shareVersion: 2 });

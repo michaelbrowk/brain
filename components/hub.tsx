@@ -577,9 +577,16 @@ function Row({
       {/* A page carrying updatedBy: "visitor" with no name is something the
           mint cannot produce and a hand-edited file can. The name is the
           visitor's own text up to 40 characters, so the badge takes the
-          title's treatment and shrinks rather than pushing the row wide. */}
+          title's treatment and shrinks rather than pushing the row wide.
+          It is also capped: the title's flex basis is 0, which gives it a
+          shrink weight of 0, so without a cap the badge absorbs the whole
+          overflow and the title renders at zero width. The row's job is to
+          name the page; the name is the annotation. */}
       {actor === "visitor" && (
-        <span className="min-w-0 truncate rounded-xs border border-line px-1.5 py-0.5 text-[10px] text-ink-2">
+        <span
+          title={actorName ? `edited by ${actorName}` : undefined}
+          className="min-w-0 max-w-[45%] truncate rounded-xs border border-line px-1.5 py-0.5 text-[10px] text-ink-2"
+        >
           {actorName ? `edited by ${actorName}` : "edited by a visitor"}
         </span>
       )}

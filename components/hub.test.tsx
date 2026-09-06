@@ -101,10 +101,14 @@ describe("Hub", () => {
     expect(host.textContent).not.toContain("edited by a visitor");
   });
 
-  it("holds a hostile name inside the row instead of pushing it wide", async () => {
+  it("holds a hostile name inside the row without taking the title's room", async () => {
     // 40 is the cap normalizeVisitorName applies, and the name is the
-    // visitor's own text. The badge takes the same treatment as the title
-    // beside it rather than a width rule of its own.
+    // visitor's own text. jsdom lays nothing out, so what is pinned here is
+    // the flex contract that decides the row at 320px: the title grows and
+    // shrinks, and the badge is capped so it can never take the whole line.
+    // Without the cap the title's flex basis of 0 gives it a shrink weight of
+    // 0, the badge absorbs every pixel of overflow, and the title renders at
+    // zero width.
     await act(async () =>
       root.render(
         <Hub
@@ -130,6 +134,19 @@ describe("Hub", () => {
     expect(badge!.className).toContain("truncate");
     expect(badge!.className).toContain("min-w-0");
     expect(badge!.className).not.toContain("shrink-0");
+    // The cap. Half the row at most, so the title always has the larger half.
+    expect(badge!.className).toContain("max-w-[45%]");
+    // Truncation hides characters, so the whole name stays readable on hover
+    // and to a pointer that rests on it.
+    expect(badge!.getAttribute("title")).toBe(`edited by ${"A".repeat(40)}`);
+
+    const title = [...host.querySelectorAll("span")].find(
+      (candidate) => candidate.textContent === "A page with a long title of its own",
+    );
+    expect(title).toBeDefined();
+    expect(title!.className).toContain("flex-1");
+    expect(title!.className).toContain("min-w-0");
+    expect(title!.className).toContain("truncate");
   });
 
   it("says a visitor without falling back on a name the mint cannot omit", async () => {

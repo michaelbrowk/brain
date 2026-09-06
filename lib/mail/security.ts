@@ -32,7 +32,20 @@ export const SMTP_EGRESS_RELAY_AUDIENCE = "brain-mail-smtp-egress-v1" as const;
 export const SMTP_EGRESS_RELAY_CHALLENGE_TTL_MS = 5_000;
 
 export const MAIL_RESOURCE_LIMITS = Object.freeze({
-  maxAccounts: 3,
+  /**
+   * How many mail accounts one Brain may hold. Every other statement of the
+   * cap is derived from this one: the admission ledger's account and mailbox
+   * quotas below, `MAX_MAIL_ACCOUNTS` in the account service, the background
+   * poller's account-list bound, and the wire readers on both sides of the
+   * proxy. The two browser modules that cannot import this file (node:crypto
+   * and node:net are in its import graph) carry a mirror, and a test fails if
+   * a mirror drifts.
+   *
+   * What bounds the number is the machine, not the merge: the unified inbox
+   * is generic in the account count, while the service runs on one shared
+   * vCPU where each account is another mailbox the poller walks.
+   */
+  maxAccounts: 7,
   rawMessageBytes: 40 * 1024 * 1024,
   headerBytes: 256 * 1024,
   htmlCharacters: 1024 * 1024,

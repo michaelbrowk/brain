@@ -6,7 +6,7 @@ import type {
   StoredImapMailAccount,
   StoredMailAccount,
 } from "./account-types";
-import { MailAccountError } from "./account-types";
+import { MailAccountError, MAX_MAIL_ACCOUNTS } from "./account-types";
 import type {
   MailAccountStore,
   MultiMailAccountStore,
@@ -315,7 +315,7 @@ describe("multi mail account service", () => {
     expect(accounts[0].account.transportBindingRef.version).toBe(2);
   });
 
-  it("lists exact redacted v2 accounts and caps additions at three", async () => {
+  it("lists exact redacted v2 accounts and caps additions at the account limit", async () => {
     const store = memoryMultiStore();
     const verifier: ImapCredentialVerifier = { verify: vi.fn(async () => undefined) };
     const service = new MultiMailAccountService({
@@ -323,12 +323,12 @@ describe("multi mail account service", () => {
       verifier,
       now: incrementingNow(),
     });
-    for (let index = 1; index <= 3; index += 1) {
+    for (let index = 1; index <= MAX_MAIL_ACCOUNTS; index += 1) {
       await service.add(createInput(index), requestFixture());
     }
     const listed = await service.list();
     expect(listed.apiVersion).toBe(2);
-    expect(listed.accounts).toHaveLength(3);
+    expect(listed.accounts).toHaveLength(MAX_MAIL_ACCOUNTS);
     expect(Object.keys(listed.accounts[0]).sort()).toEqual([
       "accountId",
       "connectedAt",
@@ -342,9 +342,9 @@ describe("multi mail account service", () => {
     ]);
     expect(JSON.stringify(listed)).not.toContain("password");
     await expect(
-      service.add(createInput(4), requestFixture()),
+      service.add(createInput(MAX_MAIL_ACCOUNTS + 1), requestFixture()),
     ).rejects.toMatchObject({ code: "account_limit_reached" });
-    expect(verifier.verify).toHaveBeenCalledTimes(3);
+    expect(verifier.verify).toHaveBeenCalledTimes(MAX_MAIL_ACCOUNTS);
   });
 
   it("publishes exact provider capabilities without changing the v2 account list", async () => {

@@ -39,7 +39,7 @@ import {
 describe("mail security and resource contracts", () => {
   it("keeps the personal-mail workload inside the shared droplet budget", () => {
     expect(MAIL_RESOURCE_LIMITS).toMatchObject({
-      maxAccounts: 3,
+      maxAccounts: 7,
       rawMessageBytes: 40 * 1024 * 1024,
       headerBytes: 256 * 1024,
       htmlCharacters: 1024 * 1024,

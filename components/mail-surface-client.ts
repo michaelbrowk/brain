@@ -25,6 +25,14 @@ import {
 } from "@/lib/mail/thread-contract";
 import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
 
+/**
+ * Mirror of `MAIL_RESOURCE_LIMITS.maxAccounts`. That module reaches node:crypto
+ * and node:net, which cannot enter a browser bundle, so the number is repeated
+ * here and `mirrors the account cap the mail service enforces` fails the build
+ * if the two ever differ.
+ */
+export const MAX_MAIL_ACCOUNTS = 7;
+
 const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
 const SAFE_RESOURCE_ID = /^[A-Za-z0-9_-]{1,255}$/;
 const SAFE_OPERATION_ID = /^[A-Za-z0-9_-]{1,128}$/;
@@ -668,7 +676,7 @@ function readAccounts(value: unknown): readonly PublicMailAccount[] {
     !isExactRecord(value, ["apiVersion", "accounts"]) ||
     value.apiVersion !== 3 ||
     !Array.isArray(value.accounts) ||
-    value.accounts.length > 3
+    value.accounts.length > MAX_MAIL_ACCOUNTS
   ) {
     throw new Error("invalid mail accounts");
   }

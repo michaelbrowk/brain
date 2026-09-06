@@ -1,6 +1,6 @@
 /**
  * Pure types and algorithms for the unified smart inbox: a client-side k-way
- * merge over up to three per-account inbox streams. No React in here — the
+ * merge over the per-account inbox streams. No React in here — the
  * surface owns state and effects, this module owns the total order, the
  * safe-horizon cut, page-one reconciliation, and section derivation, so every
  * rule is unit-testable without a DOM.

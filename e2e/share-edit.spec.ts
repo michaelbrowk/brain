@@ -154,6 +154,22 @@ test("a stranger with the link edits a page, and a revoke ends it mid-session", 
       .poll(() => ownerMarkdown(page, created.id), { timeout: 30_000 })
       .toContain("a correction from a stranger");
 
+    // owner: the edit arrived, attributed to the name the visitor gave.
+    //
+    // Named on the shared page's own row, and before the subpage step, which
+    // is what makes this the plainest case: one page, one link, one visitor.
+    // The owner was last on the shared page, so the Hub draws it under
+    // Continue and leaves it out of the activity feed. Asserting the name
+    // anywhere on the body passed for the wrong reason once the visitor's
+    // subpage existed, because that subpage carries the same name into the
+    // feed on a row of its own.
+    await page.goto("/");
+    const continueRow = page.locator("[data-hub-continue] button");
+    await expect(continueRow).toContainText("Guest chapter", {
+      timeout: 20_000,
+    });
+    await expect(continueRow).toContainText("edited by Ada");
+
     // the visitor makes a subpage. The slash menu asks for a name first,
     // because naming at creation is the only say a visitor has over a title.
     // The menu opens on a paragraph whose whole text is the trigger, so the
@@ -211,12 +227,6 @@ test("a stranger with the link edits a page, and a revoke ends it mid-session", 
     await shared.goto(link!);
     body = shared.locator("[data-share-editor] .ProseMirror");
     await expect(body).toBeVisible({ timeout: 20_000 });
-
-    // owner: the edit arrived, attributed to the name the visitor gave
-    await page.goto("/");
-    await expect(page.locator("body")).toContainText("edited by Ada", {
-      timeout: 20_000,
-    });
 
     // the visitor's draft carries an unsent edit across a reload: cut the
     // network, type, and the banner says the text is still theirs

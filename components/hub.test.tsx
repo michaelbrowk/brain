@@ -101,6 +101,39 @@ describe("Hub", () => {
     expect(host.textContent).not.toContain("edited by a visitor");
   });
 
+  it("names the visitor on the only page there is, the one Continue draws", async () => {
+    // The plainest case the feature has: one page, one link, one visitor. The
+    // shared page is also the page this device was last on, so the feed drops
+    // it to avoid drawing the same row twice and Continue is the only row
+    // left. The name has to travel with it or the Hub reports nobody.
+    localStorage.setItem("brain-last-opened", "p1");
+    await act(async () =>
+      root.render(
+        <Hub
+          tree={[
+            recent({
+              id: "p1",
+              title: "Guest chapter",
+              updatedBy: "visitor",
+              updatedByName: "Ada",
+            }),
+          ]}
+          onSelect={() => {}}
+          onCreate={async () => null}
+        />,
+      ),
+    );
+    await settle();
+
+    expect(host.textContent).toContain("Continue on this device");
+    expect(host.textContent).toContain("edited by Ada");
+    // and the row is drawn once, not repeated into the feed below it
+    const badges = [...host.querySelectorAll("span")].filter(
+      (candidate) => candidate.textContent === "edited by Ada",
+    );
+    expect(badges).toHaveLength(1);
+  });
+
   it("holds a hostile name inside the row without taking the title's room", async () => {
     // 40 is the cap normalizeVisitorName applies, and the name is the
     // visitor's own text. jsdom lays nothing out, so what is pinned here is

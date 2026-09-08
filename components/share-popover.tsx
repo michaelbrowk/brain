@@ -1116,11 +1116,19 @@ function SwitchRow({
 
 /** What the row says under its label: the grant, in whichever direction the
  *  switch is pointing. Both are true in the state that shows them and stay
- *  true after the press. */
+ *  true after the press.
+ *
+ *  Both name three things a visitor may do and three they may not, and both
+ *  wrap to two lines, which is what keeps the row at 75px in either position
+ *  (10 padding, the label's 19, the note's 3 and 32, 10 padding) down to a
+ *  250px label column, narrower than the card's own 272 and than the sheet's
+ *  at every phone width above 362. "Making subpages" is a clause the card
+ *  carried, lost while the affordance was missing, and got back with it; the
+ *  offer's opener is short because that clause has to fit beside it. */
 const EDIT_GRANTS =
-  "They can change text and images, never delete, move or rename.";
+  "They can edit text, add images and make subpages, never delete, move or rename.";
 const EDIT_OFFERS =
-  "Turning this on lets them change text and images, never delete, move or rename.";
+  "It lets them edit text, add images and make subpages, never delete, move or rename.";
 
 /** The edit row. Every other row on the card is a label and a control on one
  *  line, so this one is too: its note stacks under the label the way the

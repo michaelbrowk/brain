@@ -1082,14 +1082,14 @@ describe("SharePopover redesign", () => {
       // rhythm.
       expect(notes()).toHaveLength(1);
       expect(notes()[0].textContent).toBe(
-        "Turning this on lets them change text and images, never delete, move or rename.",
+        "It lets them edit text, add images and make subpages, never delete, move or rename.",
       );
 
       await click(switchFor(EDIT_SWITCH));
       // On, the same fact stated of the grant that now exists.
       expect(notes()).toHaveLength(1);
       expect(notes()[0].textContent).toBe(
-        "They can change text and images, never delete, move or rename.",
+        "They can edit text, add images and make subpages, never delete, move or rename.",
       );
     });
 
@@ -1194,7 +1194,7 @@ describe("SharePopover redesign", () => {
       row = document.body.querySelector('[data-share-row="edit"]') as HTMLElement;
       expect(row.textContent).not.toContain("signed out");
       expect(row.textContent).toContain(
-        "Turning this on lets them change text and images, never delete, move or rename.",
+        "It lets them edit text, add images and make subpages, never delete, move or rename.",
       );
     });
 

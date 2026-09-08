@@ -4712,14 +4712,16 @@ html[data-kbd] [contenteditable]:focus-visible {
   }
 }
 
-.brain-dialog[data-state="open"] {
+.brain-dialog[data-state="open"],
+.brain-share-dialog[data-state="open"] {
   animation: dialog-pop 220ms var(--ease-out) forwards;
 }
 .brain-dialog[data-state="open"]::before {
   animation: materialize-edge 220ms linear both;
 }
 
-.brain-dialog[data-state="closed"] {
+.brain-dialog[data-state="closed"],
+.brain-share-dialog[data-state="closed"] {
   animation: dialog-pop-out 120ms ease-in forwards;
 }
 
@@ -4915,6 +4917,26 @@ html[data-kbd] [contenteditable]:focus-visible {
   background: var(--glass-sheen);
   box-shadow: var(--edge-light);
   pointer-events: none;
+}
+/* The one dialog a share visitor meets. It is the dialog canon's geometry on
+   paper: §10 ban 10 keeps glass off the public page, and a share link is
+   opened in the browsers where a blurred layer is least reliable. So it is
+   not `.brain-dialog` with the material painted over — it is not a material
+   at all, which is also why it does not take that class's v2 ink flip: the
+   page under it is on the same ink it is. Everything else is shared by
+   selector rather than copied, so it cannot drift: the r20 sheet radius, the
+   centring transform, `.brain-sheet` for the phone, the L4 scrim over it,
+   both retraces, the reduced-motion crossfade and print's `display: none`. */
+.brain-share-dialog {
+  isolation: isolate;
+  transform: translate(-50%, -54%);
+  border: 0;
+  border-radius: var(--r-sheet);
+  background: var(--paper);
+  box-shadow:
+    0 0 0 0.5px var(--fill-rim),
+    var(--shadow-3);
+  color: var(--ink);
 }
 /* A row inside a dialog (Move's destinations, History's versions): the
    palette row's construction on the same thick material — the r10 control
@@ -5202,12 +5224,14 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
      component (the phone's search sheet fades through framer's own reduced
      branch, like the Pages sheet). */
   .brain-dialog[data-state="open"],
+  .brain-share-dialog[data-state="open"],
   .brain-sheet[data-state="open"],
   .brain-palette[data-state="open"] {
     animation-name: dialog-fade;
   }
 
   .brain-dialog[data-state="closed"],
+  .brain-share-dialog[data-state="closed"],
   /* the commit keyframe is a second closed state on the same class, and a
      rule it outranks cannot flatten it — on the sheet as well as the dialog */
   .brain-dialog[data-state="closed"][data-commit],
@@ -5259,6 +5283,7 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
   .brain-mobile-tabbar,
   .brain-dialog-overlay,
   .brain-dialog,
+  .brain-share-dialog,
   .brain-block-handle,
   .brain-drop-cursor,
   .brain-col-drop-indicator,

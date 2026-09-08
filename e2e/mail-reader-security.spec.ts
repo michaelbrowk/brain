@@ -1,6 +1,11 @@
 import { expect, test } from "playwright/test";
 
-test("sanitized mail iframe loads a parent blob without gaining script access", async ({
+/*  Part of the compact release gate (@release). The reader renders mail from
+ *  strangers, so a sandbox that stopped holding is a stranger running script
+ *  against the owner's session, and this is the only browser test that proves
+ *  it still holds. It costs a third of a second, which is the cheapest guard
+ *  in the gate by an order of magnitude. */
+test("@release sanitized mail iframe loads a parent blob without gaining script access", async ({
   page,
 }) => {
   await page.goto("/login");

@@ -208,7 +208,7 @@ Tokens are stored in oklch. The hex values are the concept's; every conversion r
 | Token | Light | Dark | Role |
 |---|---|---|---|
 | paper | `#FCFBF8` | `oklch(.205 .006 75)` | canvas, all content |
-| edge tint | sky `#CBDDF0` @.42 / sand `#EEDFC6` @.38, two radials, both on the left | same hues, chroma ×0.5, alpha .18 | glass needs something to refract, so a tint lives where glass passes over it; the third radial sat on open canvas at the window's right edge and read as a glow on a wall — removed. Static by default |
+| edge tint | sky `#CBDDF0` @.42 / sand `#EEDFC6` @.38, two radials, both on the left | same hues, chroma ×0.5, alpha **.06** | glass needs something to refract, so a tint lives where glass passes over it; the third radial sat on open canvas at the window's right edge and read as a glow on a wall — removed. Static by default. **Drawn from 768 up and nowhere else**, and **the two alphas are set to the same measured effect, not the same number** (see below) |
 | ink | `#1D1D1F` | `oklch(.92 .006 85)` | text, icons in pills |
 | ink-2 | `#5C5D63` | `oklch(.75 .006 85)` | secondary, the only grey on glass |
 | ink-3 | `#6E6E73` | `oklch(.62 .006 75)` | sources, captions — paper only |
@@ -224,6 +224,19 @@ Tokens are stored in oklch. The hex values are the concept's; every conversion r
 | sticker / tc-* / tb-* | unchanged | unchanged | content, not chrome |
 
 Dark ink-2 is `.75`, not the v1 `.72`: on thick glass over the lightest dark backdrop the Phase 0 stand measured 4.12:1 at `.72`; `.75` clears AA.
+
+**The edge tints are a desktop thing, and the dark alpha answers to light's effect rather than light's number.** Two findings, both measured at 1440 in Chromium against the same page with `--tint-sky` / `--tint-sand` forced transparent, ΔL in oklch.
+
+*A tint follows the glass it exists for.* Both radials sit on the left because that is where the sidebar passes over them, which is also why the third one was deleted. Below 768 there is no sidebar. `.brain-sidebar` is `display: none` and `--canvas-offset` closes to 0, so on a phone nothing passes over them and the rule's own words make them a glow on a wall. The geometry says the same thing louder: the radials are sized in pixels and were never gated, so the sky one's 540px reach (900 × the 60% stop) is a corner accent at 1440 and the entire screen at 390. Measured dark on a phone it carried ΔL .125 in the corner and still .051 at the far corner of the same head, a wash over everything, against §8's .03 for one hover step. Nothing had touched these since they were written, so this was never a regression, only a rule that had no width in it. The gate takes `max-width: 767px`, the sidebar's own query, in the `768px` form the hand-written queries in `globals.css` use rather than Tailwind's `48rem`: a tint that exists for the sidebar follows the sidebar.
+
+*The same alpha does different work on the two papers.* Dark was `.18`, under half of light's `.42` / `.38`, which reads as restraint and is not. A tint of L .89 laid on the dark paper (L .205) lifts lightness several times harder than it lowers the light paper (L .97). Measured on the two surfaces that carry controls, the open canvas beside the sidebar and the sidebar's own glass at the sand corner:
+
+| surface | light .42/.38 | dark .18 | dark .06 |
+|---|---|---|---|
+| open canvas | .016 | .052 | .018 |
+| under the glass | .010 | .046 | .017 |
+
+§8 sets `.03` as the *smallest* step a hover may be and measures the built ones at `.043–.080`, so at `.18` the ambient ground was arriving as loud as a state on both surfaces. At `.06` both sit under §8's floor with room and land within `.002` of what light has always done. The gradient's own peak is hotter than either, `.048` dark and `.042` light, but it falls in the 12px gutter between the window edge and the sidebar, where the canvas shows raw and nothing stands. A gradient's corner is not a step on an object, so §8's floor is not the test there. Parity with light is, and it holds. Light is unchanged. Its numbers were never the problem, only the analogy drawn from them.
 
 Dosage:
 
@@ -828,12 +841,15 @@ What paid for it was the tint. The canvas is paper plus the two edge radials
 (§2), and the sky one is 900×560 at the window's top-left corner. On a desktop
 the reader pane starts past 700px, where that radial is spent, and flat paper
 there measures ΔL 0.001 light / 0.004 dark against the canvas — the figure
-"invisible at rest" was read off. **On a phone the reader is the window**: the
-strip sits in the radial's hot corner, and the same flat paper measured 13/8/2
+"invisible at rest" was read off. **On a phone the reader was the window**: the
+strip sat in the radial's hot corner, and the same flat paper measured 13/8/2
 in RGB against the canvas beside it at 390. That is a lit band with a hard
 horizontal edge under it, sitting at the top of the screen — and it gets read
 twice over, once as a plate laid over the page and once as a progressive blur
-that has fired before anything scrolled. One artefact, two complaints. The paper is gone: the canvas runs behind the subject the way
+that has fired before anything scrolled. One artefact, two complaints. (Per §2
+the radials are drawn from 768 up now, so a phone's canvas is flat paper and
+the hot corner that made this case no longer exists. The plate stays gone with
+it: what the strip stands on at any width is the canvas.) The paper is gone: the canvas runs behind the subject the way
 it runs behind every other piece of chrome in this product, the same column
 now measures ≤1 in every channel top to bottom, and §7's one edge here is the
 scroller's own fade, which stays at 0 until `data-scrolled`.

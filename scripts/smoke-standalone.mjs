@@ -16,6 +16,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import bcrypt from "bcryptjs";
+import {
+  PRUNED_NATIVE_NAMES,
+  isPrunedNativeEntry,
+} from "./build-release.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -38,7 +42,23 @@ if (!Number.isInteger(port) || port < 1024 || port > 65535) {
 }
 const baseUrl = `http://127.0.0.1:${port}`;
 
-async function inspectArtifact(rootPath) {
+/** The size ceiling is about what a person downloads, and what ships is the
+ * release stage, which drops sharp: it is a per-architecture native module and
+ * nothing in Brain imports it at runtime. Counting it here measured a tree that
+ * never leaves the builder, and on macOS its 15 MB of arm64 libvips put the
+ * number over the ceiling on a machine whose release was perfectly fine. The
+ * rule comes from build-release.mjs so the two cannot drift apart. */
+function isPrunedFromRelease(rootPath, entryPath) {
+  const relative = path.relative(rootPath, entryPath).split(path.sep);
+  const at = relative.indexOf("node_modules");
+  if (at === -1) return false;
+  const next = relative[at + 1];
+  if (next === undefined) return false;
+  if (PRUNED_NATIVE_NAMES.includes(next)) return true;
+  return next === ".pnpm" && isPrunedNativeEntry(relative[at + 2] ?? "");
+}
+
+export async function inspectArtifact(rootPath) {
   let bytes = 0;
   const jsdomApis = [];
   const pending = [rootPath];
@@ -46,6 +66,9 @@ async function inspectArtifact(rootPath) {
     const directory = pending.pop();
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const entryPath = path.join(directory, entry.name);
+      if (isPrunedFromRelease(rootPath, entryPath)) {
+        continue;
+      }
       if (entry.isDirectory()) {
         pending.push(entryPath);
       } else if (entry.isFile()) {
@@ -78,7 +101,8 @@ await cp(path.join(root, "ops", "brain-server.cjs"), serverTarget);
 const artifact = await inspectArtifact(standalone);
 if (artifact.bytes > 120 * 1024 * 1024) {
   throw new Error(
-    `standalone artifact is unexpectedly large: ${Math.ceil(artifact.bytes / 1024 / 1024)} MiB`,
+    `standalone artifact is unexpectedly large: ${Math.ceil(artifact.bytes / 1024 / 1024)} MiB ` +
+      "(measured as the release ships it, without the native modules it prunes)",
   );
 }
 if (artifact.jsdomApis.length !== 1) {

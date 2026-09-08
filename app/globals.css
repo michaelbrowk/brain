@@ -467,8 +467,34 @@
   --yellow: oklch(0.836 0.142 86); /* #F2C24D */
   --red: oklch(0.707 0.185 26); /* #FF6961 */
 
-  --tint-sky: oklch(0.89 0.0165 250 / 0.18);
-  --tint-sand: oklch(0.909 0.0185 81 / 0.18);
+  /* The edge tints, at the alpha that gives dark the SAME EFFECT light gets,
+     not the same number. They were .18, under half of light's .42 / .38,
+     which looked like restraint on paper. It is not what an alpha does. A
+     tint of L .89 laid on the dark paper (L .205) lifts lightness several
+     times harder than the same tint laid on the light paper (L .97) lowers
+     it, so the smaller number was the louder ground. Measured at 1440 on the
+     shell, ΔL against the same page with the tokens forced transparent, on
+     the two surfaces that carry controls, the open canvas beside the sidebar
+     and the sidebar's own glass at the sand corner:
+
+                        light .42/.38   dark .18   dark .06
+       open canvas          .016          .052       .018
+       under the glass      .010          .046       .017
+
+     §8 sets .03 as the SMALLEST lightness step a hover is allowed to be, and
+     measures the built ones at .043–.080. At .18 the ambient ground was
+     arriving as loud as a state on both of them, which is the whole of
+     "какие-то они ужасные стали". At .06 both sit under §8's floor with room
+     and land within .002 of what light has always done.
+     The gradient's own peak is hotter than either, .048 dark and .042 light,
+     but it falls in the 12px gutter between the window edge and the sidebar,
+     where the canvas shows raw and nothing stands. A gradient's corner is not
+     a step on an object, so §8's floor is not the test there. Parity with
+     light is, and it holds.
+     Light is unchanged: its numbers were never the problem, only the analogy
+     drawn from them. */
+  --tint-sky: oklch(0.89 0.0165 250 / 0.06);
+  --tint-sand: oklch(0.909 0.0185 81 / 0.06);
 
   --glass-thin: oklch(0.295 0.007 286 / 0.55); /* rgb(44 44 48) */
   --glass-reg: oklch(0.278 0.007 286 / 0.6); /* rgb(40 40 44) */
@@ -2552,13 +2578,16 @@ html[data-kbd] [contenteditable]:focus-visible {
 
 /* ── Background under glass (v2) ─────────────────────────────────────────────
    Two modes on <html data-bg>, read from localStorage "brain-bg" before paint
-   (layout.tsx). "still" = three static radial edge tints. "live" = the same
-   three tints on their own compositing layers, drifting on 48–64s alternate
-   cycles (a full return takes ≥96s, far below the 0.2 Hz vestibular zone),
-   transform + opacity only. Reduced motion stops the drift entirely and the
-   layers rest at their still positions. The element is opt-in: <Background/>
-   renders it as the first child of a surface whose root isolates
-   (isolation: isolate); the current UI does not mount one. */
+   (layout.tsx). "still" = two static radial edge tints. "live" = the same two
+   tints on their own compositing layers, drifting on 48–56s alternate cycles
+   (a full return takes ≥96s, far below the 0.2 Hz vestibular zone), transform
+   + opacity only. Reduced motion stops the drift entirely and the layers rest
+   at their still positions. The element is opt-in: <Background/> renders it as
+   the first child of a surface whose root isolates (isolation: isolate); the
+   shell mounts one, fixed, as its first child (components/shell.tsx).
+
+   BOTH MODES DRAW FROM 768 UP AND NOWHERE ELSE. The gate at the foot of this
+   section carries the argument. */
 .brain-bg {
   position: absolute;
   inset: 0;
@@ -2637,6 +2666,37 @@ html[data-kbd] [contenteditable]:focus-visible {
     will-change: auto;
     transform: none;
     opacity: 1;
+  }
+}
+/* THE TINTS ARE A DESKTOP THING. Two reasons, and they meet at the same line.
+   The rule first: a tint is there for glass to refract, which is why both of
+   them sit on the left under the sidebar and why the third one was removed
+   from the open canvas at the right edge. Below 768 there IS no sidebar.
+   `.brain-sidebar` is `display: none` and `--canvas-offset` closes to 0, so
+   nothing on the phone passes over the left edge and the radials have nothing
+   to be caught in. What is left is the glow on a wall, by the rule's own
+   words.
+   The geometry second: the radials are sized in pixels and were never gated,
+   so they do not become a smaller accent on a smaller screen, they become the
+   screen. The sky one reaches 540px (900 × the 60% stop). At 390 that is the
+   whole width and most of the height: measured dark on the phone, ΔL .125 in
+   the corner and still .051 at the OPPOSITE corner of the head, a wash over
+   everything, against §8's .03 for a hover step. This is not a regression.
+   Nothing had touched these since they were written.
+   768 is the line because it is the sidebar's own, the same number
+   `.brain-sidebar` and `.brain-shell`'s `--canvas-offset` switch on, and the
+   form the hand-written queries in this file use. Tailwind's `md:` compiles
+   to 48rem, which is the same 768 at the default root size and is not the
+   same thing under a user font scale. A tint that exists for the sidebar
+   follows the sidebar, so it takes the sidebar's query verbatim. */
+@media (max-width: 767px) {
+  .brain-bg-still,
+  .brain-bg-live,
+  .brain-bg-auto {
+    background-image: none;
+  }
+  .brain-bg > i {
+    display: none;
   }
 }
 
@@ -4359,14 +4419,17 @@ html[data-kbd] [contenteditable]:focus-visible {
    THE STRIP DECLARES NO GROUND (v6). It painted `--paper` and defended it as
    "the thing the message scrolls under" — a plate against a frame that is
    clipped before it arrives. What paid for the plate was the tint: the canvas
-   is paper PLUS the sky radial (900×560 at 0% 0%, `--tint-sky` .42), and on a
-   desktop the reader pane starts past 700px, where the radial is spent — the
-   ΔL 0.001 light / 0.004 dark that "invisible at rest" was measured from.
-   On a phone the reader IS the window: the strip sits in the radial's hot
-   corner and the same flat paper measured 13/8/2 in RGB against the canvas
-   beside it — a lit band with a hard horizontal edge under it, read by the
-   owner as a plate over the page AND as a progressive blur that had fired
-   before he scrolled. The paper is gone; the canvas runs behind the subject
+   is paper PLUS the sky radial (900×560 at 0% 0%, `--tint-sky` at .42 light,
+   .06 dark), and on a desktop the reader pane starts past 700px, where the
+   radial is spent — the ΔL 0.001 light / 0.004 dark that "invisible at rest"
+   was measured from. On a phone the reader WAS the window and the strip sat
+   in the radial's hot corner, where the same flat paper measured 13/8/2 in
+   RGB against the canvas beside it — a lit band with a hard horizontal edge
+   under it, read by the owner as a plate over the page AND as a progressive
+   blur that had fired before he scrolled. (The radials are drawn from 768 up
+   now, so a phone's canvas is flat paper and the corner that made the case is
+   gone. The plate stays gone with it: what the strip stands on at any width
+   is the canvas.) The paper is gone; the canvas runs behind the subject
    the way it runs behind every other piece of chrome in the product, and §7's
    one edge here is the scroller's own fade, which stays at 0 until
    `data-scrolled`.

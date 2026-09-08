@@ -366,7 +366,9 @@ export function Hub({
       ? []
       : pages
           .filter((p) => nowMs - new Date(p.updated).getTime() < WEEK)
-          .filter((p) => p.id !== continuePage?.id) // Continue already shows it
+          // Continue already draws this page, with the same title, time and
+          // author badge, so a second row would only repeat it.
+          .filter((p) => p.id !== continuePage?.id)
           .sort((a, b) => (a.updated < b.updated ? 1 : -1));
   const feed = activityExpanded ? allActivity : allActivity.slice(0, 5);
   const splitIdx = lastVisit
@@ -433,11 +435,21 @@ export function Hub({
         )}
       </motion.div>
 
-      {/* continue where you left off */}
+      {/* continue where you left off. The row carries who wrote the page
+          last, because the feed below drops it (see allActivity) and this is
+          then the only row the page has. With one page shared with one
+          visitor that is the whole of the Hub's report, so dropping the
+          author here would leave a visitor's edit unattributed everywhere. */}
       {continuePage && (
-        <motion.div {...enter(1)} className="mt-8">
+        <motion.div {...enter(1)} className="mt-8" data-hub-continue>
           <SectionLabel>Continue on this device</SectionLabel>
-          <Row page={continuePage} onSelect={onSelect} trailing={fmtAgo(continuePage.updated)} />
+          <Row
+            page={continuePage}
+            onSelect={onSelect}
+            actor={continuePage.updatedBy}
+            actorName={continuePage.updatedByName}
+            trailing={fmtAgo(continuePage.updated)}
+          />
         </motion.div>
       )}
 

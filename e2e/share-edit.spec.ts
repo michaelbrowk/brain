@@ -106,7 +106,7 @@ test("a stranger with the link edits a page, and a revoke ends it mid-session", 
     "Anyone with the link will be able to read and edit this page.",
   );
   await expect(card.locator('[data-share-row="edit"]')).toContainText(
-    "They can change text and images, never delete, move or rename.",
+    "They can edit text, add images and make subpages, never delete, move or rename.",
   );
   await page.getByRole("button", { name: "Share this page" }).click();
 
@@ -136,7 +136,7 @@ test("a stranger with the link edits a page, and a revoke ends it mid-session", 
     await shared.getByLabel("Your name").fill("Ada");
     await shared.getByRole("button", { name: "Start editing" }).click();
 
-    const body = shared.locator("[data-share-editor] .ProseMirror");
+    let body = shared.locator("[data-share-editor] .ProseMirror");
     await expect(body).toBeVisible({ timeout: 20_000 });
     await expect(shared.locator("[data-share-name-dialog]")).toHaveCount(0);
     // the name was taken, and the page says the state changed
@@ -154,6 +154,64 @@ test("a stranger with the link edits a page, and a revoke ends it mid-session", 
       .poll(() => ownerMarkdown(page, created.id), { timeout: 30_000 })
       .toContain("a correction from a stranger");
 
+    // the visitor makes a subpage. The slash menu asks for a name first,
+    // because naming at creation is the only say a visitor has over a title.
+    // The menu opens on a paragraph whose whole text is the trigger, so the
+    // caret goes past the end of the last line rather than into the middle of
+    // a wrapped one, and Enter opens an empty paragraph under it.
+    const written = (await body.boundingBox())!;
+    await body.click({
+      position: { x: written.width - 8, y: written.height - 6 },
+    });
+    await shared.keyboard.press("Enter");
+    await shared.keyboard.type("/");
+    await expect(shared.getByTestId("slash-menu")).toBeVisible();
+    await shared.getByRole("button", { name: "New page" }).click();
+
+    const naming = shared.locator("[data-share-subpage-dialog]");
+    await expect(naming).toBeVisible();
+    await naming.getByLabel("Page title").fill("A stranger's chapter");
+    await naming.getByRole("button", { name: "Create page" }).click();
+    await expect(naming).toHaveCount(0);
+
+    // the link took the slash's place, and it points into the share
+    const ref = shared.locator("[data-share-editor] a[data-page-ref]");
+    await expect(ref).toHaveText("A stranger's chapter");
+    const childHref = await ref.getAttribute("href");
+    expect(childHref).toContain(`/share/${created.id}?page=`);
+    await expect
+      .poll(() => ownerMarkdown(page, created.id), { timeout: 30_000 })
+      .toContain("A stranger's chapter");
+
+    // and it opens: the page is there, under the name it was given, and
+    // there is nothing on it that could give it another one
+    await ref.click();
+    await expect(shared).toHaveURL(new RegExp("[?]page="), { timeout: 20_000 });
+    await expect(shared.locator("h1")).toHaveText("A stranger's chapter");
+    await expect(
+      shared.getByRole("textbox", { name: "Page title" }),
+    ).toHaveCount(0);
+    const child = shared.locator("[data-share-editor] .ProseMirror");
+    await expect(child).toBeVisible({ timeout: 20_000 });
+    await child.click();
+    await shared.keyboard.type("Written in a page a visitor made");
+    await expect
+      .poll(
+        async () => {
+          const id = new URL(childHref!, "http://127.0.0.1").searchParams.get(
+            "page",
+          )!;
+          return ownerMarkdown(page, id);
+        },
+        { timeout: 30_000 },
+      )
+      .toContain("Written in a page a visitor made");
+
+    // back to the shared page for the rest of the journey
+    await shared.goto(link!);
+    body = shared.locator("[data-share-editor] .ProseMirror");
+    await expect(body).toBeVisible({ timeout: 20_000 });
+
     // owner: the edit arrived, attributed to the name the visitor gave
     await page.goto("/");
     await expect(page.locator("body")).toContainText("edited by Ada", {
@@ -163,7 +221,7 @@ test("a stranger with the link edits a page, and a revoke ends it mid-session", 
     // the visitor's draft carries an unsent edit across a reload: cut the
     // network, type, and the banner says the text is still theirs
     await shared.route("**/api/share-edit/page/**", (route) => route.abort());
-    await body.click();
+    await body.locator("p").first().click();
     await shared.keyboard.press("End");
     await shared.keyboard.type(" kept through a reload");
     await expect(shared.locator('[data-share-save-state="unsaved"]')).toContainText(
@@ -193,7 +251,7 @@ test("a stranger with the link edits a page, and a revoke ends it mid-session", 
       page.getByRole("dialog", { name: "Share settings" }).locator(
         '[data-share-row="edit"]',
       ),
-    ).toContainText("They can change text and images, never delete, move or rename.");
+    ).toContainText("They can edit text, add images and make subpages, never delete, move or rename.");
     await liveSwitch.click();
     // the toast is where the sign-out is stated, as a result of a flip that
     // landed rather than a prophecy on a card nobody has touched
@@ -204,7 +262,7 @@ test("a stranger with the link edits a page, and a revoke ends it mid-session", 
 
     // visitor: the next save is refused, and the page says so without losing
     // the text
-    await restored.click();
+    await restored.locator("p").first().click();
     await shared.keyboard.press("End");
     await shared.keyboard.type(" one more");
     await expect(shared.locator('[data-share-save-state="gone"]')).toContainText(

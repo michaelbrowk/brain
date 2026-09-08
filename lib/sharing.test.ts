@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  cleanVisitorTitle,
   isShareExpired,
   normalizeVisitorName,
   normalizeVisitorTitle,
@@ -105,5 +106,26 @@ describe("normalizeVisitorTitle", () => {
     expect(normalizeVisitorTitle(42)).toBeNull();
     expect(normalizeVisitorTitle(["x"])).toBeNull();
     expect(normalizeVisitorTitle(undefined)).toBeNull();
+  });
+});
+
+describe("cleanVisitorTitle", () => {
+  it("cleans by the same rule and returns what is left, with no fallback", () => {
+    expect(cleanVisitorTitle("  Meeting notes  ")).toBe("Meeting notes");
+    expect(cleanVisitorTitle("Notes \nfrom\u0000Ada")).toBe("Notes fromAda");
+    expect(cleanVisitorTitle("a".repeat(250))).toBe("a".repeat(200));
+  });
+
+  it("is empty exactly where the route would answer Untitled", () => {
+    for (const value of ["", "   ", "\u0000\u0007"]) {
+      expect(cleanVisitorTitle(value)).toBe("");
+      expect(normalizeVisitorTitle(value)).toBe("Untitled");
+    }
+    expect(cleanVisitorTitle(42)).toBe("");
+    expect(cleanVisitorTitle(undefined)).toBe("");
+  });
+
+  it("keeps a title the visitor typed as Untitled, because they chose it", () => {
+    expect(cleanVisitorTitle("Untitled")).toBe("Untitled");
   });
 });

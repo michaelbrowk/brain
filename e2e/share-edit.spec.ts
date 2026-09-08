@@ -2,7 +2,13 @@ import { expect, test, type Page } from "playwright/test";
 
 /** The whole visitor journey, from a link to a saved edit to a revoke, in the
  *  browser. Everything under it is already unit-tested; what this proves is
- *  that the pieces meet. */
+ *  that the pieces meet.
+ *
+ *  Part of the compact release gate (@release). This is the only browser
+ *  coverage editable shares have, and the failure mode it guards is a
+ *  stranger holding a link to a page: reaching one that should be closed,
+ *  keeping an edit after a revoke, or writing where a name was never taken.
+ *  It adds 19 seconds to a gate that runs about three minutes. */
 
 async function browserJson(
   page: Page,
@@ -70,7 +76,7 @@ async function timesOnPage(page: Page, phrase: string) {
   }, phrase);
 }
 
-test("a stranger with the link edits a page, and a revoke ends it mid-session", async ({
+test("@release a stranger with the link edits a page, and a revoke ends it mid-session", async ({
   page,
   browser,
 }) => {

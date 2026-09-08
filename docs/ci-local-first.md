@@ -23,8 +23,8 @@ pnpm test:e2e:release
 
 `test:e2e:release` is the compact browser gate, and it is exactly
 `playwright test --grep @release`. It selects whatever carries `@release` in
-its Playwright title, wherever in `e2e/` that title lives — today 44 tests
-across eight spec files. Read the current set from the runner, never from a
+its Playwright title, wherever in `e2e/` that title lives — today 46 tests
+across nine spec files. Read the current set from the runner, never from a
 list in prose:
 
 ```bash
@@ -44,8 +44,22 @@ Six of them are the core editor journeys, and they all sit in
 The rest came later and are grouped by surface rather than by journey: the
 design stand (`design-audit`), Mail's panes, reader layout and undo
 (`mail-client`, `mail-reader-layout`), breadcrumbs, subpage filing, tree
-moves, and the phantom-draft guards. Keep the set small. Add a test to it only
-when its failure could make Brain unsafe to release.
+moves, the phantom-draft guards, and the editable-share journey
+(`share-edit`). Keep the set small. Add a test to it only when its failure
+could make Brain unsafe to release.
+
+`share-edit` is in the set because its failure mode is a stranger holding a
+link: a page reachable that should be closed, an edit that outlives a revoke,
+a write from someone who never gave a name. It is also the only browser
+coverage editable shares have. It costs 19 seconds, measured as the delta
+between the gate without it and with it, on a gate that runs about three
+minutes.
+
+The other files carry no tag on purpose. Every `e2e/*-shots.spec.ts` is
+owner-gated artifact capture that skips unless its own environment variable is
+set, so those sit outside the weekly full run too. `floating-toolbar`,
+`mail-connect` and `mail-reader-security` are narrow single guards on surfaces
+no stranger reaches, and the weekly run is the right place for them.
 
 The column line reads like a duplicate of the one above it and is not. Nesting
 worked everywhere the gate looked and nowhere it did not: a page laid out in

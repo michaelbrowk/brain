@@ -3,7 +3,7 @@ import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, it } from "vitest";
 import { PRUNED_NATIVE_NAMES, isPrunedNativeEntry, pruneNativeModules } from "./build-release.mjs";
-import { inspectArtifact } from "./smoke-standalone.mjs";
+import { inspectArtifact } from "./artifact-size.mjs";
 
 /** The size ceiling is about what a person downloads. The release stage drops
  *  sharp, so a measurement that counts it fails a build whose release is fine:

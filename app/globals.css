@@ -940,10 +940,12 @@ html[data-kbd] [contenteditable]:focus-visible {
     pointer-events: none;
     transition: opacity 160ms var(--ease-out);
   }
-  &:hover::after,
-  &[data-hover]::after {
-    opacity: 1;
-    transition-duration: 80ms;
+  @media (hover: hover) {
+    &:hover::after,
+    &[data-hover]::after {
+      opacity: 1;
+      transition-duration: 80ms;
+    }
   }
 }
 @utility mat-fill-chip {
@@ -967,17 +969,21 @@ html[data-kbd] [contenteditable]:focus-visible {
     pointer-events: none;
     transition: opacity 160ms var(--ease-out);
   }
-  &:hover::after,
-  &[data-hover]::after {
-    opacity: 1;
-    transition-duration: 80ms;
+  @media (hover: hover) {
+    &:hover::after,
+    &[data-hover]::after {
+      opacity: 1;
+      transition-duration: 80ms;
+    }
   }
 }
 /* Hover on glass is an ink tint, never white-on-white (ΔL ≥ 0.03). */
 @utility mat-fill-hover {
-  &:hover,
-  &[data-hover] {
-    background-color: var(--fill-glass-hover);
+  @media (hover: hover) {
+    &:hover,
+    &[data-hover] {
+      background-color: var(--fill-glass-hover);
+    }
   }
 }
 
@@ -1221,9 +1227,12 @@ html[data-kbd] [contenteditable]:focus-visible {
    underline). Lightening a white fill (pill .80, chip .72, selected .86 in
    the concept) measured ΔL < .01 over paper on the stand; the tint measures
    ≥ .04 over every stand backdrop in both themes. Hover fills run 80ms in,
-   160ms out. Press is scale .97 (icons .90) on pointer-down, 100ms ease-out,
-   and keeps the hover fill; reduced motion drops the scale and keeps the
-   fill. Disabled is opacity .4 and no pointer events. Focus is the global
+   160ms out, and every one of them sits inside @media (hover: hover): a
+   finger has no pointer to carry a tint away again, so a tap that painted
+   one left it sitting there. Press is scale .97 (icons .90) on pointer-down,
+   100ms ease-out, and keeps the hover fill; where an element has no press
+   scale of its own the press wears the tint instead, which is what a tap
+   gets on a phone; reduced motion drops the scale and keeps the fill. Disabled is opacity .4 and no pointer events. Focus is the global
    ring, keyboard only (html[data-kbd] + :focus-visible): a pointer press
    shows scale + tint, never the ring — no :focus / :active rule below sets
    an outline. */
@@ -1268,8 +1277,16 @@ html[data-kbd] [contenteditable]:focus-visible {
   pointer-events: none;
   transition: opacity 160ms var(--ease-out);
 }
-.tint-hover:hover::after,
-.tint-hover[data-hover]::after {
+@media (hover: hover) {
+  .tint-hover:hover::after,
+  .tint-hover[data-hover]::after {
+    opacity: 1;
+    transition-duration: 80ms;
+  }
+}
+/* A finger has no hover to keep, so the press wears the tint instead. On a
+   pointer this is what the press already looks like. */
+.tint-hover:active::after {
   opacity: 1;
   transition-duration: 80ms;
 }
@@ -1304,9 +1321,11 @@ html[data-kbd] [contenteditable]:focus-visible {
     color 160ms var(--ease-out),
     transform 100ms ease-out;
 }
-.btn:hover,
-.btn[data-hover] {
-  transition-duration: 80ms, 80ms, 100ms;
+@media (hover: hover) {
+  .btn:hover,
+  .btn[data-hover] {
+    transition-duration: 80ms, 80ms, 100ms;
+  }
 }
 .btn:active,
 .btn[data-active] {
@@ -1329,19 +1348,23 @@ html[data-kbd] [contenteditable]:focus-visible {
 .btn-quiet {
   color: var(--ink-2);
 }
-.btn-quiet:hover,
-.btn-quiet[data-hover] {
-  background-color: var(--fill-glass-hover);
-  color: var(--ink);
+@media (hover: hover) {
+  .btn-quiet:hover,
+  .btn-quiet[data-hover] {
+    background-color: var(--fill-glass-hover);
+    color: var(--ink);
+  }
 }
 /* ink — the filled primary inside dialogs; hover shifts lightness by .08 */
 .btn-ink {
   background-color: var(--accent);
   color: var(--accent-ink);
 }
-.btn-ink:hover,
-.btn-ink[data-hover] {
-  background-color: var(--accent-hover);
+@media (hover: hover) {
+  .btn-ink:hover,
+  .btn-ink[data-hover] {
+    background-color: var(--accent-hover);
+  }
 }
 /* accent — the one ink-filled circle per surface (34) */
 .btn-accent {
@@ -1352,18 +1375,22 @@ html[data-kbd] [contenteditable]:focus-visible {
   background-color: var(--accent);
   color: var(--accent-ink);
 }
-.btn-accent:hover,
-.btn-accent[data-hover] {
-  background-color: var(--accent-hover);
+@media (hover: hover) {
+  .btn-accent:hover,
+  .btn-accent[data-hover] {
+    background-color: var(--accent-hover);
+  }
 }
 /* destructive — red text, red tint on hover; never a red fill */
 .btn-destructive {
   color: var(--red);
   font-weight: 600;
 }
-.btn-destructive:hover,
-.btn-destructive[data-hover] {
-  background-color: var(--red-tint);
+@media (hover: hover) {
+  .btn-destructive:hover,
+  .btn-destructive[data-hover] {
+    background-color: var(--red-tint);
+  }
 }
 
 /* IconButton — capsule 28 (rows, menus) or 36 (toolbar pills). Icon ink-2 →
@@ -1388,11 +1415,13 @@ html[data-kbd] [contenteditable]:focus-visible {
   width: 36px;
   height: 36px;
 }
-.icon-btn:hover,
-.icon-btn[data-hover] {
-  background-color: var(--fill-glass-hover);
-  color: var(--ink);
-  transition-duration: 80ms, 80ms, 100ms;
+@media (hover: hover) {
+  .icon-btn:hover,
+  .icon-btn[data-hover] {
+    background-color: var(--fill-glass-hover);
+    color: var(--ink);
+    transition-duration: 80ms, 80ms, 100ms;
+  }
 }
 .icon-btn:active,
 .icon-btn[data-active] {
@@ -1425,10 +1454,12 @@ html[data-kbd] [contenteditable]:focus-visible {
   letter-spacing: -0.15px;
   transition: box-shadow 160ms var(--ease-out);
 }
-.field:hover,
-.field[data-hover] {
-  box-shadow: 0 0 0 1px var(--hair-field-strong);
-  transition-duration: 80ms;
+@media (hover: hover) {
+  .field:hover,
+  .field[data-hover] {
+    box-shadow: 0 0 0 1px var(--hair-field-strong);
+    transition-duration: 80ms;
+  }
 }
 .field:focus-within,
 .field[data-focus] {
@@ -1448,10 +1479,12 @@ html[data-kbd] [contenteditable]:focus-visible {
 .field:has(input[aria-invalid="true"]) {
   box-shadow: 0 0 0 1px var(--hair-field-invalid);
 }
-.field:has(input[aria-invalid="true"]):hover,
-.field:has(input[aria-invalid="true"])[data-hover] {
-  box-shadow: 0 0 0 1px var(--red);
-  transition-duration: 80ms;
+@media (hover: hover) {
+  .field:has(input[aria-invalid="true"]):hover,
+  .field:has(input[aria-invalid="true"])[data-hover] {
+    box-shadow: 0 0 0 1px var(--red);
+    transition-duration: 80ms;
+  }
 }
 .field:has(input[aria-invalid="true"]):focus-within,
 .field:has(input[aria-invalid="true"])[data-focus] {
@@ -1486,11 +1519,13 @@ html[data-kbd] [contenteditable]:focus-visible {
     background-color 160ms var(--ease-out),
     box-shadow 160ms var(--ease-out);
 }
-.field-glass:hover,
-.field-glass[data-hover] {
-  background: var(--fill-field-glass-hover);
-  box-shadow: inset 0 0.5px 0 var(--fill-rim);
-  transition-duration: 80ms;
+@media (hover: hover) {
+  .field-glass:hover,
+  .field-glass[data-hover] {
+    background: var(--fill-field-glass-hover);
+    box-shadow: inset 0 0.5px 0 var(--fill-rim);
+    transition-duration: 80ms;
+  }
 }
 .field-glass:focus-within,
 .field-glass[data-focus] {
@@ -1674,16 +1709,30 @@ html[data-kbd] [contenteditable]:focus-visible {
   opacity: 0;
   transition: opacity 160ms var(--ease-out);
 }
-.tree-row:not([data-selected]):hover,
-.tree-row:not([data-selected])[data-hover] {
+@media (hover: hover) {
+  .tree-row:not([data-selected]):hover,
+  .tree-row:not([data-selected])[data-hover] {
+    background-color: var(--fill-glass-hover);
+    transition-duration: 80ms;
+  }
+}
+/* The press, for the finger that has no hover to inherit. It is the same
+   tint, so on a pointer the row looks exactly as it did. */
+.tree-row:not([data-selected]):active {
   background-color: var(--fill-glass-hover);
   transition-duration: 80ms;
 }
 .tree-row[data-selected] {
   font-weight: 600;
 }
-.tree-row[data-selected]:hover > .tree-row-capsule::after,
-.tree-row[data-selected][data-hover] > .tree-row-capsule::after {
+@media (hover: hover) {
+  .tree-row[data-selected]:hover > .tree-row-capsule::after,
+  .tree-row[data-selected][data-hover] > .tree-row-capsule::after {
+    opacity: 1;
+    transition-duration: 80ms;
+  }
+}
+.tree-row[data-selected]:active > .tree-row-capsule::after {
   opacity: 1;
   transition-duration: 80ms;
 }
@@ -1706,9 +1755,14 @@ html[data-kbd] [contenteditable]:focus-visible {
   color: var(--ink-2);
 }
 .tree-row[data-selected] .tree-row-glyph,
-.tree-row:hover .tree-row-glyph,
-.tree-row[data-hover] .tree-row-glyph {
+.tree-row:active .tree-row-glyph {
   color: var(--ink);
+}
+@media (hover: hover) {
+  .tree-row:hover .tree-row-glyph,
+  .tree-row[data-hover] .tree-row-glyph {
+    color: var(--ink);
+  }
 }
 .tree-row-title {
   flex: 1;
@@ -1721,11 +1775,15 @@ html[data-kbd] [contenteditable]:focus-visible {
   opacity: 0;
   transition: opacity 80ms var(--ease-out);
 }
-.tree-row:hover .tree-row-more,
 .tree-row:focus-within .tree-row-more,
-.tree-row[data-hover] .tree-row-more,
 .tree-row-more:has([data-state="open"]) {
   opacity: 1;
+}
+@media (hover: hover) {
+  .tree-row:hover .tree-row-more,
+  .tree-row[data-hover] .tree-row-more {
+    opacity: 1;
+  }
 }
 .tree-row-toggle {
   display: grid;
@@ -1737,10 +1795,12 @@ html[data-kbd] [contenteditable]:focus-visible {
   border-radius: 9999px;
   color: var(--ink-2);
 }
-.tree-row-toggle:hover,
-.tree-row-toggle[data-hover] {
-  background-color: var(--fill-glass-hover);
-  color: var(--ink);
+@media (hover: hover) {
+  .tree-row-toggle:hover,
+  .tree-row-toggle[data-hover] {
+    background-color: var(--fill-glass-hover);
+    color: var(--ink);
+  }
 }
 .tree-row-toggle:active {
   transform: scale(0.9);
@@ -1843,17 +1903,21 @@ html[data-kbd] [contenteditable]:focus-visible {
 .crumb-seg:is(a, button) {
   cursor: pointer;
 }
-.crumb-seg:is(a, button):hover,
-.crumb-seg:is(a, button)[data-hover] {
-  background-color: var(--fill-glass-hover);
-  transition-duration: 80ms, 100ms;
+@media (hover: hover) {
+  .crumb-seg:is(a, button):hover,
+  .crumb-seg:is(a, button)[data-hover] {
+    background-color: var(--fill-glass-hover);
+    transition-duration: 80ms, 100ms;
+  }
 }
 /* the underline decorates the label only — never the emoji or icon */
-.crumb-seg:is(a, button):hover > .crumb-label,
-.crumb-seg:is(a, button)[data-hover] > .crumb-label {
-  text-decoration: underline;
-  text-underline-offset: 3px;
-  text-decoration-thickness: 1px;
+@media (hover: hover) {
+  .crumb-seg:is(a, button):hover > .crumb-label,
+  .crumb-seg:is(a, button)[data-hover] > .crumb-label {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+    text-decoration-thickness: 1px;
+  }
 }
 .crumb-seg:is(a, button):active,
 .crumb-seg:is(a, button)[data-active] {
@@ -1962,10 +2026,16 @@ html[data-kbd] [contenteditable]:focus-visible {
   transition: background-color 160ms var(--ease-out);
 }
 .brain-menu-item[data-highlighted],
-.brain-menu-item:hover,
-.brain-menu-item[data-hover] {
+.brain-menu-item:active {
   background-color: var(--fill-glass-hover);
   transition-duration: 80ms;
+}
+@media (hover: hover) {
+  .brain-menu-item:hover,
+  .brain-menu-item[data-hover] {
+    background-color: var(--fill-glass-hover);
+    transition-duration: 80ms;
+  }
 }
 .brain-menu-item[data-disabled],
 .brain-menu-item:disabled {
@@ -1978,9 +2048,14 @@ html[data-kbd] [contenteditable]:focus-visible {
   transition: color 80ms var(--ease-out);
 }
 .brain-menu-item[data-highlighted] .brain-menu-icon,
-.brain-menu-item:hover .brain-menu-icon,
-.brain-menu-item[data-hover] .brain-menu-icon {
+.brain-menu-item:active .brain-menu-icon {
   color: var(--ink);
+}
+@media (hover: hover) {
+  .brain-menu-item:hover .brain-menu-icon,
+  .brain-menu-item[data-hover] .brain-menu-icon {
+    color: var(--ink);
+  }
 }
 .brain-menu-sep {
   height: 1px;
@@ -2146,10 +2221,12 @@ html[data-kbd] [contenteditable]:focus-visible {
   color: var(--ink-2);
   transition: color 160ms var(--ease-out);
 }
-a.brain-share-url:hover {
-  color: var(--ink);
-  text-decoration: underline;
-  transition-duration: 80ms;
+@media (hover: hover) {
+  a.brain-share-url:hover {
+    color: var(--ink);
+    text-decoration: underline;
+    transition-duration: 80ms;
+  }
 }
 .brain-share-copied {
   flex: 1;
@@ -2182,9 +2259,11 @@ a.brain-share-url:hover {
   cursor: pointer;
   transition: color 160ms var(--ease-out);
 }
-.brain-share-eye:hover {
-  color: var(--ink);
-  transition-duration: 80ms;
+@media (hover: hover) {
+  .brain-share-eye:hover {
+    color: var(--ink);
+    transition-duration: 80ms;
+  }
 }
 .brain-share-eye:disabled {
   opacity: 0.4;
@@ -2778,11 +2857,17 @@ a.brain-share-url:hover {
     display: inline-flex;
   }
 }
-.brain-focus-exit:hover,
 .brain-focus-exit:focus-visible {
   opacity: 1;
   color: var(--ink);
   transition-duration: 80ms;
+}
+@media (hover: hover) {
+  .brain-focus-exit:hover {
+    opacity: 1;
+    color: var(--ink);
+    transition-duration: 80ms;
+  }
 }
 
 /* Title block meta on paper: "Edited 2h ago · Saved" (Caption, ink-3) */
@@ -3148,9 +3233,11 @@ a.brain-share-url:hover {
   color: var(--ink);
   transition: background-color 160ms var(--ease-out);
 }
-.brain-wordmark:hover {
-  background-color: var(--fill-glass-hover);
-  transition-duration: 80ms;
+@media (hover: hover) {
+  .brain-wordmark:hover {
+    background-color: var(--fill-glass-hover);
+    transition-duration: 80ms;
+  }
 }
 .brain-wordmark:active {
   transform: scale(0.97);
@@ -3165,8 +3252,10 @@ a.brain-share-url:hover {
   flex: 1;
   text-align: left;
 }
-.brain-sidebar-search:hover {
-  color: var(--ink);
+@media (hover: hover) {
+  .brain-sidebar-search:hover {
+    color: var(--ink);
+  }
 }
 .brain-sidebar-label {
   padding: 8px 10px 2px;
@@ -3250,10 +3339,12 @@ a.brain-share-url:hover {
   color: var(--ink-2);
   transition: background-color 160ms var(--ease-out);
 }
-.brain-sidebar-empty:hover {
-  background-color: var(--fill-glass-hover);
-  color: var(--ink);
-  transition-duration: 80ms;
+@media (hover: hover) {
+  .brain-sidebar-empty:hover {
+    background-color: var(--fill-glass-hover);
+    color: var(--ink);
+    transition-duration: 80ms;
+  }
 }
 /* the lifted row under the pointer during a tree drag (dnd-kit overlay) */
 .tree-row-overlay {
@@ -3494,10 +3585,12 @@ a.brain-share-url:hover {
   color: var(--ink);
   transition: background-color 160ms var(--ease-out);
 }
-.brain-settings-rootrow:hover,
-.brain-settings-rootrow[data-hover] {
-  background-color: var(--fill-hover);
-  transition-duration: 80ms;
+@media (hover: hover) {
+  .brain-settings-rootrow:hover,
+  .brain-settings-rootrow[data-hover] {
+    background-color: var(--fill-hover);
+    transition-duration: 80ms;
+  }
 }
 .brain-settings-rootrow:active {
   background-color: var(--fill-active);
@@ -3517,8 +3610,10 @@ a.brain-share-url:hover {
     background-color 160ms var(--ease-out),
     transform 100ms ease-out;
 }
-.brain-settings-navrow:hover {
-  transition-duration: 80ms, 100ms;
+@media (hover: hover) {
+  .brain-settings-navrow:hover {
+    transition-duration: 80ms, 100ms;
+  }
 }
 .brain-settings-navrow:active {
   transform: scale(0.99);
@@ -3560,10 +3655,12 @@ a.brain-share-url:hover {
   color: var(--ink-2);
   transition: color 160ms var(--ease-out);
 }
-.brain-settings-segment:hover,
-.brain-settings-segment[data-hover] {
-  color: var(--ink);
-  transition-duration: 80ms;
+@media (hover: hover) {
+  .brain-settings-segment:hover,
+  .brain-settings-segment[data-hover] {
+    color: var(--ink);
+    transition-duration: 80ms;
+  }
 }
 .brain-settings-segment[aria-checked="true"] {
   color: var(--ink);
@@ -3610,10 +3707,12 @@ a.brain-share-url:hover {
     background-color 160ms var(--ease-out),
     color 160ms var(--ease-out);
 }
-.brain-settings-mobile-back:hover {
-  background-color: var(--fill-hover);
-  color: var(--ink);
-  transition-duration: 80ms;
+@media (hover: hover) {
+  .brain-settings-mobile-back:hover {
+    background-color: var(--fill-hover);
+    color: var(--ink);
+    transition-duration: 80ms;
+  }
 }
 .brain-settings-mobile-back:active {
   background-color: var(--fill-active);
@@ -4321,10 +4420,12 @@ a.brain-share-url:hover {
     background-color 160ms var(--ease-out),
     box-shadow 160ms var(--ease-out);
 }
-.brain-mail-chip:hover {
-  background-color: var(--fill-hover);
-  box-shadow: 0 0 0 1px var(--hair-strong);
-  transition-duration: 80ms;
+@media (hover: hover) {
+  .brain-mail-chip:hover {
+    background-color: var(--fill-hover);
+    box-shadow: 0 0 0 1px var(--hair-strong);
+    transition-duration: 80ms;
+  }
 }
 .brain-mail-chip:active {
   background-color: var(--fill-active);
@@ -4484,12 +4585,14 @@ a.brain-share-url:hover {
 /* It has a fill of its own, so the tint rides the `.tint-hover` layer (§8) —
    the quiet variant's tint is a `background-color` and would replace the
    paper instead of sitting over it. Paper is restated here to hold it. */
-.brain-composer-copies:hover,
 .brain-composer-copies:active {
   background-color: var(--paper);
 }
-.brain-composer-copies:hover {
-  box-shadow: 0 0 0 1px var(--hair-strong);
+@media (hover: hover) {
+  .brain-composer-copies:hover {
+    background-color: var(--paper);
+    box-shadow: 0 0 0 1px var(--hair-strong);
+  }
 }
 .brain-composer-field > span,
 .brain-composer-from > span:first-child {
@@ -4534,9 +4637,11 @@ a.brain-share-url:hover {
   box-shadow: 0 0 0 1px var(--hair);
   transition: box-shadow 160ms var(--ease-out);
 }
-.brain-composer-body:hover {
-  box-shadow: 0 0 0 1px var(--hair-strong);
-  transition-duration: 80ms;
+@media (hover: hover) {
+  .brain-composer-body:hover {
+    box-shadow: 0 0 0 1px var(--hair-strong);
+    transition-duration: 80ms;
+  }
 }
 .brain-composer-body:focus-within {
   box-shadow: 0 0 0 1.5px var(--blue);
@@ -4836,13 +4941,22 @@ a.brain-share-url:hover {
   cursor: pointer;
   transition: background-color 160ms var(--ease-out);
 }
-.brain-dialog-row:hover,
-.brain-dialog-row[data-hover] {
+@media (hover: hover) {
+  .brain-dialog-row:hover,
+  .brain-dialog-row[data-hover] {
+    background-color: var(--fill-glass-hover);
+    transition-duration: 80ms;
+  }
+  .brain-dialog-row:hover .tree-row-glyph,
+  .brain-dialog-row[data-hover] .tree-row-glyph {
+    color: var(--ink);
+  }
+}
+.brain-dialog-row:active {
   background-color: var(--fill-glass-hover);
   transition-duration: 80ms;
 }
-.brain-dialog-row:hover .tree-row-glyph,
-.brain-dialog-row[data-hover] .tree-row-glyph {
+.brain-dialog-row:active .tree-row-glyph {
   color: var(--ink);
 }
 .brain-dialog-row[aria-selected="true"],

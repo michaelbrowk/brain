@@ -53,6 +53,44 @@ describe("hover and the pointer that is not there", () => {
     expect(plate.some((r) => r.selector.includes("html[data-kbd]"))).toBe(true);
   });
 
+  it("keeps every :hover rule behind a pointer that can hover", () => {
+    const hovers = all.filter((r) => r.selector.includes(":hover"));
+    // the file is full of them, so a parser that quietly found none would pass
+    expect(hovers.length).toBeGreaterThan(30);
+    for (const r of hovers) {
+      expect(guarded(r), `a touch screen can reach this hover and will not let go of it: ${r.selector}`).toBe(true);
+    }
+  });
+
+  it("keeps the states that are not hover out of the guard", () => {
+    // a keyboard, a Radix highlight and an open menu are not a pointer, and
+    // a blanket wrap over a shared selector list would have taken them too
+    const survivors = [
+      ".brain-focus-exit:focus-visible",
+      ".tree-row:focus-within .tree-row-more",
+      '.tree-row-more:has([data-state="open"])',
+      ".brain-menu-item[data-highlighted]",
+      ".brain-menu-item[data-highlighted] .brain-menu-icon",
+      ".tree-row[data-selected] .tree-row-glyph",
+    ];
+    for (const s of survivors) {
+      const owners = all.filter((r) => r.selector.split(",").some((one) => one.trim() === s));
+      expect(owners.length, `no rule paints ${s} any more`).toBeGreaterThan(0);
+      expect(owners.every((r) => !guarded(r)), `${s} was swept into the hover guard`).toBe(true);
+    }
+  });
+
+  it("answers a tap on every row whose only paint was the hover", () => {
+    // these row families lost their tint on touch and none of them carries a
+    // press scale to fall back on, so each has to answer a finger itself
+    const rows = [".tree-row", ".brain-menu-item", ".brain-dialog-row"];
+    for (const row of rows) {
+      const press = all.filter((r) => new RegExp(`\\${row}(?![\\w-])[^,{]*:active`).test(r.selector));
+      expect(press.length, `${row} has no press state`).toBeGreaterThan(0);
+      expect(press.every((r) => !guarded(r)), `${row}'s press needs a pointer to paint`).toBe(true);
+    }
+  });
+
   it("leaves a palette row something to say when a finger presses it", () => {
     const press = all.filter((r) => /\.brain-palette-item:active/.test(r.selector));
     expect(press.length).toBeGreaterThan(0);

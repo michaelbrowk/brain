@@ -3,10 +3,8 @@ import { randomUUID } from "node:crypto";
 import {
   access,
   cp,
-  lstat,
   mkdir,
   mkdtemp,
-  readdir,
   rename,
   rm,
 } from "node:fs/promises";
@@ -16,6 +14,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import bcrypt from "bcryptjs";
+import { inspectArtifact } from "./artifact-size.mjs";
 
 const execFileAsync = promisify(execFile);
 
@@ -38,26 +37,6 @@ if (!Number.isInteger(port) || port < 1024 || port > 65535) {
 }
 const baseUrl = `http://127.0.0.1:${port}`;
 
-async function inspectArtifact(rootPath) {
-  let bytes = 0;
-  const jsdomApis = [];
-  const pending = [rootPath];
-  while (pending.length > 0) {
-    const directory = pending.pop();
-    for (const entry of await readdir(directory, { withFileTypes: true })) {
-      const entryPath = path.join(directory, entry.name);
-      if (entry.isDirectory()) {
-        pending.push(entryPath);
-      } else if (entry.isFile()) {
-        bytes += (await lstat(entryPath)).size;
-        if (entryPath.endsWith(`${path.sep}jsdom${path.sep}lib${path.sep}api.js`)) {
-          jsdomApis.push(entryPath);
-        }
-      }
-    }
-  }
-  return { bytes, jsdomApis };
-}
 
 await rm(staticTarget, { recursive: true, force: true });
 await rm(publicTarget, { recursive: true, force: true });
@@ -78,7 +57,8 @@ await cp(path.join(root, "ops", "brain-server.cjs"), serverTarget);
 const artifact = await inspectArtifact(standalone);
 if (artifact.bytes > 120 * 1024 * 1024) {
   throw new Error(
-    `standalone artifact is unexpectedly large: ${Math.ceil(artifact.bytes / 1024 / 1024)} MiB`,
+    `standalone artifact is unexpectedly large: ${Math.ceil(artifact.bytes / 1024 / 1024)} MiB ` +
+      "(measured as the release ships it, without the native modules it prunes)",
   );
 }
 if (artifact.jsdomApis.length !== 1) {

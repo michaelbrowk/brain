@@ -261,6 +261,16 @@ export async function writeChecksums({ out, names }) {
  * page uses next/image), so the release stage — the one stage both the
  * two-architecture image and the tarball are built from — drops it. The
  * legacy artifact is left exactly as it always shipped. */
+/** The one rule for what the release drops, so the smoke can measure the
+ * artifact that actually ships instead of the one that sits on disk. A store
+ * entry is `sharp@0.34.5` or `@img+sharp-libvips-linux-x64@1.2.4`; a linked
+ * name is `sharp` or `@img`. */
+export const PRUNED_NATIVE_NAMES = ["sharp", "@img"];
+
+export function isPrunedNativeEntry(name) {
+  return name.startsWith("sharp@") || name.startsWith("@img+");
+}
+
 export async function pruneNativeModules(stage) {
   const modules = path.join(stage, "node_modules");
   const doomed = [path.join(modules, "sharp"), path.join(modules, "@img")];
@@ -270,7 +280,7 @@ export async function pruneNativeModules(stage) {
     throw error;
   };
   for (const entry of (await readdir(store).catch(missingIsEmpty))) {
-    if (entry.startsWith("sharp@") || entry.startsWith("@img+")) {
+    if (isPrunedNativeEntry(entry)) {
       doomed.push(path.join(store, entry));
     }
   }
@@ -279,7 +289,7 @@ export async function pruneNativeModules(stage) {
   // both carry one. Deleting only the store entries would strand those
   // links dangling in the shipped stage, so each consumer scope is swept too.
   for (const entry of (await readdir(store).catch(missingIsEmpty))) {
-    for (const name of ["sharp", "@img"]) {
+    for (const name of PRUNED_NATIVE_NAMES) {
       doomed.push(path.join(store, entry, "node_modules", name));
     }
   }

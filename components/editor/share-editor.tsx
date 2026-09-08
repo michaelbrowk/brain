@@ -20,6 +20,11 @@ import { CLIENT_ID } from "@/lib/client";
 import { formatAgo } from "@/lib/format-ago";
 import { canonicalPageMarkdown } from "@/lib/page-markdown";
 import { Button } from "../ui/button";
+import {
+  ShareSubpageDialog,
+  type ShareSubpageOutcome,
+} from "../share-subpage-dialog";
+import type { PageRef } from "./floating-toolbar";
 
 /** Longer than the owner's 700 ms (components/shell.tsx). Every visitor save
  *  is a round trip plus a scheduled git commit, and the visitor write bucket
@@ -87,6 +92,23 @@ export const SHARE_REFUSED_COPY = "That change cannot be saved here.";
 export const SHARE_STORAGE_FULL_COPY =
   "This browser's storage is full, so your text cannot be kept through a reload. Copy it somewhere first. Reloading now would lose it.";
 
+/** What the naming dialog says when the create route refuses. Each names
+ *  what happened and what to do next, and the two that another press cannot
+ *  answer end the dialog rather than offering the button again. */
+export const SHARE_SUBPAGE_FULL_COPY =
+  "This share has as many pages as it can hold. Ask whoever sent the link to make room.";
+export const SHARE_SUBPAGE_RATE_COPY =
+  "That is a lot of new pages at once. Wait a minute and try again.";
+export const SHARE_SUBPAGE_BUSY_COPY =
+  "This page is busy right now. Try again in a moment.";
+export const SHARE_SUBPAGE_FAILED_COPY =
+  "The page was not created. Try again.";
+/** The one refusal that arrives after the page exists. Pressing again would
+ *  make a second page, so the dialog stops here and says where the first one
+ *  went: an unlinked child is drawn under the page it was created in. */
+export const SHARE_SUBPAGE_UNLINKED_COPY =
+  "The page was created, but its link could not be placed here. Reload to find it under this page.";
+
 /** Every visitor slot has the same shape: namespace, root, share version,
  *  page, tab. The version is there because every rotation bumps it (unshare
  *  and re-share, a password, an expiry, toggling edit): nothing written under
@@ -145,6 +167,12 @@ export function shareAliveKey(
  *  honoured, a Reload with nowhere to keep the text. */
 type SaveState = "ok" | "unsaved" | "gone" | "conflict" | "storage" | "refused";
 type Pending = { markdown: string; operationId: string };
+/** A page the slash menu asked for: where its ref goes, and the promise the
+ *  menu is waiting on before it gives the editor back. */
+type Naming = {
+  insertPageRef: (page: PageRef) => boolean;
+  done: () => void;
+};
 type Parked = { markdown: string; updatedAt: number };
 type Recovered = Parked & { key: string };
 
@@ -432,6 +460,23 @@ function readOpening(keys: SlotKeys, initialMarkdown: string, initialRev: string
 const NO_PAGES: readonly string[] = [];
 const assignLocation = (href: string) => location.assign(href);
 
+const refusedSubpage = (
+  message: string,
+  retry: boolean,
+): ShareSubpageOutcome => ({ ok: false, message, retry });
+
+/** What the create route's answer means to the person who pressed the
+ *  button. A 404 is the guard's one word for every way a link stops granting
+ *  a write, and nothing typed afterwards will land, so it ends the dialog
+ *  the way it ends the saves. */
+function subpageRefusal(status: number): ShareSubpageOutcome {
+  if (status === 409) return refusedSubpage(SHARE_SUBPAGE_FULL_COPY, false);
+  if (status === 429) return refusedSubpage(SHARE_SUBPAGE_RATE_COPY, true);
+  if (status === 503) return refusedSubpage(SHARE_SUBPAGE_BUSY_COPY, true);
+  if (status === 404) return refusedSubpage(SHARE_GONE_COPY, false);
+  return refusedSubpage(SHARE_SUBPAGE_FAILED_COPY, true);
+}
+
 /** The one line the visitor gets on mount. The owner's editor says nothing
  *  about saving on purpose: a notes app keeps what is typed, and "Saved"
  *  under every keystroke told the owner nothing. A stranger typing into
@@ -522,6 +567,11 @@ function ShareEditorForPage({
   const flushOnNextChange = useRef(false);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const editorFlush = useRef<() => void>(() => {});
+  const island = useRef<HTMLDivElement>(null);
+  // The slash menu asked for a page and is holding the editor until this
+  // answer comes back. Open means a question on screen, never a request in
+  // flight on its own.
+  const [naming, setNaming] = useState<Naming | null>(null);
   // One save in flight per page, so a second PUT always carries the rev the
   // first one produced instead of racing it into a spurious 409.
   const [queue] = useState(createKeyedQueue);
@@ -551,11 +601,21 @@ function ShareEditorForPage({
     return () => setAttachmentSrcResolver(null);
   }, [pageId, rootId, shareVersion]);
 
+  // Pages this island made during this visit. The server decided the
+  // linkable set at render, so a subpage created since is not in it, and
+  // without this the ref the visitor just placed would draw as unavailable.
+  // Adding one grants nothing: the create route put it inside this subtree a
+  // moment ago, which is the same rule the server applied to the rest.
+  const [madeHere, setMadeHere] = useState<readonly string[]>(NO_PAGES);
+
   // The same statement for page refs: a ref the share reaches links into the
   // share, every other ref is unavailable, and the owner's /p/ address never
   // shows through. The editor gets no page directory, so a ref keeps the
   // label the owner baked into it, as on the read-only page.
-  const linkable = useMemo(() => new Set(linkablePageIds), [linkablePageIds]);
+  const linkable = useMemo(
+    () => new Set([...linkablePageIds, ...madeHere]),
+    [linkablePageIds, madeHere],
+  );
   const hrefFor = useCallback(
     (id: string): string | null => {
       if (!linkable.has(id)) return null;
@@ -828,9 +888,72 @@ function ShareEditorForPage({
           flushOnNextChange.current = true;
         },
       },
+      createPage: true,
     }),
     [fetcher, pageId, query, vidHeaders],
   );
+
+  /** The title the visitor gave, on its way to the create route and then
+   *  into the ref that replaces the slash. Everything a visitor may decide
+   *  about a title happens here, once, and there is no second call anywhere
+   *  that could change one afterwards. */
+  const createSubpage = useCallback(
+    async (title: string, insertPageRef: (page: PageRef) => boolean) => {
+      let res: Response;
+      try {
+        res = await fetcher(
+          `/api/share-edit/page?${query}&parent=${encodeURIComponent(pageId)}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ title }),
+          },
+        );
+      } catch {
+        return refusedSubpage(SHARE_SUBPAGE_FAILED_COPY, true);
+      }
+      if (!res.ok) return subpageRefusal(res.status);
+      const created = (await res.json().catch(() => null)) as {
+        id?: unknown;
+      } | null;
+      const id = typeof created?.id === "string" ? created.id : "";
+      if (!id) return refusedSubpage(SHARE_SUBPAGE_FAILED_COPY, true);
+      // The page exists from here on, so nothing below may ask for a second
+      // press. It is reachable before the ref is placed, and it is saved at
+      // once after, because an unsaved ref is the one way the two could part.
+      setMadeHere((made) => [...made, id]);
+      flushOnNextChange.current = true;
+      if (!insertPageRef({ id, title })) {
+        return refusedSubpage(SHARE_SUBPAGE_UNLINKED_COPY, false);
+      }
+      return { ok: true } as const;
+    },
+    [fetcher, pageId, query],
+  );
+
+  /** The slash menu's contract: it holds the trigger text and the editor's
+   *  lock until this promise settles, and takes the ref through the callback
+   *  it hands over. The naming step is what the island does with that
+   *  window, so the lock is exactly as long as the question. */
+  const nameThenCreate = useCallback(
+    (insertPageRef: (page: PageRef) => boolean) =>
+      new Promise<void>((resolve) => {
+        setNaming({ insertPageRef, done: resolve });
+      }),
+    [],
+  );
+
+  /** The dialog is gone and the slash menu has let the editor go. Focus
+   *  comes back on the next frame rather than through Radix's own restore,
+   *  which would land while the view is still not editable. */
+  const closeNaming = () => {
+    const open = naming;
+    setNaming(null);
+    open?.done();
+    requestAnimationFrame(() => {
+      island.current?.querySelector<HTMLElement>(".ProseMirror")?.focus();
+    });
+  };
 
   /** "Show me their version." The text is parked first, beside anything
    *  already parked, so the sentence in the banner stays true; then the
@@ -997,7 +1120,7 @@ function ShareEditorForPage({
       saveState === "refused");
 
   return (
-    <div data-share-editor>
+    <div data-share-editor ref={island}>
       <p data-share-editing-as className="mb-4 text-caption text-ink-3">
         {shareEditingCopy(visitorName)}
       </p>
@@ -1017,8 +1140,15 @@ function ShareEditorForPage({
         onChange={onChange}
         onNavigate={navigateToPage}
         registerFlush={registerFlush}
+        onCreatePageAtCursor={nameThenCreate}
         capabilities={capabilities}
       />
+      {naming && (
+        <ShareSubpageDialog
+          onCreate={(title) => createSubpage(title, naming.insertPageRef)}
+          onClose={closeNaming}
+        />
+      )}
     </div>
   );
 }

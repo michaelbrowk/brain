@@ -15,6 +15,9 @@ type StubProps = {
   onChange: (md: string) => void;
   registerFlush?: (flush: () => void) => () => void;
   onNavigate?: (id: string) => void;
+  onCreatePageAtCursor?: (
+    insertPageRef: (page: { id: string; title: string; icon?: string }) => boolean,
+  ) => Promise<void>;
   pages?: unknown;
   capabilities?: {
     upload?: {
@@ -60,6 +63,7 @@ import ShareEditor, {
   SHARE_REFUSED_TAIL,
   SHARE_DISCARD_CONFIRM_COPY,
   SHARE_STORAGE_FULL_COPY,
+  SHARE_SUBPAGE_FULL_COPY,
   SHARE_UNSAVED_COPY,
   shareAliveKey,
   shareEditingCopy,
@@ -115,14 +119,17 @@ afterEach(() => {
 type Answer = () => Response | Promise<Response>;
 
 /** Records every request and answers by method: `put` is consulted per PUT
- *  in order (the last one repeats), the GET answers the conflict re-read. */
-function recordFetch(answers: { put: Answer[]; get?: Answer }) {
+ *  in order (the last one repeats), the GET answers the conflict re-read,
+ *  and `create` answers the POST that makes a subpage. */
+function recordFetch(answers: { put: Answer[]; get?: Answer; create?: Answer[] }) {
   const seen: Seen[] = [];
   let puts = 0;
+  let creates = 0;
   vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+    const url = typeof input === "string" ? input : String(input);
     const method = init?.method ?? "GET";
     seen.push({
-      url: typeof input === "string" ? input : String(input),
+      url,
       method,
       vid: new Headers(init?.headers).get("x-brain-share-vid"),
       keepalive: init?.keepalive === true,
@@ -130,6 +137,10 @@ function recordFetch(answers: { put: Answer[]; get?: Answer }) {
     });
     if (method === "PUT") return (answers.put[puts++] ?? answers.put.at(-1)!)();
     if (method === "GET") return (answers.get ?? json({}, 200))();
+    if (url.startsWith("/api/share-edit/page?")) {
+      const create = answers.create ?? [json({ id: "page-new" }, 200)];
+      return (create[creates++] ?? create.at(-1)!)();
+    }
     return new Response(JSON.stringify({ name: "n", url: "/_attachments-v2/n.png" }), {
       status: 200,
     });
@@ -322,14 +333,17 @@ describe("the visitor editor", () => {
     expect(banner()).toBeNull();
   });
 
-  it("gives the editor upload only: no unfurl, no AI, no page creation", async () => {
+  it("gives the editor upload and page creation, and neither unfurl nor AI", async () => {
     recordFetch({ put: [json({ rev: "b" }, 200)] });
     await mount("");
     const capabilities = editorProps.current!.capabilities!;
-    expect(Object.keys(capabilities)).toEqual(["upload"]);
+    expect(Object.keys(capabilities)).toEqual(["upload", "createPage"]);
     expect(capabilities.unfurl).toBeUndefined();
     expect(capabilities.ai).toBeUndefined();
-    expect(capabilities.createPage).toBeUndefined();
+    expect(capabilities.createPage).toBe(true);
+    // The permission and the mechanism travel together: the slash row is
+    // drawn only where both are, so neither can arrive without the other.
+    expect(typeof editorProps.current!.onCreatePageAtCursor).toBe("function");
     expect(typeof capabilities.upload!.onUploaded).toBe("function");
   });
 
@@ -1086,6 +1100,154 @@ describe("the visitor editor", () => {
     );
     // Page 9's edit is not lost: it is its draft, for the next visit there.
     expect(draftsUnder(PREFIX).map((d) => d.markdown)).toEqual(["nine, edited"]);
+  });
+
+  describe("making a subpage", () => {
+    /** The slash menu's side of the contract, played by hand: it hands over
+     *  the callback that places the ref and waits on the promise, holding the
+     *  editor's own lock until it settles. */
+    async function slashNewPage(insertPageRef = () => true) {
+      const insert = vi.fn(insertPageRef);
+      let settled = false;
+      const asked = editorProps
+        .current!.onCreatePageAtCursor!(insert)
+        .then(() => {
+          settled = true;
+        });
+      await act(async () => {});
+      return { insert, asked, settled: () => settled };
+    }
+
+    const dialog = () =>
+      document.body.querySelector<HTMLElement>("[data-share-subpage-dialog]");
+
+    function name(title: string) {
+      const input = dialog()!.querySelector<HTMLInputElement>("input")!;
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      setter?.call(input, title);
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+
+    async function pressIn(label: string) {
+      await act(async () => {
+        [...dialog()!.querySelectorAll("button")]
+          .find((candidate) => candidate.textContent?.trim() === label)!
+          .dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+      });
+    }
+
+    it("holds the menu's promise while it asks for a name, and gives it back on Cancel", async () => {
+      const seen = recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("hello");
+      const { insert, settled } = await slashNewPage();
+
+      // The editor stays locked for exactly as long as the question stands.
+      expect(dialog()).not.toBeNull();
+      expect(settled()).toBe(false);
+
+      await pressIn("Cancel");
+      expect(settled()).toBe(true);
+      expect(dialog()).toBeNull();
+      expect(insert).not.toHaveBeenCalled();
+      expect(seen).toEqual([]);
+    });
+
+    it("creates the page under the one being read, links it where the slash was and saves at once", async () => {
+      const seen = recordFetch({
+        put: [json({ rev: "b" }, 200)],
+        create: [json({ id: "page-new" }, 200)],
+      });
+      await mount("hello");
+      const { insert, settled } = await slashNewPage();
+      await act(async () => name("  Meeting notes  "));
+      await pressIn("Create page");
+
+      const post = seen.find((request) => request.method === "POST")!;
+      expect(post.url).toBe("/api/share-edit/page?root=root-1&v=2&parent=page-9");
+      expect(post.vid).toBe(VID);
+      expect(JSON.parse(post.body!)).toEqual({ title: "Meeting notes" });
+      expect(insert).toHaveBeenCalledWith({ id: "page-new", title: "Meeting notes" });
+      expect(settled()).toBe(true);
+      expect(dialog()).toBeNull();
+
+      // The ref the menu placed is a change like any other, and this one does
+      // not wait out the debounce: an unlinked page is the one way the page
+      // and its link could part.
+      await change("hello [Meeting notes](/p/page-new)");
+      expect(putBodies(seen)).toEqual([
+        { markdown: "hello [Meeting notes](/p/page-new)", rev: REV },
+      ]);
+    });
+
+    it("lets the ref it just placed link into the share", async () => {
+      recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("hello");
+      expect(pageRefHref("page-new")).toBeNull();
+
+      await slashNewPage();
+      await act(async () => name("Meeting notes"));
+      await pressIn("Create page");
+
+      expect(pageRefHref("page-new")).toBe("/share/root-1?page=page-new");
+      // Everything the server did not name is still unavailable.
+      expect(pageRefHref("page-elsewhere")).toBeNull();
+    });
+
+    it("stops at a refusal a second press would only repeat", async () => {
+      const seen = recordFetch({
+        put: [json({ rev: "b" }, 200)],
+        create: [json({ error: "subtree_full" }, 409)],
+      });
+      await mount("hello");
+      const { insert, settled } = await slashNewPage();
+      await act(async () => name("Meeting notes"));
+      await pressIn("Create page");
+
+      expect(dialog()!.textContent).toContain(SHARE_SUBPAGE_FULL_COPY);
+      expect(insert).not.toHaveBeenCalled();
+      expect(settled()).toBe(false);
+
+      await pressIn("Close");
+      expect(settled()).toBe(true);
+      expect(seen.filter((request) => request.method === "POST")).toHaveLength(1);
+    });
+
+    it("names a page once, at creation, and sends nothing afterwards that could rename one", async () => {
+      // The pin under the whole feature. A visitor may decide a title at the
+      // moment the page is made and never again: one request carries a title,
+      // it is the create, and every other request the island makes is the
+      // page write. If a rename is ever wired into this editor, this goes red
+      // before it ships.
+      const seen = recordFetch({
+        put: [json({ rev: "b" }, 200), json({ rev: "c" }, 200)],
+        create: [json({ id: "page-new" }, 200)],
+      });
+      await mount("hello");
+      await slashNewPage();
+      await act(async () => name("Meeting notes"));
+      await pressIn("Create page");
+      await change("hello [Meeting notes](/p/page-new)");
+      await type("hello [Meeting notes](/p/page-new) and more");
+
+      const carryingATitle = seen.filter((request) =>
+        (request.body ?? "").includes('"title"'),
+      );
+      expect(carryingATitle).toHaveLength(1);
+      expect(carryingATitle[0].url).toBe(
+        "/api/share-edit/page?root=root-1&v=2&parent=page-9",
+      );
+      expect(carryingATitle[0].method).toBe("POST");
+      expect([...new Set(seen.map((request) => request.method))].sort()).toEqual([
+        "POST",
+        "PUT",
+      ]);
+      for (const request of seen) {
+        expect(request.url.startsWith("/api/share-edit/"), request.url).toBe(true);
+      }
+    });
   });
 
   it("has no owner-only path literal anywhere in the editor's own modules", async () => {

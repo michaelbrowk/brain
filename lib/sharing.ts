@@ -31,7 +31,7 @@ export function parseShareExpiry(
 
 export const VISITOR_NAME_MAX = 40;
 
-const VISITOR_TITLE_MAX = 200;
+export const VISITOR_TITLE_MAX = 200;
 
 const ZERO_WIDTH_JOINER = String.fromCodePoint(0x200d);
 const ZERO_WIDTH_NON_JOINER = String.fromCodePoint(0x200c);
@@ -62,17 +62,27 @@ export function normalizeVisitorName(value: unknown): string | null {
   return cleaned.slice(0, VISITOR_NAME_MAX);
 }
 
-/** A link visitor's title for a new subpage. Stripped of every Unicode
- *  control and format character by the rule above, which the visitor's name
- *  shares. Then trimmed and cut to 200 code points, counted so the cut never
- *  splits a surrogate pair. A title is a line: the owner's quick-capture path allows 500, and
- *  this one lands in a directory name, a frontmatter line and the owner's
- *  sidebar, so it gets less. Nothing left after cleaning is "Untitled", the
- *  owner's own default for a new page. Anything but a string is null. */
+/** What is left of a visitor's title, with no fallback. Stripped of every
+ *  Unicode control and format character by the rule above, which the
+ *  visitor's name shares. Then trimmed and cut to 200 code points, counted so
+ *  the cut never splits a surrogate pair. A title is a line: the owner's
+ *  quick-capture path allows 500, and this one lands in a directory name, a
+ *  frontmatter line and the owner's sidebar, so it gets less. Empty when
+ *  nothing usable is left.
+ *
+ *  The dialog that asks a visitor for a title asks with this one, so a name
+ *  the route would turn into "Untitled" is never sent. A visitor cannot
+ *  rename, so a page born unnamed stays unnamed. */
+export function cleanVisitorTitle(value: unknown): string {
+  if (typeof value !== "string") return "";
+  const cleaned = stripUnsafeCharacters(value).trim();
+  return [...cleaned].slice(0, VISITOR_TITLE_MAX).join("").trim();
+}
+
+/** The title the create route keeps. Nothing left after cleaning is
+ *  "Untitled", the owner's own default for a new page. Anything but a string
+ *  is null. */
 export function normalizeVisitorTitle(value: unknown): string | null {
   if (typeof value !== "string") return null;
-  const cleaned = stripUnsafeCharacters(value).trim();
-  return (
-    [...cleaned].slice(0, VISITOR_TITLE_MAX).join("").trim() || "Untitled"
-  );
+  return cleanVisitorTitle(value) || "Untitled";
 }

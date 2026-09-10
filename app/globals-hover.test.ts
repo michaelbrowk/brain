@@ -91,6 +91,34 @@ describe("hover and the pointer that is not there", () => {
     }
   });
 
+  it("answers a finger on the two share-card controls that only painted on hover", () => {
+    // Both of these navigate rather than toggle, which was the argument for
+    // leaving them alone, and neither navigation is instant: the address
+    // opens a second tab, the eye repaints the field it sits in. DESIGN.md
+    // §8 makes press one of five states and none of them is optional, so a
+    // control that shows nothing while a finger is on it is unfinished.
+    const pressOf = (selector: string) =>
+      all.filter((r) =>
+        r.selector.split(",").some((one) => one.trim() === `${selector}:active`),
+      );
+    for (const control of ["a.brain-share-url", ".brain-share-eye"]) {
+      const press = pressOf(control);
+      expect(press.length, `${control} has no press state`).toBeGreaterThan(0);
+      expect(
+        press.every((r) => !guarded(r)),
+        `${control}'s press needs a pointer to paint`,
+      ).toBe(true);
+    }
+    // the eye presses with a scale, so reduced motion has to be able to drop
+    // it and keep the colour, the way it does for every other pressed icon
+    const dropped = all.filter(
+      (r) =>
+        r.selector.split(",").some((one) => one.trim() === ".brain-share-eye:active") &&
+        r.at.some((a) => a.includes("prefers-reduced-motion")),
+    );
+    expect(dropped.length, "a reduced-motion press keeps the eye's scale").toBe(1);
+  });
+
   it("leaves a palette row something to say when a finger presses it", () => {
     const press = all.filter((r) => /\.brain-palette-item:active/.test(r.selector));
     expect(press.length).toBeGreaterThan(0);

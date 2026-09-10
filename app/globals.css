@@ -2254,6 +2254,15 @@ html[data-kbd] [contenteditable]:focus-visible {
     transition-duration: 80ms;
   }
 }
+/* A finger gets the same two signals, since a hover it cannot carry away
+   leaves the address with nothing to say while it is pressed. It takes no
+   press scale: the value ellipses to the row width, so a scale would move
+   the text out from under the finger reading it. */
+a.brain-share-url:active {
+  color: var(--ink);
+  text-decoration: underline;
+  transition-duration: 80ms;
+}
 .brain-share-copied {
   flex: 1;
   min-width: 0;
@@ -2283,13 +2292,22 @@ html[data-kbd] [contenteditable]:focus-visible {
   border-radius: var(--r-sm);
   color: var(--ink-2);
   cursor: pointer;
-  transition: color 160ms var(--ease-out);
+  -webkit-tap-highlight-color: transparent;
+  transition:
+    color 160ms var(--ease-out),
+    transform 100ms ease-out;
 }
 @media (hover: hover) {
   .brain-share-eye:hover {
     color: var(--ink);
     transition-duration: 80ms;
   }
+}
+/* and the press an icon button of this size takes, for the same reason */
+.brain-share-eye:active {
+  color: var(--ink);
+  transform: scale(0.9);
+  transition-duration: 80ms, 100ms;
 }
 .brain-share-eye:disabled {
   opacity: 0.4;
@@ -2553,7 +2571,8 @@ html[data-kbd] [contenteditable]:focus-visible {
   .chip:active,
   .chip[data-active],
   .crumb-seg:active,
-  .crumb-seg[data-active] {
+  .crumb-seg[data-active],
+  .brain-share-eye:active {
     transform: none;
   }
   .brain-sidebar-back:active {

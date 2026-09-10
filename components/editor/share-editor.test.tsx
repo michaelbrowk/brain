@@ -12,6 +12,7 @@ import { encodeDraft } from "@/lib/autosave";
 // capability set without mounting Milkdown.
 type StubProps = {
   value: string;
+  caretOnMount?: "end";
   onChange: (md: string) => void;
   registerFlush?: (flush: () => void) => () => void;
   onNavigate?: (id: string) => void;
@@ -533,6 +534,22 @@ describe("the visitor editor", () => {
       expect(parkedUnder(RECOVERY_PREFIX)).toEqual([]);
       await elapse(0);
       expect(draftsUnder(PREFIX)).toEqual([]);
+    });
+
+    it("puts the caret at the end of the text it just put back", async () => {
+      // The writer was in the middle of that text. Restoring it and leaving
+      // the caret at the start of the document makes them scroll and click to
+      // get back to where they were, and the editor mounts fresh, so the
+      // position has to travel with the mount that carries the text.
+      seedParked("tab-gone", ["parked"]);
+      recordFetch({ put: [json({ rev: "b" }, 200)] });
+      await mount("theirs");
+      expect(editorProps.current?.caretOnMount).toBeUndefined();
+
+      await press("Put it back");
+      await elapse(0);
+      expect(editorProps.current?.value).toBe("parked");
+      expect(editorProps.current?.caretOnMount).toBe("end");
     });
 
     it("keeps the text on the first Discard and asks before removing it", async () => {

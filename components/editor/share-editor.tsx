@@ -550,6 +550,10 @@ function ShareEditorForPage({
   const [markdown, setMarkdown] = useState(opening.markdown);
   // The editor reads its value once; putting a parked body back remounts it.
   const [editorEpoch, setEditorEpoch] = useState(0);
+  // The epoch a restored draft made. The editor is remounted for a conflicted
+  // reload as well, and that text is not the visitor's, so only the mount
+  // named here opens with the caret at the end of what it carries.
+  const [restoredEpoch, setRestoredEpoch] = useState<number | null>(null);
   const [saveState, setSaveState] = useState<SaveState>(opening.saveState);
   // What the route said about the last refusal, written to be shown as it
   // stands. Only a 422 carries one.
@@ -1018,7 +1022,9 @@ function ShareEditorForPage({
     if (!taken) return;
     setMarkdown(taken.markdown);
     latest.current = taken.markdown;
-    setEditorEpoch((epoch) => epoch + 1);
+    const restored = editorEpoch + 1;
+    setEditorEpoch(restored);
+    setRestoredEpoch(restored);
     const entry: Pending = { markdown: taken.markdown, operationId: newOperationId(tabId) };
     pending.current = entry;
     persist(entry);
@@ -1137,6 +1143,7 @@ function ShareEditorForPage({
       <MilkdownEditor
         key={editorEpoch}
         value={markdown}
+        caretOnMount={editorEpoch === restoredEpoch ? "end" : undefined}
         onChange={onChange}
         onNavigate={navigateToPage}
         registerFlush={registerFlush}

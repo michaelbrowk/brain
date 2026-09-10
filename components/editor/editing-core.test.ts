@@ -11,6 +11,7 @@ import {
   createSlashHintPlugin,
   createTrailingParagraphPlugin,
   firstEmptyBlockPos,
+  focusDocumentEnd,
   focusedWithoutCaret,
   focusFirstEmptyBlock,
   settleFocusCaret,
@@ -217,6 +218,51 @@ describe("template caret", () => {
     expect(focusFirstEmptyBlock({ state, dispatch, focus })).toBe(false);
     expect(dispatch).not.toHaveBeenCalled();
     expect(focus).not.toHaveBeenCalled();
+  });
+});
+
+describe("the caret after a restored draft", () => {
+  it("lands at the end of the text, not at the start of it", () => {
+    // A recovered draft is text the writer was in the middle of. Nothing
+    // recorded where in it they were, so the end is the one position that is
+    // never a surprise: it is where the next keystroke belongs.
+    let state = EditorState.create({
+      schema,
+      doc: schema.nodes.doc.create(null, [
+        schema.nodes.paragraph.create(null, schema.text("first line")),
+        schema.nodes.paragraph.create(null, schema.text("last line")),
+      ]),
+    });
+    let focused = false;
+    const view = {
+      get state() {
+        return state;
+      },
+      dispatch(tr: ReturnType<EditorState["tr"]["setMeta"]>) {
+        state = state.apply(tr);
+      },
+      focus() {
+        focused = true;
+      },
+    };
+
+    expect(focusDocumentEnd(view)).toBe(true);
+    expect(focused).toBe(true);
+    expect(state.selection.empty).toBe(true);
+    expect(state.selection.from).toBe(state.doc.content.size - 1);
+    expect(state.selection.$from.parent.textContent).toBe("last line");
+  });
+
+  it("takes an empty document without dispatching a selection into nothing", () => {
+    const state = EditorState.create({
+      schema,
+      doc: schema.nodes.doc.create(null, [schema.nodes.paragraph.create()]),
+    });
+    const dispatch = vi.fn();
+    const focus = vi.fn();
+    expect(focusDocumentEnd({ state, dispatch, focus })).toBe(true);
+    expect(dispatch).toHaveBeenCalledTimes(1);
+    expect(focus).toHaveBeenCalledTimes(1);
   });
 });
 

@@ -304,6 +304,27 @@ export function focusFirstEmptyBlock(view: {
   return true;
 }
 
+/** Caret at the end of the document, and the editor focused.
+ *
+ *  Where a restored draft lands. Nothing records where in that text the
+ *  writer was, so the end is the one position that is never a surprise: it
+ *  is where the next keystroke belongs. `TextSelection.atEnd` resolves the
+ *  last position a caret can hold, so a document ending in an atom block
+ *  gets the writable line after it rather than a selected node. */
+export function focusDocumentEnd(view: {
+  state: EditorState;
+  dispatch: (tr: Transaction) => void;
+  focus: () => void;
+}): boolean {
+  view.dispatch(
+    view.state.tr
+      .setSelection(TextSelection.atEnd(view.state.doc))
+      .scrollIntoView(),
+  );
+  view.focus();
+  return true;
+}
+
 export const editingCore = [
   gapCursorPlugin,
   trailingParagraph,

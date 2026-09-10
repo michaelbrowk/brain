@@ -776,10 +776,14 @@ function ManagementView({
 
       {directPublic && (
         <ManagementSecurity
-          key={`${hasPassword}:${expiresAt ?? "never"}`}
           hasPassword={hasPassword}
           expiresAt={expiresAt}
           locked={locked}
+          // checkingScope for the same reason the two rows above carry it:
+          // until the exact scope is read the card may be showing the tree's
+          // stale answer, and a press in that window writes this page's
+          // protection from a value nothing has confirmed.
+          checkingScope={checkingScope}
           onSetProtection={onSetProtection}
           renderAction={action}
         />
@@ -1318,12 +1322,14 @@ function ManagementSecurity({
   hasPassword,
   expiresAt,
   locked,
+  checkingScope,
   onSetProtection,
   renderAction,
 }: {
   hasPassword: boolean;
   expiresAt?: string;
   locked: boolean;
+  checkingScope: boolean;
   onSetProtection: (input: {
     password?: string | null;
     expiresAt?: string | null;
@@ -1339,7 +1345,25 @@ function ManagementSecurity({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
-  const disabled = busy || locked;
+  const disabled = busy || locked || checkingScope;
+
+  // Adjusted while rendering, not in an effect, for the reason the edit row
+  // above gives: these rows were keyed on the answer they show, so every
+  // correction replaced the switch and the segments and focus fell to the
+  // body inside an open popover. The answer still only moves when the props
+  // move, which is exactly what the key did, and a draft in the field
+  // belonged to the answer that has just been replaced.
+  const answer = `${hasPassword}:${expiresAt ?? "never"}`;
+  const [adopted, setAdopted] = useState(answer);
+  if (adopted !== answer) {
+    setAdopted(answer);
+    setPasswordOn(hasPassword);
+    setDraft("");
+    setVisible(false);
+    setExpiry(expiryPreset(expiresAt));
+    setDeadline(expiresAt);
+    setError(null);
+  }
 
   useEffect(() => {
     if (passwordOn) inputRef.current?.focus();

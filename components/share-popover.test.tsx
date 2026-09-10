@@ -1282,4 +1282,83 @@ describe("SharePopover redesign", () => {
       expect(document.body.querySelector('[data-share-row="edit"]')).toBeNull();
     });
   });
+
+  describe("the password and expiry rows", () => {
+    const PASSWORD_SWITCH = "Password protection";
+
+    it("keeps the controls themselves when the corrected answer arrives", async () => {
+      // The same keyed remount the edit row above was fixed for. These rows
+      // were keyed on the answer they show, so the snapshot landing replaced
+      // the switch and the segments, focus fell to the body inside an open
+      // popover, and the next Tab restarted from the document. What is
+      // pinned is that the correction does not replace the nodes.
+      const pending = deferred<ShareScopeSnapshot>();
+      await renderAndOpen(true, {
+        hasPassword: true,
+        onPrepareShare: vi.fn().mockReturnValue(pending.promise),
+      });
+      const passwordBefore = switchFor(PASSWORD_SWITCH) as HTMLButtonElement;
+      const expiryBefore = document.body.querySelector(
+        '[role="radiogroup"][aria-label="Link expiry"] [role="radio"]',
+      ) as HTMLButtonElement;
+      expect(passwordBefore.getAttribute("aria-checked")).toBe("true");
+
+      await act(async () =>
+        pending.resolve(
+          snapshot({
+            public: true,
+            shareLocked: false,
+            shareExpiresAt: new Date(Date.now() + 7 * 24 * 3600 * 1000).toISOString(),
+          }),
+        ),
+      );
+      await settle();
+
+      const passwordAfter = switchFor(PASSWORD_SWITCH) as HTMLButtonElement;
+      expect(passwordAfter).toBe(passwordBefore);
+      expect(passwordAfter.getAttribute("aria-checked")).toBe("false");
+      expect(
+        document.body.querySelector(
+          '[role="radiogroup"][aria-label="Link expiry"] [role="radio"]',
+        ),
+      ).toBe(expiryBefore);
+      // the corrected deadline is the one the segments show
+      expect(
+        document.body
+          .querySelector('[role="radiogroup"][aria-label="Link expiry"] [role="radio"][aria-checked="true"]')
+          ?.textContent?.trim(),
+      ).toBe("7 days");
+
+      // and with the answer in, the switch takes and holds focus
+      passwordAfter.focus();
+      expect(document.activeElement).toBe(passwordAfter);
+    });
+
+    it("takes no press while the exact scope is still being read", async () => {
+      // The same window the link row and the edit row above close. Until the
+      // exact scope is read the card may be showing the tree's stale answer,
+      // and a press in that window writes this page's protection from a value
+      // nothing has confirmed.
+      const pending = deferred<ShareScopeSnapshot>();
+      const onSetProtection = vi.fn();
+      await renderAndOpen(true, {
+        hasPassword: true,
+        onPrepareShare: vi.fn().mockReturnValue(pending.promise),
+        onSetProtection,
+      });
+
+      const control = switchFor(PASSWORD_SWITCH) as HTMLButtonElement;
+      expect(control.disabled).toBe(true);
+      await click(control);
+      expect(onSetProtection).not.toHaveBeenCalled();
+      await click(button("7 days"));
+      expect(onSetProtection).not.toHaveBeenCalled();
+
+      await act(async () =>
+        pending.resolve(snapshot({ public: true, shareLocked: true })),
+      );
+      await settle();
+      expect((switchFor(PASSWORD_SWITCH) as HTMLButtonElement).disabled).toBe(false);
+    });
+  });
 });

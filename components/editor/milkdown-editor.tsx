@@ -35,6 +35,7 @@ import { emptyBlocks } from "./empty-block";
 import { columnDrop } from "./column-drop";
 import {
   editingCore,
+  focusDocumentEnd,
   focusFirstEmptyBlock,
   TRAILING_PARAGRAPH_TRANSACTION_META,
 } from "./editing-core";
@@ -151,6 +152,12 @@ interface EditorProps {
   onCreatePageAtCursor?: (
     insertPageRef: (page: PageRef) => boolean,
   ) => Promise<void>;
+  /** Where the caret goes when this editor mounts. `"end"` is for a mount
+   *  that carries text the writer was already in the middle of, which is a
+   *  restored draft: the editor is remounted through its key to load it, and
+   *  a caret left at the start makes them find their place again. Absent,
+   *  the editor mounts without taking the caret anywhere. */
+  caretOnMount?: "end";
   /** Defaults to nothing: an editor that is not told what it may do may not
    *  upload, unfurl or call AI. The owner shell passes its full set. */
   capabilities?: EditorCapabilities;
@@ -367,6 +374,7 @@ function Inner({
   searchHighlight,
   onSearchHighlightStatus,
   onCreatePageAtCursor,
+  caretOnMount,
   capabilities = {},
 }: EditorProps) {
   const lastEmitted = useRef(value);
@@ -651,6 +659,34 @@ function Inner({
     frame = requestAnimationFrame(place);
     return () => cancelAnimationFrame(frame);
   }, [get]);
+
+  // A mount that carries a restored draft opens where the writing stopped.
+  // The editor has no mount callback to hang this on, so it does what the
+  // template caret above does: try on every frame until the instance answers,
+  // which is the frame it is ready on. `caretOnMount` is read once per mount,
+  // because the mount is the event.
+  useEffect(() => {
+    if (caretOnMount !== "end") return;
+    let frame = 0;
+    let attempts = 0;
+    const place = () => {
+      let ready = false;
+      try {
+        get()?.action((ctx) => {
+          ready = true;
+          focusDocumentEnd(ctx.get(editorViewCtx));
+        });
+      } catch {
+        ready = false;
+      }
+      if (!ready && attempts < 60) {
+        attempts += 1;
+        frame = requestAnimationFrame(place);
+      }
+    };
+    frame = requestAnimationFrame(place);
+    return () => cancelAnimationFrame(frame);
+  }, [get, caretOnMount]);
 
   useEffect(() => {
     if (!pageRefNestingPending || !pageRefNestingSource) return;

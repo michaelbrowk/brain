@@ -36,7 +36,7 @@ describe("Hub activity feed clock gate", () => {
       );
       expect(html).not.toContain("Review all");
       expect(html).not.toContain("Stale page 0");
-      expect(html).not.toContain("Quiet week");
+      expect(html).not.toContain("Nothing changed");
     });
   });
 
@@ -77,15 +77,45 @@ describe("Hub activity feed clock gate", () => {
       vi.unstubAllGlobals();
     });
 
-    it("filters stale pages out and shows the quiet-week empty state", async () => {
+    it("filters stale pages out and dates the last change there was", async () => {
       await act(async () =>
         root.render(
           <Hub tree={staleTree} onSelect={() => {}} onCreate={vi.fn()} />,
         ),
       );
-      expect(container.textContent).toContain("Quiet week");
+      expect(container.textContent).toContain("Nothing changed this week");
+      // the week was empty, the notebook was not: the state says when the
+      // last change was rather than implying there has never been one
+      expect(container.textContent).toContain("Last change");
       expect(container.textContent).not.toContain("Review all");
       expect(container.textContent).not.toContain("Stale page 0");
+    });
+
+    it("says nothing about a quiet week when the one change is the row above", async () => {
+      // Continue draws the page this device was last on and the feed drops it
+      // to avoid a second row for it. With that page the only one that
+      // changed this week, the empty state used to land directly under a row
+      // dated a minute ago and contradict it.
+      localStorage.setItem("brain-last-opened", "open-here");
+      const minuteAgo = new Date(Date.now() - 60_000).toISOString();
+      await act(async () =>
+        root.render(
+          <Hub
+            tree={[
+              treeNode("open-here", "The page I am on", minuteAgo),
+              ...staleTree,
+            ]}
+            onSelect={() => {}}
+            onCreate={vi.fn()}
+          />,
+        ),
+      );
+
+      expect(container.textContent).toContain("The page I am on");
+      expect(container.textContent).not.toContain("Nothing changed");
+      // and the section itself goes with it: a heading over nothing reports
+      // nothing either
+      expect(container.textContent).not.toContain("Since this device was last open");
     });
 
     it("counts only genuinely recent pages in Review all", async () => {
@@ -100,7 +130,7 @@ describe("Hub activity feed clock gate", () => {
         root.render(<Hub tree={tree} onSelect={() => {}} onCreate={vi.fn()} />),
       );
       expect(container.textContent).toContain("Review all (7)");
-      expect(container.textContent).not.toContain("Quiet week");
+      expect(container.textContent).not.toContain("Nothing changed");
     });
   });
 });

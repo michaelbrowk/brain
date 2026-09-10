@@ -361,16 +361,22 @@ export function Hub({
   // week filter — gate the feed on the mounted clock so "Review all" never
   // flashes a count of the whole tree. Hydration-safe: both renders see the
   // same empty list.
-  const allActivity =
+  const recent =
     now === null
       ? []
-      : pages
-          .filter((p) => nowMs - new Date(p.updated).getTime() < WEEK)
-          // Continue already draws this page, with the same title, time and
-          // author badge, so a second row would only repeat it.
-          .filter((p) => p.id !== continuePage?.id)
-          .sort((a, b) => (a.updated < b.updated ? 1 : -1));
+      : pages.filter((p) => nowMs - new Date(p.updated).getTime() < WEEK);
+  const allActivity = recent
+    // Continue already draws this page, with the same title, time and
+    // author badge, so a second row would only repeat it.
+    .filter((p) => p.id !== continuePage?.id)
+    .sort((a, b) => (a.updated < b.updated ? 1 : -1));
   const feed = activityExpanded ? allActivity : allActivity.slice(0, 5);
+  // The freshest page in the notebook, which the empty state below dates.
+  // ISO stamps sort as strings, the way the feed above sorts them.
+  const latestChange = pages.reduce<FlatPage | null>(
+    (latest, p) => (!latest || p.updated > latest.updated ? p : latest),
+    null,
+  );
   const splitIdx = lastVisit
     ? feed.findIndex((p) => new Date(p.updated).getTime() <= lastVisit)
     : -1;
@@ -485,14 +491,26 @@ export function Hub({
       ) : (
         <>
       {/* This timeline is based on this browser's local visit marker. Keep the
-          label honest: it is not cross-device activity tracking. */}
+          label honest: it is not cross-device activity tracking.
+
+          The section reports what changed, and the feed drops the one page
+          Continue already reported. Where that page is the only thing the
+          week holds, the section has nothing left of its own to say. It drew
+          an empty state directly under a row dated a minute ago, which is a
+          contradiction on one screen, so it now draws nothing at all. */}
+      {!(feed.length === 0 && recent.length > 0) && (
       <motion.div {...enter(2)} className="mt-8">
         <SectionLabel>Since this device was last open</SectionLabel>
         {now !== null && feed.length === 0 && (
           <Empty
             icon="clock-circle-linear"
-            title="Quiet week"
-            hint="Nothing changed yet"
+            title="Nothing changed this week"
+            // The notebook is not empty here, since that state is the branch
+            // above, so a quiet week is not the whole story. Dating the last
+            // change says which of the two this is.
+            hint={
+              latestChange ? `Last change ${formatAgo(latestChange.updated)}` : undefined
+            }
             className="px-2 py-5"
           />
         )}
@@ -526,6 +544,7 @@ export function Hub({
           </button>
         )}
       </motion.div>
+      )}
 
       {/* public surface audit */}
       {shared.length > 0 && (

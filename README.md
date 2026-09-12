@@ -62,16 +62,22 @@ Without a terminal, answer the two questions in the environment. The
 variables go after `sudo`, which drops the ones set before it:
 
 ```bash
+# on a domain, over HTTPS
 curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/main/install.sh | sudo BRAIN_PASSWORD='your password' BRAIN_DOMAIN=notes.example.com bash
+# on this machine only, with nothing after BRAIN_DOMAIN=
+curl -fsSL https://raw.githubusercontent.com/michaelbrowk/brain/main/install.sh | sudo BRAIN_PASSWORD='your password' BRAIN_DOMAIN= bash
 ```
 
-That line, password included, lands in your shell history. Start it with a
+Either line, password included, lands in your shell history. Start it with a
 space to keep it out (bash with `HISTCONTROL=ignorespace`, zsh with
 `HIST_IGNORE_SPACE`), or delete the entry afterwards.
 
-`BRAIN_DOMAIN=` with nothing after it means no domain. Brain then listens on
-this machine only, at `http://localhost:3020`, and the closing message shows
-the ssh tunnel that reaches it from another computer.
+Both variables have to be set, the second one included: an unset
+`BRAIN_DOMAIN` is a question the script still has to ask, and with no terminal
+it stops and says which variable is missing. `BRAIN_DOMAIN=` with nothing
+after it is an answer, and it means no domain. Brain then listens on this
+machine only, at `http://localhost:3020`, and the closing message shows the
+ssh tunnel that reaches it from another computer.
 
 ### Or by hand
 

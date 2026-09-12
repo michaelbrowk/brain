@@ -40,7 +40,7 @@ describe("page POST quick-capture idempotency", () => {
     });
   });
 
-  it("derives the same namespaced page id for retries of one capture key", async () => {
+  it("derives the same page id for retries of one capture key", async () => {
     const body = {
       parentId: null,
       title: "Thought",
@@ -57,7 +57,10 @@ describe("page POST quick-capture idempotency", () => {
     const secondFingerprint =
       mocks.createPage.mock.calls[1][2].quickCaptureFingerprint;
     expect(firstId).toBe(secondId);
-    expect(firstId).toMatch(/^quickcapture_[A-Za-z0-9_-]{32}$/);
+    // The id is the share id, and a share link is something a person sends,
+    // so it says nothing about where the page came from: same alphabet, same
+    // length as the nanoid every other page gets.
+    expect(firstId).toMatch(/^[A-Za-z0-9_-]{21}$/);
     expect(firstFingerprint).toBe(secondFingerprint);
     expect(firstFingerprint).toMatch(/^[a-f0-9]{64}$/);
   });
@@ -155,11 +158,26 @@ describe("page POST quick-capture idempotency", () => {
       null,
       "Thought",
       expect.objectContaining({
-        id: expect.stringMatching(/^quickcapture_[A-Za-z0-9_-]{32}$/),
+        id: expect.stringMatching(/^[A-Za-z0-9_-]{21}$/),
         quickCaptureFingerprint: expect.stringMatching(/^[a-f0-9]{64}$/),
       }),
     );
     expect(mocks.createPage.mock.calls[0][2]).not.toHaveProperty("inbox");
+  });
+
+  it("mints an id no one can read the capture box out of", async () => {
+    const ids: string[] = [];
+    for (const key of ["capture_operation_1234567890", "capture_operation_0987654321"]) {
+      await POST(request({ parentId: null, title: "Thought", idempotencyKey: key }));
+      ids.push(mocks.createPage.mock.calls.at(-1)![2].id);
+    }
+    expect(ids[0]).not.toBe(ids[1]);
+    for (const id of ids) {
+      expect(id).not.toContain("quickcapture");
+      expect(id).not.toContain("capture");
+      expect(id).not.toContain("_operation_");
+      expect(id).toMatch(/^[A-Za-z0-9_-]{21}$/);
+    }
   });
 
   it("still refuses a non-root parent on the deterministic path", async () => {

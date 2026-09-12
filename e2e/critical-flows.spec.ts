@@ -8043,3 +8043,48 @@ test("two tabs preserve independent drafts for the same page", async ({ page }) 
     await other.close();
   }
 });
+
+// Not in the compact release gate: the six journeys it runs are pinned by
+// ops/ci-cost-guardrails.test.ts, and this is a regression check, not a
+// journey. It runs in pnpm test:e2e:full.
+test("a link to a captured thought says nothing about the box that made it", async ({
+  page,
+  context,
+}) => {
+  await login(page);
+
+  // The quick-capture box on the hub, which is where a stranger's first note
+  // goes. Its page id used to carry a quickcapture_ prefix, and because the
+  // share id is the page id, the link a person sent read
+  // /share/quickcapture_<hash>.
+  const title = `Captured ${Date.now()}`;
+  await page.getByRole("textbox", { name: "New thought" }).fill(title);
+  await page.keyboard.press("Enter");
+  await expect(page).toHaveURL(/\/p\/[A-Za-z0-9_-]+$/, { timeout: 20_000 });
+
+  const id = new URL(page.url()).pathname.split("/").pop()!;
+  expect(id).not.toContain("quickcapture");
+  expect(id).toMatch(/^[A-Za-z0-9_-]{21}$/);
+
+  const disclosure = await browserJson(page, `/api/page/${id}/share`);
+  expect(disclosure.ok).toBeTruthy();
+  const shared = await browserJson(page, `/api/page/${id}/share`, {
+    method: "POST",
+    body: {
+      enabled: true,
+      expectedScopeToken: (disclosure.body as { scopeToken: string }).scopeToken,
+      canEdit: false,
+      password: null,
+      expiresAt: null,
+    },
+  });
+  expect(shared.ok).toBeTruthy();
+  expect((shared.body as { url?: string }).url ?? `/share/${id}`).toContain(id);
+
+  // The stranger's side of the link.
+  await context.clearCookies();
+  await page.goto(`/share/${id}`);
+  await expect(
+    page.locator("article.brain-page-article").getByText(title),
+  ).toBeVisible();
+});

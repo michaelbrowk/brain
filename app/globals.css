@@ -3514,13 +3514,18 @@ a.brain-share-url:active {
    column's (`.brain-mail-scrollfoot`), and the reserve belongs to the rows,
    not to the scroller, so the bottom edge-blur can still reach the foot of a
    short list. */
-.brain-mobile-tabbar-reserve {
-  height: calc(54px + var(--inset) * 2 + env(safe-area-inset-bottom, 0px));
+/* One figure for the height the floating bar takes out of the canvas, so a
+   spacer row and a sheet that has to stop above it cannot drift apart. */
+:root {
+  --tabbar-reserve: calc(54px + var(--inset) * 2 + env(safe-area-inset-bottom, 0px));
 }
 @media (min-width: 768px) {
-  .brain-mobile-tabbar-reserve {
-    height: 0;
+  :root {
+    --tabbar-reserve: 0px;
   }
+}
+.brain-mobile-tabbar-reserve {
+  height: var(--tabbar-reserve);
 }
 .brain-mobile-tabbar[data-hidden] {
   pointer-events: none;
@@ -4545,6 +4550,9 @@ a.brain-share-url:active {
   min-height: 0;
   flex: 1;
   padding-top: 8px;
+  /* The bar floats over the canvas, and the sheet fills its parent, so without
+     this the footer and its Send button sit underneath the bar. */
+  padding-bottom: var(--tabbar-reserve);
 }
 .brain-composer-sheet {
   position: relative;

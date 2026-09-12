@@ -3724,6 +3724,37 @@ test("Apply commits, and the page takes the sort from there", async ({
   );
   expect(await dialog.getAttribute("data-commit")).toBeNull();
 
+  // data-sorted-in lives for SORTED_IN_MS and is then dropped, so a re-render
+  // cannot replay the ladder. Polling for it races that window and loses on a
+  // loaded runner, where the window can close before the first poll lands. The
+  // observer is armed before the press and records both the flag and the
+  // delays that were live while it was set.
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      __sortedIn?: { seen: boolean; delays: string[] };
+    };
+    w.__sortedIn = { seen: false, delays: [] };
+    const capture = () => {
+      const body = document.querySelector(".brain-page-body");
+      if (!body || !body.hasAttribute("data-sorted-in")) return;
+      w.__sortedIn!.seen = true;
+      const delays = [...body.querySelectorAll(".brain-cols > .brain-col")].map(
+        (column) =>
+          [...column.children]
+            .slice(0, 2)
+            .map((block) => getComputedStyle(block).animationDelay)
+            .join(","),
+      );
+      if (delays.length > 0) w.__sortedIn!.delays = delays;
+    };
+    new MutationObserver(capture).observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["data-sorted-in"],
+    });
+  });
+
   await dialog.getByRole("button", { name: "Apply" }).click();
   // A dialog that committed lets go rather than retreating: the flag is what
   // picks the exit, and Cancel never carries it.
@@ -3734,24 +3765,22 @@ test("Apply commits, and the page takes the sort from there", async ({
   // flag for the frame the sorted markdown mounts, and the blocks walk the
   // order the markdown was built in — 30ms a block, the right column a flat
   // 60 behind the left.
-  await expect(page.locator(".brain-page-body")).toHaveAttribute(
-    "data-sorted-in",
-    "",
-  );
   await expect
     .poll(() =>
-      page
-        .locator("[data-sorted-in] .brain-cols > .brain-col")
-        .evaluateAll((columns) =>
-          columns.map((column) =>
-            [...column.children]
-              .slice(0, 2)
-              .map((block) => getComputedStyle(block).animationDelay)
-              .join(","),
-          ),
-        ),
+      page.evaluate(
+        () =>
+          (window as unknown as { __sortedIn?: { seen: boolean } }).__sortedIn
+            ?.seen ?? false,
+      ),
     )
-    .toEqual(["0s,0.03s", "0.06s,0.09s"]);
+    .toBe(true);
+  expect(
+    await page.evaluate(
+      () =>
+        (window as unknown as { __sortedIn?: { delays: string[] } }).__sortedIn
+          ?.delays ?? [],
+    ),
+  ).toEqual(["0s,0.03s", "0.06s,0.09s"]);
   await expectDialogLayerReleased(page);
 
   // The body now names every child, so the tail leaves; the way back rises

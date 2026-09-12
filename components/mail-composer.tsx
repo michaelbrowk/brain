@@ -24,7 +24,7 @@ import {
 import { Button, IconButton } from "./ui/button";
 import { ConfirmDialog } from "./ui/confirm-dialog";
 import { Icon } from "./ui/icon";
-import { Kbd } from "./ui/primitives";
+import { Kbd, useShortcutTitle } from "./ui/primitives";
 import { ScrollEdge } from "./ui/scroll-edge";
 import type { MailSendInput, PublicMailAccount } from "./mail-surface-client";
 
@@ -119,6 +119,7 @@ export function MailComposer({
   onOpenSettings?: (invoker: HTMLElement) => void;
   onToast?: (title: string) => void;
 }) {
+  const sendTitle = useShortcutTitle("Send", "⌘↵");
   const [to, setTo] = useState(initialDraft.to);
   const [cc, setCc] = useState(initialDraft.cc);
   const [bcc, setBcc] = useState(initialDraft.bcc);
@@ -439,7 +440,7 @@ export function MailComposer({
           <Button
             type="submit"
             variant="ink"
-            title="Send (⌘↵)"
+            title={sendTitle}
             disabled={sending || sendBlocked}
             className="brain-touch-hit shrink-0"
           >

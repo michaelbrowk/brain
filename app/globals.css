@@ -1584,6 +1584,20 @@ html[data-kbd] [contenteditable]:focus-visible {
   color: var(--ink-2);
 }
 
+/* A shortcut chip carries both spellings of its label and shows the one this
+   machine uses. The stamp comes from the before-paint script in layout.tsx, so
+   the swap happens before the first frame and the server HTML is the same tree
+   the client hydrates. No stamp (no script, no JS) keeps the Mac spelling. */
+.kbd-pc {
+  display: none;
+}
+[data-platform="pc"] .kbd-mac {
+  display: none;
+}
+[data-platform="pc"] .kbd-pc {
+  display: inline;
+}
+
 /* Chip — pinned tile on glass: white .50 fill, 600, bold icon when active.
    Matte fallback remaps --fill-chip to an ink tint. */
 .chip {

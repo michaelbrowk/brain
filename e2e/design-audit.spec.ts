@@ -818,3 +818,38 @@ test("@release chrome at the window's right edge keeps §4's one inset", async (
   expect(onThePage).toBeCloseTo(inset, 0);
   expect(inMail).toBeCloseTo(inset, 0);
 });
+
+test("@release a shortcut chip says ⌘ on a Mac and Ctrl on everything else", async ({
+  page,
+}) => {
+  await login(page);
+  const trigger = '[data-search-trigger="desktop"]';
+  const macSpelling = page.locator(`${trigger} .kbd-mac`);
+  const pcSpelling = page.locator(`${trigger} .kbd-pc`);
+
+  // Both spellings are in the HTML the server sent. The server cannot know
+  // which machine is reading, and a chip that guessed would either show a
+  // Linux reader ⌘K until hydration or disagree with the server at it.
+  await expect(macSpelling).toHaveText("⌘K");
+  await expect(pcSpelling).toHaveText("Ctrl+K");
+
+  const stamped = await page.evaluate(
+    () => document.documentElement.dataset.platform,
+  );
+  expect(["mac", "pc"]).toContain(stamped);
+  await expect(macSpelling).toBeVisible({ visible: stamped === "mac" });
+  await expect(pcSpelling).toBeVisible({ visible: stamped === "pc" });
+
+  // The stamp alone decides, so the other platform's reading is the same
+  // markup under a different attribute. Nothing re-renders.
+  await page.evaluate(() => {
+    document.documentElement.dataset.platform = "pc";
+  });
+  await expect(pcSpelling).toBeVisible();
+  await expect(macSpelling).toBeHidden();
+  await page.evaluate(() => {
+    document.documentElement.dataset.platform = "mac";
+  });
+  await expect(macSpelling).toBeVisible();
+  await expect(pcSpelling).toBeHidden();
+});

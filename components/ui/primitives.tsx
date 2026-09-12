@@ -1,15 +1,62 @@
 "use client";
 
+import { useSyncExternalStore } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { slideUp } from "@/lib/motion";
+import { pcShortcut } from "@/lib/shortcut-keys";
 import { Icon } from "./icon";
 import { Button } from "./button";
 
 /** Keyboard shortcut chip (Kbd 11/500). Takes its fill from the surface it
  *  sits on: white .70 + rim inside a material, ink .05 on paper (`--kbd-fill`
- *  set by `mat-*`, `.brain-menu`, `.brain-dialog`, `.brain-palette`). */
+ *  set by `mat-*`, `.brain-menu`, `.brain-dialog`, `.brain-palette`).
+ *
+ *  A string label is written in Mac glyphs and carries its Ctrl spelling with
+ *  it: both are in the HTML and CSS shows the one `data-platform` asks for, so
+ *  the right one is there at first paint and the hydrated tree matches what the
+ *  server sent. The stamp is set before paint in `app/layout.tsx`. */
 export function Kbd({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <kbd className={`kbd ${className}`}>{children}</kbd>;
+  return <kbd className={`kbd ${className}`}>{bothSpellings(children)}</kbd>;
+}
+
+function bothSpellings(children: React.ReactNode): React.ReactNode {
+  if (typeof children !== "string") return children;
+  const pc = pcShortcut(children);
+  if (pc === children) return children;
+  return (
+    <>
+      <span className="kbd-mac">{children}</span>
+      <span className="kbd-pc">{pc}</span>
+    </>
+  );
+}
+
+/** The platform the reader is on, once the page has hydrated, and `null`
+ *  before that: it is stamped on `<html>` by a script in the browser, which
+ *  the server rendering the HTML cannot run. Painted labels never wait for
+ *  this — they swap in CSS. It is for the strings CSS cannot reach, a `title`
+ *  above all, which no one can read before a pointer rests on the control. */
+export function usePlatform(): "mac" | "pc" | null {
+  return useSyncExternalStore(subscribeToPlatform, readPlatform, () => null);
+}
+
+function readPlatform(): "mac" | "pc" | null {
+  const stamped = document.documentElement.dataset.platform;
+  return stamped === "mac" || stamped === "pc" ? stamped : null;
+}
+
+/** The stamp is written once, before the first paint, and never changes. */
+function subscribeToPlatform(): () => void {
+  return () => {};
+}
+
+/** `Send (⌘↵)` on a Mac, `Send (Ctrl+Enter)` elsewhere, and `Send` until the
+ *  platform is known, because a tooltip that names the wrong key is the bug
+ *  this whole file is about. */
+export function useShortcutTitle(label: string, shortcut: string): string {
+  const platform = usePlatform();
+  if (platform === null) return label;
+  return `${label} (${platform === "mac" ? shortcut : pcShortcut(shortcut)})`;
 }
 
 /** Loading skeleton line: ink .05 on paper, white .40 on glass

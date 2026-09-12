@@ -314,16 +314,40 @@ describe("install.sh first install", () => {
     expect(r.stderr).toBe("Password: the two entries differ.\n");
   });
 
-  it("stops with one sentence when there is nothing to ask the password on", () => {
+  it("names only the password when the domain is already answered", () => {
     const r = runInstall({ BRAIN_DOMAIN: "" }, [], {}, "");
     expect(r.status).toBe(1);
-    expect(r.stderr).toBe("No terminal to ask on. Set BRAIN_PASSWORD and BRAIN_DOMAIN to install without prompts.\n");
+    expect(r.stderr).toBe(
+      "No terminal to ask on. Set BRAIN_PASSWORD to the password for this Brain, at least 8 characters.\n",
+    );
   });
 
-  it("stops with the same sentence when only the domain is left to ask", () => {
+  it("names both when neither is set, and says what an empty domain means", () => {
+    const r = runInstall({}, [], {}, "");
+    expect(r.status).toBe(1);
+    expect(r.stderr).toBe(
+      "No terminal to ask on. Set BRAIN_PASSWORD to the password for this Brain, at least 8 characters." +
+        " Set BRAIN_DOMAIN to the domain name Brain should answer on, or to nothing at all (BRAIN_DOMAIN=)" +
+        " to keep Brain on this machine.\n",
+    );
+  });
+
+  it("names only the domain when the password came in the environment", () => {
     const r = runInstall({ BRAIN_PASSWORD: "abc12345" }, [], {}, "");
     expect(r.status).toBe(1);
-    expect(r.stderr).toBe("No terminal to ask on. Set BRAIN_PASSWORD and BRAIN_DOMAIN to install without prompts.\n");
+    expect(r.stderr).toBe(
+      "No terminal to ask on. Set BRAIN_DOMAIN to the domain name Brain should answer on," +
+        " or to nothing at all (BRAIN_DOMAIN=) to keep Brain on this machine.\n",
+    );
+  });
+
+  it("names only the domain when the password was answered on stdin", () => {
+    const r = runInstall({}, [], {}, "abc12345\nabc12345\n");
+    expect(r.status).toBe(1);
+    expect(r.stderr).toBe(
+      "No terminal to ask on. Set BRAIN_DOMAIN to the domain name Brain should answer on," +
+        " or to nothing at all (BRAIN_DOMAIN=) to keep Brain on this machine.\n",
+    );
   });
 
   it("stops before writing .env when openssl cannot make the secret", () => {

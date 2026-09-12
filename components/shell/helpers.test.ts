@@ -26,11 +26,11 @@ describe("captureThought", () => {
   });
 
   it("posts the exact draft under its capture key and returns the page", async () => {
-    apiFetchMock.mockResolvedValue(response({ id: "quickcapture_abc" }, 200));
+    apiFetchMock.mockResolvedValue(response({ id: "Ky7fPq2vR8sT4wX1zB6nD" }, 200));
 
     await expect(
       captureThought("a thought", "capture_operation_1234567890"),
-    ).resolves.toBe("quickcapture_abc");
+    ).resolves.toBe("Ky7fPq2vR8sT4wX1zB6nD");
 
     const [url, init] = apiFetchMock.mock.calls[0];
     expect(url).toBe("/api/page");
@@ -48,14 +48,14 @@ describe("captureThought", () => {
     // and the id is derived from the key, so it is the page the draft made.
     apiFetchMock.mockResolvedValue(
       response(
-        { error: "quick capture conflict", id: "quickcapture_abc" },
+        { error: "quick capture conflict", id: "Ky7fPq2vR8sT4wX1zB6nD" },
         409,
       ),
     );
 
     await expect(
       captureThought("a thought", "capture_operation_1234567890"),
-    ).resolves.toBe("quickcapture_abc");
+    ).resolves.toBe("Ky7fPq2vR8sT4wX1zB6nD");
   });
 
   it("still fails on a conflict that names no page, and on any other failure", async () => {

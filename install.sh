@@ -30,8 +30,21 @@ if { : < /dev/tty; } 2>/dev/null; then exec 3</dev/tty; else exec 3<&0; fi
 
 say() { printf '%s\n' "$*"; }
 die() { printf '%s\n' "$*" >&2; exit 1; }
-# A read on fd 3 that hit end of input: nothing to ask on.
-no_terminal() { die "No terminal to ask on. Set BRAIN_PASSWORD and BRAIN_DOMAIN to install without prompts."; }
+# A read on fd 3 that hit end of input: nothing to ask on. It names only the
+# questions that are still unanswered and says how to answer each, because a
+# run piped over ssh stops here and the reader has nothing else to go on. $1 is
+# the question the run stopped at. The password one names the domain as well
+# when BRAIN_DOMAIN is unset, since the next question would stop the run again.
+no_terminal() {
+  local ask_password="Set BRAIN_PASSWORD to the password for this Brain, at least 8 characters."
+  local ask_domain="Set BRAIN_DOMAIN to the domain name Brain should answer on, or to nothing at all (BRAIN_DOMAIN=) to keep Brain on this machine."
+  local wanted="$ask_domain"
+  if [ "$1" = password ]; then
+    wanted="$ask_password"
+    [ -n "${BRAIN_DOMAIN+set}" ] || wanted="$ask_password $ask_domain"
+  fi
+  die "No terminal to ask on. $wanted"
+}
 # Every side effect passes through here. Under dry run it prints the plan.
 run() {
   if [ "$DRY" = "1" ]; then say "would run: $*"; return 0; fi
@@ -166,8 +179,8 @@ ask_password() {
   local p1 p2
   # Read once and dropped, so no later command inherits it.
   if [ -n "${BRAIN_PASSWORD:-}" ]; then p1="$BRAIN_PASSWORD"; unset BRAIN_PASSWORD; else
-    printf 'Choose the Brain password: '; read -rs p1 <&3 || no_terminal; printf '\n'
-    printf 'Once more: '; read -rs p2 <&3 || no_terminal; printf '\n'
+    printf 'Choose the Brain password: '; read -rs p1 <&3 || no_terminal password; printf '\n'
+    printf 'Once more: '; read -rs p2 <&3 || no_terminal password; printf '\n'
     [ "$p1" = "$p2" ] || die "Password: the two entries differ."
   fi
   [ "${#p1}" -ge 8 ] || die "Password: at least 8 characters."
@@ -183,7 +196,7 @@ ask_domain() {
   # say so without a terminal.
   if [ -n "${BRAIN_DOMAIN+set}" ]; then domain="$BRAIN_DOMAIN"; else
     printf 'Domain name for this Brain, or leave empty to keep it on this machine only: '
-    read -r domain <&3 || no_terminal
+    read -r domain <&3 || no_terminal domain
   fi
   if [ -z "$domain" ]; then DOMAIN=""; ORIGIN="http://localhost:3020"; return 0; fi
   # A pasted address is fine: lowercase it, drop the scheme and a trailing

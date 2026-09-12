@@ -13,13 +13,24 @@ export const dynamic = "force-dynamic";
 const QUICK_CAPTURE_KEY_RE = /^[A-Za-z0-9_-]{16,128}$/;
 const QUICK_CAPTURE_MAX_TITLE_LENGTH = 500;
 
+/** Quick capture needs the id of a retry to equal the id of the first try,
+ *  which is why it is derived from the capture key rather than drawn at
+ *  random. It is a plain id all the same: the page id is the share id, and a
+ *  link a person sends should not announce which box in the app typed it. The
+ *  alphabet and the length are nanoid's, so the id reads like every other
+ *  page's. The prefix on the hash is domain separation, not part of the id.
+ *
+ *  Pages made before this keep the ids they have. An id is immutable and a
+ *  share link that is already out must keep working, so only new captures
+ *  read this way. A capture whose first answer was lost across the upgrade
+ *  retries into a new page rather than the one it made; that costs a
+ *  duplicate page, which any change of id shape costs once. */
 function quickCapturePageId(idempotencyKey: string): string {
-  const digest = createHash("sha256")
+  return createHash("sha256")
     .update("brain.quick-capture.v1\0")
     .update(idempotencyKey)
     .digest("base64url")
-    .slice(0, 32);
-  return `quickcapture_${digest}`;
+    .slice(0, 21);
 }
 
 function quickCaptureFingerprint(payload: readonly unknown[]): string {

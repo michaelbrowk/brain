@@ -36,10 +36,14 @@ export default function RootLayout({
       data-bg="still"
     >
       <head>
-        {/* apply the heading-font and background-mode settings before paint (no FOUC) */}
+        {/* Apply the heading-font and background-mode settings before paint (no
+            FOUC), and stamp the platform, which decides whether a shortcut chip
+            reads ⌘K or Ctrl+K (globals.css, .kbd-pc). The stamp goes first: the
+            localStorage reads below throw in a browser set to block site data,
+            and the keyboard hints are not theirs to lose. */}
         <script
           dangerouslySetInnerHTML={{
-            __html: `try{var d=document.documentElement,h=localStorage.getItem("brain-headings");if(h==="serif")d.dataset.headings=h;if(localStorage.getItem("brain-bg")==="live")d.dataset.bg="live"}catch(e){}`,
+            __html: `try{var d=document.documentElement,p=(navigator.userAgentData&&navigator.userAgentData.platform)||navigator.platform||"";d.dataset.platform=/mac|iphone|ipad|ipod/i.test(p)?"mac":"pc";var h=localStorage.getItem("brain-headings");if(h==="serif")d.dataset.headings=h;if(localStorage.getItem("brain-bg")==="live")d.dataset.bg="live"}catch(e){}`,
           }}
         />
       </head>

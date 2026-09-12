@@ -26,7 +26,7 @@ import {
 } from "../settings/sections";
 import { useUpdateStatus } from "../settings/use-update-status";
 import { Icon } from "../ui/icon";
-import { Kbd } from "../ui/primitives";
+import { Kbd, useShortcutTitle } from "../ui/primitives";
 import { Button, IconButton } from "../ui/button";
 import { Chip } from "../ui/chip";
 import { useScrollEdge } from "../ui/scroll-edge";
@@ -129,6 +129,7 @@ export function ShellSidebar({
 }: ShellSidebarProps) {
   const reduce = useReducedMotion();
   const update = useUpdateStatus();
+  const newPageTitle = useShortcutTitle("New page", "⌘⌥N");
   const mailOpen = surface === "mail";
   const settingsOpen = surface === "settings";
   return (
@@ -189,7 +190,7 @@ export function ShellSidebar({
             <Button
               variant="accent"
               aria-label="New page"
-              title="New page (⌘⌥N)"
+              title={newPageTitle}
             >
               <Icon name="add-linear" size={17} />
             </Button>

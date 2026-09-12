@@ -602,7 +602,7 @@ describe("Store", () => {
 
   it("returns an existing deterministic page id instead of creating a duplicate", async () => {
     const { s, root } = await tmpStore();
-    const id = "quickcapture_abcdefghijklmnopqrstuvwxyz123456";
+    const id = "Ky7fPq2vR8sT4wX1zB6nD";
     const fingerprint = "a".repeat(64);
     const first = await s.createPage(null, "Captured thought", {
       id,
@@ -8167,7 +8167,7 @@ describe("Store", () => {
   it("writes no inbox marker when a page is captured", async () => {
     const { s } = await tmpStore();
     const note = await s.createPage(null, "Captured thought", {
-      id: "quickcapture_abcdefghijklmnopqrstuvwxyz123456",
+      id: "Ky7fPq2vR8sT4wX1zB6nD",
       quickCaptureFingerprint: "a".repeat(64),
       markdown: "safe",
     });

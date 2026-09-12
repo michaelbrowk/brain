@@ -16,7 +16,7 @@ import {
 import { canonicalPageMarkdown } from "@/lib/page-markdown";
 import { sectionPageIds } from "@/lib/dated-sections";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { Kbd, Skeleton, type ToastOptions } from "./ui/primitives";
+import { Kbd, Skeleton, useShortcutTitle, type ToastOptions } from "./ui/primitives";
 import { Empty } from "./ui/empty";
 import { Button } from "./ui/button";
 import { Background } from "./ui/background";
@@ -362,6 +362,7 @@ export function Shell({
   const mainRef = useRef<HTMLElement | null>(null);
   const [focusMode, setFocusMode] = useState(false);
   const [focusModeLoaded, setFocusModeLoaded] = useState(false);
+  const exitFocusTitle = useShortcutTitle("Exit focus mode", "⌘\\");
   // B5: the canvas offset follows the sidebar in ONE reflow — on collapse
   // once the transform spring settles (onCollapsed), on expand at once so
   // the panel slides into room that is already there.
@@ -5388,7 +5389,7 @@ export function Shell({
           <button
             type="button"
             onClick={() => setFocusMode(false)}
-            title={"Exit focus mode (⌘\\)"}
+            title={exitFocusTitle}
             className="brain-focus-exit mat-thin text-control"
           >
             <Kbd>{"⌘\\"}</Kbd>

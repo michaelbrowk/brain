@@ -55,7 +55,10 @@ archive is the notebook and not the screen.
   export carries every task the notebook has, including a task on a trashed
   page and a completion older than the 30 day Logbook window.
 - A body written by hand under a task's frontmatter is carried in `tasks/` and
-  restored byte for byte.
+  restored byte for byte, a leading `---` fence and a missing trailing newline
+  included. A body that is only whitespace is treated as no body.
+- Two records in one archive may hold the same id. The second one imported
+  takes a fresh id, so both land and neither is overwritten.
 
 ## Export
 

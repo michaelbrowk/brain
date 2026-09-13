@@ -208,10 +208,6 @@ export async function writeTaskFile(
   body?: string,
 ): Promise<void> {
   const file = taskFilePath(root, task.id);
-  if (body !== undefined) {
-    await atomicWrite(file, serializeTask(task, body));
-    return;
-  }
   let kept = "";
   try {
     kept = readFrontmatter(await fs.readFile(file, "utf8")).content;
@@ -219,11 +215,32 @@ export async function writeTaskFile(
     // Only a file that is not there yet. A file that IS there and cannot be
     // read or parsed is somebody's hand edit: the index is built once, so a
     // record can be edited into broken YAML long after it was loaded, and
-    // writing a record over it with an empty body would lose both the body
-    // and the edit with nothing said. Refuse instead.
+    // writing a record over it would lose both the body and the edit with
+    // nothing said. Refuse instead, and refuse it whether or not a body was
+    // handed in: the file on disk is the thing being protected, not the
+    // argument.
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  await atomicWrite(file, serializeTask(task, kept));
+  await atomicWrite(file, serializeTask(task, body ?? kept));
+}
+
+/** Whether a file sits under this id, whatever the in-memory index thinks.
+ *
+ *  The index skips a file it cannot read, cannot parse, or whose frontmatter
+ *  id does not match its filename, so "the index does not have it" is not the
+ *  same question as "the id is free". A writer that must not overwrite has to
+ *  ask the disk. */
+export async function taskFileExists(
+  root: string,
+  id: string,
+): Promise<boolean> {
+  try {
+    await fs.stat(taskFilePath(root, id));
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 export async function deleteTaskFile(root: string, id: string): Promise<void> {
@@ -247,7 +264,17 @@ export function serializeTask(task: TaskRecord, body: string): string {
   if (task.log !== undefined) ordered.log = task.log;
   ordered.created = task.created;
   ordered.updated = task.updated;
-  return matter.stringify(body, ordered);
+  // The frontmatter block on its own, then the body appended raw.
+  //
+  // `matter.stringify(body, data)` parses `body` first, so a body that opens
+  // with its own `---` fence had that fence read as frontmatter: its keys were
+  // merged into the record and the block was gone from the file. It also adds
+  // a trailing newline to a body that has none. Neither is acceptable for
+  // bytes a person wrote, so the body never goes through the parser. Stringify
+  // ends an empty body with a blank line after the closing fence, and the body
+  // has to start on the line straight after it.
+  const header = matter.stringify("", ordered).replace(/\n+$/, "\n");
+  return header + body;
 }
 
 /** The first day the Logbook still shows, counted back in whole calendar days

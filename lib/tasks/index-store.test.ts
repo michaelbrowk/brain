@@ -8,6 +8,7 @@ import {
   deleteTaskFile,
   loadTaskIndex,
   logbookWindowStart,
+  readTaskBody,
   taskFilePath,
   writeTaskFile,
 } from "./index-store";
@@ -225,5 +226,50 @@ describe("the task index", () => {
     // a subtraction of milliseconds.
     expect(logbookWindowStart("2024-03-01")).toBe("2024-01-31");
     expect(logbookWindowStart("2026-01-05")).toBe("2025-12-06");
+  });
+
+  /** The body shapes a Markdown-literate person writes. A leading fence is the
+   *  one that used to be folded into the record's own frontmatter. */
+  const BODIES = [
+    "---\nkey: value\n---\n\npara\n",
+    "no trailing newline",
+    "a\n---\nb\n",
+    "  indented, and kept\n",
+    "one\n\ntwo\n",
+  ];
+
+  it("writes every body shape back byte for byte, fence first included", async () => {
+    const root = await tmpRoot();
+    const record: TaskRecord = {
+      id: ALPHA,
+      title: "Water the plants",
+      done: false,
+      created: INSTANT,
+      updated: INSTANT,
+    };
+    for (const body of BODIES) {
+      await writeTaskFile(root, record, body);
+      expect(await readTaskBody(root, ALPHA)).toBe(body);
+      // The body is never parsed on the way in, so a key inside it cannot
+      // land in the record, and the record still loads.
+      const index = await loadTaskIndex(root);
+      expect(index.get(ALPHA)).toEqual(record);
+    }
+  });
+
+  it("refuses to write over a file it cannot parse even when a body is given", async () => {
+    const root = await tmpRoot();
+    const broken = "---\nid: [unclosed\n---\nmy own notes\n";
+    await seed(root, `${ALPHA}.md`, broken);
+    const record: TaskRecord = {
+      id: ALPHA,
+      title: "Water the plants",
+      done: false,
+      created: INSTANT,
+      updated: INSTANT,
+    };
+
+    await expect(writeTaskFile(root, record, "a new body\n")).rejects.toThrow();
+    expect(await fs.readFile(taskFilePath(root, ALPHA), "utf8")).toBe(broken);
   });
 });

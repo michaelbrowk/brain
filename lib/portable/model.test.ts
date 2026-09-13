@@ -342,26 +342,51 @@ describe("Brain portable packages", () => {
   });
 
   it("preserves the file body after the frontmatter byte for byte through export and import", async () => {
+    // The shapes a person writes into a task file by hand. The first is the
+    // one that used to lose its whole leading block, the second the one that
+    // used to gain a newline it never had.
+    const bodies = [
+      "---\nkey: value\n---\n\npara\n",
+      "no trailing newline",
+      "a\n---\nb\n",
+      "The consulate wants two photos.\n\n  Indented, and kept.\n",
+    ];
     const source = await temporaryStore();
     await source.createPage(null, "Anything");
-    const body = "The consulate wants two photos.\n\n  Indented, and kept.\n";
-    await source.importTask(
-      {
-        id: "task-noted",
-        title: "Renew the visa",
-        done: false,
-        created: "2026-06-01T09:00:00.000Z",
-        updated: "2026-06-01T09:00:00.000Z",
-      },
-      body,
-    );
+    for (const [index, body] of bodies.entries()) {
+      await source.importTask(
+        {
+          id: `task-noted-${index}`,
+          title: "Renew the visa",
+          done: false,
+          created: "2026-06-01T09:00:00.000Z",
+          updated: "2026-06-01T09:00:00.000Z",
+        },
+        body,
+      );
+    }
     const exported = await buildPortableArchive(source, { now: EXPORTED_AT });
-    expect(exported.manifest.tasks?.[0].bodyPath).toBe("tasks/t000001.md");
+    expect(
+      exported.manifest.tasks?.map((task) => task.bodyPath),
+    ).toEqual([
+      "tasks/t000001.md",
+      "tasks/t000002.md",
+      "tasks/t000003.md",
+      "tasks/t000004.md",
+    ]);
 
     const destination = await temporaryStore();
     const checked = validatePortableArchive(exported.bytes, destination);
     await applyPortableBundle(destination, checked.bundle);
-    expect(await destination.readTaskBody("task-noted")).toBe(body);
+    for (const [index, body] of bodies.entries()) {
+      expect(await destination.readTaskBody(`task-noted-${index}`)).toBe(body);
+    }
+    // A fence in the body is not a second frontmatter block: the records came
+    // back whole.
+    expect(destination.allTasks()).toHaveLength(bodies.length);
+    expect(
+      destination.allTasks().every((task) => task.title === "Renew the visa"),
+    ).toBe(true);
   });
 
   it("writes no body file for a task that has no body", async () => {

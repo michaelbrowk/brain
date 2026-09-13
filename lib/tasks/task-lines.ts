@@ -27,7 +27,11 @@ export interface TaskLine {
 /** The spec's regex, in one place and nowhere else. */
 const TASK_LINE_RE = /^\s*[-*+]\s+\[( |x|X)\]\s+(.*)$/;
 
-/** An opening or closing code fence: three or more backticks or tildes. */
+/** An opening or closing code fence: three or more backticks or tildes.
+ *  An indented code block is knowingly out of scope. Milkdown serialises code
+ *  fenced, so the four-space form only appears in hand-written or imported
+ *  markdown, and treating four spaces as code would swallow the nested task
+ *  lines that are the ordinary case. */
 const FENCE_RE = /^\s*(`{3,}|~{3,})(.*)$/;
 
 /** The template writes an empty task line as `<br />`, and a Notion export

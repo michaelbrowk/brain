@@ -11,12 +11,20 @@ import type { TaskView } from "./model";
  *  the clock and nothing here builds a `Date`: `new Date("2026-09-13")` parses
  *  as UTC midnight, so its local day is the day before for every traveller
  *  west of Greenwich. `lists.test.ts` pins that with the clock trapped.
+ *
+ *  `doneAt` is a UTC instant, which is what makes the Logbook sort, and the
+ *  reader's local day comes from `doneDayOf(instant, offsetMinutes)` with the
+ *  offset supplied the same way `today` is.
  */
 
 export type ListName = "logbook" | "today" | "upcoming" | "someday" | "inbox";
 
 /** One group inside a list. `label` is null for a group that shows no header,
- *  which is the inbox and the uncategorised group at the top of Today. */
+ *  which is the inbox and the uncategorised group at the top of Today.
+ *
+ *  The label carries no count. A Logbook header reads `Today · 5`, and the
+ *  count is the group's size, which one task cannot know: whoever renders the
+ *  header appends `· ${rows.length}`. */
 export interface TaskGroup {
   key: string;
   label: string | null;
@@ -43,12 +51,30 @@ export function listOf(task: TaskView, today: string): ListName {
   return "inbox";
 }
 
-export function groupFor(task: TaskView, today: string): TaskGroup {
+/** `offsetMinutes` is the reader's offset east of UTC, which a browser gets
+ *  from `-new Date().getTimezoneOffset()`. It is only read for the Logbook,
+ *  where a UTC instant has to become somebody's day. Zero means UTC. */
+export function groupFor(
+  task: TaskView,
+  today: string,
+  offsetMinutes = 0,
+): TaskGroup {
   const list = listOf(task, today);
   if (list === "today" || list === "someday") return categoryGroup(task);
   if (list === "upcoming") return upcomingGroup(task, today);
-  if (list === "logbook") return logbookGroup(task, today);
+  if (list === "logbook") return logbookGroup(task, today, offsetMinutes);
   return { key: "", label: null, order: 0 };
+}
+
+/** The day a UTC instant falls on for a reader at `offsetMinutes` east of UTC.
+ *  Arithmetic on the digits, so the module stays clock-free and the caller's
+ *  zone is the only zone in the answer. */
+export function doneDayOf(iso: string, offsetMinutes: number): string {
+  const day = iso.slice(0, 10);
+  const minutesIntoDay =
+    Number(iso.slice(11, 13)) * 60 + Number(iso.slice(14, 16)) + offsetMinutes;
+  const carry = Math.floor(minutesIntoDay / (24 * 60));
+  return carry === 0 ? day : dayString(dayNumber(day) + carry);
 }
 
 /** Groups sort by rank first, then by label under the reader's own collation,
@@ -61,15 +87,21 @@ export function compareGroups(a: TaskGroup, b: TaskGroup): number {
 }
 
 /** Newest first everywhere except the logbook, which reads by completion. A
- *  task with no `doneAt` sorts last rather than jumping to the top. */
+ *  task with no `doneAt` sorts last rather than jumping to the top.
+ *
+ *  Plain string comparison, not `localeCompare`: these are UTC ISO instants
+ *  and ids, and a locale has no business ordering either. */
 export function compareInGroup(a: TaskView, b: TaskView, list: ListName): number {
   if (list === "logbook") {
-    const byDone = (b.doneAt ?? "").localeCompare(a.doneAt ?? "");
+    const byDone = descending(a.doneAt ?? "", b.doneAt ?? "");
     if (byDone !== 0) return byDone;
   }
-  const byCreated = b.created.localeCompare(a.created);
-  return byCreated !== 0 ? byCreated : a.id.localeCompare(b.id);
+  const byCreated = descending(a.created, b.created);
+  return byCreated !== 0 ? byCreated : ascending(a.id, b.id);
 }
+
+const ascending = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+const descending = (a: string, b: string): number => ascending(b, a);
 
 /** The uncategorised group leads and shows no header, because a heading over
  *  the first rows of an empty-ish list is chrome nobody reads. */
@@ -80,7 +112,7 @@ function categoryGroup(task: TaskView): TaskGroup {
 }
 
 /** The day a task shows under in Upcoming is the earlier of the day it is
- *  meant for and the day it is owed — the same reason a due deadline pulls a
+ *  meant for and the day it is owed, the same reason a due deadline pulls a
  *  task into Today. */
 function upcomingGroup(task: TaskView, today: string): TaskGroup {
   const days = [task.when, task.deadline].filter(
@@ -106,11 +138,11 @@ function upcomingGroup(task: TaskView, today: string): TaskGroup {
   return { key: "later", label: "Later", order: dayNumber(today) + 15 };
 }
 
-/** Grouped by the day part of `doneAt`, newest group first. The day part is
- *  the completion day: comparing it as a string is what keeps this module free
- *  of the timezone bug a `new Date(...)` round trip would bring in. */
-function logbookGroup(task: TaskView, today: string): TaskGroup {
-  const day = task.doneAt?.slice(0, 10);
+/** Grouped by the reader's completion day, newest group first. A record with
+ *  `done` but no `doneAt` is reachable from a hand edit, and it goes to the
+ *  foot of the Logbook under no header rather than claiming a day. */
+function logbookGroup(task: TaskView, today: string, offsetMinutes: number): TaskGroup {
+  const day = task.doneAt ? doneDayOf(task.doneAt, offsetMinutes) : undefined;
   if (!isDay(day)) return { key: "", label: null, order: Number.MAX_SAFE_INTEGER };
   const distance = dayNumber(today) - dayNumber(day);
   const label =
@@ -154,6 +186,34 @@ function dayNumber(day: string): number {
   const dayOfEra =
     yearOfEra * 365 + Math.floor(yearOfEra / 4) - Math.floor(yearOfEra / 100) + dayOfYear;
   return era * 146_097 + dayOfEra - 719_468;
+}
+
+/** The inverse of `dayNumber`, Hinnant's civil_from_days. Needed because an
+ *  offset can carry an instant into the previous or the next day, and the
+ *  answer has to be a real calendar date across a month, a year and a leap
+ *  day. */
+function dayString(days: number): string {
+  const shifted = days + 719_468;
+  const era = Math.floor(shifted / 146_097);
+  const dayOfEra = shifted - era * 146_097;
+  const yearOfEra = Math.floor(
+    (dayOfEra -
+      Math.floor(dayOfEra / 1460) +
+      Math.floor(dayOfEra / 36_524) -
+      Math.floor(dayOfEra / 146_096)) /
+      365,
+  );
+  const dayOfYear =
+    dayOfEra - (365 * yearOfEra + Math.floor(yearOfEra / 4) - Math.floor(yearOfEra / 100));
+  const monthPrime = Math.floor((5 * dayOfYear + 2) / 153);
+  const day = dayOfYear - Math.floor((153 * monthPrime + 2) / 5) + 1;
+  const month = monthPrime + (monthPrime < 10 ? 3 : -9);
+  const year = yearOfEra + era * 400 + (month <= 2 ? 1 : 0);
+  return `${pad(year, 4)}-${pad(month, 2)}-${pad(day, 2)}`;
+}
+
+function pad(value: number, width: number): string {
+  return String(value).padStart(width, "0");
 }
 
 /** 0 is Monday. 1970-01-01 was a Thursday, which is the 3 below. */

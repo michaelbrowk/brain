@@ -1728,18 +1728,18 @@ test.describe("mail on a phone", () => {
 // Every frame in this PR was shot at 390 and the complaint came off a 440pt
 // phone, so the width the owner actually holds had never been looked at. 430
 // and 440 are the two that ship above it. The bar is `fit-content`, so above
-// 324 it stops growing at its 308 and only the air either side changes — the
-// question those frames answer is not whether it fits but whether 66px of
+// 360 it stops growing at its 344 and only the air either side changes — the
+// question those frames answer is not whether it fits but whether 48px of
 // canvas on each side reads as an object standing on the screen or as a
 // control that has come loose from it.
 //
 // Search and Pages used to carry a contained copy of the bar as a plain row at
 // their own foot. They are sections now: one bar, floating in one place with
-// one material, whichever of the five tabs is up. The two frames below stand
+// one material, whichever of the six tabs is up. The two frames below stand
 // over those surfaces and answer whether it really is the same object.
 //
 // The block also writes `docs/design/mail/tabbar.md` — the label widths, the
-// track width at each of four viewports and the gap between every adjacent
+// track width at each of seven viewports and the gap between every adjacent
 // pair of words — because §4's derivation is the whole defence of the change
 // and it should be checkable against the DOM rather than against a sentence.
 test.describe("the mobile tab bar", () => {
@@ -1822,7 +1822,7 @@ test.describe("the mobile tab bar", () => {
 
       // 430 and 440 — the widths above the one every other frame was shot at
       // — and 767, the last width before the bar is display:none and the
-      // sidebar takes over, where a 308 capsule has the most air it will ever
+      // sidebar takes over, where a 344 capsule has the most air it will ever
       // have. A notes page, because that is the surface the bar spends its
       // life on and the one where the canvas runs beside it.
       for (const width of [430, 440, 767] as const) {
@@ -1872,10 +1872,12 @@ test.describe("the mobile tab bar", () => {
       await page.keyboard.press("Escape");
     }
 
-    // 390 (the width the rest of the set was shot at) and the two narrow
-    // ends: 320 is the narrowest phone still in the field, and 244 is where
-    // the tracks reach their 44px floor and the bar stops giving ground.
-    for (const width of [390, 320, 244] as const) {
+    // 390 (the width the rest of the set was shot at), 375 — the width where
+    // the sixth slot costs the most and the capsule closes on the paragraph
+    // rule — and the two narrow ends: 320 is the narrowest phone still in the
+    // field, and 288 is where the tracks reach their 44px floor and the bar
+    // stops giving ground.
+    for (const width of [390, 375, 320, 288] as const) {
       await page.setViewportSize({ width, height: 844 });
       await page.goto(`/p/${childId}`);
       await expect(page.getByRole("textbox", { name: "Page title" })).toHaveValue(
@@ -1908,7 +1910,7 @@ test.describe("the mobile tab bar", () => {
 Written by \`e2e/mail-shots.spec.ts\` (\`MAIL_SHOTS=1\`), Chromium on the SF
 stack, light scheme. DESIGN.md §4 states the derivation; this is the DOM.
 
-\`--tabbar-slot\` is 60 and the grid is \`repeat(5, minmax(44px, var(--tabbar-slot)))\`
+\`--tabbar-slot\` is 56 and the grid is \`repeat(6, minmax(44px, var(--tabbar-slot)))\`
 inside \`padding: 0 4px\`, between two 8px insets, \`width: fit-content\` with
 \`margin-inline: auto\`.
 
@@ -1918,16 +1920,18 @@ inside \`padding: 0 4px\`, between two 8px insets, \`width: fit-content\` with
 |---:|---:|---:|---:|---:|---:|
 ${rows}
 
-Above 324 the bar is at its max-content 308 and only the air changes. Below
-it the window sets the width: \`(window - 8 - 8 - 4 - 4) / 5\`. The tracks
-reach their 44px floor at 244, and below that the bar is wider than the space
-between the insets and centres back through them.
+Above 360 the bar is at its max-content 344 and only the air changes. Below
+it the window sets the width: \`(window - 8 - 8 - 4 - 4) / 6\`. The tracks
+reach their 44px floor at 288, and below that the bar is wider than the space
+between the insets and centres back through them — at 272 it would reach the
+window.
 
 \`canvas beside\` is the gap between a notes paragraph's left rule and the
 capsule's left edge — the strip of page text the bar leaves showing on each
 side, which the full-width bar used to cover. Negative means the bar is still
 wider than the text rule and covers the paragraph outright, which is the case
-at 320 and below. See DESIGN.md §4, third bullet.
+at 375 and below: the capsule first clears the 20px rule at 384. See
+DESIGN.md §4, third bullet.
 
 ## Labels at 390 (Label 11/500)
 
@@ -1936,7 +1940,7 @@ at 320 and below. See DESIGN.md §4, third bullet.
 ${labels}
 
 The New slot carries no word — it is the 34px accent circle — so the words
-that stand side by side are Home↔Search and Pages↔Mail.
+that stand side by side are Home↔Search, Search↔Tasks and Pages↔Mail.
 
 ## Gap between adjacent words at 390
 

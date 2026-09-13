@@ -138,6 +138,7 @@ import {
 import {
   compareGroups,
   compareInGroup,
+  doneDayOf,
   groupFor,
   listOf,
   type ListName,
@@ -6437,6 +6438,19 @@ export class Store {
     return this.taskIndex.view(id) ?? null;
   }
 
+  /** True when a task points at a page that is in the trash. Such a task is
+   *  in no list, because the surface cannot complete what it cannot show. */
+  taskPageTrashed(id: string): boolean {
+    assertTaskId(id);
+    return this.pageTrashed(this.taskIndex.get(id)?.page);
+  }
+
+  /** A page id the walk no longer knows is not trash, it is a task whose page
+   *  was purged. That case belongs to the purge path, not to a list read. */
+  private pageTrashed(pageId: string | undefined): boolean {
+    return pageId !== undefined && this.index.has(pageId) && this.isDeleted(pageId);
+  }
+
   /** Every task of one list, group-collated, for the caller's own `today`.
    *
    *  No list membership is stored, so this is a pure derivation over the
@@ -6445,15 +6459,21 @@ export class Store {
    */
   listTasks(today: string, filter: TaskListFilter = {}): TaskView[] {
     assertToday(today);
+    // A read that can return a completed task needs the reader's offset, for
+    // the same reason it needs their today: `doneAt` is one UTC instant and
+    // the day it falls on is theirs. Completing at 23:30 in Dubai would
+    // otherwise file the task under yesterday.
+    const readsLogbook = filter.list === undefined || filter.list === "logbook";
+    if (readsLogbook) assertOffsetMinutes(filter.offsetMinutes);
+    const offsetMinutes = filter.offsetMinutes ?? 0;
     const windowStart = logbookWindowStart(today);
     const visible = this.taskIndex.views().filter((task) => {
-      if (task.page && this.index.has(task.page) && this.isDeleted(task.page)) {
-        return false;
-      }
+      if (this.pageTrashed(task.page)) return false;
       const list = listOf(task, today);
-      // The window is a 30 day cutoff, not a boundary anyone reads, so the
-      // UTC day of the instant is the granularity it needs.
-      if (list === "logbook" && (task.doneAt ?? "").slice(0, 10) < windowStart) {
+      if (
+        list === "logbook" &&
+        logbookDay(task.doneAt, offsetMinutes) < windowStart
+      ) {
         return false;
       }
       if (filter.list && list !== filter.list) return false;
@@ -6462,7 +6482,7 @@ export class Store {
       }
       return true;
     });
-    return visible.sort((a, b) => compareTasks(a, b, today));
+    return visible.sort((a, b) => compareTasks(a, b, today, offsetMinutes));
   }
 
   async createTask(input: CreateTaskInput): Promise<TaskView> {
@@ -6605,6 +6625,27 @@ function applyTaskPatch(
   return parseTask(next);
 }
 
+/** The day a completion falls on for the reader, or the empty string when the
+ *  record has no instant to place. Through `doneDayOf`, so the one reading of
+ *  an instant as a day lives in `lib/tasks`. */
+function logbookDay(doneAt: string | undefined, offsetMinutes: number): string {
+  return doneAt === undefined ? "" : doneDayOf(doneAt, offsetMinutes);
+}
+
+/** Real offsets run from -12:00 to +14:00. Anything outside that is a caller
+ *  sending milliseconds or a sign error, not a timezone. */
+const MAX_OFFSET_MINUTES = 840;
+
+function assertOffsetMinutes(value: number | undefined): void {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    Math.abs(value) > MAX_OFFSET_MINUTES
+  ) {
+    throw new TaskValidationError("bad_offset");
+  }
+}
+
 /** The order the lists are read in on the surface. */
 const TASK_LIST_ORDER: ListName[] = [
   "inbox",
@@ -6614,13 +6655,21 @@ const TASK_LIST_ORDER: ListName[] = [
   "logbook",
 ];
 
-function compareTasks(a: TaskView, b: TaskView, today: string): number {
+function compareTasks(
+  a: TaskView,
+  b: TaskView,
+  today: string,
+  offsetMinutes: number,
+): number {
   const listA = listOf(a, today);
   const listB = listOf(b, today);
   if (listA !== listB) {
     return TASK_LIST_ORDER.indexOf(listA) - TASK_LIST_ORDER.indexOf(listB);
   }
-  const byGroup = compareGroups(groupFor(a, today), groupFor(b, today));
+  const byGroup = compareGroups(
+    groupFor(a, today, offsetMinutes),
+    groupFor(b, today, offsetMinutes),
+  );
   return byGroup !== 0 ? byGroup : compareInGroup(a, b, listA);
 }
 

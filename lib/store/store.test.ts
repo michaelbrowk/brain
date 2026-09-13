@@ -10576,6 +10576,8 @@ describe("the _tasks directory", () => {
 describe("task records", () => {
   const TODAY = "2026-09-13";
   const TOMORROW = "2026-09-14";
+  /** A reader in UTC. Any read that can return a completion carries one. */
+  const UTC = { offsetMinutes: 0 };
 
   async function taskFile(root: string, id: string): Promise<string> {
     return fs.readFile(path.join(root, "_tasks", `${id}.md`), "utf8");
@@ -10782,11 +10784,43 @@ describe("task records", () => {
       when: TODAY,
     });
 
-    expect(s.listTasks(TODAY).map((t) => t.id)).toEqual([created.id]);
+    expect(s.listTasks(TODAY, UTC).map((t) => t.id)).toEqual([created.id]);
     await s.deletePage(meta.id);
-    expect(s.listTasks(TODAY)).toEqual([]);
+    expect(s.listTasks(TODAY, UTC)).toEqual([]);
     // The record is still readable by id, which is what MCP answers 409 on.
     expect(s.getTask(created.id)?.page).toBe(meta.id);
+  });
+
+  it("files a completion under the reader's own day, not the UTC one", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-evening.md"),
+      "---\nid: task-evening\ntitle: Water the plants\ndone: true\ndoneAt: '2026-09-13T20:30:00.000Z'\ncreated: '2026-09-13T09:00:00.000Z'\nupdated: '2026-09-13T20:30:00.000Z'\n---\n",
+    );
+    await s.rebuild();
+
+    // 20:30Z on the 13th is already the 14th in Dubai. The window is counted
+    // in the reader's days, so the same record falls either side of it.
+    const dubai = { list: "logbook" as const, offsetMinutes: 240 };
+    expect(s.listTasks("2026-10-14", dubai).map((t) => t.id)).toEqual([
+      "task-evening",
+    ]);
+    expect(
+      s.listTasks("2026-10-14", { list: "logbook", offsetMinutes: 0 }),
+    ).toEqual([]);
+  });
+
+  it("refuses a logbook read without the reader's offset", async () => {
+    const { s } = await tmpStore();
+
+    expect(() => s.listTasks(TODAY)).toThrow(/bad_offset/);
+    expect(() => s.listTasks(TODAY, { list: "logbook" })).toThrow(/bad_offset/);
+    expect(() =>
+      s.listTasks(TODAY, { list: "logbook", offsetMinutes: 99_999 }),
+    ).toThrow(/bad_offset/);
+    // A list that cannot hold a completion needs no offset.
+    expect(s.listTasks(TODAY, { list: "today" })).toEqual([]);
   });
 
   it("keeps the logbook to its 30 day window", async () => {
@@ -10804,8 +10838,8 @@ describe("task records", () => {
     );
     await s.rebuild();
 
-    expect(s.listTasks(TODAY, { list: "logbook" }).map((t) => t.id)).toEqual([
-      "task-recent",
-    ]);
+    expect(
+      s.listTasks(TODAY, { list: "logbook", offsetMinutes: 0 }).map((t) => t.id),
+    ).toEqual(["task-recent"]);
   });
 });

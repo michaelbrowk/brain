@@ -722,4 +722,9 @@ export interface UpdateTaskPatch {
 export interface TaskListFilter {
   list?: ListName;
   category?: string;
+  /** The reader's own UTC offset in minutes, east positive, the shape of
+   *  `-new Date().getTimezoneOffset()`. A completion is one UTC instant and
+   *  the day it falls on is the reader's, so any read that includes the
+   *  Logbook has to carry it. */
+  offsetMinutes?: number;
 }

@@ -320,7 +320,27 @@ describe("the three shapes a task record takes", () => {
       shape: "detachedAt without a page is not a shape: there is no page to name",
       record: { detachedAt: DETACHED_AT, done: true, doneAt: DONE_AT },
       ok: false,
-      reason: "detachedAt",
+      // The rule's own message. Asserting "detachedAt" alone was satisfied by
+      // the strict-key refusal from before the field existed, so the case was
+      // green against a schema that had never heard of it.
+      reason: "requires page",
+    },
+    {
+      shape: "detached with no done is not a shape: it owns one now",
+      record: { page: "page-garden", anchor, detachedAt: DETACHED_AT },
+      ok: false,
+      reason: "a detached task owns its done",
+    },
+    {
+      shape: "repeat is refused on a detached record too, not only a linked one",
+      record: {
+        page: "page-garden",
+        detachedAt: DETACHED_AT,
+        done: false,
+        repeat: { freq: "daily" },
+      },
+      ok: false,
+      reason: "repeat",
     },
     {
       shape: "unlinked: no page, no detachedAt, and its own done",
@@ -374,6 +394,7 @@ describe("the three shapes a task record takes", () => {
     const parsed = parseTaskRecord({
       ...base,
       page: "page-garden",
+      done: false,
       detachedAt: new Date("2026-09-13T10:32:00.000Z"),
     });
     expect(parsed.ok).toBe(true);

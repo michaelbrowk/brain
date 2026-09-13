@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { normalizeTaskText } from "./task-lines";
+import { MAX_TASK_TEXT, normalizeTaskText } from "./task-lines";
 
 /** A task record as it lives in the frontmatter of `_tasks/<id>.md`.
  *
@@ -24,7 +24,6 @@ import { normalizeTaskText } from "./task-lines";
  *  module-private. No dot, so no `..`, and no slash, so no traversal. */
 export const TASK_ID_RE = /^[A-Za-z0-9_-]{1,128}$/;
 
-const MAX_TASK_TEXT = 2000;
 /** `advance()` trims the log to its 30 most recent entries, which covers the
  *  30 day Logbook window at the densest rule. The schema leaves headroom above
  *  that so a hand-edited or not-yet-trimmed file is read rather than skipped. */
@@ -199,6 +198,16 @@ export const taskRecordRules = (
       code: z.ZodIssueCode.custom,
       message: "detachedAt requires page",
       path: ["detachedAt"],
+    });
+  }
+  // And it requires a completion, because there is no checkbox left to ask.
+  // A detached record read back with `done` undefined reads as reopened, and
+  // a task somebody finished reappears in Today.
+  if (value.detachedAt !== undefined && value.done === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "a detached task owns its done",
+      path: ["done"],
     });
   }
   // Writing it would create a second answer to "is this done?", and the

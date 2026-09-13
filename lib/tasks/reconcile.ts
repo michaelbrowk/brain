@@ -46,12 +46,23 @@ export interface TaskRebind {
   title: string;
   /** The completion, read off the line's checkbox. */
   done: boolean;
+  /** The instant the completion carries, present exactly when `done` is true:
+   *  the one the record already had, or `at` for a tick that has just
+   *  happened. Absent when `done` is false, and the caller clears the stored
+   *  one. The note holds no timestamp, so the write that flipped the checkbox
+   *  is the only place this can come from, and the Logbook orders on it: a
+   *  completion with no instant lands at the foot of the Logbook under no
+   *  header instead of under today. */
+  doneAt?: string;
   anchorChanged: boolean;
   titleChanged: boolean;
   doneChanged: boolean;
-  /** Whether a field the FILE holds changed. `done` is deliberately not one
-   *  of them: it is not stored for a linked task, so a tick alone must not
-   *  rewrite `_tasks/<id>.md` and must not earn a Git commit of its own. */
+  /** Whether the anchor or the title cache moved, on their own. */
+  anchorOrTitleChanged: boolean;
+  /** Whether a field the FILE holds changed, which is what tells the caller to
+   *  write `_tasks/<id>.md`. `done` itself is never stored for a linked task,
+   *  but its instant is, so a tick writes the record. The 4 second Git debounce
+   *  is what keeps that write and the note's write in one commit. */
   recordChanged: boolean;
 }
 
@@ -72,11 +83,11 @@ export interface TaskDetach {
  *  a support question about a task that left a note is unanswerable when
  *  every detach looks the same. */
 export type DetachReason =
-  /** Nothing on the page is this task any more (resolver step 4). */
+  /** No unclaimed line on the page is this task any more: the text is gone and
+   *  nothing left is recognisably the same sentence (resolver step 4). Taking
+   *  the checkbox syntax off a line reaches this too, because the line leaves
+   *  `parseTaskLines` entirely. */
   | "line-gone"
-  /** The line this anchor names is on the page, and another record already
-   *  took it. */
-  | "line-taken"
   /** The record names the page but carries no anchor, so there is nothing to
    *  resolve. A hand-edited file is the ordinary way to reach this. */
   | "no-anchor";
@@ -101,21 +112,45 @@ export function reconcilePageTasks({
   const rebound: TaskRebind[] = [];
   const detached: TaskDetach[] = [];
 
-  for (const { task, done } of ordered(tasks, page)) {
+  // Two passes, because an identity must always outrank somebody else's guess.
+  //
+  // The resolver runs its whole cascade for one record before the next record
+  // is looked at, so a single pass lets a record reach its similarity step and
+  // take a line that a later record still holds by hash. Delete the upper of
+  // two similar lines and that is what happens: the deleted record survives on
+  // the survivor's line with its title rewritten, the untouched record loses
+  // its link, and the next tick on that line lands on the wrong task. Which of
+  // the two it happens to was decided by which line sat higher.
+  //
+  // So every exact match resolves first. Only then does anything guess, and
+  // only over the lines nothing claimed.
+  const guessing: ReconcileTask[] = [];
+  for (const entry of ordered(tasks, page)) {
+    const anchor = entry.task.anchor;
+    // An unclaimed line with this hash means the resolver answers at step 1 or
+    // step 2, by identity. Everything else waits for the second pass: a record
+    // whose text is on the page but already spoken for waits too, because its
+    // own edited line is the usual answer and one line still takes at most one
+    // record.
+    if (!anchor || !hasUnclaimedHash(anchor, lines, claimed)) {
+      guessing.push(entry);
+      continue;
+    }
+    const resolved = resolveAnchor(anchor, lines, claimed);
+    if (!resolved) {
+      guessing.push(entry);
+      continue;
+    }
+    claimed.add(resolved.index);
+    rebound.push(
+      rebindOf(entry.task, entry.done, resolved.index, resolved.anchor, lines, at),
+    );
+  }
+
+  for (const { task, done } of guessing) {
     const anchor = task.anchor;
     if (!anchor) {
       detached.push(detachOf(task, done, at, "no-anchor"));
-      continue;
-    }
-    // Review finding 16, decided here. The resolver skips a claimed line and
-    // falls through to its similarity step, which would rebind this record to
-    // whichever neighbour scores above the threshold and rewrite its text and
-    // hash, so a guess is indistinguishable from an identity by the next
-    // reconcile. When this page still holds the anchor's text and every copy
-    // of it is already spoken for, the honest answer is that this record has
-    // no line: at most one record follows a line, and the rest detach.
-    if (textIsSpokenFor(anchor, lines, claimed)) {
-      detached.push(detachOf(task, done, at, "line-taken"));
       continue;
     }
     const resolved = resolveAnchor(anchor, lines, claimed);
@@ -124,7 +159,7 @@ export function reconcilePageTasks({
       continue;
     }
     claimed.add(resolved.index);
-    rebound.push(rebindOf(task, done, resolved.index, resolved.anchor, lines));
+    rebound.push(rebindOf(task, done, resolved.index, resolved.anchor, lines, at));
   }
 
   const unclaimedLines = lines
@@ -166,21 +201,15 @@ function lineKey(task: TaskRecord): number {
   return task.anchor?.line ?? Number.MAX_SAFE_INTEGER;
 }
 
-/** Whether the page still holds this anchor's exact text and every copy of it
- *  is claimed. False when the text is gone, which is the edited line the
- *  resolver's similarity step exists for. */
-function textIsSpokenFor(
+/** Whether a line nobody has taken still carries this anchor's exact text. */
+function hasUnclaimedHash(
   anchor: TaskAnchor,
   lines: TaskLine[],
   claimed: ReadonlySet<number>,
 ): boolean {
-  let seen = false;
-  for (const [index, line] of lines.entries()) {
-    if (line.hash !== anchor.hash) continue;
-    if (!claimed.has(index)) return false;
-    seen = true;
-  }
-  return seen;
+  return lines.some(
+    (line, index) => line.hash === anchor.hash && !claimed.has(index),
+  );
 }
 
 function rebindOf(
@@ -189,6 +218,7 @@ function rebindOf(
   index: number,
   anchor: TaskAnchor,
   lines: TaskLine[],
+  at: string,
 ): TaskRebind {
   const line = lines[index];
   // The normalized form, not the raw one: it is what the anchor stores and
@@ -205,16 +235,20 @@ function rebindOf(
     anchor.ordinal !== stored.ordinal ||
     anchor.line !== stored.line;
   const titleChanged = title !== task.title;
+  const anchorOrTitleChanged = anchorChanged || titleChanged;
+  const doneAt = line.checked ? (task.doneAt ?? at) : undefined;
   return {
     id: task.id,
     index,
     anchor,
     title,
     done: line.checked,
+    ...(doneAt === undefined ? {} : { doneAt }),
     anchorChanged,
     titleChanged,
     doneChanged: line.checked !== done,
-    recordChanged: anchorChanged || titleChanged,
+    anchorOrTitleChanged,
+    recordChanged: anchorOrTitleChanged || doneAt !== task.doneAt,
   };
 }
 

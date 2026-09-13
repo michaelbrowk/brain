@@ -40,6 +40,15 @@ const BREAK_TAG_RE = /<br\s*\/?>/gi;
 
 const WHITESPACE_RUN_RE = /\s+/g;
 
+/** The longest normalized task text there is. The record schema bounds both
+ *  `title` and `anchor.text` at the same number, and a rebind copies a line's
+ *  normalized text into both, so a line longer than this would mint a record
+ *  the schema refuses: `writeTaskFile` does not validate, and the next index
+ *  load would skip the file and the task would vanish from every list. The cap
+ *  belongs here, where the hash is taken, so the text, the anchor and the hash
+ *  are all taken over the same bytes. */
+export const MAX_TASK_TEXT = 2000;
+
 /** The reader's form of a task line: what a person sees, minus the break tags
  *  that are markup rather than words. */
 function visibleText(raw: string): string {
@@ -50,7 +59,17 @@ function visibleText(raw: string): string {
  *  gone is what makes `a  b`, `a b` and `a <br /> b` one text with one hash,
  *  which is what an anchor needs to survive a retyped line. */
 export function normalizeTaskText(raw: string): string {
-  return visibleText(raw).replace(WHITESPACE_RUN_RE, " ").trim();
+  const collapsed = visibleText(raw).replace(WHITESPACE_RUN_RE, " ").trim();
+  if (collapsed.length <= MAX_TASK_TEXT) return collapsed;
+  const cut = collapsed.slice(0, MAX_TASK_TEXT);
+  // A cut between the two halves of a surrogate pair leaves a lone surrogate,
+  // which encodes as a replacement character and reads as a broken glyph. Drop
+  // the orphan. The trim keeps the result its own normalized form, so running
+  // this again over it changes nothing, which is what the schema's
+  // already-normalized check asks of stored anchor text.
+  const last = cut.charCodeAt(cut.length - 1);
+  const whole = last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
+  return whole.trim();
 }
 
 export function hashTaskText(normalized: string): string {
@@ -86,7 +105,7 @@ export function parseTaskLines(markdown: string): TaskLine[] {
     if (!match) continue;
 
     const text = visibleText(match[2]);
-    const normalized = text.replace(WHITESPACE_RUN_RE, " ").trim();
+    const normalized = normalizeTaskText(match[2]);
     const ordinal = seen.get(normalized) ?? 0;
     seen.set(normalized, ordinal + 1);
     found.push({

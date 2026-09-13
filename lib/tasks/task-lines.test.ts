@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import {
+  MAX_TASK_TEXT,
   hashTaskText,
   normalizeTaskText,
   parseTaskLines,
@@ -161,5 +162,71 @@ describe("hashTaskText", () => {
       const expected = createHash("sha1").update(text, "utf8").digest("hex").slice(0, 16);
       expect(hashTaskText(text)).toBe(expected);
     }
+  });
+});
+
+/** The record schema bounds `title` and `anchor.text` at the same number, and
+ *  a rebind copies a line's normalized text into both. A line longer than the
+ *  bound would mint a record the schema refuses, `writeTaskFile` does not
+ *  validate, and the next index load would skip the file: the task would be
+ *  gone from every list with only a console warning to say so. */
+describe("the length a normalized task text stops at", () => {
+  const cap: { name: string; raw: string; length: number; startsWith: string }[] = [
+    {
+      name: "a text at the bound is untouched",
+      raw: "a".repeat(MAX_TASK_TEXT),
+      length: MAX_TASK_TEXT,
+      startsWith: "aa",
+    },
+    {
+      name: "one character over is cut to the bound",
+      raw: "a".repeat(MAX_TASK_TEXT + 1),
+      length: MAX_TASK_TEXT,
+      startsWith: "aa",
+    },
+    {
+      name: "far over is cut to the bound",
+      raw: "b".repeat(MAX_TASK_TEXT * 3),
+      length: MAX_TASK_TEXT,
+      startsWith: "bb",
+    },
+    {
+      name: "collapsing runs first, so the count is of what a person reads",
+      raw: `${"c".repeat(MAX_TASK_TEXT - 2)}${" ".repeat(50)}dddd`,
+      length: MAX_TASK_TEXT,
+      startsWith: "cc",
+    },
+    {
+      // 50 spaces collapse to one, so the cut lands inside `dddd` rather than
+      // 49 characters short of the bound.
+      name: "a cut that leaves a trailing space loses it, and comes in one under",
+      raw: `${"c".repeat(MAX_TASK_TEXT - 1)}${" ".repeat(50)}dddd`,
+      length: MAX_TASK_TEXT - 1,
+      startsWith: "cc",
+    },
+    {
+      name: "a cut that lands inside a surrogate pair drops the orphan",
+      raw: `${"e".repeat(MAX_TASK_TEXT - 1)}\u{1f331}`,
+      length: MAX_TASK_TEXT - 1,
+      startsWith: "ee",
+    },
+  ];
+
+  for (const { name, raw, length, startsWith } of cap) {
+    it(name, () => {
+      const normalized = normalizeTaskText(raw);
+      expect(normalized.length).toBe(length);
+      expect(normalized.startsWith(startsWith)).toBe(true);
+      // Idempotent, which is what the schema's already-normalized check on
+      // stored anchor text asks of it.
+      expect(normalizeTaskText(normalized)).toBe(normalized);
+    });
+  }
+
+  it("caps what parseTaskLines reports, so the hash is taken over the same bytes", () => {
+    const [line] = parseTaskLines(`- [ ] ${"f".repeat(MAX_TASK_TEXT + 500)}`);
+    expect(line.normalized.length).toBe(MAX_TASK_TEXT);
+    expect(line.hash).toBe(hashTaskText(line.normalized));
+    expect(line.hash).toBe(hashTaskText("f".repeat(MAX_TASK_TEXT)));
   });
 });

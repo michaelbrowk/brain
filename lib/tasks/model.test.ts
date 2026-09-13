@@ -317,6 +317,16 @@ describe("the three shapes a task record takes", () => {
       ok: true,
     },
     {
+      // The promote gesture is the only thing that mints a linked record, and
+      // it always knows the line. A record that names a page and no line is a
+      // task born broken: the first reconcile detaches it, so it never
+      // reaches a checkbox and never gets a title back from one.
+      shape: "linked with no anchor is not a shape: the anchor is the link",
+      record: { page: "page-garden" },
+      ok: false,
+      reason: "page requires anchor",
+    },
+    {
       shape: "detachedAt without a page is not a shape: there is no page to name",
       record: { detachedAt: DETACHED_AT, done: true, doneAt: DONE_AT },
       ok: false,

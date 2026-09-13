@@ -223,6 +223,21 @@ export const taskRecordRules = (
       path: ["done"],
     });
   }
+  // A linked record is a pointer at one checkbox, and the anchor is the
+  // pointer. Without it the reconcile has nothing to look for, so the record
+  // detaches on the first write to its page: a task born broken, with no
+  // checkbox to answer its `done` and no line to refresh its title. The
+  // promote gesture is the only thing that mints a linked record and it
+  // always knows the line, so the shape has no honest source. A DETACHED
+  // record is exempt: it may have carried no anchor into the detach, and
+  // refusing it now would make a record on disk unreadable.
+  if (value.page !== undefined && value.anchor === undefined && value.detachedAt === undefined) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "page requires anchor",
+      path: ["anchor"],
+    });
+  }
 };
 
 export const taskRecordSchema = taskRecordFields.superRefine(taskRecordRules);

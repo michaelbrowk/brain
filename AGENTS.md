@@ -95,6 +95,12 @@ file:
    Delete, move, rename, retitle, re-icon and reorder are absent for visitors,
    not refused. Absence is the only form of that guarantee a refactor cannot
    quietly undo.
+9. **One reading of a task line.** `lib/tasks/task-lines.ts` is the only rule
+   for what counts as a checkbox line and how its text normalises, for the
+   editor, the store and the merge alike. Do not add a second checkbox regex.
+   A linked task's `done` is never written to `_tasks/<id>.md`: the note line
+   owns it, reconcile recomputes it, and a file that carries it for a linked
+   task is a file Brain wrote by mistake.
 
 ## Conventions
 

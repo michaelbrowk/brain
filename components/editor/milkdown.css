@@ -1039,6 +1039,92 @@ html[data-kbd] .milkdown .ProseMirror li.brain-task-item > .brain-task-box:focus
   outline-offset: 2px;
 }
 
+/* THE + TASK MARK: THE GHOST, AND THE WORD IT BECOMES.
+
+   One element in two states, drawn by a ProseMirror widget decoration at the
+   end of the line and never written into the markdown. The ghost is the
+   invitation; the word is the mark of the link, a second signal beside the
+   box's border rather than colour alone. The moment is quiet on purpose: this
+   is a notebook, and the drama belongs to completion. */
+.milkdown .ProseMirror .brain-task-mark {
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font-family: var(--font-sf);
+  font-size: 12px;
+  line-height: 1.3;
+  letter-spacing: -0.05px;
+  white-space: nowrap;
+  vertical-align: baseline;
+  cursor: pointer;
+  user-select: none;
+}
+/* Absent until the line is under the pointer or under the caret: 80ms in and
+   160ms out, which is `HOVER` in `lib/motion.ts`. `pointer-events` travels
+   with the opacity, so a ghost nobody can see is not a target either. */
+.milkdown .ProseMirror .brain-task-mark[data-state="ghost"] {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms var(--ease-out);
+}
+.milkdown .ProseMirror .brain-task-mark[data-state="ghost"][data-shown] {
+  opacity: 1;
+  pointer-events: auto;
+  transition-duration: 80ms;
+}
+/* The word stands permanently, and arrives on the same materialize every
+   glass surface arrives on. */
+.milkdown .ProseMirror .brain-task-mark[data-state="linked"] {
+  color: var(--ink-2);
+  animation: materialize-in 220ms var(--ease-out) both;
+}
+@media (hover: hover) {
+  .milkdown .ProseMirror .brain-task-mark:hover {
+    color: var(--ink);
+  }
+}
+html[data-kbd] .milkdown .ProseMirror .brain-task-mark:focus-visible {
+  outline: 3px solid var(--blue-ring);
+  outline-offset: 2px;
+  opacity: 1;
+  pointer-events: auto;
+}
+/* The other half of the signal. `> .brain-task-body > p >` keeps it on the
+   item's OWN line: a `list_item` holds its nested items as content, so an
+   unscoped `:has` would colour a parent's box because its child is linked.
+   The 160ms is the transition already on the box. */
+.milkdown
+  .ProseMirror
+  li.brain-task-item:has(> .brain-task-body > p > .brain-task-mark[data-state="linked"])
+  > .brain-task-box {
+  border-color: var(--ink-2);
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Everything through the crossfade: nothing scales and nothing travels. */
+  .milkdown .ProseMirror .brain-task-mark[data-state="linked"] {
+    animation: dialog-fade 120ms var(--ease-out) both;
+  }
+  .milkdown .ProseMirror .brain-task-mark[data-state="ghost"],
+  .milkdown .ProseMirror .brain-task-mark[data-state="ghost"][data-shown] {
+    transition-duration: 120ms;
+  }
+}
+
+/* The + Task popover. `brain-menu` owns the material and the motion, down to
+   the 220ms materialize on `data-state` and its reduced-motion crossfade; the
+   width and the placement are all this adds. 220 rather than the list menu's
+   264, because it holds five short words and nothing else. */
+.brain-task-menu {
+  position: fixed;
+  z-index: var(--z-modal);
+  width: 220px;
+}
+.brain-task-menu > .brain-menu-label {
+  white-space: normal;
+}
+
 /* prose measure: cap text blocks at ~68ch; tables/code breathe full width */
 .milkdown .ProseMirror > p,
 .milkdown .ProseMirror > ul,

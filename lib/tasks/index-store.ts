@@ -178,17 +178,43 @@ function skip(name: string, reason: string): void {
   console.warn(`[brain/tasks] skipping ${TASKS_DIR}/${name}: ${reason}`);
 }
 
-/** Write one record, keeping the file's body after the frontmatter byte for
- *  byte. There is no task body in v1: it has no reader and no writer in the
- *  app, so a person editing `_tasks/<id>.md` by hand does not lose it. */
+/** The body after a record's frontmatter, or the empty string when the file
+ *  has none and when there is no file yet. There is no task body in v1: it has
+ *  no writer in the app, so the only one a file can hold is a person's own,
+ *  and this is how the portable export carries it out. */
+export async function readTaskBody(root: string, id: string): Promise<string> {
+  const file = taskFilePath(root, id);
+  try {
+    const content = readFrontmatter(await fs.readFile(file, "utf8")).content;
+    // A record written with no body still ends in the newline the frontmatter
+    // delimiter needs, and whitespace on its own is not somebody's writing.
+    return content.trim() === "" ? "" : content;
+  } catch (error) {
+    // Only a file that is not there. Broken YAML in a file that IS there is a
+    // hand edit, and answering the empty string would report it as an empty
+    // body and let the export write that emptiness down.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return "";
+  }
+}
+
+/** Write one record. With no `body`, the file's own body after the frontmatter
+ *  is kept byte for byte, so a person editing `_tasks/<id>.md` by hand does
+ *  not lose it. With a `body`, that body is written instead, which is what a
+ *  portable import does when it lands a record and its body together. */
 export async function writeTaskFile(
   root: string,
   task: TaskRecord,
+  body?: string,
 ): Promise<void> {
   const file = taskFilePath(root, task.id);
-  let body = "";
+  if (body !== undefined) {
+    await atomicWrite(file, serializeTask(task, body));
+    return;
+  }
+  let kept = "";
   try {
-    body = readFrontmatter(await fs.readFile(file, "utf8")).content;
+    kept = readFrontmatter(await fs.readFile(file, "utf8")).content;
   } catch (error) {
     // Only a file that is not there yet. A file that IS there and cannot be
     // read or parsed is somebody's hand edit: the index is built once, so a
@@ -197,7 +223,7 @@ export async function writeTaskFile(
     // and the edit with nothing said. Refuse instead.
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  await atomicWrite(file, serializeTask(task, body));
+  await atomicWrite(file, serializeTask(task, kept));
 }
 
 export async function deleteTaskFile(root: string, id: string): Promise<void> {

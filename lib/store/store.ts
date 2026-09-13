@@ -127,6 +127,7 @@ import {
   deleteTaskFile,
   loadTaskIndex,
   logbookWindowStart,
+  readTaskBody,
   writeTaskFile,
 } from "../tasks/index-store";
 import {
@@ -6431,6 +6432,54 @@ export class Store {
     return this.taskIndex.byPage(pageId);
   }
 
+  /** Every record the index holds, filtered by nothing.
+   *
+   *  `listTasks` is a list view: it wants the reader's day, hides a task whose
+   *  page is in the Trash, and stops the Logbook at its window. A portable
+   *  export is not a reader and has to carry the notebook whole, so it asks
+   *  for the records themselves.
+   */
+  allTasks(): TaskRecord[] {
+    return this.taskIndex.all();
+  }
+
+  /** The body a person wrote under a task's frontmatter, or the empty string.
+   *  Nothing in the app writes one, so this exists for the portable export,
+   *  which must not drop what it cannot show. */
+  async readTaskBody(id: string): Promise<string> {
+    assertTaskId(id);
+    return readTaskBody(this.root, id);
+  }
+
+  /** Land one whole record, with its body, exactly as it is given.
+   *
+   *  The portable import needs this and `createTask` cannot serve it:
+   *  `createTask` validates a creation input and mints the id, the timestamps
+   *  and the completion itself, which is right for a new task and wrong for
+   *  one that already has a history. Here the record is the truth and the
+   *  store writes it down.
+   *
+   *  The id is kept unless the notebook already has it. An import never
+   *  overwrites what is there, the same promise the page import keeps by
+   *  always minting a fresh page, so a clash takes a fresh id and both
+   *  records live.
+   */
+  async importTask(
+    raw: unknown,
+    body: string,
+    src?: string,
+  ): Promise<TaskRecord> {
+    const record = parseTask(raw);
+    return this.mutate(async () => {
+      this.assertLinkablePageUnlocked(record.page);
+      const landed = this.taskIndex.get(record.id)
+        ? parseTask({ ...record, id: nanoid() })
+        : record;
+      await this.writeTaskUnlocked(landed, src, body);
+      return landed;
+    });
+  }
+
   /** One task by id, or null. A malformed id is refused rather than answered
    *  with a miss, so a caller learns it built the wrong request. */
   getTask(id: string): TaskView | null {
@@ -6557,12 +6606,13 @@ export class Store {
     }
   }
 
-  /** Caller owns mutate(). */
+  /** Caller owns mutate(). With no `body` the file's own body is kept. */
   private async writeTaskUnlocked(
     task: TaskRecord,
     src?: string,
+    body?: string,
   ): Promise<void> {
-    await writeTaskFile(this.root, task);
+    await writeTaskFile(this.root, task, body);
     this.taskIndex.put(task);
     scheduleCommit(this.root);
     emitStore({ type: "task", id: task.id, src });

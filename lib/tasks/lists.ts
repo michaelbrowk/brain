@@ -77,6 +77,81 @@ export function doneDayOf(iso: string, offsetMinutes: number): string {
   return carry === 0 ? day : dayString(dayNumber(day) + carry);
 }
 
+/** The Logbook holds 30 days. `lib/tasks/index-store.ts` carries the same
+ *  number for the store's own window, and cannot be imported here: it opens
+ *  files, and this module is in the browser bundle. */
+const LOGBOOK_WINDOW_DAYS = 30;
+
+/** The oldest day the Logbook shows, in the reader's own days. */
+function logbookWindowStart(today: string): string {
+  return dayString(dayNumber(today) - LOGBOOK_WINDOW_DAYS);
+}
+
+/** One line of the Logbook.
+ *
+ *  A repeating task is never done: completing it appends a `log` entry and
+ *  moves `when` on to the next occurrence, so the record itself is always
+ *  open and would never reach the Logbook at all. History is per instance
+ *  even though storage is per series, so every entry draws a row of its own.
+ */
+export interface LogbookRow {
+  /** Stable across two reads and unique inside a day, which one record id is
+   *  not: a daily task has a row for every day it was finished. */
+  readonly key: string;
+  /** The record, carrying THIS row's completion: `doneAt` is the entry's
+   *  instant and `when` is the day that instance was owed. Never written. */
+  readonly task: TaskView;
+  /** Whether an untick is offered. Every ordinary done record, and the newest
+   *  entry of a repeating task only: an older entry is history, and undoing
+   *  one would leave the series on a day nothing put it on. */
+  readonly untickable: boolean;
+}
+
+/** Every completion the Logbook shows, newest first.
+ *
+ *  `offsetMinutes` decides the window edge for the same reason it decides the
+ *  group header: a completion is one UTC instant and the day it falls on is
+ *  the reader's.
+ */
+export function logbookRows(
+  tasks: readonly TaskView[],
+  today: string,
+  offsetMinutes: number,
+): LogbookRow[] {
+  const windowStart = logbookWindowStart(today);
+  // A completion with no instant has no day to measure, and `lists.ts` places
+  // it deliberately at the foot of the Logbook under no header, so the window
+  // must not be the thing that drops it.
+  const inWindow = (instant: string | undefined): boolean =>
+    instant === undefined || doneDayOf(instant, offsetMinutes) >= windowStart;
+
+  const rows: LogbookRow[] = [];
+  for (const task of tasks) {
+    if (task.repeat) {
+      const log = task.log ?? [];
+      for (const [at, completion] of log.entries()) {
+        if (!inWindow(completion.completedAt)) continue;
+        rows.push({
+          key: `${task.id}:${completion.completedAt}`,
+          task: {
+            ...task,
+            done: true,
+            doneAt: completion.completedAt,
+            when: completion.scheduled,
+          },
+          untickable: at === log.length - 1,
+        });
+      }
+      continue;
+    }
+    if (!task.done || !inWindow(task.doneAt)) continue;
+    rows.push({ key: task.id, task, untickable: true });
+  }
+  return rows.sort(
+    (a, b) => compareInGroup(a.task, b.task, "logbook") || ascending(a.key, b.key),
+  );
+}
+
 /** Groups sort by rank first, then by label under the reader's own collation,
  *  so `Ёлка` files after `Единорог` rather than after every Latin word. */
 const collator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });

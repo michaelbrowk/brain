@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { parseTaskRecord, type TaskRecord, type TaskRepeat } from "./model";
 import * as recurrenceModule from "./recurrence";
-import { advance, nextOccurrence, RecurrenceError } from "./recurrence";
+import { advance, nextOccurrence, RecurrenceError, revert } from "./recurrence";
 
 /** Every date here is a `YYYY-MM-DD` string and is compared as one. The
  *  weekdays the fixtures rely on: 2026-09-13 is a Sunday, so 2026-09-14 and
@@ -557,6 +557,15 @@ describe("advance", () => {
         refusalOf(() => advance(repeating({ repeat: undefined }), { to: "2026-09-20" })),
         refusalOf(() => advance(record, { completedAt: COMPLETED_AT, today: "someday" })),
       ],
+      revert: () => [
+        revert(
+          repeating({
+            log: [{ scheduled: "2026-09-13", completedAt: "2026-09-13T08:00:00.000Z" }],
+          }),
+        ),
+        refusalOf(() => revert(record)),
+        refusalOf(() => revert(repeating({ repeat: undefined, log: undefined }))),
+      ],
     };
 
     // A new export has to be added above, or this fails before the trap runs.
@@ -596,5 +605,86 @@ describe("advance", () => {
     expect(trapArmed).toBe(true);
     expect(thrown).toBeNull();
     expect(ran).toBe(Object.keys(exercised).length);
+  });
+});
+
+/** The Logbook's untick, which is the completion read backwards.
+ *
+ *  Only the newest entry is offered, so this pops one and puts `when` back to
+ *  the day that entry was owed. Older entries are history and no gesture
+ *  reaches them; `revert` never takes an index for that reason. */
+describe("revert", () => {
+  const FIRST = { scheduled: "2026-09-12", completedAt: "2026-09-12T08:00:00.000Z" };
+  const SECOND = { scheduled: "2026-09-13", completedAt: "2026-09-13T08:00:00.000Z" };
+
+  it("pops the newest entry and restores when to the day it was owed", () => {
+    const record = repeating({ when: "2026-09-14", log: [FIRST, SECOND] });
+
+    const result = revert(record);
+
+    expect(result.when).toBe("2026-09-13");
+    expect(result.log).toEqual([FIRST]);
+    expect(result.repeat).toEqual(DAILY);
+    expect(parseTaskRecord(result).ok).toBe(true);
+  });
+
+  it("drops the log entirely when the last entry goes", () => {
+    // `log` beside no entries is a key the schema allows and nothing reads.
+    // Removing it keeps a record that has never been completed and one that
+    // has been completed and unticked byte for byte the same file.
+    const record = repeating({ when: "2026-09-14", log: [SECOND] });
+
+    const result = revert(record);
+
+    expect(result.when).toBe("2026-09-13");
+    expect("log" in result).toBe(false);
+    expect(parseTaskRecord(result).ok).toBe(true);
+  });
+
+  it("undoes exactly what advance did, for a completion and an early one", () => {
+    for (const when of ["2026-09-14", "2026-09-20"]) {
+      const record = repeating({ when });
+      const completed = advance(record, {
+        completedAt: COMPLETED_AT,
+        today: "2026-09-14",
+      });
+      expect(revert(completed)).toEqual(record);
+    }
+  });
+
+  it("refuses a task that does not repeat", () => {
+    const plain = repeating({ repeat: undefined, log: undefined });
+
+    try {
+      revert(plain);
+      expect.unreachable("revert accepted a task with no rule");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RecurrenceError);
+      expect((error as RecurrenceError).reason).toBe("no-repeat");
+    }
+  });
+
+  it("refuses a repeating task that has completed nothing", () => {
+    for (const log of [undefined, []]) {
+      try {
+        revert(repeating({ log }));
+        expect.unreachable("revert invented a completion");
+      } catch (error) {
+        expect(error).toBeInstanceOf(RecurrenceError);
+        expect((error as RecurrenceError).reason).toBe("empty-log");
+      }
+    }
+  });
+
+  it("never mutates the record it was given", () => {
+    const log = [FIRST, SECOND];
+    const record = repeating({ log });
+    const before = structuredClone(record);
+
+    revert(record);
+
+    expect(record).toEqual(before);
+    expect(record.log).toBe(log);
+    expect(log).toHaveLength(2);
   });
 });

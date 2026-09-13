@@ -19,7 +19,7 @@ import {
   SPRING_SHEET_GESTURE,
   materializeFade,
 } from "@/lib/motion";
-import type { TaskView } from "@/lib/tasks/model";
+import type { TaskRepeat, TaskView } from "@/lib/tasks/model";
 
 import { CategoryPicker } from "./category-picker";
 import {
@@ -34,6 +34,7 @@ import {
   overdueWhenCaption,
   repeatNextLabel,
 } from "./tasks-lists";
+import { TasksRepeatMenu } from "./tasks-repeat-menu";
 import { Icon } from "./ui/icon";
 
 /** THE ROW, AND THE TWO DIRECTIONS IT CAN LEAVE IN.
@@ -120,6 +121,14 @@ export function foldRow(
 
 export interface TasksRowProps {
   task: TaskView;
+  /** What the COLUMN calls this row. The Logbook draws one row per completion,
+   *  so a repeating task has several rows carrying one record id, and the
+   *  selection has to be able to tell them apart. Defaults to the id. */
+  rowKey?: string;
+  /** A Logbook row that is history: an older completion of a repeating task.
+   *  It has nothing left to undo, so its box does not toggle and the row does
+   *  not open. */
+  historic?: boolean;
   today: string;
   offsetMinutes: number;
   reduce: boolean;
@@ -139,13 +148,23 @@ export interface TasksRowProps {
   onComplete: (task: TaskView) => Promise<void>;
   onReopen: (task: TaskView) => void;
   onReschedule: (task: TaskView, when: string | "someday" | null, label: string) => Promise<void>;
-  onPatch: (task: TaskView, patch: { title?: string; deadline?: string | null; category?: string | null }) => void;
+  onPatch: (
+    task: TaskView,
+    patch: {
+      title?: string;
+      deadline?: string | null;
+      category?: string | null;
+      repeat?: TaskRepeat | null;
+    },
+  ) => void;
   onFoldEnd: (id: string) => void;
   onOpenPage?: (pageId: string) => void;
 }
 
 export function TasksRow({
   task,
+  rowKey,
+  historic = false,
   today,
   offsetMinutes,
   reduce,
@@ -164,6 +183,7 @@ export function TasksRow({
   onFoldEnd,
   onOpenPage,
 }: TasksRowProps) {
+  const key = rowKey ?? task.id;
   const wrapRef = useRef<HTMLLIElement | null>(null);
   const boxRef = useRef<HTMLButtonElement | null>(null);
   const holdRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -226,23 +246,26 @@ export function TasksRow({
   }, [commit, reduce]);
 
   const toggle = useCallback(() => {
+    // An older completion of a repeating series is history: the untick is
+    // offered on the newest one only, so there is nothing here to undo.
+    if (historic) return;
     if (task.done) {
       onReopen(task);
       return;
     }
     if (cancelHold()) return;
     beginHold();
-  }, [beginHold, cancelHold, onReopen, task]);
+  }, [beginHold, cancelHold, historic, onReopen, task]);
 
   /** ⌘⏎: the SELECTION moves on at once and the fold plays behind it. The
    *  hold is unchanged, because the way back has nothing to do with which hand made
    *  the gesture, and a keyboard completion that wrote immediately would be
    *  the one path with no way back. */
   const completeNow = useCallback(() => {
-    onSelectNext(task.id);
+    onSelectNext(key);
     if (holdRef.current) return;
     beginHold();
-  }, [beginHold, onSelectNext, task.id]);
+  }, [beginHold, key, onSelectNext]);
 
   const leaveDown = useCallback(
     async (when: string | "someday" | null, label: string) => {
@@ -261,12 +284,21 @@ export function TasksRow({
     [onFoldEnd, onReschedule, reduce, task],
   );
 
-  useRowShortcuts({ selected, expanded, completeNow, leaveDown, onExpand, today, task });
+  useRowShortcuts({
+    selected,
+    expanded,
+    completeNow,
+    leaveDown,
+    onExpand,
+    today,
+    rowKey: key,
+    historic,
+  });
 
   const swipeHandlers = useSwipe({
     x,
     reduce,
-    enabled: !task.done && !expanded,
+    enabled: !task.done && !historic && !expanded,
     onWord: setSwipeSide,
     onCommit: (side) => {
       setSwipeSide(null);
@@ -280,7 +312,11 @@ export function TasksRow({
 
   const openRow = (event: React.MouseEvent) => {
     if ((event.target as HTMLElement).closest("[data-task-control]")) return;
-    onSelect(task.id);
+    onSelect(key);
+    // A history row opens nothing: its chips would edit the live record from
+    // under a completion that is over, and its title is not the record's to
+    // change from here either.
+    if (historic) return;
     // The title becomes editable on a SECOND tap, not on expansion, so a
     // phone keyboard does not rise from opening a row.
     if (expanded && (event.target as HTMLElement).closest(".brain-task-title")) {
@@ -288,7 +324,7 @@ export function TasksRow({
       setEditing(true);
       return;
     }
-    onExpand(expanded ? null : task.id);
+    onExpand(expanded ? null : key);
   };
 
   const commitTitle = () => {
@@ -448,13 +484,18 @@ export function TasksRow({
                     onSet={(category) => onPatch(task, { category: category || null })}
                     revealClass=""
                   />
-                  {task.repeat && (
-                    <span className="chip" data-static data-task-control>
-                      <span className="chip-glyph">
-                        <Icon name="restart" size={14} />
-                      </span>
-                      {repeatWord(task)}
-                    </span>
+                  {/* A rule can be added to any task that is not a note
+                      line's, and to no other (decision 14): a linked task's
+                      completion is the checkbox in somebody's document, and a
+                      repeat would have to write `[ ]` back into it every
+                      morning. A detached one has no line left and still came
+                      from one, so it is not offered either. */}
+                  {!linked && !detached && (
+                    <TasksRepeatMenu
+                      task={task}
+                      today={today}
+                      onSet={(repeat) => onPatch(task, { repeat })}
+                    />
                   )}
                   {/* A someday task is explicitly undated, and a deadline
                       already past would pull it straight into Today, so the
@@ -496,12 +537,6 @@ export function TasksRow({
       </div>
     </motion.li>
   );
-}
-
-function repeatWord(task: TaskView): string {
-  if (!task.repeat) return "";
-  if (task.repeat.freq === "daily") return "Daily";
-  return task.repeat.freq === "weekly" ? "Weekly" : "Monthly";
 }
 
 export function tomorrowOf(today: string): string {
@@ -612,7 +647,8 @@ function useRowShortcuts({
   leaveDown,
   onExpand,
   today,
-  task,
+  rowKey,
+  historic,
 }: {
   selected: boolean;
   expanded: boolean;
@@ -620,10 +656,13 @@ function useRowShortcuts({
   leaveDown: (when: string | "someday" | null, label: string) => Promise<void>;
   onExpand: (id: string | null) => void;
   today: string;
-  task: TaskView;
+  rowKey: string;
+  historic: boolean;
 }) {
   useEffect(() => {
-    if (!selected) return;
+    // A history row answers no key for the same reason it answers no press:
+    // there is nothing on it left to move or to undo.
+    if (!selected || historic) return;
     const onKey = (event: KeyboardEvent) => {
       if (isTyping(event.target)) return;
       const meta = event.metaKey || event.ctrlKey;
@@ -634,7 +673,7 @@ function useRowShortcuts({
       }
       if (event.key === "Enter") {
         event.preventDefault();
-        onExpand(expanded ? null : task.id);
+        onExpand(expanded ? null : rowKey);
         return;
       }
       // ⌘] is not a letter and no browser claims it, so Tomorrow keeps the
@@ -652,7 +691,7 @@ function useRowShortcuts({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [completeNow, expanded, leaveDown, onExpand, selected, task.id, today]);
+  }, [completeNow, expanded, historic, leaveDown, onExpand, rowKey, selected, today]);
 }
 
 /** The two the palette carries too, so a key and a palette row never disagree

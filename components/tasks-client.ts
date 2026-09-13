@@ -2,7 +2,7 @@
 
 import { useEffect, useSyncExternalStore } from "react";
 import { apiFetch } from "@/lib/client";
-import type { TaskView } from "@/lib/tasks/model";
+import type { TaskRepeat, TaskView } from "@/lib/tasks/model";
 
 /** ONE FETCH OF THE TASKS, READ BY EVERYTHING THAT NEEDS THEM.
  *
@@ -250,6 +250,9 @@ export interface TaskPatch {
   when?: string | null;
   deadline?: string | null;
   category?: string | null;
+  /** `null` stops the task repeating and leaves the current instance as an
+   *  ordinary task. The record's `log` goes with the rule. */
+  repeat?: TaskRepeat | null;
   done?: boolean;
 }
 

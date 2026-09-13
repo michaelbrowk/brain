@@ -34,7 +34,7 @@ function task(id: string, over: Partial<TaskView> = {}): TaskView {
 function shape(sections: ReturnType<typeof sectionsFor>) {
   return sections.map((section) => [
     section.group.label,
-    section.tasks.map((t) => t.id),
+    section.rows.map((row) => row.task.id),
   ]);
 }
 
@@ -204,5 +204,65 @@ describe("the words a row and a header say", () => {
   it("reads a completion time in the reader's offset", () => {
     expect(doneTimeOf("2026-09-13T09:05:00.000Z", 0)).toMatch(/9[:.]05/);
     expect(doneTimeOf("2026-09-12T22:30:00.000Z", 240)).toMatch(/2[:.]30/);
+  });
+});
+
+/** THE LOGBOOK COUNTS COMPLETIONS AND EVERY OTHER LIST COUNTS RECORDS.
+ *
+ *  A repeating task is never done, so it is in Today or Upcoming as one row
+ *  and in the Logbook as one row per entry in its `log`. That is the only
+ *  place in the column where a record draws more than one row, and it is why
+ *  a section carries rows rather than tasks. */
+describe("sectionsFor, the Logbook of a repeating task", () => {
+  const words = (log: { scheduled: string; completedAt: string }[]): TaskView =>
+    task("words", { repeat: { freq: "daily" }, when: "2026-09-14", log });
+
+  it("draws one row per completion, under the day each was finished on", () => {
+    const sections = sectionsFor(
+      [
+        words([
+          { scheduled: "2026-09-12", completedAt: "2026-09-12T09:00:00.000Z" },
+          { scheduled: "2026-09-13", completedAt: "2026-09-13T09:00:00.000Z" },
+        ]),
+      ],
+      list("logbook"),
+      TODAY,
+      UTC,
+    );
+
+    expect(shape(sections)).toEqual([
+      ["Today", ["words"]],
+      ["Yesterday", ["words"]],
+    ]);
+    // One id and two rows, so the key cannot be the id: two rows answering to
+    // one selection would light together.
+    expect(sections.flatMap((section) => section.rows.map((row) => row.key))).toEqual([
+      "words:2026-09-13T09:00:00.000Z",
+      "words:2026-09-12T09:00:00.000Z",
+    ]);
+    expect(
+      sections.flatMap((section) => section.rows.map((row) => row.untickable)),
+    ).toEqual([true, false]);
+  });
+
+  it("keeps the open instance out of the Logbook and in the list it is due in", () => {
+    const tasks = [
+      words([{ scheduled: "2026-09-13", completedAt: "2026-09-13T09:00:00.000Z" }]),
+    ];
+
+    expect(shape(sectionsFor(tasks, list("upcoming"), TODAY, UTC))).toEqual([
+      ["Tomorrow", ["words"]],
+    ]);
+    expect(shape(sectionsFor(tasks, list("today"), TODAY, UTC))).toEqual([]);
+    expect(shape(sectionsFor(tasks, list("logbook"), TODAY, UTC))).toEqual([
+      ["Today", ["words"]],
+    ]);
+  });
+
+  it("gives an ordinary row the record's own id as its key", () => {
+    const sections = sectionsFor([task("a", { when: TODAY })], list("today"), TODAY, UTC);
+
+    expect(sections[0].rows.map((row) => row.key)).toEqual(["a"]);
+    expect(sections[0].rows[0].untickable).toBe(true);
   });
 });

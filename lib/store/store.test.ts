@@ -10777,9 +10777,13 @@ describe("task records", () => {
     await expect(
       s.updateTask(repeating.id, { done: true, today: "2026-9-1" }),
     ).rejects.toThrow(/bad_today/);
+    // And with it the completion is the rule's: the log takes the entry and
+    // `when` moves on, so the record stays open on its next occurrence rather
+    // than turning into a done one. `store.tasks-repeat.test.ts` owns the
+    // whole of that path.
     await expect(
       s.updateTask(repeating.id, { done: true, today: TODAY }),
-    ).resolves.toMatchObject({ done: true });
+    ).resolves.toMatchObject({ done: false, when: TOMORROW });
   });
 
   it("serializes two patches so neither loses the other's field", async () => {

@@ -5,6 +5,7 @@ import {
   doneDayOf,
   groupFor,
   listOf,
+  logbookRows,
   type ListName,
   type TaskGroup,
 } from "@/lib/tasks/lists";
@@ -24,9 +25,21 @@ import type { TaskView } from "@/lib/tasks/model";
  *  for its uncategorised group.
  */
 
+/** One drawn row. A row is not a record: the Logbook draws one per COMPLETION,
+ *  and a repeating task has as many of those as it has days it was finished on
+ *  (`logbookRows` in `lib/tasks/lists.ts`). Everywhere else the two are the
+ *  same thing and `key` is the record's id. */
+export interface TaskRow {
+  readonly key: string;
+  readonly task: TaskView;
+  /** False on a Logbook row that is history: an older completion of a
+   *  repeating task, which has nothing left to undo. */
+  readonly untickable: boolean;
+}
+
 export interface TaskSection {
   readonly group: TaskGroup;
-  readonly tasks: readonly TaskView[];
+  readonly rows: readonly TaskRow[];
 }
 
 /** What the column is looking at. `category: ""` is the uncategorised view,
@@ -41,16 +54,15 @@ export function sectionsFor(
   today: string,
   offsetMinutes: number,
 ): TaskSection[] {
-  const sections = new Map<string, { group: TaskGroup; tasks: TaskView[] }>();
-  for (const task of tasks) {
-    if (!belongs(task, view, today)) continue;
+  const sections = new Map<string, { group: TaskGroup; rows: TaskRow[] }>();
+  for (const row of rowsFor(tasks, view, today, offsetMinutes)) {
     const group =
       view.kind === "list"
-        ? groupFor(task, today, offsetMinutes)
-        : categoryGroup(task, today);
+        ? groupFor(row.task, today, offsetMinutes)
+        : categoryGroup(row.task, today);
     const existing = sections.get(group.key);
-    if (existing) existing.tasks.push(task);
-    else sections.set(group.key, { group, tasks: [task] });
+    if (existing) existing.rows.push(row);
+    else sections.set(group.key, { group, rows: [row] });
   }
   // The logbook reads by completion and everything else by creation, and a
   // category view is everything else.
@@ -59,8 +71,28 @@ export function sectionsFor(
     .sort((a, b) => compareGroups(a.group, b.group))
     .map((section) => ({
       group: section.group,
-      tasks: section.tasks.sort((a, b) => compareInGroup(a, b, order)),
+      rows: section.rows.sort((a, b) => compareInGroup(a.task, b.task, order)),
     }));
+}
+
+/** THE LOGBOOK COUNTS COMPLETIONS AND EVERY OTHER LIST COUNTS RECORDS.
+ *
+ *  A repeating task is never done, so its record is in Today or Upcoming and
+ *  its history is in `log`. The Logbook therefore cannot be a filter over the
+ *  records: it is a read of the completions, one row each, and that is the one
+ *  place a record can draw more than a single row. */
+function rowsFor(
+  tasks: readonly TaskView[],
+  view: TasksView,
+  today: string,
+  offsetMinutes: number,
+): TaskRow[] {
+  if (view.kind === "list" && view.list === "logbook") {
+    return logbookRows(tasks, today, offsetMinutes);
+  }
+  return tasks
+    .filter((task) => belongs(task, view, today))
+    .map((task) => ({ key: task.id, task, untickable: true }));
 }
 
 function belongs(task: TaskView, view: TasksView, today: string): boolean {
@@ -182,22 +214,34 @@ export function doneTimeOf(iso: string, offsetMinutes: number): string {
   }).format(shifted);
 }
 
-/** Where the next one lands, in the Upcoming group's own `Thu 17` shape.
+/** The day the next occurrence lands on, or null for a task that does not
+ *  repeat.
  *
- *  Read during the completion hold so the row says where the series went
- *  before it folds. `nextOccurrence` measures from the later of the day the
- *  task is meant for and today, which is the rule's own definition of "next"
- *  (`lib/tasks/recurrence.ts`); a rule it refuses gives no label rather than
- *  a guess. */
-export function repeatNextLabel(task: TaskView, today: string): string | null {
+ *  `nextOccurrence` measures from the later of the day the task is meant for
+ *  and today, which is `advance()`'s own `max(when, today)` and the rule's
+ *  definition of "next" (`lib/tasks/recurrence.ts`). The browser computes it
+ *  for two reasons and both are about the same 1.3 seconds: the tail says
+ *  where the series went before the row folds, and the optimistic write moves
+ *  the record there so the count beside it decrements on the same beat rather
+ *  than waiting for the answer. A rule the helper refuses gives null rather
+ *  than a guess, and the server's answer replaces all of it either way. */
+export function repeatNextDay(task: TaskView, today: string): string | null {
   if (!task.repeat) return null;
   const from = isDay(task.when) && task.when > today ? task.when : today;
   try {
-    const day = nextOccurrence(task.repeat, from);
-    return `${weekdayOf(day)} ${Number(day.slice(8, 10))}`;
+    return nextOccurrence(task.repeat, from);
   } catch {
     return null;
   }
+}
+
+/** Where the next one lands, in the Upcoming group's own `Thu 17` shape.
+ *
+ *  Read during the completion hold so the row says where the series went
+ *  before it folds. */
+export function repeatNextLabel(task: TaskView, today: string): string | null {
+  const day = repeatNextDay(task, today);
+  return day === null ? null : `${weekdayOf(day)} ${Number(day.slice(8, 10))}`;
 }
 
 /** The open tasks of one category, for the count beside it in the menu. */

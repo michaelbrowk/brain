@@ -137,6 +137,7 @@ import {
   isLinkedTask,
   parseTaskRecord,
   type TaskRecord,
+  type TaskRepeat,
   type TaskView,
 } from "../tasks/model";
 import {
@@ -153,6 +154,7 @@ import {
   type CheckboxMergeResult,
 } from "../tasks/merge-checkboxes";
 import { reconcilePageTasks } from "../tasks/reconcile";
+import { RecurrenceError, advance, revert } from "../tasks/recurrence";
 
 interface Entry {
   dir: string;
@@ -6655,6 +6657,7 @@ export class Store {
 
   async createTask(input: CreateTaskInput): Promise<TaskView> {
     return this.mutate(async () => {
+      assertRepeatUnlinked(input.repeat, input.page);
       this.assertLinkablePageUnlocked(input.page);
       const now = new Date().toISOString();
       const record = parseTask({
@@ -6687,11 +6690,19 @@ export class Store {
     return this.mutate(async () => {
       let current = this.taskIndex.get(id);
       if (!current) throw new NotFoundError(id);
+      assertTodayUsage(current, patch);
+      // A repeating task is never linked and never detached: the schema
+      // refuses `repeat` beside `page`, so its completion can only be the
+      // rule's, and the branch below cannot compete with the note's.
+      if (patch.done !== undefined && current.repeat) {
+        await this.advanceTaskUnlocked(current, patch);
+        return this.taskIndex.view(id) as TaskView;
+      }
       if (patch.done !== undefined && isLinkedTask(current)) {
         // A linked task's completion lives in the note, so completing one
         // from Tasks or unticking one from the Logbook writes the checkbox
         // and lets the reconcile derive the rest. Two files, one `mutate()`.
-        assertOnlyCompletion(patch);
+        assertOnlyCompletion(patch, "a linked task's done");
         // A task whose page is hidden is in no list, and the same answer is
         // owed to a caller that reaches it by id: a refusal naming the page,
         // never a `NotFoundError` thrown out of the lock by `this.get`.
@@ -6719,6 +6730,49 @@ export class Store {
       if (!this.taskIndex.get(id)) throw new NotFoundError(id);
       await this.deleteTaskUnlocked(id, src);
     });
+  }
+
+  /** THE ONE OPEN INSTANCE, MOVED ON.
+   *
+   *  Completing a repeating task is not a `done` to write. The rule owns where
+   *  the series goes next, so the completion joins `log` and `when` moves to
+   *  the first day the rule names after the later of today and the day this
+   *  instance was owed, and `done` is never set: a record carrying both would
+   *  stand in the Logbook and in Today at once. Unticking is that read
+   *  backwards, on the newest entry and no other.
+   *
+   *  One record, one `atomicWrite`, one `task` event, so there is no half
+   *  state to journal: `advance` and `revert` are pure and the whole change is
+   *  the one file this writes.
+   *
+   *  `RecurrenceError` is turned into a validation refusal rather than allowed
+   *  out. Both of its reachable reasons are already refused above this line,
+   *  `no-repeat` by the `repeat` check in `updateTask` and `bad-today` by
+   *  `assertTodayUsage`, so anything arriving here is a caller Brain has not
+   *  thought of, and it is owed a 400 naming the reason rather than a 500.
+   *
+   *  Caller owns mutate(). */
+  private async advanceTaskUnlocked(
+    current: TaskRecord,
+    patch: UpdateTaskPatch,
+  ): Promise<void> {
+    // A completion moves `when`, so a `when` in the same call would be two
+    // answers to where the task goes next, and a silently dropped one is the
+    // worse of the two. The caller sends them as two requests.
+    assertOnlyCompletion(patch, "a repeating task's completion");
+    const at = new Date().toISOString();
+    let next: TaskRecord;
+    try {
+      next = patch.done
+        ? advance(current, { completedAt: at, today: patch.today as string })
+        : revert(current);
+    } catch (error) {
+      if (error instanceof RecurrenceError) {
+        throw new TaskValidationError(error.message);
+      }
+      throw error;
+    }
+    await this.writeTaskUnlocked(parseTask({ ...next, updated: at }), patch.src);
   }
 
   /** A page id passes the schema on its shape alone, which is not enough. A
@@ -7003,11 +7057,15 @@ function withCheckbox(
   return lines.join("\n");
 }
 
-/** A linked task's completion is a write to its note, and the note cannot
- *  carry a schedule or a category. Taking both in one call would mean two
- *  files written for two unrelated reasons under one result, so the caller
- *  sends them as two requests and learns which of them failed. */
-function assertOnlyCompletion(patch: UpdateTaskPatch): void {
+/** A completion that cannot carry anything else.
+ *
+ *  A LINKED task's completion is a write to its note, and the note cannot hold
+ *  a schedule or a category, so the two would be two files written for two
+ *  unrelated reasons under one result. A REPEATING task's completion moves
+ *  `when` itself, so a `when` beside it is a second answer to where the task
+ *  goes next. Either way the caller sends two requests and learns which of
+ *  them failed. */
+function assertOnlyCompletion(patch: UpdateTaskPatch, subject: string): void {
   const others: (keyof UpdateTaskPatch)[] = [
     "title",
     "when",
@@ -7018,10 +7076,41 @@ function assertOnlyCompletion(patch: UpdateTaskPatch): void {
   for (const key of others) {
     if (patch[key] !== undefined) {
       throw new TaskValidationError(
-        `${key} cannot be set in the same call as a linked task's done`,
+        `${key} cannot be set in the same call as ${subject}`,
       );
     }
   }
+}
+
+/** `today` is the one parameter the server cannot derive, and a repeating task
+ *  needs it on completion because the next occurrence comes off
+ *  max(when, today). Nothing else takes it, so anywhere else it is a caller
+ *  mistake worth hearing about rather than a value to ignore. */
+function assertTodayUsage(current: TaskRecord, patch: UpdateTaskPatch): void {
+  const completingRepeat = patch.done === true && current.repeat !== undefined;
+  if (patch.today !== undefined && !completingRepeat) {
+    throw new TaskValidationError(
+      "today is only accepted when completing a repeating task",
+    );
+  }
+  if (completingRepeat) assertToday(patch.today);
+}
+
+/** A task that came from a note line cannot repeat (decision 14). Otherwise
+ *  every completion would have to write `[ ]` back into somebody's document
+ *  every morning.
+ *
+ *  The schema refuses the same pair, in the words of its own two fields. This
+ *  says it in the words a person would use, and it says it for a DETACHED
+ *  record too: that one has no line left, and the reason it still cannot
+ *  repeat is the note it came from rather than a `page` key it happens to
+ *  carry. */
+function assertRepeatUnlinked(
+  repeat: TaskRepeat | null | undefined,
+  page: string | undefined,
+): void {
+  if (repeat === undefined || repeat === null || page === undefined) return;
+  throw new TaskValidationError("a task that came from a note line cannot repeat");
 }
 
 /** The one shape a rev conflict is allowed to resolve silently.
@@ -7066,17 +7155,7 @@ function applyTaskPatch(
   current: TaskRecord,
   patch: UpdateTaskPatch,
 ): TaskRecord {
-  // `today` is the one parameter the server cannot derive, and a repeating
-  // task needs it on completion because the next occurrence is computed from
-  // max(when, today). Nothing else takes it, so anywhere else it is a caller
-  // mistake worth hearing about rather than a value to ignore.
-  const completingRepeat = patch.done === true && current.repeat !== undefined;
-  if (patch.today !== undefined && !completingRepeat) {
-    throw new TaskValidationError(
-      "today is only accepted when completing a repeating task",
-    );
-  }
-  if (completingRepeat) assertToday(patch.today);
+  assertRepeatUnlinked(patch.repeat, current.page);
   const next: Record<string, unknown> = { ...current };
   if (patch.title !== undefined) {
     // The note line is a linked task's title. The copy in the file is a cache
@@ -7090,10 +7169,22 @@ function applyTaskPatch(
     }
     next.title = patch.title;
   }
-  assignOrClear(next, "when", patch.when);
+  if (patch.when !== undefined && patch.when !== null && current.repeat) {
+    // A reschedule moves THIS instance and leaves the rule where it is, which
+    // is `advance`'s other path and the reason no Skip control exists: moving
+    // the daily to Thursday is also skipping Tuesday and Wednesday, because
+    // there is only ever one open instance.
+    next.when = advance(current, { to: patch.when }).when;
+  } else {
+    assignOrClear(next, "when", patch.when);
+  }
   assignOrClear(next, "deadline", patch.deadline);
   assignOrClear(next, "category", patch.category);
   assignOrClear(next, "repeat", patch.repeat);
+  // The history goes with the rule. `log` beside no `repeat` is a shape the
+  // schema refuses, so leaving it behind would make the file unreadable on the
+  // next load and the task would vanish from every list.
+  if (patch.repeat === null) delete next.log;
   if (patch.done !== undefined) {
     // A linked task is completed by its checkbox, so `updateTask` writes the
     // note and the reconcile derives this. A detached one owns its own

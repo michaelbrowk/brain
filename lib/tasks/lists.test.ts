@@ -12,6 +12,7 @@ import {
   doneDayOf,
   groupFor,
   listOf,
+  logbookRows,
   type ListName,
   type TaskGroup,
 } from "./lists";
@@ -146,6 +147,25 @@ describe("listOf", () => {
         groupFor(task({ done: true }), TODAY),
       ],
       doneDayOf: () => doneDayOf("2026-09-12T22:00:00.000Z", -300),
+      logbookRows: () =>
+        logbookRows(
+          [
+            task({ done: true, doneAt: "2026-09-12T09:00:00.000Z" }),
+            task({ done: true }),
+            task({ id: "task-open" }),
+            task({
+              id: "task-words",
+              repeat: { freq: "daily" },
+              when: "2026-09-14",
+              log: [
+                { scheduled: "2026-09-12", completedAt: "2026-09-12T09:00:00.000Z" },
+                { scheduled: "2026-07-01", completedAt: "2026-07-01T09:00:00.000Z" },
+              ],
+            }),
+          ],
+          TODAY,
+          180,
+        ),
       compareGroups: () => compareGroups(group, { key: "Home", label: "Home", order: 1 }),
       compareInGroup: () => [
         compareInGroup(task(), task({ id: "task-beta" }), "today"),
@@ -367,5 +387,152 @@ describe("compareInGroup", () => {
       last,
       first,
     ]);
+  });
+});
+
+/** THE LOGBOOK IS DRAWN FROM COMPLETIONS, NOT FROM RECORDS.
+ *
+ *  A repeating task is never done: completing it appends a `log` entry and
+ *  moves `when` on, so the record itself is always open and would never reach
+ *  the Logbook at all. History is per instance even though storage is per
+ *  series, so every entry is a row of its own, carrying the day that instance
+ *  was owed and the instant it was finished.
+ */
+describe("logbookRows", () => {
+  const entry = (day: string, hour = "09") => ({
+    scheduled: day,
+    completedAt: `${day}T${hour}:00:00.000Z`,
+  });
+
+  const repeating = (fields: Partial<TaskView> = {}): TaskView =>
+    task({
+      id: "task-words",
+      title: "Learn words",
+      repeat: { freq: "daily" },
+      when: "2026-09-14",
+      ...fields,
+    });
+
+  it("draws one row per log entry, newest first, each carrying its own completion", () => {
+    const rows = logbookRows(
+      [repeating({ log: [entry("2026-09-11"), entry("2026-09-12"), entry("2026-09-13")] })],
+      TODAY,
+      0,
+    );
+
+    expect(rows.map((row) => row.task.doneAt)).toEqual([
+      "2026-09-13T09:00:00.000Z",
+      "2026-09-12T09:00:00.000Z",
+      "2026-09-11T09:00:00.000Z",
+    ]);
+    // The day each instance was owed, which is not the day it was finished
+    // once a completion runs early or late.
+    expect(rows.map((row) => row.task.when)).toEqual([
+      "2026-09-13",
+      "2026-09-12",
+      "2026-09-11",
+    ]);
+    expect(rows.every((row) => row.task.done)).toBe(true);
+    expect(rows.every((row) => row.task.id === "task-words")).toBe(true);
+    expect(new Set(rows.map((row) => row.key)).size).toBe(3);
+  });
+
+  it("offers the untick on the newest entry and on no other", () => {
+    const rows = logbookRows(
+      [repeating({ log: [entry("2026-09-12"), entry("2026-09-13")] })],
+      TODAY,
+      0,
+    );
+
+    expect(rows.map((row) => row.untickable)).toEqual([true, false]);
+  });
+
+  it("keeps a completion early and one late apart, by their own two days", () => {
+    // Scheduled the 12th, finished on the 11th; scheduled the 13th, finished
+    // on the 14th. The row's day is the completion's and its `when` is the
+    // instance's, and neither can stand in for the other.
+    const rows = logbookRows(
+      [
+        repeating({
+          log: [
+            { scheduled: "2026-09-12", completedAt: "2026-09-11T09:00:00.000Z" },
+            { scheduled: "2026-09-13", completedAt: "2026-09-14T09:00:00.000Z" },
+          ],
+        }),
+      ],
+      "2026-09-14",
+      0,
+    );
+
+    expect(rows.map((row) => [row.task.when, row.task.doneAt])).toEqual([
+      ["2026-09-13", "2026-09-14T09:00:00.000Z"],
+      ["2026-09-12", "2026-09-11T09:00:00.000Z"],
+    ]);
+    expect(groupFor(rows[0].task, "2026-09-14", 0).label).toBe("Today");
+  });
+
+  it("stops the log at the thirty day window, in the reader's own days", () => {
+    const inside = entry("2026-08-15");
+    const outside = entry("2026-08-13");
+    const rows = logbookRows([repeating({ log: [outside, inside] })], TODAY, 0);
+
+    expect(rows.map((row) => row.task.doneAt)).toEqual([inside.completedAt]);
+  });
+
+  it("a repeating task that has completed nothing draws no row", () => {
+    expect(logbookRows([repeating()], TODAY, 0)).toEqual([]);
+    expect(logbookRows([repeating({ log: [] })], TODAY, 0)).toEqual([]);
+  });
+
+  it("draws one row for an ordinary done task and none for an open one", () => {
+    const done = task({
+      id: "task-plants",
+      done: true,
+      doneAt: "2026-09-13T10:00:00.000Z",
+    });
+    const open = task({ id: "task-milk", when: TODAY });
+
+    const rows = logbookRows([done, open], TODAY, 0);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0].key).toBe("task-plants");
+    expect(rows[0].task).toBe(done);
+    expect(rows[0].untickable).toBe(true);
+  });
+
+  it("keeps a done record with no doneAt, which lists.ts files at the foot", () => {
+    const orphan = task({ id: "task-orphan", done: true });
+
+    const rows = logbookRows([orphan], TODAY, 0);
+
+    expect(rows.map((row) => row.key)).toEqual(["task-orphan"]);
+  });
+
+  it("orders every row by completion, across records and entries alike", () => {
+    const plain = task({
+      id: "task-plants",
+      done: true,
+      doneAt: "2026-09-12T12:00:00.000Z",
+    });
+    const rows = logbookRows(
+      [plain, repeating({ log: [entry("2026-09-12", "08"), entry("2026-09-13")] })],
+      TODAY,
+      0,
+    );
+
+    expect(rows.map((row) => row.task.doneAt)).toEqual([
+      "2026-09-13T09:00:00.000Z",
+      "2026-09-12T12:00:00.000Z",
+      "2026-09-12T08:00:00.000Z",
+    ]);
+  });
+
+  it("reads the window edge in the reader's zone, not in UTC", () => {
+    // 22:00Z on the 13th of August is already the 14th in Dubai, so the same
+    // entry is inside the window there and a day outside it in UTC.
+    const edge = { scheduled: "2026-08-13", completedAt: "2026-08-13T22:00:00.000Z" };
+
+    expect(logbookRows([repeating({ log: [edge] })], TODAY, 240)).toHaveLength(1);
+    expect(logbookRows([repeating({ log: [edge] })], TODAY, 0)).toHaveLength(0);
   });
 });

@@ -16,7 +16,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { DUR, EASE_OUT, SPRING_MATERIALIZE, materializeFade } from "@/lib/motion";
 import { listOf } from "@/lib/tasks/lists";
-import type { TaskView } from "@/lib/tasks/model";
+import type { TaskRepeat, TaskView } from "@/lib/tasks/model";
 
 import { SMART_UNDO_MS, type TasksListState } from "./shell/helpers";
 import {
@@ -34,6 +34,7 @@ import {
   categoriesOf,
   doneDayOf,
   headerLabel,
+  repeatNextDay,
   sectionsFor,
   type TaskSection,
   type TasksView,
@@ -114,10 +115,15 @@ export function TasksSurface({
   );
   const categories = useMemo(() => categoriesOf(state.tasks), [state.tasks]);
 
-  const order = useMemo(
-    () => sections.flatMap((section) => section.tasks.map((task) => task.id)),
+  /** The column's cursor runs over ROWS and not over records, because the
+   *  Logbook draws one row per completion and a daily task has a month of
+   *  them under one id. Two rows that answered to one selection would light
+   *  together and fight over the capsule's `layoutId`. */
+  const drawn = useMemo(
+    () => sections.flatMap((section) => section.rows),
     [sections],
   );
+  const order = useMemo(() => drawn.map((row) => row.key), [drawn]);
 
   const entrance = useEntrance({
     today,
@@ -159,11 +165,18 @@ export function TasksSurface({
   const reopenTask = useCallback(
     async (task: TaskView) => {
       reenter(task.id);
-      mutateTasks((tasks) =>
-        tasks.map((entry) =>
-          entry.id === task.id ? { ...task, done: false, doneAt: undefined } : entry,
-        ),
-      );
+      // A REPEATING task's untick pops its newest log entry and puts `when`
+      // back to the day that instance was owed, which is the rule's answer
+      // and not one the browser can guess: the record it is holding is the
+      // series, and flipping `done` on it here would draw a done row for a
+      // task that is never done. The row waits for the write.
+      if (!task.repeat) {
+        mutateTasks((tasks) =>
+          tasks.map((entry) =>
+            entry.id === task.id ? { ...task, done: false, doneAt: undefined } : entry,
+          ),
+        );
+      }
       try {
         const saved = await patchTask(task.id, { done: false });
         mutateTasks((tasks) =>
@@ -194,12 +207,22 @@ export function TasksSurface({
   const completeTask = useCallback(
     async (task: TaskView) => {
       hold(task);
+      // A REPEATING task is never done. Completing it appends a log entry and
+      // moves `when` to the next occurrence, so an optimistic `done: true`
+      // would file the series in the Logbook for as long as the write takes
+      // and then pull it back out. What moves optimistically is the DAY: the
+      // browser knows the rule, so the record leaves this list on the same
+      // beat an ordinary completion does and the count beside it decrements
+      // once, at 1300. The server's answer replaces it either way.
+      const nextDay = repeatNextDay(task, today);
       mutateTasks((tasks) =>
-        tasks.map((entry) =>
-          entry.id === task.id
-            ? { ...entry, done: true, doneAt: new Date().toISOString() }
-            : entry,
-        ),
+        tasks.map((entry) => {
+          if (entry.id !== task.id) return entry;
+          if (!task.repeat) {
+            return { ...entry, done: true, doneAt: new Date().toISOString() };
+          }
+          return nextDay === null ? entry : { ...entry, when: nextDay };
+        }),
       );
       try {
         const saved = await patchTask(
@@ -210,6 +233,11 @@ export function TasksSurface({
         mutateTasks((tasks) =>
           tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
         );
+        // Spec 2.4, the one case a person watches: the row folded up here and
+        // the NEXT occurrence arrives below, in the following day's group,
+        // with the insert entrance a new row gets. In Today the next one is
+        // tomorrow or later, so nothing appears and the mark is unused.
+        if (task.repeat) reenter(saved.id);
         onToast?.("Completed", {
           actionLabel: "Undo",
           durationMs: SMART_UNDO_MS,
@@ -225,7 +253,7 @@ export function TasksSurface({
         throw error;
       }
     },
-    [hold, onToast, refuse, reopenTask, today],
+    [hold, onToast, reenter, refuse, reopenTask, today],
   );
 
   const rescheduleTask = useCallback(
@@ -264,10 +292,7 @@ export function TasksSurface({
   );
 
   const patchField = useCallback(
-    (
-      task: TaskView,
-      patch: { title?: string; deadline?: string | null; category?: string | null },
-    ) => {
+    (task: TaskView, patch: TaskFieldPatch) => {
       mutateTasks((tasks) =>
         tasks.map((entry) =>
           entry.id === task.id ? { ...entry, ...normalize(patch) } : entry,
@@ -334,12 +359,14 @@ export function TasksSurface({
   // The palette's two rows and the row's two keys are one action each.
   useEffect(() => {
     return onTaskCommand((command) => {
-      const task = rows.find((entry) => entry.id === selectedId);
-      if (!task) return;
+      const row = drawn.find((entry) => entry.key === selectedId);
+      // A Logbook row that is history moves nothing, the same answer the bare
+      // letters give on the row itself.
+      if (!row || !row.untickable) return;
       const move = COMMAND_KEYS[command];
-      void rescheduleTask(task, move.when(today), move.label);
+      void rescheduleTask(row.task, move.when(today), move.label);
     });
-  }, [rescheduleTask, rows, selectedId, today]);
+  }, [drawn, rescheduleTask, selectedId, today]);
 
   // Every list but the Logbook: see `capture`.
   const capturable = !(view.kind === "list" && view.list === "logbook");
@@ -447,15 +474,28 @@ const COMMAND_KEYS: Record<TaskCommand, (typeof ROW_KEYS)[string]> = {
   "move-someday": ROW_KEYS.s as (typeof ROW_KEYS)[string],
 };
 
-function normalize(patch: {
+/** The fields a chip inside an expanded row can set. `null` clears one, which
+ *  is the store's own reading of a patch. */
+export interface TaskFieldPatch {
   title?: string;
   deadline?: string | null;
   category?: string | null;
-}): Partial<TaskView> {
+  repeat?: TaskRepeat | null;
+}
+
+function normalize(patch: TaskFieldPatch): Partial<TaskView> {
   return {
     ...(patch.title !== undefined ? { title: patch.title } : {}),
     ...(patch.deadline !== undefined ? { deadline: patch.deadline ?? undefined } : {}),
     ...(patch.category !== undefined ? { category: patch.category ?? undefined } : {}),
+    // Clearing the rule clears the history with it, the way the record does:
+    // `log` beside no `repeat` is a shape nothing reads.
+    ...(patch.repeat !== undefined
+      ? {
+          repeat: patch.repeat ?? undefined,
+          ...(patch.repeat === null ? { log: undefined } : {}),
+        }
+      : {}),
   };
 }
 
@@ -508,16 +548,13 @@ function TaskGroup({
     when: string | "someday" | null,
     label: string,
   ) => Promise<void>;
-  onPatch: (
-    task: TaskView,
-    patch: { title?: string; deadline?: string | null; category?: string | null },
-  ) => void;
+  onPatch: (task: TaskView, patch: TaskFieldPatch) => void;
   onFoldEnd: (id: string) => void;
 }) {
   const groupDelay = Math.min(index * GROUP_STEP, ENTRANCE_CEILING);
   // The count is what the LIST holds, so a row still folding is already out
   // of it: one decrement at 1300, and the row leaves at 1520.
-  const count = section.tasks.filter((task) => !held.has(task.id)).length;
+  const count = section.rows.filter((row) => !held.has(row.task.id)).length;
 
   return (
     <motion.section
@@ -583,15 +620,17 @@ function TaskGroup({
         </div>
       )}
       <ul className="brain-tasks-rows">
-        {section.tasks.map((task, row) => (
+        {section.rows.map(({ key, task, untickable }, row) => (
           <TasksRow
-            key={task.id}
+            key={key}
+            rowKey={key}
+            historic={!untickable}
             task={task}
             today={today}
             offsetMinutes={offsetMinutes}
             reduce={reduce}
-            selected={task.id === selectedId}
-            expanded={task.id === expandedId}
+            selected={key === selectedId}
+            expanded={key === expandedId}
             categories={categories}
             pageTitle={task.page ? pageTitleOf?.(task.page) : undefined}
             entrance={

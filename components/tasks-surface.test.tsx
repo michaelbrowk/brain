@@ -93,12 +93,19 @@ let token = 0;
 /** What the sidebar's Tasks row would show, off the same records the column
  *  draws from. Recorded on every render, so a race would show as two steps. */
 const counts: number[] = [];
+/** The records the store held at each render, so an OPTIMISTIC step is
+ *  readable before the write lands. What is on screen during a fold is the
+ *  row's pre-write copy and not this. */
+const records: (readonly TaskView[])[] = [];
 
 function CountProbe() {
   const state = useTasks(token);
   counts.push(state.day ? openTodayCount(state.tasks, state.day.today) : -1);
+  records.push(state.tasks);
   return null;
 }
+
+const storeNow = (): readonly TaskView[] => records.at(-1) ?? [];
 
 async function mount(
   tasks: TaskView[],
@@ -195,6 +202,7 @@ beforeEach(() => {
   toasts.length = 0;
   renders.length = 0;
   counts.length = 0;
+  records.length = 0;
   localStorage.clear();
   resetTasksStore();
   apiFetchMock.mockReset();
@@ -845,5 +853,160 @@ describe("where a captured task lands", () => {
 
     await mount([task("a", { when: TODAY })]);
     expect(document.querySelector('[aria-label="New task"]')).not.toBeNull();
+  });
+});
+
+/** SPEC 2.4: THREE CASES AND ONLY ONE IS VISIBLE.
+ *
+ *  A repeating task is never done. Completing it appends a log entry and moves
+ *  `when` to the next occurrence, so in Today the row leaves and nothing takes
+ *  its place, and in Upcoming the next instance materialises below, in the
+ *  future, which is the one screen a person watches it happen on. */
+describe("a repeating task", () => {
+  const words = (over: Partial<TaskView> = {}) =>
+    task("words", { repeat: { freq: "daily" }, when: TODAY, ...over });
+
+  /** The record the route answers a completion with: the log grew and `when`
+   *  moved on, and `done` never went true. */
+  const advanced = (scheduled: string, next: string) =>
+    words({
+      when: next,
+      log: [{ scheduled, completedAt: `${TODAY}T12:00:00.000Z` }],
+    });
+
+  it("sends the reader's own day and moves the day rather than the done", async () => {
+    await mount([words()]);
+    expect(counts.at(-1)).toBe(1);
+    let resolveWrite: ((value: Response) => void) | null = null;
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [words()] });
+      return new Promise<Response>((resolve) => {
+        resolveWrite = resolve;
+      });
+    });
+
+    await act(async () => boxIn(rowFor("words")).click());
+    await act(async () => {
+      vi.advanceTimersByTime(WRITE_AT_MS);
+    });
+    await settle();
+
+    // `today` rides along because the next occurrence comes off
+    // max(when, today), and the server has no timezone to fall back on.
+    expect(String(writes()[0]?.[0])).toBe(`/api/tasks/words?today=${TODAY}`);
+    expect(JSON.parse(String(writes()[0]?.[1]?.body))).toEqual({ done: true });
+    // MID-FLIGHT, which is the whole point: the count has already decremented
+    // at 1300, and the record the browser is holding has moved to tomorrow
+    // rather than gone done. A `done: true` here would file the series in the
+    // Logbook for as long as the write takes and then pull it back out.
+    expect(counts.at(-1)).toBe(0);
+    const optimistic = storeNow().find((entry) => entry.id === "words");
+    expect(optimistic?.done).toBe(false);
+    expect(optimistic?.when).toBe(dayFrom(1));
+
+    await act(async () => {
+      resolveWrite?.(response({ task: advanced(TODAY, dayFrom(1)) }));
+      await Promise.resolve();
+    });
+    await settle();
+    expect(rowTitles()).toEqual([]);
+    expect(toasts[0]?.title).toBe("Completed");
+  });
+
+  it("materialises the next occurrence in the following day's group in Upcoming", async () => {
+    const early = words({ when: dayFrom(1) });
+    await mount([early], { list: "upcoming" });
+    expect(headers()).toEqual(["Tomorrow"]);
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [early] });
+      return response({ task: advanced(dayFrom(1), dayFrom(2)) });
+    });
+
+    await act(async () => boxIn(rowFor("words")).click());
+    await act(async () => {
+      vi.advanceTimersByTime(WRITE_AT_MS);
+    });
+    await settle();
+
+    // Completed early, so the rule counts from the day it was OWED: the next
+    // one is the day after tomorrow, and it draws its own header and rule.
+    expect(headers()).toEqual(["Tue 15"]);
+    expect(rowTitles()).toEqual(["words"]);
+    // And it arrives the way a new row does, height 0 to its own plus
+    // opacity, rather than appearing in one frame. The LAST render, because
+    // the row it replaces mounted before the write with no entrance at all.
+    const arrived = [...renders]
+      .reverse()
+      .find(
+        (render) =>
+          String(render.props.className) === "brain-task-row-item" &&
+          render.props["data-task-id"] === "words",
+      );
+    expect(arrived?.motion.initial).toEqual({ opacity: 0, height: 0 });
+  });
+
+  it("arrives on opacity alone under reduced motion", async () => {
+    harness.reduce = true;
+    const early = words({ when: dayFrom(1) });
+    await mount([early], { list: "upcoming" });
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [early] });
+      return response({ task: advanced(dayFrom(1), dayFrom(2)) });
+    });
+
+    await act(async () => boxIn(rowFor("words")).click());
+    await act(async () => {
+      vi.advanceTimersByTime(WRITE_AT_MS);
+    });
+    await settle();
+
+    // Nothing travels and no height animates: the same crossfade 2.1 and 2.3
+    // collapse to.
+    const arrived = [...renders]
+      .reverse()
+      .find(
+        (render) =>
+          String(render.props.className) === "brain-task-row-item" &&
+          render.props["data-task-id"] === "words",
+      );
+    expect(arrived?.motion.initial).toEqual({ opacity: 0 });
+    expect(arrived?.motion.animate).toEqual({ opacity: 1 });
+  });
+
+  it("draws one Logbook row per completion and unticks only the newest", async () => {
+    const twice = words({
+      when: dayFrom(1),
+      log: [
+        { scheduled: dayFrom(-1), completedAt: `${dayFrom(-1)}T09:00:00.000Z` },
+        { scheduled: TODAY, completedAt: `${TODAY}T09:00:00.000Z` },
+      ],
+    });
+    await mount([twice], { list: "logbook" });
+
+    expect(headers()).toEqual(["Today · 1", "Yesterday · 1"]);
+    expect(rowTitles()).toEqual(["words", "words"]);
+
+    const [newest, older] = [
+      ...document.querySelectorAll<HTMLElement>(".brain-task-row-item"),
+    ];
+    // History: an older completion has nothing left to undo, so its box does
+    // not answer. The newest one pops its entry and puts `when` back.
+    await act(async () => boxIn(older).click());
+    await settle();
+    expect(writes()).toHaveLength(0);
+
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [twice] });
+      return response({ task: words({ when: TODAY, log: twice.log?.slice(0, 1) }) });
+    });
+    await act(async () => boxIn(newest).click());
+    await settle();
+    expect(writes()).toHaveLength(1);
+    expect(String(writes()[0]?.[0])).toBe("/api/tasks/words");
+    expect(JSON.parse(String(writes()[0]?.[1]?.body))).toEqual({ done: false });
   });
 });

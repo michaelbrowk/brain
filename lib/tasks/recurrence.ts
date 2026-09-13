@@ -31,22 +31,29 @@ const WEEKDAY_ORDER: WeekDay[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
-export type RecurrenceRefusal = "no-repeat" | "bad-today" | "empty-weekdays";
+export type RecurrenceRefusal =
+  | "no-repeat"
+  | "bad-today"
+  | "empty-weekdays"
+  | "empty-log";
 
 const REFUSAL_MESSAGES: Record<RecurrenceRefusal, string> = {
-  "no-repeat": "advance() needs a task that carries a repeat rule",
+  "no-repeat": "this task carries no repeat rule",
   "bad-today": "advance() needs today as a YYYY-MM-DD calendar day",
   "empty-weekdays": "a weekly rule needs at least one weekday",
+  "empty-log": "this repeating task has no completion to undo",
 };
 
 /** Thrown rather than answered with a plausible record.
  *
- *  Each of these three is a caller that has already gone wrong, and each of
+ *  Each of these four is a caller that has already gone wrong, and each of
  *  them has a quiet wrong answer available. A task with no rule would come
  *  back unchanged and a call site would write it and report success. A bad
  *  `today` would come back as `when: "0NaN-NaN-01"`, which the schema refuses,
- *  so the task drops out of every list on the next load. `reason` is there so
- *  a route can map each one to its own status rather than to one 500. */
+ *  so the task drops out of every list on the next load. An empty log would
+ *  come back with `when` untouched and the Logbook row still standing.
+ *  `reason` is there so a route can map each one to its own status rather
+ *  than to one 500. */
 export class RecurrenceError extends Error {
   readonly reason: RecurrenceRefusal;
 
@@ -165,6 +172,32 @@ export function advance(record: TaskRecord, options: AdvanceOptions): TaskRecord
   // Unreachable through `AdvanceOptions`, which always carries one of the two.
   // Here for a caller that is not TypeScript.
   return record;
+}
+
+/** One completion taken back, which is `advance()`'s completion read
+ *  backwards: the newest `log` entry is popped and `when` returns to the day
+ *  that entry was owed.
+ *
+ *  The newest and no other. The Logbook offers an untick on the most recent
+ *  entry of a repeating task only, so there is no index to take: an older
+ *  entry is history, and undoing one would leave the series sitting on a day
+ *  that neither the rule nor any completion put it on.
+ *
+ *  `log` goes away with its last entry rather than staying as an empty array,
+ *  so a task that has never been completed and one that has been completed and
+ *  unticked are the same file.
+ */
+export function revert(record: TaskRecord): TaskRecord {
+  if (!record.repeat) throw new RecurrenceError("no-repeat");
+  const log = record.log ?? [];
+  const newest = log[log.length - 1];
+  if (!newest) throw new RecurrenceError("empty-log");
+
+  const reverted: TaskRecord = { ...record, when: newest.scheduled };
+  const rest = log.slice(0, -1);
+  if (rest.length === 0) delete reverted.log;
+  else reverted.log = rest;
+  return reverted;
 }
 
 /** The calendar, not the shape. `2026-02-31` passes a `\d{2}` check and then

@@ -31,6 +31,7 @@ const pressAnimate = vi.fn(() => ({ stop: () => {} }));
 vi.mock("framer-motion/dom", () => ({ animate: pressAnimate }));
 
 const { TasksRow, foldRow } = await import("./tasks-row");
+const { DUR } = await import("@/lib/motion");
 const { renderTaskCheckbox } = await import("./tasks-checkbox");
 const { SOLAR } = await import("./ui/solar-icons.generated");
 
@@ -234,6 +235,25 @@ describe("what the row draws", () => {
     expect(tail().textContent).toBe("");
   });
 
+  it("crossfades the next occurrence under reduced motion too", async () => {
+    // `materializeFade` IS the reduced-motion shape: opacity at DUR.fast and
+    // nothing that travels. The tail carries it in both settings, so there is
+    // one behaviour here rather than two, and the one that reaches a reader
+    // with the setting on is the one every other reader sees.
+    harness.reduce = true;
+    await renderRows([
+      task("a", { repeat: { freq: "weekly", byWeekday: ["thu"] }, when: TODAY }),
+    ]);
+    await act(async () => box().click());
+
+    const caption = [...renders]
+      .reverse()
+      .find((render) => String(render.props.className) === "brain-task-caption");
+    expect(caption?.motion.initial).toEqual({ opacity: 0 });
+    expect(caption?.motion.animate).toEqual({ opacity: 1 });
+    expect(caption?.motion.transition).toEqual({ duration: DUR.fast });
+  });
+
   it("labels a detached task 'line removed from ‹page›' with the real page title", async () => {
     await renderRows(
       [task("a", { page: "page-1", detachedAt: "2026-09-12T09:00:00.000Z" })],
@@ -363,6 +383,81 @@ describe("the expansion", () => {
     const input = document.querySelector(".brain-task-input") as HTMLInputElement;
     expect(input).not.toBeNull();
     expect(input.value).toBe("a");
+  });
+});
+
+/** THREE RULES AND A STOP, AND NO FOURTH CONTROL.
+ *
+ *  No interval field, no end date, no count, no "this one or all future"
+ *  dialog. The dialog is unnecessary by construction: editing the rule is the
+ *  future and editing the instance is this one, and a control that does not
+ *  exist cannot be asked for. */
+describe("the repeat chip", () => {
+  const chipLabels = () =>
+    [...document.querySelectorAll(".chip")].map((chip) => chip.textContent);
+
+  it("offers the rule on an unlinked task, and names the one it has", async () => {
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    expect(chipLabels()).toContain("Repeat");
+
+    await renderRows([task("b", { when: TODAY, repeat: { freq: "daily" } })], {
+      expanded: true,
+    });
+    expect(chipLabels()).toContain("Daily");
+  });
+
+  it("is not offered on a task that came from a note line, linked or detached", async () => {
+    await renderRows([task("a", { page: "page-1" })], { expanded: true });
+    expect(chipLabels()).not.toContain("Repeat");
+
+    await renderRows(
+      [task("b", { page: "page-1", detachedAt: "2026-09-12T09:00:00.000Z" })],
+      { expanded: true },
+    );
+    expect(chipLabels()).not.toContain("Repeat");
+  });
+
+});
+
+/** A LOGBOOK ROW THAT IS HISTORY ANSWERS NOTHING.
+ *
+ *  Unticking is offered on the most recent completion of a repeating task and
+ *  on no other, so an older row has nothing to undo, nothing to move and no
+ *  chips to open over a completion that is over. */
+describe("a history row", () => {
+  const historic = () =>
+    task("a", {
+      done: true,
+      doneAt: "2026-09-12T09:00:00.000Z",
+      when: "2026-09-12",
+      repeat: { freq: "daily" },
+    });
+
+  it("does not reopen on a press of its box", async () => {
+    await renderRows([historic()], { historic: true });
+    await act(async () => box().click());
+    expect(calls.reopen).not.toHaveBeenCalled();
+
+    await renderRows([historic()]);
+    await act(async () => box().click());
+    expect(calls.reopen).toHaveBeenCalledTimes(1);
+  });
+
+  it("selects but does not open", async () => {
+    await renderRows([historic()], { historic: true });
+    await act(async () => {
+      (document.querySelector(".brain-task-title") as HTMLElement).click();
+    });
+    expect(calls.select).toHaveBeenCalledWith("a");
+    expect(calls.expand).not.toHaveBeenCalled();
+  });
+
+  it("answers no bare letter", async () => {
+    await renderRows([historic()], { historic: true, selected: true });
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "t", bubbles: true }));
+    });
+    expect(calls.reschedule).not.toHaveBeenCalled();
   });
 });
 

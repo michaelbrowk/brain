@@ -4,11 +4,14 @@ import { normalizeTaskText } from "./task-lines";
 
 /** A task record as it lives in the frontmatter of `_tasks/<id>.md`.
  *
- *  Two shapes share one schema. An UNLINKED task is its own record and owns
+ *  Three shapes share one schema. An UNLINKED task is its own record and owns
  *  its `done`. A LINKED task points at a checkbox in a note through `page`
  *  and `anchor`, and its `done` is never written here: the checkbox in the
  *  note is the truth, and a second copy of it would be a second source of
- *  truth to drift.
+ *  truth to drift. A DETACHED task is one whose line the reconcile could not
+ *  find: it keeps `page` and `anchor` as the last known position, carries
+ *  `detachedAt`, and owns its `done` again because there is no checkbox left
+ *  to read it from.
  *
  *  Nothing in this file reads the clock, the filesystem or a Store. It is the
  *  shape only, so the editor, the store and the routes can all agree on it.
@@ -154,6 +157,11 @@ export const taskRecordFields = z
     /** The note that holds the checkbox, for a linked task. */
     page: idSchema.optional(),
     anchor: taskAnchorSchema.optional(),
+    /** When the reconcile could no longer find this task's line. Detach keeps
+     *  `page` and `anchor` so the row can read "line removed from ‹page›" and
+     *  still say where the line was, and this instant is the mark that says
+     *  the record, not a checkbox, now answers `done`. */
+    detachedAt: instantField.optional(),
     repeat: taskRepeatSchema.optional(),
     /** The occurrences a repeating task has already completed. Logbook draws
      *  one row per entry. */
@@ -184,9 +192,22 @@ export const taskRecordRules = (
       path: ["log"],
     });
   }
+  // A detach names the note the line was removed from, so there is no such
+  // thing as being detached from nothing.
+  if (value.detachedAt !== undefined && !value.page) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "detachedAt requires page",
+      path: ["detachedAt"],
+    });
+  }
   // Writing it would create a second answer to "is this done?", and the
-  // note's checkbox is the one a person edits.
-  if (value.done !== undefined && value.page) {
+  // note's checkbox is the one a person edits. Only while the record is
+  // linked: once `detachedAt` is set there is no checkbox left to ask, so the
+  // record takes ownership of `done` exactly like an unlinked one. Without
+  // that ownership a detached task comes back from disk with `done`
+  // undefined, which reads as reopened.
+  if (value.done !== undefined && value.page && value.detachedAt === undefined) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
       message: "done is not stored for a linked task",

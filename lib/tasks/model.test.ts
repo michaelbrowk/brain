@@ -260,3 +260,123 @@ describe("the task record schema", () => {
     }).success).toBe(true);
   });
 });
+
+/** The detach rule (spec amendment `4785ca7`). Detach does not clear `page`
+ *  and `anchor`: it stamps `detachedAt`, so the row can still read "line
+ *  removed from ‹page›" and the record can still say where the line was.
+ *
+ *  That makes three shapes out of two, and the difference between them is a
+ *  question about `done`. Linked means the note's checkbox answers it.
+ *  Detached and unlinked both mean the record answers it. */
+describe("the three shapes a task record takes", () => {
+  const anchor = {
+    text: "Water the plants",
+    hash: "0123456789abcdef",
+    ordinal: 0,
+    line: 12,
+  };
+  const DETACHED_AT = "2026-09-13T10:32:00.000Z";
+  const DONE_AT = "2026-09-13T10:31:00.000Z";
+
+  const cases: {
+    shape: string;
+    record: Record<string, unknown>;
+    ok: boolean;
+    reason?: string;
+  }[] = [
+    {
+      shape: "linked: a page, no detachedAt, and the note owns done",
+      record: { page: "page-garden", anchor },
+      ok: true,
+    },
+    {
+      shape: "linked: done is refused, because the checkbox already answers it",
+      record: { page: "page-garden", anchor, done: true },
+      ok: false,
+      reason: "done",
+    },
+    {
+      shape: "detached: a page, an anchor, a detachedAt, and its own done",
+      record: {
+        page: "page-garden",
+        anchor,
+        detachedAt: DETACHED_AT,
+        done: true,
+        doneAt: DONE_AT,
+      },
+      ok: true,
+    },
+    {
+      shape: "detached: an open one, done false and no doneAt",
+      record: { page: "page-garden", anchor, detachedAt: DETACHED_AT, done: false },
+      ok: true,
+    },
+    {
+      shape: "detached: the anchor may be gone, the page may not",
+      record: { page: "page-garden", detachedAt: DETACHED_AT, done: false },
+      ok: true,
+    },
+    {
+      shape: "detachedAt without a page is not a shape: there is no page to name",
+      record: { detachedAt: DETACHED_AT, done: true, doneAt: DONE_AT },
+      ok: false,
+      reason: "detachedAt",
+    },
+    {
+      shape: "unlinked: no page, no detachedAt, and its own done",
+      record: { done: true, doneAt: DONE_AT },
+      ok: true,
+    },
+  ];
+
+  for (const { shape, record, ok, reason } of cases) {
+    it(shape, () => {
+      const parsed = parseTaskRecord({ ...base, ...record });
+      expect(parsed.ok).toBe(ok);
+      if (!parsed.ok && reason) expect(parsed.reason).toContain(reason);
+    });
+  }
+
+  it("keeps page and anchor through a detach, so the row can name the note", () => {
+    const parsed = parseTaskRecord({
+      ...base,
+      page: "page-garden",
+      anchor,
+      detachedAt: DETACHED_AT,
+      done: true,
+      doneAt: DONE_AT,
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) {
+      expect(parsed.task.page).toBe("page-garden");
+      expect(parsed.task.anchor).toEqual(anchor);
+      expect(parsed.task.detachedAt).toBe(DETACHED_AT);
+      expect(parsed.task.done).toBe(true);
+    }
+  });
+
+  it("refuses a detachedAt that is a day, a local offset, or an hour that is not one", () => {
+    for (const detachedAt of [
+      "2026-09-13",
+      "2026-09-13T10:32:00+04:00",
+      "2026-09-13T10:32:00",
+      "2026-09-13T24:00:00Z",
+      "2026-02-31T10:32:00Z",
+    ]) {
+      expect(
+        taskRecordSchema.safeParse({ ...base, page: "page-garden", detachedAt })
+          .success,
+      ).toBe(false);
+    }
+  });
+
+  it("reads a YAML date back as the instant the file meant", () => {
+    const parsed = parseTaskRecord({
+      ...base,
+      page: "page-garden",
+      detachedAt: new Date("2026-09-13T10:32:00.000Z"),
+    });
+    expect(parsed.ok).toBe(true);
+    if (parsed.ok) expect(parsed.task.detachedAt).toBe("2026-09-13T10:32:00.000Z");
+  });
+});

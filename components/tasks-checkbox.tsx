@@ -1,6 +1,7 @@
 "use client";
 
 import { animate } from "framer-motion/dom";
+import { useEffect, useRef } from "react";
 
 import { EASE_OUT, PRESS_ICON, SPRING_MATERIALIZE } from "@/lib/motion";
 
@@ -29,7 +30,11 @@ const FADE_MS = 120;
 /** The fill leads, the check follows into a box that is already ink. */
 const CHECK_DELAY_MS = 60;
 
-const EASE = `cubic-bezier(${EASE_OUT.join(", ")})`;
+/** `EASE_OUT` as CSS, for the WAAPI timings here and on the Tasks row. One
+ *  spelling of the curve, so the two surfaces cannot drift apart. */
+export const EASE_OUT_CSS = `cubic-bezier(${EASE_OUT.join(", ")})`;
+
+const EASE = EASE_OUT_CSS;
 
 export interface TaskCheckboxOptions {
   checked: boolean;
@@ -167,4 +172,80 @@ export function renderTaskCheckbox(opts: TaskCheckboxOptions): HTMLButtonElement
   });
 
   return button;
+}
+
+/** The same control, mounted from React.
+ *
+ *  The Tasks row needs the drawing above and not a second one, so this is a
+ *  host element and the DOM function inside it. The button is built ONCE:
+ *  the transition between checked and unchecked IS the drawing, and a fresh
+ *  element every render would start every draw from nothing. Later changes go
+ *  through `setTaskCheckboxChecked`, which is what makes the stroke travel.
+ *
+ *  `onBox` hands the button out, because completion on the surface draws the
+ *  check before any write is sent and erases it if the reader changes their
+ *  mind inside the hold. Both of those are calls on this element, not props.
+ */
+export function TaskCheckbox({
+  checked,
+  label,
+  reduce,
+  onToggle,
+  onBox,
+}: {
+  checked: boolean;
+  label: string;
+  reduce: boolean;
+  onToggle: () => void;
+  onBox?: (box: HTMLButtonElement | null) => void;
+}) {
+  const hostRef = useRef<HTMLSpanElement | null>(null);
+  const boxRef = useRef<HTMLButtonElement | null>(null);
+  const toggleRef = useRef(onToggle);
+  const onBoxRef = useRef(onBox);
+  const drawnRef = useRef(checked);
+
+  // Declared FIRST, so the mount effect below already sees this render's
+  // callbacks. The refs exist so the button can be built once: rebuilding it
+  // for a new `onToggle` would start every draw from nothing.
+  useEffect(() => {
+    toggleRef.current = onToggle;
+    onBoxRef.current = onBox;
+  });
+
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const box = renderTaskCheckbox({
+      checked: drawnRef.current,
+      reduce,
+      onToggle: () => toggleRef.current(),
+    });
+    boxRef.current = box;
+    host.append(box);
+    onBoxRef.current?.(box);
+    return () => {
+      box.remove();
+      boxRef.current = null;
+      onBoxRef.current?.(null);
+    };
+    // The drawing is built once; `reduce` is read at that moment the way the
+    // note's NodeView reads it, and a reader who changes the setting gets the
+    // new behaviour on the next mount.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const box = boxRef.current;
+    if (!box || drawnRef.current === checked) return;
+    drawnRef.current = checked;
+    setTaskCheckboxChecked(box, checked, reduce);
+  }, [checked, reduce]);
+
+  useEffect(() => {
+    const box = boxRef.current;
+    if (box) setTaskCheckboxLabel(box, label);
+  }, [label]);
+
+  return <span ref={hostRef} className="brain-task-boxcell" />;
 }

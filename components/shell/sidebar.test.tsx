@@ -146,17 +146,15 @@ describe("ShellSidebar tasks row", () => {
     expect(navRow("Tasks")?.querySelector(".tree-row-count")).toBeNull();
   });
 
-  it("never renders a count and a badge dot on one row", async () => {
+  it("keeps the count and the update dot on their own rows", async () => {
     await render({ tasksOpenTodayCount: 2 });
 
-    // the update dot lands on the Settings row, the count on Tasks
-    const dots = document.querySelectorAll('[aria-label="Update available"]');
-    expect(dots.length).toBeGreaterThan(0);
-    for (const row of document.querySelectorAll("button.tree-row")) {
-      const both =
-        !!row.querySelector(".tree-row-count") &&
-        !!row.querySelector('[aria-label="Update available"]');
-      expect(both).toBe(false);
-    }
+    // The two marks belong to two rows and no row is ever handed both, so
+    // the precedence inside `NavRow` is unreachable rather than untested:
+    // what is worth holding is WHICH row wears which mark.
+    const dot = document.querySelector('[aria-label="Update available"]');
+    expect(dot?.closest("button.tree-row")?.textContent).toContain("Settings");
+    const count = document.querySelector(".tree-row-count");
+    expect(count?.closest("button.tree-row")?.textContent).toContain("Tasks");
   });
 });

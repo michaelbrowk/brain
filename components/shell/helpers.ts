@@ -127,8 +127,17 @@ export function navigationPresenceReducer(
     next.surface = action.surface;
     next.settingsSection =
       action.surface === "settings" ? (action.settingsSection ?? null) : null;
+    // A RE-CLICK KEEPS THE LIST IT WAS ON. Things does, and the alternative
+    // is a sidebar row that silently throws away the reader's Upcoming every
+    // time they come back to the surface. An action that MEANS the default
+    // says so with an explicit `null`. One that only names the surface,
+    // `setSurface("tasks")` or a popstate onto /tasks, carries the list over.
     next.tasksList =
-      action.surface === "tasks" ? (action.tasksList ?? null) : null;
+      action.surface === "tasks"
+        ? action.tasksList !== undefined
+          ? action.tasksList
+          : state.tasksList
+        : null;
   }
   if (
     next.selectedId === state.selectedId &&

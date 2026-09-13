@@ -14,6 +14,8 @@ import {
   type StoredDraft,
 } from "@/lib/autosave";
 import { canonicalPageMarkdown } from "@/lib/page-markdown";
+import { openTodayCount } from "./tasks-lists";
+import { useTasks } from "./tasks-client";
 import { sectionPageIds } from "@/lib/dated-sections";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Kbd, Skeleton, useShortcutTitle, type ToastOptions } from "./ui/primitives";
@@ -1533,6 +1535,38 @@ export function Shell({
     setSelectedId,
     setSurface,
   ]);
+
+  /** THE SIDEBAR'S TASKS COUNT COMES OFF THE SURFACE'S OWN FETCH.
+   *
+   *  `components/tasks-client` holds one set of records keyed by the reader's
+   *  day and this token, so the shell subscribing here and the surface
+   *  subscribing there are one request, not two, and a completion's
+   *  optimistic write decrements the number and moves the row in the same
+   *  commit. The badge is on screen while Mail or a note is, which is the
+   *  whole reason it exists, so the subscription is the shell's and not the
+   *  surface's.
+   */
+  const taskRecords = useTasks(taskSurfaceRevision);
+  const tasksOpenToday = taskRecords.day
+    ? openTodayCount(taskRecords.tasks, taskRecords.day.today)
+    : undefined;
+
+  /** A linked task names the note it came from, and the chip in an expanded
+   *  row opens it. The tree is the shell's, so the lookup is too. */
+  const pageTitleOf = useCallback(
+    (pageId: string): string | undefined => {
+      const walk = (nodes: TreeNode[]): string | undefined => {
+        for (const node of nodes) {
+          if (node.id === pageId) return node.title;
+          const found = walk(node.children);
+          if (found !== undefined) return found;
+        }
+        return undefined;
+      };
+      return walk(treeRef.current);
+    },
+    [],
+  );
 
   /** The open list, kept in navigation state beside the settings section.
    *  Changing it does not re-key the canvas, so the rows move between the
@@ -5441,6 +5475,7 @@ export function Shell({
         onOpenDailyPage={openDailyPage}
         onOpenMail={openMail}
         onOpenTasks={openTasks}
+        tasksOpenTodayCount={tasksOpenToday}
         onSelect={select}
         onToggleExpand={toggleExpand}
         onDelete={requestDelete}
@@ -5511,6 +5546,8 @@ export function Shell({
                 onToast={showToast}
                 refreshToken={taskSurfaceRevision}
                 captureRequest={taskCaptureRequest}
+                pageTitleOf={pageTitleOf}
+                onOpenPage={(pageId) => select(pageId)}
               />
             ) : mailOpen ? (
               <MailSurface

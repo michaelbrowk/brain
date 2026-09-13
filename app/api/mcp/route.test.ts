@@ -607,7 +607,7 @@ describe("the task read tools", () => {
 
   afterEach(() => vi.unstubAllEnvs());
 
-  it("refuses today and upcoming without the caller's own date", async () => {
+  it("refuses every derived list without the caller's own date", async () => {
     for (const list of ["today", "upcoming", "someday", "logbook"]) {
       const { payload } = await toolPayload(
         await callTool("list_tasks", { list }, 1),

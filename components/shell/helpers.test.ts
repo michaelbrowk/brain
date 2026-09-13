@@ -178,6 +178,29 @@ describe("navigationPresenceReducer with the tasks surface", () => {
     expect(canvasPresenceKey(reopened)).not.toBe(canvasPresenceKey(opened));
   });
 
+  it("keeps the open list when an action only names the surface", () => {
+    const upcoming = navigationPresenceReducer(base, {
+      type: "surface",
+      surface: "tasks",
+      tasksList: "upcoming",
+    });
+    // the sidebar row, pressed again: Things keeps the list you were on, and
+    // throwing it away every time would make the row a reset button
+    const again = navigationPresenceReducer(upcoming, {
+      type: "surface",
+      surface: "tasks",
+    });
+    expect(again.tasksList).toBe("upcoming");
+
+    // an explicit null still MEANS the default
+    const reset = navigationPresenceReducer(again, {
+      type: "surface",
+      surface: "tasks",
+      tasksList: null,
+    });
+    expect(reset.tasksList).toBeNull();
+  });
+
   it("does not bump the epoch when only the list changes", () => {
     const inbox = navigationPresenceReducer(base, {
       type: "surface",

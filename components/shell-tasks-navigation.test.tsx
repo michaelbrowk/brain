@@ -8,6 +8,7 @@ import { act, useEffect, useReducer } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { apiFetch } from "@/lib/client";
+import { resetTasksStore } from "./tasks-client";
 import { Shell } from "./shell";
 
 vi.mock("@/lib/client", () => ({
@@ -114,9 +115,12 @@ describe("tasks surface navigation (desktop)", () => {
     ).IS_REACT_ACT_ENVIRONMENT = true;
     localStorage.clear();
     apiFetchMock.mockReset();
+    resetTasksStore();
     apiFetchMock.mockImplementation(async (input) => {
       const url = String(input);
       if (url === "/api/tree") return response({ tree: [] });
+      // the surface and the sidebar count read ONE list of records
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [] });
       throw new Error(`unexpected request: ${url}`);
     });
     vi.stubGlobal("matchMedia", (query: string) => ({
@@ -203,13 +207,16 @@ describe("tasks surface navigation (desktop)", () => {
         <Shell tree={[]} initialSelectedId={null} initialSurface="tasks" />,
       ),
     );
-    const body = await findLazy(surfaceBody, "tasks surface");
-    expect(body.dataset.refreshToken).toBe("0");
+    await findLazy(surfaceBody, "tasks surface");
 
-    const treeCalls = () =>
-      apiFetchMock.mock.calls.filter(([input]) => String(input) === "/api/tree")
+    const callsFor = (prefix: string) =>
+      apiFetchMock.mock.calls.filter(([input]) => String(input).startsWith(prefix))
         .length;
-    const before = treeCalls();
+    const treeBefore = callsFor("/api/tree");
+    const tasksBefore = callsFor("/api/tasks?");
+    // the count and the column subscribe to one module, so the surface being
+    // on screen is still one read
+    expect(tasksBefore).toBe(1);
 
     await act(async () => {
       FakeEventSource.instances[0]?.onmessage?.({
@@ -218,8 +225,9 @@ describe("tasks surface navigation (desktop)", () => {
     });
     await settle();
 
-    expect(surfaceBody()?.dataset.refreshToken).toBe("1");
-    expect(treeCalls()).toBe(before);
+    // the event bumps the token, and the token is part of the load's key
+    expect(callsFor("/api/tasks?")).toBe(tasksBefore + 1);
+    expect(callsFor("/api/tree")).toBe(treeBefore);
   });
 
   it("re-enters on a forward popstate to /tasks", async () => {

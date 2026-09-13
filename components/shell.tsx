@@ -1363,6 +1363,16 @@ export function Shell({
       // it instead.
       if (ev.type === "task") {
         setTaskSurfaceRevision((revision) => revision + 1);
+        // The open note's editor keeps its own copy of this page's records and
+        // is not React, so it cannot subscribe to the line above. Without this
+        // a line whose task was completed, deleted or detached somewhere else
+        // keeps its word until the editor remounts. One window event, listened
+        // for by `TASKS_CHANGED_EVENT` in `components/editor/task-checkbox.ts`;
+        // the literal is repeated there rather than imported, because importing
+        // from that module would pull Milkdown into this bundle. This tab's own
+        // writes never reach here (the `src` check above), so a promotion made
+        // in the editor does not bounce back at it.
+        window.dispatchEvent(new CustomEvent("brain:tasks-changed"));
         return;
       }
       clearTimeout(t);

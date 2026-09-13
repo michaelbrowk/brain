@@ -10,7 +10,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { hashTaskText, normalizeTaskText } from "@/lib/tasks/task-lines";
 
-import { PROMOTE_MENU_CLASS, TASK_MARK_CLASS, taskCheckbox } from "./task-checkbox";
+import {
+  PROMOTE_MENU_CLASS,
+  TASK_MARK_CLASS,
+  TASKS_CHANGED_EVENT,
+  taskCheckbox,
+} from "./task-checkbox";
 
 /** THE GESTURE, AGAINST THE REAL EDITOR AND A STUBBED ROUTE.
  *
@@ -41,6 +46,9 @@ let createAnswer: { status: number; body: Record<string, unknown> } = {
   status: 201,
   body: {},
 };
+/** Held POSTs, for the case where a second click arrives before the first
+ *  answers. `null` means answer at once. */
+let createGate: Promise<void> | null = null;
 
 const editors = new WeakMap<EditorView, Editor>();
 const open: Editor[] = [];
@@ -63,8 +71,14 @@ function stubFetch() {
         : null;
     calls.push({ url, method, body });
 
-    if (url.startsWith("/api/tasks?")) return json(200, { tasks });
+    // `?page=<id>` and nothing else: a list read hides a done, a detached or
+    // an old record, and the note needs all three.
+    if (url.startsWith("/api/tasks?")) {
+      expect(url).toBe(`/api/tasks?page=${PAGE}`);
+      return json(200, { tasks: tasks.filter((task) => task.page === PAGE) });
+    }
     if (url === "/api/tasks" && method === "POST") {
+      if (createGate) await createGate;
       if (createAnswer.status !== 201) return json(createAnswer.status, createAnswer.body);
       const task = {
         id: `task-${tasks.length + 1}`,
@@ -186,6 +200,7 @@ beforeEach(() => {
   tasks = [];
   category = null;
   createAnswer = { status: 201, body: {} };
+  createGate = null;
   stubFetch();
 });
 
@@ -242,16 +257,25 @@ describe("the + Task gesture", () => {
 
     hover(view, 0);
 
+    // The line IS a task item, which is what makes the absent mark a decision
+    // rather than a line the plugin never saw.
+    expect(items(view)).toHaveLength(1);
     expect(marks(view)).toHaveLength(0);
   });
 
   it("shows no ghost away from a note, so a share visitor is offered nothing", async () => {
-    window.history.replaceState({}, "", "/s/some-share-token");
+    // The app's own share path. `/s/<token>` would pass for any string that is
+    // not `/p/<id>`, and this is the URL a visitor is really on.
+    window.history.replaceState({}, "", `/share/${PAGE}`);
     const view = await mountEditor("- [ ] water the plants\n");
 
     hover(view, 0);
 
     expect(marks(view)).toHaveLength(0);
+    expect(menu()).toBeNull();
+    // No ghost, no menu, and nothing asked of a route a visitor has no session
+    // for. The gate is the URL, so this is the assertion that holds it.
+    expect(calls.filter((call) => call.url.startsWith("/api/tasks"))).toEqual([]);
   });
 
   it("opens a menu with Today, Tomorrow, Someday, Inbox, Date… in that order", async () => {
@@ -405,6 +429,123 @@ describe("the + Task gesture", () => {
 
     expect(marks(view).map((mark) => mark.textContent)).toEqual(["Today", "+ Task"]);
     expect(marks(view).map((mark) => mark.dataset.state)).toEqual(["linked", "ghost"]);
+  });
+
+  /* ── What the review measured, and what now holds ───────────────────────
+   *
+   *  prosemirror-view short-circuits widget equality on `spec.key`, so a mark
+   *  whose key has not changed keeps the DOM and the handlers it was drawn
+   *  with. A position captured at draw time is then a position the document
+   *  has moved, and the measured cost was a click on the second line posting
+   *  the first line's anchor. These two cases are the regression.
+   */
+
+  it("promotes the line that was clicked, after the document moved above it", async () => {
+    const view = await mountEditor("intro\n\n- [ ] alpha\n\n- [ ] beta\n");
+    hover(view, 1);
+    expect(marks(view)[1].textContent).toBe("+ Task");
+
+    // Nine characters into the paragraph above, which is exactly the gap
+    // between the two task lines in this fixture: a stale position lands on
+    // alpha rather than refusing, which is the quiet half of the bug.
+    view.dispatch(view.state.tr.insertText("xxxxxxxxx", 1));
+    marks(view)[1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("Today");
+
+    expect(postBody()).toMatchObject({
+      title: "beta",
+      anchor: { text: "beta", hash: hashTaskText("beta"), ordinal: 0 },
+    });
+    expect(marks(view).map((mark) => mark.textContent)).toEqual(["+ Task", "Today"]);
+  });
+
+  it("names the second of two identical lines, which is the whole point of the ordinal", async () => {
+    const view = await mountEditor("- [ ] buy milk\n- [ ] buy milk\n");
+    hover(view, 1);
+
+    marks(view)[1].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("Today");
+
+    expect(postBody().anchor).toMatchObject({ text: "buy milk", ordinal: 1 });
+    expect(marks(view).map((mark) => mark.textContent)).toEqual(["+ Task", "Today"]);
+  });
+
+  it("sends one POST when a row is clicked twice before the first answers", async () => {
+    let release = () => {};
+    createGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    const row = [...menu()!.querySelectorAll<HTMLButtonElement>(".brain-menu-item")].find(
+      (candidate) => (candidate.textContent ?? "").trim() === "Today",
+    )!;
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await settle();
+    // Two records on one line is the state that has no honest reading, so the
+    // rows say so while the first one is in flight.
+    expect(row.disabled).toBe(true);
+    row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await settle();
+
+    release();
+    await settle();
+
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(marks(view)[0].textContent).toBe("Today");
+  });
+
+  it("closes the menu when the page scrolls under it", async () => {
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(menu()).not.toBeNull();
+
+    // The menu is fixed to the viewport; its line is not. A menu left behind
+    // while the line travels is how somebody reschedules the wrong task.
+    window.dispatchEvent(new Event("scroll"));
+    await settle();
+
+    expect(menu()).toBeNull();
+  });
+
+  it("asks for this page's records again when a task changes somewhere else", async () => {
+    const view = await mountEditor("- [ ] water the plants\n");
+    const asked = () => calls.filter((call) => call.url.startsWith("/api/tasks?")).length;
+    expect(asked()).toBe(1);
+    expect(marks(view)[0].textContent).toBe("+ Task");
+
+    const text = normalizeTaskText("water the plants");
+    tasks = [
+      {
+        id: "task-elsewhere",
+        title: text,
+        page: PAGE,
+        when: TODAY,
+        done: false,
+        created: NOW.toISOString(),
+        updated: NOW.toISOString(),
+        anchor: { text, hash: hashTaskText(text), ordinal: 0, line: 0 },
+      },
+    ];
+    window.dispatchEvent(new CustomEvent(TASKS_CHANGED_EVENT));
+    await settle();
+
+    expect(asked()).toBe(2);
+    expect(marks(view)[0].textContent).toBe("Today");
+  });
+
+  it("stops listening for task changes once the editor is gone", async () => {
+    await mountEditor("- [ ] water the plants\n");
+    await open.pop()!.destroy();
+    const asked = calls.filter((call) => call.url.startsWith("/api/tasks?")).length;
+
+    window.dispatchEvent(new CustomEvent(TASKS_CHANGED_EVENT));
+    await settle();
+
+    expect(calls.filter((call) => call.url.startsWith("/api/tasks?"))).toHaveLength(asked);
   });
 
   it("closes the menu on Escape without sending anything", async () => {

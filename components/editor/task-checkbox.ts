@@ -205,6 +205,13 @@ export const TASK_MARK_CLASS = "brain-task-mark";
 /** The popover, on the `brain-menu` material at 220 rather than the list
  *  menu's 264. It holds five short words and nothing else. */
 export const PROMOTE_MENU_CLASS = "brain-task-menu";
+/** A task record changed somewhere this editor cannot see. Dispatched on
+ *  `window` by the shell's store-event forwarder in `components/shell.tsx`,
+ *  which is the one place that already knows a `type: "task"` event arrived
+ *  and that it was not this tab's own. The literal is repeated there rather
+ *  than imported, because importing from this module would pull Milkdown into
+ *  the shell's bundle, and the editor is dynamically imported to keep it out. */
+export const TASKS_CHANGED_EVENT = "brain:tasks-changed";
 const MENU_WIDTH = 220;
 /** The retrace, `DUR.fast`. The material's own keyframes play it; this is how
  *  long to wait before taking the element away. */
@@ -286,6 +293,10 @@ function openPageId(): string | null {
 function taskItemsOf(doc: ProseNode): TaskItem[] {
   const found: TaskItem[] = [];
   doc.descendants((node, pos) => {
+    // A textblock's children are its words, and no list item lives inside
+    // one. Returning false keeps `descendants` from walking the inline
+    // content, which is most of a note by count, so this walk is block level.
+    if (node.isTextblock) return false;
     if (node.type.name !== "list_item" || node.attrs.checked == null) return;
     const line = node.firstChild;
     if (!line || !line.isTextblock) return;
@@ -300,11 +311,33 @@ function taskItemsOf(doc: ProseNode): TaskItem[] {
   return found;
 }
 
-function itemPosOf(view: EditorView, element: Element): number | null {
-  for (const item of taskItemsOf(view.state.doc)) {
-    if (view.nodeDOM(item.pos) === element) return item.pos;
-  }
-  return null;
+/** THE LINE AN ELEMENT BELONGS TO, ASKED OF THE DOCUMENT AS IT STANDS.
+ *
+ *  Never from a render closure. prosemirror-view short-circuits widget
+ *  equality on `spec.key`, so a widget whose key has not changed keeps its
+ *  existing DOM and its existing handlers across an edit anywhere else in the
+ *  document: a position captured when the mark was drawn is a position the
+ *  document has since moved. The mark is found by walking from its own DOM to
+ *  the `list_item` it sits in, so the answer is whatever is true now. `index`
+ *  travels with it, because `byItem` is keyed by the item's place in document
+ *  order and not by its position. */
+interface MarkTarget {
+  pos: number;
+  index: number;
+  taskId: string | null;
+}
+
+function markTargetOf(view: EditorView, element: Element): MarkTarget | null {
+  const li = element.closest("li.brain-task-item");
+  if (!li) return null;
+  const items = taskItemsOf(view.state.doc);
+  const index = items.findIndex((item) => view.nodeDOM(item.pos) === li);
+  if (index < 0) return null;
+  return {
+    pos: items[index].pos,
+    index,
+    taskId: promoteKey.getState(view.state)?.byItem.get(index) ?? null,
+  };
 }
 
 /** Which line is which task, answered by `lib/tasks/reconcile.ts` and by
@@ -421,9 +454,16 @@ export const taskPromote = $prose((ctx) => {
       handleDOMEvents: {
         mouseover: (view, event) => {
           const target = event.target;
-          const item =
+          const li =
             target instanceof Element ? target.closest("li.brain-task-item") : null;
-          setHover(view, item === null ? null : itemPosOf(view, item));
+          const state = promoteKey.getState(view.state);
+          // The common event by far is the pointer moving INSIDE the line it
+          // is already on, and answering that costs one `nodeDOM`. Everything
+          // below it walks the document.
+          if (state?.hover != null && li !== null && view.nodeDOM(state.hover) === li) {
+            return false;
+          }
+          setHover(view, li === null ? null : (markTargetOf(view, li)?.pos ?? null));
           return false;
         },
         mouseleave: (view) => {
@@ -434,12 +474,24 @@ export const taskPromote = $prose((ctx) => {
     },
     view: (view) => {
       let disposed = false;
+      const reload = () => {
+        if (!disposed) void loadTasks(view, () => disposed);
+      };
       if (promoteKey.getState(view.state)?.page) {
-        void loadTasks(view, () => disposed);
+        reload();
+        // A record can change anywhere: another tab, the Tasks surface, an MCP
+        // call, a repeat rule advancing. Without this the note keeps whatever
+        // it read at mount, so a line deleted and re-typed shows a word for a
+        // task the server has since detached, and ticking that box answers
+        // nothing. The shell forwards the store's `task` event (it already
+        // ignores this tab's own echo, so a promotion from here does not
+        // bounce back as a reload).
+        window.addEventListener(TASKS_CHANGED_EVENT, reload);
       }
       return {
         destroy: () => {
           disposed = true;
+          window.removeEventListener(TASKS_CHANGED_EVENT, reload);
           // Taken away rather than dismissed: a dismiss dispatches, and this
           // editor's ctx is already being torn down around it.
           detachMenu();
@@ -482,12 +534,18 @@ function publishTasks(view: EditorView, tasks: readonly TaskView[]): void {
   );
 }
 
+/** THIS PAGE'S RECORDS, WHOLE.
+ *
+ *  `?page=<id>` is a lookup and not a list: it answers a record whatever state
+ *  it is in, done or detached or completed longer ago than the Logbook window
+ *  holds. A list read hides all three, and a line whose record the editor
+ *  could not find offers "+ Task" again and is promoted a second time, which
+ *  leaves two records contending for one checkbox. */
 async function loadTasks(view: EditorView, disposed: () => boolean): Promise<void> {
-  const day = localDay();
+  const page = promoteKey.getState(view.state)?.page;
+  if (!page) return;
   try {
-    const response = await apiFetch(
-      `/api/tasks?today=${day.today}&offset=${day.offsetMinutes}`,
-    );
+    const response = await apiFetch(`/api/tasks?page=${encodeURIComponent(page)}`);
     if (!response.ok || disposed()) return;
     const body = (await response.json()) as { tasks?: readonly TaskView[] };
     if (disposed()) return;
@@ -551,23 +609,23 @@ function markWidget(
   promote: PromoteContext,
   options: MarkOptions,
 ): Decoration {
-  return Decoration.widget(
-    item.lineTo,
-    (view) => renderMark(view, item.pos, promote, options),
-    {
-      // After the words, never before them, and carrying none of their marks.
-      side: 1,
-      marks: [],
-      key: `${options.taskId ?? "ghost"}:${options.word}:${options.shown ? "on" : "off"}`,
-      ignoreSelection: true,
-      stopEvent: () => true,
-    },
-  );
+  return Decoration.widget(item.lineTo, (view) => renderMark(view, promote, options), {
+    // After the words, never before them, and carrying none of their marks.
+    side: 1,
+    marks: [],
+    // The position leads the key. Two ghosts on two lines are otherwise the
+    // same widget to prosemirror-view, which keeps the first one's DOM for
+    // the second and lets a click land on the wrong line.
+    key: `${item.pos}:${options.taskId ?? "ghost"}:${options.word}:${
+      options.shown ? "on" : "off"
+    }`,
+    ignoreSelection: true,
+    stopEvent: () => true,
+  });
 }
 
 function renderMark(
   view: EditorView,
-  itemPos: number,
   promote: PromoteContext,
   options: MarkOptions,
 ): HTMLElement {
@@ -578,14 +636,23 @@ function renderMark(
   button.dataset.state = options.taskId === null ? "ghost" : "linked";
   if (options.shown) button.dataset.shown = "";
   button.textContent = options.word;
-  if (options.taskId === null) button.setAttribute("aria-label", "Make a task");
+  button.setAttribute(
+    "aria-label",
+    options.taskId === null ? "Make a task" : `Task, ${options.word}`,
+  );
+  button.setAttribute("aria-haspopup", "menu");
+  button.setAttribute("aria-expanded", "false");
   // The caret stays where the reader left it: a mark is a control beside the
   // line, not a place inside it.
   button.addEventListener("mousedown", (event) => event.preventDefault());
   button.addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
-    showMenu(view, itemPos, button, promote, options.taskId);
+    // Resolved here and not captured above, for the reason `markTargetOf`
+    // spells out.
+    const target = markTargetOf(view, button);
+    if (target === null) return;
+    showMenu(view, target.pos, button, promote);
   });
   return button;
 }
@@ -622,6 +689,9 @@ interface OpenMenu {
 }
 
 let currentMenu: OpenMenu | null = null;
+/** True while a create or a reschedule is in flight. One gesture is open at a
+ *  time, so one flag is one line's guard. */
+let writing = false;
 
 function dismissMenu(immediate = false): void {
   currentMenu?.dismiss(immediate);
@@ -636,9 +706,9 @@ function showMenu(
   itemPos: number,
   trigger: HTMLElement,
   promote: PromoteContext,
-  taskId: string | null,
 ): void {
   dismissMenu(true);
+  trigger.setAttribute("aria-expanded", "true");
   const day: Day = { today: localDay().today, tomorrow: tomorrowOf() };
   const element = document.createElement("div");
   element.className = `brain-menu ${PROMOTE_MENU_CLASS}`;
@@ -658,6 +728,12 @@ function showMenu(
     dismissed = true;
     document.removeEventListener("mousedown", onPointerDown, true);
     document.removeEventListener("keydown", onKeyDown);
+    // Capture, so a scroll inside the note's own container is heard too. A
+    // menu fixed to the viewport while its line travels out from under it is
+    // how somebody reschedules the wrong task.
+    window.removeEventListener("scroll", onViewportMoved, true);
+    window.removeEventListener("resize", onViewportMoved);
+    trigger.setAttribute("aria-expanded", "false");
     if (currentMenu?.element === element) currentMenu = null;
     element.remove();
   };
@@ -685,33 +761,24 @@ function showMenu(
     }
     dismiss();
   };
+  const onViewportMoved = () => dismiss();
   const onKeyDown = (event: KeyboardEvent) => {
-    if (event.key !== "Escape") return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismiss();
+      view.focus();
+      return;
+    }
+    // `role="menu"` promises arrow keys, and the rows are buttons, so Tab and
+    // Enter already work.
+    const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
+    if (step === 0) return;
+    const rows = [...element.querySelectorAll<HTMLElement>(".brain-menu-item")];
+    if (rows.length === 0) return;
     event.preventDefault();
-    dismiss();
-    view.focus();
+    const here = rows.findIndex((row) => row.contains(document.activeElement));
+    rows[(here + step + rows.length) % rows.length].focus();
   };
-
-  const choose = (when: string | null) => {
-    void applyChoice(view, itemPos, promote, taskId, when).then((reason) => {
-      if (reason === null) {
-        dismiss();
-        return;
-      }
-      refusal.hidden = false;
-      refusal.textContent = reason;
-    });
-  };
-
-  for (const row of MENU_ROWS) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "brain-menu-item";
-    button.setAttribute("role", "menuitem");
-    button.append(glyph(row.icon), document.createTextNode(row.label));
-    button.addEventListener("click", () => choose(row.when(day)));
-    element.append(button);
-  }
 
   const date = document.createElement("label");
   date.className = "brain-menu-item";
@@ -723,12 +790,57 @@ function showMenu(
     if (input.value) choose(input.value);
   });
   date.append(glyph("calendar-linear"), document.createTextNode("Date…"), input);
+
+  const rowsDisabled = (disabled: boolean) => {
+    for (const row of element.querySelectorAll<HTMLElement>(".brain-menu-item")) {
+      row.toggleAttribute("data-disabled", disabled);
+      if (row instanceof HTMLButtonElement) row.disabled = disabled;
+    }
+    input.disabled = disabled;
+  };
+
+  const choose = (when: string | null) => {
+    // One write at a time. Two clicks on one row, or Enter followed by a
+    // click, would otherwise mint two records for one checkbox, and two
+    // records contending for one line is the state that has no honest
+    // reading: the next reconcile detaches whichever loses.
+    if (writing) return;
+    writing = true;
+    rowsDisabled(true);
+    void applyChoice(view, trigger, promote, when)
+      .finally(() => {
+        writing = false;
+        rowsDisabled(false);
+      })
+      .then((reason) => {
+        if (reason === null) {
+          dismiss();
+          // The keyboard came from the note and goes back to it.
+          view.focus();
+          return;
+        }
+        refusal.hidden = false;
+        refusal.textContent = reason;
+      });
+  };
+
+  for (const row of MENU_ROWS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "brain-menu-item";
+    button.setAttribute("role", "menuitem");
+    button.append(glyph(row.icon), document.createTextNode(row.label));
+    button.addEventListener("click", () => choose(row.when(day)));
+    element.append(button);
+  }
   element.append(date);
 
   document.body.append(element);
   place(element, trigger);
   document.addEventListener("mousedown", onPointerDown, true);
   document.addEventListener("keydown", onKeyDown);
+  window.addEventListener("scroll", onViewportMoved, true);
+  window.addEventListener("resize", onViewportMoved);
   currentMenu = { element, dismiss, detach };
   setOpen(view, itemPos);
   element.dataset.state = "open";
@@ -771,22 +883,28 @@ function glyph(name: string): SVGElement {
 
 /* ── The two writes ──────────────────────────────────────────────────────── */
 
-/** Null on success, else the words the menu should show. */
+/** Null on success, else the words the menu should show.
+ *
+ *  The line and its record are resolved from the trigger and the live
+ *  document HERE, at the moment of the write, not when the menu opened: the
+ *  document can move underneath an open menu, and the whole point of the
+ *  anchor is that the record names the line the person pointed at. */
 async function applyChoice(
   view: EditorView,
-  itemPos: number,
+  trigger: HTMLElement,
   promote: PromoteContext,
-  taskId: string | null,
   when: string | null,
 ): Promise<string | null> {
-  return taskId === null
-    ? promoteLine(view, itemPos, promote, when)
-    : reschedule(view, taskId, when);
+  const target = markTargetOf(view, trigger);
+  if (target === null) return "That line has gone";
+  return target.taskId === null
+    ? promoteLine(view, target.index, promote, when)
+    : reschedule(view, target.taskId, when);
 }
 
 async function promoteLine(
   view: EditorView,
-  itemPos: number,
+  index: number,
   promote: PromoteContext,
   when: string | null,
 ): Promise<string | null> {
@@ -795,8 +913,7 @@ async function promoteLine(
   if (page === null) return "This note cannot hold a task";
 
   const items = taskItemsOf(view.state.doc);
-  const index = items.findIndex((item) => item.pos === itemPos);
-  if (index < 0) return "That line has gone";
+  if (index >= items.length) return "That line has gone";
 
   // The anchor is built from the markdown the store is about to receive, not
   // from the position in the document. `line` is a markdown line number, and

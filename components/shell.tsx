@@ -5116,6 +5116,10 @@ export function Shell({
     // back of its own.
     homeActive: surface === "notes" && !mobilePagesOpen && !mobileSearchOpen,
     searchActive: mobileSearchOpen,
+    // The Tasks surface is Task 2a's. The slot stands here first so the bar's
+    // geometry is settled once, on six tracks, rather than moved twice.
+    tasksActive: false,
+    onTasks: () => {},
     pagesActive: mobilePagesOpen,
     mailActive: mailOpen && !mobilePagesOpen && !mobileSearchOpen,
     hidden: mobileTabBarHidden,

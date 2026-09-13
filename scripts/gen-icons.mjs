@@ -127,6 +127,7 @@ const PAIRS = [
   "star",
   "folder",
   "document-text",
+  "check-read",
   // settings surface sections
   "palette",
   "plug-circle",

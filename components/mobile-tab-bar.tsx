@@ -6,6 +6,7 @@ import { Icon } from "./ui/icon";
 interface MobileTabBarProps {
   homeActive: boolean;
   searchActive: boolean;
+  tasksActive: boolean;
   pagesActive: boolean;
   mailActive: boolean;
   hidden?: boolean;
@@ -13,6 +14,7 @@ interface MobileTabBarProps {
   pagesRef?: RefObject<HTMLButtonElement | null>;
   onHome: () => void;
   onSearch: (invoker: HTMLElement) => void;
+  onTasks: () => void;
   onNew: () => void;
   onPages: (invoker: HTMLElement) => void;
   onMail: () => void;
@@ -28,28 +30,36 @@ interface MobileTabBarProps {
  *  also sits on the account row above: two wordless controls, one drawing,
  *  two different things. Pages, in the very next slot, keeps `document-text`,
  *  the page itself, and carries its word underneath; this one is wordless, so
- *  it has to say the act in the drawing. Names here are bare — the variant is
- *  the second argument, and a name that carries its own suffix reads as a
- *  different kind of entry. */
+ *  it has to say the act in the drawing. Tasks takes `check-read`, the pair
+ *  of ticks, and not `sun`, which the Journal row owns. It was
+ *  `checklist-minimalistic` first: that one is the same rounded-square frame
+ *  `document-text` and `letter` already wear, at the same 18 and the same
+ *  weight, so three of the five words below carried one silhouette and the
+ *  bold pair made Tasks and Pages two filled squares. The ticks have no
+ *  frame, so the rest state reads at a glance. Names here are bare — the
+ *  variant is the second argument, and a name that carries its own suffix
+ *  reads as a different kind of entry. */
 const items = [
   { key: "home", label: "Home", icon: "home" },
   { key: "search", label: "Search", icon: "magnifer" },
+  { key: "tasks", label: "Tasks", icon: "check-read" },
   { key: "new", label: "New", icon: "add" },
   { key: "pages", label: "Pages", icon: "document-text" },
   { key: "mail", label: "Mail", icon: "letter" },
 ] as const;
 
 /** Mobile-first primary navigation: a floating thick capsule centred over the
- *  safe area, sized by its five slots rather than by the window and never
+ *  safe area, sized by its six slots rather than by the window and never
  *  nearer to it than the 8px inset (DESIGN.md v2 → Geometry: nothing floating
  *  touches the window edge). The canvas passes under it and the material
  *  blurs on its own — no hairline, no edge band. Search and Pages render
  *  their own copy inside their focus scope, with the same position and the
  *  same material, so the bar looks and sits identically whichever of the
- *  five tabs is up; desktop keeps its sidebar. */
+ *  six tabs is up; desktop keeps its sidebar. */
 export function MobileTabBar({
   homeActive,
   searchActive,
+  tasksActive,
   pagesActive,
   mailActive,
   hidden = false,
@@ -57,6 +67,7 @@ export function MobileTabBar({
   pagesRef,
   onHome,
   onSearch,
+  onTasks,
   onNew,
   onPages,
   onMail,
@@ -73,6 +84,7 @@ export function MobileTabBar({
           const active =
             (item.key === "home" && homeActive) ||
             (item.key === "search" && searchActive) ||
+            (item.key === "tasks" && tasksActive) ||
             (item.key === "pages" && pagesActive) ||
             (item.key === "mail" && mailActive);
           return (
@@ -93,6 +105,7 @@ export function MobileTabBar({
               onClick={(event) => {
                 if (item.key === "home") onHome();
                 else if (item.key === "search") onSearch(event.currentTarget);
+                else if (item.key === "tasks") onTasks();
                 else if (item.key === "new") onNew();
                 else if (item.key === "pages") onPages(event.currentTarget);
                 else onMail();

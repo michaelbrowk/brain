@@ -3470,7 +3470,7 @@ a.brain-share-url:active {
    passes under it and it blurs on its own (no edge band, no hairline).
    Search and Pages render their own copy inside their focus scope, with this
    same position and material, so the bar looks and sits identically whichever
-   of the five tabs is up. It used to go `contained` in those two: a plain
+   of the six tabs is up. It used to go `contained` in those two: a plain
    row in flow at the foot of a sheet, which is what a section does not do.
 
    IT IS SIZED BY ITS CONTENT, NOT BY THE WINDOW. It used to stretch edge to
@@ -3480,22 +3480,26 @@ a.brain-share-url:active {
    than as an object standing on it. Everything else that floats in this
    product is shrink-to-fit — the breadcrumb pill, the toolbar pills, the
    toast — and so is the system's own tab bar on this OS. ONE measurement
-   gives the slot: the widest label is "Search" at 37.6 (Label 11/500), 11px
-   of air on each side is 59.6, and §4's 4px step rounds that to 60 — 11.2 as
-   built. Five of them plus the row's 4px ends is 308, held at every window
-   that leaves it that much between the insets (>= 324): the bar clears 41 on
-   each side at 390, 61 at 430, 66 at 440, and never touches the window (§4).
-   Below 324 the window sets the width — (w - 16 - 8) / 5, so 59.2 at 320 —
-   and the 44px track floor is not reached until 244, where the bar is 228 and
-   still on both insets; narrower again it centres back through them. The
-   20px minimum between two adjacent WORDS is a check, not the derivation:
-   two labels centred in equal tracks leave track - (w1 + w2) / 2, so the pair
-   to read is Home<->Search (New is a wordless circle), measured 25.4 here.
+   gives the slot: the widest label is still "Search" at 37.6 (Label 11/500),
+   and "Tasks" measures 30.6 and does not take it. 9.2 of air on each side is
+   56.0, which is §4's 4px step. The sixth slot moved the air from 11.2 to 9.2
+   and the slot from 60 to 56. Six of them plus the row's 4px ends is 344,
+   held at every window that leaves it that much between the insets (>= 360):
+   the bar clears 23 on each side at 390, 43 at 430, 48 at 440, and never
+   touches the window (§4). Below 360 the window sets the width —
+   (w - 16 - 8) / 6, so 49.33 at 320 — and the 44px track floor is not reached
+   until 288, where the bar is 272 and still on both insets; narrower again it
+   centres back through them. The 20px minimum between two adjacent WORDS is
+   a check, not the derivation:
+   two labels centred in equal tracks leave track - (w1 + w2) / 2, so the
+   pairs to read are Home<->Search at 21.1, Search<->Tasks at 21.9 and
+   Pages<->Mail at 28.4 (New is a wordless circle). The minimum is
+   Home<->Search and the new neighbour does not overtake it.
    `fit-content` between the two insets with `margin-inline: auto` centres it:
    no transform, which the hidden state needs for itself. Every figure per
    width by e2e/mail-shots.spec.ts. */
 .brain-mobile-tabbar {
-  --tabbar-slot: 60px;
+  --tabbar-slot: 56px;
   position: fixed;
   z-index: calc(var(--z-drawer) - 20);
   left: calc(var(--inset) + env(safe-area-inset-left, 0px));
@@ -3534,7 +3538,7 @@ a.brain-share-url:active {
 }
 .brain-mobile-tabbar-items {
   display: grid;
-  grid-template-columns: repeat(5, minmax(44px, var(--tabbar-slot)));
+  grid-template-columns: repeat(6, minmax(44px, var(--tabbar-slot)));
   height: 54px;
   padding: 0 4px;
 }

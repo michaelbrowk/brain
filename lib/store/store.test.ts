@@ -10999,4 +10999,57 @@ describe("task records", () => {
     ).rejects.toThrow();
     expect(s.allTasks()).toHaveLength(0);
   });
+
+  it("mints a fresh id when a task file the index skipped already holds it", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    // Valid YAML the index still refuses: the frontmatter id does not match
+    // the filename, so the record is invisible in memory and present on disk.
+    const onDisk =
+      `---\nid: task-other\ntitle: Renew the visa\ndone: false\ncreated: '2026-06-01T09:00:00.000Z'\nupdated: '2026-06-01T09:00:00.000Z'\n---\nSOMEBODY'S OWN NOTES\n`;
+    await fs.writeFile(path.join(root, "_tasks", "task-scratch.md"), onDisk);
+    await s.rebuild();
+    expect(s.allTasks()).toHaveLength(0);
+
+    const written = await s.importTask(
+      {
+        id: "task-scratch",
+        title: "Book the flight",
+        done: false,
+        created: "2026-09-01T09:00:00.000Z",
+        updated: "2026-09-01T09:00:00.000Z",
+      },
+      "from the archive\n",
+    );
+
+    expect(written.id).not.toBe("task-scratch");
+    expect(
+      await fs.readFile(path.join(root, "_tasks", "task-scratch.md"), "utf8"),
+    ).toBe(onDisk);
+    expect(await s.readTaskBody(written.id)).toBe("from the archive\n");
+  });
+
+  it("mints a fresh id when a task file with broken YAML already holds it", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    const onDisk = "---\nid: [unclosed\n---\nSOMEBODY'S OWN NOTES\n";
+    await fs.writeFile(path.join(root, "_tasks", "task-scratch.md"), onDisk);
+    await s.rebuild();
+
+    const written = await s.importTask(
+      {
+        id: "task-scratch",
+        title: "Book the flight",
+        done: false,
+        created: "2026-09-01T09:00:00.000Z",
+        updated: "2026-09-01T09:00:00.000Z",
+      },
+      "",
+    );
+
+    expect(written.id).not.toBe("task-scratch");
+    expect(
+      await fs.readFile(path.join(root, "_tasks", "task-scratch.md"), "utf8"),
+    ).toBe(onDisk);
+  });
 });

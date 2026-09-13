@@ -128,6 +128,7 @@ import {
   loadTaskIndex,
   logbookWindowStart,
   readTaskBody,
+  taskFileExists,
   writeTaskFile,
 } from "../tasks/index-store";
 import {
@@ -6463,6 +6464,11 @@ export class Store {
    *  overwrites what is there, the same promise the page import keeps by
    *  always minting a fresh page, so a clash takes a fresh id and both
    *  records live.
+   *
+   *  "Already has it" is a question for the disk. The index skips a file it
+   *  cannot read or parse and one whose frontmatter id does not match its
+   *  filename, and such a file is exactly the one somebody has been editing by
+   *  hand. Asking the index alone would call that id free and write over it.
    */
   async importTask(
     raw: unknown,
@@ -6472,9 +6478,10 @@ export class Store {
     const record = parseTask(raw);
     return this.mutate(async () => {
       this.assertLinkablePageUnlocked(record.page);
-      const landed = this.taskIndex.get(record.id)
-        ? parseTask({ ...record, id: nanoid() })
-        : record;
+      const taken =
+        this.taskIndex.get(record.id) !== undefined ||
+        (await taskFileExists(this.root, record.id));
+      const landed = taken ? parseTask({ ...record, id: nanoid() }) : record;
       await this.writeTaskUnlocked(landed, src, body);
       return landed;
     });

@@ -86,17 +86,30 @@ function tasksByLine(markdown: string): Map<number, TaskLine> {
 
 /** True when two lines differ by the checkbox token and by nothing else.
  *
- *  Both sides have to be task lines, so a bracket pair in a code fence or in
- *  a paragraph is not a tick. `checked` disagreeing means the token character
- *  itself differs, and one differing character in the whole line means that
- *  character is the token. That is the test, and it needs no second regex. */
+ *  `checked` disagreeing means the token character itself differs, and one
+ *  differing character in the whole line means that character is the token.
+ *  That is the test, and it needs no second regex.
+ *
+ *  Every branch returns, and none of them throws. A merge is allowed to
+ *  refuse and is never allowed to fail: a throw here would turn a 409 into a
+ *  500 and a person would see an error instead of both versions. */
 function isTokenFlip(
   baseLine: string,
   theirLine: string,
   baseTask: TaskLine | undefined,
   theirTask: TaskLine | undefined,
 ): boolean {
-  if (!baseTask || !theirTask) return false;
+  // Both sides have to be a task line, so a bracket pair in a code fence or
+  // in a paragraph is not a tick. The two sides are refused separately,
+  // because either one alone can be the side that is not a task line and
+  // reading `checked` off the missing one is what would throw.
+  if (!baseTask) return false;
+  if (!theirTask) return false;
+  // `checked` agreeing means the difference is somewhere in the words, and
+  // copying the server's line would overwrite what the client wrote. `[x]`
+  // against `[X]` lands here too, because both read as checked, so a server
+  // that ever normalised token case would refuse that line rather than merge
+  // it.
   if (baseTask.checked === theirTask.checked) return false;
   if (baseLine.length !== theirLine.length) return false;
   let differences = 0;

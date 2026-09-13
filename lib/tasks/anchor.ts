@@ -129,13 +129,13 @@ function preferredSameHash(
   return nearer(candidate, incumbent, anchor.line);
 }
 
-/** Distance in markdown lines, with the lower line winning a tie so that the
- *  answer does not depend on the order the page happened to be parsed in. */
+/** Distance in markdown lines. A tie keeps the incumbent, which is always the
+ *  earlier line: `lines` is `parseTaskLines` output and so runs in ascending
+ *  `index` order, and both scans take candidates in that order. So two equally
+ *  distant lines resolve to the first of them, every time, and the answer does
+ *  not depend on the order the page happened to be walked in. */
 function nearer(candidate: TaskLine, incumbent: TaskLine, line: number): boolean {
-  const candidateDistance = Math.abs(candidate.index - line);
-  const incumbentDistance = Math.abs(incumbent.index - line);
-  if (candidateDistance !== incumbentDistance) return candidateDistance < incumbentDistance;
-  return candidate.index < incumbent.index;
+  return Math.abs(candidate.index - line) < Math.abs(incumbent.index - line);
 }
 
 function bigramCounts(text: string): Map<string, number> {

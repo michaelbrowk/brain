@@ -31,6 +31,32 @@ const WEEKDAY_ORDER: WeekDay[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun
 
 const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+export type RecurrenceRefusal = "no-repeat" | "bad-today" | "empty-weekdays";
+
+const REFUSAL_MESSAGES: Record<RecurrenceRefusal, string> = {
+  "no-repeat": "advance() needs a task that carries a repeat rule",
+  "bad-today": "advance() needs today as a YYYY-MM-DD calendar day",
+  "empty-weekdays": "a weekly rule needs at least one weekday",
+};
+
+/** Thrown rather than answered with a plausible record.
+ *
+ *  Each of these three is a caller that has already gone wrong, and each of
+ *  them has a quiet wrong answer available. A task with no rule would come
+ *  back unchanged and a call site would write it and report success. A bad
+ *  `today` would come back as `when: "0NaN-NaN-01"`, which the schema refuses,
+ *  so the task drops out of every list on the next load. `reason` is there so
+ *  a route can map each one to its own status rather than to one 500. */
+export class RecurrenceError extends Error {
+  readonly reason: RecurrenceRefusal;
+
+  constructor(reason: RecurrenceRefusal) {
+    super(REFUSAL_MESSAGES[reason]);
+    this.name = "RecurrenceError";
+    this.reason = reason;
+  }
+}
+
 /** The first date the rule names strictly after `from`.
  *
  *  Strictly after, so calling it with the occurrence that was completed always
@@ -41,14 +67,16 @@ export function nextOccurrence(rule: TaskRepeat, from: string): string {
 
   if (rule.freq === "weekly") {
     const wanted = new Set(rule.byWeekday);
-    // At most seven steps, because a week holds every weekday the rule can
-    // name and the schema requires at least one of them.
+    // Seven steps hold every weekday a rule can name, so the loop always
+    // returns while the schema holds (`byWeekday` is `min(1)`). Falling out of
+    // it means an empty rule, and there is no date that answers it. Throwing
+    // rather than returning the eighth day keeps the bound real.
     let day = addOneDay(from);
     for (let step = 0; step < 7; step += 1) {
       if (wanted.has(WEEKDAY_ORDER[weekdayIndex(day)])) return day;
       day = addOneDay(day);
     }
-    return day;
+    throw new RecurrenceError("empty-weekdays");
   }
 
   // Monthly. The day of the month is the rule's, clamped to the month it
@@ -89,17 +117,27 @@ export type AdvanceOptions = CompleteOptions | RescheduleOptions;
  *  moving it are one operation on one record, because all three come down to
  *  where the single open instance now sits.
  *
- *  A task with no `repeat` comes back untouched. This file knows the repeat
- *  rule and nothing else, and an ordinary task's completion is the store's
- *  plain write of `done` and `doneAt`. Writing a log entry on a record with
- *  no rule would be a record the schema refuses.
+ *  A task with no `repeat` is refused on both paths, per the spec's
+ *  failure-mode table. Returning it unchanged was the other option and it is
+ *  the worse one: the record comes back byte-identical, a call site written as
+ *  `write(advance(task, ...))` reports success, and the task stays open with
+ *  nothing anywhere saying so. The caller checks `repeat` first. Completing an
+ *  ordinary task is the store's plain write of `done` and `doneAt`.
  *
  *  `updated` is not written here. It is a clock read, and the store owns it.
  */
 export function advance(record: TaskRecord, options: AdvanceOptions): TaskRecord {
-  if (!record.repeat) return record;
+  if (!record.repeat) throw new RecurrenceError("no-repeat");
 
   if (options.completedAt !== undefined) {
+    // `today` gets the same calendar check `when` gets. Left unchecked, the
+    // word `someday` wins every string comparison against a real day, because
+    // `s` sorts above every digit, and the arithmetic below then writes
+    // `when: "0NaN-NaN-01"`. The schema refuses that, so the task drops out of
+    // every list on the next load. Supplied by the caller is not the same as
+    // checked.
+    if (!isDay(options.today)) throw new RecurrenceError("bad-today");
+
     // The day this instance was owed. A repeating task parked on `someday`,
     // or filed under no day at all, has none, and the day it was finished is
     // then the honest answer for the log.
@@ -124,11 +162,21 @@ export function advance(record: TaskRecord, options: AdvanceOptions): TaskRecord
 
   if (options.to !== undefined) return { ...record, when: options.to };
 
+  // Unreachable through `AdvanceOptions`, which always carries one of the two.
+  // Here for a caller that is not TypeScript.
   return record;
 }
 
-const isDay = (value: string | undefined): value is string =>
-  value !== undefined && DAY_RE.test(value);
+/** The calendar, not the shape. `2026-02-31` passes a `\d{2}` check and then
+ *  names a day the calendar does not have, and a rule would advance off it.
+ *  This is `model.ts`'s rule for `when`, applied to `today` as well. */
+const isDay = (value: string | undefined): value is string => {
+  if (value === undefined || !DAY_RE.test(value)) return false;
+  const month = monthOf(value);
+  if (month < 1 || month > 12) return false;
+  const day = dayOfMonth(value);
+  return day >= 1 && day <= daysInMonth(yearOf(value), month);
+};
 
 const later = (a: string, b: string): string => (a > b ? a : b);
 

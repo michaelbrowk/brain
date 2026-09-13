@@ -146,6 +146,153 @@ const cases: MergeCase[] = [
     theirs: body(PLANTS_DONE, NOTE),
     merged: null,
   },
+  // 18 to 21 are the two guards inside `isTokenFlip`. Each is one deleted
+  // line away from a merge that copies the server's text over the client's.
+  {
+    name: "18: the server edited one character of the words and ticked nothing",
+    base: body(PLANTS),
+    mine: body(PLANTS),
+    theirs: body("- [ ] water the plantz"),
+    merged: null,
+  },
+  {
+    name: "19: base is a task line, theirs at that index is not",
+    base: body(PLANTS),
+    mine: body(PLANTS),
+    theirs: body("  [ ] water the plants"),
+    merged: null,
+  },
+  {
+    name: "20: theirs is a task line, base at that index is not",
+    base: body("  [ ] water the plants"),
+    mine: body("  [ ] water the plants"),
+    theirs: body(PLANTS),
+    merged: null,
+  },
+  {
+    name: "21: the server flipped a token inside a code fence",
+    base: body("```", PLANTS, "```", NOTE),
+    mine: body("```", PLANTS, "```", LONGER_NOTE),
+    theirs: body("```", PLANTS_DONE, "```", NOTE),
+    merged: null,
+  },
+  // 22 is the cost ruling 1 accepted, and the shape an LCS would flip while
+  // case 11 stayed green. Client edits above and below, tick in the middle.
+  {
+    name: "22: the client edited above and below an untouched ticked line",
+    base: body("A.", PLANTS, "B."),
+    mine: body("A edited.", PLANTS, "B edited."),
+    theirs: body("A.", PLANTS_DONE, "B."),
+    merged: null,
+  },
+  // 23 and 24: the merge matches by index and never by text. A merge that
+  // searched `mine` for the line's words would tick the first of the two.
+  {
+    name: "23: two identical base lines, the server ticks the second",
+    base: body(PLANTS, PLANTS, NOTE),
+    mine: body(PLANTS, PLANTS, LONGER_NOTE),
+    theirs: body(PLANTS, PLANTS_DONE, NOTE),
+    merged: body(PLANTS, PLANTS_DONE, LONGER_NOTE),
+  },
+  {
+    name: "24: two identical base lines, the server ticks the first",
+    base: body(PLANTS, PLANTS, NOTE),
+    mine: body(PLANTS, PLANTS, LONGER_NOTE),
+    theirs: body(PLANTS_DONE, PLANTS, NOTE),
+    merged: body(PLANTS_DONE, PLANTS, LONGER_NOTE),
+  },
+  {
+    name: "25: a nested task line is ticked and its parent is not",
+    base: body(PLANTS, "  - [ ] and the herbs"),
+    mine: body(PLANTS, "  - [ ] and the herbs", NOTE),
+    theirs: body(PLANTS, "  - [x] and the herbs"),
+    merged: body(PLANTS, "  - [x] and the herbs", NOTE),
+  },
+  // 26 to 28: the client deleted the line the server ticked. There is no
+  // index to re-apply the tick at, at any of the three positions.
+  {
+    name: "26: the client deleted the ticked line, first",
+    base: body(PLANTS, CAT, NOTE),
+    mine: body(CAT, NOTE),
+    theirs: body(PLANTS_DONE, CAT, NOTE),
+    merged: null,
+  },
+  {
+    name: "27: the client deleted the ticked line, middle",
+    base: body(PLANTS, CAT, NOTE),
+    mine: body(PLANTS, NOTE),
+    theirs: body(PLANTS, CAT_DONE, NOTE),
+    merged: null,
+  },
+  {
+    name: "28: the client deleted the ticked line, last",
+    base: body(NOTE, CAT, PLANTS),
+    mine: body(NOTE, CAT),
+    theirs: body(NOTE, CAT, PLANTS_DONE),
+    merged: null,
+  },
+  {
+    name: "29: the client deleted a different line and the ticked one survives",
+    base: body(PLANTS, CAT, NOTE),
+    mine: body(PLANTS, NOTE),
+    theirs: body(PLANTS_DONE, CAT, NOTE),
+    merged: body(PLANTS_DONE, NOTE),
+  },
+  {
+    name: "30: two identical base lines, the client deleted one, the server ticked the other",
+    base: body(PLANTS, PLANTS, NOTE),
+    mine: body(PLANTS, NOTE),
+    theirs: body(PLANTS, PLANTS_DONE, NOTE),
+    merged: null,
+  },
+  {
+    name: "31: two different lines ticked at once, one by each side",
+    base: body(PLANTS, CAT),
+    mine: body(PLANTS, CAT_DONE),
+    theirs: body(PLANTS_DONE, CAT),
+    merged: body(PLANTS_DONE, CAT_DONE),
+  },
+  // 32 to 35: a trailing newline is a final empty line to the splitter, so it
+  // counts in the line count and in the head and the tail like any other.
+  {
+    name: "32: all three bodies carry a trailing newline",
+    base: `${body(PLANTS, NOTE)}\n`,
+    mine: `${body(PLANTS, LONGER_NOTE)}\n`,
+    theirs: `${body(PLANTS_DONE, NOTE)}\n`,
+    merged: `${body(PLANTS_DONE, LONGER_NOTE)}\n`,
+  },
+  {
+    name: "33: the client added a trailing newline",
+    base: body(PLANTS, NOTE),
+    mine: `${body(PLANTS, NOTE)}\n`,
+    theirs: body(PLANTS_DONE, NOTE),
+    merged: `${body(PLANTS_DONE, NOTE)}\n`,
+  },
+  {
+    name: "34: the client removed the trailing newline",
+    base: `${body(PLANTS, NOTE)}\n`,
+    mine: body(PLANTS, NOTE),
+    theirs: `${body(PLANTS_DONE, NOTE)}\n`,
+    merged: body(PLANTS_DONE, NOTE),
+  },
+  {
+    name: "35: the server dropped the trailing newline",
+    base: `${body(PLANTS, NOTE)}\n`,
+    mine: `${body(PLANTS, NOTE)}\n`,
+    theirs: body(PLANTS_DONE, NOTE),
+    merged: null,
+  },
+  // 36 is the other side of case 21's fence boundary, and it accepts.
+  // `parseTaskLines` leaves four-space indented code out of scope on purpose
+  // (`task-lines.ts`), so the editor, the anchor and this merge all read that
+  // line as a task. Invariant 7 working, rather than a merge defect.
+  {
+    name: "36: a four-space indented code block is not a fence, so its tick merges",
+    base: body(NOTE, "    - [ ] a code sample"),
+    mine: body(LONGER_NOTE, "    - [ ] a code sample"),
+    theirs: body(NOTE, "    - [x] a code sample"),
+    merged: body(LONGER_NOTE, "    - [x] a code sample"),
+  },
 ];
 
 describe("mergeCheckboxStates", () => {

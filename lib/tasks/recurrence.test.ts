@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { parseTaskRecord, type TaskRecord, type TaskRepeat } from "./model";
 import * as recurrenceModule from "./recurrence";
-import { advance, nextOccurrence } from "./recurrence";
+import { advance, nextOccurrence, RecurrenceError } from "./recurrence";
 
 /** Every date here is a `YYYY-MM-DD` string and is compared as one. The
  *  weekdays the fixtures rely on: 2026-09-13 is a Sunday, so 2026-09-14 and
@@ -11,8 +11,21 @@ import { advance, nextOccurrence } from "./recurrence";
 const DAILY: TaskRepeat = { freq: "daily" };
 const MONDAYS: TaskRepeat = { freq: "weekly", byWeekday: ["mon"] };
 const MON_AND_THU: TaskRepeat = { freq: "weekly", byWeekday: ["mon", "thu"] };
+const WEDNESDAYS: TaskRepeat = { freq: "weekly", byWeekday: ["wed"] };
+const MON_WED_FRI: TaskRepeat = { freq: "weekly", byWeekday: ["mon", "wed", "fri"] };
 const THE_31ST: TaskRepeat = { freq: "monthly", byMonthDay: 31 };
 const THE_15TH: TaskRepeat = { freq: "monthly", byMonthDay: 15 };
+
+/** The week the "from each weekday" rows walk. 2026-09-14 is a Monday. */
+const THAT_WEEK = [
+  "2026-09-14",
+  "2026-09-15",
+  "2026-09-16",
+  "2026-09-17",
+  "2026-09-18",
+  "2026-09-19",
+  "2026-09-20",
+];
 
 const COMPLETED_AT = "2026-09-14T18:30:00.000Z";
 
@@ -130,6 +143,101 @@ describe("nextOccurrence", () => {
       from: "2026-09-30",
       expected: "2026-10-01",
     },
+
+    // Weekly, from every day of the week against one weekday, which is the
+    // spec's own case and the only way each arm of the seven-step scan runs.
+    ...THAT_WEEK.map((from, index) => ({
+      name: `weekly, Wednesday from day ${index + 1} of the week (${from})`,
+      rule: WEDNESDAYS,
+      // Monday and Tuesday reach the Wednesday inside their own week. From
+      // Wednesday itself and every day after it, the answer is the week after.
+      expected: index <= 1 ? "2026-09-16" : "2026-09-23",
+      from,
+    })),
+
+    // Weekly with three weekdays, walked round the whole rule.
+    {
+      name: "weekly, three weekdays, Monday to Wednesday",
+      rule: MON_WED_FRI,
+      from: "2026-09-14",
+      expected: "2026-09-16",
+    },
+    {
+      name: "weekly, three weekdays, Wednesday to Friday",
+      rule: MON_WED_FRI,
+      from: "2026-09-16",
+      expected: "2026-09-18",
+    },
+    {
+      name: "weekly, three weekdays, Friday round to Monday",
+      rule: MON_WED_FRI,
+      from: "2026-09-18",
+      expected: "2026-09-21",
+    },
+    {
+      name: "weekly, three weekdays, from a day none of them names",
+      rule: MON_WED_FRI,
+      from: "2026-09-19",
+      expected: "2026-09-21",
+    },
+
+    // The two clamp landings the spec names by value.
+    {
+      name: "monthly, the 31st into a leap February",
+      rule: THE_31ST,
+      from: "2024-01-31",
+      expected: "2024-02-29",
+    },
+    {
+      name: "monthly, the 31st into April",
+      rule: THE_31ST,
+      from: "2026-03-31",
+      expected: "2026-04-30",
+    },
+
+    // A `from` far in the past. A rule is read off the calendar, so a task
+    // untouched for decades still lands on a real date and not on an offset
+    // from whenever it was last seen.
+    {
+      name: "daily, from the last day of the last century",
+      rule: DAILY,
+      from: "1999-12-31",
+      expected: "2000-01-01",
+    },
+    {
+      name: "weekly, from the first day of the epoch, a Thursday",
+      rule: MONDAYS,
+      from: "1970-01-01",
+      expected: "1970-01-05",
+    },
+    {
+      name: "monthly, from a day in 1970",
+      rule: THE_15TH,
+      from: "1970-01-20",
+      expected: "1970-02-15",
+    },
+
+    // The century rules inside `daysInMonth`, which decide whether the day
+    // after 28 February exists. `model.ts` holds a second copy of this rule,
+    // so a drift between the two would otherwise go unnoticed in both files.
+    {
+      name: "daily, 1900 is not a leap year because of the 100 rule",
+      rule: DAILY,
+      from: "1900-02-28",
+      expected: "1900-03-01",
+    },
+    {
+      name: "daily, 2000 is a leap year because of the 400 rule",
+      rule: DAILY,
+      from: "2000-02-28",
+      expected: "2000-02-29",
+    },
+    {
+      name: "daily, 2100 is not a leap year because of the 100 rule",
+      rule: DAILY,
+      from: "2100-02-28",
+      expected: "2100-03-01",
+    },
   ];
 
   for (const { name, rule, from, expected } of cases) {
@@ -137,6 +245,45 @@ describe("nextOccurrence", () => {
       expect(nextOccurrence(rule, from)).toBe(expected);
     });
   }
+
+  it("walks the 31st through a leap year by value, every clamp named", () => {
+    // The property test below asserts only that each date is later than the
+    // last, which an implementation that added a day every time would pass.
+    // This one names all thirteen landings.
+    const expected = [
+      "2024-02-29",
+      "2024-03-31",
+      "2024-04-30",
+      "2024-05-31",
+      "2024-06-30",
+      "2024-07-31",
+      "2024-08-31",
+      "2024-09-30",
+      "2024-10-31",
+      "2024-11-30",
+      "2024-12-31",
+      "2025-01-31",
+      "2025-02-28",
+    ];
+
+    const walked: string[] = [];
+    let day = "2024-01-31";
+    for (let step = 0; step < expected.length; step += 1) {
+      day = nextOccurrence(THE_31ST, day);
+      walked.push(day);
+    }
+
+    expect(walked).toEqual(expected);
+  });
+
+  it("refuses a weekly rule with no weekday rather than answering the eighth day", () => {
+    // Unreachable while the schema holds, which is why the loop bound would
+    // otherwise be free to shrink. A rule with no weekday has no next date.
+    const empty = { freq: "weekly", byWeekday: [] } as unknown as TaskRepeat;
+
+    expect(() => nextOccurrence(empty, "2026-09-14")).toThrow(RecurrenceError);
+    expect(() => nextOccurrence(empty, "2026-09-14")).toThrow(/at least one weekday/);
+  });
 
   it("always moves forward, over forty occurrences of every rule", () => {
     for (const rule of [DAILY, MONDAYS, MON_AND_THU, THE_31ST, THE_15TH]) {
@@ -218,6 +365,31 @@ describe("advance", () => {
     },
   ];
 
+  // The caller's day and the completion instant's UTC day disagree here, which
+  // is the whole reason `today` is a separate argument. Every case above uses
+  // an instant whose UTC day equals `today`, so an implementation that read
+  // `completedAt.slice(0, 10)` would pass all of them.
+  const LATE_AT_NIGHT = "2026-09-15T02:00:00.000Z"; // the 14th at 21:00 in New York
+
+  it("logs the caller's day, not the completion instant's UTC day", () => {
+    const record = repeating({ repeat: DAILY, when: "someday" });
+
+    const result = advance(record, { completedAt: LATE_AT_NIGHT, today: "2026-09-14" });
+
+    expect(result.log).toEqual([
+      { scheduled: "2026-09-14", completedAt: LATE_AT_NIGHT },
+    ]);
+    expect(result.when).toBe("2026-09-15");
+  });
+
+  it("advances from the caller's day, not the completion instant's UTC day", () => {
+    const record = repeating({ repeat: DAILY, when: "2026-09-01" });
+
+    const result = advance(record, { completedAt: LATE_AT_NIGHT, today: "2026-09-14" });
+
+    expect(result.when).toBe("2026-09-15");
+  });
+
   for (const { name, fields, today, when, scheduled } of cases) {
     it(name, () => {
       const record = repeating(fields);
@@ -290,12 +462,63 @@ describe("advance", () => {
     expect(parseTaskRecord(result).ok).toBe(true);
   });
 
-  it("leaves a task that does not repeat exactly as it was", () => {
+  it("refuses a task that does not repeat, on the completion path", () => {
+    // The spec's failure-mode table says refused. Returning it unchanged
+    // would hand a call site a byte-identical record to write and report as a
+    // completion, and the task would stay open with nothing saying so.
     const plain = repeating({ repeat: undefined, log: undefined });
 
-    expect(advance(plain, { completedAt: COMPLETED_AT, today: "2026-09-14" })).toEqual(plain);
-    expect(advance(plain, { to: "2026-09-20" })).toEqual(plain);
+    expect(() => advance(plain, { completedAt: COMPLETED_AT, today: "2026-09-14" })).toThrow(
+      RecurrenceError,
+    );
+    try {
+      advance(plain, { completedAt: COMPLETED_AT, today: "2026-09-14" });
+      expect.unreachable("advance accepted a task with no rule");
+    } catch (error) {
+      expect((error as RecurrenceError).reason).toBe("no-repeat");
+    }
   });
+
+  it("refuses a task that does not repeat, on the reschedule path", () => {
+    const plain = repeating({ repeat: undefined, log: undefined });
+
+    expect(() => advance(plain, { to: "2026-09-20" })).toThrow(RecurrenceError);
+    try {
+      advance(plain, { to: "2026-09-20" });
+      expect.unreachable("advance accepted a task with no rule");
+    } catch (error) {
+      expect((error as RecurrenceError).reason).toBe("no-repeat");
+    }
+  });
+
+  // `today` reaches the digit arithmetic directly. Unchecked, each of these
+  // produces a `when` the schema refuses, which drops the task out of every
+  // list on the next load rather than failing where the mistake was made.
+  const badDays: { name: string; today: string }[] = [
+    { name: "the word someday, which sorts above every real day", today: "someday" },
+    { name: "the empty string", today: "" },
+    { name: "a day the calendar does not have", today: "2026-02-31" },
+    { name: "a month the calendar does not have", today: "2026-13-01" },
+    { name: "an instant rather than a day", today: "2026-09-14T18:30:00.000Z" },
+  ];
+
+  for (const { name, today } of badDays) {
+    it(`refuses ${name} as today`, () => {
+      const record = repeating();
+
+      expect(() => advance(record, { completedAt: COMPLETED_AT, today })).toThrow(
+        RecurrenceError,
+      );
+      try {
+        advance(record, { completedAt: COMPLETED_AT, today });
+        expect.unreachable("advance accepted a today that is not a calendar day");
+      } catch (error) {
+        expect((error as RecurrenceError).reason).toBe("bad-today");
+        // The measured wrong answers were "0NaN-NaN-01" and "0000-00-01".
+        expect((error as Error).message).not.toContain("NaN");
+      }
+    });
+  }
 
   it("never mutates the record it was given", () => {
     const log = [{ scheduled: "2026-09-13", completedAt: "2026-09-13T08:00:00.000Z" }];
@@ -312,7 +535,17 @@ describe("advance", () => {
 
   it("reads no clock, in every export of recurrence.ts", () => {
     const record = repeating();
+    /** Caught rather than propagated, because the harness below treats any
+     *  throw as a clock read. A refusal is a return value here. */
+    const refusalOf = (run: () => unknown): unknown => {
+      try {
+        return run();
+      } catch (error) {
+        return error;
+      }
+    };
     const exercised: Record<string, () => unknown> = {
+      RecurrenceError: () => new RecurrenceError("no-repeat"),
       nextOccurrence: () => [
         nextOccurrence(DAILY, "2026-09-14"),
         nextOccurrence(MON_AND_THU, "2026-09-14"),
@@ -321,7 +554,8 @@ describe("advance", () => {
       advance: () => [
         advance(record, { completedAt: COMPLETED_AT, today: "2026-09-14" }),
         advance(record, { to: "2026-09-20" }),
-        advance(repeating({ repeat: undefined }), { to: "2026-09-20" }),
+        refusalOf(() => advance(repeating({ repeat: undefined }), { to: "2026-09-20" })),
+        refusalOf(() => advance(record, { completedAt: COMPLETED_AT, today: "someday" })),
       ],
     };
 

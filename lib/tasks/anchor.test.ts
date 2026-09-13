@@ -23,6 +23,16 @@ const PLANTS_TODAY = "water the plants today";
 const PLANTS_TOMORROW = "water the plants tomorrow";
 const CAT = "feed the cat";
 
+/** Three texts chosen for where they sit against the 0.6 threshold and not
+ *  for what they say. The similarities are asserted in the cases that use
+ *  them, so a fixture edited by hand cannot quietly stop testing the line. */
+const RENT = "pay the rent";
+const RENT_BILLS = "pay the rent and the bills"; // 0.611 against RENT
+const RENT_TODAY = "pay the rent today";
+const RENT_NOON = "pay the rent before noon"; // 0.600 exactly against RENT_TODAY
+const REPORT_NOON = "read the report before noon";
+const REPORT_KEY = "read the report with the new key"; // 0.596 against REPORT_NOON
+
 const task = (text: string, checked = false) => `- [${checked ? "x" : " "}] ${text}`;
 
 describe("diceBigramSimilarity", () => {
@@ -206,6 +216,73 @@ describe("resolveAnchor", () => {
     expect(result?.anchor).toEqual(anchorFor(PLANTS, 0, 5));
   });
 
+  // Cases 14 to 16 are the threshold itself, at the resolver and not at the
+  // coefficient. `diceBigramSimilarity`'s own table asserts the number 0.6.
+  // These three assert the decision the resolver makes at that number, which
+  // is what the 0.6 rule actually is. Without them the threshold can be moved
+  // anywhere between 0.385 and 0.769 and nothing notices.
+
+  it("14: a candidate at exactly 0.600 binds, because the threshold is inclusive", () => {
+    const lines = parseTaskLines(task(RENT_NOON));
+
+    expect(diceBigramSimilarity(RENT_TODAY, RENT_NOON)).toBe(0.6);
+    const result = resolveAnchor(anchorFor(RENT_TODAY, 0, 0), lines, NOTHING_CLAIMED);
+
+    expect(result?.index).toBe(0);
+    expect(result?.anchor).toEqual(anchorFor(RENT_NOON, 0, 0));
+  });
+
+  it("15: a candidate at 0.611, a shade over the threshold, binds", () => {
+    const lines = parseTaskLines(task(RENT_BILLS));
+
+    const similarity = diceBigramSimilarity(RENT, RENT_BILLS);
+    expect(similarity).toBeGreaterThan(0.6);
+    expect(similarity).toBeLessThan(0.62);
+    expect(resolveAnchor(anchorFor(RENT, 0, 0), lines, NOTHING_CLAIMED)?.index).toBe(0);
+  });
+
+  it("16: a candidate at 0.596, a shade under the threshold, detaches", () => {
+    const lines = parseTaskLines(task(REPORT_KEY));
+
+    const similarity = diceBigramSimilarity(REPORT_NOON, REPORT_KEY);
+    expect(similarity).toBeLessThan(0.6);
+    expect(similarity).toBeGreaterThan(0.58);
+    expect(resolveAnchor(anchorFor(REPORT_NOON, 0, 0), lines, NOTHING_CLAIMED)).toBeNull();
+  });
+
+  it("17: two equally distant rebind candidates bind the earlier line", () => {
+    // Both are over the threshold and both are one line from the remembered
+    // line, so only the tie-break decides. It has to be the same answer every
+    // time, or an anchor flips between two lines on successive reconciles.
+    const lines = parseTaskLines(
+      [task(PLANTS_TODAY), "A paragraph.", task(PLANTS_TOMORROW)].join("\n"),
+    );
+
+    const result = resolveAnchor(anchorFor(PLANTS, 0, 1), lines, NOTHING_CLAIMED);
+
+    expect(result?.index).toBe(0);
+    expect(result?.anchor).toEqual(anchorFor(PLANTS_TODAY, 0, 0));
+  });
+
+  it("18: same-hash lines with no matching ordinal bind the nearest", () => {
+    // Three copies of one text and an ordinal none of them carries, which is
+    // the state after duplicates above a task are deleted. Step 2 falls back
+    // to distance, and the remembered line is the last copy.
+    const markdown = [
+      task(PLANTS),
+      "A paragraph.",
+      task(PLANTS),
+      "A paragraph.",
+      task(PLANTS),
+    ].join("\n");
+    const lines = parseTaskLines(markdown);
+
+    const result = resolveAnchor(anchorFor(PLANTS, 9, 4), lines, NOTHING_CLAIMED);
+
+    expect(result?.index).toBe(2);
+    expect(result?.anchor).toEqual(anchorFor(PLANTS, 2, 4));
+  });
+
   it("never hands two anchors the same line", () => {
     const lines = parseTaskLines([task(PLANTS), task(PLANTS)].join("\n"));
     const claimed = new Set<number>();
@@ -224,7 +301,12 @@ describe("resolveAnchor", () => {
   it("reads no clock, in every export of anchor.ts", () => {
     const lines = parseTaskLines([task(PLANTS), task(CAT)].join("\n"));
     const exercised: Record<string, () => unknown> = {
-      diceBigramSimilarity: () => diceBigramSimilarity(PLANTS, CAT),
+      // Both branches: the `a === b` short circuit answers before any
+      // counting, so a clock read on that line hides from the unequal call.
+      diceBigramSimilarity: () => [
+        diceBigramSimilarity(PLANTS, CAT),
+        diceBigramSimilarity(PLANTS, PLANTS),
+      ],
       resolveAnchor: () => [
         resolveAnchor(anchorFor(PLANTS, 0, 0), lines, NOTHING_CLAIMED),
         resolveAnchor(anchorFor(PLANTS, 3, 9), lines, NOTHING_CLAIMED),

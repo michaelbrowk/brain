@@ -1002,8 +1002,17 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
   background-color: var(--ink);
   border-color: var(--ink);
 }
-/* 28 under a mouse. `brain-touch-hit` takes it to 44 on a coarse pointer from
-   its own pseudo-element, so the two never contend for the same one. */
+/* 28 on every pointer, which is the largest target a task list can hold. Body
+   is 16 at line-height 1.5 and `li + li` adds 4, so consecutive controls sit
+   28 apart, measured. The 44 of `brain-touch-hit` would overlap its neighbour
+   by 16 and document order would decide which item owns a tap in the middle,
+   the failure `app/globals.css` already documents for the mail section header
+   and fixes there by spreading two controls to 44 between centres. A list
+   cannot spread its lines. At 28 the targets tile the gutter exactly: no dead
+   space between them, no contested band, and 4 more than the 24 of WCAG
+   2.5.8. `brain-touch-min` stays on the element for its other half,
+   `touch-action: manipulation`, which takes the double-tap delay off a tap.
+   The Tasks surface has rows tall enough for 44 and can take it there. */
 .milkdown .ProseMirror li.brain-task-item > .brain-task-box::after {
   content: "";
   position: absolute;
@@ -1015,13 +1024,18 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
 }
 .milkdown .ProseMirror li.brain-task-item > .brain-task-box > svg {
   display: block;
-  /* the 1.5 border sits outside the 16 box, so the tick recentres by it */
+  /* The button is border-box, so its 1.5 border eats into the 16 and leaves a
+     13 content box. The negative margin pulls the 16x16 drawing back onto the
+     border box, which is what the tick has to be centred on. */
   margin: -1.5px 0 0 -1.5px;
 }
-/* keyboard modality only — globals.css exempts form controls from the global
-   ring (a text field has a caret and a border), and this one has neither */
+/* The app's ring, restated. globals.css drops the ring on `[contenteditable]`
+   so a text field can rely on its caret, and that is an attribute-presence
+   selector: this button carries `contenteditable="false"` to keep the editor
+   off it, so the exemption written for editable fields catches it. Values are
+   the global ring's, not a second opinion. */
 html[data-kbd] .milkdown .ProseMirror li.brain-task-item > .brain-task-box:focus-visible {
-  outline: 2px solid var(--ink);
+  outline: 3px solid var(--blue-ring);
   outline-offset: 2px;
 }
 
@@ -1294,7 +1308,7 @@ html[data-kbd] .milkdown .ProseMirror li.brain-task-item > .brain-task-box:focus
 }
 
 /* task items: the checkbox stands where the bullet stood */
-.milkdown .ProseMirror li:has(> .brain-task-box)::before {
+.milkdown .ProseMirror li.brain-task-item::before {
   content: none;
 }
 /* An ordered task keeps its number, so its box moves out of the marker's

@@ -43,59 +43,63 @@ async function installDomGlobals() {
   return dom;
 }
 
-const lines = (...rows) => rows.join("\n");
+// Expected output, byte for byte, trailing newline included. Nothing rewrites
+// it before the comparison: a `trimEnd()` on the output would have made the
+// trailing-whitespace case pass whether or not the serializer drops the
+// spaces, and stripping CR would have done the same to the CRLF case.
+const out = (...rows) => rows.join("\n") + "\n";
 
 // Left column is what a writer, Notion or another editor can hand us. Right
 // column is the one canonical form the editor writes back.
 const CASES = [
-  { name: "unchecked", md: "- [ ] plain", want: "* [ ] plain", boxes: 1 },
-  { name: "checked, star bullet", md: "* [x] star bullet", want: "* [x] star bullet", boxes: 1 },
-  { name: "plus bullet", md: "+ [ ] plus bullet", want: "* [ ] plus bullet", boxes: 1 },
-  { name: "capital X", md: "- [X] capital X", want: "* [x] capital X", boxes: 1 },
+  { name: "unchecked", md: "- [ ] plain", want: out("* [ ] plain"), boxes: 1 },
+  { name: "checked, star bullet", md: "* [x] star bullet", want: out("* [x] star bullet"), boxes: 1 },
+  { name: "plus bullet", md: "+ [ ] plus bullet", want: out("* [ ] plus bullet"), boxes: 1 },
+  { name: "capital X", md: "- [X] capital X", want: out("* [x] capital X"), boxes: 1 },
   {
     name: "nested",
-    md: lines("- [ ] nested parent", "  - [x] nested child"),
-    want: lines("* [ ] nested parent", "  * [x] nested child"),
+    md: out("- [ ] nested parent", "  - [x] nested child"),
+    want: out("* [ ] nested parent", "  * [x] nested child"),
     boxes: 2,
   },
-  { name: "empty item", md: "- [ ] <br />", want: "* [ ] <br />", boxes: 1 },
-  { name: "notion double space", md: "-  [x] notion double space", want: "* [x] notion double space", boxes: 1 },
-  { name: "trailing whitespace", md: "- [ ] trailing whitespace   ", want: "* [ ] trailing whitespace", boxes: 1 },
+  { name: "empty item", md: "- [ ] <br />", want: out("* [ ] <br />"), boxes: 1 },
+  { name: "notion double space", md: "-  [x] notion double space", want: out("* [x] notion double space"), boxes: 1 },
+  { name: "trailing whitespace", md: "- [ ] trailing whitespace   ", want: out("* [ ] trailing whitespace"), boxes: 1 },
   {
     name: "spread siblings",
-    md: lines("- [ ] item one", "", "- [ ] item two after a blank line (spread)"),
-    want: lines("* [ ] item one", "", "* [ ] item two after a blank line (spread)"),
+    md: out("- [ ] item one", "", "- [ ] item two after a blank line (spread)"),
+    want: out("* [ ] item one", "", "* [ ] item two after a blank line (spread)"),
     boxes: 2,
   },
-  { name: "plain bullet", md: "- plain bullet, not a task", want: "* plain bullet, not a task", boxes: 0 },
+  { name: "plain bullet", md: "- plain bullet, not a task", want: out("* plain bullet, not a task"), boxes: 0 },
   {
     name: "mixed list",
-    md: lines("- [ ] task", "- plain", "- [x] done"),
-    want: lines("* [ ] task", "", "* plain", "", "* [x] done"),
+    md: out("- [ ] task", "- plain", "- [x] done"),
+    want: out("* [ ] task", "", "* plain", "", "* [x] done"),
     boxes: 2,
   },
   {
     name: "ordered task",
-    md: lines("1. [ ] ordered one", "2. [x] ordered two"),
-    want: lines("1. [ ] ordered one", "2. [x] ordered two"),
+    md: out("1. [ ] ordered one", "2. [x] ordered two"),
+    want: out("1. [ ] ordered one", "2. [x] ordered two"),
     boxes: 2,
   },
   {
     name: "fenced code is not a task",
-    md: lines("```", "- [ ] not a task, it is code", "```"),
-    want: lines("```", "- [ ] not a task, it is code", "```"),
+    md: out("```", "- [ ] not a task, it is code", "```"),
+    want: out("```", "- [ ] not a task, it is code", "```"),
     boxes: 0,
   },
   {
     name: "CRLF normalises to LF",
     md: "- [ ] one\r\n- [x] two\r\n",
-    want: lines("* [ ] one", "", "* [x] two"),
+    want: out("* [ ] one", "", "* [x] two"),
     boxes: 2,
   },
   {
     name: "multi-block item",
-    md: lines("- [ ] first para", "", "  second para in the same item"),
-    want: lines("* [ ] first para", "", "  second para in the same item"),
+    md: out("- [ ] first para", "", "  second para in the same item"),
+    want: out("* [ ] first para", "", "  second para in the same item"),
     boxes: 1,
   },
 ];
@@ -104,25 +108,23 @@ const CASES = [
 const TOGGLES = [
   {
     name: "toggle: tick the first of two",
-    md: lines("- [ ] one", "- [x] two"),
+    md: out("- [ ] one", "- [x] two"),
     press: 0,
-    want: lines("* [x] one", "", "* [x] two"),
+    want: out("* [x] one", "", "* [x] two"),
   },
   {
     name: "toggle: untick a nested child",
-    md: lines("- [ ] parent", "  - [x] child"),
+    md: out("- [ ] parent", "  - [x] child"),
     press: 1,
-    want: lines("* [ ] parent", "  * [ ] child"),
+    want: out("* [ ] parent", "  * [ ] child"),
   },
   {
     name: "toggle: an empty item keeps its placeholder",
     md: "- [ ] <br />",
     press: 0,
-    want: "* [x] <br />",
+    want: out("* [x] <br />"),
   },
 ];
-
-const normalize = (md) => md.replace(/\r\n?/g, "\n").trimEnd();
 
 function diff(label, want, got) {
   const a = want.split("\n");
@@ -187,11 +189,10 @@ async function main() {
     for (const c of CASES) {
       try {
         const first = await run(c.md);
-        const got = normalize(first.md);
-        if (got !== c.want) {
+        if (first.md !== c.want) {
           failures += 1;
           console.log(`DIFF ${c.name}`);
-          diff("fidelity", c.want, got);
+          diff("fidelity", c.want, first.md);
           continue;
         }
         if (first.boxes !== c.boxes) {
@@ -203,7 +204,7 @@ async function main() {
         if (second.md !== first.md) {
           failures += 1;
           console.log(`DRIFT ${c.name} (serializer is not a fixed point)`);
-          diff("idempotency", normalize(first.md), normalize(second.md));
+          diff("idempotency", first.md, second.md);
           continue;
         }
         console.log(`OK   ${c.name}`);
@@ -216,18 +217,17 @@ async function main() {
     for (const t of TOGGLES) {
       try {
         const pressed = await run(t.md, t.press);
-        const got = normalize(pressed.md);
-        if (got !== t.want) {
+        if (pressed.md !== t.want) {
           failures += 1;
           console.log(`DIFF ${t.name}`);
-          diff("toggle", t.want, got);
+          diff("toggle", t.want, pressed.md);
           continue;
         }
         const again = await run(pressed.md);
         if (again.md !== pressed.md) {
           failures += 1;
           console.log(`DRIFT ${t.name} (serializer is not a fixed point)`);
-          diff("idempotency", normalize(pressed.md), normalize(again.md));
+          diff("idempotency", pressed.md, again.md);
           continue;
         }
         console.log(`OK   ${t.name}`);

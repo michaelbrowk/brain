@@ -1,12 +1,15 @@
 import { listItemSchema } from "@milkdown/kit/preset/commonmark";
+import { keymap } from "@milkdown/kit/prose/keymap";
 import type { Node as ProseNode } from "@milkdown/kit/prose/model";
+import { splitListItem } from "@milkdown/kit/prose/schema-list";
+import type { Command, Transaction } from "@milkdown/kit/prose/state";
 import type {
   EditorView,
   NodeView,
   NodeViewConstructor,
   ViewMutationRecord,
 } from "@milkdown/kit/prose/view";
-import { $view } from "@milkdown/kit/utils";
+import { $prose, $view } from "@milkdown/kit/utils";
 
 import {
   prefersReducedMotion,
@@ -28,8 +31,14 @@ import {
  *  does not reach the store: inside one tab the change travels the ordinary
  *  document path and autosave carries it out, the same as typing a letter. */
 
+/** The item's own line, not its branch. A `list_item` holds `paragraph block*`,
+ *  so a parent task carries its nested items as content, and `textBetween` on
+ *  the item reads the whole subtree: a parent would be announced as "parent
+ *  child child". The first block is the line the control sits on. */
 function itemText(node: ProseNode): string {
-  return node.textBetween(0, node.content.size, " ", " ");
+  const line = node.firstChild;
+  if (!line) return "";
+  return line.textBetween(0, line.content.size, " ", " ");
 }
 
 export const taskCheckboxView = $view(listItemSchema.node, () =>
@@ -106,4 +115,54 @@ export const taskCheckboxView = $view(listItemSchema.node, () =>
   }) satisfies NodeViewConstructor,
 );
 
-export const taskCheckbox = [taskCheckboxView];
+/** Enter on a done task must not birth a done task.
+ *
+ *  `splitListItemCommand` is `splitListItem(type)` with no `itemAttrs`
+ *  (`preset-commonmark`), so `prosemirror-schema-list` passes a null entry to
+ *  `Transform.split` and the new item reuses the split node's type AND attrs,
+ *  `checked: true` among them. Every editor a reader has used resets it. The
+ *  behaviour predates this plugin and was invisible while nothing rendered a
+ *  checkbox, which is what puts it here.
+ *
+ *  The reset is applied to the item the caret lands in rather than through
+ *  `itemAttrs`, because `itemAttrs` reaches only the branch where the caret
+ *  sits at the end of the line; a split from the middle of one takes the other
+ *  branch and would keep the tick. Both branches end with the caret in the new
+ *  item, so both are covered here. */
+function uncheckSplitItem(tr: Transaction): Transaction {
+  const $pos = tr.selection.$from;
+  for (let depth = $pos.depth; depth > 0; depth -= 1) {
+    const node = $pos.node(depth);
+    if (node.type.name !== "list_item") continue;
+    if (node.attrs.checked === true) {
+      tr.setNodeMarkup($pos.before(depth), undefined, { ...node.attrs, checked: false });
+    }
+    return tr;
+  }
+  return tr;
+}
+
+const splitTaskItem: Command = (state, dispatch) => {
+  const { $from } = state.selection;
+  for (let depth = $from.depth; depth > 0; depth -= 1) {
+    const node = $from.node(depth);
+    if (node.type.name !== "list_item") continue;
+    // Only a done item needs the reset. An unchecked one already splits into
+    // an unchecked one, and a plain bullet must not become a task at all, so
+    // both fall through to the preset's own Enter.
+    if (node.attrs.checked !== true) return false;
+    return splitListItem(node.type)(
+      state,
+      dispatch && ((tr) => dispatch(uncheckSplitItem(tr))),
+    );
+  }
+  return false;
+};
+
+/** Milkdown merges every registered keymap into one ProseMirror keymap plugin
+ *  and places it after the `$prose` plugins (`@milkdown/core`), so a binding
+ *  registered here is offered the key first and falls through to the preset
+ *  by returning false. */
+export const taskSplitKeymap = $prose(() => keymap({ Enter: splitTaskItem }));
+
+export const taskCheckbox = [taskCheckboxView, taskSplitKeymap];

@@ -11,9 +11,9 @@ import { EASE_OUT, PRESS_ICON, SPRING_MATERIALIZE } from "@/lib/motion";
  *
  *  The check is a stroked path driven by `stroke-dashoffset`, not a rotated
  *  box scaled into view. Completion on the Tasks surface draws the same
- *  stroke, and a draw has to be interruptible mid-flight, which is why the
- *  dash runs on WAAPI and not on a CSS transition (DESIGN.md ban 8). Only the
- *  fill is a transition: it is colour, not movement. */
+ *  stroke, and a draw has to be interruptible mid-flight, which a CSS
+ *  transition cannot be from an arbitrary point, so the dash runs on WAAPI.
+ *  Only the fill is a transition: it is colour, not movement. */
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -104,7 +104,7 @@ export function setTaskCheckboxLabel(button: HTMLButtonElement, label: string): 
 export function renderTaskCheckbox(opts: TaskCheckboxOptions): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
-  button.className = "brain-task-box brain-touch-hit";
+  button.className = "brain-task-box brain-touch-min";
   button.setAttribute("role", "checkbox");
   button.setAttribute("aria-checked", String(opts.checked));
   button.tabIndex = 0;
@@ -132,12 +132,17 @@ export function renderTaskCheckbox(opts: TaskCheckboxOptions): HTMLButtonElement
   const toggle = () => opts.onToggle?.();
 
   // The press answers pointer-down, the way every other control here does.
+  // `pressed` is what keeps a pointer crossing a list of tasks from springing
+  // every box it passes over, since pointer-leave fires on all of them.
+  let pressed = false;
   button.addEventListener("pointerdown", () => {
     if (opts.reduce || !canAnimate(button)) return;
+    pressed = true;
     animate(button, { scale: PRESS_ICON.scale }, { duration: PRESS_ICON.duration, ease: EASE_OUT });
   });
   const release = () => {
-    if (opts.reduce || !canAnimate(button)) return;
+    if (!pressed) return;
+    pressed = false;
     animate(button, { scale: 1 }, SPRING_MATERIALIZE);
   };
   button.addEventListener("pointerup", release);

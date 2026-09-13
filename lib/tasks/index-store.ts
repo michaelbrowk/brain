@@ -178,26 +178,69 @@ function skip(name: string, reason: string): void {
   console.warn(`[brain/tasks] skipping ${TASKS_DIR}/${name}: ${reason}`);
 }
 
-/** Write one record, keeping the file's body after the frontmatter byte for
- *  byte. There is no task body in v1: it has no reader and no writer in the
- *  app, so a person editing `_tasks/<id>.md` by hand does not lose it. */
+/** The body after a record's frontmatter, or the empty string when the file
+ *  has none and when there is no file yet. There is no task body in v1: it has
+ *  no writer in the app, so the only one a file can hold is a person's own,
+ *  and this is how the portable export carries it out. */
+export async function readTaskBody(root: string, id: string): Promise<string> {
+  const file = taskFilePath(root, id);
+  try {
+    const content = readFrontmatter(await fs.readFile(file, "utf8")).content;
+    // A record written with no body still ends in the newline the frontmatter
+    // delimiter needs, and whitespace on its own is not somebody's writing.
+    return content.trim() === "" ? "" : content;
+  } catch (error) {
+    // Only a file that is not there. Broken YAML in a file that IS there is a
+    // hand edit, and answering the empty string would report it as an empty
+    // body and let the export write that emptiness down.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    return "";
+  }
+}
+
+/** Write one record. With no `body`, the file's own body after the frontmatter
+ *  is kept byte for byte, so a person editing `_tasks/<id>.md` by hand does
+ *  not lose it. With a `body`, that body is written instead, which is what a
+ *  portable import does when it lands a record and its body together. */
 export async function writeTaskFile(
   root: string,
   task: TaskRecord,
+  body?: string,
 ): Promise<void> {
   const file = taskFilePath(root, task.id);
-  let body = "";
+  let kept = "";
   try {
-    body = readFrontmatter(await fs.readFile(file, "utf8")).content;
+    kept = readFrontmatter(await fs.readFile(file, "utf8")).content;
   } catch (error) {
     // Only a file that is not there yet. A file that IS there and cannot be
     // read or parsed is somebody's hand edit: the index is built once, so a
     // record can be edited into broken YAML long after it was loaded, and
-    // writing a record over it with an empty body would lose both the body
-    // and the edit with nothing said. Refuse instead.
+    // writing a record over it would lose both the body and the edit with
+    // nothing said. Refuse instead, and refuse it whether or not a body was
+    // handed in: the file on disk is the thing being protected, not the
+    // argument.
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  await atomicWrite(file, serializeTask(task, body));
+  await atomicWrite(file, serializeTask(task, body ?? kept));
+}
+
+/** Whether a file sits under this id, whatever the in-memory index thinks.
+ *
+ *  The index skips a file it cannot read, cannot parse, or whose frontmatter
+ *  id does not match its filename, so "the index does not have it" is not the
+ *  same question as "the id is free". A writer that must not overwrite has to
+ *  ask the disk. */
+export async function taskFileExists(
+  root: string,
+  id: string,
+): Promise<boolean> {
+  try {
+    await fs.stat(taskFilePath(root, id));
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw error;
+  }
 }
 
 export async function deleteTaskFile(root: string, id: string): Promise<void> {
@@ -221,7 +264,17 @@ export function serializeTask(task: TaskRecord, body: string): string {
   if (task.log !== undefined) ordered.log = task.log;
   ordered.created = task.created;
   ordered.updated = task.updated;
-  return matter.stringify(body, ordered);
+  // The frontmatter block on its own, then the body appended raw.
+  //
+  // `matter.stringify(body, data)` parses `body` first, so a body that opens
+  // with its own `---` fence had that fence read as frontmatter: its keys were
+  // merged into the record and the block was gone from the file. It also adds
+  // a trailing newline to a body that has none. Neither is acceptable for
+  // bytes a person wrote, so the body never goes through the parser. Stringify
+  // ends an empty body with a blank line after the closing fence, and the body
+  // has to start on the line straight after it.
+  const header = matter.stringify("", ordered).replace(/\n+$/, "\n");
+  return header + body;
 }
 
 /** The first day the Logbook still shows, counted back in whole calendar days

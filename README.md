@@ -324,9 +324,10 @@ already occupied. A section with fewer than two dated pages is left alone.
 ## Portable data
 
 **Settings → Data** downloads the complete Brain as ordinary Markdown plus
-attachments. A page's actions menu can export just that page and its
+attachments and tasks. A page's actions menu can export just that page and its
 descendants. Import always runs a read-only preflight first and creates fresh
-pages instead of overwriting existing notes. The open format, limits, and
+pages and tasks instead of overwriting existing notes. An archive exported
+before tasks existed still imports. The open format, limits, and
 failure behavior are documented in `docs/portable-archives.md`.
 
 ## Upgrade and deploy

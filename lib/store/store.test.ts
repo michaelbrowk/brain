@@ -10901,4 +10901,155 @@ describe("task records", () => {
       s.listTasks(TODAY, { list: "logbook", offsetMinutes: 0 }).map((t) => t.id),
     ).toEqual(["task-recent"]);
   });
+
+  it("allTasks returns every record, trashed page and old completion included", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-old.md"),
+      `---\nid: task-old\ntitle: Renew the visa\ndone: true\ndoneAt: '2026-07-01T09:00:00.000Z'\ncreated: '2026-06-01T09:00:00.000Z'\nupdated: '2026-07-01T09:00:00.000Z'\n---\n`,
+    );
+    await s.rebuild();
+    const meta = await s.createPage(null, "Trip");
+    const linked = await s.createTask({ title: "Book the flight", page: meta.id });
+    const open = await s.createTask({ title: "Pack", when: TOMORROW });
+    await s.deletePage(meta.id);
+
+    // The list view drops both: one page is in the Trash, one completion is
+    // older than the Logbook window.
+    expect(s.listTasks(TODAY, UTC).map((t) => t.id)).toEqual([open.id]);
+    expect(s.allTasks().map((t) => t.id).sort()).toEqual(
+      [linked.id, open.id, "task-old"].sort(),
+    );
+  });
+
+  it("reads a task's hand written body, and the empty string when there is none", async () => {
+    const { s, root } = await tmpStore();
+    const plain = await s.createTask({ title: "Water the plants" });
+    expect(await s.readTaskBody(plain.id)).toBe("");
+
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-noted.md"),
+      `---\nid: task-noted\ntitle: Renew the visa\ndone: false\ncreated: '2026-09-01T09:00:00.000Z'\nupdated: '2026-09-01T09:00:00.000Z'\n---\nThe consulate wants two photos.\n`,
+    );
+    await s.rebuild();
+    expect(await s.readTaskBody("task-noted")).toBe(
+      "The consulate wants two photos.\n",
+    );
+    expect(await s.readTaskBody("task-missing")).toBe("");
+  });
+
+  it("keeps a hand written body when the record is written again", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-noted.md"),
+      `---\nid: task-noted\ntitle: Renew the visa\ndone: false\ncreated: '2026-09-01T09:00:00.000Z'\nupdated: '2026-09-01T09:00:00.000Z'\n---\nThe consulate wants two photos.\n`,
+    );
+    await s.rebuild();
+    await s.updateTask("task-noted", { when: TOMORROW });
+    expect(await s.readTaskBody("task-noted")).toBe(
+      "The consulate wants two photos.\n",
+    );
+  });
+
+  it("imports a record verbatim, id, timestamps, body and all", async () => {
+    const { s } = await tmpStore();
+    const record = {
+      id: "task-imported",
+      title: "Renew the visa",
+      when: "2026-10-01",
+      deadline: "2026-10-05",
+      category: "Admin",
+      done: true,
+      doneAt: "2026-07-01T09:00:00.000Z",
+      repeat: { freq: "weekly", byWeekday: ["mon"] },
+      log: [
+        { scheduled: "2026-06-22", completedAt: "2026-06-22T09:00:00.000Z" },
+      ],
+      created: "2026-06-01T09:00:00.000Z",
+      updated: "2026-07-01T09:00:00.000Z",
+    };
+    const written = await s.importTask(record, "Two photos, no glasses.\n");
+
+    expect(written).toEqual(record);
+    expect(s.getTask("task-imported")).toMatchObject(record);
+    expect(await s.readTaskBody("task-imported")).toBe(
+      "Two photos, no glasses.\n",
+    );
+  });
+
+  it("mints a fresh id when an imported record's id is already taken", async () => {
+    const { s } = await tmpStore();
+    const first = await s.createTask({ title: "Water the plants" });
+    const clash = { ...s.allTasks()[0], title: "Water the plants again" };
+    const written = await s.importTask(clash, "");
+
+    expect(written.id).not.toBe(first.id);
+    expect(s.getTask(first.id)?.title).toBe("Water the plants");
+    expect(s.getTask(written.id)?.title).toBe("Water the plants again");
+    expect(s.allTasks()).toHaveLength(2);
+  });
+
+  it("refuses an imported record the task schema does not accept", async () => {
+    const { s } = await tmpStore();
+    await expect(
+      s.importTask({ id: "task-bad", title: "" }, ""),
+    ).rejects.toThrow();
+    expect(s.allTasks()).toHaveLength(0);
+  });
+
+  it("mints a fresh id when a task file the index skipped already holds it", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    // Valid YAML the index still refuses: the frontmatter id does not match
+    // the filename, so the record is invisible in memory and present on disk.
+    const onDisk =
+      `---\nid: task-other\ntitle: Renew the visa\ndone: false\ncreated: '2026-06-01T09:00:00.000Z'\nupdated: '2026-06-01T09:00:00.000Z'\n---\nSOMEBODY'S OWN NOTES\n`;
+    await fs.writeFile(path.join(root, "_tasks", "task-scratch.md"), onDisk);
+    await s.rebuild();
+    expect(s.allTasks()).toHaveLength(0);
+
+    const written = await s.importTask(
+      {
+        id: "task-scratch",
+        title: "Book the flight",
+        done: false,
+        created: "2026-09-01T09:00:00.000Z",
+        updated: "2026-09-01T09:00:00.000Z",
+      },
+      "from the archive\n",
+    );
+
+    expect(written.id).not.toBe("task-scratch");
+    expect(
+      await fs.readFile(path.join(root, "_tasks", "task-scratch.md"), "utf8"),
+    ).toBe(onDisk);
+    expect(await s.readTaskBody(written.id)).toBe("from the archive\n");
+  });
+
+  it("mints a fresh id when a task file with broken YAML already holds it", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    const onDisk = "---\nid: [unclosed\n---\nSOMEBODY'S OWN NOTES\n";
+    await fs.writeFile(path.join(root, "_tasks", "task-scratch.md"), onDisk);
+    await s.rebuild();
+
+    const written = await s.importTask(
+      {
+        id: "task-scratch",
+        title: "Book the flight",
+        done: false,
+        created: "2026-09-01T09:00:00.000Z",
+        updated: "2026-09-01T09:00:00.000Z",
+      },
+      "",
+    );
+
+    expect(written.id).not.toBe("task-scratch");
+    expect(
+      await fs.readFile(path.join(root, "_tasks", "task-scratch.md"), "utf8"),
+    ).toBe(onDisk);
+  });
 });

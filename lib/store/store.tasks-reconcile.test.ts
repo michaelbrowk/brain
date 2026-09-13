@@ -67,16 +67,19 @@ async function gardenPage(s: Store) {
  *  the class alone cannot see it: `lib/api/page-write.ts` reads `currentRev`
  *  off the error and the editor's latch reads it off the response. */
 async function expectSameConflict(
-  write: Promise<unknown>,
+  write: () => Promise<unknown>,
   expected: { currentRev: string; expectedRev: string },
 ): Promise<void> {
-  await expect(write).rejects.toMatchObject({
+  // A thunk, not a promise: a promise built beside an `await` in the same
+  // argument list rejects before anything has attached a handler, which Node
+  // reports as an unhandled rejection and vitest fails the file over.
+  await expect(write()).rejects.toBeInstanceOf(RevConflictError);
+  await expect(write()).rejects.toMatchObject({
     name: "RevConflictError",
     message: "rev conflict",
     currentRev: expected.currentRev,
     expectedRev: expected.expectedRev,
   });
-  await expect(write).rejects.toBeInstanceOf(RevConflictError);
 }
 
 function viewOf(s: Store, id: string): TaskView {
@@ -155,9 +158,10 @@ describe("two writers and one checkbox", () => {
     // The tick and the edit are on one line, and no rule can say which of the
     // two a person meant. A 409 and two visible versions is the honest answer.
     const mine = "- [ ] Water the plants twice\n\nA note about the garden.";
+    const currentRev = (await s.readPage(pageId)).rev;
     await expectSameConflict(
-      s.writePage(pageId, mine, rev, "me", undefined, BASE_BODY),
-      { currentRev: (await s.readPage(pageId)).rev, expectedRev: rev },
+      () => s.writePage(pageId, mine, rev, "me", undefined, BASE_BODY),
+      { currentRev, expectedRev: rev },
     );
     expect((await s.readPage(pageId)).markdown).toBe(TICKED_BODY);
   });
@@ -171,9 +175,10 @@ describe("two writers and one checkbox", () => {
     await s.writePage(pageId, theirs, rev, "me");
 
     const mine = `${BASE_BODY}\n\nA paragraph A typed.`;
+    const currentRev = (await s.readPage(pageId)).rev;
     await expectSameConflict(
-      s.writePage(pageId, mine, rev, "me", undefined, BASE_BODY),
-      { currentRev: (await s.readPage(pageId)).rev, expectedRev: rev },
+      () => s.writePage(pageId, mine, rev, "me", undefined, BASE_BODY),
+      { currentRev, expectedRev: rev },
     );
     expect((await s.readPage(pageId)).markdown).toBe(theirs);
   });
@@ -225,17 +230,19 @@ describe("two writers and one checkbox", () => {
     await s.writePage(pageId, TICKED_BODY, rev, "me");
 
     const theirs = "- [ ] Water the plants twice\n\nA note about the garden.";
+    const currentRev = (await s.readPage(pageId)).rev;
     await expectSameConflict(
-      s.writeSharedPage({
-        rootId,
-        targetId: pageId,
-        shareVersion,
-        markdown: theirs,
-        expectedRev: rev,
-        expectedMarkdown: BASE_BODY,
-        visitorName: "Ada",
-      }),
-      { currentRev: (await s.readPage(pageId)).rev, expectedRev: rev },
+      () =>
+        s.writeSharedPage({
+          rootId,
+          targetId: pageId,
+          shareVersion,
+          markdown: theirs,
+          expectedRev: rev,
+          expectedMarkdown: BASE_BODY,
+          visitorName: "Ada",
+        }),
+      { currentRev, expectedRev: rev },
     );
     expect((await s.readPage(pageId)).markdown).toBe(TICKED_BODY);
   });

@@ -43,6 +43,7 @@ import {
 import { standalonePageRefOccurrences } from "../page-ref-nesting";
 import { brainEvents, latestStoreEventSequence } from "./events";
 import { listOf } from "../tasks/lists";
+import { parseTaskLines } from "../tasks/task-lines";
 import type { TaskView } from "../tasks/model";
 import {
   resolveShareAccess,
@@ -10661,15 +10662,44 @@ describe("task records", () => {
   it("never writes done into the file for a linked task", async () => {
     const { s, root } = await tmpStore();
     const meta = await s.createPage(null, "Groceries");
-    const created = await s.createTask({ title: "Buy milk", page: meta.id });
+    const written = await s.writePage(meta.id, "- [ ] Buy milk", undefined, "me");
+    const [line] = parseTaskLines(written.markdown);
+    const created = await s.createTask({
+      title: line.normalized,
+      page: meta.id,
+      anchor: {
+        text: line.normalized,
+        hash: line.hash,
+        ordinal: line.ordinal,
+        line: line.index,
+      },
+    });
 
-    await expect(s.updateTask(created.id, { done: true })).rejects.toThrow(
-      /done/,
-    );
+    // Completing it writes the note's checkbox, not the record's `done`: the
+    // box is the truth and a second copy of it would be a second answer.
+    // `lib/store/store.tasks-reconcile.test.ts` owns that path whole.
+    const done = await s.updateTask(created.id, { done: true });
+    expect(done.done).toBe(true);
 
     const raw = await taskFile(root, created.id);
     expect(raw).not.toContain("done:");
-    expect(s.getTask(created.id)?.done).toBe(false);
+    expect((await s.readPage(meta.id)).markdown).toContain("- [x] Buy milk");
+  });
+
+  it("detaches a task linked to a page with no anchor, so it can be completed", async () => {
+    const { s } = await tmpStore();
+    const meta = await s.createPage(null, "Groceries");
+    // A page and no anchor is not a link the reconcile can follow: there is
+    // no line recorded to look for. Rather than a task that can never be
+    // ticked and never refreshed, the first reconcile of that page hands the
+    // record its own completion back.
+    const created = await s.createTask({ title: "Buy milk", page: meta.id });
+
+    const done = await s.updateTask(created.id, { done: true });
+
+    expect(done.done).toBe(true);
+    expect(done.detachedAt).toBeDefined();
+    expect(done.page).toBe(meta.id);
   });
 
   it("writes done and doneAt into the file for an unlinked task", async () => {

@@ -275,6 +275,50 @@ describe("Brain portable packages", () => {
     expect(destination.tasksForPage(importedPageId)).toHaveLength(1);
   });
 
+  it("carries a detached record out and back byte for byte", async () => {
+    const { source, pageId, anchor } = await notebookWithTasks();
+    // The shape Task 3b's detach writes: the mark, the page kept so the row
+    // can say which note the line left, the anchor kept as the last place it
+    // was, and a completion the record owns again.
+    const linked = source
+      .allTasks()
+      .find((task) => task.title === "Draft the plan");
+    if (!linked) throw new Error("the linked task is missing from the fixture");
+    await source.importTask(
+      {
+        ...linked,
+        id: "task-detached",
+        detachedAt: "2026-09-13T09:30:00.000Z",
+        done: true,
+        doneAt: "2026-09-13T09:29:00.000Z",
+      },
+      "",
+    );
+
+    const exported = await buildPortableArchive(source, { now: EXPORTED_AT });
+    const destination = await temporaryStore();
+    const checked = validatePortableArchive(exported.bytes, destination);
+    const applied = await applyPortableBundle(destination, checked.bundle);
+    const importedPageId = applied.rootIds[0];
+
+    // The manifest schema is strict over the live record schema, so the field
+    // rides with no archive code of its own. This is what proves it.
+    const landed = destination
+      .allTasks()
+      .find((task) => task.id === "task-detached");
+    expect(landed).toBeDefined();
+    expect(landed?.detachedAt).toBe("2026-09-13T09:30:00.000Z");
+    expect(landed?.done).toBe(true);
+    expect(landed?.doneAt).toBe("2026-09-13T09:29:00.000Z");
+    expect(landed?.anchor).toEqual(anchor);
+    // The page id is remapped like any other, because the row still names it.
+    expect(landed?.page).toBe(importedPageId);
+    expect(landed?.page).not.toBe(pageId);
+    // And a detached record owns its completion, so it reads as done on the
+    // far side rather than waiting for a checkbox nobody will tick.
+    expect(destination.getTask("task-detached")?.done).toBe(true);
+  });
+
   it("imports a task whose page id is absent as detached, keeping its schedule and title", async () => {
     const { source } = await notebookWithTasks();
     const exported = await buildPortableArchive(source, { now: EXPORTED_AT });

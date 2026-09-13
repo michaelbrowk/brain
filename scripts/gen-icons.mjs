@@ -127,7 +127,14 @@ const PAIRS = [
   "star",
   "folder",
   "document-text",
-  "check-read",
+  "checklist",
+  // tasks
+  "calendar-date",
+  "calendar",
+  "box-minimalistic",
+  "restart",
+  "flag",
+  "checklist-minimalistic",
   // settings surface sections
   "palette",
   "plug-circle",

@@ -223,6 +223,60 @@ describe("Shell failure recovery", () => {
     }
   });
 
+  it("keeps a task event off the page tree and takes it to the tasks surface", async () => {
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/page/page-a") {
+        return response({
+          meta: { title: "Page A", stickers: [] },
+          markdown: "Body A",
+          rev: "rev-a",
+        });
+      }
+      if (url === "/api/tree") {
+        return response({ tree: [treeNode("page-a", "Page A")] });
+      }
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    await act(async () =>
+      root.render(
+        <Shell tree={[treeNode("page-a", "Page A")]} initialSelectedId="page-a" />,
+      ),
+    );
+    await flushAnimationFrames();
+
+    const source = FakeEventSource.instances[0];
+    const treeCalls = () =>
+      apiFetchMock.mock.calls.filter(([input]) => String(input) === "/api/tree")
+        .length;
+    const before = treeCalls();
+
+    // a task write changes no page in the tree, so the tree stays where it is
+    await act(async () => {
+      source.onmessage?.({
+        data: JSON.stringify({ type: "task", id: "task-1", src: "other" }),
+      } as MessageEvent);
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+    });
+    await settle();
+    expect(treeCalls()).toBe(before);
+
+    // a page write still refreshes it
+    await act(async () => {
+      source.onmessage?.({
+        data: JSON.stringify({ type: "write", id: "page-b", src: "other" }),
+      } as MessageEvent);
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+    });
+    await settle();
+    expect(treeCalls()).toBeGreaterThan(before);
+  });
+
   it("recreates a permanently closed EventSource and reconciles on reopen", async () => {
     apiFetchMock.mockImplementation(async (input) => {
       const url = String(input);

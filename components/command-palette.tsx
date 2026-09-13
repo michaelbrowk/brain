@@ -259,6 +259,8 @@ export function CommandPalette({
   onToday,
   onHome,
   onOpenMail,
+  onOpenTasks,
+  onNewTask,
   onOpenTrash,
   onOpenSettings,
   onToggleTheme,
@@ -277,6 +279,8 @@ export function CommandPalette({
   onToday?: () => void | Promise<void>;
   onHome?: () => void | Promise<void>;
   onOpenMail?: () => void | Promise<void>;
+  onOpenTasks?: () => void | Promise<void>;
+  onNewTask?: () => void | Promise<void>;
   onOpenTrash?: () => void | Promise<void>;
   onOpenSettings?: () => void | Promise<void>;
   onToggleTheme?: () => void | Promise<void>;
@@ -356,6 +360,28 @@ export function CommandPalette({
         run: onOpenMail,
       });
     }
+    if (onOpenTasks) {
+      items.push({
+        id: "open-tasks",
+        label: "Open Tasks",
+        // the glyph the sidebar row and the tab-bar slot wear: one surface,
+        // one drawing
+        icon: "checklist-linear",
+        keywords: ["todo", "today", "inbox"],
+        run: onOpenTasks,
+      });
+    }
+    if (onNewTask) {
+      items.push({
+        id: "new-task",
+        label: "New task",
+        // the same bare plus "New page" wears: the mark this system draws
+        // for making a thing
+        icon: "add-linear",
+        keywords: ["todo", "capture"],
+        run: onNewTask,
+      });
+    }
     if (onOpenTrash) {
       items.push({
         id: "open-trash",
@@ -389,8 +415,10 @@ export function CommandPalette({
     onHome,
     onNewChild,
     onNewPage,
+    onNewTask,
     onToday,
     onOpenMail,
+    onOpenTasks,
     onOpenSettings,
     onOpenTrash,
     onToggleTheme,
@@ -817,7 +845,7 @@ export function CommandPalette({
               </Command>
             </PaletteSheet>
             {/* The tab bar is a sibling of the sheet, not a passenger inside
-                it: one bar, in one place, whichever of the five tabs is up.
+                it: one bar, in one place, whichever of the six tabs is up.
                 It stays inside the Radix content so the focus trap can reach
                 it. */}
             {mobileFooter}

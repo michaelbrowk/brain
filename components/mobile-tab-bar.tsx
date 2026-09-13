@@ -30,19 +30,17 @@ interface MobileTabBarProps {
  *  also sits on the account row above: two wordless controls, one drawing,
  *  two different things. Pages, in the very next slot, keeps `document-text`,
  *  the page itself, and carries its word underneath; this one is wordless, so
- *  it has to say the act in the drawing. Tasks takes `check-read`, the pair
- *  of ticks, and not `sun`, which the Journal row owns. It was
- *  `checklist-minimalistic` first: that one is the same rounded-square frame
- *  `document-text` and `letter` already wear, at the same 18 and the same
- *  weight, so three of the five words below carried one silhouette and the
- *  bold pair made Tasks and Pages two filled squares. The ticks have no
- *  frame, so the rest state reads at a glance. Names here are bare — the
+ *  it has to say the act in the drawing. Tasks takes `checklist`, and not
+ *  `sun`, which the Journal row owns: it is the one Solar candidate drawn
+ *  bare in both weights, where `check-read` and `checklist-minimalistic`
+ *  each fill the rounded square `document-text` and `letter` already wear
+ *  once they go bold (DESIGN.md §10 ban 13). Names here are bare — the
  *  variant is the second argument, and a name that carries its own suffix
  *  reads as a different kind of entry. */
 const items = [
   { key: "home", label: "Home", icon: "home" },
   { key: "search", label: "Search", icon: "magnifer" },
-  { key: "tasks", label: "Tasks", icon: "check-read" },
+  { key: "tasks", label: "Tasks", icon: "checklist" },
   { key: "new", label: "New", icon: "add" },
   { key: "pages", label: "Pages", icon: "document-text" },
   { key: "mail", label: "Mail", icon: "letter" },

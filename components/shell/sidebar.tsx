@@ -75,6 +75,10 @@ export interface ShellSidebarProps {
   ) => Promise<string | null>;
   onOpenDailyPage: () => void;
   onOpenMail: () => void;
+  onOpenTasks: () => void;
+  /** Open tasks due today, drawn on the Tasks row as the tree's own count
+   *  chip. Absent or zero draws nothing. */
+  tasksOpenTodayCount?: number;
   onSelect: (id: string) => void;
   onToggleExpand: (id: string) => void;
   onDelete: TreeHandlers["onDelete"];
@@ -111,6 +115,8 @@ export function ShellSidebar({
   onCreatePage,
   onOpenDailyPage,
   onOpenMail,
+  onOpenTasks,
+  tasksOpenTodayCount,
   onSelect,
   onToggleExpand,
   onDelete,
@@ -131,6 +137,7 @@ export function ShellSidebar({
   const update = useUpdateStatus();
   const newPageTitle = useShortcutTitle("New page", "⌘⌥N");
   const mailOpen = surface === "mail";
+  const tasksOpen = surface === "tasks";
   const settingsOpen = surface === "settings";
   return (
     <motion.aside
@@ -239,6 +246,16 @@ export function ShellSidebar({
             selected={mailOpen}
             reduce={reduce}
             onClick={onOpenMail}
+          />
+          {/* the glyph the mobile tab bar's Tasks slot carries. One
+              surface, one drawing */}
+          <NavRow
+            icon="checklist"
+            label="Tasks"
+            selected={tasksOpen}
+            reduce={reduce}
+            count={tasksOpenTodayCount}
+            onClick={onOpenTasks}
           />
 
           <SidebarTreeNav>
@@ -357,9 +374,9 @@ function SidebarTreeNav({ children }: { children: ReactNode }) {
   );
 }
 
-/** A primary row of the panel (Today thoughts, Mail, Settings): the tree-row
- *  capsule as a button. `selected` renders the shared selection capsule so
- *  it flows here from the tree (Mail). */
+/** A primary row of the panel (Today thoughts, Mail, Tasks, Settings): the
+ *  tree-row capsule as a button. `selected` renders the shared selection
+ *  capsule so it flows here from the tree (Mail). */
 const NavRow = forwardRef<
   HTMLButtonElement,
   {
@@ -374,9 +391,22 @@ const NavRow = forwardRef<
     /** A dot at the row's end — the Settings row shows it while a newer
      *  release is available. */
     badge?: boolean;
+    /** A number at the row's end, in the tree's own count chip. The Tasks
+     *  row shows what is open today. Zero draws nothing, and a row that
+     *  carries a count never also carries the badge dot. */
+    count?: number;
   } & Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, "className">
 >(function NavRow(
-  { icon, label, selected, capsule = true, reduce, badge = false, ...button },
+  {
+    icon,
+    label,
+    selected,
+    capsule = true,
+    reduce,
+    badge = false,
+    count,
+    ...button
+  },
   ref,
 ) {
   return (
@@ -400,13 +430,15 @@ const NavRow = forwardRef<
         <Icon name={icon} size={16} variant={selected ? "bold" : "linear"} />
       </span>
       <span className="tree-row-title">{label}</span>
-      {badge && (
+      {count != null && count > 0 ? (
+        <span className="tree-row-count">{count}</span>
+      ) : badge ? (
         <span
           role="img"
           aria-label="Update available"
           className="ml-auto size-1.5 rounded-full bg-current"
         />
-      )}
+      ) : null}
     </button>
   );
 });

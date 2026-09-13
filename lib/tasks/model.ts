@@ -231,6 +231,19 @@ export interface TaskView extends Omit<TaskRecord, "done"> {
   done: boolean;
 }
 
+/** Whether the note's checkbox still answers this record's `done`.
+ *
+ *  The one reading of the three shapes, because five copies of
+ *  `page !== undefined` is how a detached record ends up linked in one of
+ *  them. A detached record keeps its `page`, so `page` alone has not been the
+ *  question since the detach rule landed.
+ */
+export function isLinkedTask(
+  task: Pick<TaskRecord, "page" | "detachedAt">,
+): boolean {
+  return task.page !== undefined && task.detachedAt === undefined;
+}
+
 export type ParseTaskRecordResult =
   | { ok: true; task: TaskRecord }
   | { ok: false; reason: string };

@@ -133,6 +133,7 @@ import {
 } from "../tasks/index-store";
 import {
   TASK_ID_RE,
+  isLinkedTask,
   parseTaskRecord,
   type TaskRecord,
   type TaskView,
@@ -145,6 +146,9 @@ import {
   listOf,
   type ListName,
 } from "../tasks/lists";
+import { parseTaskLines } from "../tasks/task-lines";
+import { mergeCheckboxStates } from "../tasks/merge-checkboxes";
+import { reconcilePageTasks } from "../tasks/reconcile";
 
 interface Entry {
   dir: string;
@@ -6687,7 +6691,9 @@ function applyTaskPatch(
   if (patch.title !== undefined) {
     // The note line is a linked task's title. The copy in the file is a cache
     // for list rendering and writing over it would make it a second answer.
-    if (current.page) {
+    // A detached record has no line left to own it, so the title is its own
+    // again.
+    if (isLinkedTask(current)) {
       throw new TaskValidationError(
         "title is owned by the note line of a linked task",
       );
@@ -6699,8 +6705,10 @@ function applyTaskPatch(
   assignOrClear(next, "category", patch.category);
   assignOrClear(next, "repeat", patch.repeat);
   if (patch.done !== undefined) {
-    // A linked task is completed by its checkbox, through the reconcile.
-    if (current.page) {
+    // A linked task is completed by its checkbox, so `updateTask` writes the
+    // note and the reconcile derives this. A detached one owns its own
+    // completion again and lands here.
+    if (isLinkedTask(current)) {
       throw new TaskValidationError("done is not stored for a linked task");
     }
     next.done = patch.done;

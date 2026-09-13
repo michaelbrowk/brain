@@ -3,7 +3,13 @@ import path from "node:path";
 import matter from "gray-matter";
 import { atomicWrite } from "../store/atomic";
 import { assertInRoot } from "../store/paths";
-import { TASK_ID_RE, parseTaskRecord, type TaskRecord, type TaskView } from "./model";
+import {
+  TASK_ID_RE,
+  isLinkedTask,
+  parseTaskRecord,
+  type TaskRecord,
+  type TaskView,
+} from "./model";
 
 /** The task records on disk, and the one map of them in memory.
  *
@@ -79,7 +85,10 @@ export class TaskIndex {
       ids.add(task.id);
       this.pages.set(task.page, ids);
     }
-    if (!task.page) this.linkedDone.delete(task.id);
+    // A record that no longer takes its completion from a checkbox must not
+    // leave a remembered one behind, or a detach would answer from the note
+    // it has left.
+    if (!isLinkedTask(task)) this.linkedDone.delete(task.id);
   }
 
   remove(id: string): void {
@@ -108,7 +117,7 @@ export class TaskIndex {
   }
 
   private viewOf(task: TaskRecord): TaskView {
-    const done = task.page
+    const done = isLinkedTask(task)
       ? (this.linkedDone.get(task.id) ?? false)
       : (task.done ?? false);
     return { ...task, done };
@@ -256,10 +265,13 @@ export function serializeTask(task: TaskRecord, body: string): string {
   if (task.category !== undefined) ordered.category = task.category;
   if (task.page !== undefined) ordered.page = task.page;
   if (task.anchor !== undefined) ordered.anchor = task.anchor;
+  if (task.detachedAt !== undefined) ordered.detachedAt = task.detachedAt;
   if (task.repeat !== undefined) ordered.repeat = task.repeat;
-  // Never written for a linked task: the note's checkbox is the truth, and a
-  // second copy of it would be a second answer to drift.
-  if (task.done !== undefined && task.page === undefined) ordered.done = task.done;
+  // Never written while the record is LINKED: the note's checkbox is the
+  // truth, and a second copy of it would be a second answer to drift. A
+  // detached record keeps its `page` and owns its completion again, so the
+  // question is the link and not the page.
+  if (task.done !== undefined && !isLinkedTask(task)) ordered.done = task.done;
   if (task.doneAt !== undefined) ordered.doneAt = task.doneAt;
   if (task.log !== undefined) ordered.log = task.log;
   ordered.created = task.created;

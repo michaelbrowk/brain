@@ -155,6 +155,14 @@ describe("listOf", () => {
       normalizeTaskText: () => normalizeTaskText(" a  b "),
       hashTaskText: () => hashTaskText("a b"),
       parseTaskRecord: () => parseTaskRecord(record),
+      isLinkedTask: () => [
+        modelModule.isLinkedTask({}),
+        modelModule.isLinkedTask({ page: "page-garden" }),
+        modelModule.isLinkedTask({
+          page: "page-garden",
+          detachedAt: "2026-09-14T08:15:00.000Z",
+        }),
+      ],
       taskRecordRules: () => taskRecordRules(record as never, noIssues as never),
       taskRecordSchema: () => modelModule.taskRecordSchema.safeParse(record),
       taskRecordFields: () => modelModule.taskRecordFields.safeParse(record),

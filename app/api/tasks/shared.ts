@@ -66,12 +66,13 @@ export function clientId(req: NextRequest): string | undefined {
   return req.headers.get("x-brain-client") ?? undefined;
 }
 
-/** `today` is taken only where it is needed. Anywhere else it is a caller
- *  mistake worth an answer rather than a value to ignore. */
-export function refuseToday(req: NextRequest): NextResponse | null {
-  return req.nextUrl.searchParams.has("today")
-    ? badRequest("unexpected_today")
-    : null;
+/** `today` and `offset` are taken only where a list is derived. Anywhere else
+ *  they are a caller mistake worth an answer rather than a value to ignore. */
+export function refuseListQuery(req: NextRequest): NextResponse | null {
+  const params = req.nextUrl.searchParams;
+  if (params.has("today")) return badRequest("unexpected_today");
+  if (params.has("offset")) return badRequest("unexpected_offset");
+  return null;
 }
 
 export async function readJsonObject(

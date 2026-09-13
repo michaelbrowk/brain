@@ -8,7 +8,7 @@ import {
   readJsonObject,
   readOffset,
   readsLogbook,
-  refuseToday,
+  refuseListQuery,
   type CreateBody,
 } from "./shared";
 
@@ -47,7 +47,7 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
-  const refused = refuseToday(req);
+  const refused = refuseListQuery(req);
   if (refused) return refused;
 
   const body = await readJsonObject(req);

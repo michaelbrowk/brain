@@ -89,6 +89,15 @@ describe("GET /api/tasks/[id]", () => {
     expect(await res.json()).toEqual({ task: task() });
   });
 
+  it("refuses a list query no single record derives", async () => {
+    for (const query of [`?today=${TODAY}`, "?offset=240"]) {
+      const res = await get(TASK_ID, query);
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/^unexpected_/);
+    }
+    expect(mocks.getTask).not.toHaveBeenCalled();
+  });
+
   it("answers 400 for an id that is not a task id", async () => {
     const res = await get("../escape");
     expect(res.status).toBe(400);
@@ -128,6 +137,13 @@ describe("PATCH /api/tasks/[id]", () => {
       today: TODAY,
       src: undefined,
     });
+  });
+
+  it("refuses an offset, which no patch derives", async () => {
+    const res = await patch({ when: TOMORROW }, "?offset=240");
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "unexpected_offset" });
+    expect(mocks.updateTask).not.toHaveBeenCalled();
   });
 
   it("answers 400 bad_today for a malformed today before the store is reached", async () => {

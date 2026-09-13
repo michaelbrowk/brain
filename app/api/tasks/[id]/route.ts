@@ -8,7 +8,7 @@ import {
   isDay,
   notFound,
   readJsonObject,
-  refuseToday,
+  refuseListQuery,
   type PatchBody,
 } from "../shared";
 
@@ -26,7 +26,7 @@ type Ctx = { params: Promise<{ id: string }> };
 export async function GET(req: NextRequest, { params }: Ctx) {
   const { id } = await params;
   if (!assertTaskId(id)) return badRequest("bad_id");
-  const refused = refuseToday(req);
+  const refused = refuseListQuery(req);
   if (refused) return refused;
 
   const store = await getStore();
@@ -38,6 +38,11 @@ export async function GET(req: NextRequest, { params }: Ctx) {
 export async function PATCH(req: NextRequest, { params }: Ctx) {
   const { id } = await params;
   if (!assertTaskId(id)) return badRequest("bad_id");
+
+  // A patch derives no list, so the reader's offset has nothing to do here.
+  if (req.nextUrl.searchParams.has("offset")) {
+    return badRequest("unexpected_offset");
+  }
 
   const today = req.nextUrl.searchParams.get("today");
   // Shape first, so a malformed date is answered before the store is reached.
@@ -70,7 +75,7 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
 export async function DELETE(req: NextRequest, { params }: Ctx) {
   const { id } = await params;
   if (!assertTaskId(id)) return badRequest("bad_id");
-  const refused = refuseToday(req);
+  const refused = refuseListQuery(req);
   if (refused) return refused;
 
   const store = await getStore();

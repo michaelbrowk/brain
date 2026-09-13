@@ -507,14 +507,14 @@ describe("mobile navigation surfaces", () => {
     expect(tasks.tabIndex).toBe(0);
     expect(tasks.getAttribute("aria-current")).toBeNull();
 
-    // New keeps the fourth track and still makes a page, not a task.
+    // New keeps its word off the bar and its name on the button.
     const newTab = document.querySelector(
       '.brain-mobile-tabbar [data-mobile-tab="new"]',
     ) as HTMLButtonElement;
     expect(newTab.getAttribute("aria-label")).toBe("New");
   });
 
-  it("sizes the bar by six 56px slots, 344 wide", () => {
+  it("sizes the bar by six 56px slots", () => {
     const css = readFileSync(
       path.join(process.cwd(), "app", "globals.css"),
       "utf8",
@@ -526,8 +526,10 @@ describe("mobile navigation surfaces", () => {
       );
     expect(slot?.[1]).toBe("56");
     expect(tracks?.[1]).toBe("6");
-    // plus the row's own 4px ends
-    expect(Number(tracks?.[1]) * Number(slot?.[1]) + 8).toBe(344);
+    // Six of those plus the row's own 4px ends is the 344 the DOM renders,
+    // read at every width by e2e/mail-shots.spec.ts. jsdom lays nothing out,
+    // so this case pins the two figures the bar is built from and the e2e
+    // block is what watches the box they produce.
   });
 
   it("returns to the open page when Home is tapped over the Pages sheet", async () => {

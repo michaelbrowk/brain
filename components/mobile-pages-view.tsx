@@ -185,7 +185,7 @@ export function MobilePagesView({
             />
           </PagesSheet>
           {/* The tab bar is a sibling of the sheet, not a passenger inside
-              it: one bar, in one place, whichever of the five tabs is up. It
+              it: one bar, in one place, whichever of the six tabs is up. It
               stays inside the Radix content so the focus trap can reach it. */}
           {footer}
           {nestedOverlay}

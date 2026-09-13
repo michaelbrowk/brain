@@ -196,6 +196,15 @@ describe("POST /api/tasks", () => {
     expect((await res.json()).error).toContain("repeat and page");
   });
 
+  it("refuses a page that is not there or is in the trash", async () => {
+    for (const reason of ["page not found: page-missing", "page is in the trash: page-one"]) {
+      mocks.createTask.mockRejectedValue(validation(reason));
+      const res = await post({ title: "Buy milk", page: "page-one" });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: reason });
+    }
+  });
+
   it("refuses today, which no create needs", async () => {
     const res = await post({ title: "Water the plants" }, `?today=${TODAY}`);
 

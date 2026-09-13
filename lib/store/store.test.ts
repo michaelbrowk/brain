@@ -42,6 +42,8 @@ import {
 } from "./git";
 import { standalonePageRefOccurrences } from "../page-ref-nesting";
 import { brainEvents, latestStoreEventSequence } from "./events";
+import { listOf } from "../tasks/lists";
+import type { TaskView } from "../tasks/model";
 import {
   resolveShareAccess,
   ShareAccessNotFoundError,
@@ -10715,6 +10717,63 @@ describe("task records", () => {
     await expect(
       s.updateTask(repeating.id, { done: true, today: TODAY }),
     ).resolves.toMatchObject({ done: true });
+  });
+
+  it("serializes two patches so neither loses the other's field", async () => {
+    const { s } = await tmpStore();
+    const created = await s.createTask({ title: "Water the plants" });
+
+    // Both callers read the record, merge their own field into it and write
+    // the whole frontmatter back. Read outside the lock, the second write
+    // lands whole and the first patch is gone with no error anywhere.
+    await Promise.all([
+      s.updateTask(created.id, { when: TODAY }),
+      s.updateTask(created.id, { category: "home" }),
+    ]);
+
+    const task = s.getTask(created.id);
+    expect(task?.when).toBe(TODAY);
+    expect(task?.category).toBe("home");
+  });
+
+  it("refuses to link a task to a page that is not there", async () => {
+    const { s } = await tmpStore();
+
+    await expect(
+      s.createTask({ title: "Buy milk", page: "page-missing" }),
+    ).rejects.toThrow(/page not found/);
+    expect(s.listTasks(TODAY, UTC)).toEqual([]);
+  });
+
+  it("refuses to link a task to a page in the trash", async () => {
+    const { s } = await tmpStore();
+    const meta = await s.createPage(null, "Groceries");
+    await s.deletePage(meta.id);
+
+    await expect(
+      s.createTask({ title: "Buy milk", page: meta.id }),
+    ).rejects.toThrow(/trash/);
+    expect(s.listTasks(TODAY, UTC)).toEqual([]);
+  });
+
+  it("keeps a done record with no doneAt where listOf puts it", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    // The crash case the spec names: the note has the tick and the record has
+    // no instant yet. A hand edit reaches the same record.
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-noinstant.md"),
+      "---\nid: task-noinstant\ntitle: Water the plants\ndone: true\ncreated: '2026-09-13T09:00:00.000Z'\nupdated: '2026-09-13T09:00:00.000Z'\n---\n",
+    );
+    await s.rebuild();
+
+    const view = s.getTask("task-noinstant");
+    expect(view?.doneAt).toBeUndefined();
+    expect(listOf(view as TaskView, TODAY)).toBe("logbook");
+    expect(
+      s.listTasks(TODAY, { list: "logbook", offsetMinutes: 0 }).map((t) => t.id),
+    ).toEqual(["task-noinstant"]);
+    expect(s.listTasks(TODAY, UTC).map((t) => t.id)).toEqual(["task-noinstant"]);
   });
 
   it("deletes the file and drops it from both index maps", async () => {

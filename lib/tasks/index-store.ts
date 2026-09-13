@@ -189,10 +189,13 @@ export async function writeTaskFile(
   let body = "";
   try {
     body = readFrontmatter(await fs.readFile(file, "utf8")).content;
-  } catch {
-    // A new record, or a file whose YAML no longer parses. A record the index
-    // refused is never written over, so only the first case reaches here.
-    body = "";
+  } catch (error) {
+    // Only a file that is not there yet. A file that IS there and cannot be
+    // read or parsed is somebody's hand edit: the index is built once, so a
+    // record can be edited into broken YAML long after it was loaded, and
+    // writing a record over it with an empty body would lose both the body
+    // and the edit with nothing said. Refuse instead.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   await atomicWrite(file, serializeTask(task, body));
 }

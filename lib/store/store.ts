@@ -6470,9 +6470,14 @@ export class Store {
     const visible = this.taskIndex.views().filter((task) => {
       if (this.pageTrashed(task.page)) return false;
       const list = listOf(task, today);
+      // A done record with no instant is reachable from a hand edit and from
+      // the crash between a note write and its reconcile. `lists.ts` places it
+      // deliberately, at the foot of the Logbook under no header, so there is
+      // nothing for the window to measure and it must not be dropped.
       if (
         list === "logbook" &&
-        logbookDay(task.doneAt, offsetMinutes) < windowStart
+        task.doneAt !== undefined &&
+        doneDayOf(task.doneAt, offsetMinutes) < windowStart
       ) {
         return false;
       }
@@ -6486,43 +6491,70 @@ export class Store {
   }
 
   async createTask(input: CreateTaskInput): Promise<TaskView> {
-    const now = new Date().toISOString();
-    const record = parseTask({
-      id: nanoid(),
-      title: input.title,
-      ...(input.when !== undefined ? { when: input.when } : {}),
-      ...(input.deadline !== undefined ? { deadline: input.deadline } : {}),
-      ...(input.category !== undefined ? { category: input.category } : {}),
-      ...(input.page !== undefined ? { page: input.page } : {}),
-      ...(input.anchor !== undefined ? { anchor: input.anchor } : {}),
-      ...(input.repeat !== undefined ? { repeat: input.repeat } : {}),
-      // An unlinked task owns its completion from the first write, so a
-      // reopened one has a field to clear rather than a key to invent.
-      ...(input.page === undefined ? { done: false } : {}),
-      created: now,
-      updated: now,
-    });
     return this.mutate(async () => {
+      this.assertLinkablePageUnlocked(input.page);
+      const now = new Date().toISOString();
+      const record = parseTask({
+        id: nanoid(),
+        title: input.title,
+        ...(input.when !== undefined ? { when: input.when } : {}),
+        ...(input.deadline !== undefined ? { deadline: input.deadline } : {}),
+        ...(input.category !== undefined ? { category: input.category } : {}),
+        ...(input.page !== undefined ? { page: input.page } : {}),
+        ...(input.anchor !== undefined ? { anchor: input.anchor } : {}),
+        ...(input.repeat !== undefined ? { repeat: input.repeat } : {}),
+        // An unlinked task owns its completion from the first write, so a
+        // reopened one has a field to clear rather than a key to invent.
+        ...(input.page === undefined ? { done: false } : {}),
+        created: now,
+        updated: now,
+      });
       await this.writeTaskUnlocked(record, input.src);
       return this.taskIndex.view(record.id) as TaskView;
     });
   }
 
+  /** The read, the merge and the write are one critical section. `mutate()`
+   *  exists because a read-then-write on the in-memory index loses an update
+   *  when two of them interleave, and a patch is exactly that shape: both
+   *  callers would compute a whole record from the same `current` and the
+   *  second write would land whole, dropping the first patch's fields. */
   async updateTask(id: string, patch: UpdateTaskPatch): Promise<TaskView> {
     assertTaskId(id);
-    const current = this.taskIndex.get(id);
-    if (!current) throw new NotFoundError(id);
-    const next = applyTaskPatch(current, patch);
     return this.mutate(async () => {
-      await this.writeTaskUnlocked(next, patch.src);
+      const current = this.taskIndex.get(id);
+      if (!current) throw new NotFoundError(id);
+      await this.writeTaskUnlocked(applyTaskPatch(current, patch), patch.src);
       return this.taskIndex.view(id) as TaskView;
     });
   }
 
   async deleteTask(id: string, src?: string): Promise<void> {
     assertTaskId(id);
-    if (!this.taskIndex.get(id)) throw new NotFoundError(id);
-    await this.mutate(() => this.deleteTaskUnlocked(id, src));
+    await this.mutate(async () => {
+      // Inside the lock, because `deleteTaskUnlocked` removes unconditionally:
+      // outside it, a delete racing a create removes a record minted after the
+      // check passed and still answers 200.
+      if (!this.taskIndex.get(id)) throw new NotFoundError(id);
+      await this.deleteTaskUnlocked(id, src);
+    });
+  }
+
+  /** A page id passes the schema on its shape alone, which is not enough. A
+   *  task linked to a page that is not there refuses every title and every
+   *  completion for the rest of its life, because both are the note line's to
+   *  own; one linked to a trashed page is hidden from every list, so the
+   *  caller is told it worked and can never see it.
+   *
+   *  Caller owns mutate(). */
+  private assertLinkablePageUnlocked(pageId: string | undefined): void {
+    if (pageId === undefined) return;
+    if (!this.index.has(pageId)) {
+      throw new TaskValidationError(`page not found: ${pageId}`);
+    }
+    if (this.isDeleted(pageId)) {
+      throw new TaskValidationError(`page is in the trash: ${pageId}`);
+    }
   }
 
   /** Caller owns mutate(). */
@@ -6623,13 +6655,6 @@ function applyTaskPatch(
   }
   next.updated = new Date().toISOString();
   return parseTask(next);
-}
-
-/** The day a completion falls on for the reader, or the empty string when the
- *  record has no instant to place. Through `doneDayOf`, so the one reading of
- *  an instant as a day lives in `lib/tasks`. */
-function logbookDay(doneAt: string | undefined, offsetMinutes: number): string {
-  return doneAt === undefined ? "" : doneDayOf(doneAt, offsetMinutes);
 }
 
 /** Real offsets run from -12:00 to +14:00. Anything outside that is a caller

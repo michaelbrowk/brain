@@ -6,7 +6,6 @@ const mocks = vi.hoisted(() => ({
   getTask: vi.fn(),
   updateTask: vi.fn(),
   deleteTask: vi.fn(),
-  writePage: vi.fn(),
 }));
 
 vi.mock("@/lib/store", () => ({
@@ -73,12 +72,10 @@ beforeEach(() => {
   mocks.getTask.mockReset().mockReturnValue(task());
   mocks.updateTask.mockReset().mockResolvedValue(task());
   mocks.deleteTask.mockReset().mockResolvedValue(undefined);
-  mocks.writePage.mockReset();
   mocks.getStore.mockReset().mockResolvedValue({
     getTask: mocks.getTask,
     updateTask: mocks.updateTask,
     deleteTask: mocks.deleteTask,
-    writePage: mocks.writePage,
   });
 });
 
@@ -171,14 +168,12 @@ describe("PATCH /api/tasks/[id]", () => {
 });
 
 describe("DELETE /api/tasks/[id]", () => {
-  it("removes the record and leaves the note line an ordinary checkbox", async () => {
+  it("answers 200 ok and hands the id to deleteTask", async () => {
     const res = await del();
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ ok: true });
     expect(mocks.deleteTask).toHaveBeenCalledWith(TASK_ID, undefined);
-    // A deleted task never deletes or rewrites the line it pointed at.
-    expect(mocks.writePage).not.toHaveBeenCalled();
   });
 
   it("answers 404 for an unknown id", async () => {

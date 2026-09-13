@@ -195,8 +195,31 @@ describe("the task index", () => {
     );
   });
 
+  it("refuses to write over a file it cannot parse", async () => {
+    const root = await tmpRoot();
+    await seed(
+      root,
+      `${ALPHA}.md`,
+      `---\nid: ${ALPHA}\ntitle: Water the plants\ncreated: ${INSTANT}\nupdated: ${INSTANT}\n---\nmy own notes\n`,
+    );
+    const index = await loadTaskIndex(root);
+    const task = index.get(ALPHA);
+    if (!task) throw new Error("fixture did not load");
+
+    // The person hand-edits the file into broken YAML after the index was
+    // built. The stale entry is still in memory, so a patch reaches the write
+    // path and finds a file it cannot read.
+    const broken = "---\nid: [unclosed\n---\nmy own notes\n";
+    await seed(root, `${ALPHA}.md`, broken);
+
+    await expect(writeTaskFile(root, { ...task, when: DAY })).rejects.toThrow();
+    expect(await fs.readFile(taskFilePath(root, ALPHA), "utf8")).toBe(broken);
+  });
+
   it("counts the logbook window back in whole calendar days", async () => {
-    expect(LOGBOOK_WINDOW_DAYS).toBe(30);
+    expect(logbookWindowStart("2026-09-13")).toBe(
+      logbookWindowStart("2026-09-13", LOGBOOK_WINDOW_DAYS),
+    );
     expect(logbookWindowStart("2026-09-13")).toBe("2026-08-14");
     // Across a month end and a leap day, so the arithmetic is civil and not
     // a subtraction of milliseconds.

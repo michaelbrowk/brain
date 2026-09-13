@@ -22,6 +22,7 @@
 import {
   createElement,
   forwardRef,
+  useRef,
   type ElementType,
   type ForwardRefExoticComponent,
   type ReactNode,
@@ -121,6 +122,16 @@ export interface MotionValueStub<T> {
 
 const dragControlsStub: DragControlsStub = { start: () => {} };
 
+/** framer's own `useMotionValue` returns the SAME object for the life of the
+ *  component, and a component that drives one from an event handler relies on
+ *  that: a stub rebuilt on every render loses whatever the handler set the
+ *  moment a sibling state change re-renders. So this is a real hook. */
+function useMotionValueStub<T>(initial: T): MotionValueStub<T> {
+  const held = useRef<MotionValueStub<T> | null>(null);
+  held.current ??= motionValueStub(initial);
+  return held.current;
+}
+
 function motionValueStub<T>(initial: T): MotionValueStub<T> {
   let value = initial;
   return {
@@ -183,7 +194,7 @@ export function createFramerMotionMock(
     useReducedMotion:
       typeof reducedMotion === "function" ? reducedMotion : () => reducedMotion,
     useDragControls: () => dragControlsStub,
-    useMotionValue: motionValueStub,
+    useMotionValue: useMotionValueStub,
     useMotionValueEvent: () => {},
     animate: animateStub,
   };

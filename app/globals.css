@@ -5632,6 +5632,11 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
   border-radius: var(--r-row);
   text-align: left;
   cursor: default;
+  /* THE HORIZONTAL SWIPE IS THE APP'S. Without this the row inherits
+     `touch-action: auto`, and iOS claims a sideways drag for its own back
+     gesture and fires `pointercancel` in the middle of one. `pan-y` leaves
+     the column's scroll to the browser and keeps the x axis here. */
+  touch-action: pan-y;
   transition:
     background-color 160ms var(--ease-out),
     box-shadow 160ms var(--ease-out),
@@ -5827,12 +5832,15 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
 /* Air belongs to the block below: 24 over the group, 4 under its header. The
    header rides the text rule, so its word starts where its rows' words do,
    and the rule runs from the end of the word to the column's inset. */
+/* The air is PADDING, not a margin: a leaving group animates its own height
+   to 0, and a margin sits outside that box and would hold 24px of dead space
+   open for the whole 220ms. The spec says the air collapses with it. */
 .brain-tasks-section {
-  margin-top: 24px;
+  padding-top: 24px;
   overflow: hidden;
 }
 .brain-tasks-section:first-of-type {
-  margin-top: 12px;
+  padding-top: 12px;
 }
 .brain-tasks-section-head {
   display: flex;
@@ -5845,6 +5853,11 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
 .brain-tasks-section-label {
   flex-shrink: 0;
   color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+/* The size sits inside the header's own word, in a box of its own, so it can
+   crossfade when a completion moves it without the word blinking with it. */
+.brain-tasks-section-count {
   font-variant-numeric: tabular-nums;
 }
 .brain-tasks-rule {

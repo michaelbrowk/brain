@@ -17,6 +17,7 @@ import {
   SPRING_MATERIALIZE,
   SPRING_SELECT,
   SPRING_SHEET_GESTURE,
+  materializeFade,
 } from "@/lib/motion";
 import type { TaskView } from "@/lib/tasks/model";
 
@@ -31,6 +32,7 @@ import {
   dayLabel,
   doneTimeOf,
   overdueWhenCaption,
+  repeatNextLabel,
 } from "./tasks-lists";
 import { Icon } from "./ui/icon";
 
@@ -175,6 +177,7 @@ export function TasksRow({
   const detached = task.detachedAt !== undefined;
   const overdueWhen = overdueWhenCaption(task, today);
   const deadline = deadlineCaption(task, today);
+  const repeatNext = repeatNextLabel(task, today);
 
   useEffect(
     () => () => {
@@ -390,6 +393,21 @@ export function TasksRow({
               <span className="brain-task-tail">
                 {linked && <Icon name="document-text" size={14} className="text-ink-3" />}
                 {task.repeat && <Icon name="restart" size={14} className="text-ink-3" />}
+                {/* Spec 2.1, t=100: a repeat grows `restart` plus the day the
+                    next one lands on, so the row says where it went before it
+                    goes. `materializeFade` is the spec's own choice here and
+                    is a crossfade in both motion settings. */}
+                <AnimatePresence>
+                  {holding && repeatNext && (
+                    <motion.span
+                      key={repeatNext}
+                      className="brain-task-caption"
+                      {...materializeFade}
+                    >
+                      {repeatNext}
+                    </motion.span>
+                  )}
+                </AnimatePresence>
                 {detached ? (
                   <span className="brain-task-caption">
                     line removed from {pageTitle ?? "a note"}
@@ -438,6 +456,10 @@ export function TasksRow({
                       {repeatWord(task)}
                     </span>
                   )}
+                  {/* A someday task is explicitly undated, and a deadline
+                      already past would pull it straight into Today, so the
+                      chip is not offered there. */}
+                  {task.when !== "someday" && (
                   <label className="chip" data-task-control>
                     <span className="chip-glyph">
                       <Icon name="flag" size={14} />
@@ -452,6 +474,7 @@ export function TasksRow({
                       }
                     />
                   </label>
+                  )}
                   {task.page && pageTitle && (
                     <button
                       type="button"
@@ -559,7 +582,7 @@ function WhenChip({
             />
           </label>
           {task.when && (
-            <Dropdown.Item className="brain-menu-item" onSelect={() => onPick(null, "Anytime")}>
+            <Dropdown.Item className="brain-menu-item" onSelect={() => onPick(null, "Inbox")}>
               <Icon name="close-linear" size={16} className="brain-menu-icon" />
               Clear
             </Dropdown.Item>
@@ -570,9 +593,18 @@ function WhenChip({
   );
 }
 
-/** ⏎ opens the row, ⌘⏎ completes it, ⌘T and ⌘] move it. They are bound on
- *  the selected row rather than on the column, so the row that answers is
- *  the one the capsule is standing on. */
+/** THE ROW'S KEYS ARE UNMODIFIED LETTERS, not browser chords.
+ *
+ *  ⌘T is New Tab and ⌘N is New Window; `preventDefault` does not reclaim a
+ *  chord the browser reserves, and binding one means a reader who reaches for
+ *  Today gets a tab. Things puts these on bare letters for the same reason, so
+ *  `t`, `e` and `s` move the row the capsule is standing on, and the palette
+ *  carries the same three for a hand that would rather read them.
+ *
+ *  Every one of them is off while the caret is in a field. A bare letter is
+ *  the one shortcut shape that MUST check: `t` inside the capture row is a
+ *  reader typing the word "tomorrow", not asking for Today.
+ */
 function useRowShortcuts({
   selected,
   expanded,
@@ -593,33 +625,52 @@ function useRowShortcuts({
   useEffect(() => {
     if (!selected) return;
     const onKey = (event: KeyboardEvent) => {
+      if (isTyping(event.target)) return;
       const meta = event.metaKey || event.ctrlKey;
       if (event.key === "Enter" && meta) {
         event.preventDefault();
         completeNow();
         return;
       }
-      if (event.key === "Enter" && !meta) {
-        if (isTyping(event.target)) return;
+      if (event.key === "Enter") {
         event.preventDefault();
         onExpand(expanded ? null : task.id);
         return;
       }
-      if (!meta) return;
-      if (event.key.toLowerCase() === "t") {
-        event.preventDefault();
-        void leaveDown(today, "Today");
-        return;
-      }
-      if (event.key === "]") {
+      // ⌘] is not a letter and no browser claims it, so Tomorrow keeps the
+      // spec's own chord alongside the three letters.
+      if (meta && event.key === "]") {
         event.preventDefault();
         void leaveDown(tomorrowOf(today), "Tomorrow");
+        return;
       }
+      if (meta || event.altKey) return;
+      const move = ROW_KEYS[event.key.toLowerCase()];
+      if (!move) return;
+      event.preventDefault();
+      void leaveDown(move.when(today), move.label);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [completeNow, expanded, leaveDown, onExpand, selected, task.id, today]);
 }
+
+/** The three the palette carries too, so a key and a row row never disagree
+ *  about where `t` sends a task.
+ *
+ *  "This evening" files for today. Brain's record holds a day or the word
+ *  `someday` (`lib/tasks/model.ts`), and there is no evening in it, so the
+ *  toast says Today rather than naming a state the file does not hold. The
+ *  key is bound because the keymap is the ruled one; giving it a place of its
+ *  own is a field in the model and belongs to whoever owns that file. */
+export const ROW_KEYS: Record<
+  string,
+  { when: (today: string) => string | "someday" | null; label: string }
+> = {
+  t: { when: (today) => today, label: "Today" },
+  e: { when: (today) => today, label: "Today" },
+  s: { when: () => "someday", label: "Someday" },
+};
 
 function isTyping(target: EventTarget | null): boolean {
   const element = target as HTMLElement | null;

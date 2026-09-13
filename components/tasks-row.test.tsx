@@ -32,6 +32,7 @@ vi.mock("framer-motion/dom", () => ({ animate: pressAnimate }));
 
 const { TasksRow, foldRow } = await import("./tasks-row");
 const { renderTaskCheckbox } = await import("./tasks-checkbox");
+const { SOLAR } = await import("./ui/solar-icons.generated");
 
 /** Every WAAPI animation the row starts, in order. */
 interface Recorded {
@@ -115,6 +116,26 @@ function pointer(
 }
 
 const row = () => document.querySelector(".brain-task-row") as HTMLElement;
+
+/** Where the capsule actually is. The swipe drives a `MotionValue`, so the
+ *  travel is readable without a layout engine. */
+function capsuleX(): number {
+  const capsule = [...renders]
+    .reverse()
+    .find((render) => String(render.props.className) === "brain-task-row");
+  const style = capsule?.props.style as { x?: { get: () => number } } | undefined;
+  return style?.x?.get() ?? Number.NaN;
+}
+
+/** Which Solar drawing a glyph is, not how many there are. Matched on the
+ *  path itself: jsdom reflows the attributes of an injected SVG, so the body
+ *  string does not survive a round trip but the geometry does. */
+const glyphs = (within: Element) =>
+  [...within.querySelectorAll("svg")].map((svg) => {
+    const d = svg.querySelector("path")?.getAttribute("d") ?? "";
+    if (!d) return "?";
+    return Object.entries(SOLAR).find(([, body]) => body.includes(d))?.[0] ?? "?";
+  });
 const box = () => document.querySelector(".brain-task-box") as HTMLButtonElement;
 const tick = () => box().querySelector("path") as SVGPathElement;
 
@@ -188,12 +209,29 @@ describe("what the row draws", () => {
   it("shows document-text in the tail when the task is linked", async () => {
     await renderRows([task("a", { page: "page-1" })]);
     const tail = document.querySelector(".brain-task-tail") as HTMLElement;
-    expect(tail.querySelectorAll("svg").length).toBe(1);
+    expect(glyphs(tail)).toEqual(["document-text-linear"]);
   });
 
   it("shows restart in the tail when the task repeats", async () => {
     await renderRows([task("a", { repeat: { freq: "daily" } })]);
-    expect(document.querySelectorAll(".brain-task-tail svg").length).toBe(1);
+    const tail = document.querySelector(".brain-task-tail") as HTMLElement;
+    expect(glyphs(tail)).toEqual(["restart-linear"]);
+  });
+
+  it("grows the next occurrence beside the repeat while the hold runs", async () => {
+    await renderRows([
+      task("a", { repeat: { freq: "weekly", byWeekday: ["thu"] }, when: TODAY }),
+    ]);
+    const tail = () => document.querySelector(".brain-task-tail") as HTMLElement;
+    expect(tail().textContent).toBe("");
+
+    await act(async () => box().click());
+    // 2026-09-13 is a Sunday, so the next Thursday is the 17th
+    expect(tail().textContent).toBe("Thu 17");
+
+    // and it goes back with the cancel, having said nothing untrue
+    await act(async () => box().click());
+    expect(tail().textContent).toBe("");
   });
 
   it("labels a detached task 'line removed from ‹page›' with the real page title", async () => {
@@ -308,6 +346,14 @@ describe("the expansion", () => {
     expect(ruleFor(css, ".brain-task-row[data-expanded]")).not.toContain("scale");
   });
 
+  it("offers no deadline on a someday task", async () => {
+    await renderRows([task("a", { when: "someday" })], { expanded: true });
+    expect(document.querySelector('input[type="date"]')).toBeNull();
+
+    await renderRows([task("b", { when: TODAY })], { expanded: true });
+    expect(document.querySelector('input[type="date"]')).not.toBeNull();
+  });
+
   it("makes the title editable on a second tap and not on the first", async () => {
     await renderRows([task("a")], { expanded: true });
     expect(document.querySelector(".brain-task-input")).toBeNull();
@@ -340,11 +386,31 @@ describe("the swipe", () => {
     await act(async () => {
       row().dispatchEvent(pointer("pointerdown", { clientX: 0 }));
       row().dispatchEvent(pointer("pointermove", { clientX: 9 }));
+    });
+    // nine pixels is a tap wobbling, not a swipe: nothing has moved
+    expect(capsuleX()).toBe(0);
+    expect(document.querySelector(".brain-task-word")).toBeNull();
+
+    await act(async () => {
       row().dispatchEvent(pointer("pointermove", { clientX: 40 }));
     });
-    // 40 past the hysteresis is past the word's 24, so the word is up; the
-    // point is that nothing moved at 9
+    expect(capsuleX()).toBe(40);
     expect(document.querySelector(".brain-task-word")?.textContent).toContain("Tomorrow");
+  });
+
+  it("tracks the finger to the pixel, and rubber-bands only past 160", async () => {
+    await renderRows([task("a")]);
+    await act(async () => {
+      row().dispatchEvent(pointer("pointerdown", { clientX: 0 }));
+      row().dispatchEvent(pointer("pointermove", { clientX: 100 }));
+    });
+    expect(capsuleX()).toBe(100);
+    await act(async () => {
+      row().dispatchEvent(pointer("pointermove", { clientX: 300 }));
+    });
+    // past 160 the capsule falls behind the finger rather than following it
+    expect(capsuleX()).toBeGreaterThan(160);
+    expect(capsuleX()).toBeLessThan(300);
   });
 
   it("says Tomorrow to the right and Someday to the left, after 24 px", async () => {
@@ -410,8 +476,6 @@ describe("reduced motion", () => {
   });
 
   it("keeps the 160 ms fill, because it is colour and not movement", () => {
-    const rule = ruleFor(css, "@media (prefers-reduced-motion: reduce)");
-    void rule;
     // the box's fill transition is never inside a reduced-motion block
     expect(ruleFor(css, ".brain-task-box")).toContain(
       "background-color 160ms var(--ease-out)",
@@ -464,6 +528,8 @@ describe("reduced motion", () => {
       row().dispatchEvent(pointer("pointerdown", { clientX: 0 }));
       row().dispatchEvent(pointer("pointermove", { clientX: 60 }));
     });
+    // the capsule is under the finger, to the pixel, with the setting on
+    expect(capsuleX()).toBe(60);
     expect(document.querySelector(".brain-task-word")?.textContent).toContain("Tomorrow");
   });
 

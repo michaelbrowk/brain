@@ -1,6 +1,8 @@
+import { nextOccurrence } from "@/lib/tasks/recurrence";
 import {
   compareGroups,
   compareInGroup,
+  doneDayOf,
   groupFor,
   listOf,
   type ListName,
@@ -163,6 +165,11 @@ export function deadlineCaption(task: TaskView, today: string): DeadlineCaption 
   return { label: dayLabel(task.deadline), overdue: task.deadline <= today };
 }
 
+/** The reader's day for a completion instant. Re-exported rather than
+ *  re-derived: `lib/tasks/lists.ts` owns this arithmetic, and a second copy
+ *  of it is a second answer to which day the Logbook files a task under. */
+export { doneDayOf };
+
 /** A completion's time in the reader's own offset. The instant is UTC, the
  *  clock on the row is theirs, and the shift is arithmetic on the instant so
  *  the formatter never has to be handed a zone name nobody stored. */
@@ -173,6 +180,24 @@ export function doneTimeOf(iso: string, offsetMinutes: number): string {
     minute: "2-digit",
     timeZone: "UTC",
   }).format(shifted);
+}
+
+/** Where the next one lands, in the Upcoming group's own `Thu 17` shape.
+ *
+ *  Read during the completion hold so the row says where the series went
+ *  before it folds. `nextOccurrence` measures from the later of the day the
+ *  task is meant for and today, which is the rule's own definition of "next"
+ *  (`lib/tasks/recurrence.ts`); a rule it refuses gives no label rather than
+ *  a guess. */
+export function repeatNextLabel(task: TaskView, today: string): string | null {
+  if (!task.repeat) return null;
+  const from = isDay(task.when) && task.when > today ? task.when : today;
+  try {
+    const day = nextOccurrence(task.repeat, from);
+    return `${weekdayOf(day)} ${Number(day.slice(8, 10))}`;
+  } catch {
+    return null;
+  }
 }
 
 /** The open tasks of one category, for the count beside it in the menu. */

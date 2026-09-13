@@ -1,6 +1,8 @@
 "use client";
 
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
+import { AnimatePresence, motion } from "framer-motion";
+import { DUR } from "@/lib/motion";
 import type { ListName } from "@/lib/tasks/lists";
 
 import type { TasksListState } from "./shell/helpers";
@@ -76,7 +78,25 @@ export function TasksListMenu({
             className="brain-touch-hit brain-tasks-nav"
           >
             <span className="min-w-0 truncate">{label}</span>
-            {tail && <span className="shrink-0 tabular-nums text-ink-3">{tail}</span>}
+            {/* Spec 2.3, row 1: the date changed, so the tail crossfades
+                rather than swapping in one frame. Keyed on the date, so it
+                moves only when the day does. Opacity at `DUR.fast` is what
+                §6 asks of a reduced-motion transition too, so there is one
+                behaviour here and not two. */}
+            {tail && (
+              <AnimatePresence mode="popLayout" initial={false}>
+                <motion.span
+                  key={tail}
+                  className="shrink-0 tabular-nums text-ink-3"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0, transition: { duration: DUR.fast } }}
+                  transition={{ duration: DUR.fast }}
+                >
+                  {tail}
+                </motion.span>
+              </AnimatePresence>
+            )}
             {/* the chevron does not turn: the feedback is the menu
                 materializing, and a second one says the same thing twice */}
             <Icon name="alt-arrow-down-linear" size={16} className="shrink-0 text-ink-3" />

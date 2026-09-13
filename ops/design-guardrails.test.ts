@@ -371,34 +371,35 @@ describe("design guardrails", () => {
   });
 
   it("keeps the tab bar's slot and its derivation on the same number", () => {
-    // The slot is 60 because the widest label is 37.6 and §4's air is 11 a
-    // side. That derivation is written twice in prose — DESIGN.md §4 and the
-    // block comment over `.brain-mobile-tabbar` — and once as a value, and a
-    // review found the prose stating a figure the CSS does not produce. The
-    // arithmetic is not checkable from a file, but the three numbers it runs
-    // on are: the slot, the track floor, and the width the two of them make.
+    // The slot is 56 because the widest label is 37.6 and the sixth slot cut
+    // §4's air to 9.2 a side. That derivation is written twice in prose (in
+    // DESIGN.md §4 and in the block comment over `.brain-mobile-tabbar`) and
+    // once as a value, and a review found the prose stating a figure the CSS
+    // does not produce. The arithmetic is not checkable from a file, but the
+    // three numbers it runs on are: the slot, the track floor, and the width
+    // the two of them make. Six tracks since the Tasks slot landed (2b).
     const css = readFileSync(path.join(ROOT, "app/globals.css"), "utf8");
     const design = readFileSync(path.join(ROOT, "DESIGN.md"), "utf8");
 
     const slot = /--tabbar-slot:\s*(\d+)px;/.exec(css)?.[1];
     expect(slot, "--tabbar-slot is missing from globals.css").toBeDefined();
 
-    const floor = /repeat\(5, minmax\((\d+)px, var\(--tabbar-slot\)\)\)/.exec(css)?.[1];
+    const floor = /repeat\(6, minmax\((\d+)px, var\(--tabbar-slot\)\)\)/.exec(css)?.[1];
     expect(floor, "the tab bar grid is not minmax(<floor>, --tabbar-slot)").toBeDefined();
 
-    // five slots plus the row's 4px ends — the number both prose copies quote
-    const width = Number(slot) * 5 + 8;
+    // six slots plus the row's 4px ends: the number both prose copies quote
+    const width = Number(slot) * 6 + 8;
     expect(
-      design.includes(`Five of them plus the ends is ${width}`),
+      design.includes(`Six of them plus the ends is ${width}`),
       `DESIGN.md §4 does not derive ${width} from a slot of ${slot}`,
     ).toBe(true);
     expect(
-      css.includes(`Five of them plus the row's 4px ends is ${width}`),
+      css.includes(`Six of them plus the row's 4px ends is ${width}`),
       `the .brain-mobile-tabbar comment does not derive ${width} from a slot of ${slot}`,
     ).toBe(true);
 
-    // and the width where those tracks reach the floor: (w - 16 - 8) / 5 = floor
-    const floorWidth = Number(floor) * 5 + 8 + 16;
+    // and the width where those tracks reach the floor: (w - 16 - 8) / 6 = floor
+    const floorWidth = Number(floor) * 6 + 8 + 16;
     expect(
       design.includes(`does not reach its floor until ${floorWidth}`),
       `DESIGN.md §4 does not put the ${floor}px track floor at ${floorWidth}`,

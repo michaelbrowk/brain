@@ -27,16 +27,18 @@ import {
   reloadTasks,
   useTasks,
 } from "./tasks-client";
+import { onTaskCommand, type TaskCommand } from "./tasks-commands";
 import { TasksGhostRow } from "./tasks-ghost-row";
 import { TasksListMenu } from "./tasks-list-menu";
 import {
   categoriesOf,
+  doneDayOf,
   headerLabel,
   sectionsFor,
   type TaskSection,
   type TasksView,
 } from "./tasks-lists";
-import { TasksRow } from "./tasks-row";
+import { ROW_KEYS, TasksRow, tomorrowOf } from "./tasks-row";
 import { Button } from "./ui/button";
 import { Empty } from "./ui/empty";
 import type { ToastOptions } from "./ui/primitives";
@@ -136,6 +138,13 @@ export function TasksSurface({
     setHeld((current) => new Map(current).set(task.id, task));
   }, []);
 
+  /** A row put back by Undo arrives the way a new one does: height 0 to its
+   *  own, plus opacity, with an empty box. Without this it would appear in
+   *  one frame, which is the one moment the reader is watching that spot. */
+  const reenter = useCallback((id: string) => {
+    setInserted((current) => new Set(current).add(id));
+  }, []);
+
   const refuse = useCallback(
     (error: unknown) => {
       const message =
@@ -149,6 +158,7 @@ export function TasksSurface({
 
   const reopenTask = useCallback(
     async (task: TaskView) => {
+      reenter(task.id);
       mutateTasks((tasks) =>
         tasks.map((entry) =>
           entry.id === task.id ? { ...task, done: false, doneAt: undefined } : entry,
@@ -166,12 +176,21 @@ export function TasksSurface({
         refuse(error);
       }
     },
-    [refuse],
+    [reenter, refuse],
   );
 
   /** The write is issued HERE, at 1300, called by the row as its fold starts.
    *  Nothing was sent before this point, so a cancelled completion leaves no
-   *  request, no `rev` bump and no commit behind it. */
+   *  request, no `rev` bump and no commit behind it.
+   *
+   *  THE PILL FOLLOWS THE WRITE. The tick is optimistic because the reader
+   *  has to see their own press, but "Completed · Undo" is a REPORT, and a
+   *  report issued before the answer is known can be wrong: a refusal used to
+   *  leave a pill claiming the opposite of what happened, with a live Undo
+   *  that sent a second PATCH for a completion that never landed. So the row
+   *  moves at once, the sentence waits for the 2xx, and a refusal says one
+   *  thing in the route's own words.
+   */
   const completeTask = useCallback(
     async (task: TaskView) => {
       hold(task);
@@ -182,13 +201,6 @@ export function TasksSurface({
             : entry,
         ),
       );
-      onToast?.("Completed", {
-        actionLabel: "Undo",
-        durationMs: SMART_UNDO_MS,
-        onAction: () => {
-          void reopenTask(task);
-        },
-      });
       try {
         const saved = await patchTask(
           task.id,
@@ -198,6 +210,13 @@ export function TasksSurface({
         mutateTasks((tasks) =>
           tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
         );
+        onToast?.("Completed", {
+          actionLabel: "Undo",
+          durationMs: SMART_UNDO_MS,
+          onAction: () => {
+            void reopenTask(saved);
+          },
+        });
       } catch (error) {
         mutateTasks((tasks) =>
           tasks.map((entry) => (entry.id === task.id ? task : entry)),
@@ -217,21 +236,22 @@ export function TasksSurface({
           entry.id === task.id ? { ...entry, when: when ?? undefined } : entry,
         ),
       );
-      onToast?.(`Moved to ${label}`, {
-        actionLabel: "Undo",
-        durationMs: SMART_UNDO_MS,
-        onAction: () => {
-          mutateTasks((tasks) =>
-            tasks.map((entry) => (entry.id === task.id ? task : entry)),
-          );
-          void patchTask(task.id, { when: task.when ?? null }).catch(refuse);
-        },
-      });
       try {
         const saved = await patchTask(task.id, { when });
         mutateTasks((tasks) =>
           tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
         );
+        onToast?.(`Moved to ${label}`, {
+          actionLabel: "Undo",
+          durationMs: SMART_UNDO_MS,
+          onAction: () => {
+            reenter(task.id);
+            mutateTasks((tasks) =>
+              tasks.map((entry) => (entry.id === task.id ? task : entry)),
+            );
+            void patchTask(task.id, { when: task.when ?? null }).catch(refuse);
+          },
+        });
       } catch (error) {
         mutateTasks((tasks) =>
           tasks.map((entry) => (entry.id === task.id ? task : entry)),
@@ -240,7 +260,7 @@ export function TasksSurface({
         throw error;
       }
     },
-    [hold, onToast, refuse],
+    [hold, onToast, reenter, refuse],
   );
 
   const patchField = useCallback(
@@ -269,10 +289,14 @@ export function TasksSurface({
     [refuse],
   );
 
-  /** A task captured in a list lands IN that list, which is the only reading
-   *  of the ghost row that does not make the reader file what they just
-   *  wrote. Upcoming and the Logbook have no day to give it, so a task
-   *  written there lands in the Inbox. */
+  /** A TASK LANDS IN THE LIST IT WAS TYPED INTO. Anything else files what the
+   *  reader just wrote somewhere they are not looking, with no feedback.
+   *
+   *  Today takes today, Upcoming takes tomorrow (the first day that list can
+   *  hold, since Upcoming is strictly after today), Someday takes the word,
+   *  a category view takes the word and no day, and the Inbox takes neither.
+   *  The Logbook has no ghost row at all: a task written straight into the
+   *  Logbook would have to be born completed, and nobody means that. */
   const capture = useCallback(
     (title: string) => {
       const seed =
@@ -282,9 +306,11 @@ export function TasksSurface({
             : {}
           : view.list === "today"
             ? { when: today }
-            : view.list === "someday"
-              ? { when: "someday" }
-              : {};
+            : view.list === "upcoming"
+              ? { when: tomorrowOf(today) }
+              : view.list === "someday"
+                ? { when: "someday" }
+                : {};
       void createTask({ title, ...seed })
         .then((task) => {
           setInserted((current) => new Set(current).add(task.id));
@@ -305,6 +331,18 @@ export function TasksSurface({
 
   useArrowKeys({ order, selectedId, setSelectedId, setExpandedId });
 
+  // The palette's three rows and the row's three keys are one action each.
+  useEffect(() => {
+    return onTaskCommand((command) => {
+      const task = rows.find((entry) => entry.id === selectedId);
+      if (!task) return;
+      const move = COMMAND_KEYS[command];
+      void rescheduleTask(task, move.when(today), move.label);
+    });
+  }, [rescheduleTask, rows, selectedId, today]);
+
+  // Every list but the Logbook: see `capture`.
+  const capturable = !(view.kind === "list" && view.list === "logbook");
   const counts = useCounts(state.tasks, today, offsetMinutes);
   const empty =
     today !== "" && sections.length === 0 && !state.loading && state.error === null;
@@ -325,9 +363,11 @@ export function TasksSurface({
             unconditional and its height follows --mail-chrome in CSS (§7) */}
         <ScrollEdge variant="blur" steps={1} />
         <div className="brain-tasks-scrollfoot brain-tasks-scrollpad">
-          <ul className="brain-tasks-rows" aria-label="New task">
-            <TasksGhostRow captureRequest={captureRequest} onCreate={capture} />
-          </ul>
+          {capturable && (
+            <ul className="brain-tasks-rows" aria-label="New task">
+              <TasksGhostRow captureRequest={captureRequest} onCreate={capture} />
+            </ul>
+          )}
 
           {state.error !== null && (
             <div className="brain-tasks-message">
@@ -400,6 +440,13 @@ export function TasksSurface({
     </section>
   );
 }
+
+/** The palette's rows and the row's keys resolve through one table. */
+const COMMAND_KEYS: Record<TaskCommand, (typeof ROW_KEYS)[string]> = {
+  "move-today": ROW_KEYS.t as (typeof ROW_KEYS)[string],
+  "move-evening": ROW_KEYS.e as (typeof ROW_KEYS)[string],
+  "move-someday": ROW_KEYS.s as (typeof ROW_KEYS)[string],
+};
 
 function normalize(patch: {
   title?: string;
@@ -491,21 +538,43 @@ function TaskGroup({
             className="brain-tasks-section-label text-label"
             initial={entrance ? (reduce ? { opacity: 0 } : { opacity: 0, y: -4 }) : false}
             animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, transition: { duration: DUR.fast } }}
+            exit={{ opacity: 0, transition: { duration: DUR.fast, delay: 0 } }}
             transition={{
               duration: DUR.base,
               ease: EASE_OUT,
               delay: reduce ? 0 : groupDelay,
             }}
           >
-            {counted ? headerLabel(section.group.label, count) : section.group.label}
+            {section.group.label}
+            {counted && (
+              /* One decrement, not a race: the number the optimistic write
+                 moved at 1300 crossfades while the row below it is still
+                 folding. Keyed on the count, so a re-render with the same
+                 number does not blink. */
+              <AnimatePresence mode="popLayout" initial={false}>
+                <motion.span
+                  key={count}
+                  className="brain-tasks-section-count"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0, transition: { duration: DUR.fast } }}
+                  transition={{ duration: DUR.fast }}
+                >
+                  {countSuffix(count)}
+                </motion.span>
+              </AnimatePresence>
+            )}
           </motion.h2>
           <motion.span
             aria-hidden
             className="brain-tasks-rule"
             initial={entrance && !reduce ? { scaleX: 0 } : false}
             animate={{ scaleX: 1 }}
-            exit={reduce ? { opacity: 0 } : { scaleX: 0 }}
+            exit={
+              reduce
+                ? { opacity: 0, transition: { duration: DUR.fast, delay: 0 } }
+                : { scaleX: 0, transition: { duration: DUR.page, ease: EASE_OUT, delay: 0 } }
+            }
             transition={{
               duration: DUR.page,
               ease: EASE_OUT,
@@ -551,6 +620,14 @@ function TaskGroup({
   );
 }
 
+/** `Today` + ` · 5`. The word and its size are two boxes so the size can
+ *  crossfade on its own; the separator keeps its leading space so the two
+ *  read as one string, and `headerLabel` stays the one spelling of that
+ *  string for anything that needs it in one piece. */
+function countSuffix(count: number): string {
+  return headerLabel("", count);
+}
+
 export interface TaskCounts {
   doneToday: number;
   upcomingThisWeek: number;
@@ -568,17 +645,13 @@ function useCounts(
     for (const task of tasks) {
       const list = listOf(task, today);
       if (list === "logbook") {
-        if (task.doneAt && doneDay(task.doneAt, offsetMinutes) === today) doneToday += 1;
+        if (task.doneAt && doneDayOf(task.doneAt, offsetMinutes) === today) doneToday += 1;
         continue;
       }
       if (list === "upcoming" && withinWeek(task, today)) upcomingThisWeek += 1;
     }
     return { doneToday, upcomingThisWeek };
   }, [offsetMinutes, tasks, today]);
-}
-
-function doneDay(iso: string, offsetMinutes: number): string {
-  return new Date(Date.parse(iso) + offsetMinutes * 60_000).toISOString().slice(0, 10);
 }
 
 function withinWeek(task: TaskView, today: string): boolean {

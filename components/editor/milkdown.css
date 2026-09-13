@@ -975,46 +975,52 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
   margin-top: 8px;
 }
 
-/* task list checkboxes — custom box so the check animates in (a native
-   accent-color checkbox toggles with no motion). Reduced-motion zeroes it. */
-.milkdown .ProseMirror input[type="checkbox"] {
-  appearance: none;
-  -webkit-appearance: none;
+/* Task list checkbox. The NodeView in `task-checkbox.ts` draws it on every
+   list item the gfm preset gives a `checked` attribute; the drawing itself,
+   and every timing in it, is `components/tasks-checkbox.tsx`. Only the fill
+   is a transition here — the check is a stroke a later surface has to be able
+   to interrupt mid-draw, so it runs on WAAPI over there. */
+.milkdown .ProseMirror li.brain-task-item {
   position: relative;
+}
+.milkdown .ProseMirror li.brain-task-item > .brain-task-box {
+  position: absolute;
+  left: -22px;
+  top: 4px;
   width: 16px;
   height: 16px;
-  margin-right: 6px;
-  vertical-align: -3px;
+  padding: 0;
   border: 1.5px solid var(--ink-3);
   border-radius: 4px;
+  background-color: transparent;
   cursor: pointer;
   transition:
-    background-color 160ms,
-    border-color 160ms;
+    background-color 160ms var(--ease-out),
+    border-color 160ms var(--ease-out);
 }
-.milkdown .ProseMirror input[type="checkbox"]:checked {
+.milkdown .ProseMirror li.brain-task-item > .brain-task-box[aria-checked="true"] {
   background-color: var(--ink);
   border-color: var(--ink);
 }
-.milkdown .ProseMirror input[type="checkbox"]::after {
+/* 28 under a mouse. `brain-touch-hit` takes it to 44 on a coarse pointer from
+   its own pseudo-element, so the two never contend for the same one. */
+.milkdown .ProseMirror li.brain-task-item > .brain-task-box::after {
   content: "";
   position: absolute;
-  left: 4.5px;
-  top: 1px;
-  width: 4px;
-  height: 8px;
-  border: solid var(--paper);
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg) scale(0);
-  transform-origin: center;
-  transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
+  top: 50%;
+  left: 50%;
+  width: 28px;
+  height: 28px;
+  transform: translate(-50%, -50%);
 }
-.milkdown .ProseMirror input[type="checkbox"]:checked::after {
-  transform: rotate(45deg) scale(1);
+.milkdown .ProseMirror li.brain-task-item > .brain-task-box > svg {
+  display: block;
+  /* the 1.5 border sits outside the 16 box, so the tick recentres by it */
+  margin: -1.5px 0 0 -1.5px;
 }
-/* keyboard modality only — globals.css exempts inputs from the global ring
-   (text fields rely on caret + border), but a checkbox has neither */
-html[data-kbd] .milkdown .ProseMirror input[type="checkbox"]:focus-visible {
+/* keyboard modality only — globals.css exempts form controls from the global
+   ring (a text field has a caret and a border), and this one has neither */
+html[data-kbd] .milkdown .ProseMirror li.brain-task-item > .brain-task-box:focus-visible {
   outline: 2px solid var(--ink);
   outline-offset: 2px;
 }
@@ -1287,10 +1293,17 @@ html[data-kbd] .milkdown .ProseMirror input[type="checkbox"]:focus-visible {
   font-size: 14px;
 }
 
-/* task items: checkbox replaces the bullet */
-.milkdown .ProseMirror li:has(> input[type="checkbox"])::before,
-.milkdown .ProseMirror li:has(> p > input[type="checkbox"])::before {
+/* task items: the checkbox stands where the bullet stood */
+.milkdown .ProseMirror li:has(> .brain-task-box)::before {
   content: none;
+}
+/* An ordered task keeps its number, so its box moves out of the marker's
+   gutter and the list opens a second one for it. */
+.milkdown .ProseMirror ol:has(> li.brain-task-item) {
+  padding-left: 48px;
+}
+.milkdown .ProseMirror ol > li.brain-task-item > .brain-task-box {
+  left: -44px;
 }
 
 /* unfocused empty page: invite writing (the caret-based slash hint below takes

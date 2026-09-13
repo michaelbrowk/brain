@@ -58,6 +58,7 @@ import {
   searchHighlight as searchHighlightPlugin,
   showSearchHighlight,
 } from "./search-highlight";
+import { taskCheckbox } from "./task-checkbox";
 import { toggle } from "./toggle";
 import { images } from "./image";
 import { handleWrapperImageDrop, imageUploadPlugin } from "./image-upload";
@@ -513,6 +514,9 @@ function Inner({
       })
       .use(commonmarkWithoutHeadingIdSync)
       .use(gfm)
+      // after the preset, like every view below: the checkbox attaches to the
+      // preset's own `list_item`, and gfm is what puts `checked` on it
+      .use(taskCheckbox)
       // after the preset: the extended image and link schemas replace it
       .use(attachmentRefs)
       .use(noNestedTables)

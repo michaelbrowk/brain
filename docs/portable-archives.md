@@ -11,13 +11,17 @@ manifest.json
 pages/
   p000001.md
   p000002.md
+tasks/
+  t000001.md
 assets/
   <stored attachment name>
 ```
 
 - Every note remains a separate plain Markdown file.
-- `manifest.json` contains page hierarchy, supported Brain metadata, and the
-  notebook's tasks.
+- `manifest.json` contains page hierarchy, supported Brain metadata, and every
+  task record.
+- A file under `tasks/` holds the body one task file has under its
+  frontmatter. Most tasks have none, and those get no file.
 - Links between exported pages point at the packaged Markdown files.
 - Local attachments and covers are copied into `assets/` and referenced with
   relative links.
@@ -32,22 +36,26 @@ version 2 manifest that has none either.
 
 ## Tasks
 
-A task rides in the manifest with its title, its `when`, its `deadline`, its
-category, its repeat rule, and, for a task linked to a checkbox, the page and
-the anchor that find that checkbox. A completed task comes back completed.
+Every task record travels whole: its title, its `when`, its `deadline`, its
+category, its repeat rule and that rule's completion log, its completion and
+the instant of it, and, for a task linked to a checkbox, the page and the
+anchor that find that checkbox. A task in no list still travels, because the
+archive is the notebook and not the screen.
 
+- A task keeps its own id, unless the receiving notebook already holds that id.
+  An import never overwrites what is there, so a clash takes a fresh id and
+  both records live. Importing one archive twice makes two copies of
+  everything, tasks and pages alike.
 - A task linked to a page the archive carries points at that page's new id
   after the import.
 - A task naming a page the archive does not carry is imported detached. It
-  keeps its schedule and its last known title, and it is never dropped.
-- A subtree export carries the tasks linked to the pages it carries. A whole
-  notebook export carries those and every unlinked task.
-- Brain allocates a fresh task id on import, the way it allocates a fresh page
-  id.
-- A completion older than the 30 day Logbook window is in no list, and so is
-  in no export. The same is true of a task whose page is in the Trash.
-- A task's `_tasks/<id>.md` file may hold a hand-written body under its
-  frontmatter. Brain has no reader for it and the archive does not carry it.
+  keeps its schedule and its last known title, and it is never dropped. A task
+  on a page in the Trash arrives this way, because the Trash does not travel.
+- A subtree export carries the tasks of the pages it carries. A whole notebook
+  export carries every task the notebook has, including a task on a trashed
+  page and a completion older than the 30 day Logbook window.
+- A body written by hand under a task's frontmatter is carried in `tasks/` and
+  restored byte for byte.
 
 ## Export
 
@@ -65,10 +73,11 @@ the anchor that find that checkbox. A completed task comes back completed.
 3. Review the page, attachment, and task counts.
 4. Choose **Import new pages**.
 
-Import never overwrites an existing page. Brain allocates fresh page, asset,
-and task ids, rebuilds hierarchy, and rewrites packaged links to those new ids.
-If page or task creation fails, the newly created tasks are removed and the
-newly created root pages are moved to Trash; existing notes are not changed.
+Import never overwrites an existing page or task. Brain allocates fresh page
+and asset ids, keeps a task's own id unless that id is taken, rebuilds
+hierarchy, and rewrites packaged links to those new ids. If page or task
+creation fails, the newly created tasks are removed and the newly created root
+pages are moved to Trash; existing notes are not changed.
 
 ## Limits and trust boundary
 
@@ -77,7 +86,7 @@ newly created root pages are moved to Trash; existing notes are not changed.
 - Pages: 5,000 maximum.
 - Tasks: 20,000 maximum.
 - Files: 6,000 maximum.
-- One Markdown file: 10 MB maximum.
+- One Markdown file, and one task body: 10 MB maximum.
 - One attachment: the same 25 MB limit and signature checks used by ordinary
   Brain uploads.
 - Symlinks, absolute paths, traversal, unlisted files, duplicate entries,

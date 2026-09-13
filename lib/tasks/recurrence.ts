@@ -1,0 +1,183 @@
+import type { TaskLogEntry, TaskRecord, TaskRepeat, WeekDay } from "./model";
+
+/** Where a repeating task goes next, and the one write that takes it there.
+ *
+ *  Fixed calendar, not counted from the completion. A task due on the 1st and
+ *  finished on the 9th is next due on the 1st, not on the 9th of next month,
+ *  because the rule is a statement about the calendar and a late finish is
+ *  not a decision to move the series.
+ *
+ *  Missed days never pile up either. The next date is the first rule date
+ *  strictly after the later of today and the day it was scheduled for, so a
+ *  daily task left for a fortnight comes back tomorrow with one row, not with
+ *  fourteen. There is only ever one open instance of a repeating task.
+ *
+ *  Every date is a `YYYY-MM-DD` string and every comparison is a string
+ *  comparison. No `Date` is built here: `new Date("2026-09-13")` parses as UTC
+ *  midnight, so its local day is the day before for every reader west of
+ *  Greenwich, and a repeat rule that drifts by a day per timezone is worse
+ *  than no repeat rule. `recurrence.test.ts` pins that with the clock trapped.
+ *
+ *  Nothing here reads the clock, the filesystem or a Store. `today` and
+ *  `completedAt` are always supplied by the caller.
+ */
+
+/** The Logbook shows 30 days, which is 30 entries at the densest rule. Older
+ *  entries are dropped rather than kept forever in a file a person may open. */
+const MAX_LOG_ENTRIES = 30;
+
+/** 0 is Monday, matching `WeekDay`'s own order. */
+const WEEKDAY_ORDER: WeekDay[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** The first date the rule names strictly after `from`.
+ *
+ *  Strictly after, so calling it with the occurrence that was completed always
+ *  moves. A rule that could return `from` would leave a task due today after
+ *  it had been ticked today. */
+export function nextOccurrence(rule: TaskRepeat, from: string): string {
+  if (rule.freq === "daily") return addOneDay(from);
+
+  if (rule.freq === "weekly") {
+    const wanted = new Set(rule.byWeekday);
+    // At most seven steps, because a week holds every weekday the rule can
+    // name and the schema requires at least one of them.
+    let day = addOneDay(from);
+    for (let step = 0; step < 7; step += 1) {
+      if (wanted.has(WEEKDAY_ORDER[weekdayIndex(day)])) return day;
+      day = addOneDay(day);
+    }
+    return day;
+  }
+
+  // Monthly. The day of the month is the rule's, clamped to the month it
+  // lands in, so the 31st is the last day of February and is the 31st again
+  // in March. Clamping a month never moves the rule itself, which is what
+  // fixed calendar means here.
+  const year = yearOf(from);
+  const month = monthOf(from);
+  const thisMonth = clampedDay(year, month, rule.byMonthDay);
+  if (thisMonth > from) return thisMonth;
+  const nextMonth = month === 12 ? 1 : month + 1;
+  const nextYear = month === 12 ? year + 1 : year;
+  return clampedDay(nextYear, nextMonth, rule.byMonthDay);
+}
+
+/** A completion, taken with the caller's own day so that a tick late at night
+ *  in Dubai is not filed under the day after. */
+export interface CompleteOptions {
+  /** The instant the person ticked it, UTC. */
+  completedAt: string;
+  /** The caller's own calendar day. */
+  today: string;
+  to?: undefined;
+}
+
+/** A move. The rule is untouched, so the next completion comes off the day
+ *  the task was moved to. */
+export interface RescheduleOptions {
+  /** The day the task moves to, or the word `someday`. */
+  to: string;
+  completedAt?: undefined;
+  today?: undefined;
+}
+
+export type AdvanceOptions = CompleteOptions | RescheduleOptions;
+
+/** One repeating task, moved on. Completing it, completing it early and
+ *  moving it are one operation on one record, because all three come down to
+ *  where the single open instance now sits.
+ *
+ *  A task with no `repeat` comes back untouched. This file knows the repeat
+ *  rule and nothing else, and an ordinary task's completion is the store's
+ *  plain write of `done` and `doneAt`. Writing a log entry on a record with
+ *  no rule would be a record the schema refuses.
+ *
+ *  `updated` is not written here. It is a clock read, and the store owns it.
+ */
+export function advance(record: TaskRecord, options: AdvanceOptions): TaskRecord {
+  if (!record.repeat) return record;
+
+  if (options.completedAt !== undefined) {
+    // The day this instance was owed. A repeating task parked on `someday`,
+    // or filed under no day at all, has none, and the day it was finished is
+    // then the honest answer for the log.
+    const scheduled = isDay(record.when) ? record.when : options.today;
+    const from = later(options.today, scheduled);
+    const entry: TaskLogEntry = { scheduled, completedAt: options.completedAt };
+    const log = [...(record.log ?? []), entry].slice(-MAX_LOG_ENTRIES);
+
+    const advanced: TaskRecord = {
+      ...record,
+      when: nextOccurrence(record.repeat, from),
+      log,
+    };
+    // `done` and `doneAt` are removed rather than set. A repeating task is
+    // never finished: the completion is the log entry and the open instance
+    // is the new `when`. A record carrying both would put one task in the
+    // Logbook and in Today at once.
+    delete advanced.done;
+    delete advanced.doneAt;
+    return advanced;
+  }
+
+  if (options.to !== undefined) return { ...record, when: options.to };
+
+  return record;
+}
+
+const isDay = (value: string | undefined): value is string =>
+  value !== undefined && DAY_RE.test(value);
+
+const later = (a: string, b: string): string => (a > b ? a : b);
+
+const yearOf = (day: string): number => Number(day.slice(0, 4));
+const monthOf = (day: string): number => Number(day.slice(5, 7));
+const dayOfMonth = (day: string): number => Number(day.slice(8, 10));
+
+const isLeapYear = (year: number): boolean =>
+  (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+
+const daysInMonth = (year: number, month: number): number => {
+  if (month === 2) return isLeapYear(year) ? 29 : 28;
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
+};
+
+/** The rule's day of the month in one particular month, never past its end. */
+function clampedDay(year: number, month: number, byMonthDay: number): string {
+  const day = Math.min(byMonthDay, daysInMonth(year, month));
+  return `${pad(year, 4)}-${pad(month, 2)}-${pad(day, 2)}`;
+}
+
+function addOneDay(day: string): string {
+  const year = yearOf(day);
+  const month = monthOf(day);
+  const next = dayOfMonth(day) + 1;
+  if (next <= daysInMonth(year, month)) return `${pad(year, 4)}-${pad(month, 2)}-${pad(next, 2)}`;
+  if (month === 12) return `${pad(year + 1, 4)}-01-01`;
+  return `${pad(year, 4)}-${pad(month + 1, 2)}-01`;
+}
+
+function pad(value: number, width: number): string {
+  return String(value).padStart(width, "0");
+}
+
+/** 0 is Monday. Days since 1970-01-01 by Howard Hinnant's days_from_civil,
+ *  written out because a calendar day has to stay a number here: an instant
+ *  would carry a timezone into a weekday, and a weekly rule that fires on
+ *  Sunday evening in one zone is the bug this file exists to avoid.
+ *  1970-01-01 was a Thursday, which is the 3 below. */
+function weekdayIndex(day: string): number {
+  const year = yearOf(day);
+  const month = monthOf(day);
+  const shiftedYear = year - (month <= 2 ? 1 : 0);
+  const era = Math.floor(shiftedYear / 400);
+  const yearOfEra = shiftedYear - era * 400;
+  const dayOfYear =
+    Math.floor((153 * (month + (month > 2 ? -3 : 9)) + 2) / 5) + dayOfMonth(day) - 1;
+  const dayOfEra =
+    yearOfEra * 365 + Math.floor(yearOfEra / 4) - Math.floor(yearOfEra / 100) + dayOfYear;
+  const days = era * 146_097 + dayOfEra - 719_468;
+  return (((days + 3) % 7) + 7) % 7;
+}

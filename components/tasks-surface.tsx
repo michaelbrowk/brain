@@ -444,7 +444,6 @@ export function TasksSurface({
 /** The palette's rows and the row's keys resolve through one table. */
 const COMMAND_KEYS: Record<TaskCommand, (typeof ROW_KEYS)[string]> = {
   "move-today": ROW_KEYS.t as (typeof ROW_KEYS)[string],
-  "move-evening": ROW_KEYS.e as (typeof ROW_KEYS)[string],
   "move-someday": ROW_KEYS.s as (typeof ROW_KEYS)[string],
 };
 

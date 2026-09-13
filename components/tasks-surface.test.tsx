@@ -590,7 +590,6 @@ describe("reschedule (motion 2.2)", () => {
   // bound, and `preventDefault` is not a way to take one back.
   it.each([
     ["t", "Moved to Today", TODAY],
-    ["e", "Moved to Today", TODAY],
     ["s", "Moved to Someday", "someday"],
   ])("moves the focused row on the bare key %s", async (key, title, when) => {
     const a = task("a", { when: dayFrom(3) });
@@ -609,6 +608,21 @@ describe("reschedule (motion 2.2)", () => {
 
     expect(toasts.at(-1)?.title).toBe(title);
     expect(JSON.parse(String(writes().at(-1)?.[1]?.body))).toEqual({ when });
+  });
+
+  // Things has a third key, `e` for This evening. Brain's record holds a day
+  // or the word `someday` and nothing between, so there is no evening to file
+  // a task into and no key that pretends there is.
+  it("binds no key for a state the record does not have", async () => {
+    const a = task("a", { when: dayFrom(3) });
+    await mount([a], { list: "upcoming" });
+    await selectFirst();
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "e" }));
+    });
+    await settle();
+    expect(writes()).toHaveLength(0);
+    expect(toasts).toHaveLength(0);
   });
 
   it("binds no chord the browser reserves", async () => {

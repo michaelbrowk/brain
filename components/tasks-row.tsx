@@ -655,20 +655,19 @@ function useRowShortcuts({
   }, [completeNow, expanded, leaveDown, onExpand, selected, task.id, today]);
 }
 
-/** The three the palette carries too, so a key and a row row never disagree
+/** The two the palette carries too, so a key and a palette row never disagree
  *  about where `t` sends a task.
  *
- *  "This evening" files for today. Brain's record holds a day or the word
- *  `someday` (`lib/tasks/model.ts`), and there is no evening in it, so the
- *  toast says Today rather than naming a state the file does not hold. The
- *  key is bound because the keymap is the ruled one; giving it a place of its
- *  own is a field in the model and belongs to whoever owns that file. */
+ *  There is no third. Things binds `e` to This evening and Brain has no
+ *  evening: the record holds a day or the word `someday`
+ *  (`lib/tasks/model.ts`), and the spec names no state between them. A key
+ *  that filed for today under an evening's name would be a second answer to
+ *  where the task is, and a key that did exactly what `t` does is a dead one. */
 export const ROW_KEYS: Record<
   string,
   { when: (today: string) => string | "someday" | null; label: string }
 > = {
   t: { when: (today) => today, label: "Today" },
-  e: { when: (today) => today, label: "Today" },
   s: { when: () => "someday", label: "Someday" },
 };
 

@@ -15,7 +15,7 @@
 
 export const TASK_COMMAND_EVENT = "brain:task-command";
 
-export const TASK_COMMANDS = ["move-today", "move-evening", "move-someday"] as const;
+export const TASK_COMMANDS = ["move-today", "move-someday"] as const;
 
 export type TaskCommand = (typeof TASK_COMMANDS)[number];
 

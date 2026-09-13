@@ -84,15 +84,15 @@ function parsePaletteQuery(input: string): { filter: PageFilter | null; text: st
  * the shell stays out of the loop; the surface applies its capability gates.
  */
 /**
- * The three moves the Tasks column can make on the row its capsule stands on.
+ * The two moves the Tasks column can make on the row its capsule stands on.
  * They surface only while Tasks is the open route and, like the mail block,
  * reach the mounted surface over a window bus rather than through props: the
  * shell has no business holding a copy of which task is selected. A command
  * that arrives with no row selected does nothing.
  *
- * They exist because ⌘T is New Tab. The keys on the row are `t`, `e` and `s`,
- * and these are the same three actions for a hand that would rather read them
- * than remember them.
+ * They exist because ⌘T is New Tab. The keys on the row are `t` and `s`, and
+ * these are the same two actions for a hand that would rather read them than
+ * remember them.
  */
 const TASK_PALETTE_ACTIONS: readonly {
   readonly command: TaskCommand;
@@ -105,12 +105,6 @@ const TASK_PALETTE_ACTIONS: readonly {
     label: "Move to Today",
     icon: "calendar-date-linear",
     keywords: ["task", "today", "schedule", "when"],
-  },
-  {
-    command: "move-evening",
-    label: "Move to This evening",
-    icon: "calendar-linear",
-    keywords: ["task", "evening", "tonight", "when"],
   },
   {
     command: "move-someday",

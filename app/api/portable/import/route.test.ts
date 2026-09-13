@@ -26,11 +26,13 @@ describe("portable import route", () => {
         attachments: 1,
         attachmentBytes: 12,
         collections: 0,
+        tasks: 3,
       },
     });
     mocks.applyPortableBundle.mockReset().mockResolvedValue({
       rootIds: ["new-root"],
       created: 2,
+      tasks: 3,
     });
   });
 
@@ -54,7 +56,7 @@ describe("portable import route", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       mode: "dry-run",
-      summary: { pages: 2, attachments: 1 },
+      summary: { pages: 2, attachments: 1, tasks: 3 },
     });
     expect(mocks.applyPortableBundle).not.toHaveBeenCalled();
   });
@@ -64,7 +66,7 @@ describe("portable import route", () => {
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({
       mode: "apply",
-      result: { rootIds: ["new-root"], created: 2 },
+      result: { rootIds: ["new-root"], created: 2, tasks: 3 },
     });
     expect(mocks.applyPortableBundle).toHaveBeenCalledOnce();
   });

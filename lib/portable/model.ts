@@ -9,6 +9,7 @@ import {
   collectionRowSchema,
 } from "@/lib/collections/model";
 import type { Store, TreeNode } from "@/lib/store";
+import { taskRecordFields } from "@/lib/tasks/model";
 import { createPortableArchive, readPortableArchive } from "./archive";
 
 export const PORTABLE_FORMAT = "brain-portable" as const;
@@ -86,6 +87,54 @@ const portableAttachmentSchema = z
   })
   .strict();
 
+/** One task record, carried in the manifest the way a page's metadata is.
+ *
+ *  The fields are picked from the record schema rather than retyped, so a day
+ *  and an instant mean here exactly what they mean on disk. What is picked is
+ *  what the import applies: the store mints `id`, `created`, `updated` and
+ *  `doneAt` the same way it mints a page's, so carrying them would be carrying
+ *  a value nothing could restore.
+ */
+const portableTaskSchema = taskRecordFields
+  .pick({
+    title: true,
+    when: true,
+    deadline: true,
+    category: true,
+    anchor: true,
+    repeat: true,
+    done: true,
+  })
+  .extend({
+    sourceId: safeText(128, 1),
+    /** The page holding the checkbox, named by that page's `sourceId`, the
+     *  way `parentSourceId` names a parent. The import maps it to the new page
+     *  id, and a task naming a page this archive does not carry is imported
+     *  detached rather than dropped. */
+    pageSourceId: safeText(128, 1).optional(),
+  })
+  .strict()
+  .superRefine((value, ctx) => {
+    // The two record rules that can be stated without the rest of the record.
+    // They are checked here so a crafted archive is refused by the preflight
+    // rather than by the first write.
+    if (value.pageSourceId === undefined) return;
+    if (value.repeat) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "repeat and pageSourceId cannot both be set on one task",
+        path: ["repeat"],
+      });
+    }
+    if (value.done !== undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "done is not carried for a linked task",
+        path: ["done"],
+      });
+    }
+  });
+
 export const portableManifestSchema = z
   .object({
     format: z.literal(PORTABLE_FORMAT),
@@ -95,11 +144,13 @@ export const portableManifestSchema = z
     title: safeText(1_000, 1),
     pages: z.array(portablePageSchema).min(1).max(MAX_PORTABLE_PAGES),
     attachments: z.array(portableAttachmentSchema).max(MAX_PORTABLE_PAGES * 4),
+    tasks: z.array(portableTaskSchema).max(MAX_PORTABLE_PAGES * 4).optional(),
   })
   .strict();
 
 export type PortableManifest = z.infer<typeof portableManifestSchema>;
 export type PortablePage = PortableManifest["pages"][number];
+export type PortableTask = z.infer<typeof portableTaskSchema>;
 
 export interface PortableBundle {
   manifest: PortableManifest;
@@ -114,6 +165,7 @@ export interface PortableImportSummary {
   attachments: number;
   attachmentBytes: number;
   collections: number;
+  tasks: number;
 }
 
 function flatten(nodes: TreeNode[]): TreeNode[] {
@@ -165,6 +217,47 @@ function replaceKnown(value: string, replacements: Map<string, string>): string 
     result = result.replaceAll(source, target);
   }
   return result;
+}
+
+/** The tasks one export carries.
+ *
+ *  A task rides when it is linked to a page the archive carries, and an
+ *  unlinked task rides when the whole notebook is being exported: it belongs
+ *  to the notebook rather than to any one subtree.
+ *
+ *  `listTasks` is the store's enumeration and it wants the reader's own day.
+ *  An export has no reader, so it uses the day the archive is stamped with,
+ *  at UTC. The one consequence is the Logbook window: a completion older than
+ *  its 30 days is in no list and so is in no export either.
+ */
+function exportedTasks(
+  store: Store,
+  exportedAt: Date,
+  rootId: string | undefined,
+  nodeIds: Set<string>,
+): PortableTask[] {
+  const today = exportedAt.toISOString().slice(0, 10);
+  return store
+    .listTasks(today, { offsetMinutes: 0 })
+    .filter((task) =>
+      task.page === undefined ? rootId === undefined : nodeIds.has(task.page),
+    )
+    .map((task) => ({
+      sourceId: task.id,
+      title: task.title,
+      ...(task.when !== undefined ? { when: task.when } : {}),
+      ...(task.deadline !== undefined ? { deadline: task.deadline } : {}),
+      ...(task.category !== undefined ? { category: task.category } : {}),
+      ...(task.page !== undefined
+        ? {
+            pageSourceId: task.page,
+            ...(task.anchor !== undefined ? { anchor: task.anchor } : {}),
+          }
+        : task.done
+          ? { done: true }
+          : {}),
+      ...(task.repeat !== undefined ? { repeat: task.repeat } : {}),
+    }));
 }
 
 export async function buildPortableArchive(
@@ -268,10 +361,12 @@ export async function buildPortableArchive(
       },
     };
   });
+  const exportedAt = options.now ?? new Date();
+  const manifestTasks = exportedTasks(store, exportedAt, options.rootId, nodeIds);
   const manifest = portableManifestSchema.parse({
     format: PORTABLE_FORMAT,
     version: PORTABLE_VERSION,
-    exportedAt: (options.now ?? new Date()).toISOString(),
+    exportedAt: exportedAt.toISOString(),
     scope: options.rootId ? "subtree" : "all",
     title: options.rootId ? nodes[0].title : "Brain",
     pages: manifestPages,
@@ -282,6 +377,9 @@ export async function buildPortableArchive(
       size: entry.data.byteLength,
       sha256: entry.sha256,
     })),
+    // A notebook with no tasks writes a version 2 manifest with no `tasks`
+    // key, which is byte for byte what a version 1 manifest carried.
+    ...(manifestTasks.length > 0 ? { tasks: manifestTasks } : {}),
   });
   const entries = [
     {
@@ -346,6 +444,9 @@ export function validatePortableArchive(
     );
   } catch {
     throw new Error("portable manifest is invalid");
+  }
+  if (manifest.version === 1 && manifest.tasks) {
+    throw new Error("portable manifest is version 1 and cannot carry tasks");
   }
   orderedPages(manifest.pages);
   const expectedEntries = new Set(["manifest.json"]);
@@ -434,6 +535,7 @@ export function validatePortableArchive(
       attachments: manifest.attachments.length,
       attachmentBytes,
       collections: manifest.pages.filter((page) => page.meta.collection).length,
+      tasks: manifest.tasks?.length ?? 0,
     },
   };
 }
@@ -442,7 +544,7 @@ export async function applyPortableBundle(
   store: Store,
   bundle: PortableBundle,
   options: { parentId?: string | null; src?: string } = {},
-): Promise<{ rootIds: string[]; created: number }> {
+): Promise<{ rootIds: string[]; created: number; tasks: number }> {
   const ordered = orderedPages(bundle.manifest.pages);
   const assetUrls = new Map<string, string>();
   for (const attachment of bundle.manifest.attachments) {
@@ -458,6 +560,7 @@ export async function applyPortableBundle(
   }
   const created = new Map<string, string>();
   const rootIds: string[] = [];
+  const createdTasks: string[] = [];
   try {
     for (const page of ordered) {
       const parentId = page.parentSourceId
@@ -526,8 +629,37 @@ export async function applyPortableBundle(
         options.src,
       );
     }
-    return { rootIds, created: created.size };
+    // Every task goes in through the store's own leaves, so the task index is
+    // right the moment this returns and the note edits and the task writes
+    // land in one git commit together.
+    for (const task of bundle.manifest.tasks ?? []) {
+      const pageId = task.pageSourceId
+        ? created.get(task.pageSourceId)
+        : undefined;
+      const made = await store.createTask({
+        title: task.title,
+        ...(task.when !== undefined ? { when: task.when } : {}),
+        ...(task.deadline !== undefined ? { deadline: task.deadline } : {}),
+        ...(task.category !== undefined ? { category: task.category } : {}),
+        // A task naming a page this archive does not carry is imported
+        // detached, keeping its schedule and its last known title. Its anchor
+        // named a line in a note nobody here has, so it goes with the link.
+        ...(pageId ? { page: pageId, anchor: task.anchor } : {}),
+        ...(task.repeat !== undefined ? { repeat: task.repeat } : {}),
+        src: options.src,
+      });
+      createdTasks.push(made.id);
+      // A finished task must not come back as unfinished. The store stamps its
+      // own `doneAt`, so the completion keeps its truth and loses its hour.
+      if (!pageId && task.done && task.repeat === undefined) {
+        await store.updateTask(made.id, { done: true, src: options.src });
+      }
+    }
+    return { rootIds, created: created.size, tasks: createdTasks.length };
   } catch (error) {
+    for (const taskId of createdTasks) {
+      await store.deleteTask(taskId).catch(() => undefined);
+    }
     for (const rootId of rootIds) {
       await store.deletePage(rootId).catch(() => undefined);
     }

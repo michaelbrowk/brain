@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { localAttachmentName } from "@/lib/attachments";
 import { Store } from "@/lib/store";
+import { hashTaskText, normalizeTaskText } from "@/lib/tasks/task-lines";
 import {
   createPortableArchive,
   readPortableArchive,
@@ -57,6 +58,47 @@ function repack(
         : { path, data },
     ),
   );
+}
+
+const EXPORTED_AT = new Date("2026-09-13T10:00:00.000Z");
+const TODAY = "2026-09-13";
+
+function anchorFor(text: string, line: number) {
+  const normalized = normalizeTaskText(text);
+  return { text: normalized, hash: hashTaskText(normalized), ordinal: 0, line };
+}
+
+/** One page holding one checkbox, plus four tasks: one scheduled, one
+ *  repeating, one with a deadline, and one linked to the checkbox. */
+async function notebookWithTasks(): Promise<{
+  source: Store;
+  pageId: string;
+  anchor: ReturnType<typeof anchorFor>;
+}> {
+  const source = await temporaryStore();
+  const page = await source.createPage(null, "Planning");
+  await source.writePage(page.id, "- [ ] Draft the plan");
+  const anchor = anchorFor("Draft the plan", 0);
+  await source.createTask({
+    title: "Water the plants",
+    when: "2026-09-14",
+    category: "Home",
+  });
+  await source.createTask({
+    title: "Weekly review",
+    repeat: { freq: "weekly", byWeekday: ["mon"] },
+  });
+  await source.createTask({
+    title: "Renew the passport",
+    when: "someday",
+    deadline: "2026-10-01",
+  });
+  await source.createTask({
+    title: "Draft the plan",
+    page: page.id,
+    anchor,
+  });
+  return { source, pageId: page.id, anchor };
 }
 
 describe("Brain portable packages", () => {
@@ -180,5 +222,120 @@ describe("Brain portable packages", () => {
       manifest.version = 3;
     });
     expect(() => validatePortableArchive(newer)).toThrow(/manifest is invalid/);
+  });
+
+  it("exports every task and imports them back with when, deadline, category and repeat intact", async () => {
+    const { source } = await notebookWithTasks();
+    const exported = await buildPortableArchive(source, { now: EXPORTED_AT });
+    expect(exported.manifest.tasks).toHaveLength(4);
+
+    const destination = await temporaryStore();
+    const checked = validatePortableArchive(exported.bytes, destination);
+    expect(checked.summary).toMatchObject({ pages: 1, tasks: 4 });
+    const applied = await applyPortableBundle(destination, checked.bundle);
+    expect(applied).toMatchObject({ tasks: 4 });
+
+    const imported = destination.listTasks(TODAY, { offsetMinutes: 0 });
+    expect(imported.map((task) => task.title).sort()).toEqual([
+      "Draft the plan",
+      "Renew the passport",
+      "Water the plants",
+      "Weekly review",
+    ]);
+    const byTitle = new Map(imported.map((task) => [task.title, task]));
+    expect(byTitle.get("Water the plants")).toMatchObject({
+      when: "2026-09-14",
+      category: "Home",
+    });
+    expect(byTitle.get("Renew the passport")).toMatchObject({
+      when: "someday",
+      deadline: "2026-10-01",
+    });
+    expect(byTitle.get("Weekly review")?.repeat).toEqual({
+      freq: "weekly",
+      byWeekday: ["mon"],
+    });
+  });
+
+  it("remaps a linked task's page id to the imported page's new id", async () => {
+    const { source, pageId, anchor } = await notebookWithTasks();
+    const exported = await buildPortableArchive(source, { now: EXPORTED_AT });
+
+    const destination = await temporaryStore();
+    const checked = validatePortableArchive(exported.bytes, destination);
+    const applied = await applyPortableBundle(destination, checked.bundle);
+    const importedPageId = applied.rootIds[0];
+
+    const linked = destination
+      .listTasks(TODAY, { offsetMinutes: 0 })
+      .find((task) => task.title === "Draft the plan");
+    expect(linked?.page).toBe(importedPageId);
+    expect(linked?.page).not.toBe(pageId);
+    expect(linked?.anchor).toEqual(anchor);
+    expect(destination.tasksForPage(importedPageId)).toHaveLength(1);
+  });
+
+  it("imports a task whose page id is absent as detached, keeping its schedule and title", async () => {
+    const { source } = await notebookWithTasks();
+    const exported = await buildPortableArchive(source, { now: EXPORTED_AT });
+    const orphaned = repack(exported.bytes, (manifest) => {
+      for (const task of manifest.tasks as Array<Record<string, unknown>>) {
+        if (task.pageSourceId === undefined) continue;
+        task.pageSourceId = "a-page-this-archive-never-carried";
+        task.when = "2026-09-20";
+      }
+    });
+
+    const destination = await temporaryStore();
+    const checked = validatePortableArchive(orphaned, destination);
+    const applied = await applyPortableBundle(destination, checked.bundle);
+    expect(applied).toMatchObject({ tasks: 4 });
+
+    const detached = destination
+      .listTasks(TODAY, { offsetMinutes: 0 })
+      .find((task) => task.title === "Draft the plan");
+    expect(detached).toBeDefined();
+    expect(detached?.page).toBeUndefined();
+    expect(detached?.anchor).toBeUndefined();
+    expect(detached?.when).toBe("2026-09-20");
+    expect(detached?.done).toBe(false);
+  });
+
+  it("exports no tasks key at all when the notebook has none", async () => {
+    const source = await temporaryStore();
+    await source.createPage(null, "Nothing To Do");
+    const exported = await buildPortableArchive(source, { now: EXPORTED_AT });
+    expect(exported.manifest.tasks).toBeUndefined();
+    expect(
+      Object.keys(exported.manifest).includes("tasks"),
+    ).toBe(false);
+    const destination = await temporaryStore();
+    expect(
+      validatePortableArchive(exported.bytes, destination).summary,
+    ).toMatchObject({ tasks: 0 });
+  });
+
+  it("carries a completed unlinked task back as completed", async () => {
+    const source = await temporaryStore();
+    await source.createPage(null, "Anything");
+    const done = await source.createTask({ title: "Book the flight" });
+    await source.updateTask(done.id, { done: true });
+    const exported = await buildPortableArchive(source, { now: EXPORTED_AT });
+
+    const destination = await temporaryStore();
+    const checked = validatePortableArchive(exported.bytes, destination);
+    await applyPortableBundle(destination, checked.bundle);
+    const imported = destination.listTasks(TODAY, { offsetMinutes: 0 });
+    expect(imported).toHaveLength(1);
+    expect(imported[0]).toMatchObject({ title: "Book the flight", done: true });
+  });
+
+  it("refuses a version 1 archive that carries a tasks key", async () => {
+    const { source } = await notebookWithTasks();
+    const exported = await buildPortableArchive(source, { now: EXPORTED_AT });
+    const mixed = repack(exported.bytes, (manifest) => {
+      manifest.version = 1;
+    });
+    expect(() => validatePortableArchive(mixed)).toThrow(/version 1/);
   });
 });

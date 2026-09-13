@@ -4,6 +4,12 @@ import { Store } from "./store";
 
 export * from "./types";
 export { MAX_ATTACHMENT_BYTES, Store } from "./store";
+// The task shapes a route or an MCP tool answers with. They live in
+// `lib/tasks` because the derivation is shared with the browser; a consumer
+// of the Store should not have to know that.
+export { TASK_ID_RE, type TaskAnchor, type TaskRecord, type TaskRepeat, type TaskView } from "../tasks/model";
+export { type ListName } from "../tasks/lists";
+export { LOGBOOK_WINDOW_DAYS } from "../tasks/index-store";
 
 /** Notes live outside the app release dir, and a deployment says where with
  *  NOTES_ROOT — the README and .env.example both ask for it. Unset, which is

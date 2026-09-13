@@ -22,9 +22,12 @@ export function assertInRoot(root: string, abs: string): string {
   return p;
 }
 
-/** A folder name that is not a page (attachments, dotfiles, git). */
+/** A folder name that is not a page (attachments, task records, dotfiles, git). */
 export function isReservedDir(name: string): boolean {
   return (
-    name.startsWith(".") || name === "_attachments" || name === "node_modules"
+    name.startsWith(".") ||
+    name === "_attachments" ||
+    name === "_tasks" ||
+    name === "node_modules"
   );
 }

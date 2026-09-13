@@ -117,7 +117,31 @@ import {
   PageRefNestValidationError,
   QuickCaptureConflictError,
   RevConflictError,
+  TaskValidationError,
+  type CreateTaskInput,
+  type TaskListFilter,
+  type UpdateTaskPatch,
 } from "./types";
+import {
+  TaskIndex,
+  deleteTaskFile,
+  loadTaskIndex,
+  logbookWindowStart,
+  writeTaskFile,
+} from "../tasks/index-store";
+import {
+  TASK_ID_RE,
+  parseTaskRecord,
+  type TaskRecord,
+  type TaskView,
+} from "../tasks/model";
+import {
+  compareGroups,
+  compareInGroup,
+  groupFor,
+  listOf,
+  type ListName,
+} from "../tasks/lists";
 
 interface Entry {
   dir: string;
@@ -432,6 +456,7 @@ export class Store {
   private index = new Map<string, Entry>();
   private notionIndex = new Map<string, string>();
   private abortReceiptIndex = new Map<string, string>();
+  private taskIndex = new TaskIndex();
   private mutationPoison: Error | undefined;
   /** When the last quota-triggered attachment sweep ran. Per process, which is
    *  what a single-writer Store is. */
@@ -528,6 +553,7 @@ export class Store {
     await this.reconcileMoveIntent();
     await this.reconcileBoardIntent();
     await reconcileAbortIntents(this.root);
+    await this.loadTaskIndex();
     await this.rebuild();
     await this.mutate(() =>
       this.reconcileNotionStaging().catch(rethrowStagingFailure),
@@ -564,6 +590,10 @@ export class Store {
     this.index.clear();
     this.notionIndex.clear();
     this.abortReceiptIndex.clear();
+    // Before the walk, because the per-page reconcile that joins the walk in
+    // a later release needs an index to reconcile against. Reconciling
+    // against one that is not there yet would detach every task on restart.
+    await this.loadTaskIndex();
     await this.walk(this.root, null);
     await this.normalizeOrders();
   }
@@ -6383,6 +6413,215 @@ export class Store {
     }
     return false;
   }
+
+  // ── Tasks ──────────────────────────────────────────────────────────────
+  //
+  // One record per file under `_tasks/`, one map of them in memory. Read
+  // paths answer from the map and never touch the disk. Every write is one
+  // `atomicWrite` inside one `mutate()`, so `git add -A` and the 4 second
+  // commit debounce carry a note edit and a task edit together.
+
+  private async loadTaskIndex(): Promise<void> {
+    this.taskIndex = await loadTaskIndex(this.root);
+  }
+
+  /** The tasks of one page, for the reconcile. */
+  tasksForPage(pageId: string): TaskRecord[] {
+    return this.taskIndex.byPage(pageId);
+  }
+
+  /** One task by id, or null. A malformed id is refused rather than answered
+   *  with a miss, so a caller learns it built the wrong request. */
+  getTask(id: string): TaskView | null {
+    assertTaskId(id);
+    return this.taskIndex.view(id) ?? null;
+  }
+
+  /** Every task of one list, group-collated, for the caller's own `today`.
+   *
+   *  No list membership is stored, so this is a pure derivation over the
+   *  index plus one date. Tasks whose page is in the trash are in no list,
+   *  and the Logbook stops at its window.
+   */
+  listTasks(today: string, filter: TaskListFilter = {}): TaskView[] {
+    assertToday(today);
+    const windowStart = logbookWindowStart(today);
+    const visible = this.taskIndex.views().filter((task) => {
+      if (task.page && this.index.has(task.page) && this.isDeleted(task.page)) {
+        return false;
+      }
+      const list = listOf(task, today);
+      // The window is a 30 day cutoff, not a boundary anyone reads, so the
+      // UTC day of the instant is the granularity it needs.
+      if (list === "logbook" && (task.doneAt ?? "").slice(0, 10) < windowStart) {
+        return false;
+      }
+      if (filter.list && list !== filter.list) return false;
+      if (filter.category !== undefined && task.category !== filter.category) {
+        return false;
+      }
+      return true;
+    });
+    return visible.sort((a, b) => compareTasks(a, b, today));
+  }
+
+  async createTask(input: CreateTaskInput): Promise<TaskView> {
+    const now = new Date().toISOString();
+    const record = parseTask({
+      id: nanoid(),
+      title: input.title,
+      ...(input.when !== undefined ? { when: input.when } : {}),
+      ...(input.deadline !== undefined ? { deadline: input.deadline } : {}),
+      ...(input.category !== undefined ? { category: input.category } : {}),
+      ...(input.page !== undefined ? { page: input.page } : {}),
+      ...(input.anchor !== undefined ? { anchor: input.anchor } : {}),
+      ...(input.repeat !== undefined ? { repeat: input.repeat } : {}),
+      // An unlinked task owns its completion from the first write, so a
+      // reopened one has a field to clear rather than a key to invent.
+      ...(input.page === undefined ? { done: false } : {}),
+      created: now,
+      updated: now,
+    });
+    return this.mutate(async () => {
+      await this.writeTaskUnlocked(record, input.src);
+      return this.taskIndex.view(record.id) as TaskView;
+    });
+  }
+
+  async updateTask(id: string, patch: UpdateTaskPatch): Promise<TaskView> {
+    assertTaskId(id);
+    const current = this.taskIndex.get(id);
+    if (!current) throw new NotFoundError(id);
+    const next = applyTaskPatch(current, patch);
+    return this.mutate(async () => {
+      await this.writeTaskUnlocked(next, patch.src);
+      return this.taskIndex.view(id) as TaskView;
+    });
+  }
+
+  async deleteTask(id: string, src?: string): Promise<void> {
+    assertTaskId(id);
+    if (!this.taskIndex.get(id)) throw new NotFoundError(id);
+    await this.mutate(() => this.deleteTaskUnlocked(id, src));
+  }
+
+  /** Caller owns mutate(). */
+  private async writeTaskUnlocked(
+    task: TaskRecord,
+    src?: string,
+  ): Promise<void> {
+    await writeTaskFile(this.root, task);
+    this.taskIndex.put(task);
+    scheduleCommit(this.root);
+    emitStore({ type: "task", id: task.id, src });
+  }
+
+  /** Caller owns mutate(). */
+  private async deleteTaskUnlocked(id: string, src?: string): Promise<void> {
+    await deleteTaskFile(this.root, id);
+    this.taskIndex.remove(id);
+    scheduleCommit(this.root);
+    emitStore({ type: "task", id, src });
+  }
+}
+
+/** A task id reaches a path the same way a page id does, so it is checked
+ *  against the bounded rule before any `path.join`. */
+function assertTaskId(id: string): void {
+  if (!TASK_ID_RE.test(id)) {
+    throw new TaskValidationError(`invalid task id: ${JSON.stringify(id)}`);
+  }
+}
+
+const TASK_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** The caller's own local calendar day. The server never substitutes its own:
+ *  a UTC "today" flips the list at 03:00 in Moscow and a day early in Dubai. */
+function assertToday(today: string | undefined): asserts today is string {
+  if (typeof today !== "string" || !TASK_DAY_RE.test(today)) {
+    throw new TaskValidationError("bad_today");
+  }
+}
+
+function parseTask(raw: unknown): TaskRecord {
+  const parsed = parseTaskRecord(raw);
+  if (!parsed.ok) throw new TaskValidationError(parsed.reason);
+  return parsed.task;
+}
+
+function assignOrClear(
+  target: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): void {
+  if (value === undefined) return;
+  if (value === null) delete target[key];
+  else target[key] = value;
+}
+
+function applyTaskPatch(
+  current: TaskRecord,
+  patch: UpdateTaskPatch,
+): TaskRecord {
+  // `today` is the one parameter the server cannot derive, and a repeating
+  // task needs it on completion because the next occurrence is computed from
+  // max(when, today). Nothing else takes it, so anywhere else it is a caller
+  // mistake worth hearing about rather than a value to ignore.
+  const completingRepeat = patch.done === true && current.repeat !== undefined;
+  if (patch.today !== undefined && !completingRepeat) {
+    throw new TaskValidationError(
+      "today is only accepted when completing a repeating task",
+    );
+  }
+  if (completingRepeat) assertToday(patch.today);
+  const next: Record<string, unknown> = { ...current };
+  if (patch.title !== undefined) {
+    // The note line is a linked task's title. The copy in the file is a cache
+    // for list rendering and writing over it would make it a second answer.
+    if (current.page) {
+      throw new TaskValidationError(
+        "title is owned by the note line of a linked task",
+      );
+    }
+    next.title = patch.title;
+  }
+  assignOrClear(next, "when", patch.when);
+  assignOrClear(next, "deadline", patch.deadline);
+  assignOrClear(next, "category", patch.category);
+  assignOrClear(next, "repeat", patch.repeat);
+  if (patch.done !== undefined) {
+    // A linked task is completed by its checkbox, through the reconcile.
+    if (current.page) {
+      throw new TaskValidationError("done is not stored for a linked task");
+    }
+    next.done = patch.done;
+    // A full UTC instant. The Logbook day is the reader's own, derived from
+    // this instant in their zone, so the server writes the instant and makes
+    // no guess about which calendar day it falls on.
+    if (patch.done) next.doneAt = new Date().toISOString();
+    else delete next.doneAt;
+  }
+  next.updated = new Date().toISOString();
+  return parseTask(next);
+}
+
+/** The order the lists are read in on the surface. */
+const TASK_LIST_ORDER: ListName[] = [
+  "inbox",
+  "today",
+  "upcoming",
+  "someday",
+  "logbook",
+];
+
+function compareTasks(a: TaskView, b: TaskView, today: string): number {
+  const listA = listOf(a, today);
+  const listB = listOf(b, today);
+  if (listA !== listB) {
+    return TASK_LIST_ORDER.indexOf(listA) - TASK_LIST_ORDER.indexOf(listB);
+  }
+  const byGroup = compareGroups(groupFor(a, today), groupFor(b, today));
+  return byGroup !== 0 ? byGroup : compareInGroup(a, b, listA);
 }
 
 function deslug(name: string): string {

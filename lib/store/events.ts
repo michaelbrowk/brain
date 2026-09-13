@@ -1,7 +1,10 @@
 import { EventEmitter } from "node:events";
 
 export interface StoreEvent {
-  type: "write" | "create" | "move" | "delete" | "meta";
+  /** `task` carries a task record's id, not a page id. Nothing in the page
+   *  tree changes on one, so a client that refreshes its tree on every event
+   *  has to skip it or it refetches the tree on every tick. */
+  type: "write" | "create" | "move" | "delete" | "meta" | "task";
   id: string;
   /** rev of the content after a write — lets clients skip a GET when they
    *  already hold this rev */

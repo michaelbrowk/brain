@@ -41,7 +41,7 @@ import {
   scheduleDirtyCommit,
 } from "./git";
 import { standalonePageRefOccurrences } from "../page-ref-nesting";
-import { latestStoreEventSequence } from "./events";
+import { brainEvents, latestStoreEventSequence } from "./events";
 import {
   resolveShareAccess,
   ShareAccessNotFoundError,
@@ -10546,5 +10546,266 @@ describe("share-aware Store leaves", () => {
         rootId,
       ),
     ).toBe(false);
+  });
+});
+
+describe("the _tasks directory", () => {
+  it("does not walk _tasks as a page tree", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-alpha.md"),
+      "---\nid: task-alpha\ntitle: Water the plants\ncreated: 2026-09-13T09:00:00.000Z\nupdated: 2026-09-13T09:00:00.000Z\n---\n",
+    );
+    await s.rebuild();
+    expect(s.getTree().find((n) => n.title === "Water the plants")).toBeUndefined();
+  });
+
+  it("does not walk a subfolder of _tasks as a page", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks", "archive"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "archive", "index.md"),
+      "---\nid: sneaky\ntitle: Not a page\n---\n",
+    );
+    await s.rebuild();
+    expect(s.getTree().find((n) => n.id === "sneaky")).toBeUndefined();
+  });
+});
+
+describe("task records", () => {
+  const TODAY = "2026-09-13";
+  const TOMORROW = "2026-09-14";
+
+  async function taskFile(root: string, id: string): Promise<string> {
+    return fs.readFile(path.join(root, "_tasks", `${id}.md`), "utf8");
+  }
+
+  function captureEvents(): { types: string[]; stop: () => void } {
+    const types: string[] = [];
+    const onChange = (ev: { type: string }) => types.push(ev.type);
+    brainEvents.on("change", onChange);
+    return { types, stop: () => brainEvents.off("change", onChange) };
+  }
+
+  it("creates a task with a minted id and returns it in listTasks", async () => {
+    const { s } = await tmpStore();
+    const task = await s.createTask({ title: "Water the plants", when: TODAY });
+
+    expect(task.id).toMatch(/^[A-Za-z0-9_-]{1,128}$/);
+    expect(task.done).toBe(false);
+    expect(s.listTasks(TODAY, { list: "today" }).map((t) => t.id)).toEqual([
+      task.id,
+    ]);
+    expect(s.getTask(task.id)?.title).toBe("Water the plants");
+  });
+
+  it("writes through atomicWrite and lands the file at _tasks/<id>.md", async () => {
+    const { s, root } = await tmpStore();
+    const task = await s.createTask({ title: "Water the plants" });
+
+    expect(await taskFile(root, task.id)).toContain(`id: ${task.id}`);
+    // atomicWrite renames its temp file into place, so none is left behind.
+    const left = await fs.readdir(path.join(root, "_tasks"));
+    expect(left).toEqual([`${task.id}.md`]);
+  });
+
+  it("refuses an id that is not [A-Za-z0-9_-]{1,128} before any path join", async () => {
+    const { s } = await tmpStore();
+    for (const id of ["", "with space", "a".repeat(129), "dot.dot"]) {
+      expect(() => s.getTask(id)).toThrow();
+      await expect(s.updateTask(id, { category: "x" })).rejects.toThrow();
+      await expect(s.deleteTask(id)).rejects.toThrow();
+    }
+  });
+
+  it("refuses a task id containing ../ and does not write outside the root", async () => {
+    const { s, root } = await tmpStore();
+    const outside = path.join(path.dirname(root), "escaped.md");
+
+    await expect(s.updateTask("../escaped", { category: "x" })).rejects.toThrow();
+    await expect(s.deleteTask("../../escaped")).rejects.toThrow();
+
+    await expect(fs.access(outside)).rejects.toThrow();
+  });
+
+  it("updates when, deadline and category without touching title for a linked task", async () => {
+    const { s, root } = await tmpStore();
+    const meta = await s.createPage(null, "Groceries");
+    const created = await s.createTask({
+      title: "Buy milk",
+      page: meta.id,
+      anchor: { text: "buy milk", hash: "8f14e45fceea167a", ordinal: 0, line: 3 },
+    });
+
+    const updated = await s.updateTask(created.id, {
+      when: TOMORROW,
+      deadline: "2026-09-20",
+      category: "home",
+    });
+
+    expect(updated.title).toBe("Buy milk");
+    expect(updated.when).toBe(TOMORROW);
+    expect(updated.deadline).toBe("2026-09-20");
+    expect(updated.category).toBe("home");
+    await expect(
+      s.updateTask(created.id, { title: "Buy oat milk" }),
+    ).rejects.toThrow(/title/);
+    expect(await taskFile(root, created.id)).toContain("title: Buy milk");
+  });
+
+  it("never writes done into the file for a linked task", async () => {
+    const { s, root } = await tmpStore();
+    const meta = await s.createPage(null, "Groceries");
+    const created = await s.createTask({ title: "Buy milk", page: meta.id });
+
+    await expect(s.updateTask(created.id, { done: true })).rejects.toThrow(
+      /done/,
+    );
+
+    const raw = await taskFile(root, created.id);
+    expect(raw).not.toContain("done:");
+    expect(s.getTask(created.id)?.done).toBe(false);
+  });
+
+  it("writes done and doneAt into the file for an unlinked task", async () => {
+    const { s, root } = await tmpStore();
+    const created = await s.createTask({ title: "Water the plants" });
+
+    const done = await s.updateTask(created.id, { done: true });
+
+    expect(done.done).toBe(true);
+    // A full UTC instant. The reader's Logbook day is derived from it in the
+    // reader's own zone, so the server writes no calendar day of its own.
+    expect(done.doneAt).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
+    const raw = await taskFile(root, created.id);
+    expect(raw).toContain("done: true");
+    expect(raw).toContain("doneAt:");
+
+    const reopened = await s.updateTask(created.id, { done: false });
+    expect(reopened.done).toBe(false);
+    expect(reopened.doneAt).toBeUndefined();
+    expect(await taskFile(root, created.id)).not.toContain("doneAt:");
+  });
+
+  it("takes today only when it completes a repeating task", async () => {
+    const { s } = await tmpStore();
+    const plain = await s.createTask({ title: "Water the plants" });
+    const repeating = await s.createTask({
+      title: "Learn words",
+      repeat: { freq: "daily" },
+    });
+
+    // Nothing else needs it, so anywhere else it is a caller mistake.
+    await expect(
+      s.updateTask(plain.id, { done: true, today: TODAY }),
+    ).rejects.toThrow(/today/);
+    await expect(
+      s.updateTask(plain.id, { when: TODAY, today: TODAY }),
+    ).rejects.toThrow(/today/);
+
+    await expect(s.updateTask(repeating.id, { done: true })).rejects.toThrow(
+      /bad_today/,
+    );
+    await expect(
+      s.updateTask(repeating.id, { done: true, today: "2026-9-1" }),
+    ).rejects.toThrow(/bad_today/);
+    await expect(
+      s.updateTask(repeating.id, { done: true, today: TODAY }),
+    ).resolves.toMatchObject({ done: true });
+  });
+
+  it("deletes the file and drops it from both index maps", async () => {
+    const { s, root } = await tmpStore();
+    const meta = await s.createPage(null, "Groceries");
+    const created = await s.createTask({ title: "Buy milk", page: meta.id });
+
+    await s.deleteTask(created.id);
+
+    expect(s.getTask(created.id)).toBeNull();
+    expect(s.tasksForPage(meta.id)).toEqual([]);
+    await expect(
+      fs.access(path.join(root, "_tasks", `${created.id}.md`)),
+    ).rejects.toThrow();
+  });
+
+  it("emits a StoreEvent of type task on create, update and delete", async () => {
+    const { s } = await tmpStore();
+    const seen = captureEvents();
+    try {
+      const created = await s.createTask({ title: "Water the plants" });
+      await s.updateTask(created.id, { when: TODAY });
+      await s.deleteTask(created.id);
+    } finally {
+      seen.stop();
+    }
+    expect(seen.types).toEqual(["task", "task", "task"]);
+  });
+
+  it("derives lists from listTasks(today) and not from anything stored", async () => {
+    const { s, root } = await tmpStore();
+    const created = await s.createTask({ title: "Water the plants", when: TOMORROW });
+
+    expect(s.listTasks(TODAY, { list: "upcoming" }).map((t) => t.id)).toEqual([
+      created.id,
+    ]);
+    expect(s.listTasks(TOMORROW, { list: "today" }).map((t) => t.id)).toEqual([
+      created.id,
+    ]);
+    expect(s.listTasks(TODAY, { list: "today" })).toEqual([]);
+    const raw = await taskFile(root, created.id);
+    expect(raw).not.toContain("list:");
+  });
+
+  it("reloads the index on rebuild and keeps a hand-written record", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-alpha.md"),
+      "---\nid: task-alpha\ntitle: Water the plants\nwhen: '2026-09-13'\ncreated: '2026-09-13T09:00:00.000Z'\nupdated: '2026-09-13T09:00:00.000Z'\n---\n",
+    );
+
+    await s.rebuild();
+
+    expect(s.getTask("task-alpha")?.title).toBe("Water the plants");
+    expect(s.listTasks(TODAY, { list: "today" }).map((t) => t.id)).toEqual([
+      "task-alpha",
+    ]);
+  });
+
+  it("hides the tasks of a trashed page from every list", async () => {
+    const { s } = await tmpStore();
+    const meta = await s.createPage(null, "Groceries");
+    const created = await s.createTask({
+      title: "Buy milk",
+      page: meta.id,
+      when: TODAY,
+    });
+
+    expect(s.listTasks(TODAY).map((t) => t.id)).toEqual([created.id]);
+    await s.deletePage(meta.id);
+    expect(s.listTasks(TODAY)).toEqual([]);
+    // The record is still readable by id, which is what MCP answers 409 on.
+    expect(s.getTask(created.id)?.page).toBe(meta.id);
+  });
+
+  it("keeps the logbook to its 30 day window", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    const record = (id: string, doneAt: string) =>
+      `---\nid: ${id}\ntitle: Water the plants\ndone: true\ndoneAt: '${doneAt}'\ncreated: '2026-06-01T09:00:00.000Z'\nupdated: '${doneAt}'\n---\n`;
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-recent.md"),
+      record("task-recent", "2026-09-10T09:00:00.000Z"),
+    );
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-old.md"),
+      record("task-old", "2026-07-01T09:00:00.000Z"),
+    );
+    await s.rebuild();
+
+    expect(s.listTasks(TODAY, { list: "logbook" }).map((t) => t.id)).toEqual([
+      "task-recent",
+    ]);
   });
 });

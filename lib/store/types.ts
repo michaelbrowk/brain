@@ -2,6 +2,8 @@ import type {
   CollectionDefinition,
   CollectionRow,
 } from "../collections/model";
+import type { TaskAnchor, TaskRepeat } from "../tasks/model";
+import type { ListName } from "../tasks/lists";
 
 export interface Sticker {
   id: string;
@@ -668,4 +670,56 @@ export function isShareAttachmentScope(
   e: unknown,
 ): e is ShareAttachmentScopeError {
   return e instanceof Error && e.name === "ShareAttachmentScopeError";
+}
+
+/** A task create or patch the schema, the link rules or the `?today=` contract
+ *  refuse. Carries the reason, because a route answers 400 with it rather than
+ *  a 500 with nothing. */
+export class TaskValidationError extends Error {
+  constructor(public reason: string) {
+    super(reason);
+    this.name = "TaskValidationError";
+  }
+}
+
+export function isTaskValidation(e: unknown): e is TaskValidationError {
+  return e instanceof Error && e.name === "TaskValidationError";
+}
+
+/** What a caller may set when a task is minted. `id`, `created`, `updated`,
+ *  `done` and `doneAt` are the store's to write. */
+export interface CreateTaskInput {
+  title: string;
+  /** `YYYY-MM-DD` or the word `someday`. */
+  when?: string;
+  deadline?: string;
+  category?: string;
+  /** The note that holds the checkbox, for a linked task. */
+  page?: string;
+  anchor?: TaskAnchor;
+  repeat?: TaskRepeat;
+  src?: string;
+}
+
+/** A patch. `null` clears a field, `undefined` leaves it alone. */
+export interface UpdateTaskPatch {
+  /** Unlinked only: the note line owns a linked task's title. */
+  title?: string;
+  when?: string | null;
+  deadline?: string | null;
+  category?: string | null;
+  repeat?: TaskRepeat | null;
+  /** Unlinked only in this release. A linked task is completed through its
+   *  note, which is the reconcile path. */
+  done?: boolean;
+  /** The caller's own local calendar day, `YYYY-MM-DD`. Required with
+   *  `done: true`, because `doneAt` files the task under that day in the
+   *  Logbook and the server has no timezone to fall back on. */
+  today?: string;
+  src?: string;
+}
+
+export interface TaskListFilter {
+  list?: ListName;
+  category?: string;
 }

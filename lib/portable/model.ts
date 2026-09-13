@@ -12,7 +12,12 @@ import type { Store, TreeNode } from "@/lib/store";
 import { createPortableArchive, readPortableArchive } from "./archive";
 
 export const PORTABLE_FORMAT = "brain-portable" as const;
-export const PORTABLE_VERSION = 1 as const;
+/** Version 2 is the first to carry tasks. */
+export const PORTABLE_VERSION = 2 as const;
+/** Both versions are read. A version 1 archive has no `tasks` key and imports
+ *  exactly as it did before the bump, because refusing the exports people
+ *  already hold would cost them their data and buy nothing. */
+const portableVersionSchema = z.union([z.literal(1), z.literal(2)]);
 const MAX_PORTABLE_PAGES = 5_000;
 const MAX_PAGE_MARKDOWN_BYTES = 10 * 1024 * 1024;
 
@@ -84,7 +89,7 @@ const portableAttachmentSchema = z
 export const portableManifestSchema = z
   .object({
     format: z.literal(PORTABLE_FORMAT),
-    version: z.literal(PORTABLE_VERSION),
+    version: portableVersionSchema,
     exportedAt: z.string().datetime(),
     scope: z.enum(["all", "subtree"]),
     title: safeText(1_000, 1),

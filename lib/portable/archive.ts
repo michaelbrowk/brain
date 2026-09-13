@@ -10,10 +10,17 @@ export interface PortableArchiveEntry {
   data: Uint8Array;
 }
 
+/** The closed allowlist of paths an archive may carry, applied to both the
+ *  writer and the reader. It is the boundary a crafted archive meets first,
+ *  so every alternative names an exact shape and nothing looser. A task file
+ *  is `tasks/tNNNNNN.md` on the same six digit counter as a page, which is
+ *  why `tasks/t1.md`, `tasks/anything.md` and `_tasks/t000001.md` are all
+ *  refused here rather than later. */
 function safeArchivePath(value: string): boolean {
   return (
     value === "manifest.json" ||
     /^pages\/p\d{6}\.md$/.test(value) ||
+    /^tasks\/t\d{6}\.md$/.test(value) ||
     /^assets\/[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9][A-Za-z0-9_-]{0,31})?$/.test(
       value,
     )

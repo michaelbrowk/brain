@@ -5,6 +5,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import { localAttachmentName } from "@/lib/attachments";
 import { Store } from "@/lib/store";
 import {
+  createPortableArchive,
+  readPortableArchive,
+} from "./archive";
+import {
   applyPortableBundle,
   buildPortableArchive,
   portableFileName,
@@ -28,6 +32,32 @@ afterEach(async () => {
     ),
   );
 });
+
+/** Repack an exported archive with an edited manifest, through the real
+ *  reader and writer, so a hand-made archive still has to pass every tar
+ *  rule a mailed one does. */
+function repack(
+  bytes: Uint8Array,
+  edit: (manifest: Record<string, unknown>) => void,
+): Uint8Array {
+  const entries = readPortableArchive(bytes);
+  const manifest = JSON.parse(
+    new TextDecoder().decode(entries.get("manifest.json")!),
+  ) as Record<string, unknown>;
+  edit(manifest);
+  return createPortableArchive(
+    [...entries].map(([path, data]) =>
+      path === "manifest.json"
+        ? {
+            path,
+            data: new TextEncoder().encode(
+              JSON.stringify(manifest, null, 2) + "\n",
+            ),
+          }
+        : { path, data },
+    ),
+  );
+}
 
 describe("Brain portable packages", () => {
   it("exports and safely imports a subtree with links, assets, and metadata", async () => {
@@ -111,5 +141,44 @@ describe("Brain portable packages", () => {
     expect(localAttachmentName("/_attachments-v2/ABCDEF.txt")).toBe(
       "ABCDEF.txt",
     );
+  });
+
+  it("stamps version 2 on a new export", async () => {
+    const source = await temporaryStore();
+    await source.createPage(null, "Only Page");
+    const exported = await buildPortableArchive(source);
+    expect(exported.manifest.version).toBe(2);
+  });
+
+  it("imports a version 1 archive with no tasks key exactly as it does today", async () => {
+    const source = await temporaryStore();
+    const page = await source.createPage(null, "Older Export");
+    await source.writePage(page.id, "Written before the bump");
+    const exported = await buildPortableArchive(source);
+    const older = repack(exported.bytes, (manifest) => {
+      manifest.version = 1;
+      delete manifest.tasks;
+    });
+
+    const destination = await temporaryStore();
+    const checked = validatePortableArchive(older, destination);
+    expect(checked.bundle.manifest.version).toBe(1);
+    const applied = await applyPortableBundle(destination, checked.bundle);
+    expect(applied).toMatchObject({ created: 1 });
+    const imported = await destination.readPage(applied.rootIds[0]);
+    expect(imported.markdown).toContain("Written before the bump");
+    expect(destination.listTasks("2026-09-13", { offsetMinutes: 0 })).toEqual(
+      [],
+    );
+  });
+
+  it("refuses a version 3 archive", async () => {
+    const source = await temporaryStore();
+    await source.createPage(null, "From The Future");
+    const exported = await buildPortableArchive(source);
+    const newer = repack(exported.bytes, (manifest) => {
+      manifest.version = 3;
+    });
+    expect(() => validatePortableArchive(newer)).toThrow(/manifest is invalid/);
   });
 });

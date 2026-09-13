@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
   getStore: vi.fn(),
   listTasks: vi.fn(),
   createTask: vi.fn(),
+  pageTasks: vi.fn(),
 }));
 
 vi.mock("@/lib/store", () => ({
@@ -54,9 +55,11 @@ async function post(body: Record<string, unknown>, query = "") {
 beforeEach(() => {
   mocks.listTasks.mockReset().mockReturnValue([task()]);
   mocks.createTask.mockReset().mockResolvedValue(task());
+  mocks.pageTasks.mockReset().mockReturnValue([task({ page: "page-one" })]);
   mocks.getStore.mockReset().mockResolvedValue({
     listTasks: mocks.listTasks,
     createTask: mocks.createTask,
+    pageTasks: mocks.pageTasks,
   });
 });
 
@@ -158,6 +161,47 @@ describe("GET /api/tasks", () => {
       "task-beta",
       TASK_ID,
     ]);
+  });
+
+  it("answers ?page= with every record of that page and derives no list", async () => {
+    // The note's own decoration lookup. It needs the records of ONE page,
+    // linked or detached, done or open, whatever their age: a completion
+    // older than the Logbook window still has its line in the note, and its
+    // word has to keep reading Done rather than offering "+ Task" again.
+    const res = await get("?page=page-one");
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).tasks.map((t: { id: string }) => t.id)).toEqual([
+      TASK_ID,
+    ]);
+    expect(mocks.pageTasks).toHaveBeenCalledWith("page-one");
+    expect(mocks.listTasks).not.toHaveBeenCalled();
+  });
+
+  it("refuses today, offset, list and category beside ?page=", async () => {
+    // No list is derived here, so the reader's day and offset have nothing to
+    // do, and a filter would quietly narrow a lookup that must be complete.
+    const cases: [string, string][] = [
+      [`?page=page-one&today=${TODAY}`, "unexpected_today"],
+      ["?page=page-one&offset=0", "unexpected_offset"],
+      ["?page=page-one&list=today", "unexpected_list"],
+      ["?page=page-one&category=home", "unexpected_category"],
+    ];
+    for (const [query, error] of cases) {
+      const res = await get(query);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error });
+    }
+    expect(mocks.pageTasks).not.toHaveBeenCalled();
+  });
+
+  it("refuses a page id the page id rule does not allow", async () => {
+    for (const value of ["", "with space", "../escaped", "a".repeat(129)]) {
+      const res = await get(`?page=${encodeURIComponent(value)}`);
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "bad_page" });
+    }
+    expect(mocks.pageTasks).not.toHaveBeenCalled();
   });
 });
 

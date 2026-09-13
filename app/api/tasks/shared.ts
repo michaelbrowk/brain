@@ -60,6 +60,14 @@ export function assertTaskId(id: string): boolean {
   return TASK_ID_RE.test(id);
 }
 
+/** A page id is bounded the same way a task id is (`app/api/move/route.ts`),
+ *  so no query string can name a path. It reaches no `path.join` here, and it
+ *  is still checked: an id this rule refuses can only be a caller mistake, and
+ *  answering it with an empty list would hide that. */
+export function isPageId(value: string): boolean {
+  return TASK_ID_RE.test(value);
+}
+
 /** Originating client id, threaded into the store event so the writer's own
  *  SSE echo can be ignored client-side. */
 export function clientId(req: NextRequest): string | undefined {
@@ -72,6 +80,18 @@ export function refuseListQuery(req: NextRequest): NextResponse | null {
   const params = req.nextUrl.searchParams;
   if (params.has("today")) return badRequest("unexpected_today");
   if (params.has("offset")) return badRequest("unexpected_offset");
+  return null;
+}
+
+/** `?page=` is a lookup of one note's records and derives no list, so the
+ *  reader's day and offset have nothing to do here, and a `list` or `category`
+ *  would narrow an answer that has to be complete: the editor draws a word on
+ *  every task line of the page, whatever state its record is in. */
+export function refusePageQuery(params: URLSearchParams): NextResponse | null {
+  if (params.has("today")) return badRequest("unexpected_today");
+  if (params.has("offset")) return badRequest("unexpected_offset");
+  if (params.has("list")) return badRequest("unexpected_list");
+  if (params.has("category")) return badRequest("unexpected_category");
   return null;
 }
 

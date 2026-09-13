@@ -183,15 +183,14 @@ test("a completion from Tasks lands in a note that is open and dirty in another 
 
     /* ── Leg one: an untouched line merges ──────────────────────────────── */
 
-    // `*` and not `-`: Milkdown writes every bullet marker as `*`, so a note
-    // authored with `-` has EVERY line differ from the body the tab loaded on
-    // its first editor save, and the merge correctly refuses a body it cannot
-    // line up. That is a real seam and it belongs to the serializer, not to
-    // this test, which is about a tick against a line nobody touched.
+    // `-`, the way a person and an MCP call write one. Milkdown serialises
+    // every bullet as `*`, so this tab's first save rewrites the marker on
+    // every line; `mergeCheckboxStates` levels the marker before it compares,
+    // so that rewrite is not a touched line and the tick still merges.
     const groceries = await createNote(
       open,
       "Groceries",
-      "* [ ] water the plants\n\nnotes\n",
+      "- [ ] water the plants\n\nnotes\n",
     );
     const plants = await linkTask(open, groceries, 0, today);
     await openNote(open, groceries.id);
@@ -223,7 +222,7 @@ test("a completion from Tasks lands in a note that is open and dirty in another 
     const trip = await createNote(
       open,
       "Trip",
-      "intro\n\n* [ ] book the flight\n\nnotes\n",
+      "intro\n\n- [ ] book the flight\n\nnotes\n",
     );
     const flight = await linkTask(open, trip, 0, today);
     await openNote(open, trip.id);

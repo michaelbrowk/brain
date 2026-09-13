@@ -10995,6 +10995,57 @@ describe("task records", () => {
     );
   });
 
+  it("pageTasks answers every record of one page, open, done, detached and out of the window", async () => {
+    const { s, root } = await tmpStore();
+    const meta = await s.createPage(null, "Trip");
+    const other = await s.createPage(null, "Garden");
+    const written = await s.writePage(
+      meta.id,
+      "- [ ] Book the flight",
+      undefined,
+      "me",
+    );
+    const [line] = parseTaskLines(written.markdown);
+    const open = await s.createTask({
+      title: line.normalized,
+      page: meta.id,
+      anchor: {
+        text: line.normalized,
+        hash: line.hash,
+        ordinal: line.ordinal,
+        line: line.index,
+      },
+    });
+    const elsewhere = await s.createTask({
+      title: "Water the plants",
+      page: other.id,
+      anchor: anchorFor("Water the plants"),
+    });
+    const unlinked = await s.createTask({ title: "Pack" });
+
+    // A completion older than the Logbook window, still pointing at this
+    // page. The list endpoint drops it, and the note's own line still needs
+    // to read Done, which is why the lookup is by page and not by list.
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-ancient.md"),
+      `---\nid: task-ancient\ntitle: Renew the visa\npage: ${meta.id}\ndetachedAt: '2026-07-01T09:00:00.000Z'\ndone: true\ndoneAt: '2026-07-01T09:00:00.000Z'\ncreated: '2026-06-01T09:00:00.000Z'\nupdated: '2026-07-01T09:00:00.000Z'\n---\n`,
+    );
+    await s.rebuild();
+
+    const found = s.pageTasks(meta.id);
+    expect(found.map((t) => t.id).sort()).toEqual(
+      [open.id, "task-ancient"].sort(),
+    );
+    expect(found.find((t) => t.id === "task-ancient")?.done).toBe(true);
+    expect(found.map((t) => t.id)).not.toContain(elsewhere.id);
+    expect(found.map((t) => t.id)).not.toContain(unlinked.id);
+    // Out of the window for the list view, present here.
+    expect(
+      s.listTasks(TODAY, { list: "logbook", offsetMinutes: 0 }).map((t) => t.id),
+    ).toEqual([]);
+    expect(s.pageTasks("page-missing")).toEqual([]);
+  });
+
   it("reads a task's hand written body, and the empty string when there is none", async () => {
     const { s, root } = await tmpStore();
     const plain = await s.createTask({ title: "Water the plants" });

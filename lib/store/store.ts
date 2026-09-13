@@ -6514,6 +6514,26 @@ export class Store {
     return this.taskIndex.all();
   }
 
+  /** One note's records, as a reader sees them: linked and detached, done and
+   *  open, whatever their age.
+   *
+   *  This is a lookup and not a list. The editor draws a word on every task
+   *  line it owns, and it has to find the record behind a line in every state
+   *  that record can be in. `listTasks` answers none of them: it drops a task
+   *  whose page is hidden, it stops the Logbook at 30 days, and it takes a
+   *  reader's day this question does not have. A line whose record the editor
+   *  could not find offers "+ Task" again, and the line is promoted twice.
+   */
+  pageTasks(pageId: string): TaskView[] {
+    return this.taskIndex
+      .byPage(pageId)
+      .flatMap((task) => {
+        const view = this.taskIndex.view(task.id);
+        return view ? [view] : [];
+      })
+      .sort((a, b) => compareInGroup(a, b, "today"));
+  }
+
   /** The body a person wrote under a task's frontmatter, or the empty string.
    *  Nothing in the app writes one, so this exists for the portable export,
    *  which must not drop what it cannot show. */

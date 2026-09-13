@@ -1,7 +1,7 @@
 /**
  * Typed window bus between the command palette and the mounted Tasks surface.
  *
- * The three moves a row can make live on two paths: an unmodified key while
+ * The two moves a row can make live on two paths: an unmodified key while
  * the capsule is on a row, and a palette row. The palette cannot reach the
  * surface's selection through props without threading it across shell.tsx,
  * and the shell has no business holding a copy of which task is selected, so

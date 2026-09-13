@@ -9,6 +9,8 @@ const body = (...lines: string[]) => lines.join("\n");
 
 const PLANTS = "- [ ] water the plants";
 const PLANTS_DONE = "- [x] water the plants";
+/** The same line as Milkdown writes it back. */
+const PLANTS_STAR = "* [ ] water the plants";
 const CAT = "- [ ] feed the cat";
 const CAT_DONE = "- [x] feed the cat";
 const NOTE = "A note.";
@@ -292,6 +294,45 @@ const cases: MergeCase[] = [
     mine: body(LONGER_NOTE, "    - [ ] a code sample"),
     theirs: body(NOTE, "    - [x] a code sample"),
     merged: body(LONGER_NOTE, "    - [x] a code sample"),
+  },
+  // 37 to 41: the bullet marker. Milkdown serialises every bullet as `*`, so
+  // the first editor save of a note written by hand or through MCP rewrites
+  // `-` to `*` on every line. Without marker normalisation that rewrite is a
+  // touched line everywhere and a concurrent tick 409s on every such note.
+  {
+    name: "37: the editor rewrote the bullet and the server ticked that line",
+    base: body(PLANTS, NOTE),
+    mine: body(PLANTS_STAR, LONGER_NOTE),
+    theirs: body(PLANTS_DONE, NOTE),
+    merged: body("* [x] water the plants", LONGER_NOTE),
+  },
+  {
+    name: "38: the client's marker survives the merge, so the whole body stays one style",
+    base: body(PLANTS, CAT, NOTE),
+    mine: body(PLANTS_STAR, "* [ ] feed the cat", LONGER_NOTE),
+    theirs: body(PLANTS_DONE, CAT_DONE, NOTE),
+    merged: body("* [x] water the plants", "* [x] feed the cat", LONGER_NOTE),
+  },
+  {
+    name: "39: the server's body carries the other marker",
+    base: body(PLANTS, NOTE),
+    mine: body(PLANTS, LONGER_NOTE),
+    theirs: body("+ [x] water the plants", NOTE),
+    merged: body(PLANTS_DONE, LONGER_NOTE),
+  },
+  {
+    name: "40: a marker difference does not excuse an edited word",
+    base: body(PLANTS),
+    mine: body(PLANTS),
+    theirs: body("* [x] water the plantz"),
+    merged: null,
+  },
+  {
+    name: "41: a marker change on a line that is no task line is a change",
+    base: body("- a plain bullet", PLANTS),
+    mine: body("- a plain bullet", PLANTS),
+    theirs: body("* a plain bullet", PLANTS_DONE),
+    merged: null,
   },
 ];
 

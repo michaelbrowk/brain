@@ -290,7 +290,7 @@ export function TasksSurface({
   );
 
   /** A TASK LANDS IN THE LIST IT WAS TYPED INTO. Anything else files what the
-   *  reader just wrote somewhere they are not looking, with no feedback.
+   *  reader has written somewhere they are not looking, with no feedback.
    *
    *  Today takes today, Upcoming takes tomorrow (the first day that list can
    *  hold, since Upcoming is strictly after today), Someday takes the word,
@@ -331,7 +331,7 @@ export function TasksSurface({
 
   useArrowKeys({ order, selectedId, setSelectedId, setExpandedId });
 
-  // The palette's three rows and the row's three keys are one action each.
+  // The palette's two rows and the row's two keys are one action each.
   useEffect(() => {
     return onTaskCommand((command) => {
       const task = rows.find((entry) => entry.id === selectedId);

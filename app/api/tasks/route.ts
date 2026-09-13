@@ -5,10 +5,12 @@ import {
   clientId,
   isDay,
   isListName,
+  isPageId,
   readJsonObject,
   readOffset,
   readsLogbook,
   refuseListQuery,
+  refusePageQuery,
   type CreateBody,
 } from "./shared";
 
@@ -23,6 +25,23 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: NextRequest) {
   const params = req.nextUrl.searchParams;
+
+  // ONE PAGE'S RECORDS, which is a lookup and not a list.
+  //
+  // The note editor draws a word on every task line it owns, and it has to
+  // find the record behind a line whatever state that record is in: done,
+  // detached, or completed longer ago than the Logbook window holds. A list
+  // read answers none of those, and a line whose record it could not find
+  // offers "+ Task" again and is promoted twice.
+  const page = params.get("page");
+  if (page !== null) {
+    if (!isPageId(page)) return badRequest("bad_page");
+    const refused = refusePageQuery(params);
+    if (refused) return refused;
+    const store = await getStore();
+    return NextResponse.json({ tasks: store.pageTasks(page) });
+  }
+
   const today = params.get("today");
   if (!isDay(today)) return badRequest("bad_today");
 

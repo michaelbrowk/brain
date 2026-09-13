@@ -598,8 +598,8 @@ function WhenChip({
  *  ⌘T is New Tab and ⌘N is New Window; `preventDefault` does not reclaim a
  *  chord the browser reserves, and binding one means a reader who reaches for
  *  Today gets a tab. Things puts these on bare letters for the same reason, so
- *  `t`, `e` and `s` move the row the capsule is standing on, and the palette
- *  carries the same three for a hand that would rather read them.
+ *  `t` and `s` move the row the capsule is standing on, and the palette
+ *  carries the same two for a hand that would rather read them.
  *
  *  Every one of them is off while the caret is in a field. A bare letter is
  *  the one shortcut shape that MUST check: `t` inside the capture row is a
@@ -638,7 +638,7 @@ function useRowShortcuts({
         return;
       }
       // ⌘] is not a letter and no browser claims it, so Tomorrow keeps the
-      // spec's own chord alongside the three letters.
+      // spec's own chord alongside the two letters.
       if (meta && event.key === "]") {
         event.preventDefault();
         void leaveDown(tomorrowOf(today), "Tomorrow");

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -131,23 +131,29 @@ describe("two writers and one checkbox", () => {
     const mine = `${BASE_BODY}\n\nA paragraph A typed.`;
     const merged = await s.writePage(pageId, mine, rev, "me", undefined, BASE_BODY);
 
-    expect(merged.markdown).toContain("- [x] Water the plants");
-    expect(merged.markdown).toContain("A paragraph A typed.");
+    // The whole body, not two fragments of it: a merge that kept both and
+    // dropped a blank line, reordered them or trimmed the end would satisfy
+    // any pair of `toContain`s.
+    expect(merged.markdown).toBe(`${TICKED_BODY}\n\nA paragraph A typed.`);
     expect((await s.readPage(pageId)).markdown).toBe(merged.markdown);
     expect(viewOf(s, taskId).done).toBe(true);
     // The merged body takes the CURRENT rev as its base, which is what makes
     // A's next write with the rev it was handed an ordinary write and not a
-    // second conflict. Any write moves the rev, so the assertion that says
-    // this is the follow-up, not an inequality.
+    // second conflict. No `expectedMarkdown` on the follow-up, or
+    // `bodyStillMatches` answers first and the rev is never read: with one,
+    // the case passes for any rev at all.
     const after = await s.writePage(
       pageId,
       `${merged.markdown}\n\nAnd one more line.`,
       merged.rev,
       "me",
-      undefined,
-      merged.markdown,
     );
     expect(after.markdown).toContain("And one more line.");
+    // And the same write with a rev that is not the merged one is refused, so
+    // the line above cannot pass by the rev being ignored.
+    await expect(
+      s.writePage(pageId, "Something else entirely.", rev, "me"),
+    ).rejects.toBeInstanceOf(RevConflictError);
   });
 
   it("refuses A with a 409 when A rewrote the ticked line", async () => {
@@ -197,8 +203,7 @@ describe("two writers and one checkbox", () => {
     const mine = `${BASE_BODY}\n\nA paragraph A typed.`;
     const merged = await s.writePage(pageId, mine, rev, "me", undefined, BASE_BODY);
 
-    expect(merged.markdown).toContain("- [x] Water the plants");
-    expect(merged.markdown).toContain("A paragraph A typed.");
+    expect(merged.markdown).toBe(`${TICKED_BODY}\n\nA paragraph A typed.`);
     expect(viewOf(s, taskId).done).toBe(true);
     expect(merged.meta.updatedBy).toBe("me");
   });
@@ -218,8 +223,9 @@ describe("two writers and one checkbox", () => {
       visitorName: "Ada",
     });
 
-    expect(merged.markdown).toContain("- [x] Water the plants");
-    expect(merged.markdown).toContain("A paragraph the visitor typed.");
+    expect(merged.markdown).toBe(
+      `${TICKED_BODY}\n\nA paragraph the visitor typed.`,
+    );
     expect(merged.meta.updatedBy).toBe("visitor");
     expect(merged.meta.updatedByName).toBe("Ada");
     expect(viewOf(s, taskId).done).toBe(true);
@@ -319,29 +325,41 @@ describe("reconcile", () => {
     expect(s.getTask(taskId)?.done).toBe(true);
   });
 
-  it("refreshes ordinal and line when the line crosses an identical one", async () => {
+  it("refreshes ordinal and line when the copy above the line goes", async () => {
     const { s } = await tmpStore();
-    const { pageId, taskId } = await garden(
-      s,
-      "- [ ] Water the plants\n- [ ] Feed the cat",
-    );
-
-    // A copy of the line above it, so the record's ordinal has to move with it.
-    await s.writePage(
-      pageId,
+    const page = await s.createPage(null, "Garden");
+    const written = await s.writePage(
+      page.id,
       "- [ ] Water the plants\n- [ ] Water the plants\n- [ ] Feed the cat",
       undefined,
       "me",
     );
-    expect(s.getTask(taskId)?.anchor?.ordinal).toBe(0);
+    // Anchored to the SECOND of the two identical lines, so deleting the
+    // first moves both its ordinal and its line. A fixture anchored to the
+    // first would be answered by the resolver's step 1 and would read back
+    // the values the record already had, whatever step 2 did.
+    const second = parseTaskLines(written.markdown)[1];
+    const task = await s.createTask({
+      title: second.normalized,
+      page: page.id,
+      anchor: {
+        text: second.normalized,
+        hash: second.hash,
+        ordinal: second.ordinal,
+        line: second.index,
+      },
+    });
+    expect(task.anchor?.ordinal).toBe(1);
+    expect(task.anchor?.line).toBe(1);
 
     await s.writePage(
-      pageId,
+      page.id,
       "- [ ] Water the plants\n- [ ] Feed the cat",
       undefined,
       "me",
     );
-    const view = s.getTask(taskId);
+
+    const view = s.getTask(task.id);
     expect(view?.detachedAt).toBeUndefined();
     expect(view?.anchor?.ordinal).toBe(0);
     expect(view?.anchor?.line).toBe(0);
@@ -392,11 +410,23 @@ describe("reconcile", () => {
     const { s } = await tmpStore();
     const { pageId, taskId } = await garden(s);
 
+    // The note is edited outside the store, so nothing has reconciled this
+    // page since the line went. The append is the next write to reach it, and
+    // it is the one that has to notice: with no reconcile on this path the
+    // record stays linked to a line that is not there.
+    const indexPath = path.join(s.resolve(pageId), "index.md");
+    const raw = await fs.readFile(indexPath, "utf8");
+    await fs.writeFile(
+      indexPath,
+      raw.replace("- [ ] Water the plants\n", ""),
+      "utf8",
+    );
+
     await s.appendPage(pageId, "- [ ] And a third", "me");
 
-    // The append pushed nothing above the line, so the anchor stands and the
-    // new checkbox is nobody's task.
-    expect(s.getTask(taskId)?.detachedAt).toBeUndefined();
+    expect(s.getTask(taskId)?.detachedAt).toBeDefined();
+    expect(s.getTask(taskId)?.title).toBe("Water the plants");
+    // And the checkbox the append itself wrote is nobody's task.
     expect(s.allTasks()).toHaveLength(1);
   });
 
@@ -730,5 +760,211 @@ describe("what a reconcile does not write", () => {
 
     // No task exists until the gesture.
     expect(s.allTasks()).toEqual([]);
+  });
+});
+
+/** Spec row 148, and what a note edit is allowed to cost. */
+describe("a page the index no longer holds", () => {
+  /** A record on disk pointing at a page id nothing in the notebook has. The
+   *  folder was removed by hand, or its frontmatter stopped parsing. */
+  async function orphanedTask(): Promise<{ s: Store; root: string }> {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-orphan.md"),
+      [
+        "---",
+        "id: task-orphan",
+        "title: Water the plants",
+        "when: '2026-09-14'",
+        "page: page-that-is-not-here",
+        "anchor:",
+        "  text: Water the plants",
+        "  hash: 0123456789abcdef",
+        "  ordinal: 0",
+        "  line: 0",
+        "created: '2026-09-13T09:00:00.000Z'",
+        "updated: '2026-09-13T09:00:00.000Z'",
+        "---",
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    await s.rebuild();
+    return { s, root };
+  }
+
+  it("hides its tasks exactly like a trashed page's", async () => {
+    const { s } = await orphanedTask();
+
+    expect(s.getTask("task-orphan")).not.toBeNull();
+    // A row whose only action is a write to a note that is not there is worse
+    // than a row that is not drawn.
+    expect(s.listTasks("2026-09-14", { offsetMinutes: 0 })).toEqual([]);
+    expect(s.taskPageTrashed("task-orphan")).toBe(true);
+  });
+
+  it("refuses a completion against it, rather than throwing out of the lock", async () => {
+    const { s } = await orphanedTask();
+
+    // The refusal a caller can read and a route can map, not the
+    // `NotFoundError` that `this.get(pageId)` would throw from inside the
+    // mutation lock.
+    await expect(s.updateTask("task-orphan", { done: true })).rejects.toThrow(
+      /page not found/,
+    );
+    expect(s.getTask("task-orphan")?.done).toBe(false);
+  });
+
+  it("keeps the record whole, because rebuild detaches nothing it did not walk", async () => {
+    const { s } = await orphanedTask();
+
+    const task = s.getTask("task-orphan");
+    expect(task?.page).toBe("page-that-is-not-here");
+    expect(task?.detachedAt).toBeUndefined();
+    expect(task?.when).toBe("2026-09-14");
+  });
+});
+
+describe("a task file that cannot be written", () => {
+  it("does not take the note's save down with it", async () => {
+    const { s, root } = await tmpStore();
+    const page = await s.createPage(null, "Garden");
+    const written = await s.writePage(
+      page.id,
+      "- [ ] Water the plants\n- [ ] Feed the cat",
+      undefined,
+      "me",
+    );
+    const lines = parseTaskLines(written.markdown);
+    const broken = await s.createTask({
+      title: lines[0].normalized,
+      page: page.id,
+      anchor: {
+        text: lines[0].normalized,
+        hash: lines[0].hash,
+        ordinal: lines[0].ordinal,
+        line: lines[0].index,
+      },
+    });
+    const healthy = await s.createTask({
+      title: lines[1].normalized,
+      page: page.id,
+      anchor: {
+        text: lines[1].normalized,
+        hash: lines[1].hash,
+        ordinal: lines[1].ordinal,
+        line: lines[1].index,
+      },
+    });
+
+    // Somebody hand-edits one record into broken YAML. `writeTaskFile`
+    // rethrows rather than overwrite it, which is the rule that protects the
+    // hand edit, and which used to make every save of this page a 500.
+    await fs.writeFile(
+      path.join(root, "_tasks", `${broken.id}.md`),
+      "---\nid: [unclosed\n---\nmy own notes\n",
+      "utf8",
+    );
+
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    let said = "";
+    let saved;
+    try {
+      saved = await s.writePage(
+        page.id,
+        "- [x] Water the plants\n- [x] Feed the cat",
+        undefined,
+        "me",
+      );
+      said = error.mock.calls.flat().join(" ");
+    } finally {
+      error.mockRestore();
+    }
+
+    // The note is the truth and it landed.
+    expect(saved?.markdown).toBe("- [x] Water the plants\n- [x] Feed the cat");
+    expect((await s.readPage(page.id)).markdown).toBe(
+      "- [x] Water the plants\n- [x] Feed the cat",
+    );
+    expect(said).toContain(broken.id);
+    // The broken file is still the person's, untouched.
+    expect(await readTaskFile(root, broken.id)).toBe(
+      "---\nid: [unclosed\n---\nmy own notes\n",
+    );
+    // And the other record on the same page reconciled as if nothing was wrong.
+    expect(s.getTask(healthy.id)?.done).toBe(true);
+    expect(await readTaskFile(root, healthy.id)).toContain("doneAt:");
+  });
+});
+
+describe("the order a purge takes", () => {
+  it("moves no task when the folder cannot be removed", async () => {
+    const { s } = await tmpStore();
+    const page = await s.createPage(null, "Garden");
+    const written = await s.writePage(page.id, BASE_BODY, undefined, "me");
+    const [line] = parseTaskLines(written.markdown);
+    const task = await s.createTask({
+      title: line.normalized,
+      page: page.id,
+      anchor: {
+        text: line.normalized,
+        hash: line.hash,
+        ordinal: line.ordinal,
+        line: line.index,
+      },
+    });
+    await s.deletePage(page.id);
+
+    const rm = vi.spyOn(fs, "rm").mockRejectedValueOnce(new Error("EBUSY"));
+    try {
+      await expect(s.purgePage(page.id)).rejects.toThrow(/EBUSY/);
+    } finally {
+      rm.mockRestore();
+    }
+
+    // Deleting a task is the irreversible half, so it goes last. The note and
+    // its line are still there, and so is the task.
+    expect(s.getTask(task.id)).not.toBeNull();
+    expect(s.getTask(task.id)?.detachedAt).toBeUndefined();
+    expect((await s.readPage(page.id)).markdown).toBe(BASE_BODY);
+  });
+});
+
+describe("the order a page write takes", () => {
+  it("moves no task when the page itself cannot be written", async () => {
+    const { s, root } = await tmpStore();
+    const page = await s.createPage(null, "Garden");
+    const written = await s.writePage(page.id, BASE_BODY, undefined, "me");
+    const [line] = parseTaskLines(written.markdown);
+    const task = await s.createTask({
+      title: line.normalized,
+      page: page.id,
+      anchor: {
+        text: line.normalized,
+        hash: line.hash,
+        ordinal: line.ordinal,
+        line: line.index,
+      },
+    });
+    const before = await readTaskFile(root, task.id);
+
+    // The page's own write fails. Reconciling first would have ticked the
+    // record off a body that never reached the disk, so the note and the task
+    // would disagree until something wrote the page again.
+    const rename = vi
+      .spyOn(fs, "rename")
+      .mockRejectedValueOnce(new Error("ENOSPC"));
+    try {
+      await expect(
+        s.writePage(page.id, TICKED_BODY, undefined, "me"),
+      ).rejects.toThrow(/ENOSPC/);
+    } finally {
+      rename.mockRestore();
+    }
+
+    expect((await s.readPage(page.id)).markdown).toBe(BASE_BODY);
+    expect(s.getTask(task.id)?.done).toBe(false);
+    expect(await readTaskFile(root, task.id)).toBe(before);
   });
 });

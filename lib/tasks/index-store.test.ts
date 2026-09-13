@@ -25,6 +25,12 @@ const BETA = "task-beta";
 const PAGE = "page-one";
 const DAY = "2026-09-13";
 const INSTANT = "2026-09-13T09:00:00.000Z";
+const ANCHOR = {
+  text: "Water the plants",
+  hash: "0123456789abcdef",
+  ordinal: 0,
+  line: 0,
+};
 
 function fileFor(record: Partial<TaskRecord> & { id: string }): string {
   const lines = [
@@ -35,7 +41,20 @@ function fileFor(record: Partial<TaskRecord> & { id: string }): string {
     `updated: ${record.updated ?? INSTANT}`,
   ];
   if (record.when) lines.push(`when: ${record.when}`);
-  if (record.page) lines.push(`page: ${record.page}`);
+  // A page never travels alone: `taskRecordRules` refuses a linked record with
+  // no anchor, because the anchor IS the link. The fixture writes the one the
+  // caller gave or a stand-in, so a `page:` here is a shape the index reads.
+  if (record.page) {
+    const anchor = record.anchor ?? ANCHOR;
+    lines.push(
+      `page: ${record.page}`,
+      "anchor:",
+      `  text: ${anchor.text}`,
+      `  hash: ${anchor.hash}`,
+      `  ordinal: ${anchor.ordinal}`,
+      `  line: ${anchor.line}`,
+    );
+  }
   lines.push("---", "");
   return lines.join("\n");
 }

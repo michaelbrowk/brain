@@ -275,7 +275,7 @@ describe("Brain portable packages", () => {
     expect(destination.tasksForPage(importedPageId)).toHaveLength(1);
   });
 
-  it("carries a detached record out and back byte for byte", async () => {
+  it("carries a detached record out and back, field for field", async () => {
     const { source, pageId, anchor } = await notebookWithTasks();
     // The shape Task 3b's detach writes: the mark, the page kept so the row
     // can say which note the line left, the anchor kept as the last place it
@@ -454,6 +454,7 @@ describe("Brain portable packages", () => {
     const linked = await source.createTask({
       title: "Book the flight",
       page: page.id,
+      anchor: anchorFor("Book the flight", 0),
     });
     await source.deletePage(page.id);
     // The list view cannot see it. The archive still has to.

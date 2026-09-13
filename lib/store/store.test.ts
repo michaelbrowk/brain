@@ -43,7 +43,11 @@ import {
 import { standalonePageRefOccurrences } from "../page-ref-nesting";
 import { brainEvents, latestStoreEventSequence } from "./events";
 import { listOf } from "../tasks/lists";
-import { parseTaskLines } from "../tasks/task-lines";
+import {
+  hashTaskText,
+  normalizeTaskText,
+  parseTaskLines,
+} from "../tasks/task-lines";
 import type { TaskView } from "../tasks/model";
 import {
   resolveShareAccess,
@@ -10586,6 +10590,14 @@ describe("task records", () => {
     return fs.readFile(path.join(root, "_tasks", `${id}.md`), "utf8");
   }
 
+  /** The anchor the promote gesture mints, built the one way `task-lines.ts`
+   *  builds one. A linked record with no anchor is refused by the schema: the
+   *  anchor IS the link, and without it the reconcile has nothing to look for. */
+  function anchorFor(text: string, line = 0) {
+    const normalized = normalizeTaskText(text);
+    return { text: normalized, hash: hashTaskText(normalized), ordinal: 0, line };
+  }
+
   function captureEvents(): { types: string[]; stop: () => void } {
     const types: string[] = [];
     const onChange = (ev: { type: string }) => types.push(ev.type);
@@ -10686,20 +10698,41 @@ describe("task records", () => {
     expect((await s.readPage(meta.id)).markdown).toContain("- [x] Buy milk");
   });
 
-  it("detaches a task linked to a page with no anchor, so it can be completed", async () => {
-    const { s } = await tmpStore();
+  it("refuses a task linked to a page with no anchor, at both ends", async () => {
+    const { s, root } = await tmpStore();
     const meta = await s.createPage(null, "Groceries");
-    // A page and no anchor is not a link the reconcile can follow: there is
-    // no line recorded to look for. Rather than a task that can never be
-    // ticked and never refreshed, the first reconcile of that page hands the
-    // record its own completion back.
-    const created = await s.createTask({ title: "Buy milk", page: meta.id });
 
-    const done = await s.updateTask(created.id, { done: true });
+    // The anchor is the link. Without it the reconcile has nothing to look
+    // for, so the record would be born broken: no checkbox to answer its
+    // `done`, no line to refresh its title. The promote gesture always knows
+    // the line, so the shape has no honest source and the schema refuses it.
+    await expect(
+      s.createTask({ title: "Buy milk", page: meta.id }),
+    ).rejects.toThrow(/anchor/);
 
-    expect(done.done).toBe(true);
-    expect(done.detachedAt).toBeDefined();
-    expect(done.page).toBe(meta.id);
+    // And a file somebody hand-wrote into that shape is skipped at load with
+    // the schema's own reason, never read as a task and never detached.
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-broken.md"),
+      `---\nid: task-broken\ntitle: Buy milk\npage: ${meta.id}\ncreated: '2026-09-13T09:00:00.000Z'\nupdated: '2026-09-13T09:00:00.000Z'\n---\n`,
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let said = "";
+    try {
+      await s.rebuild();
+      // Read before restoring: `mockRestore` clears the recorded calls.
+      said = warn.mock.calls.flat().join(" ");
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(s.getTask("task-broken")).toBeNull();
+    expect(said).toContain("page requires anchor");
+    // Skipped, not rewritten and not deleted: it is still the person's file.
+    await expect(
+      fs.access(path.join(root, "_tasks", "task-broken.md")),
+    ).resolves.toBeUndefined();
   });
 
   it("writes done and doneAt into the file for an unlinked task", async () => {
@@ -10809,7 +10842,11 @@ describe("task records", () => {
   it("deletes the file and drops it from both index maps", async () => {
     const { s, root } = await tmpStore();
     const meta = await s.createPage(null, "Groceries");
-    const created = await s.createTask({ title: "Buy milk", page: meta.id });
+    const created = await s.createTask({
+      title: "Buy milk",
+      page: meta.id,
+      anchor: anchorFor("Buy milk"),
+    });
 
     await s.deleteTask(created.id);
 
@@ -10870,6 +10907,7 @@ describe("task records", () => {
     const created = await s.createTask({
       title: "Buy milk",
       page: meta.id,
+      anchor: anchorFor("Buy milk"),
       when: TODAY,
     });
 
@@ -10941,7 +10979,11 @@ describe("task records", () => {
     );
     await s.rebuild();
     const meta = await s.createPage(null, "Trip");
-    const linked = await s.createTask({ title: "Book the flight", page: meta.id });
+    const linked = await s.createTask({
+      title: "Book the flight",
+      page: meta.id,
+      anchor: anchorFor("Book the flight"),
+    });
     const open = await s.createTask({ title: "Pack", when: TOMORROW });
     await s.deletePage(meta.id);
 

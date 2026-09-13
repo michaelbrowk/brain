@@ -123,6 +123,7 @@ import {
   type UpdateTaskPatch,
 } from "./types";
 import {
+  TASKS_DIR,
   TaskIndex,
   deleteTaskFile,
   loadTaskIndex,
@@ -3696,11 +3697,14 @@ export class Store {
       await this.extendScopedBaselinesUnlocked(id, () => [
         ...referencedAttachmentNames(body),
       ]);
-      // Before the page write, so a write that fails leaves neither the page
-      // nor its tasks moved. A reconcile that fails does the same.
-      await this.reconcilePageTasksUnlocked(id, body, src);
       const content = serializeLivePage(e.meta, body);
       await atomicWrite(indexPath, content);
+      // After the page, because the note is the truth. A record that cannot
+      // be written is logged and left behind, and the next reconcile of this
+      // page heals it (spec row 495). The other way round, one unreadable
+      // file under `_tasks/` would make every save of every page that holds a
+      // task fail, and the person's edit would be the thing that was lost.
+      await this.reconcilePageTasksUnlocked(id, body, src);
       scheduleCommit(this.root);
       const rev = hashRev(content);
       emitStore({ type: "write", id, rev, src });
@@ -3737,9 +3741,9 @@ export class Store {
       await this.extendScopedBaselinesUnlocked(id, () => [
         ...referencedAttachmentNames(joined),
       ]);
-      await this.reconcilePageTasksUnlocked(id, joined, src);
       const content = serializeLivePage(e.meta, joined);
       await atomicWrite(indexPath, content);
+      await this.reconcilePageTasksUnlocked(id, joined, src);
       scheduleCommit(this.root);
       const rev = hashRev(content);
       emitStore({ type: "write", id, rev, src });
@@ -4219,12 +4223,13 @@ export class Store {
       e.meta.updatedBy = "visitor";
       e.meta.updatedByName = input.visitorName;
       delete e.meta.structureWriteBarrier;
-      // A visitor's write may flip a linked task's `done` and may detach a task
-      // whose line they deleted. It may do nothing else: no task is created,
-      // scheduled, categorised or deleted on this path.
-      await this.reconcilePageTasksUnlocked(input.targetId, body, input.src);
       const content = serializeLivePage(e.meta, body);
       await atomicWrite(indexPath, content);
+      // A visitor's write may flip a linked task's `done` and may detach a task
+      // whose line they deleted. It may do nothing else: no task is created,
+      // scheduled, categorised or deleted on this path. After the page write,
+      // for the same reason the owner's is.
+      await this.reconcilePageTasksUnlocked(input.targetId, body, input.src);
       scheduleCommit(this.root);
       const rev = hashRev(content);
       emitStore({ type: "write", id: input.targetId, rev, src: input.src });
@@ -6263,11 +6268,13 @@ export class Store {
         await this.removeNotionStaging(entry.meta.notionImportToken);
       }
     }
-    // Before the folder goes, so a failure here leaves the pages intact.
-    await this.purgeSubtreeTasksUnlocked(
-      new Set(subtree.map((entry) => entry.meta.id)),
-    );
+    const purgedPageIds = new Set(subtree.map((entry) => entry.meta.id));
     await fs.rm(dir, { recursive: true, force: true });
+    // After the folder, because deleting a task is the irreversible half. An
+    // `rm` that fails leaves the notes, their lines and their tasks all where
+    // they were; the other order would delete the tasks off lines that are
+    // still on the page.
+    await this.purgeSubtreeTasksUnlocked(purgedPageIds);
     for (const [key, entry] of this.index) {
       if (entry.dir === dir || entry.dir.startsWith(dir + path.sep)) {
         if (entry.meta.notionId) {
@@ -6557,17 +6564,34 @@ export class Store {
     return this.taskIndex.view(id) ?? null;
   }
 
-  /** True when a task points at a page that is in the trash. Such a task is
+  /** True when a task points at a page that cannot be opened. Such a task is
    *  in no list, because the surface cannot complete what it cannot show. */
   taskPageTrashed(id: string): boolean {
     assertTaskId(id);
-    return this.pageTrashed(this.taskIndex.get(id)?.page);
+    const task = this.taskIndex.get(id);
+    return task !== undefined && this.taskHidden(task);
   }
 
-  /** A page id the walk no longer knows is not trash, it is a task whose page
-   *  was purged. That case belongs to the purge path, not to a list read. */
-  private pageTrashed(pageId: string | undefined): boolean {
-    return pageId !== undefined && this.index.has(pageId) && this.isDeleted(pageId);
+  /** True when this record's completion lives in a note nobody can open.
+   *
+   *  Only while it is LINKED. A detached record owns its own `done` and its
+   *  `page` is a name the row reads back, not a link it depends on, so it
+   *  stays visible whatever became of the page. That is what keeps a finished
+   *  task in the Logbook after its page is purged (spec row 149). */
+  private taskHidden(task: Pick<TaskRecord, "page" | "detachedAt">): boolean {
+    return isLinkedTask(task) && this.pageHidden(task.page);
+  }
+
+  /** A page in the trash, and a page the index does not hold at all, are one
+   *  answer (spec row 148). The second is a folder somebody removed by hand,
+   *  or a page whose frontmatter stopped parsing. Either way the note cannot
+   *  be opened, and drawing a row whose only action is a write to a note that
+   *  is not there is worse than not drawing it. The record itself is left
+   *  alone: `rebuild()` reconciles only the pages it walked, so a page it
+   *  never reached detaches nothing and the task comes back with the page. */
+  private pageHidden(pageId: string | undefined): boolean {
+    if (pageId === undefined) return false;
+    return !this.index.has(pageId) || this.isDeleted(pageId);
   }
 
   /** Every task of one list, group-collated, for the caller's own `today`.
@@ -6587,7 +6611,7 @@ export class Store {
     const offsetMinutes = filter.offsetMinutes ?? 0;
     const windowStart = logbookWindowStart(today);
     const visible = this.taskIndex.views().filter((task) => {
-      if (this.pageTrashed(task.page)) return false;
+      if (this.taskHidden(task)) return false;
       const list = listOf(task, today);
       // A done record with no instant is reachable from a hand edit and from
       // the crash between a note write and its reconcile. `lists.ts` places it
@@ -6648,6 +6672,10 @@ export class Store {
         // from Tasks or unticking one from the Logbook writes the checkbox
         // and lets the reconcile derive the rest. Two files, one `mutate()`.
         assertOnlyCompletion(patch);
+        // A task whose page is hidden is in no list, and the same answer is
+        // owed to a caller that reaches it by id: a refusal naming the page,
+        // never a `NotFoundError` thrown out of the lock by `this.get`.
+        this.assertLinkablePageUnlocked(current.page);
         await this.writeLinkedCheckboxUnlocked(current, patch.done, patch.src);
         current = this.taskIndex.get(id);
         if (!current) throw new NotFoundError(id);
@@ -6751,15 +6779,44 @@ export class Store {
         // so the write that flipped the checkbox is where it comes from.
         if (bound.doneAt === undefined) delete next.doneAt;
         else next.doneAt = bound.doneAt;
-        await this.writeTaskUnlocked(parseTask(next), src);
+        await this.tryTaskWriteUnlocked(bound.id, () =>
+          this.writeTaskUnlocked(parseTask(next), src),
+        );
       }
-      // After the write: `put` keeps a linked record's remembered completion,
-      // and this is the value it should remember.
+      // After the write, and whether or not it landed: the note is where this
+      // was read from, so the view matches the note even when the file behind
+      // it could not be rewritten.
       this.taskIndex.setLinkedDone(bound.id, bound.done);
     }
 
     for (const gone of decisions.detached) {
-      await this.detachTaskUnlocked(gone.id, gone, src);
+      await this.tryTaskWriteUnlocked(gone.id, () =>
+        this.detachTaskUnlocked(gone.id, gone, src),
+      );
+    }
+  }
+
+  /** One record's write, which must never take a note edit down with it.
+   *
+   *  `writeTaskFile` rethrows everything that is not `ENOENT`, which is the
+   *  rule that stops a hand-broken record being silently overwritten. Without
+   *  this, one unreadable file under `_tasks/` would make every save of every
+   *  page that holds a task fail, and a person would lose the edit they were
+   *  making rather than the record they had already broken.
+   *
+   *  Caller owns mutate(). */
+  private async tryTaskWriteUnlocked(
+    id: string,
+    write: () => Promise<void>,
+  ): Promise<void> {
+    try {
+      await write();
+    } catch (error) {
+      console.error(
+        `[brain/tasks] could not write ${TASKS_DIR}/${id}.md during reconcile, leaving it for the next one: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 
@@ -6863,15 +6920,15 @@ export class Store {
       if (task.page === undefined || !pageIds.has(task.page)) continue;
       if (!isLinkedTask(task)) continue;
       const done = this.taskIndex.view(task.id)?.done ?? false;
-      if (done) {
-        await this.detachTaskUnlocked(task.id, {
-          detachedAt: at,
-          done: true,
-          doneAt: task.doneAt ?? at,
-        });
-      } else {
-        await this.deleteTaskUnlocked(task.id);
-      }
+      await this.tryTaskWriteUnlocked(task.id, () =>
+        done
+          ? this.detachTaskUnlocked(task.id, {
+              detachedAt: at,
+              done: true,
+              doneAt: task.doneAt ?? at,
+            })
+          : this.deleteTaskUnlocked(task.id),
+      );
     }
   }
 

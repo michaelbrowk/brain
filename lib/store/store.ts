@@ -6529,6 +6529,27 @@ export class Store {
     return this.taskIndex.all();
   }
 
+  /** EVERY RECORD AS A READER SEES IT, WITH NO DAY AND NO LIST.
+   *
+   *  The reminder scan runs on a timer with no request behind it, so it
+   *  cannot hand `listTasks` a reader's `today` and `offsetMinutes`, and
+   *  `allTasks` gives records rather than views: a LINKED task's `done` lives
+   *  in its note's checkbox and is never in the file, so a scan reading
+   *  records alone would ring for a task that was ticked in the note an hour
+   *  ago. A record whose page is hidden is left out for the same reason
+   *  `listTasks` leaves it out: a reminder for a row the surface will not draw
+   *  is a notification with nowhere to go.
+   */
+  allTaskViews(): TaskView[] {
+    return this.taskIndex
+      .all()
+      .filter((task) => !this.taskHidden(task))
+      .flatMap((task) => {
+        const view = this.taskIndex.view(task.id);
+        return view ? [view] : [];
+      });
+  }
+
   /** One note's records, as a reader sees them: linked and detached, done and
    *  open, whatever their age.
    *
@@ -6705,7 +6726,11 @@ export class Store {
     const windowStart = logbookWindowStart(today);
     const visible = this.taskIndex.views().filter((task) => {
       if (this.taskHidden(task)) return false;
-      const list = listOf(task, today);
+      // The reader's offset, because a completion stays in its list for the
+      // rest of THEIR day. Asked in UTC, a task ticked at 23:30 in New York
+      // falls into the Logbook while `groupFor`, which is asked in the
+      // reader's day, still draws it under Today.
+      const list = listOf(task, today, offsetMinutes);
       // A done record with no instant is reachable from a hand edit and from
       // the crash between a note write and its reconcile. `lists.ts` places it
       // deliberately, at the foot of the Logbook under no header, so there is
@@ -7434,8 +7459,11 @@ function compareTasks(
   today: string,
   offsetMinutes: number,
 ): number {
-  const listA = listOf(a, today);
-  const listB = listOf(b, today);
+  // Same offset `groupFor` is given two lines down. Without it the block a
+  // row is sorted into and the header it is drawn under are two answers, and
+  // a completion made this evening sorts to the Logbook under a Today header.
+  const listA = listOf(a, today, offsetMinutes);
+  const listB = listOf(b, today, offsetMinutes);
   if (listA !== listB) {
     return TASK_LIST_ORDER.indexOf(listA) - TASK_LIST_ORDER.indexOf(listB);
   }

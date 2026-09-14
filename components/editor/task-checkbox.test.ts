@@ -1,5 +1,8 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
+
 import { Editor, defaultValueCtx, editorViewCtx, rootCtx } from "@milkdown/kit/core";
 import { commonmark } from "@milkdown/kit/preset/commonmark";
 import { gfm } from "@milkdown/kit/preset/gfm";
@@ -168,5 +171,21 @@ describe("the note checkbox", () => {
     const view = await mountEditor("- [ ] water the plants\n");
     expect(box(view).getAttribute("contenteditable")).toBe("false");
     expect(view.dom.textContent).toContain("water the plants");
+  });
+
+  it("holds no control byte, so grep can still read the file", async () => {
+    // A literal NUL used to sit in the promote plugin's item separator. git
+    // samples the first 8 KB and diffed the file as text, but `grep`,
+    // `ripgrep` and every wrapper that shells out to one classify the WHOLE
+    // file as binary and answer "Binary file … matches" with no lines. This
+    // is the one file in `components/editor/` that reaches the share bundle,
+    // so it is the one an audit of that directory must not skip.
+    const source = readFileSync(
+      path.join(process.cwd(), "components/editor/task-checkbox.ts"),
+    );
+    const control = [...source].filter(
+      (byte) => byte < 9 || (byte > 13 && byte < 32),
+    );
+    expect(control).toEqual([]);
   });
 });

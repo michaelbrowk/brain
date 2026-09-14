@@ -224,6 +224,20 @@ const EDGE_GUTTER = 8;
 
 const promoteKey = new PluginKey<PromoteState>("brainTaskPromote");
 
+/** What joins one task line's text to the next when the plugin asks whether
+ *  the list it is looking at is the list it looked at last.
+ *
+ *  Written as an escape, not as the byte. A literal NUL sat here and made the
+ *  whole file binary to `grep`, `ripgrep` and every wrapper that shells out to
+ *  one, so the single file in `components/editor/` that reaches the share
+ *  bundle was silently skipped by any audit of that directory.
+ *
+ *  A newline is the right separator and needs no second character:
+ *  `normalizeTaskText` collapses every whitespace run to one space and trims,
+ *  so no item's text can hold one and two different lists cannot join to the
+ *  same string. */
+const ITEM_SEPARATOR = "\n";
+
 type PromoteMessage =
   | { kind: "tasks"; tasks: readonly TaskView[] }
   | { kind: "hover"; pos: number | null }
@@ -398,7 +412,7 @@ export const taskPromote = $prose((ctx) => {
     rebind: boolean,
   ): PromoteState => {
     const items = taskItemsOf(doc);
-    const signature = items.map((item) => item.text).join(" ");
+    const signature = items.map((item) => item.text).join(ITEM_SEPARATOR);
     let byItem = previous.byItem;
     if (rebind || signature !== previous.signature) {
       byItem = new Map();

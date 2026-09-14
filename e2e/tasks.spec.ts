@@ -8,6 +8,12 @@
 // alone merges; a tick on a line that tab moved is the 409 it has always been,
 // shown as the conflict banner and never softened into a toast.
 //
+// ALL FOUR ARE `@release`. `ci.yml` runs the browser steps only on a push, and
+// both it and `release.yml` run `playwright test --grep @release`, so an
+// untagged test here would run in the weekly `e2e-full` job and nowhere else:
+// the merge, the branch's one deliberate loosening of the 409 contract, would
+// ship with no browser-level guard at any release from here on.
+//
 // The second tab's SSE stream is blocked on purpose. That is not a convenience:
 // it is the scenario. Somebody ticks a checkbox on their phone while the same
 // note is open in a browser, and the browser then saves the body it loaded,
@@ -162,11 +168,18 @@ async function appendToParagraph(page: Page, text: string, addition: string) {
 const conflictBanner = (page: Page) =>
   page.getByRole("alert").filter({ hasText: "Conflict" });
 
-test("a completion from Tasks lands in a note that is open and dirty in another tab", async ({
+test("@release a completion from Tasks lands in a note that is open and dirty in another tab", async ({
   browser,
 }: {
   browser: Browser;
 }) => {
+  // Two logins at 20s apiece, four create-and-link helpers at 20, and five
+  // polls at 15 to 20, all in one test. The 30s default is a timeout this can
+  // reach on a loaded runner while every assertion in it is still on its way
+  // to passing, which reads as a mystery flake rather than a merge
+  // regression. `critical-flows` uses 60 for a login-heavy test and
+  // `mail-client` 90; this is the heavier shape.
+  test.setTimeout(120_000);
   const owner = await browser.newContext();
   const phone = await browser.newContext();
   try {
@@ -269,9 +282,10 @@ test("a completion from Tasks lands in a note that is open and dirty in another 
   }
 });
 
-test("promoting a line from a note puts the task in Today and writes nothing to the markdown", async ({
+test("@release promoting a line from a note puts the task in Today and writes nothing to the markdown", async ({
   page,
 }) => {
+  test.setTimeout(60_000);
   await login(page);
   const note = await createNote(page, "Errands", "- [ ] call the bank\n\nnotes\n");
   await openNote(page, note.id);
@@ -304,9 +318,10 @@ test("promoting a line from a note puts the task in Today and writes nothing to 
   expect(await markdownOf(page, note.id)).toBe(before);
 });
 
-test("deleting the line detaches the task and labels it as removed from the note", async ({
+test("@release deleting the line detaches the task and labels it as removed from the note", async ({
   page,
 }) => {
+  test.setTimeout(60_000);
   await login(page);
   const note = await createNote(page, "Packing", "- [ ] find the charger\n");
   const task = await linkTask(page, note, 0, localToday());
@@ -329,9 +344,10 @@ test("deleting the line detaches the task and labels it as removed from the note
   await expect(row).toContainText("line removed from Packing");
 });
 
-test("deleting the task in Tasks leaves the line an ordinary checkbox", async ({
+test("@release deleting the task in Tasks leaves the line an ordinary checkbox", async ({
   page,
 }) => {
+  test.setTimeout(60_000);
   await login(page);
   const note = await createNote(page, "Reading", "- [ ] renew the library card\n");
   const task = await linkTask(page, note, 0, localToday());

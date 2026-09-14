@@ -6,13 +6,17 @@ import { describe, expect, it } from "vitest";
 import type { ListName } from "@/lib/tasks/lists";
 import type { TaskView } from "@/lib/tasks/model";
 import {
+  countsFor,
   dayLabel,
   deadlineCaption,
   doneTimeOf,
+  eveningMoon,
   headerLabel,
   movesRow,
   overdueWhenCaption,
+  reminderFired,
   sectionsFor,
+  timeCaption,
   type TasksView,
 } from "./tasks-lists";
 
@@ -318,5 +322,94 @@ describe("sectionsFor, the Logbook of a repeating task", () => {
 
     expect(sections[0].rows.map((row) => row.key)).toEqual(["a"]);
     expect(sections[0].rows[0].untickable).toBe(true);
+  });
+});
+
+/** A COMPLETION STAYS IN ITS LIST FOR THE DAY, AND IS IN THE LOGBOOK TOO.
+ *
+ *  Both, from the same record, on the same day. The Logbook is a read of
+ *  completions and not a filter over `listOf`, so the two answers are pinned
+ *  against each other here rather than one being derived from the other. */
+describe("a completion made today, read both ways", () => {
+  const both = [
+    task("open", { when: TODAY, category: "Work" }),
+    task("done", {
+      when: TODAY,
+      category: "Work",
+      done: true,
+      doneAt: `${TODAY}T09:00:00.000Z`,
+    }),
+  ];
+
+  it("sits at the foot of its own group in the Today view", () => {
+    expect(shape(sectionsFor(both, list("today"), TODAY, UTC))).toEqual([
+      ["Work", ["open", "done"]],
+    ]);
+  });
+
+  it("sits under Today in the Logbook view, by the day it was finished", () => {
+    expect(shape(sectionsFor(both, list("logbook"), TODAY, UTC))).toEqual([
+      ["Today", ["done"]],
+    ]);
+  });
+
+  it("reads the day it was finished in the reader's own offset, not UTC's", () => {
+    // 21:00 UTC on the 13th is 01:00 on the 14th in Dubai (+240), so a reader
+    // there finished it TODAY and the row has not moved out of their list.
+    const late = [
+      task("late", {
+        when: "2026-09-14",
+        category: "Work",
+        done: true,
+        doneAt: "2026-09-13T21:00:00.000Z",
+      }),
+    ];
+    expect(shape(sectionsFor(late, list("today"), "2026-09-14", 240))).toEqual([
+      ["Work", ["late"]],
+    ]);
+    expect(shape(sectionsFor(late, list("today"), "2026-09-14", UTC))).toEqual([]);
+  });
+
+  it("counts for the Done-for-today state off the completion, not off the list", () => {
+    expect(countsFor(both, TODAY, UTC).doneToday).toBe(1);
+  });
+});
+
+/** The three things the row's tail derives from the record and nothing else. */
+describe("the row's clock, moon and fired reminder", () => {
+  it("gives the stored clock back verbatim, and null when there is none", () => {
+    expect(timeCaption(task("a", { when: TODAY, time: "13:00" }))).toBe("13:00");
+    expect(timeCaption(task("b", { when: TODAY }))).toBeNull();
+  });
+
+  it("stands the moon on an evening today and on one still ahead", () => {
+    expect(eveningMoon(task("a", { when: TODAY, evening: true }), TODAY)).toBe(true);
+    expect(eveningMoon(task("b", { when: "2026-09-14", evening: true }), TODAY)).toBe(
+      true,
+    );
+  });
+
+  it("takes the moon off an evening already past, and off a task with no day", () => {
+    expect(eveningMoon(task("a", { when: "2026-09-11", evening: true }), TODAY)).toBe(
+      false,
+    );
+    expect(eveningMoon(task("b", { evening: true }), TODAY)).toBe(false);
+    expect(eveningMoon(task("c", { when: TODAY }), TODAY)).toBe(false);
+  });
+
+  it("reads a reminder as fired only while the task is still open", () => {
+    const at = `${TODAY}T12:00:00.000Z`;
+    expect(reminderFired(task("a", { when: TODAY, remindedAt: at }))).toBe(true);
+    expect(
+      reminderFired(
+        task("b", {
+          when: TODAY,
+          remindedAt: at,
+          done: true,
+          doneAt: `${TODAY}T13:00:00.000Z`,
+        }),
+      ),
+    ).toBe(false);
+    expect(reminderFired(task("c", { when: TODAY }))).toBe(false);
   });
 });

@@ -95,9 +95,14 @@ export function HubToday({
     [offsetMinutes, state.tasks, today],
   );
 
-  // What the LIST holds, so a row still folding is already out of it: one
-  // decrement at 1300, and the row leaves at 1520.
-  const open = drawn.filter((row) => !held.has(row.task.id)).length;
+  // What is still OPEN today. A completed row stays in the block, struck
+  // through and at the foot of its group, so counting the rows would hold the
+  // number at what the morning started with; and a row still folding out on a
+  // reschedule is already out of the count, which is the one decrement at 1300
+  // with the row leaving at 1520.
+  const open = drawn.filter(
+    (row) => !row.task.done && !held.has(row.task.id),
+  ).length;
   // ONE SET OF WORDS ON SCREEN AT ANY INSTANT. The flight slot is held for the
   // spring's own 300ms, and on localhost the POST lands in about 20, so the
   // captured title was drawn twice, 53px apart, for the rest of the flight.

@@ -55,9 +55,11 @@ export function sectionsFor(
   offsetMinutes: number,
 ): TaskSection[] {
   const sections = new Map<string, { group: TaskGroup; rows: TaskRow[] }>();
+  const logbook = view.kind === "list" && view.list === "logbook";
   for (const row of rowsFor(tasks, view, today, offsetMinutes)) {
-    const group =
-      view.kind === "list"
+    const group = logbook
+      ? logbookDayGroup(row.task, today, offsetMinutes)
+      : view.kind === "list"
         ? groupFor(row.task, today, offsetMinutes)
         : categoryGroup(row.task, today);
     const existing = sections.get(group.key);
@@ -91,15 +93,49 @@ function rowsFor(
     return logbookRows(tasks, today, offsetMinutes);
   }
   return tasks
-    .filter((task) => belongs(task, view, today))
+    .filter((task) => belongs(task, view, today, offsetMinutes))
     .map((task) => ({ key: task.id, task, untickable: true }));
 }
 
-function belongs(task: TaskView, view: TasksView, today: string): boolean {
-  if (view.kind === "list") return listOf(task, today) === view.list;
+function belongs(
+  task: TaskView,
+  view: TasksView,
+  today: string,
+  offsetMinutes: number,
+): boolean {
+  // The offset is not optional here. A completion stays in the list it was
+  // made in until the DAY changes, and which day a UTC instant fell on is the
+  // reader's question: at 01:00 in Dubai a task finished ten minutes ago
+  // carries yesterday's UTC date, and reading it at zero would drop the row
+  // out of Today the moment it was ticked.
+  if (view.kind === "list") return listOf(task, today, offsetMinutes) === view.list;
   // A completed task is in the Logbook and nowhere else, so a category view
   // shows what is still open under that word.
   return !task.done && (task.category ?? "") === view.category;
+}
+
+/** THE LOGBOOK VIEW GROUPS BY THE DAY THE COMPLETION WAS MADE, always.
+ *
+ *  `groupFor` cannot answer this one. A completion made TODAY is filed by
+ *  `listOf` in the list it was made in, so `groupFor` would hand a row drawn
+ *  in the Logbook the category group it wears in Today and the `Today · N`
+ *  header would be gone. The Logbook is a read of completions, and the day
+ *  each one carries is the only thing it groups on.
+ *
+ *  `offsetMinutes` for the same reason the header needs it: the instant is
+ *  UTC and the day is the reader's. A row with no instant is reachable from a
+ *  hand edit and goes to the foot under no header rather than claiming a day,
+ *  which is the answer `lib/tasks/lists.ts` gives it too. */
+function logbookDayGroup(
+  task: TaskView,
+  today: string,
+  offsetMinutes: number,
+): TaskGroup {
+  const day = task.doneAt ? doneDayOf(task.doneAt, offsetMinutes) : undefined;
+  if (!isDay(day)) return { key: "", label: null, order: Number.MAX_SAFE_INTEGER };
+  const distance = dayNumber(today) - dayNumber(day);
+  const label = distance === 0 ? "Today" : distance === 1 ? "Yesterday" : dayLabel(day);
+  return { key: day, label, order: -dayNumber(day) };
 }
 
 /** WHETHER A RESCHEDULE MOVES THE ROW.
@@ -212,6 +248,32 @@ export function overdueWhenCaption(task: TaskView, today: string): string | null
   return `since ${weekdayOf(task.when)}`;
 }
 
+/** The clock on the row, as the file holds it.
+ *
+ *  Verbatim, never through `Intl`. `time` is a WALL CLOCK in the owner's zone,
+ *  so the 13:00 the picker wrote is the 13:00 the file holds and the 13:00 the
+ *  row says, on every device. `doneTimeOf` below does use a formatter, and
+ *  rightly: that one turns a UTC instant into the reader's own clock, which is
+ *  a different question with a different answer per device. */
+export function timeCaption(task: TaskView): string | null {
+  return task.time ?? null;
+}
+
+/** Whether the moon stands in this row's tail.
+ *
+ *  An evening that has been and gone is not a section anybody is looking at:
+ *  an overdue evening task is an ordinary overdue row, with the "since Tue"
+ *  caption and no moon. */
+export function eveningMoon(task: TaskView, today: string): boolean {
+  return task.evening === true && isDay(task.when) && task.when >= today;
+}
+
+/** A reminder that has already spoken, on a task still open. Once the task is
+ *  done the clock has nothing left to announce. */
+export function reminderFired(task: TaskView): boolean {
+  return task.remindedAt !== undefined && !task.done;
+}
+
 export interface DeadlineCaption {
   readonly label: string;
   /** Drawn in `--red` as text, never as a fill: the one red in the section. */
@@ -318,12 +380,17 @@ export function countsFor(
   let doneToday = 0;
   let upcomingThisWeek = 0;
   for (const task of tasks) {
-    const list = listOf(task, today);
-    if (list === "logbook") {
-      if (task.doneAt && doneDayOf(task.doneAt, offsetMinutes) === today) doneToday += 1;
+    // Counted off the COMPLETION and not off the list it landed in: a task
+    // finished today stays in the list it was finished in for the rest of the
+    // day, so "N completed" would have read 0 all day and turned into the
+    // right number at midnight.
+    if (task.done && task.doneAt && doneDayOf(task.doneAt, offsetMinutes) === today) {
+      doneToday += 1;
       continue;
     }
-    if (list === "upcoming" && withinWeek(task, today)) upcomingThisWeek += 1;
+    if (listOf(task, today, offsetMinutes) === "upcoming" && withinWeek(task, today)) {
+      upcomingThisWeek += 1;
+    }
   }
   return { doneToday, upcomingThisWeek };
 }

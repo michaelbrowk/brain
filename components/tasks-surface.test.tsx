@@ -539,14 +539,25 @@ describe("completion (motion 2.1)", () => {
     expect(bodies.some((body) => body.includes("false"))).toBe(false);
   });
 
-  it("collapses the group and materialises the Done for today empty state", async () => {
+  /** D3. A COMPLETION IS NOT A LEAVING. The row is struck through and sinks to
+   *  the foot of its group, and the group it was in is still there: what the
+   *  reader finished this morning is the whole of what the list has to show
+   *  for it. Only the count beside the list steps down. */
+  it("keeps the completed row in its group and steps the count down", async () => {
     const done = task("a", { when: TODAY, category: "Work" });
-    await mount([done]);
+    const open = task("b", {
+      when: TODAY,
+      category: "Work",
+      created: "2026-08-01T09:00:00.000Z",
+    });
+    await mount([done, open]);
     expect(headers()).toEqual(["Work"]);
+    expect(rowTitles()).toEqual(["a", "b"]);
+    expect(counts.at(-1)).toBe(2);
 
     apiFetchMock.mockImplementation(async (input) => {
       const url = String(input);
-      if (url.startsWith("/api/tasks?")) return response({ tasks: [done] });
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [done, open] });
       return response({ task: { ...done, done: true, doneAt: `${TODAY}T12:00:00.000Z` } });
     });
 
@@ -556,14 +567,14 @@ describe("completion (motion 2.1)", () => {
     });
     await settle();
 
-    // jsdom runs no WAAPI, so the fold resolves at once and the group goes
-    expect(headers()).toEqual([]);
-    expect(rowTitles()).toEqual([]);
-    const empty = document.querySelector(".brain-tasks-empty") as HTMLElement;
-    expect(empty.textContent).toContain("Done for today");
-    // The count alone: "· Logbook" read as a link and was plain text.
-    expect(empty.textContent).toContain("1 completed");
-    expect(empty.textContent).not.toContain("Logbook");
+    // The header stands, the row stands, and it has sunk below the open one.
+    expect(headers()).toEqual(["Work"]);
+    expect(rowTitles()).toEqual(["b", "a"]);
+    expect(document.querySelector(".brain-tasks-empty")).toBeNull();
+    // and nothing folded it out: a fold fills forwards, so one played here
+    // would hold a row that never unmounts at height 0 until the next load
+    expect(foldOf(rowFor("a"))).toBeUndefined();
+    expect(counts.at(-1)).toBe(1);
   });
 
   it("decrements the count once at 1300, not once per source", async () => {
@@ -647,6 +658,32 @@ describe("reschedule (motion 2.2)", () => {
     expect(rowTitles()).toEqual([]);
     // a row that DOES leave folds down on its way out, into its bottom edge
     expect(foldOf(leaving)?.frames.at(-1)?.clipPath).toBe("inset(100% 0 0 0)");
+  });
+
+  it("collapses the group header and its rule when the reschedule empties it", async () => {
+    // The one write that still empties a group: a completion stays where it
+    // was until the day changes, a reschedule leaves at once.
+    const a = task("a", { when: TODAY, category: "Work" });
+    await mount([a]);
+    expect(headers()).toEqual(["Work"]);
+
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [a] });
+      return response({ task: { ...a, when: dayFrom(1) } });
+    });
+
+    await selectFirst();
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "]", metaKey: true }));
+    });
+    await settle();
+
+    // jsdom runs no WAAPI, so the fold resolves at once and the group goes
+    expect(headers()).toEqual([]);
+    expect(rowTitles()).toEqual([]);
+    const empty = document.querySelector(".brain-tasks-empty") as HTMLElement;
+    expect(empty.textContent).toContain("Nothing planned today");
   });
 
   /** A TASK IS IN TODAY FOR FOUR REASONS, and Today pressed on any of them is

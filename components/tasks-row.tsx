@@ -14,6 +14,7 @@ import {
   DUR,
   EASE_OUT,
   HOVER,
+  SPRING_DEAL,
   SPRING_MATERIALIZE,
   SPRING_SELECT,
   SPRING_SHEET_GESTURE,
@@ -31,19 +32,27 @@ import {
   deadlineCaption,
   dayLabel,
   doneTimeOf,
+  eveningMoon,
   movesRow,
   overdueWhenCaption,
+  reminderFired,
   repeatNextLabel,
+  timeCaption,
 } from "./tasks-lists";
 import { TasksRepeatMenu } from "./tasks-repeat-menu";
 import { Icon } from "./ui/icon";
 
-/** THE ROW, AND THE TWO DIRECTIONS IT CAN LEAVE IN.
+/** THE ROW, AND THE ONE DIRECTION IT CAN LEAVE IN.
  *
- *  Done folds UP, into the past. Every reschedule folds DOWN, into the
- *  future. The two verbs never overlap and neither scales the text: a row
- *  leaving is a capsule folding into its own edge (`clip-path` plus real
- *  height), so the words are cut off by an edge rather than shrunk.
+ *  A reschedule folds DOWN, into the future: a capsule folding into its own
+ *  bottom edge (`clip-path` plus real height), so the words are cut off by an
+ *  edge rather than shrunk.
+ *
+ *  A COMPLETION IS NOT A LEAVING (D3). The row is struck through, its title
+ *  goes quiet, and it sinks to the foot of its group on the layout spring,
+ *  where it stays until the day changes. Finishing a task is something the
+ *  reader did, and a list that erases it the moment it is done has nothing
+ *  left to show for the morning.
  *
  *  The completion is a 1200ms hold and the write is issued at its end, not at
  *  the press. A reader who changes their mind inside the window erases the
@@ -209,9 +218,17 @@ export function TasksRow({
 
   const linked = task.page !== undefined && task.detachedAt === undefined;
   const detached = task.detachedAt !== undefined;
+  /** A completed row in a list answers its checkbox and nothing else. Its
+   *  chips would edit a record the reader has finished with, its title is not
+   *  worth a keyboard on a phone, and a reschedule key on it would move
+   *  something that is already in the past. */
+  const inert = historic || task.done;
   const overdueWhen = overdueWhenCaption(task, today);
   const deadline = deadlineCaption(task, today);
   const repeatNext = repeatNextLabel(task, today);
+  const time = timeCaption(task);
+  const moon = eveningMoon(task, today);
+  const fired = reminderFired(task);
 
   useEffect(
     () => () => {
@@ -229,32 +246,26 @@ export function TasksRow({
     return true;
   }, [reduce]);
 
-  /** The fold and the write start on the same beat, 1300ms after the press.
-   *  A refusal cancels the fold and puts the box back. */
+  /** THE WRITE STILL LANDS AT 1300, AND THE ROW STAYS.
+   *
+   *  Completing a task is not the task leaving. The strike is drawn, the title
+   *  goes quiet, and the row sinks to the foot of its group on the layout
+   *  spring because the derive now sorts it there. A refusal puts the box and
+   *  the quiet title back and the row never moved. */
   const commit = useCallback(async () => {
-    const element = wrapRef.current;
-    const fold = element ? foldRow(element, "up", reduce) : null;
-    let refused = false;
     try {
       await onComplete(
         task,
         linked ? `Couldn't tick in ${pageTitle ?? "that note"}` : undefined,
       );
     } catch {
-      refused = true;
-    }
-    if (refused) {
-      fold?.cancel();
       if (boxRef.current) setTaskCheckboxChecked(boxRef.current, false, reduce);
       // Everything the hold changed goes back, not only the tick. `holding`
-      // dims the title and grows the tail that names the next occurrence, so
-      // a row left holding after a refusal reads as completed while the toast
-      // says it failed.
+      // strikes the title and grows the tail that names the next occurrence,
+      // so a row left holding after a refusal reads as completed while the
+      // toast says it failed.
       setHolding(false);
-      onFoldEnd(task.id);
-      return;
     }
-    await fold?.finished;
     onFoldEnd(task.id);
   }, [linked, onComplete, onFoldEnd, pageTitle, reduce, task]);
 
@@ -329,13 +340,13 @@ export function TasksRow({
     onExpand,
     today,
     rowKey: key,
-    historic,
+    inert,
   });
 
   const swipeHandlers = useSwipe({
     x,
     reduce,
-    enabled: !task.done && !historic && !expanded,
+    enabled: !inert && !expanded,
     onWord: setSwipeSide,
     onCommit: (side) => {
       setSwipeSide(null);
@@ -357,6 +368,10 @@ export function TasksRow({
     // selection capsule on it would be the same refusal one gesture later.
     if (historic) return;
     onSelect(key);
+    // A COMPLETED ROW STOPS HERE. The arrows can stand on it, because it is
+    // still a row in the list, but its chips would edit a record the reader
+    // has finished with and its title is not worth a keyboard on a phone.
+    if (inert) return;
     // The title becomes editable on a SECOND tap, not on expansion, so a
     // phone keyboard does not rise from opening a row.
     if (expanded && (event.target as HTMLElement).closest(".brain-task-title")) {
@@ -390,13 +405,21 @@ export function TasksRow({
       ref={wrapRef}
       className="brain-task-row-item"
       data-task-id={task.id}
-      data-holding={holding ? "" : undefined}
+      // THE SINK. The row travels to its new place in the group rather than
+      // cutting there. `layout="position"` and not `layout`: the box's height
+      // is the row's own and a size animation would stretch the words inside
+      // it. Reduced motion moves it with no spring at all, which is a reflow.
+      layout={reduce ? false : "position"}
       initial={arrival}
       animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0, height: "auto" }}
       transition={{
         duration: entrance === "insert" ? DUR.page : DUR.base,
         ease: EASE_OUT,
         delay: reduce ? 0 : arrivalDelay,
+        // The sink has its own curve, and the entrance keeps its stagger: one
+        // `transition` for two animations would give the travel the arrival's
+        // delay and the arrival the travel's spring.
+        layout: SPRING_DEAL,
       }}
     >
       <div className="brain-task-swipe">
@@ -423,6 +446,11 @@ export function TasksRow({
           data-selected={selected ? "" : undefined}
           data-expanded={expanded ? "" : undefined}
           data-done={task.done ? "" : undefined}
+          // Every state the row's own rules read sits on the row's own
+          // element. The hold used to be flagged one level up, on the list
+          // item, so `.brain-task-row[data-holding]` matched nothing and the
+          // title never went quiet behind the held tick.
+          data-holding={holding ? "" : undefined}
           data-historic={historic ? "" : undefined}
           style={{ x }}
           onClick={openRow}
@@ -469,6 +497,19 @@ export function TasksRow({
                 </span>
               )}
               <span className="brain-task-tail">
+                {/* The clock the record holds, verbatim, then the moon. Both
+                    lead the tail: they are where in the DAY this row sits, and
+                    the glyphs behind them are what KIND of row it is. */}
+                {time && (
+                  <span
+                    className="brain-task-caption"
+                    data-time
+                    data-fired={fired ? "" : undefined}
+                  >
+                    {time}
+                  </span>
+                )}
+                {moon && <Icon name="moon-linear" size={14} className="text-ink-3" />}
                 {linked && <Icon name="document-text" size={14} className="text-ink-3" />}
                 {task.repeat && <Icon name="restart" size={14} className="text-ink-3" />}
                 {/* Spec 2.1, t=100: a repeat grows `restart` plus the day the
@@ -781,7 +822,7 @@ function useRowShortcuts({
   onExpand,
   today,
   rowKey,
-  historic,
+  inert,
 }: {
   selected: boolean;
   expanded: boolean;
@@ -790,12 +831,13 @@ function useRowShortcuts({
   onExpand: (id: string | null) => void;
   today: string;
   rowKey: string;
-  historic: boolean;
+  inert: boolean;
 }) {
   useEffect(() => {
-    // A history row answers no key for the same reason it answers no press:
-    // there is nothing on it left to move or to undo.
-    if (!selected || historic) return;
+    // A finished row answers no key for the same reason it answers no press:
+    // there is nothing on it left to move, and `t` on a task that is already
+    // in the past would file a completion under today.
+    if (!selected || inert) return;
     const onKey = (event: KeyboardEvent) => {
       if (isTyping(event.target)) return;
       const meta = event.metaKey || event.ctrlKey;
@@ -824,7 +866,7 @@ function useRowShortcuts({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [completeNow, expanded, historic, leaveDown, onExpand, rowKey, selected, today]);
+  }, [completeNow, expanded, inert, leaveDown, onExpand, rowKey, selected, today]);
 }
 
 /** The two the palette carries too, so a key and a palette row never disagree

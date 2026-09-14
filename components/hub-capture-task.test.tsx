@@ -4,7 +4,7 @@
 //
 // One field, two explicit destinations: Enter still makes a page, and `Task`
 // (⌘⏎ from the keyboard) writes a task into today. Never one control with two
-// meanings — the reader says where the words are going before they go.
+// meanings. The reader says where the words are going before they go.
 //
 // And the words travel. The flight is one element with one `layoutId` in two
 // places, so what a reader watches is the sentence they typed moving into the

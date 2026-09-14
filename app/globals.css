@@ -5922,7 +5922,7 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
    Home draws the Tasks surface's own row (`components/hub-today.tsx`), and
    that row measures itself off `--task-rule` and `--task-capsule`, which are
    the Tasks COLUMN's: the column has a 12px inset the row sits inside of.
-   Home has no inset — its rule is the content edge, and every capsule on it
+   Home has no inset. Its rule is the content edge, and every capsule on it
    reaches 8px past that edge on both sides, which is what makes a page row, a
    mail row and a task row share one left rule down the whole page. So the two
    measures are restated here and the capsule's box is pulled onto Home's,

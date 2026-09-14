@@ -749,7 +749,7 @@ function showMenu(
 
   // A refusal is shown where the choice was made, and not in the shell's
   // toast. The toast is the house surface for a route `reason` everywhere the
-  // control that asked for it is already gone; here it is not — this popover
+  // control that asked for it is already gone. Here it is not: this popover
   // is open over the line, and a notice in the corner of the window would ask
   // the reader to look away from the control they are holding and then back
   // at it to pick again. So the menu stays open, the reason sits in it, and

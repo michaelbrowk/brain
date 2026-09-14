@@ -2,7 +2,7 @@
 
 // THE TODAY BLOCK ON HOME. Five rows at most, flat, in the section's own
 // order, and a completion that runs the column's cycle without leaving the
-// page. Every string here is the spec's, verbatim — including the one that
+// page. Every string here is the spec's, verbatim, including the one that
 // deliberately differs from the column's (`Add one in Tasks`, not `Add one
 // above`), which is the case a shared constant would quietly break.
 

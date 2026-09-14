@@ -214,7 +214,7 @@ const WEEK = 7 * 24 * 3600 * 1000;
  *  fast route answer does not cut the flight in half. */
 const FLIGHT_MS = 300;
 
-/** The smart hub — "/" landing: one column of blocks, in the order a day is
+/** The smart hub, the "/" landing: one column of blocks, in the order a day is
  *  read. The capture field at the head, then what is owed today, then what is
  *  waiting in mail, then what changed and where you left off, then what is
  *  public.
@@ -254,7 +254,7 @@ export function Hub({
    *  the field and mounts it in the block: one `layoutId`, two positions, and
    *  framer carries it across on `SPRING_PANEL`. */
   const [flight, setFlight] = useState<{ text: string; landed: boolean } | null>(null);
-  /** A task this page has just written, so its row arrives rather than
+  /** A task this page wrote a moment ago, so its row arrives rather than
    *  appears. */
   const [capturedId, setCapturedId] = useState<string | null>(null);
   // `now` is null until mount so the SSR HTML (which has no clock) matches the
@@ -558,9 +558,9 @@ export function Hub({
       </motion.div>
 
       {/* What is owed today, then what is waiting. Both draw nothing at all
-          until they have an answer of their own — the tasks block before the
+          until they have an answer of their own: the tasks block before the
           browser's clock has been read, the mail block where no account is
-          connected — so neither can put a heading over a question it has not
+          connected. So neither can put a heading over a question it has not
           asked yet. */}
       <HubToday
         refreshToken={taskRefreshToken}
@@ -608,7 +608,7 @@ export function Hub({
 
           CONTINUE IS THE FIRST ROW HERE, not a block of its own. The page this
           device was last on is a change like the others and was the shortest
-          section on the page — one heading over one row — and standing apart
+          section on the page, one heading over one row, and standing apart
           it produced a contradiction the moment it was the only change of the
           week: an empty state directly under a row dated a minute ago. Inside
           the block the row IS the answer, and the empty state is drawn only

@@ -5,10 +5,10 @@
 // Two properties live here. The first is the words a refused untick is
 // reported in: unticking a LINKED task writes `[ ]` back into somebody's
 // note, and a failure there is a failure in that note, which no route
-// `reason` can name. The second is a shape the store refuses — `updateTask`
+// `reason` can name. The second is a shape the store refuses. `updateTask`
 // will not take a schedule, a title, a deadline, a category or a rule in the
 // same call as a linked task's `done` or a repeating task's completion, in
-// two separate reasons — and the point of this file is that no gesture in the
+// two separate reasons, and the point of this file is that no gesture in the
 // column can produce one.
 
 import { act } from "react";

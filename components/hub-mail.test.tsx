@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 // THE MAIL BLOCK ON HOME. Three unread People rows, one digest row under
-// them, and nothing at all when no account is connected — an absent control
+// them, and nothing at all when no account is connected, because an absent control
 // takes its chrome with it. The architectural case is the seventh: Home never
 // waits for mail. Mail is another process with its own latency and its own
 // 503, and a dashboard that blocked on it would be a dashboard that is blank
@@ -177,7 +177,7 @@ describe("the Mail block on Home", () => {
 
     const people = [...host.querySelectorAll("[data-hub-mail-person]")];
     expect(people).toHaveLength(3);
-    // t2 is the 9, t3 the 7, t1 the 5 — the merge's own order, not the
+    // t2 is the 9, t3 the 7, t1 the 5: the merge's own order, not the
     // stream's.
     expect(people.map((row) => row.getAttribute("data-hub-mail-person"))).toEqual([
       "t2",

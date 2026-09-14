@@ -9,7 +9,7 @@
 // checkbox. A second row shape for a task would be a second product.
 //
 // IT RENDERS, IT DOES NOT DERIVE. Which five are today's is `sectionsFor` in
-// `components/tasks-lists`, flattened — the derive the column uses, so the two
+// `components/tasks-lists`, flattened. It is the derive the column uses, so the two
 // cannot disagree about what matters today. The records and the reader's own
 // day are `components/tasks-client`, the one fetch the sidebar count reads
 // from as well, and the writes are `components/tasks-actions`.
@@ -47,7 +47,7 @@ export interface HubTodayProps {
   onToast?: (title: string, options?: ToastOptions) => void;
   /** The text of a capture in flight from the field above. */
   flight?: string | null;
-  /** A task this page has just created: it arrives rather than appears. */
+  /** A task this page wrote a moment ago: it arrives rather than appears. */
   capturedId?: string | null;
 }
 

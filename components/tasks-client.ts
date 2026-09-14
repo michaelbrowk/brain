@@ -192,7 +192,7 @@ export function useTasks(refreshToken: number): TasksState {
 
 /** THE MIDNIGHT TIMER, FOR A READER THAT IS NOT REACT.
  *
- *  The open note draws a word per linked line — `Today`, `Tomorrow`, `Done` —
+ *  The open note draws a word per linked line (`Today`, `Tomorrow`, `Done`)
  *  and those words name the reader's own day. A tab left open past midnight
  *  keeps yesterday's word until something else makes the editor redraw, and
  *  the plugin is ProseMirror rather than a component, so it cannot subscribe

@@ -507,25 +507,34 @@ describe("the clock on a record", () => {
     expect(parseTaskRecord({ ...base, when: "2026-09-13", time }).ok).toBe(true);
   });
 
-  /** A NUMBER IS NOT A CLOCK.
+  /** EVERY WAY A PERSON WRITES A CLOCK BY HAND.
    *
    *  YAML 1.1 is sexagesimal about anything with a colon in it, so an unquoted
    *  `time: 13:00` reaches the schema as the integer 780 and `time: 9:05` as
-   *  545. A bare `time: 905`, which is how a person writes 9:05 with the colon
-   *  left out, reaches it as 905, and 905 is also exactly what `15:05`
-   *  produces. By this point there is nothing in a number that says which of
-   *  the two somebody meant, so no number is taken as a time and the reason
-   *  says what to write instead. What YAML leaves as a string it keeps: a
-   *  leading zero (`09:05`) and any quoted form both arrive here as text.
+   *  545. Both are read back as the clock they were written as. A leading zero
+   *  (`09:05`) and any quoted form arrive as text and are kept.
+   *
+   *  The one shape nothing can disambiguate is a bare `time: 905`, typed by
+   *  somebody leaving the colon out of 9:05: it is the same 905 that `15:05`
+   *  resolves to, and it reads back as 15:05. Refusing it is the worse trade,
+   *  because the same refusal would fall on every unquoted `time: 13:00` and
+   *  the index skips a record it refuses, losing the whole task over a pair of
+   *  quotes. Brain's own files never reach the shape at all: the serializer
+   *  writes the quoted form (`time: '13:00'`), so only a hand edit can make it.
+   *
+   *  Past the end of the day there is no clock to read, and the reason says
+   *  what to write instead.
    */
   it.each<[string, unknown, string | null]>([
-    ["905", 905, null],
-    ["9:05", 545, null],
-    ["13:00", 780, null],
+    ["905", 905, "15:05"],
+    ["9:05", 545, "09:05"],
+    ["13:00", 780, "13:00"],
     ["13:00:00", 46_800, null],
+    ["1440", 1440, null],
     ["09:05", "09:05", "09:05"],
     ['"9:05"', "9:05", "09:05"],
     ['"13:00"', "13:00", "13:00"],
+    ['"24:00"', "24:00", null],
   ])("reads a hand-edited time: %s", (_written, time, expected) => {
     const parsed = parseTaskRecord({ ...base, when: "2026-09-13", time });
 

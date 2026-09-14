@@ -30,6 +30,16 @@
  *  six. `Done` and a tap outside send what the reader settled on, Escape
  *  throws it away, and a value that ends where it began sends nothing at all.
  *  The host says when the write goes out, through `commit()` on the handle.
+ *
+ *  ONE WRITE AT A TIME, AND NO QUEUE. From the moment a value goes out until
+ *  the host answers, the panel is PENDING: `aria-busy`, the rows and the grid
+ *  quiet and out of reach, Done and the clock disabled. A press made there is
+ *  neither sent nor remembered, because a word held back is a word the reader
+ *  can no longer see. Escape still answers and cancels nothing: the value is
+ *  with the host, and the record will say what the host made of it whether or
+ *  not this panel is still on screen. An acceptance is the panel's last act.
+ *  A refusal gives it back: the pending state lifts, the host shows the reason
+ *  where the reader is looking, and the same press writes again.
  */
 
 import * as Popover from "@radix-ui/react-popover";
@@ -80,7 +90,8 @@ export interface WhenValue {
  *  nothing and is taken at its word, exactly as the host that returns nothing
  *  is. A REJECTION IS A REFUSAL: a host that threw has filed nothing, and
  *  reading the throw as an acceptance would spend the value and leave the
- *  rejection unhandled beside it. */
+ *  rejection unhandled beside it. A host that answers late holds the panel
+ *  PENDING until it settles, which is the whole of the waiting state. */
 export type WhenAccepted = void | boolean | Promise<boolean | void>;
 
 export interface WhenPickerOptions {
@@ -103,7 +114,8 @@ export interface WhenPickerOptions {
 }
 
 /** The one reading of "these two say the same thing", so the no-op rule and
- *  the hosts that queue a second press answer it the same way. */
+ *  every host that has to measure a press against a record answer it the same
+ *  way. */
 export function sameWhenValue(a: WhenValue, b: WhenValue): boolean {
   return a.when === b.when && a.evening === b.evening && a.time === b.time;
 }
@@ -112,13 +124,22 @@ export interface WhenPickerHandle {
   readonly element: HTMLElement;
   focus(): void;
   /** Sends what the reader settled on, unless it is what the record already
-   *  says. The HOST chooses the moment, because the moment differs: the row's
-   *  popover commits once it has closed, so the fold never plays under it,
-   *  and the note's promote popover commits while it is still open, because a
-   *  refusal has to be shown on the control the reader is holding. Calling it
-   *  twice on one answer writes once, a value the host would not take stays
-   *  one press away, and it is safe after `destroy()`. */
+   *  says, or a write from this panel is still out. The HOST chooses the
+   *  moment, because the moment differs: the row's popover commits once it has
+   *  closed, so the fold never plays under it, and the note's promote popover
+   *  commits while it is still open, because a refusal has to be shown on the
+   *  control the reader is holding. Calling it twice on one answer writes
+   *  once, a value the host would not take stays one press away, and it is
+   *  safe after `destroy()`. */
   commit(): void;
+  /** A ROW THE HOST DRAWS, ANSWERED BY THE PICKER'S OWN RULES. The note's
+   *  promote popover keeps one word above the picker (Inbox) that no grid can
+   *  say, and a press of it has to keep the no-op rule, the pending state and
+   *  the refusal path the picker's own `Clear` keeps: two controls one word
+   *  apart cannot answer to different rules. So the host hands the value here
+   *  rather than writing on its own. Inert while the panel is pending, like
+   *  every row below it. */
+  pick(value: WhenValue): void;
   destroy(): void;
 }
 
@@ -211,19 +232,26 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   let month = monthOfDay(focusedDay);
 
   /** WHAT THE RECORD ALREADY SAYS, as far as this picker knows: the baseline
-   *  it was opened on, and then whatever a host has TAKEN since. A commit that
-   *  would repeat it sends nothing, which is how a gesture that ends where it
-   *  began writes no PATCH at all, and how a second press of one quick row
-   *  cannot mint a second write. It moves on the host's word and not on the
-   *  send, so a value a route refused is still a value this picker can send
-   *  again. `null` is a record that does not exist yet: nothing can repeat
-   *  what is not there, so every press writes. */
+   *  it was opened on, and then every value a host has TAKEN. It advances on
+   *  an acceptance and on nothing else, so a value a route refused is still a
+   *  value this picker can send again, and no refusal has to walk a chain of
+   *  optimistic values back to find where the record was. A commit that would
+   *  repeat it sends nothing, which is how a gesture that ends where it began
+   *  writes no PATCH at all, and how a second press of one quick row cannot
+   *  mint a second write. `null` is a record that does not exist yet: nothing
+   *  can repeat what is not there, so every press writes. */
   let sent: WhenValue | null =
     options.baseline === undefined
       ? { ...options.value }
       : options.baseline === null
         ? null
         : { ...options.baseline };
+  /** THE ONE WRITE THIS PANEL HAS OUT, and the pending state with it. While
+   *  it is here every control is inert and `commit()` sends nothing: one write
+   *  at a time, and a press made in that window is neither queued nor kept. It
+   *  is also the identity a settlement is read against, so an answer to a
+   *  write this panel has left behind lifts nothing and moves nothing. */
+  let inFlight: WhenValue | null = null;
   /** TRUE ONCE A QUICK ROW OR DONE HAS ANSWERED THE QUESTION. The panel is
    *  closing from that press on, and its 120ms exit keeps this element and its
    *  keydown listener mounted for the whole of it. Escape in that window used
@@ -233,6 +261,9 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
 
   const element = document.createElement("div");
   element.className = "brain-when-picker";
+  // Focusable by script and not by Tab: a disabled control drops the focus to
+  // the document, and the key that closes a waiting panel is on the panel.
+  element.tabIndex = -1;
 
   /* ── The rows ─────────────────────────────────────────────────────────── */
 
@@ -435,11 +466,50 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
     minute.setAttribute("aria-valuetext", `${clock.slice(3, 5)} minutes`);
   }
 
+  /** THE PANEL WAITING ON ITS ONE WRITE, drawn. Every control that could
+   *  start a second write says so and takes none: `aria-busy` on the panel,
+   *  the rows and the grid quiet and out of reach through the one rule in
+   *  `app/globals.css`, Done, Clear, the month arrows and the clock disabled.
+   *  The guards on the handlers below say the same thing to the keyboard. */
+  function paintPending(): void {
+    const busy = inFlight !== null;
+    const held = element.contains(document.activeElement);
+    if (busy) element.setAttribute("aria-busy", "true");
+    else element.removeAttribute("aria-busy");
+    for (const row of [todayRow, eveningRow, somedayRow]) {
+      row.setAttribute("aria-disabled", String(busy));
+    }
+    // The reminder has a rule of its own (a clock needs a day), and waiting is
+    // one more reason to be out of reach rather than a reason to be back in it.
+    reminderRow.setAttribute("aria-disabled", String(busy || reminderRow.disabled));
+    for (const control of [
+      clear,
+      done,
+      previous,
+      next,
+      hourUp,
+      hourDown,
+      minuteUp,
+      minuteDown,
+      timeClear,
+    ]) {
+      control.disabled = busy;
+    }
+    for (const box of [hour, minute]) {
+      box.setAttribute("aria-disabled", String(busy));
+      box.tabIndex = busy ? -1 : 0;
+    }
+    // A disabled control drops the focus to the document, and Escape is heard
+    // here. So the panel takes the focus from the control it has disabled.
+    if (busy && held && !element.contains(document.activeElement)) element.focus();
+  }
+
   /** Repaint, keep the focus where it was, and carry the grid if the month
    *  travelled. Under reduced motion the grid changes and nothing moves. */
   function repaint(travel = 0): void {
     const held = grid.contains(document.activeElement);
     paint();
+    paintPending();
     if (held) rovingCell().focus();
     if (travel === 0 || reduce || typeof grid.animate !== "function") return;
     grid.animate(
@@ -456,6 +526,7 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   }
 
   function setFocus(day: string): void {
+    if (inFlight !== null) return;
     const nextMonth = monthOfDay(day);
     const travel = travelTo(nextMonth);
     focusedDay = day;
@@ -464,6 +535,7 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   }
 
   function pageMonth(by: number): void {
+    if (inFlight !== null) return;
     const nextMonth = shiftMonth(month, by);
     const dayOfMonth = Math.min(Number(focusedDay.slice(8, 10)), lengthOfMonth(nextMonth));
     focusedDay = `${nextMonth}-${pad2(dayOfMonth)}`;
@@ -476,6 +548,10 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
    *  so picking a day has to be something the reader can follow with a clock.
    *  Nothing leaves here. */
   function edit(next: WhenValue, travel = 0): void {
+    // A PRESS MADE WHILE THE PANEL IS WAITING DOES NOTHING AND IS NOT KEPT.
+    // One write at a time: a value parked here would be filed a moment later,
+    // out of sight of the reader who named it.
+    if (inFlight !== null) return;
     value = next;
     repaint(travel);
   }
@@ -485,6 +561,7 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
    *  way the menu they replaced answered and the way Things answers. The write
    *  itself is the host's, a moment later, through `commit()`. */
   function quick(next: WhenValue): void {
+    if (inFlight !== null) return;
     value = next;
     answered = true;
     repaint();
@@ -492,34 +569,45 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   }
 
   function commit(): void {
+    // ONE WRITE AT A TIME. A second value cannot leave while the first is
+    // still out, and it is not parked for later either: the panel is inert
+    // while it waits, so there is no press to park.
+    if (inFlight !== null) return;
     if (sent !== null && sameWhenValue(value, sent)) return;
     const going: WhenValue = { ...value };
-    const before = sent;
-    // Optimistic, so a second press of the same row while the first is in
-    // flight sends nothing, and rolled back the moment the host says it did
-    // not take it. The identity check is what stops a late refusal from
-    // undoing a value the reader has since sent on top of it.
-    sent = going;
     const answer = onPick(going);
-    if (answer === false) {
-      sent = before;
+    // A HOST THAT ANSWERS AT THE PRESS answers now. `false` is a refusal and
+    // has moved nothing, so the record stands where it stood and the same
+    // press writes again.
+    if (answer === false) return;
+    // Anything that is not a promise has answered already. A `void` host
+    // whose last statement happens to have a value is one of these, which is
+    // why the promise is recognised by shape rather than by what it is not.
+    if (answer === null || typeof answer !== "object") {
+      sent = going;
       return;
     }
-    if (typeof answer === "object") {
-      // Only `false` is a refusal, and so is a throw: a host whose promise
-      // rejects has filed nothing, and a rejection read as an acceptance
-      // spends the value and goes unhandled. An `async` host that resolves
-      // with nothing says what a plain one says by returning nothing.
-      const refused = () => {
-        if (sent === going) sent = before;
-      };
-      void answer.then((took) => {
-        if (took === false) refused();
-      }, refused);
-    }
+    // A HOST THAT ANSWERS LATER holds the panel until it does. Only `false`
+    // is a refusal, and so is a throw: a host whose promise rejects has filed
+    // nothing, and a rejection read as an acceptance would spend the value and
+    // go unhandled beside it. An `async` host that resolves with nothing says
+    // what a plain one says by returning nothing.
+    inFlight = going;
+    paintPending();
+    const settle = (took: boolean): void => {
+      // The answer to a write this panel has already left behind lifts
+      // nothing and moves nothing.
+      if (inFlight !== going) return;
+      inFlight = null;
+      if (took) sent = going;
+      paint();
+      paintPending();
+    };
+    void answer.then((took) => settle(took !== false), () => settle(false));
   }
 
   function pickDay(day: string): void {
+    if (inFlight !== null) return;
     const travel = travelTo(monthOfDay(day));
     focusedDay = day;
     month = monthOfDay(day);
@@ -585,6 +673,14 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
       // IT. The panel plays its exit for 120ms with this listener still on it,
       // and a reader who taps Today, or Done, and reaches for Escape on the
       // way out asked for one write, not for none.
+      // ESCAPE CLOSES A WAITING PANEL AND CANCELS NOTHING. The value is with
+      // the host, so there is nothing here left to throw away: the write lands
+      // or is refused off screen, and the record says so the way it says any
+      // other write.
+      if (inFlight !== null) {
+        onDone();
+        return;
+      }
       if (answered) return;
       // ESCAPE THROWS THE VALUE AWAY. It is the one way out that leaves the
       // record where it was, so a reader halfway through a month has a way
@@ -598,6 +694,9 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
     }
     const target = event.target;
     if (target instanceof Element && target.closest(OWN_KEYS) !== null) return;
+    // The grid is inert while the panel waits, on the keyboard as under a
+    // finger, so the keys it would answer are left to the panel around it.
+    if (inFlight !== null) return;
 
     const week = monthGridOf(month);
     const at = week.findIndex((cell) => cell.day === focusedDay);
@@ -636,11 +735,13 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   });
 
   paint();
+  paintPending();
 
   return {
     element,
     focus: () => rovingCell().focus(),
     commit,
+    pick: quick,
     destroy: () => element.remove(),
   };
 }

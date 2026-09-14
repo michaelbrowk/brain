@@ -57,6 +57,11 @@ let patchAnswer: { status: number; body: Record<string, unknown> } = {
   status: 200,
   body: {},
 };
+/** Held PATCHes, the twin of `createGate`. A line that is already a task
+ *  reschedules rather than creates, which is the commoner gesture in a note
+ *  whose lines have words, and without this no case could hold one open to
+ *  see what the panel does while it waits. */
+let patchGate: Promise<void> | null = null;
 
 const editors = new WeakMap<EditorView, Editor>();
 const open: Editor[] = [];
@@ -109,6 +114,7 @@ function stubFetch() {
       return json(201, { task });
     }
     if (url.startsWith("/api/tasks/") && method === "PATCH") {
+      if (patchGate) await patchGate;
       if (patchAnswer.status !== 200) return json(patchAnswer.status, patchAnswer.body);
       const id = url.slice("/api/tasks/".length);
       tasks = tasks.map((task) =>
@@ -173,6 +179,12 @@ function menu(): HTMLElement | null {
   return document.querySelector<HTMLElement>(
     `.${PROMOTE_MENU_CLASS}:not([data-state="closed"])`,
   );
+}
+
+/** The picker inside the popover, which is where the panel says it is
+ *  waiting on a write. */
+function picker(): HTMLElement | null {
+  return menu()?.querySelector<HTMLElement>(".brain-when-picker") ?? null;
 }
 
 /** The popover's OWN row, which is Inbox and nothing else. Today, This
@@ -243,6 +255,7 @@ beforeEach(() => {
   createAnswer = { status: 201, body: {} };
   createGate = null;
   patchAnswer = { status: 200, body: {} };
+  patchGate = null;
   stubFetch();
 });
 
@@ -670,7 +683,12 @@ describe("the + Task gesture", () => {
     expect(marks(view).map((mark) => mark.textContent)).toEqual(["+ Task", "Today"]);
   });
 
-  it("sends one POST when a row is clicked twice before the first answers", async () => {
+  it("takes no press while its one write is out, and remembers none", async () => {
+    // ONE WRITE AT A TIME, AND NO QUEUE. While the route is answering, the
+    // panel is pending: its own row and every row the picker draws take no
+    // press, and a press made there is neither sent nor kept. The queue this
+    // panel used to hold kept a word the reader could no longer see, and
+    // answered each caller about somebody else's write.
     let release = () => {};
     createGate = new Promise<void>((resolve) => {
       release = resolve;
@@ -684,18 +702,51 @@ describe("the + Task gesture", () => {
     ].find((candidate) => (candidate.textContent ?? "").trim() === "Inbox")!;
     row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await settle();
-    // The row answers the second press rather than refusing it, and the second
-    // press says what the first one said, so there is nothing left to write:
-    // two records on one line is the state that has no honest reading.
-    expect(row.disabled).toBe(false);
+
+    expect(menu()?.getAttribute("aria-busy")).toBe("true");
+    expect(picker()?.getAttribute("aria-busy")).toBe("true");
+    expect(row.getAttribute("aria-disabled")).toBe("true");
+
     row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
-    await settle();
+    await pick("Today");
 
     release();
     await settle();
+    await settle();
 
     expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(0);
     expect(marks(view)[0].textContent).toBe("Inbox");
+    expect(menu()).toBeNull();
+  });
+
+  it("says so when a write from the panel before it is still out", async () => {
+    // ONE WRITE AT A TIME IS A RULE ABOUT THE LINE, not about one panel. A
+    // reader can press the mark again with a write still out, and that opens a
+    // second panel over the same line. Its press is refused rather than sent,
+    // because two records contending for one checkbox is the state that has no
+    // honest reading, and it is refused OUT LOUD: a control that takes a press
+    // and does nothing is the one shape a control must not have.
+    let release = () => {};
+    createGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Today");
+    // The mark reopens the panel: it is the trigger, so the press outside does
+    // not close it first.
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("Someday");
+
+    expect(menu()).not.toBeNull();
+    expect(menu()?.textContent).toContain("still saving");
+    expect(calls.filter((call) => call.method !== "GET")).toHaveLength(1);
+
+    release();
+    await settle();
   });
 
   it("keeps a refused pick one press away, and the second press writes", async () => {
@@ -721,63 +772,41 @@ describe("the + Task gesture", () => {
     expect(marks(view)[0].textContent).toBe("Today");
   });
 
-  it("files the line where the second row says when both are pressed in flight", async () => {
-    // A READER WHO CHANGES THEIR MIND MID-FLIGHT is not told no and is not
-    // ignored: the second press queues behind the write already out and wins,
-    // so the line ends in the list the last word named. Dropping it filed the
-    // task in a list nobody chose, with no report, which is the shape the
-    // whole-value fix was about.
+  it("keeps a refused reschedule one press away, and says why while it waits", async () => {
+    // THE COMMONER GESTURE IN A NOTE IS A RESCHEDULE, not a create: the line
+    // is already a task, so the panel sends a PATCH, and a route that refuses
+    // one owes the reader the same panel, the same reason and the same second
+    // press a refused create does.
+    const text = normalizeTaskText("water the plants");
+    tasks = [
+      {
+        id: "task-known",
+        title: text,
+        page: PAGE,
+        done: false,
+        created: NOW.toISOString(),
+        updated: NOW.toISOString(),
+        anchor: { text, hash: hashTaskText(text), ordinal: 0, line: 0 },
+      },
+    ];
     let release = () => {};
-    createGate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const view = await mountEditor("- [ ] water the plants\n");
-    hover(view, 0);
-    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
-
-    await pick("Today");
-    await pick("Someday");
-    release();
-    // Two writes in a row: the create the first word asked for, then the
-    // reschedule the second one queued behind it.
-    await settle();
-    await settle();
-
-    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
-    const patch = calls.find((call) => call.method === "PATCH");
-    expect(patch?.url).toBe("/api/tasks/task-1");
-    expect(patch?.body).toEqual({ when: "someday" });
-    expect(marks(view)[0].textContent).toBe("Someday");
-    expect(menu()).toBeNull();
-  });
-
-  it("keeps a queued word one press away when the route refuses it", async () => {
-    // THE QUEUED PRESS HEARS ITS OWN ANSWER. The panel answered a press it had
-    // only parked with "taken", and handed the queued write's refusal back to
-    // the press before it, where the picker was right to ignore it: a newer
-    // value sat on top. So the reader read the reason, pressed the same row
-    // again, and the panel closed having filed nothing.
-    let release = () => {};
-    createGate = new Promise<void>((resolve) => {
+    patchGate = new Promise<void>((resolve) => {
       release = resolve;
     });
     patchAnswer = { status: 409, body: { error: "conflict", reason: "already moved" } };
     const view = await mountEditor("- [ ] water the plants\n");
-    hover(view, 0);
     marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
     await pick("Today");
+    // The panel is waiting, so the row beside the one pressed answers nothing.
     await pick("Someday");
     release();
-    // The create the first word asked for, then the reschedule the second one
-    // queued behind it, which the route says no to.
-    await settle();
     await settle();
 
     expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(1);
     expect(menu()).not.toBeNull();
     expect(menu()?.textContent).toContain("already moved");
-    expect(marks(view)[0].textContent).toBe("Today");
+    expect(marks(view)[0].textContent).toBe("Inbox");
 
     patchAnswer = { status: 200, body: {} };
     await pick("Someday");
@@ -787,12 +816,10 @@ describe("the + Task gesture", () => {
     expect(marks(view)[0].textContent).toBe("Someday");
   });
 
-  it("files the last word when it is the word the write in flight is filing", async () => {
-    // Today, then Someday, then Today again, all inside one held POST. The
-    // queue is one slot and the READER'S LAST WORD decides: the third press
-    // names the word already going out, so it empties the slot rather than
-    // leaving Someday in it. It used to read that press as "the same answer"
-    // and file the line in a list the reader had changed their mind about.
+  it("closes on Escape with the write still out, and the write still lands", async () => {
+    // ESCAPE IS A CLOSE AND NOT A CANCEL once the create has gone. There is
+    // nothing left to throw away: the value is with the route, and the line
+    // gets the word it was given whether or not this panel is still on screen.
     let release = () => {};
     createGate = new Promise<void>((resolve) => {
       release = resolve;
@@ -802,16 +829,46 @@ describe("the + Task gesture", () => {
     marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
     await pick("Today");
-    await pick("Someday");
-    await pick("Today");
+    expect(menu()).not.toBeNull();
+
+    picker()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settle();
+    expect(menu()).toBeNull();
+
     release();
     await settle();
+
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(marks(view)[0].textContent).toBe("Today");
+  });
+
+  it("drops a refusal that lands after the panel has gone", async () => {
+    // THE REASON GOES ON THE PANEL THE READER IS HOLDING, and after Escape
+    // there is none to hold: written into a detached node it tells nobody, and
+    // this popover has no toast of its own, by the decision two cases above.
+    // What is left is the line, still a ghost, which is the honest report that
+    // nothing was filed.
+    createAnswer = { status: 409, body: { error: "conflict", reason: "already a task" } };
+    let release = () => {};
+    createGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Today");
+    const label = menu()!.querySelector<HTMLElement>(".brain-menu-label")!;
+    picker()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await settle();
 
-    expect(postBody()).toMatchObject({ when: TODAY });
-    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(0);
-    expect(marks(view)[0].textContent).toBe("Today");
+    release();
+    await settle();
+
+    expect(label.textContent).toBe("");
+    expect(label.hidden).toBe(true);
     expect(menu()).toBeNull();
+    expect(marks(view)[0].textContent).toBe("+ Task");
   });
 
   it("sends nothing from Inbox when the line is already in the Inbox", async () => {

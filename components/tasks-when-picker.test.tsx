@@ -80,6 +80,9 @@ const month = (element: HTMLElement) =>
 /** The detailed path's own commit: Done sends what the reader settled on. */
 const done = (element: HTMLElement) =>
   element.querySelector<HTMLElement>("[data-when-done]")?.click();
+/** Whether a control the panel disables while it waits is disabled. */
+const busy = (element: HTMLElement, selector: string) =>
+  element.querySelector<HTMLButtonElement>(selector)?.disabled;
 const clock = (element: HTMLElement) =>
   `${element.querySelector("[data-when-hour]")?.textContent}:${
     element.querySelector("[data-when-minute]")?.textContent
@@ -608,36 +611,136 @@ describe("the commit contract", () => {
     expect(sent).toEqual([{ when: "2026-09-20", evening: false, time: null }]);
   });
 
-  it("leaves a value the reader sent on top of a refusal where it is", async () => {
-    // THE IDENTITY GUARD ON THE LATE ROLLBACK. Two writes out, the second
-    // taken and the first refused after it: putting the picker back where the
-    // first write found it would undo a value the record has since taken, and
-    // the row the reader last pressed would mint a second write on the next
-    // press.
+  it("goes inert while its one write is out, and keeps no press made there", async () => {
+    // ONE WRITE AT A TIME, AND THE PANEL SAYS SO. While the route is
+    // answering, the rows and the grid take no press and Done is disabled. A
+    // press held back and filed later is a word the reader can no longer see,
+    // and a queue of them is how a line lands in a list nobody chose.
     const answers: WhenValue[] = [];
-    let refuseFirst!: (took: boolean) => void;
+    let settle!: (took: boolean) => void;
     const handle = open({
       value: { when: null, evening: false, time: null },
       onPick: (value) => {
         answers.push(value);
-        if (answers.length > 1) return true;
         return new Promise<boolean>((resolve) => {
-          refuseFirst = resolve;
+          settle = resolve;
         });
       },
     });
     handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
-    handle.element.querySelector<HTMLElement>("[data-when-someday]")?.click();
-    expect(answers).toHaveLength(2);
 
-    refuseFirst(false);
+    expect(handle.element.getAttribute("aria-busy")).toBe("true");
+    expect(busy(handle.element, "[data-when-done]")).toBe(true);
+    expect(busy(handle.element, "[data-when-clear]")).toBe(true);
+    expect(busy(handle.element, "[data-when-hour-up]")).toBe(true);
+
+    handle.element.querySelector<HTMLElement>("[data-when-someday]")?.click();
+    cell(handle.element, "2026-09-20").click();
+    // The host's own hand, which is how the row's popover writes at all: it
+    // sends nothing here either, so a teardown that lands mid-write cannot
+    // mint a second one.
+    handle.commit();
+    expect(answers).toHaveLength(1);
+
+    settle(true);
     await Promise.resolve();
     await Promise.resolve();
 
-    // Someday is what the record says now, so the row that says it sends
-    // nothing.
-    handle.element.querySelector<HTMLElement>("[data-when-someday]")?.click();
+    // The panel is idle again and the press it swallowed was not remembered,
+    // in what it sent and in what it draws: Today is still the word on it.
+    expect(answers).toEqual([{ when: TODAY, evening: false, time: null }]);
+    expect(
+      handle.element.querySelector("[data-when-today]")?.getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(
+      handle.element.querySelector("[data-when-someday]")?.getAttribute("aria-checked"),
+    ).toBe("false");
+    expect(handle.element.hasAttribute("aria-busy")).toBe(false);
+    expect(busy(handle.element, "[data-when-done]")).toBe(false);
+  });
+
+  it("leaves the pending state on a refusal, and the same press writes again", async () => {
+    // A ROUTE THAT SAYS NO HAS MOVED NOTHING, so the panel comes back to life
+    // on the value it opened with and the row the reader is looking at writes
+    // on the next press.
+    const answers: WhenValue[] = [];
+    let settle!: (took: boolean) => void;
+    const handle = open({
+      value: { when: null, evening: false, time: null },
+      onPick: (value) => {
+        answers.push(value);
+        return new Promise<boolean>((resolve) => {
+          settle = resolve;
+        });
+      },
+    });
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    settle(false);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(handle.element.hasAttribute("aria-busy")).toBe(false);
+    expect(busy(handle.element, "[data-when-done]")).toBe(false);
+
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
     expect(answers).toHaveLength(2);
+  });
+
+  it("sends nothing on a second press of the word the host took", async () => {
+    // THE NO-OP RULE MEASURES AGAINST WHAT THE HOST ACCEPTED. A line moved to
+    // Today by this panel is a line whose record says Today, so the row that
+    // says it has nothing left to send.
+    const answers: WhenValue[] = [];
+    const handle = open({
+      value: { when: null, evening: false, time: null },
+      baseline: null,
+      onPick: (value) => {
+        answers.push(value);
+        return true;
+      },
+    });
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    expect(answers).toHaveLength(1);
+
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    expect(answers).toHaveLength(1);
+  });
+
+  it("closes on Escape while the write is out, and takes nothing back", async () => {
+    // ESCAPE IS A CLOSE AND NOT A CANCEL once the write has gone. There is
+    // nothing left to throw away: the value is with the route, and the record
+    // will say what the route made of it whether or not this panel is still
+    // on screen.
+    const answers: WhenValue[] = [];
+    let settle!: (took: boolean) => void;
+    const handle = open({
+      value: { when: null, evening: false, time: null },
+      onPick: (value) => {
+        answers.push(value);
+        return new Promise<boolean>((resolve) => {
+          settle = resolve;
+        });
+      },
+    });
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    expect(closed).toHaveLength(1);
+
+    key(handle.element, "Escape");
+    expect(closed).toHaveLength(2);
+
+    settle(false);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(answers).toHaveLength(1);
+  });
+
+  it("draws the waiting panel quiet and untouchable, in the block that draws it", () => {
+    // The rows and the grid are `aria-busy` and out of reach in the DOM, and
+    // the ink that says so is declared once, beside the panel it belongs to.
+    const block = pickerBlock();
+    expect(block).toContain('.brain-when-picker[aria-busy="true"]');
+    expect(block).toContain("pointer-events: none");
+    expect(block).toContain("var(--ink-3)");
   });
 
   it("reads a host's rejection as a refusal, and handles it", async () => {

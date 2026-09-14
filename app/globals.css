@@ -6221,6 +6221,19 @@ html[data-kbd] .brain-task-row[data-selected] {
 .brain-when-spin-gap {
   flex: 1;
 }
+/* THE PANEL WAITING ON ITS ONE WRITE. One write leaves at a time, so while it
+   is out the rows and the grid stop being controls: quiet ink and no pointer,
+   beside the `aria-busy` that says the same thing to a reader who hears the
+   panel rather than sees it. Done, Clear, the month arrows and the clock are
+   `:disabled` and take the house rule above. Nothing here moves, and nothing
+   is hidden: a panel that vanished for the length of a request would take the
+   word the reader last pressed off the screen with it. */
+.brain-when-picker[aria-busy="true"] .brain-menu-item,
+.brain-when-picker[aria-busy="true"] .brain-when-month,
+.brain-when-picker[aria-busy="true"] .brain-when-day {
+  color: var(--ink-3);
+  pointer-events: none;
+}
 .brain-when-foot {
   display: flex;
   gap: 6px;

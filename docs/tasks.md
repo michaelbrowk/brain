@@ -159,7 +159,9 @@ The Reminder row waits for a day to be picked before it will open, since a
 clock with no day names no instant. Someday takes the clock and the evening
 with it, for the same reason.
 
-A quick row (Today, This Evening, Someday, Clear) writes at once and closes the picker: one tap, one save. A day in the grid or a step of the clock edits the picker without saving, so a reminder can follow its day. **Done**, a press outside, and a drag on the sheet's grip each save that value once and close. Escape closes and throws it away, unless a quick row or Done has already answered, since that write is on its way and the key is inert. A value that ends where it began saves nothing.
+A quick row (Today, This Evening, Someday, Clear) writes at once and closes the picker: one tap, one save. A day in the grid or a step of the clock edits the picker without saving, so a reminder can follow its day. **Done**, a press outside, and a drag on the sheet's grip each save that value once and close. Escape closes and throws it away, unless a quick row or Done has already answered, since that write is on its way and the key is inert. A value that ends where it began saves nothing, and neither does a word the record already carries after a save this panel made.
+
+**One write leaves at a time, and nothing waits in line.** From the press until the route answers the panel is waiting, and says so: `aria-busy`, the rows and the grid quiet and out of reach, Done and the clock disabled. A press made in that window does nothing and is not remembered, because a word held back would be filed a moment later, out of sight of the reader who named it. Escape still closes the panel and cancels nothing: the value is with the route, and the line says what the route made of it whether or not the panel is still on screen. An acceptance is the panel's last act. A refusal gives it back, with the route's own reason on the panel's one refusal line, and the same press writes again.
 
 The keyboard walks the grid: left and right a day, up and down a week, Home
 and End the ends of the week, PageUp and PageDown a month, Enter picks the

@@ -22,11 +22,7 @@ import {
   setTaskCheckboxLabel,
 } from "@/components/tasks-checkbox";
 import { dayLabel } from "@/components/tasks-lists";
-import {
-  renderWhenPicker,
-  sameWhenValue,
-  type WhenValue,
-} from "@/components/tasks-when-picker";
+import { renderWhenPicker, type WhenValue } from "@/components/tasks-when-picker";
 import { SOLAR } from "@/components/ui/solar-icons.generated";
 import { apiFetch } from "@/lib/client";
 import { TASKS_CHANGED_EVENT } from "@/lib/editor-events";
@@ -754,8 +750,10 @@ interface OpenMenu {
 }
 
 let currentMenu: OpenMenu | null = null;
-/** True while a create or a reschedule is in flight. One gesture is open at a
- *  time, so one flag is one line's guard. */
+/** True while a create or a reschedule is in flight. ONE WRITE AT A TIME for
+ *  the line, across panels: a reader can press the mark again with a write
+ *  still out, and the panel that opens over it is refused out loud rather than
+ *  minting a second record for one checkbox. */
 let writing = false;
 
 function dismissMenu(immediate = false): void {
@@ -859,59 +857,49 @@ function showMenu(
    *  are not this panel's. */
   const rows: HTMLButtonElement[] = [];
 
-  /** The value pressed while a write was already out. One slot, because the
-   *  reader's LAST word is the one that decides where the line goes. */
-  let pending: WhenValue | null = null;
-  /** THE PRESS THAT PUT IT THERE, waiting on its own write. Every caller has
-   *  to hear what became of the value IT pressed: a queued word answered
-   *  "taken" is spent, so a route that then refuses it leaves the reader with
-   *  a reason on screen, a row that writes nothing when they press it again,
-   *  and a panel that closes having filed nothing. */
-  let answerPending: ((took: boolean) => void) | null = null;
-  /** What the write in flight is filing, so a second press of the same word
-   *  is the same answer and not a second record. */
-  let inFlight: WhenValue | null = null;
-  /** The presses waiting on that write: a later press of the word it is
-   *  already filing hears its answer rather than a guess. */
-  let waitingOnFlight: ((took: boolean) => void)[] = [];
-  /** The record a write from this panel has already made, which is what a
-   *  queued second word moves. See `applyChoice`. */
+  /** The record a write from this panel has already made, so a second word
+   *  moves it rather than minting a second one. See `applyChoice`. */
   let filed: string | null = null;
+  /** THIS PANEL'S OWN WRITE IS OUT. `writing` is the line's flag and one panel
+   *  can open over another's write, so the panel that is waiting has to know
+   *  which of the two it is: only its own write keeps it standing, and only
+   *  its own write makes Escape a close rather than a cancel. */
+  let sending = false;
 
-  /** Tells the press that queued a word what became of it, and empties the
-   *  slot. */
-  const dropPending = (took: boolean): void => {
-    const answer = answerPending;
-    pending = null;
-    answerPending = null;
-    answer?.(took);
+  /** THE PANEL IS WAITING ON ITS ONE WRITE, and the row above the picker says
+   *  so with it. The picker draws its own waiting state (`aria-busy`, quiet
+   *  rows, a disabled Done); this row is the note's, drawn here, and a control
+   *  that stayed lit while the panel was inert would be the one press this
+   *  panel cannot answer. */
+  const setBusy = (busy: boolean): void => {
+    if (busy) element.setAttribute("aria-busy", "true");
+    else element.removeAttribute("aria-busy");
+    for (const row of rows) row.setAttribute("aria-disabled", String(busy));
   };
 
   /** True once the route took the value, false once it refused it, which is
-   *  what the picker reads to decide whether its own value has been spent. */
+   *  what the picker reads to decide whether the record has moved.
+   *
+   *  ONE WRITE AT A TIME, AND NO QUEUE. Two POSTs for one checkbox would leave
+   *  two records contending for one line, and a queue of words waiting their
+   *  turn was worse: it filed a value the reader could no longer see, and told
+   *  each caller about somebody else's write. So the panel goes inert the
+   *  moment a value leaves and comes back on the answer, and the presses made
+   *  in between are not taken at all. */
   const choose = async (value: WhenValue): Promise<boolean> => {
-    // A SECOND ROW PRESSED MID-FLIGHT QUEUES BEHIND THE FIRST AND WINS. One
-    // write at a time is still true: two POSTs for one checkbox would leave
-    // two records contending for one line, and the next reconcile detaches
-    // whichever loses. But a press the panel swallows files the line in a list
-    // nobody chose, so the second word waits for the first write and then
-    // moves the record it made.
+    // A WRITE FROM THE PANEL BEFORE THIS ONE. Every control this panel holds
+    // is inert while its own write is out, so the only caller that reaches
+    // here is one in a panel opened over a line that is already saving. It is
+    // refused, because two records contending for one checkbox is the state
+    // with no honest reading, and it is refused out loud.
     if (writing) {
-      // THE READER'S LAST WORD DECIDES. A third press takes the one slot from
-      // the second, and a press naming the word already going out empties it
-      // instead: that write is filing this value, so the press waits on it
-      // rather than queueing a reschedule to where the line is headed anyway.
-      // The press it replaces is told its own value was not filed.
-      const same = inFlight !== null && sameWhenValue(value, inFlight);
-      dropPending(false);
-      if (same) return await new Promise<boolean>((resolve) => waitingOnFlight.push(resolve));
-      pending = value;
-      return await new Promise<boolean>((resolve) => {
-        answerPending = resolve;
-      });
+      refusal.hidden = false;
+      refusal.textContent = "The last change is still saving";
+      return false;
     }
     writing = true;
-    inFlight = value;
+    sending = true;
+    setBusy(true);
     let reason: string | null;
     try {
       const result = await applyChoice(view, trigger, promote, value, filed);
@@ -919,36 +907,28 @@ function showMenu(
       if (result.taskId !== null) filed = result.taskId;
     } finally {
       writing = false;
-      inFlight = null;
+      sending = false;
+      setBusy(false);
     }
-    const took = reason === null;
     if (reason !== null) {
-      refusal.hidden = false;
-      refusal.textContent = reason;
+      // A REASON WITH NO PANEL LEFT TO SHOW IT IS DROPPED. Escape and a scroll
+      // both close this popover with the write still out, and the words would
+      // go into a node that has left the document, where nobody reads them.
+      // The line stays a ghost, which is the report that nothing was filed.
+      if (!dismissed) {
+        refusal.hidden = false;
+        refusal.textContent = reason;
+      }
+      return false;
     }
-    // Every press of the word this write was filing hears this write's answer.
-    const waited = waitingOnFlight;
-    waitingOnFlight = [];
-    for (const settle of waited) settle(took);
-
-    const queued = pending;
-    const answerQueued = answerPending;
-    pending = null;
-    answerPending = null;
-    if (queued !== null) {
-      // The record exists now, so the queued word reaches `applyChoice` as a
-      // reschedule of the task the first write minted. Its answer goes to the
-      // press that made it, and this call keeps its own.
-      const tookQueued = await choose(queued);
-      answerQueued?.(tookQueued);
-      return took;
-    }
-    if (took) {
-      dismiss();
-      // The keyboard came from the note and goes back to it.
-      view.focus();
-    }
-    return took;
+    // The panel this write belonged to may have gone (Escape, a scroll) and
+    // the reader is somewhere else: there is nothing to dismiss and no focus
+    // of theirs to take.
+    if (dismissed) return true;
+    dismiss();
+    // The keyboard came from the note and goes back to it.
+    view.focus();
+    return true;
   };
 
   // WHAT THE LINE ALREADY SAYS. A line that is already a task opens the panel
@@ -975,9 +955,27 @@ function showMenu(
     // dismissal waits for `choose`, which dismisses on success and shows the
     // reason on a refusal.
     onDone: () => {
+      // ESCAPE ON A WAITING PANEL IS THE ONE PRESS THAT REACHES HERE while
+      // this panel's write is out, because every other control is inert. It
+      // closes and cancels nothing: the value is with the route, and the line
+      // will say what the route made of it.
+      if (sending) {
+        dismiss();
+        view.focus();
+        return;
+      }
+      // A REASON BELONGS TO THE PRESS THAT GOT IT. The next press clears the
+      // line before it asks, so what stands there is always an answer to the
+      // word the reader last named.
+      refusal.hidden = true;
+      refusal.textContent = "";
       picker.commit();
-      if (writing) return;
+      // The panel stands while its write is out, and stands on a reason the
+      // press put there a moment ago: a route that says no says it on the control
+      // the reader is holding.
+      if (sending || !refusal.hidden) return;
       dismiss();
+      view.focus();
     },
   });
 
@@ -986,20 +984,13 @@ function showMenu(
     button.type = "button";
     button.className = "brain-menu-item";
     button.append(glyph(row.icon), document.createTextNode(row.label));
-    button.addEventListener("click", () => {
-      const want = row.when(day);
-      // THE SAME NO-OP RULE THE PICKER BELOW KEEPS. Inbox on a line already in
-      // the Inbox has nothing to change, and the picker's Clear, one word from
-      // it, would send nothing: two rows that say the same thing cannot answer
-      // to different rules. A line with no record has nothing to repeat, so
-      // there Inbox files it.
-      if (opened !== null && sameWhenValue(want, opened)) {
-        dismiss();
-        view.focus();
-        return;
-      }
-      void choose(want);
-    });
+    // THE PICKER ANSWERS THIS ROW TOO. Inbox and the picker's Clear are one
+    // word apart and mean the same thing, so they cannot keep different rules:
+    // handed down here, this press takes the no-op rule (a line already in the
+    // Inbox sends nothing), the waiting state (a press made while a write is
+    // out does nothing at all) and the refusal path (the panel stands, the
+    // reason sits in it, the next press writes) that every row below it keeps.
+    button.addEventListener("click", () => picker.pick(row.when(day)));
     rows.push(button);
     element.append(button);
   }
@@ -1114,9 +1105,9 @@ function whenOfLine(view: EditorView, trigger: HTMLElement): WhenValue | null {
  *
  *  `filed` is the exception, and it is not a cached position: it is the record
  *  a write from THIS panel already made. The mark is redrawn the moment the
- *  line gets its word, so the trigger a queued second press was resolved from
- *  is no longer in the document, and resolving through it again would answer
- *  "That line has gone" about a line that is right there. */
+ *  line gets its word, so the trigger a second press was resolved from is no
+ *  longer in the document, and resolving through it again would answer "That
+ *  line has gone" about a line that is right there. */
 interface ChoiceResult {
   taskId: string | null;
   reason: string | null;
@@ -1129,13 +1120,23 @@ async function applyChoice(
   value: WhenValue,
   filed: string | null,
 ): Promise<ChoiceResult> {
-  if (filed !== null) {
-    return { taskId: filed, reason: await reschedule(view, filed, value) };
+  // THE WHOLE OF IT IS INSIDE THE TRY, the reading of the document as much as
+  // the request. `markTargetOf` and the markdown the anchor is built from walk
+  // a live ProseMirror document, and a throw there used to reject the caller:
+  // the panel stood mute with no reason and no dismissal, waiting on a write
+  // that had already failed. It takes a programming error to reach, and a
+  // programming error is the case that most needs to end in a sentence.
+  try {
+    if (filed !== null) {
+      return { taskId: filed, reason: await reschedule(view, filed, value) };
+    }
+    const target = markTargetOf(view, trigger);
+    if (target === null) return { taskId: null, reason: "That line has gone" };
+    if (target.taskId === null) return await promoteLine(view, target.index, promote, value);
+    return { taskId: target.taskId, reason: await reschedule(view, target.taskId, value) };
+  } catch {
+    return { taskId: filed, reason: "The task could not be saved" };
   }
-  const target = markTargetOf(view, trigger);
-  if (target === null) return { taskId: null, reason: "That line has gone" };
-  if (target.taskId === null) return await promoteLine(view, target.index, promote, value);
-  return { taskId: target.taskId, reason: await reschedule(view, target.taskId, value) };
 }
 
 /** The two fields that only travel with a day. `lib/tasks/model.ts` refuses a

@@ -214,6 +214,18 @@ folder alone. To remove Brain entirely: `docker compose down -v`, delete the
 compose file and `.env`, and `docker rmi ghcr.io/michaelbrowk/brain:<tag>`.
 The notes folder is yours to keep.
 
+### On a phone
+
+Open Brain in Safari on an iPhone or an iPad, press the share button and pick
+Add to Home Screen. It then runs as its own app, and notifications can reach
+it: Apple gives web push to a web app that has been installed this way and to
+nothing else, so an open Safari tab never rings, whatever you allow. Once it is
+installed, open Settings → Notifications and press "Turn on on this device".
+Android and desktop browsers need no install step for this.
+
+What a reminder is and when one fires is in `docs/notifications.md`, and the
+task record it is set on is in `docs/tasks.md`.
+
 ## Develop
 
 ```bash

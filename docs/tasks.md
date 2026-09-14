@@ -118,7 +118,7 @@ them, flat and ungrouped. Whatever runs over either count is named on the
 `All today` row below the block.
 
 A `time` makes the task a reminder. What fires it, and where it lands, is in
-the notifications section.
+Reminders below.
 
 ## The time zone
 
@@ -179,9 +179,20 @@ The repeat menu reads the record's clock back into its own wording ("Every day
 at 13:00") and offers no second editor for it. The clock is set in the
 picker's Reminder row and nowhere else.
 
-## What is not here yet
+## Reminders
 
-Reminders fire from a server timer, and the notification centre and push
-notifications land in the same release. Their section is written with them. A
-`time` you set today is stored, sorted and drawn on the row before anything
-rings.
+A `time` on a task is a reminder. Every thirty seconds Brain works out the
+instant that clock names in the owner's zone, and a task whose instant has
+arrived rings: a row in the notification centre, and a push on every device you
+have turned push on for. The record's `remindedAt` is written in the same pass,
+which is what keeps one instance from ringing twice.
+
+Editing the day or the clock clears `remindedAt`, so the task rings again at the
+new time. A repeating task's next instance carries the rule's clock and no mark
+of its own.
+
+A reminder missed by less than a day still rings when the server comes back. An
+older one lands in the centre as a missed reminder and is not pushed.
+
+`docs/notifications.md` has the rest: the centre and the bell, new mail from
+people, push on an installed app, and how to turn any of it off.

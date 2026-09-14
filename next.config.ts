@@ -104,7 +104,10 @@ const nextConfig: NextConfig = {
       },
       // The push service worker. A route block REPLACES the catch-all rather
       // than merging with it (the three mail overrides below are the proof),
-      // so this restates the global set and adds two of its own.
+      // so this restates four of the five global headers and adds three of its
+      // own. The fifth, the CSP, is deliberately dropped: frame-ancestors,
+      // object-src and base-uri govern a document and say nothing about a
+      // script response, and X-Frame-Options: DENY is restated here anyway.
       //
       // Service-Worker-Allowed is not strictly needed while the script sits at
       // the root and controls the root, and it is set anyway: it states the

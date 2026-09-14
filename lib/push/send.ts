@@ -2,6 +2,7 @@ import webpush from "web-push";
 import { PROJECT_URL } from "@/lib/project";
 import {
   MAX_PUSH_BODY,
+  MAX_PUSH_TAG,
   MAX_PUSH_TITLE,
   PUSH_TTL_SECONDS,
   subscriptionIsGone,
@@ -103,6 +104,10 @@ export async function sendPush(
     title: payload.title.slice(0, MAX_PUSH_TITLE),
     ...(payload.body !== undefined ? { body: payload.body.slice(0, MAX_PUSH_BODY) } : {}),
     href: payload.href,
+    // The notification's own id, which the worker tags the notification with.
+    // Without it every reminder tags `brain:/tasks` and the second of a scan
+    // replaces the first on the device.
+    ...(payload.tag !== undefined ? { tag: payload.tag.slice(0, MAX_PUSH_TAG) } : {}),
   });
 
   let sent = 0;

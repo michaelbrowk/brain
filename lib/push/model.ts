@@ -20,13 +20,21 @@ export const DEFAULT_PUSH_KINDS: PushKindPreferences = {
   "mail-new": true,
 };
 
-/** Title, body and href, and nothing else (spec §8, Privacy). A payload is
- *  encrypted to the device, and the wording in Settings still says what
- *  leaves the server, because "encrypted" is not the same as "not sent". */
+/** Title, body, href and the notification's own id (spec §8, Privacy). A
+ *  payload is encrypted to the device, and the wording in Settings still says
+ *  what leaves the server, because "encrypted" is not the same as "not sent".
+ *
+ *  `tag` is that id and not content: `task-reminder:<task id>:<when>` or
+ *  `mail-new:<account>:<hex thread id>`, which the server already made for the
+ *  centre. The worker tags the notification with it so two reminders due in
+ *  one scan are two notifications rather than one replacing the other: every
+ *  reminder's href is "/tasks" and every mail row's is "/mail", so a tag built
+ *  from the destination collapsed them. */
 export interface PushPayload {
   title: string;
   body?: string;
   href: string;
+  tag?: string;
 }
 
 /** An hour. `web-push` defaults to four weeks, which for a 13:00 reminder
@@ -46,6 +54,10 @@ export const MAX_PUSH_SUBSCRIPTIONS = 20;
  *  arrives. */
 export const MAX_PUSH_TITLE = 200;
 export const MAX_PUSH_BODY = 400;
+/** A notification id is bounded at 400 characters by the centre's own id rule
+ *  (lib/notifications/model.ts). The cap is restated rather than imported: the
+ *  push side reads nothing else from the notification centre. */
+export const MAX_PUSH_TAG = 400;
 
 export interface PushSubscriptionRecord {
   id: string;

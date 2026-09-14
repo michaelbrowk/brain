@@ -44,7 +44,7 @@ function thread(extra: Record<string, unknown> = {}) {
 
 function harness(overrides: Record<string, unknown> = {}) {
   const notified: BrainNotification[] = [];
-  const pushed: { title: string; body?: string; href: string }[] = [];
+  const pushed: { title: string; body?: string; href: string; tag?: string }[] = [];
   const mailboxCalls: string[] = [];
   const port = {
     dir,
@@ -57,7 +57,7 @@ function harness(overrides: Record<string, unknown> = {}) {
       notified.push(n);
       return true;
     },
-    push: async (p: { title: string; body?: string; href: string }) => {
+    push: async (p: { title: string; body?: string; href: string; tag?: string }) => {
       pushed.push(p);
     },
     ...overrides,
@@ -78,7 +78,17 @@ describe("the mail scan", () => {
     });
     expect(await runMailScan(later.port)).toEqual({ produced: 1 });
     expect(later.notified[0].title).toBe("Ana Silva");
-    expect(later.pushed).toEqual([{ title: "Ana Silva", body: "Lunch on Friday", href: "/mail" }]);
+    // The tag is the row's own id, so two letters that arrive in one poll are
+    // two notifications rather than one replacing the other: every mail row
+    // carries the same href "/mail".
+    expect(later.pushed).toEqual([
+      {
+        title: "Ana Silva",
+        body: "Lunch on Friday",
+        href: "/mail",
+        tag: later.notified[0].id,
+      },
+    ]);
   });
 
   it("reads the inbox mailbox, so the owner's own sent mail is never a row", async () => {

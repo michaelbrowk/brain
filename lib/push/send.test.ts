@@ -97,6 +97,34 @@ describe("sendPush", () => {
     expect(seen[0].ttl).toBe(3600);
   });
 
+  it("carries the tag the producer set, so two reminders in one scan both stand", async () => {
+    // The worker tags a notification `brain:<tag>` and falls back to the href
+    // only when there is none. Dropping the tag here would put every reminder
+    // back on `brain:/tasks`, where the second replaces the first.
+    const seen: unknown[] = [];
+    await sendPush(
+      "task-reminder",
+      {
+        title: "Water the plants",
+        body: "13:00",
+        href: "/tasks",
+        tag: "task-reminder:task-alpha:2026-09-14T13:00",
+      },
+      {
+        dir,
+        deliver: async (_record, payload) => {
+          seen.push(JSON.parse(payload));
+        },
+      },
+    );
+    expect(seen[0]).toEqual({
+      title: "Water the plants",
+      body: "13:00",
+      href: "/tasks",
+      tag: "task-reminder:task-alpha:2026-09-14T13:00",
+    });
+  });
+
   it("sends nothing when the kind is switched off", async () => {
     await writePushKinds({ "task-reminder": false }, dir);
     let called = 0;

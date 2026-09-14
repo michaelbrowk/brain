@@ -32,7 +32,7 @@ export interface MailScanPort {
   /** `false` when the centre did not keep the row: it already held the id, it
    *  refused the shape, or a full centre evicted it. */
   notify(notification: BrainNotification): Promise<boolean>;
-  push(payload: { title: string; body?: string; href: string }): Promise<void>;
+  push(payload: { title: string; body?: string; href: string; tag?: string }): Promise<void>;
 }
 
 const PORT_MEMBERS = ["dir", "accounts", "inbox", "notify", "push"] as const;
@@ -132,6 +132,10 @@ export async function runMailScan(
             title: notification.title,
             ...(notification.body !== undefined ? { body: notification.body } : {}),
             href: notification.href,
+            // The row's own id. Every mail row carries href "/mail", so a tag
+            // built from the destination let the second letter of a poll
+            // replace the first on the device.
+            tag: notification.id,
           })
           .catch((cause: unknown) => {
             console.warn(`[brain/notifications] mail push failed: ${reason(cause)}`);

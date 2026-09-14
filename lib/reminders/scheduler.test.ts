@@ -20,7 +20,7 @@ const view = (extra: Task): Task => ({
 
 function harness(overrides: Record<string, unknown> = {}) {
   const notified: BrainNotification[] = [];
-  const pushed: { title: string; body?: string; href: string }[] = [];
+  const pushed: { title: string; body?: string; href: string; tag?: string }[] = [];
   const marked: [string, string][] = [];
   const port = {
     tasks: async () => [view({ when: "2026-09-14", time: "13:00" })],
@@ -32,7 +32,7 @@ function harness(overrides: Record<string, unknown> = {}) {
       notified.push(n);
       return true;
     },
-    push: async (p: { title: string; body?: string; href: string }) => {
+    push: async (p: { title: string; body?: string; href: string; tag?: string }) => {
       pushed.push(p);
     },
     now: () => Date.parse("2026-09-14T12:00:00.000Z"),
@@ -71,7 +71,18 @@ describe("the reminder scan", () => {
         href: "/tasks",
       },
     ]);
-    expect(h.pushed).toEqual([{ title: "Water the plants", body: "13:00", href: "/tasks" }]);
+    // THE TAG IS THE NOTIFICATION'S ID, and it travels because the worker
+    // tags the notification with it. Every reminder's href is "/tasks", so a
+    // worker tagging by destination showed only the last of two reminders due
+    // in the same scan and dropped the other without a sound.
+    expect(h.pushed).toEqual([
+      {
+        title: "Water the plants",
+        body: "13:00",
+        href: "/tasks",
+        tag: "task-reminder:task-alpha:2026-09-14T13:00",
+      },
+    ]);
     expect(h.marked).toEqual([["task-alpha", "2026-09-14T12:00:00.000Z"]]);
   });
 

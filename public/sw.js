@@ -23,6 +23,7 @@ function planNotification(raw) {
   var title = PUSH_FALLBACK_TITLE;
   var body = PUSH_FALLBACK_BODY;
   var href = "/";
+  var tag = null;
   try {
     var parsed = raw === null || raw === "" ? null : JSON.parse(raw);
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
@@ -31,6 +32,7 @@ function planNotification(raw) {
         body = typeof parsed.body === "string" ? parsed.body.slice(0, MAX_BODY) : "";
         href =
           typeof parsed.href === "string" && parsed.href.charAt(0) === "/" ? parsed.href : "/";
+        tag = typeof parsed.tag === "string" && parsed.tag.length > 0 ? parsed.tag : null;
       }
     }
   } catch {
@@ -42,7 +44,7 @@ function planNotification(raw) {
       body: body,
       icon: "/icon-192.png",
       badge: "/icon-192.png",
-      tag: "brain:" + href,
+      tag: "brain:" + (tag === null ? href : tag),
       data: { href: href },
     },
   };
@@ -88,11 +90,27 @@ self.addEventListener("notificationclick", function (event) {
         for (var index = 0; index < windows.length; index += 1) {
           var open = windows[index];
           if (open.url.indexOf(self.location.origin) === 0 && "focus" in open) {
-            return open.navigate
-              ? open.navigate(target).then(function (moved) {
-                  return (moved || open).focus();
-                })
-              : open.focus();
+            if (!open.navigate) return open.focus();
+            // navigate() rejects with a TypeError on a client this worker does
+            // not control, and every page that was already open when the
+            // worker activated is uncontrolled: there is no clients.claim()
+            // here and matchAll asks for the uncontrolled ones on purpose.
+            // Without this catch the tap resolved a rejected waitUntil and did
+            // nothing at all, which reads as a dead notification.
+            return open
+              .navigate(target)
+              .then(function (moved) {
+                return (moved || open).focus();
+              })
+              .catch(function () {
+                return Promise.resolve()
+                  .then(function () {
+                    return open.focus();
+                  })
+                  .catch(function () {
+                    return self.clients.openWindow(target);
+                  });
+              });
           }
         }
         return self.clients.openWindow(target);

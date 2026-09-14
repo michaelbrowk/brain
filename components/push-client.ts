@@ -25,13 +25,33 @@ export function urlBase64ToUint8Array(value: string): Uint8Array<ArrayBuffer> {
   return bytes;
 }
 
+/** How many touch points the live device reports, for the callers that do not
+ *  pass their own. Since iPadOS 13, Safari on an iPad sends the Mac user agent
+ *  character for character, and this is the one field that still separates
+ *  them: a Mac reports 0, an iPad reports 5. Reading it here rather than
+ *  demanding it at every call site means a caller who forgets still gets an
+ *  iPad right; a test passes the number and never touches a global. */
+function livingTouchPoints(): number {
+  return typeof navigator === "undefined" ? 0 : navigator.maxTouchPoints;
+}
+
+function isIOS(userAgent: string, maxTouchPoints: number): boolean {
+  if (/iPhone|iPad|iPod/.test(userAgent)) return true;
+  return /Macintosh/.test(userAgent) && maxTouchPoints > 1;
+}
+
 /** A name the owner will recognise in a list of devices. It is a label and
  *  not an identity: the id is a hash of the endpoint (lib/push/model.ts). */
-export function deviceLabel(userAgent: string): string {
+export function deviceLabel(
+  userAgent: string,
+  maxTouchPoints: number = livingTouchPoints(),
+): string {
   if (/iPhone/.test(userAgent)) return "iPhone";
   if (/iPad/.test(userAgent)) return "iPad";
   if (/Android/.test(userAgent)) return "Android";
-  if (/Macintosh/.test(userAgent)) return "Mac";
+  if (/Macintosh/.test(userAgent)) {
+    return maxTouchPoints > 1 ? "iPad" : "Mac";
+  }
   if (/Windows/.test(userAgent)) return "Windows";
   return "This device";
 }
@@ -48,25 +68,43 @@ export function pushSupported(): boolean {
 
 /** True on an iOS browser that is not running from the Home Screen. Safari on
  *  iOS refuses `pushManager.subscribe` there, whatever the permission says,
- *  so Settings has to ask for the install before it asks for permission. */
-export function homeScreenRequired(userAgent: string, standalone: unknown): boolean {
-  const ios = /iPhone|iPad|iPod/.test(userAgent);
-  return ios && standalone !== true;
+ *  so Settings has to ask for the install before it asks for permission.
+ *
+ *  An iPad counts, and an iPad hides: desktop-class browsing sends the Mac
+ *  user agent, so a rule reading only the string never showed an iPad the
+ *  install instruction and labelled it a Mac. `standalone` is `undefined` on
+ *  macOS and `false` in an iOS or iPadOS browser, and is checked for `true`
+ *  rather than for `false` so a future platform that drops it is told to
+ *  install rather than quietly told nothing. */
+export function homeScreenRequired(
+  userAgent: string,
+  standalone: unknown,
+  maxTouchPoints: number = livingTouchPoints(),
+): boolean {
+  return isIOS(userAgent, maxTouchPoints) && standalone !== true;
 }
 
 export async function enablePushOnThisDevice(): Promise<
   | { ok: true; device: PushDeviceView }
   | { ok: false; reason: "unsupported" | "denied" | "home-screen" | "failed" }
 > {
-  if (!pushSupported()) return { ok: false, reason: "unsupported" };
+  if (typeof navigator === "undefined") return { ok: false, reason: "unsupported" };
+  // THE HOME SCREEN IS ASKED ABOUT FIRST, and the order is the whole point.
+  // `window.Notification` does not exist in an iOS Safari tab: it appears only
+  // inside a Home-Screen app. Checking support first answered "unsupported" on
+  // the one device this feature was built for, when the true answer is that
+  // the app has to be installed. The refusal a person meets has to name the
+  // cure.
   if (
     homeScreenRequired(
       navigator.userAgent,
       (navigator as Navigator & { standalone?: boolean }).standalone,
+      navigator.maxTouchPoints,
     )
   ) {
     return { ok: false, reason: "home-screen" };
   }
+  if (!pushSupported()) return { ok: false, reason: "unsupported" };
   try {
     // The permission call has to be reached from the press itself. Everything
     // before it is synchronous checks for exactly that reason.
@@ -95,7 +133,7 @@ export async function enablePushOnThisDevice(): Promise<
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         subscription: subscription.toJSON(),
-        deviceLabel: deviceLabel(navigator.userAgent),
+        deviceLabel: deviceLabel(navigator.userAgent, navigator.maxTouchPoints),
       }),
     });
     if (!saved.ok) return { ok: false, reason: "failed" };

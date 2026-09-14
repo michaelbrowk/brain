@@ -38,6 +38,7 @@ export function planNotification(raw: string | null): NotificationPlan {
   let title = PUSH_FALLBACK_TITLE;
   let body = PUSH_FALLBACK_BODY;
   let href = "/";
+  let tag: string | null = null;
   try {
     const parsed: unknown = raw === null || raw === "" ? null : JSON.parse(raw);
     if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
@@ -46,6 +47,7 @@ export function planNotification(raw: string | null): NotificationPlan {
         title = value.title.slice(0, MAX_TITLE);
         body = typeof value.body === "string" ? value.body.slice(0, MAX_BODY) : "";
         href = typeof value.href === "string" && value.href.startsWith("/") ? value.href : "/";
+        tag = typeof value.tag === "string" && value.tag.length > 0 ? value.tag : null;
       }
     }
   } catch {
@@ -57,9 +59,14 @@ export function planNotification(raw: string | null): NotificationPlan {
       body,
       icon: "/icon-192.png",
       badge: "/icon-192.png",
-      // Tagged by destination: two reminders are two notifications, and the
-      // same destination arriving twice replaces itself rather than stacking.
-      tag: `brain:${href}`,
+      // TAGGED BY THE NOTIFICATION'S OWN ID, and by the destination only when
+      // the payload names none. Every task reminder carries href "/tasks" and
+      // every new-mail row "/mail", so a tag built from the destination made
+      // the second reminder of a scan replace the first in the notification
+      // list: one buzz, one row, and the earlier reminder gone with no trace
+      // on the device. With the sender's id the two stand side by side, and
+      // the same notification pushed twice still replaces itself.
+      tag: `brain:${tag ?? href}`,
       data: { href },
     },
   };

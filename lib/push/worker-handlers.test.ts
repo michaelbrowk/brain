@@ -17,25 +17,67 @@ import {
  *  and hangs them off `self`. Evaluating the file against a fake scope is what
  *  keeps the two copies from drifting: a change to one and not the other is a
  *  failing test rather than a bug report from a phone.
+ *
+ *  The scope also collects the three listener callbacks, so the tests below
+ *  can run the bodies rather than grep the file for them. A substring search
+ *  for "showNotification" stays green if somebody wraps the call in an `if`,
+ *  and that `if` is what costs the permission on iOS.
  */
-function shippedHandlers(): {
+
+interface ShippedHandlers {
   planNotification: (raw: string | null) => NotificationPlan;
   resolveClickTarget: (href: unknown, origin: string) => string;
-} {
-  const source = readFileSync(path.join(process.cwd(), "public", "sw.js"), "utf8");
-  const listeners: string[] = [];
-  const scope = {
-    addEventListener: (type: string) => listeners.push(type),
-    registration: {},
-    clients: {},
-    __brainPushHandlers: undefined as unknown,
-  };
-  new Function("self", source)(scope);
-  expect(listeners.sort()).toEqual(["notificationclick", "push", "pushsubscriptionchange"]);
-  return scope.__brainPushHandlers as ReturnType<typeof shippedHandlers>;
 }
 
-const runners: [string, ReturnType<typeof shippedHandlers>][] = [
+interface FakeEvent {
+  data?: { text: () => string } | null;
+  notification?: { data?: unknown; close: () => void };
+  waitUntil: (value: unknown) => void;
+}
+
+type ShippedListener = (event: FakeEvent) => void;
+
+interface WorkerScope {
+  addEventListener: (type: string, listener: ShippedListener) => void;
+  registration: Record<string, unknown>;
+  clients: Record<string, unknown>;
+  location: { origin: string };
+  __brainPushHandlers?: unknown;
+}
+
+const ORIGIN = "https://brain.example";
+
+function loadShippedWorker(overrides: Partial<WorkerScope> = {}): {
+  listeners: Record<string, ShippedListener>;
+  handlers: ShippedHandlers;
+} {
+  const source = readFileSync(path.join(process.cwd(), "public", "sw.js"), "utf8");
+  const listeners: Record<string, ShippedListener> = {};
+  const scope: WorkerScope = {
+    addEventListener: (type, listener) => {
+      listeners[type] = listener;
+    },
+    registration: {},
+    clients: {},
+    location: { origin: ORIGIN },
+    __brainPushHandlers: undefined,
+    ...overrides,
+  };
+  new Function("self", source)(scope);
+  return { listeners, handlers: scope.__brainPushHandlers as ShippedHandlers };
+}
+
+function shippedHandlers(): ShippedHandlers {
+  const { listeners, handlers } = loadShippedWorker();
+  expect(Object.keys(listeners).sort()).toEqual([
+    "notificationclick",
+    "push",
+    "pushsubscriptionchange",
+  ]);
+  return handlers;
+}
+
+const runners: [string, ShippedHandlers][] = [
   ["the typed handlers", { planNotification, resolveClickTarget }],
   ["the shipped worker", shippedHandlers()],
 ];
@@ -61,6 +103,7 @@ describe.each(runners)("%s", (_name, handlers) => {
       expect(plan.title).toBe(PUSH_FALLBACK_TITLE);
       expect(plan.options.body).toBe(PUSH_FALLBACK_BODY);
       expect(plan.options.data.href).toBe("/");
+      expect(plan.options.tag).toBe("brain:/");
     }
   });
 
@@ -70,10 +113,41 @@ describe.each(runners)("%s", (_name, handlers) => {
     expect(plan.options.body).toBe("");
   });
 
-  it("tags by href, so two reminders stack and a repeat replaces itself", () => {
-    expect(handlers.planNotification(JSON.stringify({ title: "a", href: "/tasks" })).options.tag).toBe(
-      "brain:/tasks",
+  it("tags by the payload's tag, so two reminders due in one scan both stand", () => {
+    // THE TAG IS THE NOTIFICATION'S OWN ID, NOT ITS DESTINATION. Every task
+    // reminder carries href "/tasks" and every new-mail row "/mail", so a tag
+    // derived from the href made the second reminder of a scan replace the
+    // first, silently and without a sound.
+    const first = handlers.planNotification(
+      JSON.stringify({ title: "Water the plants", href: "/tasks", tag: "task-reminder:a:2026-09-14T13:00" }),
     );
+    const second = handlers.planNotification(
+      JSON.stringify({ title: "Call the bank", href: "/tasks", tag: "task-reminder:b:2026-09-14T13:00" }),
+    );
+    expect(first.options.tag).toBe("brain:task-reminder:a:2026-09-14T13:00");
+    expect(second.options.tag).toBe("brain:task-reminder:b:2026-09-14T13:00");
+    expect(first.options.tag).not.toBe(second.options.tag);
+  });
+
+  it("repeats itself on one tag, so the same notification twice replaces itself", () => {
+    const tag = "mail-new:account-a:6162";
+    expect(
+      handlers.planNotification(JSON.stringify({ title: "Ana Silva", href: "/mail", tag })).options
+        .tag,
+    ).toBe(
+      handlers.planNotification(JSON.stringify({ title: "Ana Silva", href: "/mail", tag })).options
+        .tag,
+    );
+  });
+
+  it("falls back to the destination when a payload carries no tag", () => {
+    for (const payload of [
+      { title: "a", href: "/tasks" },
+      { title: "a", href: "/tasks", tag: "" },
+      { title: "a", href: "/tasks", tag: 7 },
+    ]) {
+      expect(handlers.planNotification(JSON.stringify(payload)).options.tag).toBe("brain:/tasks");
+    }
   });
 
   it("truncates a title and a body a push service would refuse", () => {
@@ -85,12 +159,8 @@ describe.each(runners)("%s", (_name, handlers) => {
   });
 
   it("opens a same-origin path", () => {
-    expect(handlers.resolveClickTarget("/tasks", "https://brain.example")).toBe(
-      "https://brain.example/tasks",
-    );
-    expect(handlers.resolveClickTarget("/mail", "https://brain.example")).toBe(
-      "https://brain.example/mail",
-    );
+    expect(handlers.resolveClickTarget("/tasks", ORIGIN)).toBe("https://brain.example/tasks");
+    expect(handlers.resolveClickTarget("/mail", ORIGIN)).toBe("https://brain.example/mail");
   });
 
   it("refuses to open anywhere but this origin", () => {
@@ -104,16 +174,191 @@ describe.each(runners)("%s", (_name, handlers) => {
       7,
       { href: "/tasks" },
     ]) {
-      expect(handlers.resolveClickTarget(href, "https://brain.example")).toBe(
-        "https://brain.example/",
-      );
+      expect(handlers.resolveClickTarget(href, ORIGIN)).toBe("https://brain.example/");
     }
   });
 
   it("refuses a path that tries to climb out of the origin", () => {
-    expect(handlers.resolveClickTarget("/../../etc/passwd", "https://brain.example")).toBe(
+    expect(handlers.resolveClickTarget("/../../etc/passwd", ORIGIN)).toBe(
       "https://brain.example/etc/passwd",
     );
+  });
+});
+
+describe("the shipped worker's push listener", () => {
+  function showsFor(data: FakeEvent["data"]): { title: string; tag: string }[] {
+    const shown: { title: string; tag: string }[] = [];
+    const waited: unknown[] = [];
+    const { listeners } = loadShippedWorker({
+      registration: {
+        showNotification: (title: string, options: { tag: string }) => {
+          shown.push({ title, tag: options.tag });
+          return Promise.resolve();
+        },
+      },
+    });
+    listeners.push?.({ data, waitUntil: (value) => waited.push(value) });
+    expect(waited).toHaveLength(1);
+    return shown;
+  }
+
+  it("shows exactly one notification for every payload, including one that throws on read", () => {
+    // The invariant that costs the permission when it breaks, asserted by
+    // running the handler rather than by grepping the file for the call.
+    const payloads: FakeEvent["data"][] = [
+      null,
+      {
+        text: () => {
+          throw new Error("this data cannot be read");
+        },
+      },
+      { text: () => "not json" },
+      { text: () => "" },
+      { text: () => JSON.stringify({ title: "Water the plants", href: "/tasks", tag: "t" }) },
+    ];
+    for (const data of payloads) {
+      const shown = showsFor(data);
+      expect(shown).toHaveLength(1);
+      expect(shown[0]!.title.length).toBeGreaterThan(0);
+    }
+  });
+
+  it("carries the payload's tag onto the notification it shows", () => {
+    const shown = showsFor({
+      text: () => JSON.stringify({ title: "Call the bank", href: "/tasks", tag: "task-reminder:b" }),
+    });
+    expect(shown[0]!.tag).toBe("brain:task-reminder:b");
+  });
+});
+
+describe("the shipped worker's notificationclick listener", () => {
+  interface FakeWindow {
+    url: string;
+    focus: () => unknown;
+    navigate?: (url: string) => Promise<unknown>;
+  }
+
+  async function click(
+    windows: FakeWindow[],
+    openWindow: (url: string) => Promise<unknown>,
+  ): Promise<boolean> {
+    const waited: unknown[] = [];
+    const { listeners } = loadShippedWorker({
+      clients: {
+        matchAll: () => Promise.resolve(windows),
+        openWindow,
+      },
+    });
+    let closed = false;
+    listeners.notificationclick?.({
+      notification: {
+        data: { href: "/tasks" },
+        close: () => {
+          closed = true;
+        },
+      },
+      waitUntil: (value) => waited.push(value),
+    });
+    await Promise.all(waited);
+    return closed;
+  }
+
+  it("opens a window when there is none to reuse", async () => {
+    const opened: string[] = [];
+    const closed = await click([], async (url) => {
+      opened.push(url);
+    });
+    expect(opened).toEqual(["https://brain.example/tasks"]);
+    expect(closed).toBe(true);
+  });
+
+  it("navigates an open window to the notification's destination", async () => {
+    const navigated: string[] = [];
+    let focused = 0;
+    const opened: string[] = [];
+    await click(
+      [
+        {
+          url: "https://brain.example/mail",
+          focus: () => {
+            focused += 1;
+          },
+          navigate: async (url) => {
+            navigated.push(url);
+            return null;
+          },
+        },
+      ],
+      async (url) => {
+        opened.push(url);
+      },
+    );
+    expect(navigated).toEqual(["https://brain.example/tasks"]);
+    expect(focused).toBe(1);
+    expect(opened).toEqual([]);
+  });
+
+  it("still brings the app forward when navigate rejects on an uncontrolled client", async () => {
+    // WindowClient.navigate() rejects with a TypeError on a client this worker
+    // does not control, which is every page that was already open when the
+    // worker activated: there is no clients.claim() here. Without the catch
+    // the tap resolved a rejected waitUntil and did nothing at all.
+    let focused = 0;
+    const opened: string[] = [];
+    await click(
+      [
+        {
+          url: "https://brain.example/mail",
+          focus: () => {
+            focused += 1;
+          },
+          navigate: () => Promise.reject(new TypeError("client is not controlled")),
+        },
+      ],
+      async (url) => {
+        opened.push(url);
+      },
+    );
+    expect(focused).toBe(1);
+    expect(opened).toEqual([]);
+  });
+
+  it("opens a window when navigate rejects and the window cannot be focused either", async () => {
+    const opened: string[] = [];
+    await click(
+      [
+        {
+          url: "https://brain.example/mail",
+          focus: () => {
+            throw new Error("this window is gone");
+          },
+          navigate: () => Promise.reject(new TypeError("client is not controlled")),
+        },
+      ],
+      async (url) => {
+        opened.push(url);
+      },
+    );
+    expect(opened).toEqual(["https://brain.example/tasks"]);
+  });
+
+  it("opens the root rather than a destination a payload invented", async () => {
+    const opened: string[] = [];
+    const waited: unknown[] = [];
+    const { listeners } = loadShippedWorker({
+      clients: {
+        matchAll: () => Promise.resolve([]),
+        openWindow: async (url: string) => {
+          opened.push(url);
+        },
+      },
+    });
+    listeners.notificationclick?.({
+      notification: { data: { href: "https://evil.example/x" }, close: () => {} },
+      waitUntil: (value) => waited.push(value),
+    });
+    await Promise.all(waited);
+    expect(opened).toEqual(["https://brain.example/"]);
   });
 });
 

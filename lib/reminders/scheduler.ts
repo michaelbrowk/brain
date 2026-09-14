@@ -73,7 +73,7 @@ export interface ReminderPort {
   zone(): Promise<string | null>;
   /** `false` when the centre already held this id. */
   notify(notification: BrainNotification): Promise<boolean>;
-  push(payload: { title: string; body?: string; href: string }): Promise<void>;
+  push(payload: { title: string; body?: string; href: string; tag?: string }): Promise<void>;
   now(): number;
 }
 
@@ -189,7 +189,10 @@ export async function runReminderScan(
       await port.markReminded(row.id, at);
       if (appended && row.kind === "fire") {
         await port
-          .push({ title: row.title, body: row.time, href: "/tasks" })
+          // The tag is the notification's id. Every reminder's href is
+          // "/tasks", so a worker tagging by destination showed the last of
+          // two reminders due in one scan and silently dropped the other.
+          .push({ title: row.title, body: row.time, href: "/tasks", tag: notification.id })
           .catch((cause: unknown) => {
             console.warn(`[brain/reminders] push failed: ${reason(cause)}`);
           });

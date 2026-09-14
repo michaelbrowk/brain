@@ -263,3 +263,51 @@ export function categoriesOf(
 export function openTodayCount(tasks: readonly TaskView[], today: string): number {
   return tasks.filter((task) => !task.done && listOf(task, today) === "today").length;
 }
+
+/** The two numbers a Today empty state reports, and nothing else.
+ *
+ *  Both the column and the Today block on Home say "Done for today · N
+ *  completed" and "Upcoming has N this week", and they say it about the same
+ *  records. So the arithmetic is here, once, beside the derive that decides
+ *  which list those records are in. */
+export interface TaskCounts {
+  doneToday: number;
+  upcomingThisWeek: number;
+}
+
+export function countsFor(
+  tasks: readonly TaskView[],
+  today: string,
+  offsetMinutes: number,
+): TaskCounts {
+  if (!today) return { doneToday: 0, upcomingThisWeek: 0 };
+  let doneToday = 0;
+  let upcomingThisWeek = 0;
+  for (const task of tasks) {
+    const list = listOf(task, today);
+    if (list === "logbook") {
+      if (task.doneAt && doneDayOf(task.doneAt, offsetMinutes) === today) doneToday += 1;
+      continue;
+    }
+    if (list === "upcoming" && withinWeek(task, today)) upcomingThisWeek += 1;
+  }
+  return { doneToday, upcomingThisWeek };
+}
+
+function withinWeek(task: TaskView, today: string): boolean {
+  const days = [task.when, task.deadline].filter(
+    (value): value is string => typeof value === "string" && value > today,
+  );
+  if (days.length === 0) return false;
+  const soonest = days.sort()[0] as string;
+  const limit = new Date(
+    Date.UTC(
+      Number(today.slice(0, 4)),
+      Number(today.slice(5, 7)) - 1,
+      Number(today.slice(8, 10)) + 7,
+    ),
+  )
+    .toISOString()
+    .slice(0, 10);
+  return soonest <= limit;
+}

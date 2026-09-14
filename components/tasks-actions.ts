@@ -1,0 +1,315 @@
+"use client";
+
+// WHAT A TASK ROW CAN DO, IN ONE PLACE.
+//
+// The Tasks column and the Today block on Home draw the same row, and a row
+// that completes one way in the column and another way on Home is two
+// products. So the four writes a row can ask for live here: the completion
+// with its 2.1 cycle, the untick, the reschedule and the field patch, each
+// with its optimistic step, its revert and the words a refusal is reported
+// in. The surfaces own what is on screen; this owns what is written.
+//
+// ONE FIELD PER REQUEST WHERE THE STORE SAYS SO. `updateTask` refuses a
+// schedule, a title, a deadline, a category or a rule in the same call as a
+// linked task's `done` or a repeating task's completion, in two separate
+// reasons, because a completion already moves `when` and a linked completion
+// is a write to somebody's note. Nothing here ever sends both, and
+// `tasks-actions.test.ts` holds that shut.
+//
+// It derives nothing. Which list a record is in is `lib/tasks/lists.ts`, and
+// the reader's own day arrives as `today` from `components/tasks-client`,
+// which is also where the records are and where the optimistic step lands.
+
+import { useCallback, useState } from "react";
+
+import type { TaskRepeat, TaskView } from "@/lib/tasks/model";
+
+import { SMART_UNDO_MS } from "./shell/helpers";
+import {
+  TaskRequestError,
+  mutateTasks,
+  patchTask,
+  reloadTasks,
+} from "./tasks-client";
+import { repeatNextDay } from "./tasks-lists";
+import type { ToastOptions } from "./ui/primitives";
+
+/** The fields a chip inside an expanded row can set. `null` clears one, which
+ *  is the store's own reading of a patch. */
+export interface TaskFieldPatch {
+  title?: string;
+  deadline?: string | null;
+  category?: string | null;
+  repeat?: TaskRepeat | null;
+}
+
+export interface TaskActions {
+  /** Rows a fold is still playing on. They keep their PRE-write record, so a
+   *  completed task stays where it was for the 220ms it takes to leave while
+   *  the counts beside it have already moved on. That is the spec's one
+   *  decrement, at 1300, with the row still on screen until 1520. */
+  readonly held: ReadonlyMap<string, TaskView>;
+  /** Rows that arrive rather than appear: a new task, an Undo putting one
+   *  back, the next occurrence of a repeat. */
+  readonly inserted: ReadonlySet<string>;
+  markInserted: (id: string) => void;
+  releaseFold: (id: string) => void;
+  completeTask: (task: TaskView) => Promise<void>;
+  /** `refusal` is the one sentence this untick is reported in when the route
+   *  says no. Without it the route's own `reason` stands. */
+  reopenTask: (task: TaskView, refusal?: string) => Promise<void>;
+  rescheduleTask: (
+    task: TaskView,
+    when: string | "someday" | null,
+    label: string,
+  ) => Promise<void>;
+  patchField: (task: TaskView, patch: TaskFieldPatch) => void;
+}
+
+export function useTaskActions({
+  today,
+  onToast,
+}: {
+  today: string;
+  onToast?: (title: string, options?: ToastOptions) => void;
+}): TaskActions {
+  const [held, setHeld] = useState<ReadonlyMap<string, TaskView>>(new Map());
+  const [inserted, setInserted] = useState<ReadonlySet<string>>(new Set());
+
+  const releaseFold = useCallback((id: string) => {
+    setHeld((current) => {
+      if (!current.has(id)) return current;
+      const next = new Map(current);
+      next.delete(id);
+      return next;
+    });
+  }, []);
+
+  const hold = useCallback((task: TaskView) => {
+    setHeld((current) => new Map(current).set(task.id, task));
+  }, []);
+
+  /** A row put back by Undo arrives the way a new one does: height 0 to its
+   *  own, plus opacity, with an empty box. Without this it would appear in
+   *  one frame, which is the one moment the reader is watching that spot. */
+  const markInserted = useCallback((id: string) => {
+    setInserted((current) => new Set(current).add(id));
+  }, []);
+
+  const refuse = useCallback(
+    (error: unknown, instead?: string) => {
+      const reason =
+        error instanceof TaskRequestError && error.message
+          ? error.message
+          : "That did not save";
+      onToast?.(instead ?? reason, { urgent: true });
+    },
+    [onToast],
+  );
+
+  /** THE ROW HANDED IN IS NOT ALWAYS THE RECORD.
+   *
+   *  A Logbook row of a repeating task is `logbookRows`' projection of ONE of
+   *  its completions: `done: true`, `doneAt` the entry's instant, `when` the
+   *  day that instance was owed. The record behind it is open and sitting on
+   *  its next occurrence. So neither the optimistic step nor the restore may
+   *  use it: writing the projection into the store would leave a repeating
+   *  record reading as done, which `listOf` files in the Logbook, and the open
+   *  instance would be gone from Today and Upcoming until the next reload.
+   *
+   *  The untick of a repeat therefore changes nothing locally and asks the
+   *  server on failure, because a refused write leaves a record this tab never
+   *  had a correct copy of.
+   *
+   *  `refusal` is the row's own sentence for a failure it can name better than
+   *  the route can: unticking a LINKED task is a write to somebody's note, and
+   *  "Couldn't untick in ‹page›" says which note, which no route reason knows.
+   */
+  const reopenTask = useCallback(
+    async (task: TaskView, refusal?: string) => {
+      const projected = task.repeat !== undefined;
+      if (!projected) {
+        markInserted(task.id);
+        mutateTasks((tasks) =>
+          tasks.map((entry) =>
+            entry.id === task.id ? { ...task, done: false, doneAt: undefined } : entry,
+          ),
+        );
+      }
+      try {
+        const saved = await patchTask(task.id, { done: false });
+        if (projected) markInserted(saved.id);
+        mutateTasks((tasks) =>
+          tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
+        );
+      } catch (error) {
+        // The record, from the server. Never `task`: for a repeat that is the
+        // projection and would overwrite the live record with a done one.
+        if (projected) reloadTasks();
+        else {
+          mutateTasks((tasks) =>
+            tasks.map((entry) => (entry.id === task.id ? task : entry)),
+          );
+        }
+        refuse(error, refusal);
+      }
+    },
+    [markInserted, refuse],
+  );
+
+  /** The write is issued HERE, at 1300, called by the row as its fold starts.
+   *  Nothing was sent before this point, so a cancelled completion leaves no
+   *  request, no `rev` bump and no commit behind it.
+   *
+   *  THE PILL FOLLOWS THE WRITE. The tick is optimistic because the reader
+   *  has to see their own press, but "Completed · Undo" is a REPORT, and a
+   *  report issued before the answer is known can be wrong: a refusal used to
+   *  leave a pill claiming the opposite of what happened, with a live Undo
+   *  that sent a second PATCH for a completion that never landed. So the row
+   *  moves at once, the sentence waits for the 2xx, and a refusal says one
+   *  thing in the route's own words.
+   */
+  const completeTask = useCallback(
+    async (task: TaskView) => {
+      hold(task);
+      // A REPEATING task is never done. Completing it appends a log entry and
+      // moves `when` to the next occurrence, so an optimistic `done: true`
+      // would file the series in the Logbook for as long as the write takes
+      // and then pull it back out. What moves optimistically is the DAY: the
+      // browser knows the rule, so the record leaves this list on the same
+      // beat an ordinary completion does and the count beside it decrements
+      // once, at 1300. The server's answer replaces it either way.
+      const nextDay = repeatNextDay(task, today);
+      mutateTasks((tasks) =>
+        tasks.map((entry) => {
+          if (entry.id !== task.id) return entry;
+          if (!task.repeat) {
+            return { ...entry, done: true, doneAt: new Date().toISOString() };
+          }
+          return nextDay === null ? entry : { ...entry, when: nextDay };
+        }),
+      );
+      try {
+        const saved = await patchTask(
+          task.id,
+          {
+            done: true,
+            // The instance this tab was looking at. Completing a repeat is
+            // not idempotent, so a second tick of the same one from another
+            // tab is refused with a 409 rather than silently skipping a
+            // period. An ordinary completion needs no such thing.
+            ...(task.repeat ? { expectedWhen: task.when ?? null } : {}),
+          },
+          task.repeat ? today : undefined,
+        );
+        mutateTasks((tasks) =>
+          tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
+        );
+        // Spec 2.4, the one case a person watches: the row folded up here and
+        // the NEXT occurrence arrives below, in the following day's group,
+        // with the insert entrance a new row gets. In Today the next one is
+        // tomorrow or later, so nothing appears and the mark is unused.
+        if (task.repeat) markInserted(saved.id);
+        onToast?.("Completed", {
+          actionLabel: "Undo",
+          durationMs: SMART_UNDO_MS,
+          onAction: () => {
+            void reopenTask(saved);
+          },
+        });
+      } catch (error) {
+        mutateTasks((tasks) =>
+          tasks.map((entry) => (entry.id === task.id ? task : entry)),
+        );
+        refuse(error);
+        throw error;
+      }
+    },
+    [hold, markInserted, onToast, refuse, reopenTask, today],
+  );
+
+  const rescheduleTask = useCallback(
+    async (task: TaskView, when: string | "someday" | null, label: string) => {
+      hold(task);
+      mutateTasks((tasks) =>
+        tasks.map((entry) =>
+          entry.id === task.id ? { ...entry, when: when ?? undefined } : entry,
+        ),
+      );
+      try {
+        const saved = await patchTask(task.id, { when });
+        mutateTasks((tasks) =>
+          tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
+        );
+        onToast?.(`Moved to ${label}`, {
+          actionLabel: "Undo",
+          durationMs: SMART_UNDO_MS,
+          onAction: () => {
+            markInserted(task.id);
+            mutateTasks((tasks) =>
+              tasks.map((entry) => (entry.id === task.id ? task : entry)),
+            );
+            void patchTask(task.id, { when: task.when ?? null }).catch(refuse);
+          },
+        });
+      } catch (error) {
+        mutateTasks((tasks) =>
+          tasks.map((entry) => (entry.id === task.id ? task : entry)),
+        );
+        refuse(error);
+        throw error;
+      }
+    },
+    [hold, markInserted, onToast, refuse],
+  );
+
+  const patchField = useCallback(
+    (task: TaskView, patch: TaskFieldPatch) => {
+      mutateTasks((tasks) =>
+        tasks.map((entry) =>
+          entry.id === task.id ? { ...entry, ...normalize(patch) } : entry,
+        ),
+      );
+      void patchTask(task.id, patch)
+        .then((saved) =>
+          mutateTasks((tasks) =>
+            tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
+          ),
+        )
+        .catch((error: unknown) => {
+          mutateTasks((tasks) =>
+            tasks.map((entry) => (entry.id === task.id ? task : entry)),
+          );
+          refuse(error);
+        });
+    },
+    [refuse],
+  );
+
+  return {
+    held,
+    inserted,
+    markInserted,
+    releaseFold,
+    completeTask,
+    reopenTask,
+    rescheduleTask,
+    patchField,
+  };
+}
+
+function normalize(patch: TaskFieldPatch): Partial<TaskView> {
+  return {
+    ...(patch.title !== undefined ? { title: patch.title } : {}),
+    ...(patch.deadline !== undefined ? { deadline: patch.deadline ?? undefined } : {}),
+    ...(patch.category !== undefined ? { category: patch.category ?? undefined } : {}),
+    // Clearing the rule clears the history with it, the way the record does:
+    // `log` beside no `repeat` is a shape nothing reads.
+    ...(patch.repeat !== undefined
+      ? {
+          repeat: patch.repeat ?? undefined,
+          ...(patch.repeat === null ? { log: undefined } : {}),
+        }
+      : {}),
+  };
+}

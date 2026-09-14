@@ -146,7 +146,11 @@ export interface TasksRowProps {
   onExpand: (id: string | null) => void;
   /** Resolves when the write landed, rejects when the route refused it. */
   onComplete: (task: TaskView) => Promise<void>;
-  onReopen: (task: TaskView) => void;
+  /** `refusal` is the sentence a failed untick is reported in. Only the row
+   *  knows which note a linked task's box lives in, and that is the whole of
+   *  what the reader needs told: the write goes to somebody's document, so a
+   *  refusal names it. Everything else keeps the route's own `reason`. */
+  onReopen: (task: TaskView, refusal?: string) => void;
   onReschedule: (task: TaskView, when: string | "someday" | null, label: string) => Promise<void>;
   onPatch: (
     task: TaskView,
@@ -255,12 +259,18 @@ export function TasksRow({
     // offered on the newest one only, so there is nothing here to undo.
     if (historic) return;
     if (task.done) {
-      onReopen(task);
+      // Unticking a LINKED task writes `[ ]` back into its note, so a failure
+      // is a failure in that note and says so. An unlinked one is a record
+      // write and has nothing better to say than what the route said.
+      onReopen(
+        task,
+        linked ? `Couldn't untick in ${pageTitle ?? "that note"}` : undefined,
+      );
       return;
     }
     if (cancelHold()) return;
     beginHold();
-  }, [beginHold, cancelHold, historic, onReopen, task]);
+  }, [beginHold, cancelHold, historic, linked, onReopen, pageTitle, task]);
 
   /** ⌘⏎: the SELECTION moves on at once and the fold plays behind it. The
    *  hold is unchanged, because the way back has nothing to do with which hand made

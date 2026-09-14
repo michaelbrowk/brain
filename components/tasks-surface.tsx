@@ -15,15 +15,14 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { DUR, EASE_OUT, SPRING_MATERIALIZE, materializeFade } from "@/lib/motion";
-import { listOf } from "@/lib/tasks/lists";
-import type { TaskRepeat, TaskView } from "@/lib/tasks/model";
+import type { TaskView } from "@/lib/tasks/model";
 
-import { SMART_UNDO_MS, type TasksListState } from "./shell/helpers";
+import { type TasksListState } from "./shell/helpers";
+import { useTaskActions, type TaskFieldPatch } from "./tasks-actions";
 import {
   TaskRequestError,
   createTask,
   mutateTasks,
-  patchTask,
   reloadTasks,
   useTasks,
 } from "./tasks-client";
@@ -32,10 +31,10 @@ import { TasksGhostRow } from "./tasks-ghost-row";
 import { TasksListMenu } from "./tasks-list-menu";
 import {
   categoriesOf,
-  doneDayOf,
+  countsFor,
   headerLabel,
-  repeatNextDay,
   sectionsFor,
+  type TaskCounts,
   type TaskSection,
   type TasksView,
 } from "./tasks-lists";
@@ -96,14 +95,14 @@ export function TasksSurface({
     [list],
   );
 
-  /** Rows the fold is still playing on. They keep their PRE-write record, so
-   *  a completed task stays where it was for the 220ms it takes to leave
-   *  while the counts beside it have already moved on. That is the spec's one
-   *  decrement, at 1300, with the row still on screen until 1520. */
-  const [held, setHeld] = useState<ReadonlyMap<string, TaskView>>(new Map());
+  /** Every write a row can ask for, and the two sets that say which rows are
+   *  arriving and which are still folding. Shared with the Today block on
+   *  Home (`components/hub-today.tsx`), so a completion is one cycle and not
+   *  two implementations of one. */
+  const actions = useTaskActions({ today, onToast });
+  const { held, inserted } = actions;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
-  const [inserted, setInserted] = useState<ReadonlySet<string>>(new Set());
 
   const rows = useMemo(
     () => state.tasks.map((task) => held.get(task.id) ?? task),
@@ -131,212 +130,6 @@ export function TasksSurface({
     ready: sections.length > 0,
   });
 
-  const releaseFold = useCallback((id: string) => {
-    setHeld((current) => {
-      if (!current.has(id)) return current;
-      const next = new Map(current);
-      next.delete(id);
-      return next;
-    });
-  }, []);
-
-  const hold = useCallback((task: TaskView) => {
-    setHeld((current) => new Map(current).set(task.id, task));
-  }, []);
-
-  /** A row put back by Undo arrives the way a new one does: height 0 to its
-   *  own, plus opacity, with an empty box. Without this it would appear in
-   *  one frame, which is the one moment the reader is watching that spot. */
-  const reenter = useCallback((id: string) => {
-    setInserted((current) => new Set(current).add(id));
-  }, []);
-
-  const refuse = useCallback(
-    (error: unknown) => {
-      const message =
-        error instanceof TaskRequestError && error.message
-          ? error.message
-          : "That did not save";
-      onToast?.(message, { urgent: true });
-    },
-    [onToast],
-  );
-
-  /** THE ROW HANDED IN IS NOT ALWAYS THE RECORD.
-   *
-   *  A Logbook row of a repeating task is `logbookRows`' projection of ONE of
-   *  its completions: `done: true`, `doneAt` the entry's instant, `when` the
-   *  day that instance was owed. The record behind it is open and sitting on
-   *  its next occurrence. So neither the optimistic step nor the restore may
-   *  use it: writing the projection into the store would leave a repeating
-   *  record reading as done, which `listOf` files in the Logbook, and the open
-   *  instance would be gone from Today and Upcoming until the next reload.
-   *
-   *  The untick of a repeat therefore changes nothing locally and asks the
-   *  server on failure, because a refused write leaves a record this tab never
-   *  had a correct copy of.
-   */
-  const reopenTask = useCallback(
-    async (task: TaskView) => {
-      const projected = task.repeat !== undefined;
-      if (!projected) {
-        reenter(task.id);
-        mutateTasks((tasks) =>
-          tasks.map((entry) =>
-            entry.id === task.id ? { ...task, done: false, doneAt: undefined } : entry,
-          ),
-        );
-      }
-      try {
-        const saved = await patchTask(task.id, { done: false });
-        if (projected) reenter(saved.id);
-        mutateTasks((tasks) =>
-          tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
-        );
-      } catch (error) {
-        // The record, from the server. Never `task`: for a repeat that is the
-        // projection and would overwrite the live record with a done one.
-        if (projected) reloadTasks();
-        else {
-          mutateTasks((tasks) =>
-            tasks.map((entry) => (entry.id === task.id ? task : entry)),
-          );
-        }
-        refuse(error);
-      }
-    },
-    [reenter, refuse],
-  );
-
-  /** The write is issued HERE, at 1300, called by the row as its fold starts.
-   *  Nothing was sent before this point, so a cancelled completion leaves no
-   *  request, no `rev` bump and no commit behind it.
-   *
-   *  THE PILL FOLLOWS THE WRITE. The tick is optimistic because the reader
-   *  has to see their own press, but "Completed · Undo" is a REPORT, and a
-   *  report issued before the answer is known can be wrong: a refusal used to
-   *  leave a pill claiming the opposite of what happened, with a live Undo
-   *  that sent a second PATCH for a completion that never landed. So the row
-   *  moves at once, the sentence waits for the 2xx, and a refusal says one
-   *  thing in the route's own words.
-   */
-  const completeTask = useCallback(
-    async (task: TaskView) => {
-      hold(task);
-      // A REPEATING task is never done. Completing it appends a log entry and
-      // moves `when` to the next occurrence, so an optimistic `done: true`
-      // would file the series in the Logbook for as long as the write takes
-      // and then pull it back out. What moves optimistically is the DAY: the
-      // browser knows the rule, so the record leaves this list on the same
-      // beat an ordinary completion does and the count beside it decrements
-      // once, at 1300. The server's answer replaces it either way.
-      const nextDay = repeatNextDay(task, today);
-      mutateTasks((tasks) =>
-        tasks.map((entry) => {
-          if (entry.id !== task.id) return entry;
-          if (!task.repeat) {
-            return { ...entry, done: true, doneAt: new Date().toISOString() };
-          }
-          return nextDay === null ? entry : { ...entry, when: nextDay };
-        }),
-      );
-      try {
-        const saved = await patchTask(
-          task.id,
-          {
-            done: true,
-            // The instance this tab was looking at. Completing a repeat is
-            // not idempotent, so a second tick of the same one from another
-            // tab is refused with a 409 rather than silently skipping a
-            // period. An ordinary completion needs no such thing.
-            ...(task.repeat ? { expectedWhen: task.when ?? null } : {}),
-          },
-          task.repeat ? today : undefined,
-        );
-        mutateTasks((tasks) =>
-          tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
-        );
-        // Spec 2.4, the one case a person watches: the row folded up here and
-        // the NEXT occurrence arrives below, in the following day's group,
-        // with the insert entrance a new row gets. In Today the next one is
-        // tomorrow or later, so nothing appears and the mark is unused.
-        if (task.repeat) reenter(saved.id);
-        onToast?.("Completed", {
-          actionLabel: "Undo",
-          durationMs: SMART_UNDO_MS,
-          onAction: () => {
-            void reopenTask(saved);
-          },
-        });
-      } catch (error) {
-        mutateTasks((tasks) =>
-          tasks.map((entry) => (entry.id === task.id ? task : entry)),
-        );
-        refuse(error);
-        throw error;
-      }
-    },
-    [hold, onToast, reenter, refuse, reopenTask, today],
-  );
-
-  const rescheduleTask = useCallback(
-    async (task: TaskView, when: string | "someday" | null, label: string) => {
-      hold(task);
-      mutateTasks((tasks) =>
-        tasks.map((entry) =>
-          entry.id === task.id ? { ...entry, when: when ?? undefined } : entry,
-        ),
-      );
-      try {
-        const saved = await patchTask(task.id, { when });
-        mutateTasks((tasks) =>
-          tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
-        );
-        onToast?.(`Moved to ${label}`, {
-          actionLabel: "Undo",
-          durationMs: SMART_UNDO_MS,
-          onAction: () => {
-            reenter(task.id);
-            mutateTasks((tasks) =>
-              tasks.map((entry) => (entry.id === task.id ? task : entry)),
-            );
-            void patchTask(task.id, { when: task.when ?? null }).catch(refuse);
-          },
-        });
-      } catch (error) {
-        mutateTasks((tasks) =>
-          tasks.map((entry) => (entry.id === task.id ? task : entry)),
-        );
-        refuse(error);
-        throw error;
-      }
-    },
-    [hold, onToast, reenter, refuse],
-  );
-
-  const patchField = useCallback(
-    (task: TaskView, patch: TaskFieldPatch) => {
-      mutateTasks((tasks) =>
-        tasks.map((entry) =>
-          entry.id === task.id ? { ...entry, ...normalize(patch) } : entry,
-        ),
-      );
-      void patchTask(task.id, patch)
-        .then((saved) =>
-          mutateTasks((tasks) =>
-            tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
-          ),
-        )
-        .catch((error: unknown) => {
-          mutateTasks((tasks) =>
-            tasks.map((entry) => (entry.id === task.id ? task : entry)),
-          );
-          refuse(error);
-        });
-    },
-    [refuse],
-  );
-
   /** A TASK LANDS IN THE LIST IT WAS TYPED INTO. Anything else files what the
    *  reader has written somewhere they are not looking, with no feedback.
    *
@@ -361,12 +154,19 @@ export function TasksSurface({
                 : {};
       void createTask({ title, ...seed })
         .then((task) => {
-          setInserted((current) => new Set(current).add(task.id));
+          actions.markInserted(task.id);
           mutateTasks((tasks) => [task, ...tasks]);
         })
-        .catch(refuse);
+        .catch((error: unknown) => {
+          onToast?.(
+            error instanceof TaskRequestError && error.message
+              ? error.message
+              : "That did not save",
+            { urgent: true },
+          );
+        });
     },
-    [refuse, today, view],
+    [actions, onToast, today, view],
   );
 
   const selectNext = useCallback(
@@ -387,9 +187,9 @@ export function TasksSurface({
       // letters give on the row itself.
       if (!row || !row.untickable) return;
       const move = COMMAND_KEYS[command];
-      void rescheduleTask(row.task, move.when(today), move.label);
+      void actions.rescheduleTask(row.task, move.when(today), move.label);
     });
-  }, [drawn, rescheduleTask, selectedId, today]);
+  }, [actions, drawn, selectedId, today]);
 
   // Every list but the Logbook: see `capture`.
   const capturable = !(view.kind === "list" && view.list === "logbook");
@@ -453,11 +253,13 @@ export function TasksSurface({
                 onSelect={setSelectedId}
                 onSelectNext={selectNext}
                 onExpand={setExpandedId}
-                onComplete={completeTask}
-                onReopen={(task) => void reopenTask(task)}
-                onReschedule={rescheduleTask}
-                onPatch={patchField}
-                onFoldEnd={releaseFold}
+                onComplete={actions.completeTask}
+                onReopen={(task, refusal) =>
+                  void actions.reopenTask(task, refusal)
+                }
+                onReschedule={actions.rescheduleTask}
+                onPatch={actions.patchField}
+                onFoldEnd={actions.releaseFold}
               />
             ))}
           </AnimatePresence>
@@ -497,30 +299,10 @@ const COMMAND_KEYS: Record<TaskCommand, (typeof ROW_KEYS)[string]> = {
   "move-someday": ROW_KEYS.s as (typeof ROW_KEYS)[string],
 };
 
-/** The fields a chip inside an expanded row can set. `null` clears one, which
- *  is the store's own reading of a patch. */
-export interface TaskFieldPatch {
-  title?: string;
-  deadline?: string | null;
-  category?: string | null;
-  repeat?: TaskRepeat | null;
-}
-
-function normalize(patch: TaskFieldPatch): Partial<TaskView> {
-  return {
-    ...(patch.title !== undefined ? { title: patch.title } : {}),
-    ...(patch.deadline !== undefined ? { deadline: patch.deadline ?? undefined } : {}),
-    ...(patch.category !== undefined ? { category: patch.category ?? undefined } : {}),
-    // Clearing the rule clears the history with it, the way the record does:
-    // `log` beside no `repeat` is a shape nothing reads.
-    ...(patch.repeat !== undefined
-      ? {
-          repeat: patch.repeat ?? undefined,
-          ...(patch.repeat === null ? { log: undefined } : {}),
-        }
-      : {}),
-  };
-}
+/** The fields a chip inside an expanded row can set. Its one home is
+ *  `components/tasks-actions`, beside the write that applies it; re-exported
+ *  for the callers that already had the type from here. */
+export type { TaskFieldPatch };
 
 function TaskGroup({
   section,
@@ -565,7 +347,7 @@ function TaskGroup({
   onSelectNext: (afterId: string) => void;
   onExpand: (id: string | null) => void;
   onComplete: (task: TaskView) => Promise<void>;
-  onReopen: (task: TaskView) => void;
+  onReopen: (task: TaskView, refusal?: string) => void;
   onReschedule: (
     task: TaskView,
     when: string | "someday" | null,
@@ -689,48 +471,20 @@ function countSuffix(count: number): string {
   return headerLabel("", count);
 }
 
-export interface TaskCounts {
-  doneToday: number;
-  upcomingThisWeek: number;
-}
+/** The two numbers the empty states report. Its one home is
+ *  `components/tasks-lists`, beside the derive that says which list a record
+ *  is in; Home's Today block reads the same one. */
+export type { TaskCounts };
 
 function useCounts(
   tasks: readonly TaskView[],
   today: string,
   offsetMinutes: number,
 ): TaskCounts {
-  return useMemo(() => {
-    if (!today) return { doneToday: 0, upcomingThisWeek: 0 };
-    let doneToday = 0;
-    let upcomingThisWeek = 0;
-    for (const task of tasks) {
-      const list = listOf(task, today);
-      if (list === "logbook") {
-        if (task.doneAt && doneDayOf(task.doneAt, offsetMinutes) === today) doneToday += 1;
-        continue;
-      }
-      if (list === "upcoming" && withinWeek(task, today)) upcomingThisWeek += 1;
-    }
-    return { doneToday, upcomingThisWeek };
-  }, [offsetMinutes, tasks, today]);
-}
-
-function withinWeek(task: TaskView, today: string): boolean {
-  const days = [task.when, task.deadline].filter(
-    (value): value is string => typeof value === "string" && value > today,
+  return useMemo(
+    () => countsFor(tasks, today, offsetMinutes),
+    [offsetMinutes, tasks, today],
   );
-  if (days.length === 0) return false;
-  const soonest = days.sort()[0] as string;
-  const limit = new Date(
-    Date.UTC(
-      Number(today.slice(0, 4)),
-      Number(today.slice(5, 7)) - 1,
-      Number(today.slice(8, 10)) + 7,
-    ),
-  )
-    .toISOString()
-    .slice(0, 10);
-  return soonest <= limit;
 }
 
 /** Seven states, and the two Today hints are alternatives rather than both. */

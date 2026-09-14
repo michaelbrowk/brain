@@ -625,6 +625,43 @@ describe("the task read tools", () => {
     expect(mocks.getStore).not.toHaveBeenCalled();
   });
 
+  it("answers the logbook with completions, repeat rows included", async () => {
+    // A repeating record is never done, so a filter over records would tell an
+    // agent that nothing repeating was ever finished. The store derives the
+    // rows from `log`, and this is the caller that cannot derive its own.
+    const completion = (scheduled: string, completedAt: string) => ({
+      ...view(),
+      id: "task-words",
+      title: "Learn words",
+      repeat: { freq: "daily" },
+      done: true,
+      when: scheduled,
+      doneAt: completedAt,
+    });
+    const rows = [
+      completion("2026-09-13", "2026-09-13T09:00:00.000Z"),
+      completion("2026-09-12", "2026-09-12T09:00:00.000Z"),
+    ];
+    const listTasks = vi.fn().mockReturnValue(rows);
+    mocks.getStore.mockResolvedValue({ listTasks });
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "list_tasks",
+        { list: "logbook", today: TODAY, offsetMinutes: 0 },
+        12,
+      ),
+    );
+
+    // Two rows under one record id, each carrying its own completion: the
+    // store's own derivation, handed through untouched.
+    expect(payload.tasks).toEqual(rows);
+    expect(listTasks).toHaveBeenCalledWith(TODAY, {
+      list: "logbook",
+      offsetMinutes: 0,
+    });
+  });
+
   it("passes the caller's offset through to the logbook read", async () => {
     const listTasks = vi.fn().mockReturnValue([]);
     mocks.getStore.mockResolvedValue({ listTasks });

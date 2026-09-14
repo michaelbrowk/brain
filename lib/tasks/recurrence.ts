@@ -145,13 +145,21 @@ export function advance(record: TaskRecord, options: AdvanceOptions): TaskRecord
     // checked.
     if (!isDay(options.today)) throw new RecurrenceError("bad-today");
 
-    // The day this instance was owed. A repeating task parked on `someday`,
-    // or filed under no day at all, has none, and the day it was finished is
-    // then the honest answer for the log.
-    const scheduled = isDay(record.when) ? record.when : options.today;
-    const from = later(options.today, scheduled);
-    const entry: TaskLogEntry = { scheduled, completedAt: options.completedAt };
+    // The entry remembers `when` EXACTLY, because the untick is this read
+    // backwards and it has to put the task back where it stood. A repeat
+    // parked on `someday` that came back dated, or an Inbox one that came
+    // back on a day, would be the gesture moving something nobody asked it to
+    // move. So the word and the absence are both kept, and only the
+    // arithmetic below insists on a real day.
+    const entry: TaskLogEntry = {
+      ...(record.when !== undefined ? { scheduled: record.when } : {}),
+      completedAt: options.completedAt,
+    };
     const log = [...(record.log ?? []), entry].slice(-MAX_LOG_ENTRIES);
+    // Where to count from. A task with no day the rule can read is owed
+    // today: `someday` sorts above every digit and would win every
+    // comparison, and nothing at all has no day to compare.
+    const from = isDay(record.when) ? later(options.today, record.when) : options.today;
 
     const advanced: TaskRecord = {
       ...record,
@@ -175,8 +183,9 @@ export function advance(record: TaskRecord, options: AdvanceOptions): TaskRecord
 }
 
 /** One completion taken back, which is `advance()`'s completion read
- *  backwards: the newest `log` entry is popped and `when` returns to the day
- *  that entry was owed.
+ *  backwards: the newest `log` entry is popped and `when` returns to exactly
+ *  what it was when that entry was written, the word `someday` and no day at
+ *  all included.
  *
  *  The newest and no other. The Logbook offers an untick on the most recent
  *  entry of a repeating task only, so there is no index to take: an older
@@ -193,7 +202,9 @@ export function revert(record: TaskRecord): TaskRecord {
   const newest = log[log.length - 1];
   if (!newest) throw new RecurrenceError("empty-log");
 
-  const reverted: TaskRecord = { ...record, when: newest.scheduled };
+  const reverted: TaskRecord = { ...record };
+  if (newest.scheduled === undefined) delete reverted.when;
+  else reverted.when = newest.scheduled;
   const rest = log.slice(0, -1);
   if (rest.length === 0) delete reverted.log;
   else reverted.log = rest;

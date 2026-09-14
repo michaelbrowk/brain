@@ -132,9 +132,18 @@ export const taskRepeatSchema = z.discriminatedUnion("freq", [
 /** One completed occurrence of a repeating task. Both halves are load-bearing:
  *  completing early gives an instance scheduled tomorrow a completion today,
  *  so the day it was due and the instant it was finished are two values.
- *  Untick pops the newest entry and restores `when` to its `scheduled`. */
+ *  Untick pops the newest entry and restores `when` to its `scheduled`.
+ *
+ *  `scheduled` is exactly what `when` was, which is why it takes `when`'s own
+ *  three shapes and not only a day. An untick has to be the completion read
+ *  backwards: a repeat parked on `someday` that came back as a dated task, or
+ *  an Inbox one that came back dated, would be the gesture changing something
+ *  nobody asked it to. The word and the absence are both restored. */
 export const taskLogEntrySchema = z
-  .object({ scheduled: dayField, completedAt: instantField })
+  .object({
+    scheduled: z.union([dayField, z.literal("someday")]).optional(),
+    completedAt: instantField,
+  })
   .strict();
 
 /** The field list on its own, before the cross-field rules turn the schema
@@ -184,13 +193,13 @@ export const taskRecordRules = (
       path: ["repeat"],
     });
   }
-  if (value.log && !value.repeat) {
-    ctx.addIssue({
-      code: z.ZodIssueCode.custom,
-      message: "log belongs to a repeating task",
-      path: ["log"],
-    });
-  }
+  // `log` outlives `repeat` on purpose. Stopping a repeat removes the rule and
+  // keeps the instance as an ordinary task, and the completions it already has
+  // are the Logbook's: up to thirty days of rows, including the one the person
+  // may be looking at when they pick "Don't repeat". A rule that forced the
+  // two to travel together made that gesture erase history, so there is no
+  // rule here any more. A record with a log and no rule completes nothing
+  // further; its entries are read-only history.
   // A detach names the note the line was removed from, so there is no such
   // thing as being detached from nothing.
   if (value.detachedAt !== undefined && !value.page) {

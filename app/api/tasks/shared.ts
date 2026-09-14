@@ -50,6 +50,17 @@ export function badRequest(error: string): NextResponse {
   return NextResponse.json({ error }, { status: 400 });
 }
 
+/** The instance moved between the row being drawn and the tick reaching the
+ *  store. Nothing about the request is malformed, so it is a 409 and not a
+ *  400, and it carries where the task actually stands so a client can re-read
+ *  without a second round trip. */
+export function conflict(error: string, currentWhen: string | undefined): NextResponse {
+  return NextResponse.json(
+    { error, reason: "when_moved", ...(currentWhen !== undefined ? { currentWhen } : {}) },
+    { status: 409 },
+  );
+}
+
 export function notFound(): NextResponse {
   // The same body for a task that never existed and one the caller may not
   // name, so a 404 says nothing about what is on disk.
@@ -128,6 +139,7 @@ export const PATCH_FIELDS = [
   "category",
   "repeat",
   "done",
+  "expectedWhen",
 ] as const;
 
 export interface PatchBody {
@@ -137,4 +149,8 @@ export interface PatchBody {
   category?: string | null;
   repeat?: TaskRepeat | null;
   done?: boolean;
+  /** Not a field to set: the `when` of the instance the caller was looking at,
+   *  which a repeating task's completion is refused against when the record
+   *  has moved since. `null` for an instance filed under no day. */
+  expectedWhen?: string | null;
 }

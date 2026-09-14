@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { getStore, isNotFound, isTaskValidation } from "@/lib/store";
+import { getStore, isNotFound, isTaskConflict, isTaskValidation } from "@/lib/store";
 import {
   PATCH_FIELDS,
   assertTaskId,
   badRequest,
   clientId,
+  conflict,
   isDay,
   notFound,
   readJsonObject,
@@ -67,6 +68,9 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
     return NextResponse.json({ task });
   } catch (error) {
     if (isNotFound(error)) return notFound();
+    // The instance moved between the row being drawn and the tick landing.
+    // Not malformed, so not a 400: a 409 with where the task now stands.
+    if (isTaskConflict(error)) return conflict(error.reason, error.currentWhen);
     if (isTaskValidation(error)) return badRequest(error.reason);
     throw error;
   }

@@ -536,3 +536,107 @@ describe("logbookRows", () => {
     expect(logbookRows([repeating({ log: [edge] })], TODAY, 0)).toHaveLength(0);
   });
 });
+
+/** THE DERIVATION IS TOTAL OVER THE LOGBOOK.
+ *
+ *  A record `listOf` files in the Logbook that `logbookRows` draws no row for
+ *  is a record nothing on the surface can reach: every other list rejects it
+ *  for being done, and the Logbook does not draw it. So the two sources are
+ *  added rather than chosen between. */
+describe("logbookRows, every record listOf files in the logbook", () => {
+  const shapes: { name: string; fields: Partial<TaskView>; rows: number }[] = [
+    {
+      name: "an ordinary done record",
+      fields: { done: true, doneAt: "2026-09-13T09:00:00.000Z" },
+      rows: 1,
+    },
+    {
+      name: "a done record that also carries a rule, which an import can make",
+      fields: {
+        done: true,
+        doneAt: "2026-09-13T09:00:00.000Z",
+        repeat: { freq: "daily" },
+      },
+      rows: 1,
+    },
+    {
+      name: "a done record with a rule and a log",
+      fields: {
+        done: true,
+        doneAt: "2026-09-13T09:00:00.000Z",
+        repeat: { freq: "daily" },
+        log: [{ scheduled: "2026-09-12", completedAt: "2026-09-12T09:00:00.000Z" }],
+      },
+      rows: 2,
+    },
+    {
+      name: "a done record with no instant at all",
+      fields: { done: true },
+      rows: 1,
+    },
+  ];
+
+  for (const { name, fields, rows } of shapes) {
+    it(`draws ${rows} for ${name}`, () => {
+      const record = task(fields);
+      expect(listOf(record, TODAY)).toBe("logbook");
+      expect(logbookRows([record], TODAY, 0)).toHaveLength(rows);
+    });
+  }
+
+  it("keeps the history of a repeat that was stopped", () => {
+    // Stopping a rule leaves the instance as an ordinary open task and keeps
+    // its completions, so the rows outlive the rule. They are history from
+    // there on: there is no rule left to put the series back on.
+    const stopped = task({
+      when: "2026-09-14",
+      log: [
+        { scheduled: "2026-09-12", completedAt: "2026-09-12T09:00:00.000Z" },
+        { scheduled: "2026-09-13", completedAt: "2026-09-13T09:00:00.000Z" },
+      ],
+    });
+
+    const rows = logbookRows([stopped], TODAY, 0);
+
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.untickable)).toEqual([false, false]);
+    // And the record itself is still open, in the list its day puts it in.
+    expect(listOf(stopped, TODAY)).toBe("upcoming");
+  });
+
+  it("puts the untick on the record's own done, not on its newest entry", () => {
+    // A record that owns its `done` answers the untick through that. Offering
+    // it on the log entry as well would be two gestures for one state.
+    const both = task({
+      done: true,
+      doneAt: "2026-09-13T12:00:00.000Z",
+      repeat: { freq: "daily" },
+      log: [{ scheduled: "2026-09-13", completedAt: "2026-09-13T09:00:00.000Z" }],
+    });
+
+    const rows = logbookRows([both], TODAY, 0);
+
+    expect(rows.map((row) => row.untickable)).toEqual([true, false]);
+    expect(rows[0].key).toBe(both.id);
+  });
+
+  it("restores what when held, including the word and the absence", () => {
+    const parked = task({
+      repeat: { freq: "daily" },
+      when: "2026-09-14",
+      log: [
+        { scheduled: "someday", completedAt: "2026-09-12T09:00:00.000Z" },
+        { completedAt: "2026-09-13T09:00:00.000Z" },
+      ],
+    });
+
+    const rows = logbookRows([parked], TODAY, 0);
+
+    // The row carries the instance's own `when`, which is what the untick puts
+    // back: a `someday` repeat comes back on `someday` and an Inbox one comes
+    // back with no day at all.
+    expect(rows[0].task.when).toBeUndefined();
+    expect("when" in rows[0].task).toBe(false);
+    expect(rows[1].task.when).toBe("someday");
+  });
+});

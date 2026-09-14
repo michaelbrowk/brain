@@ -251,9 +251,14 @@ export interface TaskPatch {
   deadline?: string | null;
   category?: string | null;
   /** `null` stops the task repeating and leaves the current instance as an
-   *  ordinary task. The record's `log` goes with the rule. */
+   *  ordinary task. Its completions stay: they are the Logbook's. */
   repeat?: TaskRepeat | null;
   done?: boolean;
+  /** Not a field to set: the `when` of the instance this tab was looking at.
+   *  A repeating completion is refused with a 409 when the record has moved
+   *  since, because two ticks of one instance would skip a period with
+   *  nothing said. `null` for an instance filed under no day. */
+  expectedWhen?: string | null;
 }
 
 /** `today` rides along only where the store takes it: completing a repeating

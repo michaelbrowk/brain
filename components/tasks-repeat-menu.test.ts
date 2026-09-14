@@ -9,7 +9,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import type { TaskRepeat, TaskView } from "@/lib/tasks/model";
+import { parseTaskRecord, type TaskRepeat, type TaskView } from "@/lib/tasks/model";
 
 import { repeatOptions, repeatWord } from "./tasks-repeat-menu";
 
@@ -96,14 +96,29 @@ describe("repeatOptions", () => {
     expect(options[3]).toEqual({ kind: "none", label: "Don't repeat", repeat: null });
   });
 
-  it("offers no interval, no end date and no count", () => {
-    // The rows are the whole control surface. A form the menu does not draw
-    // cannot be asked for, which is what makes the "this one or all future"
-    // dialog unnecessary by construction.
-    for (const option of repeatOptions(task({ repeat: { freq: "daily" } }), TODAY)) {
-      expect(Object.keys(option.repeat ?? {}).sort()).not.toContain("interval");
-      expect(Object.keys(option.repeat ?? {}).sort()).not.toContain("until");
-      expect(Object.keys(option.repeat ?? {}).sort()).not.toContain("count");
+  it("writes rules the schema accepts, and only the three forms there are", () => {
+    // Every row is checked against the record schema rather than against a
+    // list of keys it could not carry anyway: `TaskRepeat` is a closed union,
+    // so the absence of `interval`, `until` and `count` is TypeScript's to
+    // enforce and there is nothing here for a test to catch. What IS worth
+    // catching is a row that writes a rule the schema would refuse.
+    const base = {
+      id: "task-words",
+      title: "Learn words",
+      created: "2026-09-01T09:00:00.000Z",
+      updated: "2026-09-01T09:00:00.000Z",
+    };
+    const options = repeatOptions(task({ when: "2026-09-17", repeat: { freq: "daily" } }), TODAY);
+
+    expect(options.map((option) => option.kind)).toEqual([
+      "daily",
+      "weekly",
+      "monthly",
+      "none",
+    ]);
+    for (const option of options) {
+      if (option.repeat === null) continue;
+      expect(parseTaskRecord({ ...base, repeat: option.repeat }).ok).toBe(true);
     }
   });
 });

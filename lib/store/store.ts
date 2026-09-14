@@ -117,6 +117,7 @@ import {
   PageRefNestValidationError,
   QuickCaptureConflictError,
   RevConflictError,
+  TaskConflictError,
   TaskValidationError,
   type CreateTaskInput,
   type TaskListFilter,
@@ -146,6 +147,7 @@ import {
   doneDayOf,
   groupFor,
   listOf,
+  logbookRows,
   type ListName,
 } from "../tasks/lists";
 import { parseTaskLines } from "../tasks/task-lines";
@@ -6621,6 +6623,13 @@ export class Store {
    *  No list membership is stored, so this is a pure derivation over the
    *  index plus one date. Tasks whose page is in the trash are in no list,
    *  and the Logbook stops at its window.
+   *
+   *  `list: "logbook"` is the one branch that does not return records. The
+   *  Logbook draws one row per COMPLETION, and a repeating task's completions
+   *  live in its `log` while the record itself stays open, so a filter over
+   *  records would answer that nothing repeating was ever finished. The
+   *  unfiltered read still returns records: the surface fetches everything and
+   *  derives its own rows, and it needs the open instance as itself.
    */
   listTasks(today: string, filter: TaskListFilter = {}): TaskView[] {
     assertToday(today);
@@ -6631,6 +6640,16 @@ export class Store {
     const readsLogbook = filter.list === undefined || filter.list === "logbook";
     if (readsLogbook) assertOffsetMinutes(filter.offsetMinutes);
     const offsetMinutes = filter.offsetMinutes ?? 0;
+    if (filter.list === "logbook") {
+      const shown = this.taskIndex
+        .views()
+        .filter(
+          (task) =>
+            !this.taskHidden(task) &&
+            (filter.category === undefined || task.category === filter.category),
+        );
+      return logbookRows(shown, today, offsetMinutes).map((row) => row.task);
+    }
     const windowStart = logbookWindowStart(today);
     const visible = this.taskIndex.views().filter((task) => {
       if (this.taskHidden(task)) return false;
@@ -6694,7 +6713,13 @@ export class Store {
       // A repeating task is never linked and never detached: the schema
       // refuses `repeat` beside `page`, so its completion can only be the
       // rule's, and the branch below cannot compete with the note's.
-      if (patch.done !== undefined && current.repeat) {
+      //
+      // `current.done` on a record that also carries a rule is a shape only a
+      // hand edit or an import can make (the patch path refuses it). Such a
+      // record owns its completion through `done` and the untick belongs to
+      // that, not to the log, so it takes the ordinary path below.
+      const ownsItsDone = patch.done === false && current.done === true;
+      if (patch.done !== undefined && current.repeat && !ownsItsDone) {
         await this.advanceTaskUnlocked(current, patch);
         return this.taskIndex.view(id) as TaskView;
       }
@@ -6760,6 +6785,23 @@ export class Store {
     // answers to where the task goes next, and a silently dropped one is the
     // worse of the two. The caller sends them as two requests.
     assertOnlyCompletion(patch, "a repeating task's completion");
+    // TWO TICKS OF ONE INSTANCE. Completing a repeat is not idempotent: each
+    // one appends an entry and moves `when` a rule date on, so a double press,
+    // a retried request or a second tab would silently skip a period.
+    // `mutate()` serialises them, so the second read is of the already
+    // advanced record and cannot notice on its own. The caller sends the
+    // `when` it was looking at, and this is where a stale one is refused.
+    // `when` is the whole of what a completion depends on, so no task `rev`
+    // is needed for it.
+    if (
+      patch.expectedWhen !== undefined &&
+      patch.expectedWhen !== (current.when ?? null)
+    ) {
+      throw new TaskConflictError(
+        "this task has already moved on: reload and try again",
+        current.when,
+      );
+    }
     const at = new Date().toISOString();
     let next: TaskRecord;
     try {
@@ -7156,6 +7198,16 @@ function applyTaskPatch(
   patch: UpdateTaskPatch,
 ): TaskRecord {
   assertRepeatUnlinked(patch.repeat, current.page);
+  // A rule belongs to a task that is still going. On a DONE record it would
+  // describe a series with no open instance: `listOf` files the record in the
+  // Logbook because `done` is true, and the rule promises a next occurrence
+  // nothing will ever write. The surface does not offer the chip on a done
+  // row; this is the same answer for a caller that asks anyway.
+  if (patch.repeat !== undefined && patch.repeat !== null && current.done) {
+    throw new TaskValidationError(
+      "a task that is already done cannot take a repeat rule",
+    );
+  }
   const next: Record<string, unknown> = { ...current };
   if (patch.title !== undefined) {
     // The note line is a linked task's title. The copy in the file is a cache
@@ -7181,10 +7233,11 @@ function applyTaskPatch(
   assignOrClear(next, "deadline", patch.deadline);
   assignOrClear(next, "category", patch.category);
   assignOrClear(next, "repeat", patch.repeat);
-  // The history goes with the rule. `log` beside no `repeat` is a shape the
-  // schema refuses, so leaving it behind would make the file unreadable on the
-  // next load and the task would vanish from every list.
-  if (patch.repeat === null) delete next.log;
+  // `log` STAYS when the rule goes. Stopping a repeat leaves the instance as
+  // an ordinary task, and its completions are the Logbook's: up to thirty
+  // days of rows, one of which may be the row the person is looking at when
+  // they pick "Don't repeat". They are read-only history from here on, and
+  // `logbookRows` draws them whether or not a rule is still there.
   if (patch.done !== undefined) {
     // A linked task is completed by its checkbox, so `updateTask` writes the
     // note and the reconcile derives this. A detached one owns its own

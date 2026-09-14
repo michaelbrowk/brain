@@ -102,12 +102,24 @@ export interface LogbookRow {
    *  instant and `when` is the day that instance was owed. Never written. */
   readonly task: TaskView;
   /** Whether an untick is offered. Every ordinary done record, and the newest
-   *  entry of a repeating task only: an older entry is history, and undoing
-   *  one would leave the series on a day nothing put it on. */
+   *  entry of a task that still repeats: an older entry is history, and so is
+   *  every entry of a task whose rule has been stopped, because there is no
+   *  rule left to put the series back on. */
   readonly untickable: boolean;
 }
 
 /** Every completion the Logbook shows, newest first.
+ *
+ *  TOTAL over the records `listOf` files in the Logbook, which is the property
+ *  that matters: a record this returns no row for, and that every other list
+ *  rejects, is a record nothing on the surface can reach again. So the two
+ *  sources are added rather than chosen between. A record can contribute log
+ *  entries, its own `done`, both, or neither:
+ *
+ *  - `log` entries are read whether or not the rule is still there. Stopping a
+ *    repeat keeps the history (`model.ts`), so those rows outlive the rule.
+ *  - `done` draws its own row on top, which is the ordinary case and also the
+ *    one a hand-edited or imported `{done, repeat}` record lands in.
  *
  *  `offsetMinutes` decides the window edge for the same reason it decides the
  *  group header: a completion is one UTC instant and the day it falls on is
@@ -119,7 +131,7 @@ export function logbookRows(
   offsetMinutes: number,
 ): LogbookRow[] {
   const windowStart = logbookWindowStart(today);
-  // A completion with no instant has no day to measure, and `lists.ts` places
+  // A completion with no instant has no day to measure, and this file places
   // it deliberately at the foot of the Logbook under no header, so the window
   // must not be the thing that drops it.
   const inWindow = (instant: string | undefined): boolean =>
@@ -127,25 +139,28 @@ export function logbookRows(
 
   const rows: LogbookRow[] = [];
   for (const task of tasks) {
-    if (task.repeat) {
-      const log = task.log ?? [];
-      for (const [at, completion] of log.entries()) {
-        if (!inWindow(completion.completedAt)) continue;
-        rows.push({
-          key: `${task.id}:${completion.completedAt}`,
-          task: {
-            ...task,
-            done: true,
-            doneAt: completion.completedAt,
-            when: completion.scheduled,
-          },
-          untickable: at === log.length - 1,
-        });
-      }
-      continue;
+    const log = task.log ?? [];
+    for (const [at, completion] of log.entries()) {
+      if (!inWindow(completion.completedAt)) continue;
+      const projected: TaskView = {
+        ...task,
+        done: true,
+        doneAt: completion.completedAt,
+      };
+      if (completion.scheduled === undefined) delete projected.when;
+      else projected.when = completion.scheduled;
+      rows.push({
+        key: `${task.id}:${completion.completedAt}`,
+        task: projected,
+        // The newest, and only while a rule is there to undo it against. A
+        // record that is itself done owns its completion through `done`, and
+        // that is the row the untick belongs to.
+        untickable: at === log.length - 1 && task.repeat !== undefined && !task.done,
+      });
     }
-    if (!task.done || !inWindow(task.doneAt)) continue;
-    rows.push({ key: task.id, task, untickable: true });
+    if (task.done && inWindow(task.doneAt)) {
+      rows.push({ key: task.id, task, untickable: true });
+    }
   }
   return rows.sort(
     (a, b) => compareInGroup(a.task, b.task, "logbook") || ascending(a.key, b.key),

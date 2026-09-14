@@ -30,7 +30,7 @@ vi.mock("framer-motion", async () => {
 const pressAnimate = vi.fn(() => ({ stop: () => {} }));
 vi.mock("framer-motion/dom", () => ({ animate: pressAnimate }));
 
-const { TasksRow, foldRow } = await import("./tasks-row");
+const { TasksRow, foldRow, WRITE_AT_MS: WRITE_AT } = await import("./tasks-row");
 const { DUR } = await import("@/lib/motion");
 const { renderTaskCheckbox } = await import("./tasks-checkbox");
 const { SOLAR } = await import("./ui/solar-icons.generated");
@@ -235,6 +235,34 @@ describe("what the row draws", () => {
     expect(tail().textContent).toBe("");
   });
 
+  it("puts the tail and the title back when the write is refused", async () => {
+    // The hold dims the title and grows the tail that names the next
+    // occurrence. A refusal has to take back everything the hold changed, not
+    // only the tick: a row left holding reads as completed while the toast
+    // says it failed.
+    calls.complete.mockRejectedValueOnce(new Error("refused"));
+    await renderRows([
+      task("a", { repeat: { freq: "weekly", byWeekday: ["thu"] }, when: TODAY }),
+    ]);
+    const item = () => document.querySelector(".brain-task-row-item") as HTMLElement;
+    const tail = () => document.querySelector(".brain-task-tail") as HTMLElement;
+
+    await act(async () => box().click());
+    expect(tail().textContent).toBe("Thu 17");
+    expect(item().hasAttribute("data-holding")).toBe(true);
+
+    await act(async () => {
+      vi.advanceTimersByTime(WRITE_AT);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(box().getAttribute("aria-checked")).toBe("false");
+    expect(item().hasAttribute("data-holding")).toBe(false);
+    expect(tail().textContent).toBe("");
+  });
+
   it("crossfades the next occurrence under reduced motion too", async () => {
     // `materializeFade` IS the reduced-motion shape: opacity at DUR.fast and
     // nothing that travels. The tail carries it in both settings, so there is
@@ -415,6 +443,46 @@ describe("the repeat chip", () => {
       { expanded: true },
     );
     expect(chipLabels()).not.toContain("Repeat");
+  });
+
+  it("is not offered on a done row, in the Logbook or anywhere else", async () => {
+    // A rule on a done record promises a next occurrence nothing will write:
+    // `listOf` files it in the Logbook because `done` is true, and it would
+    // sit there claiming to repeat. The store refuses the same shape.
+    await renderRows(
+      [task("a", { done: true, doneAt: "2026-09-13T09:00:00.000Z" })],
+      { expanded: true },
+    );
+    expect(chipLabels()).not.toContain("Repeat");
+
+    // Including a done row of a record that already has a rule, which only an
+    // import can make: there is nothing to change about it from here.
+    await renderRows(
+      [
+        task("b", {
+          done: true,
+          doneAt: "2026-09-13T09:00:00.000Z",
+          repeat: { freq: "daily" },
+        }),
+      ],
+      { expanded: true },
+    );
+    expect(chipLabels()).not.toContain("Daily");
+  });
+
+  it("names the rule it would set, not the word twice, for a screen reader", async () => {
+    await renderRows([task("a", { when: "2026-09-17" })], { expanded: true });
+    const chipOf = (label: string) =>
+      [...document.querySelectorAll(".chip")].find(
+        (node) => node.getAttribute("aria-label") === label,
+      );
+    expect(chipOf("Repeat")).not.toBeUndefined();
+
+    await renderRows(
+      [task("b", { when: "2026-09-17", repeat: { freq: "weekly", byWeekday: ["thu"] } })],
+      { expanded: true },
+    );
+    expect(chipOf("Repeat: every week on Thu")).not.toBeUndefined();
   });
 
 });

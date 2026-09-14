@@ -229,6 +229,11 @@ export function TasksRow({
     if (refused) {
       fold?.cancel();
       if (boxRef.current) setTaskCheckboxChecked(boxRef.current, false, reduce);
+      // Everything the hold changed goes back, not only the tick. `holding`
+      // dims the title and grows the tail that names the next occurrence, so
+      // a row left holding after a refusal reads as completed while the toast
+      // says it failed.
+      setHolding(false);
       onFoldEnd(task.id);
       return;
     }
@@ -484,13 +489,16 @@ export function TasksRow({
                     onSet={(category) => onPatch(task, { category: category || null })}
                     revealClass=""
                   />
-                  {/* A rule can be added to any task that is not a note
+                  {/* A rule can be added to an OPEN task that is not a note
                       line's, and to no other (decision 14): a linked task's
                       completion is the checkbox in somebody's document, and a
                       repeat would have to write `[ ]` back into it every
                       morning. A detached one has no line left and still came
-                      from one, so it is not offered either. */}
-                  {!linked && !detached && (
+                      from one. And a DONE one has no next occurrence to
+                      promise: the rule would describe a series with no open
+                      instance, and the record would sit in the Logbook
+                      claiming to repeat. The store refuses that shape too. */}
+                  {!linked && !detached && !task.done && (
                     <TasksRepeatMenu
                       task={task}
                       today={today}

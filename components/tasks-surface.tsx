@@ -162,15 +162,25 @@ export function TasksSurface({
     [onToast],
   );
 
+  /** THE ROW HANDED IN IS NOT ALWAYS THE RECORD.
+   *
+   *  A Logbook row of a repeating task is `logbookRows`' projection of ONE of
+   *  its completions: `done: true`, `doneAt` the entry's instant, `when` the
+   *  day that instance was owed. The record behind it is open and sitting on
+   *  its next occurrence. So neither the optimistic step nor the restore may
+   *  use it: writing the projection into the store would leave a repeating
+   *  record reading as done, which `listOf` files in the Logbook, and the open
+   *  instance would be gone from Today and Upcoming until the next reload.
+   *
+   *  The untick of a repeat therefore changes nothing locally and asks the
+   *  server on failure, because a refused write leaves a record this tab never
+   *  had a correct copy of.
+   */
   const reopenTask = useCallback(
     async (task: TaskView) => {
-      reenter(task.id);
-      // A REPEATING task's untick pops its newest log entry and puts `when`
-      // back to the day that instance was owed, which is the rule's answer
-      // and not one the browser can guess: the record it is holding is the
-      // series, and flipping `done` on it here would draw a done row for a
-      // task that is never done. The row waits for the write.
-      if (!task.repeat) {
+      const projected = task.repeat !== undefined;
+      if (!projected) {
+        reenter(task.id);
         mutateTasks((tasks) =>
           tasks.map((entry) =>
             entry.id === task.id ? { ...task, done: false, doneAt: undefined } : entry,
@@ -179,13 +189,19 @@ export function TasksSurface({
       }
       try {
         const saved = await patchTask(task.id, { done: false });
+        if (projected) reenter(saved.id);
         mutateTasks((tasks) =>
           tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
         );
       } catch (error) {
-        mutateTasks((tasks) =>
-          tasks.map((entry) => (entry.id === task.id ? task : entry)),
-        );
+        // The record, from the server. Never `task`: for a repeat that is the
+        // projection and would overwrite the live record with a done one.
+        if (projected) reloadTasks();
+        else {
+          mutateTasks((tasks) =>
+            tasks.map((entry) => (entry.id === task.id ? task : entry)),
+          );
+        }
         refuse(error);
       }
     },
@@ -227,7 +243,14 @@ export function TasksSurface({
       try {
         const saved = await patchTask(
           task.id,
-          { done: true },
+          {
+            done: true,
+            // The instance this tab was looking at. Completing a repeat is
+            // not idempotent, so a second tick of the same one from another
+            // tab is refused with a 409 rather than silently skipping a
+            // period. An ordinary completion needs no such thing.
+            ...(task.repeat ? { expectedWhen: task.when ?? null } : {}),
+          },
           task.repeat ? today : undefined,
         );
         mutateTasks((tasks) =>

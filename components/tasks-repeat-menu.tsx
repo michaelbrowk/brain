@@ -53,6 +53,13 @@ function anchorDay(task: TaskView, today: string): string {
   return DAY_RE.test(task.when ?? "") ? (task.when as string) : today;
 }
 
+/** "Every week on Thu" reads as a sentence after a colon only in lower case.
+ *  The weekday keeps its capital, which is why this touches the first letter
+ *  and nothing else. */
+function lower(label: string): string {
+  return label.charAt(0).toLowerCase() + label.slice(1);
+}
+
 /** `1st`, `2nd`, `3rd`, `4th`, and the three teens that break the pattern. */
 function ordinal(day: number): string {
   const teen = day % 100;
@@ -101,6 +108,12 @@ export function TasksRepeatMenu({
   const options = repeatOptions(task, today);
   const value: RepeatKind = task.repeat ? task.repeat.freq : "none";
   const label = repeatWord(task.repeat);
+  // The rule in the menu's own words, so a screen reader hears "Repeat: every
+  // week on Thu" rather than the chip's one-word shorthand twice over. With no
+  // rule there is nothing to name and the word is the whole label.
+  const spoken = task.repeat
+    ? `Repeat: ${lower(options.find((option) => option.kind === value)?.label ?? label)}`
+    : "Repeat";
 
   return (
     <Dropdown.Root>
@@ -109,7 +122,7 @@ export function TasksRepeatMenu({
           type="button"
           className="chip"
           data-task-control
-          aria-label={`Repeat: ${label}`}
+          aria-label={spoken}
         >
           <span className="chip-glyph">
             <Icon name="restart" size={14} />

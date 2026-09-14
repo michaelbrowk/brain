@@ -686,6 +686,33 @@ export function isTaskValidation(e: unknown): e is TaskValidationError {
   return e instanceof Error && e.name === "TaskValidationError";
 }
 
+/** Two writers and one instance of a repeating task.
+ *
+ *  Completing a repeat is not idempotent: each one appends a log entry and
+ *  moves `when` a rule date further on, so two ticks of the SAME instance
+ *  silently skip a period. `mutate()` serialises them, so the second reads the
+ *  already-advanced record and has no way to notice on its own. The client
+ *  sends the `when` it was looking at and this is the answer when the record
+ *  has moved since.
+ *
+ *  A 409 rather than a 400: nothing about the request is malformed, the task
+ *  simply moved. No task `rev` exists and none is added — `when` is the whole
+ *  of what a completion depends on. */
+export class TaskConflictError extends Error {
+  constructor(
+    public reason: string,
+    /** Where the instance actually stands now, so a client can re-read. */
+    public currentWhen: string | undefined,
+  ) {
+    super(reason);
+    this.name = "TaskConflictError";
+  }
+}
+
+export function isTaskConflict(e: unknown): e is TaskConflictError {
+  return e instanceof Error && e.name === "TaskConflictError";
+}
+
 /** What a caller may set when a task is minted. `id`, `created`, `updated`,
  *  `done` and `doneAt` are the store's to write. */
 export interface CreateTaskInput {
@@ -716,6 +743,12 @@ export interface UpdateTaskPatch {
    *  `done: true`, because `doneAt` files the task under that day in the
    *  Logbook and the server has no timezone to fall back on. */
   today?: string;
+  /** The `when` of the instance the caller was looking at, `null` for one
+   *  filed under no day. Only a repeating task's completion takes it, and
+   *  only to refuse with a 409 when the record has moved since: two ticks of
+   *  one instance would otherwise skip a period with nothing said. Omitted
+   *  means no check. */
+  expectedWhen?: string | null;
   src?: string;
 }
 

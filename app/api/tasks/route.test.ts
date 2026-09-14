@@ -146,6 +146,28 @@ describe("GET /api/tasks", () => {
     });
   });
 
+  it("answers ?list=logbook with the store's completion rows, untouched", async () => {
+    // A repeating record is never done, so this list cannot be a filter over
+    // records. The store derives one row per completion and the route hands
+    // the order through; a caller here has no records to derive from.
+    const completion = (when: string, doneAt: string) =>
+      task({ id: "task-words", repeat: { freq: "daily" }, done: true, when, doneAt });
+    const rows = [
+      completion(TODAY, `${TODAY}T09:00:00.000Z`),
+      completion("2026-09-12", "2026-09-12T09:00:00.000Z"),
+    ];
+    mocks.listTasks.mockReturnValue(rows);
+
+    const res = await get(`?today=${TODAY}&list=logbook&offset=0`);
+
+    expect(res.status).toBe(200);
+    expect((await res.json()).tasks).toEqual(rows);
+    expect(mocks.listTasks).toHaveBeenCalledWith(TODAY, {
+      list: "logbook",
+      offsetMinutes: 0,
+    });
+  });
+
   it("filters by ?category= and collates the groups", async () => {
     const ordered = [task({ id: "task-beta" }), task()];
     mocks.listTasks.mockReturnValue(ordered);

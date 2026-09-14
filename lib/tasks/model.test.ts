@@ -48,12 +48,31 @@ describe("the task record schema", () => {
     const repeat = { freq: "daily" };
     const refused = [
       [{ scheduled: "2026-09-11" }],
-      [{ completedAt: "2026-09-11T21:04:55.108Z" }],
       ["2026-09-11"],
       [{ scheduled: "2026-09-11", completedAt: "2026-09-11T21:04:55.108Z", note: "x" }],
+      [{ scheduled: "tomorrow", completedAt: "2026-09-11T21:04:55.108Z" }],
+      [{ scheduled: "2026-02-31", completedAt: "2026-09-11T21:04:55.108Z" }],
     ];
     for (const log of refused) {
       expect(taskRecordSchema.safeParse({ ...base, repeat, log }).success).toBe(false);
+    }
+  });
+
+  it("takes `when`'s own three shapes as a log entry's scheduled day", () => {
+    // The untick restores `when` from `scheduled`, so `scheduled` has to be
+    // able to hold exactly what `when` held: a day, the word `someday`, or
+    // nothing at all for a task that was in the Inbox. Anything narrower makes
+    // the gesture move a task nobody asked it to move.
+    const repeat = { freq: "daily" };
+    const completedAt = "2026-09-11T21:04:55.108Z";
+    for (const entry of [
+      { scheduled: "2026-09-11", completedAt },
+      { scheduled: "someday", completedAt },
+      { completedAt },
+    ]) {
+      const parsed = parseTaskRecord({ ...base, repeat, log: [entry] });
+      expect(parsed.ok).toBe(true);
+      if (parsed.ok) expect(parsed.task.log?.[0]).toEqual(entry);
     }
   });
 
@@ -83,7 +102,20 @@ describe("the task record schema", () => {
     if (!parsed.ok) expect(parsed.reason).toContain("repeat");
   });
 
-  it("refuses a log with no repeat", () => {
+  it("keeps a log after the rule that made it is gone", () => {
+    // Stopping a repeat removes the rule and keeps the instance as an
+    // ordinary task. Its completions are the Logbook's, up to thirty days of
+    // rows including the one the person may be looking at when they pick
+    // "Don't repeat", so the log outlives the rule rather than going with it.
+    const parsed = parseTaskRecord({
+      ...base,
+      when: "2026-09-13",
+      log: [{ scheduled: "2026-09-12", completedAt: "2026-09-12T21:04:55.108Z" }],
+    });
+    expect(parsed.ok).toBe(true);
+  });
+
+  it("still refuses a log that is not a list of entries", () => {
     const parsed = parseTaskRecord({ ...base, log: ["2026-09-12"] });
     expect(parsed.ok).toBe(false);
     if (!parsed.ok) expect(parsed.reason).toContain("log");

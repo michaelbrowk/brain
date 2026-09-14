@@ -305,7 +305,7 @@ describe("advance", () => {
     fields: Partial<TaskRecord>;
     today: string;
     when: string;
-    scheduled: string;
+    scheduled: string | undefined;
   }[] = [
     {
       name: "completing on the day it was due moves to the next one",
@@ -350,18 +350,21 @@ describe("advance", () => {
       scheduled: "2026-01-31",
     },
     {
-      name: "someday has no scheduled day, so the completion day is the one logged",
+      // The entry keeps `when` exactly, so the untick can put the task back
+      // on `someday` rather than on a day nobody chose. The arithmetic still
+      // counts from today, because `someday` is no day to count from.
+      name: "someday is logged as someday and still advances from today",
       fields: { repeat: DAILY, when: "someday" },
       today: "2026-09-14",
       when: "2026-09-15",
-      scheduled: "2026-09-14",
+      scheduled: "someday",
     },
     {
-      name: "no when at all is the same",
+      name: "no when at all is logged as no scheduled day",
       fields: { repeat: DAILY, when: undefined },
       today: "2026-09-14",
       when: "2026-09-15",
-      scheduled: "2026-09-14",
+      scheduled: undefined,
     },
   ];
 
@@ -371,13 +374,13 @@ describe("advance", () => {
   // `completedAt.slice(0, 10)` would pass all of them.
   const LATE_AT_NIGHT = "2026-09-15T02:00:00.000Z"; // the 14th at 21:00 in New York
 
-  it("logs the caller's day, not the completion instant's UTC day", () => {
+  it("advances off the caller's day, not the completion instant's UTC day", () => {
     const record = repeating({ repeat: DAILY, when: "someday" });
 
     const result = advance(record, { completedAt: LATE_AT_NIGHT, today: "2026-09-14" });
 
     expect(result.log).toEqual([
-      { scheduled: "2026-09-14", completedAt: LATE_AT_NIGHT },
+      { scheduled: "someday", completedAt: LATE_AT_NIGHT },
     ]);
     expect(result.when).toBe("2026-09-15");
   });
@@ -397,7 +400,11 @@ describe("advance", () => {
       const result = advance(record, { completedAt: COMPLETED_AT, today });
 
       expect(result.when).toBe(when);
-      expect(result.log).toEqual([{ scheduled, completedAt: COMPLETED_AT }]);
+      expect(result.log).toEqual([
+        scheduled === undefined
+          ? { completedAt: COMPLETED_AT }
+          : { scheduled, completedAt: COMPLETED_AT },
+      ]);
       expect(result.repeat).toEqual(record.repeat);
       expect(parseTaskRecord(result).ok).toBe(true);
     });
@@ -641,14 +648,18 @@ describe("revert", () => {
     expect(parseTaskRecord(result).ok).toBe(true);
   });
 
-  it("undoes exactly what advance did, for a completion and an early one", () => {
-    for (const when of ["2026-09-14", "2026-09-20"]) {
+  it("undoes exactly what advance did, for every shape when can hold", () => {
+    // A round trip, including the two shapes that are not a day: a repeat
+    // parked on `someday` comes back on `someday`, and one in the Inbox comes
+    // back with no day at all rather than dated to the morning it was ticked.
+    for (const when of ["2026-09-14", "2026-09-20", "2026-09-01", "someday", undefined]) {
       const record = repeating({ when });
       const completed = advance(record, {
         completedAt: COMPLETED_AT,
         today: "2026-09-14",
       });
       expect(revert(completed)).toEqual(record);
+      expect("when" in revert(completed)).toBe(when !== undefined);
     }
   });
 

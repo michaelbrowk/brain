@@ -14,6 +14,8 @@ vi.mock("@/lib/store", () => ({
     error instanceof Error && error.name === "NotFoundError",
   isTaskValidation: (error: unknown) =>
     error instanceof Error && error.name === "TaskValidationError",
+  isTaskConflict: (error: unknown) =>
+    error instanceof Error && error.name === "TaskConflictError",
 }));
 
 import { DELETE, GET, PATCH } from "./route";
@@ -40,6 +42,14 @@ function notFound(): Error {
 
 function validation(reason: string): Error {
   return Object.assign(new Error(reason), { name: "TaskValidationError", reason });
+}
+
+function conflictError(currentWhen: string | undefined): Error {
+  return Object.assign(new Error("this task has already moved on: reload and try again"), {
+    name: "TaskConflictError",
+    reason: "this task has already moved on: reload and try again",
+    currentWhen,
+  });
 }
 
 const ctx = (id = TASK_ID) => ({ params: Promise.resolve({ id }) });
@@ -181,5 +191,56 @@ describe("DELETE /api/tasks/[id]", () => {
     const res = await del();
     expect(res.status).toBe(404);
     expect(await res.json()).toEqual({ error: "not found" });
+  });
+});
+
+
+/** Completing a repeat is not idempotent, so the tick carries the instance the
+ *  caller was looking at and a stale one is refused. */
+describe("PATCH /api/tasks/[id], the instance that moved", () => {
+  it("hands expectedWhen through to the store untouched", async () => {
+    await patch({ done: true, expectedWhen: TODAY }, `?today=${TODAY}`);
+
+    expect(mocks.updateTask).toHaveBeenCalledWith(TASK_ID, {
+      done: true,
+      expectedWhen: TODAY,
+      today: TODAY,
+      src: undefined,
+    });
+
+    // `null` is the instance filed under no day, and it is not the same as
+    // sending nothing: nothing means no check at all.
+    await patch({ done: true, expectedWhen: null }, `?today=${TODAY}`);
+    expect(mocks.updateTask).toHaveBeenLastCalledWith(
+      TASK_ID,
+      expect.objectContaining({ expectedWhen: null }),
+    );
+  });
+
+  it("answers 409 with the reason and where the task now stands", async () => {
+    mocks.updateTask.mockRejectedValue(conflictError(TOMORROW));
+
+    const res = await patch({ done: true, expectedWhen: TODAY }, `?today=${TODAY}`);
+
+    // Nothing about the request is malformed, so it is not a 400: the task
+    // moved, and the body says where to so a client can re-read without a
+    // second round trip.
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: "this task has already moved on: reload and try again",
+      reason: "when_moved",
+      currentWhen: TOMORROW,
+    });
+  });
+
+  it("keeps a validation refusal a 400, so the two are never one answer", async () => {
+    mocks.updateTask.mockRejectedValue(
+      validation("a task that is already done cannot take a repeat rule"),
+    );
+
+    const res = await patch({ repeat: { freq: "daily" } });
+
+    expect(res.status).toBe(400);
+    expect((await res.json()).error).toContain("already done");
   });
 });

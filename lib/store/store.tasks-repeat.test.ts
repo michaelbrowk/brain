@@ -5,8 +5,8 @@ import path from "node:path";
 
 import { Store } from "./store";
 import { brainEvents } from "./events";
-import { doneDayOf, logbookRows } from "../tasks/lists";
-import type { TaskRepeat } from "../tasks/model";
+import { doneDayOf, listOf, logbookRows } from "../tasks/lists";
+import type { TaskRepeat, TaskView } from "../tasks/model";
 
 /** ONE OPEN INSTANCE, THROUGH THE REAL STORE.
  *
@@ -118,11 +118,13 @@ describe("completing a repeating task", () => {
       await s.updateTask(created.id, { done: true, today: TODAY });
 
       expect(openInstances(s, created.id, TODAY)).toBe(1);
-      // And nothing of it is in the Logbook as a record, which is what a
-      // second instance would look like from the other side.
-      expect(
-        s.listTasks(TODAY, { list: "logbook", offsetMinutes: 0 }).map((t) => t.id),
-      ).not.toContain(created.id);
+      // The Logbook shows the COMPLETION and not a second instance: one row,
+      // done, which is what a repeat's history looks like from the other side.
+      const logged = s
+        .listTasks(TODAY, { list: "logbook", offsetMinutes: 0 })
+        .filter((t) => t.id === created.id);
+      expect(logged).toHaveLength(1);
+      expect(logged[0].done).toBe(true);
       await s.deleteTask(created.id);
     }
   });
@@ -287,13 +289,15 @@ describe("rescheduling a repeating task", () => {
 });
 
 describe("the repeat rule itself", () => {
-  it("takes a rule on any unlinked task and drops it again on stop", async () => {
+  it("takes a rule on any unlinked task and drops it again on stop, keeping the history", async () => {
     const { s, root } = await tmpStore();
-    const created = await s.createTask({ title: "Learn words", when: TODAY });
+    const created = await s.createTask({ title: "Learn words", when: "2026-09-12" });
 
     const repeating = await s.updateTask(created.id, { repeat: DAILY });
     expect(repeating.repeat).toEqual(DAILY);
 
+    await s.updateTask(created.id, { done: true, today: "2026-09-12" });
+    await s.updateTask(created.id, { done: true, today: "2026-09-13" });
     await s.updateTask(created.id, { done: true, today: TODAY });
     const stopped = await s.updateTask(created.id, { repeat: null });
 
@@ -304,15 +308,77 @@ describe("the repeat rule itself", () => {
     expect(stopped.done).toBe(false);
     const raw = await taskFile(root, created.id);
     expect(raw).not.toContain("repeat:");
-    // `log` belongs to a repeating task, so it goes with the rule rather than
-    // sitting in the file as a shape the schema refuses on the next load.
-    expect(raw).not.toContain("log:");
-    expect(stopped.log).toBeUndefined();
 
-    // Completing it now is the plain write, with its own `done`.
+    // AND THE LOG STAYS. Those three completions are the Logbook's, including
+    // the row the person may be looking at when they pick "Don't repeat", so
+    // stopping a repeat is not a way to erase a month of history.
+    expect(stopped.log).toHaveLength(3);
+    expect(raw).toContain("log:");
+    expect(logbookRows([stopped], TODAY, 0)).toHaveLength(3);
+    // Read-only history now: there is no rule left to put the series back on,
+    // so no row of it offers an untick.
+    expect(logbookRows([stopped], TODAY, 0).map((row) => row.untickable)).toEqual([
+      false,
+      false,
+      false,
+    ]);
+    // And it survives a reload, which is what the schema had to be relaxed for.
+    await s.rebuild();
+    expect(s.getTask(created.id)?.log).toHaveLength(3);
+
+    // Completing it now is the plain write, with its own `done`, and the
+    // Logbook shows that row on top of the three.
     const done = await s.updateTask(created.id, { done: true });
     expect(done.done).toBe(true);
     expect(done.doneAt).toBeDefined();
+    expect(logbookRows([done], TODAY, 0)).toHaveLength(4);
+  });
+
+  it("refuses a rule on a task that is already done", async () => {
+    const { s } = await tmpStore();
+    const created = await s.createTask({ title: "Water the plants", when: TODAY });
+    const done = await s.updateTask(created.id, { done: true });
+    expect(done.done).toBe(true);
+
+    // A rule on a done record promises a next occurrence nothing will write:
+    // `listOf` files it in the Logbook because `done` is true, and it would
+    // sit there claiming to repeat. The surface does not offer the chip on a
+    // done row and this is the same answer for a caller that asks anyway.
+    await expect(
+      s.updateTask(created.id, { repeat: DAILY }),
+    ).rejects.toThrow(/already done/);
+    expect(s.getTask(created.id)?.repeat).toBeUndefined();
+
+    // Reopened, it takes one.
+    await s.updateTask(created.id, { done: false });
+    await expect(
+      s.updateTask(created.id, { repeat: DAILY }),
+    ).resolves.toMatchObject({ repeat: DAILY });
+  });
+
+  it("draws a row for a done record that carries a rule, which only an import can make", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    // The patch path refuses this shape; a hand edit and `importTask` reach
+    // it. The derivation has to stay TOTAL over what `listOf` files in the
+    // Logbook: a record with no row anywhere is a record nothing can reach.
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-odd.md"),
+      `---\nid: task-odd\ntitle: Learn words\ndone: true\ndoneAt: '${TODAY}T09:00:00.000Z'\nrepeat:\n  freq: daily\ncreated: '2026-09-01T09:00:00.000Z'\nupdated: '${TODAY}T09:00:00.000Z'\n---\n`,
+    );
+    await s.rebuild();
+
+    const odd = s.getTask("task-odd") as TaskView;
+    expect(listOf(odd, TODAY)).toBe("logbook");
+    const rows = logbookRows([odd], TODAY, 0);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].key).toBe("task-odd");
+    expect(rows[0].untickable).toBe(true);
+    // And the untick is the ordinary one: it owns its `done`, so it clears it
+    // rather than popping a log entry it does not have.
+    const reopened = await s.updateTask("task-odd", { done: false });
+    expect(reopened.done).toBe(false);
+    expect(reopened.repeat).toEqual(DAILY);
   });
 
   it("refuses a rule on a task that came from a note line, linked and detached", async () => {
@@ -432,5 +498,180 @@ describe("unticking a repeating task in the Logbook", () => {
       s.updateTask(created.id, { done: false }),
     ).rejects.toThrow(/completion/);
     expect(s.getTask(created.id)?.when).toBe(TODAY);
+  });
+});
+
+/** TWO TICKS OF ONE INSTANCE.
+ *
+ *  Completing a repeat is not idempotent: each one appends an entry and moves
+ *  `when` a rule date on. `mutate()` serialises the two writes, so the second
+ *  reads the already-advanced record and cannot notice on its own — it would
+ *  advance again and the series would skip a period with nothing said. The
+ *  caller sends the `when` it was looking at, and a stale one is refused. */
+describe("completing the same instance twice", () => {
+  it("advances once and refuses the second with a 409 reason", async () => {
+    const { s } = await tmpStore();
+    const created = await s.createTask({
+      title: "Learn words",
+      when: TODAY,
+      repeat: DAILY,
+    });
+
+    // Both tabs drew the row while it stood on TODAY, so both send that.
+    const results = await Promise.allSettled([
+      s.updateTask(created.id, { done: true, today: TODAY, expectedWhen: TODAY }),
+      s.updateTask(created.id, { done: true, today: TODAY, expectedWhen: TODAY }),
+    ]);
+
+    const landed = results.filter((result) => result.status === "fulfilled");
+    const refused = results.filter((result) => result.status === "rejected");
+    expect(landed).toHaveLength(1);
+    expect(refused).toHaveLength(1);
+    expect((refused[0] as PromiseRejectedResult).reason).toMatchObject({
+      name: "TaskConflictError",
+      currentWhen: TOMORROW,
+    });
+
+    // One period, one entry, one open instance. Without the check the second
+    // write would have advanced to the 16th and logged twice.
+    const after = s.getTask(created.id) as TaskView;
+    expect(after.when).toBe(TOMORROW);
+    expect(after.log).toHaveLength(1);
+    expect(openInstances(s, created.id, TODAY)).toBe(1);
+  });
+
+  it("checks nothing when the caller sends no expectedWhen", async () => {
+    const { s } = await tmpStore();
+    const created = await s.createTask({
+      title: "Learn words",
+      when: TODAY,
+      repeat: DAILY,
+    });
+
+    // MCP and a script have no row to have been looking at. They are not
+    // refused; the check is opt-in and belongs to a client that drew a row.
+    await expect(
+      s.updateTask(created.id, { done: true, today: TODAY }),
+    ).resolves.toMatchObject({ when: TOMORROW });
+  });
+
+  it("takes null as the expected when of an instance filed under no day", async () => {
+    const { s } = await tmpStore();
+    const created = await s.createTask({ title: "Learn words", repeat: DAILY });
+    expect(created.when).toBeUndefined();
+
+    await expect(
+      s.updateTask(created.id, { done: true, today: TODAY, expectedWhen: TODAY }),
+    ).rejects.toThrow(/moved on/);
+    await expect(
+      s.updateTask(created.id, { done: true, today: TODAY, expectedWhen: null }),
+    ).resolves.toMatchObject({ when: TOMORROW });
+  });
+});
+
+/** The Logbook a caller that is not the surface gets.
+ *
+ *  The surface fetches every record and derives its own rows. `?list=logbook`
+ *  and MCP's `list_tasks` cannot: they ask the store for the list. A filter
+ *  over records answers that nothing repeating was ever finished, because a
+ *  repeating record is never done. */
+describe("listTasks(list: logbook)", () => {
+  it("answers with completions, one row per log entry", async () => {
+    const { s } = await tmpStore();
+    const words = await s.createTask({
+      title: "Learn words",
+      when: "2026-09-13",
+      repeat: DAILY,
+    });
+    await s.updateTask(words.id, { done: true, today: "2026-09-13" });
+    await s.updateTask(words.id, { done: true, today: TODAY });
+    const plants = await s.createTask({ title: "Water the plants", when: TODAY });
+    await s.updateTask(plants.id, { done: true });
+
+    const logbook = s.listTasks(TODAY, { list: "logbook", offsetMinutes: 0 });
+
+    // Two completions of the repeat plus the ordinary one, newest first.
+    expect(logbook.map((t) => t.id)).toEqual([plants.id, words.id, words.id]);
+    expect(logbook.every((t) => t.done)).toBe(true);
+    // Each repeat row carries its own completion and the day that instance
+    // was owed, which is the whole reason the rows are not records.
+    expect(logbook[1].when).toBe(TODAY);
+    expect(logbook[2].when).toBe("2026-09-13");
+
+    // And the open instance is still answered as itself by every other read.
+    expect(s.listTasks(TODAY, { list: "upcoming" }).map((t) => t.id)).toEqual([
+      words.id,
+    ]);
+    expect(s.getTask(words.id)?.done).toBe(false);
+  });
+
+  it("leaves the unfiltered read as records, because the surface derives its own rows", async () => {
+    const { s } = await tmpStore();
+    const words = await s.createTask({
+      title: "Learn words",
+      when: TODAY,
+      repeat: DAILY,
+    });
+    await s.updateTask(words.id, { done: true, today: TODAY });
+
+    const all = s.listTasks(TODAY, UTC);
+
+    expect(all.map((t) => t.id)).toEqual([words.id]);
+    expect(all[0].done).toBe(false);
+    expect(all[0].when).toBe(TOMORROW);
+    expect(all[0].log).toHaveLength(1);
+  });
+
+  it("keeps the window and the category filter on the completion rows", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-words.md"),
+      `---\nid: task-words\ntitle: Learn words\nwhen: '${TODAY}'\ncategory: Study\nrepeat:\n  freq: daily\nlog:\n  - scheduled: '2026-09-13'\n    completedAt: '2026-09-13T09:00:00.000Z'\n  - scheduled: '2026-07-01'\n    completedAt: '2026-07-01T09:00:00.000Z'\ncreated: '2026-06-01T09:00:00.000Z'\nupdated: '2026-09-13T09:00:00.000Z'\n---\n`,
+    );
+    await s.rebuild();
+
+    // The July entry is outside the 30 day window and the August one is not.
+    const logbook = s.listTasks(TODAY, { list: "logbook", offsetMinutes: 0 });
+    expect(logbook).toHaveLength(1);
+    expect(logbook[0].doneAt).toBe("2026-09-13T09:00:00.000Z");
+
+    expect(
+      s.listTasks(TODAY, { list: "logbook", offsetMinutes: 0, category: "Study" }),
+    ).toHaveLength(1);
+    expect(
+      s.listTasks(TODAY, { list: "logbook", offsetMinutes: 0, category: "Admin" }),
+    ).toEqual([]);
+  });
+
+  it("hides the completions of a task whose page is in the trash", async () => {
+    const { s } = await tmpStore();
+    const meta = await s.createPage(null, "Groceries");
+    const written = await s.writePage(meta.id, "- [ ] Buy milk", undefined, "me");
+    const { parseTaskLines } = await import("../tasks/task-lines");
+    const [line] = parseTaskLines(written.markdown);
+    const linked = await s.createTask({
+      title: line.normalized,
+      page: meta.id,
+      anchor: {
+        text: line.normalized,
+        hash: line.hash,
+        ordinal: line.ordinal,
+        line: line.index,
+      },
+    });
+    await s.updateTask(linked.id, { done: true });
+    expect(
+      s.listTasks(TODAY, { list: "logbook", offsetMinutes: 0 }).map((t) => t.id),
+    ).toEqual([linked.id]);
+
+    await s.deletePage(meta.id);
+
+    expect(s.listTasks(TODAY, { list: "logbook", offsetMinutes: 0 })).toEqual([]);
+  });
+
+  it("still refuses a logbook read without the reader's offset", async () => {
+    const { s } = await tmpStore();
+    expect(() => s.listTasks(TODAY, { list: "logbook" })).toThrow(/bad_offset/);
   });
 });

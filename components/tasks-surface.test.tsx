@@ -895,7 +895,13 @@ describe("a repeating task", () => {
     // `today` rides along because the next occurrence comes off
     // max(when, today), and the server has no timezone to fall back on.
     expect(String(writes()[0]?.[0])).toBe(`/api/tasks/words?today=${TODAY}`);
-    expect(JSON.parse(String(writes()[0]?.[1]?.body))).toEqual({ done: true });
+    // `expectedWhen` is the instance this tab drew. Completing a repeat is not
+    // idempotent, so a second tick of the same one from another tab is
+    // refused with a 409 rather than silently skipping a period.
+    expect(JSON.parse(String(writes()[0]?.[1]?.body))).toEqual({
+      done: true,
+      expectedWhen: TODAY,
+    });
     // MID-FLIGHT, which is the whole point: the count has already decremented
     // at 1300, and the record the browser is holding has moved to tomorrow
     // rather than gone done. A `done: true` here would file the series in the
@@ -974,6 +980,44 @@ describe("a repeating task", () => {
       );
     expect(arrived?.motion.initial).toEqual({ opacity: 0 });
     expect(arrived?.motion.animate).toEqual({ opacity: 1 });
+  });
+
+  it("leaves the open instance alone when the untick is refused", async () => {
+    // The row the Logbook hands back is a PROJECTION of one completion: done,
+    // dated to that entry, sitting on the day that instance was owed. The
+    // record behind it is open on its next occurrence. Writing the projection
+    // back on a refusal would leave a repeating record reading as done, which
+    // `listOf` files in the Logbook, and the open instance would be gone from
+    // every list until a reload.
+    const twice = words({
+      when: dayFrom(1),
+      log: [{ scheduled: TODAY, completedAt: `${TODAY}T09:00:00.000Z` }],
+    });
+    await mount([twice], { list: "logbook" });
+
+    let refetched = 0;
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/tasks?")) {
+        refetched += 1;
+        return response({ tasks: [twice] });
+      }
+      return response({ error: "this repeating task has no completion to undo" }, 400);
+    });
+
+    const [row] = [...document.querySelectorAll<HTMLElement>(".brain-task-row-item")];
+    await act(async () => boxIn(row).click());
+    await settle();
+
+    // One thing said, in the route's own words.
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.title).toContain("no completion to undo");
+    // And the record this tab holds is the SERVER's, re-read: still open,
+    // still on its next occurrence, still in Upcoming.
+    expect(refetched).toBeGreaterThan(0);
+    const record = storeNow().find((entry) => entry.id === "words");
+    expect(record?.done).toBe(false);
+    expect(record?.when).toBe(dayFrom(1));
   });
 
   it("draws one Logbook row per completion and unticks only the newest", async () => {

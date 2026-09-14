@@ -17,6 +17,19 @@
  *
  *  IT READS NO CLOCK. `today` arrives from the caller, which is
  *  `components/tasks-client.ts`, the one clock read in the subsystem.
+ *
+ *  IT HOLDS TWO KINDS OF CONTROL, and they answer differently.
+ *
+ *  The QUICK ROWS are Today, This Evening, Someday and Clear: the words a
+ *  reader presses to be done with the question. One tap, one write, the panel
+ *  closes, exactly as the menu they replaced answered.
+ *
+ *  The GRID, the reminder and its clock are the DETAILED path. They move the
+ *  picker's own value and the panel stands, because a reminder needs its day
+ *  first and because a clock set one arrow at a time is one decision and not
+ *  six. `Done` and a tap outside send what the reader settled on, Escape
+ *  throws it away, and a value that ends where it began sends nothing at all.
+ *  The host says when the write goes out, through `commit()` on the handle.
  */
 
 import * as Popover from "@radix-ui/react-popover";
@@ -28,6 +41,7 @@ import {
   DUR,
   SHEET_DISMISS_OFFSET,
   SHEET_DISMISS_VELOCITY,
+  SHEET_ENTER_Y,
   SPRING_SHEET,
   SPRING_SHEET_GESTURE,
 } from "@/lib/motion";
@@ -58,6 +72,8 @@ export interface WhenPickerOptions {
   today: string;
   mode: "when" | "deadline";
   reduce: boolean;
+  /** THE WRITE. Reached only through `commit()`, which the host calls, and
+   *  never with a value the record already carries. */
   onPick: (value: WhenValue) => void;
   onDone: () => void;
 }
@@ -65,6 +81,13 @@ export interface WhenPickerOptions {
 export interface WhenPickerHandle {
   readonly element: HTMLElement;
   focus(): void;
+  /** Sends what the reader settled on, unless it is what the record already
+   *  says. The HOST chooses the moment, because the moment differs: the row's
+   *  popover commits once it has closed, so the fold never plays under it,
+   *  and the note's promote popover commits while it is still open, because a
+   *  refusal has to be shown on the control the reader is holding. Calling it
+   *  twice on one answer writes once, and it is safe after `destroy()`. */
+  commit(): void;
   destroy(): void;
 }
 
@@ -155,6 +178,13 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   let value: WhenValue = { ...options.value };
   let focusedDay = isDay(value.when) ? value.when : today;
   let month = monthOfDay(focusedDay);
+
+  /** WHAT THE RECORD ALREADY SAYS, as far as this picker knows: the value it
+   *  was opened on, and then whatever it has sent since. A commit that would
+   *  repeat it sends nothing, which is how a gesture that ends where it began
+   *  writes no PATCH at all, and how a second press of one quick row cannot
+   *  mint a second write. */
+  let sent: WhenValue = { ...options.value };
 
   const element = document.createElement("div");
   element.className = "brain-when-picker";
@@ -396,17 +426,42 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
     repaint(by > 0 ? 1 : -1);
   }
 
-  function send(next: WhenValue, travel = 0): void {
+  /** THE DETAILED PATH. The grid, the reminder switch and the clock edit the
+   *  picker's own value and the panel stands: a reminder needs its day first,
+   *  so picking a day has to be something the reader can follow with a clock.
+   *  Nothing leaves here. */
+  function edit(next: WhenValue, travel = 0): void {
     value = next;
     repaint(travel);
-    onPick(next);
+  }
+
+  /** A QUICK ROW: one tap, one write, and the picker is gone. Today, This
+   *  Evening, Someday and Clear are the words a reader presses to be done, the
+   *  way the menu they replaced answered and the way Things answers. The write
+   *  itself is the host's, a moment later, through `commit()`. */
+  function quick(next: WhenValue): void {
+    value = next;
+    repaint();
+    onDone();
+  }
+
+  function commit(): void {
+    if (
+      value.when === sent.when &&
+      value.evening === sent.evening &&
+      value.time === sent.time
+    ) {
+      return;
+    }
+    sent = { ...value };
+    onPick(sent);
   }
 
   function pickDay(day: string): void {
     const travel = travelTo(monthOfDay(day));
     focusedDay = day;
     month = monthOfDay(day);
-    send({ when: day, evening: value.evening && day === today, time: value.time }, travel);
+    edit({ when: day, evening: value.evening && day === today, time: value.time }, travel);
   }
 
   function stepClock(hours: number, minutes: number): void {
@@ -414,34 +469,34 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
     const nextHour = (((Number(clock.slice(0, 2)) + hours) % 24) + 24) % 24;
     const nextMinute =
       (((Number(clock.slice(3, 5)) + minutes * MINUTE_STEP) % 60) + 60) % 60;
-    send({ ...value, time: `${pad2(nextHour)}:${pad2(nextMinute)}` });
+    edit({ ...value, time: `${pad2(nextHour)}:${pad2(nextMinute)}` });
   }
 
   /* ── What the reader presses ──────────────────────────────────────────── */
 
   todayRow.addEventListener("click", () =>
-    send({ when: today, evening: false, time: value.time }),
+    quick({ when: today, evening: false, time: value.time }),
   );
   eveningRow.addEventListener("click", () =>
-    send({ when: today, evening: true, time: value.time }),
+    quick({ when: today, evening: true, time: value.time }),
   );
   // A clock and an evening both need a day. Someday is not one, so both come
   // off with it rather than travelling to a record that refuses the pair.
   somedayRow.addEventListener("click", () =>
-    send({ when: "someday", evening: false, time: null }),
+    quick({ when: "someday", evening: false, time: null }),
   );
   reminderRow.addEventListener("click", () => {
     if (!isDay(value.when)) return;
-    send({ ...value, time: value.time === null ? DEFAULT_REMINDER_TIME : null });
+    edit({ ...value, time: value.time === null ? DEFAULT_REMINDER_TIME : null });
   });
-  timeClear.addEventListener("click", () => send({ ...value, time: null }));
+  timeClear.addEventListener("click", () => edit({ ...value, time: null }));
   hourUp.addEventListener("click", () => stepClock(1, 0));
   hourDown.addEventListener("click", () => stepClock(-1, 0));
   minuteUp.addEventListener("click", () => stepClock(0, 1));
   minuteDown.addEventListener("click", () => stepClock(0, -1));
   previous.addEventListener("click", () => pageMonth(-1));
   next.addEventListener("click", () => pageMonth(1));
-  clear.addEventListener("click", () => send({ when: null, evening: false, time: null }));
+  clear.addEventListener("click", () => quick({ when: null, evening: false, time: null }));
   done.addEventListener("click", () => onDone());
 
   const spinKeys = (box: HTMLElement, hours: number, minutes: number) => {
@@ -459,6 +514,11 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   element.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.preventDefault();
+      // ESCAPE THROWS THE VALUE AWAY. It is the one way out that leaves the
+      // record where it was, so a reader halfway through a month has a way
+      // back that is not another five presses. Put back what the record says
+      // and every commit after it is a commit of nothing.
+      value = { ...sent };
       onDone();
       return;
     }
@@ -506,6 +566,7 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   return {
     element,
     focus: () => rovingCell().focus(),
+    commit,
     destroy: () => element.remove(),
   };
 }
@@ -538,6 +599,11 @@ export function TasksWhenPicker({
   const sheetY = useMotionValue(0);
   const pickRef = useRef(onPick);
   const valueRef = useRef(value);
+  /** TRUE ONCE THE POPOVER HAS BEEN ASKED TO CLOSE, by Done, by a quick row,
+   *  by Escape or by a tap outside. Read in the teardown below, which also
+   *  runs when a dependency changes under an OPEN popover, which is a remount
+   *  and not a decision to write anything. */
+  const closing = useRef(false);
 
   // Declared first, so the mount effect below already sees this render's
   // callback and this render's value.
@@ -553,17 +619,30 @@ export function TasksWhenPicker({
    *  returns when the host goes away. */
   const mount = useCallback(
     (host: HTMLDivElement) => {
+      closing.current = false;
       const handle = renderWhenPicker({
         value: valueRef.current,
         today,
         mode,
         reduce,
         onPick: (next) => pickRef.current(next),
-        onDone: () => setOpen(false),
+        onDone: () => {
+          closing.current = true;
+          setOpen(false);
+        },
       });
       host.append(handle.element);
       handle.focus();
-      return () => handle.destroy();
+      /** THE WRITE LANDS WHEN THE POPOVER HAS GONE, and not a frame earlier.
+       *  A reschedule folds the row downward, and a fold that starts while
+       *  the picker is still drawn takes the row out from under the panel
+       *  the reader is holding. This teardown is that moment: Radix keeps
+       *  the content mounted for its 120ms retrace and React calls back
+       *  here once it is off the tree. */
+      return () => {
+        if (closing.current) handle.commit();
+        handle.destroy();
+      };
     },
     [today, mode, reduce],
   );
@@ -583,7 +662,15 @@ export function TasksWhenPicker({
   );
 
   return (
-    <Popover.Root open={open} onOpenChange={setOpen}>
+    <Popover.Root
+      open={open}
+      onOpenChange={(next) => {
+        // A TAP OUTSIDE IS AN ANSWER, and Radix's own dismissals come through
+        // here rather than through `onDone`.
+        if (!next) closing.current = true;
+        setOpen(next);
+      }}
+    >
       <Popover.Trigger asChild>{trigger}</Popover.Trigger>
       <Popover.Portal>
         <Popover.Content
@@ -598,7 +685,7 @@ export function TasksWhenPicker({
           {sheet ? (
             <motion.div
               style={{ y: sheetY }}
-              initial={reduce ? false : { y: 48 }}
+              initial={reduce ? false : { y: SHEET_ENTER_Y }}
               animate={{ y: 0 }}
               transition={reduce ? { duration: 0 } : SPRING_SHEET}
               drag="y"

@@ -1605,6 +1605,12 @@ html[data-kbd] [contenteditable]:focus-visible {
   align-items: center;
   gap: 6px;
   min-width: 0;
+  /* A CHIP IS ONE LINE AND ITS OWN WIDTH. It never breaks its word across two
+     lines inside a 28px pill, and it never gives width up to a neighbour: a
+     squeezed row of them drew `+ Category` over the two chips beside it. The
+     row wraps instead. See `.brain-task-chips` below. */
+  white-space: nowrap;
+  flex-shrink: 0;
   height: 28px;
   padding: 0 10px 0 8px;
   border-radius: var(--r-row);
@@ -2095,9 +2101,16 @@ html[data-kbd] [contenteditable]:focus-visible {
   color: var(--ink-3);
   cursor: default;
 }
-.brain-menu-item[data-read]:hover,
 .brain-menu-item[data-read]:active {
   background-color: transparent;
+}
+/* The hover half rides the same pointer gate the rule it is undoing rides
+   (DESIGN.md §8). Outside it, a touch screen reaches a `:hover` on the tap and
+   holds it, and this one would have been the whole file's one exception. */
+@media (hover: hover) {
+  .brain-menu-item[data-read]:hover {
+    background-color: transparent;
+  }
 }
 .brain-menu-icon {
   flex-shrink: 0;
@@ -5718,10 +5731,18 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
   cursor: default;
 }
 /* Expanded: the same capsule, one tint step up with a rim, grown in REAL
-   height rather than by a layout animation, because a layout spring would stretch
-   the words inside it. 36 of row and 40 of chips. */
+   height rather than by a layout animation, because a layout spring would
+   stretch the words inside it.
+
+   THE HEIGHT IS THE CHIPS' AND NOT A NUMBER HERE. It was `capsule + 40`, one
+   line of chips, and a row of four at 390 has two: the fourth chip was drawn
+   outside the capsule. The chip row reveals itself from 0 on
+   `SPRING_MATERIALIZE` (`components/tasks-row.tsx`) and the capsule follows it
+   in real height, so one line still measures capsule + 40 to the pixel and two
+   measure what two lines are. */
 .brain-task-row[data-expanded] {
-  height: calc(var(--task-capsule) + 40px);
+  height: auto;
+  padding-bottom: 6px;
   background-color: var(--blue-tint-2);
   box-shadow: inset 0 0 0 1px var(--blue-rim);
 }
@@ -5943,17 +5964,29 @@ html[data-kbd] .brain-task-row[data-selected] {
 .brain-task-input::placeholder {
   color: var(--ink-3);
 }
-/* The second line of an expanded row. It scrolls rather than wraps: the
-   capsule's height is a number the expansion animates, so a chip flow that
-   grew a second line would leave the box the wrong size. */
+/* The second line of an expanded row. It WRAPS rather than scrolls: at 390 the
+   four chips ran past the column and the tail of the row was clipped by a
+   scroller nobody could see was there, with `+ Category` drawn over its
+   neighbours. A second line is 6px of air and 28 of chip, and the capsule
+   above sizes to whatever that comes to. */
 .brain-task-chips {
   display: flex;
   min-width: 0;
-  height: 40px;
+  flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  overflow-x: auto;
-  scrollbar-width: none;
+  /* The air above the chips, and the capsule's own `padding-bottom` is the air
+     below: a PADDING here would still draw 6px at height 0 and the row would
+     step open before it grew. */
+  margin-top: 6px;
+  /* The reveal is a height from 0, so the chips are clipped while it plays. */
+  overflow: hidden;
+}
+/* One chip wider than the row it is on is capped by the row rather than
+   carried past its edge. */
+.brain-task-chips > .chip {
+  max-width: 100%;
+  overflow: hidden;
 }
 
 /* Air belongs to the block below: 24 over the group, 4 under its header. The

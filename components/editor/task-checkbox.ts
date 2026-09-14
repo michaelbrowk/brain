@@ -22,7 +22,7 @@ import {
   setTaskCheckboxLabel,
 } from "@/components/tasks-checkbox";
 import { dayLabel } from "@/components/tasks-lists";
-import { renderWhenPicker } from "@/components/tasks-when-picker";
+import { renderWhenPicker, type WhenValue } from "@/components/tasks-when-picker";
 import { SOLAR } from "@/components/ui/solar-icons.generated";
 import { apiFetch } from "@/lib/client";
 import { TASKS_CHANGED_EVENT } from "@/lib/editor-events";
@@ -205,7 +205,7 @@ export const taskSplitKeymap = $prose(() => keymap({ Enter: splitTaskItem }));
 /** The ghost and the word: one element in two states. */
 export const TASK_MARK_CLASS = "brain-task-mark";
 /** The popover, on the `brain-menu` material at the list menu's own 264: it
- *  holds four short words and the When picker's seven 36px day cells. */
+ *  holds one short word and the When picker's seven 36px day cells. */
 export const PROMOTE_MENU_CLASS = "brain-task-menu";
 /** A task record changed somewhere this editor cannot see. Dispatched on
  *  `window` by the shell's store-event forwarder in `components/shell.tsx`,
@@ -723,13 +723,19 @@ interface Day {
   tomorrow: string;
 }
 
-/** The four that are one tap each. Every other day is the picker below them,
- *  which is the same control the Tasks column draws. */
-const MENU_ROWS: { label: string; icon: string; when: (day: Day) => string | null }[] = [
-  { label: "Today", icon: "calendar-date-linear", when: (day) => day.today },
-  { label: "Tomorrow", icon: "calendar-linear", when: (day) => day.tomorrow },
-  { label: "Someday", icon: "box-minimalistic-linear", when: () => "someday" },
-  { label: "Inbox", icon: "inbox-linear", when: () => null },
+/** THE ONE ROW THE PICKER DOES NOT DRAW.
+ *
+ *  This popover IS the picker, with the note's own Inbox above it. Today,
+ *  This Evening and Someday are the picker's own quick rows and Tomorrow is a
+ *  cell in its grid, so a list of four here drew Today twice and Someday
+ *  twice, four rows apart, and read as a bug. Inbox is the one word left: a
+ *  task with no day at all, which no grid can say. */
+const MENU_ROWS: { label: string; icon: string; when: (day: Day) => WhenValue }[] = [
+  {
+    label: "Inbox",
+    icon: "inbox-linear",
+    when: () => ({ when: null, evening: false, time: null }),
+  },
 ];
 
 interface OpenMenu {
@@ -764,7 +770,13 @@ function showMenu(
   const day: Day = { today: localDay().today, tomorrow: tomorrowOf() };
   const element = document.createElement("div");
   element.className = `brain-menu ${PROMOTE_MENU_CLASS}`;
-  element.setAttribute("role", "menu");
+  // A DIALOG AND NOT A MENU. `role="menu"` may own menu items and nothing
+  // else, and what stands in here is a month grid, two spinbuttons and four
+  // checkbox rows: a screen reader told this was a menu would not expose the
+  // grid as a grid. The panel carries the picker's own name for the same
+  // reason the row's popover does.
+  element.setAttribute("role", "dialog");
+  element.setAttribute("aria-label", "When");
 
   // A refusal is shown where the choice was made, and not in the shell's
   // toast. The toast is the house surface for a route `reason` everywhere the
@@ -779,11 +791,10 @@ function showMenu(
   element.append(refusal);
 
   let dismissed = false;
-  /** `retracing` is the one path that keeps the drawing alive past the
-   *  listeners: the popover is re-appended to the body to play its 120ms
-   *  exit, and a picker taken out here would leave a calendar-shaped hole in
-   *  the thing the reader is watching leave. */
-  const detach = (retracing = false) => {
+  /** The picker's element lives INSIDE this popover and holds no listener
+   *  outside itself, so it leaves when the popover leaves and there is
+   *  nothing here to destroy separately. */
+  const detach = () => {
     if (dismissed) return;
     dismissed = true;
     document.removeEventListener("mousedown", onPointerDown, true);
@@ -796,9 +807,6 @@ function showMenu(
     trigger.setAttribute("aria-expanded", "false");
     if (currentMenu?.element === element) currentMenu = null;
     element.remove();
-    // The picker leaves with the popover it was mounted in, key listener and
-    // all, rather than being left to the garbage collector.
-    if (!retracing) picker.destroy();
   };
   const dismiss = (immediate = false) => {
     if (dismissed) return;
@@ -810,14 +818,11 @@ function showMenu(
     // The retrace plays on the element the material already owns, so it is
     // taken out of the tree only when the 120ms are over.
     const leaving = element;
-    detach(true);
+    detach();
     setOpen(view, null);
     document.body.append(leaving);
     leaving.dataset.state = "closed";
-    window.setTimeout(() => {
-      leaving.remove();
-      picker.destroy();
-    }, MENU_EXIT_MS);
+    window.setTimeout(() => leaving.remove(), MENU_EXIT_MS);
   };
 
   const onPointerDown = (event: Event) => {
@@ -835,24 +840,16 @@ function showMenu(
       view.focus();
       return;
     }
-    // THE PICKER ANSWERS ITS OWN ARROWS. Its grid is a roving cell walked with
-    // all four of them, and a menu that also stepped between rows would move
-    // the focus out from under a reader halfway across a month.
-    const target = event.target;
-    if (target instanceof Node && picker.element.contains(target)) return;
-    // `role="menu"` promises arrow keys, and the rows are buttons, so Tab and
-    // Enter already work.
-    const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
-    if (step === 0) return;
-    if (rows.length === 0) return;
-    event.preventDefault();
-    const here = rows.findIndex((row) => row.contains(document.activeElement));
-    rows[(here + step + rows.length) % rows.length].focus();
+    // THE PICKER ANSWERS ITS OWN ARROWS, and nothing else here answers any.
+    // Its grid is a roving cell walked with all four of them; a panel that
+    // also stepped between rows would move the focus out from under a reader
+    // halfway across a month. The one row above it is a button, so Tab and
+    // Enter reach it already.
   };
 
-  /** The four one-tap rows. Held as a list rather than re-queried, because
-   *  the picker below them draws `brain-menu-item` rows of its own and those
-   *  are not this menu's to disable or to walk with an arrow key. */
+  /** The popover's own row. Held as a list rather than re-queried, because
+   *  the picker below it draws `brain-menu-item` rows of its own and those
+   *  are not this panel's to disable. */
   const rows: HTMLButtonElement[] = [];
 
   const rowsDisabled = (disabled: boolean) => {
@@ -862,7 +859,7 @@ function showMenu(
     }
   };
 
-  const choose = (when: string | null) => {
+  const choose = (value: WhenValue) => {
     // One write at a time. Two clicks on one row, or Enter followed by a
     // click, would otherwise mint two records for one checkbox, and two
     // records contending for one line is the state that has no honest
@@ -870,7 +867,7 @@ function showMenu(
     if (writing) return;
     writing = true;
     rowsDisabled(true);
-    void applyChoice(view, trigger, promote, when)
+    void applyChoice(view, trigger, promote, value)
       .finally(() => {
         writing = false;
         rowsDisabled(false);
@@ -892,15 +889,26 @@ function showMenu(
     today: day.today,
     mode: "when",
     reduce: prefersReducedMotion(),
-    onPick: (value) => choose(value.when),
-    onDone: () => dismiss(),
+    // THE WHOLE VALUE. This Evening files the line in the evening and a grid
+    // day arrives with its reminder, rather than the panel offering a section
+    // and the write quietly dropping it.
+    onPick: choose,
+    // THE WRITE GOES OUT BEFORE THE PANEL DOES, which is the opposite of the
+    // row's popover and for the reason the refusal above spells out: a route
+    // that says no has to say it on the control the reader is holding. So the
+    // dismissal waits for `choose`, which dismisses on success and shows the
+    // reason on a refusal.
+    onDone: () => {
+      picker.commit();
+      if (writing) return;
+      dismiss();
+    },
   });
 
   for (const row of MENU_ROWS) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "brain-menu-item";
-    button.setAttribute("role", "menuitem");
     button.append(glyph(row.icon), document.createTextNode(row.label));
     button.addEventListener("click", () => choose(row.when(day)));
     rows.push(button);
@@ -957,6 +965,12 @@ function place(element: HTMLElement, trigger: HTMLElement): void {
       (above ? rect.top : window.innerHeight - rect.bottom) - MENU_GAP - EDGE_GUTTER,
     )}px`,
   );
+  // THE FLOATING TAB BAR IS BELOW, so a panel that landed ABOVE the line owes
+  // it nothing: the room it was given is measured from the top of the window
+  // down, and subtracting the bar as well took ~84px of grid away on a phone
+  // for a bar the panel never reaches. The rule reads the property; this says
+  // there is no bar on this side.
+  element.style.setProperty("--tabbar-reserve", above ? "0px" : "");
   const height = element.offsetHeight;
   element.style.left = `${Math.max(
     EDGE_GUTTER,
@@ -994,20 +1008,31 @@ async function applyChoice(
   view: EditorView,
   trigger: HTMLElement,
   promote: PromoteContext,
-  when: string | null,
+  value: WhenValue,
 ): Promise<string | null> {
   const target = markTargetOf(view, trigger);
   if (target === null) return "That line has gone";
   return target.taskId === null
-    ? promoteLine(view, target.index, promote, when)
-    : reschedule(view, target.taskId, when);
+    ? promoteLine(view, target.index, promote, value)
+    : reschedule(view, target.taskId, value);
+}
+
+/** The two fields that only travel with a day. `lib/tasks/model.ts` refuses a
+ *  clock or an evening without one, so neither is sent unless the reader set
+ *  it and there is a day for it to belong to. */
+function extras(value: WhenValue): Record<string, unknown> {
+  if (value.when === null || value.when === "someday") return {};
+  return {
+    ...(value.time !== null ? { time: value.time } : {}),
+    ...(value.evening ? { evening: true } : {}),
+  };
 }
 
 async function promoteLine(
   view: EditorView,
   index: number,
   promote: PromoteContext,
-  when: string | null,
+  value: WhenValue,
 ): Promise<string | null> {
   const state = promoteKey.getState(view.state);
   const page = state?.page ?? null;
@@ -1037,7 +1062,8 @@ async function promoteLine(
       line: line.index,
     },
   };
-  if (when !== null) body.when = when;
+  if (value.when !== null) body.when = value.when;
+  Object.assign(body, extras(value));
   const category = await pageCategory(page);
   if (category !== null) body.category = category;
 
@@ -1059,13 +1085,13 @@ async function promoteLine(
 async function reschedule(
   view: EditorView,
   taskId: string,
-  when: string | null,
+  value: WhenValue,
 ): Promise<string | null> {
   try {
     const response = await apiFetch(`/api/tasks/${taskId}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ when }),
+      body: JSON.stringify({ when: value.when, ...extras(value) }),
     });
     if (!response.ok) return await refusalOf(response);
     const answer = (await response.json()) as { task: TaskView };

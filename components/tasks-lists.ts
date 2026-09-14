@@ -49,6 +49,10 @@ export type TasksView =
   | { readonly kind: "list"; readonly list: ListName }
   | { readonly kind: "category"; readonly category: string };
 
+/** `lib/tasks/lists.ts`'s own answer to which list a record is in, re-exported
+ *  because the column reaches that file through this one. */
+export { listOf };
+
 export function sectionsFor(
   tasks: readonly TaskView[],
   view: TasksView,
@@ -98,7 +102,11 @@ function rowsFor(
     .map((task) => ({ key: task.id, task, untickable: true }));
 }
 
-function belongs(
+/** Whether the view a column is looking at holds this record. Exported for
+ *  the one caller outside the derive: a link that names a task has to know
+ *  whether the open list already draws it, and `listOf` below says which list
+ *  to open when it does not. */
+export function belongs(
   task: TaskView,
   view: TasksView,
   today: string,
@@ -242,21 +250,39 @@ export function weekdayOf(day: string): string {
   return WEEKDAYS[new Date(dayNumber(day) * 86_400_000).getUTCDay()] as string;
 }
 
-/** THE WORD A MOVE IS REPORTED IN.
+/** THE WORD A FIELD IS NAMED BY.
  *
- *  "Moved to Tomorrow" over the row on its way out, and the same five
- *  answers wherever a picked value has to be said out loud. Today and Tomorrow
- *  carry their names because those are the two days a person says rather than
- *  dates; every other day carries the `20 Sep` the tail already uses, and that
- *  includes yesterday. A task filed into the past is overdue and
- *  `overdueWhenCaption` says so in its own words, so a second wording here
- *  would be a second answer to where the row went. */
+ *  What a When chip says, and the same five answers wherever a picked value
+ *  has to be said out loud. Today and Tomorrow carry their names because those
+ *  are the two days a person says rather than dates; every other day carries
+ *  the `20 Sep` the tail already uses, and that includes yesterday. A task
+ *  filed into the past is overdue and `overdueWhenCaption` says so in its own
+ *  words, so a second wording here would be a second answer to where the row
+ *  went. `movedLabel` is the toast's wording, which differs in two places. */
 export function whenLabel(when: string | null | undefined, today: string): string {
   if (when === null || when === undefined) return "No date";
   if (when === "someday") return "Someday";
   if (when === today) return "Today";
   if (when === shiftDay(today, 1)) return "Tomorrow";
   return dayLabel(when);
+}
+
+/** THE WORD A MOVE IS REPORTED IN, which is not always the word the chip says.
+ *
+ *  A toast names the LIST the task landed in. Two of the five differ from the
+ *  field's own word for that reason: no day at all is the Inbox, which is
+ *  where the reader will go looking for it, and "No date" is a sentence about
+ *  a field nobody is looking at; and a task pulled into tonight landed in
+ *  This Evening, which is a section of Today with a header of its own, so
+ *  "Moved to Today" over a row that went to the evening is the chip and the
+ *  toast disagreeing about one gesture. */
+export function movedLabel(
+  value: { when: string | null; evening: boolean },
+  today: string,
+): string {
+  if (value.when === null) return "Inbox";
+  if (value.when === today && value.evening) return "This Evening";
+  return whenLabel(value.when, today);
 }
 
 /** `Today · 5`. The count is the group's size, which one task cannot know. */

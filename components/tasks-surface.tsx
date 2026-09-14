@@ -12,7 +12,7 @@
 // twice or counts anything the column is not showing.
 
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DUR, EASE_OUT, SPRING_MATERIALIZE, materializeFade } from "@/lib/motion";
 import type { TaskView } from "@/lib/tasks/model";
@@ -30,9 +30,11 @@ import { onTaskCommand, type TaskCommand } from "./tasks-commands";
 import { TasksGhostRow } from "./tasks-ghost-row";
 import { TasksListMenu } from "./tasks-list-menu";
 import {
+  belongs,
   categoriesOf,
   countsFor,
   headerLabel,
+  listOf,
   sectionsFor,
   type TaskCounts,
   type TaskSection,
@@ -219,6 +221,16 @@ export function TasksSurface({
   );
 
   useArrowKeys({ order, selectedId, setSelectedId, setExpandedId });
+  useNamedTask({
+    tasks: state.tasks,
+    loading: state.loading,
+    today,
+    offsetMinutes,
+    view,
+    reduce,
+    onSelectList,
+    setSelectedId,
+  });
 
   // The palette's two rows and the row's two keys are one action each.
   useEffect(() => {
@@ -339,6 +351,103 @@ export function TasksSurface({
         />
       </div>
     </section>
+  );
+}
+
+/** ONE ROW, NAMED IN THE URL: `/tasks?task=<id>`.
+ *
+ *  Something outside this column points at one task: a notification, a row on
+ *  Home, a link in a note. The column has to show it wherever it lives.
+ *  The list is switched when the record is not in the open one, the capsule
+ *  lands on the row, and the query LEAVES WITH IT: a `?task=` left in the bar
+ *  would take the reader back to that row every time they came to Tasks, and
+ *  the open list is navigation state the shell already owns.
+ *
+ *  A missing id does nothing at all, and says nothing: a link to a task
+ *  somebody has since deleted is not an error to report to whoever followed
+ *  it. The records have to be in before that can be told apart from a record
+ *  that has not loaded yet, which is what `loading` is read for. */
+function useNamedTask({
+  tasks,
+  loading,
+  today,
+  offsetMinutes,
+  view,
+  reduce,
+  onSelectList,
+  setSelectedId,
+}: {
+  tasks: readonly TaskView[];
+  loading: boolean;
+  today: string;
+  offsetMinutes: number;
+  view: TasksView;
+  reduce: boolean;
+  onSelectList?: (list: TasksListState | null) => void;
+  setSelectedId: (id: string | null) => void;
+}) {
+  // THE URL IS THE STATE, so there is none of its own here: the query is read
+  // on every run and taken off once it has been ANSWERED, which is what stops
+  // the next run. `nav` exists only so Back and Forward cause a run at all,
+  // and `asked` carries the id across a list switch, because opening a list is
+  // a navigation and the query may not survive it.
+  const [nav, setNav] = useState(0);
+  const asked = useRef<string | null>(null);
+
+  useEffect(() => {
+    const bump = () => setNav((count) => count + 1);
+    window.addEventListener("popstate", bump);
+    return () => window.removeEventListener("popstate", bump);
+  }, []);
+
+  useEffect(() => {
+    const id = taskParam() ?? asked.current;
+    if (id === null || today === "") return;
+    const task = tasks.find((entry) => entry.id === id);
+    if (task === undefined) {
+      // Not loaded yet is not the same answer as not there.
+      if (loading) return;
+      // NOTHING TO ACT ON, so nothing is touched: the URL is left exactly as
+      // it was found. A link to a task somebody has since deleted is not an
+      // error to report to whoever followed it, and it is not the surface's to
+      // tidy away either.
+      asked.current = null;
+      return;
+    }
+    if (!belongs(task, view, today, offsetMinutes)) {
+      // The list the record lives in, which the shell opens. This runs again
+      // once it has, and the row is drawn by then.
+      asked.current = id;
+      onSelectList?.(listOf(task, today, offsetMinutes));
+      return;
+    }
+    asked.current = null;
+    setSelectedId(id);
+    const row = document.querySelector<HTMLElement>(
+      `.brain-task-row-item[data-task-id="${CSS.escape(id)}"]`,
+    );
+    row?.scrollIntoView?.({ block: "center", behavior: reduce ? "auto" : "smooth" });
+    clearTaskParam();
+  }, [loading, nav, offsetMinutes, onSelectList, reduce, setSelectedId, tasks, today, view]);
+}
+
+function taskParam(): string | null {
+  if (typeof window === "undefined") return null;
+  const id = new URLSearchParams(window.location.search).get("task");
+  return id === null || id === "" ? null : id;
+}
+
+/** The rest of the URL and the shell's navigation state both stand: only the
+ *  one query this surface answers to comes off. */
+function clearTaskParam(): void {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has("task")) return;
+  url.searchParams.delete("task");
+  window.history.replaceState(
+    window.history.state,
+    "",
+    `${url.pathname}${url.search}${url.hash}`,
   );
 }
 

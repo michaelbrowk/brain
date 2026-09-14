@@ -1150,13 +1150,15 @@ html[data-kbd] .milkdown .ProseMirror .brain-task-mark:focus-visible {
 .brain-task-menu > .brain-menu-label {
   white-space: normal;
 }
-/* The four one-tap rows stand above the picker's scroller in this popover, so
-   the room the grid may take is what is left after them: 4 x 32 plus the
+/* The Inbox row stands above the picker's scroller in this popover, so the
+   room the grid may take is what is left after it: one 32px row plus the
    material's own 6px top and bottom. The property itself is written by
-   `place()` in `task-checkbox.ts`, which is this popover's own positioner. */
+   `place()` in `task-checkbox.ts`, which is this popover's own positioner,
+   and so is the `--tabbar-reserve` of 0 it writes when the panel lands above
+   the line and the floating bar is nowhere near it. */
 .brain-task-menu .brain-when-scroll {
   max-height: calc(
-    var(--radix-popover-content-available-height, 100dvh) - 140px -
+    var(--radix-popover-content-available-height, 100dvh) - 44px -
       var(--tabbar-reserve, 0px)
   );
 }

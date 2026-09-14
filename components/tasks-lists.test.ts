@@ -12,6 +12,7 @@ import {
   doneTimeOf,
   eveningMoon,
   headerLabel,
+  movedLabel,
   movesRow,
   overdueWhenCaption,
   reminderFired,
@@ -488,7 +489,7 @@ describe("the row's clock, moon and fired reminder", () => {
   });
 });
 
-/** THE WORD A MOVE IS REPORTED IN, one row per answer there is. */
+/** THE WORD A FIELD IS NAMED BY, one row per answer there is. */
 describe("whenLabel", () => {
   it.each<[string | null | undefined, string]>([
     [TODAY, "Today"],
@@ -506,5 +507,30 @@ describe("whenLabel", () => {
 
   it("reads a missing day the same way it reads a cleared one", () => {
     expect(whenLabel(undefined, TODAY)).toBe("No date");
+  });
+});
+
+/** THE WORD A MOVE IS REPORTED IN, which names a LIST and so differs from the
+ *  chip's word in exactly two places. */
+describe("movedLabel", () => {
+  it.each<[string | null, boolean, string]>([
+    [TODAY, false, "Today"],
+    // The one list with no day. "Moved to No date" is a sentence about a field
+    // nobody is looking at; the Inbox is where the reader will go and find it.
+    [null, false, "Inbox"],
+    // A section of Today with a header of its own. "Moved to Today" over a row
+    // that went to the evening is the chip and the toast disagreeing.
+    [TODAY, true, "This Evening"],
+    ["2026-09-14", false, "Tomorrow"],
+    ["someday", false, "Someday"],
+    ["2026-09-20", false, "20 Sep"],
+  ])("reads %s (evening %s) as %s", (when, evening, label) => {
+    expect(movedLabel({ when, evening }, TODAY)).toBe(label);
+  });
+
+  it("keeps the evening to the day it is the evening of", () => {
+    // The picker takes the evening off the moment the day stops being today,
+    // so this pair cannot be produced; if it ever is, the day is the answer.
+    expect(movedLabel({ when: "2026-09-20", evening: true }, TODAY)).toBe("20 Sep");
   });
 });

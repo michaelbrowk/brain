@@ -27,8 +27,11 @@ const picked: WhenValue[] = [];
 const closed: number[] = [];
 const handles: WhenPickerHandle[] = [];
 
+/** The harness is a HOST, because the picker no longer decides when its value
+ *  goes out: it collects, and the host commits. This one commits the way the
+ *  note's promote popover does, the moment the picker asks to close. */
 const open = (over: Partial<WhenPickerOptions> = {}) => {
-  const handle = renderWhenPicker({
+  const handle: WhenPickerHandle = renderWhenPicker({
     value: { when: null, evening: false, time: null },
     today: TODAY,
     mode: "when",
@@ -36,6 +39,7 @@ const open = (over: Partial<WhenPickerOptions> = {}) => {
     onPick: (value) => picked.push(value),
     onDone: () => {
       closed.push(1);
+      handle.commit();
     },
     ...over,
   });
@@ -71,6 +75,13 @@ const key = (element: HTMLElement, name: string) =>
   element.dispatchEvent(new KeyboardEvent("keydown", { key: name, bubbles: true }));
 const month = (element: HTMLElement) =>
   element.querySelector(".brain-when-month")?.textContent;
+/** The detailed path's own commit: Done sends what the reader settled on. */
+const done = (element: HTMLElement) =>
+  element.querySelector<HTMLElement>("[data-when-done]")?.click();
+const clock = (element: HTMLElement) =>
+  `${element.querySelector("[data-when-hour]")?.textContent}:${
+    element.querySelector("[data-when-minute]")?.textContent
+  }`;
 
 /** Every WAAPI animation the picker starts, in order, on the same recorder the
  *  row's tests use, so a keyframe that stopped matching fails here. */
@@ -139,12 +150,17 @@ describe("the picker's rows", () => {
   });
 
   it("sends the day, the evening and Someday from their rows", () => {
-    const { element } = open();
-    element.querySelector<HTMLElement>("[data-when-evening]")?.click();
+    // A picker each: a quick row commits and closes, and a picker writes once.
+    const evening = open();
+    evening.element.querySelector<HTMLElement>("[data-when-evening]")?.click();
     expect(picked.at(-1)).toEqual({ when: TODAY, evening: true, time: null });
-    element.querySelector<HTMLElement>("[data-when-today]")?.click();
+
+    const day = open({ value: { when: "someday", evening: false, time: null } });
+    day.element.querySelector<HTMLElement>("[data-when-today]")?.click();
     expect(picked.at(-1)).toEqual({ when: TODAY, evening: false, time: null });
-    element.querySelector<HTMLElement>("[data-when-someday]")?.click();
+
+    const someday = open({ value: { when: TODAY, evening: false, time: null } });
+    someday.element.querySelector<HTMLElement>("[data-when-someday]")?.click();
     expect(picked.at(-1)).toEqual({ when: "someday", evening: false, time: null });
   });
 
@@ -194,6 +210,7 @@ describe("the month grid", () => {
     const past = cell(element, "2026-09-01");
     expect(past.getAttribute("data-past")).toBe("");
     past.click();
+    done(element);
     expect(picked.at(-1)?.when).toBe("2026-09-01");
   });
 
@@ -202,6 +219,7 @@ describe("the month grid", () => {
     const outside = cell(element, "2026-10-01");
     expect(outside.getAttribute("data-outside")).toBe("");
     outside.click();
+    done(element);
     expect(picked.at(-1)?.when).toBe("2026-10-01");
   });
 
@@ -217,8 +235,9 @@ describe("the month grid", () => {
   it("picks a day on a press", () => {
     const { element } = open();
     cell(element, "2026-09-20").click();
-    expect(picked.at(-1)).toEqual({ when: "2026-09-20", evening: false, time: null });
     expect(cell(element, "2026-09-20").getAttribute("aria-selected")).toBe("true");
+    done(element);
+    expect(picked.at(-1)).toEqual({ when: "2026-09-20", evening: false, time: null });
   });
 
   it("moves one day on the arrows and seven on up and down", () => {
@@ -253,22 +272,58 @@ describe("the month grid", () => {
     const { element } = open({ value: { when: TODAY, evening: false, time: null } });
     key(element, "ArrowRight");
     key(element, "Enter");
+    expect(cell(element, "2026-09-14").getAttribute("aria-selected")).toBe("true");
+    done(element);
     expect(picked.at(-1)?.when).toBe("2026-09-14");
   });
 
-  it("stays open through every pick, and closes on Escape and on Done", () => {
+  it("keeps the panel standing through the grid and the clock, and sends nothing yet", () => {
+    // THE DETAILED PATH. A reminder needs its day first, so picking a day has
+    // to be something a reader can follow with a clock, and a clock set one
+    // arrow at a time is one decision rather than six writes.
     const { element } = open({ value: { when: TODAY, evening: false, time: "09:00" } });
     cell(element, "2026-09-20").click();
-    element.querySelector<HTMLElement>("[data-when-today]")?.click();
     element.querySelector<HTMLElement>("[data-when-hour-up]")?.click();
-    element.querySelector<HTMLElement>("[data-when-clear]")?.click();
+    element.querySelector<HTMLElement>("[data-when-minute-up]")?.click();
     key(element, "PageDown");
-    expect(picked.length).toBeGreaterThan(0);
     expect(closed).toHaveLength(0);
+    expect(picked).toHaveLength(0);
+
+    done(element);
+    expect(closed).toHaveLength(1);
+    expect(picked).toEqual([{ when: "2026-09-20", evening: false, time: "10:05" }]);
+  });
+
+  it("closes on a quick row, which is one tap and one write", () => {
+    // Today, This Evening, Someday and Clear are the words a reader presses to
+    // be done with the question, the way the menu they replaced answered.
+    const { element } = open({ value: { when: "2026-09-20", evening: false, time: null } });
+    element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    expect(closed).toHaveLength(1);
+    expect(picked).toEqual([{ when: TODAY, evening: false, time: null }]);
+  });
+
+  it("throws the picked value away on Escape", () => {
+    const { element } = open({ value: { when: TODAY, evening: false, time: null } });
+    cell(element, "2026-09-20").click();
     key(element, "Escape");
     expect(closed).toHaveLength(1);
-    element.querySelector<HTMLElement>("[data-when-done]")?.click();
-    expect(closed).toHaveLength(2);
+    expect(picked).toHaveLength(0);
+  });
+
+  it("sends nothing when the value ends where it began", () => {
+    // A row already in Today, and Today pressed on it: a write nobody asked
+    // for, in every request body and in every git diff.
+    const { element } = open({ value: { when: TODAY, evening: false, time: null } });
+    element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    expect(closed).toHaveLength(1);
+    expect(picked).toHaveLength(0);
+
+    const second = open({ value: { when: TODAY, evening: false, time: "09:00" } });
+    second.element.querySelector<HTMLElement>("[data-when-hour-up]")?.click();
+    second.element.querySelector<HTMLElement>("[data-when-hour-down]")?.click();
+    done(second.element);
+    expect(picked).toHaveLength(0);
   });
 
   it("changes the month on PageUp and PageDown, and on the two arrows", () => {
@@ -307,6 +362,8 @@ describe("the reminder", () => {
   it("turns on at 09:00", () => {
     const { element } = open({ value: { when: TODAY, evening: false, time: null } });
     element.querySelector<HTMLElement>("[data-when-reminder]")?.click();
+    expect(clock(element)).toBe(DEFAULT_REMINDER_TIME);
+    done(element);
     expect(picked.at(-1)?.time).toBe(DEFAULT_REMINDER_TIME);
     expect(DEFAULT_REMINDER_TIME).toBe("09:00");
   });
@@ -314,26 +371,31 @@ describe("the reminder", () => {
   it("steps the hour by one and wraps", () => {
     const { element } = open({ value: { when: TODAY, evening: false, time: "23:00" } });
     element.querySelector<HTMLElement>("[data-when-hour-up]")?.click();
-    expect(picked.at(-1)?.time).toBe("00:00");
+    expect(clock(element)).toBe("00:00");
     element.querySelector<HTMLElement>("[data-when-hour-down]")?.click();
-    expect(picked.at(-1)?.time).toBe("23:00");
+    expect(clock(element)).toBe("23:00");
+    // Back where it started, so the whole gesture sent nothing.
+    done(element);
+    expect(picked).toHaveLength(0);
   });
 
   it("steps the minute by five and wraps", () => {
     const { element } = open({ value: { when: TODAY, evening: false, time: "09:55" } });
     element.querySelector<HTMLElement>("[data-when-minute-up]")?.click();
-    expect(picked.at(-1)?.time).toBe("09:00");
+    expect(clock(element)).toBe("09:00");
     element.querySelector<HTMLElement>("[data-when-minute-down]")?.click();
-    expect(picked.at(-1)?.time).toBe("09:55");
+    expect(clock(element)).toBe("09:55");
   });
 
   it("steps from the keyboard the same way", () => {
     const { element } = open({ value: { when: TODAY, evening: false, time: "09:00" } });
     const hour = element.querySelector<HTMLElement>("[role='spinbutton'][data-when-hour]")!;
     hour.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
-    expect(picked.at(-1)?.time).toBe("08:00");
+    expect(clock(element)).toBe("08:00");
     const minute = element.querySelector<HTMLElement>("[data-when-minute]")!;
     minute.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }));
+    expect(clock(element)).toBe("08:05");
+    done(element);
     expect(picked.at(-1)?.time).toBe("08:05");
   });
 
@@ -368,6 +430,7 @@ describe("the reminder", () => {
   it("clears the time and nothing else", () => {
     const { element } = open({ value: { when: TODAY, evening: true, time: "13:00" } });
     element.querySelector<HTMLElement>("[data-when-time-clear]")?.click();
+    done(element);
     expect(picked.at(-1)).toEqual({ when: TODAY, evening: true, time: null });
   });
 });
@@ -396,12 +459,15 @@ describe("clearing", () => {
   });
 
   it("offers it the moment a day is picked", () => {
+    // THE WHOLE REASON THE GRID DOES NOT CLOSE THE PICKER: the day has to be
+    // there before the reminder is a reminder on anything.
     const { element } = open();
     const row = element.querySelector<HTMLButtonElement>("[data-when-reminder]")!;
     expect(row.disabled).toBe(true);
     cell(element, "2026-09-20").click();
     expect(row.disabled).toBe(false);
     row.click();
+    done(element);
     expect(picked.at(-1)).toEqual({
       when: "2026-09-20",
       evening: false,
@@ -418,6 +484,7 @@ describe("clearing", () => {
   it("turns the evening off when the day stops being today", () => {
     const { element } = open({ value: { when: TODAY, evening: true, time: null } });
     cell(element, "2026-09-20").click();
+    done(element);
     expect(picked.at(-1)).toEqual({ when: "2026-09-20", evening: false, time: null });
   });
 });
@@ -492,7 +559,12 @@ describe("the React wrapper", () => {
     host.remove();
   });
 
-  it("keeps the popover open after a pick and takes it away on Done", async () => {
+  it("keeps the popover open after a pick and writes once it has gone", async () => {
+    // THE ROW FOLDS AFTER THE PICKER HAS CLOSED, NEVER UNDER IT. A reschedule
+    // folds the row downward, and a fold that starts while the panel is still
+    // drawn takes the row out from under the thing the reader is holding. So
+    // this host sends nothing until the popover is off the tree.
+    const sent: WhenValue[] = [];
     const host = document.createElement("div");
     document.body.append(host);
     let root!: Root;
@@ -502,7 +574,7 @@ describe("the React wrapper", () => {
         <TasksWhenPicker
           value={{ when: TODAY, evening: false, time: null }}
           today={TODAY}
-          onPick={() => {}}
+          onPick={(value) => sent.push(value)}
           ariaLabel="When"
           trigger={<button type="button">When</button>}
         />,
@@ -522,6 +594,7 @@ describe("the React wrapper", () => {
         ?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
     expect(document.querySelectorAll(".brain-when-picker")).toHaveLength(1);
+    expect(sent).toHaveLength(0);
 
     await act(async () => {
       drawn
@@ -529,6 +602,7 @@ describe("the React wrapper", () => {
         ?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
     expect(document.querySelectorAll(".brain-when-picker")).toHaveLength(0);
+    expect(sent).toEqual([{ when: "2026-09-20", evening: false, time: null }]);
 
     await act(async () => root.unmount());
     host.remove();

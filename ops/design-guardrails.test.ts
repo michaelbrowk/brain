@@ -194,7 +194,7 @@ describe("design guardrails", () => {
     }
   });
 
-  it("draws every date and every time itself, under components/", () => {
+  it("draws every date and every time itself, everywhere it ships", () => {
     // D4: `components/tasks-when-picker.tsx` is the one date and time control
     // in this app, on a pointer and on touch alike. The native input is four
     // different controls across the browsers this runs in, it renders its own
@@ -206,9 +206,12 @@ describe("design guardrails", () => {
     const jsx = /<input\b[^>]*\btype\s*=\s*["'](date|time|datetime-local|month|week)["']/g;
     const dom = /\.type\s*=\s*["'](date|time|datetime-local|month|week)["']/g;
 
+    // EVERY SOURCE DIRECTORY, not only `components/`. The spec's wording was
+    // where the four call sites were; a native input a directory over is the
+    // same second date control, and `app/` and `lib/` were already being
+    // walked and then thrown away.
     const offenders: string[] = [];
     for (const file of sourceFiles()) {
-      if (!file.startsWith("components/")) continue;
       const text = readFileSync(path.join(ROOT, file), "utf8");
       for (const pattern of [jsx, dom]) {
         pattern.lastIndex = 0;
@@ -220,7 +223,7 @@ describe("design guardrails", () => {
     }
     expect(
       offenders,
-      "a native date or time input under components/: use <TasksWhenPicker> or renderWhenPicker",
+      "a native date or time input: use <TasksWhenPicker> or renderWhenPicker",
     ).toEqual([]);
 
     // The rule is only worth having if it still lets the others through.

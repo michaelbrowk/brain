@@ -295,7 +295,14 @@ test("@release promoting a line from a note puts the task in Today and writes no
   const ghost = page.locator("button.brain-task-mark");
   await expect(ghost).toHaveText("+ Task");
   await ghost.click();
-  await page.getByRole("menuitem", { name: "Today" }).click();
+  // The popover is the When picker with the note's Inbox row above it, so
+  // Today is the picker's own quick row and carries its role: a `dialog`
+  // holding a grid and two spinbuttons cannot be a `menu`, and its rows are
+  // not `menuitem`s.
+  await page
+    .getByRole("dialog", { name: "When" })
+    .getByRole("checkbox", { name: "Today" })
+    .click();
 
   // The word replaces the ghost in the same place, and it is the mark of the
   // link: a second signal beside the checkbox border, not colour alone.

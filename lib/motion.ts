@@ -82,6 +82,11 @@ export const SPRING_SHEET_GESTURE = { type: "spring", bounce: 0.2, duration: 0.3
 export const SHEET_DISMISS_OFFSET = 120;
 export const SHEET_DISMISS_VELOCITY = 800;
 
+/** How far below its resting place a sheet starts, in px. Here for the same
+ *  reason the two thresholds are: the second sheet is the moment one number
+ *  becomes two. */
+export const SHEET_ENTER_Y = 48;
+
 /** Press: scale on pointer-down, 100ms ease-out; hover fills 80ms in / 160ms out. */
 export const PRESS = { scale: 0.97, duration: 0.1 } as const;
 export const PRESS_ICON = { scale: 0.9, duration: 0.1 } as const;

@@ -32,12 +32,12 @@ import {
   dayLabel,
   doneTimeOf,
   eveningMoon,
+  movedLabel,
   movesRow,
   overdueWhenCaption,
   reminderFired,
   repeatNextLabel,
   timeCaption,
-  whenLabel,
 } from "./tasks-lists";
 import { TasksRepeatMenu } from "./tasks-repeat-menu";
 import { TasksWhenPicker, type WhenValue } from "./tasks-when-picker";
@@ -358,7 +358,7 @@ export function TasksRow({
     onCommit: (side) => {
       setSwipeSide(null);
       const when = side === "right" ? tomorrowOf(today) : "someday";
-      void leaveDown(whenValueFor(task, when), whenLabel(when, today));
+      void leaveDown(whenValueFor(task, when), movedLabel({ when, evening: false }, today));
     },
     onRelease: () => setSwipeSide(null),
   });
@@ -575,17 +575,36 @@ export function TasksRow({
             </span>
             <AnimatePresence initial={false}>
               {expanded && (
+                /* THE CHIP ROW CARRIES THE CAPSULE'S HEIGHT. It wraps at 390,
+                   where four chips do not fit on one line, so the number that
+                   used to be in the stylesheet cannot know how tall it is. The
+                   row reveals itself from 0 and the capsule, which is
+                   `height: auto` now, grows with it: the same 220ms growth,
+                   measured off the chips rather than assumed. */
                 <motion.span
                   className="brain-task-chips"
-                  initial={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, transition: { duration: DUR.fast, ease: "easeIn" } }}
+                  initial={
+                    reduce ? { opacity: 0 } : { opacity: 0, height: 0, marginTop: 0, y: -4 }
+                  }
+                  animate={
+                    reduce ? { opacity: 1 } : { opacity: 1, height: "auto", marginTop: 6, y: 0 }
+                  }
+                  exit={
+                    reduce
+                      ? { opacity: 0, transition: { duration: DUR.fast, ease: "easeIn" } }
+                      : {
+                          opacity: 0,
+                          height: 0,
+                          marginTop: 0,
+                          transition: { duration: DUR.fast, ease: "easeIn" },
+                        }
+                  }
                   transition={SPRING_MATERIALIZE}
                 >
                   <WhenChip
                     task={task}
                     today={today}
-                    onPick={(value) => void leaveDown(value, whenLabel(value.when, today))}
+                    onPick={(value) => void leaveDown(value, movedLabel(value, today))}
                   />
                   <CategoryPicker
                     chip
@@ -617,11 +636,9 @@ export function TasksRow({
                       mode="deadline"
                       value={{ when: task.deadline ?? null, evening: false, time: null }}
                       today={today}
-                      onPick={(value) =>
-                        onPatch(task, {
-                          deadline: value.when === "someday" ? null : value.when,
-                        })
-                      }
+                      /* `mode="deadline"` draws no Someday row, so the value
+                         is a day or nothing and the record takes it whole. */
+                      onPick={(value) => onPatch(task, { deadline: value.when })}
                       ariaLabel={deadlineSpoken}
                       trigger={
                         <button
@@ -802,7 +819,10 @@ function useRowShortcuts({
       if (meta && event.key === "]") {
         event.preventDefault();
         const tomorrow = tomorrowOf(today);
-        void leaveDown(whenValueFor(task, tomorrow), whenLabel(tomorrow, today));
+        void leaveDown(
+          whenValueFor(task, tomorrow),
+          movedLabel({ when: tomorrow, evening: false }, today),
+        );
         return;
       }
       if (meta || event.altKey) return;

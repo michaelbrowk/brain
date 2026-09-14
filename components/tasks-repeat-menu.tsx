@@ -190,7 +190,10 @@ export function TasksRepeatMenu({
             {task.time !== undefined && (
               <Fragment>
                 <Dropdown.Separator className="brain-menu-sep" />
-                <div className="brain-menu-item" data-read>
+                {/* `role="presentation"`: a generic node inside the radio
+                    group, inside a menu, is a shape neither role owns. The
+                    sentence is still read; the box around it is not a thing. */}
+                <div className="brain-menu-item" role="presentation" data-read>
                   <span className="min-w-0 flex-1 truncate">{`Reminder · ${task.time}`}</span>
                 </div>
               </Fragment>

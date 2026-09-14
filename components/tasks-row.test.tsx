@@ -448,6 +448,18 @@ describe("completion, drawn", () => {
       "Tomorrow",
     );
   });
+
+  it("keeps a timed task's clock across the key that moves it", async () => {
+    await renderRows([task("a", { when: TODAY, time: "07:30" })], { selected: true });
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "]", metaKey: true }));
+    });
+    expect(calls.reschedule).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a" }),
+      { when: "2026-09-14", evening: false, time: "07:30" },
+      "Tomorrow",
+    );
+  });
 });
 
 describe("the expansion", () => {
@@ -460,10 +472,30 @@ describe("the expansion", () => {
     // the capsule's height is a real height with a transition on it, and the
     // expanded state carries no transform
     expect(ruleFor(css, ".brain-task-row")).toContain("height 220ms var(--ease-out)");
-    expect(ruleFor(css, ".brain-task-row[data-expanded]")).toContain(
-      "height: calc(var(--task-capsule) + 40px)",
-    );
     expect(ruleFor(css, ".brain-task-row[data-expanded]")).not.toContain("scale");
+  });
+
+  it("takes the expanded capsule's height off the chips, which wrap", async () => {
+    // IT WAS A NUMBER: `capsule + 40`, one line of chips. Four of them do not
+    // fit on one line at 390, so the fourth was drawn outside the capsule. The
+    // row sizes to its content and the chip row reveals itself from 0, which is
+    // the same 220ms growth measured rather than assumed.
+    expect(ruleFor(css, ".brain-task-row[data-expanded]")).toContain("height: auto");
+    expect(ruleFor(css, ".brain-task-row[data-expanded]")).not.toContain(
+      "calc(var(--task-capsule) + 40px)",
+    );
+    expect(ruleFor(css, ".brain-task-chips")).toContain("flex-wrap: wrap");
+    // A chip keeps its own width and its own one line, so no chip is ever drawn
+    // over the one beside it.
+    expect(ruleFor(css, ".chip")).toContain("white-space: nowrap");
+    expect(ruleFor(css, ".chip")).toContain("flex-shrink: 0");
+
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    const chips = renders.find(
+      (render) => String(render.props.className) === "brain-task-chips",
+    );
+    expect(chips?.motion.initial).toMatchObject({ height: 0, marginTop: 0 });
+    expect(chips?.motion.animate).toMatchObject({ height: "auto", marginTop: 6 });
   });
 
   it("offers no deadline on a someday task", async () => {
@@ -648,7 +680,10 @@ describe("a history row", () => {
  *  `components/tasks-when-picker.tsx` is the control at every width, and
  *  `ops/design-guardrails.test.ts` refuses a second one under `components/`. */
 describe("the When chip's picker", () => {
-  const stubHover = (hover: boolean) => {
+  /** `hover: hover` or not, the chip opens the same control: the branch that
+   *  read it is deleted. One stub, so the cases below run on a `matchMedia`
+   *  that exists rather than on jsdom's absent one. */
+  const stubHover = (hover = true) => {
     vi.stubGlobal("matchMedia", (query: string) => ({
       matches: query === "(hover: hover)" ? hover : false,
       media: query,
@@ -659,6 +694,17 @@ describe("the When chip's picker", () => {
       removeListener: vi.fn(),
       dispatchEvent: vi.fn(),
     }));
+  };
+
+  /** The detailed path's commit. A grid pick moves the picker's own value; Done
+   *  is what sends it, and what closes the popover before the row folds. */
+  const pressDone = async () => {
+    await act(async () => {
+      document.querySelector<HTMLElement>("[data-when-done]")?.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
   };
 
   const openMenu = async () => {
@@ -695,20 +741,65 @@ describe("the When chip's picker", () => {
     }
   });
 
+  it("folds the row only once the picker has gone", async () => {
+    // A RESCHEDULE FOLDS THE ROW DOWNWARD, and a fold that starts while the
+    // panel is still drawn takes the row out from under the thing the reader is
+    // holding. So the grid moves the picker's own value and writes nothing, and
+    // Done closes the popover and sends one PATCH.
+    stubHover();
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await openMenu();
+
+    await act(async () => {
+      document.querySelector<HTMLElement>('[data-day="2026-09-20"]')?.click();
+    });
+    expect(document.querySelector(".brain-when-picker")).not.toBeNull();
+    expect(calls.reschedule).not.toHaveBeenCalled();
+
+    await pressDone();
+
+    expect(document.querySelector(".brain-when-picker")).toBeNull();
+    expect(calls.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  it("closes and writes once on a quick row, and sends nothing that changes nothing", async () => {
+    stubHover();
+    await renderRows([task("a", { when: "someday" })], { expanded: true });
+    await openMenu();
+    await act(async () => {
+      document.querySelector<HTMLElement>("[data-when-today]")?.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(document.querySelector(".brain-when-picker")).toBeNull();
+    expect(calls.reschedule).toHaveBeenCalledTimes(1);
+
+    // Today pressed on a row already in Today is a write nobody asked for.
+    calls.reschedule.mockClear();
+    await renderRows([task("b", { when: TODAY })], { expanded: true });
+    await openMenu();
+    await act(async () => {
+      document.querySelector<HTMLElement>("[data-when-today]")?.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(calls.reschedule).not.toHaveBeenCalled();
+  });
+
   it("sends the day, the evening and the clock as one value", async () => {
     // The picker answers with the whole of where a task sits, so the row
     // hands one value on rather than three writes the reader made in one
     // gesture.
-    stubHover(true);
+    stubHover();
     await renderRows([task("a", { when: TODAY, time: "13:00" })], { expanded: true });
     await openMenu();
 
     await act(async () => {
       document.querySelector<HTMLElement>('[data-day="2026-09-20"]')?.click();
     });
-    await act(async () => {
-      await Promise.resolve();
-    });
+    await pressDone();
 
     expect(calls.reschedule).toHaveBeenCalledWith(
       expect.objectContaining({ id: "a" }),
@@ -717,8 +808,46 @@ describe("the When chip's picker", () => {
     );
   });
 
+  it("names the LIST the task landed in, not the field it cleared", async () => {
+    // "Moved to No date" is a sentence about a field nobody is looking at. The
+    // Inbox is the list with no day and where the reader will go and find it.
+    stubHover();
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await openMenu();
+    await act(async () => {
+      document.querySelector<HTMLElement>("[data-when-clear]")?.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(calls.reschedule).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a" }),
+      { when: null, evening: false, time: null },
+      "Inbox",
+    );
+  });
+
+  it("reports an evening as the evening, which is what the chip says too", async () => {
+    stubHover();
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await openMenu();
+    await act(async () => {
+      document.querySelector<HTMLElement>("[data-when-evening]")?.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(calls.reschedule).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a" }),
+      { when: TODAY, evening: true, time: null },
+      "This Evening",
+    );
+  });
+
   it("says the day and the clock the chip is standing on", async () => {
-    stubHover(true);
+    stubHover();
     await renderRows([task("a", { when: TODAY, evening: true, time: "20:30" })], {
       expanded: true,
     });
@@ -805,6 +934,25 @@ describe("the swipe", () => {
     expect(calls.reschedule).toHaveBeenCalledWith(
       expect.objectContaining({ id: "a" }),
       { when: "2026-09-14", evening: false, time: null },
+      "Tomorrow",
+    );
+  });
+
+  it("carries the clock the record already has onto the day it swipes to", async () => {
+    // THE REASON `whenValueFor` EXISTS. A swipe, a key and a palette row name a
+    // day and nothing else, so the other two fields are read off the record:
+    // the reminder the task is already carrying stays with it, and the evening
+    // comes off because tomorrow has no evening of today's.
+    await renderRows([task("a", { when: TODAY, evening: true, time: "13:00" })]);
+
+    await swipe(130);
+    await act(async () => {
+      row().dispatchEvent(pointer("pointerup", { clientX: 130 }));
+    });
+
+    expect(calls.reschedule).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a" }),
+      { when: "2026-09-14", evening: false, time: "13:00" },
       "Tomorrow",
     );
   });

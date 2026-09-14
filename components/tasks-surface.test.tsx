@@ -255,6 +255,70 @@ afterEach(async () => {
   resetTasksStore();
 });
 
+/** `/tasks?task=<id>`: the seam a link from anywhere else in the app lands on. */
+describe("a task named in the URL", () => {
+  const scrolled: HTMLElement[] = [];
+
+  beforeEach(() => {
+    scrolled.length = 0;
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      writable: true,
+      value(this: HTMLElement) {
+        scrolled.push(this);
+      },
+    });
+  });
+
+  afterEach(() => {
+    Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+    window.history.replaceState({}, "", "/tasks");
+  });
+
+  it("selects the row, brings it into view and takes the query off the URL", async () => {
+    window.history.replaceState({}, "", "/tasks?task=b");
+    await mount([task("a", { when: TODAY }), task("b", { when: TODAY })]);
+
+    expect(rowFor("b").querySelector("[data-selected]")).not.toBeNull();
+    expect(rowFor("a").querySelector("[data-selected]")).toBeNull();
+    expect(scrolled).toContain(rowFor("b"));
+    // A `?task=` left in the bar would take the reader back to that row every
+    // time they came to Tasks.
+    expect(window.location.search).toBe("");
+  });
+
+  it("opens the list the task lives in and lands on the row once it is drawn", async () => {
+    const onSelectList = vi.fn();
+    const rows = [task("now", { when: TODAY }), task("later", { when: dayFrom(4) })];
+    window.history.replaceState({}, "", "/tasks?task=later");
+    await mount(rows, { onSelectList });
+
+    expect(onSelectList).toHaveBeenCalledWith("upcoming");
+    // Nothing has been answered yet, so nothing has been tidied.
+    expect(document.querySelector("[data-selected]")).toBeNull();
+
+    // The shell opens it, which is a navigation and may write the bare path.
+    window.history.replaceState({}, "", "/tasks");
+    await mount(rows, { onSelectList, list: "upcoming" });
+
+    expect(rowFor("later").querySelector("[data-selected]")).not.toBeNull();
+    expect(scrolled).toContain(rowFor("later"));
+  });
+
+  it("does nothing for an id no record answers to", async () => {
+    window.history.replaceState({}, "", "/tasks?task=gone");
+    await mount([task("a", { when: TODAY })]);
+
+    expect(document.querySelector("[data-selected]")).toBeNull();
+    expect(scrolled).toHaveLength(0);
+    // Quietly, and without touching a thing: a link to a task somebody has
+    // since deleted is not an error to report to whoever followed it, and a
+    // query this surface never answered is not its to take off either.
+    expect(toasts).toEqual([]);
+    expect(window.location.search).toBe("?task=gone");
+  });
+});
+
 describe("the lists", () => {
   it("renders the ghost row first, above every task, in every list", async () => {
     await mount([task("a", { when: TODAY }), task("b", { when: TODAY })]);
@@ -1032,6 +1096,11 @@ describe("where a captured task lands", () => {
     await act(async () => {
       document.querySelector<HTMLElement>('[data-day="2026-09-20"]')?.click();
     });
+    // The grid moves the picker's own value; Done is what sends it back.
+    await act(async () => {
+      document.querySelector<HTMLElement>("[data-when-done]")?.click();
+    });
+    await settle();
     await act(async () => {
       field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
     });

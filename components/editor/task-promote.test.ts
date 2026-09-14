@@ -167,11 +167,18 @@ function menu(): HTMLElement | null {
   );
 }
 
-/** The menu's OWN rows. The When picker mounted under them draws
- *  `brain-menu-item` rows of its own (Today, This Evening, Someday,
- *  Reminder), and those belong to the picker's list, not to this menu's. */
+/** The popover's OWN row, which is Inbox and nothing else. Today, This
+ *  Evening, Someday and Reminder below it belong to the picker's list. */
 function menuLabels(): string[] {
   return [...(menu()?.querySelectorAll(":scope > .brain-menu-item") ?? [])].map((row) =>
+    (row.textContent ?? "").trim(),
+  );
+}
+
+/** Every row a reader can press in this popover, the panel's and the picker's
+ *  alike, in drawn order. */
+function allLabels(): string[] {
+  return [...(menu()?.querySelectorAll(".brain-menu-item") ?? [])].map((row) =>
     (row.textContent ?? "").trim(),
   );
 }
@@ -189,11 +196,23 @@ function caretInLine(view: EditorView, index: number) {
   view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, starts[index])));
 }
 
+/** A quick row: one tap, one write, and the popover is gone. */
 async function pick(label: string) {
-  const row = [
-    ...(menu()?.querySelectorAll<HTMLElement>(":scope > .brain-menu-item") ?? []),
-  ].find((candidate) => (candidate.textContent ?? "").trim() === label);
+  const row = [...(menu()?.querySelectorAll<HTMLElement>(".brain-menu-item") ?? [])].find(
+    (candidate) => (candidate.textContent ?? "").trim() === label,
+  );
   row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await settle();
+}
+
+/** The detailed path: a day out of the grid, and Done sends it. */
+async function pickDay(day: string) {
+  menu()
+    ?.querySelector<HTMLElement>(`[data-day="${day}"]`)
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  menu()
+    ?.querySelector<HTMLElement>("[data-when-done]")
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   await settle();
 }
 
@@ -292,15 +311,36 @@ describe("the + Task gesture", () => {
     expect(calls.filter((call) => call.url.startsWith("/api/tasks"))).toEqual([]);
   });
 
-  it("opens a menu with Today, Tomorrow, Someday and Inbox in that order", async () => {
+  it("opens the picker with one Inbox row above it, and says every word once", async () => {
+    // THE POPOVER IS THE PICKER. Today, This Evening and Someday are its own
+    // quick rows and Tomorrow is a cell in its grid, so a list of four here
+    // drew Today twice and Someday twice, four rows apart. Inbox is the one
+    // word left: a task with no day at all, which no grid can say.
     const view = await mountEditor("- [ ] water the plants\n");
     hover(view, 0);
 
     marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
     expect(menu()).not.toBeNull();
-    expect(menuLabels()).toEqual(["Today", "Tomorrow", "Someday", "Inbox"]);
+    expect(menuLabels()).toEqual(["Inbox"]);
+    expect(allLabels()).toEqual(["Inbox", "Today", "This Evening", "Someday", "Reminder"]);
     expect(menu()?.getAttribute("data-state")).toBe("open");
+  });
+
+  it("is a dialog and not a menu, because a menu cannot hold a grid", async () => {
+    // `role="menu"` may own menu items and nothing else. What stands in here
+    // is a month grid, two spinbuttons and four checkbox rows: a screen reader
+    // told this was a menu would not expose the grid as a grid.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    const panel = menu()!;
+    expect(panel.getAttribute("role")).toBe("dialog");
+    expect(panel.getAttribute("aria-label")).toBe("When");
+    expect(panel.querySelector("[role='menuitem']")).toBeNull();
+    expect(panel.querySelector("[role='grid']")).not.toBeNull();
   });
 
   it("draws the picker in the popover and no native input (D4)", async () => {
@@ -327,12 +367,39 @@ describe("the + Task gesture", () => {
     expect(
       panel.style.getPropertyValue("--radix-popover-content-available-height"),
     ).toMatch(/^\d+px$/);
+    // Below the line, so the floating tab bar is still under the panel and the
+    // rule may take it off.
+    expect(panel.style.getPropertyValue("--tabbar-reserve")).toBe("");
   });
 
-  it("promotes the day the picker was given, and only the day", async () => {
-    // A CLOCK ON A LINE SOMEBODY IS STILL WRITING is a decision they have not
-    // made yet, so the gesture mints a record with a day and nothing else. The
-    // row's own chip sets the time a moment later.
+  it("owes the floating tab bar nothing when it lands above the line", async () => {
+    // The bar is at the bottom of the window. A panel placed ABOVE the line is
+    // measured from the top of the window down and never reaches it, and
+    // subtracting it there took ~84px of grid away on a phone for nothing.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    const mark = marks(view)[0];
+    // A tall panel over a line near the foot of a short window: no room below,
+    // room above, which is the one case `shouldFlipAbove` answers yes to.
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+      configurable: true,
+      get: () => 430,
+    });
+    mark.getBoundingClientRect = () =>
+      ({ top: 600, bottom: 620, left: 20, right: 80 }) as DOMRect;
+
+    mark.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    const panel = menu()!;
+    expect(panel.style.top).toBe(`${600 - 430 - 6}px`);
+    expect(panel.style.getPropertyValue("--tabbar-reserve")).toBe("0px");
+    Reflect.deleteProperty(HTMLElement.prototype, "offsetHeight");
+  });
+
+  it("keeps the panel standing on a grid pick and sends it on Done", async () => {
+    // THE DETAILED PATH, here as everywhere: a reminder needs its day first,
+    // so a day out of the grid has to be something a reader can follow with a
+    // clock. Nothing is minted until they say they are done.
     const view = await mountEditor("- [ ] water the plants\n");
     hover(view, 0);
 
@@ -342,10 +409,50 @@ describe("the + Task gesture", () => {
       ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await settle();
 
+    expect(menu()).not.toBeNull();
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(0);
+
+    menu()
+      ?.querySelector<HTMLElement>("[data-when-done]")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await settle();
+
     expect(postBody()).toMatchObject({ when: "2026-09-20" });
     expect(postBody().time).toBeUndefined();
     expect(postBody().evening).toBeUndefined();
     expect(marks(view)[0].textContent).toBe("20 Sep");
+  });
+
+  it("files the line in the evening when This Evening is the row pressed", async () => {
+    // The popover used to draw This Evening and then drop the evening on the
+    // way to the route, so the reader named a section and got another one with
+    // no report. The whole value travels now.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("This Evening");
+
+    expect(postBody()).toMatchObject({ when: TODAY, evening: true });
+  });
+
+  it("carries a reminder set beside the day it was set on", async () => {
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    menu()
+      ?.querySelector<HTMLElement>('[data-day="2026-09-20"]')
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    menu()
+      ?.querySelector<HTMLElement>("[data-when-reminder]")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    menu()
+      ?.querySelector<HTMLElement>("[data-when-done]")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await settle();
+
+    expect(postBody()).toMatchObject({ when: "2026-09-20", time: "09:00" });
   });
 
   it("leaves the picker's own arrows to the picker", async () => {
@@ -395,7 +502,7 @@ describe("the + Task gesture", () => {
     hover(view, 0);
     marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    await pick("Tomorrow");
+    await pickDay(TOMORROW);
 
     expect(menu()).toBeNull();
     const mark = marks(view)[0];
@@ -426,7 +533,7 @@ describe("the + Task gesture", () => {
 
     marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    expect(menuLabels()).toEqual(["Today", "Tomorrow", "Someday", "Inbox"]);
+    expect(menuLabels()).toEqual(["Inbox"]);
 
     await pick("Someday");
 
@@ -562,11 +669,11 @@ describe("the + Task gesture", () => {
 
     const row = [
       ...menu()!.querySelectorAll<HTMLButtonElement>(":scope > .brain-menu-item"),
-    ].find((candidate) => (candidate.textContent ?? "").trim() === "Today")!;
+    ].find((candidate) => (candidate.textContent ?? "").trim() === "Inbox")!;
     row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await settle();
     // Two records on one line is the state that has no honest reading, so the
-    // rows say so while the first one is in flight.
+    // row says so while the first one is in flight.
     expect(row.disabled).toBe(true);
     row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await settle();
@@ -575,7 +682,7 @@ describe("the + Task gesture", () => {
     await settle();
 
     expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
-    expect(marks(view)[0].textContent).toBe("Today");
+    expect(marks(view)[0].textContent).toBe("Inbox");
   });
 
   it("closes the menu when the page scrolls under it", async () => {

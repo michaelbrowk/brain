@@ -87,6 +87,13 @@ export const SHEET_DISMISS_VELOCITY = 800;
  *  becomes two. */
 export const SHEET_ENTER_Y = 48;
 
+/** The air above and below an expanded task row's chips, in px. BOTH sides
+ *  travel with the reveal, so the capsule grows once rather than stepping
+ *  open first, and that makes this a motion value and not a stylesheet one:
+ *  the same 6 was three literals (a margin, a padding and this) and the
+ *  "capsule + 40 to the pixel" claim needed all three to agree. */
+export const CHIP_ROW_AIR = 6;
+
 /** Press: scale on pointer-down, 100ms ease-out; hover fills 80ms in / 160ms out. */
 export const PRESS = { scale: 0.97, duration: 0.1 } as const;
 export const PRESS_ICON = { scale: 0.9, duration: 0.1 } as const;

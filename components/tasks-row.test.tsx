@@ -31,7 +31,7 @@ const pressAnimate = vi.fn(() => ({ stop: () => {} }));
 vi.mock("framer-motion/dom", () => ({ animate: pressAnimate }));
 
 const { TasksRow, foldRow, WRITE_AT_MS: WRITE_AT } = await import("./tasks-row");
-const { DUR } = await import("@/lib/motion");
+const { CHIP_ROW_AIR, DUR } = await import("@/lib/motion");
 const { renderTaskCheck, renderTaskCheckbox } = await import("./tasks-checkbox");
 const { SOLAR } = await import("./ui/solar-icons.generated");
 const { doneTimeOf } = await import("./tasks-lists");
@@ -490,12 +490,29 @@ describe("the expansion", () => {
     expect(ruleFor(css, ".chip")).toContain("white-space: nowrap");
     expect(ruleFor(css, ".chip")).toContain("flex-shrink: 0");
 
+    // THE AIR IS ONE NUMBER IN ONE PLACE, and it travels with the reveal. It
+    // was three literals (a margin here, a padding on the capsule and the
+    // number in the component) and the padding drew its 6px at chip height 0,
+    // so the capsule stepped open before it grew. Nothing in the stylesheet
+    // holds either side of it now.
+    expect(ruleFor(css, ".brain-task-row[data-expanded]")).not.toContain("padding-bottom");
+    expect(ruleFor(css, ".brain-task-chips")).not.toContain("margin");
+
     await renderRows([task("a", { when: TODAY })], { expanded: true });
     const chips = renders.find(
       (render) => String(render.props.className) === "brain-task-chips",
     );
-    expect(chips?.motion.initial).toMatchObject({ height: 0, marginTop: 0 });
-    expect(chips?.motion.animate).toMatchObject({ height: "auto", marginTop: 6 });
+    expect(chips?.motion.initial).toMatchObject({
+      height: 0,
+      marginTop: 0,
+      marginBottom: 0,
+    });
+    expect(chips?.motion.animate).toMatchObject({
+      height: "auto",
+      marginTop: CHIP_ROW_AIR,
+      marginBottom: CHIP_ROW_AIR,
+    });
+    expect(CHIP_ROW_AIR).toBe(6);
   });
 
   it("offers no deadline on a someday task", async () => {
@@ -678,14 +695,16 @@ describe("a history row", () => {
  *
  *  The modality branch this block used to test is gone with the native input:
  *  `components/tasks-when-picker.tsx` is the control at every width, and
- *  `ops/design-guardrails.test.ts` refuses a second one under `components/`. */
+ *  `ops/design-guardrails.test.ts` refuses a second one under `app/`,
+ *  `components/` and `lib/`. */
 describe("the When chip's picker", () => {
   /** `hover: hover` or not, the chip opens the same control: the branch that
    *  read it is deleted. One stub, so the cases below run on a `matchMedia`
    *  that exists rather than on jsdom's absent one. */
-  const stubHover = (hover = true) => {
+  const stubHover = (hover = true, sheet = false) => {
     vi.stubGlobal("matchMedia", (query: string) => ({
-      matches: query === "(hover: hover)" ? hover : false,
+      matches:
+        query === "(hover: hover)" ? hover : sheet && query === "(max-width: 767px)",
       media: query,
       onchange: null,
       addEventListener: vi.fn(),
@@ -760,6 +779,38 @@ describe("the When chip's picker", () => {
 
     expect(document.querySelector(".brain-when-picker")).toBeNull();
     expect(calls.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  it("commits what the sheet was dragged away on, because a drag is a close", async () => {
+    // THE GRIP IS THE PRIMARY WAY OUT ON A PHONE, and the same panel on a
+    // pointer commits what a press outside settled on. Two dismissals of one
+    // control cannot mean opposite things, so the drag writes too.
+    stubHover(false, true);
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await openMenu();
+    await act(async () => {
+      document.querySelector<HTMLElement>('[data-day="2026-09-20"]')?.click();
+    });
+    expect(calls.reschedule).not.toHaveBeenCalled();
+
+    const sheet = [...renders].reverse().find((render) => render.motion.drag === "y");
+    const dragEnd = sheet?.motion.onDragEnd as
+      | ((event: null, info: { offset: { y: number }; velocity: { y: number } }) => void)
+      | undefined;
+    if (!dragEnd) throw new Error("the picker drew no sheet to drag");
+    await act(async () => {
+      dragEnd(null, { offset: { y: 200 }, velocity: { y: 0 } });
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(document.querySelector(".brain-when-picker")).toBeNull();
+    expect(calls.reschedule).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a" }),
+      { when: "2026-09-20", evening: false, time: null },
+      "20 Sep",
+    );
   });
 
   it("closes and writes once on a quick row, and sends nothing that changes nothing", async () => {

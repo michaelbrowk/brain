@@ -363,10 +363,12 @@ export function TasksSurface({
  *  would take the reader back to that row every time they came to Tasks, and
  *  the open list is navigation state the shell already owns.
  *
- *  A missing id does nothing at all, and says nothing: a link to a task
- *  somebody has since deleted is not an error to report to whoever followed
- *  it. The records have to be in before that can be told apart from a record
- *  that has not loaded yet, which is what `loading` is read for. */
+ *  A missing id selects nothing and says nothing: a link to a task somebody
+ *  has since deleted is not an error to report to whoever followed it. The
+ *  query still leaves, because that is an answer too, and one left standing is
+ *  read again on every refetch. The records have to be in before it can be
+ *  told apart from a record that has not loaded yet, which is what `loading`
+ *  is read for. */
 function useNamedTask({
   tasks,
   loading,
@@ -407,11 +409,15 @@ function useNamedTask({
     if (task === undefined) {
       // Not loaded yet is not the same answer as not there.
       if (loading) return;
-      // NOTHING TO ACT ON, so nothing is touched: the URL is left exactly as
-      // it was found. A link to a task somebody has since deleted is not an
-      // error to report to whoever followed it, and it is not the surface's to
-      // tidy away either.
+      // NOTHING TO ACT ON, and nothing said: a link to a task somebody has
+      // since deleted is not an error to report to whoever followed it. The
+      // query comes off all the same, because the surface HAS answered it:
+      // there is no such task. A `?task=` left standing is read again on every
+      // dependency change, so an id that becomes resolvable later would select
+      // that row and scroll the column long after the reader followed the
+      // link.
       asked.current = null;
+      clearTaskParam();
       return;
     }
     if (!belongs(task, view, today, offsetMinutes)) {

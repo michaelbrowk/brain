@@ -67,15 +67,38 @@ export interface WhenValue {
   time: string | null;
 }
 
+/** WHETHER THE HOST TOOK THE VALUE.
+ *
+ *  Nothing and `true` are an acceptance, so a host that cannot refuse says
+ *  nothing at all. `false`, now or when the promise settles, puts the picker
+ *  back where it was and the same press writes again: a route that answers
+ *  409 or 400 has not moved the record, and a picker that believed it had
+ *  would dismiss the second press with nothing filed and no second reason. */
+export type WhenAccepted = void | boolean | Promise<boolean>;
+
 export interface WhenPickerOptions {
   value: WhenValue;
+  /** WHAT THE RECORD ALREADY SAYS, when that is not the value the picker
+   *  opens on. Defaults to `value`, which is the row's case: the chip opens
+   *  on the record it belongs to. `null` says there is NO record yet, so
+   *  nothing a press could send would repeat one, and every control here is
+   *  live: on a line that is not a task, `Clear` means "file it with no day"
+   *  the way the note's own Inbox row does, rather than closing the panel
+   *  having done nothing. */
+  baseline?: WhenValue | null;
   today: string;
   mode: "when" | "deadline";
   reduce: boolean;
   /** THE WRITE. Reached only through `commit()`, which the host calls, and
    *  never with a value the record already carries. */
-  onPick: (value: WhenValue) => void;
+  onPick: (value: WhenValue) => WhenAccepted;
   onDone: () => void;
+}
+
+/** The one reading of "these two say the same thing", so the no-op rule and
+ *  the hosts that queue a second press answer it the same way. */
+export function sameWhenValue(a: WhenValue, b: WhenValue): boolean {
+  return a.when === b.when && a.evening === b.evening && a.time === b.time;
 }
 
 export interface WhenPickerHandle {
@@ -86,7 +109,8 @@ export interface WhenPickerHandle {
    *  popover commits once it has closed, so the fold never plays under it,
    *  and the note's promote popover commits while it is still open, because a
    *  refusal has to be shown on the control the reader is holding. Calling it
-   *  twice on one answer writes once, and it is safe after `destroy()`. */
+   *  twice on one answer writes once, a value the host would not take stays
+   *  one press away, and it is safe after `destroy()`. */
   commit(): void;
   destroy(): void;
 }
@@ -179,12 +203,26 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   let focusedDay = isDay(value.when) ? value.when : today;
   let month = monthOfDay(focusedDay);
 
-  /** WHAT THE RECORD ALREADY SAYS, as far as this picker knows: the value it
-   *  was opened on, and then whatever it has sent since. A commit that would
-   *  repeat it sends nothing, which is how a gesture that ends where it began
-   *  writes no PATCH at all, and how a second press of one quick row cannot
-   *  mint a second write. */
-  let sent: WhenValue = { ...options.value };
+  /** WHAT THE RECORD ALREADY SAYS, as far as this picker knows: the baseline
+   *  it was opened on, and then whatever a host has TAKEN since. A commit that
+   *  would repeat it sends nothing, which is how a gesture that ends where it
+   *  began writes no PATCH at all, and how a second press of one quick row
+   *  cannot mint a second write. It moves on the host's word and not on the
+   *  send, so a value a route refused is still a value this picker can send
+   *  again. `null` is a record that does not exist yet: nothing can repeat
+   *  what is not there, so every press writes. */
+  let sent: WhenValue | null =
+    options.baseline === undefined
+      ? { ...options.value }
+      : options.baseline === null
+        ? null
+        : { ...options.baseline };
+  /** TRUE ONCE A QUICK ROW HAS ANSWERED THE QUESTION. The panel is closing
+   *  from that press on, and its 120ms exit keeps this element and its
+   *  keydown listener mounted for the whole of it. Escape in that window used
+   *  to put the value back and cancel a write the reader had already asked
+   *  for, so Escape is inert once a row has answered. */
+  let answered = false;
 
   const element = document.createElement("div");
   element.className = "brain-when-picker";
@@ -441,20 +479,30 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
    *  itself is the host's, a moment later, through `commit()`. */
   function quick(next: WhenValue): void {
     value = next;
+    answered = true;
     repaint();
     onDone();
   }
 
   function commit(): void {
-    if (
-      value.when === sent.when &&
-      value.evening === sent.evening &&
-      value.time === sent.time
-    ) {
+    if (sent !== null && sameWhenValue(value, sent)) return;
+    const going: WhenValue = { ...value };
+    const before = sent;
+    // Optimistic, so a second press of the same row while the first is in
+    // flight sends nothing, and rolled back the moment the host says it did
+    // not take it. The identity check is what stops a late refusal from
+    // undoing a value the reader has since sent on top of it.
+    sent = going;
+    const answer = onPick(going);
+    if (answer === false) {
+      sent = before;
       return;
     }
-    sent = { ...value };
-    onPick(sent);
+    if (typeof answer === "object") {
+      void answer.then((took) => {
+        if (!took && sent === going) sent = before;
+      });
+    }
   }
 
   function pickDay(day: string): void {
@@ -514,11 +562,18 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   element.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.preventDefault();
+      // A ROW THAT ALREADY ANSWERED IS NOT UNDONE BY THE KEY THAT FOLLOWS IT.
+      // The panel plays its exit for 120ms with this listener still on it, and
+      // a reader who taps Today and reaches for Escape on the way out asked
+      // for one write, not for none.
+      if (answered) return;
       // ESCAPE THROWS THE VALUE AWAY. It is the one way out that leaves the
       // record where it was, so a reader halfway through a month has a way
-      // back that is not another five presses. Put back what the record says
-      // and every commit after it is a commit of nothing.
-      value = { ...sent };
+      // back that is not another five presses. Put back what the record says,
+      // or what the panel opened on when there is no record, and take that as
+      // the baseline: every commit after it is a commit of nothing.
+      value = sent === null ? { ...options.value } : { ...sent };
+      sent = { ...value };
       onDone();
       return;
     }
@@ -636,12 +691,14 @@ export function TasksWhenPicker({
       /** THE WRITE LANDS WHEN THE POPOVER HAS GONE, and not a frame earlier.
        *  A reschedule folds the row downward, and a fold that starts while
        *  the picker is still drawn takes the row out from under the panel
-       *  the reader is holding. This teardown is that moment: Radix keeps
-       *  the content mounted for its 120ms retrace and React calls back
-       *  here once it is off the tree. */
+       *  the reader is holding. This teardown is that moment: Radix keeps the
+       *  content mounted for its 120ms retrace and React calls back here as
+       *  it takes the host away. The picker is taken out of the document
+       *  FIRST, so "the panel has gone" is a fact the write can be measured
+       *  against rather than a claim about React's commit order. */
       return () => {
-        if (closing.current) handle.commit();
         handle.destroy();
+        if (closing.current) handle.commit();
       };
     },
     [today, mode, reduce],
@@ -699,6 +756,11 @@ export function TasksWhenPicker({
                   info.offset.y > SHEET_DISMISS_OFFSET ||
                   info.velocity.y > SHEET_DISMISS_VELOCITY
                 ) {
+                  // THE GRIP IS A CLOSE, NOT A CANCEL. On a phone it is the
+                  // primary way out of this panel, and the same panel on a
+                  // pointer commits what a press outside settled on. Two
+                  // dismissals of one control cannot mean opposite things.
+                  closing.current = true;
                   setOpen(false);
                   return;
                 }

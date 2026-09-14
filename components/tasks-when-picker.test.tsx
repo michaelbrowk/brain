@@ -36,7 +36,9 @@ const open = (over: Partial<WhenPickerOptions> = {}) => {
     today: TODAY,
     mode: "when",
     reduce: false,
-    onPick: (value) => picked.push(value),
+    onPick: (value) => {
+      picked.push(value);
+    },
     onDone: () => {
       closed.push(1);
       handle.commit();
@@ -489,6 +491,117 @@ describe("clearing", () => {
   });
 });
 
+describe("the commit contract", () => {
+  it("keeps a refused pick one press away", () => {
+    // `sent` IS A CLAIM ABOUT THE RECORD, so it may only move when the host
+    // says the record did. A route that answers 409 or 400 leaves the panel
+    // standing with the reason in it, and the reader presses the same row
+    // again: that press has to write, or the panel dismisses on the second
+    // try with nothing filed and no second reason.
+    const answers: WhenValue[] = [];
+    let takes = false;
+    const handle = open({
+      value: { when: null, evening: false, time: null },
+      onPick: (value) => {
+        answers.push(value);
+        return takes;
+      },
+    });
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    expect(answers).toHaveLength(1);
+
+    takes = true;
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    expect(answers).toEqual([
+      { when: TODAY, evening: false, time: null },
+      { when: TODAY, evening: false, time: null },
+    ]);
+  });
+
+  it("waits for a host whose answer is a promise before it believes it", async () => {
+    // The note's popover cannot answer at the press: the refusal comes back
+    // from the route. So the acceptance may settle late, and a refusal that
+    // settles late puts the value back all the same.
+    const answers: WhenValue[] = [];
+    let settle!: (took: boolean) => void;
+    const handle = open({
+      value: { when: null, evening: false, time: null },
+      onPick: (value) => {
+        answers.push(value);
+        return new Promise<boolean>((resolve) => {
+          settle = resolve;
+        });
+      },
+    });
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    expect(answers).toHaveLength(1);
+    // While it is in flight the same value is not sent twice.
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    expect(answers).toHaveLength(1);
+
+    settle(false);
+    await Promise.resolve();
+    await Promise.resolve();
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    expect(answers).toHaveLength(2);
+  });
+
+  it("writes every word when there is no record for one to repeat", () => {
+    // A HOST WITH NO RECORD YET, which is the note's line before it is a task.
+    // `Clear` there means "file it with no day", the same word the popover's
+    // own Inbox row says, and the no-op rule has nothing to measure it
+    // against: a baseline of `null` is not a record that says nothing set.
+    const handle = open({ value: { when: null, evening: false, time: null }, baseline: null });
+    handle.element.querySelector<HTMLElement>("[data-when-clear]")?.click();
+    expect(picked).toEqual([{ when: null, evening: false, time: null }]);
+  });
+
+  it("still sends nothing after Escape on a picker with no baseline", () => {
+    const handle = open({ value: { when: null, evening: false, time: null }, baseline: null });
+    cell(handle.element, "2026-09-20").click();
+    key(handle.element, "Escape");
+
+    expect(picked).toHaveLength(0);
+  });
+
+  it("leaves a quick row's write alone when Escape lands inside the exit window", () => {
+    // The material plays its exit for 120ms, so the panel and this handler are
+    // still mounted after a quick row has closed it and the focus has not gone
+    // back to the trigger yet. Escape in that window used to put the value
+    // back and cancel a write the reader had already asked for.
+    const sent: WhenValue[] = [];
+    const handle = open({
+      value: { when: null, evening: false, time: null },
+      onPick: (value) => {
+        sent.push(value);
+      },
+      // A host that commits once the panel has gone, which is the row's.
+      onDone: () => closed.push(1),
+    });
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    key(handle.element, "Escape");
+    handle.commit();
+
+    expect(sent).toEqual([{ when: TODAY, evening: false, time: null }]);
+  });
+
+  it("still throws away a half-made pick on Escape, because nothing answered yet", () => {
+    const sent: WhenValue[] = [];
+    const handle = open({
+      value: { when: TODAY, evening: false, time: null },
+      onPick: (value) => {
+        sent.push(value);
+      },
+      onDone: () => closed.push(1),
+    });
+    cell(handle.element, "2026-09-20").click();
+    key(handle.element, "Escape");
+    handle.commit();
+
+    expect(sent).toHaveLength(0);
+  });
+});
+
 describe("the motion", () => {
   it("carries the grid the way the month travelled", () => {
     const { element } = open();
@@ -607,7 +720,124 @@ describe("the React wrapper", () => {
     await act(async () => root.unmount());
     host.remove();
   });
+
+  it("writes with the picker already gone from the document", async () => {
+    // THE CLAUSE THE ROW'S FOLD RESTS ON, made falsifiable. The two facts the
+    // case above asserts are both true whether the write leaves in the click
+    // handler or in the teardown, because neither of them watches the ORDER.
+    // This one does: the host records, from inside the write itself, whether
+    // the panel was still drawn at that moment.
+    const drawnAtWrite: boolean[] = [];
+    const mounted = await mountWrapper((value) => {
+      drawnAtWrite.push(document.querySelector(".brain-when-picker") !== null);
+      mounted.sent.push(value);
+    });
+
+    await act(async () => {
+      pickDay(mounted.picker(), "2026-09-20");
+    });
+    await act(async () => {
+      press(mounted.picker(), "[data-when-done]");
+    });
+
+    expect(mounted.sent).toHaveLength(1);
+    expect(drawnAtWrite).toEqual([false]);
+    await mounted.end();
+  });
+
+  it("commits on a press outside, which is an answer and not a cancel", async () => {
+    // Radix's own dismissals reach the wrapper through `onOpenChange`, and a
+    // press outside is the reader saying they are done with the panel. The
+    // phone sheet's drag away is the same answer, pinned on the row.
+    const mounted = await mountWrapper();
+    await act(async () => {
+      pickDay(mounted.picker(), "2026-09-20");
+    });
+    expect(mounted.sent).toHaveLength(0);
+
+    const elsewhere = document.createElement("div");
+    document.body.append(elsewhere);
+    // Radix arms the outside listener a tick after the content mounts, and
+    // reads the whole press rather than its first half.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    await act(async () => {
+      elsewhere.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+      );
+      elsewhere.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, cancelable: true }));
+      elsewhere.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    elsewhere.remove();
+
+    expect(document.querySelectorAll(".brain-when-picker")).toHaveLength(0);
+    expect(mounted.sent).toEqual([{ when: "2026-09-20", evening: false, time: null }]);
+    await mounted.end();
+  });
+
+  it("sends nothing when the picker goes away without a close", async () => {
+    // A LIST REFETCH, A ROW LEAVING, A ROUTE CHANGE. None of them is a reader
+    // saying they are done, and the detailed path's whole contract is that a
+    // day picked while they reach for the clock is not a value yet. Writing it
+    // on an unmount nobody asked for files a record on a press that was never
+    // finished, with no panel left to show what happened.
+    const mounted = await mountWrapper();
+    await act(async () => {
+      pickDay(mounted.picker(), "2026-09-20");
+    });
+
+    await mounted.end();
+
+    expect(mounted.sent).toHaveLength(0);
+  });
 });
+
+/** The wrapper on a page, opened, with the four things a case needs back. */
+async function mountWrapper(onPick?: (value: WhenValue) => void) {
+  const sent: WhenValue[] = [];
+  const host = document.createElement("div");
+  document.body.append(host);
+  let root!: Root;
+  await act(async () => {
+    root = createRoot(host);
+    root.render(
+      <TasksWhenPicker
+        value={{ when: TODAY, evening: false, time: null }}
+        today={TODAY}
+        onPick={
+          onPick ??
+          ((value) => {
+            sent.push(value);
+          })
+        }
+        ariaLabel="When"
+        trigger={<button type="button">When</button>}
+      />,
+    );
+  });
+  await act(async () => {
+    host
+      .querySelector("button")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+  });
+  return {
+    sent,
+    picker: () => document.querySelector<HTMLElement>(".brain-when-picker")!,
+    end: async () => {
+      await act(async () => root.unmount());
+      host.remove();
+    },
+  };
+}
+
+const press = (element: HTMLElement, selector: string) =>
+  element
+    .querySelector<HTMLElement>(selector)
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+
+const pickDay = (element: HTMLElement, day: string) =>
+  press(element, `[data-day="${day}"]`);
 
 const css = readFileSync(path.join(path.resolve(__dirname, ".."), "app/globals.css"), "utf8");
 

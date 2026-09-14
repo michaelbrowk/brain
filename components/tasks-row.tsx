@@ -10,6 +10,7 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  CHIP_ROW_AIR,
   DUR,
   EASE_OUT,
   HOVER,
@@ -580,14 +581,37 @@ export function TasksRow({
                    used to be in the stylesheet cannot know how tall it is. The
                    row reveals itself from 0 and the capsule, which is
                    `height: auto` now, grows with it: the same 220ms growth,
-                   measured off the chips rather than assumed. */
+                   measured off the chips rather than assumed.
+
+                   BOTH SIDES OF THE AIR TRAVEL WITH IT. The 6 below the chips
+                   was `padding-bottom` on the capsule, applied in the frame the
+                   attribute was, and padding on a box drawn at chip height 0
+                   steps the row open 6px before it grows. It is this element's
+                   margin now, animated from 0 like the air above it, so the
+                   capsule moves once. */
                 <motion.span
                   className="brain-task-chips"
                   initial={
-                    reduce ? { opacity: 0 } : { opacity: 0, height: 0, marginTop: 0, y: -4 }
+                    reduce
+                      ? { opacity: 0, marginTop: CHIP_ROW_AIR, marginBottom: CHIP_ROW_AIR }
+                      : {
+                          opacity: 0,
+                          height: 0,
+                          marginTop: 0,
+                          marginBottom: 0,
+                          y: -4,
+                        }
                   }
                   animate={
-                    reduce ? { opacity: 1 } : { opacity: 1, height: "auto", marginTop: 6, y: 0 }
+                    reduce
+                      ? { opacity: 1, marginTop: CHIP_ROW_AIR, marginBottom: CHIP_ROW_AIR }
+                      : {
+                          opacity: 1,
+                          height: "auto",
+                          marginTop: CHIP_ROW_AIR,
+                          marginBottom: CHIP_ROW_AIR,
+                          y: 0,
+                        }
                   }
                   exit={
                     reduce
@@ -596,6 +620,7 @@ export function TasksRow({
                           opacity: 0,
                           height: 0,
                           marginTop: 0,
+                          marginBottom: 0,
                           transition: { duration: DUR.fast, ease: "easeIn" },
                         }
                   }

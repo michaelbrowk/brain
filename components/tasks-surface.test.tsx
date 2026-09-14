@@ -305,17 +305,20 @@ describe("a task named in the URL", () => {
     expect(scrolled).toContain(rowFor("later"));
   });
 
-  it("does nothing for an id no record answers to", async () => {
+  it("says nothing for an id no record answers to, and takes the query off", async () => {
     window.history.replaceState({}, "", "/tasks?task=gone");
     await mount([task("a", { when: TODAY })]);
 
     expect(document.querySelector("[data-selected]")).toBeNull();
     expect(scrolled).toHaveLength(0);
-    // Quietly, and without touching a thing: a link to a task somebody has
-    // since deleted is not an error to report to whoever followed it, and a
-    // query this surface never answered is not its to take off either.
+    // Quietly: a link to a task somebody has since deleted is not an error to
+    // report to whoever followed it. The query goes with the answer all the
+    // same, because it HAS been answered: there is no such task. A `?task=`
+    // left standing is read again on every dependency change, so an id that
+    // becomes resolvable later would select that row and scroll the column
+    // long after the reader followed the link.
     expect(toasts).toEqual([]);
-    expect(window.location.search).toBe("?task=gone");
+    expect(window.location.search).toBe("");
   });
 });
 

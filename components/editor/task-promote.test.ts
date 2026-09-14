@@ -341,6 +341,9 @@ describe("the + Task gesture", () => {
     expect(panel.getAttribute("aria-label")).toBe("When");
     expect(panel.querySelector("[role='menuitem']")).toBeNull();
     expect(panel.querySelector("[role='grid']")).not.toBeNull();
+    // And the trigger says what it opens. The arrow-key row walking that made
+    // this a menu went with the role.
+    expect(marks(view)[0].getAttribute("aria-haspopup")).toBe("dialog");
   });
 
   it("draws the picker in the popover and no native input (D4)", async () => {
@@ -672,9 +675,10 @@ describe("the + Task gesture", () => {
     ].find((candidate) => (candidate.textContent ?? "").trim() === "Inbox")!;
     row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await settle();
-    // Two records on one line is the state that has no honest reading, so the
-    // row says so while the first one is in flight.
-    expect(row.disabled).toBe(true);
+    // The row answers the second press rather than refusing it, and the second
+    // press says what the first one said, so there is nothing left to write:
+    // two records on one line is the state that has no honest reading.
+    expect(row.disabled).toBe(false);
     row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await settle();
 
@@ -682,6 +686,136 @@ describe("the + Task gesture", () => {
     await settle();
 
     expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(marks(view)[0].textContent).toBe("Inbox");
+  });
+
+  it("keeps a refused pick one press away, and the second press writes", async () => {
+    // THE REFUSAL LEAVES THE PANEL STANDING so the next pick is one press
+    // away, which is the sentence the case above ends on. It was not true: the
+    // picker had already taken the refused value for the record's own, so the
+    // same row sent nothing the second time and the panel dismissed with no
+    // task filed and no second reason.
+    createAnswer = { status: 409, body: { error: "conflict", reason: "already a task" } };
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Today");
+    expect(menu()).not.toBeNull();
+    expect(menu()?.textContent).toContain("already a task");
+
+    createAnswer = { status: 201, body: {} };
+    await pick("Today");
+
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(2);
+    expect(menu()).toBeNull();
+    expect(marks(view)[0].textContent).toBe("Today");
+  });
+
+  it("files the line where the second row says when both are pressed in flight", async () => {
+    // A READER WHO CHANGES THEIR MIND MID-FLIGHT is not told no and is not
+    // ignored: the second press queues behind the write already out and wins,
+    // so the line ends in the list the last word named. Dropping it filed the
+    // task in a list nobody chose, with no report, which is the shape the
+    // whole-value fix was about.
+    let release = () => {};
+    createGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Today");
+    await pick("Someday");
+    release();
+    // Two writes in a row: the create the first word asked for, then the
+    // reschedule the second one queued behind it.
+    await settle();
+    await settle();
+
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    const patch = calls.find((call) => call.method === "PATCH");
+    expect(patch?.url).toBe("/api/tasks/task-1");
+    expect(patch?.body).toEqual({ when: "someday" });
+    expect(marks(view)[0].textContent).toBe("Someday");
+    expect(menu()).toBeNull();
+  });
+
+  it("opens on the day the line already carries", async () => {
+    // THE PANEL STANDS ON THE RECORD. It used to open every line on nothing
+    // set, so a task filed in Today had no row checked and no cell selected,
+    // and the one control whose word is about the value the line already has
+    // was dead before it was pressed.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("Today");
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    const panel = menu()!;
+    expect(panel.querySelector("[data-when-today]")?.getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(panel.querySelector(`[data-day="${TODAY}"]`)?.getAttribute("aria-selected")).toBe(
+      "true",
+    );
+  });
+
+  it("clears the day of a line that has one, because that is what Clear says", async () => {
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("Today");
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    menu()
+      ?.querySelector<HTMLElement>("[data-when-clear]")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await settle();
+
+    const patch = calls.find((call) => call.method === "PATCH");
+    expect(patch?.url).toBe("/api/tasks/task-1");
+    expect(patch?.body).toEqual({ when: null });
+    expect(marks(view)[0].textContent).toBe("Inbox");
+    expect(menu()).toBeNull();
+  });
+
+  it("files a line with no day from Clear, which is the Inbox row's own word", async () => {
+    // ONE WORD APART, AND THEY USED TO DO OPPOSITE THINGS. The panel's Inbox
+    // row created the task with no day and the picker's Clear, two rows below
+    // it, closed the panel having written nothing: the picker had been told
+    // the record said "nothing set" about a line that had no record at all.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    menu()
+      ?.querySelector<HTMLElement>("[data-when-clear]")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await settle();
+
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(postBody().when).toBeUndefined();
+    expect(marks(view)[0].textContent).toBe("Inbox");
+    expect(menu()).toBeNull();
+  });
+
+  it("moves an already-promoted line to the Inbox from the row that says so", async () => {
+    // One word apart from Clear, and they used to have opposite outcomes: the
+    // panel's own row wrote and the picker's did nothing at all.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("Today");
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("Inbox");
+
+    const patch = calls.find((call) => call.method === "PATCH");
+    expect(patch?.url).toBe("/api/tasks/task-1");
+    expect(patch?.body).toEqual({ when: null });
     expect(marks(view)[0].textContent).toBe("Inbox");
   });
 

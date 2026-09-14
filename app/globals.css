@@ -5739,10 +5739,11 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
    outside the capsule. The chip row reveals itself from 0 on
    `SPRING_MATERIALIZE` (`components/tasks-row.tsx`) and the capsule follows it
    in real height, so one line still measures capsule + 40 to the pixel and two
-   measure what two lines are. */
+   measure what two lines are. The air under the chips is THEIR margin and not
+   a padding here: a padding draws its 6px at chip height 0, which stepped the
+   capsule open before it grew. */
 .brain-task-row[data-expanded] {
   height: auto;
-  padding-bottom: 6px;
   background-color: var(--blue-tint-2);
   box-shadow: inset 0 0 0 1px var(--blue-rim);
 }
@@ -5968,17 +5969,18 @@ html[data-kbd] .brain-task-row[data-selected] {
    four chips ran past the column and the tail of the row was clipped by a
    scroller nobody could see was there, with `+ Category` drawn over its
    neighbours. A second line is 6px of air and 28 of chip, and the capsule
-   above sizes to whatever that comes to. */
+   above sizes to whatever that comes to.
+
+   THE AIR ABOVE AND BELOW IS THIS ELEMENT'S MARGIN, and it is set from
+   `CHIP_ROW_AIR` in `lib/motion.ts` rather than here: both sides animate from
+   0 with the reveal, so the capsule grows once instead of stepping open first,
+   and the 6 lives in one place instead of three. */
 .brain-task-chips {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  /* The air above the chips, and the capsule's own `padding-bottom` is the air
-     below: a PADDING here would still draw 6px at height 0 and the row would
-     step open before it grew. */
-  margin-top: 6px;
   /* The reveal is a height from 0, so the chips are clipped while it plays. */
   overflow: hidden;
 }

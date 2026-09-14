@@ -180,6 +180,22 @@ describe("the sheet the When picker rides", () => {
     expect(panel?.motion.dragConstraints).toEqual({ top: 0 });
   });
 
+  /** ONE OBJECT CARRIES THE MATERIAL AND THE SPRING. The sheet used to be a
+   *  box INSIDE the popover's content, so the glass, the blur and the shadow
+   *  stayed where they were while the box slid away: for the length of the
+   *  exit an empty pane of the material sat over the list. What moves has to
+   *  be what the reader sees. */
+  it("puts the material on the element the spring moves", async () => {
+    await openSheet();
+    const panel = [...renders].reverse().find((render) => render.motion.drag === "y");
+    const className = String(panel?.props.className ?? "");
+    expect(className).toContain("brain-menu");
+    expect(className).toContain("brain-when-sheet");
+    expect(className).toContain("brain-when-panel");
+    // And nothing else in the tree wears the material beside it.
+    expect(document.querySelectorAll(".brain-menu.brain-when-sheet")).toHaveLength(1);
+  });
+
   it("takes the panel away when the drag passes the offset", async () => {
     await openSheet();
     expect(document.querySelector(".brain-when-picker")).not.toBeNull();

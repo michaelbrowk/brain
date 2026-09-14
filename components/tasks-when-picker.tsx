@@ -946,20 +946,27 @@ export function TasksWhenPicker({
     >
       <Popover.Trigger asChild>{trigger}</Popover.Trigger>
       <Popover.Portal>
+        {/* ONE OBJECT CARRIES THE MATERIAL AND THE SPRING (C3).
+            The sheet used to be a `motion.div` INSIDE the content, so the
+            glass, the blur and the shadow stayed where they were while the
+            box inside them slid away: for the length of the exit an empty
+            pane of the material sat over the list. `asChild` makes the
+            content the moving element, so what the reader sees leave the
+            screen is the whole sheet. */}
         <Popover.Content
+          asChild={sheet}
           side="bottom"
           align="start"
           sideOffset={6}
           collisionPadding={8}
           aria-label={ariaLabel}
           onOpenAutoFocus={(event) => event.preventDefault()}
-          className={`brain-menu brain-when-panel z-[var(--z-modal)]${
-            sheet ? " brain-when-sheet" : ""
-          }`}
+          className={sheet ? undefined : "brain-menu brain-when-panel z-[var(--z-modal)]"}
         >
           {sheet ? (
             <motion.div
               ref={sheetRef}
+              className="brain-menu brain-when-panel brain-when-sheet z-[var(--z-modal)]"
               style={{ y: sheetY }}
               initial={reduce ? false : { y: SHEET_ENTER_Y }}
               animate={{ y: 0 }}

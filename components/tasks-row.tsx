@@ -31,6 +31,7 @@ import {
   deadlineCaption,
   dayLabel,
   doneTimeOf,
+  movesRow,
   overdueWhenCaption,
   repeatNextLabel,
 } from "./tasks-lists";
@@ -294,9 +295,18 @@ export function TasksRow({
     beginHold();
   }, [beginHold, key, onSelectNext]);
 
+  /** A ROW THAT IS NOT LEAVING PLAYS NO LEAVING ANIMATION.
+   *
+   *  Today pressed on a task that is already in Today writes the day and
+   *  moves nothing: the derive draws the record in the same list under the
+   *  same header. The fold fills FORWARDS, so one played here would hold a
+   *  row that never unmounted at height 0, with the record correct
+   *  underneath it, until the next load. `movesRow` is the same answer
+   *  `tasks-actions` reports on, so the motion and the words cannot
+   *  disagree. */
   const leaveDown = useCallback(
     async (when: string | "someday" | null, label: string) => {
-      const element = wrapRef.current;
+      const element = movesRow(task, when, today) ? wrapRef.current : null;
       const fold = element ? foldRow(element, "down", reduce) : null;
       let refused = false;
       try {
@@ -308,7 +318,7 @@ export function TasksRow({
       else await fold?.finished;
       onFoldEnd(task.id);
     },
-    [onFoldEnd, onReschedule, reduce, task],
+    [onFoldEnd, onReschedule, reduce, task, today],
   );
 
   useRowShortcuts({

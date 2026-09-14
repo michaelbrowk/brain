@@ -10,6 +10,7 @@ import {
   deadlineCaption,
   doneTimeOf,
   headerLabel,
+  movesRow,
   overdueWhenCaption,
   sectionsFor,
   type TasksView,
@@ -174,6 +175,48 @@ describe("sectionsFor", () => {
     expect(
       sectionsFor(tasks, list("today"), TODAY, UTC).map((s) => s.group.label),
     ).toEqual(["Apple", "Единорог", "Ёлка"]);
+  });
+});
+
+describe("movesRow", () => {
+  // The four reasons a record is in Today. Today pressed on any of them
+  // writes the day and moves nothing, which is what the row's fold and the
+  // report both read.
+  it.each([
+    ["the day it is meant for is today", { when: TODAY }],
+    ["that day is past", { when: "2026-09-08" }],
+    ["a deadline has arrived and no day is set", { deadline: TODAY }],
+    [
+      "a deadline has arrived over a day still ahead",
+      { when: "2026-09-20", deadline: TODAY },
+    ],
+  ])("is false for Today on a task already in Today: %s", (_reason, over) => {
+    expect(movesRow(task("a", over), TODAY, TODAY)).toBe(false);
+  });
+
+  it("is false for Someday on a task already parked", () => {
+    expect(movesRow(task("a", { when: "someday" }), "someday", TODAY)).toBe(false);
+  });
+
+  it("is true whenever the record lands in another list", () => {
+    expect(movesRow(task("a", { when: TODAY }), "2026-09-14", TODAY)).toBe(true);
+    expect(movesRow(task("a", { when: TODAY }), "someday", TODAY)).toBe(true);
+    expect(movesRow(task("a", { when: "someday" }), TODAY, TODAY)).toBe(true);
+    expect(movesRow(task("a", { when: "2026-09-20" }), TODAY, TODAY)).toBe(true);
+    expect(movesRow(task("a"), TODAY, TODAY)).toBe(true);
+  });
+
+  // Upcoming groups by day, so two days that are both ahead are two places.
+  it("is true for a day inside Upcoming that lands under another header", () => {
+    expect(movesRow(task("a", { when: "2026-09-20" }), "2026-09-14", TODAY)).toBe(true);
+  });
+
+  // A category is not a day, so a reschedule never changes the header a task
+  // stands under in Today.
+  it("reads the same answer for a filed task as for a bare one", () => {
+    expect(movesRow(task("a", { when: TODAY, category: "Work" }), TODAY, TODAY)).toBe(
+      false,
+    );
   });
 });
 

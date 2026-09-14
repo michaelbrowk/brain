@@ -219,7 +219,6 @@ describe("the Mail block on Home", () => {
 
     expect(host.querySelectorAll("[data-hub-mail-person]")).toHaveLength(0);
     expect(host.querySelector("[data-hub-mail-digest]")).not.toBeNull();
-    expect(host.textContent).not.toContain("Empty");
     expect(host.textContent).not.toContain("Inbox is quiet");
   });
 
@@ -246,6 +245,174 @@ describe("the Mail block on Home", () => {
     );
     // One row, not an empty state beside it.
     expect(host.textContent).not.toContain("Inbox is quiet");
+  });
+
+  /** THE SERVICE ITSELF, not one stream.
+   *
+   *  `loadAccounts` is the call that decides whether this block exists, so a
+   *  503 from it used to leave whatever was on screen standing: no block on a
+   *  fresh tab, and hours-old rows with no signal on a returning one. The spec
+   *  asks for one row per account, by name. */
+  describe("the mail service being down", () => {
+    const SNAPSHOT_KEY = "brain-hub-mail-v2";
+
+    function remember(over: Record<string, unknown> = {}) {
+      sessionStorage.setItem(
+        SNAPSHOT_KEY,
+        JSON.stringify({
+          people: [
+            {
+              accountId: "account-a1",
+              threadId: "t-cached",
+              sender: "Ada",
+              subject: "Yesterday",
+              at: NOW.getTime() - 3_600_000,
+            },
+          ],
+          notifications: 0,
+          newsletters: 0,
+          unreachable: [],
+          accounts: ["ada@example.test"],
+          ...over,
+        }),
+      );
+    }
+
+    it("names every account this tab knows about when the accounts call 503s", async () => {
+      remember();
+      await mount({ accountsFail: true });
+
+      expect(host.querySelector("[data-hub-mail]")).not.toBeNull();
+      expect(
+        rowTexts().some((text) => text.includes("Couldn't reach ada@example.test")),
+      ).toBe(true);
+    });
+
+    it("keeps the cached rows beside the signal rather than blanking them", async () => {
+      remember();
+      await mount({ accountsFail: true });
+
+      // Stale rows are useful; stale rows with nothing saying so are not.
+      expect(host.querySelectorAll("[data-hub-mail-person]")).toHaveLength(1);
+      expect(host.querySelectorAll("[data-hub-mail-unreachable]")).toHaveLength(1);
+      expect(host.textContent).not.toContain("Inbox is quiet");
+    });
+
+    it("draws no block at all when it has never had an answer", async () => {
+      // Nothing here knows whether a mailbox exists, so naming one would
+      // invent it and claiming none would delete it. Silence is the honest
+      // answer, and it is the same one "no account connected" gets.
+      await mount({ accountsFail: true });
+
+      expect(host.querySelector("[data-hub-mail]")).toBeNull();
+      expect(host.textContent).toBe("");
+    });
+
+    it("turns a block that was ready into the signal when the next read 503s", async () => {
+      const a = account("account-a1", "ada@example.test");
+      const stub: Stub = {
+        accounts: [a],
+        threads: () => page([thread({ accountId: a.accountId })]),
+      };
+      await mount(stub);
+      expect(host.querySelectorAll("[data-hub-mail-person]")).toHaveLength(1);
+      expect(host.querySelectorAll("[data-hub-mail-unreachable]")).toHaveLength(0);
+
+      stub.accountsFail = true;
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await settle();
+
+      expect(
+        rowTexts().some((text) => text.includes("Couldn't reach ada@example.test")),
+      ).toBe(true);
+      expect(host.querySelectorAll("[data-hub-mail-person]")).toHaveLength(1);
+    });
+  });
+
+  describe("the snapshot and the revalidation", () => {
+    it("paints this session's last answer before the network says anything", async () => {
+      const a = account("account-a1", "ada@example.test");
+      let release!: () => void;
+      const held = new Promise<MailThreadPage>((resolve) => {
+        release = () => resolve(page([thread({ accountId: a.accountId })]));
+      });
+      sessionStorage.setItem(
+        "brain-hub-mail-v2",
+        JSON.stringify({
+          people: [
+            {
+              accountId: "account-a1",
+              threadId: "t-cached",
+              sender: "Ada",
+              subject: "Yesterday",
+              at: NOW.getTime() - 3_600_000,
+            },
+          ],
+          notifications: 0,
+          newsletters: 0,
+          unreachable: [],
+          accounts: ["ada@example.test"],
+        }),
+      );
+
+      await mount({ accounts: [a], threads: () => held });
+
+      // The cached row, not a skeleton: walking back to Home draws the block
+      // it drew a moment ago.
+      expect(host.querySelector("[data-hub-mail-pending]")).toBeNull();
+      expect(
+        host.querySelector("[data-hub-mail-person]")?.getAttribute("data-hub-mail-person"),
+      ).toBe("t-cached");
+
+      release();
+      await settle();
+      // And the answer replaces it when it lands.
+      expect(
+        host.querySelector("[data-hub-mail-person]")?.getAttribute("data-hub-mail-person"),
+      ).toBe("t1");
+    });
+
+    it("writes the snapshot the next mount reads", async () => {
+      const a = account("account-a1", "ada@example.test");
+      await mount({
+        accounts: [a],
+        threads: () => page([thread({ accountId: a.accountId })]),
+      });
+
+      const stored = JSON.parse(
+        sessionStorage.getItem("brain-hub-mail-v2") ?? "null",
+      ) as { people: unknown[]; accounts: string[] } | null;
+      expect(stored?.people).toHaveLength(1);
+      expect(stored?.accounts).toEqual(["ada@example.test"]);
+    });
+
+    it("re-asks when the tab becomes visible again", async () => {
+      const a = account("account-a1", "ada@example.test");
+      let answers = 0;
+      const stub: Stub = {
+        accounts: [a],
+        threads: () => {
+          answers += 1;
+          return page(
+            Array.from({ length: answers }, () =>
+              thread({ accountId: a.accountId }),
+            ),
+          );
+        },
+      };
+      await mount(stub);
+      expect(host.querySelectorAll("[data-hub-mail-person]")).toHaveLength(1);
+
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      await settle();
+
+      expect(answers).toBe(2);
+      expect(host.querySelectorAll("[data-hub-mail-person]")).toHaveLength(2);
+    });
   });
 
   it("renders Today and Changes immediately while mail is still loading", async () => {

@@ -231,6 +231,7 @@ export function Hub({
   onOpenTasks,
   onOpenMail,
   onToast,
+  pageTitleOf,
 }: {
   tree: TreeNode[];
   onSelect: (id: string) => void;
@@ -241,6 +242,9 @@ export function Hub({
   onOpenTasks?: () => void;
   onOpenMail?: () => void;
   onToast?: (title: string, options?: ToastOptions) => void;
+  /** A note's title by id. A detached task's row names the note its line left,
+   *  and Home reads it from the same lookup the Tasks column does. */
+  pageTitleOf?: (pageId: string) => string | undefined;
 }) {
   const [draft, setDraft] = useState("");
   const [capturePending, setCapturePending] = useState(false);
@@ -568,6 +572,8 @@ export function Hub({
         onToast={onToast}
         flight={flight?.landed ? flight.text : null}
         capturedId={capturedId}
+        pageTitleOf={pageTitleOf}
+        notebookEmpty={pages.length === 0}
       />
       {onOpenMail && <HubMail onOpenMail={onOpenMail} />}
 

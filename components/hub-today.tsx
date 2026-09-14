@@ -49,6 +49,16 @@ export interface HubTodayProps {
   flight?: string | null;
   /** A task this page wrote a moment ago: it arrives rather than appears. */
   capturedId?: string | null;
+  /** The title of a note by id, from the tree this page already holds. A
+   *  detached row says which note its line left, and without this it would
+   *  say "a note" on Home and name the page in the column: one row, two
+   *  sentences. */
+  pageTitleOf?: (pageId: string) => string | undefined;
+  /** The notebook has no pages, so the teaching screen is on the page below
+   *  this block. With no tasks either, this block draws nothing: two empty
+   *  states stacked read as two screens, and the teaching screen is the one
+   *  that teaches. */
+  notebookEmpty?: boolean;
 }
 
 export function HubToday({
@@ -57,6 +67,8 @@ export function HubToday({
   onToast,
   flight = null,
   capturedId = null,
+  pageTitleOf,
+  notebookEmpty = false,
 }: HubTodayProps) {
   const reduce = useReducedMotion() ?? false;
   const state = useTasks(refreshToken);
@@ -92,6 +104,11 @@ export function HubToday({
   // render both have no day. A block that guessed one would draw an empty
   // state over a list it has not seen.
   if (today === "") return null;
+  // A brand-new notebook: nothing written and nothing owed. The teaching
+  // screen below carries the whole message, and an empty state over an empty
+  // list beside it is the second screen the spec asks not to draw. A capture
+  // in flight is already something, so the block comes back for it.
+  if (notebookEmpty && state.tasks.length === 0 && flight === null) return null;
 
   return (
     <section className="mt-8" data-hub-today>
@@ -158,6 +175,13 @@ export function HubToday({
               selected={false}
               expanded={false}
               categories={EMPTY_CATEGORIES}
+              // Home does not group, so the word in the tail is the only
+              // thing that says which part of a life this is. The column
+              // groups BY category and passes nothing.
+              showCategory
+              pageTitle={
+                task.page === undefined ? undefined : pageTitleOf?.(task.page)
+              }
               entrance={
                 inserted.has(task.id) || task.id === capturedId ? "insert" : false
               }
@@ -170,7 +194,7 @@ export function HubToday({
               // Tasks column.
               onExpand={onOpenTasks}
               onComplete={actions.completeTask}
-              onReopen={(task) => void actions.reopenTask(task)}
+              onReopen={(task, refusal) => void actions.reopenTask(task, refusal)}
               onReschedule={actions.rescheduleTask}
               onPatch={actions.patchField}
               onFoldEnd={actions.releaseFold}
@@ -181,12 +205,15 @@ export function HubToday({
 
       {open === 0 && flight === null && (
         <motion.div
+          /* Left-aligned onto the column's own rule, not centred on the page:
+             Home is a left-aligned column and a centred card inside it is the
+             one place the block breaks its own alignment. */
           className="px-2 py-5"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ duration: reduce ? 0 : DUR.base, ease: EASE_OUT }}
         >
-          <Empty {...emptyForHome(counts)} />
+          <Empty {...emptyForHome(counts)} className="brain-hub-empty" />
         </motion.div>
       )}
 

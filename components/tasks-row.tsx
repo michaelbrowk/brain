@@ -136,6 +136,11 @@ export interface TasksRowProps {
   expanded: boolean;
   /** Categories already in use, for the picker inside an expanded row. */
   categories: readonly string[];
+  /** Whether the row's own category stands in its tail. Home's Today block
+   *  does not group, so the word is the only thing saying which part of a life
+   *  a task belongs to; the column groups BY category and would repeat it in
+   *  every tail under the header that already says it. */
+  showCategory?: boolean;
   /** The title of the note a linked or detached task points at. */
   pageTitle?: string;
   /** Play the arrival: the morning entrance, or a row inserted afterwards. */
@@ -178,6 +183,7 @@ export function TasksRow({
   selected,
   expanded,
   categories,
+  showCategory = false,
   pageTitle,
   entrance = false,
   onSelect,
@@ -490,6 +496,12 @@ export function TasksRow({
                   </span>
                 ) : overdueWhen ? (
                   <span className="brain-task-caption">{overdueWhen}</span>
+                ) : showCategory && task.category ? (
+                  /* Last in the chain, so everything above displaces it: an
+                     overdue deadline is red text in this same slot, and a task
+                     that is late about a date has nothing to say about which
+                     part of a life it belongs to. */
+                  <span className="brain-task-caption">{task.category}</span>
                 ) : null}
               </span>
             </span>

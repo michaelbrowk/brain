@@ -84,7 +84,11 @@ async function settle() {
   });
 }
 
-async function mount(tasks: TaskView[], extra: (url: string) => Response | null = () => null) {
+async function mount(
+  tasks: TaskView[],
+  extra: (url: string) => Response | null = () => null,
+  props: { notebookEmpty?: boolean } = {},
+) {
   token += 1;
   apiFetchMock.mockImplementation(async (input) => {
     const url = String(input);
@@ -99,6 +103,8 @@ async function mount(tasks: TaskView[], extra: (url: string) => Response | null 
         refreshToken={token}
         onOpenTasks={() => opened.push("tasks")}
         onToast={(title, options) => toasts.push({ title, options })}
+        pageTitleOf={(pageId) => (pageId === "page-1" ? "Trip ideas" : undefined)}
+        {...props}
       />,
     );
   });
@@ -282,6 +288,61 @@ describe("the Today block on Home", () => {
     expect(host.textContent).toContain("Nothing planned today");
     expect(host.textContent).toContain("Upcoming has 2 this week");
     expect(host.textContent).not.toContain("Add one in Tasks");
+  });
+
+  it("puts the category in the tail as a word", async () => {
+    // Home does not group, so the word is the only thing on this block that
+    // says which part of a life a task belongs to. The column groups BY
+    // category and passes nothing, which the surface's own suite holds.
+    await mount([task("call mum", { category: "Family" })]);
+
+    const captions = [...host.querySelectorAll(".brain-task-caption")].map(
+      (node) => node.textContent,
+    );
+    expect(captions).toEqual(["Family"]);
+  });
+
+  it("lets an overdue deadline displace the category as red text", async () => {
+    await mount([
+      task("owed", { category: "Family", deadline: dayFrom(-1) }),
+    ]);
+
+    const captions = [...host.querySelectorAll<HTMLElement>(".brain-task-caption")];
+    expect(captions).toHaveLength(1);
+    expect(captions[0]?.textContent).not.toBe("Family");
+    expect(captions[0]?.hasAttribute("data-overdue")).toBe(true);
+  });
+
+  it("names the note a detached row's line left, the way the column does", async () => {
+    await mount([
+      task("visa", {
+        page: "page-1",
+        detachedAt: "2026-09-12T09:00:00.000Z",
+        done: false,
+      }),
+    ]);
+
+    expect(host.querySelector(".brain-task-caption")?.textContent).toBe(
+      "line removed from Trip ideas",
+    );
+  });
+
+  it("draws nothing at all on a notebook with no pages and no tasks", async () => {
+    // The teaching screen below carries the whole message. Two empty states
+    // stacked, in two alignments and two registers, read as two screens.
+    await mount([], () => null, { notebookEmpty: true });
+
+    expect(host.querySelector("[data-hub-today]")).toBeNull();
+    expect(host.textContent).toBe("");
+  });
+
+  it("comes back the moment the notebook holds a task, pages or not", async () => {
+    await mount([task("one", { when: dayFrom(4) })], () => null, {
+      notebookEmpty: true,
+    });
+
+    expect(host.querySelector("[data-hub-today]")).not.toBeNull();
+    expect(host.textContent).toContain("Nothing planned today");
   });
 
   it("says nothing at all before the browser's clock has been read", async () => {

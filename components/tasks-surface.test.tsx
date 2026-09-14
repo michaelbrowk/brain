@@ -310,6 +310,18 @@ describe("the lists", () => {
     expect(document.querySelectorAll("[data-overdue]").length).toBe(0);
   });
 
+  it("never puts a category in a tail, because the header above already says it", async () => {
+    // Home's Today block is flat and passes `showCategory`; the column groups
+    // BY category, so the same word in every tail under the header that names
+    // the group is the word said twice.
+    await mount([task("call mum", { when: TODAY, category: "Family" })]);
+
+    expect(headers()).toEqual(["Family"]);
+    expect(
+      [...document.querySelectorAll(".brain-task-caption")].map((n) => n.textContent),
+    ).toEqual([]);
+  });
+
   it("shows an overdue deadline as red text and never as a fill", async () => {
     await mount([task("owed", { deadline: dayFrom(-2) })]);
     const caption = document.querySelector("[data-overdue]") as HTMLElement;

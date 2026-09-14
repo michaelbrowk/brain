@@ -5928,9 +5928,24 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
    measures are restated here and the capsule's box is pulled onto Home's,
    rather than the row learning about a second surface. */
 .brain-hub-tasks {
-  /* 8 of capsule overhang + 4 of inner padding + 28 of box cell + 8 of gap */
-  --task-rule: 32px;
+  /* ONE LEFT RULE FOR THE WHOLE COLUMN. `HubRow` starts its words at 30: 8 of
+     capsule overhang, 8 of inner padding, its 20 glyph and the 10 beside it.
+     The task row's own arithmetic lands on 32 (8 overhang, 4 of padding, the
+     28 box cell and 8 of gap), so a task title used to sit 2px right of every
+     page and mail title under it. The 2 comes off the gap rather than the box
+     cell: the box's centre stays where `HubRow`'s glyph centre is, and only
+     the words move onto the rule. */
+  --task-rule: 30px;
   --task-capsule: 36px;
+}
+.brain-hub-tasks .brain-task-main {
+  margin-left: 6px;
+}
+/* Home is a left-aligned column, and a card centred inside it is the one place
+   the Today block breaks the page's own alignment. */
+.brain-hub-empty {
+  align-items: flex-start;
+  text-align: left;
 }
 .brain-hub-tasks .brain-task-row {
   width: calc(100% + 16px);

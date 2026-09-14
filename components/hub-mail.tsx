@@ -49,7 +49,7 @@ const PEOPLE_ROWS = 3;
  *  it is somebody's mail, and it should not outlive the tab that asked for
  *  it. The version rides in the key, so a shape change discards the old one
  *  rather than reading it wrong. */
-const SNAPSHOT_KEY = "brain-hub-mail-v1";
+const SNAPSHOT_KEY = "brain-hub-mail-v2";
 
 /** What one People row needs, and not one field more. */
 interface MailRowView {
@@ -66,6 +66,10 @@ interface MailBlockData {
   readonly newsletters: number;
   /** The address of every account whose stream did not answer. */
   readonly unreachable: readonly string[];
+  /** Every connected address, as of the last answer the accounts call gave.
+   *  Kept so that a tab which cannot reach the mail service at all still knows
+   *  WHOSE mailbox it cannot reach, and can say so by name. */
+  readonly accounts: readonly string[];
 }
 
 type MailBlockState =
@@ -106,10 +110,26 @@ export function HubMail({
     try {
       accounts = await client.loadAccounts();
     } catch {
-      // The accounts call is the one that decides whether this block exists
-      // at all. Unanswered, it cannot: claiming "no account" would delete a
-      // connected mailbox from the screen, and claiming one would draw chrome
-      // for a control that may not be there. Whatever is on screen stands.
+      // THE MAIL SERVICE IS DOWN, which is not the same as having no mail.
+      // The accounts call is the one that decides whether this block exists,
+      // so unanswered it cannot decide it: claiming "no account" would delete
+      // a connected mailbox from the screen and claiming one would draw chrome
+      // for a control that may not be there.
+      //
+      // But a tab that has ever had an answer knows which addresses are
+      // connected, from this session's snapshot or from the answer it is
+      // already drawing. Those get the spec's row, by name, beside whatever
+      // was last true: rows that may be hours stale with nothing saying so are
+      // the worse of the two failures.
+      //
+      // With no answer ever, there is no mailbox to name and the block stays
+      // away, which is the same thing it does when there is no account.
+      if (!alive.current) return;
+      setState((current) => {
+        const known = current.kind === "ready" ? current.data : cached;
+        if (!known || known.accounts.length === 0) return current;
+        return { kind: "ready", data: { ...known, unreachable: known.accounts } };
+      });
       return;
     }
     if (!alive.current) return;
@@ -158,6 +178,7 @@ export function HubMail({
       notifications: sections.notifications.items.length,
       newsletters: sections.newsletters.items.length,
       unreachable,
+      accounts: accounts.map((account) => account.emailAddress),
     };
     rememberSnapshot(data);
     setState({ kind: "ready", data });
@@ -346,7 +367,8 @@ function readSnapshot(): MailBlockData | null {
       !Array.isArray(value.people) ||
       typeof value.notifications !== "number" ||
       typeof value.newsletters !== "number" ||
-      !Array.isArray(value.unreachable)
+      !Array.isArray(value.unreachable) ||
+      !Array.isArray(value.accounts)
     ) {
       return null;
     }
@@ -355,6 +377,7 @@ function readSnapshot(): MailBlockData | null {
       notifications: value.notifications,
       newsletters: value.newsletters,
       unreachable: value.unreachable,
+      accounts: value.accounts,
     };
   } catch {
     return null;

@@ -5766,6 +5766,7 @@ export function Shell({
                 onOpenTasks={openTasks}
                 onOpenMail={openMail}
                 onToast={showToast}
+                pageTitleOf={pageTitleOf}
               />
             )}
             </motion.div>

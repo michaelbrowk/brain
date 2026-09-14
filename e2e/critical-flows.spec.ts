@@ -5895,11 +5895,12 @@ test("@mobile Pages and Search are accessible mobile-only surfaces", async ({
   await page.goto(`/p/${created.id}`);
 
   const tabbar = page.locator("nav.brain-mobile-tabbar");
+  const plus = page.locator("button.brain-mobile-new");
   const sidebar = page.locator("aside.brain-sidebar");
   const main = page.locator("main.brain-main");
   const pagesView = page.getByTestId("mobile-pages-view");
   const searchView = page.getByTestId("mobile-search-view");
-  const labels = ["Home", "Search", "Tasks", "New", "Pages", "Mail"];
+  const labels = ["Home", "Search", "Tasks", "Pages", "Mail"];
 
   const viewportContent =
     (await page.locator('meta[name="viewport"]').getAttribute("content")) ?? "";
@@ -5913,7 +5914,7 @@ test("@mobile Pages and Search are accessible mobile-only surfaces", async ({
     });
     await expect(tabbar).toBeVisible();
     await expect(page.getByRole("button", { name: "Open menu" })).toHaveCount(0);
-    await expect(tabbar.getByRole("button")).toHaveCount(6);
+    await expect(tabbar.getByRole("button")).toHaveCount(5);
     for (const label of labels) {
       const button = tabbar.getByRole("button", { name: label, exact: true });
       await expect(button).toBeVisible();
@@ -5921,6 +5922,24 @@ test("@mobile Pages and Search are accessible mobile-only surfaces", async ({
       expect(box, `${label} is missing a mobile hit target`).not.toBeNull();
       expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
     }
+
+    // The plus is the line's second object, not a sixth tab: its own button
+    // at the other inset, standing on the bar's own line and its own height.
+    await expect(plus).toBeVisible();
+    await expect(plus).toHaveAttribute("aria-label", "New page");
+    const barBox = await tabbar.boundingBox();
+    const plusBox = await plus.boundingBox();
+    expect(barBox, "the tab bar has no box").not.toBeNull();
+    expect(plusBox, "the New page circle has no box").not.toBeNull();
+    expect(Math.round(plusBox?.height ?? 0)).toBe(Math.round(barBox?.height ?? 0));
+    expect(Math.round(plusBox?.width ?? 0)).toBe(Math.round(plusBox?.height ?? 0));
+    expect(Math.round(plusBox?.y ?? 0)).toBe(Math.round(barBox?.y ?? 0));
+    // bar on the left inset, circle on the right one, nothing overlapping
+    expect(barBox!.x).toBeLessThan(plusBox!.x);
+    expect(barBox!.x + barBox!.width).toBeLessThanOrEqual(plusBox!.x);
+    expect(Math.round(barBox!.x)).toBe(
+      Math.round(width - (plusBox!.x + plusBox!.width)),
+    );
     expect(
       await page.evaluate(
         () => document.documentElement.scrollWidth - window.innerWidth,
@@ -6243,7 +6262,9 @@ test("@mobile Search hands focus to Home and a newly created page", async ({
     const body = response.request().postDataJSON() as { parentId?: string | null };
     return body.parentId === null;
   });
-  await searchView.getByRole("button", { name: "New", exact: true }).click();
+  await searchView
+    .getByRole("button", { name: "New page", exact: true })
+    .click();
   const response = await createdResponse;
   expect(response.ok()).toBeTruthy();
   const created = (await response.json()) as { id: string };

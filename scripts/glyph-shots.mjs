@@ -149,8 +149,9 @@ for (const scheme of passes.includes("phone") ? ["light", "dark"] : []) {
   await login(page);
   await page.waitForTimeout(800);
 
-  // 8 — the tab bar's ink-filled create, the phone's twin of the sidebar one
-  const tabNew = page.getByRole("button", { name: "New", exact: true }).first();
+  // 8. The bottom line's ink-filled create, the phone's twin of the sidebar
+  // one, standing at the right inset beside the bar
+  const tabNew = page.locator("button.brain-mobile-new").first();
   await tabNew.waitFor();
   await shot(page, tabNew, "tabbar-create", scheme);
 

@@ -62,8 +62,14 @@ export async function GET(req: NextRequest) {
   // platform does not know is dropped in silence, because the list is what the
   // caller asked for and a refusal here would take a working screen away over
   // a setting nobody asked to change.
+  // A state directory that cannot be written is the same case: the list is
+  // still owed to the caller, so the failure is logged and goes no further.
   const zone = params.get("zone");
-  if (zone !== null) await captureTimeZone(zone);
+  if (zone !== null) {
+    await captureTimeZone(zone).catch((error: unknown) => {
+      console.error("tasks: the owner's time zone could not be captured", error);
+    });
+  }
 
   const category = params.get("category");
 

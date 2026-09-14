@@ -52,12 +52,16 @@ function ZoneRow({
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
 
-  // The browser's own list of names. An old browser may not have the call, so
-  // the fallback is this device and UTC: a control that offers two names is
-  // better than one that offers none.
+  // The browser's own list of names, with UTC in front of it. The platform
+  // answers canonical regions only, 418 of them, and no Etc/* entry at all, so
+  // UTC is a zone the server accepts and the list never offers: a Brain on a
+  // server, or a traveller who wants one fixed clock, has to be able to pick
+  // it. An old browser may not have the call, and the fallback is this device
+  // and UTC, because a control that offers two names beats one that offers
+  // none.
   const zones = useMemo(() => {
     try {
-      return Intl.supportedValuesOf("timeZone");
+      return ["UTC", ...Intl.supportedValuesOf("timeZone")];
     } catch {
       return [deviceZone(), "UTC"].filter((name) => name !== "");
     }
@@ -93,8 +97,14 @@ function ZoneRow({
     <div className="flex min-w-0 items-center gap-1">
       <Popover.Root open={open} onOpenChange={setOpen}>
         <Popover.Trigger asChild>
-          <Button variant="quiet" disabled={saving}>
-            {zone ?? (zone === null ? "Not set yet" : "…")}
+          {/* `.btn` is nowrap with no overflow of its own, so the name goes in
+              a span that can shrink: the longest canonical zone is 30
+              characters (`America/Argentina/Buenos_Aires`) and the action
+              beside it must survive a 375px phone whole. */}
+          <Button variant="quiet" className="min-w-0" disabled={saving}>
+            <span className="min-w-0 truncate">
+              {zone ?? (zone === null ? "Not set yet" : "…")}
+            </span>
           </Button>
         </Popover.Trigger>
         <Popover.Portal>
@@ -136,6 +146,7 @@ function ZoneRow({
       </Popover.Root>
       <Button
         variant="quiet"
+        className="shrink-0"
         aria-label="Use this device's zone"
         disabled={saving}
         onClick={() => void save(deviceZone())}
@@ -183,9 +194,13 @@ export function AccountSection({
   return (
     <div className="space-y-7">
       <SettingsGroup title="Time zone">
+        {/* `stack` because the control is a value and two actions: beside a
+            label on a 375px phone the row runs out of width at a zone name of
+            about 17 characters, and the group clips rather than scrolls. */}
         <SettingsRow
+          stack
           label="Reminders fire in"
-          hint="One zone for this notebook, whichever device you are on. It was taken from the first browser that opened Tasks."
+          hint="One zone for this notebook, whichever device you are on. Until you pick one, the first browser to open Tasks sets it."
         >
           <ZoneRow zone={zone} onSet={setZone} onToast={onToast} />
         </SettingsRow>

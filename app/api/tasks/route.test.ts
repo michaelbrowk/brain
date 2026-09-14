@@ -387,6 +387,22 @@ describe("the zone the client offers with its list request", () => {
     expect(await readTimeZone(zoneDir)).toBeNull();
   });
 
+  it("answers the list when the state directory cannot be written", async () => {
+    // A full disk or a read-only state volume is not a reason to take a
+    // working screen away over a setting nobody asked to change.
+    const file = path.join(zoneDir, "not-a-directory");
+    await fs.writeFile(file, "", "utf8");
+    process.env.BRAIN_SETTINGS_STATE_DIR = file;
+    resetOwnerSettingsCache();
+    const logged = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const res = await get(`?today=${TODAY}&offset=0&zone=Europe%2FLisbon`);
+
+    expect(res.status).toBe(200);
+    expect(logged).toHaveBeenCalled();
+    logged.mockRestore();
+  });
+
   it("captures nothing from a request the day gate refused", async () => {
     const res = await get(`?today=tomorrow&offset=0&zone=Europe%2FLisbon`);
     expect(res.status).toBe(400);

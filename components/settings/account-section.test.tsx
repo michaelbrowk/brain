@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { deviceZone } from "../tasks-client";
 import { AccountSection } from "./account-section";
 import { resetUpdateStatusForTests } from "./use-update-status";
 
@@ -217,19 +218,48 @@ describe("AccountSection · About", () => {
 });
 
 // The zone group answers a second route, so the stub routes by URL: the
-// update status and the zone are two reads of one mount.
+// update status and the zone are two reads of one mount. A PUT echoes the name
+// it was sent, the way the route does.
 function stubZone(zone: { timeZone: string | null }) {
   const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input);
     if (url.includes("/api/settings/zone")) {
-      return init?.method === "PUT"
-        ? new Response(JSON.stringify(zone), { status: 200 })
-        : new Response(JSON.stringify(zone), { status: 200 });
+      if (init?.method === "PUT") {
+        const sent = JSON.parse(String(init.body)) as { timeZone: string };
+        return new Response(JSON.stringify({ timeZone: sent.timeZone }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify(zone), { status: 200 });
     }
     return new Response(JSON.stringify(base), { status: 200 });
   });
   vi.stubGlobal("fetch", mock);
   return mock;
+}
+
+/** Radix measures and captures the pointer; jsdom does neither. The stubs are
+ *  `share-popover.test.tsx`'s, which opens a popover the same way. */
+function stubPopoverPlatform() {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  vi.stubGlobal("PointerEvent", MouseEvent);
+  for (const name of [
+    "hasPointerCapture",
+    "setPointerCapture",
+    "releasePointerCapture",
+  ]) {
+    Object.defineProperty(HTMLElement.prototype, name, {
+      configurable: true,
+      value: () => (name === "hasPointerCapture" ? false : undefined),
+    });
+  }
 }
 
 describe("AccountSection · Time zone", () => {
@@ -243,6 +273,7 @@ describe("AccountSection · Time zone", () => {
       }
     ).IS_REACT_ACT_ENVIRONMENT = true;
     resetUpdateStatusForTests();
+    stubPopoverPlatform();
     host = document.createElement("div");
     document.body.appendChild(host);
     root = createRoot(host);
@@ -251,6 +282,9 @@ describe("AccountSection · Time zone", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     host.remove();
+    document.body
+      .querySelectorAll("[data-radix-popper-content-wrapper]")
+      .forEach((node) => node.remove());
     vi.unstubAllGlobals();
   });
 
@@ -280,8 +314,69 @@ describe("AccountSection · Time zone", () => {
     await settle();
     expect(fetchMock).toHaveBeenCalledWith(
       "/api/settings/zone",
-      expect.objectContaining({ method: "PUT" }),
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ timeZone: deviceZone() }),
+      }),
     );
+  });
+
+  it("offers UTC, which the platform's own list leaves out", async () => {
+    // Intl.supportedValuesOf("timeZone") answers canonical regions only and
+    // carries no Etc/* entry, so without the prepended name a server-hosted
+    // notebook could never be set to UTC.
+    const fetchMock = stubZone({ timeZone: "Europe/Lisbon" });
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+
+    await act(async () => {
+      host
+        .querySelector<HTMLButtonElement>(".brain-settings-row[data-stack] .btn-quiet")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+
+    const utc = [...document.body.querySelectorAll(".brain-menu-item")].find(
+      (row) => row.textContent === "UTC",
+    );
+    expect(utc).toBeDefined();
+
+    await act(async () => {
+      utc?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/settings/zone",
+      expect.objectContaining({ body: JSON.stringify({ timeZone: "UTC" }) }),
+    );
+    expect(host.textContent).toContain("UTC");
+  });
+
+  it("keeps the action whole beside the longest zone name there is", async () => {
+    // America/Argentina/Buenos_Aires is 30 characters, the longest canonical
+    // name. Beside a label on a 375px phone the row runs out of width around
+    // 17, and .brain-settings-group clips rather than scrolls, so the row
+    // stacks and the name is the part that gives.
+    stubZone({ timeZone: "America/Argentina/Buenos_Aires" });
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+
+    const row = host.querySelector<HTMLElement>(
+      ".brain-settings-row[data-stack]",
+    );
+    expect(row).not.toBeNull();
+    expect(row?.textContent).toContain("Reminders fire in");
+
+    const value = row?.querySelector<HTMLElement>(".btn-quiet .truncate");
+    expect(value?.textContent).toBe("America/Argentina/Buenos_Aires");
+    expect(row?.querySelector(".btn-quiet")?.className).toContain("min-w-0");
+
+    const use = host.querySelector<HTMLElement>(
+      '[aria-label="Use this device\'s zone"]',
+    );
+    expect(use?.textContent).toBe("Use this device");
+    expect(use?.className).toContain("shrink-0");
   });
 
   it("toasts when the zone cannot be saved and keeps the one on screen", async () => {

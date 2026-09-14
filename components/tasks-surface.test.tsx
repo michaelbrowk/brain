@@ -194,6 +194,20 @@ const boxIn = (row: HTMLElement): HTMLButtonElement =>
 const writes = () =>
   apiFetchMock.mock.calls.filter(([, init]) => init?.method !== undefined);
 
+/** EVERY WAAPI ANIMATION, WITH THE ELEMENT IT WAS STARTED ON.
+ *
+ *  The fold is the one motion on this surface that is not framer's, and jsdom
+ *  has no Web Animations at all, so `foldRow` would otherwise take its own
+ *  early exit and a row folding where it should not would look exactly like a
+ *  row standing still. It fills FORWARDS in a browser, which is why a fold
+ *  started on a row that never unmounts holds it at height 0 until the next
+ *  load. `tasks-row.test.tsx` records the same way. */
+const animations: { element: Element; frames: Keyframe[] }[] = [];
+
+/** The fold played on one row, if it played at all. */
+const foldOf = (row: HTMLElement) =>
+  animations.find((entry) => entry.element === row);
+
 beforeEach(() => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
@@ -204,8 +218,17 @@ beforeEach(() => {
   counts.length = 0;
   records.length = 0;
   localStorage.clear();
+  animations.length = 0;
   resetTasksStore();
   apiFetchMock.mockReset();
+  Object.defineProperty(Element.prototype, "animate", {
+    configurable: true,
+    writable: true,
+    value(frames: Keyframe[]) {
+      animations.push({ element: this as Element, frames });
+      return { finished: Promise.resolve(), cancel: () => {} };
+    },
+  });
   vi.stubGlobal("matchMedia", (query: string) => ({
     matches: false,
     media: query,
@@ -228,6 +251,7 @@ afterEach(async () => {
   host.remove();
   vi.useRealTimers();
   vi.unstubAllGlobals();
+  Reflect.deleteProperty(Element.prototype, "animate");
   resetTasksStore();
 });
 
@@ -611,6 +635,7 @@ describe("reschedule (motion 2.2)", () => {
     });
 
     await selectFirst();
+    const leaving = rowFor("a");
     await act(async () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "]", metaKey: true }));
     });
@@ -620,6 +645,50 @@ describe("reschedule (motion 2.2)", () => {
     expect(toasts.at(-1)?.options?.actionLabel).toBe("Undo");
     expect(JSON.parse(String(writes().at(-1)?.[1]?.body))).toEqual({ when: dayFrom(1) });
     expect(rowTitles()).toEqual([]);
+    // a row that DOES leave folds down on its way out, into its bottom edge
+    expect(foldOf(leaving)?.frames.at(-1)?.clipPath).toBe("inset(100% 0 0 0)");
+  });
+
+  /** A TASK IS IN TODAY FOR FOUR REASONS, and Today pressed on any of them is
+   *  a write that moves nothing: the record is drawn in the same list, under
+   *  the same header, carrying the day the server answered with. So the row
+   *  does not fold, the count beside the list does not dip, and nothing is
+   *  reported as a move that did not happen. */
+  it.each([
+    ["the day it is meant for is today", { when: TODAY }],
+    ["that day is past", { when: dayFrom(-1) }],
+    ["a deadline has arrived and no day is set", { deadline: TODAY }],
+    [
+      "a deadline has arrived over a day still ahead",
+      { when: dayFrom(7), deadline: TODAY },
+    ],
+  ])("keeps a task already in Today where it is: %s", async (_reason, over) => {
+    const a = task("a", over);
+    await mount([a, task("b", { when: TODAY, created: "2026-08-01T09:00:00.000Z" })]);
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [a] });
+      return response({ task: { ...a, when: TODAY } });
+    });
+
+    await selectFirst();
+    animations.length = 0;
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "t" }));
+    });
+    await settle();
+
+    // the write is right, and the row is still standing in Today under it
+    expect(JSON.parse(String(writes().at(-1)?.[1]?.body))).toEqual({ when: TODAY });
+    expect(rowTitles()).toEqual(["a", "b"]);
+    expect(storeNow().find((entry) => entry.id === "a")?.when).toBe(TODAY);
+    // nothing left, so nothing folded: the fold fills forwards, and one
+    // played here would hold this row at height 0 until the next load
+    expect(foldOf(rowFor("a"))).toBeUndefined();
+    // and nothing was said, because nothing moved
+    expect(toasts).toEqual([]);
+    // the number beside the list never dipped either
+    expect(counts.at(-1)).toBe(2);
   });
 
   // ⌘T is New Tab and ⌘N is New Window: no chord the browser reserves is
@@ -722,10 +791,10 @@ describe("reschedule (motion 2.2)", () => {
 
     await selectFirst();
     await act(async () => {
-      window.dispatchEvent(new KeyboardEvent("keydown", { key: "t" }));
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "]", metaKey: true }));
     });
     await settle();
-    expect(toasts.at(-1)?.title).toBe("Moved to Today");
+    expect(toasts.at(-1)?.title).toBe("Moved to Tomorrow");
 
     renders.length = 0;
     await act(async () => {

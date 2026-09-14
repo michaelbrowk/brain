@@ -102,6 +102,35 @@ function belongs(task: TaskView, view: TasksView, today: string): boolean {
   return !task.done && (task.category ?? "") === view.category;
 }
 
+/** WHETHER A RESCHEDULE MOVES THE ROW.
+ *
+ *  A task is in Today for four reasons: the day it is meant for is today,
+ *  that day is past, a deadline has arrived, or a deadline has arrived over a
+ *  day still ahead. Today pressed on any of them is a real write and not a
+ *  move, and the same holds for Someday pressed on a task already parked.
+ *
+ *  Two callers, one answer. The row plays its leaving fold only when this is
+ *  true, because the fold fills forwards and one started on a row that never
+ *  unmounts would hold it at height 0 with the record correct underneath it
+ *  until the next load; and `tasks-actions` reports "Moved to Today" only
+ *  when this is true, because a task that was already there did not move.
+ *
+ *  It has no rule of its own: the list and the group are both
+ *  `lib/tasks/lists.ts`, asked twice, of the record and of what the write
+ *  makes of it. So a row can never fold out of a place the derive keeps it
+ *  in. */
+export function movesRow(
+  task: TaskView,
+  when: string | "someday" | null,
+  today: string,
+): boolean {
+  const next: TaskView = { ...task, when: when ?? undefined };
+  return (
+    listOf(task, today) !== listOf(next, today) ||
+    groupFor(task, today).key !== groupFor(next, today).key
+  );
+}
+
 /** Today, Tomorrow, Later, Someday, and the undated tasks first, under no
  *  header, because a heading over the top rows of a short list is chrome
  *  nobody reads (the rule `lib/tasks/lists.ts` already applies to Today). */

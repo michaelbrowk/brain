@@ -32,7 +32,7 @@ import {
   patchTask,
   reloadTasks,
 } from "./tasks-client";
-import { repeatNextDay } from "./tasks-lists";
+import { movesRow, repeatNextDay } from "./tasks-lists";
 import type { ToastOptions } from "./ui/primitives";
 
 /** The fields a chip inside an expanded row can set. `null` clears one, which
@@ -255,9 +255,23 @@ export function useTaskActions({
     [hold, markInserted, onToast, refuse, reopenTask, today],
   );
 
+  /** ONE ANSWER, TWO CONSEQUENCES.
+   *
+   *  Whether this write draws the record somewhere else decides the hold and
+   *  the report together. A LEAVING row keeps its pre-write copy while it
+   *  folds, which is what `hold` is for, and a row that stays would instead
+   *  wear yesterday's day for the length of an animation that is not playing.
+   *  And "Moved to Today" over a task that was already in Today is a sentence
+   *  about something that did not happen: Today pressed on an overdue task,
+   *  or on one a deadline pulled in, is a real write and not a move, so there
+   *  is nothing to report and nothing to undo.
+   *
+   *  The row asks `movesRow` for its fold, so the motion and the words are
+   *  the same answer twice rather than two rules. */
   const rescheduleTask = useCallback(
     async (task: TaskView, when: string | "someday" | null, label: string) => {
-      hold(task);
+      const moves = movesRow(task, when, today);
+      if (moves) hold(task);
       mutateTasks((tasks) =>
         tasks.map((entry) =>
           entry.id === task.id ? { ...entry, when: when ?? undefined } : entry,
@@ -268,6 +282,7 @@ export function useTaskActions({
         mutateTasks((tasks) =>
           tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
         );
+        if (!moves) return;
         onToast?.(`Moved to ${label}`, {
           actionLabel: "Undo",
           durationMs: SMART_UNDO_MS,
@@ -287,7 +302,7 @@ export function useTaskActions({
         throw error;
       }
     },
-    [hold, markInserted, onToast, refuse],
+    [hold, markInserted, onToast, refuse, today],
   );
 
   const patchField = useCallback(

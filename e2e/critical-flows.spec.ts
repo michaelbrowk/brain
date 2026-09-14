@@ -788,9 +788,15 @@ test("@release login, editor autosave, navigation flush, search, and mobile layo
   test.setTimeout(60_000);
   const browserProblems: string[] = [];
   page.on("console", (message) => {
-    if (message.type() === "error" || message.type() === "warning") {
-      browserProblems.push(message.text());
+    if (message.type() !== "error" && message.type() !== "warning") return;
+    // Home asks the mail sidecar for its capabilities on every visit, and the
+    // e2e never runs a sidecar, so that one request answers 503 and Chromium
+    // logs the handled response as a resource error. The Mail block draws its
+    // own "couldn't reach" state for it; it is not a problem this test owns.
+    if (message.location().url.endsWith("/api/mail/accounts/capabilities")) {
+      return;
     }
+    browserProblems.push(message.text());
   });
   page.on("pageerror", (error) => browserProblems.push(error.message));
 
@@ -5892,7 +5898,7 @@ test("@mobile Pages and Search are accessible mobile-only surfaces", async ({
   const main = page.locator("main.brain-main");
   const pagesView = page.getByTestId("mobile-pages-view");
   const searchView = page.getByTestId("mobile-search-view");
-  const labels = ["Home", "Search", "New", "Pages", "Mail"];
+  const labels = ["Home", "Search", "Tasks", "New", "Pages", "Mail"];
 
   const viewportContent =
     (await page.locator('meta[name="viewport"]').getAttribute("content")) ?? "";
@@ -5906,7 +5912,7 @@ test("@mobile Pages and Search are accessible mobile-only surfaces", async ({
     });
     await expect(tabbar).toBeVisible();
     await expect(page.getByRole("button", { name: "Open menu" })).toHaveCount(0);
-    await expect(tabbar.getByRole("button")).toHaveCount(5);
+    await expect(tabbar.getByRole("button")).toHaveCount(6);
     for (const label of labels) {
       const button = tabbar.getByRole("button", { name: label, exact: true });
       await expect(button).toBeVisible();

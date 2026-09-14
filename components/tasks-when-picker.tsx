@@ -73,8 +73,15 @@ export interface WhenValue {
  *  nothing at all. `false`, now or when the promise settles, puts the picker
  *  back where it was and the same press writes again: a route that answers
  *  409 or 400 has not moved the record, and a picker that believed it had
- *  would dismiss the second press with nothing filed and no second reason. */
-export type WhenAccepted = void | boolean | Promise<boolean>;
+ *  would dismiss the second press with nothing filed and no second reason.
+ *
+ *  A PROMISE IS READ THE SAME WAY, and its settlement strictly. Only `false`
+ *  is a refusal, so an `async` host with no answer to give resolves with
+ *  nothing and is taken at its word, exactly as the host that returns nothing
+ *  is. A REJECTION IS A REFUSAL: a host that threw has filed nothing, and
+ *  reading the throw as an acceptance would spend the value and leave the
+ *  rejection unhandled beside it. */
+export type WhenAccepted = void | boolean | Promise<boolean | void>;
 
 export interface WhenPickerOptions {
   value: WhenValue;
@@ -217,11 +224,11 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
       : options.baseline === null
         ? null
         : { ...options.baseline };
-  /** TRUE ONCE A QUICK ROW HAS ANSWERED THE QUESTION. The panel is closing
-   *  from that press on, and its 120ms exit keeps this element and its
+  /** TRUE ONCE A QUICK ROW OR DONE HAS ANSWERED THE QUESTION. The panel is
+   *  closing from that press on, and its 120ms exit keeps this element and its
    *  keydown listener mounted for the whole of it. Escape in that window used
    *  to put the value back and cancel a write the reader had already asked
-   *  for, so Escape is inert once a row has answered. */
+   *  for, so Escape is inert once either of them has answered. */
   let answered = false;
 
   const element = document.createElement("div");
@@ -499,9 +506,16 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
       return;
     }
     if (typeof answer === "object") {
+      // Only `false` is a refusal, and so is a throw: a host whose promise
+      // rejects has filed nothing, and a rejection read as an acceptance
+      // spends the value and goes unhandled. An `async` host that resolves
+      // with nothing says what a plain one says by returning nothing.
+      const refused = () => {
+        if (sent === going) sent = before;
+      };
       void answer.then((took) => {
-        if (!took && sent === going) sent = before;
-      });
+        if (took === false) refused();
+      }, refused);
     }
   }
 
@@ -545,7 +559,12 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   previous.addEventListener("click", () => pageMonth(-1));
   next.addEventListener("click", () => pageMonth(1));
   clear.addEventListener("click", () => quick({ when: null, evening: false, time: null }));
-  done.addEventListener("click", () => onDone());
+  // DONE ANSWERS THE QUESTION as squarely as a quick row does, and what
+  // follows it is the same 120ms exit with the same listener on it.
+  done.addEventListener("click", () => {
+    answered = true;
+    onDone();
+  });
 
   const spinKeys = (box: HTMLElement, hours: number, minutes: number) => {
     box.addEventListener("keydown", (event) => {
@@ -562,10 +581,10 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   element.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       event.preventDefault();
-      // A ROW THAT ALREADY ANSWERED IS NOT UNDONE BY THE KEY THAT FOLLOWS IT.
-      // The panel plays its exit for 120ms with this listener still on it, and
-      // a reader who taps Today and reaches for Escape on the way out asked
-      // for one write, not for none.
+      // A PRESS THAT ALREADY ANSWERED IS NOT UNDONE BY THE KEY THAT FOLLOWS
+      // IT. The panel plays its exit for 120ms with this listener still on it,
+      // and a reader who taps Today, or Done, and reaches for Escape on the
+      // way out asked for one write, not for none.
       if (answered) return;
       // ESCAPE THROWS THE VALUE AWAY. It is the one way out that leaves the
       // record where it was, so a reader halfway through a month has a way

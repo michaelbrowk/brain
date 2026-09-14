@@ -862,12 +862,30 @@ function showMenu(
   /** The value pressed while a write was already out. One slot, because the
    *  reader's LAST word is the one that decides where the line goes. */
   let pending: WhenValue | null = null;
+  /** THE PRESS THAT PUT IT THERE, waiting on its own write. Every caller has
+   *  to hear what became of the value IT pressed: a queued word answered
+   *  "taken" is spent, so a route that then refuses it leaves the reader with
+   *  a reason on screen, a row that writes nothing when they press it again,
+   *  and a panel that closes having filed nothing. */
+  let answerPending: ((took: boolean) => void) | null = null;
   /** What the write in flight is filing, so a second press of the same word
    *  is the same answer and not a second record. */
   let inFlight: WhenValue | null = null;
+  /** The presses waiting on that write: a later press of the word it is
+   *  already filing hears its answer rather than a guess. */
+  let waitingOnFlight: ((took: boolean) => void)[] = [];
   /** The record a write from this panel has already made, which is what a
    *  queued second word moves. See `applyChoice`. */
   let filed: string | null = null;
+
+  /** Tells the press that queued a word what became of it, and empties the
+   *  slot. */
+  const dropPending = (took: boolean): void => {
+    const answer = answerPending;
+    pending = null;
+    answerPending = null;
+    answer?.(took);
+  };
 
   /** True once the route took the value, false once it refused it, which is
    *  what the picker reads to decide whether its own value has been spent. */
@@ -879,8 +897,18 @@ function showMenu(
     // nobody chose, so the second word waits for the first write and then
     // moves the record it made.
     if (writing) {
-      if (inFlight !== null && !sameWhenValue(value, inFlight)) pending = value;
-      return true;
+      // THE READER'S LAST WORD DECIDES. A third press takes the one slot from
+      // the second, and a press naming the word already going out empties it
+      // instead: that write is filing this value, so the press waits on it
+      // rather than queueing a reschedule to where the line is headed anyway.
+      // The press it replaces is told its own value was not filed.
+      const same = inFlight !== null && sameWhenValue(value, inFlight);
+      dropPending(false);
+      if (same) return await new Promise<boolean>((resolve) => waitingOnFlight.push(resolve));
+      pending = value;
+      return await new Promise<boolean>((resolve) => {
+        answerPending = resolve;
+      });
     }
     writing = true;
     inFlight = value;
@@ -893,21 +921,34 @@ function showMenu(
       writing = false;
       inFlight = null;
     }
+    const took = reason === null;
     if (reason !== null) {
       refusal.hidden = false;
       refusal.textContent = reason;
     }
+    // Every press of the word this write was filing hears this write's answer.
+    const waited = waitingOnFlight;
+    waitingOnFlight = [];
+    for (const settle of waited) settle(took);
+
     const queued = pending;
+    const answerQueued = answerPending;
     pending = null;
-    // The record exists now, so the queued word reaches `applyChoice` as a
-    // reschedule of the task the first write minted.
-    if (queued !== null) return await choose(queued);
-    if (reason === null) {
+    answerPending = null;
+    if (queued !== null) {
+      // The record exists now, so the queued word reaches `applyChoice` as a
+      // reschedule of the task the first write minted. Its answer goes to the
+      // press that made it, and this call keeps its own.
+      const tookQueued = await choose(queued);
+      answerQueued?.(tookQueued);
+      return took;
+    }
+    if (took) {
       dismiss();
       // The keyboard came from the note and goes back to it.
       view.focus();
     }
-    return reason === null;
+    return took;
   };
 
   // WHAT THE LINE ALREADY SAYS. A line that is already a task opens the panel
@@ -945,7 +986,20 @@ function showMenu(
     button.type = "button";
     button.className = "brain-menu-item";
     button.append(glyph(row.icon), document.createTextNode(row.label));
-    button.addEventListener("click", () => void choose(row.when(day)));
+    button.addEventListener("click", () => {
+      const want = row.when(day);
+      // THE SAME NO-OP RULE THE PICKER BELOW KEEPS. Inbox on a line already in
+      // the Inbox has nothing to change, and the picker's Clear, one word from
+      // it, would send nothing: two rows that say the same thing cannot answer
+      // to different rules. A line with no record has nothing to repeat, so
+      // there Inbox files it.
+      if (opened !== null && sameWhenValue(want, opened)) {
+        dismiss();
+        view.focus();
+        return;
+      }
+      void choose(want);
+    });
     rows.push(button);
     element.append(button);
   }

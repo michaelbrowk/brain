@@ -50,6 +50,13 @@ let createAnswer: { status: number; body: Record<string, unknown> } = {
 /** Held POSTs, for the case where a second click arrives before the first
  *  answers. `null` means answer at once. */
 let createGate: Promise<void> | null = null;
+/** What PATCH /api/tasks/<id> answers with, so a refused RESCHEDULE can be
+ *  exercised too: a second word pressed mid-flight reaches the route as one,
+ *  and its refusal belongs to the press that made it. */
+let patchAnswer: { status: number; body: Record<string, unknown> } = {
+  status: 200,
+  body: {},
+};
 
 const editors = new WeakMap<EditorView, Editor>();
 const open: Editor[] = [];
@@ -102,6 +109,7 @@ function stubFetch() {
       return json(201, { task });
     }
     if (url.startsWith("/api/tasks/") && method === "PATCH") {
+      if (patchAnswer.status !== 200) return json(patchAnswer.status, patchAnswer.body);
       const id = url.slice("/api/tasks/".length);
       tasks = tasks.map((task) =>
         task.id === id
@@ -234,6 +242,7 @@ beforeEach(() => {
   category = null;
   createAnswer = { status: 201, body: {} };
   createGate = null;
+  patchAnswer = { status: 200, body: {} };
   stubFetch();
 });
 
@@ -740,6 +749,129 @@ describe("the + Task gesture", () => {
     expect(patch?.body).toEqual({ when: "someday" });
     expect(marks(view)[0].textContent).toBe("Someday");
     expect(menu()).toBeNull();
+  });
+
+  it("keeps a queued word one press away when the route refuses it", async () => {
+    // THE QUEUED PRESS HEARS ITS OWN ANSWER. The panel answered a press it had
+    // only parked with "taken", and handed the queued write's refusal back to
+    // the press before it, where the picker was right to ignore it: a newer
+    // value sat on top. So the reader read the reason, pressed the same row
+    // again, and the panel closed having filed nothing.
+    let release = () => {};
+    createGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    patchAnswer = { status: 409, body: { error: "conflict", reason: "already moved" } };
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Today");
+    await pick("Someday");
+    release();
+    // The create the first word asked for, then the reschedule the second one
+    // queued behind it, which the route says no to.
+    await settle();
+    await settle();
+
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(1);
+    expect(menu()).not.toBeNull();
+    expect(menu()?.textContent).toContain("already moved");
+    expect(marks(view)[0].textContent).toBe("Today");
+
+    patchAnswer = { status: 200, body: {} };
+    await pick("Someday");
+
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(2);
+    expect(menu()).toBeNull();
+    expect(marks(view)[0].textContent).toBe("Someday");
+  });
+
+  it("files the last word when it is the word the write in flight is filing", async () => {
+    // Today, then Someday, then Today again, all inside one held POST. The
+    // queue is one slot and the READER'S LAST WORD decides: the third press
+    // names the word already going out, so it empties the slot rather than
+    // leaving Someday in it. It used to read that press as "the same answer"
+    // and file the line in a list the reader had changed their mind about.
+    let release = () => {};
+    createGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Today");
+    await pick("Someday");
+    await pick("Today");
+    release();
+    await settle();
+    await settle();
+
+    expect(postBody()).toMatchObject({ when: TODAY });
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(0);
+    expect(marks(view)[0].textContent).toBe("Today");
+    expect(menu()).toBeNull();
+  });
+
+  it("sends nothing from Inbox when the line is already in the Inbox", async () => {
+    // ONE NO-OP RULE, BOTH ROWS. The picker's Clear will not repeat a value
+    // the record already carries, and the row one word from it did: a line
+    // filed in the Inbox took a PATCH that said where it already was.
+    const text = normalizeTaskText("water the plants");
+    tasks = [
+      {
+        id: "task-known",
+        title: text,
+        page: PAGE,
+        done: false,
+        created: NOW.toISOString(),
+        updated: NOW.toISOString(),
+        anchor: { text, hash: hashTaskText(text), ordinal: 0, line: 0 },
+      },
+    ];
+    const view = await mountEditor("- [ ] water the plants\n");
+    expect(marks(view)[0].textContent).toBe("Inbox");
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Inbox");
+
+    expect(calls.filter((call) => call.method !== "GET")).toHaveLength(0);
+    expect(menu()).toBeNull();
+    expect(marks(view)[0].textContent).toBe("Inbox");
+  });
+
+  it("opens on the evening and the clock the line already carries", async () => {
+    // The day is half the record. An evening task with a reminder opened with
+    // the evening row unchecked and the spinners away, so the panel said the
+    // line had neither.
+    const text = normalizeTaskText("water the plants");
+    tasks = [
+      {
+        id: "task-known",
+        title: text,
+        page: PAGE,
+        when: TODAY,
+        evening: true,
+        time: "18:30",
+        done: false,
+        created: NOW.toISOString(),
+        updated: NOW.toISOString(),
+        anchor: { text, hash: hashTaskText(text), ordinal: 0, line: 0 },
+      },
+    ];
+    const view = await mountEditor("- [ ] water the plants\n");
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    const panel = menu()!;
+    expect(panel.querySelector("[data-when-evening]")?.getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(panel.querySelector("[data-when-reminder]")?.getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(panel.querySelector("[data-when-hour]")?.textContent).toBe("18");
+    expect(panel.querySelector("[data-when-minute]")?.textContent).toBe("30");
   });
 
   it("opens on the day the line already carries", async () => {

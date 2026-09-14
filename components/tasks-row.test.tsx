@@ -1112,6 +1112,28 @@ describe("reduced motion", () => {
     );
   });
 
+  it("keeps the chip row's air, and travels none of it", async () => {
+    // THE AIR IS NOT MOTION. Both sides of it moved into the component when
+    // the capsule stopped carrying a padding, and the stylesheet holds neither
+    // any more, so an expanded row under this setting would lose its 6px above
+    // and below if the reduced branch dropped them. It lands at rest instead
+    // of growing: no height here, on either frame.
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    const chips = renders.find(
+      (render) => String(render.props.className) === "brain-task-chips",
+    );
+    expect(chips?.motion.initial).toMatchObject({
+      marginTop: CHIP_ROW_AIR,
+      marginBottom: CHIP_ROW_AIR,
+    });
+    expect(chips?.motion.animate).toMatchObject({
+      marginTop: CHIP_ROW_AIR,
+      marginBottom: CHIP_ROW_AIR,
+    });
+    expect(chips?.motion.initial).not.toHaveProperty("height");
+    expect(chips?.motion.animate).not.toHaveProperty("height");
+  });
+
   it("fades the check over 120 ms with no dash draw and no scale", async () => {
     await renderRows([task("a")], { reduce: true });
     await act(async () => box().click());

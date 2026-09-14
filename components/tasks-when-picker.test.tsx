@@ -585,6 +585,107 @@ describe("the commit contract", () => {
     expect(sent).toEqual([{ when: TODAY, evening: false, time: null }]);
   });
 
+  it("leaves Done's write alone when Escape lands inside the exit window", () => {
+    // DONE ANSWERED THE QUESTION TOO. The 120ms exit keeps this handler
+    // mounted after Done as squarely as after a quick row, and a reader who
+    // presses Done and reaches for Escape on the way out asked for one write,
+    // not for none. The guard was on the rows alone, so the detailed path lost
+    // the day it had been told to file a keystroke earlier.
+    const sent: WhenValue[] = [];
+    const handle = open({
+      value: { when: null, evening: false, time: null },
+      onPick: (value) => {
+        sent.push(value);
+      },
+      // A host that commits once the panel has gone, which is the row's.
+      onDone: () => closed.push(1),
+    });
+    cell(handle.element, "2026-09-20").click();
+    done(handle.element);
+    key(handle.element, "Escape");
+    handle.commit();
+
+    expect(sent).toEqual([{ when: "2026-09-20", evening: false, time: null }]);
+  });
+
+  it("leaves a value the reader sent on top of a refusal where it is", async () => {
+    // THE IDENTITY GUARD ON THE LATE ROLLBACK. Two writes out, the second
+    // taken and the first refused after it: putting the picker back where the
+    // first write found it would undo a value the record has since taken, and
+    // the row the reader last pressed would mint a second write on the next
+    // press.
+    const answers: WhenValue[] = [];
+    let refuseFirst!: (took: boolean) => void;
+    const handle = open({
+      value: { when: null, evening: false, time: null },
+      onPick: (value) => {
+        answers.push(value);
+        if (answers.length > 1) return true;
+        return new Promise<boolean>((resolve) => {
+          refuseFirst = resolve;
+        });
+      },
+    });
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    handle.element.querySelector<HTMLElement>("[data-when-someday]")?.click();
+    expect(answers).toHaveLength(2);
+
+    refuseFirst(false);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Someday is what the record says now, so the row that says it sends
+    // nothing.
+    handle.element.querySelector<HTMLElement>("[data-when-someday]")?.click();
+    expect(answers).toHaveLength(2);
+  });
+
+  it("reads a host's rejection as a refusal, and handles it", async () => {
+    // A HOST WHOSE PROMISE THROWS HAS FILED NOTHING. Read as an acceptance it
+    // spends the value, so the same row sends nothing on the second press, and
+    // it leaves the rejection unhandled beside it: this file fails the run on
+    // one of those, which is the other half of the case.
+    const answers: WhenValue[] = [];
+    let fail!: (error: Error) => void;
+    const handle = open({
+      value: { when: null, evening: false, time: null },
+      onPick: (value) => {
+        answers.push(value);
+        if (answers.length > 1) return true;
+        return new Promise<boolean>((_resolve, reject) => {
+          fail = reject;
+        });
+      },
+    });
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    fail(new Error("the route could not be reached"));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    expect(answers).toHaveLength(2);
+  });
+
+  it("reads an async host that answers nothing as an acceptance", async () => {
+    // Nothing is an acceptance on the direct arm, so a host that cannot refuse
+    // says nothing at all. An `async` host says the same thing by resolving
+    // with nothing, and reading that as a refusal would send its value a
+    // second time.
+    const answers: WhenValue[] = [];
+    const handle = open({
+      value: { when: null, evening: false, time: null },
+      onPick: async (value) => {
+        answers.push(value);
+      },
+    });
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    handle.element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    expect(answers).toHaveLength(1);
+  });
+
   it("still throws away a half-made pick on Escape, because nothing answered yet", () => {
     const sent: WhenValue[] = [];
     const handle = open({

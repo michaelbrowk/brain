@@ -5,10 +5,14 @@
 // one, and asks for a second press before firing. About shows the running
 // version and the update check's answer from the shared store.
 
-import { useState } from "react";
+import * as Popover from "@radix-ui/react-popover";
+import { useEffect, useMemo, useState } from "react";
 import { formatAgo } from "@/lib/format-ago";
+import { deviceZone } from "../tasks-client";
 import { Button, IconButton } from "../ui/button";
+import { Field } from "../ui/field";
 import { Icon } from "../ui/icon";
+import { ScrollEdge } from "../ui/scroll-edge";
 import { SettingsGroup, SettingsRow } from "./shared";
 import { useUpdateStatus, type UpdateLoadState } from "./use-update-status";
 
@@ -29,6 +33,119 @@ function updateHint(state: UpdateLoadState): string {
   return `Up to date · checked ${formatAgo(s.checkedAt)}`;
 }
 
+/** The one zone this notebook keeps, and the two ways to change it: pick a
+ *  name, or hand the server the one this browser reports. The picker is the
+ *  category picker's construction (a popover, a field, a filtered list of
+ *  menu items), because a long list of names filtered by typing is the same
+ *  control whichever list it holds. */
+function ZoneRow({
+  zone,
+  onSet,
+  onToast,
+}: {
+  /** undefined while the first read is in flight, null when nothing is set. */
+  zone: string | null | undefined;
+  onSet: (zone: string) => void;
+  onToast: (title: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  // The browser's own list of names. An old browser may not have the call, so
+  // the fallback is this device and UTC: a control that offers two names is
+  // better than one that offers none.
+  const zones = useMemo(() => {
+    try {
+      return Intl.supportedValuesOf("timeZone");
+    } catch {
+      return [deviceZone(), "UTC"].filter((name) => name !== "");
+    }
+  }, []);
+
+  const save = async (next: string) => {
+    setSaving(true);
+    try {
+      const response = await fetch("/api/settings/zone", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ timeZone: next }),
+      });
+      if (!response.ok) throw new Error();
+      onSet(next);
+    } catch {
+      // The zone on screen is the one the server still holds, so it stays.
+      onToast("Could not save the time zone");
+    } finally {
+      setSaving(false);
+      setOpen(false);
+      setDraft("");
+    }
+  };
+
+  const needle = draft.trim().toLowerCase();
+  const filtered = needle
+    ? zones.filter((name) => name.toLowerCase().includes(needle))
+    : zones;
+
+  return (
+    <div className="flex min-w-0 items-center gap-1">
+      <Popover.Root open={open} onOpenChange={setOpen}>
+        <Popover.Trigger asChild>
+          <Button variant="quiet" disabled={saving}>
+            {zone ?? (zone === null ? "Not set yet" : "…")}
+          </Button>
+        </Popover.Trigger>
+        <Popover.Portal>
+          <Popover.Content
+            side="bottom"
+            align="end"
+            sideOffset={6}
+            onOpenAutoFocus={(event) => event.preventDefault()}
+            className="brain-menu brain-keyboard-popover z-[var(--z-modal)] w-[264px]"
+          >
+            <div className="brain-keyboard-popover-panel">
+              <Field
+                on="glass"
+                autoFocus
+                aria-label="Time zone"
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") setOpen(false);
+                }}
+                placeholder="Search zones"
+                className="max-md:text-[16px]"
+              />
+              <ScrollEdge variant="fade" className="mt-1.5 max-h-44">
+                {filtered.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() => void save(name)}
+                    className="brain-menu-item w-full"
+                  >
+                    {name}
+                  </button>
+                ))}
+              </ScrollEdge>
+            </div>
+          </Popover.Content>
+        </Popover.Portal>
+      </Popover.Root>
+      <Button
+        variant="quiet"
+        aria-label="Use this device's zone"
+        disabled={saving}
+        onClick={() => void save(deviceZone())}
+      >
+        Use this device
+      </Button>
+    </div>
+  );
+}
+
 export function AccountSection({
   onToast,
 }: {
@@ -36,10 +153,44 @@ export function AccountSection({
 }) {
   const [logoutArmed, setLogoutArmed] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [zone, setZone] = useState<string | null | undefined>(undefined);
   const update = useUpdateStatus();
+
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      let answer: string | null = null;
+      try {
+        const response = await fetch("/api/settings/zone", {
+          cache: "no-store",
+          credentials: "same-origin",
+        });
+        if (response.ok) {
+          const body = (await response.json()) as { timeZone?: unknown };
+          if (typeof body.timeZone === "string") answer = body.timeZone;
+        }
+      } catch {
+        // A zone that could not be read reads as unset, the same answer the
+        // server gives before a client has offered one.
+      }
+      if (live) setZone(answer);
+    })();
+    return () => {
+      live = false;
+    };
+  }, []);
 
   return (
     <div className="space-y-7">
+      <SettingsGroup title="Time zone">
+        <SettingsRow
+          label="Reminders fire in"
+          hint="One zone for this notebook, whichever device you are on. It was taken from the first browser that opened Tasks."
+        >
+          <ZoneRow zone={zone} onSet={setZone} onToast={onToast} />
+        </SettingsRow>
+      </SettingsGroup>
+
       <SettingsGroup title="Sessions">
         <SettingsRow
           label="Log out everywhere"

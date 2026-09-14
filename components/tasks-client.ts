@@ -77,6 +77,17 @@ export function localDay(now: Date = new Date()): TasksDay {
   };
 }
 
+/** The device's own IANA zone. Offered with every list request and kept by the
+ *  server only when nothing is set, so the owner's home clock survives a trip.
+ *  The empty string on a platform that cannot answer, which the route drops. */
+export function deviceZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    return "";
+  }
+}
+
 async function reasonOf(response: Response): Promise<string> {
   try {
     const body: unknown = await response.json();
@@ -109,7 +120,9 @@ async function load(token: number): Promise<void> {
   set({ loading: true, error: null });
   try {
     const response = await apiFetch(
-      `/api/tasks?today=${day.today}&offset=${day.offsetMinutes}`,
+      `/api/tasks?today=${day.today}&offset=${day.offsetMinutes}&zone=${encodeURIComponent(
+        deviceZone(),
+      )}`,
       { signal: controller.signal },
     );
     if (controller.signal.aborted) return;

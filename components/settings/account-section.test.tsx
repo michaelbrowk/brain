@@ -144,7 +144,10 @@ describe("AccountSection · About", () => {
 
   it("offers a retry when the route fails and recovers on the next read", async () => {
     const fetchMock = vi
-      .fn(async () => new Response(JSON.stringify(base), { status: 200 }))
+      .fn(
+        async (_input: RequestInfo | URL) =>
+          new Response(JSON.stringify(base), { status: 200 }),
+      )
       .mockResolvedValueOnce(new Response("nope", { status: 503 }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -159,7 +162,12 @@ describe("AccountSection · About", () => {
     await act(async () => retry?.click());
     await settle();
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // The mount reads the zone too, so count the update reads and not every
+    // request the section makes.
+    const updateReads = fetchMock.mock.calls.filter((call) =>
+      String(call[0]).includes("/api/settings/update"),
+    );
+    expect(updateReads).toHaveLength(2);
     expect(host.textContent).toContain("Brain 0.9.0");
     expect(host.textContent).toContain("Up to date");
     expect(host.textContent).not.toContain("Try again");
@@ -205,5 +213,116 @@ describe("AccountSection · About", () => {
 
     expect(onToast).toHaveBeenCalledWith("Could not check for updates");
     expect(host.textContent).toContain("Up to date");
+  });
+});
+
+// The zone group answers a second route, so the stub routes by URL: the
+// update status and the zone are two reads of one mount.
+function stubZone(zone: { timeZone: string | null }) {
+  const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes("/api/settings/zone")) {
+      return init?.method === "PUT"
+        ? new Response(JSON.stringify(zone), { status: 200 })
+        : new Response(JSON.stringify(zone), { status: 200 });
+    }
+    return new Response(JSON.stringify(base), { status: 200 });
+  });
+  vi.stubGlobal("fetch", mock);
+  return mock;
+}
+
+describe("AccountSection · Time zone", () => {
+  let host: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (
+      globalThis as typeof globalThis & {
+        IS_REACT_ACT_ENVIRONMENT: boolean;
+      }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    resetUpdateStatusForTests();
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the captured zone", async () => {
+    stubZone({ timeZone: "Europe/Lisbon" });
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+    expect(host.textContent).toContain("Time zone");
+    expect(host.textContent).toContain("Europe/Lisbon");
+  });
+
+  it("says so when nothing has been captured yet", async () => {
+    stubZone({ timeZone: null });
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+    expect(host.textContent).toContain("Not set yet");
+  });
+
+  it("sets this device's zone in one press", async () => {
+    const fetchMock = stubZone({ timeZone: "Europe/Lisbon" });
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+    const use = host.querySelector<HTMLButtonElement>(
+      '[aria-label="Use this device\'s zone"]',
+    );
+    await act(async () => use?.click());
+    await settle();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/settings/zone",
+      expect.objectContaining({ method: "PUT" }),
+    );
+  });
+
+  it("toasts when the zone cannot be saved and keeps the one on screen", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/settings/zone")) {
+          return init?.method === "PUT"
+            ? new Response("", { status: 503 })
+            : new Response(JSON.stringify({ timeZone: "Europe/Lisbon" }), { status: 200 });
+        }
+        return new Response(JSON.stringify(base), { status: 200 });
+      }),
+    );
+    const onToast = vi.fn();
+
+    await act(async () => root.render(<AccountSection onToast={onToast} />));
+    await settle();
+    await act(async () => {
+      host
+        .querySelector<HTMLButtonElement>('[aria-label="Use this device\'s zone"]')
+        ?.click();
+    });
+    await settle();
+
+    expect(onToast).toHaveBeenCalledWith("Could not save the time zone");
+    expect(host.textContent).toContain("Europe/Lisbon");
+  });
+
+  it("says nothing is set when the zone route fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) =>
+        String(input).includes("/api/settings/zone")
+          ? new Response("nope", { status: 500 })
+          : new Response(JSON.stringify(base), { status: 200 }),
+      ),
+    );
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+    expect(host.textContent).toContain("Not set yet");
   });
 });

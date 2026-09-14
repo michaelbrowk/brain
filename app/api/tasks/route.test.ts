@@ -1,7 +1,10 @@
 import { NextRequest } from "next/server";
 import fs from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { readTimeZone, resetOwnerSettingsCache } from "@/lib/owner-settings";
 
 const mocks = vi.hoisted(() => ({
   getStore: vi.fn(),
@@ -340,5 +343,53 @@ describe("the task routes are owner-only by shape", () => {
         "task",
       );
     }
+  });
+});
+
+describe("the zone the client offers with its list request", () => {
+  // A reminder fires from a server timer with no request to read, so the zone
+  // has to be on disk before the first one is due. The list request is the one
+  // call every client makes, and it carries the browser's own answer.
+  let zoneDir: string;
+
+  beforeEach(async () => {
+    zoneDir = await fs.mkdtemp(path.join(os.tmpdir(), "brain-tasks-zone-"));
+    process.env.BRAIN_SETTINGS_STATE_DIR = zoneDir;
+    resetOwnerSettingsCache();
+  });
+
+  afterEach(async () => {
+    delete process.env.BRAIN_SETTINGS_STATE_DIR;
+    await fs.rm(zoneDir, { recursive: true, force: true });
+    resetOwnerSettingsCache();
+  });
+
+  it("captures the zone the client offers with its list request", async () => {
+    await get(`?today=${TODAY}&offset=0&zone=Europe%2FLisbon`);
+    expect(await readTimeZone(zoneDir)).toBe("Europe/Lisbon");
+  });
+
+  it("never overwrites a zone that is already set", async () => {
+    await get(`?today=${TODAY}&offset=0&zone=Europe%2FLisbon`);
+    await get(`?today=${TODAY}&offset=0&zone=Asia%2FDubai`);
+    expect(await readTimeZone(zoneDir)).toBe("Europe/Lisbon");
+  });
+
+  it("answers the list even when the zone offered is nonsense", async () => {
+    const res = await get(`?today=${TODAY}&offset=0&zone=Mars%2FOlympus`);
+    expect(res.status).toBe(200);
+    expect(await readTimeZone(zoneDir)).toBeNull();
+  });
+
+  it("captures nothing when no zone is offered", async () => {
+    const res = await get(`?today=${TODAY}&offset=0`);
+    expect(res.status).toBe(200);
+    expect(await readTimeZone(zoneDir)).toBeNull();
+  });
+
+  it("captures nothing from a request the day gate refused", async () => {
+    const res = await get(`?today=tomorrow&offset=0&zone=Europe%2FLisbon`);
+    expect(res.status).toBe(400);
+    expect(await readTimeZone(zoneDir)).toBeNull();
   });
 });

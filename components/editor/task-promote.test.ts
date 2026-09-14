@@ -942,6 +942,47 @@ describe("the + Task gesture", () => {
     expect(marks(view)[0].textContent).toBe("Today");
   });
 
+  it("takes no focus back when the write lands on a panel that has gone", async () => {
+    // THE SUCCESS ARM OF THE SAME GUARD, and the other half of the case above.
+    // A 201 that arrives after Escape finds a popover already detached: there
+    // is nothing left to dismiss, and the keyboard belongs to wherever the
+    // reader went while the route was thinking. Taking it back is how a caret
+    // jumps out of a sentence somebody is in the middle of typing.
+    let release = () => {};
+    createGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const view = await mountEditor("- [ ] water the plants\n\nand the note goes on\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Today");
+    picker()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settle();
+    expect(menu()).toBeNull();
+
+    // The reader moved on while the write was out: the caret is on the next
+    // line and the keyboard is in another field altogether.
+    caretInLine(view, 1);
+    const caret = view.state.selection.from;
+    const elsewhere = document.createElement("input");
+    document.body.append(elsewhere);
+    elsewhere.focus();
+    const painted = document.querySelectorAll(`.${PROMOTE_MENU_CLASS}`).length;
+
+    release();
+    await settle();
+
+    expect(document.activeElement).toBe(elsewhere);
+    expect(view.state.selection.from).toBe(caret);
+    // Nothing was drawn a second time, and nothing threw on the way past.
+    expect(document.querySelectorAll(`.${PROMOTE_MENU_CLASS}`).length).toBe(painted);
+    expect(menu()).toBeNull();
+    // And the write the panel sent is the write the line carries.
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(marks(view)[0].textContent).toBe("Today");
+  });
+
   it("drops a refusal that lands after the panel has gone", async () => {
     // THE REASON GOES ON THE PANEL THE READER IS HOLDING, and after Escape
     // there is none to hold: written into a detached node it tells nobody, and

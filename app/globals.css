@@ -6398,8 +6398,18 @@ html[data-kbd] .brain-task-row[data-selected] {
 .brain-when-picker[aria-busy="true"] .brain-menu-item,
 .brain-when-picker[aria-busy="true"] .brain-when-month,
 .brain-when-picker[aria-busy="true"] .brain-when-day {
-  color: var(--ink-3);
   pointer-events: none;
+}
+/* EXCEPT THE DAY THE READER PICKED. The quiet ink is a three-part selector
+   and the chosen day's ink capsule is a two-part one, so while the write was
+   out the cell kept its black fill and took `--ink-3` on top of it: about
+   2.8:1 in light, and the number the panel exists to say was the one thing on
+   it nobody could read. The capsule stays lit and stays out of reach with the
+   rest of the grid, which is the state the panel means. */
+.brain-when-picker[aria-busy="true"] .brain-menu-item,
+.brain-when-picker[aria-busy="true"] .brain-when-month,
+.brain-when-picker[aria-busy="true"] .brain-when-day:not([aria-selected="true"]) {
+  color: var(--ink-3);
 }
 /* ONE INK FILL PER SURFACE (DESIGN.md ban 5), AND THE DAY HAS IT.
 

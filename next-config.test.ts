@@ -1,26 +1,53 @@
+import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
+
 import { describe, expect, it } from "vitest";
 
 import nextConfig from "./next.config";
 
 const MAIL_BINARY_CSP =
   "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'";
-const DECIMAL_JS_STANDALONE_GLOB =
-  "./node_modules/.pnpm/decimal.js@*/node_modules/decimal.js/**/*";
-const CSS_COLOR_STANDALONE_GLOB =
-  "./node_modules/.pnpm/@asamuzakjp+css-color@*/node_modules/@asamuzakjp/css-color/**/*";
-const CSS_SYNTAX_PATCHES_STANDALONE_GLOB =
-  "./node_modules/.pnpm/@csstools+css-syntax-patches-for-csstree@*/node_modules/@csstools/css-syntax-patches-for-csstree/**/*";
+// The glob that broke the v0.10.2 release. It reached through the dependency
+// symlinks pnpm puts beside jsdom in the virtual store, so the trace named
+// both a link and paths reading through it, and Next's concurrent copier
+// raced them: whichever worker created the link first left it dangling and
+// the next `mkdir -p` through it threw ENOENT, abandoning the rest of the
+// copy. The artifact shipped without `data-urls` and the page render 500ed.
+const SYMLINK_TRAVERSING_GLOB =
+  "./node_modules/.pnpm/jsdom@*/node_modules/**/*";
+const DEPENDENCY_SUBTREE_EXCLUDE =
+  "./node_modules/.pnpm/jsdom@*/node_modules/!(jsdom)/**";
+
+const jsdomDependencies = Object.keys(
+  JSON.parse(
+    readFileSync(
+      createRequire(import.meta.url).resolve("jsdom/package.json"),
+      "utf8",
+    ),
+  ).dependencies ?? {},
+);
 
 describe("Next standalone tracing", () => {
-  it("includes jsdom's exact runtime targets in the standalone artifact", () => {
-    expect(nextConfig.outputFileTracingIncludes?.["/*"]).toContain(
-      DECIMAL_JS_STANDALONE_GLOB,
-    );
-    expect(nextConfig.outputFileTracingIncludes?.["/*"]).toContain(
-      CSS_COLOR_STANDALONE_GLOB,
-    );
-    expect(nextConfig.outputFileTracingIncludes?.["/*"]).toContain(
-      CSS_SYNTAX_PATCHES_STANDALONE_GLOB,
+  const includes = nextConfig.outputFileTracingIncludes?.["/*"] ?? [];
+  const excludes = nextConfig.outputFileTracingExcludes?.["/*"] ?? [];
+
+  it("traces no path through pnpm's dependency symlinks beside jsdom", () => {
+    expect(includes).not.toContain(SYMLINK_TRAVERSING_GLOB);
+    expect(excludes).toContain(DEPENDENCY_SUBTREE_EXCLUDE);
+  });
+
+  it("carries every jsdom dependency from the hoisted fallback", () => {
+    expect(jsdomDependencies.length).toBeGreaterThan(0);
+    for (const dependency of jsdomDependencies) {
+      expect(includes).toContain(
+        `./node_modules/.pnpm/node_modules/${dependency}/**/*`,
+      );
+    }
+  });
+
+  it("keeps jsdom's own files, which the exclude deliberately spares", () => {
+    expect(includes).toContain(
+      "./node_modules/.pnpm/jsdom@*/node_modules/jsdom/**/*",
     );
   });
 });

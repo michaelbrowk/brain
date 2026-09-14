@@ -25,22 +25,66 @@ const nextConfig: NextConfig = {
       "./ops/**/*",
       "./scripts/**/*",
       "./test-results/**/*",
+      // pnpm gives jsdom its dependencies as symlinks inside the virtual
+      // store, and the tracer emits BOTH the link
+      // (`.pnpm/jsdom@30.0.1/node_modules/data-urls`) and paths that read
+      // through it (`.../data-urls/lib/utils.js`). Next copies a trace with
+      // ten concurrent workers: a worker that creates the link first leaves
+      // it dangling, because the link target is never copied, and the next
+      // worker's `mkdir -p` through that dangling link throws ENOENT. That
+      // rejects the whole page copy, and every entry it had already claimed
+      // is skipped for good. Whichever worker wins is a matter of timing,
+      // which is why v0.10.1 shipped a working artifact and v0.10.2 did not.
+      // Drop every dependency subtree under jsdom's store directory so no
+      // link and no path through it ever reach the copier. jsdom's own files
+      // stay, and its dependencies are traced from pnpm's hoisted fallback
+      // below, which Node resolves from the same place at runtime.
+      "./node_modules/.pnpm/jsdom@*/node_modules/!(jsdom)/**",
     ],
   },
   // `isomorphic-dompurify` loads jsdom on the server. Turbopack externalizes
   // it behind a generated `.next/node_modules/jsdom-*` alias, but Linux file
   // tracing otherwise copied only package.json into the standalone release.
   // Cold RSC page loads then failed before hydration with missing `lib/api.js`.
+  // Every jsdom path here addresses a real directory. The exclude above
+  // explains why a path through pnpm's dependency symlinks cannot be trusted.
   // Turbopack bundles bcryptjs into a server chunk, and
   // ops/docker/brain-hash-password.mjs resolves it from the standalone tree
   // at runtime, so the package must be traced in.
   outputFileTracingIncludes: {
     "/*": [
       "./node_modules/bcryptjs/**/*",
-      "./node_modules/.pnpm/jsdom@*/node_modules/**/*",
-      "./node_modules/.pnpm/@asamuzakjp+css-color@*/node_modules/@asamuzakjp/css-color/**/*",
-      "./node_modules/.pnpm/@csstools+css-syntax-patches-for-csstree@*/node_modules/@csstools/css-syntax-patches-for-csstree/**/*",
-      "./node_modules/.pnpm/decimal.js@*/node_modules/decimal.js/**/*",
+      "./node_modules/.pnpm/jsdom@*/node_modules/jsdom/**/*",
+      // jsdom's 21 declared dependencies, taken from pnpm's hoisted fallback
+      // rather than from the symlinks that sit beside jsdom in the store.
+      // Each of these is a real directory, so the trace carries files alone
+      // and the copier has no link to leave dangling. At runtime Node walks
+      // up out of jsdom's own directory and finds them in `.pnpm/node_modules`,
+      // the same fallback the transitive packages below already rely on.
+      // scripts/smoke-standalone.mjs asserts every one of the 21 resolves
+      // from inside the artifact, so this list cannot silently fall behind.
+      "./node_modules/.pnpm/node_modules/@asamuzakjp/css-color/**/*",
+      "./node_modules/.pnpm/node_modules/@asamuzakjp/dom-selector/**/*",
+      "./node_modules/.pnpm/node_modules/@bramus/specificity/**/*",
+      "./node_modules/.pnpm/node_modules/@csstools/css-syntax-patches-for-csstree/**/*",
+      "./node_modules/.pnpm/node_modules/@exodus/bytes/**/*",
+      "./node_modules/.pnpm/node_modules/css-tree/**/*",
+      "./node_modules/.pnpm/node_modules/data-urls/**/*",
+      "./node_modules/.pnpm/node_modules/decimal.js/**/*",
+      "./node_modules/.pnpm/node_modules/html-encoding-sniffer/**/*",
+      "./node_modules/.pnpm/node_modules/is-potential-custom-element-name/**/*",
+      "./node_modules/.pnpm/node_modules/lru-cache/**/*",
+      "./node_modules/.pnpm/node_modules/parse5/**/*",
+      "./node_modules/.pnpm/node_modules/saxes/**/*",
+      "./node_modules/.pnpm/node_modules/symbol-tree/**/*",
+      "./node_modules/.pnpm/node_modules/tough-cookie/**/*",
+      "./node_modules/.pnpm/node_modules/undici/**/*",
+      "./node_modules/.pnpm/node_modules/w3c-xmlserializer/**/*",
+      "./node_modules/.pnpm/node_modules/webidl-conversions/**/*",
+      "./node_modules/.pnpm/node_modules/whatwg-mimetype/**/*",
+      "./node_modules/.pnpm/node_modules/whatwg-url/**/*",
+      "./node_modules/.pnpm/node_modules/xml-name-validator/**/*",
+      // Packages the 21 above reach through the same hoisted fallback.
       "./node_modules/.pnpm/node_modules/@asamuzakjp/generational-cache/**/*",
       "./node_modules/.pnpm/node_modules/@asamuzakjp/nwsapi/**/*",
       "./node_modules/.pnpm/node_modules/@csstools/color-helpers/**/*",
@@ -50,7 +94,6 @@ const nextConfig: NextConfig = {
       "./node_modules/.pnpm/node_modules/@csstools/css-tokenizer/**/*",
       "./node_modules/.pnpm/node_modules/bidi-js/**/*",
       "./node_modules/.pnpm/node_modules/entities/**/*",
-      "./node_modules/.pnpm/node_modules/lru-cache/**/*",
       "./node_modules/.pnpm/node_modules/mdn-data/**/*",
       "./node_modules/.pnpm/node_modules/punycode/**/*",
       "./node_modules/.pnpm/node_modules/require-from-string/**/*",

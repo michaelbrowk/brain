@@ -906,6 +906,90 @@ describe("Store", () => {
     });
   });
 
+  /** THE FIRST STICKER ON A PAGE.
+   *
+   *  A page with no stickers holds no `stickers` key at all, so a client that
+   *  read it has `[]` as its baseline and nothing else to send. That has to
+   *  match, in both orders around the page's own autosave, or the first
+   *  sticker anybody pins is a 409 and the toast says it changed elsewhere
+   *  while nothing else has touched the page. */
+  it("accepts an empty list as the baseline for a list the page does not hold", async () => {
+    const { s } = await tmpStore();
+    const page = await s.createPage(null, "Note");
+    const typed = await s.writePage(page.id, "A paragraph.", undefined, "me");
+    const sticker = { id: "s1", x: 40, y: 40, text: "" };
+
+    // the autosave first, then the sticker
+    const withSticker = await s.updateMeta(page.id, {
+      stickers: [sticker],
+      expected: { stickers: [] },
+      by: "me",
+    });
+    expect(withSticker.stickers).toEqual([sticker]);
+
+    // the sticker first, then the autosave, then a second sticker move whose
+    // baseline is the page's own, and the body write must not move it
+    const afterSticker = await s.readPage(page.id);
+    expect(afterSticker.meta.stickers).toEqual([sticker]);
+    // the rev the tab still holds is the one from before its sticker write:
+    // the sticker PATCH answers with metadata and no rev, so the body it
+    // loaded is what carries this save past the rev check
+    await s.writePage(
+      page.id,
+      "A paragraph, longer.",
+      typed.rev,
+      "me",
+      undefined,
+      "A paragraph.",
+    );
+    const moved = await s.updateMeta(page.id, {
+      stickers: [{ ...sticker, x: 120 }],
+      expected: { stickers: [sticker] },
+      by: "me",
+    });
+    expect(moved.stickers).toEqual([{ ...sticker, x: 120 }]);
+
+    // and the same rule on the way back: the last sticker removed leaves the
+    // field absent, so the next one starts from `[]` again
+    await s.updateMeta(page.id, {
+      stickers: [],
+      expected: { stickers: [{ ...sticker, x: 120 }] },
+      by: "me",
+    });
+    expect((await s.readPage(page.id)).meta.stickers).toBeUndefined();
+    await expect(
+      s.updateMeta(page.id, {
+        stickers: [sticker],
+        expected: { stickers: [] },
+        by: "me",
+      }),
+    ).resolves.toMatchObject({ stickers: [sticker] });
+  });
+
+  it("still refuses a list baseline the page does not hold", async () => {
+    const { s } = await tmpStore();
+    const page = await s.createPage(null, "Note");
+
+    await expect(
+      s.updateMeta(page.id, {
+        stickers: [{ id: "mine", x: 10, y: 10, text: "" }],
+        expected: { stickers: [{ id: "theirs", x: 80, y: 80, text: "hi" }] },
+        by: "me",
+      }),
+    ).rejects.toMatchObject({
+      name: "MetadataConflictError",
+      fields: ["stickers"],
+    });
+
+    await s.updateMeta(page.id, { tags: ["books"], by: "me" });
+    await expect(
+      s.updateMeta(page.id, { tags: ["films"], expected: { tags: [] }, by: "me" }),
+    ).rejects.toMatchObject({
+      name: "MetadataConflictError",
+      fields: ["tags"],
+    });
+  });
+
   it("allows concurrent metadata writes to different fields", async () => {
     const { s } = await tmpStore();
     const page = await s.createPage(null, "Before");

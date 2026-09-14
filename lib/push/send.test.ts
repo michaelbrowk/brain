@@ -42,9 +42,23 @@ const device = (endpoint: string, deviceLabel: string): PushSubscriptionRecord =
   lastSeenAt: "2026-09-14T12:00:00.000Z",
 });
 
-/** Let every queued microtask and the timer behind it run, so "what has
- *  started by now" is a settled question. */
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+/** A watcher list the injected `deliver` announces on, so the test waits for
+ *  the delivery it needs rather than for a timer. A `setTimeout(0)` here
+ *  raced the store's own file reads and failed about half the time. */
+const watchers = new Set<() => void>();
+const announce = () => {
+  for (const watcher of [...watchers]) watcher();
+};
+const waitFor = (ready: () => boolean) =>
+  new Promise<void>((resolve) => {
+    const watcher = () => {
+      if (!ready()) return;
+      watchers.delete(watcher);
+      resolve();
+    };
+    watchers.add(watcher);
+    watcher();
+  });
 
 beforeEach(async () => {
   webPush.sendNotification.mockReset();
@@ -249,23 +263,37 @@ describe("sendPush", () => {
       { title: "Water the plants", href: "/tasks" },
       {
         dir: many,
+        // One gate per call, opened by the test. Nothing here resolves on its
+        // own, so every step below is a state the test put the send into.
         deliver: async (record) => {
           started.push(record.deviceLabel);
+          announce();
           await new Promise<void>((resolve) => gates.push(resolve));
           finished.push(record.deviceLabel);
+          announce();
         },
       },
     );
-    await settle();
+
+    await waitFor(() => started.length === 4);
     expect(started).toEqual(["device-0", "device-1", "device-2", "device-3"]);
+    expect(finished).toEqual([]);
     expect(PUSH_SEND_CONCURRENCY).toBe(4);
 
-    // device-0 is the hung one. Its gate stays shut while the other seven go.
-    for (let index = 1; index < 8; index += 1) {
-      gates[index]?.();
-      await settle();
+    // A fifth can only start when a lane is freed. device-0's gate stays shut
+    // throughout: it is the hung endpoint.
+    gates[1]();
+    await waitFor(() => started.length === 5);
+    expect(started[4]).toBe("device-4");
+
+    let released = 2;
+    while (released < 8) {
+      gates[released]();
+      released += 1;
+      if (started.length < 8) await waitFor(() => started.length === released + 3);
     }
-    expect(finished).toHaveLength(7);
+    await waitFor(() => finished.length === 7);
+    expect(started).toHaveLength(8);
     expect(finished).not.toContain("device-0");
 
     gates[0]();

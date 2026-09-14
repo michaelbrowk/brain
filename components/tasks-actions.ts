@@ -33,6 +33,7 @@ import {
   reloadTasks,
 } from "./tasks-client";
 import { movesRow, repeatNextDay } from "./tasks-lists";
+import type { WhenValue } from "./tasks-when-picker";
 import type { ToastOptions } from "./ui/primitives";
 
 /** The fields a chip inside an expanded row can set. `null` clears one, which
@@ -42,13 +43,19 @@ export interface TaskFieldPatch {
   deadline?: string | null;
   category?: string | null;
   repeat?: TaskRepeat | null;
+  /** `HH:MM`, the reminder, and the evening of the day the task sits on. Both
+   *  are statements about a DAY, so the store takes them off a record the same
+   *  patch parks in Someday or sends back to the Inbox. */
+  time?: string | null;
+  evening?: true | null;
 }
 
 export interface TaskActions {
-  /** Rows a fold is still playing on. They keep their PRE-write record, so a
-   *  completed task stays where it was for the 220ms it takes to leave while
-   *  the counts beside it have already moved on. That is the spec's one
-   *  decrement, at 1300, with the row still on screen until 1520. */
+  /** Rows a fold is still playing on, which is the RESCHEDULE and nothing
+   *  else. They keep their PRE-write record, so a row on its way out of the
+   *  list stays where it was for the 220ms it takes to leave while the counts
+   *  beside it have already moved on: one decrement at 1300, the row gone at
+   *  1520. A completion holds nothing, because it does not leave. */
   readonly held: ReadonlyMap<string, TaskView>;
   /** Rows that arrive rather than appear: a new task, an Undo putting one
    *  back, the next occurrence of a repeat. */
@@ -65,7 +72,7 @@ export interface TaskActions {
   reopenTask: (task: TaskView, refusal?: string) => Promise<void>;
   rescheduleTask: (
     task: TaskView,
-    when: string | "someday" | null,
+    value: WhenValue,
     label: string,
   ) => Promise<void>;
   patchField: (task: TaskView, patch: TaskFieldPatch) => void;
@@ -73,9 +80,17 @@ export interface TaskActions {
 
 export function useTaskActions({
   today,
+  offsetMinutes,
   onToast,
 }: {
   today: string;
+  /** The reader's offset east of UTC, the browser's own
+   *  `-new Date().getTimezoneOffset()`, arriving with `today` from
+   *  `components/tasks-client.ts`. It travels wherever a record is measured
+   *  against a day: `movesRow` below asks the derive twice, and asked at zero
+   *  it answers "logbook" on both sides of a completion the reader made this
+   *  evening, so the fold never plays and the move is never reported. */
+  offsetMinutes: number;
   onToast?: (title: string, options?: ToastOptions) => void;
 }): TaskActions {
   const [held, setHeld] = useState<ReadonlyMap<string, TaskView>>(new Map());
@@ -174,14 +189,14 @@ export function useTaskActions({
     [markInserted, refuse],
   );
 
-  /** The write is issued HERE, at 1300, called by the row as its fold starts.
-   *  Nothing was sent before this point, so a cancelled completion leaves no
-   *  request, no `rev` bump and no commit behind it.
+  /** The write is issued HERE, at 1300, called by the row as its strike
+   *  finishes. Nothing was sent before this point, so a cancelled completion
+   *  leaves no request, no `rev` bump and no commit behind it.
    *
-   *  THE PILL ARRIVES WITH THE FOLD, AND CORRECTS ITSELF. Spec 2.1: "when the
-   *  fold starts, the existing Snackbar shows". Waiting for the 2xx put it 740
-   *  ms after the row left, so on a slow write the row was gone and the way
-   *  back had not appeared yet.
+   *  THE PILL ARRIVES WITH THE WRITE, AND CORRECTS ITSELF. Spec 2.1: the
+   *  Snackbar shows on the same beat the row is finished. Waiting for the 2xx
+   *  put it 740 ms later, so on a slow write the row was struck through and
+   *  the way back had not appeared yet.
    *
    *  It arrives with NO action and no window: "Completed" is a report of what
    *  the reader did a moment ago, which is true the moment they did it, and an Undo
@@ -193,7 +208,12 @@ export function useTaskActions({
    */
   const completeTask = useCallback(
     async (task: TaskView, refusal?: string) => {
-      hold(task);
+      // NOTHING IS HELD ANY MORE. `held` existed because a completed row kept
+      // its pre-write copy for the 220ms it took to fold away, and there is no
+      // fold on this path now: the optimistic `done: true` is what moves the
+      // row to the foot of its group, and the layout spring carries it there.
+      // `hold` and `releaseFold` stay for the reschedule, which does leave.
+      //
       // A REPEATING task is never done. Completing it appends a log entry and
       // moves `when` to the next occurrence, so an optimistic `done: true`
       // would file the series in the Logbook for as long as the write takes
@@ -231,8 +251,8 @@ export function useTaskActions({
         mutateTasks((tasks) =>
           tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
         );
-        // Spec 2.4, the one case a person watches: the row folded up here and
-        // the NEXT occurrence arrives below, in the following day's group,
+        // Spec 2.4, the one case a person watches: the series moved on here
+        // and the NEXT occurrence arrives below, in the following day's group,
         // with the insert entrance a new row gets. In Today the next one is
         // tomorrow or later, so nothing appears and the mark is unused.
         if (task.repeat) markInserted(saved.id);
@@ -252,7 +272,7 @@ export function useTaskActions({
         throw error;
       }
     },
-    [hold, markInserted, onToast, refuse, reopenTask, today],
+    [markInserted, onToast, refuse, reopenTask, today],
   );
 
   /** ONE ANSWER, TWO CONSEQUENCES.
@@ -269,16 +289,39 @@ export function useTaskActions({
    *  The row asks `movesRow` for its fold, so the motion and the words are
    *  the same answer twice rather than two rules. */
   const rescheduleTask = useCallback(
-    async (task: TaskView, when: string | "someday" | null, label: string) => {
-      const moves = movesRow(task, when, today);
+    async (task: TaskView, value: WhenValue, label: string) => {
+      const when = value.when;
+      const moves = movesRow(task, when, today, offsetMinutes);
       if (moves) hold(task);
       mutateTasks((tasks) =>
         tasks.map((entry) =>
-          entry.id === task.id ? { ...entry, when: when ?? undefined } : entry,
+          entry.id === task.id
+            ? {
+                ...entry,
+                when: when ?? undefined,
+                time: value.time ?? undefined,
+                evening: value.evening ? true : undefined,
+              }
+            : entry,
         ),
       );
       try {
-        const saved = await patchTask(task.id, { when });
+        const saved = await patchTask(task.id, {
+          when,
+          // ONLY WHAT THIS GESTURE CHANGED. The picker answers with all three
+          // fields whether or not it touched them, and a key or a swipe names
+          // a day alone, so a clock sent every time would be a write nobody
+          // asked for in every request body and in every git diff.
+          ...(value.time !== (task.time ?? null) ? { time: value.time } : {}),
+          ...(value.evening !== (task.evening === true)
+            ? { evening: value.evening ? true : null }
+            : {}),
+          // NO `expectedWhen` HERE. The store reads it inside
+          // `advanceTaskUnlocked`, which is a repeating task's tick and
+          // untick and nothing else; a reschedule reaches `applyTaskPatch`,
+          // where the field is never looked at. So one sent from here was a
+          // precondition nobody checked, in every request body and every diff.
+        });
         mutateTasks((tasks) =>
           tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
         );
@@ -291,7 +334,13 @@ export function useTaskActions({
             mutateTasks((tasks) =>
               tasks.map((entry) => (entry.id === task.id ? task : entry)),
             );
-            void patchTask(task.id, { when: task.when ?? null }).catch(refuse);
+            void patchTask(task.id, {
+              when: task.when ?? null,
+              ...(value.time !== (task.time ?? null) ? { time: task.time ?? null } : {}),
+              ...(value.evening !== (task.evening === true)
+                ? { evening: task.evening ?? null }
+                : {}),
+            }).catch(refuse);
           },
         });
       } catch (error) {
@@ -302,7 +351,7 @@ export function useTaskActions({
         throw error;
       }
     },
-    [hold, markInserted, onToast, refuse, today],
+    [hold, markInserted, offsetMinutes, onToast, refuse, today],
   );
 
   const patchField = useCallback(
@@ -345,6 +394,8 @@ function normalize(patch: TaskFieldPatch): Partial<TaskView> {
     ...(patch.title !== undefined ? { title: patch.title } : {}),
     ...(patch.deadline !== undefined ? { deadline: patch.deadline ?? undefined } : {}),
     ...(patch.category !== undefined ? { category: patch.category ?? undefined } : {}),
+    ...(patch.time !== undefined ? { time: patch.time ?? undefined } : {}),
+    ...(patch.evening !== undefined ? { evening: patch.evening ?? undefined } : {}),
     // Clearing the rule clears the history with it, the way the record does:
     // `log` beside no `repeat` is a shape nothing reads.
     ...(patch.repeat !== undefined

@@ -79,6 +79,7 @@
     "react-dom": "19.2.4",
     "remark-directive": "^4.0.0",
     "unicode-emoji-json": "^0.9.0",
+    "web-push": "3.6.7",
     "ws": "8.21.0",
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.3/xlsx-0.20.3.tgz",
     "zod": "^3.25.76"
@@ -89,6 +90,7 @@
     "@types/node": "^22",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "@types/web-push": "^3.6.4",
     "@types/ws": "8.18.1",
     "esbuild": "0.28.1",
     "eslint": "^9",

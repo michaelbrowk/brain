@@ -30,8 +30,15 @@ import type { ToastOptions } from "./ui/primitives";
 export const HUB_CAPTURE_FLIGHT_ID = "hub-capture-flight";
 
 /** Five, and the sixth collapses. A dashboard is a report, and a report that
- *  runs past a screen has stopped being one. */
+ *  runs past a screen has stopped being one. Five OPEN rows: what is still
+ *  owed is what the block is for, and a reader who finished five things would
+ *  otherwise open Home to five struck-through rows with the whole of the day's
+ *  work folded into "All today". */
 const HOME_ROWS = 5;
+
+/** And three of the day's completions under them, at most. Some is progress
+ *  and all of it is a logbook, which is a list of its own. */
+const HOME_DONE_ROWS = 3;
 
 /** The row the flight lands in, before the real one takes its place: 36 tall
  *  on the desktop rhythm, the height a task capsule is. */
@@ -74,7 +81,7 @@ export function HubToday({
   const state = useTasks(refreshToken);
   const today = state.day?.today ?? "";
   const offsetMinutes = state.day?.offsetMinutes ?? 0;
-  const actions = useTaskActions({ today, onToast });
+  const actions = useTaskActions({ today, offsetMinutes, onToast });
   const { held, inserted } = actions;
 
   const records = useMemo(
@@ -95,17 +102,31 @@ export function HubToday({
     [offsetMinutes, state.tasks, today],
   );
 
-  // What the LIST holds, so a row still folding is already out of it: one
-  // decrement at 1300, and the row leaves at 1520.
-  const open = drawn.filter((row) => !held.has(row.task.id)).length;
+  // What is still OPEN today. A completed row stays in the block, struck
+  // through and at the foot of its group, so counting the rows would hold the
+  // number at what the morning started with. A row still folding out on a
+  // reschedule is already out of the count too, which is the one decrement at
+  // 1300 with the row leaving at 1520.
+  const open = drawn.filter(
+    (row) => !row.task.done && !held.has(row.task.id),
+  ).length;
   // ONE SET OF WORDS ON SCREEN AT ANY INSTANT. The flight slot is held for the
   // spring's own 300ms, and on localhost the POST lands in about 20, so the
   // captured title was drawn twice, 53px apart, for the rest of the flight.
   // The row waits for the flight it is the destination of, and arrives with
   // its insert entrance the moment the words land.
-  const visible = drawn
-    .filter((row) => flight === null || row.task.id !== capturedId)
-    .slice(0, HOME_ROWS);
+  const waiting = drawn.filter(
+    (row) => flight === null || row.task.id !== capturedId,
+  );
+  // THE FIVE SLOTS ARE FIVE OPEN ROWS, and the day's completions sit under
+  // them rather than inside them. Home does not group, so "under" is the whole
+  // block: a flat list, still-to-do first, struck-through after.
+  const visible = [
+    ...waiting.filter((row) => !row.task.done).slice(0, HOME_ROWS),
+    ...waiting.filter((row) => row.task.done).slice(0, HOME_DONE_ROWS),
+  ];
+  // What the block is not showing, whichever of the two ran over.
+  const hidden = waiting.length - visible.length;
 
   // The clock is read on mount, so the server's HTML and the first client
   // render both have no day. A block that guessed one would draw an empty
@@ -226,14 +247,19 @@ export function HubToday({
         </motion.div>
       )}
 
-      {drawn.length > HOME_ROWS && (
+      {hidden > 0 && (
         <button
           type="button"
           data-hub-today-all
           onClick={onOpenTasks}
           className="-mx-2 mt-1 rounded-sm px-2 py-1.5 text-[12px] text-ink-3 transition-colors hover:bg-fill-hover hover:text-ink-2"
         >
-          {`All today (${drawn.length})`}
+          {/* NO SECOND NUMBER. The header above already says what is open
+              today, which is the number a reader is asking for; this link
+              said how many rows the day holds in all, and the two sat over a
+              block that paints a third count of its own. It is a way through
+              to the list, and a way through does not need a tally. */}
+          All today
         </button>
       )}
     </section>

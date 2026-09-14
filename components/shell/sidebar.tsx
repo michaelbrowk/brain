@@ -18,6 +18,7 @@ import type { Template } from "@/lib/templates";
 import { DUR, SPRING_PANEL, SPRING_SELECT } from "@/lib/motion";
 import { SIDEBAR_SELECT_LAYOUT_ID } from "./sidebar-select";
 import { Wordmark } from "./wordmark";
+import { NotificationsBell } from "../notifications-bell";
 import type { ShellSurface } from "./helpers";
 import {
   SETTINGS_SECTION_META,
@@ -76,6 +77,14 @@ export interface ShellSidebarProps {
   onOpenDailyPage: () => void;
   onOpenMail: () => void;
   onOpenTasks: () => void;
+  /** Opens a notification's destination. The bell is here rather than in the
+   *  shell's own chrome because the head is where this panel's two standing
+   *  controls already live, and "+" needs a neighbour, not a second row. */
+  onNavigateNotification: (href: string) => void;
+  /** The shell's count of `notification` store events this tab did not write.
+   *  The bell and Home's first row subscribe with the same one, so the two are
+   *  one request. */
+  notificationRefreshToken?: number;
   /** Open tasks due today, drawn on the Tasks row as the tree's own count
    *  chip. Absent or zero draws nothing. */
   tasksOpenTodayCount?: number;
@@ -116,6 +125,8 @@ export function ShellSidebar({
   onOpenDailyPage,
   onOpenMail,
   onOpenTasks,
+  onNavigateNotification,
+  notificationRefreshToken = 0,
   tasksOpenTodayCount,
   onSelect,
   onToggleExpand,
@@ -192,17 +203,28 @@ export function ShellSidebar({
             so this one button carried three shapes for one action — a rounded
             square inside a round ink button — and at 17px the box took the
             weight the plus needed to read. */}
-        {settingsOpen ? null : (
-          <TemplateMenu onPick={(t) => onCreatePage(selectedId, t)}>
-            <Button
-              variant="accent"
-              aria-label="New page"
-              title={newPageTitle}
-            >
-              <Icon name="add-linear" size={17} />
-            </Button>
-          </TemplateMenu>
-        )}
+        {/* THE BELL KEEPS THE ACCENT CIRCLE'S COMPANY, and stands to its left
+            so the circle keeps the corner it has always had. It is drawn on
+            Settings too, where the circle is not: "nothing there is a create"
+            is an argument about creating, and a reminder can fire while a
+            person is reading Settings. */}
+        <div className="flex items-center gap-1">
+          <NotificationsBell
+            onNavigate={onNavigateNotification}
+            refreshToken={notificationRefreshToken}
+          />
+          {settingsOpen ? null : (
+            <TemplateMenu onPick={(t) => onCreatePage(selectedId, t)}>
+              <Button
+                variant="accent"
+                aria-label="New page"
+                title={newPageTitle}
+              >
+                <Icon name="add-linear" size={17} />
+              </Button>
+            </TemplateMenu>
+          )}
+        </div>
       </div>
 
       {settingsOpen ? (

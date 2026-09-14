@@ -719,6 +719,10 @@ export interface CreateTaskInput {
   title: string;
   /** `YYYY-MM-DD` or the word `someday`. */
   when?: string;
+  /** `HH:MM`, 24-hour, wall clock in the owner's zone. Needs `when` to be a day. */
+  time?: string;
+  /** The evening of that day. Needs `when` to be a day. */
+  evening?: true;
   deadline?: string;
   category?: string;
   /** The note that holds the checkbox, for a linked task. */
@@ -733,6 +737,10 @@ export interface UpdateTaskPatch {
   /** Unlinked only: the note line owns a linked task's title. */
   title?: string;
   when?: string | null;
+  /** Both are statements about a day, so a patch that parks the task or sends
+   *  it back to the Inbox clears them whether or not the caller named them. */
+  time?: string | null;
+  evening?: true | null;
   deadline?: string | null;
   category?: string | null;
   repeat?: TaskRepeat | null;

@@ -24,6 +24,29 @@ const eslintConfig = defineConfig([
       "@typescript-eslint/no-require-imports": "off",
     },
   },
+  {
+    // The push worker runs in ServiceWorkerGlobalScope, which is neither a
+    // window nor Node. `sourceType: "script"` is what a classic worker is,
+    // and it is the half of this block that changes anything today.
+    //
+    // The globals are insurance, not a fix: `eslint --print-config
+    // public/sw.js` reports `no-undef` unset, because eslint-config-next
+    // leaves undefined names to TypeScript, and TypeScript never reads this
+    // file (tsconfig includes .ts, .tsx and .mts, and no .js). They cost
+    // nothing and are already right if `no-undef` is ever switched on.
+    files: ["public/sw.js"],
+    languageOptions: {
+      sourceType: "script",
+      globals: {
+        self: "readonly",
+        atob: "readonly",
+        fetch: "readonly",
+        URL: "readonly",
+        Uint8Array: "readonly",
+        JSON: "readonly",
+      },
+    },
+  },
 ]);
 
 export default eslintConfig;

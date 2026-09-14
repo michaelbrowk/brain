@@ -3,6 +3,7 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { deviceZone } from "../tasks-client";
 import { AccountSection } from "./account-section";
 import { resetUpdateStatusForTests } from "./use-update-status";
 
@@ -144,7 +145,10 @@ describe("AccountSection · About", () => {
 
   it("offers a retry when the route fails and recovers on the next read", async () => {
     const fetchMock = vi
-      .fn(async () => new Response(JSON.stringify(base), { status: 200 }))
+      .fn(
+        async (_input: RequestInfo | URL) =>
+          new Response(JSON.stringify(base), { status: 200 }),
+      )
       .mockResolvedValueOnce(new Response("nope", { status: 503 }));
     vi.stubGlobal("fetch", fetchMock);
 
@@ -159,7 +163,12 @@ describe("AccountSection · About", () => {
     await act(async () => retry?.click());
     await settle();
 
-    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // The mount reads the zone too, so count the update reads and not every
+    // request the section makes.
+    const updateReads = fetchMock.mock.calls.filter((call) =>
+      String(call[0]).includes("/api/settings/update"),
+    );
+    expect(updateReads).toHaveLength(2);
     expect(host.textContent).toContain("Brain 0.9.0");
     expect(host.textContent).toContain("Up to date");
     expect(host.textContent).not.toContain("Try again");
@@ -205,5 +214,237 @@ describe("AccountSection · About", () => {
 
     expect(onToast).toHaveBeenCalledWith("Could not check for updates");
     expect(host.textContent).toContain("Up to date");
+  });
+});
+
+// The zone group answers a second route, so the stub routes by URL: the
+// update status and the zone are two reads of one mount. A PUT echoes the name
+// it was sent, the way the route does.
+function stubZone(zone: { timeZone: string | null }) {
+  const mock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+    const url = String(input);
+    if (url.includes("/api/settings/zone")) {
+      if (init?.method === "PUT") {
+        const sent = JSON.parse(String(init.body)) as { timeZone: string };
+        return new Response(JSON.stringify({ timeZone: sent.timeZone }), {
+          status: 200,
+        });
+      }
+      return new Response(JSON.stringify(zone), { status: 200 });
+    }
+    return new Response(JSON.stringify(base), { status: 200 });
+  });
+  vi.stubGlobal("fetch", mock);
+  return mock;
+}
+
+/** Radix measures and captures the pointer; jsdom does neither. The stubs are
+ *  `share-popover.test.tsx`'s, which opens a popover the same way. */
+function stubPopoverPlatform() {
+  vi.stubGlobal(
+    "ResizeObserver",
+    class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+  );
+  vi.stubGlobal("PointerEvent", MouseEvent);
+  for (const name of [
+    "hasPointerCapture",
+    "setPointerCapture",
+    "releasePointerCapture",
+  ]) {
+    Object.defineProperty(HTMLElement.prototype, name, {
+      configurable: true,
+      value: () => (name === "hasPointerCapture" ? false : undefined),
+    });
+  }
+}
+
+/** A zone this machine is definitely not in, so "Use this device" is a
+ *  control that would change something and is therefore drawn. Picking a
+ *  literal would have made the case pass or fail by where the test ran. */
+const ELSEWHERE = deviceZone() === "Europe/Lisbon" ? "Europe/Madrid" : "Europe/Lisbon";
+
+describe("AccountSection · Time zone", () => {
+  let host: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (
+      globalThis as typeof globalThis & {
+        IS_REACT_ACT_ENVIRONMENT: boolean;
+      }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    resetUpdateStatusForTests();
+    stubPopoverPlatform();
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    host.remove();
+    document.body
+      .querySelectorAll("[data-radix-popper-content-wrapper]")
+      .forEach((node) => node.remove());
+    vi.unstubAllGlobals();
+  });
+
+  it("shows the captured zone", async () => {
+    stubZone({ timeZone: "Europe/Lisbon" });
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+    expect(host.textContent).toContain("Time zone");
+    expect(host.textContent).toContain("Europe/Lisbon");
+  });
+
+  it("says so when nothing has been captured yet", async () => {
+    stubZone({ timeZone: null });
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+    expect(host.textContent).toContain("Not set yet");
+  });
+
+  it("sets this device's zone in one press", async () => {
+    const fetchMock = stubZone({ timeZone: ELSEWHERE });
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+    const use = host.querySelector<HTMLButtonElement>(
+      '[aria-label="Use this device\'s zone"]',
+    );
+    await act(async () => use?.click());
+    await settle();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/settings/zone",
+      expect.objectContaining({
+        method: "PUT",
+        body: JSON.stringify({ timeZone: deviceZone() }),
+      }),
+    );
+  });
+
+  it("offers UTC, which the platform's own list leaves out", async () => {
+    // Intl.supportedValuesOf("timeZone") answers canonical regions only and
+    // carries no Etc/* entry, so without the prepended name a server-hosted
+    // notebook could never be set to UTC.
+    const fetchMock = stubZone({ timeZone: "Europe/Lisbon" });
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+
+    await act(async () => {
+      host
+        .querySelector<HTMLButtonElement>("[data-zone-value]")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+
+    const utc = [...document.body.querySelectorAll(".brain-menu-item")].find(
+      (row) => row.textContent === "UTC",
+    );
+    expect(utc).toBeDefined();
+
+    await act(async () => {
+      utc?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    await settle();
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/api/settings/zone",
+      expect.objectContaining({ body: JSON.stringify({ timeZone: "UTC" }) }),
+    );
+    expect(host.textContent).toContain("UTC");
+  });
+
+  it("keeps the action whole beside the longest zone name there is", async () => {
+    // America/Argentina/Buenos_Aires is 30 characters, the longest canonical
+    // name. Beside a label on a 375px phone the row runs out of width around
+    // 17, and .brain-settings-group clips rather than scrolls, so the row
+    // stacks and the name is the part that gives.
+    stubZone({ timeZone: "America/Argentina/Buenos_Aires" });
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+
+    const row = host.querySelector<HTMLElement>(
+      ".brain-settings-row[data-stack]",
+    );
+    expect(row).not.toBeNull();
+    expect(row?.textContent).toContain("Reminders fire in");
+
+    const value = row?.querySelector<HTMLElement>("[data-zone-value]");
+    expect(value?.textContent).toBe("America/Argentina/Buenos_Aires");
+    expect(value?.className).toContain("min-w-0");
+    expect(value?.className).toContain("truncate");
+    // The value reads as a value: the one quiet button on the row is the
+    // action beside it, and not two of them thirty pixels apart.
+    expect(value?.className).not.toContain("btn");
+    expect(row?.querySelectorAll(".btn-quiet")).toHaveLength(1);
+
+    const use = host.querySelector<HTMLElement>(
+      '[aria-label="Use this device\'s zone"]',
+    );
+    expect(use?.textContent).toBe("Use this device");
+    expect(use?.className).toContain("shrink-0");
+  });
+
+  it("toasts when the zone cannot be saved and keeps the one on screen", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.includes("/api/settings/zone")) {
+          return init?.method === "PUT"
+            ? new Response("", { status: 503 })
+            : new Response(JSON.stringify({ timeZone: ELSEWHERE }), { status: 200 });
+        }
+        return new Response(JSON.stringify(base), { status: 200 });
+      }),
+    );
+    const onToast = vi.fn();
+
+    await act(async () => root.render(<AccountSection onToast={onToast} />));
+    await settle();
+    await act(async () => {
+      host
+        .querySelector<HTMLButtonElement>('[aria-label="Use this device\'s zone"]')
+        ?.click();
+    });
+    await settle();
+
+    expect(onToast).toHaveBeenCalledWith("Could not save the time zone");
+    expect(host.textContent).toContain(ELSEWHERE);
+  });
+
+  // A control that would do nothing is worse than an absent one, and this is
+  // the row where two identical quiet buttons stood side by side.
+  it("drops 'Use this device' when the notebook is already on this browser's zone", async () => {
+    stubZone({ timeZone: deviceZone() });
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+    expect(host.textContent).toContain(deviceZone());
+    expect(host.querySelector('[aria-label="Use this device\'s zone"]')).toBeNull();
+  });
+
+  it("offers it while the notebook is on some other zone", async () => {
+    stubZone({ timeZone: ELSEWHERE });
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+    expect(host.querySelector('[aria-label="Use this device\'s zone"]')).not.toBeNull();
+  });
+
+  it("says nothing is set when the zone route fails", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) =>
+        String(input).includes("/api/settings/zone")
+          ? new Response("nope", { status: 500 })
+          : new Response(JSON.stringify(base), { status: 200 }),
+      ),
+    );
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+    expect(host.textContent).toContain("Not set yet");
   });
 });

@@ -27,6 +27,10 @@ const child = spawn(
       MCP_TOKEN: "brain-e2e-mcp-token-not-for-production",
       OPENROUTER_API_KEY: "",
       BRAIN_UPDATE_CHECK: "off",
+      // A timer writing task files under a temp notes root mid-run is a flake
+      // nobody would diagnose twice. NODE_ENV is development here, so the
+      // scan's own test guard does not cover this process.
+      BRAIN_REMINDERS: "0",
       GIT_AUTHOR_NAME: "Brain E2E",
       GIT_AUTHOR_EMAIL: "brain-e2e@example.invalid",
       GIT_COMMITTER_NAME: "Brain E2E",

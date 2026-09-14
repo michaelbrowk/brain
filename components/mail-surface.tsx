@@ -27,10 +27,14 @@ import {
 } from "./mail-reader";
 import { onMailCommand } from "./mail-commands";
 import {
+  clearOpenThreadRequest,
   defaultMailSurfaceClient,
   isListedDraft,
   isMailMutationTimeout,
   MailApiError,
+  pendingOpenThread,
+  subscribeOpenThread,
+  type MailOpenRequest,
   type MailAccountCapabilities,
   type MailDraft,
   type MailDraftCreateInput,
@@ -2302,6 +2306,166 @@ export function MailSurface({
     }
   }, [clearStickyOpen, refreshThreadsSilently]);
 
+  /** THE THREAD SOMETHING OUTSIDE MAIL ASKED FOR (spec §7, D6).
+   *
+   *  A `mail-new` row in the notification centre is pressed on whatever surface
+   *  the reader is on, so it leaves an account and a thread in
+   *  `mail-surface-client` and the shell opens Mail. This is the other end. The
+   *  request is read on mount and again on every list commit, because the list
+   *  it has to be found in usually arrives after it.
+   *
+   *  Three answers, in this order. The letter is in the list in hand, and
+   *  `selectThread` opens it exactly as a press on the row would. It is in
+   *  another account, and the column moves there first, one switch per
+   *  request, and the list that follows brings the letter with it. Or it is in
+   *  neither, and one `readThread` fetches the row to open it with. A
+   *  request that cannot be answered is dropped rather than retried: Mail is
+   *  open at the list it was going to show anyway, which is not a failure to
+   *  report to whoever pressed a notification.
+   */
+  const pendingOpen = useSyncExternalStore(
+    subscribeOpenThread,
+    pendingOpenThread,
+    pendingOpenThreadServerSnapshot,
+  );
+  /** What has already been tried for the request in hand. A switch and a fetch
+   *  are each worth one attempt, and without this ledger the effect would
+   *  switch accounts every time the list it asked for commits. `listAtSwitch`
+   *  is the list that was on screen when the switch was asked for: the fetch
+   *  waits for a commit that is not it, so the account's own page gets its
+   *  chance first. */
+  const openRequestRef = useRef<{
+    key: string;
+    opened: boolean;
+    switched: boolean;
+    listAtSwitch: MailThreadListState | null;
+    fetched: boolean;
+  } | null>(null);
+
+  const fetchRequestedThread = useCallback(
+    async (request: MailOpenRequest) => {
+      let detail: MailThreadDetail;
+      try {
+        detail = await client.readThread({
+          accountId: request.accountId,
+          threadId: request.threadId,
+        });
+      } catch {
+        // A later press replaces the slot before this one answers: only the
+        // request still standing there is this fetch's to clear.
+        if (isPendingRequest(request)) clearOpenThreadRequest();
+        return;
+      }
+      // The slot may already hold a different request by the time this
+      // fetch lands, a second press before the first is answered. Landing on
+      // the letter this fetch was for would move the reader off the one they
+      // asked for since, so an abandoned fetch is dropped instead of opened.
+      if (!isPendingRequest(request)) return;
+      clearOpenThreadRequest();
+      void selectThread(detail.thread);
+    },
+    [client, selectThread],
+  );
+
+  useEffect(() => {
+    if (pendingOpen === null) {
+      openRequestRef.current = null;
+      return;
+    }
+    // Nothing can be decided before the accounts are known: the request names
+    // one, and the column may still be choosing which it stands in.
+    if (accountsState.kind !== "ready") return;
+
+    const key = unifiedThreadKey(pendingOpen);
+    let ledger = openRequestRef.current;
+    if (ledger === null || ledger.key !== key) {
+      ledger = {
+        key,
+        opened: false,
+        switched: false,
+        listAtSwitch: null,
+        fetched: false,
+      };
+      openRequestRef.current = ledger;
+    }
+
+    // An account that is no longer connected has no letter to open.
+    if (
+      !accountsState.accounts.some(
+        (account) => account.accountId === pendingOpen.accountId,
+      )
+    ) {
+      clearOpenThreadRequest();
+      return;
+    }
+
+    const loaded = loadedThread(
+      pendingOpen,
+      selectedAccountId,
+      threadState,
+      unifiedState,
+    );
+    if (loaded) {
+      // The ledger, not `pendingOpen === null`, is what stops a development
+      // double invoke of this effect from opening the same letter twice: the
+      // clear below has not committed yet the second time this runs against
+      // the same render.
+      if (ledger.opened) return;
+      ledger.opened = true;
+      clearOpenThreadRequest();
+      void selectThread(loaded);
+      return;
+    }
+
+    // The mailbox on screen is the one a `mail-new` row is about, whichever
+    // account the request names. Checked before the switch below rather than
+    // after it: switching resets to Inbox and clears the query on its way,
+    // so a cross-account request would otherwise answer where a same-account
+    // one is dropped, for the same reader standing on the same other folder.
+    if (selectedMailboxId !== "inbox" || searchQuery.trim() !== "") {
+      clearOpenThreadRequest();
+      return;
+    }
+
+    if (selectedAccountId !== pendingOpen.accountId) {
+      if (ledger.switched) return;
+      ledger.switched = true;
+      ledger.listAtSwitch = threadState;
+      selectAccount(pendingOpen.accountId);
+      return;
+    }
+
+    // The list the switch asked for has not committed yet, so "not in the
+    // list" is not yet an answer.
+    if (threadState.kind === "loading" || threadState === ledger.listAtSwitch) {
+      return;
+    }
+    if (ledger.fetched) return;
+    ledger.fetched = true;
+    void fetchRequestedThread(pendingOpen);
+  }, [
+    accountsState,
+    fetchRequestedThread,
+    pendingOpen,
+    searchQuery,
+    selectAccount,
+    selectThread,
+    selectedAccountId,
+    selectedMailboxId,
+    threadState,
+    unifiedState,
+  ]);
+
+  // A request nothing can now answer must not outlive this instance: the
+  // reader who leaves Mail before an account switch or a fetch resolves, or
+  // whose accounts never finish loading, should not have the next Mail mount
+  // answer a press this one already gave up on.
+  useEffect(() => {
+    return () => {
+      clearOpenThreadRequest();
+    };
+  }, []);
+
   const startCompose = useCallback(
     (accountId: string) => {
       const account = selectedMailAccount(accountsStateRef.current, accountId);
@@ -4429,6 +4593,54 @@ const MAIL_VIEW_COMMANDS = {
 function isSinglePaneMailViewport(): boolean {
   if (typeof window.matchMedia !== "function") return false;
   return !window.matchMedia(`(min-width: ${MAIL_PANES_MIN_WIDTH}px)`).matches;
+}
+
+/** No request can be pending before the browser has run, so the server render
+ *  is always the empty answer. Named rather than inline so the snapshot passed
+ *  to `useSyncExternalStore` is one stable reference. */
+function pendingOpenThreadServerSnapshot(): MailOpenRequest | null {
+  return null;
+}
+
+/** Whether `request` is still the one request `mail-surface-client` holds. A
+ *  second press before the first is answered replaces the slot rather than
+ *  queuing behind it, so a fetch started for the first must not clear a slot
+ *  that now belongs to the second, or open a letter nobody asked for anymore. */
+function isPendingRequest(request: MailOpenRequest): boolean {
+  const pending = pendingOpenThread();
+  return (
+    pending !== null &&
+    pending.accountId === request.accountId &&
+    pending.threadId === request.threadId
+  );
+}
+
+/** The requested thread, if it is in the list the column is showing.
+ *
+ *  Which list that is depends on the mode, and asking the other one would be a
+ *  trap: the unified streams survive a move into a single account, so a letter
+ *  found there while the column stands in one address would be opened against
+ *  a list it is not in and the reader would never leave "loading".
+ */
+function loadedThread(
+  request: MailOpenRequest,
+  selectedAccountId: string | null,
+  threadState: MailThreadListState,
+  unifiedState: UnifiedState,
+): MailThreadListItem | null {
+  const matches = (item: MailThreadListItem) =>
+    item.accountId === request.accountId && item.threadId === request.threadId;
+  if (selectedAccountId === UNIFIED_ACCOUNT_ID) {
+    if (unifiedState.kind !== "ready") return null;
+    for (const stream of unifiedState.streams) {
+      const found = stream.items.find(matches);
+      if (found) return found;
+    }
+    return null;
+  }
+  if (selectedAccountId !== request.accountId) return null;
+  if (threadState.kind !== "ready") return null;
+  return threadState.page.items.find(matches) ?? null;
 }
 
 function selectedMailAccount(

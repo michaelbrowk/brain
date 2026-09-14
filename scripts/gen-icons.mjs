@@ -74,11 +74,17 @@ const WANT = [
   "paperclip-linear",
   "sort-vertical-linear",
   "alt-arrow-down-linear",
+  // The When picker's two spinners step up as well as down.
+  "alt-arrow-up-linear",
   // Logbook: two bare ticks. Every other "done" glyph Solar ships puts its
   // check inside a rounded square, which is ban 13, including
   // `checklist-minimalistic`, which this replaces.
   "check-read-linear",
   "bell-linear",
+  // The notification centre draws one glyph per kind: a reminder that fired
+  // takes the alarm, one that was missed takes the clock already listed
+  // above, and new mail takes the letter that is already in PAIRS.
+  "alarm-linear",
   "align-left-linear",
   "align-horizontal-center-linear",
   "align-right-linear",
@@ -141,6 +147,7 @@ const PAIRS = [
   // settings surface sections
   "palette",
   "plug-circle",
+  "bell",
   "earth",
   "user-circle",
   "heart",

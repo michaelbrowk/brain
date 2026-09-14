@@ -121,6 +121,9 @@ describe("tasks surface navigation (desktop)", () => {
       if (url === "/api/tree") return response({ tree: [] });
       // the surface and the sidebar count read ONE list of records
       if (url.startsWith("/api/tasks?")) return response({ tasks: [] });
+      // the bell asks the centre on mount, on every surface
+      if (url === "/api/notifications")
+        return response({ notifications: [], unread: 0 });
       throw new Error(`unexpected request: ${url}`);
     });
     vi.stubGlobal("matchMedia", (query: string) => ({

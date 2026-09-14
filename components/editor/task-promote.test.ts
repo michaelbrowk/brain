@@ -50,6 +50,18 @@ let createAnswer: { status: number; body: Record<string, unknown> } = {
 /** Held POSTs, for the case where a second click arrives before the first
  *  answers. `null` means answer at once. */
 let createGate: Promise<void> | null = null;
+/** What PATCH /api/tasks/<id> answers with, so a refused RESCHEDULE can be
+ *  exercised too: a second word pressed mid-flight reaches the route as one,
+ *  and its refusal belongs to the press that made it. */
+let patchAnswer: { status: number; body: Record<string, unknown> } = {
+  status: 200,
+  body: {},
+};
+/** Held PATCHes, the twin of `createGate`. A line that is already a task
+ *  reschedules rather than creates, which is the commoner gesture in a note
+ *  whose lines have words, and without this no case could hold one open to
+ *  see what the panel does while it waits. */
+let patchGate: Promise<void> | null = null;
 
 const editors = new WeakMap<EditorView, Editor>();
 const open: Editor[] = [];
@@ -102,6 +114,8 @@ function stubFetch() {
       return json(201, { task });
     }
     if (url.startsWith("/api/tasks/") && method === "PATCH") {
+      if (patchGate) await patchGate;
+      if (patchAnswer.status !== 200) return json(patchAnswer.status, patchAnswer.body);
       const id = url.slice("/api/tasks/".length);
       tasks = tasks.map((task) =>
         task.id === id
@@ -167,7 +181,23 @@ function menu(): HTMLElement | null {
   );
 }
 
+/** The picker inside the popover, which is where the panel says it is
+ *  waiting on a write. */
+function picker(): HTMLElement | null {
+  return menu()?.querySelector<HTMLElement>(".brain-when-picker") ?? null;
+}
+
+/** The popover's OWN row, which is Inbox and nothing else. Today, This
+ *  Evening, Someday and Reminder below it belong to the picker's list. */
 function menuLabels(): string[] {
+  return [...(menu()?.querySelectorAll(":scope > .brain-menu-item") ?? [])].map((row) =>
+    (row.textContent ?? "").trim(),
+  );
+}
+
+/** Every row a reader can press in this popover, the panel's and the picker's
+ *  alike, in drawn order. */
+function allLabels(): string[] {
   return [...(menu()?.querySelectorAll(".brain-menu-item") ?? [])].map((row) =>
     (row.textContent ?? "").trim(),
   );
@@ -186,11 +216,23 @@ function caretInLine(view: EditorView, index: number) {
   view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, starts[index])));
 }
 
+/** A quick row: one tap, one write, and the popover is gone. */
 async function pick(label: string) {
   const row = [...(menu()?.querySelectorAll<HTMLElement>(".brain-menu-item") ?? [])].find(
     (candidate) => (candidate.textContent ?? "").trim() === label,
   );
   row?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  await settle();
+}
+
+/** The detailed path: a day out of the grid, and Done sends it. */
+async function pickDay(day: string) {
+  menu()
+    ?.querySelector<HTMLElement>(`[data-day="${day}"]`)
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+  menu()
+    ?.querySelector<HTMLElement>("[data-when-done]")
+    ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   await settle();
 }
 
@@ -212,6 +254,8 @@ beforeEach(() => {
   category = null;
   createAnswer = { status: 201, body: {} };
   createGate = null;
+  patchAnswer = { status: 200, body: {} };
+  patchGate = null;
   stubFetch();
 });
 
@@ -289,15 +333,166 @@ describe("the + Task gesture", () => {
     expect(calls.filter((call) => call.url.startsWith("/api/tasks"))).toEqual([]);
   });
 
-  it("opens a menu with Today, Tomorrow, Someday, Inbox, Date… in that order", async () => {
+  it("opens the picker with one Inbox row above it, and says every word once", async () => {
+    // THE POPOVER IS THE PICKER. Today, This Evening and Someday are its own
+    // quick rows and Tomorrow is a cell in its grid, so a list of four here
+    // drew Today twice and Someday twice, four rows apart. Inbox is the one
+    // word left: a task with no day at all, which no grid can say.
     const view = await mountEditor("- [ ] water the plants\n");
     hover(view, 0);
 
     marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
     expect(menu()).not.toBeNull();
-    expect(menuLabels()).toEqual(["Today", "Tomorrow", "Someday", "Inbox", "Date…"]);
+    expect(menuLabels()).toEqual(["Inbox"]);
+    expect(allLabels()).toEqual(["Inbox", "Today", "This Evening", "Someday", "Reminder"]);
     expect(menu()?.getAttribute("data-state")).toBe("open");
+  });
+
+  it("is a dialog and not a menu, because a menu cannot hold a grid", async () => {
+    // `role="menu"` may own menu items and nothing else. What stands in here
+    // is a month grid, two spinbuttons and four checkbox rows: a screen reader
+    // told this was a menu would not expose the grid as a grid.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    const panel = menu()!;
+    expect(panel.getAttribute("role")).toBe("dialog");
+    expect(panel.getAttribute("aria-label")).toBe("When");
+    expect(panel.querySelector("[role='menuitem']")).toBeNull();
+    expect(panel.querySelector("[role='grid']")).not.toBeNull();
+    // And the trigger says what it opens. The arrow-key row walking that made
+    // this a menu went with the role.
+    expect(marks(view)[0].getAttribute("aria-haspopup")).toBe("dialog");
+  });
+
+  it("draws the picker in the popover and no native input (D4)", async () => {
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    expect(menu()?.querySelector(".brain-when-picker")).not.toBeNull();
+    expect(document.querySelector("input[type='date']")).toBeNull();
+  });
+
+  it("gives the grid the room there is, on the side the popover landed", async () => {
+    // The popover carries a month grid now and there are windows that hold
+    // neither side of it whole. `place()` measures the room and the picker's
+    // own scroller reads it, so Done never ends up off the bottom edge.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    const panel = menu()!;
+    expect(panel.querySelector(".brain-when-scroll .brain-when-picker")).not.toBeNull();
+    expect(
+      panel.style.getPropertyValue("--radix-popover-content-available-height"),
+    ).toMatch(/^\d+px$/);
+    // Below the line, so the floating tab bar is still under the panel and the
+    // rule may take it off.
+    expect(panel.style.getPropertyValue("--tabbar-reserve")).toBe("");
+  });
+
+  it("owes the floating tab bar nothing when it lands above the line", async () => {
+    // The bar is at the bottom of the window. A panel placed ABOVE the line is
+    // measured from the top of the window down and never reaches it, and
+    // subtracting it there took ~84px of grid away on a phone for nothing.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    const mark = marks(view)[0];
+    // A tall panel over a line near the foot of a short window: no room below,
+    // room above, which is the one case `shouldFlipAbove` answers yes to.
+    Object.defineProperty(HTMLElement.prototype, "offsetHeight", {
+      configurable: true,
+      get: () => 430,
+    });
+    mark.getBoundingClientRect = () =>
+      ({ top: 600, bottom: 620, left: 20, right: 80 }) as DOMRect;
+
+    mark.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    const panel = menu()!;
+    expect(panel.style.top).toBe(`${600 - 430 - 6}px`);
+    expect(panel.style.getPropertyValue("--tabbar-reserve")).toBe("0px");
+    Reflect.deleteProperty(HTMLElement.prototype, "offsetHeight");
+  });
+
+  it("keeps the panel standing on a grid pick and sends it on Done", async () => {
+    // THE DETAILED PATH, here as everywhere: a reminder needs its day first,
+    // so a day out of the grid has to be something a reader can follow with a
+    // clock. Nothing is minted until they say they are done.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    menu()
+      ?.querySelector<HTMLElement>('[data-day="2026-09-20"]')
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await settle();
+
+    expect(menu()).not.toBeNull();
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(0);
+
+    menu()
+      ?.querySelector<HTMLElement>("[data-when-done]")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await settle();
+
+    expect(postBody()).toMatchObject({ when: "2026-09-20" });
+    expect(postBody().time).toBeUndefined();
+    expect(postBody().evening).toBeUndefined();
+    expect(marks(view)[0].textContent).toBe("20 Sep");
+  });
+
+  it("files the line in the evening when This Evening is the row pressed", async () => {
+    // The popover used to draw This Evening and then drop the evening on the
+    // way to the route, so the reader named a section and got another one with
+    // no report. The whole value travels now.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("This Evening");
+
+    expect(postBody()).toMatchObject({ when: TODAY, evening: true });
+  });
+
+  it("carries a reminder set beside the day it was set on", async () => {
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    menu()
+      ?.querySelector<HTMLElement>('[data-day="2026-09-20"]')
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    menu()
+      ?.querySelector<HTMLElement>("[data-when-reminder]")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    menu()
+      ?.querySelector<HTMLElement>("[data-when-done]")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await settle();
+
+    expect(postBody()).toMatchObject({ when: "2026-09-20", time: "09:00" });
+  });
+
+  it("leaves the picker's own arrows to the picker", async () => {
+    // The grid is a roving cell walked with all four arrows. A menu that also
+    // stepped between rows would move the focus out from under a reader
+    // halfway across a month.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    const cell = menu()!.querySelector<HTMLElement>(`[data-day="${TODAY}"]`)!;
+    cell.focus();
+    cell.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }));
+
+    expect(document.activeElement?.closest(".brain-when-picker")).not.toBeNull();
   });
 
   it("writes nothing into the markdown when a list word is picked", async () => {
@@ -332,7 +527,7 @@ describe("the + Task gesture", () => {
     hover(view, 0);
     marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    await pick("Tomorrow");
+    await pickDay(TOMORROW);
 
     expect(menu()).toBeNull();
     const mark = marks(view)[0];
@@ -363,7 +558,7 @@ describe("the + Task gesture", () => {
 
     marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    expect(menuLabels()).toEqual(["Today", "Tomorrow", "Someday", "Inbox", "Date…"]);
+    expect(menuLabels()).toEqual(["Inbox"]);
 
     await pick("Someday");
 
@@ -429,6 +624,106 @@ describe("the + Task gesture", () => {
     expect(marks(view)[0].textContent).toBe("+ Task");
   });
 
+  /** WHAT THE PANEL CLEARS, THE RECORD CLEARS.
+   *
+   *  `extras` only ever ADDED `time` and `evening`, so a reschedule sent
+   *  `{ when, evening: true }` for a gesture that had switched the
+   *  reminder off: the clock stayed on the record, the panel reopened showing
+   *  it, and the reminder the reader had cleared went on firing. The row's own
+   *  When chip got this right one file away by comparing the picked value
+   *  against the record, and this is the same comparison, against the value
+   *  the panel opened on. */
+  describe("clearing a field from the panel", () => {
+    const seedEvening = () => {
+      const text = normalizeTaskText("water the plants");
+      tasks = [
+        {
+          id: "task-known",
+          title: text,
+          page: PAGE,
+          when: TODAY,
+          evening: true,
+          time: "18:30",
+          done: false,
+          created: NOW.toISOString(),
+          updated: NOW.toISOString(),
+          anchor: { text, hash: hashTaskText(text), ordinal: 0, line: 0 },
+        },
+      ];
+    };
+
+    const patchBody = () =>
+      calls.find((call) => call.method === "PATCH")?.body ?? null;
+
+    it("sends time: null when the reminder is switched off", async () => {
+      seedEvening();
+      const view = await mountEditor("- [ ] water the plants\n");
+      marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+      menu()
+        ?.querySelector<HTMLElement>("[data-when-time-clear]")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      menu()
+        ?.querySelector<HTMLElement>("[data-when-done]")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await settle();
+
+      expect(patchBody()).toEqual({ when: TODAY, time: null });
+    });
+
+    it("sends evening: null when Today is pressed on an evening task", async () => {
+      seedEvening();
+      const view = await mountEditor("- [ ] water the plants\n");
+      marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+      await pick("Today");
+
+      expect(patchBody()).toEqual({ when: TODAY, evening: null });
+    });
+
+    it("leaves a field the gesture never touched out of the body", async () => {
+      const text = normalizeTaskText("water the plants");
+      tasks = [
+        {
+          id: "task-known",
+          title: text,
+          page: PAGE,
+          when: TODAY,
+          time: "18:30",
+          done: false,
+          created: NOW.toISOString(),
+          updated: NOW.toISOString(),
+          anchor: { text, hash: hashTaskText(text), ordinal: 0, line: 0 },
+        },
+      ];
+      const view = await mountEditor("- [ ] water the plants\n");
+      marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await pickDay(TOMORROW);
+
+      // The day moved and the clock did not, so the clock is not in the body.
+      expect(patchBody()).toEqual({ when: TOMORROW });
+    });
+
+    it("takes the evening off a task moved to another day, because an evening is today's", async () => {
+      seedEvening();
+      const view = await mountEditor("- [ ] water the plants\n");
+      marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await pickDay(TOMORROW);
+
+      expect(patchBody()).toEqual({ when: TOMORROW, evening: null });
+    });
+
+    it("still sends only what is set on a line that is not a task yet", async () => {
+      const view = await mountEditor("- [ ] water the plants\n");
+      hover(view, 0);
+      marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await pick("Today");
+
+      expect(postBody()).not.toHaveProperty("time");
+      expect(postBody()).not.toHaveProperty("evening");
+    });
+  });
+
   it("draws the word for a task the page already had, with no ghost beside it", async () => {
     const text = normalizeTaskText("water the plants");
     tasks = [
@@ -488,7 +783,12 @@ describe("the + Task gesture", () => {
     expect(marks(view).map((mark) => mark.textContent)).toEqual(["+ Task", "Today"]);
   });
 
-  it("sends one POST when a row is clicked twice before the first answers", async () => {
+  it("takes no press while its one write is out, and remembers none", async () => {
+    // ONE WRITE AT A TIME, AND NO QUEUE. While the route is answering, the
+    // panel is pending: its own row and every row the picker draws take no
+    // press, and a press made there is neither sent nor kept. The queue this
+    // panel used to hold kept a word the reader could no longer see, and
+    // answered each caller about somebody else's write.
     let release = () => {};
     createGate = new Promise<void>((resolve) => {
       release = resolve;
@@ -497,22 +797,356 @@ describe("the + Task gesture", () => {
     hover(view, 0);
     marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
 
-    const row = [...menu()!.querySelectorAll<HTMLButtonElement>(".brain-menu-item")].find(
-      (candidate) => (candidate.textContent ?? "").trim() === "Today",
-    )!;
+    const row = [
+      ...menu()!.querySelectorAll<HTMLButtonElement>(":scope > .brain-menu-item"),
+    ].find((candidate) => (candidate.textContent ?? "").trim() === "Inbox")!;
     row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
     await settle();
-    // Two records on one line is the state that has no honest reading, so the
-    // rows say so while the first one is in flight.
-    expect(row.disabled).toBe(true);
+
+    expect(menu()?.getAttribute("aria-busy")).toBe("true");
+    expect(picker()?.getAttribute("aria-busy")).toBe("true");
+    expect(row.getAttribute("aria-disabled")).toBe("true");
+
     row.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("Today");
+
+    release();
     await settle();
+    await settle();
+
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(0);
+    expect(marks(view)[0].textContent).toBe("Inbox");
+    expect(menu()).toBeNull();
+  });
+
+  it("says so when a write from the panel before it is still out", async () => {
+    // ONE WRITE AT A TIME IS A RULE ABOUT THE LINE, not about one panel. A
+    // reader can press the mark again with a write still out, and that opens a
+    // second panel over the same line. Its press is refused rather than sent,
+    // because two records contending for one checkbox is the state that has no
+    // honest reading, and it is refused OUT LOUD: a control that takes a press
+    // and does nothing is the one shape a control must not have.
+    let release = () => {};
+    createGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Today");
+    // The mark reopens the panel: it is the trigger, so the press outside does
+    // not close it first.
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("Someday");
+
+    expect(menu()).not.toBeNull();
+    expect(menu()?.textContent).toContain("still saving");
+    expect(calls.filter((call) => call.method !== "GET")).toHaveLength(1);
+
+    release();
+    await settle();
+  });
+
+  it("keeps a refused pick one press away, and the second press writes", async () => {
+    // THE REFUSAL LEAVES THE PANEL STANDING so the next pick is one press
+    // away, which is the sentence the case above ends on. It was not true: the
+    // picker had already taken the refused value for the record's own, so the
+    // same row sent nothing the second time and the panel dismissed with no
+    // task filed and no second reason.
+    createAnswer = { status: 409, body: { error: "conflict", reason: "already a task" } };
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Today");
+    expect(menu()).not.toBeNull();
+    expect(menu()?.textContent).toContain("already a task");
+
+    createAnswer = { status: 201, body: {} };
+    await pick("Today");
+
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(2);
+    expect(menu()).toBeNull();
+    expect(marks(view)[0].textContent).toBe("Today");
+  });
+
+  it("keeps a refused reschedule one press away, and says why while it waits", async () => {
+    // THE COMMONER GESTURE IN A NOTE IS A RESCHEDULE, not a create: the line
+    // is already a task, so the panel sends a PATCH, and a route that refuses
+    // one owes the reader the same panel, the same reason and the same second
+    // press a refused create does.
+    const text = normalizeTaskText("water the plants");
+    tasks = [
+      {
+        id: "task-known",
+        title: text,
+        page: PAGE,
+        done: false,
+        created: NOW.toISOString(),
+        updated: NOW.toISOString(),
+        anchor: { text, hash: hashTaskText(text), ordinal: 0, line: 0 },
+      },
+    ];
+    let release = () => {};
+    patchGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    patchAnswer = { status: 409, body: { error: "conflict", reason: "already moved" } };
+    const view = await mountEditor("- [ ] water the plants\n");
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Today");
+    // The panel is waiting, so the row beside the one pressed answers nothing.
+    await pick("Someday");
+    release();
+    await settle();
+
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(1);
+    expect(menu()).not.toBeNull();
+    expect(menu()?.textContent).toContain("already moved");
+    expect(marks(view)[0].textContent).toBe("Inbox");
+
+    patchAnswer = { status: 200, body: {} };
+    await pick("Someday");
+
+    expect(calls.filter((call) => call.method === "PATCH")).toHaveLength(2);
+    expect(menu()).toBeNull();
+    expect(marks(view)[0].textContent).toBe("Someday");
+  });
+
+  it("closes on Escape with the write still out, and the write still lands", async () => {
+    // ESCAPE IS A CLOSE AND NOT A CANCEL once the create has gone. There is
+    // nothing left to throw away: the value is with the route, and the line
+    // gets the word it was given whether or not this panel is still on screen.
+    let release = () => {};
+    createGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Today");
+    expect(menu()).not.toBeNull();
+
+    picker()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settle();
+    expect(menu()).toBeNull();
 
     release();
     await settle();
 
     expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
     expect(marks(view)[0].textContent).toBe("Today");
+  });
+
+  it("takes no focus back when the write lands on a panel that has gone", async () => {
+    // THE SUCCESS ARM OF THE SAME GUARD, and the other half of the case above.
+    // A 201 that arrives after Escape finds a popover already detached: there
+    // is nothing left to dismiss, and the keyboard belongs to wherever the
+    // reader went while the route was thinking. Taking it back is how a caret
+    // jumps out of a sentence somebody is in the middle of typing.
+    let release = () => {};
+    createGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const view = await mountEditor("- [ ] water the plants\n\nand the note goes on\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Today");
+    picker()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settle();
+    expect(menu()).toBeNull();
+
+    // The reader moved on while the write was out: the caret is on the next
+    // line and the keyboard is in another field altogether.
+    caretInLine(view, 1);
+    const caret = view.state.selection.from;
+    const elsewhere = document.createElement("input");
+    document.body.append(elsewhere);
+    elsewhere.focus();
+    const painted = document.querySelectorAll(`.${PROMOTE_MENU_CLASS}`).length;
+
+    release();
+    await settle();
+
+    expect(document.activeElement).toBe(elsewhere);
+    expect(view.state.selection.from).toBe(caret);
+    // Nothing was drawn a second time, and nothing threw on the way past.
+    expect(document.querySelectorAll(`.${PROMOTE_MENU_CLASS}`).length).toBe(painted);
+    expect(menu()).toBeNull();
+    // And the write the panel sent is the write the line carries.
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(marks(view)[0].textContent).toBe("Today");
+  });
+
+  it("drops a refusal that lands after the panel has gone", async () => {
+    // THE REASON GOES ON THE PANEL THE READER IS HOLDING, and after Escape
+    // there is none to hold: written into a detached node it tells nobody, and
+    // this popover has no toast of its own, by the decision two cases above.
+    // What is left is the line, still a ghost, which is the honest report that
+    // nothing was filed.
+    createAnswer = { status: 409, body: { error: "conflict", reason: "already a task" } };
+    let release = () => {};
+    createGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Today");
+    const label = menu()!.querySelector<HTMLElement>(".brain-menu-label")!;
+    picker()?.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+    await settle();
+
+    release();
+    await settle();
+
+    expect(label.textContent).toBe("");
+    expect(label.hidden).toBe(true);
+    expect(menu()).toBeNull();
+    expect(marks(view)[0].textContent).toBe("+ Task");
+  });
+
+  it("sends nothing from Inbox when the line is already in the Inbox", async () => {
+    // ONE NO-OP RULE, BOTH ROWS. The picker's Clear will not repeat a value
+    // the record already carries, and the row one word from it did: a line
+    // filed in the Inbox took a PATCH that said where it already was.
+    const text = normalizeTaskText("water the plants");
+    tasks = [
+      {
+        id: "task-known",
+        title: text,
+        page: PAGE,
+        done: false,
+        created: NOW.toISOString(),
+        updated: NOW.toISOString(),
+        anchor: { text, hash: hashTaskText(text), ordinal: 0, line: 0 },
+      },
+    ];
+    const view = await mountEditor("- [ ] water the plants\n");
+    expect(marks(view)[0].textContent).toBe("Inbox");
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    await pick("Inbox");
+
+    expect(calls.filter((call) => call.method !== "GET")).toHaveLength(0);
+    expect(menu()).toBeNull();
+    expect(marks(view)[0].textContent).toBe("Inbox");
+  });
+
+  it("opens on the evening and the clock the line already carries", async () => {
+    // The day is half the record. An evening task with a reminder opened with
+    // the evening row unchecked and the spinners away, so the panel said the
+    // line had neither.
+    const text = normalizeTaskText("water the plants");
+    tasks = [
+      {
+        id: "task-known",
+        title: text,
+        page: PAGE,
+        when: TODAY,
+        evening: true,
+        time: "18:30",
+        done: false,
+        created: NOW.toISOString(),
+        updated: NOW.toISOString(),
+        anchor: { text, hash: hashTaskText(text), ordinal: 0, line: 0 },
+      },
+    ];
+    const view = await mountEditor("- [ ] water the plants\n");
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    const panel = menu()!;
+    expect(panel.querySelector("[data-when-evening]")?.getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(panel.querySelector("[data-when-reminder]")?.getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(panel.querySelector("[data-when-hour]")?.textContent).toBe("18");
+    expect(panel.querySelector("[data-when-minute]")?.textContent).toBe("30");
+  });
+
+  it("opens on the day the line already carries", async () => {
+    // THE PANEL STANDS ON THE RECORD. It used to open every line on nothing
+    // set, so a task filed in Today had no row checked and no cell selected,
+    // and the one control whose word is about the value the line already has
+    // was dead before it was pressed.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("Today");
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    const panel = menu()!;
+    expect(panel.querySelector("[data-when-today]")?.getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(panel.querySelector(`[data-day="${TODAY}"]`)?.getAttribute("aria-selected")).toBe(
+      "true",
+    );
+  });
+
+  it("clears the day of a line that has one, because that is what Clear says", async () => {
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("Today");
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    menu()
+      ?.querySelector<HTMLElement>("[data-when-clear]")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await settle();
+
+    const patch = calls.find((call) => call.method === "PATCH");
+    expect(patch?.url).toBe("/api/tasks/task-1");
+    expect(patch?.body).toEqual({ when: null });
+    expect(marks(view)[0].textContent).toBe("Inbox");
+    expect(menu()).toBeNull();
+  });
+
+  it("files a line with no day from Clear, which is the Inbox row's own word", async () => {
+    // ONE WORD APART, AND THEY USED TO DO OPPOSITE THINGS. The panel's Inbox
+    // row created the task with no day and the picker's Clear, two rows below
+    // it, closed the panel having written nothing: the picker had been told
+    // the record said "nothing set" about a line that had no record at all.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+    menu()
+      ?.querySelector<HTMLElement>("[data-when-clear]")
+      ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await settle();
+
+    expect(calls.filter((call) => call.method === "POST")).toHaveLength(1);
+    expect(postBody().when).toBeUndefined();
+    expect(marks(view)[0].textContent).toBe("Inbox");
+    expect(menu()).toBeNull();
+  });
+
+  it("moves an already-promoted line to the Inbox from the row that says so", async () => {
+    // One word apart from Clear, and they used to have opposite outcomes: the
+    // panel's own row wrote and the picker's did nothing at all.
+    const view = await mountEditor("- [ ] water the plants\n");
+    hover(view, 0);
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("Today");
+
+    marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    await pick("Inbox");
+
+    const patch = calls.find((call) => call.method === "PATCH");
+    expect(patch?.url).toBe("/api/tasks/task-1");
+    expect(patch?.body).toEqual({ when: null });
+    expect(marks(view)[0].textContent).toBe("Inbox");
   });
 
   it("closes the menu when the page scrolls under it", async () => {

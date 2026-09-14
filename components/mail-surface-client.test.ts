@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MAIL_RESOURCE_LIMITS } from "@/lib/mail/security";
 import {
+  clearOpenThreadRequest,
   defaultMailSurfaceClient,
   isDeletableDraft,
   isListedDraft,
@@ -10,6 +11,9 @@ import {
   MAIL_MUTATION_TIMEOUT_MS,
   MAX_MAIL_ACCOUNTS,
   MailApiError,
+  pendingOpenThread,
+  requestOpenThread,
+  subscribeOpenThread,
   type MailDraftState,
   type MailDraftSummary,
 } from "./mail-surface-client";
@@ -1237,5 +1241,51 @@ describe("defaultMailSurfaceClient mutation deadline", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+/** The pending-open request: a thread named from outside Mail, left here for
+ *  the surface to find. The surface's own half is in `mail-surface.test.tsx`. */
+describe("a thread asked for from outside Mail", () => {
+  afterEach(() => {
+    clearOpenThreadRequest();
+  });
+
+  it("holds the pair and tells whoever is listening", () => {
+    const heard = vi.fn();
+    const stop = subscribeOpenThread(heard);
+    requestOpenThread(ACCOUNT_ID, THREAD_ID);
+    expect(pendingOpenThread()).toEqual({ accountId: ACCOUNT_ID, threadId: THREAD_ID });
+    expect(heard).toHaveBeenCalledTimes(1);
+    stop();
+    requestOpenThread(ACCOUNT_ID, "thread-2");
+    expect(heard).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the last request, because a second press is a change of mind", () => {
+    requestOpenThread(ACCOUNT_ID, THREAD_ID);
+    requestOpenThread(ACCOUNT_ID, "thread-2");
+    expect(pendingOpenThread()?.threadId).toBe("thread-2");
+  });
+
+  it("drops an id no mail route could serve", () => {
+    requestOpenThread("account one", THREAD_ID);
+    expect(pendingOpenThread()).toBeNull();
+    requestOpenThread(ACCOUNT_ID, "thread one");
+    expect(pendingOpenThread()).toBeNull();
+  });
+
+  it("goes quiet once it has been answered", () => {
+    const heard = vi.fn();
+    const stop = subscribeOpenThread(heard);
+    requestOpenThread(ACCOUNT_ID, THREAD_ID);
+    clearOpenThreadRequest();
+    expect(pendingOpenThread()).toBeNull();
+    expect(heard).toHaveBeenCalledTimes(2);
+    // Clearing what is already clear says nothing, so a surface that answers
+    // twice does not publish twice.
+    clearOpenThreadRequest();
+    expect(heard).toHaveBeenCalledTimes(2);
+    stop();
   });
 });

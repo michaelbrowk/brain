@@ -1,10 +1,13 @@
+import { shiftDay } from "@/lib/tasks/calendar";
 import { nextOccurrence } from "@/lib/tasks/recurrence";
 import {
+  EVENING_GROUP_KEY,
   compareGroups,
   compareInGroup,
   doneDayOf,
   groupFor,
   listOf,
+  logbookGroup,
   logbookRows,
   type ListName,
   type TaskGroup,
@@ -48,6 +51,12 @@ export type TasksView =
   | { readonly kind: "list"; readonly list: ListName }
   | { readonly kind: "category"; readonly category: string };
 
+/** `lib/tasks/lists.ts`'s own answer to which list a record is in, and the key
+ *  its one named group carries, re-exported because the column reaches that
+ *  file through this one. The surface reads the key to know which header
+ *  wears the moon. */
+export { EVENING_GROUP_KEY, listOf };
+
 export function sectionsFor(
   tasks: readonly TaskView[],
   view: TasksView,
@@ -55,11 +64,13 @@ export function sectionsFor(
   offsetMinutes: number,
 ): TaskSection[] {
   const sections = new Map<string, { group: TaskGroup; rows: TaskRow[] }>();
+  const logbook = view.kind === "list" && view.list === "logbook";
   for (const row of rowsFor(tasks, view, today, offsetMinutes)) {
-    const group =
-      view.kind === "list"
+    const group = logbook
+      ? logbookGroup(row.task, today, offsetMinutes)
+      : view.kind === "list"
         ? groupFor(row.task, today, offsetMinutes)
-        : categoryGroup(row.task, today);
+        : categoryGroup(row.task, today, offsetMinutes);
     const existing = sections.get(group.key);
     if (existing) existing.rows.push(row);
     else sections.set(group.key, { group, rows: [row] });
@@ -91,18 +102,44 @@ function rowsFor(
     return logbookRows(tasks, today, offsetMinutes);
   }
   return tasks
-    .filter((task) => belongs(task, view, today))
+    .filter((task) => belongs(task, view, today, offsetMinutes))
     .map((task) => ({ key: task.id, task, untickable: true }));
 }
 
-function belongs(task: TaskView, view: TasksView, today: string): boolean {
-  if (view.kind === "list") return listOf(task, today) === view.list;
-  // A completed task is in the Logbook and nowhere else, so a category view
-  // shows what is still open under that word.
-  return !task.done && (task.category ?? "") === view.category;
+/** Whether the view a column is looking at holds this record. Exported for
+ *  the one caller outside the derive: a link that names a task has to know
+ *  whether the open list already draws it, and `listOf` below says which list
+ *  to open when it does not. */
+export function belongs(
+  task: TaskView,
+  view: TasksView,
+  today: string,
+  offsetMinutes: number,
+): boolean {
+  // The offset is not optional here. A completion stays in the list it was
+  // made in until the DAY changes, and which day a UTC instant fell on is the
+  // reader's question: at 01:00 in Dubai a task finished ten minutes ago
+  // carries yesterday's UTC date, and reading it at zero would drop the row
+  // out of Today the moment it was ticked.
+  if (view.kind === "list") return listOf(task, today, offsetMinutes) === view.list;
+  // A CATEGORY VIEW KEEPS THE DAY'S WORK TOO (spec 2). It is the one list
+  // organised by the part of a life the work belongs to, so erasing a task the
+  // instant it is finished would make it the one list with nothing to show for
+  // the morning. The same rule as everywhere else, asked the same way: a
+  // completion belongs here until `listOf` files it in the Logbook, which is
+  // the day change. `sectionsFor` already sorts a category view with the
+  // `today` comparator, which sinks it to the foot of its group.
+  if ((task.category ?? "") !== view.category) return false;
+  return !task.done || listOf(task, today, offsetMinutes) !== "logbook";
 }
 
 /** WHETHER A RESCHEDULE MOVES THE ROW.
+ *
+ *  `offsetMinutes` is not optional here for the reason `belongs` says it is
+ *  not optional there: a completion stays in the list it was made in until
+ *  the reader's day changes, and asked at zero the same record answers
+ *  "logbook" on both sides, so the fold never plays and the toast never
+ *  reports a move the derive did make.
  *
  *  A task is in Today for four reasons: the day it is meant for is today,
  *  that day is past, a deadline has arrived, or a deadline has arrived over a
@@ -123,19 +160,27 @@ export function movesRow(
   task: TaskView,
   when: string | "someday" | null,
   today: string,
+  offsetMinutes: number,
 ): boolean {
   const next: TaskView = { ...task, when: when ?? undefined };
   return (
-    listOf(task, today) !== listOf(next, today) ||
-    groupFor(task, today).key !== groupFor(next, today).key
+    listOf(task, today, offsetMinutes) !== listOf(next, today, offsetMinutes) ||
+    groupFor(task, today, offsetMinutes).key !== groupFor(next, today, offsetMinutes).key
   );
 }
 
 /** Today, Tomorrow, Later, Someday, and the undated tasks first, under no
  *  header, because a heading over the top rows of a short list is chrome
- *  nobody reads (the rule `lib/tasks/lists.ts` already applies to Today). */
-function categoryGroup(task: TaskView, today: string): TaskGroup {
-  const list = listOf(task, today);
+ *  nobody reads (the rule `lib/tasks/lists.ts` already applies to Today).
+ *
+ *  `offsetMinutes` travels with `today`, the way it does everywhere a record
+ *  is measured against a day. `belongs` keeps a completion in a category view
+ *  until the reader's day changes, and asking here at zero filed that same
+ *  row in the Logbook and dropped it into the headerless group at the TOP of
+ *  the category, above the Today header, for every hour the reader's day and
+ *  UTC's disagree. */
+function categoryGroup(task: TaskView, today: string, offsetMinutes: number): TaskGroup {
+  const list = listOf(task, today, offsetMinutes);
   if (list === "today") return { key: "today", label: "Today", order: 1 };
   if (list === "someday") return { key: "someday", label: "Someday", order: 4 };
   if (list === "upcoming") {
@@ -199,6 +244,41 @@ export function weekdayOf(day: string): string {
   return WEEKDAYS[new Date(dayNumber(day) * 86_400_000).getUTCDay()] as string;
 }
 
+/** THE WORD A FIELD IS NAMED BY.
+ *
+ *  What a When chip says, and the same five answers wherever a picked value
+ *  has to be said out loud. Today and Tomorrow carry their names because those
+ *  are the two days a person says rather than dates; every other day carries
+ *  the `20 Sep` the tail already uses, and that includes yesterday. A task
+ *  filed into the past is overdue and `overdueWhenCaption` says so in its own
+ *  words, so a second wording here would be a second answer to where the row
+ *  went. `movedLabel` is the toast's wording, which differs in two places. */
+export function whenLabel(when: string | null | undefined, today: string): string {
+  if (when === null || when === undefined) return "No date";
+  if (when === "someday") return "Someday";
+  if (when === today) return "Today";
+  if (when === shiftDay(today, 1)) return "Tomorrow";
+  return dayLabel(when);
+}
+
+/** THE WORD A MOVE IS REPORTED IN, which is not always the word the chip says.
+ *
+ *  A toast names the LIST the task landed in. Two of the five differ from the
+ *  field's own word for that reason: no day at all is the Inbox, which is
+ *  where the reader will go looking for it, and "No date" is a sentence about
+ *  a field nobody is looking at; and a task pulled into tonight landed in
+ *  This Evening, which is a section of Today with a header of its own, so
+ *  "Moved to Today" over a row that went to the evening is the chip and the
+ *  toast disagreeing about one gesture. */
+export function movedLabel(
+  value: { when: string | null; evening: boolean },
+  today: string,
+): string {
+  if (value.when === null) return "Inbox";
+  if (value.when === today && value.evening) return "This Evening";
+  return whenLabel(value.when, today);
+}
+
 /** `Today · 5`. The count is the group's size, which one task cannot know. */
 export function headerLabel(label: string, count: number): string {
   return `${label} · ${count}`;
@@ -210,6 +290,32 @@ export function headerLabel(label: string, count: number): string {
 export function overdueWhenCaption(task: TaskView, today: string): string | null {
   if (!isDay(task.when) || task.when >= today) return null;
   return `since ${weekdayOf(task.when)}`;
+}
+
+/** The clock on the row, as the file holds it.
+ *
+ *  Verbatim, never through `Intl`. `time` is a WALL CLOCK in the owner's zone,
+ *  so the 13:00 the picker wrote is the 13:00 the file holds and the 13:00 the
+ *  row says, on every device. `doneTimeOf` below does use a formatter, and
+ *  rightly: that one turns a UTC instant into the reader's own clock, which is
+ *  a different question with a different answer per device. */
+export function timeCaption(task: TaskView): string | null {
+  return task.time ?? null;
+}
+
+/** Whether the moon stands in this row's tail.
+ *
+ *  An evening that has been and gone is not a section anybody is looking at:
+ *  an overdue evening task is an ordinary overdue row, with the "since Tue"
+ *  caption and no moon. */
+export function eveningMoon(task: TaskView, today: string): boolean {
+  return task.evening === true && isDay(task.when) && task.when >= today;
+}
+
+/** A reminder that has already spoken, on a task still open. Once the task is
+ *  done the clock has nothing left to announce. */
+export function reminderFired(task: TaskView): boolean {
+  return task.remindedAt !== undefined && !task.done;
 }
 
 export interface DeadlineCaption {
@@ -236,16 +342,18 @@ export function deadlineCaption(task: TaskView, today: string): DeadlineCaption 
  *  of it is a second answer to which day the Logbook files a task under. */
 export { doneDayOf };
 
-/** A completion's time in the reader's own offset. The instant is UTC, the
- *  clock on the row is theirs, and the shift is arithmetic on the instant so
- *  the formatter never has to be handed a zone name nobody stored. */
+/** A completion's time in the reader's own offset, in the one shape this
+ *  column writes a clock in.
+ *
+ *  ONE CLOCK PER COLUMN. `timeCaption` above gives back the `HH:MM` the file
+ *  holds, verbatim, so a pending row reads `18:00`. A completion four rows
+ *  under it read `7:20 PM`, because this went through `Intl` and took the
+ *  machine's hour cycle, and the eye compared two shapes of the same thing.
+ *  So the instant is shifted into the reader's offset and sliced: the same
+ *  24-hour `HH:MM`, on every device, with no formatter and no zone name
+ *  nobody stored. */
 export function doneTimeOf(iso: string, offsetMinutes: number): string {
-  const shifted = new Date(Date.parse(iso) + offsetMinutes * 60_000);
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-    timeZone: "UTC",
-  }).format(shifted);
+  return new Date(Date.parse(iso) + offsetMinutes * 60_000).toISOString().slice(11, 16);
 }
 
 /** The day the next occurrence lands on, or null for a task that does not
@@ -318,12 +426,17 @@ export function countsFor(
   let doneToday = 0;
   let upcomingThisWeek = 0;
   for (const task of tasks) {
-    const list = listOf(task, today);
-    if (list === "logbook") {
-      if (task.doneAt && doneDayOf(task.doneAt, offsetMinutes) === today) doneToday += 1;
+    // Counted off the COMPLETION and not off the list it landed in: a task
+    // finished today stays in the list it was finished in for the rest of the
+    // day, so "N completed" would have read 0 all day and turned into the
+    // right number at midnight.
+    if (task.done && task.doneAt && doneDayOf(task.doneAt, offsetMinutes) === today) {
+      doneToday += 1;
       continue;
     }
-    if (list === "upcoming" && withinWeek(task, today)) upcomingThisWeek += 1;
+    if (listOf(task, today, offsetMinutes) === "upcoming" && withinWeek(task, today)) {
+      upcomingThisWeek += 1;
+    }
   }
   return { doneToday, upcomingThisWeek };
 }

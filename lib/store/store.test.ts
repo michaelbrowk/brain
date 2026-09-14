@@ -11370,3 +11370,327 @@ describe("task records", () => {
     });
   });
 });
+
+describe("the clock on a task, through the store", () => {
+  it("creates a task with a time and an evening", async () => {
+    const { s } = await tmpStore();
+    const task = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "13:00",
+      evening: true,
+    });
+    expect(task).toMatchObject({ time: "13:00", evening: true });
+  });
+
+  it("refuses a time on a task with no day, in the schema's own words", async () => {
+    const { s } = await tmpStore();
+    await expect(
+      s.createTask({ title: "Water the plants", time: "13:00" }),
+    ).rejects.toThrow("time: time needs a day to be a time on");
+  });
+
+  it("clears the mark when the day moves", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "13:00",
+    });
+    await s.markTaskReminded(made.id, "2026-09-13T12:00:00.000Z");
+    const moved = await s.updateTask(made.id, { when: "2026-09-14" });
+    expect(moved.remindedAt).toBeUndefined();
+  });
+
+  it("clears the mark when the time moves", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "13:00",
+    });
+    await s.markTaskReminded(made.id, "2026-09-13T12:00:00.000Z");
+    const retimed = await s.updateTask(made.id, { time: "18:00" });
+    expect(retimed.remindedAt).toBeUndefined();
+  });
+
+  it("leaves the mark alone when something else is patched", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "13:00",
+    });
+    await s.markTaskReminded(made.id, "2026-09-13T12:00:00.000Z");
+    const filed = await s.updateTask(made.id, { category: "Home" });
+    expect(filed.remindedAt).toBe("2026-09-13T12:00:00.000Z");
+  });
+
+  it("takes the clock with the day when a task is parked", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "13:00",
+      evening: true,
+    });
+    const parked = await s.updateTask(made.id, { when: "someday" });
+    expect(parked.time).toBeUndefined();
+    expect(parked.evening).toBeUndefined();
+  });
+
+  it("takes the clock with the day when a task goes back to the inbox", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "13:00",
+    });
+    const inbox = await s.updateTask(made.id, { when: null });
+    expect(inbox.when).toBeUndefined();
+    expect(inbox.time).toBeUndefined();
+  });
+
+  it("sets a day and a time in one call", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({ title: "Water the plants" });
+    const set = await s.updateTask(made.id, {
+      when: "2026-09-13",
+      time: "13:00",
+    });
+    expect(set).toMatchObject({ when: "2026-09-13", time: "13:00" });
+  });
+
+  it("refuses a time in the same call as a completion", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({
+      title: "Take the bins out",
+      when: "2026-09-13",
+      repeat: { freq: "daily" },
+    });
+    await expect(
+      s.updateTask(made.id, {
+        done: true,
+        today: "2026-09-13",
+        time: "13:00",
+      }),
+    ).rejects.toThrow(
+      "time cannot be set in the same call as a repeating task's completion",
+    );
+  });
+
+  // A patch that does not move the day gets no help from the clearing rule.
+  // The clock the caller named is theirs, so the schema answers for it in the
+  // same words `createTask` answers in, and the record is left alone. A 200
+  // here would be a write nobody asked for: a bumped `updated`, a file on disk
+  // and a `task` event, for a field that was dropped on the way past.
+  it("refuses a time on a task with no day rather than dropping it", async () => {
+    const { s, root } = await tmpStore();
+    const made = await s.createTask({ title: "Water the plants" });
+    const file = path.join(root, "_tasks", `${made.id}.md`);
+    const before = await fs.readFile(file, "utf8");
+
+    await expect(s.updateTask(made.id, { time: "13:00" })).rejects.toThrow(
+      "time: time needs a day to be a time on",
+    );
+
+    expect(s.getTask(made.id)?.updated).toBe(made.updated);
+    expect(await fs.readFile(file, "utf8")).toBe(before);
+  });
+
+  it("refuses an evening on a someday task rather than dropping it", async () => {
+    const { s, root } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "someday",
+    });
+    const file = path.join(root, "_tasks", `${made.id}.md`);
+    const before = await fs.readFile(file, "utf8");
+
+    await expect(s.updateTask(made.id, { evening: true })).rejects.toThrow(
+      "evening: the evening needs a day to be the evening of",
+    );
+
+    expect(s.getTask(made.id)?.updated).toBe(made.updated);
+    expect(await fs.readFile(file, "utf8")).toBe(before);
+  });
+
+  it("refuses a park that carries a time, rather than half-applying it", async () => {
+    const { s, root } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "09:00",
+    });
+    const file = path.join(root, "_tasks", `${made.id}.md`);
+    const before = await fs.readFile(file, "utf8");
+
+    await expect(
+      s.updateTask(made.id, { when: "someday", time: "13:00" }),
+    ).rejects.toThrow("time: time needs a day to be a time on");
+
+    expect(s.getTask(made.id)).toMatchObject({
+      when: "2026-09-13",
+      time: "09:00",
+      updated: made.updated,
+    });
+    expect(await fs.readFile(file, "utf8")).toBe(before);
+  });
+});
+
+describe("task views for the reminder scan", () => {
+  it("returns every record as a view, with no day and no list", async () => {
+    const { s } = await tmpStore();
+    await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-14",
+      time: "13:00",
+    });
+    await s.createTask({ title: "Call the bank" });
+
+    const views = s.allTaskViews();
+    expect(views.map((view) => view.title).sort()).toEqual([
+      "Call the bank",
+      "Water the plants",
+    ]);
+    // A view, not a record: `done` is answered for every one of them, which is
+    // what keeps the scan from ringing for a line ticked in a note.
+    expect(views.every((view) => typeof view.done === "boolean")).toBe(true);
+  });
+
+  /** WHY IT IS `allTaskViews` AND NOT `allTasks` (spec row 145).
+   *
+   *  A linked record never stores its own `done`: the checkbox in the note is
+   *  the answer, and the record file is refused if it carries one. A scan
+   *  reading records would therefore see `done: undefined` for a line ticked
+   *  in the note an hour ago, and ring for it.
+   */
+  it("answers done from the note for a linked record, which the record file cannot", async () => {
+    const { s, root } = await tmpStore();
+    const page = await s.createPage(null, "Errands");
+    await s.writePage(page.id, "- [ ] Water the plants", undefined, "me");
+    const [line] = parseTaskLines((await s.readPage(page.id)).markdown);
+    const task = await s.createTask({
+      title: line.normalized,
+      when: "2026-09-14",
+      time: "13:00",
+      page: page.id,
+      anchor: {
+        text: line.normalized,
+        hash: line.hash,
+        ordinal: line.ordinal,
+        line: line.index,
+      },
+    });
+    expect(s.allTaskViews().map((view) => view.done)).toEqual([false]);
+
+    await s.writePage(page.id, "- [x] Water the plants", undefined, "me");
+
+    expect(s.allTaskViews().map((view) => view.done)).toEqual([true]);
+    // And the record on disk still says nothing about it, so a scan over
+    // records rather than views would still be ringing.
+    const record = matter(
+      await fs.readFile(path.join(root, "_tasks", `${task.id}.md`), "utf8"),
+    ).data;
+    expect(record.done).toBeUndefined();
+  });
+
+  it("leaves out a record whose page is in the trash", async () => {
+    const { s } = await tmpStore();
+    const page = await s.createPage(null, "Errands");
+    await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-14",
+      time: "13:00",
+      page: page.id,
+      anchor: { text: "water the plants", hash: "a".repeat(16), ordinal: 0, line: 0 },
+    });
+    expect(s.allTaskViews()).toHaveLength(1);
+
+    await s.deletePage(page.id);
+    expect(s.allTaskViews()).toEqual([]);
+  });
+});
+
+describe("markTaskReminded, the scheduler's one write", () => {
+  it("writes remindedAt and leaves updated where it was", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-14",
+      time: "13:00",
+    });
+
+    const marked = await s.markTaskReminded(made.id, "2026-09-14T12:00:00.000Z");
+    expect(marked.remindedAt).toBe("2026-09-14T12:00:00.000Z");
+    // A reminder having fired is not an edit to the task. A bumped `updated`
+    // would read in a git diff as a change nobody made.
+    expect(marked.updated).toBe(made.updated);
+    expect(s.getTask(made.id)?.updated).toBe(made.updated);
+  });
+
+  it("throws NotFoundError for an id no record carries", async () => {
+    const { s } = await tmpStore();
+    await expect(
+      s.markTaskReminded("task-nobody", "2026-09-14T12:00:00.000Z"),
+    ).rejects.toMatchObject({ name: "NotFoundError" });
+  });
+
+  it("refuses an `at` that is not a UTC instant, and writes nothing", async () => {
+    const { s, root } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-14",
+      time: "13:00",
+    });
+    const before = await fs.readFile(path.join(root, "_tasks", `${made.id}.md`), "utf8");
+
+    await expect(s.markTaskReminded(made.id, "2026-09-14 12:00")).rejects.toThrow(
+      /remindedAt/,
+    );
+
+    expect(s.getTask(made.id)?.remindedAt).toBeUndefined();
+    expect(await fs.readFile(path.join(root, "_tasks", `${made.id}.md`), "utf8")).toBe(
+      before,
+    );
+  });
+});
+
+describe("a completion read in the reader's own day", () => {
+  /** 03:30Z on the 15th is 23:30 on the 14th in New York, so the UTC day and
+   *  the reader's day are two different answers. `listOf` has to be asked in
+   *  the reader's, the way `groupFor` already is. */
+  async function newYorkEvening() {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-late.md"),
+      "---\nid: task-late\ntitle: Water the plants\nwhen: '2026-09-14'\ndone: true\ndoneAt: '2026-09-15T03:30:00.000Z'\ncreated: '2026-09-14T09:00:00.000Z'\nupdated: '2026-09-15T03:30:00.000Z'\n---\n",
+    );
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-ahead.md"),
+      "---\nid: task-ahead\ntitle: Call the bank\nwhen: '2026-09-20'\ncreated: '2026-09-14T09:00:00.000Z'\nupdated: '2026-09-14T09:00:00.000Z'\n---\n",
+    );
+    await s.rebuild();
+    return s;
+  }
+
+  it("keeps tonight's completion in Today for a reader west of UTC", async () => {
+    const s = await newYorkEvening();
+    expect(
+      s.listTasks("2026-09-14", { list: "today", offsetMinutes: -300 }).map((t) => t.id),
+    ).toEqual(["task-late"]);
+    // The same record, read in UTC, is already yesterday's and belongs to the
+    // Logbook. Both answers are right for their own reader.
+    expect(
+      s.listTasks("2026-09-14", { list: "today", offsetMinutes: 0 }).map((t) => t.id),
+    ).toEqual([]);
+  });
+
+  it("orders it as a Today row, so the store agrees with groupFor", async () => {
+    const s = await newYorkEvening();
+    expect(
+      s.listTasks("2026-09-14", { offsetMinutes: -300 }).map((t) => t.id),
+    ).toEqual(["task-late", "task-ahead"]);
+  });
+});

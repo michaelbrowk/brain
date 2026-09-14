@@ -1,16 +1,20 @@
-// The settings surface's section registry: the seven sections in their fixed
+// The settings surface's section registry: the eight sections in their fixed
 // order, the URL slug of each (it IS the id), and the sidebar row metadata.
 // Server routes validate against SETTINGS_SECTION_ORDER; the shell reducer
 // stores a SettingsSection (or null for the mobile root list).
 //
 // The order runs from what an owner changes to what an owner only reads.
-// Donate sits last, past Account: it configures nothing about this instance,
-// and it belongs beside the About group that already names the project.
+// Notifications sits after Connections because both are about what reaches
+// this instance from outside it, and before Sharing because Sharing is about
+// what leaves. Donate sits last, past Account: it configures nothing about
+// this instance, and it belongs beside the About group that already names the
+// project.
 
 export type SettingsSection =
   | "appearance"
   | "mail"
   | "connections"
+  | "notifications"
   | "sharing"
   | "data"
   | "account"
@@ -20,6 +24,7 @@ export const SETTINGS_SECTION_ORDER: SettingsSection[] = [
   "appearance",
   "mail",
   "connections",
+  "notifications",
   "sharing",
   "data",
   "account",
@@ -33,6 +38,7 @@ export const SETTINGS_SECTION_META: Record<
   appearance: { label: "Appearance", icon: "palette" },
   mail: { label: "Mail", icon: "letter" },
   connections: { label: "Connections", icon: "plug-circle" },
+  notifications: { label: "Notifications", icon: "bell" },
   sharing: { label: "Sharing", icon: "earth" },
   data: { label: "Data", icon: "document-text" },
   account: { label: "Account", icon: "user-circle" },

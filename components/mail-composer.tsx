@@ -16,7 +16,14 @@ import {
   useMotionValue,
   useReducedMotion,
 } from "framer-motion";
-import { SPRING_SHEET, SPRING_SHEET_GESTURE } from "@/lib/motion";
+import {
+  SHEET_DISMISS_OFFSET,
+  SHEET_DISMISS_VELOCITY,
+  SPRING_SHEET,
+  SPRING_SHEET_GESTURE,
+} from "@/lib/motion";
+
+import { useSheetGesture } from "./use-sheet-gesture";
 import {
   describeMailRecipientProblem,
   parseMailRecipientFields,
@@ -50,10 +57,6 @@ export type MailComposerFields = {
 
 export type MailComposerSaveStatus = "idle" | "saving" | "saved" | "error";
 
-/** How far (px) or how fast (px/s) a downward drag must go to dismiss. */
-const SHEET_DISMISS_OFFSET = 120;
-const SHEET_DISMISS_VELOCITY = 800;
-
 /** True while the pointer carries files. A file dropped on an unguarded page
  *  navigates the browser to the file itself, which takes the unsaved draft in
  *  React state with it — so the composer claims the drop and refuses it out
@@ -62,29 +65,6 @@ const SHEET_DISMISS_VELOCITY = 800;
 function draggingFiles(event: DragEvent<HTMLElement>): boolean {
   const types = event.dataTransfer?.types;
   return types ? Array.from(types).includes("Files") : false;
-}
-
-/** True below md, where the composer keeps the sheet form: it slides in from
- *  the bottom edge and the grip drags it away. Read synchronously on the
- *  first client render so the entrance actually plays, then kept live. Guards
- *  the matchMedia surface for environments (jsdom) that stub it partially. */
-function matchesSheet(): boolean {
-  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
-  return window.matchMedia("(max-width: 767px)").matches === true;
-}
-
-function useSheetGesture(): boolean {
-  const [sheet, setSheet] = useState(matchesSheet);
-  useEffect(() => {
-    if (typeof window.matchMedia !== "function") return;
-    const query = window.matchMedia("(max-width: 767px)");
-    const update = () => setSheet(query.matches === true);
-    update();
-    if (typeof query.addEventListener !== "function") return;
-    query.addEventListener("change", update);
-    return () => query.removeEventListener("change", update);
-  }, []);
-  return sheet;
 }
 
 export function MailComposer({

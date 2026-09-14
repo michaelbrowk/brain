@@ -125,6 +125,8 @@ export async function readJsonObject(
 export interface CreateBody {
   title: string;
   when?: string;
+  time?: string;
+  evening?: true;
   deadline?: string;
   category?: string;
   page?: string;
@@ -137,6 +139,8 @@ export interface CreateBody {
 export const PATCH_FIELDS = [
   "title",
   "when",
+  "time",
+  "evening",
   "deadline",
   "category",
   "repeat",
@@ -157,12 +161,19 @@ export const PATCH_FIELDS = [
  *  that changes there changes here: `2026-02-31` is refused as a calendar day
  *  in both places, and the 200 character bound on a category is one bound.
  *  `null` is added where a patch may clear a field, which is the store's own
- *  reading of one. */
+ *  reading of one.
+ *
+ *  Exported for one assertion and nothing else: `shared.test.ts` reads the
+ *  shape's own keys against `PATCH_FIELDS`, so the two literals below cannot
+ *  drift apart unnoticed. A name on the allowlist with no parser here would
+ *  reach `applyTaskPatch` unchecked. */
 const patchFields = taskRecordFields.shape;
-const patchBodySchema = z
+export const patchBodySchema = z
   .object({
     title: patchFields.title.optional(),
     when: patchFields.when.nullable(),
+    time: patchFields.time.nullable(),
+    evening: patchFields.evening.nullable(),
     deadline: patchFields.deadline.nullable(),
     category: patchFields.category.nullable(),
     repeat: patchFields.repeat.nullable(),
@@ -189,6 +200,8 @@ export function refusePatchValues(
 export interface PatchBody {
   title?: string;
   when?: string | null;
+  time?: string | null;
+  evening?: true | null;
   deadline?: string | null;
   category?: string | null;
   repeat?: TaskRepeat | null;

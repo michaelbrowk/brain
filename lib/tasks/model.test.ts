@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   parseTaskRecord,
+  taskLogEntrySchema,
   taskRecordFields,
   taskRecordSchema,
   TASK_ID_RE,
@@ -441,5 +442,151 @@ describe("the three shapes a task record takes", () => {
     });
     expect(parsed.ok).toBe(true);
     if (parsed.ok) expect(parsed.task.detachedAt).toBe("2026-09-13T10:32:00.000Z");
+  });
+});
+
+describe("the clock on a record", () => {
+  const base = {
+    id: "task-alpha",
+    title: "Water the plants",
+    created: "2026-09-13T09:00:00.000Z",
+    updated: "2026-09-13T09:00:00.000Z",
+  };
+
+  it("accepts a day with a time and an evening", () => {
+    const parsed = parseTaskRecord({
+      ...base,
+      when: "2026-09-13",
+      time: "13:00",
+      evening: true,
+    });
+    expect(parsed).toMatchObject({ ok: true });
+  });
+
+  it("refuses a time on a task with no day", () => {
+    expect(parseTaskRecord({ ...base, time: "13:00" })).toEqual({
+      ok: false,
+      reason: "time: time needs a day to be a time on",
+    });
+  });
+
+  it("refuses a time on a someday task", () => {
+    expect(parseTaskRecord({ ...base, when: "someday", time: "13:00" })).toEqual({
+      ok: false,
+      reason: "time: time needs a day to be a time on",
+    });
+  });
+
+  it("refuses an evening with no day", () => {
+    expect(parseTaskRecord({ ...base, evening: true })).toEqual({
+      ok: false,
+      reason: "evening: the evening needs a day to be the evening of",
+    });
+  });
+
+  it("refuses an evening on a someday task", () => {
+    expect(parseTaskRecord({ ...base, when: "someday", evening: true })).toEqual({
+      ok: false,
+      reason: "evening: the evening needs a day to be the evening of",
+    });
+  });
+
+  it("refuses evening: false, because the absence is the only other state", () => {
+    const parsed = parseTaskRecord({ ...base, when: "2026-09-13", evening: false });
+    expect(parsed.ok).toBe(false);
+  });
+
+  it.each([["24:00"], ["09:60"], ["9:5"], ["13"], ["13:00:00"], [""]])(
+    "refuses %s as a time",
+    (time) => {
+      expect(parseTaskRecord({ ...base, when: "2026-09-13", time }).ok).toBe(false);
+    },
+  );
+
+  it.each([["00:00"], ["09:05"], ["13:00"], ["23:59"]])("accepts %s", (time) => {
+    expect(parseTaskRecord({ ...base, when: "2026-09-13", time }).ok).toBe(true);
+  });
+
+  /** EVERY WAY A PERSON WRITES A CLOCK BY HAND.
+   *
+   *  YAML 1.1 is sexagesimal about anything with a colon in it, so an unquoted
+   *  `time: 13:00` reaches the schema as the integer 780 and `time: 9:05` as
+   *  545. Both are read back as the clock they were written as. A leading zero
+   *  (`09:05`) and any quoted form arrive as text and are kept.
+   *
+   *  The one shape nothing can disambiguate is a bare `time: 905`, typed by
+   *  somebody leaving the colon out of 9:05: it is the same 905 that `15:05`
+   *  resolves to, and it reads back as 15:05. Refusing it is the worse trade,
+   *  because the same refusal would fall on every unquoted `time: 13:00` and
+   *  the index skips a record it refuses, losing the whole task over a pair of
+   *  quotes. Brain's own files never reach the shape at all: the serializer
+   *  writes the quoted form (`time: '13:00'`), so only a hand edit can make it.
+   *
+   *  Past the end of the day there is no clock to read, and the reason says
+   *  what to write instead.
+   */
+  it.each<[string, unknown, string | null]>([
+    ["905", 905, "15:05"],
+    ["9:05", 545, "09:05"],
+    ["13:00", 780, "13:00"],
+    ["13:00:00", 46_800, null],
+    ["1440", 1440, null],
+    ["09:05", "09:05", "09:05"],
+    ['"9:05"', "9:05", "09:05"],
+    ['"13:00"', "13:00", "13:00"],
+    ['"24:00"', "24:00", null],
+  ])("reads a hand-edited time: %s", (_written, time, expected) => {
+    const parsed = parseTaskRecord({ ...base, when: "2026-09-13", time });
+
+    if (expected === null) {
+      expect(parsed).toEqual({ ok: false, reason: 'time: write it as "HH:MM"' });
+    } else {
+      expect(parsed).toMatchObject({ ok: true, task: { time: expected } });
+    }
+  });
+
+  it("accepts remindedAt as a UTC instant and refuses a local one", () => {
+    expect(
+      parseTaskRecord({
+        ...base,
+        when: "2026-09-13",
+        time: "13:00",
+        remindedAt: "2026-09-13T12:00:00.000Z",
+      }).ok,
+    ).toBe(true);
+    expect(
+      parseTaskRecord({
+        ...base,
+        when: "2026-09-13",
+        time: "13:00",
+        remindedAt: "2026-09-13T13:00:00+01:00",
+      }).ok,
+    ).toBe(false);
+  });
+
+  it("keeps a remindedAt on a task that has lost its time, rather than skipping the file", () => {
+    // An inert mark costs nothing. A schema rule here would make the index skip
+    // the whole record, and a person would lose the task.
+    expect(
+      parseTaskRecord({ ...base, remindedAt: "2026-09-13T12:00:00.000Z" }).ok,
+    ).toBe(true);
+  });
+
+  it("keeps the time of a completed instance in its log entry", () => {
+    const parsed = taskLogEntrySchema.safeParse({
+      scheduled: "2026-09-13",
+      time: "13:00",
+      completedAt: "2026-09-13T12:59:00.000Z",
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it("refuses an unknown key in a log entry", () => {
+    expect(
+      taskLogEntrySchema.safeParse({
+        completedAt: "2026-09-13T12:59:00.000Z",
+        evening: true,
+      }).success,
+    ).toBe(false);
   });
 });

@@ -19,6 +19,7 @@ import {
 import { AppearanceSection } from "./appearance-section";
 import { MailSection } from "./mail-section";
 import { ConnectionsSection } from "./connections-section";
+import { NotificationsSection } from "./notifications-section";
 import { SharingSection } from "./sharing-section";
 import { DataSection } from "./data-section";
 import { AccountSection } from "./account-section";
@@ -105,6 +106,11 @@ export function SettingsSurface({
           />
         )}
         {section === "connections" && <ConnectionsSection onToast={onToast} />}
+        {section === "notifications" && (
+          // The zone row quotes a setting Account owns, and reaching it is a
+          // section change on this surface rather than a document load.
+          <NotificationsSection onToast={onToast} onOpenSection={onSelectSection} />
+        )}
         {section === "sharing" && (
           <SharingSection
             tree={tree}

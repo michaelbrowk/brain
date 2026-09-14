@@ -16,8 +16,11 @@ vi.mock("framer-motion", async () => {
   return createFramerMotionMock({ reducedMotion: false });
 });
 import {
+  clearOpenThreadRequest,
   defaultMailSurfaceClient,
   MailApiError,
+  pendingOpenThread,
+  requestOpenThread,
 } from "./mail-surface-client";
 import type {
   MailContentAttachmentDto,
@@ -7608,6 +7611,323 @@ describe("MailSurface", () => {
 
       await click(findButton("Full-capability mail"));
       expect(archiveButton()).not.toBeUndefined();
+    });
+  });
+  /** A THREAD ASKED FOR FROM OUTSIDE MAIL.
+   *
+   *  The notification centre is a menu in the sidebar, on whatever surface the
+   *  reader is on, and it opens a letter. It cannot hand this component a list
+   *  item, because Mail has not mounted when the row is pressed and the row
+   *  holds an id pair. It leaves the pair in `mail-surface-client` and the
+   *  surface
+   *  answers it here: in the account the letter belongs to, with the thread
+   *  selected, and the request taken back off.
+   */
+  describe("a thread asked for from outside Mail", () => {
+    const other: MailThreadListItem = {
+      ...thread,
+      accountId: accountB.accountId,
+      threadId: "thread-b",
+      subject: "The other address",
+    };
+
+    function pageFor(accountId: string): MailThreadPage {
+      return {
+        apiVersion: 1,
+        items: accountId === accountB.accountId ? [other] : [thread],
+        nextCursor: null,
+        sync: { status: "idle", lastSuccessfulAt: 1_700_000_000_000 },
+      };
+    }
+
+    function detailFor(item: MailThreadListItem): MailThreadDetail {
+      return {
+        ...detail,
+        thread: item,
+        messages: detail.messages.map((message) => ({
+          ...message,
+          threadId: item.threadId,
+        })),
+      };
+    }
+
+    /** The request is answered across several commits (a list load, sometimes
+     *  an account switch and its load), so the wait is on the outcome rather
+     *  than on a fixed number of microtask rounds. */
+    async function until(ok: () => boolean, what: string) {
+      for (let round = 0; round < 60; round += 1) {
+        if (ok()) return;
+        await settle();
+      }
+      throw new Error(`not reached: ${what}`);
+    }
+
+    afterEach(() => {
+      clearOpenThreadRequest();
+    });
+
+    it("opens a thread the loaded list already holds", async () => {
+      // Pressed before Mail exists, which is the real order: the centre writes
+      // the request and the shell then opens the surface.
+      requestOpenThread(accountA.accountId, thread.threadId);
+      const client = makeClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+
+      await until(
+        () => vi.mocked(client.readThread).mock.calls.length > 0,
+        "the thread is read",
+      );
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+      });
+      // The point of the in-list branch is the read it avoids: a fallback
+      // fetch reaches readThread twice for the same press, and only this
+      // count tells the two paths apart.
+      expect(client.readThread).toHaveBeenCalledTimes(1);
+      expect(pendingOpenThread()).toBeNull();
+    });
+
+    it("switches to the letter's own account and opens it there", async () => {
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+        listThreads: vi
+          .fn()
+          .mockImplementation(({ accountId }: { accountId: string }) =>
+            Promise.resolve(pageFor(accountId)),
+          ),
+        readThread: vi.fn().mockResolvedValue({ ...detail, thread: other }),
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount(accountA);
+      expect(document.body.textContent).toContain("Lunch this Friday?");
+
+      await act(async () => {
+        requestOpenThread(accountB.accountId, other.threadId);
+      });
+      await until(
+        () => vi.mocked(client.readThread).mock.calls.length > 0,
+        "the other account's thread is read",
+      );
+
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountB.accountId,
+        threadId: other.threadId,
+      });
+      // The column moved with it: the letter would have nowhere to stand in
+      // the account it is not in.
+      expect(document.body.textContent).toContain("The other address");
+      // The account it left behind is gone from the column, not covered by
+      // the one that arrived.
+      expect(document.body.textContent).not.toContain("Lunch this Friday?");
+      expect(pendingOpenThread()).toBeNull();
+    });
+
+    it("fetches a thread the loaded page does not hold", async () => {
+      const client = makeClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, "thread-elsewhere");
+      });
+      await until(
+        () =>
+          vi
+            .mocked(client.readThread)
+            .mock.calls.some(([input]) => input.threadId === "thread-elsewhere"),
+        "the thread outside the page is read",
+      );
+      expect(pendingOpenThread()).toBeNull();
+    });
+
+    it("leaves the list standing when the thread is nowhere to be found", async () => {
+      const client = makeClient({
+        readThread: vi.fn().mockRejectedValue(new MailApiError(404, "not_found")),
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, "thread-gone");
+      });
+      await until(() => pendingOpenThread() === null, "the request is dropped");
+      // A row that cannot be opened is not an error to report to whoever
+      // pressed it: Mail is open, at the list it was going to show anyway.
+      expect(document.body.textContent).toContain("Lunch this Friday?");
+    });
+
+    it("stays on the letter it was last asked for when an abandoned request's fetch resolves late", async () => {
+      const abandonedFetch = deferred<MailThreadDetail>();
+      const secondFetch = deferred<MailThreadDetail>();
+      const abandoned: MailThreadListItem = {
+        ...thread,
+        threadId: "thread-abandoned",
+        subject: "The abandoned letter",
+      };
+      const second: MailThreadListItem = {
+        ...thread,
+        threadId: "thread-second",
+        subject: "The second letter",
+      };
+      const readThread = vi
+        .fn()
+        .mockImplementation(({ threadId }: { threadId: string }) => {
+          if (threadId === "thread-abandoned") return abandonedFetch.promise;
+          if (threadId === "thread-second") return secondFetch.promise;
+          return Promise.resolve(detail);
+        });
+      const client = makeClient({ readThread });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+
+      // Pressed first, for a letter the loaded page does not hold: the
+      // fallback fetch starts and hangs.
+      await act(async () => {
+        requestOpenThread(accountA.accountId, "thread-abandoned");
+      });
+      await settle();
+      // Pressed second, before the first answers: the slot now holds this
+      // one, and its own fetch starts too.
+      await act(async () => {
+        requestOpenThread(accountA.accountId, "thread-second");
+      });
+      await settle();
+
+      // The second press answers first: the reader opens it.
+      await act(async () => {
+        secondFetch.resolve(detailFor(second));
+        await secondFetch.promise;
+      });
+      await settle();
+      expect(document.body.textContent).toContain("The second letter");
+
+      // The abandoned fetch lands after: it must not move the reader off
+      // the letter they asked for since.
+      await act(async () => {
+        abandonedFetch.resolve(detailFor(abandoned));
+        await abandonedFetch.promise;
+      });
+      await settle();
+
+      expect(document.body.textContent).toContain("The second letter");
+      expect(document.body.textContent).not.toContain("The abandoned letter");
+    });
+
+    it("opens a thread the unified list already holds, without switching accounts", async () => {
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+        listThreads: vi
+          .fn()
+          .mockImplementation(({ accountId }: { accountId: string }) =>
+            Promise.resolve(pageFor(accountId)),
+          ),
+        readThread: vi.fn().mockResolvedValue(detailFor(other)),
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: All inboxes");
+
+      await act(async () => {
+        requestOpenThread(accountB.accountId, other.threadId);
+      });
+      await until(
+        () => vi.mocked(client.readThread).mock.calls.length > 0,
+        "the unified thread is read",
+      );
+
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountB.accountId,
+        threadId: other.threadId,
+      });
+      // The point of the unified branch is the read it avoids too.
+      expect(client.readThread).toHaveBeenCalledTimes(1);
+      // Answered without a switch: All inboxes is still the destination.
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: All inboxes");
+      expect(document.body.textContent).toContain("The other address");
+      expect(pendingOpenThread()).toBeNull();
+    });
+
+    it("drops a same-account request when the reader is off Inbox", async () => {
+      const client = makeClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("Sent");
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, "thread-elsewhere");
+      });
+      await until(() => pendingOpenThread() === null, "the request is dropped");
+
+      expect(client.readThread).not.toHaveBeenCalled();
+      expect(navTrigger()?.getAttribute("aria-label")).toContain("Sent");
+    });
+
+    it("drops a cross-account request the same way when the reader is off Inbox", async () => {
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+        listThreads: vi
+          .fn()
+          .mockImplementation(({ accountId }: { accountId: string }) =>
+            Promise.resolve(pageFor(accountId)),
+          ),
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount(accountA);
+      await goTo("Sent");
+
+      await act(async () => {
+        requestOpenThread(accountB.accountId, other.threadId);
+      });
+      await until(() => pendingOpenThread() === null, "the request is dropped");
+
+      expect(client.readThread).not.toHaveBeenCalled();
+      // The switch this used to trigger reset the column to Inbox on its
+      // way: the same guard now applies before that reset can bypass it.
+      expect(navTrigger()?.getAttribute("aria-label")).toContain("Sent");
+      expect(document.body.textContent).not.toContain("The other address");
+    });
+
+    it("clears an unanswered request when the Mail surface unmounts", async () => {
+      const client = makeClient({
+        loadAccounts: vi
+          .fn()
+          .mockReturnValue(new Promise<PublicMailAccount[]>(() => {})),
+      });
+      requestOpenThread(accountA.accountId, "thread-elsewhere");
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      expect(pendingOpenThread()).not.toBeNull();
+
+      await act(async () => root.render(<div>Home</div>));
+
+      expect(pendingOpenThread()).toBeNull();
     });
   });
 });

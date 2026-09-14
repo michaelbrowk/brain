@@ -6544,6 +6544,27 @@ export class Store {
     return this.taskIndex.all();
   }
 
+  /** EVERY RECORD AS A READER SEES IT, WITH NO DAY AND NO LIST.
+   *
+   *  The reminder scan runs on a timer with no request behind it, so it
+   *  cannot hand `listTasks` a reader's `today` and `offsetMinutes`, and
+   *  `allTasks` gives records rather than views: a LINKED task's `done` lives
+   *  in its note's checkbox and is never in the file, so a scan reading
+   *  records alone would ring for a task that was ticked in the note an hour
+   *  ago. A record whose page is hidden is left out for the same reason
+   *  `listTasks` leaves it out: a reminder for a row the surface will not draw
+   *  is a notification with nowhere to go.
+   */
+  allTaskViews(): TaskView[] {
+    return this.taskIndex
+      .all()
+      .filter((task) => !this.taskHidden(task))
+      .flatMap((task) => {
+        const view = this.taskIndex.view(task.id);
+        return view ? [view] : [];
+      });
+  }
+
   /** One note's records, as a reader sees them: linked and detached, done and
    *  open, whatever their age.
    *
@@ -6720,7 +6741,11 @@ export class Store {
     const windowStart = logbookWindowStart(today);
     const visible = this.taskIndex.views().filter((task) => {
       if (this.taskHidden(task)) return false;
-      const list = listOf(task, today);
+      // The reader's offset, because a completion stays in its list for the
+      // rest of THEIR day. Asked in UTC, a task ticked at 23:30 in New York
+      // falls into the Logbook while `groupFor`, which is asked in the
+      // reader's day, still draws it under Today.
+      const list = listOf(task, today, offsetMinutes);
       // A done record with no instant is reachable from a hand edit and from
       // the crash between a note write and its reconcile. `lists.ts` places it
       // deliberately, at the foot of the Logbook under no header, so there is
@@ -6788,6 +6813,8 @@ export class Store {
         id: nanoid(),
         title: input.title,
         ...(input.when !== undefined ? { when: input.when } : {}),
+        ...(input.time !== undefined ? { time: input.time } : {}),
+        ...(input.evening !== undefined ? { evening: input.evening } : {}),
         ...(input.deadline !== undefined ? { deadline: input.deadline } : {}),
         ...(input.category !== undefined ? { category: input.category } : {}),
         ...(input.page !== undefined ? { page: input.page } : {}),
@@ -6859,6 +6886,25 @@ export class Store {
       // check passed and still answers 200.
       if (!this.taskIndex.get(id)) throw new NotFoundError(id);
       await this.deleteTaskUnlocked(id, src);
+    });
+  }
+
+  /** THE MARK THAT THIS INSTANCE'S REMINDER HAS FIRED.
+   *
+   *  Its own method rather than a patch, because `applyTaskPatch` clears
+   *  `remindedAt` whenever the day or the clock moves, and a reminder writing
+   *  through that path would clear the mark it is setting. It writes one field
+   *  and touches nothing else, not even `updated`: the record did not change
+   *  for the person, and a bumped `updated` would reorder nothing but would
+   *  read in a git diff as an edit nobody made.
+   */
+  async markTaskReminded(id: string, at: string): Promise<TaskView> {
+    assertTaskId(id);
+    return this.mutate(async () => {
+      const current = this.taskIndex.get(id);
+      if (!current) throw new NotFoundError(id);
+      await this.writeTaskUnlocked(parseTask({ ...current, remindedAt: at }));
+      return this.taskIndex.view(id) as TaskView;
     });
   }
 
@@ -7222,6 +7268,8 @@ function assertOnlyCompletion(patch: UpdateTaskPatch, subject: string): void {
   const others: (keyof UpdateTaskPatch)[] = [
     "title",
     "when",
+    "time",
+    "evening",
     "deadline",
     "category",
     "repeat",
@@ -7348,6 +7396,30 @@ function applyTaskPatch(
     assignOrClear(next, "when", patch.when);
   }
   assignOrClear(next, "deadline", patch.deadline);
+  // A CLOCK WITH NO DAY NAMES NO INSTANT. `time` and `evening` are both
+  // statements about a day, so a patch that parks the task or sends it back to
+  // the Inbox takes the clock it finds with it. Without this a plain "move to
+  // Someday" would come back as a 400 naming a field the caller never sent.
+  //
+  // Only the clock ALREADY on the record, and only when this patch moved the
+  // day. A clock the caller names in the same call is theirs, and it falls
+  // through to `parseTask` below, which refuses it in the same words
+  // `createTask` refuses it in. Dropping it instead would answer 200 to a
+  // request that was not carried out, and bump `updated` and write a file and
+  // emit an event for a change nobody made.
+  const landsOnADay = typeof next.when === "string" && next.when !== "someday";
+  if (patch.when !== undefined && !landsOnADay) {
+    delete next.time;
+    delete next.evening;
+  }
+  assignOrClear(next, "time", patch.time);
+  assignOrClear(next, "evening", patch.evening);
+  // THE MARK IS ABOUT ONE INSTANT, and both of these move it. A reminder that
+  // already fired for 13:00 today has nothing to say about 18:00 tomorrow, so
+  // the edit re-arms it. Anything else leaves the mark where it is.
+  if (patch.when !== undefined || patch.time !== undefined) {
+    delete next.remindedAt;
+  }
   assignOrClear(next, "category", patch.category);
   assignOrClear(next, "repeat", patch.repeat);
   // `log` STAYS when the rule goes. Stopping a repeat leaves the instance as
@@ -7402,8 +7474,11 @@ function compareTasks(
   today: string,
   offsetMinutes: number,
 ): number {
-  const listA = listOf(a, today);
-  const listB = listOf(b, today);
+  // Same offset `groupFor` is given two lines down. Without it the block a
+  // row is sorted into and the header it is drawn under are two answers, and
+  // a completion made this evening sorts to the Logbook under a Today header.
+  const listA = listOf(a, today, offsetMinutes);
+  const listB = listOf(b, today, offsetMinutes);
   if (listA !== listB) {
     return TASK_LIST_ORDER.indexOf(listA) - TASK_LIST_ORDER.indexOf(listB);
   }

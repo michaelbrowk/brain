@@ -31,9 +31,10 @@ const pressAnimate = vi.fn(() => ({ stop: () => {} }));
 vi.mock("framer-motion/dom", () => ({ animate: pressAnimate }));
 
 const { TasksRow, foldRow, WRITE_AT_MS: WRITE_AT } = await import("./tasks-row");
-const { DUR } = await import("@/lib/motion");
+const { CHIP_ROW_AIR, DUR } = await import("@/lib/motion");
 const { renderTaskCheck, renderTaskCheckbox } = await import("./tasks-checkbox");
 const { SOLAR } = await import("./ui/solar-icons.generated");
+const { doneTimeOf } = await import("./tasks-lists");
 
 /** Every WAAPI animation the row starts, in order. */
 interface Recorded {
@@ -244,7 +245,10 @@ describe("what the row draws", () => {
     await renderRows([
       task("a", { repeat: { freq: "weekly", byWeekday: ["thu"] }, when: TODAY }),
     ]);
-    const item = () => document.querySelector(".brain-task-row-item") as HTMLElement;
+    // `data-holding` sits on `.brain-task-row`, the element every one of the
+    // row's own rules is written against: on the list item outside it the
+    // whole `.brain-task-row[data-holding]` block matched nothing.
+    const item = () => document.querySelector(".brain-task-row") as HTMLElement;
     const tail = () => document.querySelector(".brain-task-tail") as HTMLElement;
 
     await act(async () => box().click());
@@ -333,9 +337,13 @@ describe("what the row draws", () => {
     expect(css.indexOf(".brain-task-row[data-historic] {")).toBeGreaterThan(
       css.indexOf(".brain-task-row:active {"),
     );
-    expect(css.indexOf(".brain-task-row[data-historic] {")).toBeGreaterThan(
-      css.indexOf(".brain-task-row:hover {"),
-    );
+    // The hover rule now excludes a selected row through `:not(:where(…))`,
+    // which weighs nothing, so "the same weight" is still true and
+    // the refusal still wins on order. A bare `:not([data-selected])` would
+    // out-weigh this rule and light a history row up under the cursor again.
+    const hoverAt = css.indexOf(".brain-task-row:not(:where([data-selected])):hover {");
+    expect(hoverAt).toBeGreaterThan(-1);
+    expect(css.indexOf(".brain-task-row[data-historic] {")).toBeGreaterThan(hoverAt);
     expect(ruleFor(css, ".brain-task-box_static")).toContain("cursor: default");
     // The mark is drawn with the same path and the same dash the control uses,
     // so the two checks cannot become two drawings.
@@ -427,20 +435,6 @@ describe("completion, drawn", () => {
     expect(calls.complete).not.toHaveBeenCalled();
   });
 
-  it("folds up on clip-path plus height over 220 ms, never on a scale", async () => {
-    await renderRows([task("a")]);
-    await act(async () => box().click());
-    await act(async () => {
-      vi.advanceTimersByTime(1300);
-    });
-    const fold = animations.at(-1) as Recorded;
-    expect(fold.options.duration).toBe(220);
-    expect(String(fold.frames[0]?.clipPath)).toBe("inset(0 0 0 0)");
-    expect(String(fold.frames.at(-1)?.clipPath)).toBe("inset(0 0 100% 0)");
-    expect(String(fold.frames.at(-1)?.height)).toBe("0px");
-    expect(JSON.stringify(fold.frames)).not.toContain("scale");
-  });
-
   it("folds down when the row is rescheduled, into the future", async () => {
     await renderRows([task("a")], { selected: true });
     await act(async () => {
@@ -450,7 +444,19 @@ describe("completion, drawn", () => {
     expect(String(fold.frames.at(-1)?.clipPath)).toBe("inset(100% 0 0 0)");
     expect(calls.reschedule).toHaveBeenCalledWith(
       expect.objectContaining({ id: "a" }),
-      "2026-09-14",
+      { when: "2026-09-14", evening: false, time: null },
+      "Tomorrow",
+    );
+  });
+
+  it("keeps a timed task's clock across the key that moves it", async () => {
+    await renderRows([task("a", { when: TODAY, time: "07:30" })], { selected: true });
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "]", metaKey: true }));
+    });
+    expect(calls.reschedule).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a" }),
+      { when: "2026-09-14", evening: false, time: "07:30" },
       "Tomorrow",
     );
   });
@@ -466,18 +472,73 @@ describe("the expansion", () => {
     // the capsule's height is a real height with a transition on it, and the
     // expanded state carries no transform
     expect(ruleFor(css, ".brain-task-row")).toContain("height 220ms var(--ease-out)");
-    expect(ruleFor(css, ".brain-task-row[data-expanded]")).toContain(
-      "height: calc(var(--task-capsule) + 40px)",
-    );
     expect(ruleFor(css, ".brain-task-row[data-expanded]")).not.toContain("scale");
+  });
+
+  /** I1. ONE LAYER ON AN EXPANDED ROW.
+   *
+   *  It painted `--blue-tint-2` plus a `--blue-rim` hairline with the ink
+   *  capsule still stacked under it: three fills on one row, on a surface
+   *  whose verdict was quiet focus, and since a row cannot be expanded
+   *  without being selected the quiet version was never what a reader saw. */
+  it("draws one fill on an expanded row, with no rim and no capsule under it", () => {
+    const rule = ruleFor(css, ".brain-task-row[data-expanded]");
+    expect(rule).toContain("background-color: var(--blue-tint)");
+    expect(rule).not.toContain("--blue-tint-2");
+    expect(rule).not.toContain("box-shadow");
+    expect(
+      ruleFor(css, ".brain-task-row[data-expanded] > .tree-row-capsule"),
+    ).toContain("background-color: transparent");
+  });
+
+  it("takes the expanded capsule's height off the chips, which wrap", async () => {
+    // IT WAS A NUMBER: `capsule + 40`, one line of chips. Four of them do not
+    // fit on one line at 390, so the fourth was drawn outside the capsule. The
+    // row sizes to its content and the chip row reveals itself from 0, which is
+    // the same 220ms growth measured rather than assumed.
+    expect(ruleFor(css, ".brain-task-row[data-expanded]")).toContain("height: auto");
+    expect(ruleFor(css, ".brain-task-row[data-expanded]")).not.toContain(
+      "calc(var(--task-capsule) + 40px)",
+    );
+    expect(ruleFor(css, ".brain-task-chips")).toContain("flex-wrap: wrap");
+    // A chip keeps its own width and its own one line, so no chip is ever drawn
+    // over the one beside it.
+    expect(ruleFor(css, ".chip")).toContain("white-space: nowrap");
+    expect(ruleFor(css, ".chip")).toContain("flex-shrink: 0");
+
+    // THE AIR IS ONE NUMBER IN ONE PLACE, and it travels with the reveal. It
+    // was three literals (a margin here, a padding on the capsule and the
+    // number in the component) and the padding drew its 6px at chip height 0,
+    // so the capsule stepped open before it grew. Nothing in the stylesheet
+    // holds either side of it now.
+    expect(ruleFor(css, ".brain-task-row[data-expanded]")).not.toContain("padding-bottom");
+    expect(ruleFor(css, ".brain-task-chips")).not.toContain("margin");
+
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    const chips = renders.find(
+      (render) => String(render.props.className) === "brain-task-chips",
+    );
+    expect(chips?.motion.initial).toMatchObject({
+      height: 0,
+      marginTop: 0,
+      marginBottom: 0,
+    });
+    expect(chips?.motion.animate).toMatchObject({
+      height: "auto",
+      marginTop: CHIP_ROW_AIR,
+      marginBottom: CHIP_ROW_AIR,
+    });
+    expect(CHIP_ROW_AIR).toBe(6);
   });
 
   it("offers no deadline on a someday task", async () => {
     await renderRows([task("a", { when: "someday" })], { expanded: true });
-    expect(document.querySelector('input[type="date"]')).toBeNull();
+    expect([...document.querySelectorAll(".chip")].map((chip) => chip.textContent))
+      .not.toContain("Deadline");
 
     await renderRows([task("b", { when: TODAY })], { expanded: true });
-    expect(document.querySelector('input[type="date"]')).not.toBeNull();
+    expect([...document.querySelectorAll(".chip")].map((chip) => chip.textContent))
+      .toContain("Deadline");
   });
 
   it("draws the category control as a chip, between two chips", async () => {
@@ -646,16 +707,20 @@ describe("a history row", () => {
   });
 });
 
-/** THE DATE CONTROL, BY MODALITY.
+/** ONE DATE CONTROL, ON A POINTER AND ON TOUCH ALIKE (D4).
  *
- *  On touch the system picker is the better control and the native input opens
- *  it directly. On a pointer the browser's own chrome is the only chrome in
- *  Brain that is not Brain's, so the menu offers a row like every other row
- *  and reveals the input when it is asked for. */
-describe("the When menu's date row", () => {
-  const stubHover = (hover: boolean) => {
+ *  The modality branch this block used to test is gone with the native input:
+ *  `components/tasks-when-picker.tsx` is the control at every width, and
+ *  `ops/design-guardrails.test.ts` refuses a second one under `app/`,
+ *  `components/` and `lib/`. */
+describe("the When chip's picker", () => {
+  /** `hover: hover` or not, the chip opens the same control: the branch that
+   *  read it is deleted. One stub, so the cases below run on a `matchMedia`
+   *  that exists rather than on jsdom's absent one. */
+  const stubHover = (hover = true, sheet = false) => {
     vi.stubGlobal("matchMedia", (query: string) => ({
-      matches: query === "(hover: hover)" ? hover : false,
+      matches:
+        query === "(hover: hover)" ? hover : sheet && query === "(max-width: 767px)",
       media: query,
       onchange: null,
       addEventListener: vi.fn(),
@@ -664,6 +729,17 @@ describe("the When menu's date row", () => {
       removeListener: vi.fn(),
       dispatchEvent: vi.fn(),
     }));
+  };
+
+  /** The detailed path's commit. A grid pick moves the picker's own value; Done
+   *  is what sends it, and what closes the popover before the row folds. */
+  const pressDone = async () => {
+    await act(async () => {
+      document.querySelector<HTMLElement>("[data-when-done]")?.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
   };
 
   const openMenu = async () => {
@@ -680,67 +756,176 @@ describe("the When menu's date row", () => {
     });
   };
 
-  const menuLabels = () =>
-    [...document.querySelectorAll(".brain-menu-item")].map((item) =>
-      (item.textContent ?? "").trim(),
-    );
-
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("offers Today, Tomorrow, Next week, Someday and Pick a date on a pointer", async () => {
-    stubHover(true);
+  it("opens the same picker on a pointer and on touch (D4)", async () => {
+    // A row per modality: the same key would keep the component mounted with
+    // the popover it opened still open, and the second press would shut it.
+    for (const [hover, id] of [
+      [true, "pointer"],
+      [false, "touch"],
+    ] as const) {
+      stubHover(hover);
+      await renderRows([task(id, { when: TODAY })], { expanded: true });
+      await openMenu();
+      expect(document.querySelector(".brain-when-picker")).not.toBeNull();
+      expect(document.querySelector('input[type="date"]')).toBeNull();
+      expect(document.querySelector("[data-task-when-pick]")).toBeNull();
+    }
+  });
+
+  it("folds the row only once the picker has gone", async () => {
+    // A RESCHEDULE FOLDS THE ROW DOWNWARD, and a fold that starts while the
+    // panel is still drawn takes the row out from under the thing the reader is
+    // holding. So the grid moves the picker's own value and writes nothing, and
+    // Done closes the popover and sends one PATCH.
+    stubHover();
     await renderRows([task("a", { when: TODAY })], { expanded: true });
     await openMenu();
 
-    expect(menuLabels()).toEqual([
-      "Today",
-      "Tomorrow",
-      "Next week",
-      "Someday",
-      "Pick a date",
-      "Clear",
-    ]);
-    // No browser chrome inside the menu until it is asked for.
-    expect(document.querySelector('.brain-menu input[type="date"]')).toBeNull();
-
-    const pick = document.querySelector<HTMLElement>("[data-task-when-pick]");
     await act(async () => {
-      pick?.click();
+      document.querySelector<HTMLElement>('[data-day="2026-09-20"]')?.click();
+    });
+    expect(document.querySelector(".brain-when-picker")).not.toBeNull();
+    expect(calls.reschedule).not.toHaveBeenCalled();
+
+    await pressDone();
+
+    expect(document.querySelector(".brain-when-picker")).toBeNull();
+    expect(calls.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  /** I6. THE REPEAT MENU STATES ITS RULE, WHOLE.
+   *
+   *  "Every month on the 14th at 0..." was truncated at the width the menu
+   *  was given and the clock was the half that got cut, in the one panel that
+   *  exists to say what the rule is. And "Reminder · 07:45" was a
+   *  `role="presentation"` div wearing `brain-menu-item`: menu item height,
+   *  menu item indent, not pressable — the shape the picker's own code
+   *  forbids two files away. */
+  const openRepeatMenu = async () => {
+    const chip = [...document.querySelectorAll<HTMLElement>(".chip")].find((node) =>
+      node.getAttribute("aria-label")?.startsWith("Repeat"),
+    );
+    if (!chip) throw new Error("no Repeat chip on the expanded row");
+    await act(async () => {
+      chip.dispatchEvent(pointer("pointerdown"));
+      chip.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+  };
+
+  it("wraps the repeat rule instead of cutting it, and says where the clock is set", async () => {
+    stubHover();
+    await renderRows(
+      [task("a", { when: TODAY, time: "07:45", repeat: { freq: "monthly", byMonthDay: 14 } })],
+      { expanded: true },
+    );
+    await openRepeatMenu();
+
+    const items = [...document.querySelectorAll(".brain-menu-item")];
+    expect(items.some((item) => item.getAttribute("role") === "presentation")).toBe(
+      false,
+    );
+    const rule = items.find((item) => item.textContent?.startsWith("Every month"));
+    expect(rule?.textContent).toBe("Every month on the 14th at 07:45");
+    expect(rule?.querySelector(".truncate")).toBeNull();
+
+    const caption = document.querySelector(".brain-menu-caption") as HTMLElement;
+    expect(caption.textContent).toBe("Reminder 07:45, set in When");
+    expect(caption.className).not.toContain("brain-menu-item");
+  });
+
+  it("commits what the sheet was dragged away on, because a drag is a close", async () => {
+    // THE GRIP IS THE PRIMARY WAY OUT ON A PHONE, and the same panel on a
+    // pointer commits what a press outside settled on. Two dismissals of one
+    // control cannot mean opposite things, so the drag writes too.
+    stubHover(false, true);
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await openMenu();
+    await act(async () => {
+      document.querySelector<HTMLElement>('[data-day="2026-09-20"]')?.click();
+    });
+    expect(calls.reschedule).not.toHaveBeenCalled();
+
+    const sheet = [...renders].reverse().find((render) => render.motion.drag === "y");
+    const dragEnd = sheet?.motion.onDragEnd as
+      | ((event: null, info: { offset: { y: number }; velocity: { y: number } }) => void)
+      | undefined;
+    if (!dragEnd) throw new Error("the picker drew no sheet to drag");
+    await act(async () => {
+      dragEnd(null, { offset: { y: 200 }, velocity: { y: 0 } });
     });
     await act(async () => {
       await Promise.resolve();
     });
 
-    // The menu stands and the row it revealed is inside it.
-    expect(document.querySelector("[data-task-when-date]")).not.toBeNull();
-    expect(document.querySelector('.brain-menu input[type="date"]')).not.toBeNull();
-    expect(document.querySelector("[data-task-when-pick]")).toBeNull();
-  });
-
-  it("opens the native input directly on touch", async () => {
-    stubHover(false);
-    await renderRows([task("a", { when: TODAY })], { expanded: true });
-    await openMenu();
-
-    expect(menuLabels()).toContain("Next week");
-    expect(menuLabels()).not.toContain("Pick a date");
-    // iOS draws the better control here, and it is one tap away rather than
-    // two.
-    expect(document.querySelector('.brain-menu input[type="date"]')).not.toBeNull();
-  });
-
-  it("moves the row to the day seven out when Next week is chosen", async () => {
-    stubHover(true);
-    await renderRows([task("a", { when: TODAY })], { expanded: true });
-    await openMenu();
-
-    const row = [...document.querySelectorAll<HTMLElement>(".brain-menu-item")].find(
-      (item) => (item.textContent ?? "").trim() === "Next week",
+    expect(document.querySelector(".brain-when-picker")).toBeNull();
+    expect(calls.reschedule).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a" }),
+      { when: "2026-09-20", evening: false, time: null },
+      "20 Sep",
     );
+  });
+
+  it("closes and writes once on a quick row, and sends nothing that changes nothing", async () => {
+    stubHover();
+    await renderRows([task("a", { when: "someday" })], { expanded: true });
+    await openMenu();
     await act(async () => {
-      row?.click();
+      document.querySelector<HTMLElement>("[data-when-today]")?.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(document.querySelector(".brain-when-picker")).toBeNull();
+    expect(calls.reschedule).toHaveBeenCalledTimes(1);
+
+    // Today pressed on a row already in Today is a write nobody asked for.
+    calls.reschedule.mockClear();
+    await renderRows([task("b", { when: TODAY })], { expanded: true });
+    await openMenu();
+    await act(async () => {
+      document.querySelector<HTMLElement>("[data-when-today]")?.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(calls.reschedule).not.toHaveBeenCalled();
+  });
+
+  it("sends the day, the evening and the clock as one value", async () => {
+    // The picker answers with the whole of where a task sits, so the row
+    // hands one value on rather than three writes the reader made in one
+    // gesture.
+    stubHover();
+    await renderRows([task("a", { when: TODAY, time: "13:00" })], { expanded: true });
+    await openMenu();
+
+    await act(async () => {
+      document.querySelector<HTMLElement>('[data-day="2026-09-20"]')?.click();
+    });
+    await pressDone();
+
+    expect(calls.reschedule).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a" }),
+      { when: "2026-09-20", evening: false, time: "13:00" },
+      "20 Sep",
+    );
+  });
+
+  it("names the LIST the task landed in, not the field it cleared", async () => {
+    // "Moved to No date" is a sentence about a field nobody is looking at. The
+    // Inbox is the list with no day and where the reader will go and find it.
+    stubHover();
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await openMenu();
+    await act(async () => {
+      document.querySelector<HTMLElement>("[data-when-clear]")?.click();
     });
     await act(async () => {
       await Promise.resolve();
@@ -748,9 +933,39 @@ describe("the When menu's date row", () => {
 
     expect(calls.reschedule).toHaveBeenCalledWith(
       expect.objectContaining({ id: "a" }),
-      "2026-09-20",
-      "Next week",
+      { when: null, evening: false, time: null },
+      "Inbox",
     );
+  });
+
+  it("reports an evening as the evening, which is what the chip says too", async () => {
+    stubHover();
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await openMenu();
+    await act(async () => {
+      document.querySelector<HTMLElement>("[data-when-evening]")?.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(calls.reschedule).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a" }),
+      { when: TODAY, evening: true, time: null },
+      "This Evening",
+    );
+  });
+
+  it("says the day and the clock the chip is standing on", async () => {
+    stubHover();
+    await renderRows([task("a", { when: TODAY, evening: true, time: "20:30" })], {
+      expanded: true,
+    });
+    const chip = [...document.querySelectorAll<HTMLElement>(".chip")].find((node) =>
+      node.getAttribute("aria-label")?.startsWith("When:"),
+    );
+    expect(chip?.textContent).toContain("This Evening");
+    expect(chip?.getAttribute("aria-label")).toBe("When: This Evening at 20:30");
   });
 });
 
@@ -828,7 +1043,26 @@ describe("the swipe", () => {
     });
     expect(calls.reschedule).toHaveBeenCalledWith(
       expect.objectContaining({ id: "a" }),
-      "2026-09-14",
+      { when: "2026-09-14", evening: false, time: null },
+      "Tomorrow",
+    );
+  });
+
+  it("carries the clock the record already has onto the day it swipes to", async () => {
+    // THE REASON `whenValueFor` EXISTS. A swipe, a key and a palette row name a
+    // day and nothing else, so the other two fields are read off the record:
+    // the reminder the task is already carrying stays with it, and the evening
+    // comes off because tomorrow has no evening of today's.
+    await renderRows([task("a", { when: TODAY, evening: true, time: "13:00" })]);
+
+    await swipe(130);
+    await act(async () => {
+      row().dispatchEvent(pointer("pointerup", { clientX: 130 }));
+    });
+
+    expect(calls.reschedule).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a" }),
+      { when: "2026-09-14", evening: false, time: "13:00" },
       "Tomorrow",
     );
   });
@@ -856,7 +1090,7 @@ describe("the swipe", () => {
 
     expect(calls.reschedule).toHaveBeenCalledWith(
       expect.objectContaining({ id: "a" }),
-      "2026-09-14",
+      { when: "2026-09-14", evening: false, time: null },
       "Tomorrow",
     );
   });
@@ -937,6 +1171,28 @@ describe("reduced motion", () => {
     );
   });
 
+  it("keeps the chip row's air, and travels none of it", async () => {
+    // THE AIR IS NOT MOTION. Both sides of it moved into the component when
+    // the capsule stopped carrying a padding, and the stylesheet holds neither
+    // any more, so an expanded row under this setting would lose its 6px above
+    // and below if the reduced branch dropped them. It lands at rest instead
+    // of growing: no height here, on either frame.
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    const chips = renders.find(
+      (render) => String(render.props.className) === "brain-task-chips",
+    );
+    expect(chips?.motion.initial).toMatchObject({
+      marginTop: CHIP_ROW_AIR,
+      marginBottom: CHIP_ROW_AIR,
+    });
+    expect(chips?.motion.animate).toMatchObject({
+      marginTop: CHIP_ROW_AIR,
+      marginBottom: CHIP_ROW_AIR,
+    });
+    expect(chips?.motion.initial).not.toHaveProperty("height");
+    expect(chips?.motion.animate).not.toHaveProperty("height");
+  });
+
   it("fades the check over 120 ms with no dash draw and no scale", async () => {
     await renderRows([task("a")], { reduce: true });
     await act(async () => box().click());
@@ -949,7 +1205,7 @@ describe("reduced motion", () => {
     expect(pressAnimate).not.toHaveBeenCalled();
   });
 
-  it("keeps the 1200 ms hold unchanged, and exits on a 120 ms opacity fade", async () => {
+  it("keeps the 1200 ms hold unchanged, and still plays no exit", async () => {
     await renderRows([task("a")], { reduce: true });
     await act(async () => box().click());
     await act(async () => {
@@ -961,10 +1217,9 @@ describe("reduced motion", () => {
     });
     expect(calls.complete).toHaveBeenCalledTimes(1);
 
-    const fold = animations.at(-1) as Recorded;
-    expect(fold.frames).toEqual([{ opacity: 1 }, { opacity: 0 }]);
-    expect(fold.options.duration).toBe(120);
-    expect(JSON.stringify(fold.frames)).not.toContain("height");
+    // The row stays under this setting too. The only WAAPI the completion
+    // started is the check's own crossfade, on the tick and not on the row.
+    expect(animations.every((entry) => entry.element === tick())).toBe(true);
   });
 
   it("drops the press scale and the row's own transform", () => {
@@ -991,5 +1246,406 @@ describe("reduced motion", () => {
     foldRow(element, "up", true);
     const fold = animations.at(-1) as Recorded;
     expect(fold.frames).toEqual([{ opacity: 1 }, { opacity: 0 }]);
+  });
+});
+
+/** D5. THE SELECTION IS A PLACE, NOT AN EMPHASIS.
+ *
+ *  None of the six shell contract fixtures draws a task row, so the quiet
+ *  focus is asserted through the rules the row computes for itself. */
+describe("the quiet focus (D5)", () => {
+  it("draws the selection at the sidebar's hover tint and not the grey fill", () => {
+    const rule = ruleFor(css, ".brain-task-row > .tree-row-capsule");
+    expect(rule).toContain("background-color: var(--fill-glass-hover)");
+    expect(rule).not.toContain("--fill-glass-selected");
+    expect(rule).not.toContain("box-shadow");
+  });
+
+  it("leaves the title's weight alone", () => {
+    expect(css).not.toContain(".brain-task-row[data-selected] .brain-task-title");
+  });
+
+  it("keeps the sidebar's own capsule exactly as it was", () => {
+    const rule = ruleFor(css, ".tree-row > .tree-row-capsule");
+    expect(rule).toContain("background-color: var(--fill-glass-selected)");
+    expect(rule).toContain("box-shadow");
+    // and its hover veil is the sidebar's alone now: the task row wears no
+    // capsule `::after` at all, so there is nothing on it to fade in
+    expect(css).not.toContain(".brain-task-row > .tree-row-capsule::after");
+    expect(css).not.toContain(
+      ".brain-task-row[data-selected]:hover > .tree-row-capsule::after",
+    );
+  });
+
+  it("adds the ring on a keyboard session and nowhere else", () => {
+    const rule = ruleFor(css, "html[data-kbd] .brain-task-row[data-selected]");
+    expect(rule).toContain("outline: 3px solid var(--blue-ring)");
+    expect(rule).toContain("outline-offset: -3px");
+  });
+
+  it("does not stack a hover tint on a selected row", () => {
+    expect(css).toContain(".brain-task-row:not(:where([data-selected])):hover");
+  });
+
+  it("still flows the capsule between rows on SPRING_SELECT", async () => {
+    await renderRows([task("a"), task("b")], { selected: true });
+    const capsule = renders.find((render) =>
+      String(render.props.className).includes("tree-row-capsule"),
+    );
+    expect(capsule?.motion.layoutId).toBe("tasks-select");
+  });
+});
+
+/** D3. A COMPLETION IS STRUCK THROUGH AND SINKS, and it does not leave. */
+describe("the strike and the sink (D3)", () => {
+  it("draws the strike from the left over DUR.base", () => {
+    const rule = ruleFor(css, ".brain-task-title::after");
+    expect(rule).toContain("transform: scaleX(0)");
+    expect(rule).toContain("transform-origin: left center");
+    expect(rule).toContain(`transition: transform ${DUR.base * 1000}ms var(--ease-out)`);
+  });
+
+  it("strikes a row that is holding and a row that is done", () => {
+    expect(css).toContain(".brain-task-row[data-holding] .brain-task-title::after");
+    expect(css).toContain(".brain-task-row[data-done] .brain-task-title::after");
+  });
+
+  it("flags the hold on the element those rules are written against", async () => {
+    await renderRows([task("a", { when: TODAY })]);
+    await act(async () => box().click());
+    expect(row().hasAttribute("data-holding")).toBe(true);
+  });
+
+  it("lets reduced motion collapse the strike, because it travels", () => {
+    // THE LOAD-BEARING FACT IS THE GLOBAL RULE'S PSEUDO-ELEMENTS. The strike
+    // lives on `.brain-task-title::after` and `transition-duration` does not
+    // inherit, so a global reduce rule written `*` alone would leave the line
+    // travelling under the setting. It is written `*, *::before, *::after`,
+    // and that is what makes the strike collapse.
+    const global = ruleFor(css, "  *,\n  *::before,\n  *::after");
+    expect(global).toContain("transition-duration: 0.01ms !important");
+    // And the surface's own block does not exempt the strike back out: it
+    // restates the four transitions that are COLOUR and nothing else.
+    const reduced = css.slice(
+      css.indexOf("/* Reduced motion: every transition on this surface"),
+    );
+    expect(reduced).not.toContain(".brain-task-title::after");
+  });
+
+  it("plays no fold when a task is completed", async () => {
+    await renderRows([task("a", { when: TODAY })]);
+    await act(async () => box().click());
+    await act(async () => vi.advanceTimersByTime(WRITE_AT));
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // The row stays. A fold fills forwards, so one played here would hold a row
+    // that never unmounts at height 0 until the next load.
+    expect(
+      animations.some((entry) => entry.frames.some((frame) => "clipPath" in frame)),
+    ).toBe(false);
+  });
+
+  it("still sends nothing when the completion is cancelled inside the hold", async () => {
+    await renderRows([task("a", { when: TODAY })]);
+    await act(async () => box().click());
+    await act(async () => vi.advanceTimersByTime(WRITE_AT - 1));
+    await act(async () => box().click());
+    await act(async () => vi.advanceTimersByTime(5_000));
+    expect(calls.complete).not.toHaveBeenCalled();
+  });
+
+  it("sinks on the layout spring and not on a fold", async () => {
+    await renderRows([task("a", { when: TODAY })]);
+    const item = [...renders]
+      .reverse()
+      .find((render) => String(render.props.className) === "brain-task-row-item");
+    expect(item?.motion.layout).toBe("position");
+    expect(item?.motion.transition).toMatchObject({
+      layout: { bounce: 0, duration: 0.42 },
+    });
+  });
+
+  /** C2. THE STRUCK ROW DOES NOT TRAVEL OVER THE ROWS IT PASSES.
+   *
+   *  It used to ride the layout spring down its group at full opacity, and
+   *  for about 110ms it was painted exactly on top of a stationary row: two
+   *  titles in one composite, and an OPEN task wearing the struck row's
+   *  filled box and its strike. So the row fades out where it stands, the
+   *  reorder happens with the row invisible, and it fades in at the foot. */
+  const lastItem = () =>
+    [...renders]
+      .reverse()
+      .find((render) => String(render.props.className) === "brain-task-row-item");
+  /** The node the fade is drawn on, which is NOT the node the reorder moves. */
+  const lastWrap = () =>
+    [...renders]
+      .reverse()
+      .find((render) => String(render.props.className) === "brain-task-swipe");
+
+  async function tickAndSettle() {
+    await act(async () => box().click());
+    await act(async () => vi.advanceTimersByTime(WRITE_AT));
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+
+  it("fades the struck row out in place and holds the reorder until it has gone", async () => {
+    await renderRows([task("a", { when: TODAY })]);
+    await tickAndSettle();
+
+    const item = lastItem();
+    expect(lastWrap()?.motion.animate).toMatchObject({ opacity: 0 });
+    expect(lastWrap()?.motion.transition).toMatchObject({ duration: DUR.base });
+    // Duration 0: the row does not travel. The delay is the fade, so the
+    // reorder happens while there is nothing on screen to see it.
+    expect(item?.motion.transition).toMatchObject({
+      layout: { duration: 0, delay: DUR.base },
+    });
+  });
+
+  /** AND THE FADE IS NOT ON THE ELEMENT THE REORDER MOVES.
+   *
+   *  Drawn on the `<li>` it never painted at all. React reorders the list by
+   *  moving that node, and the opacity animation went with it: on the page
+   *  the struck row held full ink for the whole sink, a neighbour sprang
+   *  across it at full opacity, and C2 was exactly where it had been. So the
+   *  list item animates the arrival's opacity and nothing else, and the
+   *  wrapper inside it, which no reorder re-parents, carries the fade. */
+  it("draws the fade one node in, on the wrapper the reorder never moves", async () => {
+    await renderRows([task("a", { when: TODAY })]);
+    await tickAndSettle();
+
+    expect(lastItem()?.motion.animate).toMatchObject({ opacity: 1 });
+    expect(lastWrap()?.motion.animate).toMatchObject({ opacity: 0 });
+  });
+
+  it("fades it back in at the foot once the fade is over", async () => {
+    await renderRows([task("a", { when: TODAY })]);
+    await tickAndSettle();
+    await act(async () => vi.advanceTimersByTime(DUR.base * 1000));
+
+    const item = lastItem();
+    expect(lastWrap()?.motion.animate).toMatchObject({ opacity: 1 });
+    expect(item?.motion.transition).toMatchObject({
+      layout: { bounce: 0, duration: 0.42 },
+    });
+  });
+
+  it("puts the row back where it was when the completion is refused", async () => {
+    calls.complete.mockRejectedValueOnce(new Error("no"));
+    await renderRows([task("a", { when: TODAY })]);
+    await tickAndSettle();
+    expect(lastWrap()?.motion.animate).toMatchObject({ opacity: 1 });
+  });
+
+  it("reorders instantly under reduced motion and fades nothing", async () => {
+    harness.reduce = true;
+    await renderRows([task("a", { when: TODAY })]);
+    await tickAndSettle();
+    const item = lastItem();
+    expect(item?.motion.layout).toBe(false);
+    expect(item?.motion.animate).toEqual({ opacity: 1 });
+    expect(lastWrap()?.motion.animate).toEqual({ opacity: 1 });
+  });
+
+  it("moves without a spring under reduced motion", async () => {
+    harness.reduce = true;
+    await renderRows([task("a", { when: TODAY })]);
+    const item = [...renders]
+      .reverse()
+      .find((render) => String(render.props.className) === "brain-task-row-item");
+    expect(item?.motion.layout).toBe(false);
+  });
+});
+
+describe("a completed row in a list is inert", () => {
+  const done = () =>
+    task("a", { when: TODAY, done: true, doneAt: `${TODAY}T09:00:00.000Z` });
+
+  it("does not expand on a press", async () => {
+    await renderRows([done()]);
+    await act(async () => row().click());
+    expect(calls.expand).not.toHaveBeenCalled();
+  });
+
+  it("takes no reschedule key", async () => {
+    await renderRows([done()], { selected: true });
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "t", bubbles: true }));
+    });
+    expect(calls.reschedule).not.toHaveBeenCalled();
+  });
+
+  it("takes no swipe", async () => {
+    await renderRows([done()]);
+    await act(async () => {
+      row().dispatchEvent(pointer("pointerdown", { clientX: 0 }));
+      row().dispatchEvent(pointer("pointermove", { clientX: 140 }));
+      row().dispatchEvent(pointer("pointerup", { clientX: 140 }));
+    });
+    expect(calls.reschedule).not.toHaveBeenCalled();
+    expect(capsuleX()).toBe(0);
+  });
+
+  it("still unticks from its checkbox", async () => {
+    await renderRows([done()]);
+    await act(async () => box().click());
+    expect(calls.reopen).toHaveBeenCalled();
+  });
+
+  it("wears no hover fill, no press and no pointer", () => {
+    const rule = ruleFor(css, ".brain-task-row[data-done]");
+    expect(rule).toContain("background-color: transparent");
+    expect(rule).toContain("transform: none");
+    expect(rule).toContain("cursor: default");
+    // and at the hover rule's own weight, so it wins on order the way the
+    // history row's refusal does
+    expect(css.indexOf(".brain-task-row[data-done] {")).toBeGreaterThan(
+      css.indexOf(".brain-task-row:not(:where([data-selected])):hover {"),
+    );
+    expect(css.indexOf(".brain-task-row[data-done] {")).toBeGreaterThan(
+      css.indexOf(".brain-task-row:active {"),
+    );
+  });
+});
+
+describe("the tail's clock and moon", () => {
+  const tail = () => document.querySelector(".brain-task-tail") as HTMLElement;
+
+  it("shows the time before the repeat glyph", async () => {
+    await renderRows([
+      task("a", { when: TODAY, time: "13:00", repeat: { freq: "daily" } }),
+    ]);
+    expect(tail().textContent).toContain("13:00");
+    // Where each of the two stands among the tail's own children, so a clock
+    // that drifted behind the glyph slot fails here.
+    const children = [...tail().children];
+    const slot = tail().querySelector(".brain-task-glyphs") as Element;
+    expect(glyphs(slot)).toContain("restart-linear");
+    expect(
+      children.findIndex((node) => node.textContent === "13:00"),
+    ).toBeLessThan(children.indexOf(slot));
+  });
+
+  it("writes the stored clock verbatim, with no locale in it", async () => {
+    await renderRows([task("a", { when: TODAY, time: "13:00" })]);
+    expect(tail().textContent).toContain("13:00");
+    expect(tail().textContent).not.toContain("PM");
+  });
+
+  it("shows the moon on an evening task today and tomorrow", async () => {
+    await renderRows([task("a", { when: TODAY, evening: true })]);
+    expect(glyphs(tail())).toContain("moon-linear");
+    await renderRows([task("b", { when: "2026-09-14", evening: true })]);
+    expect(glyphs(tail())).toContain("moon-linear");
+  });
+
+  it("shows no moon on an overdue evening task", async () => {
+    await renderRows([task("a", { when: "2026-09-11", evening: true })]);
+    expect(glyphs(tail())).not.toContain("moon-linear");
+    expect(tail().textContent).toContain("since Fri");
+  });
+
+  it("marks a fired reminder's time and never reddens it", async () => {
+    // The fixture carries an overdue deadline too, so the red this test says
+    // the clock does not take is red the tail is actually drawing beside it.
+    await renderRows([
+      task("a", {
+        when: TODAY,
+        time: "13:00",
+        deadline: "2026-09-11",
+        remindedAt: `${TODAY}T12:00:00.000Z`,
+      }),
+    ]);
+    const time = tail().querySelector("[data-fired]") as HTMLElement;
+    expect(time.textContent).toBe("13:00");
+    expect(time.hasAttribute("data-overdue")).toBe(false);
+    const red = [...tail().querySelectorAll("[data-overdue]")];
+    expect(red.map((node) => node.textContent)).toEqual(["11 Sep"]);
+    // A FIRED CLOCK IS ONE STEP UP FROM A PENDING ONE. The rule used to
+    // restate `--ink-3`, which is the caption's base, so the attribute was a
+    // signal with no drawing behind it and a reminder that had already spoken
+    // read exactly like one still waiting. One step, not full ink and not
+    // red: red belongs to the overdue deadline and a section with two reds
+    // has none.
+    expect(ruleFor(css, ".brain-task-caption[data-fired]")).toContain(
+      "color: var(--ink-2)",
+    );
+    expect(ruleFor(css, ".brain-task-caption")).toContain("color: var(--ink-3)");
+    expect(ruleFor(css, ".brain-task-caption[data-overdue]")).toContain(
+      "color: var(--red)",
+    );
+  });
+
+  it("says nothing about a fired reminder once the task is done", async () => {
+    await renderRows([
+      task("a", {
+        when: TODAY,
+        time: "13:00",
+        remindedAt: `${TODAY}T12:00:00.000Z`,
+        done: true,
+        doneAt: `${TODAY}T13:05:00.000Z`,
+      }),
+    ]);
+    expect(tail().querySelector("[data-fired]")).toBeNull();
+  });
+
+  it("shows one clock on a done row, the one it was finished at", async () => {
+    // Two clocks side by side made the reader work out which was which. The
+    // hour it was due at is what the strike is drawn over.
+    await renderRows([
+      task("a", {
+        when: TODAY,
+        time: "13:00",
+        done: true,
+        doneAt: `${TODAY}T12:25:00.000Z`,
+      }),
+    ]);
+    expect(tail().querySelector("[data-time]")).toBeNull();
+    // ONE CLOCK SHAPE IN THE COLUMN. A pending row prints the `HH:MM` the
+    // file holds, so a done row prints `HH:MM` too. It used to go through
+    // `Intl` and print `12:25 PM` on an en-US machine, four rows under an
+    // `18:00`.
+    expect(tail().textContent).toBe("12:25");
+    expect(tail().textContent).toBe(doneTimeOf(`${TODAY}T12:25:00.000Z`, 0));
+  });
+
+  it("says nothing at all on a done row with no instant to report", async () => {
+    await renderRows([task("a", { when: TODAY, time: "13:00", done: true })]);
+    expect(tail().textContent).toBe("");
+  });
+
+  /** I10. THE TAIL HAS A COLUMN.
+   *
+   *  The glyphs are a slot, drawn on every row whether or not the row has a
+   *  glyph for it. Without it the tail was a flex whose last child was flush,
+   *  so a row carrying `restart` put its clock 22px left of where a row
+   *  without one put its own, in the same list, on the axis a reader scans. */
+  it("reserves the glyph slot on every row, with a glyph and without one", async () => {
+    await renderRows([task("a", { when: TODAY, time: "13:00" })]);
+    const bare = tail().querySelector(".brain-task-glyphs") as HTMLElement;
+    expect(bare).not.toBeNull();
+    expect(glyphs(bare)).toEqual([]);
+
+    await renderRows([
+      task("b", { when: TODAY, time: "13:00", repeat: { freq: "daily" } }),
+    ]);
+    const carried = tail().querySelector(".brain-task-glyphs") as HTMLElement;
+    expect(glyphs(carried)).toEqual(["restart-linear"]);
+
+    const rule = ruleFor(css, ".brain-task-glyphs");
+    expect(rule).toContain("min-width: 16px");
+    expect(rule).toContain("flex-shrink: 0");
+    expect(rule).toContain("justify-content: flex-end");
+  });
+
+  it("hovers the tail only on a row that answers a hover", () => {
+    const rule = ruleFor(
+      css,
+      "  .brain-task-row:not(:where([data-done], [data-historic])):hover .brain-task-tail",
+    );
+    expect(rule).toContain("color: var(--ink-2)");
   });
 });

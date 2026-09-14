@@ -4,6 +4,8 @@
 // empty states say, and the two motions that change what is on screen,
 // completion and reschedule. Every string here is the spec's, verbatim.
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -171,6 +173,14 @@ function type(field: HTMLInputElement, value: string) {
   field.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+/** The stylesheet, for the rules a surface computes for itself and no
+ *  fixture draws. */
+const css = readFileSync(
+  path.join(path.resolve(__dirname, ".."), "app/globals.css"),
+  "utf8",
+);
+const tasksBlock = () => css;
+
 const rowTitles = () =>
   [...document.querySelectorAll(".brain-task-title")].map((node) => node.textContent);
 
@@ -255,6 +265,73 @@ afterEach(async () => {
   resetTasksStore();
 });
 
+/** `/tasks?task=<id>`: the seam a link from anywhere else in the app lands on. */
+describe("a task named in the URL", () => {
+  const scrolled: HTMLElement[] = [];
+
+  beforeEach(() => {
+    scrolled.length = 0;
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      writable: true,
+      value(this: HTMLElement) {
+        scrolled.push(this);
+      },
+    });
+  });
+
+  afterEach(() => {
+    Reflect.deleteProperty(HTMLElement.prototype, "scrollIntoView");
+    window.history.replaceState({}, "", "/tasks");
+  });
+
+  it("selects the row, brings it into view and takes the query off the URL", async () => {
+    window.history.replaceState({}, "", "/tasks?task=b");
+    await mount([task("a", { when: TODAY }), task("b", { when: TODAY })]);
+
+    expect(rowFor("b").querySelector("[data-selected]")).not.toBeNull();
+    expect(rowFor("a").querySelector("[data-selected]")).toBeNull();
+    expect(scrolled).toContain(rowFor("b"));
+    // A `?task=` left in the bar would take the reader back to that row every
+    // time they came to Tasks.
+    expect(window.location.search).toBe("");
+  });
+
+  it("opens the list the task lives in and lands on the row once it is drawn", async () => {
+    const onSelectList = vi.fn();
+    const rows = [task("now", { when: TODAY }), task("later", { when: dayFrom(4) })];
+    window.history.replaceState({}, "", "/tasks?task=later");
+    await mount(rows, { onSelectList });
+
+    expect(onSelectList).toHaveBeenCalledWith("upcoming");
+    // Nothing has been answered yet, so nothing has been tidied.
+    expect(document.querySelector("[data-selected]")).toBeNull();
+
+    // The shell opens it, which is a navigation and may write the bare path.
+    window.history.replaceState({}, "", "/tasks");
+    await mount(rows, { onSelectList, list: "upcoming" });
+
+    expect(rowFor("later").querySelector("[data-selected]")).not.toBeNull();
+    expect(scrolled).toContain(rowFor("later"));
+  });
+
+  it("says nothing for an id no record answers to, and takes the query off", async () => {
+    window.history.replaceState({}, "", "/tasks?task=gone");
+    await mount([task("a", { when: TODAY })]);
+
+    expect(document.querySelector("[data-selected]")).toBeNull();
+    expect(scrolled).toHaveLength(0);
+    // Quietly: a link to a task somebody has since deleted is not an error to
+    // report to whoever followed it. The query goes with the answer all the
+    // same, because it HAS been answered: there is no such task. A `?task=`
+    // left standing is read again on every dependency change, so an id that
+    // becomes resolvable later would select that row and scroll the column
+    // long after the reader followed the link.
+    expect(toasts).toEqual([]);
+    expect(window.location.search).toBe("");
+  });
+});
+
 describe("the lists", () => {
   it("renders the ghost row first, above every task, in every list", async () => {
     await mount([task("a", { when: TODAY }), task("b", { when: TODAY })]);
@@ -271,6 +348,30 @@ describe("the lists", () => {
     ).toBe("New task");
   });
 
+  /** I11. THE LOUDEST TEXT IN THE COLUMN BELONGED TO THE ROW WITH NO TASK IN
+   *  IT. The ghost row drew its When chip as a full glass pill with ink 600
+   *  text before anything had been typed, while every written row's chips stay
+   *  hidden until the row is opened. At rest it is the glyph and the word; the
+   *  pill is what a cursor and a keyboard bring. */
+  it("draws the capture row's When chip bare until it is hovered or focused", async () => {
+    await mount([task("a", { when: TODAY })]);
+    const ghost = document.querySelector(".brain-task-row_ghost") as HTMLElement;
+    const chip = ghost.querySelector(".chip") as HTMLElement;
+    expect(chip.textContent).toBe("When");
+    expect(chip.querySelector("svg")).not.toBeNull();
+
+    const sheet = tasksBlock();
+    const rest = sheet.slice(sheet.indexOf(".brain-task-row_ghost .chip {"));
+    const body = rest.slice(0, rest.indexOf("}"));
+    expect(body).toContain("background-color: transparent");
+    expect(body).toContain("box-shadow: none");
+    expect(body).toContain("color: var(--ink-3)");
+    // And the pill is what a cursor or a keyboard brings back, each behind
+    // its own gate: §8 guards the hover, and the focus half must not be.
+    expect(sheet).toContain(".brain-task-row_ghost .chip:hover {");
+    expect(sheet).toContain(".brain-task-row_ghost .chip:focus-visible {");
+  });
+
   it("puts the no-category group first in Today and gives it no header", async () => {
     await mount([
       task("filed", { when: TODAY, category: "Work" }),
@@ -278,6 +379,24 @@ describe("the lists", () => {
     ]);
     expect(rowTitles()).toEqual(["bare", "filed"]);
     expect(headers()).toEqual(["Work"]);
+  });
+
+  /** Spec 2. The moon is the section's own drawing, so This Evening reads as
+   *  a part of the day and not as one more category. `lib/tasks/lists.ts`
+   *  says a group carries no glyph and the renderer draws this one, which was
+   *  a claim about a renderer that drew nothing. */
+  it("stands the moon beside the This Evening header and beside no other", async () => {
+    await mount([
+      task("tonight", { when: TODAY, evening: true }),
+      task("filed", { when: TODAY, category: "Work" }),
+    ]);
+    const heads = [...document.querySelectorAll(".brain-tasks-section-head")];
+    const withMoon = heads.filter((head) => head.querySelector("svg") !== null);
+    expect(withMoon).toHaveLength(1);
+    expect(withMoon[0]?.textContent).toContain("This Evening");
+    expect(
+      withMoon[0]?.querySelector("svg")?.getAttribute("aria-hidden"),
+    ).toBe("true");
   });
 
   it("groups Upcoming by day, then next week, then one group a date", async () => {
@@ -539,14 +658,55 @@ describe("completion (motion 2.1)", () => {
     expect(bodies.some((body) => body.includes("false"))).toBe(false);
   });
 
-  it("collapses the group and materialises the Done for today empty state", async () => {
+  /** D3. A COMPLETION IS NOT A LEAVING. The row is struck through and sinks to
+   *  the foot of its group, and the group it was in is still there: what the
+   *  reader finished this morning is the whole of what the list has to show
+   *  for it. Only the count beside the list steps down. */
+  it("collapses an expanded row when it is completed", async () => {
+    // The box stops the press from reaching the row, `openRow` refuses an
+    // inert row and every key on it is dead, so an expansion left open over a
+    // completion would sit there with its chips live and no way to shut it.
+    const a = task("a", { when: TODAY });
+    await mount([a]);
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [a] });
+      return response({ task: { ...a, done: true, doneAt: `${TODAY}T12:00:00.000Z` } });
+    });
+
+    await act(async () => {
+      (rowFor("a").querySelector(".brain-task-title") as HTMLElement).click();
+    });
+    const capsule = () => rowFor("a").querySelector(".brain-task-row") as HTMLElement;
+    expect(capsule().hasAttribute("data-expanded")).toBe(true);
+    expect(rowFor("a").querySelectorAll("[data-task-control]").length).toBeGreaterThan(0);
+
+    await act(async () => boxIn(rowFor("a")).click());
+    await act(async () => {
+      vi.advanceTimersByTime(WRITE_AT_MS);
+    });
+    await settle();
+
+    expect(capsule().hasAttribute("data-done")).toBe(true);
+    expect(capsule().hasAttribute("data-expanded")).toBe(false);
+    expect(rowFor("a").querySelectorAll("[data-task-control]").length).toBe(0);
+  });
+
+  it("keeps the completed row in its group and steps the count down", async () => {
     const done = task("a", { when: TODAY, category: "Work" });
-    await mount([done]);
+    const open = task("b", {
+      when: TODAY,
+      category: "Work",
+      created: "2026-08-01T09:00:00.000Z",
+    });
+    await mount([done, open]);
     expect(headers()).toEqual(["Work"]);
+    expect(rowTitles()).toEqual(["a", "b"]);
+    expect(counts.at(-1)).toBe(2);
 
     apiFetchMock.mockImplementation(async (input) => {
       const url = String(input);
-      if (url.startsWith("/api/tasks?")) return response({ tasks: [done] });
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [done, open] });
       return response({ task: { ...done, done: true, doneAt: `${TODAY}T12:00:00.000Z` } });
     });
 
@@ -556,14 +716,14 @@ describe("completion (motion 2.1)", () => {
     });
     await settle();
 
-    // jsdom runs no WAAPI, so the fold resolves at once and the group goes
-    expect(headers()).toEqual([]);
-    expect(rowTitles()).toEqual([]);
-    const empty = document.querySelector(".brain-tasks-empty") as HTMLElement;
-    expect(empty.textContent).toContain("Done for today");
-    // The count alone: "· Logbook" read as a link and was plain text.
-    expect(empty.textContent).toContain("1 completed");
-    expect(empty.textContent).not.toContain("Logbook");
+    // The header stands, the row stands, and it has sunk below the open one.
+    expect(headers()).toEqual(["Work"]);
+    expect(rowTitles()).toEqual(["b", "a"]);
+    expect(document.querySelector(".brain-tasks-empty")).toBeNull();
+    // and nothing folded it out: a fold fills forwards, so one played here
+    // would hold a row that never unmounts at height 0 until the next load
+    expect(foldOf(rowFor("a"))).toBeUndefined();
+    expect(counts.at(-1)).toBe(1);
   });
 
   it("decrements the count once at 1300, not once per source", async () => {
@@ -647,6 +807,32 @@ describe("reschedule (motion 2.2)", () => {
     expect(rowTitles()).toEqual([]);
     // a row that DOES leave folds down on its way out, into its bottom edge
     expect(foldOf(leaving)?.frames.at(-1)?.clipPath).toBe("inset(100% 0 0 0)");
+  });
+
+  it("collapses the group header and its rule when the reschedule empties it", async () => {
+    // The one write that still empties a group: a completion stays where it
+    // was until the day changes, a reschedule leaves at once.
+    const a = task("a", { when: TODAY, category: "Work" });
+    await mount([a]);
+    expect(headers()).toEqual(["Work"]);
+
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [a] });
+      return response({ task: { ...a, when: dayFrom(1) } });
+    });
+
+    await selectFirst();
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "]", metaKey: true }));
+    });
+    await settle();
+
+    // jsdom runs no WAAPI, so the fold resolves at once and the group goes
+    expect(headers()).toEqual([]);
+    expect(rowTitles()).toEqual([]);
+    const empty = document.querySelector(".brain-tasks-empty") as HTMLElement;
+    expect(empty.textContent).toContain("Nothing planned today");
   });
 
   /** A TASK IS IN TODAY FOR FOUR REASONS, and Today pressed on any of them is
@@ -939,6 +1125,49 @@ describe("where a captured task lands", () => {
     expect(await captureInto({ list: { category: "Work" } })).toEqual({
       title: "Buy milk",
       category: "Work",
+    });
+  });
+
+  it("takes the day the capture row's own chip was given, over the list's", async () => {
+    // The chip is an override and nothing more: a line typed into Today with
+    // no picking still lands today, which the case above holds.
+    await mount([], { list: "upcoming" });
+    apiFetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [] });
+      if (init?.method === "POST") {
+        return response({ task: task("new", JSON.parse(String(init.body))) }, 201);
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    const field = document.querySelector("input") as HTMLInputElement;
+    await act(async () => type(field, "Buy milk"));
+    const chip = document.querySelector<HTMLElement>(
+      '.brain-task-row_ghost .chip',
+    ) as HTMLElement;
+    await act(async () => chip.click());
+    await settle();
+    await act(async () => {
+      document.querySelector<HTMLElement>('[data-day="2026-09-20"]')?.click();
+    });
+    // The grid moves the picker's own value; Done is what sends it back.
+    await act(async () => {
+      document.querySelector<HTMLElement>("[data-when-done]")?.click();
+    });
+    await settle();
+    await act(async () => {
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await settle();
+
+    // ONE RECORD. Reaching for the chip blurs the field, and a create on that
+    // blur filed the title under the list's own day before the reader had
+    // finished saying where it goes.
+    expect(writes()).toHaveLength(1);
+    expect(JSON.parse(String(writes().at(-1)?.[1]?.body))).toEqual({
+      title: "Buy milk",
+      when: "2026-09-20",
     });
   });
 

@@ -145,6 +145,44 @@ const nextConfig: NextConfig = {
           },
         ],
       },
+      // The push service worker. A route block REPLACES the catch-all rather
+      // than merging with it (the three mail overrides below are the proof),
+      // so this restates four of the five global headers and adds two of its
+      // own. The fifth, the CSP, is deliberately dropped: frame-ancestors,
+      // object-src and base-uri govern a document and say nothing about a
+      // script response, and X-Frame-Options: DENY is restated here anyway.
+      //
+      // THE CONTENT TYPE IS NOT SET HERE. `public/sw.js` is served by Next's
+      // own static route, which types a `.js` file
+      // `application/javascript; charset=UTF-8` already. Restating it made two
+      // places responsible for one header, and the two can disagree while both
+      // look right in review. The route types the file; this block says what
+      // the browser may do with it. `e2e/notifications.spec.ts` reads the
+      // served header, so a platform that stopped typing it is a red test
+      // rather than a worker that silently never registers.
+      //
+      // Service-Worker-Allowed is not strictly needed while the script sits at
+      // the root and controls the root, and it is set anyway: it states the
+      // scope the worker is meant to have, so moving the file later is a
+      // decision rather than an accident.
+      //
+      // no-cache, because a stale worker cannot be replaced by the page that
+      // needs replacing: the browser checks this file for an update and a
+      // cached copy makes that check a no-op.
+      {
+        source: "/sw.js",
+        headers: [
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          {
+            key: "Strict-Transport-Security",
+            value: "max-age=31536000; includeSubDomains",
+          },
+          { key: "Service-Worker-Allowed", value: "/" },
+          { key: "Cache-Control", value: "no-cache" },
+        ],
+      },
       // The catch-all CSP above is appropriate for application pages, but
       // Next applies it after route handlers and would otherwise replace the
       // stricter attachment CSP returned by the guarded Mail binary routes.

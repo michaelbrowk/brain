@@ -75,25 +75,43 @@ function ordinal(day: number): string {
  *  there is a rule to stop: an offer to clear nothing is a dead row. */
 export function repeatOptions(task: TaskView, today: string): RepeatOption[] {
   const day = anchorDay(task, today);
-  const weekday = weekdayOf(day);
-  const monthDay = Number(day.slice(8, 10));
+  // The RULE's own weekday when there is a rule, and the day the task is
+  // sitting on when there is not. Reading the anchor day off a task that
+  // already repeats on Monday showed "Every week on Thu" the moment the
+  // instance moved to Thursday, which is the menu describing a rule nobody set.
+  const weekday =
+    task.repeat?.freq === "weekly" && task.repeat.byWeekday.length > 0
+      ? capitalise(task.repeat.byWeekday[0] as WeekDay)
+      : weekdayOf(day);
+  const monthDay =
+    task.repeat?.freq === "monthly" ? task.repeat.byMonthDay : Number(day.slice(8, 10));
+  // THE CLOCK IS THE RECORD'S, and the rule carries it: "Every day at 13:00"
+  // is one sentence about one thing, so the rows say so rather than leaving
+  // the reader to remember that a repeat and a reminder are the same 13:00.
+  const at = task.time ? ` at ${task.time}` : "";
   const options: RepeatOption[] = [
-    { kind: "daily", label: "Every day", repeat: { freq: "daily" } },
+    { kind: "daily", label: `Every day${at}`, repeat: { freq: "daily" } },
     {
       kind: "weekly",
-      label: `Every week on ${weekday}`,
+      label: `Every week on ${weekday}${at}`,
       // `weekdayOf` writes `Mon` and the rule stores `mon`, which keeps the
       // seven words in one place rather than in a second table here.
       repeat: { freq: "weekly", byWeekday: [weekday.toLowerCase() as WeekDay] },
     },
     {
       kind: "monthly",
-      label: `Every month on the ${ordinal(monthDay)}`,
+      label: `Every month on the ${ordinal(monthDay)}${at}`,
       repeat: { freq: "monthly", byMonthDay: monthDay },
     },
   ];
   if (task.repeat) options.push({ kind: "none", label: "Don't repeat", repeat: null });
   return options;
+}
+
+/** `mon` is what the rule stores and `Mon` is what a person reads. One table
+ *  for the seven words stays in `weekdayOf`; this only moves a letter. */
+function capitalise(day: WeekDay): string {
+  return day.charAt(0).toUpperCase() + day.slice(1);
 }
 
 export function TasksRepeatMenu({
@@ -106,6 +124,8 @@ export function TasksRepeatMenu({
   onSet: (repeat: TaskRepeat | null) => void;
 }) {
   const options = repeatOptions(task, today);
+  const rules = options.filter((option) => option.kind !== "none");
+  const stop = options.find((option) => option.kind === "none");
   const value: RepeatKind = task.repeat ? task.repeat.freq : "none";
   const label = repeatWord(task.repeat);
   // The rule in the menu's own words, so a screen reader hears "Repeat: every
@@ -136,7 +156,7 @@ export function TasksRepeatMenu({
           align="start"
           sideOffset={6}
           collisionPadding={8}
-          className="brain-menu z-[var(--z-modal)] w-[220px]"
+          className="brain-menu brain-repeat-menu z-[var(--z-modal)] w-[220px]"
         >
           <Dropdown.RadioGroup
             value={value}
@@ -149,24 +169,53 @@ export function TasksRepeatMenu({
                 rule, so the same drawing three times would say nothing the
                 words do not, and the check is what a reader is looking for.
                 The reasoning `TasksListMenu` gives its categories. The stop
-                does carry one, and the same `close-linear` the When chip's
-                Clear row carries. */}
-            {options.map((option) => (
-              <Fragment key={option.kind}>
-                {option.kind === "none" && (
+                does carry one, and the same `close-linear` the picker's own
+                Clear button carries. */}
+            {rules.map((option) => (
+              <Dropdown.RadioItem
+                key={option.kind}
+                value={option.kind}
+                className="brain-menu-item"
+              >
+                {/* NO TRUNCATION HERE. "Every month on the 14th at 07:45" was
+                    cut at the width the menu was given and the clock was the
+                    half that went, in the one panel that exists to say what
+                    the rule is. It wraps instead. */}
+                <span className="min-w-0 flex-1">{option.label}</span>
+                {value === option.kind && (
+                  <Icon name="check-linear" size={14} className="shrink-0 text-ink-2" />
+                )}
+              </Dropdown.RadioItem>
+            ))}
+            {/* ONE FIELD, ONE EDITOR. The clock is on the RECORD, not on the
+                rule, so it is set in the When picker's Reminder row and read
+                back here. A second editor for one field is how two answers
+                start.
+                AND IT IS A CAPTION, NOT A ROW. It wore `brain-menu-item`:
+                menu item height, menu item indent, and not pressable, which
+                is the one shape a control must not have. It says where the
+                clock is set, in the register a sentence about a panel belongs
+                in. `role="presentation"`: a generic node inside the radio
+                group, inside a menu, is a shape neither role owns. */}
+            {task.time !== undefined && (
+              <Fragment>
+                <Dropdown.Separator className="brain-menu-sep" />
+                <div className="brain-menu-caption text-caption" role="presentation">
+                  {`Reminder ${task.time}, set in When`}
+                </div>
+              </Fragment>
+            )}
+            {stop && (
+              <Fragment>
+                {task.time === undefined && (
                   <Dropdown.Separator className="brain-menu-sep" />
                 )}
-                <Dropdown.RadioItem value={option.kind} className="brain-menu-item">
-                  {option.kind === "none" && (
-                    <Icon name="close-linear" size={16} className="brain-menu-icon" />
-                  )}
-                  <span className="min-w-0 flex-1 truncate">{option.label}</span>
-                  {value === option.kind && (
-                    <Icon name="check-linear" size={14} className="shrink-0 text-ink-2" />
-                  )}
+                <Dropdown.RadioItem value={stop.kind} className="brain-menu-item">
+                  <Icon name="close-linear" size={16} className="brain-menu-icon" />
+                  <span className="min-w-0 flex-1 truncate">{stop.label}</span>
                 </Dropdown.RadioItem>
               </Fragment>
-            ))}
+            )}
           </Dropdown.RadioGroup>
         </Dropdown.Content>
       </Dropdown.Portal>

@@ -12,7 +12,7 @@
 // twice or counts anything the column is not showing.
 
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { DUR, EASE_OUT, SPRING_MATERIALIZE, materializeFade } from "@/lib/motion";
 import type { TaskView } from "@/lib/tasks/model";
@@ -30,16 +30,21 @@ import { onTaskCommand, type TaskCommand } from "./tasks-commands";
 import { TasksGhostRow } from "./tasks-ghost-row";
 import { TasksListMenu } from "./tasks-list-menu";
 import {
+  EVENING_GROUP_KEY,
+  belongs,
   categoriesOf,
   countsFor,
   headerLabel,
+  listOf,
   sectionsFor,
   type TaskCounts,
   type TaskSection,
   type TasksView,
 } from "./tasks-lists";
-import { ROW_KEYS, TasksRow, tomorrowOf } from "./tasks-row";
+import { ROW_KEYS, TasksRow, tomorrowOf, whenValueFor } from "./tasks-row";
+import type { WhenValue } from "./tasks-when-picker";
 import { Button } from "./ui/button";
+import { Icon } from "./ui/icon";
 import { Empty } from "./ui/empty";
 import type { ToastOptions } from "./ui/primitives";
 import { ScrollEdge } from "./ui/scroll-edge";
@@ -99,7 +104,7 @@ export function TasksSurface({
    *  arriving and which are still folding. Shared with the Today block on
    *  Home (`components/hub-today.tsx`), so a completion is one cycle and not
    *  two implementations of one. */
-  const actions = useTaskActions({ today, onToast });
+  const actions = useTaskActions({ today, offsetMinutes, onToast });
   const { held, inserted } = actions;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -129,6 +134,28 @@ export function TasksSurface({
     [drawn],
   );
 
+  /** AN EXPANSION DOES NOT SURVIVE THE COMPLETION IT IS OPEN OVER.
+   *
+   *  Tick the checkbox of a row whose chips are open and the chips would stay:
+   *  the box stops the press from reaching the row, `openRow` refuses an inert
+   *  row, and every key on it is dead, so a When menu and a category picker
+   *  would sit live over a record the reader has finished with and nothing
+   *  short of an arrow key would shut them.
+   *
+   *  Read off the RECORD and derived during the render, not cleared by the
+   *  gesture in an effect: a completion that arrives from another tab closes
+   *  it the same way, there is no frame in which the chips are drawn over a
+   *  struck title, and `react-hooks/set-state-in-effect` is right that a value
+   *  a render can compute is not state to write.
+   *
+   *  So an Undo puts the chips back where the reader left them, because they
+   *  never dismissed them. That is the one consequence of deriving rather than
+   *  clearing, and it is the behaviour Undo should have. */
+  const expandedKey =
+    drawn.find((row) => row.key === expandedId)?.task.done === true
+      ? null
+      : expandedId;
+
   const entrance = useEntrance({
     today,
     replay: view.kind === "list" && view.list === "today",
@@ -144,7 +171,7 @@ export function TasksSurface({
    *  The Logbook has no ghost row at all: a task written straight into the
    *  Logbook would have to be born completed, and nobody means that. */
   const capture = useCallback(
-    (title: string) => {
+    (title: string, picked: WhenValue) => {
       const seed =
         view.kind === "category"
           ? view.category
@@ -157,7 +184,20 @@ export function TasksSurface({
               : view.list === "someday"
                 ? { when: "someday" }
                 : {};
-      void createTask({ title, ...seed })
+      // WHAT THE READER PICKED WINS over the list's own seed, and only what
+      // they picked: a line typed into Today with no picking still lands
+      // today, because an untouched chip answers `when: null` and overrides
+      // nothing. A clock and an evening both need a day, so neither travels
+      // without one.
+      const chosen =
+        picked.when === null
+          ? {}
+          : {
+              when: picked.when,
+              ...(picked.time !== null ? { time: picked.time } : {}),
+              ...(picked.evening ? { evening: true as const } : {}),
+            };
+      void createTask({ title, ...seed, ...chosen })
         .then((task) => {
           actions.markInserted(task.id);
           mutateTasks((tasks) => [task, ...tasks]);
@@ -183,6 +223,16 @@ export function TasksSurface({
   );
 
   useArrowKeys({ order, selectedId, setSelectedId, setExpandedId });
+  useNamedTask({
+    tasks: state.tasks,
+    loading: state.loading,
+    today,
+    offsetMinutes,
+    view,
+    reduce,
+    onSelectList,
+    setSelectedId,
+  });
 
   // The palette's two rows and the row's two keys are one action each.
   useEffect(() => {
@@ -192,7 +242,11 @@ export function TasksSurface({
       // letters give on the row itself.
       if (!row || !row.untickable) return;
       const move = COMMAND_KEYS[command];
-      void actions.rescheduleTask(row.task, move.when(today), move.label);
+      void actions.rescheduleTask(
+        row.task,
+        whenValueFor(row.task, move.when(today)),
+        move.label,
+      );
     });
   }, [actions, drawn, selectedId, today]);
 
@@ -220,7 +274,11 @@ export function TasksSurface({
         <div className="brain-tasks-scrollfoot brain-tasks-scrollpad">
           {capturable && (
             <ul className="brain-tasks-rows" aria-label="New task">
-              <TasksGhostRow captureRequest={captureRequest} onCreate={capture} />
+              <TasksGhostRow
+                captureRequest={captureRequest}
+                today={today}
+                onCreate={capture}
+              />
             </ul>
           )}
 
@@ -251,7 +309,7 @@ export function TasksSurface({
                 offsetMinutes={offsetMinutes}
                 categories={categories.map((entry) => entry.category)}
                 selectedId={selectedId}
-                expandedId={expandedId}
+                expandedId={expandedKey}
                 inserted={inserted}
                 pageTitleOf={pageTitleOf}
                 onOpenPage={onOpenPage}
@@ -295,6 +353,109 @@ export function TasksSurface({
         />
       </div>
     </section>
+  );
+}
+
+/** ONE ROW, NAMED IN THE URL: `/tasks?task=<id>`.
+ *
+ *  Something outside this column points at one task: a notification, a row on
+ *  Home, a link in a note. The column has to show it wherever it lives.
+ *  The list is switched when the record is not in the open one, the capsule
+ *  lands on the row, and the query LEAVES WITH IT: a `?task=` left in the bar
+ *  would take the reader back to that row every time they came to Tasks, and
+ *  the open list is navigation state the shell already owns.
+ *
+ *  A missing id selects nothing and says nothing: a link to a task somebody
+ *  has since deleted is not an error to report to whoever followed it. The
+ *  query still leaves, because that is an answer too, and one left standing is
+ *  read again on every refetch. The records have to be in before it can be
+ *  told apart from a record that has not loaded yet, which is what `loading`
+ *  is read for. */
+function useNamedTask({
+  tasks,
+  loading,
+  today,
+  offsetMinutes,
+  view,
+  reduce,
+  onSelectList,
+  setSelectedId,
+}: {
+  tasks: readonly TaskView[];
+  loading: boolean;
+  today: string;
+  offsetMinutes: number;
+  view: TasksView;
+  reduce: boolean;
+  onSelectList?: (list: TasksListState | null) => void;
+  setSelectedId: (id: string | null) => void;
+}) {
+  // THE URL IS THE STATE, so there is none of its own here: the query is read
+  // on every run and taken off once it has been ANSWERED, which is what stops
+  // the next run. `nav` exists only so Back and Forward cause a run at all,
+  // and `asked` carries the id across a list switch, because opening a list is
+  // a navigation and the query may not survive it.
+  const [nav, setNav] = useState(0);
+  const asked = useRef<string | null>(null);
+
+  useEffect(() => {
+    const bump = () => setNav((count) => count + 1);
+    window.addEventListener("popstate", bump);
+    return () => window.removeEventListener("popstate", bump);
+  }, []);
+
+  useEffect(() => {
+    const id = taskParam() ?? asked.current;
+    if (id === null || today === "") return;
+    const task = tasks.find((entry) => entry.id === id);
+    if (task === undefined) {
+      // Not loaded yet is not the same answer as not there.
+      if (loading) return;
+      // NOTHING TO ACT ON, and nothing said: a link to a task somebody has
+      // since deleted is not an error to report to whoever followed it. The
+      // query comes off all the same, because the surface HAS answered it:
+      // there is no such task. A `?task=` left standing is read again on every
+      // dependency change, so an id that becomes resolvable later would select
+      // that row and scroll the column long after the reader followed the
+      // link.
+      asked.current = null;
+      clearTaskParam();
+      return;
+    }
+    if (!belongs(task, view, today, offsetMinutes)) {
+      // The list the record lives in, which the shell opens. This runs again
+      // once it has, and the row is drawn by then.
+      asked.current = id;
+      onSelectList?.(listOf(task, today, offsetMinutes));
+      return;
+    }
+    asked.current = null;
+    setSelectedId(id);
+    const row = document.querySelector<HTMLElement>(
+      `.brain-task-row-item[data-task-id="${CSS.escape(id)}"]`,
+    );
+    row?.scrollIntoView?.({ block: "center", behavior: reduce ? "auto" : "smooth" });
+    clearTaskParam();
+  }, [loading, nav, offsetMinutes, onSelectList, reduce, setSelectedId, tasks, today, view]);
+}
+
+function taskParam(): string | null {
+  if (typeof window === "undefined") return null;
+  const id = new URLSearchParams(window.location.search).get("task");
+  return id === null || id === "" ? null : id;
+}
+
+/** The rest of the URL and the shell's navigation state both stand: only the
+ *  one query this surface answers to comes off. */
+function clearTaskParam(): void {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (!url.searchParams.has("task")) return;
+  url.searchParams.delete("task");
+  window.history.replaceState(
+    window.history.state,
+    "",
+    `${url.pathname}${url.search}${url.hash}`,
   );
 }
 
@@ -353,11 +514,7 @@ function TaskGroup({
   onExpand: (id: string | null) => void;
   onComplete: (task: TaskView, refusal?: string) => Promise<void>;
   onReopen: (task: TaskView, refusal?: string) => void;
-  onReschedule: (
-    task: TaskView,
-    when: string | "someday" | null,
-    label: string,
-  ) => Promise<void>;
+  onReschedule: (task: TaskView, value: WhenValue, label: string) => Promise<void>;
   onPatch: (task: TaskView, patch: TaskFieldPatch) => void;
   onFoldEnd: (id: string) => void;
 }) {
@@ -380,6 +537,27 @@ function TaskGroup({
     >
       {section.group.label !== null && (
         <div className="brain-tasks-section-head">
+          {/* Spec 2. THE EVENING IS A PART OF THE DAY, not one more category,
+              and the moon is what says so: every other header on this surface
+              is a word a person typed or a date. It arrives with the label it
+              belongs to rather than appearing under it. `lib/tasks/lists.ts`
+              says a group carries no glyph and the renderer draws this one. */}
+          {section.group.key === EVENING_GROUP_KEY && (
+            <motion.span
+              aria-hidden
+              className="brain-tasks-section-moon"
+              initial={entrance ? { opacity: 0 } : false}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0, transition: { duration: DUR.fast, delay: 0 } }}
+              transition={{
+                duration: DUR.base,
+                ease: EASE_OUT,
+                delay: reduce ? 0 : groupDelay,
+              }}
+            >
+              <Icon name="moon-linear" size={14} />
+            </motion.span>
+          )}
           <motion.h2
             className="brain-tasks-section-label text-label"
             initial={entrance ? (reduce ? { opacity: 0 } : { opacity: 0, y: -4 }) : false}

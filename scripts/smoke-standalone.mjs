@@ -196,6 +196,9 @@ const startChild = ({ startupBarrierToken = "" } = {}) => {
     env: {
       ...childEnv,
       BRAIN_UPDATE_CHECK: "off",
+      // NODE_ENV is production here, so the scan would run. A screenshot run
+      // has no reminders to deliver and no notes root worth writing to.
+      BRAIN_REMINDERS: "0",
       ...(startupBarrierToken
         ? { BRAIN_STANDALONE_STARTUP_BARRIER_TOKEN: startupBarrierToken }
         : {}),

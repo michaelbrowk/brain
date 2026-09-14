@@ -173,7 +173,15 @@ describe("the Today block on Home", () => {
     expect(host.querySelector(".brain-tasks-section-label")).toBeNull();
   });
 
-  it("collapses row six and beyond into 'All today (7)'", async () => {
+  /** I12. THREE NUMBERS AND NONE OF THEM WAS THE NUMBER OF ROWS.
+   *
+   *  The header counted what is open over the whole day, the block painted
+   *  five open plus three struck, and the link printed everything the day
+   *  holds: "Today · 6", eight rows, "All today (10)". Each was defensible on
+   *  its own and together they read as a contradiction with nothing to say
+   *  which was which. The header keeps the open count, because that is the
+   *  one number a reader is asking for; the link stops carrying a second. */
+  it("collapses row six and beyond into a link that carries no number", async () => {
     await mount([
       task("one"),
       task("two"),
@@ -185,10 +193,50 @@ describe("the Today block on Home", () => {
     ]);
 
     const more = host.querySelector<HTMLButtonElement>("[data-hub-today-all]");
-    expect(more?.textContent).toBe("All today (7)");
+    expect(more?.textContent).toBe("All today");
 
     await act(async () => more?.click());
     expect(opened).toEqual(["tasks"]);
+  });
+
+  /** THE FIVE SLOTS ARE FIVE OPEN ROWS. A completion stays in its list for the
+   *  day, and a block whose window was shared with the day's work would show a
+   *  reader who finished five things five struck-through rows with everything
+   *  still owed folded into "All today". */
+  it("fills the five from what is still open, and puts the day's work under it", async () => {
+    // Ids, because every fixture here shares one `created` and the derive's
+    // last key is the id: a1 to a6 open, z1 and z2 finished this morning.
+    await mount([
+      task("z1", { done: true, doneAt: `${TODAY}T08:00:00.000Z` }),
+      task("z2", { done: true, doneAt: `${TODAY}T09:00:00.000Z` }),
+      task("a1"),
+      task("a2"),
+      task("a3"),
+      task("a4"),
+      task("a5"),
+      task("a6"),
+    ]);
+
+    expect(titles()).toEqual(["a1", "a2", "a3", "a4", "a5", "z1", "z2"]);
+    // The count is what is owed, and the overflow names what is not drawn.
+    // THE HEADER IS THE OPEN COUNT and the link is a way through, not a
+    // second tally: six still owed, five of them drawn, the day's two
+    // completions under them.
+    expect(header()).toBe("Today · 6");
+    expect(host.querySelector("[data-hub-today-all]")?.textContent).toBe("All today");
+  });
+
+  it("takes at most three of the day's completions, because the rest is a logbook", async () => {
+    await mount([
+      task("d1", { done: true, doneAt: `${TODAY}T05:00:00.000Z` }),
+      task("d2", { done: true, doneAt: `${TODAY}T06:00:00.000Z` }),
+      task("d3", { done: true, doneAt: `${TODAY}T07:00:00.000Z` }),
+      task("d4", { done: true, doneAt: `${TODAY}T08:00:00.000Z` }),
+      task("one"),
+    ]);
+
+    expect(titles()).toEqual(["one", "d1", "d2", "d3"]);
+    expect(host.querySelector("[data-hub-today-all]")?.textContent).toBe("All today");
   });
 
   it("draws no overflow row while everything today fits", async () => {

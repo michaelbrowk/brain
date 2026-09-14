@@ -3,16 +3,22 @@
 // browser's own local day in, so a table of records has exactly one answer.
 
 import { describe, expect, it } from "vitest";
-import type { ListName } from "@/lib/tasks/lists";
+import { logbookGroup, type ListName } from "@/lib/tasks/lists";
 import type { TaskView } from "@/lib/tasks/model";
 import {
+  countsFor,
   dayLabel,
   deadlineCaption,
   doneTimeOf,
+  eveningMoon,
   headerLabel,
+  movedLabel,
   movesRow,
   overdueWhenCaption,
+  reminderFired,
   sectionsFor,
+  timeCaption,
+  whenLabel,
   type TasksView,
 } from "./tasks-lists";
 
@@ -110,6 +116,24 @@ describe("sectionsFor", () => {
     ]);
   });
 
+  /** ONE ANSWER TO WHICH DAY A COMPLETION IS FILED UNDER. The Logbook view
+   *  cannot reach it through `groupFor` (a completion made today is filed by
+   *  `listOf` in the list it was made in), so it asks `lib/tasks/lists.ts` for
+   *  the group by name rather than carrying a copy of the arithmetic. */
+  it("takes the Logbook's day group from lib/tasks/lists, not from a copy", () => {
+    const tasks = [
+      task("x", { done: true, doneAt: "2026-09-13T08:00:00.000Z" }),
+      task("z", { done: true, doneAt: "2026-09-02T10:00:00.000Z" }),
+      task("orphan", { done: true }),
+    ];
+    const drawn = sectionsFor(tasks, list("logbook"), TODAY, UTC).map((s) => s.group);
+    const expected = tasks.map((t) => logbookGroup(t, TODAY, UTC));
+    for (const group of drawn) {
+      expect(expected).toContainEqual(group);
+    }
+    expect(drawn.map((g) => g.label)).toEqual(["Today", "2 Sep", null]);
+  });
+
   it("reads the Logbook day in the reader's own offset, never off the instant", () => {
     // 22:30 UTC on the 12th is 02:30 on the 13th in Dubai (+240)
     const tasks = [task("dubai", { done: true, doneAt: "2026-09-12T22:30:00.000Z" })];
@@ -149,10 +173,12 @@ describe("sectionsFor", () => {
       task("tomorrow", { category: "Work", when: "2026-09-14" }),
       task("later", { category: "Work", when: "2026-09-30" }),
       task("other", { category: "Home", when: TODAY }),
+      // Finished this morning, and undated, so it sinks to the foot of the
+      // headerless group it was open in rather than leaving the view.
       task("done", { category: "Work", done: true, doneAt: "2026-09-13T08:00:00.000Z" }),
     ];
     expect(shape(sectionsFor(tasks, view, TODAY, UTC))).toEqual([
-      [null, ["undated"]],
+      [null, ["undated", "done"]],
       ["Today", ["today"]],
       ["Tomorrow", ["tomorrow"]],
       ["Later", ["later"]],
@@ -178,6 +204,44 @@ describe("sectionsFor", () => {
   });
 });
 
+/** THE READER'S DAY IS NOT UTC'S.
+ *
+ *  Los Angeles is `-420`. A task finished at 18:00 local carries the NEXT
+ *  UTC day on its `doneAt`, so every question asked at offset zero answers
+ *  "that was tomorrow", which for `listOf` means the Logbook. `belongs` asks
+ *  with the offset and keeps the row; anything downstream that asks without
+ *  it disagrees with `belongs` about the same record, for the several hours
+ *  of every day that the two days differ.
+ */
+describe("the reader's own offset, west of UTC", () => {
+  const LA = -420;
+  // 18:00 on the 13th in Los Angeles, which is 01:00 on the 14th in UTC.
+  const EVENING_IN_LA = "2026-09-14T01:00:00.000Z";
+  const doneToday = task("done-today", {
+    category: "Home",
+    when: TODAY,
+    done: true,
+    doneAt: EVENING_IN_LA,
+  });
+
+  it("sinks today's completion to the foot of Today in a category view", () => {
+    const view: TasksView = { kind: "category", category: "Home" };
+    const tasks = [
+      task("inbox", { category: "Home" }),
+      task("today", { category: "Home", when: TODAY }),
+      doneToday,
+    ];
+    expect(shape(sectionsFor(tasks, view, TODAY, LA))).toEqual([
+      [null, ["inbox"]],
+      ["Today", ["today", "done-today"]],
+    ]);
+  });
+
+  it("plays the leaving fold when that row is rescheduled out of Today", () => {
+    expect(movesRow(doneToday, "2026-09-20", TODAY, LA)).toBe(true);
+  });
+});
+
 describe("movesRow", () => {
   // The four reasons a record is in Today. Today pressed on any of them
   // writes the day and moves nothing, which is what the row's fold and the
@@ -191,30 +255,30 @@ describe("movesRow", () => {
       { when: "2026-09-20", deadline: TODAY },
     ],
   ])("is false for Today on a task already in Today: %s", (_reason, over) => {
-    expect(movesRow(task("a", over), TODAY, TODAY)).toBe(false);
+    expect(movesRow(task("a", over), TODAY, TODAY, UTC)).toBe(false);
   });
 
   it("is false for Someday on a task already parked", () => {
-    expect(movesRow(task("a", { when: "someday" }), "someday", TODAY)).toBe(false);
+    expect(movesRow(task("a", { when: "someday" }), "someday", TODAY, UTC)).toBe(false);
   });
 
   it("is true whenever the record lands in another list", () => {
-    expect(movesRow(task("a", { when: TODAY }), "2026-09-14", TODAY)).toBe(true);
-    expect(movesRow(task("a", { when: TODAY }), "someday", TODAY)).toBe(true);
-    expect(movesRow(task("a", { when: "someday" }), TODAY, TODAY)).toBe(true);
-    expect(movesRow(task("a", { when: "2026-09-20" }), TODAY, TODAY)).toBe(true);
-    expect(movesRow(task("a"), TODAY, TODAY)).toBe(true);
+    expect(movesRow(task("a", { when: TODAY }), "2026-09-14", TODAY, UTC)).toBe(true);
+    expect(movesRow(task("a", { when: TODAY }), "someday", TODAY, UTC)).toBe(true);
+    expect(movesRow(task("a", { when: "someday" }), TODAY, TODAY, UTC)).toBe(true);
+    expect(movesRow(task("a", { when: "2026-09-20" }), TODAY, TODAY, UTC)).toBe(true);
+    expect(movesRow(task("a"), TODAY, TODAY, UTC)).toBe(true);
   });
 
   // Upcoming groups by day, so two days that are both ahead are two places.
   it("is true for a day inside Upcoming that lands under another header", () => {
-    expect(movesRow(task("a", { when: "2026-09-20" }), "2026-09-14", TODAY)).toBe(true);
+    expect(movesRow(task("a", { when: "2026-09-20" }), "2026-09-14", TODAY, UTC)).toBe(true);
   });
 
   // A category is not a day, so a reschedule never changes the header a task
   // stands under in Today.
   it("reads the same answer for a filed task as for a bare one", () => {
-    expect(movesRow(task("a", { when: TODAY, category: "Work" }), TODAY, TODAY)).toBe(
+    expect(movesRow(task("a", { when: TODAY, category: "Work" }), TODAY, TODAY, UTC)).toBe(
       false,
     );
   });
@@ -255,9 +319,19 @@ describe("the words a row and a header say", () => {
     expect(headerLabel("12 Sep", 7)).toBe("12 Sep · 7");
   });
 
-  it("reads a completion time in the reader's offset", () => {
-    expect(doneTimeOf("2026-09-13T09:05:00.000Z", 0)).toMatch(/9[:.]05/);
-    expect(doneTimeOf("2026-09-12T22:30:00.000Z", 240)).toMatch(/2[:.]30/);
+  /** ONE CLOCK IN THE COLUMN. A pending row prints the `HH:MM` the file
+   *  holds, so a completion beside it prints `HH:MM` too, in the reader's own
+   *  offset. A locale formatter gave `7:20 PM` four rows under `18:00` and
+   *  left the eye to work out that both were the same kind of thing. */
+  it.each([
+    ["2026-09-13T09:05:00.000Z", 0, "09:05"],
+    ["2026-09-12T22:30:00.000Z", 240, "02:30"],
+    ["2026-09-13T19:20:00.000Z", 0, "19:20"],
+    ["2026-09-13T00:00:00.000Z", 0, "00:00"],
+    ["2026-09-13T12:00:00.000Z", 0, "12:00"],
+    ["2026-09-14T01:00:00.000Z", -420, "18:00"],
+  ])("reads the completion %s at offset %i as %s", (iso, offset, clock) => {
+    expect(doneTimeOf(iso, offset)).toBe(clock);
   });
 });
 
@@ -318,5 +392,211 @@ describe("sectionsFor, the Logbook of a repeating task", () => {
 
     expect(sections[0].rows.map((row) => row.key)).toEqual(["a"]);
     expect(sections[0].rows[0].untickable).toBe(true);
+  });
+});
+
+/** A COMPLETION STAYS IN ITS LIST FOR THE DAY, AND IS IN THE LOGBOOK TOO.
+ *
+ *  Both, from the same record, on the same day. The Logbook is a read of
+ *  completions and not a filter over `listOf`, so the two answers are pinned
+ *  against each other here rather than one being derived from the other. */
+describe("a completion made today, read both ways", () => {
+  const both = [
+    task("open", { when: TODAY, category: "Work" }),
+    task("done", {
+      when: TODAY,
+      category: "Work",
+      done: true,
+      doneAt: `${TODAY}T09:00:00.000Z`,
+    }),
+  ];
+
+  it("sits at the foot of its own group in the Today view", () => {
+    expect(shape(sectionsFor(both, list("today"), TODAY, UTC))).toEqual([
+      ["Work", ["open", "done"]],
+    ]);
+  });
+
+  /** Every list the spec names, one row each. The Today case above is the one
+   *  anybody watches. These three were right and unpinned, which is how a
+   *  derive quietly loses one of them. */
+  it.each([
+    [
+      "Upcoming",
+      "upcoming" as const,
+      { when: "2026-09-16" },
+      ["Wed 16", ["upcoming-open", "upcoming-done"]],
+    ],
+    ["Inbox", "inbox" as const, {}, [null, ["inbox-open", "inbox-done"]]],
+    [
+      "Someday",
+      "someday" as const,
+      { when: "someday" },
+      [null, ["someday-open", "someday-done"]],
+    ],
+  ])("keeps a completion made today in %s, at the foot of its group", (
+    name,
+    listName,
+    over,
+    expected,
+  ) => {
+    const stem = name.toLowerCase();
+    const tasks = [
+      task(`${stem}-open`, over),
+      task(`${stem}-done`, {
+        ...over,
+        done: true,
+        doneAt: `${TODAY}T09:00:00.000Z`,
+      }),
+    ];
+    expect(shape(sectionsFor(tasks, list(listName), TODAY, UTC))).toEqual([expected]);
+  });
+
+  /** Spec 2 names the category view beside the four lists, and it was the one
+   *  that erased the morning's work the instant it was done. */
+  it("keeps it in a category view too, sunk under what is still open", () => {
+    expect(
+      shape(
+        sectionsFor(
+          both,
+          { kind: "category", category: "Work" },
+          TODAY,
+          UTC,
+        ),
+      ),
+    ).toEqual([["Today", ["open", "done"]]]);
+  });
+
+  it("lets a completion made YESTERDAY leave the category view for the Logbook", () => {
+    const yesterday = [
+      task("stale", {
+        when: TODAY,
+        category: "Work",
+        done: true,
+        doneAt: "2026-09-12T09:00:00.000Z",
+      }),
+    ];
+    expect(
+      shape(
+        sectionsFor(
+          yesterday,
+          { kind: "category", category: "Work" },
+          TODAY,
+          UTC,
+        ),
+      ),
+    ).toEqual([]);
+  });
+
+  it("sits under Today in the Logbook view, by the day it was finished", () => {
+    expect(shape(sectionsFor(both, list("logbook"), TODAY, UTC))).toEqual([
+      ["Today", ["done"]],
+    ]);
+  });
+
+  it("reads the day it was finished in the reader's own offset, not UTC's", () => {
+    // 21:00 UTC on the 13th is 01:00 on the 14th in Dubai (+240), so a reader
+    // there finished it TODAY and the row has not moved out of their list.
+    const late = [
+      task("late", {
+        when: "2026-09-14",
+        category: "Work",
+        done: true,
+        doneAt: "2026-09-13T21:00:00.000Z",
+      }),
+    ];
+    expect(shape(sectionsFor(late, list("today"), "2026-09-14", 240))).toEqual([
+      ["Work", ["late"]],
+    ]);
+    expect(shape(sectionsFor(late, list("today"), "2026-09-14", UTC))).toEqual([]);
+  });
+
+  it("counts for the Done-for-today state off the completion, not off the list", () => {
+    expect(countsFor(both, TODAY, UTC).doneToday).toBe(1);
+  });
+});
+
+/** The three things the row's tail derives from the record and nothing else. */
+describe("the row's clock, moon and fired reminder", () => {
+  it("gives the stored clock back verbatim, and null when there is none", () => {
+    expect(timeCaption(task("a", { when: TODAY, time: "13:00" }))).toBe("13:00");
+    expect(timeCaption(task("b", { when: TODAY }))).toBeNull();
+  });
+
+  it("stands the moon on an evening today and on one still ahead", () => {
+    expect(eveningMoon(task("a", { when: TODAY, evening: true }), TODAY)).toBe(true);
+    expect(eveningMoon(task("b", { when: "2026-09-14", evening: true }), TODAY)).toBe(
+      true,
+    );
+  });
+
+  it("takes the moon off an evening already past, and off a task with no day", () => {
+    expect(eveningMoon(task("a", { when: "2026-09-11", evening: true }), TODAY)).toBe(
+      false,
+    );
+    expect(eveningMoon(task("b", { evening: true }), TODAY)).toBe(false);
+    expect(eveningMoon(task("c", { when: TODAY }), TODAY)).toBe(false);
+  });
+
+  it("reads a reminder as fired only while the task is still open", () => {
+    const at = `${TODAY}T12:00:00.000Z`;
+    expect(reminderFired(task("a", { when: TODAY, remindedAt: at }))).toBe(true);
+    expect(
+      reminderFired(
+        task("b", {
+          when: TODAY,
+          remindedAt: at,
+          done: true,
+          doneAt: `${TODAY}T13:00:00.000Z`,
+        }),
+      ),
+    ).toBe(false);
+    expect(reminderFired(task("c", { when: TODAY }))).toBe(false);
+  });
+});
+
+/** THE WORD A FIELD IS NAMED BY, one row per answer there is. */
+describe("whenLabel", () => {
+  it.each<[string | null | undefined, string]>([
+    [TODAY, "Today"],
+    ["2026-09-14", "Tomorrow"],
+    ["someday", "Someday"],
+    [null, "No date"],
+    ["2026-09-20", "20 Sep"],
+    // Yesterday is a date and never the word. The tail already says "since
+    // Sat" over an overdue row, and a second wording here would be a second
+    // answer to where the task went.
+    ["2026-09-12", "12 Sep"],
+  ])("reads %s as %s", (when, label) => {
+    expect(whenLabel(when, TODAY)).toBe(label);
+  });
+
+  it("reads a missing day the same way it reads a cleared one", () => {
+    expect(whenLabel(undefined, TODAY)).toBe("No date");
+  });
+});
+
+/** THE WORD A MOVE IS REPORTED IN, which names a LIST and so differs from the
+ *  chip's word in exactly two places. */
+describe("movedLabel", () => {
+  it.each<[string | null, boolean, string]>([
+    [TODAY, false, "Today"],
+    // The one list with no day. "Moved to No date" is a sentence about a field
+    // nobody is looking at; the Inbox is where the reader will go and find it.
+    [null, false, "Inbox"],
+    // A section of Today with a header of its own. "Moved to Today" over a row
+    // that went to the evening is the chip and the toast disagreeing.
+    [TODAY, true, "This Evening"],
+    ["2026-09-14", false, "Tomorrow"],
+    ["someday", false, "Someday"],
+    ["2026-09-20", false, "20 Sep"],
+  ])("reads %s (evening %s) as %s", (when, evening, label) => {
+    expect(movedLabel({ when, evening }, TODAY)).toBe(label);
+  });
+
+  it("keeps the evening to the day it is the evening of", () => {
+    // The picker takes the evening off the moment the day stops being today,
+    // so this pair cannot be produced; if it ever is, the day is the answer.
+    expect(movedLabel({ when: "2026-09-20", evening: true }, TODAY)).toBe("20 Sep");
   });
 });

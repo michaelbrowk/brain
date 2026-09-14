@@ -28,4 +28,10 @@ export async function register() {
   // otherwise one request thirty seconds after boot, then once a day.
   const { scheduleUpdateChecks } = await import("./lib/update-check");
   scheduleUpdateChecks();
+
+  // The reminder scan. Off under NODE_ENV=test and BRAIN_REMINDERS=0;
+  // otherwise one pass fifteen seconds after boot, then every thirty seconds.
+  // It also carries the new-mail poll, on every second tick.
+  const { scheduleReminderScans } = await import("./lib/reminders/scheduler");
+  scheduleReminderScans();
 }

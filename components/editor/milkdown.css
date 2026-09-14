@@ -1140,15 +1140,27 @@ html[data-kbd] .milkdown .ProseMirror .brain-task-mark:focus-visible {
 
 /* The + Task popover. `brain-menu` owns the material and the motion, down to
    the 220ms materialize on `data-state` and its reduced-motion crossfade; the
-   width and the placement are all this adds. 220 rather than the list menu's
-   264, because it holds five short words and nothing else. */
+   width and the placement are all this adds. 264, which is the list menu's own
+   width and the seven 36px day cells of the When picker inside it. */
 .brain-task-menu {
   position: fixed;
   z-index: var(--z-modal);
-  width: 220px;
+  width: 264px;
 }
 .brain-task-menu > .brain-menu-label {
   white-space: normal;
+}
+/* The Inbox row stands above the picker's scroller in this popover, so the
+   room the grid may take is what is left after it: one 32px row plus the
+   material's own 6px top and bottom. The property itself is written by
+   `place()` in `task-checkbox.ts`, which is this popover's own positioner,
+   and so is the `--tabbar-reserve` of 0 it writes when the panel lands above
+   the line and the floating bar is nowhere near it. */
+.brain-task-menu .brain-when-scroll {
+  max-height: calc(
+    var(--radix-popover-content-available-height, 100dvh) - 44px -
+      var(--tabbar-reserve, 0px)
+  );
 }
 
 /* prose measure: cap text blocks at ~68ch; tables/code breathe full width */

@@ -335,6 +335,26 @@ describe("one field per request, where the store says so", () => {
     expect(patches[0]!.body.when).toBe("someday");
   });
 
+  /** `expectedWhen` IS A COMPLETION'S PRECONDITION AND NOTHING ELSE. The
+   *  store reads it inside `advanceTaskUnlocked`, which is the tick and the
+   *  untick of a repeating task; every other patch reaches `applyTaskPatch`,
+   *  where the field is never looked at. A reschedule that sent one was a
+   *  field in the request body and in the git diff that no reader of either
+   *  could act on. */
+  it("sends no expectedWhen on a reschedule, even of a repeating task", async () => {
+    await mount([task("water", { when: TODAY, repeat: { freq: "daily" } })]);
+
+    const row = boxFor("water").closest(".brain-task-row") as HTMLElement;
+    await act(async () => row.click());
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "s" }));
+    });
+    await settle();
+
+    expect(patches).toHaveLength(1);
+    expect(Object.keys(patches[0]!.body)).toEqual(["when"]);
+  });
+
   it("sends only `done: false` on an untick", async () => {
     await mount(
       [task("shopping", { done: true, doneAt: NOON.toISOString(), page: "page-1" })],

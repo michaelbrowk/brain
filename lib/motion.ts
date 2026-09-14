@@ -75,6 +75,25 @@ export const SPRING_SHEET = { type: "spring", bounce: 0, duration: 0.3 } as cons
 /** Sheets released from a drag — the only preset with bounce. 0.8 / 0.30 */
 export const SPRING_SHEET_GESTURE = { type: "spring", bounce: 0.2, duration: 0.3 } as const;
 
+/** How far (px) or how fast (px/s) a downward drag must carry a sheet before
+ *  the release dismisses it instead of returning it. Here rather than in a
+ *  component because the second sheet is the moment two copies of a number
+ *  become two different numbers. */
+export const SHEET_DISMISS_OFFSET = 120;
+export const SHEET_DISMISS_VELOCITY = 800;
+
+/** How far below its resting place a sheet starts, in px. Here for the same
+ *  reason the two thresholds are: the second sheet is the moment one number
+ *  becomes two. */
+export const SHEET_ENTER_Y = 48;
+
+/** The air above and below an expanded task row's chips, in px. BOTH sides
+ *  travel with the reveal, so the capsule grows once rather than stepping
+ *  open first, and that makes this a motion value and not a stylesheet one:
+ *  the same 6 was three literals (a margin, a padding and this) and the
+ *  "capsule + 40 to the pixel" claim needed all three to agree. */
+export const CHIP_ROW_AIR = 6;
+
 /** Press: scale on pointer-down, 100ms ease-out; hover fills 80ms in / 160ms out. */
 export const PRESS = { scale: 0.97, duration: 0.1 } as const;
 export const PRESS_ICON = { scale: 0.9, duration: 0.1 } as const;

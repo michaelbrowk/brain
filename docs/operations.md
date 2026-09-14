@@ -46,6 +46,23 @@ Every other step applies unchanged.
 - `/var/lib/brain/update` holds the update check's last answer from GitHub.
   The file is fully reconstructible, exempt from backups, and safe to delete
   at any time. Brain recreates it on the next check.
+- `/var/lib/brain/notifications` holds the notification centre's rows, capped
+  at 500. It is reconstructible, exempt from backups, and safe to delete at any
+  time. Deleting it clears the bell and nothing else.
+- `/var/lib/brain/push` is mode `0700` and holds the VAPID key pair (mode
+  `0600`), the registered device subscriptions and the two push toggles. The
+  private key is generated on first use and exists nowhere else: back the
+  directory up or accept that every device re-registers after a restore.
+  Rotating it by deleting the file invalidates every subscription, because a
+  browser bakes the public key into the subscription it created. A `vapid.json`
+  that is present but unreadable is replaced by a fresh pair, which has the
+  same effect, so that case logs `[brain/push] the VAPID pair on disk could not
+  be read` and says every device must register again. Push identifies this
+  server to a push service with `BRAIN_PUBLIC_ORIGIN` when it is set to an
+  `https://` origin, and with the project URL otherwise, so an instance that
+  wants abuse reports to reach its own operator should set that variable.
+  `docs/notifications.md` lists both of these directories file by file, with
+  what each one costs if it is deleted.
 - `/etc/brain/brain.env` contains runtime secrets and is readable only by `root` and the `brain` group.
 - `/etc/brain/deployer.env` contains the read-only GitHub token and merger
   allowlist. It is `root:root` mode `0600` and is never loaded by the app.

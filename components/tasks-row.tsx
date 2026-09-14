@@ -1,6 +1,5 @@
 "use client";
 
-import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import {
   AnimatePresence,
   animate,
@@ -11,9 +10,11 @@ import {
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
+  CHIP_ROW_AIR,
   DUR,
   EASE_OUT,
   HOVER,
+  SPRING_DEAL,
   SPRING_MATERIALIZE,
   SPRING_SELECT,
   SPRING_SHEET_GESTURE,
@@ -31,19 +32,29 @@ import {
   deadlineCaption,
   dayLabel,
   doneTimeOf,
+  eveningMoon,
+  movedLabel,
   movesRow,
   overdueWhenCaption,
+  reminderFired,
   repeatNextLabel,
+  timeCaption,
 } from "./tasks-lists";
 import { TasksRepeatMenu } from "./tasks-repeat-menu";
+import { TasksWhenPicker, type WhenValue } from "./tasks-when-picker";
 import { Icon } from "./ui/icon";
 
-/** THE ROW, AND THE TWO DIRECTIONS IT CAN LEAVE IN.
+/** THE ROW, AND THE ONE DIRECTION IT CAN LEAVE IN.
  *
- *  Done folds UP, into the past. Every reschedule folds DOWN, into the
- *  future. The two verbs never overlap and neither scales the text: a row
- *  leaving is a capsule folding into its own edge (`clip-path` plus real
- *  height), so the words are cut off by an edge rather than shrunk.
+ *  A reschedule folds DOWN, into the future: a capsule folding into its own
+ *  bottom edge (`clip-path` plus real height), so the words are cut off by an
+ *  edge rather than shrunk.
+ *
+ *  A COMPLETION IS NOT A LEAVING (D3). The row is struck through, its title
+ *  goes quiet, and it sinks to the foot of its group on the layout spring,
+ *  where it stays until the day changes. Finishing a task is something the
+ *  reader did, and a list that erases it the moment it is done has nothing
+ *  left to show for the morning.
  *
  *  The completion is a 1200ms hold and the write is issued at its end, not at
  *  the press. A reader who changes their mind inside the window erases the
@@ -160,7 +171,7 @@ export interface TasksRowProps {
    *  what the reader needs told: the write goes to somebody's document, so a
    *  refusal names it. Everything else keeps the route's own `reason`. */
   onReopen: (task: TaskView, refusal?: string) => void;
-  onReschedule: (task: TaskView, when: string | "someday" | null, label: string) => Promise<void>;
+  onReschedule: (task: TaskView, value: WhenValue, label: string) => Promise<void>;
   onPatch: (
     task: TaskView,
     patch: {
@@ -205,17 +216,48 @@ export function TasksRow({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(task.title);
   const [swipeSide, setSwipeSide] = useState<"left" | "right" | null>(null);
+  /** C2. THE ROW IS INVISIBLE FOR THE LENGTH OF ITS OWN REORDER.
+   *
+   *  Completing a task re-sorts it to the foot of its group, and the row used
+   *  to travel there on the layout spring at full opacity: for about 110ms it
+   *  was painted exactly over the rows it passed, two titles in one composite,
+   *  and an OPEN task wearing the struck row's filled box and its strike. So
+   *  it fades out where it stands over `DUR.base`, the reorder happens with
+   *  nothing on screen to see it, and it fades in at the foot. Set before the
+   *  write leaves, so framer measures the new place with the flag already
+   *  true; cleared when the fade is over. Reduced motion never sets it and
+   *  gets the instant reorder it already had.
+   *
+   *  THE FADE IS DRAWN ON THE WRAPPER AND NOT ON THE LIST ITEM. See the
+   *  comment on `.brain-task-swipe` below: the item is the node the reorder
+   *  moves, and an opacity animation on a node being moved never paints. */
+  const [sinking, setSinking] = useState(false);
+  const sinkRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const x = useMotionValue(0);
 
   const linked = task.page !== undefined && task.detachedAt === undefined;
   const detached = task.detachedAt !== undefined;
+  /** A completed row in a list answers its checkbox and nothing else. Its
+   *  chips would edit a record the reader has finished with, its title is not
+   *  worth a keyboard on a phone, and a reschedule key on it would move
+   *  something that is already in the past. */
+  const inert = historic || task.done;
   const overdueWhen = overdueWhenCaption(task, today);
   const deadline = deadlineCaption(task, today);
+  /** The chip's word, and the sentence a screen reader hears in its place:
+   *  every chip on this row names its field and its value, so a bare `20 Sep`
+   *  beside a When chip would be a date with nothing to attach it to. */
+  const deadlineWord = task.deadline ? dayLabel(task.deadline) : "Deadline";
+  const deadlineSpoken = task.deadline ? `Deadline: ${deadlineWord}` : "Deadline";
   const repeatNext = repeatNextLabel(task, today);
+  const time = timeCaption(task);
+  const moon = eveningMoon(task, today);
+  const fired = reminderFired(task);
 
   useEffect(
     () => () => {
       if (holdRef.current) clearTimeout(holdRef.current);
+      if (sinkRef.current) clearTimeout(sinkRef.current);
     },
     [],
   );
@@ -229,32 +271,37 @@ export function TasksRow({
     return true;
   }, [reduce]);
 
-  /** The fold and the write start on the same beat, 1300ms after the press.
-   *  A refusal cancels the fold and puts the box back. */
+  /** THE WRITE STILL LANDS AT 1300, AND THE ROW STAYS.
+   *
+   *  Completing a task is not the task leaving. The strike is drawn, the title
+   *  goes quiet, and the row sinks to the foot of its group on the layout
+   *  spring because the derive now sorts it there. A refusal puts the box and
+   *  the quiet title back and the row never moved. */
   const commit = useCallback(async () => {
-    const element = wrapRef.current;
-    const fold = element ? foldRow(element, "up", reduce) : null;
-    let refused = false;
+    // Before the write leaves, so the optimistic re-sort and this flag land in
+    // one render and framer measures the row's new place with the fade already
+    // on. Set after it, the layout spring would have started travelling first.
+    if (!reduce) setSinking(true);
     try {
       await onComplete(
         task,
         linked ? `Couldn't tick in ${pageTitle ?? "that note"}` : undefined,
       );
+      if (!reduce) {
+        sinkRef.current = setTimeout(() => {
+          sinkRef.current = null;
+          setSinking(false);
+        }, DUR.base * 1000);
+      }
     } catch {
-      refused = true;
-    }
-    if (refused) {
-      fold?.cancel();
       if (boxRef.current) setTaskCheckboxChecked(boxRef.current, false, reduce);
       // Everything the hold changed goes back, not only the tick. `holding`
-      // dims the title and grows the tail that names the next occurrence, so
-      // a row left holding after a refusal reads as completed while the toast
-      // says it failed.
+      // strikes the title and grows the tail that names the next occurrence,
+      // so a row left holding after a refusal reads as completed while the
+      // toast says it failed. The fade goes back with it: the row never moved.
       setHolding(false);
-      onFoldEnd(task.id);
-      return;
+      setSinking(false);
     }
-    await fold?.finished;
     onFoldEnd(task.id);
   }, [linked, onComplete, onFoldEnd, pageTitle, reduce, task]);
 
@@ -305,12 +352,14 @@ export function TasksRow({
    *  `tasks-actions` reports on, so the motion and the words cannot
    *  disagree. */
   const leaveDown = useCallback(
-    async (when: string | "someday" | null, label: string) => {
-      const element = movesRow(task, when, today) ? wrapRef.current : null;
+    async (value: WhenValue, label: string) => {
+      const element = movesRow(task, value.when, today, offsetMinutes)
+        ? wrapRef.current
+        : null;
       const fold = element ? foldRow(element, "down", reduce) : null;
       let refused = false;
       try {
-        await onReschedule(task, when, label);
+        await onReschedule(task, value, label);
       } catch {
         refused = true;
       }
@@ -318,7 +367,7 @@ export function TasksRow({
       else await fold?.finished;
       onFoldEnd(task.id);
     },
-    [onFoldEnd, onReschedule, reduce, task, today],
+    [offsetMinutes, onFoldEnd, onReschedule, reduce, task, today],
   );
 
   useRowShortcuts({
@@ -329,20 +378,19 @@ export function TasksRow({
     onExpand,
     today,
     rowKey: key,
-    historic,
+    inert,
+    task,
   });
 
   const swipeHandlers = useSwipe({
     x,
     reduce,
-    enabled: !task.done && !historic && !expanded,
+    enabled: !inert && !expanded,
     onWord: setSwipeSide,
     onCommit: (side) => {
       setSwipeSide(null);
-      void leaveDown(
-        side === "right" ? tomorrowOf(today) : "someday",
-        side === "right" ? "Tomorrow" : "Someday",
-      );
+      const when = side === "right" ? tomorrowOf(today) : "someday";
+      void leaveDown(whenValueFor(task, when), movedLabel({ when, evening: false }, today));
     },
     onRelease: () => setSwipeSide(null),
   });
@@ -357,6 +405,10 @@ export function TasksRow({
     // selection capsule on it would be the same refusal one gesture later.
     if (historic) return;
     onSelect(key);
+    // A COMPLETED ROW STOPS HERE. The arrows can stand on it, because it is
+    // still a row in the list, but its chips would edit a record the reader
+    // has finished with and its title is not worth a keyboard on a phone.
+    if (inert) return;
     // The title becomes editable on a SECOND tap, not on expansion, so a
     // phone keyboard does not rise from opening a row.
     if (expanded && (event.target as HTMLElement).closest(".brain-task-title")) {
@@ -390,16 +442,42 @@ export function TasksRow({
       ref={wrapRef}
       className="brain-task-row-item"
       data-task-id={task.id}
-      data-holding={holding ? "" : undefined}
+      // THE SINK. The row travels to its new place in the group rather than
+      // cutting there. `layout="position"` and not `layout`: the box's height
+      // is the row's own and a size animation would stretch the words inside
+      // it. Reduced motion moves it with no spring at all, which is a reflow.
+      layout={reduce ? false : "position"}
       initial={arrival}
+      // The arrival's opacity and nothing else: the sink's fade is one node in.
       animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0, height: "auto" }}
       transition={{
         duration: entrance === "insert" ? DUR.page : DUR.base,
         ease: EASE_OUT,
         delay: reduce ? 0 : arrivalDelay,
+        // The sink has its own curve, and the entrance keeps its stagger: one
+        // `transition` for two animations would give the travel the arrival's
+        // delay and the arrival the travel's spring.
+        //
+        // AND A COMPLETION'S REORDER IS NOT A TRAVEL AT ALL. Duration 0, held
+        // back by the length of the fade above it, so the row is already gone
+        // from the screen when it changes place and back by the time it is
+        // drawn again. Every other layout change is still the spring: a
+        // neighbour closing the gap is the one thing here that should move.
+        layout: sinking ? { duration: 0, delay: DUR.base } : SPRING_DEAL,
       }}
     >
-      <div className="brain-task-swipe">
+      {/* THE FADE RIDES HERE, ONE NODE IN FROM THE ROW'S OWN ELEMENT. React
+          reorders the list by moving the `<li>`, and an opacity animation on
+          a node that is being moved never paints: measured on the page, the
+          struck row held full ink through the whole sink, and the C2
+          composite this was meant to remove was still on screen, a neighbour
+          springing across a full-opacity row. This wrapper, which no reorder
+          re-parents, keeps the fade through the move. */}
+      <motion.div
+        className="brain-task-swipe"
+        animate={reduce ? { opacity: 1 } : { opacity: sinking ? 0 : 1 }}
+        transition={{ duration: DUR.base, ease: EASE_OUT }}
+      >
         <AnimatePresence>
           {swipeSide && (
             <motion.span
@@ -423,6 +501,11 @@ export function TasksRow({
           data-selected={selected ? "" : undefined}
           data-expanded={expanded ? "" : undefined}
           data-done={task.done ? "" : undefined}
+          // Every state the row's own rules read sits on the row's own
+          // element. The hold used to be flagged one level up, on the list
+          // item, so `.brain-task-row[data-holding]` matched nothing and the
+          // title never went quiet behind the held tick.
+          data-holding={holding ? "" : undefined}
           data-historic={historic ? "" : undefined}
           style={{ x }}
           onClick={openRow}
@@ -469,8 +552,39 @@ export function TasksRow({
                 </span>
               )}
               <span className="brain-task-tail">
-                {linked && <Icon name="document-text" size={14} className="text-ink-3" />}
-                {task.repeat && <Icon name="restart" size={14} className="text-ink-3" />}
+                {/* The clock the record holds, verbatim, then the moon. Both
+                    lead the tail: they are where in the DAY this row sits, and
+                    the glyphs behind them are what KIND of row it is.
+
+                    ONE CLOCK PER ROW. A finished row reports the time it was
+                    finished at, further down this chain, and the hour it was
+                    due at is what the strike is drawn over: two clocks side by
+                    side made the reader work out which was which. A done row
+                    with no instant to report then says nothing, which is
+                    right, because there is nothing to report. */}
+                {time && !task.done && (
+                  <span
+                    className="brain-task-caption"
+                    data-time
+                    data-fired={fired ? "" : undefined}
+                  >
+                    {time}
+                  </span>
+                )}
+                {/* THE GLYPH SLOT, drawn on every row whether or not this row
+                    has a glyph for it. The tail is a flex whose last child is
+                    flush, so a row carrying `restart` put its clock 22px left
+                    of where a row without one put its own, in the same list,
+                    on the axis a reader scans down. */}
+                <span className="brain-task-glyphs">
+                  {moon && <Icon name="moon-linear" size={14} className="text-ink-3" />}
+                  {linked && (
+                    <Icon name="document-text" size={14} className="text-ink-3" />
+                  )}
+                  {task.repeat && (
+                    <Icon name="restart" size={14} className="text-ink-3" />
+                  )}
+                </span>
                 {/* Spec 2.1, t=100: a repeat grows `restart` plus the day the
                     next one lands on, so the row says where it went before it
                     goes. `materializeFade` is the spec's own choice here and
@@ -522,17 +636,60 @@ export function TasksRow({
             </span>
             <AnimatePresence initial={false}>
               {expanded && (
+                /* THE CHIP ROW CARRIES THE CAPSULE'S HEIGHT. It wraps at 390,
+                   where four chips do not fit on one line, so the number that
+                   used to be in the stylesheet cannot know how tall it is. The
+                   row reveals itself from 0 and the capsule, which is
+                   `height: auto` now, grows with it: the same 220ms growth,
+                   measured off the chips rather than assumed.
+
+                   BOTH SIDES OF THE AIR TRAVEL WITH IT. The 6 below the chips
+                   was `padding-bottom` on the capsule, applied in the frame the
+                   attribute was, and padding on a box drawn at chip height 0
+                   steps the row open 6px before it grows. It is this element's
+                   margin now, animated from 0 like the air above it, so the
+                   capsule moves once. */
                 <motion.span
                   className="brain-task-chips"
-                  initial={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, transition: { duration: DUR.fast, ease: "easeIn" } }}
+                  initial={
+                    reduce
+                      ? { opacity: 0, marginTop: CHIP_ROW_AIR, marginBottom: CHIP_ROW_AIR }
+                      : {
+                          opacity: 0,
+                          height: 0,
+                          marginTop: 0,
+                          marginBottom: 0,
+                          y: -4,
+                        }
+                  }
+                  animate={
+                    reduce
+                      ? { opacity: 1, marginTop: CHIP_ROW_AIR, marginBottom: CHIP_ROW_AIR }
+                      : {
+                          opacity: 1,
+                          height: "auto",
+                          marginTop: CHIP_ROW_AIR,
+                          marginBottom: CHIP_ROW_AIR,
+                          y: 0,
+                        }
+                  }
+                  exit={
+                    reduce
+                      ? { opacity: 0, transition: { duration: DUR.fast, ease: "easeIn" } }
+                      : {
+                          opacity: 0,
+                          height: 0,
+                          marginTop: 0,
+                          marginBottom: 0,
+                          transition: { duration: DUR.fast, ease: "easeIn" },
+                        }
+                  }
                   transition={SPRING_MATERIALIZE}
                 >
                   <WhenChip
                     task={task}
                     today={today}
-                    onPick={(when, label) => void leaveDown(when, label)}
+                    onPick={(value) => void leaveDown(value, movedLabel(value, today))}
                   />
                   <CategoryPicker
                     chip
@@ -560,20 +717,28 @@ export function TasksRow({
                       already past would pull it straight into Today, so the
                       chip is not offered there. */}
                   {task.when !== "someday" && (
-                  <label className="chip" data-task-control>
-                    <span className="chip-glyph">
-                      <Icon name="flag" size={14} />
-                    </span>
-                    <span className="sr-only">Deadline</span>
-                    <input
-                      type="date"
-                      className="brain-task-date"
-                      value={task.deadline ?? ""}
-                      onChange={(event) =>
-                        onPatch(task, { deadline: event.currentTarget.value || null })
+                    <TasksWhenPicker
+                      mode="deadline"
+                      value={{ when: task.deadline ?? null, evening: false, time: null }}
+                      today={today}
+                      /* `mode="deadline"` draws no Someday row, so the value
+                         is a day or nothing and the record takes it whole. */
+                      onPick={(value) => onPatch(task, { deadline: value.when })}
+                      ariaLabel={deadlineSpoken}
+                      trigger={
+                        <button
+                          type="button"
+                          className="chip"
+                          data-task-control
+                          aria-label={deadlineSpoken}
+                        >
+                          <span className="chip-glyph">
+                            <Icon name="flag" size={14} />
+                          </span>
+                          {deadlineWord}
+                        </button>
                       }
                     />
-                  </label>
                   )}
                   {task.page && pageTitle && (
                     <button
@@ -593,20 +758,13 @@ export function TasksRow({
             </AnimatePresence>
           </span>
         </motion.div>
-      </div>
+      </motion.div>
     </motion.li>
   );
 }
 
 export function tomorrowOf(today: string): string {
   return dayAfter(today, 1);
-}
-
-/** The day "Next week" means, and the same one `lib/tasks/lists.ts` opens the
- *  Next week group on: seven days out, past the six that still carry a
- *  weekday name. */
-export function nextWeekOf(today: string): string {
-  return dayAfter(today, 7);
 }
 
 function dayAfter(today: string, days: number): string {
@@ -620,35 +778,25 @@ function dayAfter(today: string, days: number): string {
   return next.toISOString().slice(0, 10);
 }
 
-/** WHICH CONTROL A DATE GETS, BY MODALITY.
+/** THE VALUE A KEY, A SWIPE OR A PALETTE ROW SENDS.
  *
- *  On touch the system picker is the better control by a distance and opens
- *  from the native input directly (decision: the note's own row does the
- *  same). On a pointer it is the only place in Brain where the browser draws
- *  the chrome: it renders `14/09/2026` in the browser's own metrics beside
- *  four Solar glyphs and one of Chrome's, inside a menu the spec calls quiet.
- *  So a pointer gets a `brain-menu` row that REVEALS the input, and the row
- *  reads as every other row in the list until it is asked for.
- *
- *  Defaults to touch: a reader whose browser answers no media query gets the
- *  native control, which is the one that works everywhere. */
-function usePointerFine(): boolean {
-  const [fine, setFine] = useState(false);
-  useEffect(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-      return;
-    }
-    const query = window.matchMedia("(hover: hover)");
-    const sync = () => setFine(query.matches);
-    sync();
-    query.addEventListener?.("change", sync);
-    return () => query.removeEventListener?.("change", sync);
-  }, []);
-  return fine;
+ *  The picker answers with all three fields at once, and these three gestures
+ *  name a day and nothing else, so the other two are read off the record: the
+ *  clock the task already carries stays with it, and the evening comes off,
+ *  which is what the picker's own Today row and its grid do. Someday and the
+ *  Inbox are not days at all, and a clock on neither is a shape
+ *  `lib/tasks/model.ts` refuses, so both come off with the day. */
+export function whenValueFor(
+  task: TaskView,
+  when: string | "someday" | null,
+): WhenValue {
+  const onADay = when !== null && when !== "someday";
+  return { when, evening: false, time: onADay ? (task.time ?? null) : null };
 }
 
-/** The When chip's menu: the two days a task list actually moves things to,
- *  Someday, a date for everything else, and the way back out. */
+/** The When chip, and the one date control behind it (D4). The chip says where
+ *  the task sits in the reader's own words, and the picker says everything
+ *  else: a month grid, This Evening, Someday and the reminder's clock. */
 function WhenChip({
   task,
   today,
@@ -656,108 +804,45 @@ function WhenChip({
 }: {
   task: TaskView;
   today: string;
-  onPick: (when: string | "someday" | null, label: string) => void;
+  onPick: (value: WhenValue) => void;
 }) {
-  const tomorrow = tomorrowOf(today);
-  const nextWeek = nextWeekOf(today);
-  const fine = usePointerFine();
-  const [picking, setPicking] = useState(false);
   const label =
     task.when === "someday"
       ? "Someday"
       : task.when === today
-        ? "Today"
-        : task.when === tomorrow
+        ? task.evening
+          ? "This Evening"
+          : "Today"
+        : task.when === tomorrowOf(today)
           ? "Tomorrow"
           : task.when
             ? dayLabel(task.when)
             : "When";
-  const dateRow = (
-    <label className="brain-menu-item" data-task-control data-task-when-date>
-      <Icon name="calendar-linear" size={16} className="brain-menu-icon" />
-      <span className="min-w-0 flex-1">Date</span>
-      <input
-        type="date"
-        autoFocus={picking}
-        className="brain-task-date"
-        value={task.when && task.when !== "someday" ? task.when : ""}
-        onChange={(event) => {
-          const value = event.currentTarget.value;
-          if (value) onPick(value, dayLabel(value));
-        }}
-      />
-    </label>
-  );
-
+  // EVERY CHIP NAMES ITS FIELD AND ITS VALUE, which is the sentence the
+  // Category and Repeat chips beside it already say: "Today" alone, read out
+  // next to a Deadline chip, is a date with nothing to attach it to. The
+  // popover carries the same words, so the control and the panel it opens are
+  // announced as one thing.
+  const spoken = `When: ${label}${task.time ? ` at ${task.time}` : ""}`;
   return (
-    <Dropdown.Root
-      onOpenChange={(open) => {
-        // The reveal belongs to one opening of the menu, so the list is the
-        // same list every time it is opened.
-        if (!open) setPicking(false);
+    <TasksWhenPicker
+      value={{
+        when: task.when ?? null,
+        evening: task.evening === true,
+        time: task.time ?? null,
       }}
-    >
-      <Dropdown.Trigger asChild>
-        <button type="button" className="chip" data-task-control aria-label={`When: ${label}`}>
+      today={today}
+      onPick={onPick}
+      ariaLabel={spoken}
+      trigger={
+        <button type="button" className="chip" data-task-control aria-label={spoken}>
           <span className="chip-glyph">
             <Icon name="calendar" size={14} />
           </span>
           {label}
         </button>
-      </Dropdown.Trigger>
-      <Dropdown.Portal>
-        <Dropdown.Content
-          side="bottom"
-          align="start"
-          sideOffset={6}
-          collisionPadding={8}
-          className="brain-menu z-[var(--z-modal)] w-[220px]"
-        >
-          <Dropdown.Item className="brain-menu-item" onSelect={() => onPick(today, "Today")}>
-            <Icon name="calendar-date-linear" size={16} className="brain-menu-icon" />
-            Today
-          </Dropdown.Item>
-          <Dropdown.Item className="brain-menu-item" onSelect={() => onPick(tomorrow, "Tomorrow")}>
-            <Icon name="calendar-linear" size={16} className="brain-menu-icon" />
-            Tomorrow
-          </Dropdown.Item>
-          <Dropdown.Item
-            className="brain-menu-item"
-            onSelect={() => onPick(nextWeek, "Next week")}
-          >
-            <Icon name="calendar-linear" size={16} className="brain-menu-icon" />
-            Next week
-          </Dropdown.Item>
-          <Dropdown.Item className="brain-menu-item" onSelect={() => onPick("someday", "Someday")}>
-            <Icon name="box-minimalistic-linear" size={16} className="brain-menu-icon" />
-            Someday
-          </Dropdown.Item>
-          <Dropdown.Separator className="brain-menu-sep" />
-          {fine && !picking ? (
-            <Dropdown.Item
-              className="brain-menu-item"
-              data-task-when-pick
-              onSelect={(event) => {
-                // The menu stays open: the row it reveals is inside it.
-                event.preventDefault();
-                setPicking(true);
-              }}
-            >
-              <Icon name="calendar-linear" size={16} className="brain-menu-icon" />
-              Pick a date
-            </Dropdown.Item>
-          ) : (
-            dateRow
-          )}
-          {task.when && (
-            <Dropdown.Item className="brain-menu-item" onSelect={() => onPick(null, "Inbox")}>
-              <Icon name="close-linear" size={16} className="brain-menu-icon" />
-              Clear
-            </Dropdown.Item>
-          )}
-        </Dropdown.Content>
-      </Dropdown.Portal>
-    </Dropdown.Root>
+      }
+    />
   );
 }
 
@@ -781,21 +866,26 @@ function useRowShortcuts({
   onExpand,
   today,
   rowKey,
-  historic,
+  inert,
+  task,
 }: {
   selected: boolean;
   expanded: boolean;
   completeNow: () => void;
-  leaveDown: (when: string | "someday" | null, label: string) => Promise<void>;
+  leaveDown: (value: WhenValue, label: string) => Promise<void>;
   onExpand: (id: string | null) => void;
   today: string;
   rowKey: string;
-  historic: boolean;
+  inert: boolean;
+  /** The record the value is built over: a key names a day and the clock on it
+   *  is already the task's. */
+  task: TaskView;
 }) {
   useEffect(() => {
-    // A history row answers no key for the same reason it answers no press:
-    // there is nothing on it left to move or to undo.
-    if (!selected || historic) return;
+    // A finished row answers no key for the same reason it answers no press:
+    // there is nothing on it left to move, and `t` on a task that is already
+    // in the past would file a completion under today.
+    if (!selected || inert) return;
     const onKey = (event: KeyboardEvent) => {
       if (isTyping(event.target)) return;
       const meta = event.metaKey || event.ctrlKey;
@@ -813,28 +903,33 @@ function useRowShortcuts({
       // spec's own chord alongside the two letters.
       if (meta && event.key === "]") {
         event.preventDefault();
-        void leaveDown(tomorrowOf(today), "Tomorrow");
+        const tomorrow = tomorrowOf(today);
+        void leaveDown(
+          whenValueFor(task, tomorrow),
+          movedLabel({ when: tomorrow, evening: false }, today),
+        );
         return;
       }
       if (meta || event.altKey) return;
       const move = ROW_KEYS[event.key.toLowerCase()];
       if (!move) return;
       event.preventDefault();
-      void leaveDown(move.when(today), move.label);
+      void leaveDown(whenValueFor(task, move.when(today)), move.label);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [completeNow, expanded, historic, leaveDown, onExpand, rowKey, selected, today]);
+  }, [completeNow, expanded, inert, leaveDown, onExpand, rowKey, selected, task, today]);
 }
 
 /** The two the palette carries too, so a key and a palette row never disagree
  *  about where `t` sends a task.
  *
- *  There is no third. Things binds `e` to This evening and Brain has no
- *  evening: the record holds a day or the word `someday`
- *  (`lib/tasks/model.ts`), and the spec names no state between them. A key
- *  that filed for today under an evening's name would be a second answer to
- *  where the task is, and a key that did exactly what `t` does is a dead one. */
+ *  There is no third. Brain does have an evening now, and Things binds `e` to
+ *  it, but the evening is a SECTION of today rather than a place a task is
+ *  sent to: `e` would file the row where `t` already files it and then set one
+ *  more field, which is the picker's Evening row one press away with the day
+ *  in front of the reader. A key that half-does what a control does properly
+ *  is the one shape a shortcut must not have. */
 export const ROW_KEYS: Record<
   string,
   { when: (today: string) => string | "someday" | null; label: string }

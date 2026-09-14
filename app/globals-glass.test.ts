@@ -28,7 +28,9 @@ describe("liquid glass foundations", () => {
     // surface of its own, never placed inside another): the glass button,
     // the breadcrumb and toolbar pills, menus, the share popover (P3-c),
     // dialogs, the palette, the table handle's action group, and (P5) the
-    // mail search pill and the composer sheet. Plus the cover's two edges,
+    // mail search pill, the composer sheet and the When picker's panel (the
+    // one popover under a grid of numbers, so it takes the sheet's thickness).
+    // Plus the cover's two edges,
     // the only always-on bands (DESIGN.md §7).
     const allowed = [
       /^@utility mat-(thin|reg|thick)$/,
@@ -39,7 +41,7 @@ describe("liquid glass foundations", () => {
       // carries no blur.
       /^\.brain-cover-foot > i:nth-child\([12]\)$/,
       /^\.brain-cover-left > i$/,
-      /^\.(btn-glass|crumb|toolbar-pill|brain-menu|brain-share-popover|brain-dialog|brain-palette|brain-mail-search|brain-composer-sheet)$/,
+      /^\.(btn-glass|crumb|toolbar-pill|brain-menu|brain-share-popover|brain-dialog|brain-palette|brain-mail-search|brain-composer-sheet|brain-when-panel)$/,
       /^\.milkdown \.milkdown-table-block \.cell-handle \.button-group$/,
     ];
     for (const owner of owners) {

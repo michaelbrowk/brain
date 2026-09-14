@@ -214,6 +214,19 @@ folder alone. To remove Brain entirely: `docker compose down -v`, delete the
 compose file and `.env`, and `docker rmi ghcr.io/michaelbrowk/brain:<tag>`.
 The notes folder is yours to keep.
 
+### On a phone
+
+Open Brain in Safari on an iPhone or an iPad, press the share button and pick
+Add to Home Screen. It then runs as its own app, and notifications can reach
+it: Apple gives web push to a web app that has been installed this way and to
+nothing else, so an open Safari tab never rings, whatever you allow. Once it is
+installed, open Settings → Notifications and press "Turn on" on the row for
+this device.
+Android and desktop browsers need no install step for this.
+
+What a reminder is and when one fires is in `docs/notifications.md`, and the
+task record it is set on is in `docs/tasks.md`.
+
 ## Develop
 
 ```bash
@@ -280,6 +293,10 @@ unusual-looking pin is worth much less than a knowingly vulnerable parser.
 | `OPENROUTER_MODEL`   | Optional model override (default `openai/gpt-4o-mini`)          |
 | `BRAIN_UPDATE_CHECK`  | `off` stops the daily release check (default: on)              |
 | `BRAIN_UPDATE_STATE_DIR` | Where the update check keeps its answer (default `/var/lib/brain/update`) |
+| `BRAIN_SETTINGS_STATE_DIR` | Where the owner's settings live, the time zone reminders fire in (default `/var/lib/brain/settings`) |
+| `BRAIN_NOTIFICATIONS_STATE_DIR` | Where the notification centre keeps its rows (default `/var/lib/brain/notifications`) |
+| `BRAIN_REMINDERS`    | `0` stops the reminder scan and the new-mail poll (default: on) |
+| `BRAIN_PUSH_STATE_DIR` | Where push keys and device subscriptions live (default `/var/lib/brain/push`) |
 
 Human access = password → signed httpOnly cookie. MCP clients connect to
 `/api/mcp`, discover Brain OAuth automatically, and open a Brain consent screen.

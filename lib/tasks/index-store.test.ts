@@ -13,7 +13,7 @@ import {
   taskFilePath,
   writeTaskFile,
 } from "./index-store";
-import { taskRecordFields, type TaskRecord } from "./model";
+import { taskLogEntrySchema, taskRecordFields, type TaskRecord } from "./model";
 
 async function tmpRoot(): Promise<string> {
   return fs.mkdtemp(path.join(os.tmpdir(), "brain-tasks-"));
@@ -339,6 +339,8 @@ const EVERY_FIELD: TaskRecord[] = [
     id: ALPHA,
     title: "Water the plants",
     when: DAY,
+    time: "13:00",
+    evening: true,
     deadline: "2026-09-20",
     category: "Home",
     page: PAGE,
@@ -356,7 +358,8 @@ const EVERY_FIELD: TaskRecord[] = [
     deadline: "2026-09-20",
     category: "Home",
     repeat: { freq: "weekly", byWeekday: ["mon"] },
-    log: [{ scheduled: DAY, completedAt: INSTANT }],
+    log: [{ scheduled: DAY, time: "13:00", completedAt: INSTANT }],
+    remindedAt: "2026-09-13T12:00:00.000Z",
     done: false,
     created: INSTANT,
     updated: INSTANT,
@@ -421,5 +424,47 @@ describe("the serializer and the schema, key for key", () => {
     // Nothing called `setLinkedDone`, so a record still read as linked would
     // answer false here and a finished task would reappear in Today.
     expect(index.view(ALPHA)?.done).toBe(true);
+  });
+
+  /** The key list above sees the record's own keys only, because a nested one
+   *  is indented and the regex is anchored. `log` goes to the YAML writer
+   *  whole, so a field added to `taskLogEntrySchema` reaches the file with no
+   *  list to forget it, and the risk moves to the fixtures: an entry that
+   *  never carries the field would let a serializer that drops it pass. This
+   *  reads the block that was written. */
+  it("writes every field a log entry has, and no field it does not", () => {
+    const logged: TaskRecord = {
+      id: BETA,
+      title: "Take the bins out",
+      when: DAY,
+      log: [{ scheduled: DAY, time: "13:00", completedAt: INSTANT }],
+      created: INSTANT,
+      updated: INSTANT,
+    };
+    const written = new Set<string>();
+    let inLog = false;
+    for (const line of serializeTask(logged, "").split("\n")) {
+      if (/^log:/.test(line)) {
+        inLog = true;
+        continue;
+      }
+      if (/^[A-Za-z]/.test(line)) {
+        inLog = false;
+        continue;
+      }
+      if (!inLog) continue;
+      const key = /^\s+-?\s*([A-Za-z][A-Za-z0-9_]*):/.exec(line)?.[1];
+      if (key) written.add(key);
+    }
+    expect([...written].sort()).toEqual(Object.keys(taskLogEntrySchema.shape).sort());
+  });
+
+  it("keeps a time as a quoted string through a write and a read", async () => {
+    const root = await tmpRoot();
+    const [detached] = EVERY_FIELD;
+    await writeTaskFile(root, detached);
+    expect(serializeTask(detached, "")).toContain("time: '13:00'");
+    const index = await loadTaskIndex(root);
+    expect(index.get(ALPHA)?.time).toBe("13:00");
   });
 });

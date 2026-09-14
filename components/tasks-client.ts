@@ -77,6 +77,17 @@ export function localDay(now: Date = new Date()): TasksDay {
   };
 }
 
+/** The device's own IANA zone. Offered with every list request and kept by the
+ *  server only when nothing is set, so the owner's home clock survives a trip.
+ *  The empty string on a platform that cannot answer, which the route drops. */
+export function deviceZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+  } catch {
+    return "";
+  }
+}
+
 async function reasonOf(response: Response): Promise<string> {
   try {
     const body: unknown = await response.json();
@@ -109,7 +120,9 @@ async function load(token: number): Promise<void> {
   set({ loading: true, error: null });
   try {
     const response = await apiFetch(
-      `/api/tasks?today=${day.today}&offset=${day.offsetMinutes}`,
+      `/api/tasks?today=${day.today}&offset=${day.offsetMinutes}&zone=${encodeURIComponent(
+        deviceZone(),
+      )}`,
       { signal: controller.signal },
     );
     if (controller.signal.aborted) return;
@@ -266,6 +279,10 @@ async function refuse(response: Response): Promise<never> {
 export interface CreateTaskInput {
   title: string;
   when?: string;
+  /** `HH:MM`, the reminder, and the evening of the day. Both need a day to be
+   *  about, and the record's own schema refuses either without one. */
+  time?: string;
+  evening?: true;
   deadline?: string;
   category?: string;
 }
@@ -284,6 +301,10 @@ export async function createTask(input: CreateTaskInput): Promise<TaskView> {
 export interface TaskPatch {
   title?: string;
   when?: string | null;
+  /** `null` clears the reminder, and clears the mark that says it already
+   *  fired. A patch that moves the day does the same, in the store. */
+  time?: string | null;
+  evening?: true | null;
   deadline?: string | null;
   category?: string | null;
   /** `null` stops the task repeating and leaves the current instance as an

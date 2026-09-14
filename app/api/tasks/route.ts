@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { captureTimeZone } from "@/lib/owner-settings";
 import { getStore, isTaskValidation } from "@/lib/store";
 import {
   badRequest,
@@ -54,6 +55,22 @@ export async function GET(req: NextRequest) {
     return badRequest("bad_offset");
   }
 
+  // THE ZONE, CAPTURED ONCE. A reminder fires from a timer with no request to
+  // read, so the zone cannot come from a header at the moment it is needed.
+  // The client offers its own with every list request and the server keeps the
+  // first one; a device in another zone does not change it. A name the
+  // platform does not know is dropped in silence, because the list is what the
+  // caller asked for and a refusal here would take a working screen away over
+  // a setting nobody asked to change.
+  // A state directory that cannot be written is the same case: the list is
+  // still owed to the caller, so the failure is logged and goes no further.
+  const zone = params.get("zone");
+  if (zone !== null) {
+    await captureTimeZone(zone).catch((error: unknown) => {
+      console.error("tasks: the owner's time zone could not be captured", error);
+    });
+  }
+
   const category = params.get("category");
 
   const store = await getStore();
@@ -94,6 +111,8 @@ export async function POST(req: NextRequest) {
     const task = await store.createTask({
       title: input.title,
       ...(input.when !== undefined ? { when: input.when } : {}),
+      ...(input.time !== undefined ? { time: input.time } : {}),
+      ...(input.evening !== undefined ? { evening: input.evening } : {}),
       ...(input.deadline !== undefined ? { deadline: input.deadline } : {}),
       ...(input.category !== undefined ? { category: input.category } : {}),
       ...(input.page !== undefined ? { page: input.page } : {}),

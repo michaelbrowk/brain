@@ -103,6 +103,9 @@ describe("settings surface navigation (desktop)", () => {
     apiFetchMock.mockImplementation(async (input) => {
       const url = String(input);
       if (url === "/api/tree") return response({ tree: [] });
+      // the bell asks the centre on mount, on every surface
+      if (url === "/api/notifications")
+        return response({ notifications: [], unread: 0 });
       throw new Error(`unexpected request: ${url}`);
     });
     vi.stubGlobal("matchMedia", (query: string) => ({

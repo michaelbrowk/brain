@@ -5,10 +5,14 @@
 // one, and asks for a second press before firing. About shows the running
 // version and the update check's answer from the shared store.
 
-import { useState } from "react";
+import * as Popover from "@radix-ui/react-popover";
+import { useEffect, useMemo, useState } from "react";
 import { formatAgo } from "@/lib/format-ago";
+import { deviceZone } from "../tasks-client";
 import { Button, IconButton } from "../ui/button";
+import { Field } from "../ui/field";
 import { Icon } from "../ui/icon";
+import { ScrollEdge } from "../ui/scroll-edge";
 import { SettingsGroup, SettingsRow } from "./shared";
 import { useUpdateStatus, type UpdateLoadState } from "./use-update-status";
 
@@ -29,6 +33,148 @@ function updateHint(state: UpdateLoadState): string {
   return `Up to date · checked ${formatAgo(s.checkedAt)}`;
 }
 
+/** The one zone this notebook keeps, and the two ways to change it: pick a
+ *  name, or hand the server the one this browser reports. The picker is the
+ *  category picker's construction (a popover, a field, a filtered list of
+ *  menu items), because a long list of names filtered by typing is the same
+ *  control whichever list it holds.
+ *
+ *  THE ZONE IS THE ROW'S VALUE AND "Use this device" IS THE ROW'S ACTION.
+ *  Both used to be `variant="quiet"`: the same size, the same weight, the
+ *  same colour, thirty pixels apart on one line, with nothing saying which
+ *  was the setting and which was the thing that happens. The name now reads
+ *  as the value it is and opens the picker on a press, and the one button
+ *  beside it is absent while it would do nothing, which is whenever the
+ *  notebook's zone is already this browser's. */
+function ZoneRow({
+  zone,
+  onSet,
+  onToast,
+}: {
+  /** undefined while the first read is in flight, null when nothing is set. */
+  zone: string | null | undefined;
+  onSet: (zone: string) => void;
+  onToast: (title: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  // The browser's own list of names, with UTC in front of it. The platform
+  // answers canonical regions only, 418 of them, and no Etc/* entry at all, so
+  // UTC is a zone the server accepts and the list never offers: a Brain on a
+  // server, or a traveller who wants one fixed clock, has to be able to pick
+  // it. An old browser may not have the call, and the fallback is this device
+  // and UTC, because a control that offers two names beats one that offers
+  // none.
+  const zones = useMemo(() => {
+    try {
+      return ["UTC", ...Intl.supportedValuesOf("timeZone")];
+    } catch {
+      return [deviceZone(), "UTC"].filter((name) => name !== "");
+    }
+  }, []);
+
+  const save = async (next: string) => {
+    setSaving(true);
+    try {
+      const response = await fetch("/api/settings/zone", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        credentials: "same-origin",
+        body: JSON.stringify({ timeZone: next }),
+      });
+      if (!response.ok) throw new Error();
+      onSet(next);
+    } catch {
+      // The zone on screen is the one the server still holds, so it stays.
+      onToast("Could not save the time zone");
+    } finally {
+      setSaving(false);
+      setOpen(false);
+      setDraft("");
+    }
+  };
+
+  const needle = draft.trim().toLowerCase();
+  const filtered = needle
+    ? zones.filter((name) => name.toLowerCase().includes(needle))
+    : zones;
+
+  // While the two agree the button would change nothing, so it is not drawn.
+  // `undefined` is the read still in flight, and a control that appeared and
+  // then vanished a frame later is worse than one that arrives late.
+  const offerThisDevice = zone !== undefined && zone !== deviceZone();
+
+  return (
+    <div className="flex min-w-0 items-center gap-2.5">
+      <Popover.Root open={open} onOpenChange={setOpen}>
+        <Popover.Trigger asChild>
+          {/* Value text, not a button face. It truncates because the longest
+              canonical zone is 30 characters
+              (`America/Argentina/Buenos_Aires`) and the action beside it must
+              survive a 375px phone whole. */}
+          <button
+            type="button"
+            data-zone-value=""
+            disabled={saving}
+            className="min-w-0 truncate text-table text-ink focus-inset"
+          >
+            {zone ?? (zone === null ? "Not set yet" : "…")}
+          </button>
+        </Popover.Trigger>
+        <Popover.Portal>
+          <Popover.Content
+            side="bottom"
+            align="end"
+            sideOffset={6}
+            onOpenAutoFocus={(event) => event.preventDefault()}
+            className="brain-menu brain-keyboard-popover z-[var(--z-modal)] w-[264px]"
+          >
+            <div className="brain-keyboard-popover-panel">
+              <Field
+                on="glass"
+                autoFocus
+                aria-label="Time zone"
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Escape") setOpen(false);
+                }}
+                placeholder="Search zones"
+                className="max-md:text-[16px]"
+              />
+              <ScrollEdge variant="fade" className="mt-1.5 max-h-44">
+                {filtered.map((name) => (
+                  <button
+                    key={name}
+                    type="button"
+                    onClick={() => void save(name)}
+                    className="brain-menu-item w-full"
+                  >
+                    {name}
+                  </button>
+                ))}
+              </ScrollEdge>
+            </div>
+          </Popover.Content>
+        </Popover.Portal>
+      </Popover.Root>
+      {offerThisDevice && (
+        <Button
+          variant="quiet"
+          className="shrink-0"
+          aria-label="Use this device's zone"
+          disabled={saving}
+          onClick={() => void save(deviceZone())}
+        >
+          Use this device
+        </Button>
+      )}
+    </div>
+  );
+}
+
 export function AccountSection({
   onToast,
 }: {
@@ -36,10 +182,48 @@ export function AccountSection({
 }) {
   const [logoutArmed, setLogoutArmed] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [zone, setZone] = useState<string | null | undefined>(undefined);
   const update = useUpdateStatus();
+
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      let answer: string | null = null;
+      try {
+        const response = await fetch("/api/settings/zone", {
+          cache: "no-store",
+          credentials: "same-origin",
+        });
+        if (response.ok) {
+          const body = (await response.json()) as { timeZone?: unknown };
+          if (typeof body.timeZone === "string") answer = body.timeZone;
+        }
+      } catch {
+        // A zone that could not be read reads as unset, the same answer the
+        // server gives before a client has offered one.
+      }
+      if (live) setZone(answer);
+    })();
+    return () => {
+      live = false;
+    };
+  }, []);
 
   return (
     <div className="space-y-7">
+      <SettingsGroup title="Time zone">
+        {/* `stack` because the control is a value and two actions: beside a
+            label on a 375px phone the row runs out of width at a zone name of
+            about 17 characters, and the group clips rather than scrolls. */}
+        <SettingsRow
+          stack
+          label="Reminders fire in"
+          hint="One zone for this notebook, whichever device you are on. Until you pick one, the first browser to open Tasks sets it."
+        >
+          <ZoneRow zone={zone} onSet={setZone} onToast={onToast} />
+        </SettingsRow>
+      </SettingsGroup>
+
       <SettingsGroup title="Sessions">
         <SettingsRow
           label="Log out everywhere"

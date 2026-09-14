@@ -22,6 +22,7 @@ import {
   setTaskCheckboxLabel,
 } from "@/components/tasks-checkbox";
 import { dayLabel } from "@/components/tasks-lists";
+import { renderWhenPicker, type WhenValue } from "@/components/tasks-when-picker";
 import { SOLAR } from "@/components/ui/solar-icons.generated";
 import { apiFetch } from "@/lib/client";
 import { TASKS_CHANGED_EVENT } from "@/lib/editor-events";
@@ -203,8 +204,8 @@ export const taskSplitKeymap = $prose(() => keymap({ Enter: splitTaskItem }));
 
 /** The ghost and the word: one element in two states. */
 export const TASK_MARK_CLASS = "brain-task-mark";
-/** The popover, on the `brain-menu` material at 220 rather than the list
- *  menu's 264. It holds five short words and nothing else. */
+/** The popover, on the `brain-menu` material at the list menu's own 264: it
+ *  holds one short word and the When picker's seven 36px day cells. */
 export const PROMOTE_MENU_CLASS = "brain-task-menu";
 /** A task record changed somewhere this editor cannot see. Dispatched on
  *  `window` by the shell's store-event forwarder in `components/shell.tsx`,
@@ -215,7 +216,9 @@ export const PROMOTE_MENU_CLASS = "brain-task-menu";
  *  had to be written twice. Re-exported for the callers that already had it
  *  from here. */
 export { TASKS_CHANGED_EVENT };
-const MENU_WIDTH = 220;
+/** 264, which is the list menu's own width and the seven 36px day cells of
+ *  the When picker inside this popover. */
+const MENU_WIDTH = 264;
 /** The retrace, `DUR.fast`. The material's own keyframes play it; this is how
  *  long to wait before taking the element away. */
 const MENU_EXIT_MS = DUR.fast * 1000;
@@ -687,7 +690,10 @@ function renderMark(
     "aria-label",
     options.taskId === null ? "Make a task" : `Task, ${options.word}`,
   );
-  button.setAttribute("aria-haspopup", "menu");
+  // A DIALOG, WHICH IS WHAT IT OPENS. The panel holds a month grid and two
+  // spinbuttons, so it stopped being a menu when the grid arrived, and the
+  // arrow-key row walking that made it one went with the role.
+  button.setAttribute("aria-haspopup", "dialog");
   button.setAttribute("aria-expanded", "false");
   // The caret stays where the reader left it: a mark is a control beside the
   // line, not a place inside it.
@@ -720,11 +726,19 @@ interface Day {
   tomorrow: string;
 }
 
-const MENU_ROWS: { label: string; icon: string; when: (day: Day) => string | null }[] = [
-  { label: "Today", icon: "calendar-date-linear", when: (day) => day.today },
-  { label: "Tomorrow", icon: "calendar-linear", when: (day) => day.tomorrow },
-  { label: "Someday", icon: "box-minimalistic-linear", when: () => "someday" },
-  { label: "Inbox", icon: "inbox-linear", when: () => null },
+/** THE ONE ROW THE PICKER DOES NOT DRAW.
+ *
+ *  This popover IS the picker, with the note's own Inbox above it. Today,
+ *  This Evening and Someday are the picker's own quick rows and Tomorrow is a
+ *  cell in its grid, so a list of four here drew Today twice and Someday
+ *  twice, four rows apart, and read as a bug. Inbox is the one word left: a
+ *  task with no day at all, which no grid can say. */
+const MENU_ROWS: { label: string; icon: string; when: (day: Day) => WhenValue }[] = [
+  {
+    label: "Inbox",
+    icon: "inbox-linear",
+    when: () => ({ when: null, evening: false, time: null }),
+  },
 ];
 
 interface OpenMenu {
@@ -736,8 +750,10 @@ interface OpenMenu {
 }
 
 let currentMenu: OpenMenu | null = null;
-/** True while a create or a reschedule is in flight. One gesture is open at a
- *  time, so one flag is one line's guard. */
+/** True while a create or a reschedule is in flight. ONE WRITE AT A TIME for
+ *  the line, across panels: a reader can press the mark again with a write
+ *  still out, and the panel that opens over it is refused out loud rather than
+ *  minting a second record for one checkbox. */
 let writing = false;
 
 function dismissMenu(immediate = false): void {
@@ -759,7 +775,13 @@ function showMenu(
   const day: Day = { today: localDay().today, tomorrow: tomorrowOf() };
   const element = document.createElement("div");
   element.className = `brain-menu ${PROMOTE_MENU_CLASS}`;
-  element.setAttribute("role", "menu");
+  // A DIALOG AND NOT A MENU. `role="menu"` may own menu items and nothing
+  // else, and what stands in here is a month grid, two spinbuttons and four
+  // checkbox rows: a screen reader told this was a menu would not expose the
+  // grid as a grid. The panel carries the picker's own name for the same
+  // reason the row's popover does.
+  element.setAttribute("role", "dialog");
+  element.setAttribute("aria-label", "When");
 
   // A refusal is shown where the choice was made, and not in the shell's
   // toast. The toast is the house surface for a route `reason` everywhere the
@@ -774,6 +796,9 @@ function showMenu(
   element.append(refusal);
 
   let dismissed = false;
+  /** The picker's element lives INSIDE this popover and holds no listener
+   *  outside itself, so it leaves when the popover leaves and there is
+   *  nothing here to destroy separately. */
   const detach = () => {
     if (dismissed) return;
     dismissed = true;
@@ -820,71 +845,180 @@ function showMenu(
       view.focus();
       return;
     }
-    // `role="menu"` promises arrow keys, and the rows are buttons, so Tab and
-    // Enter already work.
-    const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
-    if (step === 0) return;
-    const rows = [...element.querySelectorAll<HTMLElement>(".brain-menu-item")];
-    if (rows.length === 0) return;
-    event.preventDefault();
-    const here = rows.findIndex((row) => row.contains(document.activeElement));
-    rows[(here + step + rows.length) % rows.length].focus();
+    // THE PICKER ANSWERS ITS OWN ARROWS, and nothing else here answers any.
+    // Its grid is a roving cell walked with all four of them; a panel that
+    // also stepped between rows would move the focus out from under a reader
+    // halfway across a month. The one row above it is a button, so Tab and
+    // Enter reach it already.
   };
 
-  const date = document.createElement("label");
-  date.className = "brain-menu-item";
-  const input = document.createElement("input");
-  input.type = "date";
-  input.className = "brain-task-date";
-  input.setAttribute("aria-label", "Date");
-  input.addEventListener("change", () => {
-    if (input.value) choose(input.value);
-  });
-  date.append(glyph("calendar-linear"), document.createTextNode("Date…"), input);
+  /** The popover's own row. Held as a list rather than re-queried, because
+   *  the picker below it draws `brain-menu-item` rows of its own and those
+   *  are not this panel's. */
+  const rows: HTMLButtonElement[] = [];
 
-  const rowsDisabled = (disabled: boolean) => {
-    for (const row of element.querySelectorAll<HTMLElement>(".brain-menu-item")) {
-      row.toggleAttribute("data-disabled", disabled);
-      if (row instanceof HTMLButtonElement) row.disabled = disabled;
+  /** The record a write from this panel has already made, so a second word
+   *  moves it rather than minting a second one. See `applyChoice`. */
+  let filed: string | null = null;
+  /** WHAT THE RECORD SAYS, as far as this panel knows: the value the line
+   *  carried when the panel opened, and then every value a route has TAKEN.
+   *  It is what a clearing gesture is measured against, because a PATCH that
+   *  leaves a field unnamed leaves that field standing: the reader switching the
+   *  reminder off has to send `time: null`, and only a comparison with the
+   *  record can tell that gesture from one that never touched the clock. The
+   *  picker keeps the same belief for its own no-op rule; this is the note's,
+   *  because the request body is written here. */
+  let record: WhenValue | null = null;
+  /** THIS PANEL'S OWN WRITE IS OUT. `writing` is the line's flag and one panel
+   *  can open over another's write, so the panel that is waiting has to know
+   *  which of the two it is: only its own write keeps it standing, and only
+   *  its own write makes Escape a close rather than a cancel. */
+  let sending = false;
+
+  /** THE PANEL IS WAITING ON ITS ONE WRITE, and the row above the picker says
+   *  so with it. The picker draws its own waiting state (`aria-busy`, quiet
+   *  rows, a disabled Done); this row is the note's, drawn here, and a control
+   *  that stayed lit while the panel was inert would be the one press this
+   *  panel cannot answer. */
+  const setBusy = (busy: boolean): void => {
+    if (busy) element.setAttribute("aria-busy", "true");
+    else element.removeAttribute("aria-busy");
+    for (const row of rows) row.setAttribute("aria-disabled", String(busy));
+  };
+
+  /** True once the route took the value, false once it refused it, which is
+   *  what the picker reads to decide whether the record has moved.
+   *
+   *  ONE WRITE AT A TIME, AND NO QUEUE. Two POSTs for one checkbox would leave
+   *  two records contending for one line, and a queue of words waiting their
+   *  turn was worse: it filed a value the reader could no longer see, and told
+   *  each caller about somebody else's write. So the panel goes inert the
+   *  moment a value leaves and comes back on the answer, and the presses made
+   *  in between are not taken at all. */
+  const choose = async (value: WhenValue): Promise<boolean> => {
+    // A WRITE FROM THE PANEL BEFORE THIS ONE. Every control this panel holds
+    // is inert while its own write is out, so the only caller that reaches
+    // here is one in a panel opened over a line that is already saving. It is
+    // refused, because two records contending for one checkbox is the state
+    // with no honest reading, and it is refused out loud.
+    if (writing) {
+      refusal.hidden = false;
+      refusal.textContent = "The last change is still saving";
+      return false;
     }
-    input.disabled = disabled;
-  };
-
-  const choose = (when: string | null) => {
-    // One write at a time. Two clicks on one row, or Enter followed by a
-    // click, would otherwise mint two records for one checkbox, and two
-    // records contending for one line is the state that has no honest
-    // reading: the next reconcile detaches whichever loses.
-    if (writing) return;
     writing = true;
-    rowsDisabled(true);
-    void applyChoice(view, trigger, promote, when)
-      .finally(() => {
-        writing = false;
-        rowsDisabled(false);
-      })
-      .then((reason) => {
-        if (reason === null) {
-          dismiss();
-          // The keyboard came from the note and goes back to it.
-          view.focus();
-          return;
-        }
+    sending = true;
+    setBusy(true);
+    let reason: string | null;
+    try {
+      const result = await applyChoice(view, trigger, promote, value, filed, record);
+      reason = result.reason;
+      if (result.taskId !== null) filed = result.taskId;
+      // A value the route took IS the record now, and the next gesture is
+      // measured against it rather than against the day the panel opened on.
+      if (result.reason === null) record = { ...value };
+    } finally {
+      writing = false;
+      sending = false;
+      setBusy(false);
+    }
+    if (reason !== null) {
+      // A REASON WITH NO PANEL LEFT TO SHOW IT IS DROPPED. Escape and a scroll
+      // both close this popover with the write still out, and the words would
+      // go into a node that has left the document, where nobody reads them.
+      // The line stays a ghost, which is the report that nothing was filed.
+      if (!dismissed) {
         refusal.hidden = false;
         refusal.textContent = reason;
-      });
+      }
+      return false;
+    }
+    // The panel this write belonged to may have gone (Escape, a scroll) and
+    // the reader is somewhere else: there is nothing to dismiss and no focus
+    // of theirs to take.
+    if (dismissed) return true;
+    dismiss();
+    // The keyboard came from the note and goes back to it.
+    view.focus();
+    return true;
   };
+
+  // WHAT THE LINE ALREADY SAYS. A line that is already a task opens the panel
+  // on its own day, its own evening and its own clock: the picker draws the
+  // record rather than a blank, and `Clear` on a line with a date clears it
+  // instead of repeating a value the picker was told the record had. A line
+  // that is not a task yet opens on nothing set and on NO baseline, so the
+  // same `Clear` files it with no day the way the Inbox row above does: the
+  // two were one word apart and did opposite things.
+  const opened = whenOfLine(view, trigger);
+  record = opened;
+  const picker = renderWhenPicker({
+    value: opened ?? { when: null, evening: false, time: null },
+    baseline: opened,
+    today: day.today,
+    mode: "when",
+    reduce: prefersReducedMotion(),
+    // THE WHOLE VALUE. This Evening files the line in the evening and a grid
+    // day arrives with its reminder, rather than the panel offering a section
+    // and the write quietly dropping it.
+    onPick: choose,
+    // THE WRITE GOES OUT BEFORE THE PANEL DOES, which is the opposite of the
+    // row's popover and for the reason the refusal above spells out: a route
+    // that says no has to say it on the control the reader is holding. So the
+    // dismissal waits for `choose`, which dismisses on success and shows the
+    // reason on a refusal.
+    onDone: () => {
+      // ESCAPE ON A WAITING PANEL IS THE ONE PRESS THAT REACHES HERE while
+      // this panel's write is out, because every other control is inert. It
+      // closes and cancels nothing: the value is with the route, and the line
+      // will say what the route made of it.
+      if (sending) {
+        dismiss();
+        view.focus();
+        return;
+      }
+      // A REASON BELONGS TO THE PRESS THAT GOT IT. The next press clears the
+      // line before it asks, so what stands there is always an answer to the
+      // word the reader last named.
+      refusal.hidden = true;
+      refusal.textContent = "";
+      picker.commit();
+      // The panel stands while its write is out, and stands on a reason the
+      // press put there a moment ago: a route that says no says it on the control
+      // the reader is holding.
+      if (sending || !refusal.hidden) return;
+      dismiss();
+      view.focus();
+    },
+  });
 
   for (const row of MENU_ROWS) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "brain-menu-item";
-    button.setAttribute("role", "menuitem");
     button.append(glyph(row.icon), document.createTextNode(row.label));
-    button.addEventListener("click", () => choose(row.when(day)));
+    // THE PICKER ANSWERS THIS ROW TOO. Inbox and the picker's Clear are one
+    // word apart and mean the same thing, so they cannot keep different rules:
+    // handed down here, this press takes the no-op rule (a line already in the
+    // Inbox sends nothing), the waiting state (a press made while a write is
+    // out does nothing at all) and the refusal path (the panel stands, the
+    // reason sits in it, the next press writes) that every row below it keeps.
+    button.addEventListener("click", () => picker.pick(row.when(day)));
+    rows.push(button);
     element.append(button);
   }
-  element.append(date);
+  // The same control the Tasks column draws, mounted as DOM because this
+  // popover is a ProseMirror widget with no React tree inside it. No sheet on
+  // touch here: this is already a popover over the line at every width.
+  //
+  // The scroller is the same one the row's own picker rides, class for class,
+  // so a short window scrolls the grid here too rather than putting Done off
+  // the bottom of the screen. `place()` below measures the room and writes it
+  // where the rule reads it.
+  const scroller = document.createElement("div");
+  scroller.className = "edge-fade overflow-y-auto brain-when-scroll";
+  scroller.append(picker.element);
+  element.append(scroller);
 
   document.body.append(element);
   place(element, trigger);
@@ -895,19 +1029,37 @@ function showMenu(
   currentMenu = { element, dismiss, detach };
   setOpen(view, itemPos);
   element.dataset.state = "open";
-  element.querySelector<HTMLElement>(".brain-menu-item")?.focus();
+  rows[0]?.focus();
 }
 
 /** Under the trigger, inside the window's right edge, flipped above it when
  *  there is no room below. The same rule the caret-anchored menus use. */
 function place(element: HTMLElement, trigger: HTMLElement): void {
   const rect = trigger.getBoundingClientRect();
-  const height = element.offsetHeight;
   const above = shouldFlipAbove(
     { top: rect.top, bottom: rect.bottom },
     window.innerHeight,
-    height,
+    element.offsetHeight,
   );
+  // THE ROOM ON THE SIDE IT LANDS ON. The popover carries a month grid now,
+  // and there are windows that hold neither side of it whole, so the grid
+  // scrolls inside the material the way it does under a row. The property is
+  // Radix's name for the same measurement, because the CSS that reads it is
+  // the same CSS.
+  element.style.setProperty(
+    "--radix-popover-content-available-height",
+    `${Math.max(
+      0,
+      (above ? rect.top : window.innerHeight - rect.bottom) - MENU_GAP - EDGE_GUTTER,
+    )}px`,
+  );
+  // THE FLOATING TAB BAR IS BELOW, so a panel that landed ABOVE the line owes
+  // it nothing: the room it was given is measured from the top of the window
+  // down, and subtracting the bar as well took ~84px of grid away on a phone
+  // for a bar the panel never reaches. The rule reads the property; this says
+  // there is no bar on this side.
+  element.style.setProperty("--tabbar-reserve", above ? "0px" : "");
+  const height = element.offsetHeight;
   element.style.left = `${Math.max(
     EDGE_GUTTER,
     Math.min(rect.left, window.innerWidth - MENU_WIDTH - EDGE_GUTTER),
@@ -932,50 +1084,137 @@ function glyph(name: string): SVGElement {
   return svg;
 }
 
+/** WHAT THE LINE'S OWN RECORD SAYS, which is where the picker opens.
+ *
+ *  The panel is a claim about the line it stands over, so a task already filed
+ *  in Today opens with Today checked and that cell selected, and the picker's
+ *  no-op rule measures every press against the record rather than against a
+ *  blank. `null` is a line with no record at all, which is not the same claim
+ *  as a record with no day: there is nothing for a press to repeat, so every
+ *  word in the panel writes. */
+function whenOfLine(view: EditorView, trigger: HTMLElement): WhenValue | null {
+  const id = markTargetOf(view, trigger)?.taskId ?? null;
+  if (id === null) return null;
+  const task = (promoteKey.getState(view.state)?.tasks ?? []).find(
+    (entry) => entry.id === id,
+  );
+  if (task === undefined) return null;
+  return {
+    when: task.when ?? null,
+    evening: task.evening === true,
+    time: task.time ?? null,
+  };
+}
+
 /* ── The two writes ──────────────────────────────────────────────────────── */
 
-/** Null on success, else the words the menu should show.
+/** What one press of the panel did: the record it left behind, and the words
+ *  the panel should show when the route said no.
  *
  *  The line and its record are resolved from the trigger and the live
  *  document HERE, at the moment of the write, not when the menu opened: the
  *  document can move underneath an open menu, and the whole point of the
- *  anchor is that the record names the line the person pointed at. */
+ *  anchor is that the record names the line the person pointed at.
+ *
+ *  `filed` is the exception, and it is not a cached position: it is the record
+ *  a write from THIS panel already made. The mark is redrawn the moment the
+ *  line gets its word, so the trigger a second press was resolved from is no
+ *  longer in the document, and resolving through it again would answer "That
+ *  line has gone" about a line that is right there. */
+interface ChoiceResult {
+  taskId: string | null;
+  reason: string | null;
+}
+
 async function applyChoice(
   view: EditorView,
   trigger: HTMLElement,
   promote: PromoteContext,
-  when: string | null,
-): Promise<string | null> {
-  const target = markTargetOf(view, trigger);
-  if (target === null) return "That line has gone";
-  return target.taskId === null
-    ? promoteLine(view, target.index, promote, when)
-    : reschedule(view, target.taskId, when);
+  value: WhenValue,
+  filed: string | null,
+  /** What the record says, for the fields a gesture can CLEAR. `null` is a
+   *  line with no record behind it yet, where nothing can be cleared and only
+   *  what the reader set is sent. */
+  record: WhenValue | null,
+): Promise<ChoiceResult> {
+  // THE WHOLE OF IT IS INSIDE THE TRY, the reading of the document as much as
+  // the request. `markTargetOf` and the markdown the anchor is built from walk
+  // a live ProseMirror document, and a throw there used to reject the caller:
+  // the panel stood mute with no reason and no dismissal, waiting on a write
+  // that had already failed. It takes a programming error to reach, and a
+  // programming error is the case that most needs to end in a sentence.
+  try {
+    if (filed !== null) {
+      return { taskId: filed, reason: await reschedule(view, filed, value, record) };
+    }
+    const target = markTargetOf(view, trigger);
+    if (target === null) return { taskId: null, reason: "That line has gone" };
+    if (target.taskId === null) return await promoteLine(view, target.index, promote, value);
+    return {
+      taskId: target.taskId,
+      reason: await reschedule(view, target.taskId, value, record),
+    };
+  } catch {
+    return { taskId: filed, reason: "The task could not be saved" };
+  }
+}
+
+/** The two fields that only travel with a day.
+ *
+ *  `lib/tasks/model.ts` refuses a clock or an evening without one, and the
+ *  store drops both when a patch takes the day away, so neither is named on a
+ *  value with no day of its own.
+ *
+ *  ONLY WHAT THE GESTURE CHANGED, and `null` IS A CHANGE. This only ever ADDED
+ *  the two, so switching the reminder off sent `{ when, evening: true }` and
+ *  the clock stayed on the record: the panel reopened showing the time the
+ *  reader had cleared a moment before, and the reminder went on firing. A patch that
+ *  leaves a field unnamed leaves that field standing, so clearing one means sending
+ *  `null` for it, which can only be told from a gesture that never touched it
+ *  by comparing against what the record says. `record` is that answer, and
+ *  `null` is a line with no record yet: nothing there can be cleared, so only
+ *  what the reader set travels. `components/tasks-actions.ts` does the same
+ *  comparison for the row's own When chip. */
+function extras(value: WhenValue, record: WhenValue | null): Record<string, unknown> {
+  if (value.when === null || value.when === "someday") return {};
+  if (record === null) {
+    return {
+      ...(value.time !== null ? { time: value.time } : {}),
+      ...(value.evening ? { evening: true } : {}),
+    };
+  }
+  return {
+    ...(value.time !== record.time ? { time: value.time } : {}),
+    ...(value.evening !== record.evening
+      ? { evening: value.evening ? true : null }
+      : {}),
+  };
 }
 
 async function promoteLine(
   view: EditorView,
   index: number,
   promote: PromoteContext,
-  when: string | null,
-): Promise<string | null> {
+  value: WhenValue,
+): Promise<ChoiceResult> {
+  const refused = (reason: string): ChoiceResult => ({ taskId: null, reason });
   const state = promoteKey.getState(view.state);
   const page = state?.page ?? null;
-  if (page === null) return "This note cannot hold a task";
+  if (page === null) return refused("This note cannot hold a task");
 
   const items = taskItemsOf(view.state.doc);
-  if (index >= items.length) return "That line has gone";
+  if (index >= items.length) return refused("That line has gone");
 
   // The anchor is built from the markdown the store is about to receive, not
   // from the position in the document. `line` is a markdown line number, and
   // the text and the hash have to be the ones `parseTaskLines` reads, or the
   // store's first reconcile will not find the line.
   const markdown = promote.markdownOf(view.state.doc);
-  if (markdown === null) return "This note could not be read";
+  if (markdown === null) return refused("This note could not be read");
   const lines = parseTaskLines(markdown);
-  if (lines.length !== items.length) return "This note could not be read";
+  if (lines.length !== items.length) return refused("This note could not be read");
   const line = lines[index];
-  if (line.normalized === "") return "Write the line first";
+  if (line.normalized === "") return refused("Write the line first");
 
   const body: Record<string, unknown> = {
     title: line.normalized,
@@ -987,7 +1226,10 @@ async function promoteLine(
       line: line.index,
     },
   };
-  if (when !== null) body.when = when;
+  if (value.when !== null) body.when = value.when;
+  // A CREATE HAS NO RECORD TO DIFFER FROM: nothing on it can be cleared, so
+  // only what the reader set is named.
+  Object.assign(body, extras(value, null));
   const category = await pageCategory(page);
   if (category !== null) body.category = category;
 
@@ -997,25 +1239,26 @@ async function promoteLine(
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
     });
-    if (!response.ok) return await refusalOf(response);
+    if (!response.ok) return refused(await refusalOf(response));
     const answer = (await response.json()) as { task: TaskView };
     publishTasks(view, [...(promoteKey.getState(view.state)?.tasks ?? []), answer.task]);
-    return null;
+    return { taskId: answer.task.id, reason: null };
   } catch {
-    return "The task could not be saved";
+    return refused("The task could not be saved");
   }
 }
 
 async function reschedule(
   view: EditorView,
   taskId: string,
-  when: string | null,
+  value: WhenValue,
+  record: WhenValue | null,
 ): Promise<string | null> {
   try {
     const response = await apiFetch(`/api/tasks/${taskId}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ when }),
+      body: JSON.stringify({ when: value.when, ...extras(value, record) }),
     });
     if (!response.ok) return await refusalOf(response);
     const answer = (await response.json()) as { task: TaskView };

@@ -362,9 +362,13 @@ describe("the repeat rule itself", () => {
     // The patch path refuses this shape; a hand edit and `importTask` reach
     // it. The derivation has to stay TOTAL over what `listOf` files in the
     // Logbook: a record with no row anywhere is a record nothing can reach.
+    // Completed the day BEFORE `TODAY`. A completion now stays in the list it
+    // was in until the day turns, so one made today reads as `inbox` and the
+    // Logbook is the wrong place to look for it. This case is about a done
+    // record that carries a rule, and it wants a completion whose day is over.
     await fs.writeFile(
       path.join(root, "_tasks", "task-odd.md"),
-      `---\nid: task-odd\ntitle: Learn words\ndone: true\ndoneAt: '${TODAY}T09:00:00.000Z'\nrepeat:\n  freq: daily\ncreated: '2026-09-01T09:00:00.000Z'\nupdated: '${TODAY}T09:00:00.000Z'\n---\n`,
+      `---\nid: task-odd\ntitle: Learn words\ndone: true\ndoneAt: '2026-09-13T09:00:00.000Z'\nrepeat:\n  freq: daily\ncreated: '2026-09-01T09:00:00.000Z'\nupdated: '${TODAY}T09:00:00.000Z'\n---\n`,
     );
     await s.rebuild();
 

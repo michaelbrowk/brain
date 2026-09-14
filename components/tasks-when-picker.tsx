@@ -41,8 +41,9 @@ import {
 } from "@/lib/tasks/calendar";
 
 import { EASE_OUT_CSS } from "./tasks-checkbox";
-import { useSheetGesture } from "./use-sheet-gesture";
+import { ScrollEdge } from "./ui/scroll-edge";
 import { SOLAR } from "./ui/solar-icons.generated";
+import { useSheetGesture } from "./use-sheet-gesture";
 
 export interface WhenValue {
   /** A day, the word `someday`, or nothing set. */
@@ -567,7 +568,19 @@ export function TasksWhenPicker({
     [today, mode, reduce],
   );
 
-  const body = <div ref={mount} />;
+  /** THE PICKER IS 430 TALL AND SOME WINDOWS ARE NOT.
+   *
+   *  A landscape phone, a short laptop window, a chip already low on the
+   *  page: Radix measures the room it has and hands it over as
+   *  `--radix-popover-content-available-height`, and past that the grid has to
+   *  scroll rather than run off the bottom edge with Done on it. The edge is
+   *  the panel atom's `fade`, which is what every other list inside glass
+   *  uses, and it stays invisible while the whole picker fits. */
+  const body = (
+    <ScrollEdge variant="fade" className="brain-when-scroll">
+      <div ref={mount} />
+    </ScrollEdge>
+  );
 
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>

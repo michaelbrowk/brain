@@ -22,6 +22,7 @@ import {
   setTaskCheckboxLabel,
 } from "@/components/tasks-checkbox";
 import { dayLabel } from "@/components/tasks-lists";
+import { renderWhenPicker } from "@/components/tasks-when-picker";
 import { SOLAR } from "@/components/ui/solar-icons.generated";
 import { apiFetch } from "@/lib/client";
 import { TASKS_CHANGED_EVENT } from "@/lib/editor-events";
@@ -203,8 +204,8 @@ export const taskSplitKeymap = $prose(() => keymap({ Enter: splitTaskItem }));
 
 /** The ghost and the word: one element in two states. */
 export const TASK_MARK_CLASS = "brain-task-mark";
-/** The popover, on the `brain-menu` material at 220 rather than the list
- *  menu's 264. It holds five short words and nothing else. */
+/** The popover, on the `brain-menu` material at the list menu's own 264: it
+ *  holds four short words and the When picker's seven 36px day cells. */
 export const PROMOTE_MENU_CLASS = "brain-task-menu";
 /** A task record changed somewhere this editor cannot see. Dispatched on
  *  `window` by the shell's store-event forwarder in `components/shell.tsx`,
@@ -215,7 +216,9 @@ export const PROMOTE_MENU_CLASS = "brain-task-menu";
  *  had to be written twice. Re-exported for the callers that already had it
  *  from here. */
 export { TASKS_CHANGED_EVENT };
-const MENU_WIDTH = 220;
+/** 264, which is the list menu's own width and the seven 36px day cells of
+ *  the When picker inside this popover. */
+const MENU_WIDTH = 264;
 /** The retrace, `DUR.fast`. The material's own keyframes play it; this is how
  *  long to wait before taking the element away. */
 const MENU_EXIT_MS = DUR.fast * 1000;
@@ -720,6 +723,8 @@ interface Day {
   tomorrow: string;
 }
 
+/** The four that are one tap each. Every other day is the picker below them,
+ *  which is the same control the Tasks column draws. */
 const MENU_ROWS: { label: string; icon: string; when: (day: Day) => string | null }[] = [
   { label: "Today", icon: "calendar-date-linear", when: (day) => day.today },
   { label: "Tomorrow", icon: "calendar-linear", when: (day) => day.tomorrow },
@@ -774,7 +779,11 @@ function showMenu(
   element.append(refusal);
 
   let dismissed = false;
-  const detach = () => {
+  /** `retracing` is the one path that keeps the drawing alive past the
+   *  listeners: the popover is re-appended to the body to play its 120ms
+   *  exit, and a picker taken out here would leave a calendar-shaped hole in
+   *  the thing the reader is watching leave. */
+  const detach = (retracing = false) => {
     if (dismissed) return;
     dismissed = true;
     document.removeEventListener("mousedown", onPointerDown, true);
@@ -787,6 +796,9 @@ function showMenu(
     trigger.setAttribute("aria-expanded", "false");
     if (currentMenu?.element === element) currentMenu = null;
     element.remove();
+    // The picker leaves with the popover it was mounted in, key listener and
+    // all, rather than being left to the garbage collector.
+    if (!retracing) picker.destroy();
   };
   const dismiss = (immediate = false) => {
     if (dismissed) return;
@@ -798,11 +810,14 @@ function showMenu(
     // The retrace plays on the element the material already owns, so it is
     // taken out of the tree only when the 120ms are over.
     const leaving = element;
-    detach();
+    detach(true);
     setOpen(view, null);
     document.body.append(leaving);
     leaving.dataset.state = "closed";
-    window.setTimeout(() => leaving.remove(), MENU_EXIT_MS);
+    window.setTimeout(() => {
+      leaving.remove();
+      picker.destroy();
+    }, MENU_EXIT_MS);
   };
 
   const onPointerDown = (event: Event) => {
@@ -820,34 +835,31 @@ function showMenu(
       view.focus();
       return;
     }
+    // THE PICKER ANSWERS ITS OWN ARROWS. Its grid is a roving cell walked with
+    // all four of them, and a menu that also stepped between rows would move
+    // the focus out from under a reader halfway across a month.
+    const target = event.target;
+    if (target instanceof Node && picker.element.contains(target)) return;
     // `role="menu"` promises arrow keys, and the rows are buttons, so Tab and
     // Enter already work.
     const step = event.key === "ArrowDown" ? 1 : event.key === "ArrowUp" ? -1 : 0;
     if (step === 0) return;
-    const rows = [...element.querySelectorAll<HTMLElement>(".brain-menu-item")];
     if (rows.length === 0) return;
     event.preventDefault();
     const here = rows.findIndex((row) => row.contains(document.activeElement));
     rows[(here + step + rows.length) % rows.length].focus();
   };
 
-  const date = document.createElement("label");
-  date.className = "brain-menu-item";
-  const input = document.createElement("input");
-  input.type = "date";
-  input.className = "brain-task-date";
-  input.setAttribute("aria-label", "Date");
-  input.addEventListener("change", () => {
-    if (input.value) choose(input.value);
-  });
-  date.append(glyph("calendar-linear"), document.createTextNode("Date…"), input);
+  /** The four one-tap rows. Held as a list rather than re-queried, because
+   *  the picker below them draws `brain-menu-item` rows of its own and those
+   *  are not this menu's to disable or to walk with an arrow key. */
+  const rows: HTMLButtonElement[] = [];
 
   const rowsDisabled = (disabled: boolean) => {
-    for (const row of element.querySelectorAll<HTMLElement>(".brain-menu-item")) {
+    for (const row of rows) {
       row.toggleAttribute("data-disabled", disabled);
-      if (row instanceof HTMLButtonElement) row.disabled = disabled;
+      row.disabled = disabled;
     }
-    input.disabled = disabled;
   };
 
   const choose = (when: string | null) => {
@@ -875,6 +887,15 @@ function showMenu(
       });
   };
 
+  const picker = renderWhenPicker({
+    value: { when: null, evening: false, time: null },
+    today: day.today,
+    mode: "when",
+    reduce: prefersReducedMotion(),
+    onPick: (value) => choose(value.when),
+    onDone: () => dismiss(),
+  });
+
   for (const row of MENU_ROWS) {
     const button = document.createElement("button");
     button.type = "button";
@@ -882,9 +903,26 @@ function showMenu(
     button.setAttribute("role", "menuitem");
     button.append(glyph(row.icon), document.createTextNode(row.label));
     button.addEventListener("click", () => choose(row.when(day)));
+    rows.push(button);
     element.append(button);
   }
-  element.append(date);
+  // The same control the Tasks column draws, mounted as DOM because this
+  // popover is a ProseMirror widget with no React tree inside it. No sheet on
+  // touch here: this is already a popover over the line at every width.
+  //
+  // A PROMOTED LINE TAKES ONLY ITS DAY. The gesture mints a record through
+  // POST /api/tasks, and a clock on a line somebody is still writing is a
+  // decision they have not made yet; the row's own chip sets it a moment
+  // later.
+  //
+  // The scroller is the same one the row's own picker rides, class for class,
+  // so a short window scrolls the grid here too rather than putting Done off
+  // the bottom of the screen. `place()` below measures the room and writes it
+  // where the rule reads it.
+  const scroller = document.createElement("div");
+  scroller.className = "edge-fade overflow-y-auto brain-when-scroll";
+  scroller.append(picker.element);
+  element.append(scroller);
 
   document.body.append(element);
   place(element, trigger);
@@ -895,19 +933,31 @@ function showMenu(
   currentMenu = { element, dismiss, detach };
   setOpen(view, itemPos);
   element.dataset.state = "open";
-  element.querySelector<HTMLElement>(".brain-menu-item")?.focus();
+  rows[0]?.focus();
 }
 
 /** Under the trigger, inside the window's right edge, flipped above it when
  *  there is no room below. The same rule the caret-anchored menus use. */
 function place(element: HTMLElement, trigger: HTMLElement): void {
   const rect = trigger.getBoundingClientRect();
-  const height = element.offsetHeight;
   const above = shouldFlipAbove(
     { top: rect.top, bottom: rect.bottom },
     window.innerHeight,
-    height,
+    element.offsetHeight,
   );
+  // THE ROOM ON THE SIDE IT LANDS ON. The popover carries a month grid now,
+  // and there are windows that hold neither side of it whole, so the grid
+  // scrolls inside the material the way it does under a row. The property is
+  // Radix's name for the same measurement, because the CSS that reads it is
+  // the same CSS.
+  element.style.setProperty(
+    "--radix-popover-content-available-height",
+    `${Math.max(
+      0,
+      (above ? rect.top : window.innerHeight - rect.bottom) - MENU_GAP - EDGE_GUTTER,
+    )}px`,
+  );
+  const height = element.offsetHeight;
   element.style.left = `${Math.max(
     EDGE_GUTTER,
     Math.min(rect.left, window.innerWidth - MENU_WIDTH - EDGE_GUTTER),

@@ -444,7 +444,7 @@ describe("completion, drawn", () => {
     expect(String(fold.frames.at(-1)?.clipPath)).toBe("inset(100% 0 0 0)");
     expect(calls.reschedule).toHaveBeenCalledWith(
       expect.objectContaining({ id: "a" }),
-      "2026-09-14",
+      { when: "2026-09-14", evening: false, time: null },
       "Tomorrow",
     );
   });
@@ -468,10 +468,12 @@ describe("the expansion", () => {
 
   it("offers no deadline on a someday task", async () => {
     await renderRows([task("a", { when: "someday" })], { expanded: true });
-    expect(document.querySelector('input[type="date"]')).toBeNull();
+    expect([...document.querySelectorAll(".chip")].map((chip) => chip.textContent))
+      .not.toContain("Deadline");
 
     await renderRows([task("b", { when: TODAY })], { expanded: true });
-    expect(document.querySelector('input[type="date"]')).not.toBeNull();
+    expect([...document.querySelectorAll(".chip")].map((chip) => chip.textContent))
+      .toContain("Deadline");
   });
 
   it("draws the category control as a chip, between two chips", async () => {
@@ -640,13 +642,12 @@ describe("a history row", () => {
   });
 });
 
-/** THE DATE CONTROL, BY MODALITY.
+/** ONE DATE CONTROL, ON A POINTER AND ON TOUCH ALIKE (D4).
  *
- *  On touch the system picker is the better control and the native input opens
- *  it directly. On a pointer the browser's own chrome is the only chrome in
- *  Brain that is not Brain's, so the menu offers a row like every other row
- *  and reveals the input when it is asked for. */
-describe("the When menu's date row", () => {
+ *  The modality branch this block used to test is gone with the native input:
+ *  `components/tasks-when-picker.tsx` is the control at every width, and
+ *  `ops/design-guardrails.test.ts` refuses a second one under `components/`. */
+describe("the When chip's picker", () => {
   const stubHover = (hover: boolean) => {
     vi.stubGlobal("matchMedia", (query: string) => ({
       matches: query === "(hover: hover)" ? hover : false,
@@ -674,67 +675,36 @@ describe("the When menu's date row", () => {
     });
   };
 
-  const menuLabels = () =>
-    [...document.querySelectorAll(".brain-menu-item")].map((item) =>
-      (item.textContent ?? "").trim(),
-    );
-
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("offers Today, Tomorrow, Next week, Someday and Pick a date on a pointer", async () => {
-    stubHover(true);
-    await renderRows([task("a", { when: TODAY })], { expanded: true });
-    await openMenu();
-
-    expect(menuLabels()).toEqual([
-      "Today",
-      "Tomorrow",
-      "Next week",
-      "Someday",
-      "Pick a date",
-      "Clear",
-    ]);
-    // No browser chrome inside the menu until it is asked for.
-    expect(document.querySelector('.brain-menu input[type="date"]')).toBeNull();
-
-    const pick = document.querySelector<HTMLElement>("[data-task-when-pick]");
-    await act(async () => {
-      pick?.click();
-    });
-    await act(async () => {
-      await Promise.resolve();
-    });
-
-    // The menu stands and the row it revealed is inside it.
-    expect(document.querySelector("[data-task-when-date]")).not.toBeNull();
-    expect(document.querySelector('.brain-menu input[type="date"]')).not.toBeNull();
-    expect(document.querySelector("[data-task-when-pick]")).toBeNull();
+  it("opens the same picker on a pointer and on touch (D4)", async () => {
+    // A row per modality: the same key would keep the component mounted with
+    // the popover it opened still open, and the second press would shut it.
+    for (const [hover, id] of [
+      [true, "pointer"],
+      [false, "touch"],
+    ] as const) {
+      stubHover(hover);
+      await renderRows([task(id, { when: TODAY })], { expanded: true });
+      await openMenu();
+      expect(document.querySelector(".brain-when-picker")).not.toBeNull();
+      expect(document.querySelector('input[type="date"]')).toBeNull();
+      expect(document.querySelector("[data-task-when-pick]")).toBeNull();
+    }
   });
 
-  it("opens the native input directly on touch", async () => {
-    stubHover(false);
-    await renderRows([task("a", { when: TODAY })], { expanded: true });
-    await openMenu();
-
-    expect(menuLabels()).toContain("Next week");
-    expect(menuLabels()).not.toContain("Pick a date");
-    // iOS draws the better control here, and it is one tap away rather than
-    // two.
-    expect(document.querySelector('.brain-menu input[type="date"]')).not.toBeNull();
-  });
-
-  it("moves the row to the day seven out when Next week is chosen", async () => {
+  it("sends the day, the evening and the clock as one value", async () => {
+    // The picker answers with the whole of where a task sits, so the row
+    // hands one value on rather than three writes the reader made in one
+    // gesture.
     stubHover(true);
-    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await renderRows([task("a", { when: TODAY, time: "13:00" })], { expanded: true });
     await openMenu();
 
-    const row = [...document.querySelectorAll<HTMLElement>(".brain-menu-item")].find(
-      (item) => (item.textContent ?? "").trim() === "Next week",
-    );
     await act(async () => {
-      row?.click();
+      document.querySelector<HTMLElement>('[data-day="2026-09-20"]')?.click();
     });
     await act(async () => {
       await Promise.resolve();
@@ -742,9 +712,21 @@ describe("the When menu's date row", () => {
 
     expect(calls.reschedule).toHaveBeenCalledWith(
       expect.objectContaining({ id: "a" }),
-      "2026-09-20",
-      "Next week",
+      { when: "2026-09-20", evening: false, time: "13:00" },
+      "20 Sep",
     );
+  });
+
+  it("says the day and the clock the chip is standing on", async () => {
+    stubHover(true);
+    await renderRows([task("a", { when: TODAY, evening: true, time: "20:30" })], {
+      expanded: true,
+    });
+    const chip = [...document.querySelectorAll<HTMLElement>(".chip")].find((node) =>
+      node.getAttribute("aria-label")?.startsWith("When:"),
+    );
+    expect(chip?.textContent).toContain("This Evening");
+    expect(chip?.getAttribute("aria-label")).toBe("When: This Evening at 20:30");
   });
 });
 
@@ -822,7 +804,7 @@ describe("the swipe", () => {
     });
     expect(calls.reschedule).toHaveBeenCalledWith(
       expect.objectContaining({ id: "a" }),
-      "2026-09-14",
+      { when: "2026-09-14", evening: false, time: null },
       "Tomorrow",
     );
   });
@@ -850,7 +832,7 @@ describe("the swipe", () => {
 
     expect(calls.reschedule).toHaveBeenCalledWith(
       expect.objectContaining({ id: "a" }),
-      "2026-09-14",
+      { when: "2026-09-14", evening: false, time: null },
       "Tomorrow",
     );
   });

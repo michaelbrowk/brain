@@ -85,6 +85,35 @@ describe("repeatOptions", () => {
     expect(repeatOptions(task({ when }), TODAY)[2].label).toBe(label);
   });
 
+  it("reads the rule's own weekday back, not the day the instance sits on", () => {
+    // An instance that has moved to Thursday still repeats on Monday. Reading
+    // the weekday off the row showed "Every week on Thu", which is the menu
+    // describing a rule nobody set and offering to write it.
+    const options = repeatOptions(
+      task({ when: "2026-09-17", repeat: { freq: "weekly", byWeekday: ["mon"] } }),
+      TODAY,
+    );
+    expect(options.map((option) => option.label)).toContain("Every week on Mon");
+  });
+
+  it("reads the rule's own day of the month back the same way", () => {
+    const options = repeatOptions(
+      task({ when: "2026-09-17", repeat: { freq: "monthly", byMonthDay: 3 } }),
+      TODAY,
+    );
+    expect(options.map((option) => option.label)).toContain("Every month on the 3rd");
+  });
+
+  it("says the time the rule carries", () => {
+    const options = repeatOptions(
+      task({ when: TODAY, time: "13:00", repeat: { freq: "daily" } }),
+      TODAY,
+    );
+    expect(options[0].label).toBe("Every day at 13:00");
+    expect(options[1].label).toBe("Every week on Sun at 13:00");
+    expect(options[2].label).toBe("Every month on the 13th at 13:00");
+  });
+
   it("offers the stop only once there is a rule to stop", () => {
     expect(repeatOptions(task({ when: TODAY }), TODAY)).toHaveLength(3);
 

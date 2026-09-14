@@ -2087,6 +2087,18 @@ html[data-kbd] [contenteditable]:focus-visible {
   opacity: 0.4;
   pointer-events: none;
 }
+/* A MENU ROW THAT ONLY READS. The repeat menu says which clock its rule
+   carries, and that clock is set in the When picker: one field, one editor.
+   So the row is a sentence rather than a control: quiet ink, the ordinary
+   cursor, and none of the hover the rows around it answer with. */
+.brain-menu-item[data-read] {
+  color: var(--ink-3);
+  cursor: default;
+}
+.brain-menu-item[data-read]:hover,
+.brain-menu-item[data-read]:active {
+  background-color: transparent;
+}
 .brain-menu-icon {
   flex-shrink: 0;
   color: var(--ink-2);
@@ -5918,14 +5930,6 @@ html[data-kbd] .brain-task-row[data-selected] {
   overflow-x: auto;
   scrollbar-width: none;
 }
-.brain-task-date {
-  min-width: 0;
-  border: 0;
-  background: transparent;
-  color: inherit;
-  font: inherit;
-  outline: none;
-}
 
 /* Air belongs to the block below: 24 over the group, 4 under its header. The
    header rides the text rule, so its word starts where its rows' words do,
@@ -6154,6 +6158,15 @@ html[data-kbd] .brain-task-row[data-selected] {
 .brain-when-foot > .btn {
   flex: 1;
 }
+/* THE ROOM THERE IS, AND NOT A PIXEL MORE. The picker stands about 430 tall
+   and a short window does not have 430: Radix measures the gap between the
+   chip and the window edge (its `collisionPadding` already taken off) and
+   writes it here, so the grid scrolls inside the material instead of running
+   off the bottom edge with Done on it. Less the material's own 6px top and
+   bottom, which sit outside this scroller. */
+.brain-when-scroll {
+  max-height: calc(var(--radix-popover-content-available-height, 100dvh) - 12px);
+}
 @media (max-width: 767px) {
   /* FULL WIDTH UNDER THE ROW, not a 184px popover wearing a grip. The
      material's `min-width` is a menu's floor, and `width: 100%` on the sole
@@ -6172,6 +6185,11 @@ html[data-kbd] .brain-task-row[data-selected] {
   }
   .brain-when-day {
     width: auto;
+  }
+  /* The grip rides above the scroller and must not scroll away with it, so
+     its 26px comes off the room the grid may take. */
+  .brain-when-sheet .brain-when-scroll {
+    max-height: calc(var(--radix-popover-content-available-height, 100dvh) - 38px);
   }
 }
 

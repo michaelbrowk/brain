@@ -194,6 +194,40 @@ describe("design guardrails", () => {
     }
   });
 
+  it("draws every date and every time itself, under components/", () => {
+    // D4: `components/tasks-when-picker.tsx` is the one date and time control
+    // in this app, on a pointer and on touch alike. The native input is four
+    // different controls across the browsers this runs in, it renders its own
+    // chrome in its own metrics inside a menu the spec calls quiet, and on
+    // touch it hands the gesture to a sheet Brain does not draw.
+    //
+    // Whole-file text rather than line by line: JSX puts the attribute on its
+    // own line, and `[^>]` matches a newline inside a character class.
+    const jsx = /<input\b[^>]*\btype\s*=\s*["'](date|time|datetime-local|month|week)["']/g;
+    const dom = /\.type\s*=\s*["'](date|time|datetime-local|month|week)["']/g;
+
+    const offenders: string[] = [];
+    for (const file of sourceFiles()) {
+      if (!file.startsWith("components/")) continue;
+      const text = readFileSync(path.join(ROOT, file), "utf8");
+      for (const pattern of [jsx, dom]) {
+        pattern.lastIndex = 0;
+        for (const match of text.matchAll(pattern)) {
+          const line = text.slice(0, match.index).split("\n").length;
+          offenders.push(`${file}:${line} ${match[1]}`);
+        }
+      }
+    }
+    expect(
+      offenders,
+      "a native date or time input under components/: use <TasksWhenPicker> or renderWhenPicker",
+    ).toEqual([]);
+
+    // The rule is only worth having if it still lets the others through.
+    expect([...'<input type="text" />'.matchAll(jsx)]).toEqual([]);
+    expect([...'const property = { type: "date" };'.matchAll(dom)]).toEqual([]);
+  });
+
   it("has no macOS Finder duplicate files", () => {
     // iCloud / Finder produce `name 2.tsx` next to `name.tsx`. vitest's glob
     // would run a stale `*.test 2.tsx` as a real test, and tsc would type it.

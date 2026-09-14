@@ -1,3 +1,4 @@
+import { shiftDay } from "@/lib/tasks/calendar";
 import { nextOccurrence } from "@/lib/tasks/recurrence";
 import {
   compareGroups,
@@ -239,6 +240,23 @@ export function dayLabel(day: string): string {
 
 export function weekdayOf(day: string): string {
   return WEEKDAYS[new Date(dayNumber(day) * 86_400_000).getUTCDay()] as string;
+}
+
+/** THE WORD A MOVE IS REPORTED IN.
+ *
+ *  "Moved to Tomorrow" over the row on its way out, and the same five
+ *  answers wherever a picked value has to be said out loud. Today and Tomorrow
+ *  carry their names because those are the two days a person says rather than
+ *  dates; every other day carries the `20 Sep` the tail already uses, and that
+ *  includes yesterday. A task filed into the past is overdue and
+ *  `overdueWhenCaption` says so in its own words, so a second wording here
+ *  would be a second answer to where the row went. */
+export function whenLabel(when: string | null | undefined, today: string): string {
+  if (when === null || when === undefined) return "No date";
+  if (when === "someday") return "Someday";
+  if (when === today) return "Today";
+  if (when === shiftDay(today, 1)) return "Tomorrow";
+  return dayLabel(when);
 }
 
 /** `Today · 5`. The count is the group's size, which one task cannot know. */

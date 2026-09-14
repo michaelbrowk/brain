@@ -33,6 +33,7 @@ import {
   reloadTasks,
 } from "./tasks-client";
 import { movesRow, repeatNextDay } from "./tasks-lists";
+import type { WhenValue } from "./tasks-when-picker";
 import type { ToastOptions } from "./ui/primitives";
 
 /** The fields a chip inside an expanded row can set. `null` clears one, which
@@ -42,6 +43,11 @@ export interface TaskFieldPatch {
   deadline?: string | null;
   category?: string | null;
   repeat?: TaskRepeat | null;
+  /** `HH:MM`, the reminder, and the evening of the day the task sits on. Both
+   *  are statements about a DAY, so the store takes them off a record the same
+   *  patch parks in Someday or sends back to the Inbox. */
+  time?: string | null;
+  evening?: true | null;
 }
 
 export interface TaskActions {
@@ -66,7 +72,7 @@ export interface TaskActions {
   reopenTask: (task: TaskView, refusal?: string) => Promise<void>;
   rescheduleTask: (
     task: TaskView,
-    when: string | "someday" | null,
+    value: WhenValue,
     label: string,
   ) => Promise<void>;
   patchField: (task: TaskView, patch: TaskFieldPatch) => void;
@@ -275,16 +281,39 @@ export function useTaskActions({
    *  The row asks `movesRow` for its fold, so the motion and the words are
    *  the same answer twice rather than two rules. */
   const rescheduleTask = useCallback(
-    async (task: TaskView, when: string | "someday" | null, label: string) => {
+    async (task: TaskView, value: WhenValue, label: string) => {
+      const when = value.when;
       const moves = movesRow(task, when, today);
       if (moves) hold(task);
       mutateTasks((tasks) =>
         tasks.map((entry) =>
-          entry.id === task.id ? { ...entry, when: when ?? undefined } : entry,
+          entry.id === task.id
+            ? {
+                ...entry,
+                when: when ?? undefined,
+                time: value.time ?? undefined,
+                evening: value.evening ? true : undefined,
+              }
+            : entry,
         ),
       );
       try {
-        const saved = await patchTask(task.id, { when });
+        const saved = await patchTask(task.id, {
+          when,
+          // ONLY WHAT THIS GESTURE CHANGED. The picker answers with all three
+          // fields whether or not it touched them, and a key or a swipe names
+          // a day alone, so a clock sent every time would be a write nobody
+          // asked for in every request body and in every git diff.
+          ...(value.time !== (task.time ?? null) ? { time: value.time } : {}),
+          ...(value.evening !== (task.evening === true)
+            ? { evening: value.evening ? true : null }
+            : {}),
+          // The instance this tab was looking at. A repeating task's `when` is
+          // the rule's own answer and moving it runs through `advance`, so a
+          // reschedule aimed at an occurrence that has already moved on is a
+          // reschedule of something else.
+          ...(task.repeat ? { expectedWhen: task.when ?? null } : {}),
+        });
         mutateTasks((tasks) =>
           tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
         );
@@ -297,7 +326,13 @@ export function useTaskActions({
             mutateTasks((tasks) =>
               tasks.map((entry) => (entry.id === task.id ? task : entry)),
             );
-            void patchTask(task.id, { when: task.when ?? null }).catch(refuse);
+            void patchTask(task.id, {
+              when: task.when ?? null,
+              ...(value.time !== (task.time ?? null) ? { time: task.time ?? null } : {}),
+              ...(value.evening !== (task.evening === true)
+                ? { evening: task.evening ?? null }
+                : {}),
+            }).catch(refuse);
           },
         });
       } catch (error) {
@@ -351,6 +386,8 @@ function normalize(patch: TaskFieldPatch): Partial<TaskView> {
     ...(patch.title !== undefined ? { title: patch.title } : {}),
     ...(patch.deadline !== undefined ? { deadline: patch.deadline ?? undefined } : {}),
     ...(patch.category !== undefined ? { category: patch.category ?? undefined } : {}),
+    ...(patch.time !== undefined ? { time: patch.time ?? undefined } : {}),
+    ...(patch.evening !== undefined ? { evening: patch.evening ?? undefined } : {}),
     // Clearing the rule clears the history with it, the way the record does:
     // `log` beside no `repeat` is a shape nothing reads.
     ...(patch.repeat !== undefined

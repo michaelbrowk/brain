@@ -279,6 +279,10 @@ async function refuse(response: Response): Promise<never> {
 export interface CreateTaskInput {
   title: string;
   when?: string;
+  /** `HH:MM`, the reminder, and the evening of the day. Both need a day to be
+   *  about, and the record's own schema refuses either without one. */
+  time?: string;
+  evening?: true;
   deadline?: string;
   category?: string;
 }
@@ -297,6 +301,10 @@ export async function createTask(input: CreateTaskInput): Promise<TaskView> {
 export interface TaskPatch {
   title?: string;
   when?: string | null;
+  /** `null` clears the reminder, and clears the mark that says it already
+   *  fired. A patch that moves the day does the same, in the store. */
+  time?: string | null;
+  evening?: true | null;
   deadline?: string | null;
   category?: string | null;
   /** `null` stops the task repeating and leaves the current instance as an

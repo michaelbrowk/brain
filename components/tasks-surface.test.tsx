@@ -1009,6 +1009,44 @@ describe("where a captured task lands", () => {
     });
   });
 
+  it("takes the day the capture row's own chip was given, over the list's", async () => {
+    // The chip is an override and nothing more: a line typed into Today with
+    // no picking still lands today, which the case above holds.
+    await mount([], { list: "upcoming" });
+    apiFetchMock.mockImplementation(async (input, init) => {
+      const url = String(input);
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [] });
+      if (init?.method === "POST") {
+        return response({ task: task("new", JSON.parse(String(init.body))) }, 201);
+      }
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    const field = document.querySelector("input") as HTMLInputElement;
+    await act(async () => type(field, "Buy milk"));
+    const chip = document.querySelector<HTMLElement>(
+      '.brain-task-row_ghost .chip',
+    ) as HTMLElement;
+    await act(async () => chip.click());
+    await settle();
+    await act(async () => {
+      document.querySelector<HTMLElement>('[data-day="2026-09-20"]')?.click();
+    });
+    await act(async () => {
+      field.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true }));
+    });
+    await settle();
+
+    // ONE RECORD. Reaching for the chip blurs the field, and a create on that
+    // blur filed the title under the list's own day before the reader had
+    // finished saying where it goes.
+    expect(writes()).toHaveLength(1);
+    expect(JSON.parse(String(writes().at(-1)?.[1]?.body))).toEqual({
+      title: "Buy milk",
+      when: "2026-09-20",
+    });
+  });
+
   it("offers no ghost row in the Logbook", async () => {
     await mount([task("a", { done: true, doneAt: `${TODAY}T09:00:00.000Z` })], {
       list: "logbook",

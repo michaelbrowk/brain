@@ -1,6 +1,5 @@
 "use client";
 
-import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import {
   AnimatePresence,
   animate,
@@ -38,8 +37,10 @@ import {
   reminderFired,
   repeatNextLabel,
   timeCaption,
+  whenLabel,
 } from "./tasks-lists";
 import { TasksRepeatMenu } from "./tasks-repeat-menu";
+import { TasksWhenPicker, type WhenValue } from "./tasks-when-picker";
 import { Icon } from "./ui/icon";
 
 /** THE ROW, AND THE ONE DIRECTION IT CAN LEAVE IN.
@@ -169,7 +170,7 @@ export interface TasksRowProps {
    *  what the reader needs told: the write goes to somebody's document, so a
    *  refusal names it. Everything else keeps the route's own `reason`. */
   onReopen: (task: TaskView, refusal?: string) => void;
-  onReschedule: (task: TaskView, when: string | "someday" | null, label: string) => Promise<void>;
+  onReschedule: (task: TaskView, value: WhenValue, label: string) => Promise<void>;
   onPatch: (
     task: TaskView,
     patch: {
@@ -225,6 +226,11 @@ export function TasksRow({
   const inert = historic || task.done;
   const overdueWhen = overdueWhenCaption(task, today);
   const deadline = deadlineCaption(task, today);
+  /** The chip's word, and the sentence a screen reader hears in its place:
+   *  every chip on this row names its field and its value, so a bare `20 Sep`
+   *  beside a When chip would be a date with nothing to attach it to. */
+  const deadlineWord = task.deadline ? dayLabel(task.deadline) : "Deadline";
+  const deadlineSpoken = task.deadline ? `Deadline: ${deadlineWord}` : "Deadline";
   const repeatNext = repeatNextLabel(task, today);
   const time = timeCaption(task);
   const moon = eveningMoon(task, today);
@@ -316,12 +322,12 @@ export function TasksRow({
    *  `tasks-actions` reports on, so the motion and the words cannot
    *  disagree. */
   const leaveDown = useCallback(
-    async (when: string | "someday" | null, label: string) => {
-      const element = movesRow(task, when, today) ? wrapRef.current : null;
+    async (value: WhenValue, label: string) => {
+      const element = movesRow(task, value.when, today) ? wrapRef.current : null;
       const fold = element ? foldRow(element, "down", reduce) : null;
       let refused = false;
       try {
-        await onReschedule(task, when, label);
+        await onReschedule(task, value, label);
       } catch {
         refused = true;
       }
@@ -341,6 +347,7 @@ export function TasksRow({
     today,
     rowKey: key,
     inert,
+    task,
   });
 
   const swipeHandlers = useSwipe({
@@ -350,10 +357,8 @@ export function TasksRow({
     onWord: setSwipeSide,
     onCommit: (side) => {
       setSwipeSide(null);
-      void leaveDown(
-        side === "right" ? tomorrowOf(today) : "someday",
-        side === "right" ? "Tomorrow" : "Someday",
-      );
+      const when = side === "right" ? tomorrowOf(today) : "someday";
+      void leaveDown(whenValueFor(task, when), whenLabel(when, today));
     },
     onRelease: () => setSwipeSide(null),
   });
@@ -580,7 +585,7 @@ export function TasksRow({
                   <WhenChip
                     task={task}
                     today={today}
-                    onPick={(when, label) => void leaveDown(when, label)}
+                    onPick={(value) => void leaveDown(value, whenLabel(value.when, today))}
                   />
                   <CategoryPicker
                     chip
@@ -608,20 +613,30 @@ export function TasksRow({
                       already past would pull it straight into Today, so the
                       chip is not offered there. */}
                   {task.when !== "someday" && (
-                  <label className="chip" data-task-control>
-                    <span className="chip-glyph">
-                      <Icon name="flag" size={14} />
-                    </span>
-                    <span className="sr-only">Deadline</span>
-                    <input
-                      type="date"
-                      className="brain-task-date"
-                      value={task.deadline ?? ""}
-                      onChange={(event) =>
-                        onPatch(task, { deadline: event.currentTarget.value || null })
+                    <TasksWhenPicker
+                      mode="deadline"
+                      value={{ when: task.deadline ?? null, evening: false, time: null }}
+                      today={today}
+                      onPick={(value) =>
+                        onPatch(task, {
+                          deadline: value.when === "someday" ? null : value.when,
+                        })
+                      }
+                      ariaLabel={deadlineSpoken}
+                      trigger={
+                        <button
+                          type="button"
+                          className="chip"
+                          data-task-control
+                          aria-label={deadlineSpoken}
+                        >
+                          <span className="chip-glyph">
+                            <Icon name="flag" size={14} />
+                          </span>
+                          {deadlineWord}
+                        </button>
                       }
                     />
-                  </label>
                   )}
                   {task.page && pageTitle && (
                     <button
@@ -650,13 +665,6 @@ export function tomorrowOf(today: string): string {
   return dayAfter(today, 1);
 }
 
-/** The day "Next week" means, and the same one `lib/tasks/lists.ts` opens the
- *  Next week group on: seven days out, past the six that still carry a
- *  weekday name. */
-export function nextWeekOf(today: string): string {
-  return dayAfter(today, 7);
-}
-
 function dayAfter(today: string, days: number): string {
   const next = new Date(
     Date.UTC(
@@ -668,35 +676,25 @@ function dayAfter(today: string, days: number): string {
   return next.toISOString().slice(0, 10);
 }
 
-/** WHICH CONTROL A DATE GETS, BY MODALITY.
+/** THE VALUE A KEY, A SWIPE OR A PALETTE ROW SENDS.
  *
- *  On touch the system picker is the better control by a distance and opens
- *  from the native input directly (decision: the note's own row does the
- *  same). On a pointer it is the only place in Brain where the browser draws
- *  the chrome: it renders `14/09/2026` in the browser's own metrics beside
- *  four Solar glyphs and one of Chrome's, inside a menu the spec calls quiet.
- *  So a pointer gets a `brain-menu` row that REVEALS the input, and the row
- *  reads as every other row in the list until it is asked for.
- *
- *  Defaults to touch: a reader whose browser answers no media query gets the
- *  native control, which is the one that works everywhere. */
-function usePointerFine(): boolean {
-  const [fine, setFine] = useState(false);
-  useEffect(() => {
-    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
-      return;
-    }
-    const query = window.matchMedia("(hover: hover)");
-    const sync = () => setFine(query.matches);
-    sync();
-    query.addEventListener?.("change", sync);
-    return () => query.removeEventListener?.("change", sync);
-  }, []);
-  return fine;
+ *  The picker answers with all three fields at once, and these three gestures
+ *  name a day and nothing else, so the other two are read off the record: the
+ *  clock the task already carries stays with it, and the evening comes off,
+ *  which is what the picker's own Today row and its grid do. Someday and the
+ *  Inbox are not days at all, and a clock on neither is a shape
+ *  `lib/tasks/model.ts` refuses, so both come off with the day. */
+export function whenValueFor(
+  task: TaskView,
+  when: string | "someday" | null,
+): WhenValue {
+  const onADay = when !== null && when !== "someday";
+  return { when, evening: false, time: onADay ? (task.time ?? null) : null };
 }
 
-/** The When chip's menu: the two days a task list actually moves things to,
- *  Someday, a date for everything else, and the way back out. */
+/** The When chip, and the one date control behind it (D4). The chip says where
+ *  the task sits in the reader's own words, and the picker says everything
+ *  else: a month grid, This Evening, Someday and the reminder's clock. */
 function WhenChip({
   task,
   today,
@@ -704,108 +702,45 @@ function WhenChip({
 }: {
   task: TaskView;
   today: string;
-  onPick: (when: string | "someday" | null, label: string) => void;
+  onPick: (value: WhenValue) => void;
 }) {
-  const tomorrow = tomorrowOf(today);
-  const nextWeek = nextWeekOf(today);
-  const fine = usePointerFine();
-  const [picking, setPicking] = useState(false);
   const label =
     task.when === "someday"
       ? "Someday"
       : task.when === today
-        ? "Today"
-        : task.when === tomorrow
+        ? task.evening
+          ? "This Evening"
+          : "Today"
+        : task.when === tomorrowOf(today)
           ? "Tomorrow"
           : task.when
             ? dayLabel(task.when)
             : "When";
-  const dateRow = (
-    <label className="brain-menu-item" data-task-control data-task-when-date>
-      <Icon name="calendar-linear" size={16} className="brain-menu-icon" />
-      <span className="min-w-0 flex-1">Date</span>
-      <input
-        type="date"
-        autoFocus={picking}
-        className="brain-task-date"
-        value={task.when && task.when !== "someday" ? task.when : ""}
-        onChange={(event) => {
-          const value = event.currentTarget.value;
-          if (value) onPick(value, dayLabel(value));
-        }}
-      />
-    </label>
-  );
-
+  // EVERY CHIP NAMES ITS FIELD AND ITS VALUE, which is the sentence the
+  // Category and Repeat chips beside it already say: "Today" alone, read out
+  // next to a Deadline chip, is a date with nothing to attach it to. The
+  // popover carries the same words, so the control and the panel it opens are
+  // announced as one thing.
+  const spoken = `When: ${label}${task.time ? ` at ${task.time}` : ""}`;
   return (
-    <Dropdown.Root
-      onOpenChange={(open) => {
-        // The reveal belongs to one opening of the menu, so the list is the
-        // same list every time it is opened.
-        if (!open) setPicking(false);
+    <TasksWhenPicker
+      value={{
+        when: task.when ?? null,
+        evening: task.evening === true,
+        time: task.time ?? null,
       }}
-    >
-      <Dropdown.Trigger asChild>
-        <button type="button" className="chip" data-task-control aria-label={`When: ${label}`}>
+      today={today}
+      onPick={onPick}
+      ariaLabel={spoken}
+      trigger={
+        <button type="button" className="chip" data-task-control aria-label={spoken}>
           <span className="chip-glyph">
             <Icon name="calendar" size={14} />
           </span>
           {label}
         </button>
-      </Dropdown.Trigger>
-      <Dropdown.Portal>
-        <Dropdown.Content
-          side="bottom"
-          align="start"
-          sideOffset={6}
-          collisionPadding={8}
-          className="brain-menu z-[var(--z-modal)] w-[220px]"
-        >
-          <Dropdown.Item className="brain-menu-item" onSelect={() => onPick(today, "Today")}>
-            <Icon name="calendar-date-linear" size={16} className="brain-menu-icon" />
-            Today
-          </Dropdown.Item>
-          <Dropdown.Item className="brain-menu-item" onSelect={() => onPick(tomorrow, "Tomorrow")}>
-            <Icon name="calendar-linear" size={16} className="brain-menu-icon" />
-            Tomorrow
-          </Dropdown.Item>
-          <Dropdown.Item
-            className="brain-menu-item"
-            onSelect={() => onPick(nextWeek, "Next week")}
-          >
-            <Icon name="calendar-linear" size={16} className="brain-menu-icon" />
-            Next week
-          </Dropdown.Item>
-          <Dropdown.Item className="brain-menu-item" onSelect={() => onPick("someday", "Someday")}>
-            <Icon name="box-minimalistic-linear" size={16} className="brain-menu-icon" />
-            Someday
-          </Dropdown.Item>
-          <Dropdown.Separator className="brain-menu-sep" />
-          {fine && !picking ? (
-            <Dropdown.Item
-              className="brain-menu-item"
-              data-task-when-pick
-              onSelect={(event) => {
-                // The menu stays open: the row it reveals is inside it.
-                event.preventDefault();
-                setPicking(true);
-              }}
-            >
-              <Icon name="calendar-linear" size={16} className="brain-menu-icon" />
-              Pick a date
-            </Dropdown.Item>
-          ) : (
-            dateRow
-          )}
-          {task.when && (
-            <Dropdown.Item className="brain-menu-item" onSelect={() => onPick(null, "Inbox")}>
-              <Icon name="close-linear" size={16} className="brain-menu-icon" />
-              Clear
-            </Dropdown.Item>
-          )}
-        </Dropdown.Content>
-      </Dropdown.Portal>
-    </Dropdown.Root>
+      }
+    />
   );
 }
 
@@ -830,15 +765,19 @@ function useRowShortcuts({
   today,
   rowKey,
   inert,
+  task,
 }: {
   selected: boolean;
   expanded: boolean;
   completeNow: () => void;
-  leaveDown: (when: string | "someday" | null, label: string) => Promise<void>;
+  leaveDown: (value: WhenValue, label: string) => Promise<void>;
   onExpand: (id: string | null) => void;
   today: string;
   rowKey: string;
   inert: boolean;
+  /** The record the value is built over: a key names a day and the clock on it
+   *  is already the task's. */
+  task: TaskView;
 }) {
   useEffect(() => {
     // A finished row answers no key for the same reason it answers no press:
@@ -862,28 +801,30 @@ function useRowShortcuts({
       // spec's own chord alongside the two letters.
       if (meta && event.key === "]") {
         event.preventDefault();
-        void leaveDown(tomorrowOf(today), "Tomorrow");
+        const tomorrow = tomorrowOf(today);
+        void leaveDown(whenValueFor(task, tomorrow), whenLabel(tomorrow, today));
         return;
       }
       if (meta || event.altKey) return;
       const move = ROW_KEYS[event.key.toLowerCase()];
       if (!move) return;
       event.preventDefault();
-      void leaveDown(move.when(today), move.label);
+      void leaveDown(whenValueFor(task, move.when(today)), move.label);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [completeNow, expanded, inert, leaveDown, onExpand, rowKey, selected, today]);
+  }, [completeNow, expanded, inert, leaveDown, onExpand, rowKey, selected, task, today]);
 }
 
 /** The two the palette carries too, so a key and a palette row never disagree
  *  about where `t` sends a task.
  *
- *  There is no third. Things binds `e` to This evening and Brain has no
- *  evening: the record holds a day or the word `someday`
- *  (`lib/tasks/model.ts`), and the spec names no state between them. A key
- *  that filed for today under an evening's name would be a second answer to
- *  where the task is, and a key that did exactly what `t` does is a dead one. */
+ *  There is no third. Brain does have an evening now, and Things binds `e` to
+ *  it, but the evening is a SECTION of today rather than a place a task is
+ *  sent to: `e` would file the row where `t` already files it and then set one
+ *  more field, which is the picker's Evening row one press away with the day
+ *  in front of the reader. A key that half-does what a control does properly
+ *  is the one shape a shortcut must not have. */
 export const ROW_KEYS: Record<
   string,
   { when: (today: string) => string | "someday" | null; label: string }

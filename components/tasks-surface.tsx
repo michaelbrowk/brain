@@ -38,7 +38,8 @@ import {
   type TaskSection,
   type TasksView,
 } from "./tasks-lists";
-import { ROW_KEYS, TasksRow, tomorrowOf } from "./tasks-row";
+import { ROW_KEYS, TasksRow, tomorrowOf, whenValueFor } from "./tasks-row";
+import type { WhenValue } from "./tasks-when-picker";
 import { Button } from "./ui/button";
 import { Empty } from "./ui/empty";
 import type { ToastOptions } from "./ui/primitives";
@@ -166,7 +167,7 @@ export function TasksSurface({
    *  The Logbook has no ghost row at all: a task written straight into the
    *  Logbook would have to be born completed, and nobody means that. */
   const capture = useCallback(
-    (title: string) => {
+    (title: string, picked: WhenValue) => {
       const seed =
         view.kind === "category"
           ? view.category
@@ -179,7 +180,20 @@ export function TasksSurface({
               : view.list === "someday"
                 ? { when: "someday" }
                 : {};
-      void createTask({ title, ...seed })
+      // WHAT THE READER PICKED WINS over the list's own seed, and only what
+      // they picked: a line typed into Today with no picking still lands
+      // today, because an untouched chip answers `when: null` and overrides
+      // nothing. A clock and an evening both need a day, so neither travels
+      // without one.
+      const chosen =
+        picked.when === null
+          ? {}
+          : {
+              when: picked.when,
+              ...(picked.time !== null ? { time: picked.time } : {}),
+              ...(picked.evening ? { evening: true as const } : {}),
+            };
+      void createTask({ title, ...seed, ...chosen })
         .then((task) => {
           actions.markInserted(task.id);
           mutateTasks((tasks) => [task, ...tasks]);
@@ -214,7 +228,11 @@ export function TasksSurface({
       // letters give on the row itself.
       if (!row || !row.untickable) return;
       const move = COMMAND_KEYS[command];
-      void actions.rescheduleTask(row.task, move.when(today), move.label);
+      void actions.rescheduleTask(
+        row.task,
+        whenValueFor(row.task, move.when(today)),
+        move.label,
+      );
     });
   }, [actions, drawn, selectedId, today]);
 
@@ -242,7 +260,11 @@ export function TasksSurface({
         <div className="brain-tasks-scrollfoot brain-tasks-scrollpad">
           {capturable && (
             <ul className="brain-tasks-rows" aria-label="New task">
-              <TasksGhostRow captureRequest={captureRequest} onCreate={capture} />
+              <TasksGhostRow
+                captureRequest={captureRequest}
+                today={today}
+                onCreate={capture}
+              />
             </ul>
           )}
 
@@ -375,11 +397,7 @@ function TaskGroup({
   onExpand: (id: string | null) => void;
   onComplete: (task: TaskView, refusal?: string) => Promise<void>;
   onReopen: (task: TaskView, refusal?: string) => void;
-  onReschedule: (
-    task: TaskView,
-    when: string | "someday" | null,
-    label: string,
-  ) => Promise<void>;
+  onReschedule: (task: TaskView, value: WhenValue, label: string) => Promise<void>;
   onPatch: (task: TaskView, patch: TaskFieldPatch) => void;
   onFoldEnd: (id: string) => void;
 }) {

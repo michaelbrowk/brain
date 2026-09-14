@@ -17,6 +17,7 @@ import {
   reminderFired,
   sectionsFor,
   timeCaption,
+  whenLabel,
   type TasksView,
 } from "./tasks-lists";
 
@@ -484,5 +485,26 @@ describe("the row's clock, moon and fired reminder", () => {
       ),
     ).toBe(false);
     expect(reminderFired(task("c", { when: TODAY }))).toBe(false);
+  });
+});
+
+/** THE WORD A MOVE IS REPORTED IN, one row per answer there is. */
+describe("whenLabel", () => {
+  it.each<[string | null | undefined, string]>([
+    [TODAY, "Today"],
+    ["2026-09-14", "Tomorrow"],
+    ["someday", "Someday"],
+    [null, "No date"],
+    ["2026-09-20", "20 Sep"],
+    // Yesterday is a date and never the word. The tail already says "since
+    // Sat" over an overdue row, and a second wording here would be a second
+    // answer to where the task went.
+    ["2026-09-12", "12 Sep"],
+  ])("reads %s as %s", (when, label) => {
+    expect(whenLabel(when, TODAY)).toBe(label);
+  });
+
+  it("reads a missing day the same way it reads a cleared one", () => {
+    expect(whenLabel(undefined, TODAY)).toBe("No date");
   });
 });

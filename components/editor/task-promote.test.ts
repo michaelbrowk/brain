@@ -624,6 +624,106 @@ describe("the + Task gesture", () => {
     expect(marks(view)[0].textContent).toBe("+ Task");
   });
 
+  /** WHAT THE PANEL CLEARS, THE RECORD CLEARS.
+   *
+   *  `extras` only ever ADDED `time` and `evening`, so a reschedule sent
+   *  `{ when, evening: true }` for a gesture that had switched the
+   *  reminder off: the clock stayed on the record, the panel reopened showing
+   *  it, and the reminder the reader had cleared went on firing. The row's own
+   *  When chip got this right one file away by comparing the picked value
+   *  against the record, and this is the same comparison, against the value
+   *  the panel opened on. */
+  describe("clearing a field from the panel", () => {
+    const seedEvening = () => {
+      const text = normalizeTaskText("water the plants");
+      tasks = [
+        {
+          id: "task-known",
+          title: text,
+          page: PAGE,
+          when: TODAY,
+          evening: true,
+          time: "18:30",
+          done: false,
+          created: NOW.toISOString(),
+          updated: NOW.toISOString(),
+          anchor: { text, hash: hashTaskText(text), ordinal: 0, line: 0 },
+        },
+      ];
+    };
+
+    const patchBody = () =>
+      calls.find((call) => call.method === "PATCH")?.body ?? null;
+
+    it("sends time: null when the reminder is switched off", async () => {
+      seedEvening();
+      const view = await mountEditor("- [ ] water the plants\n");
+      marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+      menu()
+        ?.querySelector<HTMLElement>("[data-when-time-clear]")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      menu()
+        ?.querySelector<HTMLElement>("[data-when-done]")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await settle();
+
+      expect(patchBody()).toEqual({ when: TODAY, time: null });
+    });
+
+    it("sends evening: null when Today is pressed on an evening task", async () => {
+      seedEvening();
+      const view = await mountEditor("- [ ] water the plants\n");
+      marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+      await pick("Today");
+
+      expect(patchBody()).toEqual({ when: TODAY, evening: null });
+    });
+
+    it("leaves a field the gesture never touched out of the body", async () => {
+      const text = normalizeTaskText("water the plants");
+      tasks = [
+        {
+          id: "task-known",
+          title: text,
+          page: PAGE,
+          when: TODAY,
+          time: "18:30",
+          done: false,
+          created: NOW.toISOString(),
+          updated: NOW.toISOString(),
+          anchor: { text, hash: hashTaskText(text), ordinal: 0, line: 0 },
+        },
+      ];
+      const view = await mountEditor("- [ ] water the plants\n");
+      marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await pickDay(TOMORROW);
+
+      // The day moved and the clock did not, so the clock is not in the body.
+      expect(patchBody()).toEqual({ when: TOMORROW });
+    });
+
+    it("takes the evening off a task moved to another day, because an evening is today's", async () => {
+      seedEvening();
+      const view = await mountEditor("- [ ] water the plants\n");
+      marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await pickDay(TOMORROW);
+
+      expect(patchBody()).toEqual({ when: TOMORROW, evening: null });
+    });
+
+    it("still sends only what is set on a line that is not a task yet", async () => {
+      const view = await mountEditor("- [ ] water the plants\n");
+      hover(view, 0);
+      marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await pick("Today");
+
+      expect(postBody()).not.toHaveProperty("time");
+      expect(postBody()).not.toHaveProperty("evening");
+    });
+  });
+
   it("draws the word for a task the page already had, with no ghost beside it", async () => {
     const text = normalizeTaskText("water the plants");
     tasks = [

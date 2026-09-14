@@ -862,7 +862,7 @@ export function TasksWhenPicker({
    *  animates nothing in the sheet form now; what holds the node while the
    *  exit plays is a keyframe that moves nothing, and the travel off the
    *  bottom is this spring, alone. Reduced motion collapses that keyframe
-   *  through the global rule, so there the sheet simply goes. */
+   *  through the global rule, and there the sheet goes at once. */
   const close = useCallback(() => {
     closing.current = true;
     if (sheet && !reduce) {

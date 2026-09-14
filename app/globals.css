@@ -6408,8 +6408,8 @@ html[data-kbd] .brain-task-row[data-selected] {
      is a keyframe that changes nothing at all, and the travel off the bottom
      is the spring's, started from the value the drag left the sheet on
      (`components/tasks-when-picker.tsx`). The global reduced-motion rule
-     collapses this hold like every other animation, and there the sheet
-     simply goes. */
+     collapses this hold like every other animation, and there the sheet goes
+     at once. */
   .brain-menu.brain-when-sheet[data-state="open"],
   .brain-menu.brain-when-sheet[data-state="open"]::before,
   .brain-menu.brain-when-sheet[data-state="closed"]::before {

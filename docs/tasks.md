@@ -96,26 +96,41 @@ today's completions are in two places at once, their own list and the
 Logbook's Today group. A category view keeps the day's work for the same
 reason.
 
-**This Evening** is the last group of Today. It holds the open rows whose
-`when` is today and whose `evening` is set. An evening on a day still ahead is
-grouped by that day, and an evening already past is an ordinary overdue row
-with no moon in its tail.
+**This Evening** is the last group of Today, and the moon stands beside its
+header: every other header in the column is a word you typed or a date, and
+the evening is a part of the day. It holds the open rows whose `when` is today
+and whose `evening` is set. An evening on a day still ahead is grouped by that
+day, and an evening already past is an ordinary overdue row with no moon in
+its tail.
 
 **Inside a group**: open rows before done ones, then the timed rows by the
 clock and the untimed after them, then newest first. The Logbook takes neither
 of the last two and reads by completion instead, newest first, over a 30 day
 window.
 
-**One clock per row.** An open row shows its own `time` verbatim, because that
-clock is a wall clock in the owner's zone and means the same thing on every
-device. A finished row shows the time it was finished at instead, in the
-reader's own clock, and the hour it was due at is what the strike is drawn
-over. A reminder that has already fired on a row still open draws its clock at
-the caption's quiet ink, a note rather than an alarm.
+**One clock per row, and one clock shape in the column.** An open row shows
+its own `time` verbatim, because that clock is a wall clock in the owner's zone
+and means the same thing on every device. A finished row shows the time it was
+finished at instead, in your own offset and in the same 24-hour `HH:MM`, and
+the hour it was due at is what the strike is drawn over. A reminder that has
+already fired on a row still open draws its clock one step brighter than the
+caption around it, so a clock that has spoken reads differently from one still
+waiting.
+
+**The tail is a column.** Its glyph slot is reserved on every row, with or
+without a glyph to put in it, so a repeating task's clock lines up with the
+clock on the row below it.
+
+**A completion does not travel.** It is struck through, held for a moment
+wearing whatever it has left to say, then fades out where it stands while the
+rows below close the gap, and fades back in at the foot of its group. Reduced
+motion reorders at once.
 
 **Home draws five open rows** and up to three of the day's completions under
-them, flat and ungrouped. Whatever runs over either count is named on the
-`All today` row below the block.
+them, flat and ungrouped. The count beside the header is what is still open
+today. Whatever runs over either window is reached through the `All today` row
+below the block, which carries no count of its own: one number on the block,
+and it is the one you are asking for.
 
 A `time` makes the task a reminder. What fires it, and where it lands, is in
 Reminders below.
@@ -152,9 +167,12 @@ the deadline chip beside it, the capture row at the head of a list, and the
 
 It offers **Today**, **This Evening** while the picked day is today, a
 Monday-first **month grid**, **Someday** under the grid, and a **Reminder** row
-that opens two spinners at 09:00. Then **Clear** and **Done**. Today is ringed
-in the grid and the picked day is an ink capsule. Days before today are quiet
-and still pickable, because a deadline in the past is a real thing to record.
+that opens two spinners at 09:00, each of them a value with its own pair of
+chevrons beside it, up over down. Then **Clear** and **Done** in the foot, both
+quiet: the picked day is the panel's one ink fill, so Done carries its weight
+in ink text and Clear stands a step quieter beside it. Today is ringed in the
+grid and the picked day is an ink capsule. Days before today are quiet and
+still pickable, because a deadline in the past is a real thing to record.
 The Reminder row waits for a day to be picked before it will open, since a
 clock with no day names no instant. Someday takes the clock and the evening
 with it, for the same reason.
@@ -169,17 +187,23 @@ focused day. The spinners take their own up and down, an hour and five
 minutes.
 
 **The deadline form is the same control** with This Evening, Someday and the
-Reminder hidden, and "No deadline" in place of Clear. Today stays, because a
-deadline of today is a deadline.
+Reminder hidden, "No deadline" in place of Clear, and the word **Deadline** at
+the top of the panel. Today stays, because a deadline of today is a deadline.
 
 Below 768px the picker is full width under the row it belongs to, riding a
-sheet a grip drags away. There is no `input[type=date]` and no
-`input[type=time]` anywhere under `components/`, on a pointer or on touch, and
-`ops/design-guardrails.test.ts` refuses one.
+sheet a grip drags away: it rises from the bottom edge on one spring and, when
+it is dismissed, continues off the bottom on the same one rather than fading
+where it stands. The panel is drawn on the thicker glass the mail composer's
+sheet uses, so nothing behind it can be read through the grid. There is no
+`input[type=date]` and no `input[type=time]` anywhere under `components/`, on a
+pointer or on touch, and `ops/design-guardrails.test.ts` refuses one.
 
 The repeat menu reads the record's clock back into its own wording ("Every day
-at 13:00") and offers no second editor for it. The clock is set in the
-picker's Reminder row and nowhere else.
+at 13:00") and offers no second editor for it. A rule too long for the menu's
+width wraps to a second line and is never cut, since the rule is what the menu
+is there to state. Under it, a caption says "Reminder 07:45, set in When": the
+clock is set in the picker's Reminder row and nowhere else, and a line that
+says so is not a row you can press.
 
 ## Reminders
 

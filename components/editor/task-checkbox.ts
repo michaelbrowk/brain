@@ -860,6 +860,15 @@ function showMenu(
   /** The record a write from this panel has already made, so a second word
    *  moves it rather than minting a second one. See `applyChoice`. */
   let filed: string | null = null;
+  /** WHAT THE RECORD SAYS, as far as this panel knows: the value the line
+   *  carried when the panel opened, and then every value a route has TAKEN.
+   *  It is what a clearing gesture is measured against, because a PATCH that
+   *  leaves a field unnamed leaves that field standing: the reader switching the
+   *  reminder off has to send `time: null`, and only a comparison with the
+   *  record can tell that gesture from one that never touched the clock. The
+   *  picker keeps the same belief for its own no-op rule; this is the note's,
+   *  because the request body is written here. */
+  let record: WhenValue | null = null;
   /** THIS PANEL'S OWN WRITE IS OUT. `writing` is the line's flag and one panel
    *  can open over another's write, so the panel that is waiting has to know
    *  which of the two it is: only its own write keeps it standing, and only
@@ -902,9 +911,12 @@ function showMenu(
     setBusy(true);
     let reason: string | null;
     try {
-      const result = await applyChoice(view, trigger, promote, value, filed);
+      const result = await applyChoice(view, trigger, promote, value, filed, record);
       reason = result.reason;
       if (result.taskId !== null) filed = result.taskId;
+      // A value the route took IS the record now, and the next gesture is
+      // measured against it rather than against the day the panel opened on.
+      if (result.reason === null) record = { ...value };
     } finally {
       writing = false;
       sending = false;
@@ -939,6 +951,7 @@ function showMenu(
   // same `Clear` files it with no day the way the Inbox row above does: the
   // two were one word apart and did opposite things.
   const opened = whenOfLine(view, trigger);
+  record = opened;
   const picker = renderWhenPicker({
     value: opened ?? { when: null, evening: false, time: null },
     baseline: opened,
@@ -1119,6 +1132,10 @@ async function applyChoice(
   promote: PromoteContext,
   value: WhenValue,
   filed: string | null,
+  /** What the record says, for the fields a gesture can CLEAR. `null` is a
+   *  line with no record behind it yet, where nothing can be cleared and only
+   *  what the reader set is sent. */
+  record: WhenValue | null,
 ): Promise<ChoiceResult> {
   // THE WHOLE OF IT IS INSIDE THE TRY, the reading of the document as much as
   // the request. `markTargetOf` and the markdown the anchor is built from walk
@@ -1128,25 +1145,49 @@ async function applyChoice(
   // programming error is the case that most needs to end in a sentence.
   try {
     if (filed !== null) {
-      return { taskId: filed, reason: await reschedule(view, filed, value) };
+      return { taskId: filed, reason: await reschedule(view, filed, value, record) };
     }
     const target = markTargetOf(view, trigger);
     if (target === null) return { taskId: null, reason: "That line has gone" };
     if (target.taskId === null) return await promoteLine(view, target.index, promote, value);
-    return { taskId: target.taskId, reason: await reschedule(view, target.taskId, value) };
+    return {
+      taskId: target.taskId,
+      reason: await reschedule(view, target.taskId, value, record),
+    };
   } catch {
     return { taskId: filed, reason: "The task could not be saved" };
   }
 }
 
-/** The two fields that only travel with a day. `lib/tasks/model.ts` refuses a
- *  clock or an evening without one, so neither is sent unless the reader set
- *  it and there is a day for it to belong to. */
-function extras(value: WhenValue): Record<string, unknown> {
+/** The two fields that only travel with a day.
+ *
+ *  `lib/tasks/model.ts` refuses a clock or an evening without one, and the
+ *  store drops both when a patch takes the day away, so neither is named on a
+ *  value with no day of its own.
+ *
+ *  ONLY WHAT THE GESTURE CHANGED, and `null` IS A CHANGE. This only ever ADDED
+ *  the two, so switching the reminder off sent `{ when, evening: true }` and
+ *  the clock stayed on the record: the panel reopened showing the time the
+ *  reader had cleared a moment before, and the reminder went on firing. A patch that
+ *  leaves a field unnamed leaves that field standing, so clearing one means sending
+ *  `null` for it, which can only be told from a gesture that never touched it
+ *  by comparing against what the record says. `record` is that answer, and
+ *  `null` is a line with no record yet: nothing there can be cleared, so only
+ *  what the reader set travels. `components/tasks-actions.ts` does the same
+ *  comparison for the row's own When chip. */
+function extras(value: WhenValue, record: WhenValue | null): Record<string, unknown> {
   if (value.when === null || value.when === "someday") return {};
+  if (record === null) {
+    return {
+      ...(value.time !== null ? { time: value.time } : {}),
+      ...(value.evening ? { evening: true } : {}),
+    };
+  }
   return {
-    ...(value.time !== null ? { time: value.time } : {}),
-    ...(value.evening ? { evening: true } : {}),
+    ...(value.time !== record.time ? { time: value.time } : {}),
+    ...(value.evening !== record.evening
+      ? { evening: value.evening ? true : null }
+      : {}),
   };
 }
 
@@ -1186,7 +1227,9 @@ async function promoteLine(
     },
   };
   if (value.when !== null) body.when = value.when;
-  Object.assign(body, extras(value));
+  // A CREATE HAS NO RECORD TO DIFFER FROM: nothing on it can be cleared, so
+  // only what the reader set is named.
+  Object.assign(body, extras(value, null));
   const category = await pageCategory(page);
   if (category !== null) body.category = category;
 
@@ -1209,12 +1252,13 @@ async function reschedule(
   view: EditorView,
   taskId: string,
   value: WhenValue,
+  record: WhenValue | null,
 ): Promise<string | null> {
   try {
     const response = await apiFetch(`/api/tasks/${taskId}`, {
       method: "PATCH",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ when: value.when, ...extras(value) }),
+      body: JSON.stringify({ when: value.when, ...extras(value, record) }),
     });
     if (!response.ok) return await refusalOf(response);
     const answer = (await response.json()) as { task: TaskView };

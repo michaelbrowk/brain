@@ -254,7 +254,12 @@ export function HubToday({
           onClick={onOpenTasks}
           className="-mx-2 mt-1 rounded-sm px-2 py-1.5 text-[12px] text-ink-3 transition-colors hover:bg-fill-hover hover:text-ink-2"
         >
-          {`All today (${drawn.length})`}
+          {/* NO SECOND NUMBER. The header above already says what is open
+              today, which is the number a reader is asking for; this link
+              said how many rows the day holds in all, and the two sat over a
+              block that paints a third count of its own. It is a way through
+              to the list, and a way through does not need a tally. */}
+          All today
         </button>
       )}
     </section>

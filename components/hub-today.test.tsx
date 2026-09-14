@@ -173,7 +173,15 @@ describe("the Today block on Home", () => {
     expect(host.querySelector(".brain-tasks-section-label")).toBeNull();
   });
 
-  it("collapses row six and beyond into 'All today (7)'", async () => {
+  /** I12. THREE NUMBERS AND NONE OF THEM WAS THE NUMBER OF ROWS.
+   *
+   *  The header counted what is open over the whole day, the block painted
+   *  five open plus three struck, and the link printed everything the day
+   *  holds: "Today · 6", eight rows, "All today (10)". Each was defensible on
+   *  its own and together they read as a contradiction with nothing to say
+   *  which was which. The header keeps the open count, because that is the
+   *  one number a reader is asking for; the link stops carrying a second. */
+  it("collapses row six and beyond into a link that carries no number", async () => {
     await mount([
       task("one"),
       task("two"),
@@ -185,7 +193,7 @@ describe("the Today block on Home", () => {
     ]);
 
     const more = host.querySelector<HTMLButtonElement>("[data-hub-today-all]");
-    expect(more?.textContent).toBe("All today (7)");
+    expect(more?.textContent).toBe("All today");
 
     await act(async () => more?.click());
     expect(opened).toEqual(["tasks"]);
@@ -211,10 +219,11 @@ describe("the Today block on Home", () => {
 
     expect(titles()).toEqual(["a1", "a2", "a3", "a4", "a5", "z1", "z2"]);
     // The count is what is owed, and the overflow names what is not drawn.
+    // THE HEADER IS THE OPEN COUNT and the link is a way through, not a
+    // second tally: six still owed, five of them drawn, the day's two
+    // completions under them.
     expect(header()).toBe("Today · 6");
-    expect(host.querySelector("[data-hub-today-all]")?.textContent).toBe(
-      "All today (8)",
-    );
+    expect(host.querySelector("[data-hub-today-all]")?.textContent).toBe("All today");
   });
 
   it("takes at most three of the day's completions, because the rest is a logbook", async () => {
@@ -227,9 +236,7 @@ describe("the Today block on Home", () => {
     ]);
 
     expect(titles()).toEqual(["one", "d1", "d2", "d3"]);
-    expect(host.querySelector("[data-hub-today-all]")?.textContent).toBe(
-      "All today (5)",
-    );
+    expect(host.querySelector("[data-hub-today-all]")?.textContent).toBe("All today");
   });
 
   it("draws no overflow row while everything today fits", async () => {

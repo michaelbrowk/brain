@@ -307,6 +307,19 @@ describe("POST /api/tasks", () => {
     expect(res.status).toBe(400);
     expect(await res.json()).toEqual({ error: "bad_body" });
   });
+
+  it("creates a task with a time and an evening", async () => {
+    const res = await post({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "13:00",
+      evening: true,
+    });
+    expect(res.status).toBe(201);
+    expect(mocks.createTask).toHaveBeenCalledWith(
+      expect.objectContaining({ time: "13:00", evening: true }),
+    );
+  });
 });
 
 describe("the task routes are owner-only by shape", () => {

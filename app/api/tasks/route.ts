@@ -94,6 +94,8 @@ export async function POST(req: NextRequest) {
     const task = await store.createTask({
       title: input.title,
       ...(input.when !== undefined ? { when: input.when } : {}),
+      ...(input.time !== undefined ? { time: input.time } : {}),
+      ...(input.evening !== undefined ? { evening: input.evening } : {}),
       ...(input.deadline !== undefined ? { deadline: input.deadline } : {}),
       ...(input.category !== undefined ? { category: input.category } : {}),
       ...(input.page !== undefined ? { page: input.page } : {}),

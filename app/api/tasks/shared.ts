@@ -125,6 +125,8 @@ export async function readJsonObject(
 export interface CreateBody {
   title: string;
   when?: string;
+  time?: string;
+  evening?: true;
   deadline?: string;
   category?: string;
   page?: string;
@@ -137,6 +139,8 @@ export interface CreateBody {
 export const PATCH_FIELDS = [
   "title",
   "when",
+  "time",
+  "evening",
   "deadline",
   "category",
   "repeat",
@@ -163,6 +167,8 @@ const patchBodySchema = z
   .object({
     title: patchFields.title.optional(),
     when: patchFields.when.nullable(),
+    time: patchFields.time.nullable(),
+    evening: patchFields.evening.nullable(),
     deadline: patchFields.deadline.nullable(),
     category: patchFields.category.nullable(),
     repeat: patchFields.repeat.nullable(),
@@ -189,6 +195,8 @@ export function refusePatchValues(
 export interface PatchBody {
   title?: string;
   when?: string | null;
+  time?: string | null;
+  evening?: true | null;
   deadline?: string | null;
   category?: string | null;
   repeat?: TaskRepeat | null;

@@ -11286,3 +11286,112 @@ describe("task records", () => {
     });
   });
 });
+
+describe("the clock on a task, through the store", () => {
+  it("creates a task with a time and an evening", async () => {
+    const { s } = await tmpStore();
+    const task = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "13:00",
+      evening: true,
+    });
+    expect(task).toMatchObject({ time: "13:00", evening: true });
+  });
+
+  it("refuses a time on a task with no day, in the schema's own words", async () => {
+    const { s } = await tmpStore();
+    await expect(
+      s.createTask({ title: "Water the plants", time: "13:00" }),
+    ).rejects.toThrow("time: time needs a day to be a time on");
+  });
+
+  it("clears the mark when the day moves", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "13:00",
+    });
+    await s.markTaskReminded(made.id, "2026-09-13T12:00:00.000Z");
+    const moved = await s.updateTask(made.id, { when: "2026-09-14" });
+    expect(moved.remindedAt).toBeUndefined();
+  });
+
+  it("clears the mark when the time moves", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "13:00",
+    });
+    await s.markTaskReminded(made.id, "2026-09-13T12:00:00.000Z");
+    const retimed = await s.updateTask(made.id, { time: "18:00" });
+    expect(retimed.remindedAt).toBeUndefined();
+  });
+
+  it("leaves the mark alone when something else is patched", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "13:00",
+    });
+    await s.markTaskReminded(made.id, "2026-09-13T12:00:00.000Z");
+    const filed = await s.updateTask(made.id, { category: "Home" });
+    expect(filed.remindedAt).toBe("2026-09-13T12:00:00.000Z");
+  });
+
+  it("takes the clock with the day when a task is parked", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "13:00",
+      evening: true,
+    });
+    const parked = await s.updateTask(made.id, { when: "someday" });
+    expect(parked.time).toBeUndefined();
+    expect(parked.evening).toBeUndefined();
+  });
+
+  it("takes the clock with the day when a task goes back to the inbox", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "13:00",
+    });
+    const inbox = await s.updateTask(made.id, { when: null });
+    expect(inbox.when).toBeUndefined();
+    expect(inbox.time).toBeUndefined();
+  });
+
+  it("sets a day and a time in one call", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({ title: "Water the plants" });
+    const set = await s.updateTask(made.id, {
+      when: "2026-09-13",
+      time: "13:00",
+    });
+    expect(set).toMatchObject({ when: "2026-09-13", time: "13:00" });
+  });
+
+  it("refuses a time in the same call as a completion", async () => {
+    const { s } = await tmpStore();
+    const made = await s.createTask({
+      title: "Take the bins out",
+      when: "2026-09-13",
+      repeat: { freq: "daily" },
+    });
+    await expect(
+      s.updateTask(made.id, {
+        done: true,
+        today: "2026-09-13",
+        time: "13:00",
+      }),
+    ).rejects.toThrow(
+      "time cannot be set in the same call as a repeating task's completion",
+    );
+  });
+});

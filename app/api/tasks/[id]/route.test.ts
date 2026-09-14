@@ -306,3 +306,32 @@ describe("PATCH /api/tasks/[id], the instance that moved", () => {
     expect((await res.json()).error).toContain("already done");
   });
 });
+
+describe("the clock on the patch surface", () => {
+  it("accepts a time and an evening", async () => {
+    const res = await patch({ when: TOMORROW, time: "13:00", evening: true });
+    expect(res.status).toBe(200);
+    expect(mocks.updateTask).toHaveBeenCalledWith(
+      TASK_ID,
+      expect.objectContaining({ when: TOMORROW, time: "13:00", evening: true }),
+    );
+  });
+
+  it("accepts null for either, which is how a caller clears one", async () => {
+    const res = await patch({ time: null, evening: null });
+    expect(res.status).toBe(200);
+  });
+
+  it("refuses a time the field cannot hold, before the store is reached", async () => {
+    const res = await patch({ time: "25:00" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "time: Invalid" });
+    expect(mocks.updateTask).not.toHaveBeenCalled();
+  });
+
+  it("refuses evening: false, because the absence is the only other state", async () => {
+    const res = await patch({ evening: false });
+    expect(res.status).toBe(400);
+    expect(mocks.updateTask).not.toHaveBeenCalled();
+  });
+});

@@ -6773,6 +6773,8 @@ export class Store {
         id: nanoid(),
         title: input.title,
         ...(input.when !== undefined ? { when: input.when } : {}),
+        ...(input.time !== undefined ? { time: input.time } : {}),
+        ...(input.evening !== undefined ? { evening: input.evening } : {}),
         ...(input.deadline !== undefined ? { deadline: input.deadline } : {}),
         ...(input.category !== undefined ? { category: input.category } : {}),
         ...(input.page !== undefined ? { page: input.page } : {}),
@@ -6844,6 +6846,25 @@ export class Store {
       // check passed and still answers 200.
       if (!this.taskIndex.get(id)) throw new NotFoundError(id);
       await this.deleteTaskUnlocked(id, src);
+    });
+  }
+
+  /** THE MARK THAT THIS INSTANCE'S REMINDER HAS FIRED.
+   *
+   *  Its own method rather than a patch, because `applyTaskPatch` clears
+   *  `remindedAt` whenever the day or the clock moves, and a reminder writing
+   *  through that path would clear the mark it is setting. It writes one field
+   *  and touches nothing else, not even `updated`: the record did not change
+   *  for the person, and a bumped `updated` would reorder nothing but would
+   *  read in a git diff as an edit nobody made.
+   */
+  async markTaskReminded(id: string, at: string): Promise<TaskView> {
+    assertTaskId(id);
+    return this.mutate(async () => {
+      const current = this.taskIndex.get(id);
+      if (!current) throw new NotFoundError(id);
+      await this.writeTaskUnlocked(parseTask({ ...current, remindedAt: at }));
+      return this.taskIndex.view(id) as TaskView;
     });
   }
 
@@ -7207,6 +7228,8 @@ function assertOnlyCompletion(patch: UpdateTaskPatch, subject: string): void {
   const others: (keyof UpdateTaskPatch)[] = [
     "title",
     "when",
+    "time",
+    "evening",
     "deadline",
     "category",
     "repeat",
@@ -7333,6 +7356,23 @@ function applyTaskPatch(
     assignOrClear(next, "when", patch.when);
   }
   assignOrClear(next, "deadline", patch.deadline);
+  assignOrClear(next, "time", patch.time);
+  assignOrClear(next, "evening", patch.evening);
+  // A CLOCK WITH NO DAY NAMES NO INSTANT. `time` and `evening` are both
+  // statements about a day, so parking a task or sending it back to the Inbox
+  // takes them with it. Without this the schema would refuse the record and a
+  // plain "move to Someday" would come back as a 400.
+  const landsOnADay = typeof next.when === "string" && next.when !== "someday";
+  if (!landsOnADay) {
+    delete next.time;
+    delete next.evening;
+  }
+  // THE MARK IS ABOUT ONE INSTANT, and both of these move it. A reminder that
+  // already fired for 13:00 today has nothing to say about 18:00 tomorrow, so
+  // the edit re-arms it. Anything else leaves the mark where it is.
+  if (patch.when !== undefined || patch.time !== undefined || !landsOnADay) {
+    delete next.remindedAt;
+  }
   assignOrClear(next, "category", patch.category);
   assignOrClear(next, "repeat", patch.repeat);
   // `log` STAYS when the rule goes. Stopping a repeat leaves the instance as

@@ -3,6 +3,7 @@ import path from "node:path";
 import matter from "gray-matter";
 import { atomicWrite } from "../store/atomic";
 import { assertInRoot } from "../store/paths";
+import { LOGBOOK_WINDOW_DAYS } from "./lists";
 import {
   TASK_ID_RE,
   isLinkedTask,
@@ -27,8 +28,14 @@ import {
 export const TASKS_DIR = "_tasks";
 
 /** The Logbook holds 30 days. Older completions stay on disk and stay out of
- *  every list. */
-export const LOGBOOK_WINDOW_DAYS = 30;
+ *  every list.
+ *
+ *  The number lives in `./lists`, where the browser's own derivation reads it,
+ *  and is re-exported here because the store's window and the column's window
+ *  are the same window: two constants could drift into a list that shows a day
+ *  the store no longer serves. `lists.ts` opens no files, so a server-only
+ *  module importing it costs the browser bundle nothing. */
+export { LOGBOOK_WINDOW_DAYS };
 
 /** The path of one task record. The id is validated against `TASK_ID_RE`
  *  before it reaches `path.join`, and the result passes `assertInRoot`, so no

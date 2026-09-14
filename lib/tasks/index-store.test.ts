@@ -248,6 +248,14 @@ describe("the task index", () => {
     expect(logbookWindowStart("2026-01-05")).toBe("2025-12-06");
   });
 
+  it("takes that window from lists.ts, so the store and the column cannot hold two", async () => {
+    // The column derives the Logbook from the same number the store serves it
+    // by. Two constants drift, and the day they do the list shows a completion
+    // the store has already dropped.
+    const lists = await import("./lists");
+    expect(LOGBOOK_WINDOW_DAYS).toBe(lists.LOGBOOK_WINDOW_DAYS);
+  });
+
   /** The body shapes a Markdown-literate person writes. A leading fence is the
    *  one that used to be folded into the record's own frontmatter. */
   const BODIES = [

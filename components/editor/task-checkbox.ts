@@ -14,7 +14,7 @@ import type {
 } from "@milkdown/kit/prose/view";
 import { $prose, $view } from "@milkdown/kit/utils";
 
-import { localDay } from "@/components/tasks-client";
+import { localDay, onDayChange } from "@/components/tasks-client";
 import {
   prefersReducedMotion,
   renderTaskCheckbox,
@@ -24,6 +24,7 @@ import {
 import { dayLabel } from "@/components/tasks-lists";
 import { SOLAR } from "@/components/ui/solar-icons.generated";
 import { apiFetch } from "@/lib/client";
+import { TASKS_CHANGED_EVENT } from "@/lib/editor-events";
 import { classifyInternalPageLink } from "@/lib/internal-page-link";
 import { DUR } from "@/lib/motion";
 import { isLinkedTask, type TaskView } from "@/lib/tasks/model";
@@ -208,10 +209,12 @@ export const PROMOTE_MENU_CLASS = "brain-task-menu";
 /** A task record changed somewhere this editor cannot see. Dispatched on
  *  `window` by the shell's store-event forwarder in `components/shell.tsx`,
  *  which is the one place that already knows a `type: "task"` event arrived
- *  and that it was not this tab's own. The literal is repeated there rather
- *  than imported, because importing from this module would pull Milkdown into
- *  the shell's bundle, and the editor is dynamically imported to keep it out. */
-export const TASKS_CHANGED_EVENT = "brain:tasks-changed";
+ *  and that it was not this tab's own. The name lives in `lib/editor-events`,
+ *  which both sides import: this module cannot be imported from the shell
+ *  (it would pull Milkdown into that bundle), so a shared literal would have
+ *  had to be written twice. Re-exported for the callers that already had it
+ *  from here. */
+export { TASKS_CHANGED_EVENT };
 const MENU_WIDTH = 220;
 /** The retrace, `DUR.fast`. The material's own keyframes play it; this is how
  *  long to wait before taking the element away. */
@@ -224,7 +227,10 @@ const promoteKey = new PluginKey<PromoteState>("brainTaskPromote");
 type PromoteMessage =
   | { kind: "tasks"; tasks: readonly TaskView[] }
   | { kind: "hover"; pos: number | null }
-  | { kind: "open"; pos: number | null };
+  | { kind: "open"; pos: number | null }
+  /** Midnight passed. Nothing in the document moved and no record changed,
+   *  but every word a linked line carries names the reader's own day. */
+  | { kind: "day" };
 
 /** One task list item of the document, in document order. */
 interface TaskItem {
@@ -444,7 +450,12 @@ export const taskPromote = $prose((ctx) => {
         }
         if (message?.kind === "hover") next = { ...next, hover: message.pos };
         if (message?.kind === "open") next = { ...next, open: message.pos };
-        if (!rebind && next === value && !tr.docChanged && !tr.selectionSet) return value;
+        // A new day redraws the words and nothing else: the lines are the
+        // lines they were a second ago, so no rebind and no serialisation.
+        const redraw = message?.kind === "day";
+        if (!rebind && !redraw && next === value && !tr.docChanged && !tr.selectionSet) {
+          return value;
+        }
         return build(state.doc, state.selection, next, rebind);
       },
     },
@@ -477,8 +488,17 @@ export const taskPromote = $prose((ctx) => {
       const reload = () => {
         if (!disposed) void loadTasks(view, () => disposed);
       };
+      // Midnight, off the one clock the subsystem reads
+      // (`components/tasks-client`): the same timer, `visibilitychange` and
+      // `focus` the Tasks surface and the sidebar count are armed from. Without
+      // it a note left open overnight still says `Today` on a line that is now
+      // owed yesterday, and `Done` on one completed the day before.
+      let releaseDay: (() => void) | null = null;
       if (promoteKey.getState(view.state)?.page) {
         reload();
+        releaseDay = onDayChange(() => {
+          if (!disposed) redrawDay(view);
+        });
         // A record can change anywhere: another tab, the Tasks surface, an MCP
         // call, a repeat rule advancing. Without this the note keeps whatever
         // it read at mount, so a line deleted and re-typed shows a word for a
@@ -491,6 +511,7 @@ export const taskPromote = $prose((ctx) => {
       return {
         destroy: () => {
           disposed = true;
+          releaseDay?.();
           window.removeEventListener(TASKS_CHANGED_EVENT, reload);
           // Taken away rather than dismissed: a dismiss dispatches, and this
           // editor's ctx is already being torn down around it.
@@ -521,6 +542,18 @@ function setOpen(view: EditorView, pos: number | null): void {
   view.dispatch(
     view.state.tr
       .setMeta(promoteKey, { kind: "open", pos } satisfies PromoteMessage)
+      .setMeta("addToHistory", false),
+  );
+}
+
+/** Redraw the words for a new day. No record changed and no line moved, so
+ *  this is not in the history and asks for no re-serialisation. */
+function redrawDay(view: EditorView): void {
+  if (view.isDestroyed) return;
+  if (promoteKey.getState(view.state)?.page == null) return;
+  view.dispatch(
+    view.state.tr
+      .setMeta(promoteKey, { kind: "day" } satisfies PromoteMessage)
       .setMeta("addToHistory", false),
   );
 }
@@ -714,9 +747,13 @@ function showMenu(
   element.className = `brain-menu ${PROMOTE_MENU_CLASS}`;
   element.setAttribute("role", "menu");
 
-  // A refusal is shown where the choice was made. The menu stays open, so the
-  // reader can read the reason and pick again rather than watch a gesture do
-  // nothing.
+  // A refusal is shown where the choice was made, and not in the shell's
+  // toast. The toast is the house surface for a route `reason` everywhere the
+  // control that asked for it is already gone; here it is not — this popover
+  // is open over the line, and a notice in the corner of the window would ask
+  // the reader to look away from the control they are holding and then back
+  // at it to pick again. So the menu stays open, the reason sits in it, and
+  // the next pick is one press away. The words are still the route's own.
   const refusal = document.createElement("p");
   refusal.className = "brain-menu-label";
   refusal.hidden = true;

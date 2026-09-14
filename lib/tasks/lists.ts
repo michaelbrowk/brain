@@ -77,10 +77,12 @@ export function doneDayOf(iso: string, offsetMinutes: number): string {
   return carry === 0 ? day : dayString(dayNumber(day) + carry);
 }
 
-/** The Logbook holds 30 days. `lib/tasks/index-store.ts` carries the same
- *  number for the store's own window, and cannot be imported here: it opens
- *  files, and this module is in the browser bundle. */
-const LOGBOOK_WINDOW_DAYS = 30;
+/** The Logbook holds 30 days.
+ *
+ *  Its one home. `lib/tasks/index-store.ts` re-exports it for the store's own
+ *  window rather than carrying a second 30: this module opens no files, so a
+ *  server module can import it, and the reverse could never be true. */
+export const LOGBOOK_WINDOW_DAYS = 30;
 
 /** The oldest day the Logbook shows, in the reader's own days. */
 function logbookWindowStart(today: string): string {

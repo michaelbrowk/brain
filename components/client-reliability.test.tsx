@@ -380,6 +380,7 @@ describe("client reliability states", () => {
       attachments: 2,
       attachmentBytes: 2_048,
       collections: 0,
+      tasks: 4,
     };
     const portableResponses = [
       response({ ok: true, mode: "dry-run", summary }),
@@ -423,7 +424,9 @@ describe("client reliability states", () => {
     await settle();
 
     expect(document.body.textContent).toContain("Project Notes");
-    expect(document.body.textContent).toContain("3 pages · 2 attachments · 2 KB");
+    expect(document.body.textContent).toContain(
+      "3 pages · 4 tasks · 2 attachments · 2 KB",
+    );
     const portableCalls = () =>
       fetchMock.mock.calls.filter(
         ([input]) => String(input) === "/api/portable/import",

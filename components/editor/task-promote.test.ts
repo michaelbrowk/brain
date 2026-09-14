@@ -8,6 +8,7 @@ import type { EditorView } from "@milkdown/kit/prose/view";
 import { getMarkdown } from "@milkdown/kit/utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { resetTasksStore } from "@/components/tasks-client";
 import { hashTaskText, normalizeTaskText } from "@/lib/tasks/task-lines";
 
 import {
@@ -73,7 +74,13 @@ function stubFetch() {
 
     // `?page=<id>` and nothing else: a list read hides a done, a detached or
     // an old record, and the note needs all three.
+    //
+    // The other shape reaching this path is not the plugin's. Its day watcher
+    // shares `components/tasks-client`'s one clock, and that module asks for
+    // the reader's own lists whenever the day it holds moves. Answered empty:
+    // nothing here reads it.
     if (url.startsWith("/api/tasks?")) {
+      if (!url.includes("page=")) return json(200, { tasks: [] });
       expect(url).toBe(`/api/tasks?page=${PAGE}`);
       return json(200, { tasks: tasks.filter((task) => task.page === PAGE) });
     }
@@ -195,6 +202,10 @@ function postBody(): Record<string, unknown> {
 beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(NOW);
+  // Module state outlives a file's cases, and the day it holds decides
+  // whether the next mount's watcher sees a change. Reset, so no case
+  // depends on the order it runs in.
+  resetTasksStore();
   window.history.replaceState({}, "", `/p/${PAGE}`);
   calls = [];
   tasks = [];
@@ -265,7 +276,7 @@ describe("the + Task gesture", () => {
 
   it("shows no ghost away from a note, so a share visitor is offered nothing", async () => {
     // The app's own share path. `/s/<token>` would pass for any string that is
-    // not `/p/<id>`, and this is the URL a visitor is really on.
+    // not `/p/<id>`, and this is the URL a visitor lands on.
     window.history.replaceState({}, "", `/share/${PAGE}`);
     const view = await mountEditor("- [ ] water the plants\n");
 
@@ -398,7 +409,14 @@ describe("the + Task gesture", () => {
     expect(postBody().category).toBeUndefined();
   });
 
-  it("keeps the menu open and says so when the route refuses", async () => {
+  it("keeps the menu open and says so when the route refuses, rather than toasting", async () => {
+    // THE REFUSAL IS SHOWN WHERE THE CHOICE WAS MADE, and that is the
+    // decision, not an oversight. A toast is the house surface for a route
+    // `reason`, and it is the wrong one here: the popover is still open over
+    // the line, so a notice in the corner of the window asks the reader to
+    // look away from the control they are holding and then back at it to pick
+    // again. The menu stays, the reason sits in it, and the next pick is one
+    // press away. The words are still the route's own.
     createAnswer = { status: 400, body: { error: "bad_title", reason: "title too long" } };
     const view = await mountEditor("- [ ] water the plants\n");
     hover(view, 0);
@@ -513,7 +531,7 @@ describe("the + Task gesture", () => {
 
   it("asks for this page's records again when a task changes somewhere else", async () => {
     const view = await mountEditor("- [ ] water the plants\n");
-    const asked = () => calls.filter((call) => call.url.startsWith("/api/tasks?")).length;
+    const asked = () => calls.filter((call) => call.url.includes("/api/tasks?page=")).length;
     expect(asked()).toBe(1);
     expect(marks(view)[0].textContent).toBe("+ Task");
 
@@ -537,15 +555,69 @@ describe("the + Task gesture", () => {
     expect(marks(view)[0].textContent).toBe("Today");
   });
 
+  it("renames the word when the day moves under an open note", async () => {
+    // A tab left open overnight. Nothing in the document moved and no record
+    // changed: what changed is which day `Today` means, and the line is owed
+    // yesterday now. The plugin hears it from the one clock the subsystem
+    // reads, the same timer, visibilitychange and focus the Tasks surface and
+    // the sidebar count are armed from.
+    const text = normalizeTaskText("water the plants");
+    tasks = [
+      {
+        id: "task-overnight",
+        title: text,
+        page: PAGE,
+        when: TODAY,
+        done: false,
+        created: NOW.toISOString(),
+        updated: NOW.toISOString(),
+        anchor: { text, hash: hashTaskText(text), ordinal: 0, line: 0 },
+      },
+    ];
+    const view = await mountEditor("- [ ] water the plants\n");
+    expect(marks(view)[0].textContent).toBe("Today");
+
+    vi.setSystemTime(new Date(2026, 8, 14, 9, 0, 0));
+    window.dispatchEvent(new Event("focus"));
+    await settle();
+
+    expect(marks(view)[0].textContent).toBe("13 Sep");
+  });
+
+  it("stops watching the day once the editor is gone", async () => {
+    const text = normalizeTaskText("water the plants");
+    tasks = [
+      {
+        id: "task-overnight",
+        title: text,
+        page: PAGE,
+        when: TODAY,
+        done: false,
+        created: NOW.toISOString(),
+        updated: NOW.toISOString(),
+        anchor: { text, hash: hashTaskText(text), ordinal: 0, line: 0 },
+      },
+    ];
+    const view = await mountEditor("- [ ] water the plants\n");
+    await open.pop()!.destroy();
+
+    vi.setSystemTime(new Date(2026, 8, 14, 9, 0, 0));
+    window.dispatchEvent(new Event("focus"));
+    await settle();
+
+    // No throw, and the torn-down view was never dispatched into.
+    expect(view.isDestroyed).toBe(true);
+  });
+
   it("stops listening for task changes once the editor is gone", async () => {
     await mountEditor("- [ ] water the plants\n");
     await open.pop()!.destroy();
-    const asked = calls.filter((call) => call.url.startsWith("/api/tasks?")).length;
+    const asked = calls.filter((call) => call.url.includes("/api/tasks?page=")).length;
 
     window.dispatchEvent(new CustomEvent(TASKS_CHANGED_EVENT));
     await settle();
 
-    expect(calls.filter((call) => call.url.startsWith("/api/tasks?"))).toHaveLength(asked);
+    expect(calls.filter((call) => call.url.includes("/api/tasks?page="))).toHaveLength(asked);
   });
 
   it("closes the menu on Escape without sending anything", async () => {

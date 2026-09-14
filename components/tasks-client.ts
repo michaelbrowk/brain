@@ -190,6 +190,34 @@ export function useTasks(refreshToken: number): TasksState {
   return snapshot;
 }
 
+/** THE MIDNIGHT TIMER, FOR A READER THAT IS NOT REACT.
+ *
+ *  The open note draws a word per linked line — `Today`, `Tomorrow`, `Done` —
+ *  and those words name the reader's own day. A tab left open past midnight
+ *  keeps yesterday's word until something else makes the editor redraw, and
+ *  the plugin is ProseMirror rather than a component, so it cannot subscribe
+ *  to `useTasks`. This is the same timer, the same `visibilitychange` and the
+ *  same `focus` the surface and the sidebar count run on: one clock, reference
+ *  counted, and the listener hears only a CHANGE of day, never a re-read of
+ *  the same one. */
+export function onDayChange(listener: () => void): () => void {
+  // Armed first, and synchronously: `watchDay` reads the clock before it
+  // returns, so the day this subscriber starts from is today's and not the
+  // null it would otherwise fire against on the very next notification.
+  watchDay();
+  let seen = state.day?.today ?? null;
+  const unsubscribe = subscribe(() => {
+    const next = state.day?.today ?? null;
+    if (next === seen) return;
+    seen = next;
+    listener();
+  });
+  return () => {
+    unsubscribe();
+    releaseDay();
+  };
+}
+
 /** Move the records this tab already knows about, without a round trip: an
  *  optimistic completion, its revert, a created task landing at the top. Both
  *  the column and the sidebar count read the result of this one call. */

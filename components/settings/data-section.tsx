@@ -16,6 +16,9 @@ type PortableSummary = {
   attachments: number;
   attachmentBytes: number;
   collections: number;
+  /** Task records. A version 1 archive carries none and the route answers 0,
+   *  so the card always has a number to print. */
+  tasks: number;
 };
 type PortableStatus = "idle" | "checking" | "ready" | "applying" | "error" | "done";
 
@@ -134,8 +137,13 @@ export function DataSection({
                 <p className="text-table font-semibold text-ink">
                   {portableSummary.title}
                 </p>
+                {/* Tasks stand between the pages and the attachments, in the
+                    order the archive writes them and in the same caption: an
+                    import brings task records in too, and a count the card
+                    leaves out is a thing a reader imports unannounced. */}
                 <p className="mt-0.5 text-caption text-ink-3">
                   {portableSummary.pages} pages ·{" "}
+                  {portableSummary.tasks} tasks ·{" "}
                   {portableSummary.attachments} attachments ·{" "}
                   {formatPortableBytes(portableSummary.attachmentBytes)}
                 </p>

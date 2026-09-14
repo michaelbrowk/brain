@@ -129,7 +129,7 @@ let zoneAnnounced = false;
  *
  *  Keyed by task id and pruned against the due list on every scan, so a record
  *  that stopped being due takes its entry with it and the map is bounded by
- *  the number of reminders actually owed. */
+ *  the number of reminders owed. */
 const markRetries = new Map<string, { after: number; wait: number }>();
 
 /** For this module's own test. Nothing in the app calls it: the map is

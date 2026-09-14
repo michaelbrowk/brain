@@ -307,8 +307,8 @@ describe("Settings → Notifications", () => {
 
   // The load and the gesture write the same two pieces of state, and the
   // gesture is the cure the failed load offers: a section that kept saying it
-  // could not read anything, under a device it had just added, would be
-  // reporting a failure that is over.
+  // could not read anything, under a device it had added a moment before,
+  // would be reporting a failure that is over.
   it("clears the load failure when the gesture succeeds after it", async () => {
     stateShouldFail = true;
     enable.mockResolvedValue({

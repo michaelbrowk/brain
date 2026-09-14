@@ -30,7 +30,7 @@ async function readBody(req: Request): Promise<Record<string, unknown> | null> {
  *  retiring, and the worker sends its endpoint here so the row goes with it.
  *  It is read to the same bounds as the endpoint it names and it is never a
  *  refusal: a body this cannot read is an ordinary registration, because a
- *  device that just lost its endpoint must not also be refused a new one. */
+ *  device whose endpoint has gone must not also be refused a new one. */
 function previousRowId(value: unknown): string | null {
   if (typeof value !== "string" || value.length > 2_048) return null;
   if (!value.startsWith("https://")) return null;

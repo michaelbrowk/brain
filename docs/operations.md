@@ -61,6 +61,8 @@ Every other step applies unchanged.
   server to a push service with `BRAIN_PUBLIC_ORIGIN` when it is set to an
   `https://` origin, and with the project URL otherwise, so an instance that
   wants abuse reports to reach its own operator should set that variable.
+  `docs/notifications.md` lists both of these directories file by file, with
+  what each one costs if it is deleted.
 - `/etc/brain/brain.env` contains runtime secrets and is readable only by `root` and the `brain` group.
 - `/etc/brain/deployer.env` contains the read-only GitHub token and merger
   allowlist. It is `root:root` mode `0600` and is never loaded by the app.

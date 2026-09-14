@@ -220,7 +220,8 @@ Open Brain in Safari on an iPhone or an iPad, press the share button and pick
 Add to Home Screen. It then runs as its own app, and notifications can reach
 it: Apple gives web push to a web app that has been installed this way and to
 nothing else, so an open Safari tab never rings, whatever you allow. Once it is
-installed, open Settings → Notifications and press "Turn on on this device".
+installed, open Settings → Notifications and press "Turn on" on the row for
+this device.
 Android and desktop browsers need no install step for this.
 
 What a reminder is and when one fires is in `docs/notifications.md`, and the

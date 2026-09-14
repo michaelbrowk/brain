@@ -37,6 +37,7 @@ vi.mock("framer-motion/dom", () => ({ animate: springBack }));
 
 const { matchesSheet, useSheetGesture } = await import("./use-sheet-gesture");
 const { TasksWhenPicker } = await import("./tasks-when-picker");
+const { MailComposer } = await import("./mail-composer");
 const { SHEET_DISMISS_OFFSET, SHEET_DISMISS_VELOCITY } = await import("@/lib/motion");
 
 const TODAY = "2026-09-13";
@@ -239,5 +240,111 @@ describe("the sheet the When picker rides", () => {
     expect(springBack).toHaveBeenCalledTimes(1);
     // Back to where it started, on the gesture spring and not the entrance's.
     expect(springBack.mock.calls[0][1]).toBe(0);
+  });
+});
+
+/** THE OTHER PANEL THAT ASKS THE QUESTION.
+ *
+ *  The hook was pulled out of the composer, and the picker's cases above
+ *  measure it on the picker alone. A shared hook proves nothing about the two
+ *  surfaces agreeing: the composer could stop asking it, or keep asking it and
+ *  hand the grip different numbers, and every case above would stay green. So
+ *  the composer states the same three facts here.
+ */
+describe("the sheet the mail composer rides", () => {
+  const account = {
+    accountId: "account-a",
+    emailAddress: "owner@example.com",
+    displayName: null,
+    status: "connected",
+    connectedAt: 0,
+    createdAt: 0,
+    updatedAt: 0,
+    capabilities: {
+      mailboxes: ["inbox"],
+      listThreads: true,
+      sync: true,
+      headerPreview: true,
+      messageBodies: true,
+      threadMutations: true,
+      compose: true,
+      send: true,
+      reply: true,
+    },
+    providerKind: "gmail",
+  } as const;
+
+  const draft = {
+    idempotencyKey: "key-one",
+    mode: "compose",
+    to: "",
+    cc: "",
+    bcc: "",
+    subject: "",
+    text: "",
+    replyToMessageId: null,
+    notice: null,
+  } as const;
+
+  const cancelled = vi.fn();
+
+  const openComposer = async (phone: boolean) => {
+    cancelled.mockReset();
+    stubMatchMedia(phone);
+    await act(async () => {
+      root.render(
+        createElement(MailComposer, {
+          account,
+          initialDraft: draft,
+          sending: false,
+          sendError: null,
+          sendBlocked: false,
+          onCancel: cancelled,
+          onDiscard: () => {},
+          onDraftChange: () => {},
+          onRetrySave: () => {},
+          onSend: () => {},
+        }),
+      );
+    });
+  };
+
+  /** The one render that declared `drag: "y"`, which is the sheet itself. */
+  const panel = () => [...renders].reverse().find((render) => render.motion.drag === "y");
+
+  it("draws the grip below the breakpoint and hands it the drag, and nothing else", async () => {
+    await openComposer(true);
+    expect(host.querySelector(".brain-composer-grip")).not.toBeNull();
+    expect(panel()?.motion.dragListener).toBe(false);
+    expect(panel()?.motion.dragConstraints).toEqual({ top: 0 });
+  });
+
+  it("is not a sheet above it, where the composer is a pane", async () => {
+    await openComposer(false);
+    expect(host.querySelector(".brain-composer-grip")).toBeNull();
+    expect(panel()).toBeUndefined();
+  });
+
+  it("closes on the same two numbers the picker closes on", async () => {
+    await openComposer(true);
+    const dragEnded = panel()?.motion.onDragEnd as (
+      event: unknown,
+      info: { offset: { y: number }; velocity: { y: number } },
+    ) => void;
+
+    await act(async () => {
+      dragEnded(null, { offset: { y: SHEET_DISMISS_OFFSET - 1 }, velocity: { y: 0 } });
+    });
+    expect(cancelled).not.toHaveBeenCalled();
+
+    await act(async () => {
+      dragEnded(null, { offset: { y: SHEET_DISMISS_OFFSET + 1 }, velocity: { y: 0 } });
+    });
+    expect(cancelled).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      dragEnded(null, { offset: { y: 8 }, velocity: { y: SHEET_DISMISS_VELOCITY + 1 } });
+    });
+    expect(cancelled).toHaveBeenCalledTimes(2);
   });
 });

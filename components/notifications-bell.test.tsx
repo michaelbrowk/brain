@@ -143,6 +143,9 @@ const badgeMotion = () =>
     String(span.props.className ?? "").includes("brain-bell-badge"),
   );
 
+const glyphMotion = () =>
+  harness.spans.filter((span) => span.props["data-bell-glyph"] !== undefined);
+
 describe("the bell", () => {
   it("is drawn with nothing unread, and says so", async () => {
     await render();
@@ -193,6 +196,42 @@ describe("the bell", () => {
     expect(drawn.motion.exit).toEqual({ opacity: 0, transition: { duration: 0 } });
   });
 
+  // The bell goes bold while anything is unread. That swap used to be a
+  // one-frame cut beside a number that dissolved, so half of one state change
+  // faded and half snapped. One behaviour, not two.
+  it("crossfades the bell's own weight beside the number, on the same beat", async () => {
+    rows = [
+      { id: "a", kind: "task-reminder", at: "2026-09-14T12:00:00.000Z", title: "One", href: "/tasks" },
+    ];
+    await render();
+    const drawn = glyphMotion().at(-1)!;
+    expect(drawn.motion.transition).toEqual({ duration: DUR.fast });
+    expect(drawn.motion.exit).toEqual({ opacity: 0, transition: { duration: DUR.fast } });
+  });
+
+  it("collapses the bell's crossfade under reduced motion, the way the number's collapses", async () => {
+    harness.reduce = true;
+    await render();
+    const drawn = glyphMotion().at(-1)!;
+    expect(drawn.motion.transition).toEqual({ duration: 0 });
+    expect(drawn.motion.exit).toEqual({ opacity: 0, transition: { duration: 0 } });
+  });
+
+  it("draws the bell bold while something is unread and linear when nothing is", async () => {
+    await render();
+    const quiet = host.querySelector("[data-bell-glyph] svg")!.innerHTML;
+    await act(async () => root.unmount());
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+    resetNotificationsStore();
+    rows = [
+      { id: "a", kind: "task-reminder", at: "2026-09-14T12:00:00.000Z", title: "One", href: "/tasks" },
+    ];
+    await render();
+    expect(host.querySelector("[data-bell-glyph] svg")!.innerHTML).not.toBe(quiet);
+  });
+
   it("says the centre is empty rather than drawing an empty list", async () => {
     await render();
     await open();
@@ -221,6 +260,54 @@ describe("the bell", () => {
     await open();
     await act(async () => item("Water the plants")!.click());
     expect(navigate).toHaveBeenCalledWith("/tasks?task=task-1");
+  });
+
+  // The rewrite is keyed on the destination as well as on the id. A row whose
+  // href already names something is a row the centre stored a destination for
+  // on purpose, and turning it into "/tasks?task=…" because the id happened to
+  // decode would send the reader somewhere they were not going.
+  it("leaves a row alone whose href is not the Tasks column", async () => {
+    rows = [
+      {
+        id: "task-reminder:task-1:2026-09-14T13:00",
+        kind: "task-reminder",
+        at: "2026-09-14T12:00:00.000Z",
+        title: "Water the plants",
+        href: "/tasks/archive",
+      },
+    ];
+    await render();
+    await open();
+    await act(async () => item("Water the plants")!.click());
+    expect(navigate).toHaveBeenCalledWith("/tasks/archive");
+  });
+
+  // THE BODY IS WHAT SAYS WHAT HAPPENED. Title and body shared one truncating
+  // span, so a long title ate the row and every body was cut in its first two
+  // characters: a fired reminder and a missed one became one row, one small
+  // circle and a timestamp.
+  it("truncates the title and never shrinks the body to make room for it", async () => {
+    rows = [
+      {
+        id: "a",
+        kind: "task-missed",
+        at: "2026-09-14T12:00:00.000Z",
+        title: "Call the fitter about the worktop template before Friday",
+        body: "Missed 2026-09-13 at 18:00",
+        href: "/tasks",
+      },
+    ];
+    await render();
+    await open();
+    const row = document.querySelector('[role="menuitem"]')!;
+    const title = row.querySelector("[data-notification-title]")!;
+    const body = row.querySelector("[data-notification-body]")!;
+    expect(title.textContent).toBe("Call the fitter about the worktop template before Friday");
+    expect(title.className).toContain("truncate");
+    expect(title.className).toContain("flex-1");
+    expect(body.textContent).toBe("Missed 2026-09-13 at 18:00");
+    expect(body.className).toContain("shrink-0");
+    expect(body.className).toContain("max-w-[45%]");
   });
 
   it("marks a mail row's thread read before it opens Mail", async () => {

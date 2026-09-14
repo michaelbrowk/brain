@@ -199,7 +199,11 @@ export async function runReminderScan(
             kind: "task-missed",
             at,
             title: row.title,
-            body: `Was due ${row.when} at ${row.time}`,
+            // THE KIND IS IN WORDS, not only in a 16px glyph. The alarm and
+            // the clock-circle differ by two bumps at that size, so a fired
+            // reminder and a missed one read alike in the centre unless the
+            // body opens by saying which this is.
+            body: `Missed ${row.when} at ${row.time}`,
             href: "/tasks",
           };
     try {

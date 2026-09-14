@@ -129,6 +129,28 @@ describe("the centre on Home", () => {
     expect(only.querySelector("svg")).not.toBeNull();
   });
 
+  // The same two spans the bell's rows carry, for the same reason: the phone
+  // block's own header comment says the rows say what they are, and they only
+  // do while the body survives the title.
+  it("truncates the title and never shrinks the body to make room for it", async () => {
+    rows = [
+      row("a", {
+        kind: "task-missed",
+        title: "Call the fitter about the worktop template before Friday",
+        body: "Missed 2026-09-13 at 18:00",
+      }),
+    ];
+    await render();
+    const only = drawn()[0];
+    const title = only.querySelector("[data-notification-title]")!;
+    const body = only.querySelector("[data-notification-body]")!;
+    expect(title.textContent).toBe("Call the fitter about the worktop template before Friday");
+    expect(title.className).toContain("truncate");
+    expect(body.textContent).toBe("Missed 2026-09-13 at 18:00");
+    expect(body.className).toContain("shrink-0");
+    expect(body.className).toContain("max-w-[45%]");
+  });
+
   it("opens the place a pressed row came from", async () => {
     rows = [row("a", { href: "/tasks" })];
     await render();

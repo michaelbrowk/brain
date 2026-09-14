@@ -3465,14 +3465,25 @@ a.brain-share-url:active {
    tracking, this gives the 16 it has to fit in. */
 .brain-bell-badge {
   position: absolute;
-  top: -1px;
-  right: -1px;
+  /* THE CORNER, CLEAR OF THE CROWN. The 17px glyph is centred in a 28 box, so
+     its dome runs to about 5px from the top edge; at -1px the badge landed on
+     it and the pair grew together. Out to the control's own corner the badge
+     rides the box rather than the bell. */
+  top: -3px;
+  right: -3px;
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
   border-radius: var(--r-pill);
   background: var(--ink);
   color: var(--paper);
+  /* A PAPER RING, SO THE TWO INK SHAPES STAY TWO. Badge and bell are both
+     --ink and the bell goes bold while anything is unread, so with nothing
+     between them what is drawn is one black amoeba with a number in it and a
+     clapper below: the bell stops being recognisable as a bell. The ring is
+     the ground the sidebar head sits on, which is why it is one rule in both
+     schemes rather than a hard-coded white. */
+  box-shadow: 0 0 0 2px var(--paper);
   line-height: 16px;
   text-align: center;
   font-variant-numeric: tabular-nums;

@@ -96,6 +96,10 @@ describe("the reminder scan", () => {
     expect(await runReminderScan(h.port)).toEqual({ fired: 0, missed: 1, skipped: null });
     expect(h.notified[0]?.kind).toBe("task-missed");
     expect(h.notified[0]?.id).toBe("task-missed:task-alpha:2026-09-14T13:00");
+    // The word, not only the glyph: at 16px the alarm and the clock-circle
+    // differ by two bumps, and the centre draws nothing else that separates a
+    // fired reminder from a missed one.
+    expect(h.notified[0]?.body).toBe("Missed 2026-09-14 at 13:00");
     expect(h.pushed).toEqual([]);
     expect(h.marked).toEqual([["task-alpha", "2026-09-16T12:00:00.000Z"]]);
   });

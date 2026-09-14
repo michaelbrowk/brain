@@ -47,6 +47,10 @@ export const KIND_GLYPH: Record<NotificationRow["kind"], string> = {
  *  reader can act on that "a lot" does not. */
 const BADGE_CAP = 99;
 
+/** The one destination this rewrites. Everything else a row was stored with
+ *  is a destination the producer chose, and is left alone. */
+const TASKS_COLUMN = "/tasks";
+
 /** WHERE A ROW GOES, which is not always what it was stored with.
  *
  *  A task row's href is "/tasks": it opens the column and names nothing in it,
@@ -54,11 +58,17 @@ const BADGE_CAP = 99;
  *  in the row's own id, so the query is derived here rather than by rewriting
  *  five hundred stored rows, and a row the decoder cannot read a task out of
  *  keeps the href it came with. `components/tasks-surface.tsx` reads `?task=`,
- *  selects that row wherever it lives and takes the query back off. */
+ *  selects that row wherever it lives and takes the query back off.
+ *
+ *  KEYED ON THE DESTINATION AS WELL AS ON THE ID. Reading the id alone meant
+ *  any row whose id happened to decode was sent to the Tasks column, whatever
+ *  the producer had stored: a kind added later with a task id in it and a
+ *  surface of its own would have been silently redirected here. The rewrite
+ *  applies to the bare column and to nothing else. */
 export function notificationHref(row: NotificationRow): string {
-  if (row.kind === "mail-new" || row.href.includes("?")) return row.href;
+  if (row.href !== TASKS_COLUMN) return row.href;
   const taskId = decodeTaskNotificationId(row.id);
-  return taskId === null ? row.href : `/tasks?task=${encodeURIComponent(taskId)}`;
+  return taskId === null ? row.href : `${TASKS_COLUMN}?task=${encodeURIComponent(taskId)}`;
 }
 
 /** WHAT A ROW DOES WHEN IT IS PRESSED, wherever it is drawn. The menu here and
@@ -106,6 +116,7 @@ export function NotificationsBell({
   const reduce = useReducedMotion() ?? false;
   const { notifications, unread } = useNotifications(refreshToken);
   const badge = unread > BADGE_CAP ? `${BADGE_CAP}+` : String(unread);
+  const weight = unread > 0 ? "bold" : "linear";
   const duration = reduce ? 0 : DUR.fast;
   const openRow = (row: NotificationRow) => openNotificationRow(row, onNavigate);
 
@@ -117,7 +128,28 @@ export function NotificationsBell({
           className="relative"
           aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
         >
-          <Icon name="bell" size={17} variant={unread > 0 ? "bold" : "linear"} />
+          {/* THE WEIGHT CROSSFADES WITH THE NUMBER. The bell goes bold while
+              anything is unread, and that swap was a one-frame cut beside a
+              number that dissolved, so half of one state change faded and half
+              snapped. Same key-on-the-value, same duration, same collapse
+              under reduced motion: one behaviour here and not two.
+              `popLayout` takes the leaving glyph out of flow, so the two
+              overlap for the length of the fade instead of standing side by
+              side and widening the control. */}
+          <AnimatePresence mode="popLayout" initial={false}>
+            <motion.span
+              key={weight}
+              aria-hidden
+              data-bell-glyph=""
+              className="flex"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0, transition: { duration } }}
+              transition={{ duration }}
+            >
+              <Icon name="bell" size={17} variant={weight} />
+            </motion.span>
+          </AnimatePresence>
           {/* THE NUMBER CROSSFADES, the identical construction the sidebar's
               Tasks count uses one panel down, for the identical reason: it
               changes while the reader is looking somewhere else, and a number
@@ -175,14 +207,31 @@ export function NotificationsBell({
                       size={16}
                       className="brain-menu-icon"
                     />
-                    <span className="min-w-0 flex-1 truncate">
-                      <span className={row.readAt === undefined ? "text-ink" : "text-ink-3"}>
-                        {row.title}
-                      </span>
-                      {row.body !== undefined && (
-                        <span className="text-ink-3"> {row.body}</span>
-                      )}
+                    {/* THE BODY IS WHAT SAYS WHAT HAPPENED, so it is the half
+                        that does not yield. Both used to sit in one truncating
+                        span, and the title ate the row: every body was cut in
+                        its first two characters, which left a fired reminder
+                        and a missed one reading as one line, one small circle
+                        and a timestamp. The title takes what is left and
+                        truncates; the body never shrinks to make room for it
+                        and is capped at 45% so the title always keeps the
+                        larger half. */}
+                    <span
+                      data-notification-title=""
+                      className={`min-w-0 flex-1 truncate ${
+                        row.readAt === undefined ? "text-ink" : "text-ink-3"
+                      }`}
+                    >
+                      {row.title}
                     </span>
+                    {row.body !== undefined && (
+                      <span
+                        data-notification-body=""
+                        className="max-w-[45%] shrink-0 truncate text-ink-3"
+                      >
+                        {row.body}
+                      </span>
+                    )}
                     <span className="shrink-0 tabular-nums text-ink-3">
                       {formatAgo(row.at, { compact: true })}
                     </span>

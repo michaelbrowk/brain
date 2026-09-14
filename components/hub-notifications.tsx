@@ -68,10 +68,24 @@ export function HubNotifications({
             trailing={formatAgo(row.at, { compact: true })}
             onClick={() => openNotificationRow(row, onNavigate)}
           >
-            <span className="min-w-0 flex-1 truncate text-[14px] text-ink">
+            {/* Two spans, the bell's own arrangement. One truncating span held
+                both, so the title ate the row and every body was cut in its
+                first two characters, which is exactly what the header comment
+                above says these rows do not do. */}
+            <span
+              data-notification-title=""
+              className="min-w-0 flex-1 truncate text-[14px] text-ink"
+            >
               {row.title}
-              {row.body !== undefined && <span className="text-ink-3"> {row.body}</span>}
             </span>
+            {row.body !== undefined && (
+              <span
+                data-notification-body=""
+                className="max-w-[45%] shrink-0 truncate text-[14px] text-ink-3"
+              >
+                {row.body}
+              </span>
+            )}
           </HubRow>
         </motion.div>
       ))}

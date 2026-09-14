@@ -3,7 +3,7 @@
 // The phone's bottom line is two objects, not one: the five-slot bar on the
 // left inset and the New page circle on the right one. They are siblings with
 // no wrapper between them, so what holds them together is the state they
-// share — one `hidden`, two consumers. These cases pin the shape, the order
+// share: one `hidden`, two consumers. These cases pin the shape, the order
 // and that shared state; the geometry they resolve to is pinned by the CSS
 // contract in `mobile-surfaces.test.tsx` and measured per width by
 // `e2e/mail-shots.spec.ts`.

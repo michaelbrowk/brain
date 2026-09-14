@@ -1942,8 +1942,11 @@ ${rows}
 
 Down to 366 the bar is at its max-content 288 and only the air changes. Below
 that the air is at its 8 floor and the window sets the bar: \`(window - 78 - 8) / 5\`
-per track. The tracks reach their 44px floor at 306, and below that the line is
-wider than the space between the insets and the plus crosses the bar.
+per track. The tracks reach their 44px floor at 306, and below that the two boxes stay 8
+apart while the bar's content escapes: \`max-width\` beats \`fit-content\`, the box
+shrinks past the 228 its five 44px tracks need, and the row overflows a capsule
+that sets no \`overflow\`, putting the last tab outside its own material and under
+the circle.
 
 \`air\` is the gap between the bar's right edge and the circle's left one, and
 it is the strip of page text the line leaves showing: the canvas runs between

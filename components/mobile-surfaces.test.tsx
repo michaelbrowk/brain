@@ -588,6 +588,29 @@ describe("mobile navigation surfaces", () => {
     );
   });
 
+  it("keeps the line's height on one declaration and nowhere else", () => {
+    // `--tabbar-h` is only a single source while nothing else spells the
+    // number out. Two rules did: `.brain-toast-stack`'s bottom and
+    // `.brain-mail-scrollfoot`'s padding both rebuilt the reserve from a
+    // literal 54, so the prose could name a token the CSS was not using, and
+    // a change to the line's height would have moved the bar and left the
+    // toast and the mail column behind. Every occurrence of the figure has to
+    // be the declaration itself. A rule that genuinely wants a 54 for some
+    // other reason belongs on this list with a word about why.
+    const css = readFileSync(
+      path.join(process.cwd(), "app", "globals.css"),
+      "utf8",
+    );
+    const spelled = css
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /\b54px\b/.test(line));
+    expect(
+      spelled,
+      "54px belongs to --tabbar-h; use var(--tabbar-h) for the line's height",
+    ).toEqual(["--tabbar-h: 54px;"]);
+  });
+
   it("returns to the open page when Home is tapped over the Pages sheet", async () => {
     const tree = [node("page", "Page")];
     window.history.replaceState({}, "", "/p/page");

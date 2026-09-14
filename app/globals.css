@@ -2547,7 +2547,7 @@ a.brain-share-url:active {
    offset clears the mobile tab bar: the bar occupies safe+8 to safe+62 and a
    pill at safe+24 covered the middle three slots for the whole ten seconds of
    an undo. Same reserve `.brain-mail-scrollfoot` already keeps for that strip
-   (--inset*2 + the bar's 54), and it is kept whether or not the bar is up: a
+   (--inset*2 + --tabbar-h), and it is kept whether or not the bar is up: a
    pill that moved with the bar would move under the reader's hand. The rows
    space on the pill's own margin rather than a `gap`, because a closed pill
    still leaves its live region mounted and a gap would count the empty ones.
@@ -2561,7 +2561,7 @@ a.brain-share-url:active {
   position: fixed;
   z-index: var(--z-toast);
   right: 0;
-  bottom: calc(var(--inset) * 2 + 54px + env(safe-area-inset-bottom, 0px));
+  bottom: calc(var(--inset) * 2 + var(--tabbar-h) + env(safe-area-inset-bottom, 0px));
   left: var(--canvas-offset, 0px);
   display: flex;
   flex-direction: column;
@@ -3550,8 +3550,12 @@ a.brain-share-url:active {
    width spends: 32 at 390, 17 at 375, 72 at 430, 409 at 767. Below 366 the
    slots give evenly instead: (w - 78 - 8) / 5, so 46.8 at 320. They
    reach their floor at 306, where every track is 44, the bar is 228 and the
-   plus still has its inset. Narrower again the line is wider than the space
-   between the insets and the plus crosses the bar; nothing ships there.
+   plus still has its inset. Narrower again the two boxes stay 8 apart and the
+   CONTENT is what escapes: max-width beats fit-content, so the bar's box keeps
+   shrinking past the 228 its five 44px tracks need, the row overflows a
+   capsule that sets no overflow, and the last tab paints on bare canvas
+   outside its own material and slides under the circle. Nothing ships there,
+   so the floor is left where it is rather than bought back by dropping the 44.
 
    The 20px minimum between two adjacent WORDS is a check, not the
    derivation: two labels centred in equal tracks leave track - (w1 + w2) / 2,
@@ -4076,15 +4080,17 @@ a.brain-share-url:active {
   flex: 1;
   overflow-y: auto;
 }
-/* Below md the mobile tab bar floats over the column's foot. The rows reserve
-   the bar's height at their end, so the last row of the column can be scrolled
-   clear of it — a list whose last line you cannot reach has no end — while the
-   rows above it still pass underneath, which is the §7 case the bottom
-   edge-blur answers. The reserve belongs to the rows, not to the scroller: it
-   has to count as content, or the sticky edge below it can never reach the
-   foot of a column that would otherwise fit. */
+/* Below md the phone's bottom line floats over the column's foot. The rows
+   reserve the line's height at their end, so the last row of the column can be
+   scrolled clear of it (a list whose last line you cannot reach has no end)
+   while the rows above it still pass underneath, which is the §7 case the
+   bottom edge-blur answers. The figure is --tabbar-h, the one number the bar's
+   row, the circle's square and --tabbar-reserve are all built from. The
+   reserve belongs to the rows, not to the scroller: it has to count as
+   content, or the sticky edge below it can never reach the foot of a column
+   that would otherwise fit. */
 .brain-mail-scrollfoot {
-  padding-bottom: calc(54px + var(--inset) * 2 + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(var(--tabbar-h) + var(--inset) * 2 + env(safe-area-inset-bottom, 0px));
 }
 @media (min-width: 768px) {
   .brain-mail-scrollfoot {

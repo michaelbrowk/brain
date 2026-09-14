@@ -1039,6 +1039,22 @@ html[data-kbd] .milkdown .ProseMirror li.brain-task-item > .brain-task-box:focus
   outline-offset: 2px;
 }
 
+/* A widget decoration at the end of a textblock leaves ProseMirror nowhere
+   to put a cursor after it, so prosemirror-view appends its own
+   `<img class="ProseMirror-separator"><br class="ProseMirror-trailingBreak">`
+   to hold that position. Upstream's own stylesheet un-blocks the separator
+   (`display: inline !important`), but this project never imports that
+   stylesheet, so the element fell through to Tailwind preflight's
+   `img { display: block }`. A block-level separator forces the line before
+   it to end, and the trailing `<br>` then opens a second, empty one: every
+   task line carries the mark, so every task line doubled from one line
+   (24px) to two (48px) while an ordinary bullet, which ends in plain text
+   and needs no separator, stayed single. This file is loaded unlayered, so
+   naming the element here is enough to beat preflight without `!important`. */
+.milkdown .ProseMirror img.ProseMirror-separator {
+  display: inline;
+}
+
 /* THE + TASK MARK: THE GHOST, AND THE WORD IT BECOMES.
 
    One element in two states, drawn by a ProseMirror widget decoration at the

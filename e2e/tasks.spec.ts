@@ -368,3 +368,30 @@ test("@release deleting the task in Tasks leaves the line an ordinary checkbox",
   });
   expect(await markdownOf(page, note.id)).toContain("[ ] renew the library card");
 });
+
+test("@release consecutive task lines sit as close together as consecutive bullets", async ({
+  page,
+}) => {
+  // Every task line carries a ghost `+ Task` widget at the end of it, and
+  // prosemirror-view answers that widget with its own
+  // `<img class="ProseMirror-separator"><br class="ProseMirror-trailingBreak">`
+  // so the cursor has somewhere to land after it. Tailwind preflight's
+  // `img { display: block }` (this project never loads prosemirror-view's
+  // own stylesheet, which would have un-blocked it) turned that separator
+  // into a line break of its own, so every task line doubled from one 24px
+  // line to two, 48px apart, while an ordinary bullet stayed single. Two
+  // consecutive task lines belong exactly as close as two consecutive
+  // bullets: 16px text at 1.5 line-height (24) plus the `li + li` gap (4).
+  test.setTimeout(60_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const note = await createNote(page, "Gap check", "- [ ] Buy milk and eggs\n- [ ] Pick up bread\n");
+  await openNote(page, note.id);
+
+  const items = page.locator("li.brain-task-item");
+  await expect(items).toHaveCount(2);
+  const tops = await items.evaluateAll((nodes) =>
+    nodes.map((node) => node.getBoundingClientRect().top),
+  );
+  expect(tops[1] - tops[0]).toBeLessThanOrEqual(32);
+});

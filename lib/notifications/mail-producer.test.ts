@@ -35,6 +35,9 @@ describe("senderName", () => {
   it("says Someone when a thread carries no participant", () => {
     expect(senderName([])).toBe("Someone");
   });
+  it("says Someone rather than an empty title the schema would refuse", () => {
+    expect(senderName([{ name: null, address: "" }])).toBe("Someone");
+  });
 });
 
 describe("newMailNotifications", () => {
@@ -98,6 +101,59 @@ describe("newMailNotifications", () => {
     expect(result.notifications).toHaveLength(1);
   });
 
+  /** THE OWNER'S OWN SENT MAIL (spec §7).
+   *
+   *  On IMAP every message is its own thread and the owner's reply lives in
+   *  another mailbox, so an Inbox page never carries it. On Gmail the whole
+   *  conversation is one thread: `lastMessageAt` counts the SENT-labelled
+   *  messages too, the thread keeps INBOX because one message in it has that
+   *  label, and `participants` filters the owner out. So the owner answering
+   *  from their phone used to bump the thread and the bell said "Ana Silva"
+   *  about words Ana did not write.
+   *
+   *  `unread` is what tells them apart: a thread whose newest message is the
+   *  owner's own has nothing unread left in it.
+   */
+  it("produces nothing when the owner's own reply is the newest message on Gmail", () => {
+    const result = newMailNotifications(
+      [
+        item({
+          subject: "Re: Lunch on Friday",
+          lastMessageAt: Date.parse("2026-09-14T11:30:00.000Z"),
+          messageCount: 2,
+          unread: false,
+        }),
+      ],
+      Date.parse("2026-09-14T11:00:00.000Z"),
+      AT,
+    );
+    expect(result.notifications).toEqual([]);
+    // The mark still moves, so the owner's own reply is not offered again on
+    // every poll for as long as the thread sits in the inbox.
+    expect(result.watermark).toBe(Date.parse("2026-09-14T11:30:00.000Z"));
+  });
+
+  it("produces a row for the IMAP shape, where the letter is unread", () => {
+    const result = newMailNotifications(
+      [item({ unread: true })],
+      Date.parse("2026-09-14T10:00:00.000Z"),
+      AT,
+    );
+    expect(result.notifications).toHaveLength(1);
+  });
+
+  it("produces nothing when a re-sync rewrites the timestamp of a thread already read", () => {
+    // A label applied to an old Gmail thread, an IMAP COPY into INBOX, a
+    // migration: the timestamp moves and the thread looks new. It is read, so
+    // it says nothing.
+    const result = newMailNotifications(
+      [item({ unread: false, lastMessageAt: Date.parse("2026-09-14T11:59:00.000Z") })],
+      Date.parse("2026-09-14T10:00:00.000Z"),
+      AT,
+    );
+    expect(result.notifications).toEqual([]);
+  });
+
   it("produces nothing for a thread with no timestamp", () => {
     const result = newMailNotifications(
       [item({ lastMessageAt: null })],
@@ -132,13 +188,13 @@ describe("newMailNotifications", () => {
         item({
           threadId: "t2",
           category: "newsletter",
-          lastMessageAt: Date.parse("2026-09-14T13:00:00.000Z"),
+          lastMessageAt: Date.parse("2026-09-14T11:45:00.000Z"),
         }),
       ],
       Date.parse("2026-09-14T10:00:00.000Z"),
       AT,
     );
-    expect(result.watermark).toBe(Date.parse("2026-09-14T13:00:00.000Z"));
+    expect(result.watermark).toBe(Date.parse("2026-09-14T11:45:00.000Z"));
   });
 
   it("holds a row stamped in the future down to the scan's own instant", () => {
@@ -151,9 +207,51 @@ describe("newMailNotifications", () => {
       AT,
     );
     expect(result.notifications[0].at).toBe(AT);
-    // The watermark still moves to what the page said, or the same
-    // thread would be new again on every poll for a year.
-    expect(result.watermark).toBe(Date.parse("2027-01-01T00:00:00.000Z"));
+  });
+
+  it("never moves the mark past the scan's own instant", () => {
+    // IMAP's date parser takes any safe integer, and falls back to the
+    // SENDER-supplied header when INTERNALDATE is missing. One letter stamped
+    // in 2027 used to move the mark to 2027, and every real letter after it
+    // read as older than the mark: that account's bell went quiet for a year,
+    // on disk, past a restart.
+    const result = newMailNotifications(
+      [item({ lastMessageAt: Date.parse("2027-01-01T00:00:00.000Z") })],
+      Date.parse("2026-09-14T10:00:00.000Z"),
+      AT,
+    );
+    expect(result.watermark).toBe(Date.parse(AT));
+  });
+
+  it("still announces the letter that lands after a future-stamped one", () => {
+    const first = newMailNotifications(
+      [item({ threadId: "t1", lastMessageAt: Date.parse("2027-01-01T00:00:00.000Z") })],
+      Date.parse("2026-09-14T10:00:00.000Z"),
+      AT,
+    );
+    const second = newMailNotifications(
+      [
+        item({ threadId: "t1", lastMessageAt: Date.parse("2027-01-01T00:00:00.000Z") }),
+        item({ threadId: "t2", lastMessageAt: Date.parse("2026-09-14T12:30:00.000Z") }),
+      ],
+      first.watermark,
+      "2026-09-14T12:31:00.000Z",
+    );
+    // Both are offered. The real letter is new, and the future-stamped one is
+    // an id the centre already holds, which is where it stops.
+    expect(second.notifications).toHaveLength(2);
+  });
+
+  it("cuts a display name the schema would refuse rather than losing the letter", () => {
+    // The centre caps `title` at 200 and refuses the whole row above it, while
+    // the mark moves on regardless. An over-long name used to cost the letter
+    // itself and leave one log line as the only trace of it.
+    const result = newMailNotifications(
+      [item({ participants: [{ name: "A".repeat(400), address: "ana@example.com" }] })],
+      Date.parse("2026-09-14T10:00:00.000Z"),
+      AT,
+    );
+    expect(result.notifications[0].title).toHaveLength(200);
   });
 
   it("carries no mail address and no body into a row", () => {

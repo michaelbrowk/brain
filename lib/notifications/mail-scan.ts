@@ -25,6 +25,21 @@ import { readMailWatermarks, writeMailWatermark } from "./watermarks";
  *  the third busy account onwards. */
 export const MAX_MAIL_APPENDS_PER_SCAN = 50;
 
+/** ONE PAGE MUST FIT INSIDE ONE SCAN'S BUDGET, AND `tsc` SAYS SO.
+ *
+ *  The whole-account rule below carries an account whose page does not fit the
+ *  remaining budget, so a page larger than the cap would be carried on every
+ *  tick for ever and that account's bell would never speak again. Prose next
+ *  to two numbers is not a guard: this is, and it costs nothing at runtime.
+ */
+type Slots<N extends number, T extends 0[] = []> = T["length"] extends N ? T : Slots<N, [...T, 0]>;
+type Under<A extends number, B extends number> =
+  Slots<B> extends [...Slots<A>, 0, ...0[]] ? true : false;
+type Assert<T extends true> = T;
+export type MailScanPageFitsInOneScan = Assert<
+  Under<typeof MAIL_SCAN_PAGE, typeof MAX_MAIL_APPENDS_PER_SCAN>
+>;
+
 export interface MailScanPort {
   dir: string;
   accounts(): Promise<readonly { readonly accountId: string }[]>;

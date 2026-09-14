@@ -43,9 +43,14 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-/** The POST is fired and not awaited, so the assertion has to let the
- *  microtask that sends it run. */
-const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+/** The seam collects ids and sends them a quarter second after the last one,
+ *  so a test that wants the request has to close the window. The window itself
+ *  is pinned in `notifications-read.test.ts`. */
+async function settle() {
+  const { flushMailNotificationReads } = await import("./notifications-read");
+  flushMailNotificationReads();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
 
 describe("marking a thread read in Mail", () => {
   it("marks that thread's notification read", async () => {
@@ -59,6 +64,23 @@ describe("marking a thread read in Mail", () => {
     expect(posted).toEqual([
       { url: "/api/notifications/read", body: { ids: [NOTIFICATION_ID] } },
     ]);
+  });
+
+  it("sends one request for a bulk run, not one per thread", async () => {
+    // Bulk Done archives and then marks read, thread by thread. Forty of those
+    // used to be forty POSTs, each one a read and a zod parse of the whole
+    // centre file through the store's serialised queue.
+    const { defaultMailSurfaceClient } = await import("./mail-surface-client");
+    for (const threadId of ["thread-one", "thread-two", "thread-three"]) {
+      await defaultMailSurfaceClient.updateThread({
+        accountId: ACCOUNT_ID,
+        threadId,
+        read: true,
+      });
+    }
+    await settle();
+    expect(posted).toHaveLength(1);
+    expect((posted[0].body as { ids: string[] }).ids).toHaveLength(3);
   });
 
   it("says nothing to the centre when a thread is marked unread", async () => {

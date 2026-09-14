@@ -143,6 +143,7 @@ const PAIRS = [
   // settings surface sections
   "palette",
   "plug-circle",
+  "bell",
   "earth",
   "user-circle",
   "heart",

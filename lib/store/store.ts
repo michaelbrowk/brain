@@ -292,9 +292,24 @@ function metadataValue(
   return value === undefined ? null : value;
 }
 
+/** An empty list and an absent one are ONE state on this store: `updateMeta`
+ *  stores a list it empties as absent and `serializePage` omits it, so no page
+ *  can hold `stickers: []`. A client that reads the page and finds no stickers
+ *  has `[]` and nothing else to send, and comparing that against the absent
+ *  field's `null` made the first sticker on a page a 409 against nobody: the
+ *  precondition could not be met by any client, on any page, ever. A baseline
+ *  that names a list the page does not have still conflicts, which is the part
+ *  that protects a second writer. */
+function metadataList(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
 function metadataValuesEqual(current: unknown, expected: unknown): boolean {
   if (Array.isArray(current) || Array.isArray(expected)) {
-    return JSON.stringify(current) === JSON.stringify(expected);
+    return (
+      JSON.stringify(metadataList(current)) ===
+      JSON.stringify(metadataList(expected))
+    );
   }
   return Object.is(current, expected);
 }

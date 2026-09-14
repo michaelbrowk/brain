@@ -149,6 +149,7 @@ import {
   listOf,
   logbookRows,
   type ListName,
+  type LogbookRow,
 } from "../tasks/lists";
 import { parseTaskLines } from "../tasks/task-lines";
 import {
@@ -2348,6 +2349,11 @@ export class Store {
       }
       entry.meta = nextMeta;
       this.notionIndex.set(notionId, entry.meta.id);
+      // A body write is where a page's records come back in step with its
+      // lines (spec row 150). This one does not go through `writePage`, so it
+      // has to say so itself, or a task under this page keeps the anchor and
+      // the completion the body had before the adopt read it.
+      await this.reconcilePageTasksUnlocked(entry.meta.id, canonicalMarkdown);
       scheduleCommit(this.root);
       const rev = hashRev(content);
       emitStore({ type: "meta", id: entry.meta.id });
@@ -3225,6 +3231,11 @@ export class Store {
         durabilityError = error;
       }
       entry.meta = nextMeta;
+      // The re-import replaced this page's body wholesale. Without this a task
+      // promoted from one of its lines keeps the old anchor, the old title
+      // cache and the old answer for `done` until the page is written again
+      // (spec row 150).
+      await this.reconcilePageTasksUnlocked(entry.meta.id, finalizedMarkdown);
       const stagingRemoved = await this.tryRemoveNotionStaging(
         reservationToken,
       );
@@ -6533,9 +6544,32 @@ export class Store {
       .byPage(pageId)
       .flatMap((task) => {
         const view = this.taskIndex.view(task.id);
-        return view ? [view] : [];
+        return view ? [this.attributed(view)] : [];
       })
       .sort((a, b) => compareInGroup(a, b, "today"));
+  }
+
+  /** WHO ANSWERED A LINKED TASK'S `done` (spec row 145).
+   *
+   *  A share visitor may tick a checkbox in a note they can edit, and the
+   *  Logbook says so: "done by ‹name› via link". The note owns a linked
+   *  task's completion, so it owns the attribution too, and the page's own
+   *  `updatedBy` / `updatedByName` are where it already lives. Read here
+   *  rather than written into the record: a record that stored a name would
+   *  have to be rewritten by every visitor write, and the note is the truth
+   *  either way.
+   *
+   *  Only for a task that is DONE and still LINKED. A detached or unlinked
+   *  record owns its own completion, and a page whose last writer was the
+   *  owner has nothing to attribute. */
+  private attributed(view: TaskView): TaskView {
+    if (!view.done || !isLinkedTask(view)) return view;
+    const entry = view.page !== undefined ? this.index.get(view.page) : undefined;
+    const meta = entry?.meta;
+    if (meta?.updatedBy !== "visitor" || meta.updatedByName === undefined) {
+      return view;
+    }
+    return { ...view, updatedByName: meta.updatedByName };
   }
 
   /** The body a person wrote under a task's frontmatter, or the empty string.
@@ -6581,11 +6615,34 @@ export class Store {
     });
   }
 
+  /** Read this page's body and bring its tasks back in step with it.
+   *
+   *  For a caller that landed records on a page that was already written. The
+   *  page write's own reconcile ran when the page had no records, so nothing
+   *  told the index what the checkboxes say, and a linked completion reads as
+   *  open until the page is saved again or the process restarts. The portable
+   *  import is the one such caller: it writes every page first and lands the
+   *  records after.
+   *
+   *  A page the index does not hold is a no-op rather than a throw, because a
+   *  record naming a page nobody here has is a shape the import already
+   *  handles by dropping the link. */
+  async reconcileTasksForPage(pageId: string, src?: string): Promise<void> {
+    return this.mutate(async () => {
+      if (!this.index.has(pageId)) return;
+      const entry = this.get(pageId);
+      const indexPath = assertInRoot(this.root, path.join(entry.dir, "index.md"));
+      const parsed = parsePage(await fs.readFile(indexPath, "utf8"));
+      await this.reconcilePageTasksUnlocked(pageId, parsed.markdown, src);
+    });
+  }
+
   /** One task by id, or null. A malformed id is refused rather than answered
    *  with a miss, so a caller learns it built the wrong request. */
   getTask(id: string): TaskView | null {
     assertTaskId(id);
-    return this.taskIndex.view(id) ?? null;
+    const view = this.taskIndex.view(id);
+    return view ? this.attributed(view) : null;
   }
 
   /** True when a task points at a page that cannot be opened. Such a task is
@@ -6641,14 +6698,9 @@ export class Store {
     if (readsLogbook) assertOffsetMinutes(filter.offsetMinutes);
     const offsetMinutes = filter.offsetMinutes ?? 0;
     if (filter.list === "logbook") {
-      const shown = this.taskIndex
-        .views()
-        .filter(
-          (task) =>
-            !this.taskHidden(task) &&
-            (filter.category === undefined || task.category === filter.category),
-        );
-      return logbookRows(shown, today, offsetMinutes).map((row) => row.task);
+      return this.logbookRowsFor(today, offsetMinutes, filter.category).map(
+        (row) => row.task,
+      );
     }
     const windowStart = logbookWindowStart(today);
     const visible = this.taskIndex.views().filter((task) => {
@@ -6671,7 +6723,45 @@ export class Store {
       }
       return true;
     });
-    return visible.sort((a, b) => compareTasks(a, b, today, offsetMinutes));
+    return visible
+      .sort((a, b) => compareTasks(a, b, today, offsetMinutes))
+      .map((task) => this.attributed(task));
+  }
+
+  /** The Logbook as ROWS: one per completion, each carrying the key a record
+   *  id is not.
+   *
+   *  A daily task finished seven days running is seven rows of one record, so
+   *  `listTasks(today, { list: "logbook" })` hands a caller seven objects with
+   *  the same `id`, differing only in `doneAt` and `when`. The surface never
+   *  meets that, because it fetches every record and derives its own rows. The
+   *  two callers that ask the store for the list are the tasks route and MCP,
+   *  and an agent keying on `id` collapses the history or mis-attributes it.
+   *  So they read this instead, and get the `key` every other consumer of
+   *  `logbookRows` already sees, plus whether an untick is offered. */
+  listLogbook(
+    today: string,
+    filter: { offsetMinutes: number; category?: string },
+  ): LogbookRow[] {
+    assertToday(today);
+    assertOffsetMinutes(filter.offsetMinutes);
+    return this.logbookRowsFor(today, filter.offsetMinutes, filter.category);
+  }
+
+  private logbookRowsFor(
+    today: string,
+    offsetMinutes: number,
+    category: string | undefined,
+  ): LogbookRow[] {
+    const shown = this.taskIndex
+      .views()
+      .filter(
+        (task) =>
+          !this.taskHidden(task) &&
+          (category === undefined || task.category === category),
+      )
+      .map((task) => this.attributed(task));
+    return logbookRows(shown, today, offsetMinutes);
   }
 
   async createTask(input: CreateTaskInput): Promise<TaskView> {
@@ -6985,7 +7075,13 @@ export class Store {
       } as PageMeta;
       e.meta.updated = now();
       e.meta.updatedBy = "me";
-      delete e.meta.structureWriteBarrier;
+      // THE BARRIER STAYS UP. `writePage` clears it only after a write has
+      // survived the rev check the barrier forces, because the fence exists
+      // for the tab that has not seen the structural move. This write passes
+      // no rev at all, and the tab whose completion it is has not seen the
+      // move either, so clearing it here would hand that tab's next save a
+      // silent merge against a baseline the page no longer has. The barrier
+      // comes down on the first real page write, where it always did.
       const content = serializeLivePage(e.meta, body);
       await atomicWrite(indexPath, content);
       emitStore({ type: "write", id: pageId, rev: hashRev(content), src });

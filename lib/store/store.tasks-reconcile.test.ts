@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { Store } from "./store";
+import { serializeLivePage } from "./frontmatter";
 import { RevConflictError } from "./types";
 import { parseTaskLines } from "../tasks/task-lines";
 import type { TaskView } from "../tasks/model";
@@ -351,6 +352,50 @@ describe("reconcile", () => {
     expect(s.getTask(taskId)?.done).toBe(true);
   });
 
+  it("detaches a line cut from one note and pasted into another, and binds nothing there", async () => {
+    // SPEC ROW 137, DEFERRED. The row says `page` is rewritten and the target's
+    // reconcile binds the record. Nothing on this branch rewrites `page`:
+    // `reconcilePageTasks` only ever considers records that already name the
+    // page it is reconciling. So a cut and paste across notes is a detach, the
+    // task keeps its schedule and its last known title, and the person
+    // re-promotes the line in its new home. This pins that answer so the
+    // deferral is a decision somebody made rather than a gap nobody noticed;
+    // the day the rebind is built, this test is the one that changes.
+    const { s } = await tmpStore();
+    const admin = await s.createPage(null, "Admin");
+    const trip = await s.createPage(null, "Trip");
+    const written = await s.writePage(admin.id, "- [ ] Renew the visa", undefined, "me");
+    await s.writePage(trip.id, "Somewhere warm.", undefined, "me");
+    const [line] = parseTaskLines(written.markdown);
+    const task = await s.createTask({
+      title: line.normalized,
+      when: "2026-09-20",
+      page: admin.id,
+      anchor: {
+        text: line.normalized,
+        hash: line.hash,
+        ordinal: line.ordinal,
+        line: line.index,
+      },
+    });
+
+    // The cut, then the paste, in the order the two saves land.
+    await s.writePage(admin.id, "Nothing left here.", undefined, "me");
+    await s.writePage(trip.id, "Somewhere warm.\n\n- [ ] Renew the visa", undefined, "me");
+
+    const after = s.getTask(task.id);
+    expect(after?.detachedAt).toBeDefined();
+    // `page` is kept as a NAME, which is what makes the row read "line removed
+    // from Admin" rather than pointing at a note that no longer holds it.
+    expect(after?.page).toBe(admin.id);
+    expect(after?.when).toBe("2026-09-20");
+    expect(after?.title).toBe("Renew the visa");
+    // And the target binds nothing: a checkbox becomes a task through the
+    // gesture only, so the pasted line is an ordinary checkbox again.
+    expect(s.tasksForPage(trip.id)).toHaveLength(0);
+    expect(s.allTasks()).toHaveLength(1);
+  });
+
   it("refreshes ordinal and line when the copy above the line goes", async () => {
     const { s } = await tmpStore();
     const page = await s.createPage(null, "Garden");
@@ -600,6 +645,38 @@ describe("a share visitor and the reconcile", () => {
     expect(meta.updatedByName).toBe("Ada");
   });
 
+  it("carries the visitor's name onto the view, so the Logbook can say who ticked it", async () => {
+    const { s, rootId, pageId, taskId, rev, shareVersion } = await sharedGarden();
+    // Open, and nobody's name on it yet.
+    expect(s.getTask(taskId)?.updatedByName).toBeUndefined();
+
+    await s.writeSharedPage({
+      rootId,
+      targetId: pageId,
+      shareVersion,
+      markdown: TICKED_BODY,
+      expectedRev: rev,
+      visitorName: "Ada",
+    });
+
+    // Spec row 145: the note owns a linked task's completion, so it owns who
+    // answered it. Every read a row can come through carries the name.
+    expect(s.getTask(taskId)?.updatedByName).toBe("Ada");
+    expect(
+      s
+        .listLogbook(TODAY, { offsetMinutes: 0 })
+        .map((entry) => entry.task.updatedByName),
+    ).toEqual(["Ada"]);
+    expect(
+      s.pageTasks(pageId).map((task) => task.updatedByName),
+    ).toEqual(["Ada"]);
+
+    // The owner's own write takes the sentence away again: the page is no
+    // longer a visitor's last word.
+    await s.writePage(pageId, TICKED_BODY.replace("plants", "plants well"), undefined, "me");
+    expect(s.getTask(taskId)?.updatedByName).toBeUndefined();
+  });
+
   it("changes no when, deadline or category on any visitor write", async () => {
     const { s, rootId, pageId, taskId, rev, shareVersion } = await sharedGarden();
 
@@ -747,6 +824,45 @@ describe("completing a linked task from Tasks", () => {
 
     expect(done.done).toBe(true);
     expect(await readTaskFile(root, created.id)).toContain("done: true");
+  });
+
+  it("leaves the structure barrier standing, so a stale tab is still refused", async () => {
+    // The barrier is the page-ref nesting move's fence: that move changes the
+    // rev without changing a byte of markdown, so a tab holding the old rev
+    // would otherwise pass `bodyStillMatches` or the merge against a baseline
+    // that is no longer the page's. It stands until a write that has SEEN the
+    // moved body establishes a new one, and a tick from Tasks is not that
+    // write: it passes no rev, and the tab whose completion it is has not
+    // seen the move either. Clearing it here handed the next stale save a
+    // silent merge.
+    const { s, pageId, taskId } = await linkedGarden();
+    const before = await s.readPage(pageId);
+    // The move, in the one shape that matters here: same body, new rev, fence
+    // up.
+    await fs.writeFile(
+      path.join(s.resolve(pageId), "index.md"),
+      serializeLivePage(
+        { ...before.meta, structureWriteBarrier: true },
+        before.markdown,
+      ),
+    );
+
+    await s.updateTask(taskId, { done: true });
+
+    const after = await s.readPage(pageId);
+    expect(after.markdown).toContain("- [x] Water the plants");
+    expect(after.meta.structureWriteBarrier).toBe(true);
+    // The stale tab, saving the body it loaded before the move.
+    await expect(
+      s.writePage(
+        pageId,
+        `${BASE_BODY}\n\nA paragraph A typed.`,
+        before.rev,
+        "me",
+        undefined,
+        BASE_BODY,
+      ),
+    ).rejects.toBeInstanceOf(RevConflictError);
   });
 });
 

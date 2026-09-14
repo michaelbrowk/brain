@@ -8,7 +8,7 @@ export { MAX_ATTACHMENT_BYTES, Store } from "./store";
 // `lib/tasks` because the derivation is shared with the browser; a consumer
 // of the Store should not have to know that.
 export { TASK_ID_RE, type TaskAnchor, type TaskRecord, type TaskRepeat, type TaskView } from "../tasks/model";
-export { type ListName } from "../tasks/lists";
+export { type ListName, type LogbookRow } from "../tasks/lists";
 export { LOGBOOK_WINDOW_DAYS } from "../tasks/index-store";
 
 /** Notes live outside the app release dir, and a deployment says where with

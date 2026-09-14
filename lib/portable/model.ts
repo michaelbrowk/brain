@@ -568,6 +568,7 @@ export async function applyPortableBundle(
   const created = new Map<string, string>();
   const rootIds: string[] = [];
   const createdTasks: string[] = [];
+  const landedPages = new Set<string>();
   try {
     for (const page of ordered) {
       const parentId = page.parentSourceId
@@ -671,7 +672,16 @@ export async function applyPortableBundle(
         task.bodyPath ? (bundle.taskBodies.get(task.bodyPath) ?? "") : "",
         options.src,
       );
+      if (landed.page !== undefined) landedPages.add(landed.page);
       createdTasks.push(landed.id);
+    }
+    // The pages were written before the records existed, so every page write's
+    // own reconcile found nothing to reconcile. A linked task stores no `done`
+    // of its own, and until a reconcile reads the checkbox back the index
+    // answers `false`: an imported notebook would show every finished linked
+    // task as open, in Today, beside a ticked box in the note.
+    for (const pageId of landedPages) {
+      await store.reconcileTasksForPage(pageId, options.src);
     }
     return { rootIds, created: created.size, tasks: createdTasks.length };
   } catch (error) {

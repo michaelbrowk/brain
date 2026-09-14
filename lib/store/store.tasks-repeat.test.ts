@@ -555,6 +555,35 @@ describe("completing the same instance twice", () => {
     ).resolves.toMatchObject({ when: TOMORROW });
   });
 
+  it("pops one entry and refuses a second untick of the same instance", async () => {
+    const { s } = await tmpStore();
+    const created = await s.createTask({
+      title: "Learn words",
+      when: TODAY,
+      repeat: DAILY,
+    });
+    await s.updateTask(created.id, { done: true, today: TODAY, expectedWhen: TODAY });
+
+    // Both tabs drew the Logbook row while the record stood on TOMORROW. A
+    // double press on Undo used to pop two entries and put `when` two
+    // occurrences into the past, with no error anywhere.
+    const results = await Promise.allSettled([
+      s.updateTask(created.id, { done: false, expectedWhen: TOMORROW }),
+      s.updateTask(created.id, { done: false, expectedWhen: TOMORROW }),
+    ]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const refused = results.filter((result) => result.status === "rejected");
+    expect(refused).toHaveLength(1);
+    expect((refused[0] as PromiseRejectedResult).reason).toMatchObject({
+      name: "TaskConflictError",
+      currentWhen: TODAY,
+    });
+
+    const after = s.getTask(created.id) as TaskView;
+    expect(after.when).toBe(TODAY);
+    expect(after.log ?? []).toHaveLength(0);
+  });
+
   it("takes null as the expected when of an instance filed under no day", async () => {
     const { s } = await tmpStore();
     const created = await s.createTask({ title: "Learn words", repeat: DAILY });
@@ -603,6 +632,37 @@ describe("listTasks(list: logbook)", () => {
       words.id,
     ]);
     expect(s.getTask(words.id)?.done).toBe(false);
+  });
+
+  it("gives listLogbook a distinct key per completion where the id repeats", async () => {
+    const { s } = await tmpStore();
+    const words = await s.createTask({
+      title: "Learn words",
+      when: "2026-09-13",
+      repeat: DAILY,
+    });
+    await s.updateTask(words.id, { done: true, today: "2026-09-13" });
+    await s.updateTask(words.id, { done: true, today: TODAY });
+
+    const entries = s.listLogbook(TODAY, { offsetMinutes: 0 });
+
+    expect(entries).toHaveLength(2);
+    // One record, two completions: keying an agent's own map on the id would
+    // collapse them into one or mis-attribute the second.
+    expect(new Set(entries.map((entry) => entry.task.id)).size).toBe(1);
+    expect(new Set(entries.map((entry) => entry.key)).size).toBe(2);
+    // The newest is the only one an untick is offered on, because there is
+    // one rule to put the series back on.
+    expect(entries.map((entry) => entry.untickable)).toEqual([true, false]);
+    expect(entries[0].task.when).toBe(TODAY);
+    expect(entries[1].task.when).toBe("2026-09-13");
+  });
+
+  it("refuses listLogbook without the reader's own offset", async () => {
+    const { s } = await tmpStore();
+    expect(() =>
+      s.listLogbook(TODAY, { offsetMinutes: undefined as unknown as number }),
+    ).toThrow();
   });
 
   it("leaves the unfiltered read as records, because the surface derives its own rows", async () => {

@@ -11179,4 +11179,102 @@ describe("task records", () => {
       await fs.readFile(path.join(root, "_tasks", "task-scratch.md"), "utf8"),
     ).toBe(onDisk);
   });
+
+  /** Spec row 150, for the two body writers that are not `writePage`.
+   *
+   *  A Notion re-import replaces a page's body wholesale. The records under it
+   *  keep their old anchors and the index keeps its old answer for `done`,
+   *  so without a reconcile a task whose line moved still names the old index,
+   *  one whose text changed still shows the old title, and one whose new line
+   *  is `[x]` still reads as open. */
+  describe("the Notion writers and a promoted task", () => {
+    it("rebinds a task line the finalize rewrote, and reads its checkbox", async () => {
+      const { s } = await tmpStore();
+      const reserved = await reserveNotionImport(s, {
+        notionId: NOTION_PAGE,
+        sourceHash: SOURCE_A,
+        parentId: null,
+        title: "Planning",
+      });
+      if (reserved.status !== "reserved") throw new Error("expected reservation");
+      const first = "- [ ] Draft the plan";
+      await s.finalizeNotionImport({
+        notionId: NOTION_PAGE,
+        sourceHash: SOURCE_A,
+        conversionHash: conversionHash(SOURCE_A, "Planning", first),
+        reservationToken: reserved.reservationToken,
+        markdown: first,
+      });
+      const pageId = reserved.page.id;
+      const [line] = parseTaskLines((await s.readPage(pageId)).markdown);
+      const task = await s.createTask({
+        title: line.normalized,
+        page: pageId,
+        anchor: {
+          text: line.normalized,
+          hash: line.hash,
+          ordinal: line.ordinal,
+          line: line.index,
+        },
+      });
+      expect(s.getTask(task.id)?.done).toBe(false);
+
+      // The re-import: a paragraph above the line, and the box ticked in
+      // Notion.
+      const again = await reserveNotionImport(s, {
+        notionId: NOTION_PAGE,
+        sourceHash: SOURCE_B,
+        parentId: null,
+        title: "Planning",
+      });
+      if (again.status !== "reserved") throw new Error("expected reservation");
+      const second = "A paragraph from Notion.\n\n- [x] Draft the plan";
+      await s.finalizeNotionImport({
+        notionId: NOTION_PAGE,
+        sourceHash: SOURCE_B,
+        conversionHash: conversionHash(SOURCE_B, "Planning", second),
+        reservationToken: again.reservationToken,
+        markdown: second,
+      });
+
+      const after = s.getTask(task.id);
+      expect(after?.detachedAt).toBeUndefined();
+      expect(after?.page).toBe(pageId);
+      expect(after?.done).toBe(true);
+      expect(after?.anchor?.line).toBe(2);
+    });
+
+    it("rebinds a task line the adopt found on disk, and reads its checkbox", async () => {
+      const { s } = await tmpStore();
+      const page = await s.createPage(null, "Planning");
+      await s.writePage(page.id, "- [ ] Draft the plan", undefined, "me");
+      const [line] = parseTaskLines((await s.readPage(page.id)).markdown);
+      const task = await s.createTask({
+        title: line.normalized,
+        page: page.id,
+        anchor: {
+          text: line.normalized,
+          hash: line.hash,
+          ordinal: line.ordinal,
+          line: line.index,
+        },
+      });
+
+      // The body arrives past `writePage`: a `git pull`, a restore, a hand
+      // edit. The index still holds the old anchor and the old answer for
+      // `done`. The adopt then writes this page's body itself, and a body
+      // write is where the records come back in step.
+      const meta = (await s.readPage(page.id)).meta;
+      await fs.writeFile(
+        path.join(s.resolve(page.id), "index.md"),
+        serializeLivePage(meta, "A paragraph from Notion.\n\n- [x] Draft the plan"),
+      );
+      await adoptExisting(s, page.id, NOTION_PAGE_B);
+
+      const after = s.getTask(task.id);
+      expect(after?.detachedAt).toBeUndefined();
+      expect(after?.done).toBe(true);
+      expect(after?.anchor?.line).toBe(2);
+    });
+  });
 });

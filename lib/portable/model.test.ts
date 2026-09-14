@@ -347,6 +347,48 @@ describe("Brain portable packages", () => {
     expect(detached?.done).toBe(false);
   });
 
+  it("brings a linked completion across, without waiting for the next save of its page", async () => {
+    // The note owns a linked task's `done`, so the record carries none and the
+    // checkbox in the markdown is the whole answer. The import writes the
+    // pages before it lands the records, so the reconcile each page write runs
+    // finds no records to reconcile and the index is never told. Without a
+    // sweep afterwards every imported completion reads as open, in Today, with
+    // a ticked box on its own line.
+    const source = await temporaryStore();
+    const page = await source.createPage(null, "Planning");
+    await source.writePage(page.id, "- [ ] Draft the plan", undefined, "me");
+    await source.createTask({
+      title: "Draft the plan",
+      page: page.id,
+      anchor: anchorFor("Draft the plan", 0),
+    });
+    await source.writePage(page.id, "- [x] Draft the plan", undefined, "me");
+
+    const exported = await buildPortableArchive(source, { now: EXPORTED_AT });
+    const destination = await temporaryStore();
+    const checked = validatePortableArchive(exported.bytes, destination);
+    const applied = await applyPortableBundle(destination, checked.bundle);
+    const importedPageId = applied.rootIds[0];
+
+    const landed = destination
+      .allTasks()
+      .find((task) => task.title === "Draft the plan");
+    expect(landed?.page).toBe(importedPageId);
+    // Through the view, because a linked record stores no `done` at all: the
+    // index is where the checkbox's answer lives.
+    expect(destination.getTask(landed!.id)?.done).toBe(true);
+    expect(
+      destination
+        .listTasks(TODAY, { offsetMinutes: 0, list: "logbook" })
+        .map((task) => task.title),
+    ).toContain("Draft the plan");
+    expect(
+      destination
+        .listTasks(TODAY, { offsetMinutes: 0, list: "today" })
+        .map((task) => task.title),
+    ).not.toContain("Draft the plan");
+  });
+
   it("imports a notebook whose trash was emptied on a page holding a finished task", async () => {
     // The shape the spec's own purge rule mints (row 149): the done record is
     // kept, detached, with `page` naming a page no export can carry. The

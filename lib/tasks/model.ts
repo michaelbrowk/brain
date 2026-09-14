@@ -262,6 +262,11 @@ export type TaskRecord = z.infer<typeof taskRecordSchema>;
  *  what every list, group and route works with. */
 export interface TaskView extends Omit<TaskRecord, "done"> {
   done: boolean;
+  /** The name a link visitor gave, when this task's completion came from
+   *  their tick (spec row 145). Read from the note's own `updatedByName` at
+   *  read time and never stored on the record: the note owns a linked task's
+   *  `done`, so it owns who answered it too. Absent everywhere else. */
+  updatedByName?: string;
 }
 
 /** Whether the note's checkbox still answers this record's `done`.

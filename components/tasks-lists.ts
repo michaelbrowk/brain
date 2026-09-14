@@ -109,9 +109,15 @@ function belongs(
   // carries yesterday's UTC date, and reading it at zero would drop the row
   // out of Today the moment it was ticked.
   if (view.kind === "list") return listOf(task, today, offsetMinutes) === view.list;
-  // A completed task is in the Logbook and nowhere else, so a category view
-  // shows what is still open under that word.
-  return !task.done && (task.category ?? "") === view.category;
+  // A CATEGORY VIEW KEEPS THE DAY'S WORK TOO (spec 2). It is the one list
+  // organised by the part of a life the work belongs to, so erasing a task the
+  // instant it is finished would make it the one list with nothing to show for
+  // the morning. The same rule as everywhere else, asked the same way: a
+  // completion belongs here until `listOf` files it in the Logbook, which is
+  // the day change. `sectionsFor` already sorts a category view with the
+  // `today` comparator, which sinks it to the foot of its group.
+  if ((task.category ?? "") !== view.category) return false;
+  return !task.done || listOf(task, today, offsetMinutes) !== "logbook";
 }
 
 /** THE LOGBOOK VIEW GROUPS BY THE DAY THE COMPLETION WAS MADE, always.

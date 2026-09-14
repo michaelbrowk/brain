@@ -129,6 +129,28 @@ export function TasksSurface({
     [drawn],
   );
 
+  /** AN EXPANSION DOES NOT SURVIVE THE COMPLETION IT IS OPEN OVER.
+   *
+   *  Tick the checkbox of a row whose chips are open and the chips would stay:
+   *  the box stops the press from reaching the row, `openRow` refuses an inert
+   *  row, and every key on it is dead, so a When menu and a category picker
+   *  would sit live over a record the reader has finished with and nothing
+   *  short of an arrow key would shut them.
+   *
+   *  Read off the RECORD and derived during the render, not cleared by the
+   *  gesture in an effect: a completion that arrives from another tab closes
+   *  it the same way, there is no frame in which the chips are drawn over a
+   *  struck title, and `react-hooks/set-state-in-effect` is right that a value
+   *  a render can compute is not state to write.
+   *
+   *  So an Undo puts the chips back where the reader left them, because they
+   *  never dismissed them. That is the one consequence of deriving rather than
+   *  clearing, and it is the behaviour Undo should have. */
+  const expandedKey =
+    drawn.find((row) => row.key === expandedId)?.task.done === true
+      ? null
+      : expandedId;
+
   const entrance = useEntrance({
     today,
     replay: view.kind === "list" && view.list === "today",
@@ -251,7 +273,7 @@ export function TasksSurface({
                 offsetMinutes={offsetMinutes}
                 categories={categories.map((entry) => entry.category)}
                 selectedId={selectedId}
-                expandedId={expandedId}
+                expandedId={expandedKey}
                 inserted={inserted}
                 pageTitleOf={pageTitleOf}
                 onOpenPage={onOpenPage}

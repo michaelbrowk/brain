@@ -543,6 +543,36 @@ describe("completion (motion 2.1)", () => {
    *  the foot of its group, and the group it was in is still there: what the
    *  reader finished this morning is the whole of what the list has to show
    *  for it. Only the count beside the list steps down. */
+  it("collapses an expanded row when it is completed", async () => {
+    // The box stops the press from reaching the row, `openRow` refuses an
+    // inert row and every key on it is dead, so an expansion left open over a
+    // completion would sit there with its chips live and no way to shut it.
+    const a = task("a", { when: TODAY });
+    await mount([a]);
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [a] });
+      return response({ task: { ...a, done: true, doneAt: `${TODAY}T12:00:00.000Z` } });
+    });
+
+    await act(async () => {
+      (rowFor("a").querySelector(".brain-task-title") as HTMLElement).click();
+    });
+    const capsule = () => rowFor("a").querySelector(".brain-task-row") as HTMLElement;
+    expect(capsule().hasAttribute("data-expanded")).toBe(true);
+    expect(rowFor("a").querySelectorAll("[data-task-control]").length).toBeGreaterThan(0);
+
+    await act(async () => boxIn(rowFor("a")).click());
+    await act(async () => {
+      vi.advanceTimersByTime(WRITE_AT_MS);
+    });
+    await settle();
+
+    expect(capsule().hasAttribute("data-done")).toBe(true);
+    expect(capsule().hasAttribute("data-expanded")).toBe(false);
+    expect(rowFor("a").querySelectorAll("[data-task-control]").length).toBe(0);
+  });
+
   it("keeps the completed row in its group and steps the count down", async () => {
     const done = task("a", { when: TODAY, category: "Work" });
     const open = task("b", {

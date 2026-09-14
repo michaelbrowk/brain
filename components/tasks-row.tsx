@@ -499,8 +499,15 @@ export function TasksRow({
               <span className="brain-task-tail">
                 {/* The clock the record holds, verbatim, then the moon. Both
                     lead the tail: they are where in the DAY this row sits, and
-                    the glyphs behind them are what KIND of row it is. */}
-                {time && (
+                    the glyphs behind them are what KIND of row it is.
+
+                    ONE CLOCK PER ROW. A finished row reports the time it was
+                    finished at, further down this chain, and the hour it was
+                    due at is what the strike is drawn over: two clocks side by
+                    side made the reader work out which was which. A done row
+                    with no instant to report then says nothing, which is
+                    right, because there is nothing to report. */}
+                {time && !task.done && (
                   <span
                     className="brain-task-caption"
                     data-time

@@ -34,6 +34,7 @@ const { TasksRow, foldRow, WRITE_AT_MS: WRITE_AT } = await import("./tasks-row")
 const { DUR } = await import("@/lib/motion");
 const { renderTaskCheck, renderTaskCheckbox } = await import("./tasks-checkbox");
 const { SOLAR } = await import("./ui/solar-icons.generated");
+const { doneTimeOf } = await import("./tasks-lists");
 
 /** Every WAAPI animation the row starts, in order. */
 interface Recorded {
@@ -337,7 +338,7 @@ describe("what the row draws", () => {
       css.indexOf(".brain-task-row:active {"),
     );
     // The hover rule now excludes a selected row through `:not(:where(…))`,
-    // which weighs nothing, so "the same weight" is still literally true and
+    // which weighs nothing, so "the same weight" is still true and
     // the refusal still wins on order. A bare `:not([data-selected])` would
     // out-weigh this rule and light a history row up under the cursor again.
     const hoverAt = css.indexOf(".brain-task-row:not(:where([data-selected])):hover {");
@@ -1054,13 +1055,19 @@ describe("the strike and the sink (D3)", () => {
   });
 
   it("lets reduced motion collapse the strike, because it travels", () => {
-    // The surface's own reduce block restates the four transitions that are
-    // COLOUR and nothing else, so the global `transition-duration: 0.01ms
-    // !important` takes the strike and the line appears at once.
-    const reduce = css.slice(
+    // THE LOAD-BEARING FACT IS THE GLOBAL RULE'S PSEUDO-ELEMENTS. The strike
+    // lives on `.brain-task-title::after` and `transition-duration` does not
+    // inherit, so a global reduce rule written `*` alone would leave the line
+    // travelling under the setting. It is written `*, *::before, *::after`,
+    // and that is what makes the strike collapse.
+    const global = ruleFor(css, "  *,\n  *::before,\n  *::after");
+    expect(global).toContain("transition-duration: 0.01ms !important");
+    // And the surface's own block does not exempt the strike back out: it
+    // restates the four transitions that are COLOUR and nothing else.
+    const reduced = css.slice(
       css.indexOf("/* Reduced motion: every transition on this surface"),
     );
-    expect(reduce).not.toContain(".brain-task-title::after");
+    expect(reduced).not.toContain(".brain-task-title::after");
   });
 
   it("plays no fold when a task is completed", async () => {
@@ -1195,17 +1202,33 @@ describe("the tail's clock and moon", () => {
     expect(tail().textContent).toContain("since Fri");
   });
 
-  it("tints a fired reminder's time and never reddens it", async () => {
+  it("marks a fired reminder's time and never reddens it", async () => {
+    // The fixture carries an overdue deadline too, so the red this test says
+    // the clock does not take is red the tail is actually drawing beside it.
     await renderRows([
-      task("a", { when: TODAY, time: "13:00", remindedAt: `${TODAY}T12:00:00.000Z` }),
+      task("a", {
+        when: TODAY,
+        time: "13:00",
+        deadline: "2026-09-11",
+        remindedAt: `${TODAY}T12:00:00.000Z`,
+      }),
     ]);
     const time = tail().querySelector("[data-fired]") as HTMLElement;
     expect(time.textContent).toBe("13:00");
-    expect(ruleFor(css, ".brain-task-caption[data-fired]")).toContain("color: var(--ink)");
-    expect(document.querySelectorAll("[data-overdue]").length).toBe(0);
+    expect(time.hasAttribute("data-overdue")).toBe(false);
+    const red = [...tail().querySelectorAll("[data-overdue]")];
+    expect(red.map((node) => node.textContent)).toEqual(["11 Sep"]);
+    // A fired reminder reads like the tail's other late note, "since Fri":
+    // the caption's own quiet, and not the full ink that shipped first.
+    expect(ruleFor(css, ".brain-task-caption[data-fired]")).toContain(
+      "color: var(--ink-3)",
+    );
+    expect(ruleFor(css, ".brain-task-caption[data-overdue]")).toContain(
+      "color: var(--red)",
+    );
   });
 
-  it("does not tint a fired reminder once the task is done", async () => {
+  it("says nothing about a fired reminder once the task is done", async () => {
     await renderRows([
       task("a", {
         when: TODAY,
@@ -1216,5 +1239,34 @@ describe("the tail's clock and moon", () => {
       }),
     ]);
     expect(tail().querySelector("[data-fired]")).toBeNull();
+  });
+
+  it("shows one clock on a done row, the one it was finished at", async () => {
+    // Two clocks side by side made the reader work out which was which. The
+    // hour it was due at is what the strike is drawn over.
+    await renderRows([
+      task("a", {
+        when: TODAY,
+        time: "13:00",
+        done: true,
+        doneAt: `${TODAY}T12:25:00.000Z`,
+      }),
+    ]);
+    expect(tail().textContent).not.toContain("13:00");
+    expect(tail().querySelector("[data-time]")).toBeNull();
+    expect(tail().textContent).toBe(doneTimeOf(`${TODAY}T12:25:00.000Z`, 0));
+  });
+
+  it("says nothing at all on a done row with no instant to report", async () => {
+    await renderRows([task("a", { when: TODAY, time: "13:00", done: true })]);
+    expect(tail().textContent).toBe("");
+  });
+
+  it("hovers the tail only on a row that answers a hover", () => {
+    const rule = ruleFor(
+      css,
+      "  .brain-task-row:not(:where([data-done], [data-historic])):hover .brain-task-tail",
+    );
+    expect(rule).toContain("color: var(--ink-2)");
   });
 });

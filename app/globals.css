@@ -5851,15 +5851,24 @@ html[data-kbd] .brain-task-row[data-selected] {
 .brain-task-caption[data-overdue] {
   color: var(--red);
 }
-/* A fired reminder on a row still open. The one red in the section is the
-   overdue deadline and spending a second one here would stop it being a
-   signal, so the clock that has already spoken steps to full ink instead.
-   `--ink-2` was the other candidate and is taken: it is the tail's hover. */
+/* A fired reminder on a row still open READS LIKE AN OVERDUE NOTE.
+   "since Fri" is the other thing this tail says about a row that is late, and
+   it draws at `--ink-3`, the caption's own quiet: a note, not an alarm. So the
+   clock that has already spoken takes the same, stated here rather than left
+   to the base rule, because the attribute exists to be a signal and a signal
+   with no declared colour is one nobody can see was decided. Full ink shipped
+   first and was louder than the title it sits beside. Red is spoken for by the
+   overdue deadline, and a section with two reds in it has none. */
 .brain-task-caption[data-fired] {
-  color: var(--ink);
+  color: var(--ink-3);
 }
+/* The tail brightens under the cursor on a row that answers one, and on no
+   other: the row's own fill already refuses a finished row, and a tail that
+   went on stepping up under it was the last hover response left on a capsule
+   that has nothing to offer. `:not(:where(…))` again, so the weight is the one
+   this rule has always had. */
 @media (hover: hover) {
-  .brain-task-row:hover .brain-task-tail {
+  .brain-task-row:not(:where([data-done], [data-historic])):hover .brain-task-tail {
     color: var(--ink-2);
   }
 }

@@ -153,10 +153,12 @@ describe("sectionsFor", () => {
       task("tomorrow", { category: "Work", when: "2026-09-14" }),
       task("later", { category: "Work", when: "2026-09-30" }),
       task("other", { category: "Home", when: TODAY }),
+      // Finished this morning, and undated, so it sinks to the foot of the
+      // headerless group it was open in rather than leaving the view.
       task("done", { category: "Work", done: true, doneAt: "2026-09-13T08:00:00.000Z" }),
     ];
     expect(shape(sectionsFor(tasks, view, TODAY, UTC))).toEqual([
-      [null, ["undated"]],
+      [null, ["undated", "done"]],
       ["Today", ["today"]],
       ["Tomorrow", ["tomorrow"]],
       ["Later", ["later"]],
@@ -345,6 +347,77 @@ describe("a completion made today, read both ways", () => {
     expect(shape(sectionsFor(both, list("today"), TODAY, UTC))).toEqual([
       ["Work", ["open", "done"]],
     ]);
+  });
+
+  /** Every list the spec names, one row each. The Today case above is the one
+   *  anybody watches. These three were right and unpinned, which is how a
+   *  derive quietly loses one of them. */
+  it.each([
+    [
+      "Upcoming",
+      "upcoming" as const,
+      { when: "2026-09-16" },
+      ["Wed 16", ["upcoming-open", "upcoming-done"]],
+    ],
+    ["Inbox", "inbox" as const, {}, [null, ["inbox-open", "inbox-done"]]],
+    [
+      "Someday",
+      "someday" as const,
+      { when: "someday" },
+      [null, ["someday-open", "someday-done"]],
+    ],
+  ])("keeps a completion made today in %s, at the foot of its group", (
+    name,
+    listName,
+    over,
+    expected,
+  ) => {
+    const stem = name.toLowerCase();
+    const tasks = [
+      task(`${stem}-open`, over),
+      task(`${stem}-done`, {
+        ...over,
+        done: true,
+        doneAt: `${TODAY}T09:00:00.000Z`,
+      }),
+    ];
+    expect(shape(sectionsFor(tasks, list(listName), TODAY, UTC))).toEqual([expected]);
+  });
+
+  /** Spec 2 names the category view beside the four lists, and it was the one
+   *  that erased the morning's work the instant it was done. */
+  it("keeps it in a category view too, sunk under what is still open", () => {
+    expect(
+      shape(
+        sectionsFor(
+          both,
+          { kind: "category", category: "Work" },
+          TODAY,
+          UTC,
+        ),
+      ),
+    ).toEqual([["Today", ["open", "done"]]]);
+  });
+
+  it("lets a completion made YESTERDAY leave the category view for the Logbook", () => {
+    const yesterday = [
+      task("stale", {
+        when: TODAY,
+        category: "Work",
+        done: true,
+        doneAt: "2026-09-12T09:00:00.000Z",
+      }),
+    ];
+    expect(
+      shape(
+        sectionsFor(
+          yesterday,
+          { kind: "category", category: "Work" },
+          TODAY,
+          UTC,
+        ),
+      ),
+    ).toEqual([]);
   });
 
   it("sits under Today in the Logbook view, by the day it was finished", () => {

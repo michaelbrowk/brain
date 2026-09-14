@@ -30,8 +30,15 @@ import type { ToastOptions } from "./ui/primitives";
 export const HUB_CAPTURE_FLIGHT_ID = "hub-capture-flight";
 
 /** Five, and the sixth collapses. A dashboard is a report, and a report that
- *  runs past a screen has stopped being one. */
+ *  runs past a screen has stopped being one. Five OPEN rows: what is still
+ *  owed is what the block is for, and a reader who finished five things would
+ *  otherwise open Home to five struck-through rows with the whole of the day's
+ *  work folded into "All today". */
 const HOME_ROWS = 5;
+
+/** And three of the day's completions under them, at most. Some is progress
+ *  and all of it is a logbook, which is a list of its own. */
+const HOME_DONE_ROWS = 3;
 
 /** The row the flight lands in, before the real one takes its place: 36 tall
  *  on the desktop rhythm, the height a task capsule is. */
@@ -97,9 +104,9 @@ export function HubToday({
 
   // What is still OPEN today. A completed row stays in the block, struck
   // through and at the foot of its group, so counting the rows would hold the
-  // number at what the morning started with; and a row still folding out on a
-  // reschedule is already out of the count, which is the one decrement at 1300
-  // with the row leaving at 1520.
+  // number at what the morning started with. A row still folding out on a
+  // reschedule is already out of the count too, which is the one decrement at
+  // 1300 with the row leaving at 1520.
   const open = drawn.filter(
     (row) => !row.task.done && !held.has(row.task.id),
   ).length;
@@ -108,9 +115,18 @@ export function HubToday({
   // captured title was drawn twice, 53px apart, for the rest of the flight.
   // The row waits for the flight it is the destination of, and arrives with
   // its insert entrance the moment the words land.
-  const visible = drawn
-    .filter((row) => flight === null || row.task.id !== capturedId)
-    .slice(0, HOME_ROWS);
+  const waiting = drawn.filter(
+    (row) => flight === null || row.task.id !== capturedId,
+  );
+  // THE FIVE SLOTS ARE FIVE OPEN ROWS, and the day's completions sit under
+  // them rather than inside them. Home does not group, so "under" is the whole
+  // block: a flat list, still-to-do first, struck-through after.
+  const visible = [
+    ...waiting.filter((row) => !row.task.done).slice(0, HOME_ROWS),
+    ...waiting.filter((row) => row.task.done).slice(0, HOME_DONE_ROWS),
+  ];
+  // What the block is not showing, whichever of the two ran over.
+  const hidden = waiting.length - visible.length;
 
   // The clock is read on mount, so the server's HTML and the first client
   // render both have no day. A block that guessed one would draw an empty
@@ -231,7 +247,7 @@ export function HubToday({
         </motion.div>
       )}
 
-      {drawn.length > HOME_ROWS && (
+      {hidden > 0 && (
         <button
           type="button"
           data-hub-today-all

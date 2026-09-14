@@ -475,6 +475,22 @@ describe("the expansion", () => {
     expect(ruleFor(css, ".brain-task-row[data-expanded]")).not.toContain("scale");
   });
 
+  /** I1. ONE LAYER ON AN EXPANDED ROW.
+   *
+   *  It painted `--blue-tint-2` plus a `--blue-rim` hairline with the ink
+   *  capsule still stacked under it: three fills on one row, on a surface
+   *  whose verdict was quiet focus, and since a row cannot be expanded
+   *  without being selected the quiet version was never what a reader saw. */
+  it("draws one fill on an expanded row, with no rim and no capsule under it", () => {
+    const rule = ruleFor(css, ".brain-task-row[data-expanded]");
+    expect(rule).toContain("background-color: var(--blue-tint)");
+    expect(rule).not.toContain("--blue-tint-2");
+    expect(rule).not.toContain("box-shadow");
+    expect(
+      ruleFor(css, ".brain-task-row[data-expanded] > .tree-row-capsule"),
+    ).toContain("background-color: transparent");
+  });
+
   it("takes the expanded capsule's height off the chips, which wrap", async () => {
     // IT WAS A NUMBER: `capsule + 40`, one line of chips. Four of them do not
     // fit on one line at 390, so the fourth was drawn outside the capsule. The
@@ -1307,6 +1323,67 @@ describe("the strike and the sink (D3)", () => {
     });
   });
 
+  /** C2. THE STRUCK ROW DOES NOT TRAVEL OVER THE ROWS IT PASSES.
+   *
+   *  It used to ride the layout spring down its group at full opacity, and
+   *  for about 110ms it was painted exactly on top of a stationary row: two
+   *  titles in one composite, and an OPEN task wearing the struck row's
+   *  filled box and its strike. So the row fades out where it stands, the
+   *  reorder happens with the row invisible, and it fades in at the foot. */
+  const lastItem = () =>
+    [...renders]
+      .reverse()
+      .find((render) => String(render.props.className) === "brain-task-row-item");
+
+  async function tickAndSettle() {
+    await act(async () => box().click());
+    await act(async () => vi.advanceTimersByTime(WRITE_AT));
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+
+  it("fades the struck row out in place and holds the reorder until it has gone", async () => {
+    await renderRows([task("a", { when: TODAY })]);
+    await tickAndSettle();
+
+    const item = lastItem();
+    expect(item?.motion.animate).toMatchObject({ opacity: 0 });
+    // Duration 0: the row does not travel. The delay is the fade, so the
+    // reorder happens while there is nothing on screen to see it.
+    expect(item?.motion.transition).toMatchObject({
+      layout: { duration: 0, delay: DUR.base },
+    });
+  });
+
+  it("fades it back in at the foot once the fade is over", async () => {
+    await renderRows([task("a", { when: TODAY })]);
+    await tickAndSettle();
+    await act(async () => vi.advanceTimersByTime(DUR.base * 1000));
+
+    const item = lastItem();
+    expect(item?.motion.animate).toMatchObject({ opacity: 1 });
+    expect(item?.motion.transition).toMatchObject({
+      layout: { bounce: 0, duration: 0.42 },
+    });
+  });
+
+  it("puts the row back where it was when the completion is refused", async () => {
+    calls.complete.mockRejectedValueOnce(new Error("no"));
+    await renderRows([task("a", { when: TODAY })]);
+    await tickAndSettle();
+    expect(lastItem()?.motion.animate).toMatchObject({ opacity: 1 });
+  });
+
+  it("reorders instantly under reduced motion and fades nothing", async () => {
+    harness.reduce = true;
+    await renderRows([task("a", { when: TODAY })]);
+    await tickAndSettle();
+    const item = lastItem();
+    expect(item?.motion.layout).toBe(false);
+    expect(item?.motion.animate).toEqual({ opacity: 1 });
+  });
+
   it("moves without a spring under reduced motion", async () => {
     harness.reduce = true;
     await renderRows([task("a", { when: TODAY })]);
@@ -1377,13 +1454,13 @@ describe("the tail's clock and moon", () => {
     ]);
     expect(tail().textContent).toContain("13:00");
     // Where each of the two stands among the tail's own children, so a clock
-    // that drifted behind the glyphs fails here.
+    // that drifted behind the glyph slot fails here.
     const children = [...tail().children];
-    const drawings = children.filter((node) => node.tagName.toLowerCase() === "svg");
-    const repeat = drawings[glyphs(tail()).indexOf("restart-linear")] as Element;
+    const slot = tail().querySelector(".brain-task-glyphs") as Element;
+    expect(glyphs(slot)).toContain("restart-linear");
     expect(
       children.findIndex((node) => node.textContent === "13:00"),
-    ).toBeLessThan(children.indexOf(repeat));
+    ).toBeLessThan(children.indexOf(slot));
   });
 
   it("writes the stored clock verbatim, with no locale in it", async () => {
@@ -1421,11 +1498,16 @@ describe("the tail's clock and moon", () => {
     expect(time.hasAttribute("data-overdue")).toBe(false);
     const red = [...tail().querySelectorAll("[data-overdue]")];
     expect(red.map((node) => node.textContent)).toEqual(["11 Sep"]);
-    // A fired reminder reads like the tail's other late note, "since Fri":
-    // the caption's own quiet, and not the full ink that shipped first.
+    // A FIRED CLOCK IS ONE STEP UP FROM A PENDING ONE. The rule used to
+    // restate `--ink-3`, which is the caption's base, so the attribute was a
+    // signal with no drawing behind it and a reminder that had already spoken
+    // read exactly like one still waiting. One step, not full ink and not
+    // red: red belongs to the overdue deadline and a section with two reds
+    // has none.
     expect(ruleFor(css, ".brain-task-caption[data-fired]")).toContain(
-      "color: var(--ink-3)",
+      "color: var(--ink-2)",
     );
+    expect(ruleFor(css, ".brain-task-caption")).toContain("color: var(--ink-3)");
     expect(ruleFor(css, ".brain-task-caption[data-overdue]")).toContain(
       "color: var(--red)",
     );
@@ -1455,14 +1537,42 @@ describe("the tail's clock and moon", () => {
         doneAt: `${TODAY}T12:25:00.000Z`,
       }),
     ]);
-    expect(tail().textContent).not.toContain("13:00");
     expect(tail().querySelector("[data-time]")).toBeNull();
+    // ONE CLOCK SHAPE IN THE COLUMN. A pending row prints the `HH:MM` the
+    // file holds, so a done row prints `HH:MM` too. It used to go through
+    // `Intl` and print `12:25 PM` on an en-US machine, four rows under an
+    // `18:00`.
+    expect(tail().textContent).toBe("12:25");
     expect(tail().textContent).toBe(doneTimeOf(`${TODAY}T12:25:00.000Z`, 0));
   });
 
   it("says nothing at all on a done row with no instant to report", async () => {
     await renderRows([task("a", { when: TODAY, time: "13:00", done: true })]);
     expect(tail().textContent).toBe("");
+  });
+
+  /** I10. THE TAIL HAS A COLUMN.
+   *
+   *  The glyphs are a slot, drawn on every row whether or not the row has a
+   *  glyph for it. Without it the tail was a flex whose last child was flush,
+   *  so a row carrying `restart` put its clock 22px left of where a row
+   *  without one put its own, in the same list, on the axis a reader scans. */
+  it("reserves the glyph slot on every row, with a glyph and without one", async () => {
+    await renderRows([task("a", { when: TODAY, time: "13:00" })]);
+    const bare = tail().querySelector(".brain-task-glyphs") as HTMLElement;
+    expect(bare).not.toBeNull();
+    expect(glyphs(bare)).toEqual([]);
+
+    await renderRows([
+      task("b", { when: TODAY, time: "13:00", repeat: { freq: "daily" } }),
+    ]);
+    const carried = tail().querySelector(".brain-task-glyphs") as HTMLElement;
+    expect(glyphs(carried)).toEqual(["restart-linear"]);
+
+    const rule = ruleFor(css, ".brain-task-glyphs");
+    expect(rule).toContain("min-width: 16px");
+    expect(rule).toContain("flex-shrink: 0");
+    expect(rule).toContain("justify-content: flex-end");
   });
 
   it("hovers the tail only on a row that answers a hover", () => {

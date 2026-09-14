@@ -30,6 +30,7 @@ import { onTaskCommand, type TaskCommand } from "./tasks-commands";
 import { TasksGhostRow } from "./tasks-ghost-row";
 import { TasksListMenu } from "./tasks-list-menu";
 import {
+  EVENING_GROUP_KEY,
   belongs,
   categoriesOf,
   countsFor,
@@ -43,6 +44,7 @@ import {
 import { ROW_KEYS, TasksRow, tomorrowOf, whenValueFor } from "./tasks-row";
 import type { WhenValue } from "./tasks-when-picker";
 import { Button } from "./ui/button";
+import { Icon } from "./ui/icon";
 import { Empty } from "./ui/empty";
 import type { ToastOptions } from "./ui/primitives";
 import { ScrollEdge } from "./ui/scroll-edge";
@@ -535,6 +537,27 @@ function TaskGroup({
     >
       {section.group.label !== null && (
         <div className="brain-tasks-section-head">
+          {/* Spec 2. THE EVENING IS A PART OF THE DAY, not one more category,
+              and the moon is what says so: every other header on this surface
+              is a word a person typed or a date. It arrives with the label it
+              belongs to rather than appearing under it. `lib/tasks/lists.ts`
+              says a group carries no glyph and the renderer draws this one. */}
+          {section.group.key === EVENING_GROUP_KEY && (
+            <motion.span
+              aria-hidden
+              className="brain-tasks-section-moon"
+              initial={entrance ? { opacity: 0 } : false}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0, transition: { duration: DUR.fast, delay: 0 } }}
+              transition={{
+                duration: DUR.base,
+                ease: EASE_OUT,
+                delay: reduce ? 0 : groupDelay,
+              }}
+            >
+              <Icon name="moon-linear" size={14} />
+            </motion.span>
+          )}
           <motion.h2
             className="brain-tasks-section-label text-label"
             initial={entrance ? (reduce ? { opacity: 0 } : { opacity: 0, y: -4 }) : false}

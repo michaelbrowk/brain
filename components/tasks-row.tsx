@@ -216,6 +216,19 @@ export function TasksRow({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(task.title);
   const [swipeSide, setSwipeSide] = useState<"left" | "right" | null>(null);
+  /** C2. THE ROW IS INVISIBLE FOR THE LENGTH OF ITS OWN REORDER.
+   *
+   *  Completing a task re-sorts it to the foot of its group, and the row used
+   *  to travel there on the layout spring at full opacity: for about 110ms it
+   *  was painted exactly over the rows it passed, two titles in one composite,
+   *  and an OPEN task wearing the struck row's filled box and its strike. So
+   *  it fades out where it stands over `DUR.base`, the reorder happens with
+   *  nothing on screen to see it, and it fades in at the foot. Set before the
+   *  write leaves, so framer measures the new place with the flag already
+   *  true; cleared when the fade is over. Reduced motion never sets it and
+   *  gets the instant reorder it already had. */
+  const [sinking, setSinking] = useState(false);
+  const sinkRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const x = useMotionValue(0);
 
   const linked = task.page !== undefined && task.detachedAt === undefined;
@@ -240,6 +253,7 @@ export function TasksRow({
   useEffect(
     () => () => {
       if (holdRef.current) clearTimeout(holdRef.current);
+      if (sinkRef.current) clearTimeout(sinkRef.current);
     },
     [],
   );
@@ -260,18 +274,29 @@ export function TasksRow({
    *  spring because the derive now sorts it there. A refusal puts the box and
    *  the quiet title back and the row never moved. */
   const commit = useCallback(async () => {
+    // Before the write leaves, so the optimistic re-sort and this flag land in
+    // one render and framer measures the row's new place with the fade already
+    // on. Set after it, the layout spring would have started travelling first.
+    if (!reduce) setSinking(true);
     try {
       await onComplete(
         task,
         linked ? `Couldn't tick in ${pageTitle ?? "that note"}` : undefined,
       );
+      if (!reduce) {
+        sinkRef.current = setTimeout(() => {
+          sinkRef.current = null;
+          setSinking(false);
+        }, DUR.base * 1000);
+      }
     } catch {
       if (boxRef.current) setTaskCheckboxChecked(boxRef.current, false, reduce);
       // Everything the hold changed goes back, not only the tick. `holding`
       // strikes the title and grows the tail that names the next occurrence,
       // so a row left holding after a refusal reads as completed while the
-      // toast says it failed.
+      // toast says it failed. The fade goes back with it: the row never moved.
       setHolding(false);
+      setSinking(false);
     }
     onFoldEnd(task.id);
   }, [linked, onComplete, onFoldEnd, pageTitle, reduce, task]);
@@ -419,7 +444,9 @@ export function TasksRow({
       // it. Reduced motion moves it with no spring at all, which is a reflow.
       layout={reduce ? false : "position"}
       initial={arrival}
-      animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0, height: "auto" }}
+      animate={
+        reduce ? { opacity: 1 } : { opacity: sinking ? 0 : 1, y: 0, height: "auto" }
+      }
       transition={{
         duration: entrance === "insert" ? DUR.page : DUR.base,
         ease: EASE_OUT,
@@ -427,7 +454,13 @@ export function TasksRow({
         // The sink has its own curve, and the entrance keeps its stagger: one
         // `transition` for two animations would give the travel the arrival's
         // delay and the arrival the travel's spring.
-        layout: SPRING_DEAL,
+        //
+        // AND A COMPLETION'S REORDER IS NOT A TRAVEL AT ALL. Duration 0, held
+        // back by the length of the fade above it, so the row is already gone
+        // from the screen when it changes place and back by the time it is
+        // drawn again. Every other layout change is still the spring: a
+        // neighbour closing the gap is the one thing here that should move.
+        layout: sinking ? { duration: 0, delay: DUR.base } : SPRING_DEAL,
       }}
     >
       <div className="brain-task-swipe">
@@ -524,9 +557,20 @@ export function TasksRow({
                     {time}
                   </span>
                 )}
-                {moon && <Icon name="moon-linear" size={14} className="text-ink-3" />}
-                {linked && <Icon name="document-text" size={14} className="text-ink-3" />}
-                {task.repeat && <Icon name="restart" size={14} className="text-ink-3" />}
+                {/* THE GLYPH SLOT, drawn on every row whether or not this row
+                    has a glyph for it. The tail is a flex whose last child is
+                    flush, so a row carrying `restart` put its clock 22px left
+                    of where a row without one put its own, in the same list,
+                    on the axis a reader scans down. */}
+                <span className="brain-task-glyphs">
+                  {moon && <Icon name="moon-linear" size={14} className="text-ink-3" />}
+                  {linked && (
+                    <Icon name="document-text" size={14} className="text-ink-3" />
+                  )}
+                  {task.repeat && (
+                    <Icon name="restart" size={14} className="text-ink-3" />
+                  )}
+                </span>
                 {/* Spec 2.1, t=100: a repeat grows `restart` plus the day the
                     next one lands on, so the row says where it went before it
                     goes. `materializeFade` is the spec's own choice here and

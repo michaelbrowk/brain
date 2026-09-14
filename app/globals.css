@@ -5741,9 +5741,19 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
   display: block;
   cursor: default;
 }
-/* Expanded: the same capsule, one tint step up with a rim, grown in REAL
-   height rather than by a layout animation, because a layout spring would
-   stretch the words inside it.
+/* Expanded: ONE LAYER, and it is the quiet one.
+
+   It painted `--blue-tint-2` plus a `--blue-rim` hairline with the ink
+   capsule still stacked under it: three fills on one row, on the surface
+   whose whole verdict was quiet focus, and in dark the tint stepped to .24
+   and the row became a saturated navy slab on a near-black page. A row
+   cannot be expanded without being selected, so the quiet version below was
+   never what a reader saw. So the row takes the list tint the column already
+   uses under a cursor, once, the capsule under it draws nothing while it is
+   there, and the chip row sits on that.
+
+   Grown in REAL height rather than by a layout animation, because a layout
+   spring would stretch the words inside it.
 
    THE HEIGHT IS THE CHIPS' AND NOT A NUMBER HERE. It was `capsule + 40`, one
    line of chips, and a row of four at 390 has two: the fourth chip was drawn
@@ -5755,8 +5765,11 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
    capsule open before it grew. */
 .brain-task-row[data-expanded] {
   height: auto;
-  background-color: var(--blue-tint-2);
-  box-shadow: inset 0 0 0 1px var(--blue-rim);
+  background-color: var(--blue-tint);
+}
+/* ONE FILL, so the tint above is the whole of it. */
+.brain-task-row[data-expanded] > .tree-row-capsule {
+  background-color: transparent;
 }
 /* D5. THE SELECTION IS A PLACE, NOT AN EMPHASIS.
    A whole column of tasks is one weight of one size, and the grey plate under
@@ -5901,6 +5914,22 @@ html[data-kbd] .brain-task-row[data-selected] {
   gap: 6px;
   color: var(--ink-3);
 }
+/* THE GLYPHS ARE A SLOT AND NOT A RUN OF SIBLINGS. The tail is a flex whose
+   last child is flush, so a row carrying `restart` put its clock 22px left of
+   where a row without one put its own, in the same list, on exactly the axis
+   a reader scans down. The slot is drawn on every row and reserves its 16
+   whether or not the row has a glyph for it, so two rows that differ only in
+   what kind of row they are still line their clocks up. Right-aligned inside
+   itself, so a second glyph grows the slot leftward rather than pushing the
+   caption. */
+.brain-task-glyphs {
+  display: flex;
+  min-width: 16px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
 /* No character cap. The tail is its own column and does not shrink, so a
    caption takes the width it needs and the title truncates first. 22ch cut
    "line removed from Weekly planning" mid-word with no way to see the rest,
@@ -5921,16 +5950,15 @@ html[data-kbd] .brain-task-row[data-selected] {
 .brain-task-caption[data-overdue] {
   color: var(--red);
 }
-/* A fired reminder on a row still open READS LIKE AN OVERDUE NOTE.
-   "since Fri" is the other thing this tail says about a row that is late, and
-   it draws at `--ink-3`, the caption's own quiet: a note, not an alarm. So the
-   clock that has already spoken takes the same, stated here rather than left
-   to the base rule, because the attribute exists to be a signal and a signal
-   with no declared colour is one nobody can see was decided. Full ink shipped
-   first and was louder than the title it sits beside. Red is spoken for by the
-   overdue deadline, and a section with two reds in it has none. */
+/* A REMINDER THAT HAS ALREADY SPOKEN, one step up from one still waiting.
+   The rule used to restate `--ink-3`, which is the caption's own base, so the
+   attribute was a signal with no drawing behind it: a clock that had fired
+   and a clock still to fire were the same grey. One step is the whole of it.
+   Full ink shipped first and was louder than the title beside it, and red is
+   spoken for by the overdue deadline — a section with two reds in it has
+   none. */
 .brain-task-caption[data-fired] {
-  color: var(--ink-3);
+  color: var(--ink-2);
 }
 /* The tail brightens under the cursor on a row that answers one, and on no
    other: the row's own fill already refuses a finished row, and a tail that
@@ -6027,6 +6055,16 @@ html[data-kbd] .brain-task-row[data-selected] {
   flex-shrink: 0;
   color: var(--ink-3);
   font-variant-numeric: tabular-nums;
+}
+/* The one header on this surface that is not a word somebody typed or a date.
+   Its own flex child, so the label's box is the label's box and the count
+   inside it goes on crossfading where it always did; it takes the head's own
+   gap and the label's own ink, so the block gains no measure and no colour. */
+.brain-tasks-section-moon {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  color: var(--ink-3);
 }
 /* The size sits inside the header's own word, in a box of its own, so it can
    crossfade when a completion moves it without the word blinking with it. */

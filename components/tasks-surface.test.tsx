@@ -347,6 +347,24 @@ describe("the lists", () => {
     expect(headers()).toEqual(["Work"]);
   });
 
+  /** Spec 2. The moon is the section's own drawing, so This Evening reads as
+   *  a part of the day and not as one more category. `lib/tasks/lists.ts`
+   *  says a group carries no glyph and the renderer draws this one, which was
+   *  a claim about a renderer that drew nothing. */
+  it("stands the moon beside the This Evening header and beside no other", async () => {
+    await mount([
+      task("tonight", { when: TODAY, evening: true }),
+      task("filed", { when: TODAY, category: "Work" }),
+    ]);
+    const heads = [...document.querySelectorAll(".brain-tasks-section-head")];
+    const withMoon = heads.filter((head) => head.querySelector("svg") !== null);
+    expect(withMoon).toHaveLength(1);
+    expect(withMoon[0]?.textContent).toContain("This Evening");
+    expect(
+      withMoon[0]?.querySelector("svg")?.getAttribute("aria-hidden"),
+    ).toBe("true");
+  });
+
   it("groups Upcoming by day, then next week, then one group a date", async () => {
     await mount(
       [

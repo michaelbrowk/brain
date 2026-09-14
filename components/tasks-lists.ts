@@ -1,6 +1,7 @@
 import { shiftDay } from "@/lib/tasks/calendar";
 import { nextOccurrence } from "@/lib/tasks/recurrence";
 import {
+  EVENING_GROUP_KEY,
   compareGroups,
   compareInGroup,
   doneDayOf,
@@ -50,9 +51,11 @@ export type TasksView =
   | { readonly kind: "list"; readonly list: ListName }
   | { readonly kind: "category"; readonly category: string };
 
-/** `lib/tasks/lists.ts`'s own answer to which list a record is in, re-exported
- *  because the column reaches that file through this one. */
-export { listOf };
+/** `lib/tasks/lists.ts`'s own answer to which list a record is in, and the key
+ *  its one named group carries, re-exported because the column reaches that
+ *  file through this one. The surface reads the key to know which header
+ *  wears the moon. */
+export { EVENING_GROUP_KEY, listOf };
 
 export function sectionsFor(
   tasks: readonly TaskView[],

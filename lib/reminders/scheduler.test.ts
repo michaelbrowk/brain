@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { BrainNotification } from "@/lib/notifications/model";
 import {
+  MAX_APPENDS_PER_SCAN,
   REMINDER_SCAN_MS,
   remindersEnabled,
   runReminderScan,
@@ -170,6 +171,66 @@ describe("the reminder scan", () => {
     });
     expect((await runReminderScan(h.port)).fired).toBe(1);
     expect(h.marked).toEqual([["task-good", "2026-09-14T12:00:00.000Z"]]);
+  });
+});
+
+describe("a backlog after a long downtime", () => {
+  /** Every append takes a slot in the 256-entry SSE replay journal, so a scan
+   *  that found a week of missed reminders and wrote all of them would empty
+   *  the journal for every other subscriber. */
+  function backlog(count: number) {
+    const records: Task[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const minute = String(index % 60).padStart(2, "0");
+      const hour = String(Math.floor(index / 60)).padStart(2, "0");
+      records.push(
+        view({ id: `task-${String(index).padStart(3, "0")}`, when: "2026-09-14", time: `${hour}:${minute}` }),
+      );
+    }
+    const h = harness({
+      tasks: async () => records,
+      now: () => Date.parse("2026-09-14T23:00:00.000Z"),
+      markReminded: async (id: string, at: string) => {
+        for (const record of records) if (record.id === id) record.remindedAt = at;
+      },
+    });
+    return { ...h, records };
+  }
+
+  it("caps one scan at fifty appends", () => {
+    expect(MAX_APPENDS_PER_SCAN).toBe(50);
+  });
+
+  it("takes the oldest fifty and carries the rest to the next tick", async () => {
+    quiet();
+    const h = backlog(120);
+
+    const first = await runReminderScan(h.port);
+    expect(first.fired + first.missed).toBe(50);
+    expect(h.notified).toHaveLength(50);
+    // Oldest first, so a backlog drains in the order the reminders were owed.
+    expect(h.notified[0]?.id).toContain("task-000");
+    expect(h.notified[49]?.id).toContain("task-049");
+    expect(h.records.filter((record) => record.remindedAt !== undefined)).toHaveLength(50);
+
+    const second = await runReminderScan(h.port);
+    expect(second.fired + second.missed).toBe(50);
+    expect(h.notified[50]?.id).toContain("task-050");
+
+    const third = await runReminderScan(h.port);
+    expect(third.fired + third.missed).toBe(20);
+    expect(h.records.every((record) => record.remindedAt !== undefined)).toBe(true);
+  });
+
+  it("says how many it carried, and says nothing when it carried none", async () => {
+    const warn = quiet();
+    await runReminderScan(backlog(51).port);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]?.[0])).toContain("51 reminders are owed");
+
+    warn.mockClear();
+    await runReminderScan(backlog(50).port);
+    expect(warn).not.toHaveBeenCalled();
   });
 });
 

@@ -25,6 +25,16 @@ import { dueReminders } from "./due";
 
 export const REMINDER_SCAN_MS = 30_000;
 const FIRST_SCAN_DELAY_MS = 15_000;
+/** HOW MANY ROWS ONE SCAN MAY APPEND.
+ *
+ *  Every `appendNotification` takes a slot in the 256-entry SSE replay
+ *  journal, so a first scan after a week of downtime, finding hundreds of
+ *  missed reminders, would push every other event out of the journal and
+ *  leave a reconnecting tab with nothing to replay. The due list is oldest
+ *  first, so the fifty oldest go now and the rest are still due on the next
+ *  tick: a backlog drains at a hundred a minute and the journal survives it.
+ */
+export const MAX_APPENDS_PER_SCAN = 50;
 /** The mail service's own background sync runs once a minute, so polling it
  *  twice that often would ask the same question twice for one answer. */
 const MAIL_SCAN_EVERY = 2;
@@ -121,11 +131,17 @@ export async function runReminderScan(
 
   const now = port.now();
   const rows = dueReminders(await port.tasks(), zone, now);
+  const batch = rows.slice(0, MAX_APPENDS_PER_SCAN);
+  if (batch.length < rows.length) {
+    console.warn(
+      `[brain/reminders] ${rows.length} reminders are owed; taking the oldest ${batch.length} and the rest on the next scan`,
+    );
+  }
   const at = new Date(now).toISOString();
   let fired = 0;
   let missed = 0;
 
-  for (const row of rows) {
+  for (const row of batch) {
     const notification: BrainNotification =
       row.kind === "fire"
         ? {

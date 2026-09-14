@@ -29,11 +29,13 @@ vi.mock("framer-motion", async () => {
 });
 
 const updateThread = vi.fn(async () => undefined);
+const requestOpenThread = vi.fn();
 vi.mock("./mail-surface-client", () => ({
   defaultMailSurfaceClient: {
     updateThread: (...args: unknown[]) =>
       (updateThread as unknown as (...a: unknown[]) => Promise<undefined>)(...args),
   },
+  requestOpenThread: (...args: unknown[]) => requestOpenThread(...args),
 }));
 
 let rows: unknown[];
@@ -49,6 +51,7 @@ beforeEach(() => {
   harness.reduce = false;
   harness.spans.length = 0;
   navigate.mockReset();
+  requestOpenThread.mockReset();
   updateThread.mockReset();
   updateThread.mockResolvedValue(undefined);
   rows = [];
@@ -207,6 +210,19 @@ describe("the bell", () => {
     expect(updateThread).not.toHaveBeenCalled();
   });
 
+  it("names the task in the path it opens", async () => {
+    // The stored href is "/tasks", which opens the column and points at
+    // nothing in it. The task is in the row's own id, and the surface reads
+    // `?task=` to select that row and scroll to it.
+    rows = [
+      { id: "task-reminder:task-1:2026-09-14T13:00", kind: "task-reminder", at: "2026-09-14T12:00:00.000Z", title: "Water the plants", href: "/tasks" },
+    ];
+    await render();
+    await open();
+    await act(async () => item("Water the plants")!.click());
+    expect(navigate).toHaveBeenCalledWith("/tasks?task=task-1");
+  });
+
   it("marks a mail row's thread read before it opens Mail", async () => {
     rows = [
       { id: MAIL_ID, kind: "mail-new", at: "2026-09-14T12:00:00.000Z", title: "Ana Silva", body: "Lunch on Friday", href: "/mail" },
@@ -220,6 +236,21 @@ describe("the bell", () => {
       read: true,
     });
     expect(navigate).toHaveBeenCalledWith("/mail");
+  });
+
+  it("asks Mail to open the thread the row is about", async () => {
+    // The href is "/mail", which is the surface and not the letter. The pair
+    // goes to Mail's own client, and the surface opens it when it mounts.
+    rows = [
+      { id: MAIL_ID, kind: "mail-new", at: "2026-09-14T12:00:00.000Z", title: "Ana Silva", href: "/mail" },
+    ];
+    await render();
+    await open();
+    await act(async () => item("Ana Silva")!.click());
+    expect(requestOpenThread).toHaveBeenCalledWith(
+      "account-adeadbeefdeadbeefdeadbeefdeadbeef",
+      "thread-one",
+    );
   });
 
   it("still opens Mail when the thread mutation fails", async () => {

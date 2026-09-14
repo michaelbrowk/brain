@@ -17,8 +17,11 @@ import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { formatAgo } from "@/lib/format-ago";
 import { DUR } from "@/lib/motion";
-import { decodeMailNotificationId } from "@/lib/notifications/ids";
-import { defaultMailSurfaceClient } from "./mail-surface-client";
+import {
+  decodeMailNotificationId,
+  decodeTaskNotificationId,
+} from "@/lib/notifications/ids";
+import { defaultMailSurfaceClient, requestOpenThread } from "./mail-surface-client";
 import {
   markAllRead,
   markRead,
@@ -44,6 +47,20 @@ export const KIND_GLYPH: Record<NotificationRow["kind"], string> = {
  *  reader can act on that "a lot" does not. */
 const BADGE_CAP = 99;
 
+/** WHERE A ROW GOES, which is not always what it was stored with.
+ *
+ *  A task row's href is "/tasks": it opens the column and names nothing in it,
+ *  and the reader who pressed a reminder is looking for one row. The task is
+ *  in the row's own id, so the query is derived here rather than by rewriting
+ *  five hundred stored rows, and a row the decoder cannot read a task out of
+ *  keeps the href it came with. `components/tasks-surface.tsx` reads `?task=`,
+ *  selects that row wherever it lives and takes the query back off. */
+export function notificationHref(row: NotificationRow): string {
+  if (row.kind === "mail-new" || row.href.includes("?")) return row.href;
+  const taskId = decodeTaskNotificationId(row.id);
+  return taskId === null ? row.href : `/tasks?task=${encodeURIComponent(taskId)}`;
+}
+
 /** WHAT A ROW DOES WHEN IT IS PRESSED, wherever it is drawn. The menu here and
  *  `components/hub-notifications.tsx` on a phone are two drawings of one list,
  *  and a second copy of this would be the place the two stopped agreeing. */
@@ -64,12 +81,19 @@ export function openNotificationRow(
     // latency, and a bell that waited on it would feel like a broken menu.
     const thread = decodeMailNotificationId(row.id);
     if (thread) {
+      // The href says "/mail", which is the surface and not the letter. The
+      // pair goes to Mail's own client, where the surface finds it on the
+      // mount the navigation below causes, opens the account it belongs to and
+      // selects the thread. Left before the navigation on purpose: a request
+      // written after Mail mounted would be read on its next list commit
+      // instead of on this one.
+      requestOpenThread(thread.accountId, thread.threadId);
       void defaultMailSurfaceClient
         .updateThread({ accountId: thread.accountId, threadId: thread.threadId, read: true })
         .catch(() => undefined);
     }
   }
-  onNavigate(row.href);
+  onNavigate(notificationHref(row));
 }
 
 export function NotificationsBell({

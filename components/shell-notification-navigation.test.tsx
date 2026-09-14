@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 
 // WHERE A NOTIFICATION ROW TAKES THE READER. The shell routes on the row's
-// PATH and not on its kind, so a kind added later needs no branch there — and
-// that generosity is exactly what needs holding: an href the shell has no
-// surface for has to land somewhere deliberate rather than nowhere.
+// PATH and not on its kind, so a kind added later needs no branch there. That
+// generosity is exactly what needs holding: an href the shell has no surface
+// for has to land somewhere deliberate rather than nowhere.
 
 import { act, useEffect, useReducer } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -24,8 +24,16 @@ vi.mock("next-themes", () => ({
 
 vi.mock("framer-motion", () => import("@/test/framer-motion-mock"));
 
+// BOTH SURFACES ARE DOUBLED, because the subject here is where a press goes
+// and not what the column does once it is there. The real Tasks surface reads
+// `?task=` and takes the query off again as soon as it has answered it, which
+// would erase the half of this the shell owns.
 vi.mock("./mail-surface", () => ({
   MailSurface: () => <div data-testid="fake-mail-surface" />,
+}));
+
+vi.mock("./tasks-surface", () => ({
+  TasksSurface: () => <div data-testid="tasks-surface" />,
 }));
 
 vi.mock("next/dynamic", () => ({
@@ -239,6 +247,10 @@ describe("a notification row's destination", () => {
 
     await findLazy(tasksSurface, "tasks surface after the row press");
     expect(window.location.pathname).toBe("/tasks");
+    // The entry carries the task, because that is what the surface reads to
+    // select the row and scroll to it. `openTasks` writes the bare path, so
+    // the row's own href is written before it rather than after.
+    expect(window.location.search).toBe("?task=task-1");
     expect(mailSurface()).toBeNull();
   });
 

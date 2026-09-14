@@ -336,6 +336,56 @@ export interface MailSurfaceClient {
   ): Promise<MailSendOperation>;
 }
 
+/** A THREAD SOMETHING OUTSIDE MAIL ASKED FOR.
+ *
+ *  The notification centre opens a letter from a menu that is not in Mail and
+ *  may be on another surface entirely, so it cannot hand the surface a thread:
+ *  Mail has not mounted yet when the row is pressed, and the row holds an id
+ *  pair rather than a list item. It leaves the pair here instead, the surface
+ *  reads it when it mounts and again as its list reconciles, and whoever
+ *  answers it takes it back off.
+ *
+ *  Module state and not React state for the same reason the request exists at
+ *  all: the two sides never share a tree. One request at a time, because a
+ *  second press before the first is answered is a change of mind.
+ */
+export interface MailOpenRequest {
+  readonly accountId: string;
+  readonly threadId: string;
+}
+
+let openRequest: MailOpenRequest | null = null;
+const openRequestListeners = new Set<() => void>();
+
+function publishOpenRequest(): void {
+  for (const listener of openRequestListeners) listener();
+}
+
+/** Ask Mail to open this thread. Ids no mail route could serve are dropped
+ *  here rather than becoming a request the surface cannot answer. */
+export function requestOpenThread(accountId: string, threadId: string): void {
+  if (!SAFE_ACCOUNT_ID.test(accountId) || !SAFE_RESOURCE_ID.test(threadId)) return;
+  openRequest = { accountId, threadId };
+  publishOpenRequest();
+}
+
+export function pendingOpenThread(): MailOpenRequest | null {
+  return openRequest;
+}
+
+export function clearOpenThreadRequest(): void {
+  if (openRequest === null) return;
+  openRequest = null;
+  publishOpenRequest();
+}
+
+export function subscribeOpenThread(listener: () => void): () => void {
+  openRequestListeners.add(listener);
+  return () => {
+    openRequestListeners.delete(listener);
+  };
+}
+
 export const defaultMailSurfaceClient: MailSurfaceClient = {
   async loadAccounts(signal) {
     const payload = await requestJson("/api/mail/accounts/capabilities", { signal });

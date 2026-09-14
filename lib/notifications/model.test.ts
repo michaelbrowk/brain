@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   NOTIFICATION_CAP,
   decodeMailNotificationId,
+  decodeTaskNotificationId,
   mailNotificationId,
   notificationSchema,
   taskMissedNotificationId,
@@ -76,6 +77,26 @@ describe("the notification model", () => {
   it("refuses a thread id too long to fit the bounded id", () => {
     const accountId = "account-adeadbeefdeadbeefdeadbeefdeadbeef";
     expect(() => mailNotificationId(accountId, "t".repeat(200))).toThrow(/too long/);
+  });
+
+  it("reads a task's own id back out of both task ids", () => {
+    // The row in the centre says "/tasks"; the task it came from is in the id
+    // it was minted with, and that is what takes a press to the right row.
+    expect(decodeTaskNotificationId(taskReminderNotificationId("task-alpha", "2026-09-14", "13:00"))).toBe(
+      "task-alpha",
+    );
+    expect(decodeTaskNotificationId(taskMissedNotificationId("task-alpha", "2026-09-14", "13:00"))).toBe(
+      "task-alpha",
+    );
+  });
+
+  it("returns null for an id that names no task", () => {
+    const mailId = mailNotificationId("account-adeadbeefdeadbeefdeadbeefdeadbeef", "thread-one");
+    expect(decodeTaskNotificationId(mailId)).toBeNull();
+    expect(decodeTaskNotificationId("task-reminder:")).toBeNull();
+    // A task id is `[A-Za-z0-9_-]`, so a segment holding anything else is not
+    // one and the row opens the surface without naming a row.
+    expect(decodeTaskNotificationId("task-reminder:task alpha:2026-09-14T13:00")).toBeNull();
   });
 });
 

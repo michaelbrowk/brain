@@ -37,6 +37,25 @@ export function mailNotificationId(accountId: string, threadId: string): string 
   return `mail-new:${accountId}:${hex}`;
 }
 
+/** A task id, `TASK_ID_RE` in `lib/tasks/model.ts`. Written out rather than
+ *  imported for the reason at the head of this file: that module is the tasks
+ *  schema, and the browser reads this one. */
+const TASK_ID = /^task-(?:reminder|missed):([A-Za-z0-9_-]{1,128}):/;
+
+/** THE TASK A ROW CAME FROM, out of the row's own id.
+ *
+ *  A task row's stored href is "/tasks", which opens the column and names no
+ *  row in it. The task is in the id the reminder was minted with
+ *  (`task-reminder:<task id>:<day>T<time>`), so the browser reads it back here
+ *  and opens `/tasks?task=<id>` instead, including the rows already in the
+ *  centre, which no producer can go back and rewrite.
+ *
+ *  `null` for anything that is not one of the two task ids, which is the
+ *  answer that leaves the href as it stands. */
+export function decodeTaskNotificationId(id: string): string | null {
+  return TASK_ID.exec(id)?.[1] ?? null;
+}
+
 export function decodeMailNotificationId(
   id: string,
 ): { accountId: string; threadId: string } | null {

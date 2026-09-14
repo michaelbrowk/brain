@@ -1572,12 +1572,17 @@ export function Shell({
         return;
       }
       if (href.startsWith("/tasks")) {
+        // A task row names one record (`/tasks?task=<id>`) and the surface
+        // reads that query. `openTasks` writes the bare path, and writes
+        // nothing at all when Tasks already holds the screen, so the entry is
+        // written here first and openTasks then finds the path it wanted.
+        if (href !== "/tasks") pushNavigationEntry(href);
         openTasks();
         return;
       }
       goHome();
     },
-    [goHome, openMail, openTasks],
+    [goHome, openMail, openTasks, pushNavigationEntry],
   );
 
   /** THE SIDEBAR'S TASKS COUNT COMES OFF THE SURFACE'S OWN FETCH.

@@ -138,8 +138,8 @@ describe("the centre on Home", () => {
 
   it("draws nothing at desktop widths, where the bell is", async () => {
     // `md:hidden` is a CSS rule, so without a mount gate the same three rows
-    // stand in the document twice at 1440 — once here and once in the open
-    // menu — and an unscoped query resolves to two of everything.
+    // stand in the document twice at 1440, once here and once in the open
+    // menu, and an unscoped query resolves to two of everything.
     stubWidth(false);
     rows = [row("a")];
     await render();

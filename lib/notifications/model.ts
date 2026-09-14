@@ -89,4 +89,8 @@ export function taskMissedNotificationId(taskId: string, when: string, time: str
 /** The mail id pair lives in its own zod-free module so the Mail client can
  *  import it without pulling this file's schemas into the browser bundle. It
  *  is re-exported here so a server caller still has one import. */
-export { mailNotificationId, decodeMailNotificationId } from "./ids";
+export {
+  mailNotificationId,
+  decodeMailNotificationId,
+  decodeTaskNotificationId,
+} from "./ids";

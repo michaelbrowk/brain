@@ -11394,4 +11394,62 @@ describe("the clock on a task, through the store", () => {
       "time cannot be set in the same call as a repeating task's completion",
     );
   });
+
+  // A patch that does not move the day gets no help from the clearing rule.
+  // The clock the caller named is theirs, so the schema answers for it in the
+  // same words `createTask` answers in, and the record is left alone. A 200
+  // here would be a write nobody asked for: a bumped `updated`, a file on disk
+  // and a `task` event, for a field that was dropped on the way past.
+  it("refuses a time on a task with no day rather than dropping it", async () => {
+    const { s, root } = await tmpStore();
+    const made = await s.createTask({ title: "Water the plants" });
+    const file = path.join(root, "_tasks", `${made.id}.md`);
+    const before = await fs.readFile(file, "utf8");
+
+    await expect(s.updateTask(made.id, { time: "13:00" })).rejects.toThrow(
+      "time: time needs a day to be a time on",
+    );
+
+    expect(s.getTask(made.id)?.updated).toBe(made.updated);
+    expect(await fs.readFile(file, "utf8")).toBe(before);
+  });
+
+  it("refuses an evening on a someday task rather than dropping it", async () => {
+    const { s, root } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "someday",
+    });
+    const file = path.join(root, "_tasks", `${made.id}.md`);
+    const before = await fs.readFile(file, "utf8");
+
+    await expect(s.updateTask(made.id, { evening: true })).rejects.toThrow(
+      "evening: the evening needs a day to be the evening of",
+    );
+
+    expect(s.getTask(made.id)?.updated).toBe(made.updated);
+    expect(await fs.readFile(file, "utf8")).toBe(before);
+  });
+
+  it("refuses a park that carries a time, rather than half-applying it", async () => {
+    const { s, root } = await tmpStore();
+    const made = await s.createTask({
+      title: "Water the plants",
+      when: "2026-09-13",
+      time: "09:00",
+    });
+    const file = path.join(root, "_tasks", `${made.id}.md`);
+    const before = await fs.readFile(file, "utf8");
+
+    await expect(
+      s.updateTask(made.id, { when: "someday", time: "13:00" }),
+    ).rejects.toThrow("time: time needs a day to be a time on");
+
+    expect(s.getTask(made.id)).toMatchObject({
+      when: "2026-09-13",
+      time: "09:00",
+      updated: made.updated,
+    });
+    expect(await fs.readFile(file, "utf8")).toBe(before);
+  });
 });

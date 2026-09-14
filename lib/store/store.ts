@@ -7356,21 +7356,28 @@ function applyTaskPatch(
     assignOrClear(next, "when", patch.when);
   }
   assignOrClear(next, "deadline", patch.deadline);
-  assignOrClear(next, "time", patch.time);
-  assignOrClear(next, "evening", patch.evening);
   // A CLOCK WITH NO DAY NAMES NO INSTANT. `time` and `evening` are both
-  // statements about a day, so parking a task or sending it back to the Inbox
-  // takes them with it. Without this the schema would refuse the record and a
-  // plain "move to Someday" would come back as a 400.
+  // statements about a day, so a patch that parks the task or sends it back to
+  // the Inbox takes the clock it finds with it. Without this a plain "move to
+  // Someday" would come back as a 400 naming a field the caller never sent.
+  //
+  // Only the clock ALREADY on the record, and only when this patch moved the
+  // day. A clock the caller names in the same call is theirs, and it falls
+  // through to `parseTask` below, which refuses it in the same words
+  // `createTask` refuses it in. Dropping it instead would answer 200 to a
+  // request that was not carried out, and bump `updated` and write a file and
+  // emit an event for a change nobody made.
   const landsOnADay = typeof next.when === "string" && next.when !== "someday";
-  if (!landsOnADay) {
+  if (patch.when !== undefined && !landsOnADay) {
     delete next.time;
     delete next.evening;
   }
+  assignOrClear(next, "time", patch.time);
+  assignOrClear(next, "evening", patch.evening);
   // THE MARK IS ABOUT ONE INSTANT, and both of these move it. A reminder that
   // already fired for 13:00 today has nothing to say about 18:00 tomorrow, so
   // the edit re-arms it. Anything else leaves the mark where it is.
-  if (patch.when !== undefined || patch.time !== undefined || !landsOnADay) {
+  if (patch.when !== undefined || patch.time !== undefined) {
     delete next.remindedAt;
   }
   assignOrClear(next, "category", patch.category);

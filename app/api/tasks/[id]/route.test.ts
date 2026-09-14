@@ -320,18 +320,39 @@ describe("the clock on the patch surface", () => {
   it("accepts null for either, which is how a caller clears one", async () => {
     const res = await patch({ time: null, evening: null });
     expect(res.status).toBe(200);
+    // The nulls have to REACH the store, which is where a clear happens. A
+    // status on its own would pass for a route that took them and dropped them.
+    expect(mocks.updateTask).toHaveBeenCalledWith(
+      TASK_ID,
+      expect.objectContaining({ time: null, evening: null }),
+    );
   });
 
   it("refuses a time the field cannot hold, before the store is reached", async () => {
     const res = await patch({ time: "25:00" });
     expect(res.status).toBe(400);
-    expect(await res.json()).toEqual({ error: "time: Invalid" });
+    // The record's own parser wrote this sentence, not the route. When the
+    // schema's wording changes the route's refusal changes with it, which is
+    // the whole point of `refusePatchValues` reusing `taskRecordFields`.
+    expect(await res.json()).toEqual({ error: 'time: write it as "HH:MM"' });
     expect(mocks.updateTask).not.toHaveBeenCalled();
   });
 
   it("refuses evening: false, because the absence is the only other state", async () => {
     const res = await patch({ evening: false });
     expect(res.status).toBe(400);
+    expect(mocks.updateTask).not.toHaveBeenCalled();
+  });
+
+  // The mark is the scheduler's, written through `markTaskReminded` and no
+  // other way. Pinned by name rather than left to the nearest neighbour, which
+  // refuses `page` for an unrelated reason: a later task that added the name to
+  // `PATCH_FIELDS` would keep every other case green and hand the scheduler a
+  // path that clears the mark it is setting.
+  it("does not take the mark, which is the scheduler's", async () => {
+    const res = await patch({ remindedAt: "2026-09-13T12:00:00.000Z" });
+    expect(res.status).toBe(400);
+    expect(await res.json()).toEqual({ error: "unknown_field" });
     expect(mocks.updateTask).not.toHaveBeenCalled();
   });
 });

@@ -3461,9 +3461,12 @@ a.brain-share-url:active {
   /* A PAPER RING, SO THE TWO INK SHAPES STAY TWO. Badge and bell are both
      --ink and the bell goes bold while anything is unread, so with nothing
      between them what is drawn is one black amoeba with a number in it and a
-     clapper below: the bell stops being recognisable as a bell. The ring is
-     the ground the sidebar head sits on, which is why it is one rule in both
-     schemes rather than a hard-coded white. */
+     clapper below: the bell stops being recognisable as a bell. The sidebar
+     head sits on --glass-thick, a translucent material with its own blur, so
+     a ring drawn from it would blend into whatever sits behind the
+     glass instead of separating two solid shapes. --paper is opaque and reads
+     cleanly against --ink in both schemes, which is why it is one rule here
+     rather than a hard-coded white. */
   box-shadow: 0 0 0 2px var(--paper);
   line-height: 16px;
   text-align: center;

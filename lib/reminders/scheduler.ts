@@ -217,13 +217,11 @@ export async function runReminderScan(
           `[brain/reminders] the centre did not store ${notification.id}; the record is marked anyway`,
         );
       }
-      // THE MARK GOES ON WHATEVER THE CENTRE AND THE PUSH ANSWERED. The mark
-      // means handled, not delivered. Leaving a record unmarked so a row the
-      // centre would not take could be retried, or so a failed push could be,
-      // would ring again in thirty seconds, and again after that, for as long
-      // as the condition lasted.
-      await port.markReminded(row.id, at);
-      markRetries.delete(row.id);
+      // THE PUSH GOES BEFORE THE MARK. A mark that throws used to swallow a
+      // push that had already been earned: the row sat appended and silent,
+      // and every retry inside the back-off below found the centre already
+      // holding the id and never reached the push at all. Sending it first
+      // costs a failing mark a retried mark, not a missed phone.
       if (appended && row.kind === "fire") {
         await port
           // The tag is the notification's id. Every reminder's href is
@@ -234,6 +232,13 @@ export async function runReminderScan(
             console.warn(`[brain/reminders] push failed: ${reason(cause)}`);
           });
       }
+      // THE MARK GOES LAST, on whatever the centre and the push answered. It
+      // means handled, not delivered. Leaving a record unmarked so a row the
+      // centre would not take could be retried, or so a failed push could be,
+      // would ring again in thirty seconds, and again after that, for as long
+      // as the condition lasted.
+      await port.markReminded(row.id, at);
+      markRetries.delete(row.id);
       if (row.kind === "fire") fired += 1;
       else missed += 1;
     } catch (cause: unknown) {

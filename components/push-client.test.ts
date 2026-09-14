@@ -123,6 +123,7 @@ describe("a subscription the browser already holds", () => {
   function browser(heldKey: Uint8Array | null) {
     const unsubscribed: true[] = [];
     const subscribed: { applicationServerKey: Uint8Array }[] = [];
+    const posted: Record<string, unknown>[] = [];
     const held =
       heldKey === null
         ? null
@@ -151,13 +152,16 @@ describe("a subscription the browser already holds", () => {
       },
     });
     vi.stubGlobal("window", { PushManager: class {}, Notification: class {} });
-    vi.stubGlobal("fetch", async (url: string) => {
+    vi.stubGlobal("fetch", async (url: string, init?: { body?: string }) => {
       if (String(url) === "/api/push/key") {
         return { ok: true, json: async () => ({ publicKey: KEY }) };
       }
+      if (String(url) === "/api/push/subscriptions" && init?.body) {
+        posted.push(JSON.parse(init.body) as Record<string, unknown>);
+      }
       return { ok: true, json: async () => ({ device: { id: "0123456789abcdef" } }) };
     });
-    return { unsubscribed, subscribed };
+    return { unsubscribed, subscribed, posted };
   }
 
   it("keeps one made against the key this server still serves", async () => {
@@ -177,6 +181,30 @@ describe("a subscription the browser already holds", () => {
     expect(Array.from(subscribed[0].applicationServerKey)).toEqual(
       Array.from(urlBase64ToUint8Array(KEY)),
     );
+  });
+
+  // A ROTATED KEY MUST REPLACE THE ROW, NOT DOUBLE IT. The subscribe above
+  // drops the stale subscription and makes a fresh one, at a new endpoint. If
+  // that fresh registration goes up as an ordinary one, the server keeps the
+  // old row beside the new one and Settings shows the same phone twice until
+  // the retired endpoint next answers 410, which for a device with nothing due
+  // that week is not soon. `pushsubscriptionchange` (public/sw.js) already
+  // sends the endpoint it is retiring for the same reason; the button has to
+  // send its own.
+  it("sends the retired endpoint as previousEndpoint, so the row is replaced and not doubled", async () => {
+    const stale = urlBase64ToUint8Array(KEY);
+    stale[1] = stale[1] ^ 0xff;
+    const { posted } = browser(stale);
+    expect((await enablePushOnThisDevice()).ok).toBe(true);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.previousEndpoint).toBe("https://push.example/held");
+  });
+
+  it("sends no previousEndpoint when there was nothing held to replace", async () => {
+    const { posted } = browser(null);
+    expect((await enablePushOnThisDevice()).ok).toBe(true);
+    expect(posted).toHaveLength(1);
+    expect(posted[0]?.previousEndpoint ?? null).toBeNull();
   });
 
   it("subscribes where the browser holds none", async () => {

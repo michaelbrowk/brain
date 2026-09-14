@@ -132,6 +132,13 @@ export async function listPushSubscriptions(
   return readSubscriptions(dir);
 }
 
+/** The worker's own placeholder on the `pushsubscriptionchange` path
+ *  (public/sw.js): there is no user agent in a service worker to build a real
+ *  label from, so it posts this and leaves the naming to the row it replaces.
+ *  A caller that sends anything else is naming the device itself, the way
+ *  Settings' own rotated-key re-subscribe does (components/push-client.ts). */
+const WORKER_DEVICE_LABEL = "This device";
+
 /** `previousId` is the row this registration REPLACES, from the endpoint a
  *  `pushsubscriptionchange` names. A push service may retire an endpoint
  *  without asking, and the worker that hears it has no user agent to build a
@@ -139,9 +146,13 @@ export async function listPushSubscriptions(
  *  one phone became two rows in Settings: the name the owner recognises on a
  *  row that can never ring again, and "This device" beside it.
  *
- *  The name and the first day move across and the old row goes. A same-id save
- *  is not a replacement: a device registering on its own endpoint from
- *  Settings is naming itself, and its new label wins. */
+ *  The first day always moves across. The name moves across only when the
+ *  incoming one is the worker's placeholder: a rotated-key re-subscribe from
+ *  Settings carries the device's own real label (`deviceLabel(navigator.userAgent, …)`),
+ *  and that must win over the row it replaces or a Mac renames itself "iPhone"
+ *  forever. A same-id save is not a replacement: a device registering on its
+ *  own endpoint from Settings is naming itself, and its new label wins there
+ *  too. */
 export async function savePushSubscription(
   record: PushSubscriptionRecord,
   dir = pushStateDirectory(),
@@ -161,7 +172,10 @@ export async function savePushSubscription(
       ? {
           ...record,
           createdAt: carried.createdAt,
-          deviceLabel: held ? record.deviceLabel : carried.deviceLabel,
+          deviceLabel:
+            held || record.deviceLabel !== WORKER_DEVICE_LABEL
+              ? record.deviceLabel
+              : carried.deviceLabel,
         }
       : record;
     const next = [

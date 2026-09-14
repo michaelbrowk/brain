@@ -217,6 +217,31 @@ describe("the bell", () => {
     expect(drawn.motion.exit).toEqual({ opacity: 0, transition: { duration: 0 } });
   });
 
+  // THE SWAP HAS TO REMOUNT THE GLYPH, not repaint it in place: `key={weight}`
+  // is what makes AnimatePresence treat a weight change as one glyph leaving
+  // and another arriving instead of one glyph's `variant` prop changing under
+  // it, which is the one-frame cut this crossfade exists to remove. A
+  // constant key would leave the duration and reduced-motion cases above
+  // green while quietly undoing the fix, so the DOM node's own identity is
+  // the thing pinned here.
+  it("remounts the glyph node on a weight change, rather than updating it in place", async () => {
+    await render();
+    const linear = host.querySelector("[data-bell-glyph]");
+    rows = [
+      { id: "a", kind: "task-reminder", at: "2026-09-14T12:00:00.000Z", title: "One", href: "/tasks" },
+    ];
+    await act(async () => {
+      root.render(<NotificationsBell onNavigate={navigate} refreshToken={1} />);
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    const bold = host.querySelector("[data-bell-glyph]");
+    expect(bold).not.toBeNull();
+    expect(bold).not.toBe(linear);
+  });
+
   it("draws the bell bold while something is unread and linear when nothing is", async () => {
     await render();
     const quiet = host.querySelector("[data-bell-glyph] svg")!.innerHTML;

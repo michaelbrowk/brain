@@ -175,6 +175,25 @@ describe("the subscription store", () => {
     expect(rows[0].lastSeenAt).toBe("2026-09-20T12:00:00.000Z");
   });
 
+  // The Settings button that cures a rotated VAPID key also replaces the
+  // retired row, and it sends its own real label (components/push-client.ts),
+  // not the worker's placeholder. That real label must win: carrying the old
+  // row's name over it would rename a Mac "iPhone" forever, the same bug in a
+  // new shape one commit after the worker path fixed it.
+  it("keeps the real label a rotated key's own re-subscribe sends, rather than the row it replaces", async () => {
+    await savePushSubscription(record(ENDPOINT, "iPhone"), dir);
+    const moved = await savePushSubscription(
+      { ...record(`${ENDPOINT}-rotated`, "Mac"), createdAt: "2026-09-20T12:00:00.000Z" },
+      dir,
+      pushSubscriptionId(ENDPOINT),
+    );
+    const rows = await listPushSubscriptions(dir);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(moved.id);
+    expect(rows[0].deviceLabel).toBe("Mac");
+    expect(rows[0].createdAt).toBe("2026-09-14T12:00:00.000Z");
+  });
+
   it("takes a previous endpoint it holds no row for as an ordinary registration", async () => {
     const saved = await savePushSubscription(
       record(ENDPOINT, "This device"),

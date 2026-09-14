@@ -135,6 +135,31 @@ describe("the reminder scan", () => {
     expect(h.marked).toEqual([["task-alpha", "2026-09-14T12:00:00.000Z"]]);
   });
 
+  // A FAILING MARK MUST NOT SWALLOW A PUSH THAT ALREADY WENT OUT. The append
+  // is idempotent and the mark is not (see the back-off above): a mark that
+  // throws is retried behind a doubling wait, and every one of those retries
+  // finds the centre already holding the id and refuses to append again. If
+  // the push sat after the mark, none of those retries would ever reach it,
+  // and a reminder that fired stays silent on the phone for as long as the
+  // notes root cannot be written.
+  it("pushes a fire whose mark then throws, so the phone rings before the retry starts", async () => {
+    quiet();
+    const h = harness({
+      markReminded: async () => {
+        throw new Error("disk is full");
+      },
+    });
+    expect(await runReminderScan(h.port)).toEqual({ fired: 0, missed: 0, skipped: null });
+    expect(h.pushed).toEqual([
+      {
+        title: "Water the plants",
+        body: "13:00",
+        href: "/tasks",
+        tag: "task-reminder:task-alpha:2026-09-14T13:00",
+      },
+    ]);
+  });
+
   it("does not push a row the centre did not store", async () => {
     const warn = quiet();
     const h = harness({ notify: async () => false });

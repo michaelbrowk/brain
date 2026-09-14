@@ -140,9 +140,17 @@ export async function enablePushOnThisDevice(): Promise<
     const wanted = urlBase64ToUint8Array(publicKey);
     const held = await registration.pushManager.getSubscription();
     // A subscription addressed to a key this server has rotated away from can
-    // never be delivered to, so it goes rather than being handed back.
+    // never be delivered to, so it goes rather than being handed back. Its
+    // endpoint is read before it goes: the row it named must be replaced, not
+    // duplicated (lib/push/store.ts's `previousId`), the same problem and the
+    // same cure `pushsubscriptionchange` already has in public/sw.js. Without
+    // it Settings grew a second row for one phone, the retired endpoint's
+    // silent forever, until it next answered 410, which for a device with
+    // nothing due that week is not soon.
     let subscription = held;
+    let previousEndpoint: string | null = null;
     if (held && !sameApplicationServerKey(held.options.applicationServerKey, wanted)) {
+      previousEndpoint = held.toJSON().endpoint ?? null;
       await held.unsubscribe();
       subscription = null;
     }
@@ -159,6 +167,7 @@ export async function enablePushOnThisDevice(): Promise<
       body: JSON.stringify({
         subscription: subscription.toJSON(),
         deviceLabel: deviceLabel(navigator.userAgent, navigator.maxTouchPoints),
+        previousEndpoint,
       }),
     });
     if (!saved.ok) return { ok: false, reason: "failed" };

@@ -22,7 +22,7 @@
 import {
   createElement,
   forwardRef,
-  useRef,
+  useState,
   type ElementType,
   type ForwardRefExoticComponent,
   type ReactNode,
@@ -127,9 +127,14 @@ const dragControlsStub: DragControlsStub = { start: () => {} };
  *  that: a stub rebuilt on every render loses whatever the handler set the
  *  moment a sibling state change re-renders. So this is a real hook. */
 function useMotionValueStub<T>(initial: T): MotionValueStub<T> {
-  const held = useRef<MotionValueStub<T> | null>(null);
-  held.current ??= motionValueStub(initial);
-  return held.current;
+  // `useState` with a lazy initializer, not a ref written during render:
+  // `react-hooks/refs` is right that a ref may not be read or written while
+  // rendering, and this is the sanctioned "build once, keep for the life of
+  // the component" primitive. React may throw a `useMemo` away; it never
+  // throws this away, which is the identity stability framer's own hook has.
+  // `initial` is deliberately not a dependency of anything.
+  const [held] = useState(() => motionValueStub(initial));
+  return held;
 }
 
 function motionValueStub<T>(initial: T): MotionValueStub<T> {

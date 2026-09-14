@@ -5,6 +5,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import matter from "gray-matter";
 import { Store } from "./store";
 import { serializeLivePage, serializePage } from "./frontmatter";
 import {
@@ -10621,7 +10622,14 @@ describe("task records", () => {
     const { s, root } = await tmpStore();
     const task = await s.createTask({ title: "Water the plants" });
 
-    expect(await taskFile(root, task.id)).toContain(`id: ${task.id}`);
+    // Through the parser, not as a raw substring. `nanoid`'s alphabet holds
+    // `-`, so one id in 64 starts with one, and js-yaml correctly quotes a
+    // plain scalar that would: `id: '-V1StGXR8_Z5jdHi6B'` on disk, parsed back
+    // as the same string. A `toContain("id: <id>")` misses that file and fails
+    // one run in sixty-four for no fault of the code.
+    expect(matter(await taskFile(root, task.id), { language: "yaml" }).data.id).toBe(
+      task.id,
+    );
     // atomicWrite renames its temp file into place, so none is left behind.
     const left = await fs.readdir(path.join(root, "_tasks"));
     expect(left).toEqual([`${task.id}.md`]);

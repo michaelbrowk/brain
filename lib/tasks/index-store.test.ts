@@ -252,8 +252,36 @@ describe("the task index", () => {
     // The column derives the Logbook from the same number the store serves it
     // by. Two constants drift, and the day they do the list shows a completion
     // the store has already dropped.
+    //
+    // Asserted through what `lists.ts` DERIVES, against a literal day.
+    // `index-store.ts` re-exports the binding it imports from `./lists`, so
+    // comparing the two exports is one value compared with itself and cannot
+    // fail whatever either file becomes. The first day of the window can.
     const lists = await import("./lists");
-    expect(LOGBOOK_WINDOW_DAYS).toBe(lists.LOGBOOK_WINDOW_DAYS);
+    const oldest = lists.logbookRows(
+      [
+        {
+          id: "task-edge",
+          title: "The oldest row the window holds",
+          created: "2026-08-14T09:00:00.000Z",
+          updated: "2026-08-14T09:00:00.000Z",
+          done: true,
+          doneAt: "2026-08-14T09:00:00.000Z",
+        },
+        {
+          id: "task-past",
+          title: "One day older than that",
+          created: "2026-08-13T09:00:00.000Z",
+          updated: "2026-08-13T09:00:00.000Z",
+          done: true,
+          doneAt: "2026-08-13T09:00:00.000Z",
+        },
+      ],
+      "2026-09-13",
+      0,
+    );
+    expect(oldest.map((row) => row.task.id)).toEqual(["task-edge"]);
+    expect(logbookWindowStart("2026-09-13")).toBe("2026-08-14");
   });
 
   /** The body shapes a Markdown-literate person writes. A leading fence is the

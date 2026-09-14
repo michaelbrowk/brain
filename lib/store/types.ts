@@ -696,8 +696,8 @@ export function isTaskValidation(e: unknown): e is TaskValidationError {
  *  has moved since.
  *
  *  A 409 rather than a 400: nothing about the request is malformed, the task
- *  simply moved. No task `rev` exists and none is added — `when` is the whole
- *  of what a completion depends on. */
+ *  moved. No task `rev` exists and none is added. `when` is the whole of what a
+ *  completion depends on. */
 export class TaskConflictError extends Error {
   constructor(
     public reason: string,

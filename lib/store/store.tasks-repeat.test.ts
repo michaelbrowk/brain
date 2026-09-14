@@ -505,7 +505,7 @@ describe("unticking a repeating task in the Logbook", () => {
  *
  *  Completing a repeat is not idempotent: each one appends an entry and moves
  *  `when` a rule date on. `mutate()` serialises the two writes, so the second
- *  reads the already-advanced record and cannot notice on its own — it would
+ *  reads the already-advanced record and cannot notice on its own. It would
  *  advance again and the series would skip a period with nothing said. The
  *  caller sends the `when` it was looking at, and a stale one is refused. */
 describe("completing the same instance twice", () => {

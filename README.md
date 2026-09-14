@@ -281,6 +281,7 @@ unusual-looking pin is worth much less than a knowingly vulnerable parser.
 | `BRAIN_UPDATE_CHECK`  | `off` stops the daily release check (default: on)              |
 | `BRAIN_UPDATE_STATE_DIR` | Where the update check keeps its answer (default `/var/lib/brain/update`) |
 | `BRAIN_SETTINGS_STATE_DIR` | Where the owner's settings live, the time zone reminders fire in (default `/var/lib/brain/settings`) |
+| `BRAIN_NOTIFICATIONS_STATE_DIR` | Where the notification centre keeps its rows (default `/var/lib/brain/notifications`) |
 
 Human access = password → signed httpOnly cookie. MCP clients connect to
 `/api/mcp`, discover Brain OAuth automatically, and open a Brain consent screen.

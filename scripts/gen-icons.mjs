@@ -81,6 +81,10 @@ const WANT = [
   // `checklist-minimalistic`, which this replaces.
   "check-read-linear",
   "bell-linear",
+  // The notification centre draws one glyph per kind: a reminder that fired
+  // takes the alarm, one that was missed takes the clock already listed
+  // above, and new mail takes the letter that is already in PAIRS.
+  "alarm-linear",
   "align-left-linear",
   "align-horizontal-center-linear",
   "align-right-linear",

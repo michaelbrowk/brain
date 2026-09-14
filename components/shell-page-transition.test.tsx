@@ -198,6 +198,9 @@ describe("Shell page transitions", () => {
           rev: "rev-a",
         });
       }
+      // the bell asks the centre on mount, on every surface
+      if (String(input).startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${String(input)}`);
     });
 
@@ -244,6 +247,9 @@ describe("Shell page transitions", () => {
           rev: `rev-${id}`,
         });
       }
+      // the bell asks the centre on mount, on every surface
+      if (String(input).startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${String(input)}`);
     });
 
@@ -279,6 +285,9 @@ describe("Shell page transitions", () => {
         });
       }
       if (url === "/api/page/page-b") return pageB.promise;
+      // the bell asks the centre on mount, on every surface
+      if (String(input).startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
 
@@ -331,6 +340,9 @@ describe("Shell page transitions", () => {
     const revalidation = deferred<Response>();
     apiFetchMock.mockImplementation(async (input) => {
       if (String(input) === "/api/page/page-a") return revalidation.promise;
+      // the bell asks the centre on mount, on every surface
+      if (String(input).startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${String(input)}`);
     });
 
@@ -390,6 +402,9 @@ describe("Shell page transitions", () => {
           rev: "rev-a",
         });
       }
+      // the bell asks the centre on mount, on every surface
+      if (String(input).startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${String(input)}`);
     });
 
@@ -470,6 +485,9 @@ describe("Shell page transitions", () => {
           tree: [{ ...shared, public: undefined }],
         });
       }
+      // the bell asks the centre on mount, on every surface
+      if (String(input).startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
 

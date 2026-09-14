@@ -337,6 +337,10 @@ export function Shell({
   const [taskSurfaceRevision, setTaskSurfaceRevision] = useState(0);
   // Bumped by "New task": the surface puts the caret in its capture field.
   const [taskCaptureRequest, setTaskCaptureRequest] = useState(0);
+  // Bumped by a notification written anywhere but this tab (the reminder scan,
+  // the mail poll, another tab's read). The bell and Home's first row refetch
+  // on it, through the one module both subscribe to.
+  const [notificationRevision, setNotificationRevision] = useState(0);
   const selectedIdRef = useRef(selectedId);
   const surfaceRef = useRef(surface);
   const treeRef = useRef(tree);
@@ -1378,6 +1382,14 @@ export function Shell({
         window.dispatchEvent(new CustomEvent(TASKS_CHANGED_EVENT));
         return;
       }
+      // A notification changes nothing in the page tree either. The bell and
+      // Home's first row subscribe to the same module, so one revision bump
+      // moves both, and without this early return every reminder that fired
+      // would refetch the whole tree.
+      if (ev.type === "notification") {
+        setNotificationRevision((revision) => revision + 1);
+        return;
+      }
       clearTimeout(t);
       t = setTimeout(() => void refreshTree().catch(() => {}), 500);
       const cur = selectedIdRef.current;
@@ -1548,6 +1560,25 @@ export function Shell({
     setSelectedId,
     setSurface,
   ]);
+
+  /** A notification's href is a path on this origin (the schema enforces it),
+   *  and the shell already knows how to reach each of them. Routing on the
+   *  path rather than on the kind keeps the centre generic: a kind added later
+   *  needs no branch here. */
+  const openNotification = useCallback(
+    (href: string) => {
+      if (href.startsWith("/mail")) {
+        openMail();
+        return;
+      }
+      if (href.startsWith("/tasks")) {
+        openTasks();
+        return;
+      }
+      goHome();
+    },
+    [goHome, openMail, openTasks],
+  );
 
   /** THE SIDEBAR'S TASKS COUNT COMES OFF THE SURFACE'S OWN FETCH.
    *
@@ -5488,6 +5519,8 @@ export function Shell({
         onOpenDailyPage={openDailyPage}
         onOpenMail={openMail}
         onOpenTasks={openTasks}
+        onNavigateNotification={openNotification}
+        notificationRefreshToken={notificationRevision}
         tasksOpenTodayCount={tasksOpenToday}
         onSelect={select}
         onToggleExpand={toggleExpand}
@@ -5763,8 +5796,10 @@ export function Shell({
                 // subscribe with, so the three are one request and one
                 // optimistic commit rather than three answers to one question.
                 taskRefreshToken={taskSurfaceRevision}
+                notificationRefreshToken={notificationRevision}
                 onOpenTasks={openTasks}
                 onOpenMail={openMail}
+                onNavigateNotification={openNotification}
                 onToast={showToast}
                 pageTitleOf={pageTitleOf}
               />

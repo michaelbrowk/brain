@@ -187,6 +187,9 @@ describe("mobile navigation surfaces", () => {
     apiFetchMock.mockImplementation(async (input) => {
       const url = String(input);
       if (url === "/api/tree") return response({ tree: [] });
+      // the bell asks the centre on mount, on every surface
+      if (url.startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`unexpected request: ${url}`);
     });
     vi.stubGlobal("matchMedia", (query: string) => ({
@@ -363,6 +366,7 @@ describe("mobile navigation surfaces", () => {
       "Appearance",
       "Mail",
       "Connections",
+      "Notifications",
       "Sharing",
       "Data",
       "Account",
@@ -453,6 +457,9 @@ describe("mobile navigation surfaces", () => {
           rev: "rev-page",
         });
       }
+      // the bell asks the centre on mount, on every surface
+      if (url.startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`unexpected request: ${url}`);
     });
 
@@ -546,6 +553,9 @@ describe("mobile navigation surfaces", () => {
           rev: "rev-page",
         });
       }
+      // the bell asks the centre on mount, on every surface
+      if (url.startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`unexpected request: ${url}`);
     });
 
@@ -590,6 +600,9 @@ describe("mobile navigation surfaces", () => {
           rev: "rev-page",
         });
       }
+      // the bell asks the centre on mount, on every surface
+      if (url.startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`unexpected request: ${url}`);
     });
 
@@ -664,6 +677,9 @@ describe("mobile navigation surfaces", () => {
           rev: `rev-${match[1]}`,
         });
       }
+      // the bell asks the centre on mount, on every surface
+      if (url.startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`unexpected request: ${url}`);
     });
 

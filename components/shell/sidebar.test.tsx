@@ -41,6 +41,7 @@ function sidebarProps(
     onOpenDailyPage: vi.fn(),
     onOpenMail: vi.fn(),
     onOpenTasks: vi.fn(),
+    onNavigateNotification: vi.fn(),
     onSelect: vi.fn(),
     onToggleExpand: vi.fn(),
     onDelete: vi.fn(),

@@ -188,6 +188,9 @@ describe("Shell failure recovery", () => {
       if (url === "/api/tree") {
         return response({ tree: [treeNode("page-a", "Page A")] });
       }
+      // the bell asks the centre on mount, on every surface
+      if (url.startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
 
@@ -236,6 +239,9 @@ describe("Shell failure recovery", () => {
       if (url === "/api/tree") {
         return response({ tree: [treeNode("page-a", "Page A")] });
       }
+      // the bell asks the centre on mount, on every surface
+      if (url.startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
 
@@ -277,6 +283,53 @@ describe("Shell failure recovery", () => {
     expect(treeCalls()).toBeGreaterThan(before);
   });
 
+  it("keeps a notification event off the page tree and takes it to the centre", async () => {
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/page/page-a") {
+        return response({
+          meta: { title: "Page A", stickers: [] },
+          markdown: "Body A",
+          rev: "rev-a",
+        });
+      }
+      if (url === "/api/tree") {
+        return response({ tree: [treeNode("page-a", "Page A")] });
+      }
+      // the bell asks the centre on mount, on every surface
+      if (url.startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    await act(async () =>
+      root.render(
+        <Shell tree={[treeNode("page-a", "Page A")]} initialSelectedId="page-a" />,
+      ),
+    );
+    await flushAnimationFrames();
+
+    const source = FakeEventSource.instances[0];
+    const callsTo = (path: string) =>
+      apiFetchMock.mock.calls.filter(([input]) => String(input) === path).length;
+    const treeBefore = callsTo("/api/tree");
+    const centreBefore = callsTo("/api/notifications");
+
+    // A reminder that fired touches no page, so the tree stays where it is and
+    // the bell is the only thing that asks anything.
+    await act(async () => {
+      source.onmessage?.({
+        data: JSON.stringify({ type: "notification", id: "task-reminder:t:1", src: "other" }),
+      } as MessageEvent);
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(1_000);
+    });
+    await settle();
+    expect(callsTo("/api/tree")).toBe(treeBefore);
+    expect(callsTo("/api/notifications")).toBeGreaterThan(centreBefore);
+  });
+
   it("recreates a permanently closed EventSource and reconciles on reopen", async () => {
     apiFetchMock.mockImplementation(async (input) => {
       const url = String(input);
@@ -290,6 +343,9 @@ describe("Shell failure recovery", () => {
       if (url === "/api/tree") {
         return response({ tree: [treeNode("page-a", "Page A")] });
       }
+      // the bell asks the centre on mount, on every surface
+      if (url.startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
 
@@ -350,6 +406,9 @@ describe("Shell failure recovery", () => {
           tree: [treeNode("page-a", "Page A"), treeNode("page-b", "Page B")],
         });
       }
+      // the bell asks the centre on mount, on every surface
+      if (url.startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
 
@@ -415,6 +474,9 @@ describe("Shell failure recovery", () => {
       if (url === "/api/tree") {
         return response({ tree: [treeNode("page-a", "Page A")] });
       }
+      // the bell asks the centre on mount, on every surface
+      if (url.startsWith("/api/notifications"))
+        return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
 

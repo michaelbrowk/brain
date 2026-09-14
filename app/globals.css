@@ -3440,6 +3440,31 @@ a.brain-share-url:active {
   font-variant-numeric: tabular-nums;
   color: var(--ink-2);
 }
+/* THE COUNT ON THE BELL.
+   It rides the 28 control rather than standing beside it: the head is 36 tall
+   with the wordmark and New page in it already, and there is no third slot.
+   `pointer-events: none` keeps the whole 28 box the press target under it.
+   Ink and paper, no hue. §7 gives red to destructive text and errors and says
+   never a red fill, and §8 keeps hue out of the chrome. What carries the
+   signal beside the number is the bell itself going bold. The box is set here
+   rather than left to `text-label`, whose 18px line is taller than a corner
+   badge on a 28 control: the utility gives the family, size, weight and
+   tracking, this gives the 16 it has to fit in. */
+.brain-bell-badge {
+  position: absolute;
+  top: -1px;
+  right: -1px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--r-pill);
+  background: var(--ink);
+  color: var(--paper);
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
 /* the sidebar's empty state: one quiet row */
 .brain-sidebar-empty {
   width: 100%;

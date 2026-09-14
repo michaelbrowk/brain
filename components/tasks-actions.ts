@@ -184,7 +184,7 @@ export function useTaskActions({
    *  back had not appeared yet.
    *
    *  It arrives with NO action and no window: "Completed" is a report of what
-   *  the reader just did, which is true the moment they did it, and an Undo
+   *  the reader did a moment ago, which is true the moment they did it, and an Undo
    *  offered before the write landed would send a second PATCH for a
    *  completion that never happened. When the 2xx lands the same sentence is
    *  said again under the same id, now with the way back and its nine

@@ -657,7 +657,7 @@ export async function applyPortableBundle(
           // `detachedAt` goes too, and it is the one that matters: a detach
           // is a link that was broken, and the record schema refuses the mark
           // without the page it names. The purge rule mints exactly that
-          // record — a finished linked task whose page is gone — so a
+          // record, a finished linked task whose page is gone, so a
           // notebook that has ever emptied its trash exports an archive that
           // would throw on the way in and roll every imported page into the
           // Trash. Unlinked and done says the same thing to a reader, in a

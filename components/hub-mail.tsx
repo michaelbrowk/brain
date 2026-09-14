@@ -256,7 +256,7 @@ function MailBlockBody({
   return (
     <>
       {data.people.map((row) => (
-        <motion.div key={`${row.accountId} ${row.threadId}`} {...enter(index++)}>
+        <motion.div key={`${row.accountId}:${row.threadId}`} {...enter(index++)}>
           <HubRow
             data-hub-mail-row
             data-hub-mail-person={row.threadId}

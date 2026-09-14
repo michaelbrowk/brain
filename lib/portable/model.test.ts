@@ -392,7 +392,7 @@ describe("Brain portable packages", () => {
   it("imports a notebook whose trash was emptied on a page holding a finished task", async () => {
     // The shape the spec's own purge rule mints (row 149): the done record is
     // kept, detached, with `page` naming a page no export can carry. The
-    // archive has no page to remap it to, so the link goes — and `detachedAt`
+    // archive has no page to remap it to, so the link goes, and `detachedAt`
     // has to go with it, or the record is refused on the way in and the whole
     // import rolls back into the Trash.
     const source = await temporaryStore();

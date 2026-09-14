@@ -1107,4 +1107,31 @@ describe("a repeating task", () => {
       expectedWhen: dayFrom(1),
     });
   });
+
+  it("steps the keyboard selection over a history row", async () => {
+    const twice = words({
+      when: dayFrom(1),
+      log: [
+        { scheduled: dayFrom(-1), completedAt: `${dayFrom(-1)}T09:00:00.000Z` },
+        { scheduled: TODAY, completedAt: `${TODAY}T09:00:00.000Z` },
+      ],
+    });
+    await mount([twice], { list: "logbook" });
+    const [newest, older] = [
+      ...document.querySelectorAll<HTMLElement>(".brain-task-row-item"),
+    ];
+
+    // Two steps down: the first lands on the newest completion, the second
+    // has nowhere to go, because the older row answers no key and must not
+    // take the capsule either.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    });
+    expect(newest.querySelector("[data-selected]")).not.toBeNull();
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown" }));
+    });
+    expect(newest.querySelector("[data-selected]")).not.toBeNull();
+    expect(older.querySelector("[data-selected]")).toBeNull();
+  });
 });

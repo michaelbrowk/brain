@@ -122,7 +122,12 @@ export function TasksSurface({
     () => sections.flatMap((section) => section.rows),
     [sections],
   );
-  const order = useMemo(() => drawn.map((row) => row.key), [drawn]);
+  /** A history row (a repeat's past completion) answers no key, so the
+   *  arrows step over it; only rows that can be acted on take the capsule. */
+  const order = useMemo(
+    () => drawn.filter((row) => row.untickable).map((row) => row.key),
+    [drawn],
+  );
 
   const entrance = useEntrance({
     today,

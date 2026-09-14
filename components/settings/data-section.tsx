@@ -87,7 +87,7 @@ export function DataSection({
       <SettingsGroup title="Your notes">
         <SettingsRow
           label="Export all notes"
-          hint="Downloads Markdown, page structure, and local attachments"
+          hint="Downloads Markdown, page structure, tasks, and local attachments"
         >
           <a
             href="/api/portable/export"

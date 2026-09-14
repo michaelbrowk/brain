@@ -117,6 +117,27 @@ async function resolvePort(overrides: Partial<ReminderPort>): Promise<ReminderPo
  *  zone appears, so a zone that is removed later is announced again. */
 let zoneAnnounced = false;
 
+/** A RECORD WHOSE MARK WILL NOT WRITE IS NOT RETRIED ON EVERY TICK.
+ *
+ *  The append is idempotent and the mark is not. When `markReminded` throws,
+ *  the record stays unmarked, the next scan computes the same reminder again,
+ *  the centre refuses the duplicate id, and the mark throws again: two log
+ *  lines per record every thirty seconds, for as long as the notes root
+ *  cannot be written. The wait doubles from two scan intervals to the same
+ *  ceiling `scheduleReminderScans` gives a failing scan, so the retry survives
+ *  a transient failure and a lasting one goes quiet.
+ *
+ *  Keyed by task id and pruned against the due list on every scan, so a record
+ *  that stopped being due takes its entry with it and the map is bounded by
+ *  the number of reminders actually owed. */
+const markRetries = new Map<string, { after: number; wait: number }>();
+
+/** For this module's own test. Nothing in the app calls it: the map is
+ *  per-process state the way `zoneAnnounced` above is. */
+export function resetReminderRetries(): void {
+  markRetries.clear();
+}
+
 function reason(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
 }
@@ -151,7 +172,18 @@ export async function runReminderScan(
   let fired = 0;
   let missed = 0;
 
+  // A record that is no longer owed a reminder takes its wait with it.
+  const owed = new Set(rows.map((row) => row.id));
+  for (const id of [...markRetries.keys()]) {
+    if (!owed.has(id)) markRetries.delete(id);
+  }
+
   for (const row of batch) {
+    const waiting = markRetries.get(row.id);
+    // Inside the wait this record is not touched at all. Appending again
+    // would only earn the centre's refusal, which is the second of the two
+    // log lines this back-off exists to stop.
+    if (waiting !== undefined && now < waiting.after) continue;
     const notification: BrainNotification =
       row.kind === "fire"
         ? {
@@ -187,6 +219,7 @@ export async function runReminderScan(
       // would ring again in thirty seconds, and again after that, for as long
       // as the condition lasted.
       await port.markReminded(row.id, at);
+      markRetries.delete(row.id);
       if (appended && row.kind === "fire") {
         await port
           // The tag is the notification's id. Every reminder's href is
@@ -200,8 +233,16 @@ export async function runReminderScan(
       if (row.kind === "fire") fired += 1;
       else missed += 1;
     } catch (cause: unknown) {
-      // One task's failed write is not the scan's. The next tick tries again.
-      console.warn(`[brain/reminders] ${row.id} did not fire: ${reason(cause)}`);
+      // One task's failed write is not the scan's, and it is not the next
+      // tick's either: the wait doubles so a lasting failure stops printing.
+      const wait = Math.min(
+        waiting === undefined ? REMINDER_SCAN_MS * 2 : waiting.wait * 2,
+        MAX_REMINDER_BACKOFF_MS,
+      );
+      markRetries.set(row.id, { after: now + wait, wait });
+      console.warn(
+        `[brain/reminders] ${row.id} did not fire, trying again in ${Math.round(wait / 1000)}s: ${reason(cause)}`,
+      );
     }
   }
   return { fired, missed, skipped: null };

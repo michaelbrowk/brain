@@ -9,9 +9,9 @@ import { readMailWatermarks, writeMailWatermark } from "./watermarks";
  *
  *  The mail service is a separate process (ops/brain-mail.service) and emits
  *  nothing into this one: app/api/events/route.ts streams the store's own
- *  events and no mail event exists. So the producer polls, on the reminder
- *  timer's every-second tick, one Inbox page per account, against a per
- *  account high-water mark.
+ *  events and no mail event exists. So the producer polls one Inbox page per
+ *  account against a per-account high-water mark, on every second tick of the
+ *  reminder timer, which is once a minute.
  *
  *  Nothing here logs an address or an endpoint. A poll that cannot reach the
  *  service raises no alarm of its own: the Mail surface already says so where

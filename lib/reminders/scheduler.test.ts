@@ -4,6 +4,7 @@ import {
   MAX_APPENDS_PER_SCAN,
   REMINDER_SCAN_MS,
   remindersEnabled,
+  resetReminderRetries,
   runReminderScan,
   scheduleReminderScans,
 } from "./scheduler";
@@ -51,6 +52,10 @@ function quiet() {
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+  // The per-record wait after a failed mark is module state, the way the
+  // zone's own "said once" flag is. A case that left one standing would sit
+  // the next case's record out.
+  resetReminderRetries();
 });
 
 describe("the reminder scan", () => {
@@ -166,6 +171,75 @@ describe("the reminder scan", () => {
       },
     });
     expect((await runReminderScan(h.port)).fired).toBe(1);
+  });
+
+  // A FAILING MARK USED TO PRINT FOREVER. The append is idempotent and the
+  // mark is not: an unmarked record is computed again on the next scan, the
+  // centre refuses the duplicate id, and the mark throws again. Two log lines
+  // per record every thirty seconds, for as long as the notes root cannot be
+  // written, which on a full disk is until somebody notices.
+  it("backs a failing mark off rather than retrying it on every tick", async () => {
+    quiet();
+    const clock = { now: Date.parse("2026-09-14T12:00:00.000Z") };
+    const attempts: string[] = [];
+    const h = harness({
+      tasks: async () => [view({ id: "task-bad", when: "2026-09-14", time: "09:00" })],
+      markReminded: async (id: string) => {
+        attempts.push(id);
+        throw new Error("disk is full");
+      },
+      now: () => clock.now,
+    });
+
+    await runReminderScan(h.port);
+    expect(attempts).toHaveLength(1);
+
+    // The next tick sits the row out: the wait is two scan intervals.
+    clock.now += REMINDER_SCAN_MS;
+    await runReminderScan(h.port);
+    expect(attempts).toHaveLength(1);
+
+    // Past the wait it tries once more, and the wait doubles behind it.
+    clock.now += REMINDER_SCAN_MS * 2;
+    await runReminderScan(h.port);
+    expect(attempts).toHaveLength(2);
+
+    clock.now += REMINDER_SCAN_MS * 2;
+    await runReminderScan(h.port);
+    expect(attempts).toHaveLength(2);
+  });
+
+  it("starts the wait over once a mark has landed", async () => {
+    quiet();
+    const clock = { now: Date.parse("2026-09-14T12:00:00.000Z") };
+    const attempts: string[] = [];
+    let broken = true;
+    const h = harness({
+      tasks: async () => [view({ id: "task-bad", when: "2026-09-14", time: "09:00" })],
+      markReminded: async (id: string) => {
+        attempts.push(id);
+        if (broken) throw new Error("disk is full");
+      },
+      now: () => clock.now,
+    });
+
+    await runReminderScan(h.port);
+    broken = false;
+    clock.now += REMINDER_SCAN_MS * 2;
+    await runReminderScan(h.port);
+    expect(attempts).toHaveLength(2);
+
+    // The record is marked now, so nothing is due until a second one is. This
+    // is the same record failing again from a clean slate: the wait it gets is
+    // the first wait and not the doubled one, which is only true if the landed
+    // mark cleared the entry.
+    broken = true;
+    clock.now += REMINDER_SCAN_MS;
+    await runReminderScan(h.port);
+    expect(attempts).toHaveLength(3);
+    clock.now += REMINDER_SCAN_MS * 2;
+    await runReminderScan(h.port);
+    expect(attempts).toHaveLength(4);
   });
 
   it("keeps scanning when the centre refuses one row", async () => {

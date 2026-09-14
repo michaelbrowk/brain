@@ -60,6 +60,37 @@ describe("the owner's zone", () => {
     expect(await captureTimeZone("Mars/Olympus", dir)).toBeNull();
   });
 
+  // THE FIRST WRITER WINS, AND TWO ARRIVING TOGETHER ARE STILL TWO WRITERS.
+  // The capture reads, checks the zone is unset and then awaits a write, and
+  // two list requests from devices in different zones both used to read null,
+  // both write, and the later one land. The function's own sentence says
+  // "captured once and never overwritten", so the read and the write happen
+  // under one queue and the second caller sees what the first left.
+  it("keeps the first of two captures that arrive together", async () => {
+    const [first, second] = await Promise.all([
+      captureTimeZone("Europe/Lisbon", dir),
+      captureTimeZone("Asia/Dubai", dir),
+    ]);
+    expect(first).toBe("Europe/Lisbon");
+    expect(second).toBe("Europe/Lisbon");
+    expect(await readTimeZone(dir)).toBe("Europe/Lisbon");
+    resetOwnerSettingsCache();
+    expect(await readTimeZone(dir)).toBe("Europe/Lisbon");
+  });
+
+  it("runs the owner's own set after a capture that arrived first", async () => {
+    const [captured] = await Promise.all([
+      captureTimeZone("Europe/Lisbon", dir),
+      setTimeZone("Asia/Dubai", dir),
+    ]);
+    // The capture saw an unset file and captured; the set then overwrote it,
+    // which is what a set is for. Neither read a file the other was part way
+    // through writing.
+    expect(captured).toBe("Europe/Lisbon");
+    resetOwnerSettingsCache();
+    expect(await readTimeZone(dir)).toBe("Asia/Dubai");
+  });
+
   it.each([["Europe/Lisbon"], ["Asia/Dubai"], ["UTC"], ["America/Argentina/Salta"]])(
     "knows %s",
     (zone) => {

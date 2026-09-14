@@ -118,6 +118,25 @@ export async function readTimeZone(
   return (await readOwnerSettings(dir)).timeZone;
 }
 
+/** ONE WRITER AT A TIME, SO "CAPTURED ONCE" IS TRUE.
+ *
+ *  `captureTimeZone` reads, checks the zone is unset, and only then awaits a
+ *  write. Two list requests arriving together from devices in different zones
+ *  both read null, both write, and the later one lands, which is the opposite
+ *  of what the function below promises. The queue is the same construction
+ *  `lib/push/store.ts` uses over its own file, and for the same reason: a
+ *  read-modify-write of a whole file loses one of two interleaved saves.
+ *  Reads stay outside it, because a read never has to wait on a write. */
+let queue: Promise<unknown> = Promise.resolve();
+function serialise<T>(work: () => Promise<T>): Promise<T> {
+  const run = queue.then(work, work);
+  queue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
 async function write(dir: string, settings: OwnerSettings): Promise<void> {
   await fs.mkdir(dir, { recursive: true, mode: 0o700 });
   const file = path.join(dir, OWNER_SETTINGS_FILE);
@@ -140,11 +159,15 @@ export async function captureTimeZone(
   zone: string,
   dir = ownerSettingsDirectory(),
 ): Promise<string | null> {
-  const current = await readOwnerSettings(dir);
-  if (current.timeZone !== null) return current.timeZone;
-  if (!isTimeZone(zone)) return null;
-  await write(dir, { schema: 1, timeZone: zone });
-  return zone;
+  // The read and the write are one turn on the queue. Outside it, two first
+  // requests both saw an unset file and the later one won.
+  return serialise(async () => {
+    const current = await readOwnerSettings(dir);
+    if (current.timeZone !== null) return current.timeZone;
+    if (!isTimeZone(zone)) return null;
+    await write(dir, { schema: 1, timeZone: zone });
+    return zone;
+  });
 }
 
 /** The owner saying so, in Settings. This one does overwrite. */
@@ -153,5 +176,5 @@ export async function setTimeZone(
   dir = ownerSettingsDirectory(),
 ): Promise<void> {
   if (!isTimeZone(zone)) throw new Error(`unknown time zone: ${zone}`);
-  await write(dir, { schema: 1, timeZone: zone });
+  await serialise(() => write(dir, { schema: 1, timeZone: zone }));
 }

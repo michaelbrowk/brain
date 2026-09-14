@@ -619,10 +619,20 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
 .milkdown .ProseMirror .brain-toggle[open]::details-content {
   block-size: auto;
 }
-/* a paragraph ending in an atom gets a ProseMirror trailing <br> for cursor
-   placement — it renders as a phantom second line. Collapse it for page-ref
-   paragraphs so each reference is a single tight line. */
-.milkdown .ProseMirror p:has(> a.brain-page-ref) > br.ProseMirror-trailingBreak {
+/* a paragraph ending in an atom gets a ProseMirror trailing
+   `<img class="ProseMirror-separator"><br class="ProseMirror-trailingBreak">`
+   for cursor placement, and it renders as a phantom second line. Collapse
+   both for page-ref paragraphs so each reference is a single tight line.
+
+   The separator is named here as well as the break. The rule further down
+   un-blocks it so a task line does not double, and this row draws its link
+   as a block, so an inline separator after that block opens a line box of
+   its own: the row measures 48 where it draws 24. Every gesture that reads
+   the row's rect then reads a row twice the height it shows. `lib/drop-zone.ts`
+   puts the nesting band at 30-70% of that rect, which lands under the title
+   rather than on it, and a centre drop stops nesting. */
+.milkdown .ProseMirror p:has(> a.brain-page-ref) > br.ProseMirror-trailingBreak,
+.milkdown .ProseMirror p:has(> a.brain-page-ref) > img.ProseMirror-separator {
   display: none;
 }
 

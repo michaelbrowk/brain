@@ -1051,6 +1051,12 @@ describe("a repeating task", () => {
     await settle();
     expect(writes()).toHaveLength(1);
     expect(String(writes()[0]?.[0])).toBe("/api/tasks/words");
-    expect(JSON.parse(String(writes()[0]?.[1]?.body))).toEqual({ done: false });
+    // `expectedWhen` is the LIVE record's day, not this row's: the row is one
+    // completion's projection and carries the day that instance was owed. A
+    // second press is refused against it rather than popping a second entry.
+    expect(JSON.parse(String(writes()[0]?.[1]?.body))).toEqual({
+      done: false,
+      expectedWhen: dayFrom(1),
+    });
   });
 });

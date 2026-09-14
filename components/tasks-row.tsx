@@ -144,8 +144,11 @@ export interface TasksRowProps {
   /** ⌘⏎ moves the capsule on at once and the fold plays behind it. */
   onSelectNext: (afterId: string) => void;
   onExpand: (id: string | null) => void;
-  /** Resolves when the write landed, rejects when the route refused it. */
-  onComplete: (task: TaskView) => Promise<void>;
+  /** Resolves when the write landed, rejects when the route refused it.
+   *  `refusal` is this row's own sentence for a failure the route cannot
+   *  name: completing a LINKED task writes `[x]` into a note, and which note
+   *  is a thing only the row knows. */
+  onComplete: (task: TaskView, refusal?: string) => Promise<void>;
   /** `refusal` is the sentence a failed untick is reported in. Only the row
    *  knows which note a linked task's box lives in, and that is the whole of
    *  what the reader needs told: the write goes to somebody's document, so a
@@ -226,7 +229,10 @@ export function TasksRow({
     const fold = element ? foldRow(element, "up", reduce) : null;
     let refused = false;
     try {
-      await onComplete(task);
+      await onComplete(
+        task,
+        linked ? `Couldn't tick in ${pageTitle ?? "that note"}` : undefined,
+      );
     } catch {
       refused = true;
     }
@@ -243,7 +249,7 @@ export function TasksRow({
     }
     await fold?.finished;
     onFoldEnd(task.id);
-  }, [onComplete, onFoldEnd, reduce, task]);
+  }, [linked, onComplete, onFoldEnd, pageTitle, reduce, task]);
 
   const beginHold = useCallback(() => {
     if (boxRef.current) setTaskCheckboxChecked(boxRef.current, true, reduce);
@@ -462,6 +468,14 @@ export function TasksRow({
                 {detached ? (
                   <span className="brain-task-caption">
                     line removed from {pageTitle ?? "a note"}
+                  </span>
+                ) : task.done && task.updatedByName ? (
+                  /* Spec row 145. The note owns a linked task's completion,
+                     so when a link visitor ticked the box the Logbook says
+                     who, in place of the time: the name answers the question
+                     the time was standing in for. */
+                  <span className="brain-task-caption">
+                    done by {task.updatedByName} via link
                   </span>
                 ) : task.done && task.doneAt ? (
                   <span className="brain-task-caption">

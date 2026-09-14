@@ -294,6 +294,31 @@ describe("what the row draws", () => {
     expect(document.querySelectorAll(".brain-task-tail svg").length).toBe(0);
   });
 
+  it("says who ticked a linked task from a share link, in place of the time", async () => {
+    // Spec row 145. The note owns a linked task's completion, so a visitor's
+    // tick is the note's answer and the Logbook names them.
+    await renderRows([
+      task("a", {
+        page: "page-1",
+        done: true,
+        doneAt: "2026-09-13T09:00:00.000Z",
+        updatedByName: "Ada",
+      }),
+    ]);
+    expect(document.querySelector(".brain-task-caption")?.textContent).toBe(
+      "done by Ada via link",
+    );
+  });
+
+  it("keeps the time on a completion nobody else answered", async () => {
+    await renderRows([
+      task("a", { page: "page-1", done: true, doneAt: "2026-09-13T09:00:00.000Z" }),
+    ]);
+    expect(document.querySelector(".brain-task-caption")?.textContent).not.toContain(
+      "via link",
+    );
+  });
+
   it("truncates the title and sets dir=auto", async () => {
     await renderRows([task("a", { title: "ذهاب إلى السوق" })]);
     const title = document.querySelector(".brain-task-title") as HTMLElement;

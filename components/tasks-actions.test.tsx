@@ -198,6 +198,40 @@ describe("the untick's own words", () => {
     expect(toasts.at(-1)?.title).toBe("Couldn't untick in that note");
   });
 
+  it("names the note when a linked completion is refused", async () => {
+    // Spec line 493: ticking a LINKED task writes `[x]` into somebody's note,
+    // so a failure there is a failure in that note, exactly as the untick's
+    // is. The row goes back open and the sentence says where.
+    await mount([task("shopping", { when: TODAY, page: "page-1" })], {
+      patchAnswer: () =>
+        response({ error: "page_missing", reason: "That page is gone" }, 409),
+    });
+
+    await act(async () => boxFor("shopping").click());
+    await act(async () => {
+      vi.advanceTimersByTime(WRITE_AT_MS);
+    });
+    await settle();
+
+    expect(toasts.at(-1)?.title).toBe("Couldn't tick in Groceries");
+    expect(toasts.at(-1)?.options?.urgent).toBe(true);
+  });
+
+  it("keeps the route's own reason for a completion no note owns", async () => {
+    await mount([task("shopping", { when: TODAY })], {
+      patchAnswer: () =>
+        response({ error: "busy", reason: "The notebook is busy" }, 409),
+    });
+
+    await act(async () => boxFor("shopping").click());
+    await act(async () => {
+      vi.advanceTimersByTime(WRITE_AT_MS);
+    });
+    await settle();
+
+    expect(toasts.at(-1)?.title).toBe("The notebook is busy");
+  });
+
   it("keeps the route's own reason for a task no note owns", async () => {
     await mount([task("shopping", { done: true, doneAt: NOON.toISOString() })], {
       list: "logbook",
@@ -258,5 +292,28 @@ describe("one field per request, where the store says so", () => {
 
     expect(patches).toHaveLength(1);
     expect(patches[0]!.body).toEqual({ done: false });
+  });
+
+  it("sends the live record's when when a repeat's newest completion is unticked", async () => {
+    // The row is `logbookRows`' projection of ONE completion: its `when` is
+    // the day that instance was owed. The record behind it is open and stands
+    // on the NEXT occurrence, and that is the value the store's guard compares
+    // against, so a projection's `when` would refuse every first untick.
+    await mount(
+      [
+        task("daily", {
+          when: "2026-09-14",
+          repeat: { freq: "daily" },
+          log: [{ scheduled: TODAY, completedAt: NOON.toISOString() }],
+        }),
+      ],
+      { list: "logbook" },
+    );
+
+    await act(async () => boxFor("daily").click());
+    await settle();
+
+    expect(patches).toHaveLength(1);
+    expect(patches[0]!.body).toEqual({ done: false, expectedWhen: "2026-09-14" });
   });
 });

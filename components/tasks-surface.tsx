@@ -346,7 +346,7 @@ function TaskGroup({
   onSelect: (id: string) => void;
   onSelectNext: (afterId: string) => void;
   onExpand: (id: string | null) => void;
-  onComplete: (task: TaskView) => Promise<void>;
+  onComplete: (task: TaskView, refusal?: string) => Promise<void>;
   onReopen: (task: TaskView, refusal?: string) => void;
   onReschedule: (
     task: TaskView,

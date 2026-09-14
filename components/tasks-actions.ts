@@ -27,6 +27,7 @@ import type { TaskRepeat, TaskView } from "@/lib/tasks/model";
 import { SMART_UNDO_MS } from "./shell/helpers";
 import {
   TaskRequestError,
+  liveTask,
   mutateTasks,
   patchTask,
   reloadTasks,
@@ -54,7 +55,11 @@ export interface TaskActions {
   readonly inserted: ReadonlySet<string>;
   markInserted: (id: string) => void;
   releaseFold: (id: string) => void;
-  completeTask: (task: TaskView) => Promise<void>;
+  /** `refusal` is the one sentence this completion is reported in when the
+   *  route says no, for the same reason the untick has one: ticking a LINKED
+   *  task is a write to somebody's note. Without it the route's own `reason`
+   *  stands. */
+  completeTask: (task: TaskView, refusal?: string) => Promise<void>;
   /** `refusal` is the one sentence this untick is reported in when the route
    *  says no. Without it the route's own `reason` stands. */
   reopenTask: (task: TaskView, refusal?: string) => Promise<void>;
@@ -136,8 +141,18 @@ export function useTaskActions({
           ),
         );
       }
+      // TWO UNTICKS OF ONE INSTANCE. `revert` pops the newest log entry and
+      // puts `when` back on the day it was owed, so a double press or a second
+      // tab would pop two entries and leave the record two occurrences in the
+      // past, with nothing said. The store refuses a stale precondition with
+      // the 409 the completion already uses; it has to be the RECORD's `when`,
+      // because the row is this completion's projection.
+      const live = projected ? liveTask(task.id) : undefined;
       try {
-        const saved = await patchTask(task.id, { done: false });
+        const saved = await patchTask(task.id, {
+          done: false,
+          ...(live ? { expectedWhen: live.when ?? null } : {}),
+        });
         if (projected) markInserted(saved.id);
         mutateTasks((tasks) =>
           tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
@@ -170,7 +185,7 @@ export function useTaskActions({
    *  thing in the route's own words.
    */
   const completeTask = useCallback(
-    async (task: TaskView) => {
+    async (task: TaskView, refusal?: string) => {
       hold(task);
       // A REPEATING task is never done. Completing it appends a log entry and
       // moves `when` to the next occurrence, so an optimistic `done: true`
@@ -221,7 +236,7 @@ export function useTaskActions({
         mutateTasks((tasks) =>
           tasks.map((entry) => (entry.id === task.id ? task : entry)),
         );
-        refuse(error);
+        refuse(error, refusal);
         throw error;
       }
     },

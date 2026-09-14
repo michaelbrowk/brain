@@ -227,6 +227,14 @@ export function mutateTasks(
   set({ tasks: update(state.tasks) });
 }
 
+/** The RECORD this tab holds for an id, which a Logbook row of a repeat is
+ *  not: that row is one completion's projection, carrying the day that
+ *  instance was owed, while the record is open and standing on the next
+ *  occurrence. A precondition sent to the store has to be the record's. */
+export function liveTask(id: string): TaskView | undefined {
+  return state.tasks.find((task) => task.id === id);
+}
+
 /** Ask again for the same day, after a write or from "Try again". */
 export function reloadTasks(): void {
   loadedKey = null;

@@ -1,7 +1,7 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The real store against a temp state directory, with only the directory
 // redirected: what these routes are is validation over that store, and a mock
@@ -18,6 +18,12 @@ import { POST as readAllPost } from "./read-all/route";
 
 beforeEach(async () => {
   dirHolder.current = await mkdtemp(path.join(os.tmpdir(), "brain-notifications-route-"));
+});
+
+// The house pattern of lib/owner-settings.test.ts: the temp directory a test
+// made is the test's to remove.
+afterEach(async () => {
+  await rm(dirHolder.current, { recursive: true, force: true });
 });
 
 const row = (id: string, at: string) => ({

@@ -2,7 +2,12 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { atomicWrite } from "@/lib/store/atomic";
 import { emitStore } from "@/lib/store/events";
-import { NOTIFICATION_CAP, notificationSchema, type BrainNotification } from "./model";
+import {
+  NOTIFICATION_CAP,
+  isNotificationInstant,
+  notificationSchema,
+  type BrainNotification,
+} from "./model";
 import { notificationStateDirectory } from "./state-dir";
 
 /** THE CENTRE ON DISK.
@@ -102,35 +107,53 @@ export async function unreadNotificationCount(
   return (await readAll(dir)).filter((row) => row.readAt === undefined).length;
 }
 
-/** `false` when the id is already there: two scans that compute the same
- *  reminder, or two polls that see the same thread, are one row.
+/** `true` only when the row is in the file after the call, and the event fires
+ *  on exactly that. Three ways to get `false`, and a caller has to be able to
+ *  tell them apart from a success or it will mark work done that was not:
  *
- *  A row the centre took is announced on the store's event bus, so an open tab
- *  lights its bell without polling. The announcement is here rather than in
- *  each producer, so a kind added later cannot forget it. */
+ *  - the id is already there. Two scans that compute the same reminder, or two
+ *    polls that see the same thread, are one row.
+ *  - the row is not one the schema accepts. `readAll` refuses the same rows on
+ *    the way back, so a row written without this check would be announced and
+ *    then vanish at the next read.
+ *  - the centre is full and this row is older than everything in it. The cap
+ *    drops the oldest by `at`, so a backfilled row can evict itself. Nothing is
+ *    written in that case, and the producer is free to retry or record the loss.
+ *
+ *  The announcement is here rather than in each producer, so a kind added later
+ *  cannot forget it, and an open tab lights its bell without polling. */
 export async function appendNotification(
   notification: BrainNotification,
   dir = notificationStateDirectory(),
 ): Promise<boolean> {
-  const appended = await serialise(async () => {
+  const taken = await serialise(async () => {
+    const parsed = notificationSchema.safeParse(notification);
+    if (!parsed.success) return false;
+    const row = parsed.data;
     const items = await readAll(dir);
-    if (items.some((row) => row.id === notification.id)) return false;
-    const next = sorted([...items, notification]).slice(0, NOTIFICATION_CAP);
+    if (items.some((held) => held.id === row.id)) return false;
+    const next = sorted([...items, row]).slice(0, NOTIFICATION_CAP);
+    if (!next.some((held) => held.id === row.id)) return false;
     await writeAll(dir, next);
     return true;
   });
-  if (appended) emitStore({ type: "notification", id: notification.id });
-  return appended;
+  if (taken) emitStore({ type: "notification", id: notification.id });
+  return taken;
 }
 
 /** A read is not announced. The tab that pressed the row already knows, and a
  *  second tab showing one stale unread until its next fetch is cheaper than a
- *  broadcast on every press. */
+ *  broadcast on every press.
+ *
+ *  An `at` the schema would refuse touches nothing and answers 0. Writing one
+ *  would put a `readAt` on real rows that `readAll` then refuses, so a read
+ *  would delete the notifications it was marking. */
 export async function markNotificationsRead(
   ids: readonly string[],
   at: string,
   dir = notificationStateDirectory(),
 ): Promise<number> {
+  if (!isNotificationInstant(at)) return 0;
   return serialise(async () => {
     const wanted = new Set(ids);
     const items = await readAll(dir);
@@ -149,6 +172,7 @@ export async function markAllNotificationsRead(
   at: string,
   dir = notificationStateDirectory(),
 ): Promise<number> {
+  if (!isNotificationInstant(at)) return 0;
   return serialise(async () => {
     const items = await readAll(dir);
     let changed = 0;

@@ -48,7 +48,7 @@ Every other step applies unchanged.
   at any time. Brain recreates it on the next check.
 - `/var/lib/brain/notifications` holds the notification centre's rows, capped
   at 500. It is reconstructible, exempt from backups, and safe to delete at any
-  time; deleting it clears the bell and nothing else.
+  time. Deleting it clears the bell and nothing else.
 - `/etc/brain/brain.env` contains runtime secrets and is readable only by `root` and the `brain` group.
 - `/etc/brain/deployer.env` contains the read-only GitHub token and merger
   allowlist. It is `root:root` mode `0600` and is never loaded by the app.

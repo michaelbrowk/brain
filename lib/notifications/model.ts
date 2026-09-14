@@ -30,9 +30,39 @@ const hrefField = z
   .max(300)
   .regex(/^\/(?!\/)[A-Za-z0-9/_?=&:.,%+-]*$/, "href must be a path on this origin");
 
+const isLeapYear = (year: number): boolean =>
+  year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+
+const daysInMonth = (year: number, month: number): number => {
+  if (month === 2) return isLeapYear(year) ? 29 : 28;
+  return month === 4 || month === 6 || month === 9 || month === 11 ? 30 : 31;
+};
+
+/** The calendar, not the shape. `2026-02-31T00:00:00.000Z` passes a `\d{2}`
+ *  check and then sorts as if it were a day, which is how one nonsense row
+ *  pins itself at the head of the bell and stays there: the centre orders on
+ *  this string and never through `Date`. The clock range is in the pattern for
+ *  the same reason, so `T99:99` cannot outrank every real instant. */
+const isCalendarDay = (value: string): boolean => {
+  const year = Number(value.slice(0, 4));
+  const month = Number(value.slice(5, 7));
+  const day = Number(value.slice(8, 10));
+  return month >= 1 && month <= 12 && day >= 1 && day <= daysInMonth(year, month);
+};
+
+const INSTANT_RE = /^\d{4}-\d{2}-\d{2}T([01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{3}Z$/;
+
+/** UTC to the millisecond, the one shape `new Date().toISOString()` produces.
+ *  A local offset is refused because the centre compares this value as a
+ *  string, and two rows written in different offsets would sort backwards. */
+export function isNotificationInstant(value: unknown): value is string {
+  return typeof value === "string" && INSTANT_RE.test(value) && isCalendarDay(value.slice(0, 10));
+}
+
 const instantField = z
   .string()
-  .regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/, "must be an ISO instant");
+  .regex(INSTANT_RE, "must be an ISO instant")
+  .refine((value) => isCalendarDay(value.slice(0, 10)), "not a day the calendar has");
 
 export const notificationSchema = z
   .object({
@@ -58,11 +88,22 @@ export function taskMissedNotificationId(taskId: string, when: string, time: str
 
 const MAX_THREAD_ID_BYTES = 150;
 
+/** What `decodeMailNotificationId` can read back, and so what the encoder
+ *  accepts. Wider than today's `account-a<32 hex>` and narrower than the id
+ *  charset, which has to hold the two separators as well. */
+const ACCOUNT_ID_RE = /^[A-Za-z0-9_-]+$/;
+
 /** A provider's thread id may hold anything, and the id has to stay inside
  *  NOTIFICATION_ID_RE so Mail can compute it on the client and mark the row
  *  read without a lookup. Hex of the UTF-8 bytes is the one encoding that
  *  needs neither Buffer nor btoa, so the same function runs on both sides. */
 export function mailNotificationId(accountId: string, threadId: string): string {
+  // The decoder reads the account back out of the id, so an account id it
+  // cannot parse must never be encoded into one. Every mail module already
+  // gates on `account-a<32 hex>`; this is the same gate at the other end.
+  if (!ACCOUNT_ID_RE.test(accountId)) {
+    throw new Error(`account id is not one a notification id can carry: ${accountId}`);
+  }
   const bytes = new TextEncoder().encode(threadId);
   if (bytes.length > MAX_THREAD_ID_BYTES) {
     throw new Error(`thread id is too long for a notification id: ${bytes.length} bytes`);

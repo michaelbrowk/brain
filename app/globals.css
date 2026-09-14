@@ -6163,9 +6163,14 @@ html[data-kbd] .brain-task-row[data-selected] {
    chip and the window edge (its `collisionPadding` already taken off) and
    writes it here, so the grid scrolls inside the material instead of running
    off the bottom edge with Done on it. Less the material's own 6px top and
-   bottom, which sit outside this scroller. */
+   bottom, which sit outside this scroller, and less the floating tab bar,
+   which is 0 above 768 and is the reason `--tabbar-reserve` exists: a panel
+   whose last row you cannot reach has no last row. */
 .brain-when-scroll {
-  max-height: calc(var(--radix-popover-content-available-height, 100dvh) - 12px);
+  max-height: calc(
+    var(--radix-popover-content-available-height, 100dvh) - 12px -
+      var(--tabbar-reserve, 0px)
+  );
 }
 @media (max-width: 767px) {
   /* FULL WIDTH UNDER THE ROW, not a 184px popover wearing a grip. The
@@ -6189,7 +6194,10 @@ html[data-kbd] .brain-task-row[data-selected] {
   /* The grip rides above the scroller and must not scroll away with it, so
      its 26px comes off the room the grid may take. */
   .brain-when-sheet .brain-when-scroll {
-    max-height: calc(var(--radix-popover-content-available-height, 100dvh) - 38px);
+    max-height: calc(
+      var(--radix-popover-content-available-height, 100dvh) - 38px -
+        var(--tabbar-reserve, 0px)
+    );
   }
 }
 

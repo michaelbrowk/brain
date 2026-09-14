@@ -1155,7 +1155,10 @@ html[data-kbd] .milkdown .ProseMirror .brain-task-mark:focus-visible {
    material's own 6px top and bottom. The property itself is written by
    `place()` in `task-checkbox.ts`, which is this popover's own positioner. */
 .brain-task-menu .brain-when-scroll {
-  max-height: calc(var(--radix-popover-content-available-height, 100dvh) - 140px);
+  max-height: calc(
+    var(--radix-popover-content-available-height, 100dvh) - 140px -
+      var(--tabbar-reserve, 0px)
+  );
 }
 
 /* prose measure: cap text blocks at ~68ch; tables/code breathe full width */

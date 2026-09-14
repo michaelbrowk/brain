@@ -215,8 +215,10 @@ describe("the sheet the When picker rides", () => {
     const css = readFileSync(path.join(process.cwd(), "app/globals.css"), "utf8");
     const cap = /\.brain-when-scroll \{\s*max-height: ([^;]+);/.exec(css)?.[1];
     expect(cap).toContain("--radix-popover-content-available-height");
-    expect(css).toContain(
-      ".brain-when-sheet .brain-when-scroll {\n    max-height: calc(var(--radix-popover-content-available-height, 100dvh) - 38px);",
+    // The grip's 26px and the floating tab bar both come off the room the grid
+    // may take, so Done is never under either of them.
+    expect(css).toMatch(
+      /\.brain-when-sheet \.brain-when-scroll \{\s*max-height: calc\(\s*var\(--radix-popover-content-available-height, 100dvh\) - 38px -\s*var\(--tabbar-reserve, 0px\)\s*\);/,
     );
     // The edge is the atom's, so its 160ms is collapsed where every other
     // scroller's is rather than exempted here.

@@ -249,11 +249,189 @@ describe("the kill switch", () => {
     expect(remindersEnabled({ NODE_ENV: "production" })).toBe(true);
   });
 
-  it("schedules nothing while it is off", () => {
+  it("arms no timer at all while it is off", () => {
+    // The boot timeout is what the switch has to stop, and `setInterval` is
+    // only reached from inside it. A test that watched the interval alone
+    // would stay green with the switch deleted, which is what it was doing.
+    vi.stubEnv("NODE_ENV", "production");
+    vi.stubEnv("BRAIN_REMINDERS", "0");
+    const timeout = vi.spyOn(globalThis, "setTimeout");
     const interval = vi.spyOn(globalThis, "setInterval");
-    const dispose = scheduleReminderScans();
+
+    const dispose = scheduleReminderScans({ initialDelayMs: 60_000 });
+    expect(timeout).not.toHaveBeenCalled();
     expect(interval).not.toHaveBeenCalled();
     dispose();
+  });
+
+  it("arms the boot timeout while it is on, which is what the row above denies", () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const timeout = vi.spyOn(globalThis, "setTimeout");
+    const dispose = scheduleReminderScans({ initialDelayMs: 60_000 });
+    expect(timeout).toHaveBeenCalledTimes(1);
+    dispose();
+  });
+});
+
+describe("a scan that cannot open the store", () => {
+  it("doubles its wait up to five minutes and says so once until it succeeds", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const warn = quiet();
+    vi.useFakeTimers();
+    try {
+      let failing = true;
+      let attempts = 0;
+      const dispose = scheduleReminderScans({
+        initialDelayMs: 0,
+        intervalMs: 30_000,
+        scan: async () => {
+          attempts += 1;
+          if (failing) throw new Error("notes root is not readable");
+        },
+        mailScan: async () => undefined,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(attempts).toBe(1);
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      // The first failure bought a minute, so the tick at thirty seconds is
+      // one this scan sits out.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(attempts).toBe(1);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(attempts).toBe(2);
+      // One line for the outage, not one line per tick.
+      expect(warn).toHaveBeenCalledTimes(1);
+
+      // Two minutes, then four, then the five-minute ceiling twice over.
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(attempts).toBe(3);
+      await vi.advanceTimersByTimeAsync(240_000);
+      expect(attempts).toBe(4);
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(attempts).toBe(5);
+
+      failing = false;
+      await vi.advanceTimersByTimeAsync(300_000);
+      expect(attempts).toBe(6);
+      // One pass that worked puts it back on the thirty-second cadence.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(attempts).toBe(7);
+
+      failing = true;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(attempts).toBe(8);
+      expect(warn).toHaveBeenCalledTimes(2);
+      dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("skips a tick that lands while the scan before it is still running", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    const warn = quiet();
+    vi.useFakeTimers();
+    try {
+      let starts = 0;
+      let release = () => {};
+      const dispose = scheduleReminderScans({
+        initialDelayMs: 0,
+        intervalMs: 30_000,
+        scan: () => {
+          starts += 1;
+          return new Promise<void>((resolve) => {
+            release = resolve;
+          });
+        },
+        mailScan: async () => undefined,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      expect(starts).toBe(1);
+
+      // Two ticks land while the first scan is still out. Both passes would
+      // read the same due list, whose records are not marked yet, and ring
+      // every one of them twice.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(starts).toBe(1);
+      expect(warn).not.toHaveBeenCalled();
+
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      // Counted, not announced tick by tick: one line for the whole overlap.
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]?.[0])).toContain("2 ticks");
+
+      // The guard clears on the way out, so the timer is not wedged shut.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(starts).toBe(2);
+      dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not wedge the timer shut when the long scan fails", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    quiet();
+    vi.useFakeTimers();
+    try {
+      let starts = 0;
+      let fail = () => {};
+      const dispose = scheduleReminderScans({
+        initialDelayMs: 0,
+        intervalMs: 30_000,
+        scan: () => {
+          starts += 1;
+          return new Promise<void>((_resolve, reject) => {
+            fail = () => {
+              reject(new Error("notes root is not readable"));
+            };
+          });
+        },
+        mailScan: async () => undefined,
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      fail();
+      await vi.advanceTimersByTimeAsync(0);
+      // A minute of back-off after the failure, then the next tick runs.
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(starts).toBe(2);
+      dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves the mail poll on its own cadence while the reminders back off", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    quiet();
+    vi.useFakeTimers();
+    try {
+      let polls = 0;
+      const dispose = scheduleReminderScans({
+        initialDelayMs: 0,
+        intervalMs: 30_000,
+        scan: async () => {
+          throw new Error("notes root is not readable");
+        },
+        mailScan: async () => {
+          polls += 1;
+        },
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      // Four more ticks, every second one a poll. The notes root says nothing
+      // about the mail service, which is another process.
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect(polls).toBe(3);
+      dispose();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

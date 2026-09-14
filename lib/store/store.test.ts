@@ -11474,6 +11474,43 @@ describe("task views for the reminder scan", () => {
     expect(views.every((view) => typeof view.done === "boolean")).toBe(true);
   });
 
+  /** WHY IT IS `allTaskViews` AND NOT `allTasks` (spec row 145).
+   *
+   *  A linked record never stores its own `done`: the checkbox in the note is
+   *  the answer, and the record file is refused if it carries one. A scan
+   *  reading records would therefore see `done: undefined` for a line ticked
+   *  in the note an hour ago, and ring for it.
+   */
+  it("answers done from the note for a linked record, which the record file cannot", async () => {
+    const { s, root } = await tmpStore();
+    const page = await s.createPage(null, "Errands");
+    await s.writePage(page.id, "- [ ] Water the plants", undefined, "me");
+    const [line] = parseTaskLines((await s.readPage(page.id)).markdown);
+    const task = await s.createTask({
+      title: line.normalized,
+      when: "2026-09-14",
+      time: "13:00",
+      page: page.id,
+      anchor: {
+        text: line.normalized,
+        hash: line.hash,
+        ordinal: line.ordinal,
+        line: line.index,
+      },
+    });
+    expect(s.allTaskViews().map((view) => view.done)).toEqual([false]);
+
+    await s.writePage(page.id, "- [x] Water the plants", undefined, "me");
+
+    expect(s.allTaskViews().map((view) => view.done)).toEqual([true]);
+    // And the record on disk still says nothing about it, so a scan over
+    // records rather than views would still be ringing.
+    const record = matter(
+      await fs.readFile(path.join(root, "_tasks", `${task.id}.md`), "utf8"),
+    ).data;
+    expect(record.done).toBeUndefined();
+  });
+
   it("leaves out a record whose page is in the trash", async () => {
     const { s } = await tmpStore();
     const page = await s.createPage(null, "Errands");

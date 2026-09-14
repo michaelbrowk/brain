@@ -42,6 +42,56 @@ describe("zonedInstant", () => {
     );
   });
 
+  /** THE TABLE, PAST LISBON.
+   *
+   *  Two rows in one European zone pin one shape of transition: a whole hour,
+   *  at one in the morning, on a Sunday. Three more zones pin the shapes it
+   *  cannot reach. A transition at midnight, a transition of half an hour,
+   *  and a standard offset of half an hour that never moves at all.
+   */
+  it("reads a fall-back that happens at midnight", () => {
+    // Chile 2026: 00:00 on 5 April becomes 23:00 on 4 April, so 23:30 on the
+    // 4th happens twice, once at -03 and once at -04. The first is meant.
+    expect(iso(zonedInstant("2026-04-04", "23:30", "America/Santiago"))).toBe(
+      "2026-04-05T02:30:00.000Z",
+    );
+  });
+
+  it("reads a spring-forward gap that opens at midnight", () => {
+    // Chile 2026: 00:00 on 6 September becomes 01:00, so 00:30 never happens
+    // and a reminder set for it rings at 01:30 local, which is 04:30Z at -03.
+    expect(iso(zonedInstant("2026-09-06", "00:30", "America/Santiago"))).toBe(
+      "2026-09-06T04:30:00.000Z",
+    );
+  });
+
+  it("reads a fall-back of half an hour", () => {
+    // Lord Howe moves by thirty minutes, not sixty. 2026: 02:00 on 5 April
+    // becomes 01:30, so 01:45 happens twice, at +11:00 and at +10:30.
+    expect(iso(zonedInstant("2026-04-05", "01:45", "Australia/Lord_Howe"))).toBe(
+      "2026-04-04T14:45:00.000Z",
+    );
+  });
+
+  it("reads a spring-forward gap of half an hour", () => {
+    // 2026: 02:00 on 4 October becomes 02:30, so 02:15 never happens and the
+    // reminder rings at 02:45 local, which is 15:45Z the day before at +11.
+    expect(iso(zonedInstant("2026-10-04", "02:15", "Australia/Lord_Howe"))).toBe(
+      "2026-10-03T15:45:00.000Z",
+    );
+  });
+
+  it("reads a zone on a half-hour offset that never moves", () => {
+    // India is +05:30 all year. Both halves of the year answer the same way,
+    // which is the row that would go red if a DST guess crept in.
+    expect(iso(zonedInstant("2026-01-15", "13:00", "Asia/Kolkata"))).toBe(
+      "2026-01-15T07:30:00.000Z",
+    );
+    expect(iso(zonedInstant("2026-07-15", "13:00", "Asia/Kolkata"))).toBe(
+      "2026-07-15T07:30:00.000Z",
+    );
+  });
+
   it("crosses a year boundary the same way", () => {
     expect(iso(zonedInstant("2026-12-31", "23:59", "Europe/Lisbon"))).toBe(
       "2026-12-31T23:59:00.000Z",

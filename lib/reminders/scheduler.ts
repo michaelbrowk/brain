@@ -38,6 +38,16 @@ export const MAX_APPENDS_PER_SCAN = 50;
 /** The mail service's own background sync runs once a minute, so polling it
  *  twice that often would ask the same question twice for one answer. */
 const MAIL_SCAN_EVERY = 2;
+/** HOW LONG A FAILING SCAN WAITS BEFORE THE NEXT ONE.
+ *
+ *  The first scan builds the Store, and a notes root this process cannot read
+ *  fails `init()` only after walking the whole folder. At a flat thirty
+ *  seconds that walk repeats 2,880 times a day and prints the same warning
+ *  every one of them, which is a boot problem wearing a log flood as a
+ *  disguise. The wait doubles from one interval to five minutes, so the retry
+ *  survives and the noise does not.
+ */
+export const MAX_REMINDER_BACKOFF_MS = 300_000;
 
 export interface ReminderEnv {
   NODE_ENV?: string;
@@ -194,31 +204,110 @@ export async function runReminderScan(
   return { fired, missed, skipped: null };
 }
 
+/** ONE TICK AT A TIME.
+ *
+ *  A scan that runs past thirty seconds, because a push endpoint hangs or a
+ *  mail poll waits on a socket, meets the next tick while it is still out. Two
+ *  passes over the same due list both read a record whose `remindedAt` is not
+ *  written yet, and the reminder rings twice. The in-flight promise is the
+ *  whole guard, and it is cleared in `finally` so a scan that threw does not
+ *  wedge the timer shut.
+ *
+ *  Skips are counted rather than announced: a poll on a slow morning would
+ *  otherwise print a line every thirty seconds. One line when the long scan
+ *  finally lands, carrying how many ticks it cost.
+ */
+function oneAtATime(work: () => Promise<unknown>, label: string): () => void {
+  let inFlight: Promise<unknown> | null = null;
+  let skipped = 0;
+  return () => {
+    if (inFlight !== null) {
+      skipped += 1;
+      return;
+    }
+    inFlight = work().finally(() => {
+      inFlight = null;
+      if (skipped > 0) {
+        console.warn(
+          `[brain/reminders] the ${label} ran past its tick and ${skipped} ticks were skipped while it finished`,
+        );
+        skipped = 0;
+      }
+    });
+  };
+}
+
+export interface ReminderScheduleOptions {
+  initialDelayMs?: number;
+  intervalMs?: number;
+  /** The two calls the timer makes. Injected by this module's own test alone,
+   *  so a back-off can be watched without a notes root and without a mail
+   *  socket; nothing in the app passes either. */
+  scan?: () => Promise<unknown>;
+  mailScan?: () => Promise<unknown>;
+}
+
 /** Boot-time scheduler. Returns a disposer. */
-export function scheduleReminderScans(
-  options: { initialDelayMs?: number; intervalMs?: number } = {},
-): () => void {
+export function scheduleReminderScans(options: ReminderScheduleOptions = {}): () => void {
   if (!remindersEnabled()) return () => {};
   const initialDelayMs = options.initialDelayMs ?? FIRST_SCAN_DELAY_MS;
   const intervalMs = options.intervalMs ?? REMINDER_SCAN_MS;
+  const scan = options.scan ?? (() => runReminderScan());
+  const mailScan =
+    options.mailScan ??
+    (() => import("@/lib/notifications/mail-scan").then(({ runMailScan }) => runMailScan()));
   let disposed = false;
   let ticks = 0;
   let interval: NodeJS.Timeout | null = null;
+  let backoffMs = 0;
+  let retryAt = 0;
+  let failureAnnounced = false;
+
+  const runScan = async () => {
+    // A tick inside the back-off window is a tick this scan sits out. The
+    // interval keeps its cadence so the mail poll beside it is unaffected:
+    // a notes root this process cannot read says nothing about the mail
+    // service, which is another process entirely.
+    if (Date.now() < retryAt) return;
+    try {
+      await scan();
+      backoffMs = 0;
+      retryAt = 0;
+      failureAnnounced = false;
+    } catch (cause: unknown) {
+      backoffMs = Math.min(
+        backoffMs === 0 ? intervalMs * 2 : backoffMs * 2,
+        MAX_REMINDER_BACKOFF_MS,
+      );
+      retryAt = Date.now() + backoffMs;
+      // Once, and again only after a pass that worked. A failing `init()`
+      // repeats the same sentence forever otherwise.
+      if (!failureAnnounced) {
+        failureAnnounced = true;
+        console.warn(
+          `[brain/reminders] scan failed, retrying in ${Math.round(backoffMs / 1000)}s and backing off to ${Math.round(MAX_REMINDER_BACKOFF_MS / 1000)}s: ${reason(cause)}`,
+        );
+      }
+    }
+  };
+
+  const tickScan = oneAtATime(runScan, "scan");
+  const tickMail = oneAtATime(
+    () =>
+      mailScan().catch((cause: unknown) => {
+        // The mail service is another process with its own outage. A mail
+        // poll that cannot reach it must never stop the reminders beside it.
+        console.warn(`[brain/notifications] mail scan failed: ${reason(cause)}`);
+      }),
+    "mail poll",
+  );
 
   const run = () => {
     if (disposed) return;
     ticks += 1;
-    void runReminderScan().catch((cause: unknown) => {
-      console.warn(`[brain/reminders] scan failed: ${reason(cause)}`);
-    });
+    tickScan();
     if (ticks % MAIL_SCAN_EVERY !== 1) return;
-    void import("@/lib/notifications/mail-scan")
-      .then(({ runMailScan }) => runMailScan())
-      .catch((cause: unknown) => {
-        // The mail service is another process with its own outage. A mail
-        // poll that cannot reach it must never stop the reminders beside it.
-        console.warn(`[brain/notifications] mail scan failed: ${reason(cause)}`);
-      });
+    tickMail();
   };
 
   const first = setTimeout(() => {

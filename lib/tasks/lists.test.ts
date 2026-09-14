@@ -16,11 +16,13 @@ import * as taskLinesModule from "./task-lines";
 import { hashTaskText, normalizeTaskText, parseTaskLines } from "./task-lines";
 import * as listsModule from "./lists";
 import {
+  EVENING_GROUP_KEY,
   compareGroups,
   compareInGroup,
   doneDayOf,
   groupFor,
   listOf,
+  logbookGroup,
   logbookRows,
   type ListName,
   type TaskGroup,
@@ -169,6 +171,11 @@ describe("listOf", () => {
         groupFor(task({ done: true }), TODAY),
       ],
       doneDayOf: () => doneDayOf("2026-09-12T22:00:00.000Z", -300),
+      logbookGroup: () => [
+        logbookGroup(task({ done: true, doneAt: `${TODAY}T08:00:00.000Z` }), TODAY, 0),
+        logbookGroup(task({ done: true, doneAt: "2026-09-12T22:00:00.000Z" }), TODAY, 240),
+        logbookGroup(task({ done: true }), TODAY, 0),
+      ],
       logbookRows: () =>
         logbookRows(
           [
@@ -369,6 +376,27 @@ describe("groupFor", () => {
     const dated = groupFor(task({ done: true, doneAt: "2026-08-12T21:00:00.000Z" }), TODAY);
     expect(orphan).toMatchObject({ key: "", label: null });
     expect(compareGroups(dated, orphan)).toBeLessThan(0);
+  });
+
+  /** THE LOGBOOK'S DAY GROUP HAS ONE HOME. The Logbook VIEW cannot reach it
+   *  through `groupFor`, because a completion made today is filed by `listOf`
+   *  in the list it was made in, so `components/tasks-lists.ts` asks for it by
+   *  name. It asks for THIS one: a second copy over there was a second answer
+   *  to which day a completion is filed under. */
+  it.each([
+    [`${TODAY}T08:00:00.000Z`, 0, "Today"],
+    ["2026-09-12T08:00:00.000Z", 0, "Yesterday"],
+    ["2026-09-02T08:00:00.000Z", 0, "2 Sep"],
+    ["2026-09-12T22:00:00.000Z", 240, "Today"],
+  ])("names the completion day of %s at offset %i", (doneAt, offset, label) => {
+    expect(logbookGroup(task({ done: true, doneAt }), TODAY, offset).label).toBe(label);
+  });
+
+  it("gives a completion with no instant the headerless foot", () => {
+    expect(logbookGroup(task({ done: true }), TODAY, 0)).toMatchObject({
+      key: "",
+      label: null,
+    });
   });
 });
 
@@ -759,7 +787,7 @@ describe("a completion stays where it was for the rest of the day", () => {
 describe("This Evening", () => {
   it("is the last group of today", () => {
     const evening = groupFor(task({ when: TODAY, evening: true }), TODAY);
-    expect(evening).toEqual({ key: "evening", label: "This Evening", order: 2 });
+    expect(evening).toEqual({ key: EVENING_GROUP_KEY, label: "This Evening", order: 2 });
     expect(compareGroups(groupFor(task({ when: TODAY, category: "Home" }), TODAY), evening))
       .toBeLessThan(0);
     expect(compareGroups(groupFor(task({ when: TODAY }), TODAY), evening)).toBeLessThan(0);
@@ -767,7 +795,19 @@ describe("This Evening", () => {
 
   it("outranks the category, because the evening is when and a category is what", () => {
     expect(groupFor(task({ when: TODAY, evening: true, category: "Home" }), TODAY).key)
-      .toBe("evening");
+      .toBe(EVENING_GROUP_KEY);
+  });
+
+  /** A CATEGORY IS A WORD A PERSON TYPED, and one of the words a person can
+   *  type is the one this group is keyed by. `sectionsFor` maps its sections
+   *  on the key alone, so a shared key is one section holding two kinds of
+   *  row with the "This Evening" header gone. The key is namespaced and a
+   *  category cannot reach the namespace. */
+  it("keeps its key out of reach of a category called evening", () => {
+    const filed = groupFor(task({ when: TODAY, category: "evening" }), TODAY);
+    const tonight = groupFor(task({ when: TODAY, evening: true }), TODAY);
+    expect(filed.key).not.toBe(tonight.key);
+    expect(EVENING_GROUP_KEY).not.toBe("evening");
   });
 
   it("groups an evening task tomorrow by its day, not by the evening", () => {
@@ -787,7 +827,7 @@ describe("This Evening", () => {
       done: true,
       doneAt: `${TODAY}T20:30:00.000Z`,
     });
-    expect(groupFor(closed, TODAY, 0).key).toBe("evening");
+    expect(groupFor(closed, TODAY, 0).key).toBe(EVENING_GROUP_KEY);
   });
 });
 

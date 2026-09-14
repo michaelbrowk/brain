@@ -6,6 +6,7 @@ import {
   doneDayOf,
   groupFor,
   listOf,
+  logbookGroup,
   logbookRows,
   type ListName,
   type TaskGroup,
@@ -63,10 +64,10 @@ export function sectionsFor(
   const logbook = view.kind === "list" && view.list === "logbook";
   for (const row of rowsFor(tasks, view, today, offsetMinutes)) {
     const group = logbook
-      ? logbookDayGroup(row.task, today, offsetMinutes)
+      ? logbookGroup(row.task, today, offsetMinutes)
       : view.kind === "list"
         ? groupFor(row.task, today, offsetMinutes)
-        : categoryGroup(row.task, today);
+        : categoryGroup(row.task, today, offsetMinutes);
     const existing = sections.get(group.key);
     if (existing) existing.rows.push(row);
     else sections.set(group.key, { group, rows: [row] });
@@ -129,31 +130,13 @@ export function belongs(
   return !task.done || listOf(task, today, offsetMinutes) !== "logbook";
 }
 
-/** THE LOGBOOK VIEW GROUPS BY THE DAY THE COMPLETION WAS MADE, always.
- *
- *  `groupFor` cannot answer this one. A completion made TODAY is filed by
- *  `listOf` in the list it was made in, so `groupFor` would hand a row drawn
- *  in the Logbook the category group it wears in Today and the `Today · N`
- *  header would be gone. The Logbook is a read of completions, and the day
- *  each one carries is the only thing it groups on.
- *
- *  `offsetMinutes` for the same reason the header needs it: the instant is
- *  UTC and the day is the reader's. A row with no instant is reachable from a
- *  hand edit and goes to the foot under no header rather than claiming a day,
- *  which is the answer `lib/tasks/lists.ts` gives it too. */
-function logbookDayGroup(
-  task: TaskView,
-  today: string,
-  offsetMinutes: number,
-): TaskGroup {
-  const day = task.doneAt ? doneDayOf(task.doneAt, offsetMinutes) : undefined;
-  if (!isDay(day)) return { key: "", label: null, order: Number.MAX_SAFE_INTEGER };
-  const distance = dayNumber(today) - dayNumber(day);
-  const label = distance === 0 ? "Today" : distance === 1 ? "Yesterday" : dayLabel(day);
-  return { key: day, label, order: -dayNumber(day) };
-}
-
 /** WHETHER A RESCHEDULE MOVES THE ROW.
+ *
+ *  `offsetMinutes` is not optional here for the reason `belongs` says it is
+ *  not optional there: a completion stays in the list it was made in until
+ *  the reader's day changes, and asked at zero the same record answers
+ *  "logbook" on both sides, so the fold never plays and the toast never
+ *  reports a move the derive did make.
  *
  *  A task is in Today for four reasons: the day it is meant for is today,
  *  that day is past, a deadline has arrived, or a deadline has arrived over a
@@ -174,19 +157,27 @@ export function movesRow(
   task: TaskView,
   when: string | "someday" | null,
   today: string,
+  offsetMinutes: number,
 ): boolean {
   const next: TaskView = { ...task, when: when ?? undefined };
   return (
-    listOf(task, today) !== listOf(next, today) ||
-    groupFor(task, today).key !== groupFor(next, today).key
+    listOf(task, today, offsetMinutes) !== listOf(next, today, offsetMinutes) ||
+    groupFor(task, today, offsetMinutes).key !== groupFor(next, today, offsetMinutes).key
   );
 }
 
 /** Today, Tomorrow, Later, Someday, and the undated tasks first, under no
  *  header, because a heading over the top rows of a short list is chrome
- *  nobody reads (the rule `lib/tasks/lists.ts` already applies to Today). */
-function categoryGroup(task: TaskView, today: string): TaskGroup {
-  const list = listOf(task, today);
+ *  nobody reads (the rule `lib/tasks/lists.ts` already applies to Today).
+ *
+ *  `offsetMinutes` travels with `today`, the way it does everywhere a record
+ *  is measured against a day. `belongs` keeps a completion in a category view
+ *  until the reader's day changes, and asking here at zero filed that same
+ *  row in the Logbook and dropped it into the headerless group at the TOP of
+ *  the category, above the Today header, for every hour the reader's day and
+ *  UTC's disagree. */
+function categoryGroup(task: TaskView, today: string, offsetMinutes: number): TaskGroup {
+  const list = listOf(task, today, offsetMinutes);
   if (list === "today") return { key: "today", label: "Today", order: 1 };
   if (list === "someday") return { key: "someday", label: "Someday", order: 4 };
   if (list === "upcoming") {
@@ -348,16 +339,18 @@ export function deadlineCaption(task: TaskView, today: string): DeadlineCaption 
  *  of it is a second answer to which day the Logbook files a task under. */
 export { doneDayOf };
 
-/** A completion's time in the reader's own offset. The instant is UTC, the
- *  clock on the row is theirs, and the shift is arithmetic on the instant so
- *  the formatter never has to be handed a zone name nobody stored. */
+/** A completion's time in the reader's own offset, in the one shape this
+ *  column writes a clock in.
+ *
+ *  ONE CLOCK PER COLUMN. `timeCaption` above gives back the `HH:MM` the file
+ *  holds, verbatim, so a pending row reads `18:00`. A completion four rows
+ *  under it read `7:20 PM`, because this went through `Intl` and took the
+ *  machine's hour cycle, and the eye compared two shapes of the same thing.
+ *  So the instant is shifted into the reader's offset and sliced: the same
+ *  24-hour `HH:MM`, on every device, with no formatter and no zone name
+ *  nobody stored. */
 export function doneTimeOf(iso: string, offsetMinutes: number): string {
-  const shifted = new Date(Date.parse(iso) + offsetMinutes * 60_000);
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-    timeZone: "UTC",
-  }).format(shifted);
+  return new Date(Date.parse(iso) + offsetMinutes * 60_000).toISOString().slice(11, 16);
 }
 
 /** The day the next occurrence lands on, or null for a task that does not

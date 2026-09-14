@@ -88,8 +88,15 @@ export function groupFor(
 }
 
 /** The last group of Today. The renderer draws the moon beside the label, and
- *  a group carries no glyph and gains none. */
-export const EVENING_GROUP_KEY = "evening";
+ *  a group carries no glyph and gains none.
+ *
+ *  NAMESPACED, because a category is a word a person typed and one of the
+ *  words they can type is "evening". `categoryGroup` keys a group by the raw
+ *  category, and whoever draws a list keys its sections on `group.key`, so a
+ *  shared key put a category's rows and tonight's rows in one section with
+ *  the "This Evening" header gone. The prefix is not reachable from a
+ *  category, which cannot hold a colon by any route the picker offers. */
+export const EVENING_GROUP_KEY = "group:evening";
 
 /** The day a UTC instant falls on for a reader at `offsetMinutes` east of UTC.
  *  Arithmetic on the digits, so the module stays clock-free and the caller's
@@ -289,8 +296,19 @@ function upcomingGroup(task: TaskView, today: string): TaskGroup {
 
 /** Grouped by the reader's completion day, newest group first. A record with
  *  `done` but no `doneAt` is reachable from a hand edit, and it goes to the
- *  foot of the Logbook under no header rather than claiming a day. */
-function logbookGroup(task: TaskView, today: string, offsetMinutes: number): TaskGroup {
+ *  foot of the Logbook under no header rather than claiming a day.
+ *
+ *  EXPORTED FOR THE LOGBOOK VIEW. `groupFor` cannot answer that view: a
+ *  completion made today is filed by `listOf` in the list it was made in, so
+ *  it would hand a row drawn in the Logbook the category group it wears in
+ *  Today. `components/tasks-lists.ts` therefore asks for this group by name,
+ *  and asks for THIS one: the copy it carried was a second answer to which
+ *  day a completion is filed under. */
+export function logbookGroup(
+  task: TaskView,
+  today: string,
+  offsetMinutes: number,
+): TaskGroup {
   const day = task.doneAt ? doneDayOf(task.doneAt, offsetMinutes) : undefined;
   if (!isDay(day)) return { key: "", label: null, order: Number.MAX_SAFE_INTEGER };
   const distance = dayNumber(today) - dayNumber(day);

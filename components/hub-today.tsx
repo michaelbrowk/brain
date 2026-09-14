@@ -81,7 +81,7 @@ export function HubToday({
   const state = useTasks(refreshToken);
   const today = state.day?.today ?? "";
   const offsetMinutes = state.day?.offsetMinutes ?? 0;
-  const actions = useTaskActions({ today, onToast });
+  const actions = useTaskActions({ today, offsetMinutes, onToast });
   const { held, inserted } = actions;
 
   const records = useMemo(

@@ -324,7 +324,9 @@ export function TasksRow({
    *  disagree. */
   const leaveDown = useCallback(
     async (value: WhenValue, label: string) => {
-      const element = movesRow(task, value.when, today) ? wrapRef.current : null;
+      const element = movesRow(task, value.when, today, offsetMinutes)
+        ? wrapRef.current
+        : null;
       const fold = element ? foldRow(element, "down", reduce) : null;
       let refused = false;
       try {
@@ -336,7 +338,7 @@ export function TasksRow({
       else await fold?.finished;
       onFoldEnd(task.id);
     },
-    [onFoldEnd, onReschedule, reduce, task, today],
+    [offsetMinutes, onFoldEnd, onReschedule, reduce, task, today],
   );
 
   useRowShortcuts({

@@ -3,7 +3,7 @@
 // browser's own local day in, so a table of records has exactly one answer.
 
 import { describe, expect, it } from "vitest";
-import type { ListName } from "@/lib/tasks/lists";
+import { logbookGroup, type ListName } from "@/lib/tasks/lists";
 import type { TaskView } from "@/lib/tasks/model";
 import {
   countsFor,
@@ -116,6 +116,24 @@ describe("sectionsFor", () => {
     ]);
   });
 
+  /** ONE ANSWER TO WHICH DAY A COMPLETION IS FILED UNDER. The Logbook view
+   *  cannot reach it through `groupFor` (a completion made today is filed by
+   *  `listOf` in the list it was made in), so it asks `lib/tasks/lists.ts` for
+   *  the group by name rather than carrying a copy of the arithmetic. */
+  it("takes the Logbook's day group from lib/tasks/lists, not from a copy", () => {
+    const tasks = [
+      task("x", { done: true, doneAt: "2026-09-13T08:00:00.000Z" }),
+      task("z", { done: true, doneAt: "2026-09-02T10:00:00.000Z" }),
+      task("orphan", { done: true }),
+    ];
+    const drawn = sectionsFor(tasks, list("logbook"), TODAY, UTC).map((s) => s.group);
+    const expected = tasks.map((t) => logbookGroup(t, TODAY, UTC));
+    for (const group of drawn) {
+      expect(expected).toContainEqual(group);
+    }
+    expect(drawn.map((g) => g.label)).toEqual(["Today", "2 Sep", null]);
+  });
+
   it("reads the Logbook day in the reader's own offset, never off the instant", () => {
     // 22:30 UTC on the 12th is 02:30 on the 13th in Dubai (+240)
     const tasks = [task("dubai", { done: true, doneAt: "2026-09-12T22:30:00.000Z" })];
@@ -186,6 +204,44 @@ describe("sectionsFor", () => {
   });
 });
 
+/** THE READER'S DAY IS NOT UTC'S.
+ *
+ *  Los Angeles is `-420`. A task finished at 18:00 local carries the NEXT
+ *  UTC day on its `doneAt`, so every question asked at offset zero answers
+ *  "that was tomorrow", which for `listOf` means the Logbook. `belongs` asks
+ *  with the offset and keeps the row; anything downstream that asks without
+ *  it disagrees with `belongs` about the same record, for the several hours
+ *  of every day that the two days differ.
+ */
+describe("the reader's own offset, west of UTC", () => {
+  const LA = -420;
+  // 18:00 on the 13th in Los Angeles, which is 01:00 on the 14th in UTC.
+  const EVENING_IN_LA = "2026-09-14T01:00:00.000Z";
+  const doneToday = task("done-today", {
+    category: "Home",
+    when: TODAY,
+    done: true,
+    doneAt: EVENING_IN_LA,
+  });
+
+  it("sinks today's completion to the foot of Today in a category view", () => {
+    const view: TasksView = { kind: "category", category: "Home" };
+    const tasks = [
+      task("inbox", { category: "Home" }),
+      task("today", { category: "Home", when: TODAY }),
+      doneToday,
+    ];
+    expect(shape(sectionsFor(tasks, view, TODAY, LA))).toEqual([
+      [null, ["inbox"]],
+      ["Today", ["today", "done-today"]],
+    ]);
+  });
+
+  it("plays the leaving fold when that row is rescheduled out of Today", () => {
+    expect(movesRow(doneToday, "2026-09-20", TODAY, LA)).toBe(true);
+  });
+});
+
 describe("movesRow", () => {
   // The four reasons a record is in Today. Today pressed on any of them
   // writes the day and moves nothing, which is what the row's fold and the
@@ -199,30 +255,30 @@ describe("movesRow", () => {
       { when: "2026-09-20", deadline: TODAY },
     ],
   ])("is false for Today on a task already in Today: %s", (_reason, over) => {
-    expect(movesRow(task("a", over), TODAY, TODAY)).toBe(false);
+    expect(movesRow(task("a", over), TODAY, TODAY, UTC)).toBe(false);
   });
 
   it("is false for Someday on a task already parked", () => {
-    expect(movesRow(task("a", { when: "someday" }), "someday", TODAY)).toBe(false);
+    expect(movesRow(task("a", { when: "someday" }), "someday", TODAY, UTC)).toBe(false);
   });
 
   it("is true whenever the record lands in another list", () => {
-    expect(movesRow(task("a", { when: TODAY }), "2026-09-14", TODAY)).toBe(true);
-    expect(movesRow(task("a", { when: TODAY }), "someday", TODAY)).toBe(true);
-    expect(movesRow(task("a", { when: "someday" }), TODAY, TODAY)).toBe(true);
-    expect(movesRow(task("a", { when: "2026-09-20" }), TODAY, TODAY)).toBe(true);
-    expect(movesRow(task("a"), TODAY, TODAY)).toBe(true);
+    expect(movesRow(task("a", { when: TODAY }), "2026-09-14", TODAY, UTC)).toBe(true);
+    expect(movesRow(task("a", { when: TODAY }), "someday", TODAY, UTC)).toBe(true);
+    expect(movesRow(task("a", { when: "someday" }), TODAY, TODAY, UTC)).toBe(true);
+    expect(movesRow(task("a", { when: "2026-09-20" }), TODAY, TODAY, UTC)).toBe(true);
+    expect(movesRow(task("a"), TODAY, TODAY, UTC)).toBe(true);
   });
 
   // Upcoming groups by day, so two days that are both ahead are two places.
   it("is true for a day inside Upcoming that lands under another header", () => {
-    expect(movesRow(task("a", { when: "2026-09-20" }), "2026-09-14", TODAY)).toBe(true);
+    expect(movesRow(task("a", { when: "2026-09-20" }), "2026-09-14", TODAY, UTC)).toBe(true);
   });
 
   // A category is not a day, so a reschedule never changes the header a task
   // stands under in Today.
   it("reads the same answer for a filed task as for a bare one", () => {
-    expect(movesRow(task("a", { when: TODAY, category: "Work" }), TODAY, TODAY)).toBe(
+    expect(movesRow(task("a", { when: TODAY, category: "Work" }), TODAY, TODAY, UTC)).toBe(
       false,
     );
   });
@@ -263,9 +319,19 @@ describe("the words a row and a header say", () => {
     expect(headerLabel("12 Sep", 7)).toBe("12 Sep · 7");
   });
 
-  it("reads a completion time in the reader's offset", () => {
-    expect(doneTimeOf("2026-09-13T09:05:00.000Z", 0)).toMatch(/9[:.]05/);
-    expect(doneTimeOf("2026-09-12T22:30:00.000Z", 240)).toMatch(/2[:.]30/);
+  /** ONE CLOCK IN THE COLUMN. A pending row prints the `HH:MM` the file
+   *  holds, so a completion beside it prints `HH:MM` too, in the reader's own
+   *  offset. A locale formatter gave `7:20 PM` four rows under `18:00` and
+   *  left the eye to work out that both were the same kind of thing. */
+  it.each([
+    ["2026-09-13T09:05:00.000Z", 0, "09:05"],
+    ["2026-09-12T22:30:00.000Z", 240, "02:30"],
+    ["2026-09-13T19:20:00.000Z", 0, "19:20"],
+    ["2026-09-13T00:00:00.000Z", 0, "00:00"],
+    ["2026-09-13T12:00:00.000Z", 0, "12:00"],
+    ["2026-09-14T01:00:00.000Z", -420, "18:00"],
+  ])("reads the completion %s at offset %i as %s", (iso, offset, clock) => {
+    expect(doneTimeOf(iso, offset)).toBe(clock);
   });
 });
 

@@ -80,9 +80,17 @@ export interface TaskActions {
 
 export function useTaskActions({
   today,
+  offsetMinutes,
   onToast,
 }: {
   today: string;
+  /** The reader's offset east of UTC, the browser's own
+   *  `-new Date().getTimezoneOffset()`, arriving with `today` from
+   *  `components/tasks-client.ts`. It travels wherever a record is measured
+   *  against a day: `movesRow` below asks the derive twice, and asked at zero
+   *  it answers "logbook" on both sides of a completion the reader made this
+   *  evening, so the fold never plays and the move is never reported. */
+  offsetMinutes: number;
   onToast?: (title: string, options?: ToastOptions) => void;
 }): TaskActions {
   const [held, setHeld] = useState<ReadonlyMap<string, TaskView>>(new Map());
@@ -283,7 +291,7 @@ export function useTaskActions({
   const rescheduleTask = useCallback(
     async (task: TaskView, value: WhenValue, label: string) => {
       const when = value.when;
-      const moves = movesRow(task, when, today);
+      const moves = movesRow(task, when, today, offsetMinutes);
       if (moves) hold(task);
       mutateTasks((tasks) =>
         tasks.map((entry) =>
@@ -308,11 +316,11 @@ export function useTaskActions({
           ...(value.evening !== (task.evening === true)
             ? { evening: value.evening ? true : null }
             : {}),
-          // The instance this tab was looking at. A repeating task's `when` is
-          // the rule's own answer and moving it runs through `advance`, so a
-          // reschedule aimed at an occurrence that has already moved on is a
-          // reschedule of something else.
-          ...(task.repeat ? { expectedWhen: task.when ?? null } : {}),
+          // NO `expectedWhen` HERE. The store reads it inside
+          // `advanceTaskUnlocked`, which is a repeating task's tick and
+          // untick and nothing else; a reschedule reaches `applyTaskPatch`,
+          // where the field is never looked at. So one sent from here was a
+          // precondition nobody checked, in every request body and every diff.
         });
         mutateTasks((tasks) =>
           tasks.map((entry) => (entry.id === saved.id ? saved : entry)),
@@ -343,7 +351,7 @@ export function useTaskActions({
         throw error;
       }
     },
-    [hold, markInserted, onToast, refuse, today],
+    [hold, markInserted, offsetMinutes, onToast, refuse, today],
   );
 
   const patchField = useCallback(

@@ -102,7 +102,7 @@ export function TasksSurface({
    *  arriving and which are still folding. Shared with the Today block on
    *  Home (`components/hub-today.tsx`), so a completion is one cycle and not
    *  two implementations of one. */
-  const actions = useTaskActions({ today, onToast });
+  const actions = useTaskActions({ today, offsetMinutes, onToast });
   const { held, inserted } = actions;
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);

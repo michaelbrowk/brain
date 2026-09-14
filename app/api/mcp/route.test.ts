@@ -625,25 +625,34 @@ describe("the task read tools", () => {
     expect(mocks.getStore).not.toHaveBeenCalled();
   });
 
-  it("answers the logbook with completions, repeat rows included", async () => {
+  it("answers the logbook with keyed entries, repeat completions included", async () => {
     // A repeating record is never done, so a filter over records would tell an
     // agent that nothing repeating was ever finished. The store derives the
     // rows from `log`, and this is the caller that cannot derive its own.
+    //
+    // And an agent needs to tell two of them apart. Both rows below carry the
+    // record id `task-words`, so the id cannot be the key; the entry's own
+    // `key` is.
     const completion = (scheduled: string, completedAt: string) => ({
-      ...view(),
-      id: "task-words",
-      title: "Learn words",
-      repeat: { freq: "daily" },
-      done: true,
-      when: scheduled,
-      doneAt: completedAt,
+      key: `task-words:${completedAt}`,
+      task: {
+        ...view(),
+        id: "task-words",
+        title: "Learn words",
+        repeat: { freq: "daily" },
+        done: true,
+        when: scheduled,
+        doneAt: completedAt,
+      },
+      untickable: scheduled === "2026-09-13",
     });
     const rows = [
       completion("2026-09-13", "2026-09-13T09:00:00.000Z"),
       completion("2026-09-12", "2026-09-12T09:00:00.000Z"),
     ];
-    const listTasks = vi.fn().mockReturnValue(rows);
-    mocks.getStore.mockResolvedValue({ listTasks });
+    const listLogbook = vi.fn().mockReturnValue(rows);
+    const listTasks = vi.fn();
+    mocks.getStore.mockResolvedValue({ listTasks, listLogbook });
 
     const { payload } = await toolPayload(
       await callTool(
@@ -653,18 +662,17 @@ describe("the task read tools", () => {
       ),
     );
 
-    // Two rows under one record id, each carrying its own completion: the
-    // store's own derivation, handed through untouched.
-    expect(payload.tasks).toEqual(rows);
-    expect(listTasks).toHaveBeenCalledWith(TODAY, {
-      list: "logbook",
-      offsetMinutes: 0,
-    });
+    expect(payload.entries).toEqual(rows);
+    expect(payload.tasks).toBeUndefined();
+    expect(new Set(rows.map((row) => row.task.id)).size).toBe(1);
+    expect(new Set(rows.map((row) => row.key)).size).toBe(2);
+    expect(listLogbook).toHaveBeenCalledWith(TODAY, { offsetMinutes: 0 });
+    expect(listTasks).not.toHaveBeenCalled();
   });
 
   it("passes the caller's offset through to the logbook read", async () => {
-    const listTasks = vi.fn().mockReturnValue([]);
-    mocks.getStore.mockResolvedValue({ listTasks });
+    const listLogbook = vi.fn().mockReturnValue([]);
+    mocks.getStore.mockResolvedValue({ listLogbook });
 
     await toolPayload(
       await callTool(
@@ -674,10 +682,7 @@ describe("the task read tools", () => {
       ),
     );
 
-    expect(listTasks).toHaveBeenCalledWith(TODAY, {
-      list: "logbook",
-      offsetMinutes: 240,
-    });
+    expect(listLogbook).toHaveBeenCalledWith(TODAY, { offsetMinutes: 240 });
   });
 
   it("refuses a malformed today", async () => {

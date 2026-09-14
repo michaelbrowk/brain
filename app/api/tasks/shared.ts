@@ -1,8 +1,10 @@
 import { NextRequest, NextResponse } from "next/server";
+import { z } from "zod";
 import type { ListName, TaskAnchor, TaskRepeat } from "@/lib/store";
-// The id rule comes from the module that owns it rather than the store's
-// barrel, so validating an id never depends on the Store being reachable.
-import { TASK_ID_RE } from "@/lib/tasks/model";
+// The id rule and the field parsers come from the module that owns them rather
+// than the store's barrel, so validating a request never depends on the Store
+// being reachable.
+import { TASK_ID_RE, taskRecordFields } from "@/lib/tasks/model";
 
 /** What the two task route files share: the query contract, the field
  *  allowlists and the one error shape. Nothing here reads a clock. */
@@ -141,6 +143,48 @@ export const PATCH_FIELDS = [
   "done",
   "expectedWhen",
 ] as const;
+
+/** EVERY PATCH VALUE, THROUGH THE RECORD'S OWN PARSERS.
+ *
+ *  A name on `PATCH_FIELDS` says a caller may set that field, not that what
+ *  they sent is a value the field can hold. Most junk was caught downstream,
+ *  because `applyTaskPatch` reparses the whole record; `done` was not, because
+ *  it never reaches the record. A `done` of `"yes"` is neither `=== true` nor
+ *  `=== false`, so it fell past every branch into the linked-completion path
+ *  and rewrote somebody's note off a value no schema had seen.
+ *
+ *  The field parsers are the record's, reused rather than retyped, so a rule
+ *  that changes there changes here: `2026-02-31` is refused as a calendar day
+ *  in both places, and the 200 character bound on a category is one bound.
+ *  `null` is added where a patch may clear a field, which is the store's own
+ *  reading of one. */
+const patchFields = taskRecordFields.shape;
+const patchBodySchema = z
+  .object({
+    title: patchFields.title.optional(),
+    when: patchFields.when.nullable(),
+    deadline: patchFields.deadline.nullable(),
+    category: patchFields.category.nullable(),
+    repeat: patchFields.repeat.nullable(),
+    done: patchFields.done,
+    // Not a field to set: the `when` of the instance the caller was looking
+    // at, so it takes `when`'s three shapes and nothing else.
+    expectedWhen: patchFields.when.nullable(),
+  })
+  .strict();
+
+/** `null` when every value is one the field can hold, otherwise the reason,
+ *  named by field the way the record's own parser names one. */
+export function refusePatchValues(
+  body: Record<string, unknown>,
+): string | null {
+  const parsed = patchBodySchema.safeParse(body);
+  if (parsed.success) return null;
+  const issue = parsed.error.issues[0];
+  const key = issue?.path.join(".");
+  const message = issue?.message ?? "is not a value this field can hold";
+  return key ? `${key}: ${message}` : message;
+}
 
 export interface PatchBody {
   title?: string;

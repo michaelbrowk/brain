@@ -57,6 +57,18 @@ export async function GET(req: NextRequest) {
   const category = params.get("category");
 
   const store = await getStore();
+  // THE LOGBOOK IS ENTRIES, NOT RECORDS. A repeating task finished on seven
+  // days is seven rows of ONE record, so a list of records hands a caller
+  // seven objects with the same `id` and nothing to tell them apart but a
+  // timestamp. Each entry carries its own stable key instead, and whether an
+  // untick is offered on it.
+  if (list === "logbook") {
+    const entries = store.listLogbook(today, {
+      offsetMinutes: offsetMinutes as number,
+      ...(category !== null ? { category } : {}),
+    });
+    return NextResponse.json({ entries });
+  }
   const tasks = store.listTasks(today, {
     ...(list !== null ? { list } : {}),
     ...(category !== null ? { category } : {}),

@@ -10,6 +10,7 @@ import {
   notFound,
   readJsonObject,
   refuseListQuery,
+  refusePatchValues,
   type PatchBody,
 } from "../shared";
 
@@ -56,6 +57,11 @@ export async function PATCH(req: NextRequest, { params }: Ctx) {
   if (Object.keys(body).some((field) => !allowed.includes(field))) {
     return badRequest("unknown_field");
   }
+  // And the VALUE behind each of those names, through the record's own field
+  // parsers. A name on the list is permission to set the field, not proof that
+  // what arrived is something the field can hold.
+  const badValue = refusePatchValues(body);
+  if (badValue) return badRequest(badValue);
 
   const patch = body as unknown as PatchBody;
   const store = await getStore();

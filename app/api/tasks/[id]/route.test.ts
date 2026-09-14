@@ -175,6 +175,68 @@ describe("PATCH /api/tasks/[id]", () => {
     expect(await res.json()).toEqual({ error: "unknown_field" });
     expect(mocks.updateTask).not.toHaveBeenCalled();
   });
+
+  /** A NAME ON THE LIST IS NOT A VALUE THE STORE CAN TAKE.
+   *
+   *  Most junk was caught downstream by the record schema, which reparses the
+   *  whole record. `done` was the hole: `{"done":"yes"}` is neither `=== true`
+   *  nor `=== false`, so it fell past every branch into the linked-completion
+   *  path and wrote `[x]` into somebody's note off a value no schema had seen.
+   *  Every value now goes through the record's own field parsers here, before
+   *  the store is reached. */
+  describe("the value behind the field name", () => {
+    const refused: [string, Record<string, unknown>][] = [
+      ["done as a string", { done: "yes" }],
+      ["done as a number", { done: 1 }],
+      ["when as a boolean", { when: true }],
+      ["when as a date that is not one", { when: "2026-02-31" }],
+      ["when as a loose day", { when: "2026-9-1" }],
+      ["deadline as an instant", { deadline: "2026-09-13T09:00:00.000Z" }],
+      ["category as an object", { category: { name: "Home" } }],
+      ["category past its bound", { category: "x".repeat(201) }],
+      ["repeat with an unknown freq", { repeat: { freq: "fortnightly" } }],
+      ["repeat as a string", { repeat: "daily" }],
+      ["expectedWhen as a number", { expectedWhen: 20260913 }],
+      ["expectedWhen as a loose day", { expectedWhen: "13 Sep" }],
+      ["title as a number", { title: 42 }],
+    ];
+    for (const [name, body] of refused) {
+      it(`answers 400 with a reason for ${name}`, async () => {
+        const res = await patch(body);
+        expect(res.status).toBe(400);
+        const answered = (await res.json()) as { error: string };
+        // The one error shape, and a reason naming the field rather than a
+        // bare "bad_body": a caller learns which value it built wrong.
+        expect(answered.error).toContain(Object.keys(body)[0]);
+        expect(mocks.updateTask).not.toHaveBeenCalled();
+      });
+    }
+
+    const taken: [string, Record<string, unknown>][] = [
+      ["done: true", { done: true }],
+      ["done: false", { done: false }],
+      ["when as a day", { when: TOMORROW }],
+      ["when as the word", { when: "someday" }],
+      ["when cleared", { when: null }],
+      ["deadline as a day", { deadline: TOMORROW }],
+      ["deadline cleared", { deadline: null }],
+      ["category cleared", { category: null }],
+      ["repeat stopped", { repeat: null }],
+      ["repeat as a rule", { repeat: { freq: "weekly", byWeekday: ["mon"] } }],
+      ["expectedWhen as a day", { expectedWhen: TODAY }],
+      ["expectedWhen as null", { expectedWhen: null }],
+    ];
+    for (const [name, body] of taken) {
+      it(`takes ${name} through to the store`, async () => {
+        const res = await patch(body);
+        expect(res.status).toBe(200);
+        expect(mocks.updateTask).toHaveBeenCalledWith(
+          TASK_ID,
+          expect.objectContaining(body),
+        );
+      });
+    }
+  });
 });
 
 describe("DELETE /api/tasks/[id]", () => {

@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   getStore: vi.fn(),
   listTasks: vi.fn(),
+  listLogbook: vi.fn(),
   createTask: vi.fn(),
   pageTasks: vi.fn(),
 }));
@@ -54,10 +55,12 @@ async function post(body: Record<string, unknown>, query = "") {
 
 beforeEach(() => {
   mocks.listTasks.mockReset().mockReturnValue([task()]);
+  mocks.listLogbook.mockReset().mockReturnValue([]);
   mocks.createTask.mockReset().mockResolvedValue(task());
   mocks.pageTasks.mockReset().mockReturnValue([task({ page: "page-one" })]);
   mocks.getStore.mockReset().mockResolvedValue({
     listTasks: mocks.listTasks,
+    listLogbook: mocks.listLogbook,
     createTask: mocks.createTask,
     pageTasks: mocks.pageTasks,
   });
@@ -140,31 +143,45 @@ describe("GET /api/tasks", () => {
     expect(mocks.listTasks).toHaveBeenCalledWith(TODAY, { list: "today" });
 
     await get(`?today=${TODAY}&list=logbook&offset=-300`);
-    expect(mocks.listTasks).toHaveBeenLastCalledWith(TODAY, {
-      list: "logbook",
+    expect(mocks.listLogbook).toHaveBeenLastCalledWith(TODAY, {
       offsetMinutes: -300,
     });
   });
 
-  it("answers ?list=logbook with the store's completion rows, untouched", async () => {
+  it("answers ?list=logbook with entries, each keyed by its own completion", async () => {
     // A repeating record is never done, so this list cannot be a filter over
     // records. The store derives one row per completion and the route hands
     // the order through; a caller here has no records to derive from.
-    const completion = (when: string, doneAt: string) =>
-      task({ id: "task-words", repeat: { freq: "daily" }, done: true, when, doneAt });
+    //
+    // And the rows carry the key, because the id does not: a daily task
+    // finished on two days is two rows of ONE record, and an agent keying on
+    // `id` would collapse the history into one.
+    const completion = (when: string, doneAt: string) => ({
+      key: `task-words:${doneAt}`,
+      task: task({ id: "task-words", repeat: { freq: "daily" }, done: true, when, doneAt }),
+      untickable: when === TODAY,
+    });
     const rows = [
       completion(TODAY, `${TODAY}T09:00:00.000Z`),
       completion("2026-09-12", "2026-09-12T09:00:00.000Z"),
     ];
-    mocks.listTasks.mockReturnValue(rows);
+    mocks.listLogbook.mockReturnValue(rows);
 
     const res = await get(`?today=${TODAY}&list=logbook&offset=0`);
 
     expect(res.status).toBe(200);
-    expect((await res.json()).tasks).toEqual(rows);
-    expect(mocks.listTasks).toHaveBeenCalledWith(TODAY, {
-      list: "logbook",
+    const body = (await res.json()) as { entries?: unknown; tasks?: unknown };
+    expect(body.entries).toEqual(rows);
+    expect(body.tasks).toBeUndefined();
+    expect(mocks.listLogbook).toHaveBeenCalledWith(TODAY, { offsetMinutes: 0 });
+    expect(mocks.listTasks).not.toHaveBeenCalled();
+  });
+
+  it("passes ?category= through to the logbook read", async () => {
+    await get(`?today=${TODAY}&list=logbook&offset=0&category=home`);
+    expect(mocks.listLogbook).toHaveBeenCalledWith(TODAY, {
       offsetMinutes: 0,
+      category: "home",
     });
   });
 

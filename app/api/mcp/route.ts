@@ -216,7 +216,7 @@ const handler = createMcpHandler(
 
     server.tool(
       "list_tasks",
-      "List open tasks of one list. Pass the caller's own local calendar date as `today`; the server has no timezone to fall back on.",
+      "List the tasks of one list. Pass the caller's own local calendar date as `today`; the server has no timezone to fall back on. Every list but `logbook` answers `{tasks}`, one record each; `logbook` answers `{entries}`, one per completion, because a repeating task has many completions and one record, and each entry carries its own `key`.",
       {
         list: z.enum(["inbox", "today", "upcoming", "someday", "logbook"]),
         today: z
@@ -250,6 +250,18 @@ const handler = createMcpHandler(
           return text({ error: "bad_offset" });
         }
         const store = await getStore();
+        // THE LOGBOOK IS ENTRIES, NOT RECORDS. A repeating task finished on
+        // seven days is seven completions of ONE record, so a list of records
+        // answers with seven objects carrying the same `id`. Each entry is
+        // handed over with its own stable `key` instead.
+        if (list === "logbook") {
+          return text({
+            entries: store.listLogbook(today ?? ANY_DAY, {
+              offsetMinutes: offsetMinutes as number,
+              ...(category !== undefined ? { category } : {}),
+            }),
+          });
+        }
         return text({
           tasks: store.listTasks(today ?? ANY_DAY, {
             list,

@@ -24,6 +24,23 @@ const eslintConfig = defineConfig([
       "@typescript-eslint/no-require-imports": "off",
     },
   },
+  {
+    // The push worker runs in ServiceWorkerGlobalScope, which is neither a
+    // window nor Node. Without this, `self`, `atob` and `URL` read as
+    // undefined globals and the file cannot be linted at all.
+    files: ["public/sw.js"],
+    languageOptions: {
+      sourceType: "script",
+      globals: {
+        self: "readonly",
+        atob: "readonly",
+        fetch: "readonly",
+        URL: "readonly",
+        Uint8Array: "readonly",
+        JSON: "readonly",
+      },
+    },
+  },
 ]);
 
 export default eslintConfig;

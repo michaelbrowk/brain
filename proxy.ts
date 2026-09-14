@@ -13,6 +13,10 @@ const PUBLIC_ASSETS = new Set([
   "/globe.svg",
   "/window.svg",
   "/manifest.webmanifest",
+  // Two pure functions and three listeners, with no secret in them. It is in
+  // the allowlist so the browser's periodic update fetch cannot be answered
+  // with the login page's HTML and quietly freeze the installed worker.
+  "/sw.js",
 ]);
 
 export async function proxy(req: NextRequest) {

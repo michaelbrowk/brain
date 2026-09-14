@@ -102,6 +102,33 @@ const nextConfig: NextConfig = {
           },
         ],
       },
+      // The push service worker. A route block REPLACES the catch-all rather
+      // than merging with it (the three mail overrides below are the proof),
+      // so this restates the global set and adds two of its own.
+      //
+      // Service-Worker-Allowed is not strictly needed while the script sits at
+      // the root and controls the root, and it is set anyway: it states the
+      // scope the worker is meant to have, so moving the file later is a
+      // decision rather than an accident.
+      //
+      // no-cache, because a stale worker cannot be replaced by the page that
+      // needs replacing: the browser checks this file for an update and a
+      // cached copy makes that check a no-op.
+      {
+        source: "/sw.js",
+        headers: [
+          { key: "X-Frame-Options", value: "DENY" },
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          {
+            key: "Strict-Transport-Security",
+            value: "max-age=31536000; includeSubDomains",
+          },
+          { key: "Content-Type", value: "application/javascript; charset=utf-8" },
+          { key: "Service-Worker-Allowed", value: "/" },
+          { key: "Cache-Control", value: "no-cache" },
+        ],
+      },
       // The catch-all CSP above is appropriate for application pages, but
       // Next applies it after route handlers and would otherwise replace the
       // stricter attachment CSP returned by the guarded Mail binary routes.

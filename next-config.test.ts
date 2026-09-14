@@ -90,3 +90,42 @@ describe("the /share surface", () => {
     });
   });
 });
+
+describe("the service worker's headers", () => {
+  it("serves /sw.js with Service-Worker-Allowed: / and no cache", async () => {
+    const rules = await nextConfig.headers?.();
+    const catchAllIndex = rules!.findIndex((rule) => rule.source === "/:path*");
+    const swIndex = rules!.findIndex((rule) => rule.source === "/sw.js");
+    // A route block REPLACES the catch-all, so this one has to come after it
+    // and restate whatever of the global set it still wants.
+    expect(swIndex).toBeGreaterThan(catchAllIndex);
+    expect(rules![swIndex]!.headers).toContainEqual({
+      key: "Service-Worker-Allowed",
+      value: "/",
+    });
+    expect(rules![swIndex]!.headers).toContainEqual({
+      key: "Cache-Control",
+      value: "no-cache",
+    });
+    expect(rules![swIndex]!.headers).toContainEqual({
+      key: "Content-Type",
+      value: "application/javascript; charset=utf-8",
+    });
+  });
+
+  it("keeps a CSP on the worker that does not block it", async () => {
+    // The catch-all CSP names frame-ancestors, object-src and base-uri only.
+    // There is no script-src and no worker-src anywhere in the config, so
+    // nothing here stops a same-origin worker from registering or running.
+    const rules = await nextConfig.headers?.();
+    for (const rule of rules!) {
+      const csp = rule.headers.find((header) => header.key === "Content-Security-Policy")?.value;
+      if (!csp) continue;
+      if (rule.source === "/api/mail/attachments/:attachmentId") continue;
+      if (rule.source === "/api/mail/remote-images/:remoteImageId") continue;
+      if (rule.source === "/api/mail/sender-icon/:domain") continue;
+      expect(csp).not.toContain("worker-src");
+      expect(csp).not.toContain("script-src");
+    }
+  });
+});

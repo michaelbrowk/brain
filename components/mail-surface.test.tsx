@@ -7640,6 +7640,17 @@ describe("MailSurface", () => {
       };
     }
 
+    function detailFor(item: MailThreadListItem): MailThreadDetail {
+      return {
+        ...detail,
+        thread: item,
+        messages: detail.messages.map((message) => ({
+          ...message,
+          threadId: item.threadId,
+        })),
+      };
+    }
+
     /** The request is answered across several commits (a list load, sometimes
      *  an account switch and its load), so the wait is on the outcome rather
      *  than on a fixed number of microtask rounds. */
@@ -7674,6 +7685,10 @@ describe("MailSurface", () => {
         accountId: accountA.accountId,
         threadId: thread.threadId,
       });
+      // The point of the in-list branch is the read it avoids: a fallback
+      // fetch reaches readThread twice for the same press, and only this
+      // count tells the two paths apart.
+      expect(client.readThread).toHaveBeenCalledTimes(1);
       expect(pendingOpenThread()).toBeNull();
     });
 
@@ -7709,6 +7724,9 @@ describe("MailSurface", () => {
       // The column moved with it: the letter would have nowhere to stand in
       // the account it is not in.
       expect(document.body.textContent).toContain("The other address");
+      // The account it left behind is gone from the column, not covered by
+      // the one that arrived.
+      expect(document.body.textContent).not.toContain("Lunch this Friday?");
       expect(pendingOpenThread()).toBeNull();
     });
 
@@ -7750,6 +7768,166 @@ describe("MailSurface", () => {
       // A row that cannot be opened is not an error to report to whoever
       // pressed it: Mail is open, at the list it was going to show anyway.
       expect(document.body.textContent).toContain("Lunch this Friday?");
+    });
+
+    it("stays on the letter it was last asked for when an abandoned request's fetch resolves late", async () => {
+      const abandonedFetch = deferred<MailThreadDetail>();
+      const secondFetch = deferred<MailThreadDetail>();
+      const abandoned: MailThreadListItem = {
+        ...thread,
+        threadId: "thread-abandoned",
+        subject: "The abandoned letter",
+      };
+      const second: MailThreadListItem = {
+        ...thread,
+        threadId: "thread-second",
+        subject: "The second letter",
+      };
+      const readThread = vi
+        .fn()
+        .mockImplementation(({ threadId }: { threadId: string }) => {
+          if (threadId === "thread-abandoned") return abandonedFetch.promise;
+          if (threadId === "thread-second") return secondFetch.promise;
+          return Promise.resolve(detail);
+        });
+      const client = makeClient({ readThread });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+
+      // Pressed first, for a letter the loaded page does not hold: the
+      // fallback fetch starts and hangs.
+      await act(async () => {
+        requestOpenThread(accountA.accountId, "thread-abandoned");
+      });
+      await settle();
+      // Pressed second, before the first answers: the slot now holds this
+      // one, and its own fetch starts too.
+      await act(async () => {
+        requestOpenThread(accountA.accountId, "thread-second");
+      });
+      await settle();
+
+      // The second press answers first: the reader opens it.
+      await act(async () => {
+        secondFetch.resolve(detailFor(second));
+        await secondFetch.promise;
+      });
+      await settle();
+      expect(document.body.textContent).toContain("The second letter");
+
+      // The abandoned fetch lands after: it must not move the reader off
+      // the letter they asked for since.
+      await act(async () => {
+        abandonedFetch.resolve(detailFor(abandoned));
+        await abandonedFetch.promise;
+      });
+      await settle();
+
+      expect(document.body.textContent).toContain("The second letter");
+      expect(document.body.textContent).not.toContain("The abandoned letter");
+    });
+
+    it("opens a thread the unified list already holds, without switching accounts", async () => {
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+        listThreads: vi
+          .fn()
+          .mockImplementation(({ accountId }: { accountId: string }) =>
+            Promise.resolve(pageFor(accountId)),
+          ),
+        readThread: vi.fn().mockResolvedValue(detailFor(other)),
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: All inboxes");
+
+      await act(async () => {
+        requestOpenThread(accountB.accountId, other.threadId);
+      });
+      await until(
+        () => vi.mocked(client.readThread).mock.calls.length > 0,
+        "the unified thread is read",
+      );
+
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountB.accountId,
+        threadId: other.threadId,
+      });
+      // The point of the unified branch is the read it avoids too.
+      expect(client.readThread).toHaveBeenCalledTimes(1);
+      // Answered without a switch: All inboxes is still the destination.
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: All inboxes");
+      expect(document.body.textContent).toContain("The other address");
+      expect(pendingOpenThread()).toBeNull();
+    });
+
+    it("drops a same-account request when the reader is off Inbox", async () => {
+      const client = makeClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("Sent");
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, "thread-elsewhere");
+      });
+      await until(() => pendingOpenThread() === null, "the request is dropped");
+
+      expect(client.readThread).not.toHaveBeenCalled();
+      expect(navTrigger()?.getAttribute("aria-label")).toContain("Sent");
+    });
+
+    it("drops a cross-account request the same way when the reader is off Inbox", async () => {
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+        listThreads: vi
+          .fn()
+          .mockImplementation(({ accountId }: { accountId: string }) =>
+            Promise.resolve(pageFor(accountId)),
+          ),
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount(accountA);
+      await goTo("Sent");
+
+      await act(async () => {
+        requestOpenThread(accountB.accountId, other.threadId);
+      });
+      await until(() => pendingOpenThread() === null, "the request is dropped");
+
+      expect(client.readThread).not.toHaveBeenCalled();
+      // The switch this used to trigger reset the column to Inbox on its
+      // way: the same guard now applies before that reset can bypass it.
+      expect(navTrigger()?.getAttribute("aria-label")).toContain("Sent");
+      expect(document.body.textContent).not.toContain("The other address");
+    });
+
+    it("clears an unanswered request when the Mail surface unmounts", async () => {
+      const client = makeClient({
+        loadAccounts: vi
+          .fn()
+          .mockReturnValue(new Promise<PublicMailAccount[]>(() => {})),
+      });
+      requestOpenThread(accountA.accountId, "thread-elsewhere");
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      expect(pendingOpenThread()).not.toBeNull();
+
+      await act(async () => root.render(<div>Home</div>));
+
+      expect(pendingOpenThread()).toBeNull();
     });
   });
 });

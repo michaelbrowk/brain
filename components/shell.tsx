@@ -1576,13 +1576,20 @@ export function Shell({
         // reads that query. `openTasks` writes the bare path, and writes
         // nothing at all when Tasks already holds the screen, so the entry is
         // written here first and openTasks then finds the path it wanted.
-        if (href !== "/tasks") pushNavigationEntry(href);
+        if (href !== "/tasks") {
+          pushNavigationEntry(href);
+          // A pushed entry fires no popstate and Tasks, already on screen,
+          // commits no state this press touches, so useNamedTask would not
+          // run again until the next task event, Back/Forward or reload.
+          // Bumping the token useTasks keys its load on forces that commit.
+          setTaskSurfaceRevision((revision) => revision + 1);
+        }
         openTasks();
         return;
       }
       goHome();
     },
-    [goHome, openMail, openTasks, pushNavigationEntry],
+    [goHome, openMail, openTasks, pushNavigationEntry, setTaskSurfaceRevision],
   );
 
   /** THE SIDEBAR'S TASKS COUNT COMES OFF THE SURFACE'S OWN FETCH.

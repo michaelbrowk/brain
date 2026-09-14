@@ -254,6 +254,48 @@ describe("a notification row's destination", () => {
     expect(mailSurface()).toBeNull();
   });
 
+  it("re-asks the tasks surface for its records when a task row is pressed while Tasks is already on screen", async () => {
+    rows = [
+      {
+        id: TASK_ID,
+        kind: "task-reminder",
+        at: "2026-09-14T12:00:00.000Z",
+        title: "Water the plants",
+        body: "13:00",
+        href: "/tasks",
+      },
+    ];
+    await pressTheRow("Water the plants");
+    await findLazy(tasksSurface, "tasks surface after the first press");
+
+    const tasksCallsBefore = apiFetchMock.mock.calls.filter(([input]) =>
+      String(input).startsWith("/api/tasks?"),
+    ).length;
+
+    // Pressed again with Tasks already the surface on screen: `openTasks`
+    // writes nothing this time, since the pathname already starts with
+    // `/tasks`, so a bumped revision is the only thing that can make the
+    // shell's own `useTasks` read again.
+    rows = [
+      {
+        id: TASK_ID,
+        kind: "task-reminder",
+        at: "2026-09-14T12:05:00.000Z",
+        title: "Water the plants",
+        body: "13:00",
+        href: "/tasks",
+      },
+    ];
+    await pressTheRow("Water the plants");
+
+    await vi.waitFor(() => {
+      const tasksCallsAfter = apiFetchMock.mock.calls.filter(([input]) =>
+        String(input).startsWith("/api/tasks?"),
+      ).length;
+      expect(tasksCallsAfter).toBeGreaterThan(tasksCallsBefore);
+    });
+  });
+
   it("takes a mail row to Mail", async () => {
     rows = [
       {

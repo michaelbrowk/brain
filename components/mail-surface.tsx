@@ -2336,6 +2336,7 @@ export function MailSurface({
    *  chance first. */
   const openRequestRef = useRef<{
     key: string;
+    opened: boolean;
     switched: boolean;
     listAtSwitch: MailThreadListState | null;
     fetched: boolean;
@@ -2350,9 +2351,16 @@ export function MailSurface({
           threadId: request.threadId,
         });
       } catch {
-        clearOpenThreadRequest();
+        // A later press replaces the slot before this one answers: only the
+        // request still standing there is this fetch's to clear.
+        if (isPendingRequest(request)) clearOpenThreadRequest();
         return;
       }
+      // The slot may already hold a different request by the time this
+      // fetch lands, a second press before the first is answered. Landing on
+      // the letter this fetch was for would move the reader off the one they
+      // asked for since, so an abandoned fetch is dropped instead of opened.
+      if (!isPendingRequest(request)) return;
       clearOpenThreadRequest();
       void selectThread(detail.thread);
     },
@@ -2371,7 +2379,13 @@ export function MailSurface({
     const key = unifiedThreadKey(pendingOpen);
     let ledger = openRequestRef.current;
     if (ledger === null || ledger.key !== key) {
-      ledger = { key, switched: false, listAtSwitch: null, fetched: false };
+      ledger = {
+        key,
+        opened: false,
+        switched: false,
+        listAtSwitch: null,
+        fetched: false,
+      };
       openRequestRef.current = ledger;
     }
 
@@ -2392,8 +2406,24 @@ export function MailSurface({
       unifiedState,
     );
     if (loaded) {
+      // The ledger, not `pendingOpen === null`, is what stops a development
+      // double invoke of this effect from opening the same letter twice: the
+      // clear below has not committed yet the second time this runs against
+      // the same render.
+      if (ledger.opened) return;
+      ledger.opened = true;
       clearOpenThreadRequest();
       void selectThread(loaded);
+      return;
+    }
+
+    // The mailbox on screen is the one a `mail-new` row is about, whichever
+    // account the request names. Checked before the switch below rather than
+    // after it: switching resets to Inbox and clears the query on its way,
+    // so a cross-account request would otherwise answer where a same-account
+    // one is dropped, for the same reader standing on the same other folder.
+    if (selectedMailboxId !== "inbox" || searchQuery.trim() !== "") {
+      clearOpenThreadRequest();
       return;
     }
 
@@ -2408,13 +2438,6 @@ export function MailSurface({
     // The list the switch asked for has not committed yet, so "not in the
     // list" is not yet an answer.
     if (threadState.kind === "loading" || threadState === ledger.listAtSwitch) {
-      return;
-    }
-    // The mailbox on screen is the one a `mail-new` row is about. Another
-    // folder means the reader went somewhere else in the meantime, and the
-    // single-thread read here is the Inbox's.
-    if (selectedMailboxId !== "inbox" || searchQuery.trim() !== "") {
-      clearOpenThreadRequest();
       return;
     }
     if (ledger.fetched) return;
@@ -2432,6 +2455,16 @@ export function MailSurface({
     threadState,
     unifiedState,
   ]);
+
+  // A request nothing can now answer must not outlive this instance: the
+  // reader who leaves Mail before an account switch or a fetch resolves, or
+  // whose accounts never finish loading, should not have the next Mail mount
+  // answer a press this one already gave up on.
+  useEffect(() => {
+    return () => {
+      clearOpenThreadRequest();
+    };
+  }, []);
 
   const startCompose = useCallback(
     (accountId: string) => {
@@ -4569,7 +4602,20 @@ function pendingOpenThreadServerSnapshot(): MailOpenRequest | null {
   return null;
 }
 
-/** The requested thread, if it is in the list the column is actually showing.
+/** Whether `request` is still the one request `mail-surface-client` holds. A
+ *  second press before the first is answered replaces the slot rather than
+ *  queuing behind it, so a fetch started for the first must not clear a slot
+ *  that now belongs to the second, or open a letter nobody asked for anymore. */
+function isPendingRequest(request: MailOpenRequest): boolean {
+  const pending = pendingOpenThread();
+  return (
+    pending !== null &&
+    pending.accountId === request.accountId &&
+    pending.threadId === request.threadId
+  );
+}
+
+/** The requested thread, if it is in the list the column is showing.
  *
  *  Which list that is depends on the mode, and asking the other one would be a
  *  trap: the unified streams survive a move into a single account, so a letter

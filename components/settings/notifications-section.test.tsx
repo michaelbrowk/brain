@@ -57,6 +57,7 @@ let state: { devices: unknown[]; kinds: Record<string, boolean> };
 let zone: string | null;
 let testResponseBody: { sent: number; removed: number; skipped: string | null };
 let patchShouldFail: boolean;
+let stateShouldFail: boolean;
 
 function response(body: unknown, status = 200): Response {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as Response;
@@ -72,11 +73,14 @@ beforeEach(() => {
   zone = "Europe/Lisbon";
   testResponseBody = { sent: 1, removed: 0, skipped: null };
   patchShouldFail = false;
+  stateShouldFail = false;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
-      if (url === "/api/push/state" && (init?.method ?? "GET") === "GET") return response(state);
+      if (url === "/api/push/state" && (init?.method ?? "GET") === "GET") {
+        return stateShouldFail ? response(null, 500) : response(state);
+      }
       if (url === "/api/push/state") {
         if (patchShouldFail) return response(null, 500);
         const patch = JSON.parse(String(init!.body)).kinds;
@@ -114,13 +118,24 @@ async function render() {
 }
 
 const text = () => host.textContent ?? "";
+
+/** THE HINT OF ONE ROW, not the whole section's text. The Devices group prints
+ *  "No device is registered yet." as its own empty state, so a `text()` search
+ *  for that sentence is satisfied before the test is ever pressed. A row's
+ *  first paragraph is its label and its second is its hint. */
+const rowHint = (label: string) => {
+  const row = [...host.querySelectorAll(".brain-settings-row")].find(
+    (node) => (node.querySelector("p")?.textContent ?? "") === label,
+  );
+  return row?.querySelectorAll("p")[1]?.textContent ?? null;
+};
 const button = (name: string) =>
   [...host.querySelectorAll("button")].find((b) => (b.textContent ?? "").trim() === name);
 
 describe("Settings → Notifications", () => {
   it("offers the gesture that turns push on for this device", async () => {
     await render();
-    expect(button("Turn on on this device")).toBeTruthy();
+    expect(button("Turn on")).toBeTruthy();
   });
 
   it("adds the device to the list when the gesture succeeds", async () => {
@@ -134,14 +149,14 @@ describe("Settings → Notifications", () => {
       },
     });
     await render();
-    await act(async () => button("Turn on on this device")!.click());
+    await act(async () => button("Turn on")!.click());
     expect(text()).toContain("Mac");
   });
 
   it("says what to do when the browser refused the permission", async () => {
     enable.mockResolvedValue({ ok: false, reason: "denied" });
     await render();
-    await act(async () => button("Turn on on this device")!.click());
+    await act(async () => button("Turn on")!.click());
     expect(text()).toContain(
       "This browser refused notifications. Allow them for Brain in the browser's own settings, then try again.",
     );
@@ -157,7 +172,7 @@ describe("Settings → Notifications", () => {
     expect(text()).toContain(
       "Add Brain to your Home Screen first. On iPhone and iPad, notifications reach a web app only once it is installed: open the share sheet and pick Add to Home Screen.",
     );
-    expect(button("Turn on on this device")).toBeUndefined();
+    expect(button("Turn on")).toBeUndefined();
   });
 
   it("does not ask for the Home Screen once the app is installed", async () => {
@@ -169,7 +184,7 @@ describe("Settings → Notifications", () => {
     Object.defineProperty(navigator, "standalone", { configurable: true, value: true });
     await render();
     expect(text()).not.toContain("Add Brain to your Home Screen first");
-    expect(button("Turn on on this device")).toBeTruthy();
+    expect(button("Turn on")).toBeTruthy();
   });
 
   it("lists a registered device and removes it", async () => {
@@ -216,10 +231,14 @@ describe("Settings → Notifications", () => {
     expect(state.kinds).toEqual({ "task-reminder": true, "mail-new": false });
   });
 
+  // "and nothing else" was narrower than the payload, which also carries the
+  // path the notification opens and the row's own id (the task, or the account
+  // and thread). docs/notifications.md already stated it accurately and this
+  // sentence now says the same thing.
   it("says what a push carries, in the owner's own words", async () => {
     await render();
     expect(text()).toContain(
-      "A push carries the task's title, or the sender's name and the subject, and nothing else. It is encrypted to the device.",
+      "A push carries the task's title, or the sender's name and the subject, along with the path it opens and the row's own id. Nothing about your notes is in it, and it is encrypted to the device.",
     );
   });
 
@@ -252,7 +271,7 @@ describe("Settings → Notifications", () => {
     pushSupportedMock.mockReturnValue(false);
     await render();
     expect(text()).toContain("This browser cannot receive push notifications.");
-    expect(button("Turn on on this device")).toBeUndefined();
+    expect(button("Turn on")).toBeUndefined();
   });
 
   it("reports the plural when more than one device took the test", async () => {
@@ -272,8 +291,11 @@ describe("Settings → Notifications", () => {
   it("says no device is registered when none has ever subscribed", async () => {
     testResponseBody = { sent: 0, removed: 0, skipped: "no-devices" };
     await render();
+    // Before the press the row says what a press would do, which is what makes
+    // the assertion after it mean something.
+    expect(rowHint("Test notification")).toBe("Rings every device in the list below");
     await act(async () => button("Send a test")!.click());
-    expect(text()).toContain("No device is registered yet.");
+    expect(rowHint("Test notification")).toBe("No device is registered yet.");
   });
 
   it("says every device refused when devices exist but none took it", async () => {
@@ -281,6 +303,49 @@ describe("Settings → Notifications", () => {
     await render();
     await act(async () => button("Send a test")!.click());
     expect(text()).toContain("No device took the message. Try again.");
+  });
+
+  // The load and the gesture write the same two pieces of state, and the
+  // gesture is the cure the failed load offers: a section that kept saying it
+  // could not read anything, under a device it had just added, would be
+  // reporting a failure that is over.
+  it("clears the load failure when the gesture succeeds after it", async () => {
+    stateShouldFail = true;
+    enable.mockResolvedValue({
+      ok: true,
+      device: {
+        id: "0123456789abcdef",
+        deviceLabel: "Mac",
+        createdAt: "2026-09-14T12:00:00.000Z",
+        lastSeenAt: "2026-09-14T12:00:00.000Z",
+      },
+    });
+    await render();
+    expect(text()).toContain("Couldn't load your notification settings.");
+
+    await act(async () => button("Turn on")!.click());
+    expect(text()).not.toContain("Couldn't load your notification settings.");
+    expect(text()).toContain("Mac");
+  });
+
+  it("offers the Account section without leaving the surface", async () => {
+    const openSection = vi.fn();
+    await act(async () =>
+      root.render(<NotificationsSection onToast={() => {}} onOpenSection={openSection} />),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await act(async () => button("Account")!.click());
+    expect(openSection).toHaveBeenCalledWith("account");
+  });
+
+  it("draws no Account link where there is no way to change section", async () => {
+    // A control that advertises itself and then refuses is the one shape a
+    // control must not have. Without the handler there is nothing to press.
+    await render();
+    expect(button("Account")).toBeUndefined();
   });
 
   it("reverts a kind toggle when the save fails", async () => {

@@ -37,7 +37,15 @@ function updateHint(state: UpdateLoadState): string {
  *  name, or hand the server the one this browser reports. The picker is the
  *  category picker's construction (a popover, a field, a filtered list of
  *  menu items), because a long list of names filtered by typing is the same
- *  control whichever list it holds. */
+ *  control whichever list it holds.
+ *
+ *  THE ZONE IS THE ROW'S VALUE AND "Use this device" IS THE ROW'S ACTION.
+ *  Both used to be `variant="quiet"`: the same size, the same weight, the
+ *  same colour, thirty pixels apart on one line, with nothing saying which
+ *  was the setting and which was the thing that happens. The name now reads
+ *  as the value it is and opens the picker on a press, and the one button
+ *  beside it is absent while it would do nothing, which is whenever the
+ *  notebook's zone is already this browser's. */
 function ZoneRow({
   zone,
   onSet,
@@ -93,19 +101,27 @@ function ZoneRow({
     ? zones.filter((name) => name.toLowerCase().includes(needle))
     : zones;
 
+  // While the two agree the button would change nothing, so it is not drawn.
+  // `undefined` is the read still in flight, and a control that appeared and
+  // then vanished a frame later is worse than one that arrives late.
+  const offerThisDevice = zone !== undefined && zone !== deviceZone();
+
   return (
-    <div className="flex min-w-0 items-center gap-1">
+    <div className="flex min-w-0 items-center gap-2.5">
       <Popover.Root open={open} onOpenChange={setOpen}>
         <Popover.Trigger asChild>
-          {/* `.btn` is nowrap with no overflow of its own, so the name goes in
-              a span that can shrink: the longest canonical zone is 30
-              characters (`America/Argentina/Buenos_Aires`) and the action
-              beside it must survive a 375px phone whole. */}
-          <Button variant="quiet" className="min-w-0" disabled={saving}>
-            <span className="min-w-0 truncate">
-              {zone ?? (zone === null ? "Not set yet" : "…")}
-            </span>
-          </Button>
+          {/* Value text, not a button face. It truncates because the longest
+              canonical zone is 30 characters
+              (`America/Argentina/Buenos_Aires`) and the action beside it must
+              survive a 375px phone whole. */}
+          <button
+            type="button"
+            data-zone-value=""
+            disabled={saving}
+            className="min-w-0 truncate text-table text-ink focus-inset"
+          >
+            {zone ?? (zone === null ? "Not set yet" : "…")}
+          </button>
         </Popover.Trigger>
         <Popover.Portal>
           <Popover.Content
@@ -144,15 +160,17 @@ function ZoneRow({
           </Popover.Content>
         </Popover.Portal>
       </Popover.Root>
-      <Button
-        variant="quiet"
-        className="shrink-0"
-        aria-label="Use this device's zone"
-        disabled={saving}
-        onClick={() => void save(deviceZone())}
-      >
-        Use this device
-      </Button>
+      {offerThisDevice && (
+        <Button
+          variant="quiet"
+          className="shrink-0"
+          aria-label="Use this device's zone"
+          disabled={saving}
+          onClick={() => void save(deviceZone())}
+        >
+          Use this device
+        </Button>
+      )}
     </div>
   );
 }

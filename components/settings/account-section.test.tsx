@@ -262,6 +262,11 @@ function stubPopoverPlatform() {
   }
 }
 
+/** A zone this machine is definitely not in, so "Use this device" is a
+ *  control that would change something and is therefore drawn. Picking a
+ *  literal would have made the case pass or fail by where the test ran. */
+const ELSEWHERE = deviceZone() === "Europe/Lisbon" ? "Europe/Madrid" : "Europe/Lisbon";
+
 describe("AccountSection · Time zone", () => {
   let host: HTMLDivElement;
   let root: Root;
@@ -304,7 +309,7 @@ describe("AccountSection · Time zone", () => {
   });
 
   it("sets this device's zone in one press", async () => {
-    const fetchMock = stubZone({ timeZone: "Europe/Lisbon" });
+    const fetchMock = stubZone({ timeZone: ELSEWHERE });
     await act(async () => root.render(<AccountSection onToast={() => {}} />));
     await settle();
     const use = host.querySelector<HTMLButtonElement>(
@@ -331,7 +336,7 @@ describe("AccountSection · Time zone", () => {
 
     await act(async () => {
       host
-        .querySelector<HTMLButtonElement>(".brain-settings-row[data-stack] .btn-quiet")
+        .querySelector<HTMLButtonElement>("[data-zone-value]")
         ?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
     });
     await settle();
@@ -368,9 +373,14 @@ describe("AccountSection · Time zone", () => {
     expect(row).not.toBeNull();
     expect(row?.textContent).toContain("Reminders fire in");
 
-    const value = row?.querySelector<HTMLElement>(".btn-quiet .truncate");
+    const value = row?.querySelector<HTMLElement>("[data-zone-value]");
     expect(value?.textContent).toBe("America/Argentina/Buenos_Aires");
-    expect(row?.querySelector(".btn-quiet")?.className).toContain("min-w-0");
+    expect(value?.className).toContain("min-w-0");
+    expect(value?.className).toContain("truncate");
+    // The value reads as a value: the one quiet button on the row is the
+    // action beside it, and not two of them thirty pixels apart.
+    expect(value?.className).not.toContain("btn");
+    expect(row?.querySelectorAll(".btn-quiet")).toHaveLength(1);
 
     const use = host.querySelector<HTMLElement>(
       '[aria-label="Use this device\'s zone"]',
@@ -387,7 +397,7 @@ describe("AccountSection · Time zone", () => {
         if (url.includes("/api/settings/zone")) {
           return init?.method === "PUT"
             ? new Response("", { status: 503 })
-            : new Response(JSON.stringify({ timeZone: "Europe/Lisbon" }), { status: 200 });
+            : new Response(JSON.stringify({ timeZone: ELSEWHERE }), { status: 200 });
         }
         return new Response(JSON.stringify(base), { status: 200 });
       }),
@@ -404,7 +414,24 @@ describe("AccountSection · Time zone", () => {
     await settle();
 
     expect(onToast).toHaveBeenCalledWith("Could not save the time zone");
-    expect(host.textContent).toContain("Europe/Lisbon");
+    expect(host.textContent).toContain(ELSEWHERE);
+  });
+
+  // A control that would do nothing is worse than an absent one, and this is
+  // the row where two identical quiet buttons stood side by side.
+  it("drops 'Use this device' when the notebook is already on this browser's zone", async () => {
+    stubZone({ timeZone: deviceZone() });
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+    expect(host.textContent).toContain(deviceZone());
+    expect(host.querySelector('[aria-label="Use this device\'s zone"]')).toBeNull();
+  });
+
+  it("offers it while the notebook is on some other zone", async () => {
+    stubZone({ timeZone: ELSEWHERE });
+    await act(async () => root.render(<AccountSection onToast={() => {}} />));
+    await settle();
+    expect(host.querySelector('[aria-label="Use this device\'s zone"]')).not.toBeNull();
   });
 
   it("says nothing is set when the zone route fails", async () => {

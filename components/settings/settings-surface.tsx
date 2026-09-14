@@ -106,7 +106,11 @@ export function SettingsSurface({
           />
         )}
         {section === "connections" && <ConnectionsSection onToast={onToast} />}
-        {section === "notifications" && <NotificationsSection onToast={onToast} />}
+        {section === "notifications" && (
+          // The zone row quotes a setting Account owns, and reaching it is a
+          // section change on this surface rather than a document load.
+          <NotificationsSection onToast={onToast} onOpenSection={onSelectSection} />
+        )}
         {section === "sharing" && (
           <SharingSection
             tree={tree}

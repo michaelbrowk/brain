@@ -15,6 +15,7 @@ import type { PushDeviceView, PushKindPreferences } from "@/lib/push/model";
 import { enablePushOnThisDevice, homeScreenRequired, pushSupported } from "../push-client";
 import { Button } from "../ui/button";
 import { Empty } from "../ui/empty";
+import type { SettingsSection } from "./sections";
 import { SettingsGroup, SettingsRow, Segmented } from "./shared";
 
 /** Every sentence the section can say, in one place. Each names the cure,
@@ -25,8 +26,13 @@ const DENIED =
   "This browser refused notifications. Allow them for Brain in the browser's own settings, then try again.";
 const UNSUPPORTED = "This browser cannot receive push notifications.";
 const FAILED = "Couldn't turn notifications on. Try again.";
+/** THE WHOLE PAYLOAD, NOT HALF OF IT. "and nothing else" was narrower than
+ *  what leaves the server: a push also carries the path it opens and the
+ *  notification's own id, which is the task, or the account and the thread.
+ *  `docs/notifications.md` already says it this way, and a privacy sentence
+ *  that is narrower than the truth is the one kind that must not be. */
 const PRIVACY =
-  "A push carries the task's title, or the sender's name and the subject, and nothing else. It is encrypted to the device.";
+  "A push carries the task's title, or the sender's name and the subject, along with the path it opens and the row's own id. Nothing about your notes is in it, and it is encrypted to the device.";
 const NO_ZONE = "No time zone is set, so no reminder will fire. Set one in Account.";
 const ZONE_UNREADABLE = "Couldn't read the time zone.";
 const NO_DEVICE = "No device is registered yet.";
@@ -64,7 +70,19 @@ function Sentence({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function NotificationsSection({ onToast }: { onToast: (title: string) => void }) {
+export function NotificationsSection({
+  onToast,
+  onOpenSection,
+}: {
+  onToast: (title: string) => void;
+  /** The surface's own section change, handed down by `settings-surface`. The
+   *  zone row quotes a setting Account owns, and reaching it used to be
+   *  `location.assign`: a full document load, the shell rebuilt, the tree
+   *  refetched, to move between two panels of one surface. Optional because a
+   *  caller that cannot change section exists (a test, and any future embed),
+   *  and where it is absent the link is not drawn rather than drawn dead. */
+  onOpenSection?: (section: SettingsSection) => void;
+}) {
   const [devices, setDevices] = useState<PushDeviceView[] | null>(null);
   const [kinds, setKinds] = useState<PushKindPreferences | null>(null);
   const [loadFailed, setLoadFailed] = useState(false);
@@ -289,8 +307,11 @@ export function NotificationsSection({ onToast }: { onToast: (title: string) => 
             label="Push on this device"
             hint="The browser asks for permission on the press"
           >
+            {/* The row carries the subject and the button names what pressing
+                it does. "Turn on on this device" stumbled over its own two
+                `on`s and repeated the label it sits beside. */}
             <Button variant="ink" disabled={enabling} onClick={turnOn}>
-              Turn on on this device
+              Turn on
             </Button>
           </SettingsRow>
         )}
@@ -377,12 +398,15 @@ export function NotificationsSection({ onToast }: { onToast: (title: string) => 
       <SettingsGroup title="Time zone">
         <div className="brain-settings-row">
           <p className="min-w-0 flex-1 text-table text-ink-2">{zoneSentence}</p>
-          {/* Account owns the setting; this row quotes it. A full navigation
-              is what the surface already does to leave itself
-              (account-section.tsx). */}
-          <Button variant="quiet" onClick={() => location.assign("/settings/account")}>
-            Account
-          </Button>
+          {/* Account owns the setting; this row quotes it. The press is a
+              section change inside the surface, not a document load: both
+              panels are this surface, and reloading it to cross between them
+              threw away the shell and refetched the tree to move 200px. */}
+          {onOpenSection && (
+            <Button variant="quiet" onClick={() => onOpenSection("account")}>
+              Account
+            </Button>
+          )}
         </div>
       </SettingsGroup>
     </div>

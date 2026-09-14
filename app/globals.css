@@ -6194,8 +6194,10 @@ html[data-kbd] .brain-task-row[data-selected] {
    never the ground under a table, and this is the one popover where a stray
    glyph is indistinguishable from content. So it takes the composer sheet's
    material, which is the thickness the house gives its largest surfaces, and
-   the reduced-transparency fallbacks remap both tokens to the matte with it. */
-.brain-menu.brain-when-panel {
+   the reduced-transparency fallbacks remap both tokens to the matte with it.
+   One class, later in the file than `.brain-menu`, so it wins on order and the
+   glass audit sees one owner it knows. */
+.brain-when-panel {
   background: var(--glass-thick);
   -webkit-backdrop-filter: var(--blur-thick);
   backdrop-filter: var(--blur-thick);

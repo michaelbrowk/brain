@@ -945,13 +945,13 @@ describe("the motion", () => {
    *  material, on a pointer and on a phone alike. */
   it("gives the panel the composer sheet's material, desktop and phone", () => {
     const block = pickerBlock();
-    const rule = block.slice(block.indexOf(".brain-menu.brain-when-panel {"));
+    const rule = block.slice(block.indexOf(".brain-when-panel {"));
     expect(rule.slice(0, rule.indexOf("}"))).toContain("background: var(--glass-thick)");
     expect(rule.slice(0, rule.indexOf("}"))).toContain(
       "backdrop-filter: var(--blur-thick)",
     );
     // Declared outside the phone media query, so the popover takes it too.
-    expect(block.indexOf(".brain-menu.brain-when-panel {")).toBeLessThan(
+    expect(block.indexOf(".brain-when-panel {")).toBeLessThan(
       block.indexOf("@media (max-width: 767px)"),
     );
   });

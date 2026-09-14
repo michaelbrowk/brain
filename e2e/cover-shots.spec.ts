@@ -343,7 +343,7 @@ async function measureFoot(page: Page, label: string) {
 async function sidebarContrast(page: Page, label: string) {
   const targets: [string, ReturnType<Page["locator"]>][] = [
     ["Search", page.locator(".brain-sidebar").getByText("Search").first()],
-    ["Today thoughts", page.locator(".brain-sidebar").getByText("Today thoughts").first()],
+    ["Journal", page.locator(".brain-sidebar").getByText("Journal").first()],
     ["Mail", page.locator(".brain-sidebar").getByText("Mail").first()],
     ["Pinned chip", page.locator(".brain-sidebar-pinned").getByText(/Cover/).first()],
     ["tree row", page.locator(".brain-sidebar").getByText("Cover and canvas").last()],

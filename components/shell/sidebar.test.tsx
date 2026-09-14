@@ -3,9 +3,22 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { MotionRender } from "@/test/framer-motion-mock";
+import { DUR } from "@/lib/motion";
 import { ShellSidebar, type ShellSidebarProps } from "./sidebar";
 
-vi.mock("framer-motion", () => import("@/test/framer-motion-mock"));
+const harness = { reduce: false };
+const renders: MotionRender[] = [];
+
+vi.mock("framer-motion", async () => {
+  const { createFramerMotionMock } = await import("@/test/framer-motion-mock");
+  return createFramerMotionMock({
+    reducedMotion: () => harness.reduce,
+    onRender: (render) => {
+      renders.push(render);
+    },
+  });
+});
 
 function sidebarProps(
   overrides: Partial<ShellSidebarProps> = {},
@@ -47,6 +60,13 @@ function sidebarProps(
   };
 }
 
+/** The framer props the count chip rendered with, off the stub's record. */
+function countRender(): MotionRender | undefined {
+  return renders.findLast((render) =>
+    String(render.props.className ?? "").includes("tree-row-count"),
+  );
+}
+
 function navRow(label: string): HTMLButtonElement | null {
   return (
     [...document.querySelectorAll<HTMLButtonElement>("button.tree-row")].find(
@@ -63,6 +83,8 @@ describe("ShellSidebar tasks row", () => {
     (
       globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
     ).IS_REACT_ACT_ENVIRONMENT = true;
+    harness.reduce = false;
+    renders.length = 0;
     vi.stubGlobal(
       "IntersectionObserver",
       class {
@@ -114,6 +136,22 @@ describe("ShellSidebar tasks row", () => {
     await act(async () => root.render(<ShellSidebar {...sidebarProps(overrides)} />));
   }
 
+  it("calls the daily-page row Journal, so Today means one thing in this panel", async () => {
+    // Tasks has a list called Today, and the row above it opened a page also
+    // called "Today thoughts". Two rows, one word, two destinations. The row
+    // keeps its `sun` and its page: only the label moved.
+    await render();
+
+    const journal = navRow("Journal");
+    expect(journal).not.toBeNull();
+    expect(navRow("Today thoughts")).toBeNull();
+
+    const onOpenDailyPage = vi.fn();
+    await render({ onOpenDailyPage });
+    await act(async () => navRow("Journal")?.click());
+    expect(onOpenDailyPage).toHaveBeenCalledTimes(1);
+  });
+
   it("renders a Tasks row under Mail, current while the surface is tasks", async () => {
     await render();
 
@@ -144,6 +182,32 @@ describe("ShellSidebar tasks row", () => {
 
     await render();
     expect(navRow("Tasks")?.querySelector(".tree-row-count")).toBeNull();
+  });
+
+  it("crossfades the count when it changes, the way a group header's count does", async () => {
+    // A completion decrements this number while the reader is looking at
+    // Mail or a note, which is the whole reason the chip exists. The group
+    // header in the Tasks column crossfades its own count at DUR.fast, and
+    // one number changing in two places should not change in two ways.
+    await render({ tasksOpenTodayCount: 3 });
+    const chip = countRender();
+    expect(chip?.motion.initial).toEqual({ opacity: 0 });
+    expect(chip?.motion.animate).toEqual({ opacity: 1 });
+    expect(chip?.motion.exit).toEqual({
+      opacity: 0,
+      transition: { duration: DUR.fast },
+    });
+    expect(chip?.motion.transition).toEqual({ duration: DUR.fast });
+    expect(navRow("Tasks")?.querySelector(".tree-row-count")?.textContent).toBe("3");
+  });
+
+  it("collapses that crossfade under reduced motion", async () => {
+    harness.reduce = true;
+    await render({ tasksOpenTodayCount: 3 });
+
+    const chip = countRender();
+    expect(chip?.motion.transition).toEqual({ duration: 0 });
+    expect(chip?.motion.exit).toEqual({ opacity: 0, transition: { duration: 0 } });
   });
 
   it("keeps the count and the update dot on their own rows", async () => {

@@ -81,7 +81,10 @@ import {
 import type { Template } from "@/lib/templates";
 import { StickersLayer, stickerPrintCanvasHeight } from "./stickers";
 import type { Sticker } from "@/lib/store/types";
-import { NESTED_TABLE_BLOCKED_EVENT } from "@/lib/editor-events";
+import {
+  NESTED_TABLE_BLOCKED_EVENT,
+  TASKS_CHANGED_EVENT,
+} from "@/lib/editor-events";
 import {
   mapMarkdownOffset,
   removeStandalonePageRefOccurrenceWithRestore,
@@ -1366,13 +1369,13 @@ export function Shell({
         // The open note's editor keeps its own copy of this page's records and
         // is not React, so it cannot subscribe to the line above. Without this
         // a line whose task was completed, deleted or detached somewhere else
-        // keeps its word until the editor remounts. One window event, listened
-        // for by `TASKS_CHANGED_EVENT` in `components/editor/task-checkbox.ts`;
-        // the literal is repeated there rather than imported, because importing
-        // from that module would pull Milkdown into this bundle. This tab's own
-        // writes never reach here (the `src` check above), so a promotion made
-        // in the editor does not bounce back at it.
-        window.dispatchEvent(new CustomEvent("brain:tasks-changed"));
+        // keeps its word until the editor remounts. One window event, whose
+        // name both sides take from `lib/editor-events.ts`: the editor is
+        // dynamically imported to keep Milkdown out of this bundle, so the two
+        // cannot import each other and the seam is a module with no runtime.
+        // This tab's own writes never reach here (the `src` check above), so a
+        // promotion made in the editor does not bounce back at it.
+        window.dispatchEvent(new CustomEvent(TASKS_CHANGED_EVENT));
         return;
       }
       clearTimeout(t);
@@ -5752,7 +5755,18 @@ export function Shell({
               )}
               </NotesCanvasBody>
             ) : (
-              <Hub tree={tree} onSelect={select} onCreate={createFromHub} />
+              <Hub
+                tree={tree}
+                onSelect={select}
+                onCreate={createFromHub}
+                // The same token the sidebar count and the Tasks surface
+                // subscribe with, so the three are one request and one
+                // optimistic commit rather than three answers to one question.
+                taskRefreshToken={taskSurfaceRevision}
+                onOpenTasks={openTasks}
+                onOpenMail={openMail}
+                onToast={showToast}
+              />
             )}
             </motion.div>
           </AnimatePresence>

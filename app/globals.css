@@ -5916,3 +5916,61 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
     transition: background-color 160ms var(--ease-out);
   }
 }
+
+/* ── Home's Today block (P6) ─────────────────────────────────────────────────
+
+   Home draws the Tasks surface's own row (`components/hub-today.tsx`), and
+   that row measures itself off `--task-rule` and `--task-capsule`, which are
+   the Tasks COLUMN's: the column has a 12px inset the row sits inside of.
+   Home has no inset — its rule is the content edge, and every capsule on it
+   reaches 8px past that edge on both sides, which is what makes a page row, a
+   mail row and a task row share one left rule down the whole page. So the two
+   measures are restated here and the capsule's box is pulled onto Home's,
+   rather than the row learning about a second surface. */
+.brain-hub-tasks {
+  /* 8 of capsule overhang + 4 of inner padding + 28 of box cell + 8 of gap */
+  --task-rule: 32px;
+  --task-capsule: 36px;
+}
+.brain-hub-tasks .brain-task-row {
+  width: calc(100% + 16px);
+  margin: 0 -8px;
+}
+@media (max-width: 767px) {
+  /* 40, the height every other row on Home takes on a phone */
+  .brain-hub-tasks {
+    --task-capsule: 40px;
+  }
+}
+
+/* THE CAPTURED WORDS, IN THE AIR. One element in two places: at rest over the
+   field's own text box, and then in the first row slot of the block below it.
+   Both wear the same `layoutId`, so what travels is the words themselves. */
+.brain-hub-flight-field {
+  position: absolute;
+  top: 0;
+  /* the field's 10 of padding, its 16 glyph and the 8 between: where the
+     caret was standing */
+  left: 34px;
+  display: flex;
+  height: 32px;
+  align-items: center;
+  pointer-events: none;
+}
+.brain-hub-flight-slot {
+  display: flex;
+  height: var(--task-capsule);
+  align-items: center;
+  padding-left: var(--task-rule);
+  pointer-events: none;
+}
+.brain-hub-flight-text {
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--font-sf);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: -0.15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

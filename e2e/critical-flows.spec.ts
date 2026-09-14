@@ -4239,7 +4239,7 @@ test("the Inbox is gone from the sidebar, the palette, and its own address", asy
 
   const sidebar = page.locator(".brain-sidebar");
   await expect(
-    sidebar.getByRole("button", { name: "Today thoughts" }),
+    sidebar.getByRole("button", { name: "Journal" }),
   ).toBeVisible();
   await expect(
     sidebar.getByRole("button", { name: "Inbox", exact: true }),

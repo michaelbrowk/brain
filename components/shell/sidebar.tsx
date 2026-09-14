@@ -12,10 +12,10 @@
 // shell reflows the canvas offset once (B5).
 
 import { forwardRef, useState, type ReactNode } from "react";
-import { motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import type { TreeNode } from "@/lib/store/types";
 import type { Template } from "@/lib/templates";
-import { SPRING_PANEL, SPRING_SELECT } from "@/lib/motion";
+import { DUR, SPRING_PANEL, SPRING_SELECT } from "@/lib/motion";
 import { SIDEBAR_SELECT_LAYOUT_ID } from "./sidebar-select";
 import { Wordmark } from "./wordmark";
 import type { ShellSurface } from "./helpers";
@@ -235,9 +235,14 @@ export function ShellSidebar({
             <Kbd>⌘K</Kbd>
           </button>
 
+          {/* Journal, not "Today thoughts". Tasks has a list called Today,
+              two rows below this one, and one word standing over two
+              destinations in one panel is a word that names neither. The
+              `sun` stays, and so does the page it opens: only the label
+              moved, and no page on disk is renamed. */}
           <NavRow
             icon="sun"
-            label="Today thoughts"
+            label="Journal"
             onClick={() => onOpenDailyPage()}
           />
           <NavRow
@@ -374,7 +379,7 @@ function SidebarTreeNav({ children }: { children: ReactNode }) {
   );
 }
 
-/** A primary row of the panel (Today thoughts, Mail, Tasks, Settings): the
+/** A primary row of the panel (Journal, Mail, Tasks, Settings): the
  *  tree-row capsule as a button. `selected` renders the shared selection
  *  capsule so it flows here from the tree (Mail). */
 const NavRow = forwardRef<
@@ -431,7 +436,24 @@ const NavRow = forwardRef<
       </span>
       <span className="tree-row-title">{label}</span>
       {count != null && count > 0 ? (
-        <span className="tree-row-count">{count}</span>
+        /* THE NUMBER CROSSFADES, the way the group header's count does in the
+           Tasks column. A completion decrements it while the reader is
+           looking at Mail or a note, which is the whole reason this chip is
+           on screen, and a number that swaps in one frame reads as a glitch
+           where the same number two hundred pixels away dissolves. Keyed on
+           the count, so a re-render carrying the same one does not blink. */
+        <AnimatePresence mode="popLayout" initial={false}>
+          <motion.span
+            key={count}
+            className="tree-row-count"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0, transition: { duration: reduce ? 0 : DUR.fast } }}
+            transition={{ duration: reduce ? 0 : DUR.fast }}
+          >
+            {count}
+          </motion.span>
+        </AnimatePresence>
       ) : badge ? (
         <span
           role="img"

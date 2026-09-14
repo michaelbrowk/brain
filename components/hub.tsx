@@ -4,10 +4,14 @@ import { motion, useReducedMotion } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
 import { DEFAULT_PAGE_ICON } from "@/lib/constants";
 import type { TreeNode } from "@/lib/store/types";
-import { DUR, EASE_OUT } from "@/lib/motion";
+import { DUR, EASE_OUT, SPRING_PANEL } from "@/lib/motion";
+import { HubMail } from "./hub-mail";
+import { HubRow } from "./hub-row";
+import { HUB_CAPTURE_FLIGHT_ID, HubToday } from "./hub-today";
+import { TaskRequestError, createTask, localDay, mutateTasks } from "./tasks-client";
 import { Empty } from "./ui/empty";
 import { Field } from "./ui/field";
-import { Kbd } from "./ui/primitives";
+import { Kbd, useShortcutTitle, type ToastOptions } from "./ui/primitives";
 import { formatAgo } from "@/lib/format-ago";
 
 const QUICK_CAPTURE_STORAGE_PREFIX = "brain-quick-capture-record-v3:";
@@ -205,16 +209,38 @@ function flatten(tree: TreeNode[]): FlatPage[] {
 
 const WEEK = 7 * 24 * 3600 * 1000;
 
-/** The smart hub — "/" landing: what changed (incl. Claude), where you left
- *  off, and a capture box that needs no destination. */
+/** How long the captured words are in the air. `SPRING_PANEL` is 0.30, and
+ *  the landing row is taken away only once the spring has had its time, so a
+ *  fast route answer does not cut the flight in half. */
+const FLIGHT_MS = 300;
+
+/** The smart hub — "/" landing: one column of blocks, in the order a day is
+ *  read. The capture field at the head, then what is owed today, then what is
+ *  waiting in mail, then what changed and where you left off, then what is
+ *  public.
+ *
+ *  THREE SOURCES, NEVER ONE AGGREGATE REQUEST. The tree is already in the
+ *  client, the tasks are a memory-index read this tab shares with the sidebar
+ *  count, and mail is another process with its own latency and its own 503.
+ *  One `/api/hub` would wait for the slowest of the three and fail whole. */
 export function Hub({
   tree,
   onSelect,
   onCreate,
+  taskRefreshToken = 0,
+  onOpenTasks,
+  onOpenMail,
+  onToast,
 }: {
   tree: TreeNode[];
   onSelect: (id: string) => void;
   onCreate: (title: string, idempotencyKey: string) => Promise<string | null>;
+  /** The shell's count of task events this tab did not write. Shared with the
+   *  sidebar count and the Tasks surface, so the three are one request. */
+  taskRefreshToken?: number;
+  onOpenTasks?: () => void;
+  onOpenMail?: () => void;
+  onToast?: (title: string, options?: ToastOptions) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [capturePending, setCapturePending] = useState(false);
@@ -223,10 +249,19 @@ export function Hub({
   const [lastVisit, setLastVisit] = useState<number | null>(null);
   const [lastOpened, setLastOpened] = useState<string | null>(null);
   const [activityExpanded, setActivityExpanded] = useState(false);
+  /** The words between the field and the Today block. `landed` flips one
+   *  commit after the press, which is the commit that unmounts the element at
+   *  the field and mounts it in the block: one `layoutId`, two positions, and
+   *  framer carries it across on `SPRING_PANEL`. */
+  const [flight, setFlight] = useState<{ text: string; landed: boolean } | null>(null);
+  /** A task this page has just written, so its row arrives rather than
+   *  appears. */
+  const [capturedId, setCapturedId] = useState<string | null>(null);
   // `now` is null until mount so the SSR HTML (which has no clock) matches the
   // first client render — the time-based feed + labels only render after mount
   const [now, setNow] = useState<number | null>(null);
   const inputRef = useRef<HTMLInputElement>(null);
+  const newTaskTitle = useShortcutTitle("New task", "⌘⏎");
   const draftRef = useRef("");
   const captureRecordIdRef = useRef<string | null>(null);
   const captureKeyRef = useRef<string | null>(null);
@@ -353,6 +388,55 @@ export function Hub({
     setCaptureFailed(true);
   };
 
+  /** THE SECOND CONTROL, AND IT IS EXPLICIT. `Enter` still makes a page and
+   *  `Task` makes a task; one field with two named destinations, never one
+   *  control that has to be guessed at.
+   *
+   *  The words leave the field at once, because the reader has already said
+   *  where they are going. They land in Today, which is the list a thought
+   *  captured now belongs to and the block directly under the field. */
+  const submitTask = () => {
+    const title = draftRef.current.trim();
+    if (!title || capturePendingRef.current) return;
+    updateDraft("");
+    if (!reduce) setFlight({ text: title, landed: false });
+    const startedAt = Date.now();
+    void createTask({ title, when: localDay().today })
+      .then((task) => {
+        mutateTasks((tasks) => [task, ...tasks]);
+        setCapturedId(task.id);
+      })
+      .catch((error: unknown) => {
+        // The words come back to the field they left, because a refusal that
+        // swallowed them would be a thought lost to a 400.
+        updateDraft(title);
+        inputRef.current?.focus();
+        onToast?.(
+          error instanceof TaskRequestError && error.message
+            ? error.message
+            : "That did not save",
+          { urgent: true },
+        );
+      })
+      .finally(() => {
+        const left = Math.max(0, FLIGHT_MS - (Date.now() - startedAt));
+        window.setTimeout(() => setFlight(null), reduce ? 0 : left);
+      });
+  };
+
+  // One frame after the press the element moves from the field to the block.
+  // Both renders carry the same `layoutId`, so what the reader sees is the
+  // words travelling rather than one disappearing and another appearing.
+  useEffect(() => {
+    if (flight === null || flight.landed) return;
+    const frame = window.requestAnimationFrame(() =>
+      setFlight((current) =>
+        current === null || current.landed ? current : { ...current, landed: true },
+      ),
+    );
+    return () => window.cancelAnimationFrame(frame);
+  }, [flight]);
+
   const pages = flatten(tree);
   const nowMs = now ?? 0;
   const fmtAgo = (iso: string) => (now ? formatAgo(iso, { compact: true }) : ""); // empty until mounted
@@ -392,11 +476,14 @@ export function Hub({
       : { duration: DUR.base, ease: EASE_OUT, delay: 0.03 * i },
   });
 
+  const openTasks = () => onOpenTasks?.();
+
   return (
     <div className="brain-page-top mx-auto max-w-[720px] px-5 pb-40 md:px-6">
       {/* quick capture — a thought needs no destination: a Field 32 on
-          paper (hairline ring, blue on focus) */}
-      <motion.div {...enter(0)}>
+          paper (hairline ring, blue on focus), and one trailing control for
+          the one destination that is not a page */}
+      <motion.div {...enter(0)} className="relative">
         <Field
           ref={inputRef}
           icon="pen-new-square"
@@ -406,14 +493,43 @@ export function Hub({
           aria-busy={capturePending}
           onChange={(e) => updateDraft(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && draft.trim()) {
-              e.preventDefault();
-              void submitCapture();
-            }
+            if (e.key !== "Enter" || !draft.trim()) return;
+            e.preventDefault();
+            // ⌘⏎ is the keyboard form of the control beside the field, and
+            // plain Enter still makes a page. Two gestures, two destinations,
+            // and neither one has to be guessed at.
+            if (e.metaKey || e.ctrlKey) submitTask();
+            else void submitCapture();
           }}
           placeholder="New thought…"
           aria-label="New thought"
+          trailing={
+            <button
+              type="button"
+              data-hub-capture-task
+              disabled={!draft.trim() || capturePending}
+              title={newTaskTitle}
+              onClick={submitTask}
+              className="rounded-xs px-1.5 py-0.5 text-[12px] text-ink-2 transition-colors hover:bg-fill-hover disabled:pointer-events-none disabled:text-ink-3"
+            >
+              Task
+            </button>
+          }
         />
+        {flight !== null && !flight.landed && (
+          /* The words at rest, exactly over the text they were typed as. They
+             leave on the next commit; what the reader sees is one element
+             moving, not two appearing. */
+          <span className="brain-hub-flight-field" aria-hidden data-hub-flight>
+            <motion.span
+              layoutId={HUB_CAPTURE_FLIGHT_ID}
+              className="brain-hub-flight-text"
+              transition={SPRING_PANEL}
+            >
+              {flight.text}
+            </motion.span>
+          </span>
+        )}
         {(capturePending || captureFailed || localRecoveryUnavailable) && (
           <div className="mt-2 flex min-h-6 items-center gap-3 text-[12px] text-ink-3">
             <span
@@ -441,26 +557,23 @@ export function Hub({
         )}
       </motion.div>
 
-      {/* continue where you left off. The row carries who wrote the page
-          last, because the feed below drops it (see allActivity) and this is
-          then the only row the page has. With one page shared with one
-          visitor that is the whole of the Hub's report, so dropping the
-          author here would leave a visitor's edit unattributed everywhere. */}
-      {continuePage && (
-        <motion.div {...enter(1)} className="mt-8" data-hub-continue>
-          <SectionLabel>Continue on this device</SectionLabel>
-          <Row
-            page={continuePage}
-            onSelect={onSelect}
-            actor={continuePage.updatedBy}
-            actorName={continuePage.updatedByName}
-            trailing={fmtAgo(continuePage.updated)}
-          />
-        </motion.div>
-      )}
+      {/* What is owed today, then what is waiting. Both draw nothing at all
+          until they have an answer of their own — the tasks block before the
+          browser's clock has been read, the mail block where no account is
+          connected — so neither can put a heading over a question it has not
+          asked yet. */}
+      <HubToday
+        refreshToken={taskRefreshToken}
+        onOpenTasks={openTasks}
+        onToast={onToast}
+        flight={flight?.landed ? flight.text : null}
+        capturedId={capturedId}
+      />
+      {onOpenMail && <HubMail onOpenMail={onOpenMail} />}
 
       {/* a brand-new notebook teaches the interface instead of claiming a
-          "quiet week" that never happened */}
+          "quiet week" that never happened. It is the ONE onboarding message
+          on screen: the blocks above report state and teach nothing. */}
       {pages.length === 0 ? (
         <motion.div {...enter(1)} className="mt-10">
           <p className="text-[14px] text-ink-2">
@@ -481,7 +594,7 @@ export function Hub({
             </li>
           </ul>
           <p className="mt-4 text-[13px] text-ink-2">
-            Today thoughts opens a page for today. Mail is for a Gmail or IMAP account you connect in Settings.
+            Journal opens a page for today. Tasks holds what you owe, and a checkbox in any note can become one. Mail is for a Gmail or IMAP account you connect in Settings.
           </p>
           {/* no keyboard on a phone — point at the tab bar instead */}
           <p className="mt-4 hidden text-[13px] text-ink-2 [@media(hover:none)]:block">
@@ -493,15 +606,22 @@ export function Hub({
       {/* This timeline is based on this browser's local visit marker. Keep the
           label honest: it is not cross-device activity tracking.
 
-          The section reports what changed, and the feed drops the one page
-          Continue already reported. Where that page is the only thing the
-          week holds, the section has nothing left of its own to say. It drew
-          an empty state directly under a row dated a minute ago, which is a
-          contradiction on one screen, so it now draws nothing at all. */}
-      {!(feed.length === 0 && recent.length > 0) && (
+          CONTINUE IS THE FIRST ROW HERE, not a block of its own. The page this
+          device was last on is a change like the others and was the shortest
+          section on the page — one heading over one row — and standing apart
+          it produced a contradiction the moment it was the only change of the
+          week: an empty state directly under a row dated a minute ago. Inside
+          the block the row IS the answer, and the empty state is drawn only
+          where there is no row at all.
+
+          The row carries who wrote the page last, because the feed drops it
+          (see allActivity) and this is then the only row the page has. With
+          one page shared with one visitor that is the whole of the Hub's
+          report, so dropping the author here would leave a visitor's edit
+          unattributed everywhere. */}
       <motion.div {...enter(2)} className="mt-8">
         <SectionLabel>Since this device was last open</SectionLabel>
-        {now !== null && feed.length === 0 && (
+        {now !== null && feed.length === 0 && !continuePage && (
           <Empty
             icon="clock-circle-linear"
             title="Nothing changed this week"
@@ -513,6 +633,17 @@ export function Hub({
             }
             className="px-2 py-5"
           />
+        )}
+        {continuePage && (
+          <div data-hub-continue>
+            <Row
+              page={continuePage}
+              onSelect={onSelect}
+              actor={continuePage.updatedBy}
+              actorName={continuePage.updatedByName}
+              trailing={fmtAgo(continuePage.updated)}
+            />
+          </div>
         )}
         {feed.map((p, i) => (
           <div key={p.id}>
@@ -544,7 +675,6 @@ export function Hub({
           </button>
         )}
       </motion.div>
-      )}
 
       {/* public surface audit */}
       {shared.length > 0 && (
@@ -586,13 +716,11 @@ function Row({
   actorName?: string;
 }) {
   return (
-    <button
+    <HubRow
       onClick={() => onSelect(page.id)}
-      className="-mx-2 flex h-10 w-[calc(100%+16px)] items-center gap-2.5 rounded-[var(--r-block)] px-2 text-left transition-colors hover:bg-blue-tint md:h-9"
+      glyph={page.icon ?? DEFAULT_PAGE_ICON}
+      trailing={trailing || undefined}
     >
-      <span className="grid size-5 shrink-0 place-items-center text-[15px] leading-none">
-        {page.icon ?? DEFAULT_PAGE_ICON}
-      </span>
       {isNew && (
         <span
           aria-label="new since your last visit"
@@ -621,7 +749,6 @@ function Row({
           {actorName ? `edited by ${actorName}` : "edited by a visitor"}
         </span>
       )}
-      {trailing && <span className="shrink-0 text-[12px] text-ink-3">{trailing}</span>}
-    </button>
+    </HubRow>
   );
 }

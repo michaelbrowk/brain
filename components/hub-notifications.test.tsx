@@ -146,9 +146,11 @@ describe("the centre on Home", () => {
     const body = only.querySelector("[data-notification-body]")!;
     expect(title.textContent).toBe("Call the fitter about the worktop template before Friday");
     expect(title.className).toContain("truncate");
-    expect(body.textContent).toBe("Missed 2026-09-13 at 18:00");
+    // The same read-out the bell's rows get: the stored body is locale-free
+    // and the row is the place the ISO day becomes a month.
+    expect(body.textContent).toBe("Missed 13 Sep, 18:00");
     expect(body.className).toContain("shrink-0");
-    expect(body.className).toContain("max-w-[45%]");
+    expect(body.className).toContain("max-w-[57%]");
   });
 
   it("opens the place a pressed row came from", async () => {

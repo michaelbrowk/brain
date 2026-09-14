@@ -305,9 +305,70 @@ describe("the bell", () => {
     expect(title.textContent).toBe("Call the fitter about the worktop template before Friday");
     expect(title.className).toContain("truncate");
     expect(title.className).toContain("flex-1");
-    expect(body.textContent).toBe("Missed 2026-09-13 at 18:00");
+    expect(body.textContent).toBe("Missed 13 Sep, 18:00");
     expect(body.className).toContain("shrink-0");
-    expect(body.className).toContain("max-w-[45%]");
+    expect(body.className).toContain("max-w-[57%]");
+  });
+
+  // THE STORED BODY IS LOCALE-FREE AND THE ROW IS NOT. A server timer writes
+  // the body into a file that also feeds a push payload, so the day in it is
+  // an ISO one; at 320px "Missed 2026-09-13 at 18:00" wants 176px against a
+  // cap of 176, and the date was the half that got cut. The row reads it out.
+  it("reads a missed row's ISO day out as a month a reader can see whole", async () => {
+    rows = [
+      {
+        id: "a",
+        kind: "task-missed",
+        at: "2026-09-14T12:00:00.000Z",
+        title: "Ring the dentist about the crown",
+        body: "Missed 2026-09-13 at 18:00",
+        href: "/tasks",
+      },
+    ];
+    await render();
+    await open();
+    expect(
+      document.querySelector('[role="menuitem"] [data-notification-body]')!.textContent,
+    ).toBe("Missed 13 Sep, 18:00");
+  });
+
+  it("leaves a fired row's clock alone, so the two kinds read alike", async () => {
+    rows = [
+      {
+        id: "b",
+        kind: "task-reminder",
+        at: "2026-09-14T12:00:00.000Z",
+        title: "Water the plants",
+        body: "07:45",
+        href: "/tasks",
+      },
+    ];
+    await render();
+    await open();
+    expect(
+      document.querySelector('[role="menuitem"] [data-notification-body]')!.textContent,
+    ).toBe("07:45");
+  });
+
+  it("does not touch a mail subject, which is the sender's own words", async () => {
+    rows = [
+      {
+        id: MAIL_ID,
+        kind: "mail-new",
+        at: "2026-09-14T12:00:00.000Z",
+        title: "Vera Almeida",
+        body: "Re: the 2026-09-13 at 18:00 slot",
+        href: "/mail",
+      },
+    ];
+    await render();
+    await open();
+    // The producer's shape is a body that STARTS with it. A subject that
+    // happens to carry a date is a sentence somebody wrote, and rewriting it
+    // would be this row editing its own mail.
+    expect(
+      document.querySelector('[role="menuitem"] [data-notification-body]')!.textContent,
+    ).toBe("Re: the 2026-09-13 at 18:00 slot");
   });
 
   it("marks a mail row's thread read before it opens Mail", async () => {

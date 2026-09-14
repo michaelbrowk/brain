@@ -26,7 +26,7 @@ import { formatAgo } from "@/lib/format-ago";
 import { DUR, EASE_OUT } from "@/lib/motion";
 
 import { HubRow } from "./hub-row";
-import { KIND_GLYPH, openNotificationRow } from "./notifications-bell";
+import { KIND_GLYPH, notificationBody, openNotificationRow } from "./notifications-bell";
 import { useNotifications, type NotificationRow } from "./notifications-client";
 import { Icon } from "./ui/icon";
 import { useSheetGesture } from "./use-sheet-gesture";
@@ -81,9 +81,9 @@ export function HubNotifications({
             {row.body !== undefined && (
               <span
                 data-notification-body=""
-                className="max-w-[45%] shrink-0 truncate text-[14px] text-ink-3"
+                className="max-w-[57%] shrink-0 truncate text-[14px] text-ink-3"
               >
-                {row.body}
+                {notificationBody(row.body)}
               </span>
             )}
           </HubRow>

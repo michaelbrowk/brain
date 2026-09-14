@@ -21,6 +21,7 @@ import {
   decodeMailNotificationId,
   decodeTaskNotificationId,
 } from "@/lib/notifications/ids";
+import { monthName } from "@/lib/tasks/calendar";
 import { defaultMailSurfaceClient, requestOpenThread } from "./mail-surface-client";
 import {
   markAllRead,
@@ -50,6 +51,27 @@ const BADGE_CAP = 99;
 /** The one destination this rewrites. Everything else a row was stored with
  *  is a destination the producer chose, and is left alone. */
 const TASKS_COLUMN = "/tasks";
+
+/** The missed producer's own sentence, whole (`lib/reminders/scheduler.ts`).
+ *  Anchored at both ends on purpose: the one other thing that could match is a
+ *  mail subject, and a subject is a sentence somebody wrote. */
+const MISSED_BODY = /^Missed (\d{4}-\d{2}-\d{2}) at (\d{2}:\d{2})$/;
+
+/** THE STORED BODY IS LOCALE-FREE, AND THE ROW IS NOT.
+ *
+ *  A body is written by a server timer into a file that also feeds a push
+ *  payload, so the day in it is an ISO one: a server locale inside a stored
+ *  string is how `7:20 PM` got into a column of `07:45`s. The row is where it
+ *  is read out, and it reads it out through the same month table the picker's
+ *  own grid uses, cut to the three letters a 320px panel has room for. A
+ *  fired row's body is already a clock and passes through untouched, so the
+ *  two kinds read alike down one column. */
+export function notificationBody(body: string): string {
+  const hit = MISSED_BODY.exec(body);
+  if (hit === null) return body;
+  const [, day, time] = hit;
+  return `Missed ${Number(day.slice(8, 10))} ${monthName(day).slice(0, 3)}, ${time}`;
+}
 
 /** WHERE A ROW GOES, which is not always what it was stored with.
  *
@@ -214,8 +236,8 @@ export function NotificationsBell({
                         and a missed one reading as one line, one small circle
                         and a timestamp. The title takes what is left and
                         truncates; the body never shrinks to make room for it
-                        and is capped at 45% so the title always keeps the
-                        larger half. */}
+                        and is capped at 57%, which is the width the longest
+                        body the producer writes asks for at 320px. */}
                     <span
                       data-notification-title=""
                       className={`min-w-0 flex-1 truncate ${
@@ -227,9 +249,9 @@ export function NotificationsBell({
                     {row.body !== undefined && (
                       <span
                         data-notification-body=""
-                        className="max-w-[45%] shrink-0 truncate text-ink-3"
+                        className="max-w-[57%] shrink-0 truncate text-ink-3"
                       >
-                        {row.body}
+                        {notificationBody(row.body)}
                       </span>
                     )}
                     <span className="shrink-0 tabular-nums text-ink-3">

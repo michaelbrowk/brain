@@ -5954,6 +5954,140 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
   }
 }
 
+/* ── The When picker (P6.2) ──────────────────────────────────────────────────
+
+   Things' "When" popover in Brain's own tokens, on the `brain-menu` material.
+   264 wide, which is seven 36px day cells plus the material's own 6px padding
+   on each side, and the same 264 the list menu already declares: one menu
+   width on this surface, not two.
+
+   The month arrows and the two spinner steps are `.icon-btn[data-size="28"]`
+   and the foot is `.btn`, the house controls, so their hover, their press
+   and their reduced-motion handling are already declared above and this block
+   adds none of it back. Everything it does declare that moves is colour. */
+.brain-when-picker {
+  width: 252px;
+}
+.brain-when-head {
+  display: flex;
+  height: 28px;
+  align-items: center;
+  gap: 4px;
+}
+.brain-when-month {
+  flex: 1;
+  text-align: center;
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: -0.08px;
+  color: var(--ink-2);
+}
+.brain-when-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 36px);
+}
+/* The weeks are `role="row"` for the grid pattern and no box at all for the
+   layout, so the 49 cells sit on the one seven-column track above. */
+.brain-when-grid > [role="row"] {
+  display: contents;
+}
+.brain-when-weekday {
+  display: grid;
+  height: 20px;
+  place-items: center;
+  font-family: var(--font-sf);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.06px;
+  color: var(--ink-3);
+  text-align: center;
+}
+.brain-when-day {
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  border-radius: var(--r-control);
+  color: var(--ink);
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  transition: background-color 160ms var(--ease-out);
+}
+@media (hover: hover) {
+  .brain-when-day:hover {
+    background-color: var(--blue-tint);
+    transition-duration: 80ms;
+  }
+}
+/* Outside the month, and before today: quiet and still pickable. A deadline in
+   the past is a real thing a person records. */
+.brain-when-day[data-outside] {
+  color: var(--ink-4);
+}
+.brain-when-day[data-past] {
+  color: var(--ink-3);
+}
+.brain-when-day[data-today] {
+  box-shadow: inset 0 0 0 1px var(--blue-rim);
+}
+.brain-when-day[aria-selected="true"] {
+  background-color: var(--ink);
+  color: var(--paper);
+}
+.brain-when-spin {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 8px 4px;
+}
+/* The clock is drawn only once there is one, and `.brain-when-spin` sets a
+   display the attribute alone cannot beat. */
+.brain-when-spin[hidden] {
+  display: none;
+}
+.brain-when-spin > [role="spinbutton"] {
+  min-width: 28px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.08px;
+  color: var(--ink);
+}
+.brain-when-spin-sep {
+  color: var(--ink-3);
+}
+.brain-when-spin-gap {
+  flex: 1;
+}
+.brain-when-foot {
+  display: flex;
+  gap: 6px;
+  padding-top: 6px;
+}
+.brain-when-foot > .btn {
+  flex: 1;
+}
+@media (max-width: 767px) {
+  /* Full width under the row, on the sheet the composer already draws. */
+  .brain-when-picker {
+    width: 100%;
+  }
+  .brain-when-grid {
+    grid-template-columns: repeat(7, 1fr);
+  }
+  .brain-when-day {
+    width: auto;
+  }
+}
+
 /* ── Home's Today block (P6) ─────────────────────────────────────────────────
 
    Home draws the Tasks surface's own row (`components/hub-today.tsx`), and

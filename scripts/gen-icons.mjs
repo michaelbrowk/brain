@@ -74,6 +74,8 @@ const WANT = [
   "paperclip-linear",
   "sort-vertical-linear",
   "alt-arrow-down-linear",
+  // The When picker's two spinners step up as well as down.
+  "alt-arrow-up-linear",
   // Logbook: two bare ticks. Every other "done" glyph Solar ships puts its
   // check inside a rounded square, which is ban 13, including
   // `checklist-minimalistic`, which this replaces.

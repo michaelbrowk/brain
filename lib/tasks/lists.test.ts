@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import * as calendarModule from "./calendar";
+import { monthGridOf, monthLabel, monthOfDay, shiftDay, shiftMonth } from "./calendar";
 import * as modelModule from "./model";
 import { parseTaskRecord, taskRecordRules } from "./model";
 import type { TaskView } from "./model";
@@ -122,16 +124,17 @@ describe("listOf", () => {
   });
 
   it("reads no clock, in any exported function of lib/tasks", () => {
-    // The `time` is here so the schema's own YAML preprocess runs under the
-    // trap: a clock read on the way to `"13:00"` would be the same bug in a
-    // quieter place.
+    // The `time` is YAML's own reading of `13:00`, a sexagesimal 780, so the
+    // schema's number branch runs under the trap rather than the string one
+    // that needs no conversion. A clock read on the way to `"13:00"` would be
+    // the same bug in a quieter place.
     const record = {
       id: "task-alpha",
       title: "Water the plants",
       created: "2026-09-13T09:00:00.000Z",
       updated: "2026-09-13T09:00:00.000Z",
       when: TODAY,
-      time: "13:00",
+      time: 780,
     };
     const anchor = { text: "alpha", hash: "0123456789abcdef", ordinal: 0, line: 0 };
     const group = { key: "", label: null, order: 0 };
@@ -211,10 +214,16 @@ describe("listOf", () => {
           completedAt: "2026-09-13T21:04:55.108Z",
         }),
       weekDaySchema: () => modelModule.weekDaySchema.safeParse("mon"),
+      monthGridOf: () => monthGridOf("2026-09"),
+      shiftMonth: () => shiftMonth("2026-09", 1),
+      shiftDay: () => shiftDay("2026-09-13", 7),
+      monthOfDay: () => monthOfDay("2026-09-13"),
+      monthLabel: () => monthLabel("2026-09"),
     };
 
     // A new export has to be added above, or this fails before the trap runs.
-    const callable = [modelModule, taskLinesModule, listsModule].flatMap((module) =>
+    const modules = [modelModule, taskLinesModule, listsModule, calendarModule];
+    const callable = modules.flatMap((module) =>
       Object.entries(module)
         .filter(
           ([, value]) =>
@@ -791,6 +800,27 @@ describe("the clock sorts inside a group", () => {
     const older = task({ id: "task-old", when: TODAY, created: "2026-09-01T09:00:00.000Z" });
     const newer = task({ id: "task-new", when: TODAY, created: "2026-09-12T09:00:00.000Z" });
     expect(compareInGroup(newer, older, "today")).toBeLessThan(0);
+  });
+
+  it("sinks a completion under every open row, whatever clock it kept", () => {
+    // THE ORDER OF THE TWO KEYS, falsified. Swapping the done key and the
+    // clock key above leaves every other case in this file green, and an open
+    // 18:00 row would then sort below a done 09:00 one.
+    const open = at("task-evening", "18:00");
+    const untimed = at("task-untimed");
+    const finished = task({
+      id: "task-morning",
+      when: TODAY,
+      time: "09:00",
+      done: true,
+      doneAt: `${TODAY}T09:00:00.000Z`,
+    });
+    const rows = [finished, untimed, open];
+    expect(rows.sort((a, b) => compareInGroup(a, b, "today")).map((row) => row.id)).toEqual([
+      "task-evening",
+      "task-untimed",
+      "task-morning",
+    ]);
   });
 
   it("keeps the logbook on completion order, whatever the clock says", () => {

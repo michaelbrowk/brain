@@ -186,7 +186,7 @@ export function advance(record: TaskRecord, options: AdvanceOptions): TaskRecord
     // the absence of one. `parseTaskRecord` refuses that pair, so a park that
     // left either in place would mint a record the index skips and the task
     // would be gone from every list until somebody opened the file. The store
-    // derives the same rule on a patch; this is the copy that holds for a
+    // derives the same rule on a patch. This is the copy that holds for a
     // caller who reaches `advance()` on its own.
     if (options.to === "someday") {
       delete moved.time;

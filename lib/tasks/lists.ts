@@ -87,8 +87,8 @@ export function groupFor(
   return { key: "", label: null, order: 0 };
 }
 
-/** The last group of Today. The renderer draws the moon beside the label; a
- *  group carries no glyph and gains none. */
+/** The last group of Today. The renderer draws the moon beside the label, and
+ *  a group carries no glyph and gains none. */
 export const EVENING_GROUP_KEY = "evening";
 
 /** The day a UTC instant falls on for a reader at `offsetMinutes` east of UTC.

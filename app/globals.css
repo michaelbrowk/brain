@@ -3457,8 +3457,8 @@ a.brain-share-url:active {
    It rides the 28 control rather than standing beside it: the head is 36 tall
    with the wordmark and New page in it already, and there is no third slot.
    `pointer-events: none` keeps the whole 28 box the press target under it.
-   Ink and paper, no hue. §7 gives red to destructive text and errors and says
-   never a red fill, and §8 keeps hue out of the chrome. What carries the
+   Ink and paper, no hue. §2 gives red to destructive text and errors, says
+   never a red fill, and keeps hue out of the chrome. What carries the
    signal beside the number is the bell itself going bold. The box is set here
    rather than left to `text-label`, whose 18px line is taller than a corner
    badge on a 28 control: the utility gives the family, size, weight and

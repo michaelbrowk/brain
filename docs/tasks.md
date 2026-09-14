@@ -159,7 +159,7 @@ The Reminder row waits for a day to be picked before it will open, since a
 clock with no day names no instant. Someday takes the clock and the evening
 with it, for the same reason.
 
-A pick leaves the picker open. **Done**, Escape or a press outside close it.
+A quick row (Today, This Evening, Someday, Clear) writes at once and closes the picker: one tap, one save. A day in the grid or a step of the clock edits the picker without saving, so a reminder can follow its day. **Done** or a press outside saves that value once and closes. Escape closes and throws it away. A value that ends where it began saves nothing.
 
 The keyboard walks the grid: left and right a day, up and down a week, Home
 and End the ends of the week, PageUp and PageDown a month, Enter picks the

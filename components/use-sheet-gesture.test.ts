@@ -38,7 +38,9 @@ vi.mock("framer-motion/dom", () => ({ animate: springBack }));
 const { matchesSheet, useSheetGesture } = await import("./use-sheet-gesture");
 const { TasksWhenPicker } = await import("./tasks-when-picker");
 const { MailComposer } = await import("./mail-composer");
-const { SHEET_DISMISS_OFFSET, SHEET_DISMISS_VELOCITY } = await import("@/lib/motion");
+const { SHEET_DISMISS_OFFSET, SHEET_DISMISS_VELOCITY, SPRING_SHEET } = await import(
+  "@/lib/motion"
+);
 
 const TODAY = "2026-09-13";
 
@@ -190,7 +192,14 @@ describe("the sheet the When picker rides", () => {
     });
 
     expect(document.querySelector(".brain-when-picker")).toBeNull();
-    expect(springBack).not.toHaveBeenCalled();
+    // C3. IT CONTINUES OFF THE BOTTOM, it does not dissolve where it stands
+    // and it does not spring back to nought. One object, one animation: the
+    // material's own keyframes are off for the sheet form, so this spring is
+    // the whole of the dismissal.
+    expect(springBack).toHaveBeenCalledTimes(1);
+    const [, to, transition] = springBack.mock.calls[0]!;
+    expect(to).toBeGreaterThan(SHEET_DISMISS_OFFSET);
+    expect(transition).toEqual(SPRING_SHEET);
   });
 
   it("takes it away on a flick that never travelled, at 800 px/s", async () => {

@@ -797,6 +797,49 @@ describe("the When chip's picker", () => {
     expect(calls.reschedule).toHaveBeenCalledTimes(1);
   });
 
+  /** I6. THE REPEAT MENU STATES ITS RULE, WHOLE.
+   *
+   *  "Every month on the 14th at 0..." was truncated at the width the menu
+   *  was given and the clock was the half that got cut, in the one panel that
+   *  exists to say what the rule is. And "Reminder · 07:45" was a
+   *  `role="presentation"` div wearing `brain-menu-item`: menu item height,
+   *  menu item indent, not pressable — the shape the picker's own code
+   *  forbids two files away. */
+  const openRepeatMenu = async () => {
+    const chip = [...document.querySelectorAll<HTMLElement>(".chip")].find((node) =>
+      node.getAttribute("aria-label")?.startsWith("Repeat"),
+    );
+    if (!chip) throw new Error("no Repeat chip on the expanded row");
+    await act(async () => {
+      chip.dispatchEvent(pointer("pointerdown"));
+      chip.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+  };
+
+  it("wraps the repeat rule instead of cutting it, and says where the clock is set", async () => {
+    stubHover();
+    await renderRows(
+      [task("a", { when: TODAY, time: "07:45", repeat: { freq: "monthly", byMonthDay: 14 } })],
+      { expanded: true },
+    );
+    await openRepeatMenu();
+
+    const items = [...document.querySelectorAll(".brain-menu-item")];
+    expect(items.some((item) => item.getAttribute("role") === "presentation")).toBe(
+      false,
+    );
+    const rule = items.find((item) => item.textContent?.startsWith("Every month"));
+    expect(rule?.textContent).toBe("Every month on the 14th at 07:45");
+    expect(rule?.querySelector(".truncate")).toBeNull();
+
+    const caption = document.querySelector(".brain-menu-caption") as HTMLElement;
+    expect(caption.textContent).toBe("Reminder 07:45, set in When");
+    expect(caption.className).not.toContain("brain-menu-item");
+  });
+
   it("commits what the sheet was dragged away on, because a drag is a close", async () => {
     // THE GRIP IS THE PRIMARY WAY OUT ON A PHONE, and the same panel on a
     // pointer commits what a press outside settled on. Two dismissals of one

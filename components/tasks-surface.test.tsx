@@ -4,6 +4,8 @@
 // empty states say, and the two motions that change what is on screen,
 // completion and reschedule. Every string here is the spec's, verbatim.
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -171,6 +173,14 @@ function type(field: HTMLInputElement, value: string) {
   field.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
+/** The stylesheet, for the rules a surface computes for itself and no
+ *  fixture draws. */
+const css = readFileSync(
+  path.join(path.resolve(__dirname, ".."), "app/globals.css"),
+  "utf8",
+);
+const tasksBlock = () => css;
+
 const rowTitles = () =>
   [...document.querySelectorAll(".brain-task-title")].map((node) => node.textContent);
 
@@ -336,6 +346,30 @@ describe("the lists", () => {
         "aria-label",
       ),
     ).toBe("New task");
+  });
+
+  /** I11. THE LOUDEST TEXT IN THE COLUMN BELONGED TO THE ROW WITH NO TASK IN
+   *  IT. The ghost row drew its When chip as a full glass pill with ink 600
+   *  text before anything had been typed, while every written row's chips stay
+   *  hidden until the row is opened. At rest it is the glyph and the word; the
+   *  pill is what a cursor and a keyboard bring. */
+  it("draws the capture row's When chip bare until it is hovered or focused", async () => {
+    await mount([task("a", { when: TODAY })]);
+    const ghost = document.querySelector(".brain-task-row_ghost") as HTMLElement;
+    const chip = ghost.querySelector(".chip") as HTMLElement;
+    expect(chip.textContent).toBe("When");
+    expect(chip.querySelector("svg")).not.toBeNull();
+
+    const sheet = tasksBlock();
+    const rest = sheet.slice(sheet.indexOf(".brain-task-row_ghost .chip {"));
+    const body = rest.slice(0, rest.indexOf("}"));
+    expect(body).toContain("background-color: transparent");
+    expect(body).toContain("box-shadow: none");
+    expect(body).toContain("color: var(--ink-3)");
+    // And the pill is what a cursor or a keyboard brings back, each behind
+    // its own gate: §8 guards the hover, and the focus half must not be.
+    expect(sheet).toContain(".brain-task-row_ghost .chip:hover {");
+    expect(sheet).toContain(".brain-task-row_ghost .chip:focus-visible {");
   });
 
   it("puts the no-category group first in Today and gives it no header", async () => {

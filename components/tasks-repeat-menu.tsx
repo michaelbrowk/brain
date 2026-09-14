@@ -156,7 +156,7 @@ export function TasksRepeatMenu({
           align="start"
           sideOffset={6}
           collisionPadding={8}
-          className="brain-menu z-[var(--z-modal)] w-[220px]"
+          className="brain-menu brain-repeat-menu z-[var(--z-modal)] w-[220px]"
         >
           <Dropdown.RadioGroup
             value={value}
@@ -177,7 +177,11 @@ export function TasksRepeatMenu({
                 value={option.kind}
                 className="brain-menu-item"
               >
-                <span className="min-w-0 flex-1 truncate">{option.label}</span>
+                {/* NO TRUNCATION HERE. "Every month on the 14th at 07:45" was
+                    cut at the width the menu was given and the clock was the
+                    half that went, in the one panel that exists to say what
+                    the rule is. It wraps instead. */}
+                <span className="min-w-0 flex-1">{option.label}</span>
                 {value === option.kind && (
                   <Icon name="check-linear" size={14} className="shrink-0 text-ink-2" />
                 )}
@@ -186,15 +190,18 @@ export function TasksRepeatMenu({
             {/* ONE FIELD, ONE EDITOR. The clock is on the RECORD, not on the
                 rule, so it is set in the When picker's Reminder row and read
                 back here. A second editor for one field is how two answers
-                start. */}
+                start.
+                AND IT IS A CAPTION, NOT A ROW. It wore `brain-menu-item`:
+                menu item height, menu item indent, and not pressable, which
+                is the one shape a control must not have. It says where the
+                clock is set, in the register a sentence about a panel belongs
+                in. `role="presentation"`: a generic node inside the radio
+                group, inside a menu, is a shape neither role owns. */}
             {task.time !== undefined && (
               <Fragment>
                 <Dropdown.Separator className="brain-menu-sep" />
-                {/* `role="presentation"`: a generic node inside the radio
-                    group, inside a menu, is a shape neither role owns. The
-                    sentence is still read; the box around it is not a thing. */}
-                <div className="brain-menu-item" role="presentation" data-read>
-                  <span className="min-w-0 flex-1 truncate">{`Reminder · ${task.time}`}</span>
+                <div className="brain-menu-caption text-caption" role="presentation">
+                  {`Reminder ${task.time}, set in When`}
                 </div>
               </Fragment>
             )}

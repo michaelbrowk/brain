@@ -196,6 +196,35 @@ function glyph(name: string, size = 16): SVGElement {
   return svg;
 }
 
+/** One value with its own arrow pair, up over down. */
+function spinUnit(
+  box: HTMLElement,
+  up: HTMLButtonElement,
+  down: HTMLButtonElement,
+): HTMLElement {
+  const unit = document.createElement("div");
+  unit.className = "brain-when-spin-unit";
+  const arrows = document.createElement("div");
+  arrows.className = "brain-when-spin-arrows";
+  arrows.append(up, down);
+  unit.append(box, arrows);
+  return unit;
+}
+
+/** A spinner's step: 16px, because a pair of them stands beside one 13px
+ *  value and the atom's smallest is 28. Everything else about it is
+ *  `.icon-btn`'s. */
+function arrowButton(label: string, name: string, flag: string): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "icon-btn";
+  button.dataset.whenStep = "";
+  button.setAttribute(flag, "");
+  button.setAttribute("aria-label", label);
+  button.append(glyph(name, 12));
+  return button;
+}
+
 function stepButton(label: string, name: string, flag: string): HTMLButtonElement {
   const button = document.createElement("button");
   button.type = "button";
@@ -278,11 +307,24 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
     return button;
   };
 
+  /** I5. THE PANEL NAMES ITS FIELD, in deadline mode.
+   *
+   *  It drew Today, the grid, "No deadline" and "Done", and the word deadline
+   *  appeared once, on the button that clears it. The chip that opened it has
+   *  already turned from "Deadline" into "15 Sep" by then, so on the row the
+   *  only thing separating when from deadline was a 14px flag glyph beside a
+   *  14px calendar glyph. The `aria-label` said "Deadline" and nothing
+   *  visible did. */
+  const caption = document.createElement("div");
+  caption.className = "brain-when-caption text-label";
+  caption.textContent = "Deadline";
+
   const todayRow = row("Today", "star-linear", "data-when-today");
   const eveningRow = row("This Evening", "moon-linear", "data-when-evening");
   const somedayRow = row("Someday", "box-minimalistic-linear", "data-when-someday");
   const reminderRow = row("Reminder", "clock-circle-linear", "data-when-reminder");
 
+  if (deadline) element.append(caption);
   // Today is offered in both modes. A deadline of today is a deadline.
   element.append(todayRow);
 
@@ -345,10 +387,18 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   spin.className = "brain-when-spin";
   const hour = document.createElement("div");
   const minute = document.createElement("div");
-  const hourUp = stepButton("An hour later", "alt-arrow-up-linear", "data-when-hour-up");
-  const hourDown = stepButton("An hour earlier", "alt-arrow-down-linear", "data-when-hour-down");
-  const minuteUp = stepButton("Five minutes later", "alt-arrow-up-linear", "data-when-minute-up");
-  const minuteDown = stepButton(
+  const hourUp = arrowButton("An hour later", "alt-arrow-up-linear", "data-when-hour-up");
+  const hourDown = arrowButton(
+    "An hour earlier",
+    "alt-arrow-down-linear",
+    "data-when-hour-down",
+  );
+  const minuteUp = arrowButton(
+    "Five minutes later",
+    "alt-arrow-up-linear",
+    "data-when-minute-up",
+  );
+  const minuteDown = arrowButton(
     "Five minutes earlier",
     "alt-arrow-down-linear",
     "data-when-minute-down",
@@ -380,7 +430,20 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
     timeClear.setAttribute("aria-label", "Clear the reminder");
     timeClear.append(glyph("close-linear", 14));
 
-    spin.append(hour, hourDown, hourUp, colon, minute, minuteDown, minuteUp, gap, timeClear);
+    // TWO SPINNERS, NOT SEVEN SIBLINGS IN A ROW. The children were `hour,
+    // hourDown, hourUp, colon, minute, minuteDown, minuteUp` with a uniform
+    // 2px between every one of them: nothing bound an arrow pair to the value
+    // it steps, the hour's "later" arrow touched the colon, and down came
+    // before up, inverted from every stepper a reader has used. Each value
+    // now carries its own vertical pair, up over down, and the colon stands
+    // clear of the pair before it.
+    spin.append(
+      spinUnit(hour, hourUp, hourDown),
+      colon,
+      spinUnit(minute, minuteUp, minuteDown),
+      gap,
+      timeClear,
+    );
     element.append(reminderRow, spin);
   }
 
@@ -393,9 +456,15 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   clear.className = "btn btn-quiet";
   clear.dataset.whenClear = "";
   clear.append(glyph("close-linear", 14), document.createTextNode(deadline ? "No deadline" : "Clear"));
+  // I9. ONE INK FILL PER SURFACE (DESIGN.md ban 5). The chosen day is an
+  // ink-filled square and Done was an ink-filled primary, two black masses at
+  // opposite ends of a 430px panel. The day keeps its capsule, because that is
+  // the answer the panel exists to give; Done is the quiet button the rows
+  // are, carrying its weight in ink text, and Clear stands beside it a step
+  // quieter still.
   const done = document.createElement("button");
   done.type = "button";
-  done.className = "btn btn-ink";
+  done.className = "btn btn-quiet";
   done.dataset.whenDone = "";
   done.textContent = "Done";
   foot.append(clear, done);
@@ -772,6 +841,7 @@ export function TasksWhenPicker({
   const sheet = useSheetGesture();
   const dragControls = useDragControls();
   const sheetY = useMotionValue(0);
+  const sheetRef = useRef<HTMLDivElement | null>(null);
   const pickRef = useRef(onPick);
   const valueRef = useRef(value);
   /** TRUE ONCE THE POPOVER HAS BEEN ASKED TO CLOSE, by Done, by a quick row,
@@ -779,6 +849,29 @@ export function TasksWhenPicker({
    *  runs when a dependency changes under an OPEN popover, which is a remount
    *  and not a decision to write anything. */
   const closing = useRef(false);
+
+  /** THE ONE WAY OUT, so the sheet leaves the same way whichever gesture
+   *  asked it to.
+   *
+   *  C3. The sheet used to carry two arrivals and two dismissals at once: the
+   *  material's `materialize-in`/`materialize-out` keyframes on the
+   *  `Popover.Content` and framer's `SPRING_SHEET` on the box inside it. So it
+   *  popped rather than rose, and on release it faded and scaled where it
+   *  stood over the list it was drawn on, with the calendar's week rows and
+   *  the rows underneath both legible and neither readable. The material
+   *  animates nothing in the sheet form now; what holds the node while the
+   *  exit plays is a keyframe that moves nothing, and the travel off the
+   *  bottom is this spring, alone. Reduced motion collapses that keyframe
+   *  through the global rule, so there the sheet simply goes. */
+  const close = useCallback(() => {
+    closing.current = true;
+    if (sheet && !reduce) {
+      const height = sheetRef.current?.offsetHeight ?? 0;
+      const away = sheetY.get() + (height > 0 ? height : window.innerHeight);
+      animate(sheetY, away, SPRING_SHEET);
+    }
+    setOpen(false);
+  }, [reduce, sheet, sheetY]);
 
   // Declared first, so the mount effect below already sees this render's
   // callback and this render's value.
@@ -801,10 +894,7 @@ export function TasksWhenPicker({
         mode,
         reduce,
         onPick: (next) => pickRef.current(next),
-        onDone: () => {
-          closing.current = true;
-          setOpen(false);
-        },
+        onDone: close,
       });
       host.append(handle.element);
       handle.focus();
@@ -821,7 +911,7 @@ export function TasksWhenPicker({
         if (closing.current) handle.commit();
       };
     },
-    [today, mode, reduce],
+    [close, today, mode, reduce],
   );
 
   /** THE PICKER IS 430 TALL AND SOME WINDOWS ARE NOT.
@@ -844,8 +934,14 @@ export function TasksWhenPicker({
       onOpenChange={(next) => {
         // A TAP OUTSIDE IS AN ANSWER, and Radix's own dismissals come through
         // here rather than through `onDone`.
-        if (!next) closing.current = true;
-        setOpen(next);
+        if (!next) {
+          close();
+          return;
+        }
+        // A sheet that was carried away last time starts its next arrival
+        // from its resting place, not from wherever the dismissal left it.
+        sheetY.set(0);
+        setOpen(true);
       }}
     >
       <Popover.Trigger asChild>{trigger}</Popover.Trigger>
@@ -857,10 +953,13 @@ export function TasksWhenPicker({
           collisionPadding={8}
           aria-label={ariaLabel}
           onOpenAutoFocus={(event) => event.preventDefault()}
-          className={`brain-menu z-[var(--z-modal)]${sheet ? " brain-when-sheet" : ""}`}
+          className={`brain-menu brain-when-panel z-[var(--z-modal)]${
+            sheet ? " brain-when-sheet" : ""
+          }`}
         >
           {sheet ? (
             <motion.div
+              ref={sheetRef}
               style={{ y: sheetY }}
               initial={reduce ? false : { y: SHEET_ENTER_Y }}
               animate={{ y: 0 }}
@@ -880,8 +979,7 @@ export function TasksWhenPicker({
                   // primary way out of this panel, and the same panel on a
                   // pointer commits what a press outside settled on. Two
                   // dismissals of one control cannot mean opposite things.
-                  closing.current = true;
-                  setOpen(false);
+                  close();
                   return;
                 }
                 animate(sheetY, 0, reduce ? { duration: 0 } : SPRING_SHEET_GESTURE);

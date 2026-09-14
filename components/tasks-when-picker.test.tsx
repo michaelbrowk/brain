@@ -145,6 +145,49 @@ describe("the picker's rows", () => {
     expect(element.querySelector("[data-when-clear]")?.textContent).toBe("No deadline");
   });
 
+  /** I5. THE DEADLINE PANEL NAMES ITS FIELD.
+   *
+   *  It drew Today, the grid, "No deadline" and "Done", and the word deadline
+   *  appeared once, on the button that clears it. The chip that opened it has
+   *  already turned from "Deadline" into "15 Sep", so on the row the only
+   *  thing separating when from deadline was a 14px flag beside a 14px
+   *  calendar. */
+  it("names the field at the top of the panel in deadline mode, and only there", () => {
+    const { element } = open({ mode: "deadline" });
+    const caption = element.firstElementChild as HTMLElement;
+    expect(caption.className).toContain("brain-when-caption");
+    expect(caption.textContent).toBe("Deadline");
+    expect(caption.className).toContain("text-label");
+
+    expect(open().element.querySelector(".brain-when-caption")).toBeNull();
+    const block = pickerBlock();
+    expect(block).toContain(".brain-when-caption");
+    expect(block).toMatch(/\.brain-when-caption \{[^}]*color: var\(--ink-3\)/);
+  });
+
+  /** I9. ONE INK FILL PER SURFACE (DESIGN.md ban 5). The chosen day was an
+   *  ink-filled square and Done was an ink-filled primary, two black masses
+   *  at opposite ends of a 430px panel. The day keeps its capsule, because
+   *  that is the answer the panel is there to give; Done is the quiet button
+   *  the rows are, and Clear stands beside it a step quieter still. */
+  it("keeps one ink fill: the chosen day, with a quiet foot under it", () => {
+    const { element } = open({ value: { when: TODAY, evening: false, time: null } });
+    const doneButton = element.querySelector("[data-when-done]") as HTMLElement;
+    const clearButton = element.querySelector("[data-when-clear]") as HTMLElement;
+    expect(doneButton.className).toBe("btn btn-quiet");
+    expect(clearButton.className).toBe("btn btn-quiet");
+    expect(element.innerHTML).not.toContain("btn-ink");
+
+    const block = pickerBlock();
+    expect(block).toMatch(
+      /\.brain-when-day\[aria-selected="true"\] \{[^}]*background-color: var\(--ink\)/,
+    );
+    expect(block).toMatch(
+      /\[data-when-done\] \{[^}]*color: var\(--ink\);[^}]*font-weight: 600/,
+    );
+    expect(block).toMatch(/\[data-when-clear\] \{[^}]*color: var\(--ink-3\)/);
+  });
+
   it("draws Today with the star, the evening with the moon, Someday with the box", () => {
     const { element } = open();
     expect(glyphs(element).slice(0, 3)).toEqual([
@@ -364,6 +407,48 @@ describe("the month grid", () => {
 });
 
 describe("the reminder", () => {
+  /** I3. THE STEPPER IS TWO SPINNERS, NOT SEVEN SIBLINGS IN A ROW.
+   *
+   *  DOM order was `hour, hourDown, hourUp, colon, minute, minuteDown,
+   *  minuteUp` with a uniform 2px between every one of them: nothing bound an
+   *  arrow pair to its value, the hour's "later" arrow touched the colon, and
+   *  down came before up, inverted from every stepper a reader has used. */
+  it("binds each value to its own vertical arrow pair, up before down", () => {
+    const { element } = open({ value: { when: TODAY, evening: false, time: "09:00" } });
+    const spin = element.querySelector(".brain-when-spin") as HTMLElement;
+    expect([...spin.children].map((child) => child.className)).toEqual([
+      "brain-when-spin-unit",
+      "brain-when-spin-sep",
+      "brain-when-spin-unit",
+      "brain-when-spin-gap",
+      "icon-btn",
+    ]);
+
+    const units = [...spin.querySelectorAll(".brain-when-spin-unit")];
+    for (const [unit, flag, up, down] of [
+      [units[0], "data-when-hour", "data-when-hour-up", "data-when-hour-down"],
+      [units[1], "data-when-minute", "data-when-minute-up", "data-when-minute-down"],
+    ] as const) {
+      expect((unit.firstElementChild as HTMLElement).hasAttribute(flag)).toBe(true);
+      const arrows = unit.querySelector(".brain-when-spin-arrows") as HTMLElement;
+      expect([...arrows.children].map((arrow) => arrow.getAttribute("aria-label"))).toEqual(
+        [
+          (unit.querySelector(`[${up}]`) as HTMLElement).getAttribute("aria-label"),
+          (unit.querySelector(`[${down}]`) as HTMLElement).getAttribute("aria-label"),
+        ],
+      );
+      expect(arrows.firstElementChild?.hasAttribute(up)).toBe(true);
+      expect(arrows.lastElementChild?.hasAttribute(down)).toBe(true);
+    }
+
+    const block = pickerBlock();
+    expect(block).toMatch(/\.brain-when-spin-unit \{[^}]*gap: 6px/);
+    expect(block).toMatch(/\.brain-when-spin-arrows \{[^}]*flex-direction: column/);
+    expect(block).toMatch(/\.brain-when-spin-sep \{[^}]*margin-left: 6px/);
+    expect(block).toMatch(/\.brain-when-spin \{[^}]*gap: 6px/);
+    expect(block).toMatch(/\.brain-when-spin-arrows > \.icon-btn \{[^}]*height: 16px/);
+  });
+
   it("turns on at 09:00", () => {
     const { element } = open({ value: { when: TODAY, evening: false, time: null } });
     element.querySelector<HTMLElement>("[data-when-reminder]")?.click();
@@ -812,7 +897,11 @@ describe("the motion", () => {
     key(element, "PageDown");
     expect(animations).toHaveLength(1);
     expect(animations[0].element).toBe(element.querySelector(".brain-when-grid"));
+    // From the side the month came from, 6px, and the opacity with it.
     expect(animations[0].frames[0].transform).toBe("translateX(6px)");
+    expect(animations[0].frames[0].opacity).toBe(0);
+    expect(animations[0].frames[1].transform).toBe("translateX(0)");
+    expect(animations[0].frames[1].opacity).toBe(1);
     key(element, "PageUp");
     expect(animations[1].frames[0].transform).toBe("translateX(-6px)");
   });
@@ -822,6 +911,49 @@ describe("the motion", () => {
     key(element, "PageDown");
     expect(animations).toHaveLength(0);
     expect(month(element)).toBe("October 2026");
+  });
+
+  /** C3. ONE OBJECT, ONE ANIMATION.
+   *
+   *  The sheet's arrival ran the material's scale-and-opacity keyframes AND a
+   *  `SPRING_SHEET` y-slide on the same element, so it popped rather than
+   *  rose; its dismissal ran framer's and Radix's `materialize-out` together,
+   *  so it dissolved where it stood and for ~120ms the calendar's week rows
+   *  were printed across the list underneath at partial opacity. The material
+   *  animates nothing in the sheet form. What holds the node for the exit is
+   *  a keyframe that moves nothing, so the travel off the bottom is the
+   *  spring's alone. */
+  it("takes the material's keyframes off the sheet, in both directions", () => {
+    const block = pickerBlock();
+    expect(block).toMatch(
+      /\.brain-menu\.brain-when-sheet\[data-state="open"\][\s\S]{0,200}?animation: none/,
+    );
+    expect(block).toMatch(
+      /\.brain-menu\.brain-when-sheet\[data-state="closed"\] \{\s*animation: when-sheet-hold 300ms/,
+    );
+    expect(block).not.toMatch(/animation:\s*materialize-/);
+    expect(block).toContain("@keyframes when-sheet-hold");
+  });
+
+  /** I4. NOTHING UNDER THE GRID IS LEGIBLE.
+   *
+   *  A 7x6 grid of numbers is the one popover in this app where a stray glyph
+   *  from behind is indistinguishable from content, and at 390 "Sep", "PM", a
+   *  repeat glyph and a moon all landed among the day numbers, with "4 PM"
+   *  reading as a date-time in the Sat/Sun corner. `--blur-reg` is not enough
+   *  for 14px ink behind it, so the panel takes the composer sheet's
+   *  material, on a pointer and on a phone alike. */
+  it("gives the panel the composer sheet's material, desktop and phone", () => {
+    const block = pickerBlock();
+    const rule = block.slice(block.indexOf(".brain-menu.brain-when-panel {"));
+    expect(rule.slice(0, rule.indexOf("}"))).toContain("background: var(--glass-thick)");
+    expect(rule.slice(0, rule.indexOf("}"))).toContain(
+      "backdrop-filter: var(--blur-thick)",
+    );
+    // Declared outside the phone media query, so the popover takes it too.
+    expect(block.indexOf(".brain-menu.brain-when-panel {")).toBeLessThan(
+      block.indexOf("@media (max-width: 767px)"),
+    );
   });
 
   it("leaves the picker's own transitions to the sheet's blanket collapse", () => {

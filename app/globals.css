@@ -2093,25 +2093,6 @@ html[data-kbd] [contenteditable]:focus-visible {
   opacity: 0.4;
   pointer-events: none;
 }
-/* A MENU ROW THAT ONLY READS. The repeat menu says which clock its rule
-   carries, and that clock is set in the When picker: one field, one editor.
-   So the row is a sentence rather than a control: quiet ink, the ordinary
-   cursor, and none of the hover the rows around it answer with. */
-.brain-menu-item[data-read] {
-  color: var(--ink-3);
-  cursor: default;
-}
-.brain-menu-item[data-read]:active {
-  background-color: transparent;
-}
-/* The hover half rides the same pointer gate the rule it is undoing rides
-   (DESIGN.md §8). Outside it, a touch screen reaches a `:hover` on the tap and
-   holds it, and this one would have been the whole file's one exception. */
-@media (hover: hover) {
-  .brain-menu-item[data-read]:hover {
-    background-color: transparent;
-  }
-}
 .brain-menu-icon {
   flex-shrink: 0;
   color: var(--ink-2);
@@ -5799,6 +5780,45 @@ html[data-kbd] .brain-task-row[data-selected] {
   background-color: transparent;
   transform: none;
 }
+/* I11. THE LOUDEST TEXT IN THE COLUMN BELONGED TO THE ROW WITH NO TASK IN IT.
+   The capture row drew its When chip as a full glass pill with ink 600 text
+   at rest, before anything had been typed, while every written row keeps its
+   chips hidden until the row is opened. At rest it is the glyph and the word,
+   in the tail's own quiet, and the pill is what a cursor or a keyboard brings.
+
+   The pill's paint is named once, here, and read back by the two states
+   below: they cannot share one rule, because the hover half rides §8's
+   pointer gate (a touch screen reaches a `:hover` on the tap and holds it)
+   and the focus half must not. */
+.brain-task-row_ghost .chip {
+  --ghost-chip-rim:
+    inset 0 1px 0 var(--fill-highlight), 0 0 0 0.5px var(--fill-rim),
+    0 1px 2px var(--fill-rim);
+  background-color: transparent;
+  box-shadow: none;
+  color: var(--ink-3);
+}
+.brain-task-row_ghost .chip .chip-glyph > svg {
+  color: var(--ink-3);
+}
+@media (hover: hover) {
+  .brain-task-row_ghost .chip:hover {
+    background-color: var(--fill-chip);
+    box-shadow: var(--ghost-chip-rim);
+    color: var(--ink);
+  }
+  .brain-task-row_ghost .chip:hover .chip-glyph > svg {
+    color: var(--ink-2);
+  }
+}
+.brain-task-row_ghost .chip:focus-visible {
+  background-color: var(--fill-chip);
+  box-shadow: var(--ghost-chip-rim);
+  color: var(--ink);
+}
+.brain-task-row_ghost .chip:focus-visible .chip-glyph > svg {
+  color: var(--ink-2);
+}
 
 /* The checkbox, as the note draws it. `components/editor/milkdown.css` keeps
    the positioning the NodeView needs and nothing else: the box, the radius,
@@ -6160,6 +6180,32 @@ html[data-kbd] .brain-task-row[data-selected] {
 .brain-when-picker {
   width: 252px;
 }
+/* THE PANEL'S OWN MATERIAL, on a pointer and on a phone alike.
+
+   I4. `brain-menu` is `--glass-reg` under an 18px blur, which is the right
+   material for a list of words and not for a 7x6 grid of numbers: at 1440 the
+   words "mplate" and "call" from the rows behind printed INSIDE the grid, one
+   of them beside the 6 under the Sun heading, and at 390 "Sep", "PM", a repeat
+   glyph and a moon landed among the day numbers with "4 PM" reading as a
+   date-time in the Sat/Sun corner. DESIGN.md ban 2 says a blurred layer is
+   never the ground under a table, and this is the one popover where a stray
+   glyph is indistinguishable from content. So it takes the composer sheet's
+   material, which is the thickness the house gives its largest surfaces, and
+   the reduced-transparency fallbacks remap both tokens to the matte with it. */
+.brain-menu.brain-when-panel {
+  background: var(--glass-thick);
+  -webkit-backdrop-filter: var(--blur-thick);
+  backdrop-filter: var(--blur-thick);
+}
+/* The field's own name, in deadline mode. The panel drew Today, the grid, "No
+   deadline" and "Done", and the word deadline appeared once, on the button
+   that clears it, while the chip that opened it had already turned from
+   "Deadline" into "15 Sep". The label register, so it reads as a name over the
+   panel and not as one more row in it. */
+.brain-when-caption {
+  padding: 4px 8px 2px;
+  color: var(--ink-3);
+}
 .brain-when-head {
   display: flex;
   height: 28px;
@@ -6232,18 +6278,44 @@ html[data-kbd] .brain-task-row[data-selected] {
   background-color: var(--ink);
   color: var(--paper);
 }
+/* THE CLOCK IS TWO SPINNERS AND A COLON, not seven controls in a row.
+
+   I3. The children were `hour, hourDown, hourUp, colon, minute, minuteDown,
+   minuteUp` with a uniform 2px between every one of them: nothing bound an
+   arrow pair to the value it steps, the hour's "later" arrow touched the
+   colon, and down came before up, inverted from every stepper a reader has
+   used. Two numbers here, 6 and its double: 6 between a value and its pair,
+   12 between the pair and the colon (the 6 the spin sets plus the 6 the colon
+   adds), 6 again from the colon to the minute's digits. */
 .brain-when-spin {
   display: flex;
   align-items: center;
-  gap: 2px;
+  gap: 6px;
   padding: 0 8px 4px;
+}
+.brain-when-spin-unit {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.brain-when-spin-arrows {
+  display: flex;
+  flex-direction: column;
+}
+/* 16, because a pair of them stands beside one 13px value and the atom's
+   smallest is 28. Everything else about them is `.icon-btn`'s: the hover, the
+   press, the disabled state and the reduced-motion handling are all declared
+   once, above, and this adds none of it back. */
+.brain-when-spin-arrows > .icon-btn {
+  width: 16px;
+  height: 16px;
 }
 /* The clock is drawn only once there is one, and `.brain-when-spin` sets a
    display the attribute alone cannot beat. */
 .brain-when-spin[hidden] {
   display: none;
 }
-.brain-when-spin > [role="spinbutton"] {
+.brain-when-spin-unit > [role="spinbutton"] {
   min-width: 28px;
   text-align: center;
   font-variant-numeric: tabular-nums;
@@ -6254,6 +6326,7 @@ html[data-kbd] .brain-task-row[data-selected] {
   color: var(--ink);
 }
 .brain-when-spin-sep {
+  margin-left: 6px;
   color: var(--ink-3);
 }
 .brain-when-spin-gap {
@@ -6272,6 +6345,14 @@ html[data-kbd] .brain-task-row[data-selected] {
   color: var(--ink-3);
   pointer-events: none;
 }
+/* ONE INK FILL PER SURFACE (DESIGN.md ban 5), AND THE DAY HAS IT.
+
+   I9. The chosen day is an ink-filled square and Done was an ink-filled
+   primary: two black masses competing at opposite ends of a 430px panel, in
+   light, where the panel's whole job is to say which day was picked. The day
+   keeps its capsule. Done is the quiet button the rows are, carrying its
+   weight in ink text rather than in a fill, and Clear stands beside it one
+   step quieter, which is the order a reader should read them in. */
 .brain-when-foot {
   display: flex;
   gap: 6px;
@@ -6279,6 +6360,13 @@ html[data-kbd] .brain-task-row[data-selected] {
 }
 .brain-when-foot > .btn {
   flex: 1;
+}
+.brain-when-foot > [data-when-done] {
+  color: var(--ink);
+  font-weight: 600;
+}
+.brain-when-foot > [data-when-clear] {
+  color: var(--ink-3);
 }
 /* THE ROOM THERE IS, AND NOT A PIXEL MORE. The picker stands about 430 tall
    and a short window does not have 430: Radix measures the gap between the
@@ -6304,6 +6392,32 @@ html[data-kbd] .brain-task-row[data-selected] {
     min-width: 0;
     width: calc(100vw - 16px);
   }
+  /* ONE OBJECT, ONE ANIMATION (C3).
+
+     The sheet carried two arrivals and two dismissals at once: the material's
+     `materialize-in` / `materialize-out` keyframes here and framer's
+     `SPRING_SHEET` on the box inside. So it POPPED rather than rose, stayed
+     translucent over the list for its first ~150ms, and on release faded and
+     scaled where it stood: for ~120ms the calendar's week rows, "This
+     Evening", "Today" and "Someday" were printed across the rows underneath,
+     all legible, none readable. DESIGN.md section 6 is explicit that a Radix
+     surface materialises and framer is for what physically moves, and here
+     both did.
+
+     So the material moves nothing. What holds the node while the exit plays
+     is a keyframe that changes nothing at all, and the travel off the bottom
+     is the spring's, started from the value the drag left the sheet on
+     (`components/tasks-when-picker.tsx`). The global reduced-motion rule
+     collapses this hold like every other animation, and there the sheet
+     simply goes. */
+  .brain-menu.brain-when-sheet[data-state="open"],
+  .brain-menu.brain-when-sheet[data-state="open"]::before,
+  .brain-menu.brain-when-sheet[data-state="closed"]::before {
+    animation: none;
+  }
+  .brain-menu.brain-when-sheet[data-state="closed"] {
+    animation: when-sheet-hold 300ms linear both;
+  }
   .brain-when-picker {
     width: 100%;
   }
@@ -6321,6 +6435,46 @@ html[data-kbd] .brain-task-row[data-selected] {
         var(--tabbar-reserve, 0px)
     );
   }
+}
+
+/* The exit's own length, which is `SPRING_SHEET`'s 0.3s: the node has to stay
+   in the tree for as long as the spring is carrying it, and Radix keeps a
+   surface only while an animation is running on it. It draws nothing. */
+@keyframes when-sheet-hold {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ── The repeat menu (P6.2) ─────────────────────────────────────────────────
+
+   Three grades of one rule and a stop, and the rule itself is the whole point
+   of the panel, so it is never cut: "Every month on the 14th at 0..." was
+   truncated at the width the menu was given and the clock was the half that
+   went. The rows grow to the lines their words need.
+
+   The reminder line under them is a CAPTION and not a row. It wore
+   `brain-menu-item` with a `role="presentation"` on it: menu item height, menu
+   item indent, and not pressable, which is the one shape a control must not
+   have. It says where the clock is set, in the caption register, under the
+   separator, and answers nothing. */
+.brain-repeat-menu .brain-menu-item {
+  height: auto;
+  min-height: 32px;
+  padding-top: 7px;
+  padding-bottom: 7px;
+  line-height: 18px;
+  align-items: flex-start;
+}
+.brain-repeat-menu .brain-menu-icon {
+  margin-top: 1px;
+}
+.brain-menu-caption {
+  padding: 4px 8px 2px;
+  color: var(--ink-3);
 }
 
 /* ── Home's Today block (P6) ─────────────────────────────────────────────────

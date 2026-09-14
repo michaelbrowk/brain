@@ -33,6 +33,12 @@ const TODAY = "2026-09-14";
 const BASE_BODY = "- [ ] Water the plants\n\nA note about the garden.";
 const TICKED_BODY = "- [x] Water the plants\n\nA note about the garden.";
 
+/** The same page with the task line BELOW the prose, which is the half of the
+ *  geometry the shared head cannot carry: a tick under the client's edit has
+ *  to come back through the shared tail. */
+const BELOW_BODY = "A note about the garden.\n\n- [ ] Water the plants";
+const BELOW_TICKED = "A note about the garden.\n\n- [x] Water the plants";
+
 /** One task record as the file holds it. */
 async function readTaskFile(root: string, id: string): Promise<string> {
   return fs.readFile(path.join(root, "_tasks", `${id}.md`), "utf8");
@@ -46,9 +52,9 @@ async function tmpStore(options: { publicOrigin?: string | null } = {}) {
 }
 
 /** A page holding one unticked task line, and a task linked to that line. */
-async function gardenPage(s: Store) {
+async function gardenPage(s: Store, body: string = BASE_BODY) {
   const page = await s.createPage(null, "Garden");
-  const written = await s.writePage(page.id, BASE_BODY, undefined, "me");
+  const written = await s.writePage(page.id, body, undefined, "me");
   const [line] = parseTaskLines(written.markdown);
   const task = await s.createTask({
     title: line.normalized,
@@ -154,6 +160,26 @@ describe("two writers and one checkbox", () => {
     await expect(
       s.writePage(pageId, "Something else entirely.", rev, "me"),
     ).rejects.toBeInstanceOf(RevConflictError);
+  });
+
+  it("accepts A's edit with B's tick on the line below it, serializer newline and all", async () => {
+    const { s } = await tmpStore();
+    const { pageId, taskId, rev } = await gardenPage(s, BELOW_BODY);
+    await s.writePage(pageId, BELOW_TICKED, rev, "me");
+
+    // What a real client sends. Milkdown's serializer ends every body with a
+    // newline, and the baseline the client was handed is stored trimmed
+    // (`lib/autosave.ts` canonicalises it). So `mine` carries one line the
+    // base does not, and comparing the two from the end finds nothing shared:
+    // the tick lands below the edit, where only the shared tail can carry it.
+    const mine = "A note about the garden, watered twice weekly.\n\n- [ ] Water the plants\n";
+    const merged = await s.writePage(pageId, mine, rev, "me", undefined, BELOW_BODY);
+
+    expect(merged.markdown).toBe(
+      "A note about the garden, watered twice weekly.\n\n- [x] Water the plants",
+    );
+    expect((await s.readPage(pageId)).markdown).toBe(merged.markdown);
+    expect(viewOf(s, taskId).done).toBe(true);
   });
 
   it("refuses A with a 409 when A rewrote the ticked line", async () => {

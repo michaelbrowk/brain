@@ -7170,9 +7170,15 @@ function mergeConcurrentTicks(
 ): CheckboxMergeResult {
   if (parsed.meta.structureWriteBarrier === true) return { ok: false };
   if (expectedMarkdown === undefined) return { ok: false };
+  // All three through the same function. The merge compares the three bodies
+  // line by line from both ends, so one body carrying a trailing blank the
+  // other two do not have makes every shared tail zero, and only a tick ABOVE
+  // the client's first edit could ever come back. The client's body is the
+  // one that carries it: Milkdown's serializer ends a body with a newline,
+  // and `parsePage` and the stored baseline are both trimmed already.
   return mergeCheckboxStates(
     canonicalPageMarkdown(expectedMarkdown),
-    markdown,
+    canonicalPageMarkdown(markdown),
     parsed.markdown,
   );
 }

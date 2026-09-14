@@ -187,10 +187,14 @@ test("a completion from Tasks lands in a note that is open and dirty in another 
     // every bullet as `*`, so this tab's first save rewrites the marker on
     // every line; `mergeCheckboxStates` levels the marker before it compares,
     // so that rewrite is not a touched line and the tick still merges.
+    //
+    // The checkbox sits BELOW the paragraph this tab edits, which is the half
+    // of the merge only the shared tail can carry. With it above, the shared
+    // head alone answers and a body the client never sends would pass.
     const groceries = await createNote(
       open,
       "Groceries",
-      "- [ ] water the plants\n\nnotes\n",
+      "notes\n\n- [ ] water the plants\n",
     );
     const plants = await linkTask(open, groceries, 0, today);
     await openNote(open, groceries.id);

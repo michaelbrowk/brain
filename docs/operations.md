@@ -54,7 +54,13 @@ Every other step applies unchanged.
   private key is generated on first use and exists nowhere else: back the
   directory up or accept that every device re-registers after a restore.
   Rotating it by deleting the file invalidates every subscription, because a
-  browser bakes the public key into the subscription it created.
+  browser bakes the public key into the subscription it created. A `vapid.json`
+  that is present but unreadable is replaced by a fresh pair, which has the
+  same effect, so that case logs `[brain/push] the VAPID pair on disk could not
+  be read` and says every device must register again. Push identifies this
+  server to a push service with `BRAIN_PUBLIC_ORIGIN` when it is set to an
+  `https://` origin, and with the project URL otherwise, so an instance that
+  wants abuse reports to reach its own operator should set that variable.
 - `/etc/brain/brain.env` contains runtime secrets and is readable only by `root` and the `brain` group.
 - `/etc/brain/deployer.env` contains the read-only GitHub token and merger
   allowlist. It is `root:root` mode `0600` and is never loaded by the app.

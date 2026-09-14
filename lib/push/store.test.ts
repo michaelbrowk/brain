@@ -1,7 +1,7 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { pushSubscriptionId, type PushSubscriptionRecord } from "./model";
 import {
   listPushSubscriptions,
@@ -10,11 +10,14 @@ import {
   readVapidKeys,
   removePushSubscription,
   savePushSubscription,
-  touchPushSubscription,
   writePushKinds,
 } from "./store";
 
 const ENDPOINT = "https://web.push.apple.com/brain-store-endpoint-not-for-production";
+/** 65 bytes, first byte 0x04, one repeated byte after it: the shape a browser
+ *  produces and obviously not a key anyone holds. */
+const P256DH = `BH${"p".repeat(85)}`;
+const AUTH = "a".repeat(22);
 let dir: string;
 beforeEach(async () => {
   dir = await mkdtemp(path.join(os.tmpdir(), "brain-push-test-"));
@@ -29,7 +32,7 @@ afterEach(async () => {
 const record = (endpoint = ENDPOINT, label = "iPhone"): PushSubscriptionRecord => ({
   id: pushSubscriptionId(endpoint),
   endpoint,
-  keys: { p256dh: "p".repeat(87), auth: "a".repeat(22) },
+  keys: { p256dh: P256DH, auth: AUTH },
   deviceLabel: label,
   createdAt: "2026-09-14T12:00:00.000Z",
   lastSeenAt: "2026-09-14T12:00:00.000Z",
@@ -50,15 +53,48 @@ describe("the VAPID key pair", () => {
     expect(await readVapidKeys(dir)).toEqual(first);
   });
 
-  it("writes the private half 0600 inside a 0700 directory", async () => {
+  // The directory under test is one the store creates itself, not the one
+  // mkdtemp made: mkdtemp already gives 0700, so asserting on it measured
+  // Node's mode and not the store's.
+  it("writes the private half 0600 inside a directory it creates 0700", async () => {
+    const made = path.join(dir, "made-by-the-store");
+    await readVapidKeys(made);
+    expect((await stat(made)).mode & 0o777).toBe(0o700);
+    expect((await stat(path.join(made, "vapid.json"))).mode & 0o777).toBe(0o600);
+  });
+
+  // fs.mkdir(recursive) leaves an existing directory's mode alone, so a push
+  // directory laid down by hand at 0755 would stay 0755 and the key inside it
+  // would be world-readable to anyone with a shell on the box.
+  it("narrows a directory that already existed too wide", async () => {
+    await chmod(dir, 0o755);
     await readVapidKeys(dir);
     expect((await stat(dir)).mode & 0o777).toBe(0o700);
-    expect((await stat(path.join(dir, "vapid.json"))).mode & 0o777).toBe(0o600);
   });
 
   it("regenerates when the file on disk is not a pair, rather than throwing", async () => {
     await writeFile(path.join(dir, "vapid.json"), "{ not json", "utf8");
     expect((await readVapidKeys(dir)).publicKey.length).toBeGreaterThan(80);
+  });
+
+  // Losing the pair is the loudest failure this subsystem has: every device
+  // stops receiving anything, because a browser baked the old public key into
+  // the subscription it created. It must not happen in silence.
+  it("says out loud that a pair it could not read was replaced", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await writeFile(path.join(dir, "vapid.json"), "{ not json", "utf8");
+    await readVapidKeys(dir);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toMatch(/register again/);
+    warn.mockRestore();
+  });
+
+  it("says nothing when there was no pair to lose", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    await readVapidKeys(dir);
+    await readVapidKeys(dir);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it("keeps the private half out of every other file in the directory", async () => {
@@ -105,9 +141,11 @@ describe("the subscription store", () => {
     expect(rows.some((r) => r.deviceLabel === "device-0")).toBe(false);
   });
 
-  it("moves lastSeenAt without moving createdAt", async () => {
-    const saved = await savePushSubscription(record(), dir);
-    await touchPushSubscription(saved.id, "2026-09-20T12:00:00.000Z", dir);
+  // lastSeenAt moves through a re-registration, which is the only event that
+  // proves a device is still there. There is no separate toucher.
+  it("moves lastSeenAt without moving createdAt when a device registers again", async () => {
+    await savePushSubscription(record(), dir);
+    await savePushSubscription({ ...record(), lastSeenAt: "2026-09-20T12:00:00.000Z" }, dir);
     const row = (await listPushSubscriptions(dir))[0];
     expect(row.lastSeenAt).toBe("2026-09-20T12:00:00.000Z");
     expect(row.createdAt).toBe("2026-09-14T12:00:00.000Z");

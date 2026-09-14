@@ -1,6 +1,8 @@
 import webpush from "web-push";
 import { PROJECT_URL } from "@/lib/project";
 import {
+  MAX_PUSH_BODY,
+  MAX_PUSH_TITLE,
   PUSH_TTL_SECONDS,
   subscriptionIsGone,
   type PushKind,
@@ -34,6 +36,17 @@ export interface SendPort {
   ): Promise<void>;
 }
 
+/** `web-push` sets a socket timeout only when it is handed one, so without
+ *  this an unresponsive push service holds a request open with no ceiling,
+ *  and the reminder scan behind it waits for the same forever. */
+export const PUSH_REQUEST_TIMEOUT_MS = 10_000;
+
+/** How many devices are in flight at once. One at a time made every later
+ *  device wait out the slowest one before it; all at once would open twenty
+ *  sockets for one reminder. Four keeps a stalled endpoint off the other
+ *  lanes without making a burst of it. */
+export const PUSH_SEND_CONCURRENCY = 4;
+
 /** RFC 8292 §2 wants a contact URI for whoever runs this server, so a push
  *  service has somewhere to complain. The instance's own origin when it has
  *  one, the project otherwise. */
@@ -63,12 +76,17 @@ export async function sendPush(
   const records = await listPushSubscriptions(dir);
   if (records.length === 0) return { sent: 0, removed: 0, skipped: "no-devices" };
 
+  // Read once for the whole send rather than once per device, and not once
+  // per process: a pair replaced on disk has to reach the next send.
+  let pair: Promise<{ publicKey: string; privateKey: string }> | null = null;
   const deliver =
     overrides.deliver ??
     (async (record: PushSubscriptionRecord, body: string, options: { TTL: number }) => {
-      const keys = await readVapidKeys(dir);
+      pair ??= readVapidKeys(dir);
+      const keys = await pair;
       await webpush.sendNotification({ endpoint: record.endpoint, keys: record.keys }, body, {
         TTL: options.TTL,
+        timeout: PUSH_REQUEST_TIMEOUT_MS,
         urgency: "normal",
         vapidDetails: {
           subject: vapidSubject(),
@@ -78,29 +96,45 @@ export async function sendPush(
       });
     });
 
+  // Cut to what the worker will show. The encrypted body has a ceiling near
+  // 4 KB and a push service answers 413 past it, so a long mail subject would
+  // otherwise cost the whole notification rather than its tail.
   const body = JSON.stringify({
-    title: payload.title,
-    ...(payload.body !== undefined ? { body: payload.body } : {}),
+    title: payload.title.slice(0, MAX_PUSH_TITLE),
+    ...(payload.body !== undefined ? { body: payload.body.slice(0, MAX_PUSH_BODY) } : {}),
     href: payload.href,
   });
 
   let sent = 0;
   let removed = 0;
-  for (const record of records) {
-    try {
-      await deliver(record, body, { TTL: PUSH_TTL_SECONDS });
-      sent += 1;
-    } catch (cause: unknown) {
-      const status = statusOf(cause);
-      if (status !== null && subscriptionIsGone(status)) {
-        await removePushSubscription(record.id, dir);
-        removed += 1;
-        continue;
+  let next = 0;
+  const lanes = Math.min(PUSH_SEND_CONCURRENCY, records.length);
+  await Promise.all(
+    Array.from({ length: lanes }, async () => {
+      for (;;) {
+        // One thread, so taking an index and moving it on is atomic.
+        const record = records[next];
+        next += 1;
+        if (!record) return;
+        try {
+          await deliver(record, body, { TTL: PUSH_TTL_SECONDS });
+          sent += 1;
+        } catch (cause: unknown) {
+          const status = statusOf(cause);
+          if (status !== null && subscriptionIsGone(status)) {
+            await removePushSubscription(record.id, dir);
+            removed += 1;
+            continue;
+          }
+          // The status is the one thing an operator needs here: WebPushError's
+          // message is a constant, so 429, 400 and 500 read the same without
+          // it. The endpoint is a capability and stays out of the journal.
+          console.warn(
+            `[brain/push] device ${record.id} did not take the message (status ${status ?? "none"}): ${cause instanceof Error ? cause.message : String(cause)}`,
+          );
+        }
       }
-      console.warn(
-        `[brain/push] device ${record.id} did not take the message: ${cause instanceof Error ? cause.message : String(cause)}`,
-      );
-    }
-  }
+    }),
+  );
   return { sent, removed, skipped: null };
 }

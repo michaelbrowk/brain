@@ -25,6 +25,17 @@ afterEach(async () => {
 });
 
 const ENDPOINT = "https://web.push.apple.com/brain-route-endpoint-not-for-production";
+/** 65 bytes, first byte 0x04: the shape a browser produces, filled with one
+ *  repeated byte so it is obviously not a key anyone holds. */
+const P256DH = `BH${"p".repeat(85)}`;
+const AUTH = "a".repeat(22);
+
+/** Device labels and the instance's public key are per-owner state. A shared
+ *  cache is the one place they must never land. */
+const expectPrivate = (response: Response) => {
+  expect(response.headers.get("Cache-Control")).toBe("private, no-store");
+};
+
 const body = (value: unknown) =>
   new Request("http://localhost/api/push/subscriptions", {
     method: "POST",
@@ -49,7 +60,7 @@ describe("POST /api/push/subscriptions", () => {
   it("registers a device and answers 201 with the view, not the endpoint", async () => {
     const response = await subsPost(
       body({
-        subscription: { endpoint: ENDPOINT, keys: { p256dh: "p".repeat(87), auth: "a".repeat(22) } },
+        subscription: { endpoint: ENDPOINT, keys: { p256dh: P256DH, auth: AUTH } },
         deviceLabel: "iPhone",
       }),
     );
@@ -91,7 +102,7 @@ describe("DELETE /api/push/subscriptions", () => {
         body({
           subscription: {
             endpoint: ENDPOINT,
-            keys: { p256dh: "p".repeat(87), auth: "a".repeat(22) },
+            keys: { p256dh: P256DH, auth: AUTH },
           },
           deviceLabel: "iPhone",
         }),
@@ -165,7 +176,7 @@ describe("POST /api/push/test", () => {
   it("obeys the task-reminder toggle rather than proving the wrong thing", async () => {
     await subsPost(
       body({
-        subscription: { endpoint: ENDPOINT, keys: { p256dh: "p".repeat(87), auth: "a".repeat(22) } },
+        subscription: { endpoint: ENDPOINT, keys: { p256dh: P256DH, auth: AUTH } },
         deviceLabel: "iPhone",
       }),
     );
@@ -181,6 +192,64 @@ describe("POST /api/push/test", () => {
       removed: 0,
       skipped: "kind-off",
     });
+  });
+});
+
+describe("the private-route preamble", () => {
+  it("keeps every answer, errors included, out of a shared cache", async () => {
+    expectPrivate(await keyGet());
+    expectPrivate(await stateGet());
+    expectPrivate(await testPost());
+    expectPrivate(
+      await subsPost(
+        body({
+          subscription: { endpoint: ENDPOINT, keys: { p256dh: P256DH, auth: AUTH } },
+          deviceLabel: "iPhone",
+        }),
+      ),
+    );
+    expectPrivate(await subsPost(body({})));
+    expectPrivate(
+      await statePatch(
+        new Request("http://localhost/api/push/state", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ kinds: { "mail-new": false } }),
+        }),
+      ),
+    );
+    expectPrivate(
+      await statePatch(
+        new Request("http://localhost/api/push/state", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: "{ not json",
+        }),
+      ),
+    );
+    expectPrivate(
+      await subsDelete(
+        new Request("http://localhost/api/push/subscriptions", {
+          method: "DELETE",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ id: "nope" }),
+        }),
+      ),
+    );
+  });
+
+  // These stores read files. The declaration says so out loud, the way
+  // app/api/notifications/route.ts does.
+  it("runs on the node runtime, in all four routes", async () => {
+    const { readFile } = await import("node:fs/promises");
+    for (const route of ["key", "state", "subscriptions", "test"]) {
+      const source = await readFile(
+        path.join(process.cwd(), "app/api/push", route, "route.ts"),
+        "utf8",
+      );
+      expect(source).toContain('export const runtime = "nodejs";');
+      expect(source).toContain('export const dynamic = "force-dynamic";');
+    }
   });
 });
 

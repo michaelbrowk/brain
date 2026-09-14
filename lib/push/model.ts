@@ -38,6 +38,15 @@ export const PUSH_TTL_SECONDS = 3600;
  *  short of a file worth worrying about. */
 export const MAX_PUSH_SUBSCRIPTIONS = 20;
 
+/** What the service worker will show of either field
+ *  (`lib/push/worker-handlers.ts` slices to the same two numbers), and the
+ *  reason the wire payload is cut to them before it is sent: the encrypted
+ *  body has a ceiling near 4 KB, and a push service answers 413 for a longer
+ *  one. A subject line that arrives cut is better than a reminder that never
+ *  arrives. */
+export const MAX_PUSH_TITLE = 200;
+export const MAX_PUSH_BODY = 400;
+
 export interface PushSubscriptionRecord {
   id: string;
   /** Never logged and never sent to the browser. It is a capability: anyone
@@ -78,6 +87,28 @@ export function deviceView(record: PushSubscriptionRecord): PushDeviceView {
   };
 }
 
+/** Decode a base64url field and say how many bytes it held. `Buffer.from`
+ *  drops characters outside the alphabet without complaining, so the shape of
+ *  the string is checked before its length is trusted. */
+function base64UrlByteLength(value: string): number | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(value)) return null;
+  return Buffer.from(value, "base64url").length;
+}
+
+/** THE KEYS ARE CHECKED FOR SHAPE, NOT ONLY FOR LENGTH.
+ *
+ *  A `p256dh` that is not an uncompressed P-256 point makes `web-push` throw
+ *  from the encryption step with a plain Error and no `statusCode`, so the
+ *  send path cannot tell it from a network problem: the row is kept, and every
+ *  reminder from then on warns about a device that can never receive one. The
+ *  door is the only place that failure can be stopped.
+ */
+function keysAreWellFormed(p256dh: string, auth: string): boolean {
+  if (base64UrlByteLength(p256dh) !== 65) return false;
+  if (Buffer.from(p256dh, "base64url")[0] !== 0x04) return false;
+  return base64UrlByteLength(auth) === 16;
+}
+
 export function parsePushSubscription(raw: unknown): PushSubscriptionRecord | null {
   if (typeof raw !== "object" || raw === null) return null;
   const body = raw as Record<string, unknown>;
@@ -94,6 +125,7 @@ export function parsePushSubscription(raw: unknown): PushSubscriptionRecord | nu
   const { p256dh, auth } = keys as Record<string, unknown>;
   if (typeof p256dh !== "string" || typeof auth !== "string") return null;
   if (p256dh.length < 1 || p256dh.length > 200 || auth.length < 1 || auth.length > 100) return null;
+  if (!keysAreWellFormed(p256dh, auth)) return null;
   return {
     id: pushSubscriptionId(endpoint),
     endpoint,

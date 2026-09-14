@@ -46,12 +46,26 @@ function serialise<T>(work: () => Promise<T>): Promise<T> {
 
 async function writePrivate(dir: string, name: string, value: unknown): Promise<void> {
   await fs.mkdir(/* turbopackIgnore: true */ dir, { recursive: true, mode: 0o700 });
+  // `mkdir` sets a mode only when it creates the directory, so a push
+  // directory laid down by hand at 0755 would keep the private key where any
+  // shell account on the box can read it. Narrow it every time, the way the
+  // file below is narrowed.
+  await fs.chmod(/* turbopackIgnore: true */ dir, 0o700);
   const file = path.join(dir, name);
   await atomicWrite(file, JSON.stringify(value) + "\n");
   // atomicWrite opens the temp file with the process umask, which on a
   // developer machine is 0022. The systemd unit sets UMask=0077 so production
   // already lands at 0600; this makes the mode the same everywhere.
   await fs.chmod(/* turbopackIgnore: true */ file, 0o600);
+}
+
+async function fileExists(file: string): Promise<boolean> {
+  try {
+    await fs.stat(file);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function readPrivate(dir: string, name: string): Promise<unknown> {
@@ -74,6 +88,16 @@ export async function readVapidKeys(
       typeof (held as Record<string, unknown>).privateKey === "string"
     ) {
       return held as { publicKey: string; privateKey: string };
+    }
+    // A missing file is an ordinary first boot. A file that is there and
+    // cannot be read is the loudest failure this subsystem has: the new pair
+    // silently invalidates every subscription, because a browser baked the old
+    // public key into the one it created. Nothing else marks that moment.
+    if (await fileExists(path.join(dir, VAPID_FILE))) {
+      console.warn(
+        "[brain/push] the VAPID pair on disk could not be read. A new pair was generated, " +
+          "so every device must register again before it receives anything.",
+      );
     }
     const made = webpush.generateVAPIDKeys();
     await writePrivate(dir, VAPID_FILE, made);
@@ -138,22 +162,6 @@ export async function removePushSubscription(
     if (next.length === rows.length) return false;
     await writePrivate(dir, SUBSCRIPTIONS_FILE, next);
     return true;
-  });
-}
-
-export async function touchPushSubscription(
-  id: string,
-  at: string,
-  dir = pushStateDirectory(),
-): Promise<void> {
-  await serialise(async () => {
-    const rows = await readSubscriptions(dir);
-    if (!rows.some((row) => row.id === id)) return;
-    await writePrivate(
-      dir,
-      SUBSCRIPTIONS_FILE,
-      rows.map((row) => (row.id === id ? { ...row, lastSeenAt: at } : row)),
-    );
   });
 }
 

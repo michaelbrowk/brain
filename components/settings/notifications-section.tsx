@@ -30,6 +30,7 @@ const PRIVACY =
 const NO_ZONE = "No time zone is set, so no reminder will fire. Set one in Account.";
 const ZONE_UNREADABLE = "Couldn't read the time zone.";
 const NO_DEVICE = "No device is registered yet.";
+const NONE_TOOK_IT = "No device took the message. Try again.";
 const KIND_OFF = "Task reminders are switched off, so nothing was sent.";
 const LOAD_FAILED = "Couldn't load your notification settings.";
 const SAVE_FAILED = "Couldn't save that. Try again.";
@@ -43,10 +44,14 @@ const REASON: Record<"unsupported" | "denied" | "home-screen" | "failed", string
 };
 
 /** What a test press answers with. `skipped` is the server saying it never
- *  tried: the kind is switched off, or nothing is registered. */
+ *  tried: the kind is switched off, or nothing is registered. `sent === 0`
+ *  with `skipped === null` is a third case: devices exist and every one of
+ *  them refused the message, which is not the same silence as none being
+ *  registered. */
 function testSentence(result: { sent: number; skipped: string | null }): string {
   if (result.skipped === "kind-off") return KIND_OFF;
-  if (result.sent === 0) return NO_DEVICE;
+  if (result.skipped === "no-devices") return NO_DEVICE;
+  if (result.sent === 0) return NONE_TOOK_IT;
   if (result.sent === 1) return "Sent to 1 device.";
   return `Sent to ${result.sent} devices.`;
 }
@@ -77,7 +82,7 @@ export function NotificationsSection({ onToast }: { onToast: (title: string) => 
   const [timeZone, setTimeZone] = useState<string | null>(null);
   const [zoneStatus, setZoneStatus] = useState<"loading" | "ready" | "error">("loading");
 
-  const loadState = useCallback(async () => {
+  const loadState = useCallback(async (isAlive: () => boolean = () => true) => {
     try {
       const answer = await fetch("/api/push/state");
       if (!answer.ok) throw new Error(String(answer.status));
@@ -85,10 +90,12 @@ export function NotificationsSection({ onToast }: { onToast: (title: string) => 
         devices: PushDeviceView[];
         kinds: PushKindPreferences;
       };
+      if (!isAlive()) return;
       setDevices(body.devices);
       setKinds(body.kinds);
       setLoadFailed(false);
     } catch {
+      if (!isAlive()) return;
       setDevices(null);
       setKinds(null);
       setLoadFailed(true);
@@ -97,9 +104,14 @@ export function NotificationsSection({ onToast }: { onToast: (title: string) => 
 
   // The section mounts on each visit, so a load per mount keeps the surface
   // fresh; the microtask is the same rule as the effect below, no setState
-  // synchronously inside an effect body.
+  // synchronously inside an effect body. The `alive` guard reads the same as
+  // the zone effect's: a slow load outliving the mount must not setState.
   useEffect(() => {
-    queueMicrotask(() => void loadState());
+    let alive = true;
+    queueMicrotask(() => void loadState(() => alive));
+    return () => {
+      alive = false;
+    };
   }, [loadState]);
 
   // Both facts are read after the first render commits, in a microtask and
@@ -146,17 +158,26 @@ export function NotificationsSection({ onToast }: { onToast: (title: string) => 
     // THE PRESS REACHES THE PERMISSION PROMPT. Nothing is awaited above this
     // line: iOS grants Notification.requestPermission() only from inside the
     // gesture, and a single await before the call loses it.
-    void enablePushOnThisDevice().then((result) => {
-      setEnabling(false);
-      if (!result.ok) {
-        setProblem(REASON[result.reason]);
-        return;
-      }
-      setDevices((list) => [
-        result.device,
-        ...(list ?? []).filter((device) => device.id !== result.device.id),
-      ]);
-    });
+    void enablePushOnThisDevice()
+      .then((result) => {
+        setEnabling(false);
+        if (!result.ok) {
+          setProblem(REASON[result.reason]);
+          return;
+        }
+        setLoadFailed(false);
+        setDevices((list) => [
+          result.device,
+          ...(list ?? []).filter((device) => device.id !== result.device.id),
+        ]);
+      })
+      .catch(() => {
+        // enablePushOnThisDevice is total today and never rejects; this is the
+        // fallback if that ever changes, so the button never sticks disabled
+        // with no sentence.
+        setEnabling(false);
+        setProblem(FAILED);
+      });
   };
 
   const removeDevice = async (device: PushDeviceView) => {

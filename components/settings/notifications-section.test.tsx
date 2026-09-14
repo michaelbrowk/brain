@@ -18,10 +18,13 @@ import { NotificationsSection } from "./notifications-section";
 
 vi.mock("framer-motion", () => import("@/test/framer-motion-mock"));
 
-const { enable } = vi.hoisted(() => ({ enable: vi.fn() }));
+const { enable, pushSupportedMock } = vi.hoisted(() => ({
+  enable: vi.fn(),
+  pushSupportedMock: vi.fn(() => true),
+}));
 vi.mock("../push-client", async () => {
   const actual = await vi.importActual<typeof import("../push-client")>("../push-client");
-  return { ...actual, enablePushOnThisDevice: enable, pushSupported: () => true };
+  return { ...actual, enablePushOnThisDevice: enable, pushSupported: pushSupportedMock };
 });
 
 describe("the settings registry", () => {
@@ -52,6 +55,8 @@ let host: HTMLDivElement;
 let root: Root;
 let state: { devices: unknown[]; kinds: Record<string, boolean> };
 let zone: string | null;
+let testResponseBody: { sent: number; removed: number; skipped: string | null };
+let patchShouldFail: boolean;
 
 function response(body: unknown, status = 200): Response {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as Response;
@@ -61,20 +66,25 @@ beforeEach(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT =
     true;
   enable.mockReset();
+  pushSupportedMock.mockReset();
+  pushSupportedMock.mockReturnValue(true);
   state = { devices: [], kinds: { "task-reminder": true, "mail-new": true } };
   zone = "Europe/Lisbon";
+  testResponseBody = { sent: 1, removed: 0, skipped: null };
+  patchShouldFail = false;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
       if (url === "/api/push/state" && (init?.method ?? "GET") === "GET") return response(state);
       if (url === "/api/push/state") {
+        if (patchShouldFail) return response(null, 500);
         const patch = JSON.parse(String(init!.body)).kinds;
         state = { ...state, kinds: { ...state.kinds, ...patch } };
         return response({ kinds: state.kinds });
       }
       if (url === "/api/push/subscriptions") return response({ removed: true });
-      if (url === "/api/push/test") return response({ sent: 1, removed: 0, skipped: null });
+      if (url === "/api/push/test") return response(testResponseBody);
       if (url === "/api/settings/zone") return response({ timeZone: zone });
       throw new Error(`unexpected request: ${url}`);
     }),
@@ -176,6 +186,12 @@ describe("Settings → Notifications", () => {
     const remove = host.querySelector<HTMLButtonElement>('[aria-label="Remove iPhone"]');
     await act(async () => remove!.click());
     expect(host.textContent).not.toContain("iPhone");
+    const call = vi
+      .mocked(fetch)
+      .mock.calls.find(([input]) => String(input) === "/api/push/subscriptions")!;
+    const init = call[1] as RequestInit;
+    expect(init.method).toBe("DELETE");
+    expect(JSON.parse(String(init.body))).toEqual({ id: "0123456789abcdef" });
   });
 
   it("never shows an endpoint", async () => {
@@ -230,5 +246,55 @@ describe("Settings → Notifications", () => {
     await render();
     await act(async () => button("Send a test")!.click());
     expect(text()).toContain("Sent to 1 device.");
+  });
+
+  it("says push is unsupported when the browser cannot receive it", async () => {
+    pushSupportedMock.mockReturnValue(false);
+    await render();
+    expect(text()).toContain("This browser cannot receive push notifications.");
+    expect(button("Turn on on this device")).toBeUndefined();
+  });
+
+  it("reports the plural when more than one device took the test", async () => {
+    testResponseBody = { sent: 3, removed: 0, skipped: null };
+    await render();
+    await act(async () => button("Send a test")!.click());
+    expect(text()).toContain("Sent to 3 devices.");
+  });
+
+  it("says the kind is off when the test was skipped for it", async () => {
+    testResponseBody = { sent: 0, removed: 0, skipped: "kind-off" };
+    await render();
+    await act(async () => button("Send a test")!.click());
+    expect(text()).toContain("Task reminders are switched off, so nothing was sent.");
+  });
+
+  it("says no device is registered when none has ever subscribed", async () => {
+    testResponseBody = { sent: 0, removed: 0, skipped: "no-devices" };
+    await render();
+    await act(async () => button("Send a test")!.click());
+    expect(text()).toContain("No device is registered yet.");
+  });
+
+  it("says every device refused when devices exist but none took it", async () => {
+    testResponseBody = { sent: 0, removed: 0, skipped: null };
+    await render();
+    await act(async () => button("Send a test")!.click());
+    expect(text()).toContain("No device took the message. Try again.");
+  });
+
+  it("reverts a kind toggle when the save fails", async () => {
+    patchShouldFail = true;
+    await render();
+    const group = host.querySelector('[role="radiogroup"][aria-label="New mail"]')!;
+    const off = [...group.querySelectorAll('[role="radio"]')].find(
+      (node) => (node.textContent ?? "").trim() === "Off",
+    ) as HTMLElement;
+    await act(async () => off.click());
+    expect(text()).toContain("Couldn't save that. Try again.");
+    const on = [...group.querySelectorAll('[role="radio"]')].find(
+      (node) => (node.textContent ?? "").trim() === "On",
+    )!;
+    expect(on.getAttribute("aria-checked")).toBe("true");
   });
 });

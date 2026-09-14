@@ -5655,6 +5655,22 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
   background-color: var(--blue-tint);
   transform: scale(0.97);
 }
+/* HISTORY ADVERTISES NOTHING. An older completion of a repeating task has
+   nothing left to undo, so the row takes no hover fill, no press and no
+   pointer: a capsule that lights up under the cursor and then refuses every
+   gesture is the one shape a control must not have. */
+/* One rule, and no `:hover` of its own: it sits after the two it has to beat
+   and carries the same weight, so it wins on order. A `:hover` here would be
+   a hover a touch screen can reach and not let go of. */
+.brain-task-row[data-historic] {
+  background-color: transparent;
+  transform: none;
+  cursor: default;
+}
+.brain-task-box_static {
+  display: block;
+  cursor: default;
+}
 /* Expanded: the same capsule, one tint step up with a rim, grown in REAL
    height rather than by a layout animation, because a layout spring would stretch
    the words inside it. 36 of row and 40 of chips. */
@@ -5761,8 +5777,11 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
   gap: 6px;
   color: var(--ink-3);
 }
+/* No character cap. The tail is its own column and does not shrink, so a
+   caption takes the width it needs and the title truncates first. 22ch cut
+   "line removed from Weekly planning" mid-word with no way to see the rest,
+   and that caption is the whole of what a detached row has to say. */
 .brain-task-caption {
-  max-width: 22ch;
   overflow: hidden;
   color: var(--ink-3);
   font-family: var(--font-sf);
@@ -5903,17 +5922,35 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
 }
 
 /* Reduced motion: every transition on this surface collapses to an instant
-   state change, except the two that are COLOUR, the box filling and the
-   title going quiet, because colour is not movement. */
+   state change, except the ones that are COLOUR, the box filling and the title
+   going quiet, because colour is not movement (spec 2.1 and 2.5).
+
+   `!important` because the global reduce rule above is
+   `* { transition-duration: 0.01ms !important }`, which wins over any
+   shorthand a component writes: without it this whole block was dead code and
+   the measured duration on a row under reduce was 1e-05s. The exemption is by
+   PROPERTY and by class, never a blanket one: nothing here travels, changes
+   size or fades, so a reader who asked for less motion is given none. */
 @media (prefers-reduced-motion: reduce) {
   .brain-task-row {
-    transition: background-color 160ms var(--ease-out);
+    transition: background-color 160ms var(--ease-out) !important;
   }
   .brain-task-row:active {
     transform: none;
   }
   .brain-task-row[data-expanded] {
-    transition: background-color 160ms var(--ease-out);
+    transition: background-color 160ms var(--ease-out) !important;
+  }
+  /* The fill of the box, which is the one thing a completion draws that is
+     colour rather than the stroke travelling. */
+  .brain-task-box {
+    transition:
+      background-color 160ms var(--ease-out),
+      border-color 160ms var(--ease-out) !important;
+  }
+  /* And the title going quiet behind the held tick. */
+  .brain-task-row[data-holding] .brain-task-title {
+    transition: color 160ms var(--ease-out) 100ms !important;
   }
 }
 

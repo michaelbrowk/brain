@@ -102,12 +102,14 @@ export function useTaskActions({
   }, []);
 
   const refuse = useCallback(
-    (error: unknown, instead?: string) => {
+    (error: unknown, instead?: string, id?: string) => {
       const reason =
         error instanceof TaskRequestError && error.message
           ? error.message
           : "That did not save";
-      onToast?.(instead ?? reason, { urgent: true });
+      // `id` replaces a report this gesture already made rather than queueing
+      // behind it: a refusal and the sentence it corrects are one message.
+      onToast?.(instead ?? reason, { urgent: true, ...(id ? { id } : {}) });
     },
     [onToast],
   );
@@ -176,13 +178,18 @@ export function useTaskActions({
    *  Nothing was sent before this point, so a cancelled completion leaves no
    *  request, no `rev` bump and no commit behind it.
    *
-   *  THE PILL FOLLOWS THE WRITE. The tick is optimistic because the reader
-   *  has to see their own press, but "Completed · Undo" is a REPORT, and a
-   *  report issued before the answer is known can be wrong: a refusal used to
-   *  leave a pill claiming the opposite of what happened, with a live Undo
-   *  that sent a second PATCH for a completion that never landed. So the row
-   *  moves at once, the sentence waits for the 2xx, and a refusal says one
-   *  thing in the route's own words.
+   *  THE PILL ARRIVES WITH THE FOLD, AND CORRECTS ITSELF. Spec 2.1: "when the
+   *  fold starts, the existing Snackbar shows". Waiting for the 2xx put it 740
+   *  ms after the row left, so on a slow write the row was gone and the way
+   *  back had not appeared yet.
+   *
+   *  It arrives with NO action and no window: "Completed" is a report of what
+   *  the reader just did, which is true the moment they did it, and an Undo
+   *  offered before the write landed would send a second PATCH for a
+   *  completion that never happened. When the 2xx lands the same sentence is
+   *  said again under the same id, now with the way back and its nine
+   *  seconds; a refusal replaces it under that id too, in the route's own
+   *  words, so a report is never left standing over its own correction.
    */
   const completeTask = useCallback(
     async (task: TaskView, refusal?: string) => {
@@ -195,6 +202,9 @@ export function useTaskActions({
       // beat an ordinary completion does and the count beside it decrements
       // once, at 1300. The server's answer replaces it either way.
       const nextDay = repeatNextDay(task, today);
+      // One message, said up to twice: the report now, its correction when the
+      // answer lands.
+      const pill = `task-complete-${task.id}`;
       mutateTasks((tasks) =>
         tasks.map((entry) => {
           if (entry.id !== task.id) return entry;
@@ -204,6 +214,7 @@ export function useTaskActions({
           return nextDay === null ? entry : { ...entry, when: nextDay };
         }),
       );
+      onToast?.("Completed", { id: pill, durationMs: null });
       try {
         const saved = await patchTask(
           task.id,
@@ -226,6 +237,7 @@ export function useTaskActions({
         // tomorrow or later, so nothing appears and the mark is unused.
         if (task.repeat) markInserted(saved.id);
         onToast?.("Completed", {
+          id: pill,
           actionLabel: "Undo",
           durationMs: SMART_UNDO_MS,
           onAction: () => {
@@ -236,7 +248,7 @@ export function useTaskActions({
         mutateTasks((tasks) =>
           tasks.map((entry) => (entry.id === task.id ? task : entry)),
         );
-        refuse(error, refusal);
+        refuse(error, refusal, pill);
         throw error;
       }
     },

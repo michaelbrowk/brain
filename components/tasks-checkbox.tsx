@@ -106,14 +106,10 @@ export function setTaskCheckboxLabel(button: HTMLButtonElement, label: string): 
   button.setAttribute("aria-label", label.trim() || "Empty task");
 }
 
-export function renderTaskCheckbox(opts: TaskCheckboxOptions): HTMLButtonElement {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "brain-task-box brain-touch-min";
-  button.setAttribute("role", "checkbox");
-  button.setAttribute("aria-checked", String(opts.checked));
-  button.tabIndex = 0;
-
+/** The box's drawing, with nothing around it. One path, one dash length and
+ *  one stroke, so the control and the static mark below cannot become two
+ *  different checks. */
+function buildTick(): { svg: SVGSVGElement; tick: SVGPathElement } {
   const svg = document.createElementNS(SVG_NS, "svg");
   svg.setAttribute("viewBox", "0 0 16 16");
   svg.setAttribute("width", "16");
@@ -128,8 +124,45 @@ export function renderTaskCheckbox(opts: TaskCheckboxOptions): HTMLButtonElement
   tick.setAttribute("stroke-linecap", "round");
   tick.setAttribute("stroke-linejoin", "round");
   tick.setAttribute("stroke-dasharray", String(DASH));
-
   svg.append(tick);
+  return { svg, tick };
+}
+
+/** THE MARK, NOT THE CONTROL.
+ *
+ *  A Logbook row of a repeating task's OLDER completion has nothing to undo:
+ *  the untick is offered on the newest entry only, because there is one rule
+ *  to put the series back on. The box there was still a `<button>` with a
+ *  pointer cursor, a tab stop and the row's full hover fill, and pressing it
+ *  issued no request and changed nothing. A control that advertises itself and
+ *  then refuses is the one shape a control must not have, so history draws the
+ *  check and no control at all.
+ *
+ *  `role="checkbox"` with `aria-disabled` rather than a bare graphic: the
+ *  completion is information a reader using a screen reader needs, and "not
+ *  actionable" is the other half of what they need to hear. */
+export function renderTaskCheck(checked: boolean, label: string): HTMLSpanElement {
+  const mark = document.createElement("span");
+  mark.className = "brain-task-box brain-task-box_static";
+  mark.setAttribute("role", "checkbox");
+  mark.setAttribute("aria-checked", String(checked));
+  mark.setAttribute("aria-disabled", "true");
+  mark.setAttribute("aria-label", label.trim() || "Empty task");
+  const { svg, tick } = buildTick();
+  rest(tick, checked);
+  mark.append(svg);
+  return mark;
+}
+
+export function renderTaskCheckbox(opts: TaskCheckboxOptions): HTMLButtonElement {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "brain-task-box brain-touch-min";
+  button.setAttribute("role", "checkbox");
+  button.setAttribute("aria-checked", String(opts.checked));
+  button.tabIndex = 0;
+
+  const { svg, tick } = buildTick();
   button.append(svg);
   ticks.set(button, tick);
   draw(button, opts.checked, opts.reduce, false);
@@ -192,18 +225,22 @@ export function TaskCheckbox({
   reduce,
   onToggle,
   onBox,
+  staticCheck = false,
 }: {
   checked: boolean;
   label: string;
   reduce: boolean;
   onToggle: () => void;
   onBox?: (box: HTMLButtonElement | null) => void;
+  /** Draw the mark and no control: a Logbook row that is history. */
+  staticCheck?: boolean;
 }) {
   const hostRef = useRef<HTMLSpanElement | null>(null);
   const boxRef = useRef<HTMLButtonElement | null>(null);
   const toggleRef = useRef(onToggle);
   const onBoxRef = useRef(onBox);
   const drawnRef = useRef(checked);
+  const labelRef = useRef(label);
 
   // Declared FIRST, so the mount effect below already sees this render's
   // callbacks. The refs exist so the button can be built once: rebuilding it
@@ -211,11 +248,17 @@ export function TaskCheckbox({
   useEffect(() => {
     toggleRef.current = onToggle;
     onBoxRef.current = onBox;
+    labelRef.current = label;
   });
 
   useEffect(() => {
     const host = hostRef.current;
     if (!host) return;
+    if (staticCheck) {
+      const mark = renderTaskCheck(drawnRef.current, labelRef.current);
+      host.append(mark);
+      return () => mark.remove();
+    }
     const box = renderTaskCheckbox({
       checked: drawnRef.current,
       reduce,
@@ -229,11 +272,13 @@ export function TaskCheckbox({
       boxRef.current = null;
       onBoxRef.current?.(null);
     };
-    // The drawing is built once; `reduce` is read at that moment the way the
-    // note's NodeView reads it, and a reader who changes the setting gets the
-    // new behaviour on the next mount.
+    // `staticCheck` IS a dependency, and deliberately: unticking the newest
+    // completion of a repeat makes the one below it the newest, so a mark has
+    // to become a control under a row whose key never changed. `reduce` is
+    // read once, the way the note's NodeView reads it, and a reader who
+    // changes the setting gets the new behaviour on the next mount.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [staticCheck]);
 
   useEffect(() => {
     const box = boxRef.current;

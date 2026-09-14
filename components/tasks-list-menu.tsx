@@ -73,7 +73,10 @@ export function TasksListMenu({
           <Button
             type="button"
             variant="quiet"
-            aria-label={`List: ${label}`}
+            /* The name, not the category of thing it is: Mail's nav pill
+               names its folder the same way, and a screen reader here heard
+               the word "List" before every switch. */
+            aria-label={label}
             title={label}
             className="brain-touch-hit brain-tasks-nav"
           >

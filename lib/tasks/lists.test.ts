@@ -269,11 +269,16 @@ describe("groupFor", () => {
     ["2026-09-15", "Tue 15"],
     ["2026-09-16", "Wed 16"],
     ["2026-09-17", "Thu 17"],
-    ["2026-09-20", "Sun 20"],
-    ["2026-09-21", "Next week"],
-    ["2026-09-27", "Next week"],
-    ["2026-09-28", "Later"],
-    ["2027-01-04", "Later"],
+    // The four the boundary turns on. Today is Sunday the 13th, so day 6 is
+    // still this week, day 7 opens the next one, day 13 closes it, and day 14
+    // is the week after: "Next week" for a day a fortnight out was the one
+    // label here that was untrue rather than loose.
+    ["2026-09-19", "Sat 19"],
+    ["2026-09-20", "Next week"],
+    ["2026-09-26", "Next week"],
+    ["2026-09-27", "27 Sep"],
+    ["2026-09-28", "28 Sep"],
+    ["2027-01-04", "4 Jan"],
   ])("labels the upcoming day %s as %s", (when, label) => {
     expect(groupFor(task({ when }), TODAY).label).toBe(label);
   });

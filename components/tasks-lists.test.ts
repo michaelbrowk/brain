@@ -78,7 +78,7 @@ describe("sectionsFor", () => {
     ]);
   });
 
-  it("groups Upcoming by day with Tomorrow first and Later last", () => {
+  it("groups Upcoming by day, then next week, then one group a date", () => {
     const tasks = [
       task("far", { when: "2026-10-20" }),
       task("tomorrow", { when: "2026-09-14" }),
@@ -89,7 +89,9 @@ describe("sectionsFor", () => {
       ["Tomorrow", ["tomorrow"]],
       ["Thu 17", ["thursday"]],
       ["Next week", ["nextweek"]],
-      ["Later", ["far"]],
+      // Past next week each day names itself: one "Later" pile holds months
+      // of rows under one word.
+      ["20 Oct", ["far"]],
     ]);
   });
 
@@ -183,15 +185,24 @@ describe("the words a row and a header say", () => {
     expect(overdueWhenCaption(task("a", { when: "someday" }), TODAY)).toBeNull();
   });
 
-  it("shows a deadline as the bare date, and marks the ones already owed", () => {
-    expect(deadlineCaption(task("a", { deadline: "2026-09-15" }), TODAY)).toEqual({
-      label: "15 Sep",
-      overdue: false,
-    });
-    expect(deadlineCaption(task("a", { deadline: "2026-09-11" }), TODAY)).toEqual({
-      label: "11 Sep",
-      overdue: true,
-    });
+  it.each([
+    ["2026-09-15", "15 Sep", false],
+    // The day itself is not late. Every task with a deadline is in Today on
+    // its own day, so red here would fire for every deadline, every time.
+    [TODAY, "13 Sep", false],
+    ["2026-09-12", "12 Sep", true],
+    ["2026-09-11", "11 Sep", true],
+  ])(
+    "draws the deadline %s as the bare date, red only once it is past",
+    (deadline, label, overdue) => {
+      expect(deadlineCaption(task("a", { deadline }), TODAY)).toEqual({
+        label,
+        overdue,
+      });
+    },
+  );
+
+  it("has no deadline caption at all when the task carries none", () => {
     expect(deadlineCaption(task("a"), TODAY)).toBeNull();
   });
 

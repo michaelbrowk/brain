@@ -339,11 +339,14 @@ export function TasksRow({
 
   const openRow = (event: React.MouseEvent) => {
     if ((event.target as HTMLElement).closest("[data-task-control]")) return;
-    onSelect(key);
-    // A history row opens nothing: its chips would edit the live record from
-    // under a completion that is over, and its title is not the record's to
-    // change from here either.
+    // A history row answers NOTHING, and says so before it is pressed: no
+    // hover fill, no pointer cursor, a drawn check instead of a box. Its chips
+    // would edit the live record from under a completion that is over, its
+    // title is not the record's to change from here, and the untick belongs to
+    // the newest entry because there is one rule to put the series back on. A
+    // selection capsule on it would be the same refusal one gesture later.
     if (historic) return;
+    onSelect(key);
     // The title becomes editable on a SECOND tap, not on expansion, so a
     // phone keyboard does not rise from opening a row.
     if (expanded && (event.target as HTMLElement).closest(".brain-task-title")) {
@@ -410,6 +413,7 @@ export function TasksRow({
           data-selected={selected ? "" : undefined}
           data-expanded={expanded ? "" : undefined}
           data-done={task.done ? "" : undefined}
+          data-historic={historic ? "" : undefined}
           style={{ x }}
           onClick={openRow}
           {...swipeHandlers}
@@ -426,6 +430,7 @@ export function TasksRow({
             checked={task.done}
             label={task.title}
             reduce={reduce}
+            staticCheck={historic}
             onToggle={toggle}
             onBox={(box) => {
               boxRef.current = box;
@@ -520,10 +525,10 @@ export function TasksRow({
                     onPick={(when, label) => void leaveDown(when, label)}
                   />
                   <CategoryPicker
+                    chip
                     value={task.category}
                     suggestions={[...categories]}
                     onSet={(category) => onPatch(task, { category: category || null })}
-                    revealClass=""
                   />
                   {/* A rule can be added to an OPEN task that is not a note
                       line's, and to no other (decision 14): a linked task's
@@ -584,14 +589,52 @@ export function TasksRow({
 }
 
 export function tomorrowOf(today: string): string {
+  return dayAfter(today, 1);
+}
+
+/** The day "Next week" means, and the same one `lib/tasks/lists.ts` opens the
+ *  Next week group on: seven days out, past the six that still carry a
+ *  weekday name. */
+export function nextWeekOf(today: string): string {
+  return dayAfter(today, 7);
+}
+
+function dayAfter(today: string, days: number): string {
   const next = new Date(
     Date.UTC(
       Number(today.slice(0, 4)),
       Number(today.slice(5, 7)) - 1,
-      Number(today.slice(8, 10)) + 1,
+      Number(today.slice(8, 10)) + days,
     ),
   );
   return next.toISOString().slice(0, 10);
+}
+
+/** WHICH CONTROL A DATE GETS, BY MODALITY.
+ *
+ *  On touch the system picker is the better control by a distance and opens
+ *  from the native input directly (decision: the note's own row does the
+ *  same). On a pointer it is the only place in Brain where the browser draws
+ *  the chrome: it renders `14/09/2026` in the browser's own metrics beside
+ *  four Solar glyphs and one of Chrome's, inside a menu the spec calls quiet.
+ *  So a pointer gets a `brain-menu` row that REVEALS the input, and the row
+ *  reads as every other row in the list until it is asked for.
+ *
+ *  Defaults to touch: a reader whose browser answers no media query gets the
+ *  native control, which is the one that works everywhere. */
+function usePointerFine(): boolean {
+  const [fine, setFine] = useState(false);
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const query = window.matchMedia("(hover: hover)");
+    const sync = () => setFine(query.matches);
+    sync();
+    query.addEventListener?.("change", sync);
+    return () => query.removeEventListener?.("change", sync);
+  }, []);
+  return fine;
 }
 
 /** The When chip's menu: the two days a task list actually moves things to,
@@ -606,6 +649,9 @@ function WhenChip({
   onPick: (when: string | "someday" | null, label: string) => void;
 }) {
   const tomorrow = tomorrowOf(today);
+  const nextWeek = nextWeekOf(today);
+  const fine = usePointerFine();
+  const [picking, setPicking] = useState(false);
   const label =
     task.when === "someday"
       ? "Someday"
@@ -616,8 +662,31 @@ function WhenChip({
           : task.when
             ? dayLabel(task.when)
             : "When";
+  const dateRow = (
+    <label className="brain-menu-item" data-task-control data-task-when-date>
+      <Icon name="calendar-linear" size={16} className="brain-menu-icon" />
+      <span className="min-w-0 flex-1">Date</span>
+      <input
+        type="date"
+        autoFocus={picking}
+        className="brain-task-date"
+        value={task.when && task.when !== "someday" ? task.when : ""}
+        onChange={(event) => {
+          const value = event.currentTarget.value;
+          if (value) onPick(value, dayLabel(value));
+        }}
+      />
+    </label>
+  );
+
   return (
-    <Dropdown.Root>
+    <Dropdown.Root
+      onOpenChange={(open) => {
+        // The reveal belongs to one opening of the menu, so the list is the
+        // same list every time it is opened.
+        if (!open) setPicking(false);
+      }}
+    >
       <Dropdown.Trigger asChild>
         <button type="button" className="chip" data-task-control aria-label={`When: ${label}`}>
           <span className="chip-glyph">
@@ -642,24 +711,34 @@ function WhenChip({
             <Icon name="calendar-linear" size={16} className="brain-menu-icon" />
             Tomorrow
           </Dropdown.Item>
+          <Dropdown.Item
+            className="brain-menu-item"
+            onSelect={() => onPick(nextWeek, "Next week")}
+          >
+            <Icon name="calendar-linear" size={16} className="brain-menu-icon" />
+            Next week
+          </Dropdown.Item>
           <Dropdown.Item className="brain-menu-item" onSelect={() => onPick("someday", "Someday")}>
             <Icon name="box-minimalistic-linear" size={16} className="brain-menu-icon" />
             Someday
           </Dropdown.Item>
           <Dropdown.Separator className="brain-menu-sep" />
-          <label className="brain-menu-item" data-task-control>
-            <Icon name="calendar-linear" size={16} className="brain-menu-icon" />
-            <span className="min-w-0 flex-1">Date</span>
-            <input
-              type="date"
-              className="brain-task-date"
-              value={task.when && task.when !== "someday" ? task.when : ""}
-              onChange={(event) => {
-                const value = event.currentTarget.value;
-                if (value) onPick(value, dayLabel(value));
+          {fine && !picking ? (
+            <Dropdown.Item
+              className="brain-menu-item"
+              data-task-when-pick
+              onSelect={(event) => {
+                // The menu stays open: the row it reveals is inside it.
+                event.preventDefault();
+                setPicking(true);
               }}
-            />
-          </label>
+            >
+              <Icon name="calendar-linear" size={16} className="brain-menu-icon" />
+              Pick a date
+            </Dropdown.Item>
+          ) : (
+            dateRow
+          )}
           {task.when && (
             <Dropdown.Item className="brain-menu-item" onSelect={() => onPick(null, "Inbox")}>
               <Icon name="close-linear" size={16} className="brain-menu-icon" />
@@ -850,7 +929,17 @@ function useSwipe({
       const target = event.currentTarget as HTMLElement & {
         releasePointerCapture?: (id: number) => void;
       };
-      target.releasePointerCapture?.(state.id);
+      // iOS releases the capture itself on `pointercancel`, and releasing a
+      // capture that is already gone throws `NotFoundError`. Thrown here it
+      // would abort the handler BEFORE the commit below: the finger travels,
+      // the word appears, and the release silently does nothing. Wrapped, and
+      // before the decision rather than inside it, so nothing about whether
+      // the swipe commits depends on it.
+      try {
+        target.releasePointerCapture?.(state.id);
+      } catch {
+        // Already released. The gesture is this handler's either way.
+      }
       const far = Math.abs(state.travel) >= COMMIT_PX;
       const fast = state.velocity >= COMMIT_VELOCITY;
       if (far || fast) {

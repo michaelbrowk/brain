@@ -216,18 +216,28 @@ function upcomingGroup(task: TaskView, today: string): TaskGroup {
   const distance = dayNumber(day) - dayNumber(today);
   if (distance === 1) return { key: day, label: "Tomorrow", order: dayNumber(day) };
   // A weekday name is unambiguous only inside a week of today, so the named
-  // days stop at seven and the two coarse buckets take over.
-  if (distance <= 7) {
+  // days stop at six and the week after this one takes over.
+  if (distance <= 6) {
     return {
       key: day,
       label: `${WEEKDAYS[weekdayIndex(day)]} ${Number(day.slice(8, 10))}`,
       order: dayNumber(day),
     };
   }
-  if (distance <= 14) {
-    return { key: "next-week", label: "Next week", order: dayNumber(today) + 8 };
+  // NEXT WEEK IS SEVEN DAYS, not a rolling fortnight. Day 7 to day 13 is the
+  // week after the six named ones; day 14 is the week after that, and calling
+  // it "next week" was the one label on this surface that was untrue rather
+  // than loose.
+  if (distance <= 13) {
+    return { key: "next-week", label: "Next week", order: dayNumber(today) + 7 };
   }
-  return { key: "later", label: "Later", order: dayNumber(today) + 15 };
+  // And past that a single bucket would hold months of rows under one word,
+  // so each day names its own date, the way the Logbook's older groups do.
+  return {
+    key: day,
+    label: `${Number(day.slice(8, 10))} ${MONTHS[Number(day.slice(5, 7)) - 1]}`,
+    order: dayNumber(day),
+  };
 }
 
 /** Grouped by the reader's completion day, newest group first. A record with

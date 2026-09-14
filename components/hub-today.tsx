@@ -98,7 +98,14 @@ export function HubToday({
   // What the LIST holds, so a row still folding is already out of it: one
   // decrement at 1300, and the row leaves at 1520.
   const open = drawn.filter((row) => !held.has(row.task.id)).length;
-  const visible = drawn.slice(0, HOME_ROWS);
+  // ONE SET OF WORDS ON SCREEN AT ANY INSTANT. The flight slot is held for the
+  // spring's own 300ms, and on localhost the POST lands in about 20, so the
+  // captured title was drawn twice, 53px apart, for the rest of the flight.
+  // The row waits for the flight it is the destination of, and arrives with
+  // its insert entrance the moment the words land.
+  const visible = drawn
+    .filter((row) => flight === null || row.task.id !== capturedId)
+    .slice(0, HOME_ROWS);
 
   // The clock is read on mount, so the server's HTML and the first client
   // render both have no day. A block that guessed one would draw an empty
@@ -143,10 +150,12 @@ export function HubToday({
         {flight !== null && (
           /* WHERE THE CAPTURED TEXT LANDS. The capsule opens under it, 0 to
              36, while the words travel here from the field on the shared
-             `layoutId`. Both are gone by the time the real row arrives. */
+             `layoutId`. The real row is held out of the list until this slot
+             goes, so the words are never on screen twice. */
           <motion.li
             aria-hidden
             className="brain-task-row-item"
+            data-hub-flight-slot
             initial={reduce ? { opacity: 0 } : { height: 0, opacity: 0 }}
             animate={reduce ? { opacity: 1 } : { height: FLIGHT_ROW_PX, opacity: 1 }}
             exit={{ opacity: 0, transition: { duration: DUR.exit } }}
@@ -246,7 +255,7 @@ function emptyForHome(counts: TaskCounts): {
     return {
       icon: "checklist-linear",
       title: "Done for today",
-      hint: `${counts.doneToday} completed · Logbook`,
+      hint: `${counts.doneToday} completed`,
     };
   }
   return {

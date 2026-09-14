@@ -500,7 +500,7 @@ export function emptyFor(
       return {
         icon: "checklist-linear",
         title: "Done for today",
-        hint: `${counts.doneToday} completed · Logbook`,
+        hint: `${counts.doneToday} completed`,
       };
     }
     return {

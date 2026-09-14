@@ -29,6 +29,7 @@ vi.mock("framer-motion", () => import("@/test/framer-motion-mock"));
 const { localDay, resetTasksStore } = await import("./tasks-client");
 const { TasksSurface } = await import("./tasks-surface");
 const { WRITE_AT_MS } = await import("./tasks-row");
+const { SMART_UNDO_MS } = await import("./shell/helpers");
 
 const apiFetchMock = vi.mocked(apiFetch);
 
@@ -242,6 +243,59 @@ describe("the untick's own words", () => {
     await settle();
 
     expect(toasts.at(-1)?.title).toBe("The notebook is busy");
+  });
+});
+
+describe("the pill and the fold", () => {
+  it("reports at the fold and corrects itself when the answer lands", async () => {
+    // Spec 2.1: the pill shows when the fold STARTS. Waiting for the 2xx put
+    // it 740ms later, so on a slow write the row was gone and the way back had
+    // not appeared. The report is true the moment the reader made it; the
+    // Undo is not offered until the write it would reverse exists.
+    await mount([task("water", { when: TODAY })]);
+
+    await act(async () => boxFor("water").click());
+    await act(async () => {
+      vi.advanceTimersByTime(WRITE_AT_MS);
+    });
+    await settle();
+
+    expect(
+      toasts.map((entry) => [entry.title, entry.options?.actionLabel ?? null]),
+    ).toEqual([
+      ["Completed", null],
+      ["Completed", "Undo"],
+    ]);
+    // The first stands until the second replaces it: no window, and no way
+    // back to press for a completion that has not landed.
+    expect(toasts[0]?.options?.durationMs).toBeNull();
+    expect(toasts[0]?.options?.onAction).toBeUndefined();
+    // One message, said twice.
+    expect(toasts[0]?.options?.id).toBeDefined();
+    expect(toasts[1]?.options?.id).toBe(toasts[0]?.options?.id);
+    expect(toasts[1]?.options?.durationMs).toBe(SMART_UNDO_MS);
+  });
+
+  it("replaces its own report with the refusal rather than standing over it", async () => {
+    await mount([task("water", { when: TODAY })], {
+      patchAnswer: () =>
+        response({ error: "busy", reason: "The notebook is busy" }, 409),
+    });
+
+    await act(async () => boxFor("water").click());
+    await act(async () => {
+      vi.advanceTimersByTime(WRITE_AT_MS);
+    });
+    await settle();
+
+    expect(toasts.map((entry) => entry.title)).toEqual([
+      "Completed",
+      "The notebook is busy",
+    ]);
+    // The refusal wears the report's id, so a pill claiming the opposite of
+    // what happened cannot be left standing with no window to take it down.
+    expect(toasts[1]?.options?.id).toBe(toasts[0]?.options?.id);
+    expect(toasts[1]?.options?.urgent).toBe(true);
   });
 });
 

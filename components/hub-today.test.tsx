@@ -268,7 +268,10 @@ describe("the Today block on Home", () => {
     );
 
     expect(host.textContent).toContain("Done for today");
-    expect(host.textContent).toContain("1 completed · Logbook");
+    // The count alone. "· Logbook" read as a link to the Logbook and was
+    // plain text with nothing behind it.
+    expect(host.textContent).toContain("1 completed");
+    expect(host.textContent).not.toContain("Logbook");
   });
 
   it("renders 'Nothing planned today' with 'Add one in Tasks', not 'Add one above'", async () => {

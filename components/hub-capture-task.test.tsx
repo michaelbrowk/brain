@@ -190,10 +190,51 @@ describe("the capture field's Task control", () => {
     const post = calls.find((call) => call.url === "/api/tasks" && call.method === "POST");
     expect(post?.body).toEqual({ title: "water the plants", when: "2026-09-13" });
     expect(field().value).toBe("");
-    // and the row is in the block below, as a task and not as a page
+    // and the row is in the block below, as a task and not as a page, once the
+    // flight it is the destination of has landed
+    await act(async () => {
+      vi.advanceTimersByTime(400);
+    });
     expect(host.querySelector(".brain-task-title")?.textContent).toBe(
       "water the plants",
     );
+  });
+
+  it("never paints the captured words twice", async () => {
+    // The flight slot is held for the spring's own 300ms and the POST lands in
+    // about 20 on localhost, so the title used to be on screen twice, 53px
+    // apart, for the rest of the flight, with the block a row taller than it
+    // would end up. The row waits for the flight now.
+    await render();
+    await type("water the plants");
+
+    await act(async () => taskControl().click());
+    await settle();
+
+    // The record is already in this tab: the header counts it.
+    expect(host.querySelector("[data-hub-today-open]")?.textContent).toBe(
+      "Today · 1",
+    );
+    // And there is exactly one set of words on screen, the flight's.
+    expect(host.querySelectorAll(".brain-hub-flight-text")).toHaveLength(1);
+    expect(host.querySelectorAll(".brain-task-title")).toHaveLength(0);
+    expect(host.querySelector("[data-hub-flight-slot]")).not.toBeNull();
+
+    // Halfway through the flight, still one.
+    await act(async () => {
+      vi.advanceTimersByTime(150);
+    });
+    expect(host.querySelectorAll(".brain-hub-flight-text")).toHaveLength(1);
+    expect(host.querySelectorAll(".brain-task-title")).toHaveLength(0);
+
+    // The words land, the slot goes and the row takes its place: still one.
+    await act(async () => {
+      vi.advanceTimersByTime(250);
+    });
+    expect(host.querySelectorAll(".brain-hub-flight-text")).toHaveLength(0);
+    expect(
+      [...host.querySelectorAll(".brain-task-title")].map((n) => n.textContent),
+    ).toEqual(["water the plants"]);
   });
 
   it("keeps plain Enter on the page path and puts ⌘⏎ on the task one", async () => {

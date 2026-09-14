@@ -196,9 +196,14 @@ export function Snackbar({
             layout="position"
             onHoverStart={onHoverStart}
             onHoverEnd={onHoverEnd}
+            /* The tight left padding belongs to the RING, and the ring is
+               drawn inside the icon's slot: a pill with a deadline and no icon
+               has no ring to make room for, and used to sit 6px tight with
+               nothing in the gap. So the padding reads the same condition the
+               ring does. */
             className={`brain-toast group pointer-events-auto relative flex items-center gap-3 overflow-hidden py-2.5 ${
               actionLabel ? "pr-2.5" : "pr-5"
-            } ${durationSec != null && durationSec > 0 ? "pl-3.5" : "pl-5"}`}
+            } ${icon && durationSec != null && durationSec > 0 ? "pl-3.5" : "pl-5"}`}
           >
             {icon && (
               <span className="relative grid size-8 shrink-0 place-items-center">

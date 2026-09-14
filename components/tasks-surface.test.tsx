@@ -256,7 +256,7 @@ describe("the lists", () => {
     expect(headers()).toEqual(["Work"]);
   });
 
-  it("groups Upcoming by day with Tomorrow first and Later last", async () => {
+  it("groups Upcoming by day, then next week, then one group a date", async () => {
     await mount(
       [
         task("far", { when: dayFrom(40) }),
@@ -265,7 +265,7 @@ describe("the lists", () => {
       ],
       { list: "upcoming" },
     );
-    expect(headers()).toEqual(["Tomorrow", "Next week", "Later"]);
+    expect(headers()).toEqual(["Tomorrow", "Next week", "23 Oct"]);
     expect(rowTitles()).toEqual(["soon", "week", "far"]);
   });
 
@@ -368,7 +368,7 @@ describe("the empty states", () => {
       ],
       null,
       "Done for today",
-      "2 completed · Logbook",
+      "2 completed",
     ],
     ["inbox", [], "inbox", "Inbox is clear", "Checkboxes in notes and MCP land here"],
     ["upcoming", [], "upcoming", "Nothing scheduled", undefined],
@@ -430,7 +430,7 @@ describe("completion (motion 2.1)", () => {
     expect(JSON.parse(String(writes()[0]?.[1]?.body))).toEqual({ done: true });
   });
 
-  it("reports Completed only once the write has landed, with action Undo", async () => {
+  it("reports Completed with the fold and grows its Undo when the write lands", async () => {
     await mount([task("a", { when: TODAY })]);
     let resolveWrite: ((value: Response) => void) | null = null;
     apiFetchMock.mockImplementation(async (input) => {
@@ -442,15 +442,23 @@ describe("completion (motion 2.1)", () => {
     });
 
     await act(async () => boxIn(rowFor("a")).click());
+    // Nothing is said inside the window a reader can change their mind in.
     expect(toasts).toHaveLength(0);
     await act(async () => {
       vi.advanceTimersByTime(WRITE_AT_MS);
     });
     await settle();
-    // the write is out and the row has moved, and the sentence has not been
-    // said yet: a report issued before the answer can be wrong
+    // Spec 2.1: when the fold starts, the pill shows. The write is still out,
+    // so the sentence is a REPORT of what the reader did and carries no way
+    // back: an Undo offered here would send a second PATCH for a completion
+    // that has not landed.
     expect(writes()).toHaveLength(1);
-    expect(toasts).toHaveLength(0);
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]?.title).toBe("Completed");
+    expect(toasts[0]?.options?.actionLabel).toBeUndefined();
+    expect(toasts[0]?.options?.onAction).toBeUndefined();
+    // No window either: it stands until the answer replaces it.
+    expect(toasts[0]?.options?.durationMs).toBeNull();
 
     await act(async () => {
       resolveWrite?.(
@@ -459,12 +467,16 @@ describe("completion (motion 2.1)", () => {
       await Promise.resolve();
     });
     await settle();
-    expect(toasts[0]?.title).toBe("Completed");
-    expect(toasts[0]?.options?.actionLabel).toBe("Undo");
+    // The same sentence again under the same id, now with the way back: a
+    // report and its completion are one message, not two owed to the reader.
+    expect(toasts).toHaveLength(2);
+    expect(toasts[1]?.title).toBe("Completed");
+    expect(toasts[1]?.options?.id).toBe(toasts[0]?.options?.id);
+    expect(toasts[1]?.options?.actionLabel).toBe("Undo");
     // ⌘Z needs no key handler here: the shell binds it to any toast carrying
     // an action, so carrying one IS the wiring
-    expect(typeof toasts[0]?.options?.onAction).toBe("function");
-    expect(toasts[0]?.options?.durationMs).toBe(9000);
+    expect(typeof toasts[1]?.options?.onAction).toBe("function");
+    expect(toasts[1]?.options?.durationMs).toBe(9000);
   });
 
   it("says one thing and sends nothing more when the write is refused", async () => {
@@ -483,13 +495,15 @@ describe("completion (motion 2.1)", () => {
 
     expect(rowTitles()).toEqual(["a"]);
     expect(boxIn(rowFor("a")).getAttribute("aria-checked")).toBe("false");
-    // ONE pill, in the route's own words, and no "Completed" claiming the
-    // opposite of what happened
-    expect(toasts).toHaveLength(1);
-    expect(toasts[0]?.title).toBe("done is not stored for a linked task");
-    expect(toasts[0]?.options?.urgent).toBe(true);
-    expect(toasts.some((entry) => entry.title === "Completed")).toBe(false);
-    expect(toasts[0]?.options?.onAction).toBeUndefined();
+    // The report went up with the fold and the refusal REPLACES it, under the
+    // same id: what is left on screen is the route's own words, with no way
+    // back to press for a completion that never happened.
+    expect(toasts).toHaveLength(2);
+    expect(toasts[0]?.title).toBe("Completed");
+    expect(toasts.at(-1)?.title).toBe("done is not stored for a linked task");
+    expect(toasts.at(-1)?.options?.urgent).toBe(true);
+    expect(toasts.at(-1)?.options?.id).toBe(toasts[0]?.options?.id);
+    expect(toasts.at(-1)?.options?.onAction).toBeUndefined();
 
     // and a refused tick never sends the undo of a completion that never was
     await act(async () => {
@@ -523,7 +537,9 @@ describe("completion (motion 2.1)", () => {
     expect(rowTitles()).toEqual([]);
     const empty = document.querySelector(".brain-tasks-empty") as HTMLElement;
     expect(empty.textContent).toContain("Done for today");
-    expect(empty.textContent).toContain("1 completed · Logbook");
+    // The count alone: "· Logbook" read as a link and was plain text.
+    expect(empty.textContent).toContain("1 completed");
+    expect(empty.textContent).not.toContain("Logbook");
   });
 
   it("decrements the count once at 1300, not once per source", async () => {
@@ -1053,6 +1069,26 @@ describe("a repeating task", () => {
     await act(async () => boxIn(older).click());
     await settle();
     expect(writes()).toHaveLength(0);
+
+    // AND IT DOES NOT ADVERTISE ONE EITHER. A capsule that lights up under the
+    // cursor, takes a tab stop and then refuses every gesture is the one shape
+    // a control must not have. The mark is drawn, the control is not there.
+    const olderRow = older.querySelector<HTMLElement>(".brain-task-row");
+    const newestRow = newest.querySelector<HTMLElement>(".brain-task-row");
+    expect(olderRow?.hasAttribute("data-historic")).toBe(true);
+    expect(newestRow?.hasAttribute("data-historic")).toBe(false);
+    const olderBox = older.querySelector<HTMLElement>(".brain-task-box");
+    expect(olderBox?.tagName).toBe("SPAN");
+    expect(olderBox?.className).toContain("brain-task-box_static");
+    expect(olderBox?.getAttribute("aria-disabled")).toBe("true");
+    expect(olderBox?.getAttribute("aria-checked")).toBe("true");
+    expect(olderBox?.hasAttribute("tabindex")).toBe(false);
+    expect(newest.querySelector(".brain-task-box")?.tagName).toBe("BUTTON");
+    // And a press on it selects nothing, so the refusal is not one gesture
+    // away either.
+    await act(async () => olderRow?.click());
+    await settle();
+    expect(olderRow?.hasAttribute("data-selected")).toBe(false);
 
     apiFetchMock.mockImplementation(async (input) => {
       const url = String(input);

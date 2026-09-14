@@ -32,7 +32,7 @@ vi.mock("framer-motion/dom", () => ({ animate: pressAnimate }));
 
 const { TasksRow, foldRow, WRITE_AT_MS: WRITE_AT } = await import("./tasks-row");
 const { DUR } = await import("@/lib/motion");
-const { renderTaskCheckbox } = await import("./tasks-checkbox");
+const { renderTaskCheck, renderTaskCheckbox } = await import("./tasks-checkbox");
 const { SOLAR } = await import("./ui/solar-icons.generated");
 
 /** Every WAAPI animation the row starts, in order. */
@@ -319,6 +319,59 @@ describe("what the row draws", () => {
     );
   });
 
+  it("takes the affordance off a history row rather than giving it behaviour", async () => {
+    // An older completion of a repeating task has nothing left to undo. It
+    // used to take the full hover fill, a pointer cursor and a tab stop and
+    // then answer no gesture at all.
+    const historic = ruleFor(css, ".brain-task-row[data-historic]");
+    expect(historic).toContain("background-color: transparent");
+    expect(historic).toContain("transform: none");
+    expect(historic).toContain("cursor: default");
+    // It beats the hover and the press on ORDER, at the same weight, so it
+    // needs no `:hover` of its own: a `:hover` a touch screen can reach is one
+    // it will not let go of.
+    expect(css.indexOf(".brain-task-row[data-historic] {")).toBeGreaterThan(
+      css.indexOf(".brain-task-row:active {"),
+    );
+    expect(css.indexOf(".brain-task-row[data-historic] {")).toBeGreaterThan(
+      css.indexOf(".brain-task-row:hover {"),
+    );
+    expect(ruleFor(css, ".brain-task-box_static")).toContain("cursor: default");
+    // The mark is drawn with the same path and the same dash the control uses,
+    // so the two checks cannot become two drawings.
+    const mark = renderTaskCheck(true, "Water the office plants");
+    expect(mark.tagName).toBe("SPAN");
+    expect(mark.getAttribute("aria-disabled")).toBe("true");
+    expect(mark.getAttribute("aria-checked")).toBe("true");
+    expect(mark.hasAttribute("tabindex")).toBe(false);
+    const path = mark.querySelector("path");
+    expect(path?.getAttribute("d")).toBe(
+      renderTaskCheckbox({ checked: true, reduce: false })
+        .querySelector("path")
+        ?.getAttribute("d"),
+    );
+    expect((path as SVGPathElement).style.strokeDashoffset).toBe("0");
+  });
+
+  it("caps no caption at a count of characters", async () => {
+    // "line removed from Weekly planning" does not fit 22ch, and a reader got
+    // "line removed from Weekly pl\u2026" with nothing to open and no title
+    // attribute. The tail is its own column and does not shrink, so the
+    // caption takes the width it needs and the title truncates first.
+    const caption = ruleFor(css, ".brain-task-caption");
+    expect(caption).not.toContain("max-width");
+    expect(caption).toContain("text-overflow: ellipsis");
+    expect(ruleFor(css, ".brain-task-tail")).toContain("flex-shrink: 0");
+
+    await renderRows(
+      [task("a", { page: "page-1", detachedAt: "2026-09-12T09:00:00.000Z" })],
+      { pageTitle: "Weekly planning" },
+    );
+    expect(document.querySelector(".brain-task-caption")?.textContent).toBe(
+      "line removed from Weekly planning",
+    );
+  });
+
   it("truncates the title and sets dir=auto", async () => {
     await renderRows([task("a", { title: "ذهاب إلى السوق" })]);
     const title = document.querySelector(".brain-task-title") as HTMLElement;
@@ -425,6 +478,27 @@ describe("the expansion", () => {
 
     await renderRows([task("b", { when: TODAY })], { expanded: true });
     expect(document.querySelector('input[type="date"]')).not.toBeNull();
+  });
+
+  it("draws the category control as a chip, between two chips", async () => {
+    // Spec, The row: the second line materialises chips (`.chip`, 28, r14),
+    // and `+ Category` or the word is one of them. It used to keep its own
+    // bare-text geometry between two filled 28-tall capsules, where it read as
+    // a label rather than as something to press.
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    const labels = [...document.querySelectorAll(".chip")].map((chip) =>
+      chip.textContent,
+    );
+    expect(labels).toContain("+ Category");
+
+    await renderRows([task("b", { when: TODAY, category: "Family" })], {
+      expanded: true,
+    });
+    const set = [...document.querySelectorAll(".chip")].find(
+      (chip) => chip.textContent === "Family",
+    );
+    expect(set).toBeDefined();
+    expect(set?.getAttribute("aria-label")).toBe("Category: Family");
   });
 
   it("makes the title editable on a second tap and not on the first", async () => {
@@ -536,13 +610,31 @@ describe("a history row", () => {
     expect(calls.reopen).toHaveBeenCalledTimes(1);
   });
 
-  it("selects but does not open", async () => {
+  it("selects nothing and opens nothing", async () => {
+    // Not even the selection capsule: a capsule on a row that answers no key
+    // is the same refusal one gesture later.
     await renderRows([historic()], { historic: true });
     await act(async () => {
       (document.querySelector(".brain-task-title") as HTMLElement).click();
     });
-    expect(calls.select).toHaveBeenCalledWith("a");
+    expect(calls.select).not.toHaveBeenCalled();
     expect(calls.expand).not.toHaveBeenCalled();
+
+    await renderRows([historic()]);
+    await act(async () => {
+      (document.querySelector(".brain-task-title") as HTMLElement).click();
+    });
+    expect(calls.select).toHaveBeenCalledWith("a");
+  });
+
+  it("becomes a control again when the entry above it is unticked", async () => {
+    // A Logbook row's key is its completion, so the row below the newest one
+    // keeps its key and stops being history the moment that one is undone.
+    await renderRows([historic()], { historic: true });
+    expect(document.querySelector(".brain-task-box")?.tagName).toBe("SPAN");
+
+    await renderRows([historic()]);
+    expect(document.querySelector(".brain-task-box")?.tagName).toBe("BUTTON");
   });
 
   it("answers no bare letter", async () => {
@@ -551,6 +643,114 @@ describe("a history row", () => {
       window.dispatchEvent(new KeyboardEvent("keydown", { key: "t", bubbles: true }));
     });
     expect(calls.reschedule).not.toHaveBeenCalled();
+  });
+});
+
+/** THE DATE CONTROL, BY MODALITY.
+ *
+ *  On touch the system picker is the better control and the native input opens
+ *  it directly. On a pointer the browser's own chrome is the only chrome in
+ *  Brain that is not Brain's, so the menu offers a row like every other row
+ *  and reveals the input when it is asked for. */
+describe("the When menu's date row", () => {
+  const stubHover = (hover: boolean) => {
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(hover: hover)" ? hover : false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+  };
+
+  const openMenu = async () => {
+    const chip = [...document.querySelectorAll<HTMLElement>(".chip")].find(
+      (node) => node.getAttribute("aria-label")?.startsWith("When:"),
+    );
+    if (!chip) throw new Error("no When chip on the expanded row");
+    await act(async () => {
+      chip.dispatchEvent(pointer("pointerdown"));
+      chip.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+  };
+
+  const menuLabels = () =>
+    [...document.querySelectorAll(".brain-menu-item")].map((item) =>
+      (item.textContent ?? "").trim(),
+    );
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("offers Today, Tomorrow, Next week, Someday and Pick a date on a pointer", async () => {
+    stubHover(true);
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await openMenu();
+
+    expect(menuLabels()).toEqual([
+      "Today",
+      "Tomorrow",
+      "Next week",
+      "Someday",
+      "Pick a date",
+      "Clear",
+    ]);
+    // No browser chrome inside the menu until it is asked for.
+    expect(document.querySelector('.brain-menu input[type="date"]')).toBeNull();
+
+    const pick = document.querySelector<HTMLElement>("[data-task-when-pick]");
+    await act(async () => {
+      pick?.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // The menu stands and the row it revealed is inside it.
+    expect(document.querySelector("[data-task-when-date]")).not.toBeNull();
+    expect(document.querySelector('.brain-menu input[type="date"]')).not.toBeNull();
+    expect(document.querySelector("[data-task-when-pick]")).toBeNull();
+  });
+
+  it("opens the native input directly on touch", async () => {
+    stubHover(false);
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await openMenu();
+
+    expect(menuLabels()).toContain("Next week");
+    expect(menuLabels()).not.toContain("Pick a date");
+    // iOS draws the better control here, and it is one tap away rather than
+    // two.
+    expect(document.querySelector('.brain-menu input[type="date"]')).not.toBeNull();
+  });
+
+  it("moves the row to the day seven out when Next week is chosen", async () => {
+    stubHover(true);
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await openMenu();
+
+    const row = [...document.querySelectorAll<HTMLElement>(".brain-menu-item")].find(
+      (item) => (item.textContent ?? "").trim() === "Next week",
+    );
+    await act(async () => {
+      row?.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(calls.reschedule).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a" }),
+      "2026-09-20",
+      "Next week",
+    );
   });
 });
 
@@ -633,6 +833,34 @@ describe("the swipe", () => {
     );
   });
 
+  it("still commits when the capture was already released under it", async () => {
+    // iOS releases the capture itself on `pointercancel`, and releasing one
+    // that is gone throws `NotFoundError`. Thrown out of the handler it
+    // aborted it before the commit: the finger travelled, the word appeared,
+    // and the release silently did nothing, which on a device reads as the
+    // gesture being broken.
+    await renderRows([task("a")]);
+    const element = row() as HTMLElement & {
+      releasePointerCapture: (id: number) => void;
+    };
+    element.releasePointerCapture = () => {
+      throw Object.assign(new Error("no pointer with this id"), {
+        name: "NotFoundError",
+      });
+    };
+
+    await swipe(130);
+    await act(async () => {
+      element.dispatchEvent(pointer("pointerup", { clientX: 130 }));
+    });
+
+    expect(calls.reschedule).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a" }),
+      "2026-09-14",
+      "Tomorrow",
+    );
+  });
+
   it("commits a short flick on velocity alone, at 800 px/s", async () => {
     await renderRows([task("a")]);
     await act(async () => {
@@ -663,13 +891,50 @@ describe("reduced motion", () => {
     harness.reduce = true;
   });
 
-  it("keeps the 160 ms fill, because it is colour and not movement", () => {
-    // the box's fill transition is never inside a reduced-motion block
+  /** The surface's own reduced-motion block, on its own. */
+  const reducedTasks = () => {
+    const at = css.indexOf("/* Reduced motion: every transition on this surface");
+    expect(at).toBeGreaterThan(-1);
+    const end = css.indexOf("\n/* \u2500", at);
+    return css.slice(at, end === -1 ? undefined : end);
+  };
+
+  it("keeps the 160 ms fill and the title's dim, because they are colour", () => {
+    // The GLOBAL reduce rule is `* { transition-duration: 0.01ms !important }`
+    // and it comes first, so a plain shorthand written under reduce loses to
+    // it whatever it says: the measured duration on a row was 1e-05s and this
+    // whole block was dead code. Every colour transition the spec keeps has to
+    // carry `!important` to survive it.
+    const global = css.slice(
+      css.indexOf("@media (prefers-reduced-motion: reduce)"),
+    );
+    expect(global).toContain("transition-duration: 0.01ms !important");
+
+    const reduced = reducedTasks();
+    for (const selector of [
+      ".brain-task-row {",
+      ".brain-task-row[data-expanded] {",
+      ".brain-task-box {",
+      ".brain-task-row[data-holding] .brain-task-title {",
+    ]) {
+      expect(reduced).toContain(selector);
+    }
+    // Every transition this block restates wins, and every one of them is a
+    // colour: nothing here travels, resizes or fades.
+    const transitions = [...reduced.matchAll(/transition:[^;]+;/g)].map(
+      (match) => match[0],
+    );
+    expect(transitions.length).toBe(4);
+    for (const declaration of transitions) {
+      expect(declaration).toContain("!important");
+      expect(declaration).toMatch(/background-color|border-color|color /);
+      expect(declaration).not.toMatch(/transform|opacity|height|width/);
+    }
+    // And the box still declares its fill outside the block, so the surface
+    // reads the same either way.
     expect(ruleFor(css, ".brain-task-box")).toContain(
       "background-color 160ms var(--ease-out)",
     );
-    const reduced = css.slice(css.indexOf("/* Reduced motion: every transition on this surface"));
-    expect(reduced).not.toContain(".brain-task-box");
   });
 
   it("fades the check over 120 ms with no dash draw and no scale", async () => {

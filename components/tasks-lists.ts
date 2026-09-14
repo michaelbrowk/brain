@@ -189,12 +189,17 @@ export interface DeadlineCaption {
   readonly overdue: boolean;
 }
 
-/** The bare date. Not "due in 3d", not "overdue 2d". A deadline that has
- *  arrived is owed today, so the boundary is the same `<=` that pulls the
- *  task into Today. */
+/** The bare date. Not "due in 3d", not "overdue 2d".
+ *
+ *  Red is for a deadline that is PAST, strictly: the spec's own words are
+ *  "`--ink-3` while it is ahead and `--red` once it is past". A deadline is
+ *  owed today on its own day, which is why it pulls the task into Today, and
+ *  drawing it red there spent the section's one red on every deadline on the
+ *  one day it is not yet late. A signal that fires every time stops being
+ *  one. */
 export function deadlineCaption(task: TaskView, today: string): DeadlineCaption | null {
   if (!isDay(task.deadline)) return null;
-  return { label: dayLabel(task.deadline), overdue: task.deadline <= today };
+  return { label: dayLabel(task.deadline), overdue: task.deadline < today };
 }
 
 /** The reader's day for a completion instant. Re-exported rather than

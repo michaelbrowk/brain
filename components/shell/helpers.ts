@@ -14,6 +14,7 @@ import {
 } from "@/lib/page-ref-nesting";
 import { structureMutationConfirmed } from "@/lib/structure-reconciliation";
 import type { SettingsSection } from "../settings/sections";
+import type { ListName } from "@/lib/tasks/lists";
 import type { PageRefEffectReceipt } from "./page-ref-reconcile";
 import type { ToastOptions } from "../ui/primitives";
 
@@ -72,8 +73,13 @@ export function toastAdmit(
   };
 }
 
-/** The canvas surface: notes (a page or the hub), mail, or settings. */
-export type ShellSurface = "notes" | "mail" | "settings";
+/** The canvas surface: notes (a page or the hub), mail, settings, or tasks. */
+export type ShellSurface = "notes" | "mail" | "settings" | "tasks";
+
+/** What the Tasks surface has open: one of the five lists, or the view of one
+ *  category. It is navigation state and not part of the canvas identity
+ *  (see `navigationPresenceIdentity`). */
+export type TasksListState = ListName | { category: string };
 
 export type NavigationPresenceState = {
   selectedId: string | null;
@@ -81,6 +87,9 @@ export type NavigationPresenceState = {
   /** The open settings section; null is the mobile root list. Meaningful
    *  only while `surface` is "settings". */
   settingsSection: SettingsSection | null;
+  /** The open Tasks list, or a category view. Meaningful only while
+   *  `surface` is "tasks". */
+  tasksList: TasksListState | null;
   epoch: number;
 };
 
@@ -90,10 +99,15 @@ export type NavigationPresenceAction =
       type: "surface";
       surface: ShellSurface;
       settingsSection?: SettingsSection | null;
+      tasksList?: TasksListState | null;
     };
 
 export function navigationPresenceIdentity(state: NavigationPresenceState): string {
   if (state.surface === "mail") return "mail";
+  // "tasks", not `tasks:${list}`: Inbox to Today moves rows inside the
+  // surface, so the list is not part of the canvas identity and switching it
+  // must not re-key the canvas through the page transition.
+  if (state.surface === "tasks") return "tasks";
   if (state.surface === "settings")
     return `settings:${state.settingsSection ?? "root"}`;
   return state.selectedId ? `page:${state.selectedId}` : "hub";
@@ -113,11 +127,23 @@ export function navigationPresenceReducer(
     next.surface = action.surface;
     next.settingsSection =
       action.surface === "settings" ? (action.settingsSection ?? null) : null;
+    // A RE-CLICK KEEPS THE LIST IT WAS ON. Things does, and the alternative
+    // is a sidebar row that silently throws away the reader's Upcoming every
+    // time they come back to the surface. An action that MEANS the default
+    // says so with an explicit `null`. One that only names the surface,
+    // `setSurface("tasks")` or a popstate onto /tasks, carries the list over.
+    next.tasksList =
+      action.surface === "tasks"
+        ? action.tasksList !== undefined
+          ? action.tasksList
+          : state.tasksList
+        : null;
   }
   if (
     next.selectedId === state.selectedId &&
     next.surface === state.surface &&
-    next.settingsSection === state.settingsSection
+    next.settingsSection === state.settingsSection &&
+    next.tasksList === state.tasksList
   ) {
     return state;
   }
@@ -129,7 +155,7 @@ export function navigationPresenceReducer(
 }
 
 /** One canvas mount per navigation target: `page:<id>` / `hub` / `mail` /
- *  `settings:<section>`, suffixed with the epoch so A→B→A gets a fresh
+ *  `settings:<section>` / `tasks`, suffixed with the epoch so A→B→A gets a fresh
  *  enter. Skeleton, load error and the resolved page all swap INSIDE this
  *  child — arrival never re-keys the canvas, which is what used to leave it
  *  at opacity 0 mid-exit. */

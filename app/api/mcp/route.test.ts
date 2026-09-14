@@ -576,3 +576,222 @@ describe("Notion MCP route validation", () => {
     expect(mocks.getStore).not.toHaveBeenCalled();
   });
 });
+
+describe("the task read tools", () => {
+  const TODAY = "2026-09-13";
+  const TASK_ID = "task-alpha";
+  const PAGE_ID = "page-one";
+
+  const view = (overrides: Record<string, unknown> = {}) => ({
+    id: TASK_ID,
+    title: "Water the plants",
+    done: false,
+    created: "2026-09-13T09:00:00.000Z",
+    updated: "2026-09-13T09:00:00.000Z",
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    mocks.getStore.mockReset();
+    mocks.verifyMcpBearerToken.mockReset();
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "test-machine-token",
+      clientId: "legacy-client",
+      scopes: ["brain:read"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+    vi.stubEnv("MCP_TOKEN", "test-machine-token");
+    vi.stubEnv("AUTH_SECRET", "test-auth-secret-with-at-least-32-bytes");
+    vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "https://brain.example.test");
+  });
+
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("refuses every derived list without the caller's own date", async () => {
+    for (const list of ["today", "upcoming", "someday", "logbook"]) {
+      const { payload } = await toolPayload(
+        await callTool("list_tasks", { list }, 1),
+      );
+      expect(payload.error).toContain("today is required for this list");
+      expect(mocks.getStore).not.toHaveBeenCalled();
+    }
+  });
+
+  it("refuses the logbook without the caller's own offset", async () => {
+    const { payload } = await toolPayload(
+      await callTool("list_tasks", { list: "logbook", today: TODAY }, 10),
+    );
+    expect(payload).toEqual({ error: "bad_offset" });
+    expect(mocks.getStore).not.toHaveBeenCalled();
+  });
+
+  it("answers the logbook with keyed entries, repeat completions included", async () => {
+    // A repeating record is never done, so a filter over records would tell an
+    // agent that nothing repeating was ever finished. The store derives the
+    // rows from `log`, and this is the caller that cannot derive its own.
+    //
+    // And an agent needs to tell two of them apart. Both rows below carry the
+    // record id `task-words`, so the id cannot be the key; the entry's own
+    // `key` is.
+    const completion = (scheduled: string, completedAt: string) => ({
+      key: `task-words:${completedAt}`,
+      task: {
+        ...view(),
+        id: "task-words",
+        title: "Learn words",
+        repeat: { freq: "daily" },
+        done: true,
+        when: scheduled,
+        doneAt: completedAt,
+      },
+      untickable: scheduled === "2026-09-13",
+    });
+    const rows = [
+      completion("2026-09-13", "2026-09-13T09:00:00.000Z"),
+      completion("2026-09-12", "2026-09-12T09:00:00.000Z"),
+    ];
+    const listLogbook = vi.fn().mockReturnValue(rows);
+    const listTasks = vi.fn();
+    mocks.getStore.mockResolvedValue({ listTasks, listLogbook });
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "list_tasks",
+        { list: "logbook", today: TODAY, offsetMinutes: 0 },
+        12,
+      ),
+    );
+
+    expect(payload.entries).toEqual(rows);
+    expect(payload.tasks).toBeUndefined();
+    expect(new Set(rows.map((row) => row.task.id)).size).toBe(1);
+    expect(new Set(rows.map((row) => row.key)).size).toBe(2);
+    expect(listLogbook).toHaveBeenCalledWith(TODAY, { offsetMinutes: 0 });
+    expect(listTasks).not.toHaveBeenCalled();
+  });
+
+  it("passes the caller's offset through to the logbook read", async () => {
+    const listLogbook = vi.fn().mockReturnValue([]);
+    mocks.getStore.mockResolvedValue({ listLogbook });
+
+    await toolPayload(
+      await callTool(
+        "list_tasks",
+        { list: "logbook", today: TODAY, offsetMinutes: 240 },
+        11,
+      ),
+    );
+
+    expect(listLogbook).toHaveBeenCalledWith(TODAY, { offsetMinutes: 240 });
+  });
+
+  it("refuses a malformed today", async () => {
+    const { payload } = await toolPayload(
+      await callTool("list_tasks", { list: "today", today: "2026-9-1" }, 2),
+    );
+    expect(payload).toEqual({ error: "bad_today" });
+    expect(mocks.getStore).not.toHaveBeenCalled();
+  });
+
+  it("answers the inbox without a date, because inbox needs none", async () => {
+    const listTasks = vi.fn().mockReturnValue([view()]);
+    mocks.getStore.mockResolvedValue({ listTasks });
+
+    const { payload } = await toolPayload(
+      await callTool("list_tasks", { list: "inbox" }, 3),
+    );
+
+    expect(payload.tasks).toEqual([view()]);
+    expect(listTasks.mock.calls[0][1]).toEqual({ list: "inbox" });
+  });
+
+  it("passes the caller's date and category to the store", async () => {
+    const listTasks = vi.fn().mockReturnValue([]);
+    mocks.getStore.mockResolvedValue({ listTasks });
+
+    await toolPayload(
+      await callTool(
+        "list_tasks",
+        { list: "today", today: TODAY, category: "home" },
+        4,
+      ),
+    );
+
+    expect(listTasks).toHaveBeenCalledWith(TODAY, {
+      list: "today",
+      category: "home",
+    });
+  });
+
+  it("reads one task and says which page it is linked to", async () => {
+    const linked = view({ page: PAGE_ID });
+    mocks.getStore.mockResolvedValue({
+      getTask: vi.fn().mockReturnValue(linked),
+      taskPageTrashed: vi.fn().mockReturnValue(false),
+    });
+
+    const { payload } = await toolPayload(
+      await callTool("get_task", { id: TASK_ID }, 5),
+    );
+
+    expect(payload.task).toEqual(linked);
+  });
+
+  it("answers page_trashed for a task whose page is in the trash", async () => {
+    mocks.getStore.mockResolvedValue({
+      getTask: vi.fn().mockReturnValue(view({ page: PAGE_ID })),
+      taskPageTrashed: vi.fn().mockReturnValue(true),
+    });
+
+    const { payload } = await toolPayload(
+      await callTool("get_task", { id: TASK_ID }, 6),
+    );
+
+    expect(payload).toEqual({ error: "page_trashed" });
+  });
+
+  it("answers not_found for an unknown id and bad_id for one that is not a task id", async () => {
+    mocks.getStore.mockResolvedValue({
+      getTask: vi.fn().mockReturnValue(null),
+      taskPageTrashed: vi.fn().mockReturnValue(false),
+    });
+
+    const missing = await toolPayload(
+      await callTool("get_task", { id: "task-missing" }, 7),
+    );
+    expect(missing.payload).toEqual({ error: "not_found" });
+
+    const bad = await toolPayload(
+      await callTool("get_task", { id: "../escape" }, 8),
+    );
+    expect(bad.payload).toEqual({ error: "bad_id" });
+  });
+
+  it("registers no task write tool", async () => {
+    const response = await POST(
+      new Request("https://brain.example.test/api/mcp", {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: "Bearer test-machine-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 9,
+          method: "tools/list",
+          params: {},
+        }),
+      }),
+    );
+    const body = await response.text();
+
+    expect(body).toContain("list_tasks");
+    expect(body).toContain("get_task");
+    // Deferred on purpose. An agent that wants a task writes a checkbox line
+    // into a page and the person promotes it.
+    expect(body).not.toContain("create_task");
+    expect(body).not.toContain("update_task");
+    expect(body).not.toContain("complete_task");
+  });
+});

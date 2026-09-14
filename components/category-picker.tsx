@@ -11,6 +11,7 @@ export function CategoryPicker({
   suggestions,
   onSet,
   revealClass = "",
+  chip = false,
 }: {
   value?: string;
   suggestions: string[];
@@ -18,6 +19,12 @@ export function CategoryPicker({
   /** hides the empty "+ Category" affordance until the header is hovered; a set
    *  category pill stays visible */
   revealClass?: string;
+  /** Draw the trigger as a `.chip`. An expanded task row materialises a line
+   *  of them, and a bare-text control standing between two 28-tall capsules
+   *  reads as a label rather than as something to press. The page header,
+   *  where this control is alone on a line and hides until hover, keeps its
+   *  own geometry. */
+  chip?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState("");
@@ -36,7 +43,18 @@ export function CategoryPicker({
   return (
     <Popover.Root open={open} onOpenChange={setOpen}>
       <Popover.Trigger asChild>
-        {value ? (
+        {chip ? (
+          /* The spec's own row: `.chip`, 28, r14, carrying "+ Category" or the
+             word. No glyph, because a category is a word a person wrote and
+             the list menu draws one without a glyph too. */
+          <button
+            type="button"
+            className="chip"
+            {...(value ? { "aria-label": `Category: ${value}` } : {})}
+          >
+            {value ?? "+ Category"}
+          </button>
+        ) : value ? (
           <button className="brain-touch-min -ml-2.5 rounded-full border border-line px-2.5 py-0.5 text-[12px] text-ink-2 transition-colors hover:bg-fill-hover hover:text-ink">
             {value}
           </button>

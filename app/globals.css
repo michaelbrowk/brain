@@ -1277,7 +1277,7 @@ html[data-kbd] [contenteditable]:focus-visible {
    at 13px, inside every 28/32/36 control), the way SF's UI labels sit in
    their capsules. A decoration (the breadcrumb underline) goes on the
    label span, never on the emoji or icon next to it. */
-:is(.btn, .chip, .tree-row, .crumb-seg, .brain-menu-item, .brain-palette-item, .brain-dialog-row, .brain-toast, .brain-mail-row, .brain-mail-row-static) .truncate,
+:is(.btn, .chip, .tree-row, .crumb-seg, .brain-menu-item, .brain-palette-item, .brain-dialog-row, .brain-toast, .brain-mail-row, .brain-mail-row-static, .brain-task-row) .truncate,
 .tree-row-title,
 .crumb-label {
   line-height: 1.25;
@@ -1726,7 +1726,8 @@ html[data-kbd] [contenteditable]:focus-visible {
 .tree-row > * {
   position: relative;
 }
-.tree-row > .tree-row-capsule {
+.tree-row > .tree-row-capsule,
+.brain-task-row > .tree-row-capsule {
   position: absolute;
   inset: 0;
   border-radius: inherit;
@@ -1740,7 +1741,8 @@ html[data-kbd] [contenteditable]:focus-visible {
     0 1px 2px var(--fill-selected-rim);
   pointer-events: none;
 }
-.tree-row > .tree-row-capsule::after {
+.tree-row > .tree-row-capsule::after,
+.brain-task-row > .tree-row-capsule::after {
   content: "";
   position: absolute;
   inset: 0;
@@ -1767,7 +1769,8 @@ html[data-kbd] [contenteditable]:focus-visible {
 }
 @media (hover: hover) {
   .tree-row[data-selected]:hover > .tree-row-capsule::after,
-  .tree-row[data-selected][data-hover] > .tree-row-capsule::after {
+  .tree-row[data-selected][data-hover] > .tree-row-capsule::after,
+  .brain-task-row[data-selected]:hover > .tree-row-capsule::after {
     opacity: 1;
     transition-duration: 80ms;
   }
@@ -3470,7 +3473,7 @@ a.brain-share-url:active {
    passes under it and it blurs on its own (no edge band, no hairline).
    Search and Pages render their own copy inside their focus scope, with this
    same position and material, so the bar looks and sits identically whichever
-   of the five tabs is up. It used to go `contained` in those two: a plain
+   of the six tabs is up. It used to go `contained` in those two: a plain
    row in flow at the foot of a sheet, which is what a section does not do.
 
    IT IS SIZED BY ITS CONTENT, NOT BY THE WINDOW. It used to stretch edge to
@@ -3480,22 +3483,26 @@ a.brain-share-url:active {
    than as an object standing on it. Everything else that floats in this
    product is shrink-to-fit — the breadcrumb pill, the toolbar pills, the
    toast — and so is the system's own tab bar on this OS. ONE measurement
-   gives the slot: the widest label is "Search" at 37.6 (Label 11/500), 11px
-   of air on each side is 59.6, and §4's 4px step rounds that to 60 — 11.2 as
-   built. Five of them plus the row's 4px ends is 308, held at every window
-   that leaves it that much between the insets (>= 324): the bar clears 41 on
-   each side at 390, 61 at 430, 66 at 440, and never touches the window (§4).
-   Below 324 the window sets the width — (w - 16 - 8) / 5, so 59.2 at 320 —
-   and the 44px track floor is not reached until 244, where the bar is 228 and
-   still on both insets; narrower again it centres back through them. The
-   20px minimum between two adjacent WORDS is a check, not the derivation:
-   two labels centred in equal tracks leave track - (w1 + w2) / 2, so the pair
-   to read is Home<->Search (New is a wordless circle), measured 25.4 here.
+   gives the slot: the widest label is still "Search" at 37.6 (Label 11/500),
+   and "Tasks" measures 30.6 and does not take it. 9.2 of air on each side is
+   56.0, which is §4's 4px step. The sixth slot moved the air from 11.2 to 9.2
+   and the slot from 60 to 56. Six of them plus the row's 4px ends is 344,
+   held at every window that leaves it that much between the insets (>= 360):
+   the bar clears 23 on each side at 390, 43 at 430, 48 at 440, and never
+   touches the window (§4). Below 360 the window sets the width —
+   (w - 16 - 8) / 6, so 49.33 at 320 — and the 44px track floor is not reached
+   until 288, where the bar is 272 and still on both insets; narrower again it
+   centres back through them. The 20px minimum between two adjacent WORDS is
+   a check, not the derivation:
+   two labels centred in equal tracks leave track - (w1 + w2) / 2, so the
+   pairs to read are Home<->Search at 21.1, Search<->Tasks at 21.9 and
+   Pages<->Mail at 28.4 (New is a wordless circle). The minimum is
+   Home<->Search and the new neighbour does not overtake it.
    `fit-content` between the two insets with `margin-inline: auto` centres it:
    no transform, which the hidden state needs for itself. Every figure per
    width by e2e/mail-shots.spec.ts. */
 .brain-mobile-tabbar {
-  --tabbar-slot: 60px;
+  --tabbar-slot: 56px;
   position: fixed;
   z-index: calc(var(--z-drawer) - 20);
   left: calc(var(--inset) + env(safe-area-inset-left, 0px));
@@ -3534,7 +3541,7 @@ a.brain-share-url:active {
 }
 .brain-mobile-tabbar-items {
   display: grid;
-  grid-template-columns: repeat(5, minmax(44px, var(--tabbar-slot)));
+  grid-template-columns: repeat(6, minmax(44px, var(--tabbar-slot)));
   height: 54px;
   padding: 0 4px;
 }
@@ -4040,7 +4047,7 @@ a.brain-share-url:active {
 .brain-mail-head > .brain-mail-search {
   flex: none;
 }
-/* The rows start below the floating head — inset, the head, and the 8 of air
+/* The rows start below the floating head: inset, the head, and the 8 of air
    that separates chrome from content everywhere else in the column. */
 .brain-mail-scrollpad {
   padding-top: calc(var(--inset) + var(--mail-chrome) + 8px);
@@ -5492,4 +5499,530 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
   to {
     stroke-dashoffset: 87.96;
   }
+}
+
+
+/* ── Tasks surface (P6) ──────────────────────────────────────────────────────
+
+   The column is the mail column's construction with one field instead of two:
+   a floating head on the inset, rows passing under it, and a capsule per row
+   inset into the column so nothing reaches past the mark that groups it.
+
+   ONE LEFT RULE, and it is arithmetic rather than a number: the inset, the 4
+   the row keeps inside its capsule, the 28 the checkbox's cell occupies and
+   the 8 between the box and the word. 52 at the desktop inset and 48 at the
+   phone's, and the group headers ride it so a label starts on the same line
+   its rows do. */
+.brain-tasks {
+  --task-rule: calc(var(--inset) + 40px);
+  --task-capsule: 36px;
+  --task-chrome: 36px;
+  position: relative;
+  display: flex;
+  min-height: 100%;
+  width: 100%;
+  flex-direction: column;
+}
+/* The head floats: a glass object on the canvas with the rows running under
+   it, never a plate across the column. It lets everything through except its
+   own pill, so the space beside it is a place a reader clicks a task. */
+.brain-tasks-head {
+  position: absolute;
+  z-index: var(--z-toolbar);
+  top: var(--inset);
+  right: 0;
+  left: 0;
+  /* the inset lives INSIDE the 700 box, so the pill's left edge lands on the
+     row capsule's, not half an inset off it */
+  padding-inline: var(--inset);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  pointer-events: none;
+}
+.brain-tasks-head > .toolbar-pill {
+  pointer-events: auto;
+}
+.brain-tasks-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+}
+/* THE COLUMN IS A MEASURE, not the window. A task is one line of text with a
+   date at its end, and across 1100px of canvas the two stop being one row:
+   the reader's eye has to travel the width of the screen to pair a title with
+   the day it is owed. So the rows take the editor's own 700, centred in the
+   space right of the sidebar (§4, Widths), and the head is centred on the
+   same box so the pill stands over the column it names. */
+.brain-tasks-head,
+.brain-tasks-scrollpad {
+  max-width: 700px;
+  margin-inline: auto;
+}
+/* The rows start below the floating head: inset, the head, and the 8 of air
+   that separates chrome from content everywhere else. */
+.brain-tasks-scrollpad {
+  padding-top: calc(var(--inset) + var(--task-chrome) + 8px);
+}
+/* Below md the mobile tab bar floats over the column's foot, so the rows
+   reserve its height at their end: a list whose last row you cannot reach has
+   no end. The reserve belongs to the rows, not the scroller, or the sticky
+   bottom edge could never meet the foot of a short column. */
+.brain-tasks-scrollfoot {
+  padding-bottom: var(--tabbar-reserve);
+}
+/* §7's own formula: the chrome content hides behind, the inset above it, and
+   28 of bleed past both. Only the top edge, since the bottom one is the tab bar's
+   and carries its own 90. */
+.brain-tasks-scroll > .edge:not([data-position="bottom"]) {
+  --edge-size: calc(var(--task-chrome) + var(--inset) + 28px);
+}
+.brain-tasks-nav {
+  min-width: 0;
+  justify-content: flex-start;
+}
+
+.brain-tasks-rows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* The 4 between one capsule and the next, as the wrapper's padding rather
+   than the row's margin: the step is 40, being 36 of row and 4 of air, so the
+   column reads at one rhythm whether or not two neighbours are tinted. It
+   also owns the fold, which animates this box's real height. */
+.brain-task-row-item {
+  padding: 2px 0;
+}
+.brain-task-swipe {
+  position: relative;
+}
+/* The word the swipe reveals, on the text rule so a reader reads it where
+   they read the title. It is behind the capsule and never takes a press. */
+.brain-task-word {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: var(--task-rule);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-2);
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: -0.08px;
+  pointer-events: none;
+}
+.brain-task-row {
+  position: relative;
+  /* the selection capsule is a FILL under the row's own content, the way
+     `.tint-hover` puts its layer at z -1 inside the element's own stacking
+     context; without this an absolutely positioned child paints over the
+     title and the row reads as veiled */
+  isolation: isolate;
+  display: flex;
+  align-items: flex-start;
+  /* not `auto`: a flex container sizes to its content, so the capsule has to
+     be told the column minus its two insets */
+  width: calc(100% - var(--inset) * 2);
+  height: var(--task-capsule);
+  margin: 0 var(--inset);
+  padding: 0 8px 0 4px;
+  border-radius: var(--r-row);
+  text-align: left;
+  cursor: default;
+  /* THE HORIZONTAL SWIPE IS THE APP'S. Without this the row inherits
+     `touch-action: auto`, and iOS claims a sideways drag for its own back
+     gesture and fires `pointercancel` in the middle of one. `pan-y` leaves
+     the column's scroll to the browser and keeps the x axis here. */
+  touch-action: pan-y;
+  transition:
+    background-color 160ms var(--ease-out),
+    box-shadow 160ms var(--ease-out),
+    height 220ms var(--ease-out),
+    transform 100ms ease-out;
+}
+@media (hover: hover) {
+  .brain-task-row:hover {
+    background-color: var(--blue-tint);
+    transition-duration: 80ms;
+  }
+}
+/* Press is the scale (§8): hover already owns the blue, and a press that
+   repaints the fill it is already wearing says nothing. */
+.brain-task-row:active {
+  background-color: var(--blue-tint);
+  transform: scale(0.97);
+}
+/* HISTORY ADVERTISES NOTHING. An older completion of a repeating task has
+   nothing left to undo, so the row takes no hover fill, no press and no
+   pointer: a capsule that lights up under the cursor and then refuses every
+   gesture is the one shape a control must not have. */
+/* One rule, and no `:hover` of its own: it sits after the two it has to beat
+   and carries the same weight, so it wins on order. A `:hover` here would be
+   a hover a touch screen can reach and not let go of. */
+.brain-task-row[data-historic] {
+  background-color: transparent;
+  transform: none;
+  cursor: default;
+}
+.brain-task-box_static {
+  display: block;
+  cursor: default;
+}
+/* Expanded: the same capsule, one tint step up with a rim, grown in REAL
+   height rather than by a layout animation, because a layout spring would stretch
+   the words inside it. 36 of row and 40 of chips. */
+.brain-task-row[data-expanded] {
+  height: calc(var(--task-capsule) + 40px);
+  background-color: var(--blue-tint-2);
+  box-shadow: inset 0 0 0 1px var(--blue-rim);
+}
+.brain-task-row[data-selected] .brain-task-title {
+  font-weight: 600;
+}
+.brain-task-row > .tree-row-capsule {
+  z-index: -1;
+}
+.brain-task-row_ghost,
+.brain-task-row_ghost:active {
+  background-color: transparent;
+  transform: none;
+}
+
+/* The checkbox, as the note draws it. `components/editor/milkdown.css` keeps
+   the positioning the NodeView needs and nothing else: the box, the radius,
+   the border and the fill are declared once, here, so the two surfaces cannot
+   drift into two controls. */
+.brain-task-box {
+  position: relative;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: 1.5px solid var(--ink-3);
+  border-radius: 4px;
+  background-color: transparent;
+  cursor: pointer;
+  transition:
+    background-color 160ms var(--ease-out),
+    border-color 160ms var(--ease-out);
+}
+.brain-task-box[aria-checked="true"] {
+  background-color: var(--ink);
+  border-color: var(--ink);
+}
+.brain-task-box > svg {
+  display: block;
+  /* border-box: the 1.5 border eats into the 16 and leaves a 13 content box,
+     and the tick has to be centred on the border box */
+  margin: -1.5px 0 0 -1.5px;
+}
+/* 28 on a pointer, which is 4 more than WCAG 2.5.8 and what the note's own
+   28px line pitch allows there. A task row is 40 apart, so the phone takes
+   the full 44 (`brain-touch-min`'s other half, `touch-action`, rides the
+   element). */
+.brain-task-box::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 28px;
+  height: 28px;
+  transform: translate(-50%, -50%);
+}
+/* A drawing, not a control: there is nothing to tick until the line is a
+   task, so the ghost's box is outlined in the faint marker ink and takes no
+   press. */
+.brain-task-box_ghost {
+  border-color: var(--ink-4);
+  cursor: text;
+}
+.brain-task-boxcell {
+  display: grid;
+  width: 28px;
+  height: var(--task-capsule);
+  flex-shrink: 0;
+  place-items: center;
+}
+.brain-task-main {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  margin-left: 8px;
+}
+.brain-task-line {
+  display: flex;
+  min-width: 0;
+  height: var(--task-capsule);
+  align-items: center;
+  gap: 8px;
+}
+.brain-task-title {
+  min-width: 0;
+  flex: 1;
+  color: var(--ink);
+  font-family: var(--font-sf);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: -0.15px;
+}
+/* The tail: the linked glyph, then the repeat glyph, then one caption. Its
+   own column, where truncation of the title cannot eat it. */
+.brain-task-tail {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--ink-3);
+}
+/* No character cap. The tail is its own column and does not shrink, so a
+   caption takes the width it needs and the title truncates first. 22ch cut
+   "line removed from Weekly planning" mid-word with no way to see the rest,
+   and that caption is the whole of what a detached row has to say. */
+.brain-task-caption {
+  overflow: hidden;
+  color: var(--ink-3);
+  font-family: var(--font-sf);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1.35;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A deadline already owed is RED TEXT and never a fill: the one red in the
+   section, and the only place §2's destructive hue appears on this surface. */
+.brain-task-caption[data-overdue] {
+  color: var(--red);
+}
+@media (hover: hover) {
+  .brain-task-row:hover .brain-task-tail {
+    color: var(--ink-2);
+  }
+}
+/* The hold: the title goes quiet 100ms in, over 160, and the row does not
+   move for the 1200 that follow. Colour, so reduced motion keeps it. */
+.brain-task-row[data-holding] .brain-task-title {
+  color: var(--ink-3);
+  transition: color 160ms var(--ease-out) 100ms;
+}
+.brain-task-row[data-done] .brain-task-title {
+  color: var(--ink-2);
+}
+.brain-task-input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--font-sf);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: -0.15px;
+  outline: none;
+}
+/* the documented placeholder exception: ink-3 may voice a hint on paper */
+.brain-task-input::placeholder {
+  color: var(--ink-3);
+}
+/* The second line of an expanded row. It scrolls rather than wraps: the
+   capsule's height is a number the expansion animates, so a chip flow that
+   grew a second line would leave the box the wrong size. */
+.brain-task-chips {
+  display: flex;
+  min-width: 0;
+  height: 40px;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.brain-task-date {
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  outline: none;
+}
+
+/* Air belongs to the block below: 24 over the group, 4 under its header. The
+   header rides the text rule, so its word starts where its rows' words do,
+   and the rule runs from the end of the word to the column's inset. */
+/* The air is PADDING, not a margin: a leaving group animates its own height
+   to 0, and a margin sits outside that box and would hold 24px of dead space
+   open for the whole 220ms. The spec says the air collapses with it. */
+.brain-tasks-section {
+  padding-top: 24px;
+  overflow: hidden;
+}
+.brain-tasks-section:first-of-type {
+  padding-top: 12px;
+}
+.brain-tasks-section-head {
+  display: flex;
+  height: 28px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 var(--inset) 0 var(--task-rule);
+  margin-bottom: 4px;
+}
+.brain-tasks-section-label {
+  flex-shrink: 0;
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+/* The size sits inside the header's own word, in a box of its own, so it can
+   crossfade when a completion moves it without the word blinking with it. */
+.brain-tasks-section-count {
+  font-variant-numeric: tabular-nums;
+}
+.brain-tasks-rule {
+  height: 1px;
+  flex: 1;
+  background: var(--hair);
+  transform-origin: left center;
+}
+.brain-tasks-empty {
+  display: flex;
+  justify-content: center;
+  padding: 48px 20px;
+}
+.brain-tasks-message {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 32px 20px;
+}
+
+@media (min-width: 768px) {
+  .brain-tasks-scrollfoot {
+    padding-bottom: 0;
+  }
+}
+@media (max-width: 767px) {
+  .brain-tasks {
+    --task-capsule: 44px;
+  }
+  /* the row is 48 apart here, so the box takes the full touch minimum */
+  .brain-tasks .brain-task-box::after {
+    width: 44px;
+    height: 44px;
+  }
+  .brain-task-row-item {
+    padding: 2px 0;
+  }
+  /* 16px, so iOS never zooms the page when the caret lands */
+  .brain-task-input {
+    font-size: 16px;
+  }
+}
+
+/* Reduced motion: every transition on this surface collapses to an instant
+   state change, except the ones that are COLOUR, the box filling and the title
+   going quiet, because colour is not movement (spec 2.1 and 2.5).
+
+   `!important` because the global reduce rule above is
+   `* { transition-duration: 0.01ms !important }`, which wins over any
+   shorthand a component writes: without it this whole block was dead code and
+   the measured duration on a row under reduce was 1e-05s. The exemption is by
+   PROPERTY and by class, never a blanket one: nothing here travels, changes
+   size or fades, so a reader who asked for less motion is given none. */
+@media (prefers-reduced-motion: reduce) {
+  .brain-task-row {
+    transition: background-color 160ms var(--ease-out) !important;
+  }
+  .brain-task-row:active {
+    transform: none;
+  }
+  .brain-task-row[data-expanded] {
+    transition: background-color 160ms var(--ease-out) !important;
+  }
+  /* The fill of the box, which is the one thing a completion draws that is
+     colour rather than the stroke travelling. */
+  .brain-task-box {
+    transition:
+      background-color 160ms var(--ease-out),
+      border-color 160ms var(--ease-out) !important;
+  }
+  /* And the title going quiet behind the held tick. */
+  .brain-task-row[data-holding] .brain-task-title {
+    transition: color 160ms var(--ease-out) 100ms !important;
+  }
+}
+
+/* ── Home's Today block (P6) ─────────────────────────────────────────────────
+
+   Home draws the Tasks surface's own row (`components/hub-today.tsx`), and
+   that row measures itself off `--task-rule` and `--task-capsule`, which are
+   the Tasks COLUMN's: the column has a 12px inset the row sits inside of.
+   Home has no inset. Its rule is the content edge, and every capsule on it
+   reaches 8px past that edge on both sides, which is what makes a page row, a
+   mail row and a task row share one left rule down the whole page. So the two
+   measures are restated here and the capsule's box is pulled onto Home's,
+   rather than the row learning about a second surface. */
+.brain-hub-tasks {
+  /* ONE LEFT RULE FOR THE WHOLE COLUMN. `HubRow` starts its words at 30: 8 of
+     capsule overhang, 8 of inner padding, its 20 glyph and the 10 beside it.
+     The task row's own arithmetic lands on 32 (8 overhang, 4 of padding, the
+     28 box cell and 8 of gap), so a task title used to sit 2px right of every
+     page and mail title under it. The 2 comes off the gap rather than the box
+     cell: the box's centre stays where `HubRow`'s glyph centre is, and only
+     the words move onto the rule. */
+  --task-rule: 30px;
+  --task-capsule: 36px;
+}
+.brain-hub-tasks .brain-task-main {
+  margin-left: 6px;
+}
+/* Home is a left-aligned column, and a card centred inside it is the one place
+   the Today block breaks the page's own alignment. */
+.brain-hub-empty {
+  align-items: flex-start;
+  text-align: left;
+}
+.brain-hub-tasks .brain-task-row {
+  width: calc(100% + 16px);
+  margin: 0 -8px;
+}
+@media (max-width: 767px) {
+  /* 40, the height every other row on Home takes on a phone */
+  .brain-hub-tasks {
+    --task-capsule: 40px;
+  }
+}
+
+/* THE CAPTURED WORDS, IN THE AIR. One element in two places: at rest over the
+   field's own text box, and then in the first row slot of the block below it.
+   Both wear the same `layoutId`, so what travels is the words themselves. */
+.brain-hub-flight-field {
+  position: absolute;
+  top: 0;
+  /* the field's 10 of padding, its 16 glyph and the 8 between: where the
+     caret was standing */
+  left: 34px;
+  display: flex;
+  height: 32px;
+  align-items: center;
+  pointer-events: none;
+}
+.brain-hub-flight-slot {
+  display: flex;
+  height: var(--task-capsule);
+  align-items: center;
+  padding-left: var(--task-rule);
+  pointer-events: none;
+}
+.brain-hub-flight-text {
+  overflow: hidden;
+  color: var(--ink);
+  font-family: var(--font-sf);
+  font-size: 14px;
+  font-weight: 400;
+  letter-spacing: -0.15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }

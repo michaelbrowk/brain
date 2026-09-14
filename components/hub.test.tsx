@@ -4,6 +4,7 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TreeNode } from "@/lib/store/types";
+import { resetTasksStore } from "./tasks-client";
 import { Hub } from "./hub";
 
 vi.mock("framer-motion", () => import("@/test/framer-motion-mock"));
@@ -13,6 +14,21 @@ async function settle() {
     await Promise.resolve();
     await Promise.resolve();
   });
+}
+
+/** Home now mounts the tasks and mail blocks as well. Neither is what these
+ *  cases are about, so both are answered empty and the shared task store is
+ *  reset, or one file's records would arrive in the next one's Hub. */
+function stubHubSources() {
+  resetTasksStore();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: unknown) => {
+      const url = String(input);
+      const body = url.includes("/api/mail/") ? { accounts: [] } : { tasks: [] };
+      return { ok: true, status: 200, json: async () => body } as Response;
+    }),
+  );
 }
 
 describe("Hub", () => {
@@ -27,6 +43,7 @@ describe("Hub", () => {
     ).IS_REACT_ACT_ENVIRONMENT = true;
     localStorage.clear();
     sessionStorage.clear();
+    stubHubSources();
     vi.stubGlobal(
       "requestAnimationFrame",
       vi.fn((callback: FrameRequestCallback) => {
@@ -51,7 +68,7 @@ describe("Hub", () => {
     vi.unstubAllGlobals();
   });
 
-  it("explains the two sidebar items a new notebook shows", async () => {
+  it("explains the three sidebar items a new notebook shows", async () => {
     await act(async () =>
       root.render(
         <Hub tree={[]} onSelect={() => {}} onCreate={async () => null} />,
@@ -60,7 +77,11 @@ describe("Hub", () => {
     await settle();
 
     expect(host.textContent).toContain("Your notebook is empty");
-    expect(host.textContent).toContain("Today thoughts opens a page for today");
+    // Journal, not "Today thoughts": Tasks has a list called Today and one
+    // word cannot stand over two destinations.
+    expect(host.textContent).toContain("Journal opens a page for today");
+    expect(host.textContent).not.toContain("Today thoughts");
+    expect(host.textContent).toContain("Tasks holds what you owe");
     expect(host.textContent).toContain("Mail is for a Gmail or IMAP account");
   });
 
@@ -106,6 +127,9 @@ describe("Hub", () => {
     // shared page is also the page this device was last on, so the feed drops
     // it to avoid drawing the same row twice and Continue is the only row
     // left. The name has to travel with it or the Hub reports nobody.
+    //
+    // Continue is the first ROW of the changes block now, not a block of its
+    // own, so what is asserted is the row and not a heading over it.
     localStorage.setItem("brain-last-opened", "p1");
     await act(async () =>
       root.render(
@@ -125,7 +149,9 @@ describe("Hub", () => {
     );
     await settle();
 
-    expect(host.textContent).toContain("Continue on this device");
+    const continueRow = host.querySelector("[data-hub-continue]");
+    expect(continueRow?.textContent).toContain("Guest chapter");
+    expect(host.textContent).toContain("Since this device was last open");
     expect(host.textContent).toContain("edited by Ada");
     // and the row is drawn once, not repeated into the feed below it
     const badges = [...host.querySelectorAll("span")].filter(

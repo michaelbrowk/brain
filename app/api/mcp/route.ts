@@ -30,6 +30,7 @@ import {
   oauthIssuer,
 } from "@/lib/oauth/config";
 import { canonicalizeMcpPageMarkdown } from "@/lib/mcp-page-markdown";
+import { TASK_ID_RE } from "@/lib/tasks/model";
 import {
   exactBearerToken,
   mcpInsufficientScopeResponse,
@@ -43,6 +44,16 @@ export const maxDuration = 60;
 const text = (data: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
 });
+
+const TASK_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Real UTC offsets run from -12:00 to +14:00. */
+const MAX_OFFSET_MINUTES = 840;
+
+/** Inbox is the one list that is a property of the record alone: no `when`,
+ *  no `deadline`, not done. Every day gives the same answer, so a caller who
+ *  asked only for the Inbox is not made to supply one. */
+const ANY_DAY = "1970-01-01";
 
 const insufficientScope = (scope: "brain:write" | "brain:import") => ({
   ...text({
@@ -200,6 +211,81 @@ const handler = createMcpHandler(
             });
           throw e;
         }
+      },
+    );
+
+    server.tool(
+      "list_tasks",
+      "List the tasks of one list. Pass the caller's own local calendar date as `today`; the server has no timezone to fall back on. Every list but `logbook` answers `{tasks}`, one record each; `logbook` answers `{entries}`, one per completion, because a repeating task has many completions and one record, and each entry carries its own `key`.",
+      {
+        list: z.enum(["inbox", "today", "upcoming", "someday", "logbook"]),
+        today: z
+          .string()
+          .optional()
+          .describe("YYYY-MM-DD, required for every list but inbox"),
+        offsetMinutes: z
+          .number()
+          .int()
+          .min(-MAX_OFFSET_MINUTES)
+          .max(MAX_OFFSET_MINUTES)
+          .optional()
+          .describe(
+            "the caller's own UTC offset in minutes, east positive, required for the logbook",
+          ),
+        category: z.string().optional(),
+      },
+      async ({ list, today, offsetMinutes, category }) => {
+        if (list !== "inbox" && today === undefined) {
+          return text({
+            error:
+              "today is required for this list. Pass the caller's local calendar date as YYYY-MM-DD",
+          });
+        }
+        if (today !== undefined && !TASK_DAY_RE.test(today)) {
+          return text({ error: "bad_today" });
+        }
+        // `doneAt` is one UTC instant and the Logbook day it falls on is the
+        // caller's, so the logbook cannot be answered without their offset.
+        if (list === "logbook" && offsetMinutes === undefined) {
+          return text({ error: "bad_offset" });
+        }
+        const store = await getStore();
+        // THE LOGBOOK IS ENTRIES, NOT RECORDS. A repeating task finished on
+        // seven days is seven completions of ONE record, so a list of records
+        // answers with seven objects carrying the same `id`. Each entry is
+        // handed over with its own stable `key` instead.
+        if (list === "logbook") {
+          return text({
+            entries: store.listLogbook(today ?? ANY_DAY, {
+              offsetMinutes: offsetMinutes as number,
+              ...(category !== undefined ? { category } : {}),
+            }),
+          });
+        }
+        return text({
+          tasks: store.listTasks(today ?? ANY_DAY, {
+            list,
+            ...(offsetMinutes !== undefined ? { offsetMinutes } : {}),
+            ...(category !== undefined ? { category } : {}),
+          }),
+        });
+      },
+    );
+
+    server.tool(
+      "get_task",
+      "Read one task record, including whether its note line was removed and which page it is linked to.",
+      { id: z.string() },
+      async ({ id }) => {
+        if (!TASK_ID_RE.test(id)) return text({ error: "bad_id" });
+        const store = await getStore();
+        const task = store.getTask(id);
+        if (!task) return text({ error: "not_found" });
+        // A trashed page's tasks are hidden from every list, so reading one by
+        // id answers the same way rather than handing back a row the surface
+        // would never show.
+        if (store.taskPageTrashed(id)) return text({ error: "page_trashed" });
+        return text({ task });
       },
     );
 

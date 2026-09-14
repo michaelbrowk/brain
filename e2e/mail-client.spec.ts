@@ -1629,18 +1629,19 @@ test("@release @mobile the undo and the refusal stack clear of the tab bar at 39
   expect(gap).toBeLessThanOrEqual(9);
   // The column stands on the tab bar's strip, not over it.
   expect(geometry.stack.bottom).toBeLessThanOrEqual(geometry.tabBar.top);
-  // Both are reachable: the bar's five slots and the undo the pill offers.
+  // Both are reachable: the bar's six slots and the undo the pill offers.
   // Home and Mail are only checked for the pill, since in `next dev` the
   // framework's own corner indicator can own the far corners of the bar.
   expect(geometry.tabs.map((tab) => tab.key)).toEqual([
     "home",
     "search",
+    "tasks",
     "new",
     "pages",
     "mail",
   ]);
   for (const tab of geometry.tabs) expect(tab.coveredByPill).toBe(false);
-  for (const key of ["search", "new", "pages"] as const) {
+  for (const key of ["search", "tasks", "new", "pages"] as const) {
     expect(geometry.tabs.find((tab) => tab.key === key)?.ownsItsCentre).toBe(
       true,
     );

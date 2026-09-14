@@ -34,9 +34,10 @@ export interface ShellTopbarProps {
   /** The open page, or null on the hub / in mail / in settings. */
   currentNode: TreeNode | null;
   path: TreeNode[];
-  /** Mail: neither variant draws anything — mail brings its own header row.
-   *  Settings: desktop renders the "Settings › Section" breadcrumb pill,
-   *  mobile nothing (the surface's own header is in flow). */
+  /** Mail and tasks: neither variant draws anything. Both bring their own
+   *  header row. Settings: desktop renders the "Settings › Section"
+   *  breadcrumb pill, mobile nothing (the surface's own header is in
+   *  flow). */
   surface: ShellSurface;
   settingsSection: SettingsSection | null;
   onSelectSettingsSection: (section: SettingsSection) => void;
@@ -115,6 +116,9 @@ export function ShellTopbar({
   onRequestDelete,
 }: ShellTopbarProps) {
   const mailOpen = surface === "mail";
+  // tasks, like mail, brings its own head in flow: 52px of empty band above
+  // it would read as a scroll edge over the strip below
+  const tasksOpen = surface === "tasks";
   if (surface === "settings") {
     // Mobile settings renders its own in-flow header; desktop shows the
     // breadcrumb pill — "Settings" jumps to the first section.
@@ -247,7 +251,7 @@ export function ShellTopbar({
     // subject strip), the way mobile settings already does, and 52px of
     // empty band above them was what made the canvas's top tint read as a
     // scroll edge over the strip below it.
-    if (mailOpen) return null;
+    if (mailOpen || tasksOpen) return null;
     // The hub has no crumb and no page pill — nothing to float, the way the
     // desktop layer already returns nothing there.
     if (!path.length && !currentNode) return null;
@@ -269,7 +273,7 @@ export function ShellTopbar({
     );
   }
 
-  if (mailOpen) return null;
+  if (mailOpen || tasksOpen) return null;
   if (!path.length && !currentNode) return null;
   return (
     <div className="brain-topbar brain-topbar-desktop">

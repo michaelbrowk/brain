@@ -261,6 +261,38 @@ describe("client reliability states", () => {
     expect(status?.textContent).toContain("Your draft is safe");
   });
 
+  it("keeps a ringless pill off the ring's padding", async () => {
+    // The tight left padding is the slot a countdown ring stands in, and the
+    // ring is drawn inside the icon's box: a pill with a window and no icon
+    // has no ring, and used to leave its words 6px short of where every other
+    // pill starts them. "Completed · Undo" is exactly that pill.
+    await act(async () =>
+      root.render(
+        <Snackbar open title="Completed" actionLabel="Undo" durationSec={9} />,
+      ),
+    );
+    const ringless = container.querySelector(".brain-toast");
+    expect(ringless?.querySelector("[data-toast-ring]")).toBeNull();
+    expect(ringless?.className).toContain("pl-5");
+    expect(ringless?.className).not.toContain("pl-3.5");
+
+    // And a pill that DOES draw one keeps the tight padding it was built for.
+    await act(async () =>
+      root.render(
+        <Snackbar
+          open
+          icon="check-read-linear"
+          title="Completed"
+          actionLabel="Undo"
+          durationSec={9}
+        />,
+      ),
+    );
+    const ringed = container.querySelector(".brain-toast");
+    expect(ringed?.querySelector("[data-toast-ring]")).not.toBeNull();
+    expect(ringed?.className).toContain("pl-3.5");
+  });
+
   // The two tests here were the Inbox dialog's: a failed triage stayed
   // retryable, and AI never took away the manual "File…" escape hatch. Both
   // surfaces are gone. What is left to hold is the promise the settings
@@ -380,6 +412,7 @@ describe("client reliability states", () => {
       attachments: 2,
       attachmentBytes: 2_048,
       collections: 0,
+      tasks: 4,
     };
     const portableResponses = [
       response({ ok: true, mode: "dry-run", summary }),
@@ -423,7 +456,9 @@ describe("client reliability states", () => {
     await settle();
 
     expect(document.body.textContent).toContain("Project Notes");
-    expect(document.body.textContent).toContain("3 pages · 2 attachments · 2 KB");
+    expect(document.body.textContent).toContain(
+      "3 pages · 4 tasks · 2 attachments · 2 KB",
+    );
     const portableCalls = () =>
       fetchMock.mock.calls.filter(
         ([input]) => String(input) === "/api/portable/import",

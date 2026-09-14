@@ -11,6 +11,7 @@ import { useScrollEdge } from "./ui/scroll-edge";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { emitMailCommand, type MailCommand } from "./mail-commands";
+import { emitTaskCommand, type TaskCommand } from "./tasks-commands";
 import type { TreeNode } from "@/lib/store/types";
 import type { SearchHit } from "@/lib/search";
 import type { SearchTextTarget } from "@/lib/search-navigation";
@@ -82,6 +83,37 @@ function parsePaletteQuery(input: string): { filter: PageFilter | null; text: st
  * mounted MailSurface over the mail-commands window bus instead of props, so
  * the shell stays out of the loop; the surface applies its capability gates.
  */
+/**
+ * The two moves the Tasks column can make on the row its capsule stands on.
+ * They surface only while Tasks is the open route and, like the mail block,
+ * reach the mounted surface over a window bus rather than through props: the
+ * shell has no business holding a copy of which task is selected. A command
+ * that arrives with no row selected does nothing.
+ *
+ * They exist because ⌘T is New Tab. The keys on the row are `t` and `s`, and
+ * these are the same two actions for a hand that would rather read them than
+ * remember them.
+ */
+const TASK_PALETTE_ACTIONS: readonly {
+  readonly command: TaskCommand;
+  readonly label: string;
+  readonly icon: string;
+  readonly keywords: readonly string[];
+}[] = [
+  {
+    command: "move-today",
+    label: "Move to Today",
+    icon: "calendar-date-linear",
+    keywords: ["task", "today", "schedule", "when"],
+  },
+  {
+    command: "move-someday",
+    label: "Move to Someday",
+    icon: "box-minimalistic-linear",
+    keywords: ["task", "someday", "park", "later", "when"],
+  },
+];
+
 const MAIL_PALETTE_ACTIONS: readonly {
   readonly command: MailCommand;
   readonly label: string;
@@ -259,6 +291,8 @@ export function CommandPalette({
   onToday,
   onHome,
   onOpenMail,
+  onOpenTasks,
+  onNewTask,
   onOpenTrash,
   onOpenSettings,
   onToggleTheme,
@@ -277,6 +311,8 @@ export function CommandPalette({
   onToday?: () => void | Promise<void>;
   onHome?: () => void | Promise<void>;
   onOpenMail?: () => void | Promise<void>;
+  onOpenTasks?: () => void | Promise<void>;
+  onNewTask?: () => void | Promise<void>;
   onOpenTrash?: () => void | Promise<void>;
   onOpenSettings?: () => void | Promise<void>;
   onToggleTheme?: () => void | Promise<void>;
@@ -356,6 +392,28 @@ export function CommandPalette({
         run: onOpenMail,
       });
     }
+    if (onOpenTasks) {
+      items.push({
+        id: "open-tasks",
+        label: "Open Tasks",
+        // the glyph the sidebar row and the tab-bar slot wear: one surface,
+        // one drawing
+        icon: "checklist-linear",
+        keywords: ["todo", "today", "inbox"],
+        run: onOpenTasks,
+      });
+    }
+    if (onNewTask) {
+      items.push({
+        id: "new-task",
+        label: "New task",
+        // the same bare plus "New page" wears: the mark this system draws
+        // for making a thing
+        icon: "add-linear",
+        keywords: ["todo", "capture"],
+        run: onNewTask,
+      });
+    }
     if (onOpenTrash) {
       items.push({
         id: "open-trash",
@@ -389,8 +447,10 @@ export function CommandPalette({
     onHome,
     onNewChild,
     onNewPage,
+    onNewTask,
     onToday,
     onOpenMail,
+    onOpenTasks,
     onOpenSettings,
     onOpenTrash,
     onToggleTheme,
@@ -406,28 +466,40 @@ export function CommandPalette({
     );
   }, [actions, hasPageFilter, q]);
   // Evaluated while open, so the list rebuilds against the current route.
-  const mailOpen =
-    open && typeof window !== "undefined" && window.location.pathname === "/mail";
-  const mailActions = useMemo<PaletteAction[]>(() => {
-    if (!mailOpen) return [];
-    return MAIL_PALETTE_ACTIONS.map((action) => ({
-      id: `mail-${action.command}`,
-      label: action.label,
-      icon: action.icon,
-      keywords: [...action.keywords],
-      run: () => emitMailCommand(action.command),
-    }));
-  }, [mailOpen]);
-  const filteredMailActions = useMemo(() => {
+  const path = open && typeof window !== "undefined" ? window.location.pathname : "";
+  const mailOpen = path === "/mail";
+  const tasksOpen = path.startsWith("/tasks");
+  const routeActions = useMemo<PaletteAction[]>(() => {
+    if (mailOpen) {
+      return MAIL_PALETTE_ACTIONS.map((action) => ({
+        id: `mail-${action.command}`,
+        label: action.label,
+        icon: action.icon,
+        keywords: [...action.keywords],
+        run: () => emitMailCommand(action.command),
+      }));
+    }
+    if (tasksOpen) {
+      return TASK_PALETTE_ACTIONS.map((action) => ({
+        id: `task-${action.command}`,
+        label: action.label,
+        icon: action.icon,
+        keywords: [...action.keywords],
+        run: () => emitTaskCommand(action.command),
+      }));
+    }
+    return [];
+  }, [mailOpen, tasksOpen]);
+  const filteredRouteActions = useMemo(() => {
     if (hasPageFilter) return [];
     const needle = q.toLowerCase();
-    if (!needle) return mailActions;
-    return mailActions.filter((action) =>
+    if (!needle) return routeActions;
+    return routeActions.filter((action) =>
       [action.label, ...(action.keywords ?? [])].some((value) =>
         value?.toLowerCase().includes(needle),
       ),
     );
-  }, [hasPageFilter, mailActions, q]);
+  }, [hasPageFilter, routeActions, q]);
   const filteredPages = useMemo(() => {
     const scopedPages = pages
       .map((page, index) => ({ page, index, rank: rankTitleMatch(page.title, q) }))
@@ -542,7 +614,7 @@ export function CommandPalette({
     effectiveSearchState !== "loading" &&
     effectiveSearchState !== "error" &&
     filteredActions.length === 0 &&
-    filteredMailActions.length === 0 &&
+    filteredRouteActions.length === 0 &&
     recentPages.length === 0 &&
     pageResults.length === 0 &&
     visibleHits.length === 0;
@@ -614,9 +686,9 @@ export function CommandPalette({
         </Command.Group>
       )}
 
-      {filteredMailActions.length > 0 && (
+      {filteredRouteActions.length > 0 && (
         <Command.Group heading="Mail">
-          {filteredMailActions.map((action) => (
+          {filteredRouteActions.map((action) => (
             <Command.Item
               key={action.id}
               value={`action-${action.id}`}
@@ -817,7 +889,7 @@ export function CommandPalette({
               </Command>
             </PaletteSheet>
             {/* The tab bar is a sibling of the sheet, not a passenger inside
-                it: one bar, in one place, whichever of the five tabs is up.
+                it: one bar, in one place, whichever of the six tabs is up.
                 It stays inside the Radix content so the focus trap can reach
                 it. */}
             {mobileFooter}

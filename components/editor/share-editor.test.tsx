@@ -1271,8 +1271,8 @@ describe("the visitor editor", () => {
     // What this proves, and only this: every string literal in the files
     // directly under components/editor that starts with "/api/…" or
     // "/_attachments…" is either a share-edit path, a media path, or sits in
-    // one of the files named below, each of which is behind a capability or
-    // is the attachment-path authority itself. It is not recursive, it does
+    // one of the files named below, each of which is behind a capability, is
+    // the attachment-path authority itself, or is unreachable off `/p/<id>`. It is not recursive, it does
     // not follow imports into lib/ or components/ui, it reads comments as
     // well as code, and it cannot see a URL built from pieces. The mount
     // tests above cover the paths actually taken; this covers the ones that
@@ -1284,6 +1284,13 @@ describe("the visitor editor", () => {
       "floating-toolbar.tsx", // /api/ai — capabilities.ai
       "slash-menu.tsx", // /api/ai — capabilities.ai
       "attachment-src.ts", // /_attachments-v2 — the resolver and its inverse
+      // /api/tasks, /api/page — the + Task gesture. Not behind a capability
+      // but behind the URL: it reads the open note's id from `/p/<id>` with
+      // `classifyInternalPageLink`, and a visitor is on `/share/<id>`, where
+      // that answers null. With no page there is no ghost, no menu and no
+      // request, which `task-promote.test.ts` pins and the mount cases above
+      // confirm by asserting every request a visitor makes is share-edit.
+      "task-checkbox.ts",
     ]);
     const offenders: string[] = [];
     let scanned = 0;

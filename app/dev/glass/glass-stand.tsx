@@ -574,7 +574,7 @@ function Composition({ tree }: { tree: StandPage[] }) {
           <span className="flex-1">Search</span>
           <kbd className="stand-kbd-glass text-kbd rounded-sm px-1.5 py-0.5 text-ink-2">⌘K</kbd>
         </div>
-        <Row icon="sun" label="Today thoughts" />
+        <Row icon="sun" label="Journal" />
         <Row icon="letter" label="Mail" />
         <ScrollEdge variant="fade" className="-mx-1 mt-1 flex-1 px-1" scrollerProps={{ "aria-label": "Page tree" }}>
           <div className="text-label px-2.5 pt-1 text-ink-2">Pinned</div>

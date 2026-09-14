@@ -49,7 +49,7 @@
 </g>
 </svg>
 </span>
-<span class="tree-row-title">Today thoughts</span>
+<span class="tree-row-title">Journal</span>
 </button>
 <button type="button" class="tree-row focus-inset">
 <span class="tree-row-glyph" aria-hidden="true">
@@ -63,6 +63,19 @@
 </svg>
 </span>
 <span class="tree-row-title">Mail</span>
+</button>
+<button type="button" class="tree-row focus-inset">
+<span class="tree-row-glyph" aria-hidden="true">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5">
+<path stroke-linejoin="round" d="M2 5.5L3.214 7L7.5 3M2 12.5L3.214 14L7.5 10M2 19.5L3.214 21L7.5 17">
+</path>
+<path d="M22 19H12m10-7H12m10-7H12">
+</path>
+</g>
+</svg>
+</span>
+<span class="tree-row-title">Tasks</span>
 </button>
 <nav class="brain-sidebar-tree edge-fade overflow-y-auto">
 <div aria-hidden="true" class="-mb-px h-px w-full shrink-0">
@@ -201,7 +214,7 @@
 <div class="brain-page-scroll flex-1 overflow-y-auto overflow-x-clip">
 <div>
 <div class="brain-page-top mx-auto max-w-[720px] px-5 pb-40 md:px-6">
-<div>
+<div class="relative">
 <label class="field ">
 <svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
 <g fill="none" stroke="currentColor" stroke-width="1.5">
@@ -212,8 +225,28 @@
 </g>
 </svg>
 <input maxlength="500" aria-busy="false" placeholder="New thought…" aria-label="New thought" value="">
+<button type="button" data-hub-capture-task="true" disabled="" title="New task" class="rounded-xs px-1.5 py-0.5 text-[12px] text-ink-2 transition-colors hover:bg-fill-hover disabled:pointer-events-none disabled:text-ink-3">Task</button>
 </label>
 </div>
+<section class="mt-8" data-hub-today="true">
+<button type="button" data-hub-today-open="true" class="text-h3 -mx-2 mb-1.5 rounded-sm px-2 py-0.5 text-left text-ink transition-colors hover:bg-fill-hover">Today</button>
+<ul class="brain-tasks-rows brain-hub-tasks">
+</ul>
+<div class="px-2 py-5">
+<div class="flex flex-col items-center justify-center gap-1.5 text-center brain-hub-empty">
+<svg width="20" height="20" viewBox="0 0 24 24" class="text-ink-3" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5">
+<path stroke-linejoin="round" d="M2 5.5L3.214 7L7.5 3M2 12.5L3.214 14L7.5 10M2 19.5L3.214 21L7.5 17">
+</path>
+<path d="M22 19H12m10-7H12m10-7H12">
+</path>
+</g>
+</svg>
+<p class="text-[13px] text-ink-2">Nothing planned today</p>
+<p class="max-w-[28ch] text-[12px] leading-snug text-ink-3">Add one in Tasks</p>
+</div>
+</div>
+</section>
 <div class="mt-8">
 <p class="text-h3 pb-1.5 text-ink">Since this device was last open</p>
 <div class="flex flex-col items-center justify-center gap-1.5 text-center px-2 py-5">
@@ -262,6 +295,17 @@
 </g>
 </svg>
 <span>Search</span>
+</button>
+<button data-mobile-tab="tasks" type="button" class="brain-mobile-tab brain-touch-min focus-inset">
+<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5">
+<path stroke-linejoin="round" d="M2 5.5L3.214 7L7.5 3M2 12.5L3.214 14L7.5 10M2 19.5L3.214 21L7.5 17">
+</path>
+<path d="M22 19H12m10-7H12m10-7H12">
+</path>
+</g>
+</svg>
+<span>Tasks</span>
 </button>
 <button data-mobile-tab="new" type="button" aria-label="New" class="brain-mobile-tab brain-touch-min focus-inset">
 <span class="brain-mobile-tab-new" aria-hidden="true">

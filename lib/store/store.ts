@@ -117,7 +117,47 @@ import {
   PageRefNestValidationError,
   QuickCaptureConflictError,
   RevConflictError,
+  TaskConflictError,
+  TaskValidationError,
+  type CreateTaskInput,
+  type TaskListFilter,
+  type UpdateTaskPatch,
 } from "./types";
+import {
+  TASKS_DIR,
+  TaskIndex,
+  deleteTaskFile,
+  loadTaskIndex,
+  logbookWindowStart,
+  readTaskBody,
+  taskFileExists,
+  writeTaskFile,
+} from "../tasks/index-store";
+import {
+  TASK_ID_RE,
+  isLinkedTask,
+  parseTaskRecord,
+  type TaskRecord,
+  type TaskRepeat,
+  type TaskView,
+} from "../tasks/model";
+import {
+  compareGroups,
+  compareInGroup,
+  doneDayOf,
+  groupFor,
+  listOf,
+  logbookRows,
+  type ListName,
+  type LogbookRow,
+} from "../tasks/lists";
+import { parseTaskLines } from "../tasks/task-lines";
+import {
+  mergeCheckboxStates,
+  type CheckboxMergeResult,
+} from "../tasks/merge-checkboxes";
+import { reconcilePageTasks } from "../tasks/reconcile";
+import { RecurrenceError, advance, revert } from "../tasks/recurrence";
 
 interface Entry {
   dir: string;
@@ -432,6 +472,7 @@ export class Store {
   private index = new Map<string, Entry>();
   private notionIndex = new Map<string, string>();
   private abortReceiptIndex = new Map<string, string>();
+  private taskIndex = new TaskIndex();
   private mutationPoison: Error | undefined;
   /** When the last quota-triggered attachment sweep ran. Per process, which is
    *  what a single-writer Store is. */
@@ -528,6 +569,7 @@ export class Store {
     await this.reconcileMoveIntent();
     await this.reconcileBoardIntent();
     await reconcileAbortIntents(this.root);
+    await this.loadTaskIndex();
     await this.rebuild();
     await this.mutate(() =>
       this.reconcileNotionStaging().catch(rethrowStagingFailure),
@@ -564,8 +606,29 @@ export class Store {
     this.index.clear();
     this.notionIndex.clear();
     this.abortReceiptIndex.clear();
+    // Before the walk, because the per-page reconcile needs an index to
+    // reconcile against. Reconciling against one that is not there yet would
+    // detach every task on restart.
+    await this.loadTaskIndex();
+    this.walkedTaskPages = new Map();
     await this.walk(this.root, null);
     await this.normalizeOrders();
+    // This is the path that heals a notes directory restored from a backup,
+    // edited by hand, or pulled with `git pull`. The note wins the text and
+    // the completion; the record keeps its `when`, `deadline`, `category` and
+    // `repeat`, none of which the reconcile touches.
+    //
+    // After the walk rather than inside it: the walk reads its directories
+    // concurrently, and a page's reconcile writes task records. Ordering the
+    // pages by id makes a restart's writes the same every time. It costs no
+    // I/O, because the markdown was already read to build the page index.
+    const walked = this.walkedTaskPages;
+    this.walkedTaskPages = null;
+    if (walked) {
+      for (const pageId of [...walked.keys()].sort()) {
+        await this.reconcilePageTasksUnlocked(pageId, walked.get(pageId) as string);
+      }
+    }
   }
 
   private async walk(dir: string, parentId: string | null): Promise<void> {
@@ -625,6 +688,11 @@ export class Store {
         // parallel, and delaying index.set would let two incomplete files with
         // the same id both pass the duplicate check.
         this.index.set(meta.id, { dir: pageDir, parentId, meta });
+        // Only the pages something is anchored to, so a notebook with no tasks
+        // carries nothing extra through a restart.
+        if (this.walkedTaskPages && this.taskIndex.byPage(meta.id).length > 0) {
+          this.walkedTaskPages.set(meta.id, markdown);
+        }
         if (meta.notionId) {
           const notionId = normalizeNotionId(meta.notionId);
           const existingNotionPage = this.notionIndex.get(notionId);
@@ -2281,6 +2349,11 @@ export class Store {
       }
       entry.meta = nextMeta;
       this.notionIndex.set(notionId, entry.meta.id);
+      // A body write is where a page's records come back in step with its
+      // lines (spec row 150). This one does not go through `writePage`, so it
+      // has to say so itself, or a task under this page keeps the anchor and
+      // the completion the body had before the adopt read it.
+      await this.reconcilePageTasksUnlocked(entry.meta.id, canonicalMarkdown);
       scheduleCommit(this.root);
       const rev = hashRev(content);
       emitStore({ type: "meta", id: entry.meta.id });
@@ -3158,6 +3231,11 @@ export class Store {
         durabilityError = error;
       }
       entry.meta = nextMeta;
+      // The re-import replaced this page's body wholesale. Without this a task
+      // promoted from one of its lines keeps the old anchor, the old title
+      // cache and the old answer for `done` until the page is written again
+      // (spec row 150).
+      await this.reconcilePageTasksUnlocked(entry.meta.id, finalizedMarkdown);
       const stagingRemoved = await this.tryRemoveNotionStaging(
         reservationToken,
       );
@@ -3597,12 +3675,21 @@ export class Store {
         parsed.meta.structureWriteBarrier !== true &&
         expectedMarkdown !== undefined &&
         parsed.markdown === canonicalPageMarkdown(expectedMarkdown);
+      // One silent resolution, and one only: the server changed nothing but
+      // checkbox tokens, on lines this writer did not touch. That is a tick
+      // arriving from Tasks or from a phone while this body was being typed,
+      // and refusing it puts a conflict banner on every completion against an
+      // open note. Everything else is the 409 it has always been, thrown here
+      // in the one shape `lib/api/page-write.ts` answers with.
+      let body = markdown;
       if (
         expectedRev !== undefined &&
         expectedRev !== currentRev &&
         !bodyStillMatches
       ) {
-        throw new RevConflictError(currentRev, expectedRev);
+        const merged = mergeConcurrentTicks(parsed, expectedMarkdown, markdown);
+        if (!merged.ok) throw new RevConflictError(currentRev, expectedRev);
+        body = merged.merged;
       }
       const fresh = parsed.meta;
       e.meta = {
@@ -3613,7 +3700,7 @@ export class Store {
         created: fresh.created || e.meta.created,
         updated: fresh.updated || e.meta.updated,
       } as PageMeta;
-      const bodyChanged = canonicalPageMarkdown(markdown) !== parsed.markdown;
+      const bodyChanged = canonicalPageMarkdown(body) !== parsed.markdown;
       // An unchanged body is not an edit: no `updated` stamp, no disk write,
       // no event, no Git commit. Opening a page must not read as editing it.
       if (!bodyChanged) {
@@ -3623,14 +3710,20 @@ export class Store {
       if (by) e.meta.updatedBy = by;
       delete e.meta.structureWriteBarrier;
       await this.extendScopedBaselinesUnlocked(id, () => [
-        ...referencedAttachmentNames(markdown),
+        ...referencedAttachmentNames(body),
       ]);
-      const content = serializeLivePage(e.meta, markdown);
+      const content = serializeLivePage(e.meta, body);
       await atomicWrite(indexPath, content);
+      // After the page, because the note is the truth. A record that cannot
+      // be written is logged and left behind, and the next reconcile of this
+      // page heals it (spec row 495). The other way round, one unreadable
+      // file under `_tasks/` would make every save of every page that holds a
+      // task fail, and the person's edit would be the thing that was lost.
+      await this.reconcilePageTasksUnlocked(id, body, src);
       scheduleCommit(this.root);
       const rev = hashRev(content);
       emitStore({ type: "write", id, rev, src });
-      return { meta: e.meta, markdown: markdown.trimEnd(), rev };
+      return { meta: e.meta, markdown: body.trimEnd(), rev };
     });
   }
 
@@ -3665,6 +3758,7 @@ export class Store {
       ]);
       const content = serializeLivePage(e.meta, joined);
       await atomicWrite(indexPath, content);
+      await this.reconcilePageTasksUnlocked(id, joined, src);
       scheduleCommit(this.root);
       const rev = hashRev(content);
       emitStore({ type: "write", id, rev, src });
@@ -4051,12 +4145,22 @@ export class Store {
         parsed.meta.structureWriteBarrier !== true &&
         input.expectedMarkdown !== undefined &&
         parsed.markdown === canonicalPageMarkdown(input.expectedMarkdown);
+      // The same one resolution as `writePage`, and the same refusal. A
+      // visitor's stale body merges over a tick that arrived while they were
+      // typing, and nothing else merges.
+      let body = input.markdown;
       if (
         input.expectedRev !== undefined &&
         input.expectedRev !== currentRev &&
         !bodyStillMatches
       ) {
-        throw new RevConflictError(currentRev, input.expectedRev);
+        const merged = mergeConcurrentTicks(
+          parsed,
+          input.expectedMarkdown,
+          input.markdown,
+        );
+        if (!merged.ok) throw new RevConflictError(currentRev, input.expectedRev);
+        body = merged.merged;
       }
       const fresh = parsed.meta;
       e.meta = {
@@ -4067,8 +4171,7 @@ export class Store {
         created: fresh.created || e.meta.created,
         updated: fresh.updated || e.meta.updated,
       } as PageMeta;
-      const bodyChanged =
-        canonicalPageMarkdown(input.markdown) !== parsed.markdown;
+      const bodyChanged = canonicalPageMarkdown(body) !== parsed.markdown;
       // Same rule as writePage: an unchanged body is not an edit.
       if (!bodyChanged) {
         return { meta: e.meta, markdown: parsed.markdown, rev: currentRev };
@@ -4080,7 +4183,7 @@ export class Store {
       // step with the file, which is a conflict loop rather than a message.
       // Same held rule as the references below.
       const unsafeLink = unsafeLinkDestination(
-        input.markdown,
+        body,
         linkDestinations(parsed.markdown),
       );
       if (unsafeLink !== null) throw new ShareLinkSchemeError(unsafeLink);
@@ -4091,7 +4194,7 @@ export class Store {
       // the owner's own remote media. A visitor has no need for one: uploading
       // is the supported path and an upload is same-origin.
       const remote = remoteMediaReference(
-        input.markdown,
+        body,
         remoteMediaReferences(parsed.markdown),
       );
       if (remote !== null) throw new ShareRemoteMediaError(remote);
@@ -4111,7 +4214,7 @@ export class Store {
       // nothing, and a body that only rearranges what it already holds
       // introduces nothing either.
       let liveNames: ReadonlySet<string> | null = null;
-      for (const name of referencedAttachmentNames(input.markdown)) {
+      for (const name of referencedAttachmentNames(body)) {
         if (held.has(name)) continue;
         if (!attachmentGrantsRoot(scope, name, input.rootId)) {
           throw new ShareAttachmentScopeError(name);
@@ -4135,12 +4238,17 @@ export class Store {
       e.meta.updatedBy = "visitor";
       e.meta.updatedByName = input.visitorName;
       delete e.meta.structureWriteBarrier;
-      const content = serializeLivePage(e.meta, input.markdown);
+      const content = serializeLivePage(e.meta, body);
       await atomicWrite(indexPath, content);
+      // A visitor's write may flip a linked task's `done` and may detach a task
+      // whose line they deleted. It may do nothing else: no task is created,
+      // scheduled, categorised or deleted on this path. After the page write,
+      // for the same reason the owner's is.
+      await this.reconcilePageTasksUnlocked(input.targetId, body, input.src);
       scheduleCommit(this.root);
       const rev = hashRev(content);
       emitStore({ type: "write", id: input.targetId, rev, src: input.src });
-      return { meta: e.meta, markdown: input.markdown.trimEnd(), rev };
+      return { meta: e.meta, markdown: body.trimEnd(), rev };
     });
   }
 
@@ -6175,7 +6283,13 @@ export class Store {
         await this.removeNotionStaging(entry.meta.notionImportToken);
       }
     }
+    const purgedPageIds = new Set(subtree.map((entry) => entry.meta.id));
     await fs.rm(dir, { recursive: true, force: true });
+    // After the folder, because deleting a task is the irreversible half. An
+    // `rm` that fails leaves the notes, their lines and their tasks all where
+    // they were; the other order would delete the tasks off lines that are
+    // still on the page.
+    await this.purgeSubtreeTasksUnlocked(purgedPageIds);
     for (const [key, entry] of this.index) {
       if (entry.dir === dir || entry.dir.startsWith(dir + path.sep)) {
         if (entry.meta.notionId) {
@@ -6383,6 +6497,906 @@ export class Store {
     }
     return false;
   }
+
+  // ── Tasks ──────────────────────────────────────────────────────────────
+  //
+  // One record per file under `_tasks/`, one map of them in memory. Read
+  // paths answer from the map and never touch the disk. Every write is one
+  // `atomicWrite` inside one `mutate()`, so `git add -A` and the 4 second
+  // commit debounce carry a note edit and a task edit together.
+
+  /** The markdown of every walked page that has a task anchored to it, held
+   *  only for the length of one `rebuild()`. Null at every other moment. */
+  private walkedTaskPages: Map<string, string> | null = null;
+
+  private async loadTaskIndex(): Promise<void> {
+    this.taskIndex = await loadTaskIndex(this.root);
+  }
+
+  /** The tasks of one page, for the reconcile. */
+  tasksForPage(pageId: string): TaskRecord[] {
+    return this.taskIndex.byPage(pageId);
+  }
+
+  /** Every record the index holds, filtered by nothing.
+   *
+   *  `listTasks` is a list view: it wants the reader's day, hides a task whose
+   *  page is in the Trash, and stops the Logbook at its window. A portable
+   *  export is not a reader and has to carry the notebook whole, so it asks
+   *  for the records themselves.
+   */
+  allTasks(): TaskRecord[] {
+    return this.taskIndex.all();
+  }
+
+  /** One note's records, as a reader sees them: linked and detached, done and
+   *  open, whatever their age.
+   *
+   *  This is a lookup and not a list. The editor draws a word on every task
+   *  line it owns, and it has to find the record behind a line in every state
+   *  that record can be in. `listTasks` answers none of them: it drops a task
+   *  whose page is hidden, it stops the Logbook at 30 days, and it takes a
+   *  reader's day this question does not have. A line whose record the editor
+   *  could not find offers "+ Task" again, and the line is promoted twice.
+   */
+  pageTasks(pageId: string): TaskView[] {
+    return this.taskIndex
+      .byPage(pageId)
+      .flatMap((task) => {
+        const view = this.taskIndex.view(task.id);
+        return view ? [this.attributed(view)] : [];
+      })
+      .sort((a, b) => compareInGroup(a, b, "today"));
+  }
+
+  /** WHO ANSWERED A LINKED TASK'S `done` (spec row 145).
+   *
+   *  A share visitor may tick a checkbox in a note they can edit, and the
+   *  Logbook says so: "done by ‹name› via link". The note owns a linked
+   *  task's completion, so it owns the attribution too, and the page's own
+   *  `updatedBy` / `updatedByName` are where it already lives. Read here
+   *  rather than written into the record: a record that stored a name would
+   *  have to be rewritten by every visitor write, and the note is the truth
+   *  either way.
+   *
+   *  Only for a task that is DONE and still LINKED. A detached or unlinked
+   *  record owns its own completion, and a page whose last writer was the
+   *  owner has nothing to attribute. */
+  private attributed(view: TaskView): TaskView {
+    if (!view.done || !isLinkedTask(view)) return view;
+    const entry = view.page !== undefined ? this.index.get(view.page) : undefined;
+    const meta = entry?.meta;
+    if (meta?.updatedBy !== "visitor" || meta.updatedByName === undefined) {
+      return view;
+    }
+    return { ...view, updatedByName: meta.updatedByName };
+  }
+
+  /** The body a person wrote under a task's frontmatter, or the empty string.
+   *  Nothing in the app writes one, so this exists for the portable export,
+   *  which must not drop what it cannot show. */
+  async readTaskBody(id: string): Promise<string> {
+    assertTaskId(id);
+    return readTaskBody(this.root, id);
+  }
+
+  /** Land one whole record, with its body, exactly as it is given.
+   *
+   *  The portable import needs this and `createTask` cannot serve it:
+   *  `createTask` validates a creation input and mints the id, the timestamps
+   *  and the completion itself, which is right for a new task and wrong for
+   *  one that already has a history. Here the record is the truth and the
+   *  store writes it down.
+   *
+   *  The id is kept unless the notebook already has it. An import never
+   *  overwrites what is there, the same promise the page import keeps by
+   *  always minting a fresh page, so a clash takes a fresh id and both
+   *  records live.
+   *
+   *  "Already has it" is a question for the disk. The index skips a file it
+   *  cannot read or parse and one whose frontmatter id does not match its
+   *  filename, and such a file is exactly the one somebody has been editing by
+   *  hand. Asking the index alone would call that id free and write over it.
+   */
+  async importTask(
+    raw: unknown,
+    body: string,
+    src?: string,
+  ): Promise<TaskRecord> {
+    const record = parseTask(raw);
+    return this.mutate(async () => {
+      this.assertLinkablePageUnlocked(record.page);
+      const taken =
+        this.taskIndex.get(record.id) !== undefined ||
+        (await taskFileExists(this.root, record.id));
+      const landed = taken ? parseTask({ ...record, id: nanoid() }) : record;
+      await this.writeTaskUnlocked(landed, src, body);
+      return landed;
+    });
+  }
+
+  /** Read this page's body and bring its tasks back in step with it.
+   *
+   *  For a caller that landed records on a page that was already written. The
+   *  page write's own reconcile ran when the page had no records, so nothing
+   *  told the index what the checkboxes say, and a linked completion reads as
+   *  open until the page is saved again or the process restarts. The portable
+   *  import is the one such caller: it writes every page first and lands the
+   *  records after.
+   *
+   *  A page the index does not hold is a no-op rather than a throw, because a
+   *  record naming a page nobody here has is a shape the import already
+   *  handles by dropping the link. */
+  async reconcileTasksForPage(pageId: string, src?: string): Promise<void> {
+    return this.mutate(async () => {
+      if (!this.index.has(pageId)) return;
+      const entry = this.get(pageId);
+      const indexPath = assertInRoot(this.root, path.join(entry.dir, "index.md"));
+      const parsed = parsePage(await fs.readFile(indexPath, "utf8"));
+      await this.reconcilePageTasksUnlocked(pageId, parsed.markdown, src);
+    });
+  }
+
+  /** One task by id, or null. A malformed id is refused rather than answered
+   *  with a miss, so a caller learns it built the wrong request. */
+  getTask(id: string): TaskView | null {
+    assertTaskId(id);
+    const view = this.taskIndex.view(id);
+    return view ? this.attributed(view) : null;
+  }
+
+  /** True when a task points at a page that cannot be opened. Such a task is
+   *  in no list, because the surface cannot complete what it cannot show. */
+  taskPageTrashed(id: string): boolean {
+    assertTaskId(id);
+    const task = this.taskIndex.get(id);
+    return task !== undefined && this.taskHidden(task);
+  }
+
+  /** True when this record's completion lives in a note nobody can open.
+   *
+   *  Only while it is LINKED. A detached record owns its own `done` and its
+   *  `page` is a name the row reads back, not a link it depends on, so it
+   *  stays visible whatever became of the page. That is what keeps a finished
+   *  task in the Logbook after its page is purged (spec row 149). */
+  private taskHidden(task: Pick<TaskRecord, "page" | "detachedAt">): boolean {
+    return isLinkedTask(task) && this.pageHidden(task.page);
+  }
+
+  /** A page in the trash, and a page the index does not hold at all, are one
+   *  answer (spec row 148). The second is a folder somebody removed by hand,
+   *  or a page whose frontmatter stopped parsing. Either way the note cannot
+   *  be opened, and drawing a row whose only action is a write to a note that
+   *  is not there is worse than not drawing it. The record itself is left
+   *  alone: `rebuild()` reconciles only the pages it walked, so a page it
+   *  never reached detaches nothing and the task comes back with the page. */
+  private pageHidden(pageId: string | undefined): boolean {
+    if (pageId === undefined) return false;
+    return !this.index.has(pageId) || this.isDeleted(pageId);
+  }
+
+  /** Every task of one list, group-collated, for the caller's own `today`.
+   *
+   *  No list membership is stored, so this is a pure derivation over the
+   *  index plus one date. Tasks whose page is in the trash are in no list,
+   *  and the Logbook stops at its window.
+   *
+   *  `list: "logbook"` is the one branch that does not return records. The
+   *  Logbook draws one row per COMPLETION, and a repeating task's completions
+   *  live in its `log` while the record itself stays open, so a filter over
+   *  records would answer that nothing repeating was ever finished. The
+   *  unfiltered read still returns records: the surface fetches everything and
+   *  derives its own rows, and it needs the open instance as itself.
+   */
+  listTasks(today: string, filter: TaskListFilter = {}): TaskView[] {
+    assertToday(today);
+    // A read that can return a completed task needs the reader's offset, for
+    // the same reason it needs their today: `doneAt` is one UTC instant and
+    // the day it falls on is theirs. Completing at 23:30 in Dubai would
+    // otherwise file the task under yesterday.
+    const readsLogbook = filter.list === undefined || filter.list === "logbook";
+    if (readsLogbook) assertOffsetMinutes(filter.offsetMinutes);
+    const offsetMinutes = filter.offsetMinutes ?? 0;
+    if (filter.list === "logbook") {
+      return this.logbookRowsFor(today, offsetMinutes, filter.category).map(
+        (row) => row.task,
+      );
+    }
+    const windowStart = logbookWindowStart(today);
+    const visible = this.taskIndex.views().filter((task) => {
+      if (this.taskHidden(task)) return false;
+      const list = listOf(task, today);
+      // A done record with no instant is reachable from a hand edit and from
+      // the crash between a note write and its reconcile. `lists.ts` places it
+      // deliberately, at the foot of the Logbook under no header, so there is
+      // nothing for the window to measure and it must not be dropped.
+      if (
+        list === "logbook" &&
+        task.doneAt !== undefined &&
+        doneDayOf(task.doneAt, offsetMinutes) < windowStart
+      ) {
+        return false;
+      }
+      if (filter.list && list !== filter.list) return false;
+      if (filter.category !== undefined && task.category !== filter.category) {
+        return false;
+      }
+      return true;
+    });
+    return visible
+      .sort((a, b) => compareTasks(a, b, today, offsetMinutes))
+      .map((task) => this.attributed(task));
+  }
+
+  /** The Logbook as ROWS: one per completion, each carrying the key a record
+   *  id is not.
+   *
+   *  A daily task finished seven days running is seven rows of one record, so
+   *  `listTasks(today, { list: "logbook" })` hands a caller seven objects with
+   *  the same `id`, differing only in `doneAt` and `when`. The surface never
+   *  meets that, because it fetches every record and derives its own rows. The
+   *  two callers that ask the store for the list are the tasks route and MCP,
+   *  and an agent keying on `id` collapses the history or mis-attributes it.
+   *  So they read this instead, and get the `key` every other consumer of
+   *  `logbookRows` already sees, plus whether an untick is offered. */
+  listLogbook(
+    today: string,
+    filter: { offsetMinutes: number; category?: string },
+  ): LogbookRow[] {
+    assertToday(today);
+    assertOffsetMinutes(filter.offsetMinutes);
+    return this.logbookRowsFor(today, filter.offsetMinutes, filter.category);
+  }
+
+  private logbookRowsFor(
+    today: string,
+    offsetMinutes: number,
+    category: string | undefined,
+  ): LogbookRow[] {
+    const shown = this.taskIndex
+      .views()
+      .filter(
+        (task) =>
+          !this.taskHidden(task) &&
+          (category === undefined || task.category === category),
+      )
+      .map((task) => this.attributed(task));
+    return logbookRows(shown, today, offsetMinutes);
+  }
+
+  async createTask(input: CreateTaskInput): Promise<TaskView> {
+    return this.mutate(async () => {
+      assertRepeatUnlinked(input.repeat, input.page);
+      this.assertLinkablePageUnlocked(input.page);
+      const now = new Date().toISOString();
+      const record = parseTask({
+        id: nanoid(),
+        title: input.title,
+        ...(input.when !== undefined ? { when: input.when } : {}),
+        ...(input.deadline !== undefined ? { deadline: input.deadline } : {}),
+        ...(input.category !== undefined ? { category: input.category } : {}),
+        ...(input.page !== undefined ? { page: input.page } : {}),
+        ...(input.anchor !== undefined ? { anchor: input.anchor } : {}),
+        ...(input.repeat !== undefined ? { repeat: input.repeat } : {}),
+        // An unlinked task owns its completion from the first write, so a
+        // reopened one has a field to clear rather than a key to invent.
+        ...(input.page === undefined ? { done: false } : {}),
+        created: now,
+        updated: now,
+      });
+      await this.writeTaskUnlocked(record, input.src);
+      return this.taskIndex.view(record.id) as TaskView;
+    });
+  }
+
+  /** The read, the merge and the write are one critical section. `mutate()`
+   *  exists because a read-then-write on the in-memory index loses an update
+   *  when two of them interleave, and a patch is exactly that shape: both
+   *  callers would compute a whole record from the same `current` and the
+   *  second write would land whole, dropping the first patch's fields. */
+  async updateTask(id: string, patch: UpdateTaskPatch): Promise<TaskView> {
+    assertTaskId(id);
+    return this.mutate(async () => {
+      let current = this.taskIndex.get(id);
+      if (!current) throw new NotFoundError(id);
+      assertTodayUsage(current, patch);
+      // A repeating task is never linked and never detached: the schema
+      // refuses `repeat` beside `page`, so its completion can only be the
+      // rule's, and the branch below cannot compete with the note's.
+      //
+      // `current.done` on a record that also carries a rule is a shape only a
+      // hand edit or an import can make (the patch path refuses it). Such a
+      // record owns its completion through `done` and the untick belongs to
+      // that, not to the log, so it takes the ordinary path below.
+      const ownsItsDone = patch.done === false && current.done === true;
+      if (patch.done !== undefined && current.repeat && !ownsItsDone) {
+        await this.advanceTaskUnlocked(current, patch);
+        return this.taskIndex.view(id) as TaskView;
+      }
+      if (patch.done !== undefined && isLinkedTask(current)) {
+        // A linked task's completion lives in the note, so completing one
+        // from Tasks or unticking one from the Logbook writes the checkbox
+        // and lets the reconcile derive the rest. Two files, one `mutate()`.
+        assertOnlyCompletion(patch, "a linked task's done");
+        // A task whose page is hidden is in no list, and the same answer is
+        // owed to a caller that reaches it by id: a refusal naming the page,
+        // never a `NotFoundError` thrown out of the lock by `this.get`.
+        this.assertLinkablePageUnlocked(current.page);
+        await this.writeLinkedCheckboxUnlocked(current, patch.done, patch.src);
+        current = this.taskIndex.get(id);
+        if (!current) throw new NotFoundError(id);
+        // Still linked means the note answered and the reconcile wrote it.
+        // Otherwise the line went between the list being drawn and this
+        // write, the reconcile detached the record, and the record owns its
+        // completion now, so the ordinary path below applies it.
+        if (isLinkedTask(current)) return this.taskIndex.view(id) as TaskView;
+      }
+      await this.writeTaskUnlocked(applyTaskPatch(current, patch), patch.src);
+      return this.taskIndex.view(id) as TaskView;
+    });
+  }
+
+  async deleteTask(id: string, src?: string): Promise<void> {
+    assertTaskId(id);
+    await this.mutate(async () => {
+      // Inside the lock, because `deleteTaskUnlocked` removes unconditionally:
+      // outside it, a delete racing a create removes a record minted after the
+      // check passed and still answers 200.
+      if (!this.taskIndex.get(id)) throw new NotFoundError(id);
+      await this.deleteTaskUnlocked(id, src);
+    });
+  }
+
+  /** THE ONE OPEN INSTANCE, MOVED ON.
+   *
+   *  Completing a repeating task is not a `done` to write. The rule owns where
+   *  the series goes next, so the completion joins `log` and `when` moves to
+   *  the first day the rule names after the later of today and the day this
+   *  instance was owed, and `done` is never set: a record carrying both would
+   *  stand in the Logbook and in Today at once. Unticking is that read
+   *  backwards, on the newest entry and no other.
+   *
+   *  One record, one `atomicWrite`, one `task` event, so there is no half
+   *  state to journal: `advance` and `revert` are pure and the whole change is
+   *  the one file this writes.
+   *
+   *  `RecurrenceError` is turned into a validation refusal rather than allowed
+   *  out. Both of its reachable reasons are already refused above this line,
+   *  `no-repeat` by the `repeat` check in `updateTask` and `bad-today` by
+   *  `assertTodayUsage`, so anything arriving here is a caller Brain has not
+   *  thought of, and it is owed a 400 naming the reason rather than a 500.
+   *
+   *  Caller owns mutate(). */
+  private async advanceTaskUnlocked(
+    current: TaskRecord,
+    patch: UpdateTaskPatch,
+  ): Promise<void> {
+    // A completion moves `when`, so a `when` in the same call would be two
+    // answers to where the task goes next, and a silently dropped one is the
+    // worse of the two. The caller sends them as two requests.
+    assertOnlyCompletion(patch, "a repeating task's completion");
+    // TWO TICKS OF ONE INSTANCE. Completing a repeat is not idempotent: each
+    // one appends an entry and moves `when` a rule date on, so a double press,
+    // a retried request or a second tab would silently skip a period.
+    // `mutate()` serialises them, so the second read is of the already
+    // advanced record and cannot notice on its own. The caller sends the
+    // `when` it was looking at, and this is where a stale one is refused.
+    // `when` is the whole of what a completion depends on, so no task `rev`
+    // is needed for it.
+    if (
+      patch.expectedWhen !== undefined &&
+      patch.expectedWhen !== (current.when ?? null)
+    ) {
+      throw new TaskConflictError(
+        "this task has already moved on: reload and try again",
+        current.when,
+      );
+    }
+    const at = new Date().toISOString();
+    let next: TaskRecord;
+    try {
+      next = patch.done
+        ? advance(current, { completedAt: at, today: patch.today as string })
+        : revert(current);
+    } catch (error) {
+      if (error instanceof RecurrenceError) {
+        throw new TaskValidationError(error.message);
+      }
+      throw error;
+    }
+    await this.writeTaskUnlocked(parseTask({ ...next, updated: at }), patch.src);
+  }
+
+  /** A page id passes the schema on its shape alone, which is not enough. A
+   *  task linked to a page that is not there refuses every title and every
+   *  completion for the rest of its life, because both are the note line's to
+   *  own; one linked to a trashed page is hidden from every list, so the
+   *  caller is told it worked and can never see it.
+   *
+   *  Caller owns mutate(). */
+  private assertLinkablePageUnlocked(pageId: string | undefined): void {
+    if (pageId === undefined) return;
+    if (!this.index.has(pageId)) {
+      throw new TaskValidationError(`page not found: ${pageId}`);
+    }
+    if (this.isDeleted(pageId)) {
+      throw new TaskValidationError(`page is in the trash: ${pageId}`);
+    }
+  }
+
+  /** Caller owns mutate(). With no `body` the file's own body is kept. */
+  private async writeTaskUnlocked(
+    task: TaskRecord,
+    src?: string,
+    body?: string,
+  ): Promise<void> {
+    await writeTaskFile(this.root, task, body);
+    this.taskIndex.put(task);
+    scheduleCommit(this.root);
+    emitStore({ type: "task", id: task.id, src });
+  }
+
+  /** Bring this page's tasks back in step with the lines it now has.
+   *
+   *  Everything the reconcile decides is decided in `lib/tasks/reconcile.ts`,
+   *  which has no filesystem and no clock. This applies the decisions: it
+   *  refreshes the anchor and the title cache, recomputes `done` from the
+   *  checkbox into the in-memory index, and detaches a task whose line is
+   *  gone. It never creates a task, because a checkbox becomes a task only
+   *  through the gesture, and it never deletes one, because a person's task
+   *  is not the note's to discard.
+   *
+   *  The record file is written only when a stored field changed. An anchor
+   *  that moved, a title that was edited and a completion that flipped are all
+   *  stored; a line that stayed put is not, so opening and saving a page does
+   *  not rewrite every task under it.
+   *
+   *  Caller owns mutate(). */
+  private async reconcilePageTasksUnlocked(
+    pageId: string,
+    markdown: string,
+    src?: string,
+  ): Promise<void> {
+    const records = this.taskIndex.byPage(pageId);
+    if (records.length === 0) return;
+    const at = now();
+    const decisions = reconcilePageTasks({
+      page: pageId,
+      lines: parseTaskLines(markdown),
+      tasks: records.map((task) => ({
+        task,
+        done: this.taskIndex.view(task.id)?.done ?? false,
+      })),
+      at,
+    });
+
+    for (const bound of decisions.rebound) {
+      const task = this.taskIndex.get(bound.id);
+      if (!task) continue;
+      if (bound.recordChanged) {
+        const next: Record<string, unknown> = {
+          ...task,
+          anchor: bound.anchor,
+          title: bound.title,
+          updated: at,
+        };
+        // `done` itself is never written for a linked task. Its instant is,
+        // because the Logbook orders on it and the note holds no timestamp,
+        // so the write that flipped the checkbox is where it comes from.
+        if (bound.doneAt === undefined) delete next.doneAt;
+        else next.doneAt = bound.doneAt;
+        await this.tryTaskWriteUnlocked(bound.id, () =>
+          this.writeTaskUnlocked(parseTask(next), src),
+        );
+      }
+      // After the write, and whether or not it landed: the note is where this
+      // was read from, so the view matches the note even when the file behind
+      // it could not be rewritten.
+      this.taskIndex.setLinkedDone(bound.id, bound.done);
+    }
+
+    for (const gone of decisions.detached) {
+      await this.tryTaskWriteUnlocked(gone.id, () =>
+        this.detachTaskUnlocked(gone.id, gone, src),
+      );
+    }
+  }
+
+  /** One record's write, which must never take a note edit down with it.
+   *
+   *  `writeTaskFile` rethrows everything that is not `ENOENT`, which is the
+   *  rule that stops a hand-broken record being silently overwritten. Without
+   *  this, one unreadable file under `_tasks/` would make every save of every
+   *  page that holds a task fail, and a person would lose the edit they were
+   *  making rather than the record they had already broken.
+   *
+   *  Caller owns mutate(). */
+  private async tryTaskWriteUnlocked(
+    id: string,
+    write: () => Promise<void>,
+  ): Promise<void> {
+    try {
+      await write();
+    } catch (error) {
+      console.error(
+        `[brain/tasks] could not write ${TASKS_DIR}/${id}.md during reconcile, leaving it for the next one: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /** Move a linked task's checkbox in its note, and let the reconcile read the
+   *  completion back off it.
+   *
+   *  The note is the truth for a linked task, so this is the only way its
+   *  `done` can move. It takes no `expectedRev`: the mutation lock is held,
+   *  the body was read inside it, and the one silent merge in `writePage`
+   *  exists for a client that loaded a body earlier. There is no such client
+   *  here, so there is nothing to conflict with and this write cannot 409.
+   *
+   *  Caller owns mutate(). */
+  private async writeLinkedCheckboxUnlocked(
+    task: TaskRecord,
+    checked: boolean,
+    src?: string,
+  ): Promise<void> {
+    const pageId = task.page;
+    if (pageId === undefined) return;
+    const e = this.get(pageId);
+    const indexPath = assertInRoot(this.root, path.join(e.dir, "index.md"));
+    const parsed = parsePage(await fs.readFile(indexPath, "utf8"));
+    const lines = parseTaskLines(parsed.markdown);
+    // Which line is this task's is the reconcile's question, asked the same
+    // way here so the answer cannot differ from the one the page write gets.
+    const decisions = reconcilePageTasks({
+      page: pageId,
+      lines,
+      tasks: this.taskIndex.byPage(pageId).map((record) => ({
+        task: record,
+        done: this.taskIndex.view(record.id)?.done ?? false,
+      })),
+      at: now(),
+    });
+    const bound = decisions.rebound.find((rebind) => rebind.id === task.id);
+    const body =
+      bound === undefined
+        ? parsed.markdown
+        : withCheckbox(parsed.markdown, lines[bound.index].index, checked);
+    if (body !== parsed.markdown) {
+      const fresh = parsed.meta;
+      e.meta = {
+        ...fresh,
+        id: fresh.id || e.meta.id,
+        title: fresh.title || e.meta.title,
+        order: fresh.order || e.meta.order,
+        created: fresh.created || e.meta.created,
+        updated: fresh.updated || e.meta.updated,
+      } as PageMeta;
+      e.meta.updated = now();
+      e.meta.updatedBy = "me";
+      // THE BARRIER STAYS UP. `writePage` clears it only after a write has
+      // survived the rev check the barrier forces, because the fence exists
+      // for the tab that has not seen the structural move. This write passes
+      // no rev at all, and the tab whose completion it is has not seen the
+      // move either, so clearing it here would hand that tab's next save a
+      // silent merge against a baseline the page no longer has. The barrier
+      // comes down on the first real page write, where it always did.
+      const content = serializeLivePage(e.meta, body);
+      await atomicWrite(indexPath, content);
+      emitStore({ type: "write", id: pageId, rev: hashRev(content), src });
+    }
+    // Always, even when the token was already where it should be: this is
+    // where a task whose line has gone learns that, and detaches.
+    await this.reconcilePageTasksUnlocked(pageId, body, src);
+    scheduleCommit(this.root);
+  }
+
+  /** The task keeps its last known title, schedule and category, keeps `page`
+   *  so the row can read "line removed from <page>", keeps `anchor` as the
+   *  last place the line was, and takes ownership of its completion. Without
+   *  that last part the record comes back from disk with `done` undefined,
+   *  which reads as reopened, and a finished task reappears in Today.
+   *
+   *  Caller owns mutate(). */
+  private async detachTaskUnlocked(
+    id: string,
+    lastKnown: { detachedAt: string; done: boolean; doneAt?: string },
+    src?: string,
+  ): Promise<void> {
+    const task = this.taskIndex.get(id);
+    if (!task) return;
+    const next: Record<string, unknown> = {
+      ...task,
+      detachedAt: lastKnown.detachedAt,
+      done: lastKnown.done,
+      updated: lastKnown.detachedAt,
+    };
+    if (lastKnown.doneAt === undefined) delete next.doneAt;
+    else next.doneAt = lastKnown.doneAt;
+    await this.writeTaskUnlocked(parseTask(next), src);
+  }
+
+  /** What a purged subtree does to the tasks that pointed into it.
+   *
+   *  An open linked task goes with the page: keeping it would fill the Inbox
+   *  with the tails of pages somebody deliberately threw away. A done one
+   *  stays, detached, because the Logbook is a record of what was finished
+   *  and deleting the page does not unfinish it. A task that had already
+   *  detached is nobody's to touch; its page id is a name now, not a link.
+   *
+   *  Caller owns mutate(). */
+  private async purgeSubtreeTasksUnlocked(pageIds: Set<string>): Promise<void> {
+    const at = now();
+    for (const task of this.taskIndex.all()) {
+      if (task.page === undefined || !pageIds.has(task.page)) continue;
+      if (!isLinkedTask(task)) continue;
+      const done = this.taskIndex.view(task.id)?.done ?? false;
+      await this.tryTaskWriteUnlocked(task.id, () =>
+        done
+          ? this.detachTaskUnlocked(task.id, {
+              detachedAt: at,
+              done: true,
+              doneAt: task.doneAt ?? at,
+            })
+          : this.deleteTaskUnlocked(task.id),
+      );
+    }
+  }
+
+  /** Caller owns mutate(). */
+  private async deleteTaskUnlocked(id: string, src?: string): Promise<void> {
+    await deleteTaskFile(this.root, id);
+    this.taskIndex.remove(id);
+    scheduleCommit(this.root);
+    emitStore({ type: "task", id, src });
+  }
+}
+
+/** A task id reaches a path the same way a page id does, so it is checked
+ *  against the bounded rule before any `path.join`. */
+function assertTaskId(id: string): void {
+  if (!TASK_ID_RE.test(id)) {
+    throw new TaskValidationError(`invalid task id: ${JSON.stringify(id)}`);
+  }
+}
+
+const TASK_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** The caller's own local calendar day. The server never substitutes its own:
+ *  a UTC "today" flips the list at 03:00 in Moscow and a day early in Dubai. */
+function assertToday(today: string | undefined): asserts today is string {
+  if (typeof today !== "string" || !TASK_DAY_RE.test(today)) {
+    throw new TaskValidationError("bad_today");
+  }
+}
+
+/** The checkbox token, and nothing else on the line. The line number comes
+ *  from `parseTaskLines`, which splits on /\r?\n/; splitting on "\n" alone
+ *  and joining the same way agrees with it on every index and returns a CRLF
+ *  body byte for byte. */
+const TASK_TOKEN_RE = /^(\s*[-*+]\s+\[)( |x|X)(\])/;
+
+function withCheckbox(
+  markdown: string,
+  line: number,
+  checked: boolean,
+): string {
+  const lines = markdown.split("\n");
+  const raw = lines[line];
+  if (raw === undefined) return markdown;
+  const next = raw.replace(
+    TASK_TOKEN_RE,
+    (_match, head: string, _token: string, tail: string) =>
+      `${head}${checked ? "x" : " "}${tail}`,
+  );
+  if (next === raw) return markdown;
+  lines[line] = next;
+  return lines.join("\n");
+}
+
+/** A completion that cannot carry anything else.
+ *
+ *  A LINKED task's completion is a write to its note, and the note cannot hold
+ *  a schedule or a category, so the two would be two files written for two
+ *  unrelated reasons under one result. A REPEATING task's completion moves
+ *  `when` itself, so a `when` beside it is a second answer to where the task
+ *  goes next. Either way the caller sends two requests and learns which of
+ *  them failed. */
+function assertOnlyCompletion(patch: UpdateTaskPatch, subject: string): void {
+  const others: (keyof UpdateTaskPatch)[] = [
+    "title",
+    "when",
+    "deadline",
+    "category",
+    "repeat",
+  ];
+  for (const key of others) {
+    if (patch[key] !== undefined) {
+      throw new TaskValidationError(
+        `${key} cannot be set in the same call as ${subject}`,
+      );
+    }
+  }
+}
+
+/** `today` is the one parameter the server cannot derive, and a repeating task
+ *  needs it on completion because the next occurrence comes off
+ *  max(when, today). Nothing else takes it, so anywhere else it is a caller
+ *  mistake worth hearing about rather than a value to ignore. */
+function assertTodayUsage(current: TaskRecord, patch: UpdateTaskPatch): void {
+  const completingRepeat = patch.done === true && current.repeat !== undefined;
+  if (patch.today !== undefined && !completingRepeat) {
+    throw new TaskValidationError(
+      "today is only accepted when completing a repeating task",
+    );
+  }
+  if (completingRepeat) assertToday(patch.today);
+}
+
+/** A task that came from a note line cannot repeat (decision 14). Otherwise
+ *  every completion would have to write `[ ]` back into somebody's document
+ *  every morning.
+ *
+ *  The schema refuses the same pair, in the words of its own two fields. This
+ *  says it in the words a person would use, and it says it for a DETACHED
+ *  record too: that one has no line left, and the reason it still cannot
+ *  repeat is the note it came from rather than a `page` key it happens to
+ *  carry. */
+function assertRepeatUnlinked(
+  repeat: TaskRepeat | null | undefined,
+  page: string | undefined,
+): void {
+  if (repeat === undefined || repeat === null || page === undefined) return;
+  throw new TaskValidationError("a task that came from a note line cannot repeat");
+}
+
+/** The one shape a rev conflict is allowed to resolve silently.
+ *
+ *  `mergeCheckboxStates` decides it. This only answers the two questions that
+ *  belong to the page write: whether there is a base body to merge from, and
+ *  whether the structure barrier is up. The barrier means a structural write
+ *  moved this body in a way a line index cannot follow, and it already refuses
+ *  a byte-identical body, so it refuses a merge for the same reason.
+ */
+function mergeConcurrentTicks(
+  parsed: { meta: Partial<PageMeta>; markdown: string },
+  expectedMarkdown: string | undefined,
+  markdown: string,
+): CheckboxMergeResult {
+  if (parsed.meta.structureWriteBarrier === true) return { ok: false };
+  if (expectedMarkdown === undefined) return { ok: false };
+  // All three through the same function. The merge compares the three bodies
+  // line by line from both ends, so one body carrying a trailing blank the
+  // other two do not have makes every shared tail zero, and only a tick ABOVE
+  // the client's first edit could ever come back. The client's body is the
+  // one that carries it: Milkdown's serializer ends a body with a newline,
+  // and `parsePage` and the stored baseline are both trimmed already.
+  return mergeCheckboxStates(
+    canonicalPageMarkdown(expectedMarkdown),
+    canonicalPageMarkdown(markdown),
+    parsed.markdown,
+  );
+}
+
+function parseTask(raw: unknown): TaskRecord {
+  const parsed = parseTaskRecord(raw);
+  if (!parsed.ok) throw new TaskValidationError(parsed.reason);
+  return parsed.task;
+}
+
+function assignOrClear(
+  target: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): void {
+  if (value === undefined) return;
+  if (value === null) delete target[key];
+  else target[key] = value;
+}
+
+function applyTaskPatch(
+  current: TaskRecord,
+  patch: UpdateTaskPatch,
+): TaskRecord {
+  assertRepeatUnlinked(patch.repeat, current.page);
+  // A rule belongs to a task that is still going. On a DONE record it would
+  // describe a series with no open instance: `listOf` files the record in the
+  // Logbook because `done` is true, and the rule promises a next occurrence
+  // nothing will ever write. The surface does not offer the chip on a done
+  // row; this is the same answer for a caller that asks anyway.
+  if (patch.repeat !== undefined && patch.repeat !== null && current.done) {
+    throw new TaskValidationError(
+      "a task that is already done cannot take a repeat rule",
+    );
+  }
+  const next: Record<string, unknown> = { ...current };
+  if (patch.title !== undefined) {
+    // The note line is a linked task's title. The copy in the file is a cache
+    // for list rendering and writing over it would make it a second answer.
+    // A detached record has no line left to own it, so the title is its own
+    // again.
+    if (isLinkedTask(current)) {
+      throw new TaskValidationError(
+        "title is owned by the note line of a linked task",
+      );
+    }
+    next.title = patch.title;
+  }
+  if (patch.when !== undefined && patch.when !== null && current.repeat) {
+    // A reschedule moves THIS instance and leaves the rule where it is, which
+    // is `advance`'s other path and the reason no Skip control exists: moving
+    // the daily to Thursday is also skipping Tuesday and Wednesday, because
+    // there is only ever one open instance.
+    next.when = advance(current, { to: patch.when }).when;
+  } else {
+    assignOrClear(next, "when", patch.when);
+  }
+  assignOrClear(next, "deadline", patch.deadline);
+  assignOrClear(next, "category", patch.category);
+  assignOrClear(next, "repeat", patch.repeat);
+  // `log` STAYS when the rule goes. Stopping a repeat leaves the instance as
+  // an ordinary task, and its completions are the Logbook's: up to thirty
+  // days of rows, one of which may be the row the person is looking at when
+  // they pick "Don't repeat". They are read-only history from here on, and
+  // `logbookRows` draws them whether or not a rule is still there.
+  if (patch.done !== undefined) {
+    // A linked task is completed by its checkbox, so `updateTask` writes the
+    // note and the reconcile derives this. A detached one owns its own
+    // completion again and lands here.
+    if (isLinkedTask(current)) {
+      throw new TaskValidationError("done is not stored for a linked task");
+    }
+    next.done = patch.done;
+    // A full UTC instant. The Logbook day is the reader's own, derived from
+    // this instant in their zone, so the server writes the instant and makes
+    // no guess about which calendar day it falls on.
+    if (patch.done) next.doneAt = new Date().toISOString();
+    else delete next.doneAt;
+  }
+  next.updated = new Date().toISOString();
+  return parseTask(next);
+}
+
+/** Real offsets run from -12:00 to +14:00. Anything outside that is a caller
+ *  sending milliseconds or a sign error, not a timezone. */
+const MAX_OFFSET_MINUTES = 840;
+
+function assertOffsetMinutes(value: number | undefined): void {
+  if (
+    typeof value !== "number" ||
+    !Number.isInteger(value) ||
+    Math.abs(value) > MAX_OFFSET_MINUTES
+  ) {
+    throw new TaskValidationError("bad_offset");
+  }
+}
+
+/** The order the lists are read in on the surface. */
+const TASK_LIST_ORDER: ListName[] = [
+  "inbox",
+  "today",
+  "upcoming",
+  "someday",
+  "logbook",
+];
+
+function compareTasks(
+  a: TaskView,
+  b: TaskView,
+  today: string,
+  offsetMinutes: number,
+): number {
+  const listA = listOf(a, today);
+  const listB = listOf(b, today);
+  if (listA !== listB) {
+    return TASK_LIST_ORDER.indexOf(listA) - TASK_LIST_ORDER.indexOf(listB);
+  }
+  const byGroup = compareGroups(
+    groupFor(a, today, offsetMinutes),
+    groupFor(b, today, offsetMinutes),
+  );
+  return byGroup !== 0 ? byGroup : compareInGroup(a, b, listA);
 }
 
 function deslug(name: string): string {

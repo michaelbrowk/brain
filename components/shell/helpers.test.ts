@@ -3,7 +3,14 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { apiFetch } from "@/lib/client";
 import type { ShareScopeSnapshot } from "@/lib/store/types";
-import { captureThought, isShareScopeSnapshot } from "./helpers";
+import {
+  canvasPresenceKey,
+  captureThought,
+  isShareScopeSnapshot,
+  navigationPresenceIdentity,
+  navigationPresenceReducer,
+  type NavigationPresenceState,
+} from "./helpers";
 
 vi.mock("@/lib/client", () => ({
   apiFetch: vi.fn(),
@@ -111,5 +118,103 @@ describe("isShareScopeSnapshot", () => {
     for (const shareEdit of ["true", 1, null, {}]) {
       expect(isShareScopeSnapshot(snapshot({ shareEdit }))).toBe(false);
     }
+  });
+});
+
+describe("navigationPresenceReducer with the tasks surface", () => {
+  const base: NavigationPresenceState = {
+    selectedId: null,
+    surface: "notes",
+    settingsSection: null,
+    tasksList: null,
+    epoch: 0,
+  };
+
+  it("carries tasksList the way it carries settingsSection", () => {
+    const opened = navigationPresenceReducer(base, {
+      type: "surface",
+      surface: "tasks",
+      tasksList: "today",
+    });
+    expect(opened.tasksList).toBe("today");
+
+    const left = navigationPresenceReducer(opened, {
+      type: "surface",
+      surface: "notes",
+    });
+    expect(left.tasksList).toBeNull();
+  });
+
+  it("carries a category view, which is not a list name", () => {
+    const opened = navigationPresenceReducer(base, {
+      type: "surface",
+      surface: "tasks",
+      tasksList: { category: "Errands" },
+    });
+    expect(opened.tasksList).toEqual({ category: "Errands" });
+  });
+
+  it("gives tasks one presence identity, so notes to tasks to notes re-enters", () => {
+    expect(
+      navigationPresenceIdentity({
+        ...base,
+        surface: "tasks",
+        tasksList: "today",
+      }),
+    ).toBe("tasks");
+
+    const opened = navigationPresenceReducer(base, {
+      type: "surface",
+      surface: "tasks",
+    });
+    const back = navigationPresenceReducer(opened, {
+      type: "surface",
+      surface: "notes",
+    });
+    const reopened = navigationPresenceReducer(back, {
+      type: "surface",
+      surface: "tasks",
+    });
+    expect(canvasPresenceKey(reopened)).not.toBe(canvasPresenceKey(opened));
+  });
+
+  it("keeps the open list when an action only names the surface", () => {
+    const upcoming = navigationPresenceReducer(base, {
+      type: "surface",
+      surface: "tasks",
+      tasksList: "upcoming",
+    });
+    // the sidebar row, pressed again: Things keeps the list you were on, and
+    // throwing it away every time would make the row a reset button
+    const again = navigationPresenceReducer(upcoming, {
+      type: "surface",
+      surface: "tasks",
+    });
+    expect(again.tasksList).toBe("upcoming");
+
+    // an explicit null still MEANS the default
+    const reset = navigationPresenceReducer(again, {
+      type: "surface",
+      surface: "tasks",
+      tasksList: null,
+    });
+    expect(reset.tasksList).toBeNull();
+  });
+
+  it("does not bump the epoch when only the list changes", () => {
+    const inbox = navigationPresenceReducer(base, {
+      type: "surface",
+      surface: "tasks",
+      tasksList: "inbox",
+    });
+    const today = navigationPresenceReducer(inbox, {
+      type: "surface",
+      surface: "tasks",
+      tasksList: "today",
+    });
+
+    expect(today.tasksList).toBe("today");
+    expect(today.epoch).toBe(inbox.epoch);
+    expect(canvasPresenceKey(today)).toBe(canvasPresenceKey(inbox));
   });
 });

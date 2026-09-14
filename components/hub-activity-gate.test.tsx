@@ -5,6 +5,7 @@ import { createRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TreeNode } from "@/lib/store/types";
+import { resetTasksStore } from "./tasks-client";
 import { Hub } from "./hub";
 
 vi.mock("framer-motion", () => import("@/test/framer-motion-mock"));
@@ -27,6 +28,21 @@ function treeNode(id: string, title: string, updated: string): TreeNode {
 const staleTree = Array.from({ length: 8 }, (_, i) =>
   treeNode(`stale-${i}`, `Stale page ${i}`, "2020-01-01T00:00:00.000Z"),
 );
+
+/** Home now mounts the tasks and mail blocks as well. Neither is what these
+ *  cases are about, so both are answered empty and the shared task store is
+ *  reset, or one file's records would arrive in the next one's Hub. */
+function stubHubSources() {
+  resetTasksStore();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: unknown) => {
+      const url = String(input);
+      const body = url.includes("/api/mail/") ? { accounts: [] } : { tasks: [] };
+      return { ok: true, status: 200, json: async () => body } as Response;
+    }),
+  );
+}
 
 describe("Hub activity feed clock gate", () => {
   describe("before the clock mounts (SSR HTML)", () => {
@@ -52,6 +68,7 @@ describe("Hub activity feed clock gate", () => {
       ).IS_REACT_ACT_ENVIRONMENT = true;
       localStorage.clear();
       sessionStorage.clear();
+      stubHubSources();
       vi.stubGlobal(
         "requestAnimationFrame",
         vi.fn((callback: FrameRequestCallback) => {
@@ -96,6 +113,11 @@ describe("Hub activity feed clock gate", () => {
       // to avoid a second row for it. With that page the only one that
       // changed this week, the empty state used to land directly under a row
       // dated a minute ago and contradict it.
+      //
+      // Continue is the first ROW of this block now rather than a block above
+      // it, so the heading stands and the contradiction is gone by
+      // construction: the empty state is drawn only where the block has no
+      // row at all, Continue included.
       localStorage.setItem("brain-last-opened", "open-here");
       const minuteAgo = new Date(Date.now() - 60_000).toISOString();
       await act(async () =>
@@ -113,9 +135,12 @@ describe("Hub activity feed clock gate", () => {
 
       expect(container.textContent).toContain("The page I am on");
       expect(container.textContent).not.toContain("Nothing changed");
-      // and the section itself goes with it: a heading over nothing reports
-      // nothing either
-      expect(container.textContent).not.toContain("Since this device was last open");
+      // The heading stands over the one row the week has, which is the row
+      // the reader was last on. A heading over NOTHING is what was wrong.
+      expect(container.textContent).toContain("Since this device was last open");
+      expect(
+        container.querySelector("[data-hub-continue]")?.textContent,
+      ).toContain("The page I am on");
     });
 
     it("counts only genuinely recent pages in Review all", async () => {

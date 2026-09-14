@@ -9,10 +9,16 @@ import {
   collectionRowSchema,
 } from "@/lib/collections/model";
 import type { Store, TreeNode } from "@/lib/store";
+import { type TaskRecord, taskRecordSchema } from "@/lib/tasks/model";
 import { createPortableArchive, readPortableArchive } from "./archive";
 
 export const PORTABLE_FORMAT = "brain-portable" as const;
-export const PORTABLE_VERSION = 1 as const;
+/** Version 2 is the first to carry tasks. */
+export const PORTABLE_VERSION = 2 as const;
+/** Both versions are read. A version 1 archive has no `tasks` key and imports
+ *  exactly as it did before the bump, because refusing the exports people
+ *  already hold would cost them their data and buy nothing. */
+const portableVersionSchema = z.union([z.literal(1), z.literal(2)]);
 const MAX_PORTABLE_PAGES = 5_000;
 const MAX_PAGE_MARKDOWN_BYTES = 10 * 1024 * 1024;
 
@@ -81,25 +87,49 @@ const portableAttachmentSchema = z
   })
   .strict();
 
+/** One task, carried whole.
+ *
+ *  `record` is the task record itself, through the very schema the store
+ *  writes to disk: every field, nothing picked and nothing renamed, so a
+ *  notebook that travels arrives with its completions, its repeat logs and its
+ *  hand-set timestamps intact. A field added to the record later rides with no
+ *  change here, which is the point of carrying the schema rather than a copy
+ *  of its field list.
+ *
+ *  `record.page` names the page by the id it had in the exporting notebook,
+ *  the way `parentSourceId` names a parent, and the import maps it. `bodyPath`
+ *  is there only when the file had a body under its frontmatter.
+ */
+const portableTaskSchema = z
+  .object({
+    record: taskRecordSchema,
+    bodyPath: z.string().regex(/^tasks\/t\d{6}\.md$/).optional(),
+  })
+  .strict();
+
 export const portableManifestSchema = z
   .object({
     format: z.literal(PORTABLE_FORMAT),
-    version: z.literal(PORTABLE_VERSION),
+    version: portableVersionSchema,
     exportedAt: z.string().datetime(),
     scope: z.enum(["all", "subtree"]),
     title: safeText(1_000, 1),
     pages: z.array(portablePageSchema).min(1).max(MAX_PORTABLE_PAGES),
     attachments: z.array(portableAttachmentSchema).max(MAX_PORTABLE_PAGES * 4),
+    tasks: z.array(portableTaskSchema).max(MAX_PORTABLE_PAGES * 4).optional(),
   })
   .strict();
 
 export type PortableManifest = z.infer<typeof portableManifestSchema>;
 export type PortablePage = PortableManifest["pages"][number];
+export type PortableTask = z.infer<typeof portableTaskSchema>;
 
 export interface PortableBundle {
   manifest: PortableManifest;
   markdown: Map<string, string>;
   attachments: Map<string, Uint8Array>;
+  /** The body each `bodyPath` names, decoded and untrimmed. */
+  taskBodies: Map<string, string>;
 }
 
 export interface PortableImportSummary {
@@ -109,6 +139,7 @@ export interface PortableImportSummary {
   attachments: number;
   attachmentBytes: number;
   collections: number;
+  tasks: number;
 }
 
 function flatten(nodes: TreeNode[]): TreeNode[] {
@@ -160,6 +191,45 @@ function replaceKnown(value: string, replacements: Map<string, string>): string 
     result = result.replaceAll(source, target);
   }
   return result;
+}
+
+/** The tasks one export carries, each with the body its file holds.
+ *
+ *  A whole notebook export carries every record the index has, with nothing
+ *  filtered: a task whose page is in the Trash and a completion older than the
+ *  Logbook window are in no list, and an archive that dropped them would not
+ *  be the notebook. A subtree export carries the tasks of the pages it is
+ *  carrying, and leaves the rest of the notebook where it is.
+ *
+ *  Records are ordered by id so two exports of one notebook number their body
+ *  files the same way.
+ */
+async function exportedTasks(
+  store: Store,
+  rootId: string | undefined,
+  nodeIds: Set<string>,
+): Promise<{ entries: PortableTask[]; bodies: string[] }> {
+  const records = store
+    .allTasks()
+    .filter(
+      (task) =>
+        rootId === undefined ||
+        (task.page !== undefined && nodeIds.has(task.page)),
+    )
+    .sort((left, right) => (left.id < right.id ? -1 : left.id > right.id ? 1 : 0));
+  const bodies = await Promise.all(
+    records.map((task) => store.readTaskBody(task.id)),
+  );
+  let files = 0;
+  const entries = records.map((record, index) =>
+    bodies[index]
+      ? {
+          record,
+          bodyPath: `tasks/t${String(++files).padStart(6, "0")}.md`,
+        }
+      : { record },
+  );
+  return { entries, bodies };
 }
 
 export async function buildPortableArchive(
@@ -263,10 +333,12 @@ export async function buildPortableArchive(
       },
     };
   });
+  const exportedAt = options.now ?? new Date();
+  const tasks = await exportedTasks(store, options.rootId, nodeIds);
   const manifest = portableManifestSchema.parse({
     format: PORTABLE_FORMAT,
     version: PORTABLE_VERSION,
-    exportedAt: (options.now ?? new Date()).toISOString(),
+    exportedAt: exportedAt.toISOString(),
     scope: options.rootId ? "subtree" : "all",
     title: options.rootId ? nodes[0].title : "Brain",
     pages: manifestPages,
@@ -277,6 +349,9 @@ export async function buildPortableArchive(
       size: entry.data.byteLength,
       sha256: entry.sha256,
     })),
+    // A notebook with no tasks writes a version 2 manifest with no `tasks`
+    // key, which is byte for byte what a version 1 manifest carried.
+    ...(tasks.entries.length > 0 ? { tasks: tasks.entries } : {}),
   });
   const entries = [
     {
@@ -296,6 +371,19 @@ export async function buildPortableArchive(
       path: entry.archivePath,
       data: entry.data,
     })),
+    // Only the tasks that have one. The body is written raw, with no trim,
+    // because the promise the store's own writer makes about it is byte for
+    // byte and an export is not the place to start editing somebody's file.
+    ...tasks.entries.flatMap((task, index) =>
+      task.bodyPath
+        ? [
+            {
+              path: task.bodyPath,
+              data: new TextEncoder().encode(tasks.bodies[index]),
+            },
+          ]
+        : [],
+    ),
   ];
   return { bytes: createPortableArchive(entries), manifest };
 }
@@ -341,6 +429,9 @@ export function validatePortableArchive(
     );
   } catch {
     throw new Error("portable manifest is invalid");
+  }
+  if (manifest.version === 1 && manifest.tasks) {
+    throw new Error("portable manifest is version 1 and cannot carry tasks");
   }
   orderedPages(manifest.pages);
   const expectedEntries = new Set(["manifest.json"]);
@@ -398,6 +489,28 @@ export function validatePortableArchive(
     attachments.set(attachment.archivePath, data);
     attachmentBytes += data.byteLength;
   }
+  const taskBodies = new Map<string, string>();
+  for (const task of manifest.tasks ?? []) {
+    if (!task.bodyPath) continue;
+    if (taskBodies.has(task.bodyPath)) {
+      throw new Error("portable manifest has duplicate task bodies");
+    }
+    expectedEntries.add(task.bodyPath);
+    const data = entries.get(task.bodyPath);
+    if (!data || data.byteLength > MAX_PAGE_MARKDOWN_BYTES) {
+      throw new Error(`portable task body is missing or too large: ${task.bodyPath}`);
+    }
+    try {
+      // No trim. The body is what the file held after its frontmatter and it
+      // goes back exactly that way.
+      taskBodies.set(
+        task.bodyPath,
+        new TextDecoder("utf-8", { fatal: true }).decode(data),
+      );
+    } catch {
+      throw new Error(`portable task body is not UTF-8: ${task.bodyPath}`);
+    }
+  }
   for (const path of entries.keys()) {
     if (!expectedEntries.has(path)) {
       throw new Error(`portable archive contains an unlisted file: ${path}`);
@@ -421,7 +534,7 @@ export function validatePortableArchive(
     }
   }
   return {
-    bundle: { manifest, markdown, attachments },
+    bundle: { manifest, markdown, attachments, taskBodies },
     summary: {
       title: manifest.title,
       pages: manifest.pages.length,
@@ -429,6 +542,7 @@ export function validatePortableArchive(
       attachments: manifest.attachments.length,
       attachmentBytes,
       collections: manifest.pages.filter((page) => page.meta.collection).length,
+      tasks: manifest.tasks?.length ?? 0,
     },
   };
 }
@@ -437,7 +551,7 @@ export async function applyPortableBundle(
   store: Store,
   bundle: PortableBundle,
   options: { parentId?: string | null; src?: string } = {},
-): Promise<{ rootIds: string[]; created: number }> {
+): Promise<{ rootIds: string[]; created: number; tasks: number }> {
   const ordered = orderedPages(bundle.manifest.pages);
   const assetUrls = new Map<string, string>();
   for (const attachment of bundle.manifest.attachments) {
@@ -453,6 +567,8 @@ export async function applyPortableBundle(
   }
   const created = new Map<string, string>();
   const rootIds: string[] = [];
+  const createdTasks: string[] = [];
+  const landedPages = new Set<string>();
   try {
     for (const page of ordered) {
       const parentId = page.parentSourceId
@@ -521,8 +637,57 @@ export async function applyPortableBundle(
         options.src,
       );
     }
-    return { rootIds, created: created.size };
+    // Every task goes in through the store's own leaf, so the task index is
+    // right the moment this returns and the note edits and the task writes
+    // land in one git commit together.
+    for (const task of bundle.manifest.tasks ?? []) {
+      const record: TaskRecord = { ...task.record };
+      if (record.page !== undefined) {
+        const pageId = created.get(record.page);
+        if (pageId) {
+          // The page it names was minted fresh a moment ago, the way every
+          // other reference in the archive is remapped.
+          record.page = pageId;
+        } else {
+          // A task naming a page this archive does not carry is imported
+          // unlinked, keeping its schedule, its completion and its last known
+          // title. Its anchor named a line in a note nobody here has, so it
+          // goes with the link rather than pointing at a stranger's page.
+          //
+          // `detachedAt` goes too, and it is the one that matters: a detach
+          // is a link that was broken, and the record schema refuses the mark
+          // without the page it names. The purge rule mints exactly that
+          // record, a finished linked task whose page is gone, so a
+          // notebook that has ever emptied its trash exports an archive that
+          // would throw on the way in and roll every imported page into the
+          // Trash. Unlinked and done says the same thing to a reader, in a
+          // shape the schema accepts.
+          delete record.page;
+          delete record.anchor;
+          delete record.detachedAt;
+        }
+      }
+      const landed = await store.importTask(
+        record,
+        task.bodyPath ? (bundle.taskBodies.get(task.bodyPath) ?? "") : "",
+        options.src,
+      );
+      if (landed.page !== undefined) landedPages.add(landed.page);
+      createdTasks.push(landed.id);
+    }
+    // The pages were written before the records existed, so every page write's
+    // own reconcile found nothing to reconcile. A linked task stores no `done`
+    // of its own, and until a reconcile reads the checkbox back the index
+    // answers `false`: an imported notebook would show every finished linked
+    // task as open, in Today, beside a ticked box in the note.
+    for (const pageId of landedPages) {
+      await store.reconcileTasksForPage(pageId, options.src);
+    }
+    return { rootIds, created: created.size, tasks: createdTasks.length };
   } catch (error) {
+    for (const taskId of createdTasks) {
+      await store.deleteTask(taskId).catch(() => undefined);
+    }
     for (const rootId of rootIds) {
       await store.deletePage(rootId).catch(() => undefined);
     }

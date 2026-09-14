@@ -14,6 +14,8 @@ import {
   type StoredDraft,
 } from "@/lib/autosave";
 import { canonicalPageMarkdown } from "@/lib/page-markdown";
+import { openTodayCount } from "./tasks-lists";
+import { useTasks } from "./tasks-client";
 import { sectionPageIds } from "@/lib/dated-sections";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Kbd, Skeleton, useShortcutTitle, type ToastOptions } from "./ui/primitives";
@@ -62,6 +64,11 @@ const SettingsSurface = dynamic(
   () => import("./settings/settings-surface").then((m) => m.SettingsSurface),
   { ssr: false },
 );
+// and the tasks surface: someone opening a note must not download the lists
+const TasksSurface = dynamic(
+  () => import("./tasks-surface").then((m) => m.TasksSurface),
+  { ssr: false },
+);
 import type { ShareEnableResult } from "./share-popover";
 import { Hub } from "./hub";
 import { MobileTabBar } from "./mobile-tab-bar";
@@ -74,7 +81,10 @@ import {
 import type { Template } from "@/lib/templates";
 import { StickersLayer, stickerPrintCanvasHeight } from "./stickers";
 import type { Sticker } from "@/lib/store/types";
-import { NESTED_TABLE_BLOCKED_EVENT } from "@/lib/editor-events";
+import {
+  NESTED_TABLE_BLOCKED_EVENT,
+  TASKS_CHANGED_EVENT,
+} from "@/lib/editor-events";
 import {
   mapMarkdownOffset,
   removeStandalonePageRefOccurrenceWithRestore,
@@ -148,7 +158,9 @@ import {
   toastAdmit,
   type SaveState,
   type ShellInitialPage,
+  type ShellSurface,
   type ShellToast,
+  type TasksListState,
 } from "./shell/helpers";
 import {
   reconcilePageRefEffect,
@@ -266,8 +278,8 @@ export function Shell({
   tree: TreeNode[];
   initialSelectedId?: string | null;
   /** "settings" mounts the settings surface (/settings and
-   *  /settings/[section]). */
-  initialSurface?: "notes" | "mail" | "settings";
+   *  /settings/[section]); "tasks" mounts the tasks surface (/tasks). */
+  initialSurface?: ShellSurface;
   /** The section of a /settings/[section] deep link; null is the root list
    *  (mobile) — desktop normalises it to "appearance" on mount. */
   initialSettingsSection?: SettingsSection | null;
@@ -280,41 +292,51 @@ export function Shell({
 }) {
   const [tree, setTree] = useState(initialTree);
   const [
-    { selectedId, surface, settingsSection, epoch: navigationPresenceEpoch },
+    {
+      selectedId,
+      surface,
+      settingsSection,
+      tasksList,
+      epoch: navigationPresenceEpoch,
+    },
     dispatchNavigationPresence,
   ] = useReducer(navigationPresenceReducer, {
     selectedId:
-      initialSurface === "mail" || initialSurface === "settings"
+      initialSurface !== "notes"
         ? null
         : initialSelectedId === undefined
           ? firstId(initialTree)
           : initialSelectedId,
-    surface:
-      initialSurface === "mail"
-        ? "mail"
-        : initialSurface === "settings"
-          ? "settings"
-          : "notes",
+    surface: initialSurface,
     settingsSection:
       initialSurface === "settings" ? initialSettingsSection : null,
+    // no deep link into a list yet: /tasks is the whole route, and the open
+    // list lives in navigation state from there
+    tasksList: null,
     epoch: 0,
   });
   const mailOpen = surface === "mail";
+  const tasksOpen = surface === "tasks";
   const settingsActive = surface === "settings";
   const setSelectedId = useCallback(
     (value: SetStateAction<string | null>) =>
       dispatchNavigationPresence({ type: "selected-id", value }),
     [],
   );
-  const setMailOpen = useCallback(
-    (value: boolean) =>
-      dispatchNavigationPresence({
-        type: "surface",
-        surface: value ? "mail" : "notes",
-      }),
+  /** Move the canvas to a surface. It was a two-state `setMailOpen`, and a
+   *  third destination left it with nowhere to send "not mail": leaving Tasks
+   *  would have landed on notes by accident. */
+  const setSurface = useCallback(
+    (next: ShellSurface) =>
+      dispatchNavigationPresence({ type: "surface", surface: next }),
     [],
   );
   const [mailSurfaceRevision, setMailSurfaceRevision] = useState(0);
+  // Bumped by a task written anywhere but this tab (another tab, an MCP call,
+  // the repeat rule advancing one). The surface refetches on it.
+  const [taskSurfaceRevision, setTaskSurfaceRevision] = useState(0);
+  // Bumped by "New task": the surface puts the caret in its capture field.
+  const [taskCaptureRequest, setTaskCaptureRequest] = useState(0);
   const selectedIdRef = useRef(selectedId);
   const surfaceRef = useRef(surface);
   const treeRef = useRef(tree);
@@ -1339,6 +1361,23 @@ export function Shell({
       }
       // our own write echoed back — this tab already holds that state
       if (ev.src === CLIENT_ID) return;
+      // A task write touches no page in the tree, so refreshing the tree here
+      // would refetch the whole thing on every tick. The tasks surface takes
+      // it instead.
+      if (ev.type === "task") {
+        setTaskSurfaceRevision((revision) => revision + 1);
+        // The open note's editor keeps its own copy of this page's records and
+        // is not React, so it cannot subscribe to the line above. Without this
+        // a line whose task was completed, deleted or detached somewhere else
+        // keeps its word until the editor remounts. One window event, whose
+        // name both sides take from `lib/editor-events.ts`: the editor is
+        // dynamically imported to keep Milkdown out of this bundle, so the two
+        // cannot import each other and the seam is a module with no runtime.
+        // This tab's own writes never reach here (the `src` check above), so a
+        // promotion made in the editor does not bounce back at it.
+        window.dispatchEvent(new CustomEvent(TASKS_CHANGED_EVENT));
+        return;
+      }
       clearTimeout(t);
       t = setTimeout(() => void refreshTree().catch(() => {}), 500);
       const cur = selectedIdRef.current;
@@ -1398,7 +1437,7 @@ export function Shell({
     editorFlushRef.current();
     flushPendingRef.current();
     setSelectedId(id);
-    setMailOpen(false);
+    setSurface("notes");
     discardSmartSort();
     editorContextTargetRef.current = null;
     setEditorContextTargetId(null);
@@ -1411,8 +1450,8 @@ export function Shell({
     discardSmartSort,
     pushNavigationEntry,
     rememberRecent,
-    setMailOpen,
     setSelectedId,
+    setSurface,
   ]);
 
   // The page the reader had open last, written wherever it changes rather
@@ -1443,7 +1482,7 @@ export function Shell({
     editorFlushRef.current();
     flushPendingRef.current();
     setSelectedId(null);
-    setMailOpen(false);
+    setSurface("notes");
     discardSmartSort();
     editorContextTargetRef.current = null;
     setEditorContextTargetId(null);
@@ -1455,8 +1494,8 @@ export function Shell({
     clearSearchHighlightIntent,
     discardSmartSort,
     pushNavigationEntry,
-    setMailOpen,
     setSelectedId,
+    setSurface,
   ]);
 
   const openMail = useCallback(() => {
@@ -1465,7 +1504,7 @@ export function Shell({
     editorFlushRef.current();
     flushPendingRef.current();
     setSelectedId(null);
-    setMailOpen(true);
+    setSurface("mail");
     discardSmartSort();
     editorContextTargetRef.current = null;
     setEditorContextTargetId(null);
@@ -1479,11 +1518,90 @@ export function Shell({
     clearSearchHighlightIntent,
     discardSmartSort,
     pushNavigationEntry,
-    setMailOpen,
     setSelectedId,
+    setSurface,
   ]);
 
-  // browser back/forward moves between pages, mail, and settings
+  const openTasks = useCallback(() => {
+    clearSearchHighlightIntent();
+    historyOpenRequestRef.current += 1;
+    editorFlushRef.current();
+    flushPendingRef.current();
+    setSelectedId(null);
+    setSurface("tasks");
+    discardSmartSort();
+    editorContextTargetRef.current = null;
+    setEditorContextTargetId(null);
+    editorContextPageRefRef.current = null;
+    setEditorContextPageRef(null);
+    setMobilePagesOpen(false);
+    if (
+      currentOverlayEntry() ||
+      !window.location.pathname.startsWith("/tasks")
+    ) {
+      pushNavigationEntry("/tasks");
+    }
+  }, [
+    clearSearchHighlightIntent,
+    discardSmartSort,
+    pushNavigationEntry,
+    setSelectedId,
+    setSurface,
+  ]);
+
+  /** THE SIDEBAR'S TASKS COUNT COMES OFF THE SURFACE'S OWN FETCH.
+   *
+   *  `components/tasks-client` holds one set of records keyed by the reader's
+   *  day and this token, so the shell subscribing here and the surface
+   *  subscribing there are one request, not two, and a completion's
+   *  optimistic write decrements the number and moves the row in the same
+   *  commit. The badge is on screen while Mail or a note is, which is the
+   *  whole reason it exists, so the subscription is the shell's and not the
+   *  surface's.
+   */
+  const taskRecords = useTasks(taskSurfaceRevision);
+  const tasksOpenToday = taskRecords.day
+    ? openTodayCount(taskRecords.tasks, taskRecords.day.today)
+    : undefined;
+
+  /** A linked task names the note it came from, and the chip in an expanded
+   *  row opens it. The tree is the shell's, so the lookup is too. */
+  const pageTitleOf = useCallback(
+    (pageId: string): string | undefined => {
+      const walk = (nodes: TreeNode[]): string | undefined => {
+        for (const node of nodes) {
+          if (node.id === pageId) return node.title;
+          const found = walk(node.children);
+          if (found !== undefined) return found;
+        }
+        return undefined;
+      };
+      return walk(treeRef.current);
+    },
+    [],
+  );
+
+  /** The open list, kept in navigation state beside the settings section.
+   *  Changing it does not re-key the canvas, so the rows move between the
+   *  lists instead of the canvas cross-fading. */
+  const selectTasksList = useCallback(
+    (list: TasksListState | null) =>
+      dispatchNavigationPresence({
+        type: "surface",
+        surface: "tasks",
+        tasksList: list,
+      }),
+    [],
+  );
+
+  /** "New task" from the palette: the surface is where a task is written, so
+   *  open it and ask it for the caret. */
+  const newTask = useCallback(() => {
+    openTasks();
+    setTaskCaptureRequest((request) => request + 1);
+  }, [openTasks]);
+
+  // browser back/forward moves between pages, mail, tasks, and settings
   useEffect(() => {
     const onPop = () => {
       clearSearchHighlightIntent();
@@ -1523,11 +1641,14 @@ export function Shell({
         setMobilePagesOpen(false);
         return;
       }
+      // startsWith, not ===: a category view is /tasks with the list in
+      // navigation state, and a deep link later is /tasks/<list>
+      const nextTasksOpen = location.pathname.startsWith("/tasks");
       const nextMailOpen = location.pathname === "/mail";
       const m = location.pathname.match(/^\/p\/([\w-]+)/);
-      const nextSelectedId = !nextMailOpen && m ? m[1] : null;
+      const nextSelectedId = !nextMailOpen && !nextTasksOpen && m ? m[1] : null;
       setSelectedId(nextSelectedId);
-      setMailOpen(nextMailOpen);
+      setSurface(nextTasksOpen ? "tasks" : nextMailOpen ? "mail" : "notes");
       // The entry we landed on says whether a layer belongs on this screen,
       // so Back leaves Search and Pages and Forward brings them back.
       setMobilePagesOpen(overlay === "pages");
@@ -1584,7 +1705,7 @@ export function Shell({
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [clearSearchHighlightIntent, discardSmartSort, setMailOpen, setSelectedId]);
+  }, [clearSearchHighlightIntent, discardSmartSort, setSelectedId, setSurface]);
 
   const toggleExpand = useCallback((id: string) => {
     setExpanded((s) => {
@@ -5116,6 +5237,11 @@ export function Shell({
     // back of its own.
     homeActive: surface === "notes" && !mobilePagesOpen && !mobileSearchOpen,
     searchActive: mobileSearchOpen,
+    tasksActive: tasksOpen && !mobilePagesOpen && !mobileSearchOpen,
+    onTasks: () => {
+      if (paletteOpen) closePaletteForNavigation();
+      openTasks();
+    },
     pagesActive: mobilePagesOpen,
     mailActive: mailOpen && !mobilePagesOpen && !mobileSearchOpen,
     hidden: mobileTabBarHidden,
@@ -5180,6 +5306,8 @@ export function Shell({
       onToday={() => void runOverlayNavigation(() => openDailyPage())}
       onHome={goHome}
       onOpenMail={openMail}
+      onOpenTasks={openTasks}
+      onNewTask={newTask}
       onOpenTrash={() => setTrashOpen(true)}
       onOpenSettings={openSettings}
       onToggleTheme={toggleTheme}
@@ -5359,6 +5487,8 @@ export function Shell({
         onCreatePage={createPage}
         onOpenDailyPage={openDailyPage}
         onOpenMail={openMail}
+        onOpenTasks={openTasks}
+        tasksOpenTodayCount={tasksOpenToday}
         onSelect={select}
         onToggleExpand={toggleExpand}
         onDelete={requestDelete}
@@ -5408,18 +5538,31 @@ export function Shell({
                 selectedId,
                 surface,
                 settingsSection,
+                // carried, and deliberately not part of the identity: Inbox
+                // to Today moves rows inside the surface
+                tasksList,
                 epoch: navigationPresenceEpoch,
               })}
               {...(reduce ? pageFade : pageTransition)}
               className={
-                mailOpen || settingsActive
+                mailOpen || settingsActive || tasksOpen
                   ? "min-h-full"
                   : selectedId
                     ? "brain-page-frame relative pb-40"
                     : undefined
               }
             >
-            {mailOpen ? (
+            {tasksOpen ? (
+              <TasksSurface
+                list={tasksList}
+                onSelectList={selectTasksList}
+                onToast={showToast}
+                refreshToken={taskSurfaceRevision}
+                captureRequest={taskCaptureRequest}
+                pageTitleOf={pageTitleOf}
+                onOpenPage={(pageId) => select(pageId)}
+              />
+            ) : mailOpen ? (
               <MailSurface
                 onOpenSettings={(invoker, accountId) =>
                   openSettings("mail", { accountId })
@@ -5612,7 +5755,19 @@ export function Shell({
               )}
               </NotesCanvasBody>
             ) : (
-              <Hub tree={tree} onSelect={select} onCreate={createFromHub} />
+              <Hub
+                tree={tree}
+                onSelect={select}
+                onCreate={createFromHub}
+                // The same token the sidebar count and the Tasks surface
+                // subscribe with, so the three are one request and one
+                // optimistic commit rather than three answers to one question.
+                taskRefreshToken={taskSurfaceRevision}
+                onOpenTasks={openTasks}
+                onOpenMail={openMail}
+                onToast={showToast}
+                pageTitleOf={pageTitleOf}
+              />
             )}
             </motion.div>
           </AnimatePresence>

@@ -74,6 +74,10 @@ const WANT = [
   "paperclip-linear",
   "sort-vertical-linear",
   "alt-arrow-down-linear",
+  // Logbook: two bare ticks. Every other "done" glyph Solar ships puts its
+  // check inside a rounded square, which is ban 13, including
+  // `checklist-minimalistic`, which this replaces.
+  "check-read-linear",
   "bell-linear",
   "align-left-linear",
   "align-horizontal-center-linear",
@@ -127,6 +131,13 @@ const PAIRS = [
   "star",
   "folder",
   "document-text",
+  "checklist",
+  // tasks
+  "calendar-date",
+  "calendar",
+  "box-minimalistic",
+  "restart",
+  "flag",
   // settings surface sections
   "palette",
   "plug-circle",

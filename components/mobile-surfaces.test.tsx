@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { act, createRef, useEffect, useReducer } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -482,6 +484,52 @@ describe("mobile navigation surfaces", () => {
     await settle();
     expect(window.location.pathname).toBe("/");
     expect(tab("home").getAttribute("aria-current")).toBe("page");
+  });
+
+  it("stands six slots, Home, Search, Tasks, New, Pages, Mail", async () => {
+    await act(async () => root.render(<Shell tree={[]} />));
+    await settle();
+
+    const keys = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        ".brain-mobile-tabbar [data-mobile-tab]",
+      ),
+    ).map((el) => el.dataset.mobileTab);
+    expect(keys).toEqual(["home", "search", "tasks", "new", "pages", "mail"]);
+
+    // Tasks carries its word and takes the tab ring like every other slot.
+    // The surface it opens is Task 2a's; until that lands the slot is here,
+    // named and reachable, and opens nothing.
+    const tasks = document.querySelector(
+      '.brain-mobile-tabbar [data-mobile-tab="tasks"]',
+    ) as HTMLButtonElement;
+    expect(tasks.textContent).toContain("Tasks");
+    expect(tasks.tabIndex).toBe(0);
+    expect(tasks.getAttribute("aria-current")).toBeNull();
+
+    // New keeps its word off the bar and its name on the button.
+    const newTab = document.querySelector(
+      '.brain-mobile-tabbar [data-mobile-tab="new"]',
+    ) as HTMLButtonElement;
+    expect(newTab.getAttribute("aria-label")).toBe("New");
+  });
+
+  it("sizes the bar by six 56px slots", () => {
+    const css = readFileSync(
+      path.join(process.cwd(), "app", "globals.css"),
+      "utf8",
+    );
+    const slot = /--tabbar-slot:\s*(\d+)px/.exec(css);
+    const tracks =
+      /grid-template-columns:\s*repeat\((\d+), minmax\(44px, var\(--tabbar-slot\)\)\)/.exec(
+        css,
+      );
+    expect(slot?.[1]).toBe("56");
+    expect(tracks?.[1]).toBe("6");
+    // Six of those plus the row's own 4px ends is the 344 the DOM renders,
+    // read at every width by e2e/mail-shots.spec.ts. jsdom lays nothing out,
+    // so this case pins the two figures the bar is built from and the e2e
+    // block is what watches the box they produce.
   });
 
   it("returns to the open page when Home is tapped over the Pages sheet", async () => {

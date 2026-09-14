@@ -975,48 +975,170 @@ html:has(a[data-page-ref-nest-target="true"]) .brain-drop-cursor {
   margin-top: 8px;
 }
 
-/* task list checkboxes — custom box so the check animates in (a native
-   accent-color checkbox toggles with no motion). Reduced-motion zeroes it. */
-.milkdown .ProseMirror input[type="checkbox"] {
-  appearance: none;
-  -webkit-appearance: none;
+/* Task list checkbox. The NodeView in `task-checkbox.ts` draws it on every
+   list item the gfm preset gives a `checked` attribute; the drawing itself,
+   and every timing in it, is `components/tasks-checkbox.tsx`. Only the fill
+   is a transition here — the check is a stroke a later surface has to be able
+   to interrupt mid-draw, so it runs on WAAPI over there. */
+.milkdown .ProseMirror li.brain-task-item {
   position: relative;
+}
+.milkdown .ProseMirror li.brain-task-item > .brain-task-box {
+  position: absolute;
+  left: -22px;
+  top: 4px;
   width: 16px;
   height: 16px;
-  margin-right: 6px;
-  vertical-align: -3px;
+  padding: 0;
   border: 1.5px solid var(--ink-3);
   border-radius: 4px;
+  background-color: transparent;
   cursor: pointer;
   transition:
-    background-color 160ms,
-    border-color 160ms;
+    background-color 160ms var(--ease-out),
+    border-color 160ms var(--ease-out);
 }
-.milkdown .ProseMirror input[type="checkbox"]:checked {
+.milkdown .ProseMirror li.brain-task-item > .brain-task-box[aria-checked="true"] {
   background-color: var(--ink);
   border-color: var(--ink);
 }
-.milkdown .ProseMirror input[type="checkbox"]::after {
+/* 28 on every pointer, which is the largest target a task list can hold. Body
+   is 16 at line-height 1.5 and `li + li` adds 4, so consecutive controls sit
+   28 apart, measured. The 44 of `brain-touch-hit` would overlap its neighbour
+   by 16 and document order would decide which item owns a tap in the middle,
+   the failure `app/globals.css` already documents for the mail section header
+   and fixes there by spreading two controls to 44 between centres. A list
+   cannot spread its lines. At 28 the targets tile the gutter exactly: no dead
+   space between them, no contested band, and 4 more than the 24 of WCAG
+   2.5.8. `brain-touch-min` stays on the element for its other half,
+   `touch-action: manipulation`, which takes the double-tap delay off a tap.
+   The Tasks surface has rows tall enough for 44 and can take it there. */
+.milkdown .ProseMirror li.brain-task-item > .brain-task-box::after {
   content: "";
   position: absolute;
-  left: 4.5px;
-  top: 1px;
-  width: 4px;
-  height: 8px;
-  border: solid var(--paper);
-  border-width: 0 2px 2px 0;
-  transform: rotate(45deg) scale(0);
-  transform-origin: center;
-  transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
+  top: 50%;
+  left: 50%;
+  width: 28px;
+  height: 28px;
+  transform: translate(-50%, -50%);
 }
-.milkdown .ProseMirror input[type="checkbox"]:checked::after {
-  transform: rotate(45deg) scale(1);
+.milkdown .ProseMirror li.brain-task-item > .brain-task-box > svg {
+  display: block;
+  /* The button is border-box, so its 1.5 border eats into the 16 and leaves a
+     13 content box. The negative margin pulls the 16x16 drawing back onto the
+     border box, which is what the tick has to be centred on. */
+  margin: -1.5px 0 0 -1.5px;
 }
-/* keyboard modality only — globals.css exempts inputs from the global ring
-   (text fields rely on caret + border), but a checkbox has neither */
-html[data-kbd] .milkdown .ProseMirror input[type="checkbox"]:focus-visible {
-  outline: 2px solid var(--ink);
+/* The app's ring, restated. globals.css drops the ring on `[contenteditable]`
+   so a text field can rely on its caret, and that is an attribute-presence
+   selector: this button carries `contenteditable="false"` to keep the editor
+   off it, so the exemption written for editable fields catches it. Values are
+   the global ring's, not a second opinion. */
+html[data-kbd] .milkdown .ProseMirror li.brain-task-item > .brain-task-box:focus-visible {
+  outline: 3px solid var(--blue-ring);
   outline-offset: 2px;
+}
+
+/* A widget decoration at the end of a textblock leaves ProseMirror nowhere
+   to put a cursor after it, so prosemirror-view appends its own
+   `<img class="ProseMirror-separator"><br class="ProseMirror-trailingBreak">`
+   to hold that position. Upstream's own stylesheet un-blocks the separator
+   (`display: inline !important`), but this project never imports that
+   stylesheet, so the element fell through to Tailwind preflight's
+   `img { display: block }`. A block-level separator forces the line before
+   it to end, and the trailing `<br>` then opens a second, empty one: every
+   task line carries the mark, so every task line doubled from one line
+   (24px) to two (48px) while an ordinary bullet, which ends in plain text
+   and needs no separator, stayed single. This file is loaded unlayered, so
+   naming the element here is enough to beat preflight without `!important`. */
+.milkdown .ProseMirror img.ProseMirror-separator {
+  display: inline;
+}
+
+/* THE + TASK MARK: THE GHOST, AND THE WORD IT BECOMES.
+
+   One element in two states, drawn by a ProseMirror widget decoration at the
+   end of the line and never written into the markdown. The ghost is the
+   invitation; the word is the mark of the link, a second signal beside the
+   box's border rather than colour alone. The moment is quiet on purpose: this
+   is a notebook, and the drama belongs to completion. */
+.milkdown .ProseMirror .brain-task-mark {
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--ink-3);
+  font-family: var(--font-sf);
+  font-size: 12px;
+  line-height: 1.3;
+  letter-spacing: -0.05px;
+  white-space: nowrap;
+  vertical-align: baseline;
+  cursor: pointer;
+  user-select: none;
+}
+/* Absent until the line is under the pointer or under the caret: 80ms in and
+   160ms out, which is `HOVER` in `lib/motion.ts`. `pointer-events` travels
+   with the opacity, so a ghost nobody can see is not a target either. */
+.milkdown .ProseMirror .brain-task-mark[data-state="ghost"] {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms var(--ease-out);
+}
+.milkdown .ProseMirror .brain-task-mark[data-state="ghost"][data-shown] {
+  opacity: 1;
+  pointer-events: auto;
+  transition-duration: 80ms;
+}
+/* The word stands permanently, and arrives on the same materialize every
+   glass surface arrives on. */
+.milkdown .ProseMirror .brain-task-mark[data-state="linked"] {
+  color: var(--ink-2);
+  animation: materialize-in 220ms var(--ease-out) both;
+}
+@media (hover: hover) {
+  .milkdown .ProseMirror .brain-task-mark:hover {
+    color: var(--ink);
+  }
+}
+html[data-kbd] .milkdown .ProseMirror .brain-task-mark:focus-visible {
+  outline: 3px solid var(--blue-ring);
+  outline-offset: 2px;
+  opacity: 1;
+  pointer-events: auto;
+}
+/* The other half of the signal. `> .brain-task-body > p >` keeps it on the
+   item's OWN line: a `list_item` holds its nested items as content, so an
+   unscoped `:has` would colour a parent's box because its child is linked.
+   The 160ms is the transition already on the box. */
+.milkdown
+  .ProseMirror
+  li.brain-task-item:has(> .brain-task-body > p > .brain-task-mark[data-state="linked"])
+  > .brain-task-box {
+  border-color: var(--ink-2);
+}
+@media (prefers-reduced-motion: reduce) {
+  /* Everything through the crossfade: nothing scales and nothing travels. */
+  .milkdown .ProseMirror .brain-task-mark[data-state="linked"] {
+    animation: dialog-fade 120ms var(--ease-out) both;
+  }
+  .milkdown .ProseMirror .brain-task-mark[data-state="ghost"],
+  .milkdown .ProseMirror .brain-task-mark[data-state="ghost"][data-shown] {
+    transition-duration: 120ms;
+  }
+}
+
+/* The + Task popover. `brain-menu` owns the material and the motion, down to
+   the 220ms materialize on `data-state` and its reduced-motion crossfade; the
+   width and the placement are all this adds. 220 rather than the list menu's
+   264, because it holds five short words and nothing else. */
+.brain-task-menu {
+  position: fixed;
+  z-index: var(--z-modal);
+  width: 220px;
+}
+.brain-task-menu > .brain-menu-label {
+  white-space: normal;
 }
 
 /* prose measure: cap text blocks at ~68ch; tables/code breathe full width */
@@ -1287,10 +1409,17 @@ html[data-kbd] .milkdown .ProseMirror input[type="checkbox"]:focus-visible {
   font-size: 14px;
 }
 
-/* task items: checkbox replaces the bullet */
-.milkdown .ProseMirror li:has(> input[type="checkbox"])::before,
-.milkdown .ProseMirror li:has(> p > input[type="checkbox"])::before {
+/* task items: the checkbox stands where the bullet stood */
+.milkdown .ProseMirror li.brain-task-item::before {
   content: none;
+}
+/* An ordered task keeps its number, so its box moves out of the marker's
+   gutter and the list opens a second one for it. */
+.milkdown .ProseMirror ol:has(> li.brain-task-item) {
+  padding-left: 48px;
+}
+.milkdown .ProseMirror ol > li.brain-task-item > .brain-task-box {
+  left: -44px;
 }
 
 /* unfocused empty page: invite writing (the caret-based slash hint below takes

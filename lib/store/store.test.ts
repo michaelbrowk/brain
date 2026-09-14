@@ -5,6 +5,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import matter from "gray-matter";
 import { Store } from "./store";
 import { serializeLivePage, serializePage } from "./frontmatter";
 import {
@@ -41,7 +42,14 @@ import {
   scheduleDirtyCommit,
 } from "./git";
 import { standalonePageRefOccurrences } from "../page-ref-nesting";
-import { latestStoreEventSequence } from "./events";
+import { brainEvents, latestStoreEventSequence } from "./events";
+import { listOf } from "../tasks/lists";
+import {
+  hashTaskText,
+  normalizeTaskText,
+  parseTaskLines,
+} from "../tasks/task-lines";
+import type { TaskView } from "../tasks/model";
 import {
   resolveShareAccess,
   ShareAccessNotFoundError,
@@ -10546,5 +10554,735 @@ describe("share-aware Store leaves", () => {
         rootId,
       ),
     ).toBe(false);
+  });
+});
+
+describe("the _tasks directory", () => {
+  it("does not walk _tasks as a page tree", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-alpha.md"),
+      "---\nid: task-alpha\ntitle: Water the plants\ncreated: 2026-09-13T09:00:00.000Z\nupdated: 2026-09-13T09:00:00.000Z\n---\n",
+    );
+    await s.rebuild();
+    expect(s.getTree().find((n) => n.title === "Water the plants")).toBeUndefined();
+  });
+
+  it("does not walk a subfolder of _tasks as a page", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks", "archive"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "archive", "index.md"),
+      "---\nid: sneaky\ntitle: Not a page\n---\n",
+    );
+    await s.rebuild();
+    expect(s.getTree().find((n) => n.id === "sneaky")).toBeUndefined();
+  });
+});
+
+describe("task records", () => {
+  const TODAY = "2026-09-13";
+  const TOMORROW = "2026-09-14";
+  /** A reader in UTC. Any read that can return a completion carries one. */
+  const UTC = { offsetMinutes: 0 };
+
+  async function taskFile(root: string, id: string): Promise<string> {
+    return fs.readFile(path.join(root, "_tasks", `${id}.md`), "utf8");
+  }
+
+  /** The anchor the promote gesture mints, built the one way `task-lines.ts`
+   *  builds one. A linked record with no anchor is refused by the schema: the
+   *  anchor IS the link, and without it the reconcile has nothing to look for. */
+  function anchorFor(text: string, line = 0) {
+    const normalized = normalizeTaskText(text);
+    return { text: normalized, hash: hashTaskText(normalized), ordinal: 0, line };
+  }
+
+  function captureEvents(): { types: string[]; stop: () => void } {
+    const types: string[] = [];
+    const onChange = (ev: { type: string }) => types.push(ev.type);
+    brainEvents.on("change", onChange);
+    return { types, stop: () => brainEvents.off("change", onChange) };
+  }
+
+  it("creates a task with a minted id and returns it in listTasks", async () => {
+    const { s } = await tmpStore();
+    const task = await s.createTask({ title: "Water the plants", when: TODAY });
+
+    expect(task.id).toMatch(/^[A-Za-z0-9_-]{1,128}$/);
+    expect(task.done).toBe(false);
+    expect(s.listTasks(TODAY, { list: "today" }).map((t) => t.id)).toEqual([
+      task.id,
+    ]);
+    expect(s.getTask(task.id)?.title).toBe("Water the plants");
+  });
+
+  it("writes through atomicWrite and lands the file at _tasks/<id>.md", async () => {
+    const { s, root } = await tmpStore();
+    const task = await s.createTask({ title: "Water the plants" });
+
+    // Through the parser, not as a raw substring. `nanoid`'s alphabet holds
+    // `-`, so one id in 64 starts with one, and js-yaml correctly quotes a
+    // plain scalar that would: `id: '-V1StGXR8_Z5jdHi6B'` on disk, parsed back
+    // as the same string. A `toContain("id: <id>")` misses that file and fails
+    // one run in sixty-four for no fault of the code.
+    expect(matter(await taskFile(root, task.id), { language: "yaml" }).data.id).toBe(
+      task.id,
+    );
+    // atomicWrite renames its temp file into place, so none is left behind.
+    const left = await fs.readdir(path.join(root, "_tasks"));
+    expect(left).toEqual([`${task.id}.md`]);
+  });
+
+  it("refuses an id that is not [A-Za-z0-9_-]{1,128} before any path join", async () => {
+    const { s } = await tmpStore();
+    for (const id of ["", "with space", "a".repeat(129), "dot.dot"]) {
+      expect(() => s.getTask(id)).toThrow();
+      await expect(s.updateTask(id, { category: "x" })).rejects.toThrow();
+      await expect(s.deleteTask(id)).rejects.toThrow();
+    }
+  });
+
+  it("refuses a task id containing ../ and does not write outside the root", async () => {
+    const { s, root } = await tmpStore();
+    const outside = path.join(path.dirname(root), "escaped.md");
+
+    await expect(s.updateTask("../escaped", { category: "x" })).rejects.toThrow();
+    await expect(s.deleteTask("../../escaped")).rejects.toThrow();
+
+    await expect(fs.access(outside)).rejects.toThrow();
+  });
+
+  it("updates when, deadline and category without touching title for a linked task", async () => {
+    const { s, root } = await tmpStore();
+    const meta = await s.createPage(null, "Groceries");
+    const created = await s.createTask({
+      title: "Buy milk",
+      page: meta.id,
+      anchor: { text: "buy milk", hash: "8f14e45fceea167a", ordinal: 0, line: 3 },
+    });
+
+    const updated = await s.updateTask(created.id, {
+      when: TOMORROW,
+      deadline: "2026-09-20",
+      category: "home",
+    });
+
+    expect(updated.title).toBe("Buy milk");
+    expect(updated.when).toBe(TOMORROW);
+    expect(updated.deadline).toBe("2026-09-20");
+    expect(updated.category).toBe("home");
+    await expect(
+      s.updateTask(created.id, { title: "Buy oat milk" }),
+    ).rejects.toThrow(/title/);
+    expect(await taskFile(root, created.id)).toContain("title: Buy milk");
+  });
+
+  it("never writes done into the file for a linked task", async () => {
+    const { s, root } = await tmpStore();
+    const meta = await s.createPage(null, "Groceries");
+    const written = await s.writePage(meta.id, "- [ ] Buy milk", undefined, "me");
+    const [line] = parseTaskLines(written.markdown);
+    const created = await s.createTask({
+      title: line.normalized,
+      page: meta.id,
+      anchor: {
+        text: line.normalized,
+        hash: line.hash,
+        ordinal: line.ordinal,
+        line: line.index,
+      },
+    });
+
+    // Completing it writes the note's checkbox, not the record's `done`: the
+    // box is the truth and a second copy of it would be a second answer.
+    // `lib/store/store.tasks-reconcile.test.ts` owns that path whole.
+    const done = await s.updateTask(created.id, { done: true });
+    expect(done.done).toBe(true);
+
+    const raw = await taskFile(root, created.id);
+    expect(raw).not.toContain("done:");
+    expect((await s.readPage(meta.id)).markdown).toContain("- [x] Buy milk");
+  });
+
+  it("refuses a task linked to a page with no anchor, at both ends", async () => {
+    const { s, root } = await tmpStore();
+    const meta = await s.createPage(null, "Groceries");
+
+    // The anchor is the link. Without it the reconcile has nothing to look
+    // for, so the record would be born broken: no checkbox to answer its
+    // `done`, no line to refresh its title. The promote gesture always knows
+    // the line, so the shape has no honest source and the schema refuses it.
+    await expect(
+      s.createTask({ title: "Buy milk", page: meta.id }),
+    ).rejects.toThrow(/anchor/);
+
+    // And a file somebody hand-wrote into that shape is skipped at load with
+    // the schema's own reason, never read as a task and never detached.
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-broken.md"),
+      `---\nid: task-broken\ntitle: Buy milk\npage: ${meta.id}\ncreated: '2026-09-13T09:00:00.000Z'\nupdated: '2026-09-13T09:00:00.000Z'\n---\n`,
+    );
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let said = "";
+    try {
+      await s.rebuild();
+      // Read before restoring: `mockRestore` clears the recorded calls.
+      said = warn.mock.calls.flat().join(" ");
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect(s.getTask("task-broken")).toBeNull();
+    expect(said).toContain("page requires anchor");
+    // Skipped, not rewritten and not deleted: it is still the person's file.
+    await expect(
+      fs.access(path.join(root, "_tasks", "task-broken.md")),
+    ).resolves.toBeUndefined();
+  });
+
+  it("writes done and doneAt into the file for an unlinked task", async () => {
+    const { s, root } = await tmpStore();
+    const created = await s.createTask({ title: "Water the plants" });
+
+    const done = await s.updateTask(created.id, { done: true });
+
+    expect(done.done).toBe(true);
+    // A full UTC instant. The reader's Logbook day is derived from it in the
+    // reader's own zone, so the server writes no calendar day of its own.
+    expect(done.doneAt).toMatch(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z$/);
+    const raw = await taskFile(root, created.id);
+    expect(raw).toContain("done: true");
+    expect(raw).toContain("doneAt:");
+
+    const reopened = await s.updateTask(created.id, { done: false });
+    expect(reopened.done).toBe(false);
+    expect(reopened.doneAt).toBeUndefined();
+    expect(await taskFile(root, created.id)).not.toContain("doneAt:");
+  });
+
+  it("takes today only when it completes a repeating task", async () => {
+    const { s } = await tmpStore();
+    const plain = await s.createTask({ title: "Water the plants" });
+    const repeating = await s.createTask({
+      title: "Learn words",
+      repeat: { freq: "daily" },
+    });
+
+    // Nothing else needs it, so anywhere else it is a caller mistake.
+    await expect(
+      s.updateTask(plain.id, { done: true, today: TODAY }),
+    ).rejects.toThrow(/today/);
+    await expect(
+      s.updateTask(plain.id, { when: TODAY, today: TODAY }),
+    ).rejects.toThrow(/today/);
+
+    await expect(s.updateTask(repeating.id, { done: true })).rejects.toThrow(
+      /bad_today/,
+    );
+    await expect(
+      s.updateTask(repeating.id, { done: true, today: "2026-9-1" }),
+    ).rejects.toThrow(/bad_today/);
+    // And with it the completion is the rule's: the log takes the entry and
+    // `when` moves on, so the record stays open on its next occurrence rather
+    // than turning into a done one. `store.tasks-repeat.test.ts` owns the
+    // whole of that path.
+    await expect(
+      s.updateTask(repeating.id, { done: true, today: TODAY }),
+    ).resolves.toMatchObject({ done: false, when: TOMORROW });
+  });
+
+  it("serializes two patches so neither loses the other's field", async () => {
+    const { s } = await tmpStore();
+    const created = await s.createTask({ title: "Water the plants" });
+
+    // Both callers read the record, merge their own field into it and write
+    // the whole frontmatter back. Read outside the lock, the second write
+    // lands whole and the first patch is gone with no error anywhere.
+    await Promise.all([
+      s.updateTask(created.id, { when: TODAY }),
+      s.updateTask(created.id, { category: "home" }),
+    ]);
+
+    const task = s.getTask(created.id);
+    expect(task?.when).toBe(TODAY);
+    expect(task?.category).toBe("home");
+  });
+
+  it("refuses to link a task to a page that is not there", async () => {
+    const { s } = await tmpStore();
+
+    await expect(
+      s.createTask({ title: "Buy milk", page: "page-missing" }),
+    ).rejects.toThrow(/page not found/);
+    expect(s.listTasks(TODAY, UTC)).toEqual([]);
+  });
+
+  it("refuses to link a task to a page in the trash", async () => {
+    const { s } = await tmpStore();
+    const meta = await s.createPage(null, "Groceries");
+    await s.deletePage(meta.id);
+
+    await expect(
+      s.createTask({ title: "Buy milk", page: meta.id }),
+    ).rejects.toThrow(/trash/);
+    expect(s.listTasks(TODAY, UTC)).toEqual([]);
+  });
+
+  it("keeps a done record with no doneAt where listOf puts it", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    // The crash case the spec names: the note has the tick and the record has
+    // no instant yet. A hand edit reaches the same record.
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-noinstant.md"),
+      "---\nid: task-noinstant\ntitle: Water the plants\ndone: true\ncreated: '2026-09-13T09:00:00.000Z'\nupdated: '2026-09-13T09:00:00.000Z'\n---\n",
+    );
+    await s.rebuild();
+
+    const view = s.getTask("task-noinstant");
+    expect(view?.doneAt).toBeUndefined();
+    expect(listOf(view as TaskView, TODAY)).toBe("logbook");
+    expect(
+      s.listTasks(TODAY, { list: "logbook", offsetMinutes: 0 }).map((t) => t.id),
+    ).toEqual(["task-noinstant"]);
+    expect(s.listTasks(TODAY, UTC).map((t) => t.id)).toEqual(["task-noinstant"]);
+  });
+
+  it("deletes the file and drops it from both index maps", async () => {
+    const { s, root } = await tmpStore();
+    const meta = await s.createPage(null, "Groceries");
+    const created = await s.createTask({
+      title: "Buy milk",
+      page: meta.id,
+      anchor: anchorFor("Buy milk"),
+    });
+
+    await s.deleteTask(created.id);
+
+    expect(s.getTask(created.id)).toBeNull();
+    expect(s.tasksForPage(meta.id)).toEqual([]);
+    await expect(
+      fs.access(path.join(root, "_tasks", `${created.id}.md`)),
+    ).rejects.toThrow();
+  });
+
+  it("emits a StoreEvent of type task on create, update and delete", async () => {
+    const { s } = await tmpStore();
+    const seen = captureEvents();
+    try {
+      const created = await s.createTask({ title: "Water the plants" });
+      await s.updateTask(created.id, { when: TODAY });
+      await s.deleteTask(created.id);
+    } finally {
+      seen.stop();
+    }
+    expect(seen.types).toEqual(["task", "task", "task"]);
+  });
+
+  it("derives lists from listTasks(today) and not from anything stored", async () => {
+    const { s, root } = await tmpStore();
+    const created = await s.createTask({ title: "Water the plants", when: TOMORROW });
+
+    expect(s.listTasks(TODAY, { list: "upcoming" }).map((t) => t.id)).toEqual([
+      created.id,
+    ]);
+    expect(s.listTasks(TOMORROW, { list: "today" }).map((t) => t.id)).toEqual([
+      created.id,
+    ]);
+    expect(s.listTasks(TODAY, { list: "today" })).toEqual([]);
+    const raw = await taskFile(root, created.id);
+    expect(raw).not.toContain("list:");
+  });
+
+  it("reloads the index on rebuild and keeps a hand-written record", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-alpha.md"),
+      "---\nid: task-alpha\ntitle: Water the plants\nwhen: '2026-09-13'\ncreated: '2026-09-13T09:00:00.000Z'\nupdated: '2026-09-13T09:00:00.000Z'\n---\n",
+    );
+
+    await s.rebuild();
+
+    expect(s.getTask("task-alpha")?.title).toBe("Water the plants");
+    expect(s.listTasks(TODAY, { list: "today" }).map((t) => t.id)).toEqual([
+      "task-alpha",
+    ]);
+  });
+
+  it("hides the tasks of a trashed page from every list", async () => {
+    const { s } = await tmpStore();
+    const meta = await s.createPage(null, "Groceries");
+    const created = await s.createTask({
+      title: "Buy milk",
+      page: meta.id,
+      anchor: anchorFor("Buy milk"),
+      when: TODAY,
+    });
+
+    expect(s.listTasks(TODAY, UTC).map((t) => t.id)).toEqual([created.id]);
+    await s.deletePage(meta.id);
+    expect(s.listTasks(TODAY, UTC)).toEqual([]);
+    // The record is still readable by id, which is what MCP answers 409 on.
+    expect(s.getTask(created.id)?.page).toBe(meta.id);
+  });
+
+  it("files a completion under the reader's own day, not the UTC one", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-evening.md"),
+      "---\nid: task-evening\ntitle: Water the plants\ndone: true\ndoneAt: '2026-09-13T20:30:00.000Z'\ncreated: '2026-09-13T09:00:00.000Z'\nupdated: '2026-09-13T20:30:00.000Z'\n---\n",
+    );
+    await s.rebuild();
+
+    // 20:30Z on the 13th is already the 14th in Dubai. The window is counted
+    // in the reader's days, so the same record falls either side of it.
+    const dubai = { list: "logbook" as const, offsetMinutes: 240 };
+    expect(s.listTasks("2026-10-14", dubai).map((t) => t.id)).toEqual([
+      "task-evening",
+    ]);
+    expect(
+      s.listTasks("2026-10-14", { list: "logbook", offsetMinutes: 0 }),
+    ).toEqual([]);
+  });
+
+  it("refuses a logbook read without the reader's offset", async () => {
+    const { s } = await tmpStore();
+
+    expect(() => s.listTasks(TODAY)).toThrow(/bad_offset/);
+    expect(() => s.listTasks(TODAY, { list: "logbook" })).toThrow(/bad_offset/);
+    expect(() =>
+      s.listTasks(TODAY, { list: "logbook", offsetMinutes: 99_999 }),
+    ).toThrow(/bad_offset/);
+    // A list that cannot hold a completion needs no offset.
+    expect(s.listTasks(TODAY, { list: "today" })).toEqual([]);
+  });
+
+  it("keeps the logbook to its 30 day window", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    const record = (id: string, doneAt: string) =>
+      `---\nid: ${id}\ntitle: Water the plants\ndone: true\ndoneAt: '${doneAt}'\ncreated: '2026-06-01T09:00:00.000Z'\nupdated: '${doneAt}'\n---\n`;
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-recent.md"),
+      record("task-recent", "2026-09-10T09:00:00.000Z"),
+    );
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-old.md"),
+      record("task-old", "2026-07-01T09:00:00.000Z"),
+    );
+    await s.rebuild();
+
+    expect(
+      s.listTasks(TODAY, { list: "logbook", offsetMinutes: 0 }).map((t) => t.id),
+    ).toEqual(["task-recent"]);
+  });
+
+  it("allTasks returns every record, trashed page and old completion included", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-old.md"),
+      `---\nid: task-old\ntitle: Renew the visa\ndone: true\ndoneAt: '2026-07-01T09:00:00.000Z'\ncreated: '2026-06-01T09:00:00.000Z'\nupdated: '2026-07-01T09:00:00.000Z'\n---\n`,
+    );
+    await s.rebuild();
+    const meta = await s.createPage(null, "Trip");
+    const linked = await s.createTask({
+      title: "Book the flight",
+      page: meta.id,
+      anchor: anchorFor("Book the flight"),
+    });
+    const open = await s.createTask({ title: "Pack", when: TOMORROW });
+    await s.deletePage(meta.id);
+
+    // The list view drops both: one page is in the Trash, one completion is
+    // older than the Logbook window.
+    expect(s.listTasks(TODAY, UTC).map((t) => t.id)).toEqual([open.id]);
+    expect(s.allTasks().map((t) => t.id).sort()).toEqual(
+      [linked.id, open.id, "task-old"].sort(),
+    );
+  });
+
+  it("pageTasks answers every record of one page, open, done, detached and out of the window", async () => {
+    const { s, root } = await tmpStore();
+    const meta = await s.createPage(null, "Trip");
+    const other = await s.createPage(null, "Garden");
+    const written = await s.writePage(
+      meta.id,
+      "- [ ] Book the flight",
+      undefined,
+      "me",
+    );
+    const [line] = parseTaskLines(written.markdown);
+    const open = await s.createTask({
+      title: line.normalized,
+      page: meta.id,
+      anchor: {
+        text: line.normalized,
+        hash: line.hash,
+        ordinal: line.ordinal,
+        line: line.index,
+      },
+    });
+    const elsewhere = await s.createTask({
+      title: "Water the plants",
+      page: other.id,
+      anchor: anchorFor("Water the plants"),
+    });
+    const unlinked = await s.createTask({ title: "Pack" });
+
+    // A completion older than the Logbook window, still pointing at this
+    // page. The list endpoint drops it, and the note's own line still needs
+    // to read Done, which is why the lookup is by page and not by list.
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-ancient.md"),
+      `---\nid: task-ancient\ntitle: Renew the visa\npage: ${meta.id}\ndetachedAt: '2026-07-01T09:00:00.000Z'\ndone: true\ndoneAt: '2026-07-01T09:00:00.000Z'\ncreated: '2026-06-01T09:00:00.000Z'\nupdated: '2026-07-01T09:00:00.000Z'\n---\n`,
+    );
+    await s.rebuild();
+
+    const found = s.pageTasks(meta.id);
+    expect(found.map((t) => t.id).sort()).toEqual(
+      [open.id, "task-ancient"].sort(),
+    );
+    expect(found.find((t) => t.id === "task-ancient")?.done).toBe(true);
+    expect(found.map((t) => t.id)).not.toContain(elsewhere.id);
+    expect(found.map((t) => t.id)).not.toContain(unlinked.id);
+    // Out of the window for the list view, present here.
+    expect(
+      s.listTasks(TODAY, { list: "logbook", offsetMinutes: 0 }).map((t) => t.id),
+    ).toEqual([]);
+    expect(s.pageTasks("page-missing")).toEqual([]);
+  });
+
+  it("reads a task's hand written body, and the empty string when there is none", async () => {
+    const { s, root } = await tmpStore();
+    const plain = await s.createTask({ title: "Water the plants" });
+    expect(await s.readTaskBody(plain.id)).toBe("");
+
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-noted.md"),
+      `---\nid: task-noted\ntitle: Renew the visa\ndone: false\ncreated: '2026-09-01T09:00:00.000Z'\nupdated: '2026-09-01T09:00:00.000Z'\n---\nThe consulate wants two photos.\n`,
+    );
+    await s.rebuild();
+    expect(await s.readTaskBody("task-noted")).toBe(
+      "The consulate wants two photos.\n",
+    );
+    expect(await s.readTaskBody("task-missing")).toBe("");
+  });
+
+  it("keeps a hand written body when the record is written again", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    await fs.writeFile(
+      path.join(root, "_tasks", "task-noted.md"),
+      `---\nid: task-noted\ntitle: Renew the visa\ndone: false\ncreated: '2026-09-01T09:00:00.000Z'\nupdated: '2026-09-01T09:00:00.000Z'\n---\nThe consulate wants two photos.\n`,
+    );
+    await s.rebuild();
+    await s.updateTask("task-noted", { when: TOMORROW });
+    expect(await s.readTaskBody("task-noted")).toBe(
+      "The consulate wants two photos.\n",
+    );
+  });
+
+  it("imports a record verbatim, id, timestamps, body and all", async () => {
+    const { s } = await tmpStore();
+    const record = {
+      id: "task-imported",
+      title: "Renew the visa",
+      when: "2026-10-01",
+      deadline: "2026-10-05",
+      category: "Admin",
+      done: true,
+      doneAt: "2026-07-01T09:00:00.000Z",
+      repeat: { freq: "weekly", byWeekday: ["mon"] },
+      log: [
+        { scheduled: "2026-06-22", completedAt: "2026-06-22T09:00:00.000Z" },
+      ],
+      created: "2026-06-01T09:00:00.000Z",
+      updated: "2026-07-01T09:00:00.000Z",
+    };
+    const written = await s.importTask(record, "Two photos, no glasses.\n");
+
+    expect(written).toEqual(record);
+    expect(s.getTask("task-imported")).toMatchObject(record);
+    expect(await s.readTaskBody("task-imported")).toBe(
+      "Two photos, no glasses.\n",
+    );
+  });
+
+  it("mints a fresh id when an imported record's id is already taken", async () => {
+    const { s } = await tmpStore();
+    const first = await s.createTask({ title: "Water the plants" });
+    const clash = { ...s.allTasks()[0], title: "Water the plants again" };
+    const written = await s.importTask(clash, "");
+
+    expect(written.id).not.toBe(first.id);
+    expect(s.getTask(first.id)?.title).toBe("Water the plants");
+    expect(s.getTask(written.id)?.title).toBe("Water the plants again");
+    expect(s.allTasks()).toHaveLength(2);
+  });
+
+  it("refuses an imported record the task schema does not accept", async () => {
+    const { s } = await tmpStore();
+    await expect(
+      s.importTask({ id: "task-bad", title: "" }, ""),
+    ).rejects.toThrow();
+    expect(s.allTasks()).toHaveLength(0);
+  });
+
+  it("mints a fresh id when a task file the index skipped already holds it", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    // Valid YAML the index still refuses: the frontmatter id does not match
+    // the filename, so the record is invisible in memory and present on disk.
+    const onDisk =
+      `---\nid: task-other\ntitle: Renew the visa\ndone: false\ncreated: '2026-06-01T09:00:00.000Z'\nupdated: '2026-06-01T09:00:00.000Z'\n---\nSOMEBODY'S OWN NOTES\n`;
+    await fs.writeFile(path.join(root, "_tasks", "task-scratch.md"), onDisk);
+    await s.rebuild();
+    expect(s.allTasks()).toHaveLength(0);
+
+    const written = await s.importTask(
+      {
+        id: "task-scratch",
+        title: "Book the flight",
+        done: false,
+        created: "2026-09-01T09:00:00.000Z",
+        updated: "2026-09-01T09:00:00.000Z",
+      },
+      "from the archive\n",
+    );
+
+    expect(written.id).not.toBe("task-scratch");
+    expect(
+      await fs.readFile(path.join(root, "_tasks", "task-scratch.md"), "utf8"),
+    ).toBe(onDisk);
+    expect(await s.readTaskBody(written.id)).toBe("from the archive\n");
+  });
+
+  it("mints a fresh id when a task file with broken YAML already holds it", async () => {
+    const { s, root } = await tmpStore();
+    await fs.mkdir(path.join(root, "_tasks"), { recursive: true });
+    const onDisk = "---\nid: [unclosed\n---\nSOMEBODY'S OWN NOTES\n";
+    await fs.writeFile(path.join(root, "_tasks", "task-scratch.md"), onDisk);
+    await s.rebuild();
+
+    const written = await s.importTask(
+      {
+        id: "task-scratch",
+        title: "Book the flight",
+        done: false,
+        created: "2026-09-01T09:00:00.000Z",
+        updated: "2026-09-01T09:00:00.000Z",
+      },
+      "",
+    );
+
+    expect(written.id).not.toBe("task-scratch");
+    expect(
+      await fs.readFile(path.join(root, "_tasks", "task-scratch.md"), "utf8"),
+    ).toBe(onDisk);
+  });
+
+  /** Spec row 150, for the two body writers that are not `writePage`.
+   *
+   *  A Notion re-import replaces a page's body wholesale. The records under it
+   *  keep their old anchors and the index keeps its old answer for `done`,
+   *  so without a reconcile a task whose line moved still names the old index,
+   *  one whose text changed still shows the old title, and one whose new line
+   *  is `[x]` still reads as open. */
+  describe("the Notion writers and a promoted task", () => {
+    it("rebinds a task line the finalize rewrote, and reads its checkbox", async () => {
+      const { s } = await tmpStore();
+      const reserved = await reserveNotionImport(s, {
+        notionId: NOTION_PAGE,
+        sourceHash: SOURCE_A,
+        parentId: null,
+        title: "Planning",
+      });
+      if (reserved.status !== "reserved") throw new Error("expected reservation");
+      const first = "- [ ] Draft the plan";
+      await s.finalizeNotionImport({
+        notionId: NOTION_PAGE,
+        sourceHash: SOURCE_A,
+        conversionHash: conversionHash(SOURCE_A, "Planning", first),
+        reservationToken: reserved.reservationToken,
+        markdown: first,
+      });
+      const pageId = reserved.page.id;
+      const [line] = parseTaskLines((await s.readPage(pageId)).markdown);
+      const task = await s.createTask({
+        title: line.normalized,
+        page: pageId,
+        anchor: {
+          text: line.normalized,
+          hash: line.hash,
+          ordinal: line.ordinal,
+          line: line.index,
+        },
+      });
+      expect(s.getTask(task.id)?.done).toBe(false);
+
+      // The re-import: a paragraph above the line, and the box ticked in
+      // Notion.
+      const again = await reserveNotionImport(s, {
+        notionId: NOTION_PAGE,
+        sourceHash: SOURCE_B,
+        parentId: null,
+        title: "Planning",
+      });
+      if (again.status !== "reserved") throw new Error("expected reservation");
+      const second = "A paragraph from Notion.\n\n- [x] Draft the plan";
+      await s.finalizeNotionImport({
+        notionId: NOTION_PAGE,
+        sourceHash: SOURCE_B,
+        conversionHash: conversionHash(SOURCE_B, "Planning", second),
+        reservationToken: again.reservationToken,
+        markdown: second,
+      });
+
+      const after = s.getTask(task.id);
+      expect(after?.detachedAt).toBeUndefined();
+      expect(after?.page).toBe(pageId);
+      expect(after?.done).toBe(true);
+      expect(after?.anchor?.line).toBe(2);
+    });
+
+    it("rebinds a task line the adopt found on disk, and reads its checkbox", async () => {
+      const { s } = await tmpStore();
+      const page = await s.createPage(null, "Planning");
+      await s.writePage(page.id, "- [ ] Draft the plan", undefined, "me");
+      const [line] = parseTaskLines((await s.readPage(page.id)).markdown);
+      const task = await s.createTask({
+        title: line.normalized,
+        page: page.id,
+        anchor: {
+          text: line.normalized,
+          hash: line.hash,
+          ordinal: line.ordinal,
+          line: line.index,
+        },
+      });
+
+      // The body arrives past `writePage`: a `git pull`, a restore, a hand
+      // edit. The index still holds the old anchor and the old answer for
+      // `done`. The adopt then writes this page's body itself, and a body
+      // write is where the records come back in step.
+      const meta = (await s.readPage(page.id)).meta;
+      await fs.writeFile(
+        path.join(s.resolve(page.id), "index.md"),
+        serializeLivePage(meta, "A paragraph from Notion.\n\n- [x] Draft the plan"),
+      );
+      await adoptExisting(s, page.id, NOTION_PAGE_B);
+
+      const after = s.getTask(task.id);
+      expect(after?.detachedAt).toBeUndefined();
+      expect(after?.done).toBe(true);
+      expect(after?.anchor?.line).toBe(2);
+    });
   });
 });

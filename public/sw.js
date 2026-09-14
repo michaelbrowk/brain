@@ -103,13 +103,12 @@ self.addEventListener("notificationclick", function (event) {
                 return (moved || open).focus();
               })
               .catch(function () {
-                return Promise.resolve()
-                  .then(function () {
-                    return open.focus();
-                  })
-                  .catch(function () {
-                    return self.clients.openWindow(target);
-                  });
+                // Opening, not focusing: somebody who taps a reminder wants
+                // the task, and focusing this window would bring the app
+                // forward on whatever page it last showed. Inside an installed
+                // iOS app, openWindow with a path in scope opens the app
+                // there.
+                return self.clients.openWindow(target);
               });
           }
         }

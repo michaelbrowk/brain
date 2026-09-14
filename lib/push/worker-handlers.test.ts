@@ -298,11 +298,15 @@ describe("the shipped worker's notificationclick listener", () => {
     expect(opened).toEqual([]);
   });
 
-  it("still brings the app forward when navigate rejects on an uncontrolled client", async () => {
+  it("opens the destination when navigate rejects on an uncontrolled client", async () => {
     // WindowClient.navigate() rejects with a TypeError on a client this worker
     // does not control, which is every page that was already open when the
     // worker activated: there is no clients.claim() here. Without the catch
     // the tap resolved a rejected waitUntil and did nothing at all.
+    //
+    // It opens rather than focuses, because somebody who taps a reminder wants
+    // the task and not whatever page the app was last showing. On an installed
+    // iOS app openWindow with a path inside the scope opens the app there.
     let focused = 0;
     const opened: string[] = [];
     await click(
@@ -319,27 +323,8 @@ describe("the shipped worker's notificationclick listener", () => {
         opened.push(url);
       },
     );
-    expect(focused).toBe(1);
-    expect(opened).toEqual([]);
-  });
-
-  it("opens a window when navigate rejects and the window cannot be focused either", async () => {
-    const opened: string[] = [];
-    await click(
-      [
-        {
-          url: "https://brain.example/mail",
-          focus: () => {
-            throw new Error("this window is gone");
-          },
-          navigate: () => Promise.reject(new TypeError("client is not controlled")),
-        },
-      ],
-      async (url) => {
-        opened.push(url);
-      },
-    );
     expect(opened).toEqual(["https://brain.example/tasks"]);
+    expect(focused).toBe(0);
   });
 
   it("opens the root rather than a destination a payload invented", async () => {

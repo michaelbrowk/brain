@@ -189,7 +189,7 @@ describe("Shell failure recovery", () => {
         return response({ tree: [treeNode("page-a", "Page A")] });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -240,7 +240,7 @@ describe("Shell failure recovery", () => {
         return response({ tree: [treeNode("page-a", "Page A")] });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -297,7 +297,7 @@ describe("Shell failure recovery", () => {
         return response({ tree: [treeNode("page-a", "Page A")] });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -344,7 +344,7 @@ describe("Shell failure recovery", () => {
         return response({ tree: [treeNode("page-a", "Page A")] });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -407,7 +407,7 @@ describe("Shell failure recovery", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -475,7 +475,7 @@ describe("Shell failure recovery", () => {
         return response({ tree: [treeNode("page-a", "Page A")] });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });

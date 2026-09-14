@@ -1,13 +1,15 @@
 // @vitest-environment jsdom
 
-// The desktop URL contract of the tasks surface (/tasks): the deep-link
-// mount, the sidebar row that opens it with a real history entry, and Back
-// leaving it for the notes surface.
+// WHERE A NOTIFICATION ROW TAKES THE READER. The shell routes on the row's
+// PATH and not on its kind, so a kind added later needs no branch there — and
+// that generosity is exactly what needs holding: an href the shell has no
+// surface for has to land somewhere deliberate rather than nowhere.
 
 import { act, useEffect, useReducer } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { apiFetch } from "@/lib/client";
+import { resetNotificationsStore } from "./notifications-client";
 import { resetTasksStore } from "./tasks-client";
 import { Shell } from "./shell";
 
@@ -44,6 +46,11 @@ vi.mock("next/dynamic", () => ({
     };
   },
 }));
+
+const TASK_ID = "task-reminder:task-1:2026-09-14T13:00";
+const MAIL_ID = "mail-new:account-adeadbeefdeadbeefdeadbeefdeadbeef:7468726561642d6f6e65";
+
+let rows: unknown[];
 
 function response(body: unknown, status = 200): Response {
   return {
@@ -92,19 +99,15 @@ class FakeEventSource {
   }
 }
 
-function surfaceBody(): HTMLElement | null {
+function tasksSurface(): HTMLElement | null {
   return document.querySelector<HTMLElement>('[data-testid="tasks-surface"]');
 }
 
-function navRow(label: string): HTMLButtonElement | null {
-  return (
-    [...document.querySelectorAll<HTMLButtonElement>("button.tree-row")].find(
-      (button) => button.textContent?.includes(label),
-    ) ?? null
-  );
+function mailSurface(): HTMLElement | null {
+  return document.querySelector<HTMLElement>('[data-testid="fake-mail-surface"]');
 }
 
-describe("tasks surface navigation (desktop)", () => {
+describe("a notification row's destination", () => {
   let host: HTMLDivElement;
   let root: Root;
   const apiFetchMock = vi.mocked(apiFetch);
@@ -116,18 +119,28 @@ describe("tasks surface navigation (desktop)", () => {
     localStorage.clear();
     apiFetchMock.mockReset();
     resetTasksStore();
+    resetNotificationsStore();
+    rows = [];
     apiFetchMock.mockImplementation(async (input) => {
       const url = String(input);
       if (url === "/api/tree") return response({ tree: [] });
-      // the surface and the sidebar count read ONE list of records
       if (url.startsWith("/api/tasks?")) return response({ tasks: [] });
-      // the bell asks the centre on mount, on every surface
-      if (url === "/api/notifications")
-        return response({ notifications: [], unread: 0 });
+      if (url === "/api/notifications") {
+        return response({
+          notifications: rows,
+          unread: rows.filter((item) => (item as { readAt?: string }).readAt === undefined)
+            .length,
+        });
+      }
+      // A press in the centre marks the row read, so this file answers that
+      // one write on its own path rather than on a prefix that would also
+      // swallow a stray one.
+      if (url === "/api/notifications/read") return response({ read: 1 });
       throw new Error(`unexpected request: ${url}`);
     });
     vi.stubGlobal("matchMedia", (query: string) => ({
-      // desktop viewport: neither (max-width: 767px) nor reduced motion
+      // desktop viewport: the bell is in the sidebar head and Home draws no
+      // notification rows of its own
       matches: false,
       media: query,
       onchange: null,
@@ -149,6 +162,23 @@ describe("tasks surface navigation (desktop)", () => {
         return Promise.reject(new Error(`unexpected fetch: ${url}`));
       }),
     );
+    // Radix measures its content and captures the pointer; jsdom ships
+    // neither. The same stubs `notifications-bell.test.tsx` puts up.
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    vi.stubGlobal("PointerEvent", MouseEvent);
+    for (const name of ["hasPointerCapture", "setPointerCapture", "releasePointerCapture"]) {
+      Object.defineProperty(HTMLElement.prototype, name, {
+        configurable: true,
+        value: () => (name === "hasPointerCapture" ? false : undefined),
+      });
+    }
     Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
       configurable: true,
       value: () => undefined,
@@ -161,88 +191,92 @@ describe("tasks surface navigation (desktop)", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     host.remove();
+    document
+      .querySelectorAll("[data-radix-popper-content-wrapper]")
+      .forEach((element) => element.remove());
+    resetNotificationsStore();
     window.history.replaceState(null, "", "/");
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
   });
 
-  it("mounts the surface on a /tasks deep link, with the row current and no toolbar", async () => {
-    window.history.replaceState({}, "", "/tasks");
-
-    await act(async () =>
-      root.render(
-        <Shell tree={[]} initialSelectedId={null} initialSurface="tasks" />,
-      ),
-    );
-    await settle();
-
-    await findLazy(surfaceBody, "tasks surface");
-    expect(navRow("Tasks")?.getAttribute("aria-current")).toBe("page");
-    expect(navRow("Mail")?.getAttribute("aria-current")).toBeNull();
-    // the surface carries its own head, so neither toolbar variant draws
-    expect(document.querySelector(".brain-topbar")).toBeNull();
-  });
-
-  it("opens from the sidebar row with a real entry, and Back leaves it", async () => {
+  /** The centre with one row in it, opened, and that row pressed. */
+  async function pressTheRow(title: string) {
     window.history.replaceState({}, "", "/");
-
     await act(async () => root.render(<Shell tree={[]} initialSelectedId={null} />));
     await settle();
-    expect(surfaceBody()).toBeNull();
 
-    await act(async () => navRow("Tasks")?.click());
-    await findLazy(surfaceBody, "tasks surface after the row click");
+    const bell = document.querySelector<HTMLButtonElement>('[aria-label^="Notifications"]');
+    if (!bell) throw new Error("the bell is not in the sidebar head");
+    // Radix opens a dropdown on `pointerdown`, so a bare `.click()` here would
+    // press against a menu that never opened.
+    await act(async () => {
+      bell.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
+    await settle();
+    const item = [...document.querySelectorAll('[role="menuitem"]')].find((node) =>
+      (node.textContent ?? "").includes(title),
+    );
+    if (!(item instanceof HTMLElement)) throw new Error(`no row reading ${title}`);
+    await act(async () => item.click());
+    await settle();
+  }
+
+  it("takes a task row to the Tasks surface", async () => {
+    rows = [
+      {
+        id: TASK_ID,
+        kind: "task-reminder",
+        at: "2026-09-14T12:00:00.000Z",
+        title: "Water the plants",
+        body: "13:00",
+        href: "/tasks",
+      },
+    ];
+    await pressTheRow("Water the plants");
+
+    await findLazy(tasksSurface, "tasks surface after the row press");
     expect(window.location.pathname).toBe("/tasks");
-
-    await act(async () => {
-      window.history.replaceState({}, "", "/");
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    });
-    await settle();
-    expect(surfaceBody()).toBeNull();
+    expect(mailSurface()).toBeNull();
   });
 
-  it("hands a task event to the surface without refetching the tree", async () => {
-    window.history.replaceState({}, "", "/tasks");
+  it("takes a mail row to Mail", async () => {
+    rows = [
+      {
+        id: MAIL_ID,
+        kind: "mail-new",
+        at: "2026-09-14T12:00:00.000Z",
+        title: "Ana Silva",
+        body: "Lunch on Friday",
+        href: "/mail",
+      },
+    ];
+    await pressTheRow("Ana Silva");
 
-    await act(async () =>
-      root.render(
-        <Shell tree={[]} initialSelectedId={null} initialSurface="tasks" />,
-      ),
-    );
-    await findLazy(surfaceBody, "tasks surface");
-
-    const callsFor = (prefix: string) =>
-      apiFetchMock.mock.calls.filter(([input]) => String(input).startsWith(prefix))
-        .length;
-    const treeBefore = callsFor("/api/tree");
-    const tasksBefore = callsFor("/api/tasks?");
-    // the count and the column subscribe to one module, so the surface being
-    // on screen is still one read
-    expect(tasksBefore).toBe(1);
-
-    await act(async () => {
-      FakeEventSource.instances[0]?.onmessage?.({
-        data: JSON.stringify({ type: "task", id: "task-1", src: "other" }),
-      } as MessageEvent);
-    });
-    await settle();
-
-    // the event bumps the token, and the token is part of the load's key
-    expect(callsFor("/api/tasks?")).toBe(tasksBefore + 1);
-    expect(callsFor("/api/tree")).toBe(treeBefore);
+    await findLazy(mailSurface, "mail surface after the row press");
+    expect(window.location.pathname).toBe("/mail");
+    expect(tasksSurface()).toBeNull();
   });
 
-  it("re-enters on a forward popstate to /tasks", async () => {
-    window.history.replaceState({}, "", "/");
+  it("takes a row it has no surface for home, rather than nowhere", async () => {
+    // The centre is generic: a kind whose href is neither Mail nor Tasks joins
+    // without a branch in the shell, and Home is where it lands until one of
+    // its own exists.
+    rows = [
+      {
+        id: "agent-notice:one",
+        kind: "task-reminder",
+        at: "2026-09-14T12:00:00.000Z",
+        title: "Something else entirely",
+        href: "/nowhere",
+      },
+    ];
+    await pressTheRow("Something else entirely");
 
-    await act(async () => root.render(<Shell tree={[]} initialSelectedId={null} />));
-    await settle();
-
-    await act(async () => {
-      window.history.replaceState({}, "", "/tasks");
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    });
-    await findLazy(surfaceBody, "tasks surface after a forward popstate");
+    expect(window.location.pathname).toBe("/");
+    expect(tasksSurface()).toBeNull();
+    expect(mailSurface()).toBeNull();
   });
 });

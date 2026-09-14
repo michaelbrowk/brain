@@ -184,7 +184,7 @@ describe("Shell search navigation", () => {
     apiFetchMock.mockImplementation(async (input) => {
       if (String(input) === "/api/page/b") return delayed.promise;
       // the bell asks the centre on mount, on every surface
-      if (String(input).startsWith("/api/notifications"))
+      if (String(input) === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${String(input)}`);
     });
@@ -268,7 +268,7 @@ describe("Shell search navigation", () => {
       if (String(input) === "/api/page/b") return pageB.promise;
       if (String(input) === "/api/page/c") return pageC.promise;
       // the bell asks the centre on mount, on every surface
-      if (String(input).startsWith("/api/notifications"))
+      if (String(input) === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${String(input)}`);
     });

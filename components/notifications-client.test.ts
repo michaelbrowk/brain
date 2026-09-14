@@ -41,6 +41,26 @@ vi.mock("@/lib/client", () => ({
 let calls: { url: string; body: unknown }[];
 let rows: unknown[];
 
+const MAIL_ID = "mail-new:account-adeadbeefdeadbeefdeadbeefdeadbeef:7468726561642d6f6e65";
+
+/** What the mail route answers a thread mutation with. The client validates
+ *  it, so a bare `{ ok: true }` would fail before the seam is reached. */
+const THREAD_MUTATION = {
+  apiVersion: 1,
+  thread: {
+    accountId: "account-adeadbeefdeadbeefdeadbeefdeadbeef",
+    threadId: "thread-one",
+    subject: "Lunch on Friday",
+    participants: [{ name: "Ana Silva", address: "ana@example.test" }],
+    snippet: "Cached safely",
+    lastMessageAt: 1_700_000_000_000,
+    messageCount: 1,
+    unread: false,
+    starred: false,
+    hasAttachments: false,
+  },
+};
+
 function response(body: unknown): Response {
   return { ok: true, status: 200, json: async () => body } as Response;
 }
@@ -190,6 +210,57 @@ describe("the notifications client", () => {
       markMailNotificationRead("account-adeadbeefdeadbeefdeadbeefdeadbeef", "thread-one");
       await vi.advanceTimersByTimeAsync(400);
       expect(calls).toEqual([{ url: "/api/notifications/read", body: { ids: [mailId] } }]);
+      await act(async () => root.unmount());
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("opens a mail row with one read POST and the thread PATCH after it", async () => {
+    // THE ORDERING IS THIS TASK'S OWN DECISION, and this is the one case that
+    // runs the REAL seam: `./mail-surface-client` is not doubled here, so
+    // `updateThread` calls `markMailNotificationRead` on its way out the way it
+    // does in a browser. `openNotificationRow` marks the row read first, which
+    // takes the id out of the live unread set before the seam's window closes,
+    // so the seam's own flush owes nothing and one press is one POST. Move
+    // `markRead` after `updateThread` and the two lines below swap.
+    const mailRow = {
+      id: MAIL_ID,
+      kind: "mail-new" as const,
+      at: "2026-09-14T12:00:00.000Z",
+      title: "Ana Silva",
+      href: "/mail",
+    };
+    rows = [mailRow];
+    const wire: string[] = [];
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = String(input);
+          wire.push(`${init?.method ?? "GET"} ${url}`);
+          if (url === "/api/notifications") {
+            return response({ notifications: rows, unread: 1 });
+          }
+          if (url === "/api/notifications/read") return response({ read: 1 });
+          // The mail client validates what a mutation answers, and a body it
+          // refuses would leave the seam behind it unreached.
+          return response(THREAD_MUTATION);
+        }),
+      );
+      const { root } = mount();
+      await settle();
+      const { openNotificationRow } = await import("./notifications-bell");
+      wire.length = 0;
+      await act(async () => {
+        openNotificationRow(mailRow, () => undefined);
+        await vi.advanceTimersByTimeAsync(400);
+      });
+      expect(wire).toEqual([
+        "POST /api/notifications/read",
+        "PATCH /api/mail/threads/thread-one",
+      ]);
       await act(async () => root.unmount());
     } finally {
       vi.useRealTimers();

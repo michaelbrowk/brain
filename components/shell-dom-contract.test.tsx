@@ -233,7 +233,7 @@ describe("Shell DOM contract", () => {
       const page = /^\/api\/page\/([^/?]+)$/.exec(url);
       if (page) return response(pageBody(page[1]));
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`unexpected request in DOM contract: ${url}`);
     });

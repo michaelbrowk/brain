@@ -286,7 +286,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -331,7 +331,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -403,7 +403,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -472,7 +472,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -529,7 +529,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -610,7 +610,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -705,7 +705,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -881,7 +881,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -968,7 +968,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -1034,7 +1034,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -1095,7 +1095,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -1175,7 +1175,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -1252,7 +1252,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -1330,7 +1330,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -1409,7 +1409,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -1492,7 +1492,7 @@ describe("Shell standalone page-ref removal", () => {
           });
         }
         // the bell asks the centre on mount, on every surface
-        if (url.startsWith("/api/notifications"))
+        if (url === "/api/notifications")
           return response({ notifications: [], unread: 0 });
         throw new Error(`Unexpected request: ${url}`);
       });
@@ -1579,7 +1579,7 @@ describe("Shell standalone page-ref removal", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });

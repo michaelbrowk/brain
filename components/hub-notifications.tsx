@@ -7,9 +7,14 @@
 // the way in instead: up to three unread rows at the top of Home, each one
 // opening the place it came from, and nothing at all when nothing is waiting.
 //
-// `md:hidden`, because from 768 up the bell is two hundred pixels away in the
-// sidebar head and a second copy of the same three rows is the same
-// information twice.
+// It is GATED ON THE PHONE QUESTION AND NOT ONLY ON `md:hidden`, because a
+// class hides a block without unmounting it: from 768 up the same three rows
+// would stand in the document twice, once here and once in the bell's menu,
+// and a query for one of them would find two. `useSheetGesture` is the query
+// the composer and the When picker already ask, so the breakpoint is one
+// string in one module. `md:hidden` stays under the gate: a window dragged
+// past 768 moves the class in the same frame as the resize, while the hook's
+// listener lands a commit later.
 //
 // It carries no heading. A heading would take Home's opening line away from
 // the capture field for a block that is absent most days, and the rows say
@@ -24,6 +29,7 @@ import { HubRow } from "./hub-row";
 import { KIND_GLYPH, openNotificationRow } from "./notifications-bell";
 import { useNotifications, type NotificationRow } from "./notifications-client";
 import { Icon } from "./ui/icon";
+import { useSheetGesture } from "./use-sheet-gesture";
 
 /** Three, the number Home's mail block previews a section with. */
 const ROWS = 3;
@@ -36,8 +42,9 @@ export function HubNotifications({
   refreshToken?: number;
 }) {
   const reduce = useReducedMotion() ?? false;
+  const phone = useSheetGesture();
   const { notifications, unread } = useNotifications(refreshToken);
-  if (unread === 0) return null;
+  if (!phone || unread === 0) return null;
 
   const rows: readonly NotificationRow[] = notifications
     .filter((row) => row.readAt === undefined)

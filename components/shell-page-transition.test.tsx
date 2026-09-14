@@ -199,7 +199,7 @@ describe("Shell page transitions", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (String(input).startsWith("/api/notifications"))
+      if (String(input) === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${String(input)}`);
     });
@@ -248,7 +248,7 @@ describe("Shell page transitions", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (String(input).startsWith("/api/notifications"))
+      if (String(input) === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${String(input)}`);
     });
@@ -286,7 +286,7 @@ describe("Shell page transitions", () => {
       }
       if (url === "/api/page/page-b") return pageB.promise;
       // the bell asks the centre on mount, on every surface
-      if (String(input).startsWith("/api/notifications"))
+      if (String(input) === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });
@@ -341,7 +341,7 @@ describe("Shell page transitions", () => {
     apiFetchMock.mockImplementation(async (input) => {
       if (String(input) === "/api/page/page-a") return revalidation.promise;
       // the bell asks the centre on mount, on every surface
-      if (String(input).startsWith("/api/notifications"))
+      if (String(input) === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${String(input)}`);
     });
@@ -403,7 +403,7 @@ describe("Shell page transitions", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (String(input).startsWith("/api/notifications"))
+      if (String(input) === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${String(input)}`);
     });
@@ -486,7 +486,7 @@ describe("Shell page transitions", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (String(input).startsWith("/api/notifications"))
+      if (String(input) === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`Unexpected request: ${url}`);
     });

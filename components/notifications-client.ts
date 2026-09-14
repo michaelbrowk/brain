@@ -216,12 +216,17 @@ export function hasUnreadRow(id: string): boolean {
   return unreadIds.has(id);
 }
 
-/** The ids worth a request, in the order they were offered. Before the centre
- *  has answered that is all of them; after it, only the ones it holds unread,
- *  so a thread read in Mail with no notification behind it costs nothing. */
+/** Whether a read under this id is worth a request at all. Before the centre
+ *  has answered there is no set to consult and every read must reach the
+ *  server; after it, only an id it holds unread. The seam asks this before the
+ *  id joins a batch, and `sendable` asks it again for whatever did. */
+function worthAsking(id: string): boolean {
+  return !loaded || hasUnreadRow(id);
+}
+
+/** The ids worth a request, in the order they were offered. */
 function sendable(ids: readonly string[]): string[] {
-  const unique = [...new Set(ids)];
-  return loaded ? unique.filter((id) => unreadIds.has(id)) : unique;
+  return [...new Set(ids)].filter(worthAsking);
 }
 
 function commitRead(ids: readonly string[], at: string): void {
@@ -330,6 +335,12 @@ export function markMailNotificationRead(accountId: string, threadId: string): v
   } catch {
     return;
   }
+  // THE CENTRE IS ASKED BEFORE THE ID JOINS THE BATCH. `hasUnreadRow` is the
+  // public form of that question and this is its caller: a mailbox read in a
+  // tab whose bell holds no row for the thread is the common case, and it now
+  // costs neither a batch entry nor a timer. `sendable` asks the same thing of
+  // whatever did join, because the centre can answer between the two.
+  if (!worthAsking(id)) return;
   // A Set, so a thread marked twice inside one window costs one id and not
   // two. The centre answers `{ read: 0 }` for the second anyway, but the
   // cheapest request is the one nobody sent.

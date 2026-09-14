@@ -188,7 +188,7 @@ describe("mobile navigation surfaces", () => {
       const url = String(input);
       if (url === "/api/tree") return response({ tree: [] });
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`unexpected request: ${url}`);
     });
@@ -458,7 +458,7 @@ describe("mobile navigation surfaces", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`unexpected request: ${url}`);
     });
@@ -554,7 +554,7 @@ describe("mobile navigation surfaces", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`unexpected request: ${url}`);
     });
@@ -601,7 +601,7 @@ describe("mobile navigation surfaces", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`unexpected request: ${url}`);
     });
@@ -678,7 +678,7 @@ describe("mobile navigation surfaces", () => {
         });
       }
       // the bell asks the centre on mount, on every surface
-      if (url.startsWith("/api/notifications"))
+      if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
       throw new Error(`unexpected request: ${url}`);
     });

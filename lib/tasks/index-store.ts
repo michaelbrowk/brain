@@ -268,6 +268,8 @@ export async function deleteTaskFile(root: string, id: string): Promise<void> {
 export function serializeTask(task: TaskRecord, body: string): string {
   const ordered: Record<string, unknown> = { id: task.id, title: task.title };
   if (task.when !== undefined) ordered.when = task.when;
+  if (task.time !== undefined) ordered.time = task.time;
+  if (task.evening !== undefined) ordered.evening = task.evening;
   if (task.deadline !== undefined) ordered.deadline = task.deadline;
   if (task.category !== undefined) ordered.category = task.category;
   if (task.page !== undefined) ordered.page = task.page;
@@ -280,6 +282,7 @@ export function serializeTask(task: TaskRecord, body: string): string {
   // question is the link and not the page.
   if (task.done !== undefined && !isLinkedTask(task)) ordered.done = task.done;
   if (task.doneAt !== undefined) ordered.doneAt = task.doneAt;
+  if (task.remindedAt !== undefined) ordered.remindedAt = task.remindedAt;
   if (task.log !== undefined) ordered.log = task.log;
   ordered.created = task.created;
   ordered.updated = task.updated;

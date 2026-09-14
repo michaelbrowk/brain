@@ -153,6 +153,7 @@ export function advance(record: TaskRecord, options: AdvanceOptions): TaskRecord
     // arithmetic below insists on a real day.
     const entry: TaskLogEntry = {
       ...(record.when !== undefined ? { scheduled: record.when } : {}),
+      ...(record.time !== undefined ? { time: record.time } : {}),
       completedAt: options.completedAt,
     };
     const log = [...(record.log ?? []), entry].slice(-MAX_LOG_ENTRIES);
@@ -172,6 +173,10 @@ export function advance(record: TaskRecord, options: AdvanceOptions): TaskRecord
     // Logbook and in Today at once.
     delete advanced.done;
     delete advanced.doneAt;
+    // The mark belongs to the instance that was finished a moment ago, not to the
+    // one this mints. Left in place, the next occurrence would count as already
+    // reminded and its reminder would never fire.
+    delete advanced.remindedAt;
     return advanced;
   }
 

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   parseTaskRecord,
+  taskLogEntrySchema,
   taskRecordFields,
   taskRecordSchema,
   TASK_ID_RE,
@@ -441,5 +442,131 @@ describe("the three shapes a task record takes", () => {
     });
     expect(parsed.ok).toBe(true);
     if (parsed.ok) expect(parsed.task.detachedAt).toBe("2026-09-13T10:32:00.000Z");
+  });
+});
+
+describe("the clock on a record", () => {
+  const base = {
+    id: "task-alpha",
+    title: "Water the plants",
+    created: "2026-09-13T09:00:00.000Z",
+    updated: "2026-09-13T09:00:00.000Z",
+  };
+
+  it("accepts a day with a time and an evening", () => {
+    const parsed = parseTaskRecord({
+      ...base,
+      when: "2026-09-13",
+      time: "13:00",
+      evening: true,
+    });
+    expect(parsed).toMatchObject({ ok: true });
+  });
+
+  it("refuses a time on a task with no day", () => {
+    expect(parseTaskRecord({ ...base, time: "13:00" })).toEqual({
+      ok: false,
+      reason: "time: time needs a day to be a time on",
+    });
+  });
+
+  it("refuses a time on a someday task", () => {
+    expect(parseTaskRecord({ ...base, when: "someday", time: "13:00" })).toEqual({
+      ok: false,
+      reason: "time: time needs a day to be a time on",
+    });
+  });
+
+  it("refuses an evening with no day", () => {
+    expect(parseTaskRecord({ ...base, evening: true })).toEqual({
+      ok: false,
+      reason: "evening: the evening needs a day to be the evening of",
+    });
+  });
+
+  it("refuses an evening on a someday task", () => {
+    expect(parseTaskRecord({ ...base, when: "someday", evening: true })).toEqual({
+      ok: false,
+      reason: "evening: the evening needs a day to be the evening of",
+    });
+  });
+
+  it("refuses evening: false, because the absence is the only other state", () => {
+    const parsed = parseTaskRecord({ ...base, when: "2026-09-13", evening: false });
+    expect(parsed.ok).toBe(false);
+  });
+
+  it.each([["24:00"], ["09:60"], ["9:5"], ["13"], ["13:00:00"], [""]])(
+    "refuses %s as a time",
+    (time) => {
+      expect(parseTaskRecord({ ...base, when: "2026-09-13", time }).ok).toBe(false);
+    },
+  );
+
+  it.each([["00:00"], ["09:05"], ["13:00"], ["23:59"]])("accepts %s", (time) => {
+    expect(parseTaskRecord({ ...base, when: "2026-09-13", time }).ok).toBe(true);
+  });
+
+  it("reads a hand-edited unquoted 9:05 back as 09:05", () => {
+    // YAML resolves an unquoted 9:05 as a sexagesimal integer, 545. A person's
+    // own file is not skipped over its quoting, the reason `when` takes a Date.
+    const parsed = parseTaskRecord({ ...base, when: "2026-09-13", time: 545 });
+    expect(parsed).toMatchObject({ ok: true, task: { time: "09:05" } });
+  });
+
+  it("pads a hand-edited quoted 9:05 the same way", () => {
+    expect(parseTaskRecord({ ...base, when: "2026-09-13", time: "9:05" })).toMatchObject({
+      ok: true,
+      task: { time: "09:05" },
+    });
+  });
+
+  it("refuses a sexagesimal number past the end of the day", () => {
+    expect(parseTaskRecord({ ...base, when: "2026-09-13", time: 1440 }).ok).toBe(false);
+  });
+
+  it("accepts remindedAt as a UTC instant and refuses a local one", () => {
+    expect(
+      parseTaskRecord({
+        ...base,
+        when: "2026-09-13",
+        time: "13:00",
+        remindedAt: "2026-09-13T12:00:00.000Z",
+      }).ok,
+    ).toBe(true);
+    expect(
+      parseTaskRecord({
+        ...base,
+        when: "2026-09-13",
+        time: "13:00",
+        remindedAt: "2026-09-13T13:00:00+01:00",
+      }).ok,
+    ).toBe(false);
+  });
+
+  it("keeps a remindedAt on a task that has lost its time, rather than skipping the file", () => {
+    // An inert mark costs nothing. A schema rule here would make the index skip
+    // the whole record, and a person would lose the task.
+    expect(
+      parseTaskRecord({ ...base, remindedAt: "2026-09-13T12:00:00.000Z" }).ok,
+    ).toBe(true);
+  });
+
+  it("keeps the time of a completed instance in its log entry", () => {
+    const parsed = taskLogEntrySchema.safeParse({
+      scheduled: "2026-09-13",
+      time: "13:00",
+      completedAt: "2026-09-13T12:59:00.000Z",
+    });
+    expect(parsed.success).toBe(true);
+  });
+
+  it("refuses an unknown key in a log entry", () => {
+    expect(
+      taskLogEntrySchema.safeParse({
+        completedAt: "2026-09-13T12:59:00.000Z",
+        evening: true,
+      }).success,
+    ).toBe(false);
   });
 });

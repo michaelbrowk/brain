@@ -699,3 +699,74 @@ describe("revert", () => {
     expect(log).toHaveLength(2);
   });
 });
+
+describe("the clock across an occurrence", () => {
+  const daily = (over: Partial<TaskRecord> = {}): TaskRecord => ({
+    id: "task-bins",
+    title: "Take the bins out",
+    repeat: { freq: "daily" },
+    when: "2026-09-13",
+    created: "2026-09-01T09:00:00.000Z",
+    updated: "2026-09-01T09:00:00.000Z",
+    ...over,
+  });
+
+  it("carries the time and the evening to the next instance", () => {
+    const next = advance(daily({ time: "13:00", evening: true }), {
+      completedAt: "2026-09-13T12:00:00.000Z",
+      today: "2026-09-13",
+    });
+    expect(next.when).toBe("2026-09-14");
+    expect(next.time).toBe("13:00");
+    expect(next.evening).toBe(true);
+  });
+
+  it("clears remindedAt when it mints the next instance", () => {
+    const next = advance(
+      daily({ time: "13:00", remindedAt: "2026-09-13T12:00:00.000Z" }),
+      { completedAt: "2026-09-13T12:30:00.000Z", today: "2026-09-13" },
+    );
+    expect(next.remindedAt).toBeUndefined();
+    expect("remindedAt" in next).toBe(false);
+  });
+
+  it("writes the completed instance's time into its log entry", () => {
+    const next = advance(daily({ time: "13:00" }), {
+      completedAt: "2026-09-13T12:00:00.000Z",
+      today: "2026-09-13",
+    });
+    expect(next.log).toEqual([
+      { scheduled: "2026-09-13", time: "13:00", completedAt: "2026-09-13T12:00:00.000Z" },
+    ]);
+  });
+
+  it("writes no time key for an untimed instance", () => {
+    const next = advance(daily(), {
+      completedAt: "2026-09-13T12:00:00.000Z",
+      today: "2026-09-13",
+    });
+    expect(next.log?.[0]).toEqual({
+      scheduled: "2026-09-13",
+      completedAt: "2026-09-13T12:00:00.000Z",
+    });
+  });
+
+  it("restores nothing when a completion is taken back", () => {
+    // A reverted completion whose reminder already fired does not fire again:
+    // the instant has passed and the row is back where it was, so a second
+    // notification would report an event that never repeated.
+    const advanced = advance(
+      daily({ time: "13:00", remindedAt: "2026-09-13T12:00:00.000Z" }),
+      { completedAt: "2026-09-13T12:30:00.000Z", today: "2026-09-13" },
+    );
+    const back = revert(advanced);
+    expect(back.when).toBe("2026-09-13");
+    expect(back.time).toBe("13:00");
+    expect(back.remindedAt).toBeUndefined();
+  });
+
+  it("keeps the time through a move", () => {
+    const moved = advance(daily({ time: "13:00" }), { to: "2026-09-20" });
+    expect(moved).toMatchObject({ when: "2026-09-20", time: "13:00" });
+  });
+});

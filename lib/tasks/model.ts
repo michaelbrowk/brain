@@ -88,6 +88,32 @@ const fromYamlInstant = (value: unknown) =>
 const dayField = z.preprocess(fromYamlDay, daySchema);
 const instantField = z.preprocess(fromYamlInstant, instantSchema);
 
+/** A wall clock, 24-hour, in the owner's zone. No zone in the record: the zone
+ *  is one owner setting, so a day and a clock in a file mean the same thing on
+ *  every device the owner uses. */
+const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+
+const pad2 = (value: number): string => String(value).padStart(2, "0");
+
+/** YAML 1.1 sexagesimal: an unquoted `time: 9:05` in a hand-edited file is
+ *  resolved as the integer 545, while `09:00` keeps its leading zero and stays
+ *  a string. Both forms, and a quoted `9:05`, are the ordinary way somebody
+ *  writes this by hand, so all three are taken and padded rather than refused.
+ *  Anything else passes through untouched and the schema names it. */
+const fromYamlTime = (value: unknown) => {
+  if (typeof value === "number") {
+    if (!Number.isInteger(value) || value < 0 || value > 1439) return value;
+    return `${pad2(Math.floor(value / 60))}:${pad2(value % 60)}`;
+  }
+  if (typeof value !== "string") return value;
+  const parts = /^(\d{1,2}):([0-5]\d)$/.exec(value);
+  if (!parts) return value;
+  const hour = Number(parts[1]);
+  return hour > 23 ? value : `${pad2(hour)}:${parts[2]}`;
+};
+
+const timeField = z.preprocess(fromYamlTime, timeSchema);
+
 export const taskAnchorSchema = z
   .object({
     /** `TaskLine.normalized`: the collapsed form the hash is taken over, and
@@ -142,6 +168,9 @@ export const taskRepeatSchema = z.discriminatedUnion("freq", [
 export const taskLogEntrySchema = z
   .object({
     scheduled: z.union([dayField, z.literal("someday")]).optional(),
+    /** The clock that instance carried, so a completion of a timed instance
+     *  keeps its time in the log. */
+    time: timeField.optional(),
     completedAt: instantField,
   })
   .strict();
@@ -160,6 +189,15 @@ export const taskRecordFields = z
     doneAt: instantField.optional(),
     /** The day it is meant for, or the word `someday`. */
     when: z.union([dayField, z.literal("someday")]).optional(),
+    /** The clock on that day, `HH:MM`. Requires `when` to be a day. */
+    time: timeField.optional(),
+    /** The evening of that day. A section, not a clock: a task may carry both,
+     *  an evening task with a 20:00 reminder. `true` or absent, because a
+     *  `false` would be a second spelling of the absence. */
+    evening: z.literal(true).optional(),
+    /** When this instance's reminder fired. `advance()` clears it for the next
+     *  instance, and editing `when` or `time` clears it so it fires again. */
+    remindedAt: instantField.optional(),
     deadline: dayField.optional(),
     category: boundedText(200).optional(),
     /** The note that holds the checkbox, for a linked task. */
@@ -245,6 +283,24 @@ export const taskRecordRules = (
       code: z.ZodIssueCode.custom,
       message: "page requires anchor",
       path: ["anchor"],
+    });
+  }
+  // A time and an evening are both statements about a DAY. `someday` is the
+  // explicit absence of one, and a record with neither has no day to put a
+  // clock on, so both would name an instant nothing could compute.
+  const onADay = typeof value.when === "string" && value.when !== "someday";
+  if (value.time !== undefined && !onADay) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "time needs a day to be a time on",
+      path: ["time"],
+    });
+  }
+  if (value.evening !== undefined && !onADay) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "the evening needs a day to be the evening of",
+      path: ["evening"],
     });
   }
 };

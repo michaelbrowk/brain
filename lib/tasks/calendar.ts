@@ -58,7 +58,15 @@ export function monthOfDay(day: string): string {
  *  to read a month name is a clock read in a quiet place and the trap would
  *  bite on it. */
 export function monthLabel(month: string): string {
-  return `${MONTHS[Number(month.slice(5, 7)) - 1]} ${Number(month.slice(0, 4))}`;
+  return `${monthName(month)} ${Number(month.slice(0, 4))}`;
+}
+
+/** The month alone, for a sentence that already carries the day. A grid cell
+ *  says "Tuesday 15 September" to a screen reader, and splitting the year
+ *  back off `monthLabel` at the call site is how a second name table gets
+ *  written somewhere else. */
+export function monthName(month: string): string {
+  return MONTHS[Number(month.slice(5, 7)) - 1];
 }
 
 const MONTHS = [

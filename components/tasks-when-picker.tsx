@@ -24,10 +24,24 @@ import { motion, useDragControls, useMotionValue, useReducedMotion } from "frame
 import { animate } from "framer-motion/dom";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 
-import { DUR, SPRING_SHEET, SPRING_SHEET_GESTURE } from "@/lib/motion";
-import { monthGridOf, monthLabel, monthOfDay, shiftDay, shiftMonth } from "@/lib/tasks/calendar";
+import {
+  DUR,
+  SHEET_DISMISS_OFFSET,
+  SHEET_DISMISS_VELOCITY,
+  SPRING_SHEET,
+  SPRING_SHEET_GESTURE,
+} from "@/lib/motion";
+import {
+  monthGridOf,
+  monthLabel,
+  monthName,
+  monthOfDay,
+  shiftDay,
+  shiftMonth,
+} from "@/lib/tasks/calendar";
 
 import { EASE_OUT_CSS } from "./tasks-checkbox";
+import { useSheetGesture } from "./use-sheet-gesture";
 import { SOLAR } from "./ui/solar-icons.generated";
 
 export interface WhenValue {
@@ -63,6 +77,21 @@ const MINUTE_STEP = 5;
 const MONTH_SHIFT_PX = 6;
 const MONTH_TRAVEL_MS = Math.round(DUR.base * 1000);
 const WEEKDAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+/** What a screen reader hears. A cell's accessible name is a date a person
+ *  would say out loud, never the ISO string the value is stored as. */
+const SPOKEN_WEEKDAYS = [
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+  "Sunday",
+];
+/** The reminder needs a day to be a reminder on. `lib/tasks/model.ts` refuses
+ *  a clock without one and the store answers 400, so the row says why rather
+ *  than minting a value no record can hold. */
+const NO_DAY_YET = "Pick a day first";
 /** The controls that answer their own keys. The grid's handler sits on the
  *  root so a press anywhere in the picker reaches it, and these are what it
  *  has to keep its hands off. */
@@ -103,6 +132,14 @@ function stepButton(label: string, name: string, flag: string): HTMLButtonElemen
   return button;
 }
 
+/** "Tuesday 15 September", off the cell's own place in a Monday-first grid so
+ *  no second weekday table is needed to say it. */
+function spokenDate(day: string, index: number): string {
+  return `${SPOKEN_WEEKDAYS[index % 7]} ${Number(day.slice(8, 10))} ${monthName(
+    monthOfDay(day),
+  )}`;
+}
+
 /** How many days the month holds, off the grid rather than a second table. */
 function lengthOfMonth(month: string): number {
   return monthGridOf(month).filter((cell) => cell.inMonth).length;
@@ -139,7 +176,8 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   const somedayRow = row("Someday", "box-minimalistic-linear", "data-when-someday");
   const reminderRow = row("Reminder", "clock-circle-linear", "data-when-reminder");
 
-  if (!deadline) element.append(todayRow, eveningRow, somedayRow);
+  // Today is offered in both modes. A deadline of today is a deadline.
+  element.append(todayRow);
 
   /* ── The head and the grid ────────────────────────────────────────────── */
 
@@ -175,7 +213,10 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
     for (let index = 0; index < 7; index += 1) {
       const cell = document.createElement("button");
       cell.type = "button";
-      cell.className = "brain-when-day";
+      // `.focus-inset` rather than the global ring: the cells sit in a grid
+      // with no gap, and a 3px outline at +2 offset lands on the four
+      // neighbours and on the weekday heads above the top row.
+      cell.className = "brain-when-day focus-inset";
       cell.setAttribute("role", "gridcell");
       cell.tabIndex = -1;
       cell.addEventListener("click", () => pickDay(cell.dataset.day ?? focusedDay));
@@ -185,6 +226,11 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
     grid.append(line);
   }
   element.append(head, grid);
+
+  // SOMEDAY SITS UNDER THE GRID, where the spec and Things both put it: the
+  // grid is the answer to "when", and Someday is the row that says there is
+  // no answer yet.
+  if (!deadline) element.append(somedayRow);
 
   /* ── The reminder ─────────────────────────────────────────────────────── */
 
@@ -254,7 +300,12 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
     cells.find((cell) => cell.dataset.day === focusedDay) ?? cells[0];
 
   function paint(): void {
-    label.textContent = monthLabel(month);
+    // A LIVE REGION IS WRITTEN ONLY WHEN IT CHANGED. `paint()` runs on every
+    // pick, every clock step and every evening toggle, and assigning
+    // `textContent` replaces the node whether or not the words moved, which
+    // announces the month again for a gesture that never touched it.
+    const words = monthLabel(month);
+    if (label.textContent !== words) label.textContent = words;
 
     const cellsOfMonth = monthGridOf(month);
     for (let index = 0; index < cells.length; index += 1) {
@@ -266,16 +317,24 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
       cell.toggleAttribute("data-past", day < today);
       cell.toggleAttribute("data-today", day === today);
       cell.setAttribute("aria-selected", String(day === value.when));
-      cell.setAttribute("aria-label", day);
+      cell.setAttribute("aria-label", spokenDate(day, index));
+      if (day === today) cell.setAttribute("aria-current", "date");
+      else cell.removeAttribute("aria-current");
       cell.tabIndex = day === focusedDay ? 0 : -1;
     }
 
+    todayRow.setAttribute("aria-checked", String(value.when === today && !value.evening));
     if (deadline) return;
 
-    todayRow.setAttribute("aria-checked", String(value.when === today && !value.evening));
     eveningRow.setAttribute("aria-checked", String(value.when === today && value.evening));
     somedayRow.setAttribute("aria-checked", String(value.when === "someday"));
+    // The reminder is offered only once there is a day for it to fire on.
+    const onADay = isDay(value.when);
     reminderRow.setAttribute("aria-checked", String(value.time !== null));
+    reminderRow.disabled = !onADay;
+    reminderRow.setAttribute("aria-disabled", String(!onADay));
+    reminderRow.title = onADay ? "" : NO_DAY_YET;
+    reminderRow.setAttribute("aria-label", onADay ? "Reminder" : `Reminder. ${NO_DAY_YET}`);
 
     // The evening is on offer only while the picked day is today, and a row
     // that does not apply is taken out rather than dimmed: a control that
@@ -365,12 +424,15 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
   eveningRow.addEventListener("click", () =>
     send({ when: today, evening: true, time: value.time }),
   );
+  // A clock and an evening both need a day. Someday is not one, so both come
+  // off with it rather than travelling to a record that refuses the pair.
   somedayRow.addEventListener("click", () =>
-    send({ when: "someday", evening: false, time: value.time }),
+    send({ when: "someday", evening: false, time: null }),
   );
-  reminderRow.addEventListener("click", () =>
-    send({ ...value, time: value.time === null ? DEFAULT_REMINDER_TIME : null }),
-  );
+  reminderRow.addEventListener("click", () => {
+    if (!isDay(value.when)) return;
+    send({ ...value, time: value.time === null ? DEFAULT_REMINDER_TIME : null });
+  });
   timeClear.addEventListener("click", () => send({ ...value, time: null }));
   hourUp.addEventListener("click", () => stepClock(1, 0));
   hourDown.addEventListener("click", () => stepClock(-1, 0));
@@ -453,30 +515,6 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
  *  the one checkbox. Below md the body rides the sheet the composer already
  *  draws, and the grip drags it away. */
 
-const SHEET_DISMISS_OFFSET = 120;
-const SHEET_DISMISS_VELOCITY = 800;
-
-/** True below md, read synchronously on the first client render and then kept
- *  live. Guards the matchMedia surface for environments that stub it. */
-function matchesSheet(): boolean {
-  if (typeof window === "undefined" || typeof window.matchMedia !== "function") return false;
-  return window.matchMedia("(max-width: 767px)").matches === true;
-}
-
-function useSheetGesture(): boolean {
-  const [sheet, setSheet] = useState(matchesSheet);
-  useEffect(() => {
-    if (typeof window.matchMedia !== "function") return;
-    const query = window.matchMedia("(max-width: 767px)");
-    const update = () => setSheet(query.matches === true);
-    update();
-    if (typeof query.addEventListener !== "function") return;
-    query.addEventListener("change", update);
-    return () => query.removeEventListener("change", update);
-  }, []);
-  return sheet;
-}
-
 export function TasksWhenPicker({
   value,
   today,
@@ -539,9 +577,10 @@ export function TasksWhenPicker({
           side="bottom"
           align="start"
           sideOffset={6}
+          collisionPadding={8}
           aria-label={ariaLabel}
           onOpenAutoFocus={(event) => event.preventDefault()}
-          className="brain-menu z-[var(--z-modal)]"
+          className={`brain-menu z-[var(--z-modal)]${sheet ? " brain-when-sheet" : ""}`}
         >
           {sheet ? (
             <motion.div

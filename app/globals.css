@@ -6146,7 +6146,15 @@ html[data-kbd] .brain-task-row[data-selected] {
   flex: 1;
 }
 @media (max-width: 767px) {
-  /* Full width under the row, on the sheet the composer already draws. */
+  /* FULL WIDTH UNDER THE ROW, not a 184px popover wearing a grip. The
+     material's `min-width` is a menu's floor, and `width: 100%` on the sole
+     child of a shrink-to-fit box sizes itself from that box rather than
+     widening it, so the floor has to come off before the percentage means
+     anything. */
+  .brain-menu.brain-when-sheet {
+    min-width: 0;
+    width: calc(100vw - 16px);
+  }
   .brain-when-picker {
     width: 100%;
   }

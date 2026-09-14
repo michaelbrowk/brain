@@ -1,7 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
 import * as calendarModule from "./calendar";
-import { monthGridOf, monthLabel, monthOfDay, shiftDay, shiftMonth } from "./calendar";
+import {
+  monthGridOf,
+  monthLabel,
+  monthName,
+  monthOfDay,
+  shiftDay,
+  shiftMonth,
+} from "./calendar";
 import * as modelModule from "./model";
 import { parseTaskRecord, taskRecordRules } from "./model";
 import type { TaskView } from "./model";
@@ -219,6 +226,7 @@ describe("listOf", () => {
       shiftDay: () => shiftDay("2026-09-13", 7),
       monthOfDay: () => monthOfDay("2026-09-13"),
       monthLabel: () => monthLabel("2026-09"),
+      monthName: () => monthName("2026-09"),
     };
 
     // A new export has to be added above, or this fails before the trap runs.

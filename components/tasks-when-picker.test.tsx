@@ -54,6 +54,15 @@ const glyphs = (element: HTMLElement) =>
   [...element.querySelectorAll(".brain-menu-item [data-glyph]")].map((mark) =>
     mark.getAttribute("data-glyph"),
   );
+/** The picker's children in drawn order: a row by its words, a box by its
+ *  class. `rows()` collects `.brain-menu-item` only, so the grid's place
+ *  between them is invisible to it. */
+const shape = (element: HTMLElement) =>
+  [...element.children].map((child) =>
+    child.classList.contains("brain-menu-item")
+      ? (child.textContent ?? "").trim()
+      : child.className,
+  );
 const cell = (element: HTMLElement, day: string) =>
   element.querySelector<HTMLElement>(`[data-day="${day}"]`)!;
 const roving = (element: HTMLElement) =>
@@ -114,9 +123,9 @@ describe("the picker's rows", () => {
     expect(rows(open().element)).toContain("This Evening");
   });
 
-  it("hides the evening, Someday and the reminder on a deadline", () => {
+  it("hides the evening, Someday and the reminder on a deadline, and keeps Today", () => {
     const { element } = open({ mode: "deadline" });
-    expect(rows(element)).toEqual([]);
+    expect(rows(element)).toEqual(["Today"]);
     expect(element.querySelector("[data-when-clear]")?.textContent).toBe("No deadline");
   });
 
@@ -137,6 +146,19 @@ describe("the picker's rows", () => {
     expect(picked.at(-1)).toEqual({ when: TODAY, evening: false, time: null });
     element.querySelector<HTMLElement>("[data-when-someday]")?.click();
     expect(picked.at(-1)).toEqual({ when: "someday", evening: false, time: null });
+  });
+
+  it("draws Someday under the grid, which is the order the popover reads in", () => {
+    expect(shape(open().element)).toEqual([
+      "Today",
+      "This Evening",
+      "brain-when-head",
+      "brain-when-grid",
+      "Someday",
+      "Reminder",
+      "brain-when-spin",
+      "brain-when-foot",
+    ]);
   });
 
   it("says which row is the current one", () => {
@@ -166,17 +188,30 @@ describe("the month grid", () => {
   });
 
   it("keeps a day before today pickable and quiet", () => {
+    // A deadline in the past is a real thing a person records, so the press
+    // has to land. Marking the cell disabled reddens this.
     const { element } = open();
     const past = cell(element, "2026-09-01");
-    expect(past.hasAttribute("disabled")).toBe(false);
     expect(past.getAttribute("data-past")).toBe("");
+    past.click();
+    expect(picked.at(-1)?.when).toBe("2026-09-01");
   });
 
   it("keeps a day outside the month pickable and quieter still", () => {
     const { element } = open();
     const outside = cell(element, "2026-10-01");
-    expect(outside.hasAttribute("disabled")).toBe(false);
     expect(outside.getAttribute("data-outside")).toBe("");
+    outside.click();
+    expect(picked.at(-1)?.when).toBe("2026-10-01");
+  });
+
+  it("says the date out loud, and names today as today", () => {
+    const { element } = open();
+    expect(cell(element, "2026-09-15").getAttribute("aria-label")).toBe(
+      "Tuesday 15 September",
+    );
+    expect(cell(element, "2026-09-13").getAttribute("aria-current")).toBe("date");
+    expect(cell(element, "2026-09-14").hasAttribute("aria-current")).toBe(false);
   });
 
   it("picks a day on a press", () => {
@@ -221,8 +256,15 @@ describe("the month grid", () => {
     expect(picked.at(-1)?.when).toBe("2026-09-14");
   });
 
-  it("closes on Escape, and on Done", () => {
-    const { element } = open();
+  it("stays open through every pick, and closes on Escape and on Done", () => {
+    const { element } = open({ value: { when: TODAY, evening: false, time: "09:00" } });
+    cell(element, "2026-09-20").click();
+    element.querySelector<HTMLElement>("[data-when-today]")?.click();
+    element.querySelector<HTMLElement>("[data-when-hour-up]")?.click();
+    element.querySelector<HTMLElement>("[data-when-clear]")?.click();
+    key(element, "PageDown");
+    expect(picked.length).toBeGreaterThan(0);
+    expect(closed).toHaveLength(0);
     key(element, "Escape");
     expect(closed).toHaveLength(1);
     element.querySelector<HTMLElement>("[data-when-done]")?.click();
@@ -331,6 +373,42 @@ describe("the reminder", () => {
 });
 
 describe("clearing", () => {
+  // `lib/tasks/model.ts` refuses a clock without a day to be a clock on, and
+  // `lib/store/store.test.ts` pins the store answering 400 to exactly that
+  // pair. Every value that leaves this control has to be one a record can
+  // hold, which is why the three cases below sit beside each other.
+  it("takes the clock and the evening off when the day becomes Someday", () => {
+    const { element } = open({ value: { when: TODAY, evening: true, time: "13:00" } });
+    element.querySelector<HTMLElement>("[data-when-someday]")?.click();
+    expect(picked.at(-1)).toEqual({ when: "someday", evening: false, time: null });
+  });
+
+  it.each([
+    ["nothing set", null],
+    ["someday", "someday"],
+  ])("does not offer a reminder while the day is %s", (_name, when) => {
+    const { element } = open({ value: { when, evening: false, time: null } });
+    const row = element.querySelector<HTMLButtonElement>("[data-when-reminder]")!;
+    expect(row.disabled).toBe(true);
+    expect(row.title).toBe("Pick a day first");
+    row.click();
+    expect(picked).toHaveLength(0);
+  });
+
+  it("offers it the moment a day is picked", () => {
+    const { element } = open();
+    const row = element.querySelector<HTMLButtonElement>("[data-when-reminder]")!;
+    expect(row.disabled).toBe(true);
+    cell(element, "2026-09-20").click();
+    expect(row.disabled).toBe(false);
+    row.click();
+    expect(picked.at(-1)).toEqual({
+      when: "2026-09-20",
+      evening: false,
+      time: DEFAULT_REMINDER_TIME,
+    });
+  });
+
   it("takes the evening and the clock with the day", () => {
     const { element } = open({ value: { when: TODAY, evening: true, time: "13:00" } });
     element.querySelector<HTMLElement>("[data-when-clear]")?.click();
@@ -408,8 +486,50 @@ describe("the React wrapper", () => {
       onPick: () => {},
       onDone: () => {},
     });
-    expect(mounted?.innerHTML).toBe(drawn.element.innerHTML);
+    expect(mounted?.outerHTML).toBe(drawn.element.outerHTML);
     drawn.destroy();
+    await act(async () => root.unmount());
+    host.remove();
+  });
+
+  it("keeps the popover open after a pick and takes it away on Done", async () => {
+    const host = document.createElement("div");
+    document.body.append(host);
+    let root!: Root;
+    await act(async () => {
+      root = createRoot(host);
+      root.render(
+        <TasksWhenPicker
+          value={{ when: TODAY, evening: false, time: null }}
+          today={TODAY}
+          onPick={() => {}}
+          ariaLabel="When"
+          trigger={<button type="button">When</button>}
+        />,
+      );
+    });
+    await act(async () => {
+      host.querySelector("button")?.dispatchEvent(
+        new MouseEvent("click", { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(document.querySelectorAll(".brain-when-picker")).toHaveLength(1);
+
+    const drawn = document.querySelector<HTMLElement>(".brain-when-picker")!;
+    await act(async () => {
+      drawn
+        .querySelector<HTMLElement>('[data-day="2026-09-20"]')
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(document.querySelectorAll(".brain-when-picker")).toHaveLength(1);
+
+    await act(async () => {
+      drawn
+        .querySelector<HTMLElement>("[data-when-done]")
+        ?.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    });
+    expect(document.querySelectorAll(".brain-when-picker")).toHaveLength(0);
+
     await act(async () => root.unmount());
     host.remove();
   });

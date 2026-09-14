@@ -67,14 +67,20 @@ if (artifact.jsdomApis.length !== 1) {
   );
 }
 const requireFromJsdom = createRequire(artifact.jsdomApis[0]);
-for (const dependency of [
-  "@asamuzakjp/css-color",
-  "@csstools/css-syntax-patches-for-csstree",
-  "css-tree",
-  // css-color imports this one at call time, so a tree that resolves the
-  // package can still fail on first use without it.
-  "lru-cache",
-]) {
+// Assert against jsdom's own declared dependencies rather than a list kept by
+// hand. The hand-kept list named four packages and went green on the v0.10.2
+// artifact, which was missing `data-urls`: the release failed later, when the
+// page render died with "Cannot find module 'data-urls'". Reading the manifest
+// covers every dependency and follows a jsdom upgrade without being edited.
+const jsdomRoot = path.dirname(path.dirname(artifact.jsdomApis[0]));
+const jsdomManifest = createRequire(import.meta.url)(
+  path.join(jsdomRoot, "package.json"),
+);
+const jsdomDependencies = Object.keys(jsdomManifest.dependencies ?? {});
+if (jsdomDependencies.length === 0) {
+  throw new Error("standalone jsdom package.json declares no dependencies");
+}
+for (const dependency of jsdomDependencies) {
   try {
     // The standalone tree sits inside the repository, so a resolution that
     // walked up into the repo's own node_modules would pass here and fail in
@@ -83,10 +89,32 @@ for (const dependency of [
     if (!resolved.startsWith(standalone + path.sep)) {
       throw new Error(`resolved outside the standalone tree: ${resolved}`);
     }
-    requireFromJsdom(dependency);
   } catch (cause) {
     throw new Error(
       `standalone-jsdom dependency ${JSON.stringify(dependency)} is unavailable`,
+      { cause },
+    );
+  }
+}
+// Resolving proves the files are present. Loading proves the package works,
+// which is a stronger claim than some of these can honour: `@exodus/bytes`
+// throws on a bare entry by design and exposes submodules only. Load the ones
+// whose entry is meant to be required, and note why each is worth the load.
+// css-color imports lru-cache at call time, so a tree that resolves the
+// package can still fail on first use.
+for (const dependency of [
+  "@asamuzakjp/css-color",
+  "@csstools/css-syntax-patches-for-csstree",
+  "css-tree",
+  "data-urls",
+  "lru-cache",
+  "whatwg-url",
+]) {
+  try {
+    requireFromJsdom(dependency);
+  } catch (cause) {
+    throw new Error(
+      `standalone-jsdom dependency ${JSON.stringify(dependency)} cannot be loaded`,
       { cause },
     );
   }

@@ -180,7 +180,23 @@ export function advance(record: TaskRecord, options: AdvanceOptions): TaskRecord
     return advanced;
   }
 
-  if (options.to !== undefined) return { ...record, when: options.to };
+  if (options.to !== undefined) {
+    const moved: TaskRecord = { ...record, when: options.to };
+    // A time and an evening are both statements about a DAY, and `someday` is
+    // the absence of one. `parseTaskRecord` refuses that pair, so a park that
+    // left either in place would mint a record the index skips and the task
+    // would be gone from every list until somebody opened the file. The store
+    // derives the same rule on a patch; this is the copy that holds for a
+    // caller who reaches `advance()` on its own.
+    if (options.to === "someday") {
+      delete moved.time;
+      delete moved.evening;
+    }
+    // The mark belongs to the day the reminder was owed on. Moved to another
+    // day it is owed again, and a mark carried across would silence it.
+    if (options.to !== record.when) delete moved.remindedAt;
+    return moved;
+  }
 
   // Unreachable through `AdvanceOptions`, which always carries one of the two.
   // Here for a caller that is not TypeScript.

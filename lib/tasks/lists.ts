@@ -36,10 +36,22 @@ const DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 const isDay = (value: string | undefined): value is string =>
   value !== undefined && DAY_RE.test(value);
 
-/** The clause order is the rule. Read top to bottom: done, then the day it is
- *  meant for, then the day it is owed, then the future, then someday. */
-export function listOf(task: TaskView, today: string): ListName {
-  if (task.done) return "logbook";
+/** The clause order is the rule. Read top to bottom: a completion that is not
+ *  today's, then the day it is meant for, then the day it is owed, then the
+ *  future, then someday.
+ *
+ *  A COMPLETION STAYS WHERE IT WAS UNTIL THE DAY CHANGES. Finishing a task is
+ *  not the task leaving: the row stays in the list it was in, struck through
+ *  and at the foot of its group, and reaches the Logbook on the day change.
+ *  That is why this needs the reader's own offset: `doneAt` is one UTC instant
+ *  and the day it falls on is theirs. Zero means UTC, which is what a caller
+ *  with no offset to give already gets for the Logbook window.
+ */
+export function listOf(task: TaskView, today: string, offsetMinutes = 0): ListName {
+  if (task.done) {
+    const day = task.doneAt === undefined ? undefined : doneDayOf(task.doneAt, offsetMinutes);
+    if (day !== today) return "logbook";
+  }
   if (isDay(task.when) && task.when <= today) return "today";
   // A deadline that has arrived pulls the task into Today whatever `when`
   // says, including `someday`: the day it is owed outranks the day it was
@@ -52,19 +64,32 @@ export function listOf(task: TaskView, today: string): ListName {
 }
 
 /** `offsetMinutes` is the reader's offset east of UTC, which a browser gets
- *  from `-new Date().getTimezoneOffset()`. It is only read for the Logbook,
- *  where a UTC instant has to become somebody's day. Zero means UTC. */
+ *  from `-new Date().getTimezoneOffset()`. It is read wherever a UTC instant
+ *  has to become somebody's day, which is the Logbook's header and, since a
+ *  completion stays in its list for the rest of the day, the list itself.
+ *  Zero means UTC. */
 export function groupFor(
   task: TaskView,
   today: string,
   offsetMinutes = 0,
 ): TaskGroup {
-  const list = listOf(task, today);
+  const list = listOf(task, today, offsetMinutes);
+  // THE EVENING IS A SECTION OF TODAY AND OF NO OTHER DAY. A task carrying it
+  // on a day still ahead is grouped by that day, and one carrying it on a day
+  // already past is an ordinary overdue row: an evening that has been and gone
+  // is not a section anybody is looking at.
+  if (list === "today" && task.evening === true && task.when === today) {
+    return { key: EVENING_GROUP_KEY, label: "This Evening", order: 2 };
+  }
   if (list === "today" || list === "someday") return categoryGroup(task);
   if (list === "upcoming") return upcomingGroup(task, today);
   if (list === "logbook") return logbookGroup(task, today, offsetMinutes);
   return { key: "", label: null, order: 0 };
 }
+
+/** The last group of Today. The renderer draws the moon beside the label; a
+ *  group carries no glyph and gains none. */
+export const EVENING_GROUP_KEY = "evening";
 
 /** The day a UTC instant falls on for a reader at `offsetMinutes` east of UTC.
  *  Arithmetic on the digits, so the module stays clock-free and the caller's
@@ -116,7 +141,14 @@ export interface LogbookRow {
  *  that matters: a record this returns no row for, and that every other list
  *  rejects, is a record nothing on the surface can reach again. So the two
  *  sources are added rather than chosen between. A record can contribute log
- *  entries, its own `done`, both, or neither:
+ *  entries, its own `done`, both, or neither.
+ *
+ *  Total in that direction only. A completion stays in the list it was made in
+ *  until the day changes, so today's completion has a row here AND a place in
+ *  Today, and whoever draws the Logbook owns what today's rows do there. This
+ *  read has never been a filter over `listOf` and is not one now.
+ *
+ *  Where the rows come from:
  *
  *  - `log` entries are read whether or not the rule is still there. Stopping a
  *    repeat keeps the history (`model.ts`), so those rows outlive the rule.
@@ -178,15 +210,30 @@ export function compareGroups(a: TaskGroup, b: TaskGroup): number {
   return collator.compare(a.label ?? "", b.label ?? "");
 }
 
-/** Newest first everywhere except the logbook, which reads by completion. A
- *  task with no `doneAt` sorts last rather than jumping to the top.
+/** Three keys, in this order: open before done, then timed before untimed and
+ *  timed by the clock, then newest first. The logbook keeps its own first key,
+ *  completion descending, and takes neither of the other two: it is a reading
+ *  of when things were finished, and a task with no `doneAt` sorts last there
+ *  rather than jumping to the top.
  *
- *  Plain string comparison, not `localeCompare`: these are UTC ISO instants
- *  and ids, and a locale has no business ordering either. */
+ *  Plain string comparison, not `localeCompare`: these are UTC ISO instants,
+ *  `HH:MM` clocks and ids, and a locale has no business ordering any of them.
+ */
 export function compareInGroup(a: TaskView, b: TaskView, list: ListName): number {
   if (list === "logbook") {
     const byDone = descending(a.doneAt ?? "", b.doneAt ?? "");
     if (byDone !== 0) return byDone;
+  } else {
+    // A COMPLETION SINKS TO THE FOOT OF ITS GROUP and stays there for the rest
+    // of the day. This is the sort the row's own sink animates against.
+    if (a.done !== b.done) return a.done ? 1 : -1;
+    // Then the clock, ascending: a row that names an hour is a row with a
+    // place in the day, and a row without one has not claimed a place yet.
+    if ((a.time ?? "") !== (b.time ?? "")) {
+      if (a.time === undefined) return 1;
+      if (b.time === undefined) return -1;
+      return ascending(a.time, b.time);
+    }
   }
   const byCreated = descending(a.created, b.created);
   return byCreated !== 0 ? byCreated : ascending(a.id, b.id);

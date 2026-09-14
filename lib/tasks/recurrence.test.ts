@@ -745,28 +745,139 @@ describe("the clock across an occurrence", () => {
       completedAt: "2026-09-13T12:00:00.000Z",
       today: "2026-09-13",
     });
+    // `toEqual` reads an explicit `undefined` as an absence, so the key itself
+    // is the assertion: a `time: undefined` written into a log entry is a key
+    // in the YAML on disk.
+    expect("time" in next).toBe(false);
+    expect("time" in (next.log?.[0] ?? {})).toBe(false);
     expect(next.log?.[0]).toEqual({
       scheduled: "2026-09-13",
       completedAt: "2026-09-13T12:00:00.000Z",
     });
   });
 
-  it("restores nothing when a completion is taken back", () => {
-    // A reverted completion whose reminder already fired does not fire again:
-    // the instant has passed and the row is back where it was, so a second
-    // notification would report an event that never repeated.
-    const advanced = advance(
-      daily({ time: "13:00", remindedAt: "2026-09-13T12:00:00.000Z" }),
-      { completedAt: "2026-09-13T12:30:00.000Z", today: "2026-09-13" },
+  it("carries the evening to the next instance, and the absence of one", () => {
+    // An evening routine stays an evening routine. The evening travels with
+    // the rule exactly as the time does, and a rule that never named one does
+    // not gain one from being completed.
+    const evening = advance(daily({ evening: true }), {
+      completedAt: "2026-09-13T20:00:00.000Z",
+      today: "2026-09-13",
+    });
+    expect(evening).toMatchObject({ when: "2026-09-14", evening: true });
+
+    const plain = advance(daily(), {
+      completedAt: "2026-09-13T20:00:00.000Z",
+      today: "2026-09-13",
+    });
+    expect("evening" in plain).toBe(false);
+  });
+
+  it("leaves the evening exactly as it was when a completion is taken back", () => {
+    const evening = revert(
+      advance(daily({ evening: true }), {
+        completedAt: "2026-09-13T20:00:00.000Z",
+        today: "2026-09-13",
+      }),
     );
-    const back = revert(advanced);
+    expect(evening).toMatchObject({ when: "2026-09-13", evening: true });
+
+    const plain = revert(
+      advance(daily(), { completedAt: "2026-09-13T20:00:00.000Z", today: "2026-09-13" }),
+    );
+    expect("evening" in plain).toBe(false);
+  });
+
+  it("leaves the mark of the instance it is handed where it is", () => {
+    // The mark belongs to the record `revert()` is given, not to the entry it
+    // pops. A reminder that has already fired for the open instance has fired,
+    // and putting the series back a day does not unfire it. The case this
+    // replaces reverted a record whose mark `advance()` had already cleared,
+    // so it could not have failed either way.
+    const advanced = advance(daily({ time: "13:00" }), {
+      completedAt: "2026-09-13T12:30:00.000Z",
+      today: "2026-09-13",
+    });
+    const fired: TaskRecord = { ...advanced, remindedAt: "2026-09-14T12:00:00.000Z" };
+
+    const back = revert(fired);
+
+    expect(back.remindedAt).toBe("2026-09-14T12:00:00.000Z");
     expect(back.when).toBe("2026-09-13");
     expect(back.time).toBe("13:00");
-    expect(back.remindedAt).toBeUndefined();
+  });
+
+  it("mints no mark on a record that carries none", () => {
+    const back = revert(
+      advance(daily({ time: "13:00" }), {
+        completedAt: "2026-09-13T12:30:00.000Z",
+        today: "2026-09-13",
+      }),
+    );
+
+    expect("remindedAt" in back).toBe(false);
   });
 
   it("keeps the time through a move", () => {
     const moved = advance(daily({ time: "13:00" }), { to: "2026-09-20" });
     expect(moved).toMatchObject({ when: "2026-09-20", time: "13:00" });
+  });
+
+  /** A MOVE HAS TO LEAVE A RECORD THE SCHEMA STILL TAKES.
+   *
+   *  A time and an evening are both statements about a day, and `someday` is
+   *  the absence of one, so a park that left either in place would mint a
+   *  record `parseTaskRecord` refuses and the index skips: the task would be
+   *  gone from every list until somebody opened the file. The mark is the
+   *  other half of it, and it is about the day rather than the schema: moved
+   *  to a day it was not owed on, the reminder is owed again.
+   *
+   *  The store re-derives all of this on a patch. This copy is here so that a
+   *  caller reaching `advance()` on its own cannot write a record the reader
+   *  cannot read.
+   */
+  const moves: {
+    name: string;
+    fields: Partial<TaskRecord>;
+    to: string;
+    kept: Partial<TaskRecord>;
+    gone: string[];
+  }[] = [
+    {
+      name: "parking a timed evening task drops the clock and the evening",
+      fields: { time: "13:00", evening: true },
+      to: "someday",
+      kept: { when: "someday" },
+      gone: ["time", "evening"],
+    },
+    {
+      name: "parking it clears the mark as well, the day being gone",
+      fields: { time: "13:00", remindedAt: "2026-09-13T12:00:00.000Z" },
+      to: "someday",
+      kept: { when: "someday" },
+      gone: ["time", "remindedAt"],
+    },
+    {
+      name: "moving it to another day keeps the clock and clears the mark",
+      fields: { time: "13:00", evening: true, remindedAt: "2026-09-13T12:00:00.000Z" },
+      to: "2026-09-20",
+      kept: { when: "2026-09-20", time: "13:00", evening: true },
+      gone: ["remindedAt"],
+    },
+    {
+      name: "moving it to the day it is already on keeps the mark",
+      fields: { time: "13:00", remindedAt: "2026-09-13T12:00:00.000Z" },
+      to: "2026-09-13",
+      kept: { when: "2026-09-13", time: "13:00", remindedAt: "2026-09-13T12:00:00.000Z" },
+      gone: [],
+    },
+  ];
+
+  it.each(moves)("$name", ({ fields, to, kept, gone }) => {
+    const moved = advance(daily(fields), { to });
+
+    expect(moved).toMatchObject(kept);
+    for (const key of gone) expect(key in moved).toBe(false);
+    expect(parseTaskRecord(moved).ok).toBe(true);
   });
 });

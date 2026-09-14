@@ -507,22 +507,33 @@ describe("the clock on a record", () => {
     expect(parseTaskRecord({ ...base, when: "2026-09-13", time }).ok).toBe(true);
   });
 
-  it("reads a hand-edited unquoted 9:05 back as 09:05", () => {
-    // YAML resolves an unquoted 9:05 as a sexagesimal integer, 545. A person's
-    // own file is not skipped over its quoting, the reason `when` takes a Date.
-    const parsed = parseTaskRecord({ ...base, when: "2026-09-13", time: 545 });
-    expect(parsed).toMatchObject({ ok: true, task: { time: "09:05" } });
-  });
+  /** A NUMBER IS NOT A CLOCK.
+   *
+   *  YAML 1.1 is sexagesimal about anything with a colon in it, so an unquoted
+   *  `time: 13:00` reaches the schema as the integer 780 and `time: 9:05` as
+   *  545. A bare `time: 905`, which is how a person writes 9:05 with the colon
+   *  left out, reaches it as 905, and 905 is also exactly what `15:05`
+   *  produces. By this point there is nothing in a number that says which of
+   *  the two somebody meant, so no number is taken as a time and the reason
+   *  says what to write instead. What YAML leaves as a string it keeps: a
+   *  leading zero (`09:05`) and any quoted form both arrive here as text.
+   */
+  it.each<[string, unknown, string | null]>([
+    ["905", 905, null],
+    ["9:05", 545, null],
+    ["13:00", 780, null],
+    ["13:00:00", 46_800, null],
+    ["09:05", "09:05", "09:05"],
+    ['"9:05"', "9:05", "09:05"],
+    ['"13:00"', "13:00", "13:00"],
+  ])("reads a hand-edited time: %s", (_written, time, expected) => {
+    const parsed = parseTaskRecord({ ...base, when: "2026-09-13", time });
 
-  it("pads a hand-edited quoted 9:05 the same way", () => {
-    expect(parseTaskRecord({ ...base, when: "2026-09-13", time: "9:05" })).toMatchObject({
-      ok: true,
-      task: { time: "09:05" },
-    });
-  });
-
-  it("refuses a sexagesimal number past the end of the day", () => {
-    expect(parseTaskRecord({ ...base, when: "2026-09-13", time: 1440 }).ok).toBe(false);
+    if (expected === null) {
+      expect(parsed).toEqual({ ok: false, reason: 'time: write it as "HH:MM"' });
+    } else {
+      expect(parsed).toMatchObject({ ok: true, task: { time: expected } });
+    }
   });
 
   it("accepts remindedAt as a UTC instant and refuses a local one", () => {

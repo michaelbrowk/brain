@@ -122,11 +122,16 @@ describe("listOf", () => {
   });
 
   it("reads no clock, in any exported function of lib/tasks", () => {
+    // The `time` is here so the schema's own YAML preprocess runs under the
+    // trap: a clock read on the way to `"13:00"` would be the same bug in a
+    // quieter place.
     const record = {
       id: "task-alpha",
       title: "Water the plants",
       created: "2026-09-13T09:00:00.000Z",
       updated: "2026-09-13T09:00:00.000Z",
+      when: TODAY,
+      time: "13:00",
     };
     const anchor = { text: "alpha", hash: "0123456789abcdef", ordinal: 0, line: 0 };
     const group = { key: "", label: null, order: 0 };
@@ -136,11 +141,18 @@ describe("listOf", () => {
      *  own branch. A Today task and an inbox task are here because a clock
      *  read inside the category branch went undetected without them. */
     const exercised: Record<string, () => unknown> = {
-      listOf: () => listOf(task({ when: "2026-09-20" }), TODAY),
+      listOf: () => [
+        listOf(task({ when: "2026-09-20" }), TODAY),
+        // With an offset, which is the completion-day read: it turns one UTC
+        // instant into the reader's day, and a `Date` in there would put the
+        // whole feature a day out for half the planet.
+        listOf(task({ done: true, doneAt: `${TODAY}T22:30:00.000Z` }), TODAY, 180),
+      ],
       groupFor: () => [
         groupFor(task(), TODAY),
         groupFor(task({ when: TODAY, category: "Home" }), TODAY),
         groupFor(task({ when: TODAY }), TODAY),
+        groupFor(task({ when: TODAY, evening: true }), TODAY),
         groupFor(task({ when: "someday", category: "Reading" }), TODAY),
         groupFor(task({ when: "2026-09-20" }), TODAY),
         groupFor(task({ done: true, doneAt: "2026-09-12T09:00:00.000Z" }), TODAY, 180),
@@ -170,6 +182,11 @@ describe("listOf", () => {
       compareInGroup: () => [
         compareInGroup(task(), task({ id: "task-beta" }), "today"),
         compareInGroup(task(), task({ id: "task-beta" }), "logbook"),
+        compareInGroup(
+          task({ when: TODAY, time: "09:00" }),
+          task({ id: "task-beta", when: TODAY }),
+          "today",
+        ),
       ],
       parseTaskLines: () => parseTaskLines("- [ ] alpha\n- [x] beta"),
       normalizeTaskText: () => normalizeTaskText(" a  b "),
@@ -295,7 +312,6 @@ describe("groupFor", () => {
   });
 
   it.each([
-    ["2026-09-13T21:00:00.000Z", "Today"],
     ["2026-09-12T21:00:00.000Z", "Yesterday"],
     ["2026-09-05T21:00:00.000Z", "5 Sep"],
     ["2026-08-12T21:00:00.000Z", "12 Aug"],
@@ -303,13 +319,32 @@ describe("groupFor", () => {
     expect(groupFor(task({ done: true, doneAt }), TODAY).label).toBe(label);
   });
 
+  it("has no Today group, because today's completion has not reached the logbook", () => {
+    // The Logbook's oldest label was "Today" and there is no longer anything
+    // to put under it: a completion stays in the list it was made in until the
+    // day changes. The group it gets is the group it had while it was open.
+    const closed = task({ done: true, doneAt: `${TODAY}T21:00:00.000Z` });
+    expect(listOf(closed, TODAY, 0)).toBe("inbox");
+    expect(groupFor(closed, TODAY, 0)).toMatchObject({ key: "", label: null });
+  });
+
   it("files a completion under the reader's own day, not the UTC one", () => {
-    // 22:00Z on the 12th is already the 13th in Dubai and still the 12th in
+    // 22:00Z on the 11th is already the 12th in Dubai and still the 11th in
     // New York. The instant is one value, the day is the reader's.
+    const done = task({ done: true, doneAt: "2026-09-11T22:00:00.000Z" });
+    expect(groupFor(done, TODAY, 240).label).toBe("Yesterday");
+    expect(groupFor(done, TODAY, -300).label).toBe("11 Sep");
+    expect(groupFor(done, TODAY, 0).label).toBe("11 Sep");
+  });
+
+  it("holds a completion back from the logbook for the reader whose day it still is", () => {
+    // The same instant, and the two readers are a day apart on it: 22:00Z on
+    // the 12th is already the 13th in Dubai, where the completion is still
+    // today's, and the 12th in New York, where it is history.
     const done = task({ done: true, doneAt: "2026-09-12T22:00:00.000Z" });
-    expect(groupFor(done, TODAY, 240).label).toBe("Today");
+    expect(listOf(done, TODAY, 240)).toBe("inbox");
+    expect(listOf(done, TODAY, -300)).toBe("logbook");
     expect(groupFor(done, TODAY, -300).label).toBe("Yesterday");
-    expect(groupFor(done, TODAY, 0).label).toBe("Yesterday");
   });
 
   it("puts a done task with no doneAt at the foot of the logbook", () => {
@@ -334,9 +369,9 @@ describe("doneDayOf", () => {
   });
 
   it("orders logbook groups newest first", () => {
-    const today = groupFor(task({ done: true, doneAt: "2026-09-13T21:00:00.000Z" }), TODAY);
+    const newer = groupFor(task({ done: true, doneAt: "2026-09-12T21:00:00.000Z" }), TODAY);
     const older = groupFor(task({ done: true, doneAt: "2026-09-05T21:00:00.000Z" }), TODAY);
-    expect(compareGroups(today, older)).toBeLessThan(0);
+    expect(compareGroups(newer, older)).toBeLessThan(0);
   });
 });
 
@@ -473,7 +508,9 @@ describe("logbookRows", () => {
       ["2026-09-13", "2026-09-14T09:00:00.000Z"],
       ["2026-09-12", "2026-09-11T09:00:00.000Z"],
     ]);
-    expect(groupFor(rows[0].task, "2026-09-14", 0).label).toBe("Today");
+    // Read a day on, where the row has reached the Logbook: its group is the
+    // day it was finished on, the 14th, and not the 13th it was owed.
+    expect(groupFor(rows[0].task, "2026-09-15", 0).label).toBe("Yesterday");
   });
 
   it("stops the log at the thirty day window, in the reader's own days", () => {
@@ -549,17 +586,19 @@ describe("logbookRows", () => {
  *  for being done, and the Logbook does not draw it. So the two sources are
  *  added rather than chosen between. */
 describe("logbookRows, every record listOf files in the logbook", () => {
+  /** Every completion here is yesterday's, because that is when a record is in
+   *  the Logbook at all: today's stays in the list it was made in. */
   const shapes: { name: string; fields: Partial<TaskView>; rows: number }[] = [
     {
       name: "an ordinary done record",
-      fields: { done: true, doneAt: "2026-09-13T09:00:00.000Z" },
+      fields: { done: true, doneAt: "2026-09-12T09:00:00.000Z" },
       rows: 1,
     },
     {
       name: "a done record that also carries a rule, which an import can make",
       fields: {
         done: true,
-        doneAt: "2026-09-13T09:00:00.000Z",
+        doneAt: "2026-09-12T09:00:00.000Z",
         repeat: { freq: "daily" },
       },
       rows: 1,
@@ -568,7 +607,7 @@ describe("logbookRows, every record listOf files in the logbook", () => {
       name: "a done record with a rule and a log",
       fields: {
         done: true,
-        doneAt: "2026-09-13T09:00:00.000Z",
+        doneAt: "2026-09-12T12:00:00.000Z",
         repeat: { freq: "daily" },
         log: [{ scheduled: "2026-09-12", completedAt: "2026-09-12T09:00:00.000Z" }],
       },
@@ -588,6 +627,16 @@ describe("logbookRows, every record listOf files in the logbook", () => {
       expect(logbookRows([record], TODAY, 0)).toHaveLength(rows);
     });
   }
+
+  it("draws a row for today's completion, which listOf keeps in its own list", () => {
+    // The other direction is no longer total, and this is the one place that
+    // says so: a completion made today has a Logbook row and is filed in
+    // Today, so whoever draws the Logbook owns what today's rows do there.
+    const closed = task({ done: true, when: TODAY, doneAt: `${TODAY}T09:00:00.000Z` });
+
+    expect(listOf(closed, TODAY, 0)).toBe("today");
+    expect(logbookRows([closed], TODAY, 0)).toHaveLength(1);
+  });
 
   it("keeps the history of a repeat that was stopped", () => {
     // Stopping a rule leaves the instance as an ordinary open task and keeps
@@ -643,5 +692,110 @@ describe("logbookRows, every record listOf files in the logbook", () => {
     expect(rows[0].task.when).toBeUndefined();
     expect("when" in rows[0].task).toBe(false);
     expect(rows[1].task.when).toBe("someday");
+  });
+});
+
+describe("a completion stays where it was for the rest of the day", () => {
+  const doneToday = (over: Partial<TaskView> = {}): TaskView =>
+    task({ done: true, doneAt: `${TODAY}T09:00:00.000Z`, ...over });
+
+  it.each([
+    ["a dated task", { when: TODAY }, "today"],
+    ["a task due tomorrow", { when: "2026-09-14" }, "upcoming"],
+    ["a parked task", { when: "someday" }, "someday"],
+    ["an inbox task", {}, "inbox"],
+  ])("files %s completed today in %s", (_name, fields, expected) => {
+    expect(listOf(doneToday(fields), TODAY, 0)).toBe(expected);
+  });
+
+  it("files the same record in the logbook the next day", () => {
+    expect(listOf(doneToday({ when: TODAY }), "2026-09-14", 0)).toBe("logbook");
+  });
+
+  it("reads the completion day in the reader's own offset", () => {
+    // 22:30 UTC is half past one in the morning in Moscow, so the reader's day
+    // is the 14th and the completion is already history for them.
+    const late = task({ done: true, doneAt: `${TODAY}T22:30:00.000Z`, when: TODAY });
+    expect(listOf(late, "2026-09-14", 180)).toBe("today");
+    expect(listOf(late, TODAY, 180)).toBe("logbook");
+  });
+
+  it("files a completion with no instant in the logbook, as it always did", () => {
+    expect(listOf(task({ done: true }), TODAY, 0)).toBe("logbook");
+  });
+
+  it("keeps the group it would have had open", () => {
+    expect(groupFor(doneToday({ when: TODAY, category: "Home" }), TODAY, 0)).toMatchObject({
+      key: "Home",
+      label: "Home",
+    });
+  });
+
+  it("sorts a completion after every open row of its group", () => {
+    const open = task({ id: "task-open", when: TODAY, created: "2026-09-01T09:00:00.000Z" });
+    const closed = doneToday({ id: "task-closed", when: TODAY, created: "2026-09-13T09:00:00.000Z" });
+    expect(compareInGroup(closed, open, "today")).toBeGreaterThan(0);
+    expect(compareInGroup(open, closed, "today")).toBeLessThan(0);
+  });
+});
+
+describe("This Evening", () => {
+  it("is the last group of today", () => {
+    const evening = groupFor(task({ when: TODAY, evening: true }), TODAY);
+    expect(evening).toEqual({ key: "evening", label: "This Evening", order: 2 });
+    expect(compareGroups(groupFor(task({ when: TODAY, category: "Home" }), TODAY), evening))
+      .toBeLessThan(0);
+    expect(compareGroups(groupFor(task({ when: TODAY }), TODAY), evening)).toBeLessThan(0);
+  });
+
+  it("outranks the category, because the evening is when and a category is what", () => {
+    expect(groupFor(task({ when: TODAY, evening: true, category: "Home" }), TODAY).key)
+      .toBe("evening");
+  });
+
+  it("groups an evening task tomorrow by its day, not by the evening", () => {
+    expect(groupFor(task({ when: "2026-09-14", evening: true }), TODAY).label).toBe("Tomorrow");
+  });
+
+  it("makes an overdue evening an ordinary overdue row", () => {
+    const late = task({ when: "2026-09-11", evening: true });
+    expect(listOf(late, TODAY)).toBe("today");
+    expect(groupFor(late, TODAY)).toMatchObject({ key: "", label: null });
+  });
+
+  it("keeps a completed evening task in This Evening, at the bottom", () => {
+    const closed = task({
+      when: TODAY,
+      evening: true,
+      done: true,
+      doneAt: `${TODAY}T20:30:00.000Z`,
+    });
+    expect(groupFor(closed, TODAY, 0).key).toBe("evening");
+  });
+});
+
+describe("the clock sorts inside a group", () => {
+  const at = (id: string, time?: string): TaskView =>
+    task({ id, when: TODAY, ...(time ? { time } : {}) });
+
+  it("puts timed rows first, by the clock", () => {
+    const rows = [at("task-c"), at("task-b", "13:00"), at("task-a", "09:00")];
+    expect(rows.sort((a, b) => compareInGroup(a, b, "today")).map((row) => row.id)).toEqual([
+      "task-a",
+      "task-b",
+      "task-c",
+    ]);
+  });
+
+  it("leaves untimed rows on the comparator they already had", () => {
+    const older = task({ id: "task-old", when: TODAY, created: "2026-09-01T09:00:00.000Z" });
+    const newer = task({ id: "task-new", when: TODAY, created: "2026-09-12T09:00:00.000Z" });
+    expect(compareInGroup(newer, older, "today")).toBeLessThan(0);
+  });
+
+  it("keeps the logbook on completion order, whatever the clock says", () => {
+    const early = task({ id: "task-a", time: "09:00", done: true, doneAt: `${TODAY}T18:00:00.000Z` });
+    const late = task({ id: "task-b", time: "18:00", done: true, doneAt: `${TODAY}T09:00:00.000Z` });
+    expect(compareInGroup(early, late, "logbook")).toBeLessThan(0);
   });
 });

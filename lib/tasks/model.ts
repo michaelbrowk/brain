@@ -91,20 +91,29 @@ const instantField = z.preprocess(fromYamlInstant, instantSchema);
 /** A wall clock, 24-hour, in the owner's zone. No zone in the record: the zone
  *  is one owner setting, so a day and a clock in a file mean the same thing on
  *  every device the owner uses. */
-const timeSchema = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/);
+const timeSchema = z
+  .string({ invalid_type_error: 'write it as "HH:MM"' })
+  .regex(/^([01]\d|2[0-3]):[0-5]\d$/);
 
 const pad2 = (value: number): string => String(value).padStart(2, "0");
 
-/** YAML 1.1 sexagesimal: an unquoted `time: 9:05` in a hand-edited file is
- *  resolved as the integer 545, while `09:00` keeps its leading zero and stays
- *  a string. Both forms, and a quoted `9:05`, are the ordinary way somebody
- *  writes this by hand, so all three are taken and padded rather than refused.
- *  Anything else passes through untouched and the schema names it. */
+/** YAML 1.1 is sexagesimal about anything with a colon in it, so an unquoted
+ *  `time: 13:00` in a hand-edited file is resolved to the integer 780 and
+ *  `time: 9:05` to 545, while `09:05` keeps its leading zero and stays a
+ *  string.
+ *
+ *  A NUMBER IS REFUSED. `time: 905`, which is how somebody writes 9:05 with
+ *  the colon left out, resolves to 905, and 905 is also exactly what `15:05`
+ *  resolves to: by the time the value reaches this function there is nothing
+ *  left in it that says which of the two was written. Reading it as minutes
+ *  answered one of them with the other's clock and said nothing, and a
+ *  reminder six hours off is worse than one that never fired. So every number
+ *  falls through to the schema, whose reason says what to write instead.
+ *
+ *  A string is padded: `09:05` and a quoted `"9:05"` are both the ordinary way
+ *  somebody writes this by hand, and neither is ambiguous. Anything else
+ *  passes through untouched and the schema names it. */
 const fromYamlTime = (value: unknown) => {
-  if (typeof value === "number") {
-    if (!Number.isInteger(value) || value < 0 || value > 1439) return value;
-    return `${pad2(Math.floor(value / 60))}:${pad2(value % 60)}`;
-  }
   if (typeof value !== "string") return value;
   const parts = /^(\d{1,2}):([0-5]\d)$/.exec(value);
   if (!parts) return value;

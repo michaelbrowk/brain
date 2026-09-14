@@ -649,11 +649,21 @@ export async function applyPortableBundle(
           record.page = pageId;
         } else {
           // A task naming a page this archive does not carry is imported
-          // detached, keeping its schedule and its last known title. Its
-          // anchor named a line in a note nobody here has, so it goes with
-          // the link rather than pointing at a stranger's page.
+          // unlinked, keeping its schedule, its completion and its last known
+          // title. Its anchor named a line in a note nobody here has, so it
+          // goes with the link rather than pointing at a stranger's page.
+          //
+          // `detachedAt` goes too, and it is the one that matters: a detach
+          // is a link that was broken, and the record schema refuses the mark
+          // without the page it names. The purge rule mints exactly that
+          // record — a finished linked task whose page is gone — so a
+          // notebook that has ever emptied its trash exports an archive that
+          // would throw on the way in and roll every imported page into the
+          // Trash. Unlinked and done says the same thing to a reader, in a
+          // shape the schema accepts.
           delete record.page;
           delete record.anchor;
+          delete record.detachedAt;
         }
       }
       const landed = await store.importTask(

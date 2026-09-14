@@ -48,9 +48,10 @@ archive is the notebook and not the screen.
   everything, tasks and pages alike.
 - A task linked to a page the archive carries points at that page's new id
   after the import.
-- A task naming a page the archive does not carry is imported detached. It
-  keeps its schedule and its last known title, and it is never dropped. A task
-  on a page in the Trash arrives this way, because the Trash does not travel.
+- A task naming a page the archive does not carry is imported unlinked. It
+  keeps its schedule, its completion and its last known title, and it is never
+  dropped. A task on a page in the Trash arrives this way, because the Trash
+  does not travel, and so does a finished task whose page was purged.
 - A subtree export carries the tasks of the pages it carries. A whole notebook
   export carries every task the notebook has, including a task on a trashed
   page and a completion older than the 30 day Logbook window.

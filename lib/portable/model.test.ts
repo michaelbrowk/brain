@@ -347,6 +347,55 @@ describe("Brain portable packages", () => {
     expect(detached?.done).toBe(false);
   });
 
+  it("imports a notebook whose trash was emptied on a page holding a finished task", async () => {
+    // The shape the spec's own purge rule mints (row 149): the done record is
+    // kept, detached, with `page` naming a page no export can carry. The
+    // archive has no page to remap it to, so the link goes — and `detachedAt`
+    // has to go with it, or the record is refused on the way in and the whole
+    // import rolls back into the Trash.
+    const source = await temporaryStore();
+    const kept = await source.createPage(null, "Still here");
+    await source.writePage(kept.id, "Nothing to do here.", undefined, "me");
+    const doomed = await source.createPage(null, "Old plans");
+    await source.writePage(doomed.id, "- [ ] Draft the plan", undefined, "me");
+    await source.createTask({
+      title: "Draft the plan",
+      page: doomed.id,
+      anchor: anchorFor("Draft the plan", 0),
+    });
+    await source.writePage(doomed.id, "- [x] Draft the plan", undefined, "me");
+    await source.deletePage(doomed.id);
+    await source.purgePage(doomed.id);
+
+    const exported = await buildPortableArchive(source, { now: EXPORTED_AT });
+    const destination = await temporaryStore();
+    const checked = validatePortableArchive(exported.bytes, destination);
+    const applied = await applyPortableBundle(destination, checked.bundle);
+
+    // Every page lands: the rollback would have moved this one to the Trash.
+    expect(applied.created).toBe(1);
+    expect(destination.getTree().map((page) => page.title)).toEqual([
+      "Still here",
+    ]);
+    expect(kept.id).toBeDefined();
+
+    const landed = destination
+      .allTasks()
+      .find((task) => task.title === "Draft the plan");
+    expect(landed).toBeDefined();
+    expect(landed?.page).toBeUndefined();
+    expect(landed?.anchor).toBeUndefined();
+    expect(landed?.detachedAt).toBeUndefined();
+    // It owns its completion, so it reads in the Logbook rather than coming
+    // back open in the Inbox.
+    expect(landed?.done).toBe(true);
+    expect(
+      destination
+        .listTasks(TODAY, { offsetMinutes: 0, list: "logbook" })
+        .map((task) => task.title),
+    ).toContain("Draft the plan");
+  });
+
   it("exports no tasks key at all when the notebook has none", async () => {
     const source = await temporaryStore();
     await source.createPage(null, "Nothing To Do");

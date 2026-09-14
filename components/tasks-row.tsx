@@ -226,7 +226,11 @@ export function TasksRow({
    *  nothing on screen to see it, and it fades in at the foot. Set before the
    *  write leaves, so framer measures the new place with the flag already
    *  true; cleared when the fade is over. Reduced motion never sets it and
-   *  gets the instant reorder it already had. */
+   *  gets the instant reorder it already had.
+   *
+   *  THE FADE IS DRAWN ON THE WRAPPER AND NOT ON THE LIST ITEM. See the
+   *  comment on `.brain-task-swipe` below: the item is the node the reorder
+   *  moves, and an opacity animation on a node being moved never paints. */
   const [sinking, setSinking] = useState(false);
   const sinkRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const x = useMotionValue(0);
@@ -444,9 +448,8 @@ export function TasksRow({
       // it. Reduced motion moves it with no spring at all, which is a reflow.
       layout={reduce ? false : "position"}
       initial={arrival}
-      animate={
-        reduce ? { opacity: 1 } : { opacity: sinking ? 0 : 1, y: 0, height: "auto" }
-      }
+      // The arrival's opacity and nothing else: the sink's fade is one node in.
+      animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0, height: "auto" }}
       transition={{
         duration: entrance === "insert" ? DUR.page : DUR.base,
         ease: EASE_OUT,
@@ -463,7 +466,18 @@ export function TasksRow({
         layout: sinking ? { duration: 0, delay: DUR.base } : SPRING_DEAL,
       }}
     >
-      <div className="brain-task-swipe">
+      {/* THE FADE RIDES HERE, ONE NODE IN FROM THE ROW'S OWN ELEMENT. React
+          reorders the list by moving the `<li>`, and an opacity animation on
+          a node that is being moved never paints: measured on the page, the
+          struck row held full ink through the whole sink, and the C2
+          composite this was meant to remove was still on screen, a neighbour
+          springing across a full-opacity row. This wrapper, which no reorder
+          re-parents, keeps the fade through the move. */}
+      <motion.div
+        className="brain-task-swipe"
+        animate={reduce ? { opacity: 1 } : { opacity: sinking ? 0 : 1 }}
+        transition={{ duration: DUR.base, ease: EASE_OUT }}
+      >
         <AnimatePresence>
           {swipeSide && (
             <motion.span
@@ -744,7 +758,7 @@ export function TasksRow({
             </AnimatePresence>
           </span>
         </motion.div>
-      </div>
+      </motion.div>
     </motion.li>
   );
 }

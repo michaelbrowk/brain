@@ -1377,6 +1377,11 @@ describe("the strike and the sink (D3)", () => {
     [...renders]
       .reverse()
       .find((render) => String(render.props.className) === "brain-task-row-item");
+  /** The node the fade is drawn on, which is NOT the node the reorder moves. */
+  const lastWrap = () =>
+    [...renders]
+      .reverse()
+      .find((render) => String(render.props.className) === "brain-task-swipe");
 
   async function tickAndSettle() {
     await act(async () => box().click());
@@ -1391,12 +1396,29 @@ describe("the strike and the sink (D3)", () => {
     await tickAndSettle();
 
     const item = lastItem();
-    expect(item?.motion.animate).toMatchObject({ opacity: 0 });
+    expect(lastWrap()?.motion.animate).toMatchObject({ opacity: 0 });
+    expect(lastWrap()?.motion.transition).toMatchObject({ duration: DUR.base });
     // Duration 0: the row does not travel. The delay is the fade, so the
     // reorder happens while there is nothing on screen to see it.
     expect(item?.motion.transition).toMatchObject({
       layout: { duration: 0, delay: DUR.base },
     });
+  });
+
+  /** AND THE FADE IS NOT ON THE ELEMENT THE REORDER MOVES.
+   *
+   *  Drawn on the `<li>` it never painted at all. React reorders the list by
+   *  moving that node, and the opacity animation went with it: on the page
+   *  the struck row held full ink for the whole sink, a neighbour sprang
+   *  across it at full opacity, and C2 was exactly where it had been. So the
+   *  list item animates the arrival's opacity and nothing else, and the
+   *  wrapper inside it, which no reorder re-parents, carries the fade. */
+  it("draws the fade one node in, on the wrapper the reorder never moves", async () => {
+    await renderRows([task("a", { when: TODAY })]);
+    await tickAndSettle();
+
+    expect(lastItem()?.motion.animate).toMatchObject({ opacity: 1 });
+    expect(lastWrap()?.motion.animate).toMatchObject({ opacity: 0 });
   });
 
   it("fades it back in at the foot once the fade is over", async () => {
@@ -1405,7 +1427,7 @@ describe("the strike and the sink (D3)", () => {
     await act(async () => vi.advanceTimersByTime(DUR.base * 1000));
 
     const item = lastItem();
-    expect(item?.motion.animate).toMatchObject({ opacity: 1 });
+    expect(lastWrap()?.motion.animate).toMatchObject({ opacity: 1 });
     expect(item?.motion.transition).toMatchObject({
       layout: { bounce: 0, duration: 0.42 },
     });
@@ -1415,7 +1437,7 @@ describe("the strike and the sink (D3)", () => {
     calls.complete.mockRejectedValueOnce(new Error("no"));
     await renderRows([task("a", { when: TODAY })]);
     await tickAndSettle();
-    expect(lastItem()?.motion.animate).toMatchObject({ opacity: 1 });
+    expect(lastWrap()?.motion.animate).toMatchObject({ opacity: 1 });
   });
 
   it("reorders instantly under reduced motion and fades nothing", async () => {
@@ -1425,6 +1447,7 @@ describe("the strike and the sink (D3)", () => {
     const item = lastItem();
     expect(item?.motion.layout).toBe(false);
     expect(item?.motion.animate).toEqual({ opacity: 1 });
+    expect(lastWrap()?.motion.animate).toEqual({ opacity: 1 });
   });
 
   it("moves without a spring under reduced motion", async () => {

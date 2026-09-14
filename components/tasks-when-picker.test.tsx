@@ -828,6 +828,42 @@ describe("the commit contract", () => {
     expect(block).toContain("var(--ink-3)");
   });
 
+  it("keeps the chosen day's number legible while the write is out", () => {
+    // A1. THE ONE THING THE PANEL EXISTS TO SAY STAYS READABLE. The quiet ink
+    // is a three-part selector and the chosen day's ink capsule is a two-part
+    // one, so the busy rule reached the selected cell and put `--ink-3` on top
+    // of a black fill: about 2.8:1, for the length of the request. A scan of
+    // the block's text cannot see a cascade collision, so this lifts every
+    // top-level rule that reaches a day cell out of the block, in source
+    // order, and reads the colour off the cell the panel is filing.
+    const style = document.createElement("style");
+    style.textContent = dayCascade();
+    document.head.append(style);
+    try {
+      const handle = open({
+        value: { when: null, evening: false, time: null },
+        onPick: () => new Promise<boolean>(() => {}),
+      });
+      pickDay(handle.element, "2026-09-20");
+      done(handle.element);
+      expect(handle.element.getAttribute("aria-busy")).toBe("true");
+
+      const chosen = cell(handle.element, "2026-09-20");
+      const quiet = cell(handle.element, "2026-09-21");
+      expect(chosen.getAttribute("aria-selected")).toBe("true");
+      // The capsule and the number inside it, both still the selected rule's.
+      expect(getComputedStyle(chosen).backgroundColor).toBe("var(--ink)");
+      expect(getComputedStyle(chosen).color).toBe("var(--paper)");
+      // And it goes out of reach with the rest of the grid, which is the other
+      // half of what the waiting panel means.
+      expect(getComputedStyle(chosen).pointerEvents).toBe("none");
+      expect(getComputedStyle(quiet).color).toBe("var(--ink-3)");
+      expect(getComputedStyle(quiet).pointerEvents).toBe("none");
+    } finally {
+      style.remove();
+    }
+  });
+
   it("reads a host's rejection as a refusal, and handles it", async () => {
     // A HOST WHOSE PROMISE THROWS HAS FILED NOTHING. Read as an acceptance it
     // spends the value, so the same row sends nothing on the second press, and
@@ -953,6 +989,18 @@ describe("the motion", () => {
     // Declared outside the phone media query, so the popover takes it too.
     expect(block.indexOf(".brain-when-panel {")).toBeLessThan(
       block.indexOf("@media (max-width: 767px)"),
+    );
+  });
+
+  it("declares the panel's material after the menu's, which is what wins it", () => {
+    // MA11. The rule is one class, because the glass audit reads one class per
+    // backdrop owner and weakening its regex for a single compound would be
+    // the worse trade. One class ties `.brain-menu` on weight, so the whole of
+    // the panel's thickness rests on this rule coming later in the file. A
+    // second `.brain-menu` declaration below it takes the thickness back and
+    // nothing else in the suite says a word.
+    expect(css.indexOf(".brain-when-panel {")).toBeGreaterThan(
+      css.lastIndexOf(".brain-menu {"),
     );
   });
 
@@ -1176,6 +1224,34 @@ const pickDay = (element: HTMLElement, day: string) =>
   press(element, `[data-day="${day}"]`);
 
 const css = readFileSync(path.join(path.resolve(__dirname, ".."), "app/globals.css"), "utf8");
+
+/** THE DAY CELL'S WHOLE CASCADE, lifted out of the picker's block: every
+ *  top-level rule that reaches a day, in source order, and nothing from a
+ *  media query, which is a condition rather than a cascade. jsdom weighs
+ *  specificity and order the way a browser does, so a rule that outranks the
+ *  ink capsule reads here as the wrong colour on the cell. */
+function dayCascade(): string {
+  const block = pickerBlock().replace(/\/\*[\s\S]*?\*\//g, "");
+  const out: string[] = [];
+  let depth = 0;
+  let head = 0;
+  let brace = 0;
+  for (let i = 0; i < block.length; i += 1) {
+    if (block[i] === "{") {
+      if (depth === 0) brace = i;
+      depth += 1;
+      continue;
+    }
+    if (block[i] !== "}") continue;
+    depth -= 1;
+    if (depth !== 0) continue;
+    const selector = block.slice(head, brace).trim();
+    head = i + 1;
+    if (!selector.startsWith("@") && selector.includes(".brain-when-day"))
+      out.push(`${selector} { ${block.slice(brace + 1, i).trim()} }`);
+  }
+  return out.join("\n");
+}
 
 /** The picker's own CSS block, from its banner to the next one. */
 function pickerBlock(): string {

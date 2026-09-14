@@ -34,7 +34,12 @@ test("@release the push worker is served, registers and activates", async ({ pag
   expect(script.status()).toBe(200);
   expect(script.headers()["service-worker-allowed"]).toBe("/");
   expect(script.headers()["cache-control"]).toContain("no-cache");
+  // ONE CONTENT TYPE, FROM ONE SOURCE. Next's static route types the file and
+  // next.config.ts no longer restates it. Playwright joins repeated headers
+  // with a comma, so a second source would show up here as a comma and a
+  // browser would refuse the worker over it.
   expect(script.headers()["content-type"]).toContain("javascript");
+  expect(script.headers()["content-type"]).not.toContain(",");
 
   // `navigator.serviceWorker.ready` resolves as soon as the registration has
   // an active worker, which is the START of activation and not its end: read
@@ -62,7 +67,13 @@ test("@release the push worker is served, registers and activates", async ({ pag
       state: worker?.state ?? null,
     };
   });
-  expect(registered.scope).toBe("http://127.0.0.1:3021/");
+  // THE ORIGIN IS THE PAGE'S, NOT A PORT WRITTEN DOWN HERE. The harness takes
+  // its port from BRAIN_E2E_PORT (playwright.config.ts), so a hard-coded 3021
+  // failed this whole file on any run that moved the server, which is every
+  // parallel run there has ever been. The scope is still asserted exactly: it
+  // has to be the root, because a worker scoped anywhere else receives no push
+  // for the pages that matter.
+  expect(registered.scope).toBe(`${new URL(page.url()).origin}/`);
   expect(registered.hasPushManager).toBe(true);
   expect(registered.state).toBe("activated");
 });

@@ -25,6 +25,25 @@ export function urlBase64ToUint8Array(value: string): Uint8Array<ArrayBuffer> {
   return bytes;
 }
 
+/** WHETHER A SUBSCRIPTION THE BROWSER STILL HOLDS WAS MADE AGAINST THIS KEY.
+ *
+ *  RFC 8292 bakes the server's public key into every PushSubscription, so a
+ *  VAPID pair that was lost or could not be read leaves the browser holding a
+ *  subscription this server can never deliver to. The enable button below is
+ *  the only way the product offers to make a new one, and it used to hand the
+ *  dead subscription straight back: Settings reported success, every send
+ *  failed with a 403, and 403 is not a status the send path removes a row for,
+ *  so the row stayed too. Comparing the bytes is the whole fix. */
+export function sameApplicationServerKey(
+  held: ArrayBuffer | null | undefined,
+  wanted: Uint8Array,
+): boolean {
+  if (!held) return false;
+  const bytes = new Uint8Array(held);
+  if (bytes.length !== wanted.length) return false;
+  return bytes.every((byte, index) => byte === wanted[index]);
+}
+
 /** How many touch points the live device reports, for the callers that do not
  *  pass their own. Since iPadOS 13, Safari on an iPad sends the Mac user agent
  *  character for character, and this is the one field that still separates
@@ -118,15 +137,21 @@ export async function enablePushOnThisDevice(): Promise<
     if (!keyResponse.ok) return { ok: false, reason: "failed" };
     const { publicKey } = (await keyResponse.json()) as { publicKey: string };
 
-    const existing = await registration.pushManager.getSubscription();
+    const wanted = urlBase64ToUint8Array(publicKey);
+    const held = await registration.pushManager.getSubscription();
+    // A subscription addressed to a key this server has rotated away from can
+    // never be delivered to, so it goes rather than being handed back.
+    let subscription = held;
+    if (held && !sameApplicationServerKey(held.options.applicationServerKey, wanted)) {
+      await held.unsubscribe();
+      subscription = null;
+    }
     // userVisibleOnly is not optional anywhere: a silent push costs the
     // permission on iOS and a warning everywhere else.
-    const subscription =
-      existing ??
-      (await registration.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(publicKey),
-      }));
+    subscription ??= await registration.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: wanted,
+    });
 
     const saved = await fetch("/api/push/subscriptions", {
       method: "POST",

@@ -150,6 +150,55 @@ describe("the subscription store", () => {
     expect(row.lastSeenAt).toBe("2026-09-20T12:00:00.000Z");
     expect(row.createdAt).toBe("2026-09-14T12:00:00.000Z");
   });
+
+  // A push service may replace an endpoint without asking, and the worker that
+  // hears it has no user agent to name the device with, so it posts "This
+  // device". Without the endpoint it replaced, the owner's Settings grew a
+  // second row for one phone: "iPhone", last seen weeks ago and never ringing
+  // again, beside "This device".
+  it("moves a replaced endpoint's name and its first day onto the new row", async () => {
+    await savePushSubscription(record(ENDPOINT, "iPhone"), dir);
+    const moved = await savePushSubscription(
+      {
+        ...record(`${ENDPOINT}-replaced`, "This device"),
+        createdAt: "2026-09-20T12:00:00.000Z",
+        lastSeenAt: "2026-09-20T12:00:00.000Z",
+      },
+      dir,
+      pushSubscriptionId(ENDPOINT),
+    );
+    const rows = await listPushSubscriptions(dir);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].id).toBe(moved.id);
+    expect(rows[0].deviceLabel).toBe("iPhone");
+    expect(rows[0].createdAt).toBe("2026-09-14T12:00:00.000Z");
+    expect(rows[0].lastSeenAt).toBe("2026-09-20T12:00:00.000Z");
+  });
+
+  it("takes a previous endpoint it holds no row for as an ordinary registration", async () => {
+    const saved = await savePushSubscription(
+      record(ENDPOINT, "This device"),
+      dir,
+      "0123456789abcdef",
+    );
+    expect(await listPushSubscriptions(dir)).toEqual([saved]);
+    expect(saved.deviceLabel).toBe("This device");
+  });
+
+  // The relabel path is the one Settings uses, and it must keep winning: a
+  // device re-registering on its own endpoint is naming itself, not being
+  // replaced.
+  it("still takes the new name when the endpoint did not change", async () => {
+    await savePushSubscription(record(ENDPOINT, "iPhone"), dir);
+    await savePushSubscription(
+      record(ENDPOINT, "iPhone 17"),
+      dir,
+      pushSubscriptionId(ENDPOINT),
+    );
+    const rows = await listPushSubscriptions(dir);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].deviceLabel).toBe("iPhone 17");
+  });
 });
 
 describe("the per-kind toggles", () => {

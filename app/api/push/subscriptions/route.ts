@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { deviceView, parsePushSubscription } from "@/lib/push/model";
+import { deviceView, parsePushSubscription, pushSubscriptionId } from "@/lib/push/model";
 import { removePushSubscription, savePushSubscription } from "@/lib/push/store";
 
 /** A device registers here and is removed here. The endpoint arrives in a
@@ -24,6 +24,19 @@ async function readBody(req: Request): Promise<Record<string, unknown> | null> {
   }
 }
 
+/** THE ENDPOINT THIS REGISTRATION REPLACES, as a row id.
+ *
+ *  `pushsubscriptionchange` gives the worker the subscription the browser is
+ *  retiring, and the worker sends its endpoint here so the row goes with it.
+ *  It is read to the same bounds as the endpoint it names and it is never a
+ *  refusal: a body this cannot read is an ordinary registration, because a
+ *  device that just lost its endpoint must not also be refused a new one. */
+function previousRowId(value: unknown): string | null {
+  if (typeof value !== "string" || value.length > 2_048) return null;
+  if (!value.startsWith("https://")) return null;
+  return pushSubscriptionId(value);
+}
+
 export async function POST(req: Request) {
   const body = await readBody(req);
   if (!body) {
@@ -33,8 +46,9 @@ export async function POST(req: Request) {
   if (!record) {
     return NextResponse.json({ error: "bad_subscription" }, { status: 400, headers: HEADERS });
   }
+  const previous = previousRowId(body.previousEndpoint);
   return NextResponse.json(
-    { device: deviceView(await savePushSubscription(record)) },
+    { device: deviceView(await savePushSubscription(record, undefined, previous)) },
     { status: 201, headers: HEADERS },
   );
 }

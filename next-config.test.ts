@@ -107,10 +107,16 @@ describe("the service worker's headers", () => {
       key: "Cache-Control",
       value: "no-cache",
     });
-    expect(rules![swIndex]!.headers).toContainEqual({
-      key: "Content-Type",
-      value: "application/javascript; charset=utf-8",
-    });
+  });
+
+  it("leaves the content type to the static route that serves the file", async () => {
+    // One header, one source. `public/sw.js` goes out through Next's own
+    // static route, which types a `.js` file already; a second answer here
+    // could disagree with it and both would look right in review. The served
+    // header is asserted end to end in `e2e/notifications.spec.ts`.
+    const rules = await nextConfig.headers?.();
+    const sw = rules!.find((rule) => rule.source === "/sw.js")!;
+    expect(sw.headers.map((header) => header.key)).not.toContain("Content-Type");
   });
 
   it("keeps a CSP on the worker that does not block it", async () => {

@@ -132,21 +132,42 @@ export async function listPushSubscriptions(
   return readSubscriptions(dir);
 }
 
+/** `previousId` is the row this registration REPLACES, from the endpoint a
+ *  `pushsubscriptionchange` names. A push service may retire an endpoint
+ *  without asking, and the worker that hears it has no user agent to build a
+ *  label from, so it posts "This device". Without the endpoint it replaced,
+ *  one phone became two rows in Settings: the name the owner recognises on a
+ *  row that can never ring again, and "This device" beside it.
+ *
+ *  The name and the first day move across and the old row goes. A same-id save
+ *  is not a replacement: a device registering on its own endpoint from
+ *  Settings is naming itself, and its new label wins. */
 export async function savePushSubscription(
   record: PushSubscriptionRecord,
   dir = pushStateDirectory(),
+  previousId: string | null = null,
 ): Promise<PushSubscriptionRecord> {
   return serialise(async () => {
     const rows = await readSubscriptions(dir);
     const held = rows.find((row) => row.id === record.id);
+    const replaced =
+      previousId !== null && previousId !== record.id
+        ? rows.find((row) => row.id === previousId)
+        : undefined;
     // A device that re-subscribes on the same endpoint is the same device,
     // and the day it first allowed notifications is a fact about it.
-    const landed: PushSubscriptionRecord = held
-      ? { ...record, createdAt: held.createdAt }
+    const carried = held ?? replaced;
+    const landed: PushSubscriptionRecord = carried
+      ? {
+          ...record,
+          createdAt: carried.createdAt,
+          deviceLabel: held ? record.deviceLabel : carried.deviceLabel,
+        }
       : record;
-    const next = [...rows.filter((row) => row.id !== record.id), landed].slice(
-      -MAX_PUSH_SUBSCRIPTIONS,
-    );
+    const next = [
+      ...rows.filter((row) => row.id !== record.id && row.id !== previousId),
+      landed,
+    ].slice(-MAX_PUSH_SUBSCRIPTIONS);
     await writePrivate(dir, SUBSCRIPTIONS_FILE, next);
     return landed;
   });

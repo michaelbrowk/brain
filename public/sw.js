@@ -119,7 +119,14 @@ self.addEventListener("notificationclick", function (event) {
 
 // A push service may replace a subscription without asking. Without this the
 // device goes quiet and nothing on either side says why.
+//
+// The endpoint being retired goes with the new one. There is no user agent to
+// build a label from in here, so the POST below says "This device"; the server
+// takes the name off the row it replaces and removes it, and one phone stays
+// one row. Without that the owner's Settings grew a second entry for the same
+// device, the first of them silent forever.
 self.addEventListener("pushsubscriptionchange", function (event) {
+  var previousEndpoint = event.oldSubscription ? event.oldSubscription.endpoint : null;
   event.waitUntil(
     fetch("/api/push/key")
       .then(function (response) {
@@ -147,6 +154,7 @@ self.addEventListener("pushsubscriptionchange", function (event) {
           body: JSON.stringify({
             subscription: subscription.toJSON(),
             deviceLabel: "This device",
+            previousEndpoint: previousEndpoint,
           }),
         });
       })

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   PUSH_FALLBACK_BODY,
   PUSH_FALLBACK_TITLE,
@@ -32,6 +32,8 @@ interface ShippedHandlers {
 interface FakeEvent {
   data?: { text: () => string } | null;
   notification?: { data?: unknown; close: () => void };
+  /** `pushsubscriptionchange` carries the endpoint the browser is retiring. */
+  oldSubscription?: { endpoint: string } | null;
   waitUntil: (value: unknown) => void;
 }
 
@@ -344,6 +346,66 @@ describe("the shipped worker's notificationclick listener", () => {
     });
     await Promise.all(waited);
     expect(opened).toEqual(["https://brain.example/"]);
+  });
+});
+
+describe("the shipped worker's re-subscribe", () => {
+  const OLD = "https://web.push.apple.com/brain-worker-old-endpoint";
+  const NEW = "https://web.push.apple.com/brain-worker-new-endpoint";
+  /** 65 bytes base64url, the shape `/api/push/key` answers with. */
+  const PUBLIC_KEY = `BQ${"p".repeat(85)}`;
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  async function resubscribe(oldSubscription: { endpoint: string } | null) {
+    const posts: { url: string; body: unknown }[] = [];
+    vi.stubGlobal("fetch", async (url: string, init?: { body?: string }) => {
+      if (url === "/api/push/key") {
+        return { ok: true, json: async () => ({ publicKey: PUBLIC_KEY }) };
+      }
+      posts.push({ url, body: JSON.parse(String(init?.body)) });
+      return { ok: true };
+    });
+    vi.stubGlobal("atob", (value: string) =>
+      Buffer.from(value, "base64").toString("binary"),
+    );
+    const waited: unknown[] = [];
+    const { listeners } = loadShippedWorker({
+      registration: {
+        pushManager: {
+          subscribe: async () => ({
+            toJSON: () => ({ endpoint: NEW, keys: { p256dh: "p", auth: "a" } }),
+          }),
+        },
+      },
+    });
+    listeners.pushsubscriptionchange?.({
+      oldSubscription,
+      waitUntil: (value) => waited.push(value),
+    });
+    await Promise.all(waited);
+    return posts;
+  }
+
+  // Without the endpoint it replaces, the server has no way to know the new
+  // row is the same phone: Settings grows a second row for one device, the
+  // first of them silent forever and named after a device the owner still has.
+  it("names the endpoint the browser retired, so the old row goes", async () => {
+    const posts = await resubscribe({ endpoint: OLD });
+    expect(posts).toHaveLength(1);
+    expect(posts[0].url).toBe("/api/push/subscriptions");
+    expect(posts[0].body).toMatchObject({
+      subscription: { endpoint: NEW },
+      previousEndpoint: OLD,
+    });
+  });
+
+  it("posts the new subscription anyway when the event carries no old one", async () => {
+    const posts = await resubscribe(null);
+    expect(posts).toHaveLength(1);
+    expect((posts[0].body as { previousEndpoint?: unknown }).previousEndpoint).toBeNull();
   });
 });
 

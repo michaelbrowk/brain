@@ -93,6 +93,48 @@ describe("POST /api/push/subscriptions", () => {
       expect(await response.json()).toEqual({ error: "bad_subscription" });
     }
   });
+
+  // `pushsubscriptionchange`: the browser replaced the endpoint and the worker
+  // posts the new one under the label it has, which is "This device". The row
+  // the owner already recognises is the one being replaced, so the name and
+  // the first day move across and the dead row goes.
+  it("moves the label off the endpoint a re-subscribe replaces, and drops it", async () => {
+    await subsPost(
+      body({
+        subscription: { endpoint: ENDPOINT, keys: { p256dh: P256DH, auth: AUTH } },
+        deviceLabel: "iPhone",
+      }),
+    );
+    const response = await subsPost(
+      body({
+        subscription: {
+          endpoint: `${ENDPOINT}-replaced`,
+          keys: { p256dh: P256DH, auth: AUTH },
+        },
+        deviceLabel: "This device",
+        previousEndpoint: ENDPOINT,
+      }),
+    );
+    expect(response.status).toBe(201);
+    expect((await response.json()).device.deviceLabel).toBe("iPhone");
+    const rows = JSON.parse(
+      await readFile(path.join(dirHolder.current, "subscriptions.json"), "utf8"),
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].endpoint).toBe(`${ENDPOINT}-replaced`);
+  });
+
+  it("registers normally when previousEndpoint is not an endpoint", async () => {
+    const response = await subsPost(
+      body({
+        subscription: { endpoint: ENDPOINT, keys: { p256dh: P256DH, auth: AUTH } },
+        deviceLabel: "iPhone",
+        previousEndpoint: "not-a-url",
+      }),
+    );
+    expect(response.status).toBe(201);
+    expect((await response.json()).device.deviceLabel).toBe("iPhone");
+  });
 });
 
 describe("DELETE /api/push/subscriptions", () => {

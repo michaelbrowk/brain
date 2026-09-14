@@ -96,3 +96,93 @@ describe("enablePushOnThisDevice", () => {
     expect(await enablePushOnThisDevice()).toEqual({ ok: false, reason: "unsupported" });
   });
 });
+
+/** THE ONE CURE FOR A ROTATED KEY IS THIS BUTTON, so it has to work.
+ *
+ *  RFC 8292 bakes the server's public key into every PushSubscription. A
+ *  `vapid.json` that was lost or could not be read is replaced by a fresh
+ *  pair, and every subscription a browser still holds is then addressed to a
+ *  key this server no longer has. Reusing `getSubscription()` as it stands
+ *  registered that dead subscription again: Settings reported success, every
+ *  send failed with a 403, and 403 is not a status `subscriptionIsGone`
+ *  removes a row for, so nothing was cleaned up either.
+ */
+describe("a subscription the browser already holds", () => {
+  const KEY = Buffer.from(
+    Uint8Array.from([4, ...Array.from({ length: 64 }, (_, index) => index)]),
+  )
+    .toString("base64")
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  function browser(heldKey: Uint8Array | null) {
+    const unsubscribed: true[] = [];
+    const subscribed: { applicationServerKey: Uint8Array }[] = [];
+    const held =
+      heldKey === null
+        ? null
+        : {
+            options: { applicationServerKey: heldKey.buffer as ArrayBuffer },
+            unsubscribe: async () => {
+              unsubscribed.push(true);
+              return true;
+            },
+            toJSON: () => ({ endpoint: "https://push.example/held" }),
+          };
+    const pushManager = {
+      getSubscription: async () => held,
+      subscribe: async (options: { applicationServerKey: Uint8Array }) => {
+        subscribed.push(options);
+        return { toJSON: () => ({ endpoint: "https://push.example/fresh" }) };
+      },
+    };
+    vi.stubGlobal("Notification", { requestPermission: async () => "granted" });
+    vi.stubGlobal("navigator", {
+      userAgent: MAC,
+      maxTouchPoints: MAC_TOUCH_POINTS,
+      serviceWorker: {
+        register: async () => ({ pushManager }),
+        ready: Promise.resolve({ pushManager }),
+      },
+    });
+    vi.stubGlobal("window", { PushManager: class {}, Notification: class {} });
+    vi.stubGlobal("fetch", async (url: string) => {
+      if (String(url) === "/api/push/key") {
+        return { ok: true, json: async () => ({ publicKey: KEY }) };
+      }
+      return { ok: true, json: async () => ({ device: { id: "0123456789abcdef" } }) };
+    });
+    return { unsubscribed, subscribed };
+  }
+
+  it("keeps one made against the key this server still serves", async () => {
+    const { unsubscribed, subscribed } = browser(urlBase64ToUint8Array(KEY));
+    expect((await enablePushOnThisDevice()).ok).toBe(true);
+    expect(unsubscribed).toHaveLength(0);
+    expect(subscribed).toHaveLength(0);
+  });
+
+  it("drops one made against a key that has since rotated, and subscribes again", async () => {
+    const stale = urlBase64ToUint8Array(KEY);
+    stale[1] = stale[1] ^ 0xff;
+    const { unsubscribed, subscribed } = browser(stale);
+    expect((await enablePushOnThisDevice()).ok).toBe(true);
+    expect(unsubscribed).toHaveLength(1);
+    expect(subscribed).toHaveLength(1);
+    expect(Array.from(subscribed[0].applicationServerKey)).toEqual(
+      Array.from(urlBase64ToUint8Array(KEY)),
+    );
+  });
+
+  it("subscribes where the browser holds none", async () => {
+    const { unsubscribed, subscribed } = browser(null);
+    expect((await enablePushOnThisDevice()).ok).toBe(true);
+    expect(unsubscribed).toHaveLength(0);
+    expect(subscribed).toHaveLength(1);
+  });
+});

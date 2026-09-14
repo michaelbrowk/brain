@@ -1587,18 +1587,18 @@ test("@release @mobile the undo and the refusal stack clear of the tab bar at 39
     const lineHeight = parseFloat(getComputedStyle(subtitle).lineHeight);
     const owns = (selector: string, x: number, y: number) =>
       !!document.elementFromPoint(x, y)?.closest(selector);
-    const tabs = [...document.querySelectorAll("[data-mobile-tab]")].map(
-      (tab) => {
-        const rect = tab.getBoundingClientRect();
-        const x = rect.left + rect.width / 2;
-        const y = rect.top + rect.height / 2;
-        return {
-          key: tab.getAttribute("data-mobile-tab") ?? "",
-          ownsItsCentre: owns("[data-mobile-tab]", x, y),
-          coveredByPill: owns(".brain-toast-stack", x, y),
-        };
-      },
-    );
+    const tabs = [
+      ...document.querySelectorAll("[data-mobile-tab], .brain-mobile-new"),
+    ].map((tab) => {
+      const rect = tab.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      return {
+        key: tab.getAttribute("data-mobile-tab") ?? "new",
+        ownsItsCentre: owns("[data-mobile-tab], .brain-mobile-new", x, y),
+        coveredByPill: owns(".brain-toast-stack", x, y),
+      };
+    });
     const undo = document
       .querySelector('[aria-live="polite"] .brain-toast button')
       ?.getBoundingClientRect();
@@ -1629,19 +1629,20 @@ test("@release @mobile the undo and the refusal stack clear of the tab bar at 39
   expect(gap).toBeLessThanOrEqual(9);
   // The column stands on the tab bar's strip, not over it.
   expect(geometry.stack.bottom).toBeLessThanOrEqual(geometry.tabBar.top);
-  // Both are reachable: the bar's six slots and the undo the pill offers.
-  // Home and Mail are only checked for the pill, since in `next dev` the
-  // framework's own corner indicator can own the far corners of the bar.
+  // Both are reachable: the bar's five slots, the plus that stands beside
+  // them, and the undo the pill offers. Home, Mail and the plus are only
+  // checked for the pill, since in `next dev` the framework's own corner
+  // indicator can own the far corners of the line.
   expect(geometry.tabs.map((tab) => tab.key)).toEqual([
     "home",
     "search",
     "tasks",
-    "new",
     "pages",
     "mail",
+    "new",
   ]);
   for (const tab of geometry.tabs) expect(tab.coveredByPill).toBe(false);
-  for (const key of ["search", "tasks", "new", "pages"] as const) {
+  for (const key of ["search", "tasks", "pages"] as const) {
     expect(geometry.tabs.find((tab) => tab.key === key)?.ownsItsCentre).toBe(
       true,
     );

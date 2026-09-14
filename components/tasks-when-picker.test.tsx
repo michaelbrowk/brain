@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   DEFAULT_REMINDER_TIME,
@@ -20,6 +20,41 @@ import {
   type WhenPickerOptions,
   type WhenValue,
 } from "./tasks-when-picker";
+
+/** `close()`'s only path under `sheet && !reduce`: the imperative spring that
+ *  carries the sheet off the bottom edge. A spy in place of the real physics,
+ *  so a case can ask whether the call was queued without waiting on it. */
+const { sheetAnimate } = vi.hoisted(() => ({
+  sheetAnimate: vi.fn<(...args: unknown[]) => { stop: () => void }>(() => ({
+    stop: () => {},
+  })),
+}));
+vi.mock("framer-motion/dom", () => ({ animate: sheetAnimate }));
+
+/** Real framer-motion for every render in this file, with `useReducedMotion`
+ *  swapped for a value a case can set directly: the real hook caches the
+ *  platform's answer once per process, on the first component that calls it,
+ *  which no later case here could turn around. */
+const reducedMotion = vi.hoisted(() => ({ value: false }));
+vi.mock("framer-motion", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("framer-motion")>();
+  return { ...actual, useReducedMotion: () => reducedMotion.value };
+});
+
+/** `useSheetGesture`'s own query (`use-sheet-gesture.ts`), matched so the
+ *  wrapper renders the phone sheet instead of the desktop popover. */
+function stubSheetMedia(): void {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: true,
+    media: query,
+    onchange: null,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    addListener: () => {},
+    removeListener: () => {},
+    dispatchEvent: () => false,
+  }));
+}
 
 const TODAY = "2026-09-13"; // a Sunday
 
@@ -1174,6 +1209,33 @@ describe("the React wrapper", () => {
     await mounted.end();
 
     expect(mounted.sent).toHaveLength(0);
+  });
+});
+
+describe("close() under reduced motion", () => {
+  afterEach(() => {
+    reducedMotion.value = false;
+    vi.unstubAllGlobals();
+  });
+
+  /** M-rm2. `close()` queues the imperative spring only `if (sheet && !reduce)`.
+   *  The sheet form is pinned above (`use-sheet-gesture.test.ts`'s own suite);
+   *  this is the other half of that guard, on the surface it belongs to. */
+  it("takes the sheet away without queuing the spring", async () => {
+    reducedMotion.value = true;
+    stubSheetMedia();
+
+    const mounted = await mountWrapper();
+    expect(document.querySelector(".brain-when-sheet")).not.toBeNull();
+
+    await act(async () => {
+      press(mounted.picker(), "[data-when-done]");
+    });
+
+    expect(document.querySelectorAll(".brain-when-picker")).toHaveLength(0);
+    expect(sheetAnimate).not.toHaveBeenCalled();
+
+    await mounted.end();
   });
 });
 

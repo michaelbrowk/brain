@@ -2547,7 +2547,7 @@ a.brain-share-url:active {
    offset clears the mobile tab bar: the bar occupies safe+8 to safe+62 and a
    pill at safe+24 covered the middle three slots for the whole ten seconds of
    an undo. Same reserve `.brain-mail-scrollfoot` already keeps for that strip
-   (--inset*2 + the bar's 54), and it is kept whether or not the bar is up: a
+   (--inset*2 + --tabbar-h), and it is kept whether or not the bar is up: a
    pill that moved with the bar would move under the reader's hand. The rows
    space on the pill's own margin rather than a `gap`, because a closed pill
    still leaves its live region mounted and a gap would count the empty ones.
@@ -2561,7 +2561,7 @@ a.brain-share-url:active {
   position: fixed;
   z-index: var(--z-toast);
   right: 0;
-  bottom: calc(var(--inset) * 2 + 54px + env(safe-area-inset-bottom, 0px));
+  bottom: calc(var(--inset) * 2 + var(--tabbar-h) + env(safe-area-inset-bottom, 0px));
   left: var(--canvas-offset, 0px);
   display: flex;
   flex-direction: column;
@@ -3516,48 +3516,94 @@ a.brain-share-url:active {
   height: 28px;
 }
 
-/* Mobile tab bar — a floating thick capsule over the safe area; the canvas
-   passes under it and it blurs on its own (no edge band, no hairline).
-   Search and Pages render their own copy inside their focus scope, with this
-   same position and material, so the bar looks and sits identically whichever
-   of the six tabs is up. It used to go `contained` in those two: a plain
-   row in flow at the foot of a sheet, which is what a section does not do.
+/* THE PHONE'S BOTTOM LINE IS TWO OBJECTS, NOT ONE. The five-slot bar stands
+   on the left inset, the New page circle on the right one, both 54 tall, and
+   the air between them is whatever the window leaves. New used to be the
+   middle slot of six: a create between two destinations, in a run of
+   identical cells that had to say one of them was not navigation. Taking it
+   out of the bar gives the act its own object and gives the thumb the corner
+   it reaches without crossing the screen.
 
-   IT IS SIZED BY ITS CONTENT, NOT BY THE WINDOW. It used to stretch edge to
-   edge on the 8px inset and divide that into five equal parts: 73px slots
+   Each is a floating capsule over the safe area; the canvas passes under
+   both and the material blurs on its own (no edge band, no hairline). Search
+   and Pages render their own copy inside their focus scope, with these same
+   positions and this same material, so the line looks and sits identically
+   whichever of the five tabs is up. The bar used to go `contained` in those
+   two: a plain row in flow at the foot of a sheet, which is what a section
+   does not do.
+
+   THE BAR IS SIZED BY ITS CONTENT, NOT BY THE WINDOW. It used to stretch
+   edge to edge on the 8px inset and divide that into equal parts: 73px slots
    carrying a 38px word at 390, so nearly half of every slot was air and the
-   run of five read as a backing laid across the foot of the screen rather
-   than as an object standing on it. Everything else that floats in this
-   product is shrink-to-fit — the breadcrumb pill, the toolbar pills, the
-   toast — and so is the system's own tab bar on this OS. ONE measurement
-   gives the slot: the widest label is still "Search" at 37.6 (Label 11/500),
-   and "Tasks" measures 30.6 and does not take it. 9.2 of air on each side is
-   56.0, which is §4's 4px step. The sixth slot moved the air from 11.2 to 9.2
-   and the slot from 60 to 56. Six of them plus the row's 4px ends is 344,
-   held at every window that leaves it that much between the insets (>= 360):
-   the bar clears 23 on each side at 390, 43 at 430, 48 at 440, and never
-   touches the window (§4). Below 360 the window sets the width —
-   (w - 16 - 8) / 6, so 49.33 at 320 — and the 44px track floor is not reached
-   until 288, where the bar is 272 and still on both insets; narrower again it
-   centres back through them. The 20px minimum between two adjacent WORDS is
-   a check, not the derivation:
-   two labels centred in equal tracks leave track - (w1 + w2) / 2, so the
-   pairs to read are Home<->Search at 21.1, Search<->Tasks at 21.9 and
-   Pages<->Mail at 28.4 (New is a wordless circle). The minimum is
-   Home<->Search and the new neighbour does not overtake it.
-   `fit-content` between the two insets with `margin-inline: auto` centres it:
-   no transform, which the hidden state needs for itself. Every figure per
-   width by e2e/mail-shots.spec.ts. */
+   run read as a backing laid across the foot of the screen rather than as an
+   object standing on it. Everything else that floats in this product is
+   shrink-to-fit (the breadcrumb pill, the toolbar pills, the toast), and so
+   is the system's own tab bar on this OS. ONE measurement gives the slot:
+   the widest label is still "Search" at 37.6 (Label 11/500), and "Tasks"
+   measures 30.6 and does not take it. 9.2 of air on each side is 56.0, which
+   is §4's 4px step. Five of them plus the row's 4px ends is 288.
+
+   WHAT THE BAR MAY TAKE IS THE WINDOW LESS THREE INSETS AND THE PLUS: its
+   own inset, the plus's, and the air between them, which never closes
+   tighter than the inset the two objects stand on. So the bar
+   holds 288 down to 366, where the air is exactly 8, and the air is what the
+   width spends: 32 at 390, 17 at 375, 72 at 430, 409 at 767. Below 366 the
+   slots give evenly instead: (w - 78 - 8) / 5, so 46.8 at 320. They
+   reach their floor at 306, where every track is 44, the bar is 228 and the
+   plus still has its inset. Narrower again the two boxes stay 8 apart and the
+   CONTENT is what escapes: max-width beats fit-content, so the bar's box keeps
+   shrinking past the 228 its five 44px tracks need, the row overflows a
+   capsule that sets no overflow, and the last tab paints on bare canvas
+   outside its own material and slides under the circle. Nothing ships there,
+   so the floor is left where it is rather than bought back by dropping the 44.
+
+   The 20px minimum between two adjacent WORDS is a check, not the
+   derivation: two labels centred in equal tracks leave track - (w1 + w2) / 2,
+   so the pairs to read are Home<->Search at 21.1, Search<->Tasks at 21.9,
+   Tasks<->Pages at 24.3 and Pages<->Mail at 28.4. The minimum is
+   Home<->Search and the pair New left behind does not overtake it. The check
+   passes from 361 up, where the track is 55 and Home<->Search is 20.1.
+
+   `fit-content` from the left inset, capped by that max-width: no transform,
+   which the hidden state needs for itself, and no `margin-inline: auto`,
+   which centred the bar when it was alone on the line. ONE HIDDEN RULE, TWO
+   CONSUMERS, so a sheet cannot take the bar away and leave the plus standing
+   over it. Every figure per width by e2e/mail-shots.spec.ts. */
 .brain-mobile-tabbar {
   --tabbar-slot: 56px;
   position: fixed;
   z-index: calc(var(--z-drawer) - 20);
   left: calc(var(--inset) + env(safe-area-inset-left, 0px));
-  right: calc(var(--inset) + env(safe-area-inset-right, 0px));
+  right: auto;
   bottom: calc(var(--inset) + env(safe-area-inset-bottom, 0px));
   width: fit-content;
-  margin-inline: auto;
+  max-width: calc(
+    100% - var(--inset) * 3 - env(safe-area-inset-left, 0px) -
+      env(safe-area-inset-right, 0px) - var(--tabbar-h)
+  );
   border-radius: var(--r-sheet);
+}
+/* The ink circle at the other inset: `--ink` fill, paper glyph, the bare
+   plus, square on the height the bar stands at. It is the surface's one
+   ink-filled control (DESIGN.md v2 → Colour → Dosage) and it wears the
+   desktop New page circle's states: the fill lightens by .08 on hover
+   (light) or darkens (dark), and press is scale .97 at 100ms. The press lives on
+   the inner circle so the hide's transform and the press's never contend for
+   one property. */
+.brain-mobile-new {
+  position: fixed;
+  z-index: calc(var(--z-drawer) - 20);
+  right: calc(var(--inset) + env(safe-area-inset-right, 0px));
+  left: auto;
+  bottom: calc(var(--inset) + env(safe-area-inset-bottom, 0px));
+  display: grid;
+  place-items: center;
+  width: var(--tabbar-h);
+  height: var(--tabbar-h);
+  border-radius: 50%;
+}
+.brain-mobile-tabbar,
+.brain-mobile-new {
   transition:
     transform 200ms var(--ease-out),
     opacity 200ms var(--ease-out);
@@ -3568,10 +3614,16 @@ a.brain-share-url:active {
    column's (`.brain-mail-scrollfoot`), and the reserve belongs to the rows,
    not to the scroller, so the bottom edge-blur can still reach the foot of a
    short list. */
-/* One figure for the height the floating bar takes out of the canvas, so a
-   spacer row and a sheet that has to stop above it cannot drift apart. */
+/* ONE HEIGHT FOR THE WHOLE LINE: the bar's row, the plus's square and the
+   reserve the canvas keeps for them are the same 54, so the two objects
+   cannot end up different heights and the spacer cannot drift from either.
+   And one figure for what the line takes out of the canvas, so a spacer row
+   and a sheet that has to stop above it cannot drift apart. */
 :root {
-  --tabbar-reserve: calc(54px + var(--inset) * 2 + env(safe-area-inset-bottom, 0px));
+  --tabbar-h: 54px;
+  --tabbar-reserve: calc(
+    var(--tabbar-h) + var(--inset) * 2 + env(safe-area-inset-bottom, 0px)
+  );
 }
 @media (min-width: 768px) {
   :root {
@@ -3581,15 +3633,16 @@ a.brain-share-url:active {
 .brain-mobile-tabbar-reserve {
   height: var(--tabbar-reserve);
 }
-.brain-mobile-tabbar[data-hidden] {
+.brain-mobile-tabbar[data-hidden],
+.brain-mobile-new[data-hidden] {
   pointer-events: none;
   opacity: 0;
   transform: translateY(calc(100% + var(--inset) + env(safe-area-inset-bottom, 0px)));
 }
 .brain-mobile-tabbar-items {
   display: grid;
-  grid-template-columns: repeat(6, minmax(44px, var(--tabbar-slot)));
-  height: 54px;
+  grid-template-columns: repeat(5, minmax(44px, var(--tabbar-slot)));
+  height: var(--tabbar-h);
   padding: 0 4px;
 }
 .brain-mobile-tab {
@@ -3618,15 +3671,13 @@ a.brain-share-url:active {
   background-color: var(--fill-glass-hover);
   color: var(--ink);
 }
-/* New is the one ink-filled primary on the mobile surface (DESIGN.md v2 →
-   Colour → Dosage): the accent circle — ink fill, paper glyph, inverted in
-   dark by the tokens. Press moves the fill by .08 and scales like every
-   accent; the cell behind it keeps no tint. */
-.brain-mobile-tab-new {
+/* The circle itself fills the button, so the 54 square the thumb aims at and
+   the ink it lands on are one shape. */
+.brain-mobile-new-circle {
   display: grid;
   place-items: center;
-  width: 34px;
-  height: 34px;
+  width: 100%;
+  height: 100%;
   border-radius: 50%;
   background-color: var(--accent);
   color: var(--accent-ink);
@@ -3634,20 +3685,23 @@ a.brain-share-url:active {
     background-color 160ms var(--ease-out),
     transform 100ms ease-out;
 }
-.brain-mobile-tab[data-mobile-tab="new"]:active {
-  background-color: transparent;
+@media (hover: hover) {
+  .brain-mobile-new:hover .brain-mobile-new-circle {
+    background-color: var(--accent-hover);
+  }
 }
-.brain-mobile-tab[data-mobile-tab="new"]:active .brain-mobile-tab-new {
+.brain-mobile-new:active .brain-mobile-new-circle {
   background-color: var(--accent-hover);
   transform: scale(0.97);
 }
 @media (prefers-reduced-motion: reduce) {
-  .brain-mobile-tab[data-mobile-tab="new"]:active .brain-mobile-tab-new {
+  .brain-mobile-new:active .brain-mobile-new-circle {
     transform: none;
   }
 }
 @media (min-width: 768px) {
-  .brain-mobile-tabbar {
+  .brain-mobile-tabbar,
+  .brain-mobile-new {
     display: none;
   }
 }
@@ -4026,15 +4080,17 @@ a.brain-share-url:active {
   flex: 1;
   overflow-y: auto;
 }
-/* Below md the mobile tab bar floats over the column's foot. The rows reserve
-   the bar's height at their end, so the last row of the column can be scrolled
-   clear of it — a list whose last line you cannot reach has no end — while the
-   rows above it still pass underneath, which is the §7 case the bottom
-   edge-blur answers. The reserve belongs to the rows, not to the scroller: it
-   has to count as content, or the sticky edge below it can never reach the
-   foot of a column that would otherwise fit. */
+/* Below md the phone's bottom line floats over the column's foot. The rows
+   reserve the line's height at their end, so the last row of the column can be
+   scrolled clear of it (a list whose last line you cannot reach has no end)
+   while the rows above it still pass underneath, which is the §7 case the
+   bottom edge-blur answers. The figure is --tabbar-h, the one number the bar's
+   row, the circle's square and --tabbar-reserve are all built from. The
+   reserve belongs to the rows, not to the scroller: it has to count as
+   content, or the sticky edge below it can never reach the foot of a column
+   that would otherwise fit. */
 .brain-mail-scrollfoot {
-  padding-bottom: calc(54px + var(--inset) * 2 + env(safe-area-inset-bottom, 0px));
+  padding-bottom: calc(var(--tabbar-h) + var(--inset) * 2 + env(safe-area-inset-bottom, 0px));
 }
 @media (min-width: 768px) {
   .brain-mail-scrollfoot {
@@ -5439,6 +5495,7 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
   .brain-sidebar,
   .brain-topbar,
   .brain-mobile-tabbar,
+  .brain-mobile-new,
   .brain-dialog-overlay,
   .brain-dialog,
   .brain-share-dialog,

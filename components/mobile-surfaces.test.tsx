@@ -493,7 +493,7 @@ describe("mobile navigation surfaces", () => {
     expect(tab("home").getAttribute("aria-current")).toBe("page");
   });
 
-  it("stands six slots, Home, Search, Tasks, New, Pages, Mail", async () => {
+  it("stands five slots, Home, Search, Tasks, Pages, Mail, and one New page beside them", async () => {
     await act(async () => root.render(<Shell tree={[]} />));
     await settle();
 
@@ -502,7 +502,7 @@ describe("mobile navigation surfaces", () => {
         ".brain-mobile-tabbar [data-mobile-tab]",
       ),
     ).map((el) => el.dataset.mobileTab);
-    expect(keys).toEqual(["home", "search", "tasks", "new", "pages", "mail"]);
+    expect(keys).toEqual(["home", "search", "tasks", "pages", "mail"]);
 
     // Tasks carries its word and takes the tab ring like every other slot.
     // The surface it opens is Task 2a's; until that lands the slot is here,
@@ -514,14 +514,41 @@ describe("mobile navigation surfaces", () => {
     expect(tasks.tabIndex).toBe(0);
     expect(tasks.getAttribute("aria-current")).toBeNull();
 
-    // New keeps its word off the bar and its name on the button.
-    const newTab = document.querySelector(
-      '.brain-mobile-tabbar [data-mobile-tab="new"]',
-    ) as HTMLButtonElement;
-    expect(newTab.getAttribute("aria-label")).toBe("New");
+    // The plus is not a tab and does not live in the bar: it is its own
+    // object standing at the other inset, wordless, and it carries the name
+    // the desktop circle carries for the same act.
+    const bars = document.querySelectorAll(".brain-mobile-tabbar");
+    expect(bars).toHaveLength(1);
+    const plus = document.querySelectorAll<HTMLButtonElement>(
+      ".brain-mobile-new",
+    );
+    expect(plus).toHaveLength(1);
+    expect(plus[0].getAttribute("aria-label")).toBe("New page");
+    expect(plus[0].getAttribute("data-mobile-tab")).toBeNull();
+    expect(bars[0].contains(plus[0])).toBe(false);
+    expect(bars[0].nextElementSibling).toBe(plus[0]);
+    expect(plus[0].className).toContain("brain-touch-min");
+    expect(plus[0].className).toContain("focus-inset");
   });
 
-  it("sizes the bar by six 56px slots", () => {
+  it("reads left to right by keyboard, the plus last after Mail", async () => {
+    await act(async () => root.render(<Shell tree={[]} />));
+    await settle();
+
+    // Document order is tab order, and the bar sits at the left inset with
+    // the plus at the right one, so the two agree.
+    const group = Array.from(
+      document.querySelectorAll<HTMLButtonElement>(
+        ".brain-mobile-tabbar [data-mobile-tab], .brain-mobile-new",
+      ),
+    );
+    expect(
+      group.map((el) => el.dataset.mobileTab ?? el.getAttribute("aria-label")),
+    ).toEqual(["home", "search", "tasks", "pages", "mail", "New page"]);
+    expect(group.every((el) => el.tabIndex === 0)).toBe(true);
+  });
+
+  it("sizes the bar by five 56px slots and leaves the plus its inset", () => {
     const css = readFileSync(
       path.join(process.cwd(), "app", "globals.css"),
       "utf8",
@@ -532,11 +559,56 @@ describe("mobile navigation surfaces", () => {
         css,
       );
     expect(slot?.[1]).toBe("56");
-    expect(tracks?.[1]).toBe("6");
-    // Six of those plus the row's own 4px ends is the 344 the DOM renders,
+    expect(tracks?.[1]).toBe("5");
+    // Five of those plus the row's own 4px ends is the 288 the DOM renders,
     // read at every width by e2e/mail-shots.spec.ts. jsdom lays nothing out,
-    // so this case pins the two figures the bar is built from and the e2e
-    // block is what watches the box they produce.
+    // so this case pins the figures the two objects are built from and the
+    // e2e block is what watches the boxes they produce.
+    expect(css).toMatch(/--tabbar-h:\s*54px/);
+
+    // The bar stands on the left inset and stops short of the plus: three
+    // insets (its own, the plus's, and the air between) plus the plus.
+    const bar = /\.brain-mobile-tabbar \{([^}]*)\}/.exec(css)?.[1] ?? "";
+    expect(bar).toMatch(/left:\s*calc\(var\(--inset\) \+ env\(safe-area-inset-left/);
+    expect(bar).toMatch(/right:\s*auto/);
+    expect(bar).toMatch(/var\(--inset\) \* 3/);
+    expect(bar).toMatch(/var\(--tabbar-h\)/);
+    expect(bar).not.toMatch(/margin-inline/);
+
+    // and the plus stands on the right one, square on the bar's height
+    const plus = /\.brain-mobile-new \{([^}]*)\}/.exec(css)?.[1] ?? "";
+    expect(plus).toMatch(/right:\s*calc\(var\(--inset\) \+ env\(safe-area-inset-right/);
+    expect(plus).toMatch(/left:\s*auto/);
+    expect(plus).toMatch(/width:\s*var\(--tabbar-h\)/);
+    expect(plus).toMatch(/height:\s*var\(--tabbar-h\)/);
+
+    // One hidden rule, two consumers: they cannot drift apart.
+    expect(css).toMatch(
+      /\.brain-mobile-tabbar\[data-hidden\],\s*\n\.brain-mobile-new\[data-hidden\] \{/,
+    );
+  });
+
+  it("keeps the line's height on one declaration and nowhere else", () => {
+    // `--tabbar-h` is only a single source while nothing else spells the
+    // number out. Two rules did: `.brain-toast-stack`'s bottom and
+    // `.brain-mail-scrollfoot`'s padding both rebuilt the reserve from a
+    // literal 54, so the prose could name a token the CSS was not using, and
+    // a change to the line's height would have moved the bar and left the
+    // toast and the mail column behind. Every occurrence of the figure has to
+    // be the declaration itself. A rule that genuinely wants a 54 for some
+    // other reason belongs on this list with a word about why.
+    const css = readFileSync(
+      path.join(process.cwd(), "app", "globals.css"),
+      "utf8",
+    );
+    const spelled = css
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /\b54px\b/.test(line));
+    expect(
+      spelled,
+      "54px belongs to --tabbar-h; use var(--tabbar-h) for the line's height",
+    ).toEqual(["--tabbar-h: 54px;"]);
   });
 
   it("returns to the open page when Home is tapped over the Pages sheet", async () => {

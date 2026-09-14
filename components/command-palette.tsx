@@ -888,10 +888,10 @@ export function CommandPalette({
                 </PaletteList>
               </Command>
             </PaletteSheet>
-            {/* The tab bar is a sibling of the sheet, not a passenger inside
-                it: one bar, in one place, whichever of the six tabs is up.
-                It stays inside the Radix content so the focus trap can reach
-                it. */}
+            {/* The line is a sibling of the sheet, not a passenger inside
+                it: one bar and one New page circle, in one place, whichever of
+                the five tabs is up. Both stay inside the Radix content so the
+                focus trap can reach them. */}
             {mobileFooter}
           </Dialog.Content>
         </Dialog.Portal>

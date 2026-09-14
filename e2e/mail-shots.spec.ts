@@ -1724,46 +1724,53 @@ test.describe("mail on a phone", () => {
   }
 });
 
-// ── The tab bar, above 390 and inside a sheet ───────────────────────────────
-// Every frame in this PR was shot at 390 and the complaint came off a 440pt
-// phone, so the width the owner actually holds had never been looked at. 430
-// and 440 are the two that ship above it. The bar is `fit-content`, so above
-// 360 it stops growing at its 344 and only the air either side changes — the
-// question those frames answer is not whether it fits but whether 48px of
-// canvas on each side reads as an object standing on the screen or as a
-// control that has come loose from it.
+// ── The phone's bottom line, above 390 and inside a sheet ───────────────────
+// Every frame in the mail PR was shot at 390 and the complaint came off a
+// 440pt phone, so the width the owner holds had never been looked
+// at. 430 and 440 are the two that ship above it. The line is two objects
+// now, the five-slot bar on the left inset and the New page circle on the
+// right one, so above 366 the bar stops growing at its 288 and only the air
+// between them changes. The question those frames answer is not whether it
+// fits but whether a bar in one corner and a circle in the other read as two
+// objects standing on the screen with the page running between them.
 //
 // Search and Pages used to carry a contained copy of the bar as a plain row at
-// their own foot. They are sections now: one bar, floating in one place with
-// one material, whichever of the six tabs is up. The two frames below stand
-// over those surfaces and answer whether it really is the same object.
+// their own foot. They are sections now: one bar and one plus, floating in
+// one place with one material, whichever of the five tabs is up. The two
+// frames below stand over those surfaces and answer whether they are the
+// same two objects.
 //
 // The block also writes `docs/design/mail/tabbar.md` — the label widths, the
-// track width at each of seven viewports and the gap between every adjacent
-// pair of words — because §4's derivation is the whole defence of the change
-// and it should be checkable against the DOM rather than against a sentence.
+// track width and the air between the two objects at each of seven viewports,
+// and the gap between every adjacent pair of words, because §4's derivation
+// is the whole defence of the change and it should be checkable against the
+// DOM rather than against a sentence.
 test.describe("the mobile tab bar", () => {
   test.use({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
 
-  /** The bar's own geometry at one viewport: what the grid resolved to, what
-   *  each word measures, and the gap between two words that stand side by
-   *  side. Two labels centred in equal tracks leave `track - (w1 + w2) / 2`
-   *  between them, so the pair to watch is the widest one, not the widest
-   *  single word. */
+  /** The line's geometry at one viewport: what the grid resolved to, what
+   *  each word measures, the gap between two words that stand side by side,
+   *  and the air the window left between the bar and the plus. Two labels
+   *  centred in equal tracks leave `track - (w1 + w2) / 2` between them, so
+   *  the pair to watch is the widest one, not the widest single word. */
   const measure = (page: Page) =>
     page.evaluate(() => {
       const bar = document.querySelector<HTMLElement>(
         ".brain-mobile-tabbar:not([data-hidden])",
       );
       const items = bar?.querySelector<HTMLElement>(".brain-mobile-tabbar-items");
+      const plus = document.querySelector<HTMLElement>(
+        ".brain-mobile-new:not([data-hidden])",
+      );
       if (!bar || !items) throw new Error("no floating tab bar on this screen");
+      if (!plus) throw new Error("no New page circle beside the bar");
       const tracks = getComputedStyle(items)
         .gridTemplateColumns.split(" ")
         .map((value) => Number.parseFloat(value));
       const labels = Array.from(
         items.querySelectorAll<HTMLElement>(".brain-mobile-tab"),
       ).map((tab) => {
-        const span = tab.querySelector("span:not(.brain-mobile-tab-new)");
+        const span = tab.querySelector("span");
         const box = span?.getBoundingClientRect();
         return {
           key: tab.dataset.mobileTab ?? "?",
@@ -1784,16 +1791,22 @@ test.describe("the mobile tab bar", () => {
         });
       }
       const box = bar.getBoundingClientRect();
-      // How much of the canvas the bar leaves showing beside it: the page's
-      // own text runs to the window's edge (§7 gives the canvas no band), so
-      // whatever sits between the paragraph rule and the capsule is read.
+      const plusBox = plus.getBoundingClientRect();
+      // How much of the canvas the line leaves showing between its two
+      // objects: the page's own text runs to the window's edge (§7 gives the
+      // canvas no band), so whatever stands between the bar and the circle is
+      // read.
       const para = document.querySelector(".brain-main p");
       const paraLeft = para?.getBoundingClientRect().left ?? null;
       return {
         window: window.innerWidth,
         barWidth: Math.round(box.width * 10) / 10,
+        plusWidth: Math.round(plusBox.width * 10) / 10,
+        plusHeight: Math.round(plusBox.height * 10) / 10,
+        barHeight: Math.round(box.height * 10) / 10,
+        air: Math.round((plusBox.left - box.right) * 10) / 10,
         clearLeft: Math.round(box.left * 10) / 10,
-        clearRight: Math.round((window.innerWidth - box.right) * 10) / 10,
+        clearRight: Math.round((window.innerWidth - plusBox.right) * 10) / 10,
         track: Math.round(tracks[0] * 100) / 100,
         exposed: paraLeft == null ? null : Math.round((box.left - paraLeft) * 10) / 10,
         labels,
@@ -1821,10 +1834,11 @@ test.describe("the mobile tab bar", () => {
       await setScheme(page, scheme);
 
       // 430 and 440 — the widths above the one every other frame was shot at
-      // — and 767, the last width before the bar is display:none and the
-      // sidebar takes over, where a 344 capsule has the most air it will ever
-      // have. A notes page, because that is the surface the bar spends its
-      // life on and the one where the canvas runs beside it.
+      // and 767, the last width before the line is display:none and the
+      // sidebar takes over, where the 288 bar and the circle stand at the two
+      // corners with 409 of page between them. A notes page, because that is
+      // the surface the line spends its life on and the one where the canvas
+      // runs between its two objects.
       for (const width of [430, 440, 767] as const) {
         await page.setViewportSize({ width, height: 932 });
         await page.goto(`/p/${childId}`);
@@ -1849,11 +1863,14 @@ test.describe("the mobile tab bar", () => {
       await page.locator('[data-mobile-tab="pages"]').click();
       await expect(page.getByTestId("mobile-pages-view")).toBeVisible();
       await expect(page.locator(".brain-mobile-tabbar")).toHaveCount(1);
+      await expect(page.locator(".brain-mobile-new")).toHaveCount(1);
       await expect(page.locator(".brain-mobile-tabbar")).toHaveClass(
         /mat-thick/,
       );
       await page.waitForTimeout(600);
-      expect((await measure(page)).barWidth).toBe(onCanvas.barWidth);
+      const overPages = await measure(page);
+      expect(overPages.barWidth).toBe(onCanvas.barWidth);
+      expect(overPages.air).toBe(onCanvas.air);
       await page.screenshot({
         path: path.join(OUT, `tabbar-over-pages-${scheme}.png`),
       });
@@ -1865,6 +1882,7 @@ test.describe("the mobile tab bar", () => {
       await page.locator('[data-mobile-tab="search"]').click();
       await expect(page.locator(".brain-palette-mobile")).toBeVisible();
       await expect(page.locator(".brain-mobile-tabbar")).toHaveCount(1);
+      await expect(page.locator(".brain-mobile-new")).toHaveCount(1);
       await page.waitForTimeout(600);
       await page.screenshot({
         path: path.join(OUT, `tabbar-over-search-${scheme}.png`),
@@ -1872,12 +1890,12 @@ test.describe("the mobile tab bar", () => {
       await page.keyboard.press("Escape");
     }
 
-    // 390 (the width the rest of the set was shot at), 375 — the width where
-    // the sixth slot costs the most and the capsule closes on the paragraph
-    // rule — and the two narrow ends: 320 is the narrowest phone still in the
-    // field, and 288 is where the tracks reach their 44px floor and the bar
-    // stops giving ground.
-    for (const width of [390, 375, 320, 288] as const) {
+    // 390 (the width the rest of the set was shot at), 375, 366, the width
+    // where the air closes to its 8 and the slots take over the giving, and
+    // the two narrow ends: 320 is the narrowest phone still in the field, and
+    // 306 is where the tracks reach their 44px floor and the bar stops giving
+    // ground.
+    for (const width of [390, 375, 366, 320, 306] as const) {
       await page.setViewportSize({ width, height: 844 });
       await page.goto(`/p/${childId}`);
       await expect(page.getByRole("textbox", { name: "Page title" })).toHaveValue(
@@ -1891,7 +1909,7 @@ test.describe("the mobile tab bar", () => {
     const rows = readings
       .map(
         (r) =>
-          `| ${r.window} | ${r.barWidth} | ${r.track} | ${r.clearLeft} | ${r.clearRight} | ${r.exposed ?? "—"} |`,
+          `| ${r.window} | ${r.barWidth} | ${r.track} | ${r.air} | ${r.clearLeft} | ${r.clearRight} | ${r.exposed ?? "n/a"} |`,
       )
       .join("\n");
     const at390 = readings.find((r) => r.window === 390);
@@ -1905,33 +1923,37 @@ test.describe("the mobile tab bar", () => {
 
     await fs.writeFile(
       path.join(OUT, "tabbar.md"),
-      `# Mobile tab bar — measured
+      `# The phone's bottom line, measured
 
 Written by \`e2e/mail-shots.spec.ts\` (\`MAIL_SHOTS=1\`), Chromium on the SF
 stack, light scheme. DESIGN.md §4 states the derivation; this is the DOM.
 
-\`--tabbar-slot\` is 56 and the grid is \`repeat(6, minmax(44px, var(--tabbar-slot)))\`
-inside \`padding: 0 4px\`, between two 8px insets, \`width: fit-content\` with
-\`margin-inline: auto\`.
+Two objects, both \`--tabbar-h\` (54) tall. \`--tabbar-slot\` is 56 and the
+bar's grid is \`repeat(5, minmax(44px, var(--tabbar-slot)))\` inside
+\`padding: 0 4px\`, \`width: fit-content\` from the left inset and capped at
+the window less three insets and the plus. The New page circle is 54 square
+on the right inset.
 
 ## Per viewport
 
-| window | bar | track | clear left | clear right | canvas beside |
-|---:|---:|---:|---:|---:|---:|
+| window | bar | track | air | clear left | clear right | canvas under the bar |
+|---:|---:|---:|---:|---:|---:|---:|
 ${rows}
 
-Above 360 the bar is at its max-content 344 and only the air changes. Below
-it the window sets the width: \`(window - 8 - 8 - 4 - 4) / 6\`. The tracks
-reach their 44px floor at 288, and below that the bar is wider than the space
-between the insets and centres back through them — at 272 it would reach the
-window.
+Down to 366 the bar is at its max-content 288 and only the air changes. Below
+that the air is at its 8 floor and the window sets the bar: \`(window - 78 - 8) / 5\`
+per track. The tracks reach their 44px floor at 306, and below that the two boxes stay 8
+apart while the bar's content escapes: \`max-width\` beats \`fit-content\`, the box
+shrinks past the 228 its five 44px tracks need, and the row overflows a capsule
+that sets no \`overflow\`, putting the last tab outside its own material and under
+the circle.
 
-\`canvas beside\` is the gap between a notes paragraph's left rule and the
-capsule's left edge — the strip of page text the bar leaves showing on each
-side, which the full-width bar used to cover. Negative means the bar is still
-wider than the text rule and covers the paragraph outright, which is the case
-at 375 and below: the capsule first clears the 20px rule at 384. See
-DESIGN.md §4, third bullet.
+\`air\` is the gap between the bar's right edge and the circle's left one, and
+it is the strip of page text the line leaves showing: the canvas runs between
+the two objects rather than beside one. \`canvas under the bar\` is the gap
+between a notes paragraph's left rule and the bar's left edge, which is the
+fixed −12 both objects now sit inside, the 8px inset against the canvas's 20px
+rule. See DESIGN.md §4, third bullet.
 
 ## Labels at 390 (Label 11/500)
 
@@ -1939,8 +1961,8 @@ DESIGN.md §4, third bullet.
 |---|---:|
 ${labels}
 
-The New slot carries no word — it is the 34px accent circle — so the words
-that stand side by side are Home↔Search, Search↔Tasks and Pages↔Mail.
+Every slot carries a word now that the plus stands outside the bar, so the
+pairs are Home↔Search, Search↔Tasks, Tasks↔Pages and Pages↔Mail.
 
 ## Gap between adjacent words at 390
 

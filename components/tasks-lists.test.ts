@@ -240,6 +240,16 @@ describe("the reader's own offset, west of UTC", () => {
   it("plays the leaving fold when that row is rescheduled out of Today", () => {
     expect(movesRow(doneToday, "2026-09-20", TODAY, LA)).toBe(true);
   });
+
+  // Same record, parked to Someday instead: at the reader's offset `doneAt`
+  // falls on the 13th, so the row is still in Today and the park moves it.
+  // Asked at UTC, `doneAt` falls on the 14th and the row is already in the
+  // Logbook on both sides of the park, so nothing moves. One call answers
+  // both ways depending only on the offset it is handed.
+  it("plays the leaving fold for a park to Someday only at the reader's offset", () => {
+    expect(movesRow(doneToday, "someday", TODAY, LA)).toBe(true);
+    expect(movesRow(doneToday, "someday", TODAY, UTC)).toBe(false);
+  });
 });
 
 describe("movesRow", () => {

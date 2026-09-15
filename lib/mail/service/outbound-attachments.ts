@@ -58,7 +58,7 @@ export function encodeAttachmentFilename(filename: string): string {
  * delimiter with no trailing break: the caller appends the message's own.
  * The caller keeps ownership of every `bytes` buffer and wipes them itself.
  *
- * Every byte is measured before anything is allocated, so a 10 MiB set of
+ * Every byte is measured before anything is allocated, so a 5 MiB set of
  * files produces one buffer of the finished size rather than a string of it
  * and a buffer of it. A send at the cap is the peak this service has to
  * survive inside `MemoryHigh=192M`.

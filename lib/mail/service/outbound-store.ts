@@ -75,7 +75,21 @@ const SAFE_MESSAGE_ID = /^<[^<>\s\u0000-\u001f\u007f]+>$/u;
 const SAFE_ATTEMPT_ID = /^attempt-[0-9a-f-]{36}$/;
 const SAFE_DRAFT_FINGERPRINT = /^[a-f0-9]{64}$/;
 const MAX_ACCOUNT_CACHE_ENTRIES = 64;
-const MAX_SERIALIZED_SUBMISSION_BYTES = 2 * 1024 * 1024;
+/* The row carries the whole finished message, so this budget follows
+ * `MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes`, which follows in turn from
+ * the one outgoing number, `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes`.
+ * `rawRfc2822Base64Url` is four characters per three bytes and its alphabet
+ * needs no JSON escaping, so a message at that ceiling is exactly 4/3 of it as
+ * a string, and the megabyte on top holds the rest of the record: the
+ * envelope's addresses, the message id, the two digests and the ids.
+ *
+ * Arithmetic rather than a figure, because a figure is what made the outgoing
+ * attachment cap unreachable. This constant stayed at 2 MiB while the outgoing
+ * caps moved around it, so every send carrying more than about 1.09 MiB of
+ * files was refused here, after the message had been built, as a service
+ * outage that named no size. */
+const MAX_SERIALIZED_SUBMISSION_BYTES =
+  Math.ceil(MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes / 3) * 4 + 1024 * 1024;
 const MAX_SERIALIZED_SMTP_STATE_BYTES = 128 * 1024;
 const MAX_LEGACY_ROWS_PER_ACCOUNT = 10_000;
 const TERMINAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;

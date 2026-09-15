@@ -168,11 +168,12 @@ async function admitSending(): Promise<SendingGate> {
 
 /** One attachment-carrying send at a time in this process.
  *
- *  A 10 MiB attachment costs about 60 MiB of resident memory while it is on
+ *  A 5 MiB attachment costs about 30 MiB of resident memory while it is on
  *  its way: the file itself, its base64, the JSON string of the whole send
- *  input and the Buffer of that string. Four at once measured +144 MiB
- *  against the unit's `MemoryHigh=512M`, and the mail service builds one MIME
- *  message at a time, so a second caller that had already read its bytes
+ *  input and the Buffer of that string. Four at once measured +144 MiB when
+ *  the cap was 10 MiB, against the unit's `MemoryHigh=512M`, and the mail
+ *  service builds one MIME message at a time, so a second caller that had
+ *  already read its bytes
  *  would hold them for the whole of the first send rather than getting rid of
  *  them. Task 4 answered the same question service-side with a queue, and
  *  this is its Brain-side half.

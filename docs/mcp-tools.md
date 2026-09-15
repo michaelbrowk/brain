@@ -323,7 +323,7 @@ exists, because a page id the agent can read would otherwise be a key to every
 file in the notes folder. What an agent can send is what the note it named
 already shows, which is what a person could forward by opening that note.
 
-Ten files and 10 MiB of them are the limits for one message. Each file is read
+Ten files and 5 MiB of them are the limits for one message. Each file is read
 against what is left of that budget and the total is summed as it goes, so a
 set over the cap is turned down before a single byte is encoded and a file
 above the budget is turned down without being read at all. The bytes reach the
@@ -332,8 +332,8 @@ filesystem, and never through a temporary file. A file's type is the one its
 name records, and a type a MIME header cannot carry is refused with that as
 the reason.
 
-One message with files goes out at a time. A 10 MiB attachment costs about
-60 MiB of memory while it is on its way, counting the file, its base64, the
+One message with files goes out at a time. A 5 MiB attachment costs about
+30 MiB of memory while it is on its way, counting the file, its base64, the
 JSON of the whole request and the buffer of that, and the mail service builds
 one message at a time anyway. So a second call carrying files waits for the
 first to answer before it reads a byte, rather than holding its own encoded

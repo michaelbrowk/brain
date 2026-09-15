@@ -197,7 +197,7 @@ passes.
 | HTML | Sanitized, remote content blocked, sandboxed, strict CSP |
 | Attachments | Download by default. Only verified CID raster images may render inline |
 | Sender-icon egress | Deliberate, documented exception: the Brain app, never the mail service, may resolve DNS and open TLS to a sender's own domain to fetch its `/favicon.ico`, server-side and SSRF-guarded, cached on disk under an LRU cap. Sender domains are the only data that leaves; message content, addresses, and subjects never do |
-| Capacity | Separate receive, 18 MiB send, relay-frame, parser, connection, queue, cache, temp, WAL, and process limits sized for a handful of accounts on a small host shared with the rest of Brain |
+| Capacity | Separate receive, 10 MiB send, relay-frame, parser, connection, queue, cache, temp, WAL, and process limits sized for a handful of accounts on a small host shared with the rest of Brain |
 | PR0 dependencies | None added |
 
 ## 3. Build versus buy
@@ -658,7 +658,7 @@ unresolved mark once through `getSendOperation`, caching the `threadId` back.
 The Sent-row caption is that join, which is why the paragraph above about a
 null `threadId` decides whether a caption can ever appear.
 
-The 10 MiB outgoing attachment cap is this path's own limit and it is set by
+The 5 MiB outgoing attachment cap is this path's own limit and it is set by
 memory, not by a provider. `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes` is the
 one number every other outgoing cap derives from, and §11 records the
 measurement behind it. One MIME build at a time for the whole process is the
@@ -767,8 +767,8 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 | --- | ---: |
 | Accounts | 7 |
 | Incoming raw message | 40 MiB |
-| Outgoing raw message | 18 MiB |
-| Outgoing attachments | 10 MiB total, 10 files |
+| Outgoing raw message | 10 MiB |
+| Outgoing attachments | 5 MiB total, 10 files |
 | Relay frame | 16 KiB |
 | Relay client bytes | 2 MiB per tunnel, including SMTP/TLS overhead |
 | Relay server bytes | 128 KiB |
@@ -805,7 +805,22 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 | Parser memory | `MemoryHigh=128 MiB`, `MemoryMax=192 MiB` contract |
 | Parser CPU/tasks/FDs | 20% CPU quota / 8 tasks / 64 file descriptors contract |
 
-The two outgoing rows are set by the process contract three rows above them, not by what a provider would accept. `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes` is the one number: 10 MiB of decoded attachments per message, measured twice on 2026-09-15 at 155 and 165 MiB peak RSS for one send through the whole wire path, against `MemoryHigh=192 MiB` and a 37.5 MiB bare-node baseline. 165 is the figure to hold against `MemoryMax=256M`, which leaves about 90 MiB of margin. Every other outgoing cap follows from it. Base64 at 76 columns multiplies a payload by 1.3684, so 10 MiB of files becomes 13.68 MiB of MIME parts, the 1 MiB text part expands the same way, and the headers take the finished message to the 18 MiB `outgoingRawMessageBytes` states. The JSON body that carries it is capped at 24 MiB, which is the base64 plus a text body escaped at its worst six bytes per source byte. The note store's own 25 MiB per-file cap is a different limit on a different path and does not move with these.
+The two outgoing rows are set by the process contract three rows above them, not by what a provider would accept. `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes` is the one number: 5 MiB of decoded attachments per message.
+
+The figure was 10 MiB until 2026-09-15. That number came from a measurement that stopped at the MIME build, and the build is not where the peak is. A send holds the finished message twice more after it: `rawRfc2822Base64Url` is the whole message as a string on the submission record, and `JSON.stringify` makes a second copy of that string for the outbox row. Measured again through the path a request actually runs, the body off the socket, `JSON.parse`, `validateMailSendInput`, the build, and `store.enqueue` into SQLite, five runs each on Node 22 against a 39 MiB bare-node baseline:
+
+| Attachment payload | Through the build | Built and enqueued | Read back to deliver |
+| ---: | ---: | ---: | ---: |
+| 5 MiB | 104.3 MiB | **173.0 MiB** | 80.2 MiB |
+| 6 MiB | 115.7 MiB | 179.3 MiB | 87.4 MiB |
+| 7 MiB | 127.4 MiB | 186.0 MiB, one run 201.3 | 94.7 MiB |
+| 10 MiB | 164.3 MiB | 278.4 MiB | 117.0 MiB |
+
+The middle column is the one the contract has to hold: `MemoryHigh=192M` and `MemoryMax=256M` in `ops/brain-mail.service`. 10 MiB crosses `MemoryMax`. 5 MiB is the largest figure whose every run stayed under `MemoryHigh` with room for the service's own resident set, about 19 MiB of it, and 83 MiB under `MemoryMax`. The deliver read-back is a later turn in the same process and never overlaps the build, so its own peak is not additive.
+
+Every other outgoing cap follows from that number. Base64 at 76 columns multiplies a payload by 1.3684, so 5 MiB of files becomes 6.84 MiB of MIME parts, the 1 MiB text part expands the same way, and the headers take the finished message to the 10 MiB `outgoingRawMessageBytes` states. The outbox row holds that message base64url'd, which is 4/3 of it and needs no JSON escaping, so `MAX_SERIALIZED_SUBMISSION_BYTES` in `outbound-store.ts` is that figure plus a megabyte for the envelope and the digests around it, written as arithmetic over `outgoingRawMessageBytes` rather than as a literal. The JSON body that carries the request is capped at 16 MiB, which is the base64 plus a text body escaped at its worst six bytes per source byte. The note store's own 25 MiB per-file cap is a different limit on a different path and does not move with these.
+
+What would buy the 10 MiB back is structural rather than numeric: the row stores the message as JSON text, so the whole thing is materialised twice to be written. A separate BLOB column holding `rawRfc2822` would remove both copies. That is a schema change and it is not in 0.11.0.
 
 One bound sits outside that file because it belongs to the browser rather than the service. `UNIFIED_FANOUT_LIMIT` in [`components/mail-surface.tsx`](../components/mail-surface.tsx) caps how many per-account requests the merged inbox has in flight at once, across its first load, its load-more, and its 60-second refresh. The merge itself is generic in the number of accounts, so the account cap can rise without it noticing, and the merged inbox is the one surface that asks every account at the same moment. The peak it makes stays at three however many accounts are connected, and the accounts waiting a turn read as pending rather than as empty or as failed.
 

@@ -9,18 +9,36 @@ export const MAIL_SEND_ATTACHMENT_LIMITS = Object.freeze({
   maxCount: 10,
   maxFilenameBytes: 255,
   /**
-   * 10 MiB of decoded payload per message, the one number every other
-   * outgoing cap is derived from. What sets it is the service's memory
-   * contract rather than what a provider would accept: `MemoryHigh=192M` and
-   * `MemoryMax=256M` in `ops/brain-mail.service`, measured twice on
-   * 2026-09-15 at 155 and 165 MiB peak RSS for one send of 10 MiB against a
-   * 37.5 MiB bare-node baseline. 165 is the number to hold against
-   * `MemoryMax`, which leaves about 90 MiB of margin. `MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes` follows from it:
-   * base64 at 76 columns multiplies a payload by 1.3684, so 10 MiB of files
-   * becomes 13.68 MiB of parts, and the 1 MiB text part and the headers take
-   * the finished message to the 18 MiB stated there.
+   * 5 MiB of decoded payload per message, the one number every other outgoing
+   * cap is derived from. What sets it is the service's memory contract rather
+   * than what a provider would accept: `MemoryHigh=192M` and `MemoryMax=256M`
+   * in `ops/brain-mail.service`.
+   *
+   * The figure was 10 MiB until 2026-09-15, on a measurement that stopped at
+   * the MIME build. Measured again through the whole path a send takes, the
+   * request body off the socket, `JSON.parse`, `validateMailSendInput`, the
+   * build, and `store.enqueue` into SQLite in the same request, five runs each
+   * against a 39 MiB bare-node baseline:
+   *
+   *   payload   build    built and enqueued
+   *    5 MiB    104.3 MiB   173.0 MiB
+   *    6 MiB    115.7 MiB   179.3 MiB
+   *    7 MiB    127.4 MiB   186.0 MiB (one run 201.3)
+   *   10 MiB    164.3 MiB   278.4 MiB
+   *
+   * The enqueue is what the build measurement missed: the row carries the
+   * whole finished message as base64url, and `JSON.stringify` makes a second
+   * copy of it beside the first. 5 MiB is the largest figure whose every run
+   * stayed under `MemoryHigh` with room for the service's own resident set,
+   * about 19 MiB of it, and 83 MiB under `MemoryMax`. The later turn that
+   * reads the row back to deliver it peaks at 80 MiB and never overlaps.
+   *
+   * `MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes` follows from this number:
+   * base64 at 76 columns multiplies a payload by 1.3684, so 5 MiB of files
+   * becomes 6.84 MiB of parts, and the 1 MiB text part and the headers take
+   * the finished message to the 10 MiB stated there.
    */
-  maxTotalBytes: 10_485_760,
+  maxTotalBytes: 5_242_880,
 });
 
 export interface MailSendAttachment {
@@ -103,7 +121,7 @@ export function validateMailSendAttachments(
 }
 
 /**
- * The decoded size read off the base64 length. Decoding 10 MiB to measure it
+ * The decoded size read off the base64 length. Decoding 5 MiB to measure it
  * is the allocation the cap exists to prevent. The group count is floored
  * because the function is exported for a tool to size a file, and a length
  * that is not a whole number of groups would otherwise answer a fraction.

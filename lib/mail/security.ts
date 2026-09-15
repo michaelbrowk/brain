@@ -63,13 +63,13 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
   concurrentMimeParsers: 2,
   concurrentSmtpSubmissions: 1,
   /* Derived from `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes`, which is the one
-   * outgoing number: 10 MiB of attachments is 13.68 MiB once base64 wraps it
+   * outgoing number: 5 MiB of attachments is 6.84 MiB once base64 wraps it
    * at 76 columns, the 1 MiB text part expands the same way, and the headers
-   * take the rest, so 18 MiB carries the whole band under the attachment cap
+   * take the rest, so 10 MiB carries the whole band under the attachment cap
    * with room to spare. The tunnel ceiling below is deliberately not raised
    * with it: a message this size reaches a Gmail account and is refused at the
    * relay for an IMAP one. */
-  outgoingRawMessageBytes: 18 * 1024 * 1024,
+  outgoingRawMessageBytes: 10 * 1024 * 1024,
   egressTunnelFrameBytes: 16 * 1024,
   egressTunnelClientBytes: 2 * 1024 * 1024,
   egressTunnelServerBytes: 128 * 1024,

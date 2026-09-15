@@ -13,6 +13,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { MAIL_RESOURCE_LIMITS } from "../security";
+import { MAIL_SEND_ATTACHMENT_LIMITS } from "../send-attachment-codec";
 import {
   fingerprintMailDraftCreate,
   fingerprintMailDraftDelete,
@@ -98,6 +99,41 @@ describe("private durable mail outbox", () => {
     expect(metadata.mode & 0o077).toBe(0);
     await expect(readFile(databasePath)).resolves.toBeInstanceOf(Buffer);
     await reopened.close();
+  });
+
+  // The gap between the MIME writer and the outbox. Everything else in this
+  // file runs on a 53-byte body, so a row big enough to meet the serialized
+  // submission cap had never been written, and the branch shipped an
+  // attachment cap the store would not hold. A message at the cap has to
+  // reach the row and come back off it whole, or `rawRfc2822Base64Url` is
+  // not what the sender puts on the wire.
+  it("holds a message at the attachment cap and reads it back whole", async () => {
+    const fixture = await createStore();
+    const queued = cappedSubmissionFixture();
+    expect(queued.message.rawRfc2822Bytes).toBeGreaterThan(
+      MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes,
+    );
+    expect(queued.message.rawRfc2822Bytes).toBeLessThanOrEqual(
+      MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes,
+    );
+
+    await expect(fixture.store.enqueue(queued)).resolves.toEqual({
+      created: true,
+      submission: queued,
+    });
+    const readBack = await fixture.store.readByOperationId(queued.operationId);
+    expect(readBack).toEqual(queued);
+    expect(readBack?.message.rawRfc2822Base64Url).toBe(
+      queued.message.rawRfc2822Base64Url,
+    );
+    expect(
+      createHash("sha256")
+        .update(
+          Buffer.from(readBack?.message.rawRfc2822Base64Url ?? "", "base64url"),
+        )
+        .digest("hex"),
+    ).toBe(queued.message.rawRfc2822Sha256);
+    await fixture.store.close();
   });
 
   it("keeps Gmail rows byte-for-byte outside the SMTP ownership boundary", async () => {
@@ -3163,6 +3199,46 @@ function submissionFixture(
     createdAt: Date.parse("2026-07-15T10:00:00.000Z"),
     updatedAt: Date.parse("2026-07-15T10:00:00.000Z"),
     ...override,
+  });
+}
+
+/** A real message at the outgoing attachment cap, built by the writer the
+ *  service builds with, so the row this enqueues is the row a send at the cap
+ *  would write. One file, because the cap is on the total and one part is the
+ *  cheapest way to reach it. */
+function cappedSubmissionFixture(): StoredMailSendSubmission {
+  const built = buildOutboundRfc2822({
+    from: "me@example.com",
+    to: ["friend@example.net"],
+    cc: [],
+    bcc: [],
+    subject: "At the cap",
+    text: "One line of body beside the file.\n",
+    messageId: "<brain.cap@example.com>",
+    createdAt: Date.parse("2026-07-15T10:00:00.000Z"),
+    reply: null,
+    attachments: [
+      {
+        filename: "payload.bin",
+        mimeType: "application/octet-stream",
+        bytes: Buffer.alloc(MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes, 7),
+      },
+    ],
+    origin: "mcp",
+    agentLine: false,
+  });
+  return submissionFixture({
+    idempotencyKey: "compose-at-the-cap",
+    message: Object.freeze({
+      messageId: built.messageId,
+      envelope: built.envelope,
+      providerThreadId: null,
+      rawRfc2822Base64Url: built.rawRfc2822.toString("base64url"),
+      rawRfc2822Bytes: built.rawRfc2822.byteLength,
+      rawRfc2822Sha256: createHash("sha256")
+        .update(built.rawRfc2822)
+        .digest("hex"),
+    }),
   });
 }
 

@@ -7,7 +7,11 @@ import {
   type MailSendAttachment,
 } from "@/lib/mail/send-attachment-codec";
 import type { McpActivityEntry } from "@/lib/mcp/activity-log";
-import { getStore, isNotFound } from "@/lib/store";
+import {
+  getStore,
+  isNotFound,
+  type ReadAttachmentResult,
+} from "@/lib/store";
 import { refusal } from "./tool-kit";
 
 /** A PAGE'S OWN FILES ONTO A MESSAGE, AND NOTHING ELSE.
@@ -129,7 +133,16 @@ export async function resolveOutgoingAttachments(
         if (isNotFound(error)) {
           return refuse("page not found", ref.page, "page_not_found");
         }
-        throw error;
+        // The notes folder failed, and the mail service has not been asked
+        // for anything. Letting this throw put it in the send tool's own
+        // catch, which answers `mail_service_unavailable` and writes that
+        // code into the owner's log, naming a subsystem that was never
+        // involved.
+        return refuse(
+          "that page could not be read",
+          "page_changed",
+          "page_changed",
+        );
       }
       shownBy.set(ref.page, shown);
     }
@@ -140,7 +153,20 @@ export async function resolveOutgoingAttachments(
         "attachment_not_on_page",
       );
     }
-    const read = await store.readAttachment(ref.name, remaining);
+    let read: ReadAttachmentResult;
+    try {
+      read = await store.readAttachment(ref.name, remaining);
+    } catch {
+      // The store throws when a file changed between its size being measured
+      // and its bytes being read, which a person editing a note while an
+      // agent sends it can cause. Same reasoning as above: the notes folder
+      // is what failed, so that is what the answer and the line say.
+      return refuse(
+        "that file could not be read from the notes folder",
+        "attachment_read_failed",
+        "attachment_read_failed",
+      );
+    }
     if (read.kind === "missing") {
       return refuse("that file is gone", ref.name, "attachment_missing");
     }

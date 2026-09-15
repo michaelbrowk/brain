@@ -172,7 +172,7 @@ owner sees what was attempted.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent sending is off`; `invalid_account_id`; `to is empty`; `that is not an address` naming the field and index, and `that address is listed twice` the same way; `that message is too long` and `that subject is too long`, each naming its cap; `that subject holds a control character`; `that message holds a null byte`; `account not found`; `cannot send from this account` with the blocked reason; `too many attachments`, `that is not an attachment name`, `page not found`, `that page does not hold that file`, `that file is gone`, `those attachments are too large`, `that file cannot be sent`; the service's own codes |
+| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent sending is off`; `invalid_account_id`; `to is empty`; `that is not an address` naming the field and index, and `that address is listed twice` the same way; `that message is too long` and `that subject is too long`, each naming its cap; `that subject holds a control character`; `that message holds a null byte`; `account not found`; `cannot send from this account` with the blocked reason; `too many attachments`, `that is not an attachment name`, `page not found`, `that page does not hold that file`, `that file is gone`, `those attachments are too large`, `that file cannot be sent`, `page_changed`, `attachment_read_failed`; the service's own codes. A send that timed out is not refused: see the `state` unknown answer below |
 | `reply_mail` | `brain:mail:send` | `accountId`, `threadId`, `messageId`, `replyAll?`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`, the reply threaded by the service onto the message named | everything `send_mail` refuses, plus `invalid_thread_id`, `invalid_message_id`, `that message is not in that thread`, and `there is no one to reply to` when the message names this account and no one else. A `to`, `cc`, `bcc` or `subject` is an unknown argument and is refused by the schema |
 | `get_mail_send_status` | `brain:mail:send` | `operationId`, `accountId?` | `{ operationId, status, threadId }`. `threadId` is the thread the Sent copy landed in, or `null`. With `accountId` given, a send the tool never got an answer for gets its Sent-row mark written here | `invalid_operation_id`, `invalid_account_id`, `no send with that id`, the service's own codes |
 
@@ -273,10 +273,25 @@ filesystem, and never through a temporary file. A file's type is the one its
 name records, and a type a MIME header cannot carry is refused with that as
 the reason.
 
+One message with files goes out at a time. A 10 MiB attachment costs about
+60 MiB of memory while it is on its way, counting the file, its base64, the
+JSON of the whole request and the buffer of that, and the mail service builds
+one message at a time anyway. So a second call carrying files waits for the
+first to answer before it reads a byte, rather than holding its own encoded
+copy for the length of somebody else's send. It waits, it is never refused,
+and a message with no files is not held up at all.
+
+A failure in the notes folder is answered as one. A page that cannot be read
+answers `page_changed` and a file that changed while it was being read answers
+`attachment_read_failed`, each with the mail service untouched and the same
+code in the activity line, so the owner's log never names a subsystem that was
+not involved.
+
 The activity line for a send with files names how many there were and the
 names the store minted for them. Those names are the store's own, not a
 filename a person chose, so the line says which file left the notes folder
-without saying anything about what is in it.
+without saying anything about what is in it. A line has room for about two or
+three names before it is cut, and a cut is marked.
 
 ## Mail, an attachment into a note
 

@@ -5282,4 +5282,151 @@ describe("outgoing attachments", () => {
     });
     expect(entry.attachmentId).toBeUndefined();
   });
+  it("sends one attachment-carrying message at a time", async () => {
+    const events: string[] = [];
+    let releaseFirst = () => {};
+    const firstOnTheWire = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const readAttachment = vi.fn(async (name: string) => {
+      events.push(`read ${name}`);
+      return {
+        kind: "file",
+        name,
+        mimeType: "application/pdf",
+        data: new Uint8Array([1, 2, 3]),
+      };
+    });
+    mocks.getStore.mockResolvedValue({
+      readPage: vi.fn().mockResolvedValue(pageHolding(NAME, SECOND)),
+      readAttachment,
+    });
+
+    let sends = 0;
+    const fake = createMailClientFake({
+      sendMessage: async () => {
+        sends += 1;
+        const mine = sends;
+        events.push(`send ${mine}`);
+        if (mine === 1) await firstOnTheWire;
+        return {
+          apiVersion: 1,
+          operationId: `send-${mine}`,
+          created: true,
+          status: "queued",
+        };
+      },
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const call = (name: string, key: string, id: number) =>
+      callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Here it is",
+          text: "attached",
+          idempotencyKey: key,
+          attachments: [{ page: "page-one", name }],
+        },
+        id,
+      );
+
+    // The handler runs while its answer is read, so both bodies are put in
+    // flight before either is awaited.
+    const first = toolPayload(await call(NAME, "mcp-key-alpha-0001", 620));
+    const second = toolPayload(await call(SECOND, "mcp-key-alpha-0002", 621));
+
+    await vi.waitFor(() => expect(events).toContain("send 1"));
+    // A 10 MiB attachment costs about 60 MiB resident while it is on its way,
+    // and the service builds one message at a time, so a second caller that
+    // read its bytes now would hold them for the whole of the first send.
+    expect(events).toEqual([`read ${NAME}`, "send 1"]);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+
+    expect(events).toEqual([
+      `read ${NAME}`,
+      "send 1",
+      `read ${SECOND}`,
+      "send 2",
+    ]);
+  });
+
+  it("names the notes folder, not the mail service, when a page cannot be read", async () => {
+    const readAttachment = vi.fn();
+    mocks.getStore.mockResolvedValue({
+      readPage: vi.fn().mockRejectedValue(new Error("EIO on the notes disk")),
+      readAttachment,
+    });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Here it is",
+          text: "attached",
+          idempotencyKey: KEY,
+          attachments: [{ page: "page-one", name: NAME }],
+        },
+        622,
+      ),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "that page could not be read",
+      reason: "page_changed",
+    });
+    // The mail service was never asked to send anything, so neither the
+    // answer nor the owner's log may name it.
+    expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
+    expect(readAttachment).not.toHaveBeenCalled();
+    const [entry] = await readMcpActivity(1);
+    expect(entry.outcome).toBe("page_changed");
+  });
+
+  it("names the notes folder when a file changes while it is being read", async () => {
+    mocks.getStore.mockResolvedValue({
+      readPage: vi.fn().mockResolvedValue(pageHolding(NAME)),
+      readAttachment: vi
+        .fn()
+        .mockRejectedValue(
+          new Error(`attachment changed while reading: ${NAME}`),
+        ),
+    });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Here it is",
+          text: "attached",
+          idempotencyKey: KEY,
+          attachments: [{ page: "page-one", name: NAME }],
+        },
+        623,
+      ),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "that file could not be read from the notes folder",
+      reason: "attachment_read_failed",
+    });
+    expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
+    const [entry] = await readMcpActivity(1);
+    expect(entry.outcome).toBe("attachment_read_failed");
+  });
 });

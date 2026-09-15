@@ -120,19 +120,27 @@ describe("the agent send marks", () => {
     ]);
   });
 
-  it("drops the oldest mark at the cap", async () => {
-    for (let i = 0; i < MCP_AGENT_SEND_MAX + 5; i += 1) {
-      await recordAgentSend({
-        operationId: `send-${i}`,
-        accountId: ACCOUNT,
-        clientName: "Claude",
-      });
-    }
-    const marks = await readAgentSends();
-    expect(marks).toHaveLength(MCP_AGENT_SEND_MAX);
-    expect(marks[0].operationId).toBe("send-5");
-    expect(marks.at(-1)?.operationId).toBe(`send-${MCP_AGENT_SEND_MAX + 4}`);
-  });
+  it(
+    "drops the oldest mark at the cap",
+    async () => {
+      for (let i = 0; i < MCP_AGENT_SEND_MAX + 5; i += 1) {
+        await recordAgentSend({
+          operationId: `send-${i}`,
+          accountId: ACCOUNT,
+          clientName: "Claude",
+        });
+      }
+      const marks = await readAgentSends();
+      expect(marks).toHaveLength(MCP_AGENT_SEND_MAX);
+      expect(marks[0].operationId).toBe("send-5");
+      expect(marks.at(-1)?.operationId).toBe(`send-${MCP_AGENT_SEND_MAX + 4}`);
+    },
+    // 205 marks, each a read, an atomic write and a chmod, one after another
+    // because the module serialises its writers. Under 1.9 s on an idle
+    // machine and over the 5 s default when several suites run at once, which
+    // is how this one earned a reputation for going red at random.
+    20_000,
+  );
 
   it("writes the file under 0600 in a 0700 directory", async () => {
     await recordAgentSend({

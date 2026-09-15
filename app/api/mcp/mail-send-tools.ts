@@ -9,6 +9,7 @@ import type {
   MailAddress,
   MailMessageDto,
   MailSendInput,
+  MailSendResult,
 } from "@/lib/mail/message-types";
 import {
   deriveReplyAllRecipients,
@@ -162,6 +163,66 @@ async function admitSending(): Promise<SendingGate> {
     };
   }
   return { refused: null, settings: state.settings };
+}
+
+/** One attachment-carrying send at a time in this process.
+ *
+ *  A 10 MiB attachment costs about 60 MiB of resident memory while it is on
+ *  its way: the file itself, its base64, the JSON string of the whole send
+ *  input and the Buffer of that string. Four at once measured +144 MiB
+ *  against the unit's `MemoryHigh=512M`, and the mail service builds one MIME
+ *  message at a time, so a second caller that had already read its bytes
+ *  would hold them for the whole of the first send rather than getting rid of
+ *  them. Task 4 answered the same question service-side with a queue, and
+ *  this is its Brain-side half.
+ *
+ *  The turn is taken before a byte is read and given up once the send has
+ *  answered, so at most one encoded body exists here. A send waits, it is
+ *  never refused: an agent that asked for two messages wants two messages.
+ *  A message with no files is not gated, because its body is capped at 1 MiB
+ *  and the wait would cost an agent a turn for nothing. */
+let attachmentSendTurn: Promise<unknown> = Promise.resolve();
+
+function inAttachmentSendTurn<T>(
+  attachmentCount: number,
+  work: () => Promise<T>,
+): Promise<T> {
+  if (attachmentCount === 0) return work();
+  const run = attachmentSendTurn.then(work, work);
+  attachmentSendTurn = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
+
+type CarriedSend =
+  | { readonly refused: ReturnType<typeof refusal>; readonly outcome: string }
+  | { readonly unknown: unknown }
+  | { readonly result: MailSendResult };
+
+/** The files and the wire, inside one turn of the gate above.
+ *
+ *  Everything before this either never reached the service or told it nothing
+ *  to send. The wire starts at `sendMessage`, and a failure from there on can
+ *  mean the message went out anyway, which is why it has its own catch and
+ *  its own answer. A failure the resolver decided on is a refusal the notes
+ *  folder named, and it comes back as one. */
+async function carrySend(
+  client: BrainMailClient,
+  refs: readonly OutgoingAttachmentRef[],
+  build: (attachments: MailSendInput["attachments"]) => MailSendInput,
+): Promise<CarriedSend> {
+  return inAttachmentSendTurn(refs.length, async () => {
+    const resolved = await resolveOutgoingAttachments(refs);
+    if ("refused" in resolved) return resolved;
+    try {
+      return { result: await client.sendMessage(build(resolved.attachments)) };
+    } catch (error) {
+      if (!isAmbiguousSendFailure(error)) throw error;
+      return { unknown: error };
+    }
+  });
 }
 
 /** Not a refusal: the message may be on its way. `/v1/send` enqueues durably
@@ -420,12 +481,7 @@ export function registerMailSendTools(server: McpToolServer): void {
         // The notes folder is read last, after every refusal that costs
         // nothing and after the account is known to be able to send, so the
         // bytes are held for as short a time as the path allows.
-        const resolved = await resolveOutgoingAttachments(refs);
-        if ("refused" in resolved) {
-          await log(resolved.outcome);
-          return resolved.refused;
-        }
-        const input: MailSendInput = {
+        const carried = await carrySend(client, refs, (attachments) => ({
           accountId,
           idempotencyKey,
           mode: "compose",
@@ -435,21 +491,19 @@ export function registerMailSendTools(server: McpToolServer): void {
           subject,
           text: body,
           replyToMessageId: null,
-          attachments: resolved.attachments,
+          attachments,
           origin: "mcp",
           agentLine: settings.tellRecipients,
-        };
-        // Everything above either never reached the service or told it
-        // nothing to send. The wire starts here, and a failure from here on
-        // can mean the message went out anyway.
-        let result;
-        try {
-          result = await client.sendMessage(input);
-        } catch (error) {
-          if (!isAmbiguousSendFailure(error)) throw error;
-          await log("unknown");
-          return unknownSend(idempotencyKey, error);
+        }));
+        if ("refused" in carried) {
+          await log(carried.outcome);
+          return carried.refused;
         }
+        if ("unknown" in carried) {
+          await log("unknown");
+          return unknownSend(idempotencyKey, carried.unknown);
+        }
+        const result = carried.result;
         await recordSend(extra, accountId, result.operationId);
         await log("ok", result.operationId);
         return text({
@@ -600,12 +654,7 @@ export function registerMailSendTools(server: McpToolServer): void {
           await log("subject_too_long");
           return badSubject;
         }
-        const resolved = await resolveOutgoingAttachments(refs);
-        if ("refused" in resolved) {
-          await log(resolved.outcome);
-          return resolved.refused;
-        }
-        const input: MailSendInput = {
+        const carried = await carrySend(client, refs, (attachments) => ({
           accountId,
           idempotencyKey,
           mode: "reply",
@@ -615,19 +664,19 @@ export function registerMailSendTools(server: McpToolServer): void {
           subject,
           text: body,
           replyToMessageId: messageId,
-          attachments: resolved.attachments,
+          attachments,
           origin: "mcp",
           agentLine: settings.tellRecipients,
-        };
-        // The wire starts here, the same way it does on a compose.
-        let result;
-        try {
-          result = await client.sendMessage(input);
-        } catch (error) {
-          if (!isAmbiguousSendFailure(error)) throw error;
-          await log("unknown");
-          return unknownSend(idempotencyKey, error);
+        }));
+        if ("refused" in carried) {
+          await log(carried.outcome);
+          return carried.refused;
         }
+        if ("unknown" in carried) {
+          await log("unknown");
+          return unknownSend(idempotencyKey, carried.unknown);
+        }
+        const result = carried.result;
         await recordSend(extra, accountId, result.operationId);
         await log("ok", result.operationId);
         return text({

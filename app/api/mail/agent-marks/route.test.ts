@@ -174,7 +174,10 @@ describe("the agent send marks route", () => {
     getSendOperation.mockClear();
     await get();
     expect(getSendOperation).toHaveBeenCalledWith("send-old", expect.anything());
-  });
+    // 400 marks written one after another, because the module serialises its
+    // writers and each one is a read, an atomic write and a chmod. Well under
+    // the default alone and over it when several suites run at once.
+  }, 20_000);
 
   it("resolves pending marks with a small concurrency, not one at a time", async () => {
     const { AGENT_MARKS_RESOLVE_CONCURRENCY } = await import("./route");

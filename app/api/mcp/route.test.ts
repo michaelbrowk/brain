@@ -1,3 +1,6 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
@@ -47,6 +50,12 @@ import {
   fakeThread,
 } from "./mail-client-fake";
 import { BrainMailClientError } from "@/lib/mail/brain-mail-client";
+import { readMcpActivity } from "@/lib/mcp/activity-log";
+import { mailNotificationId } from "@/lib/notifications/ids";
+import {
+  appendNotification,
+  listNotifications,
+} from "@/lib/notifications/store";
 
 const notionId = "a".repeat(32);
 const sourceHash = "b".repeat(64);
@@ -82,6 +91,21 @@ async function toolPayload(response: Response) {
     payload: JSON.parse(envelope.result?.content?.[0]?.text ?? "null"),
     isError: envelope.result?.isError ?? false,
   };
+}
+
+/** The whole tool table as the server advertises it. A test that asserts a
+ *  tool is absent has to ask the server rather than read the source, because
+ *  the source is where a forgotten registration still looks right. */
+function toolsListRequest(id: number) {
+  return new Request("https://brain.example.test/api/mcp", {
+    method: "POST",
+    headers: {
+      accept: "application/json, text/event-stream",
+      authorization: "Bearer test-machine-token",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ jsonrpc: "2.0", id, method: "tools/list" }),
+  });
 }
 
 describe("Notion MCP route validation", () => {
@@ -1315,4 +1339,296 @@ describe("the mail read tools", () => {
       expect(fake.calls).toEqual([]);
     },
   );
+});
+
+describe("update_mail_thread", () => {
+  let stateRoot: string;
+  let centreRoot: string;
+
+  beforeEach(async () => {
+    stateRoot = path.join(os.tmpdir(), "brain-mcp-triage-state-test");
+    centreRoot = path.join(os.tmpdir(), "brain-mcp-triage-centre-test");
+    await fs.rm(stateRoot, { recursive: true, force: true });
+    await fs.rm(centreRoot, { recursive: true, force: true });
+    mocks.getStore.mockReset();
+    mocks.createBrainMailClient.mockReset();
+    mocks.verifyMcpBearerToken.mockReset();
+    // The legacy bearer's own client id, so `clientNameOf` answers without
+    // reaching the OAuth state store for a name no test wrote there.
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "test-machine-token",
+      clientId: "brain-legacy-bearer",
+      scopes: ["brain:read", "brain:mail"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+    vi.stubEnv("MCP_TOKEN", "test-machine-token");
+    vi.stubEnv("AUTH_SECRET", "test-auth-secret-with-at-least-32-bytes");
+    vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "https://brain.example.test");
+    vi.stubEnv("BRAIN_MCP_STATE_DIR", stateRoot);
+    vi.stubEnv("BRAIN_NOTIFICATIONS_STATE_DIR", centreRoot);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(stateRoot, { recursive: true, force: true });
+    await fs.rm(centreRoot, { recursive: true, force: true });
+  });
+
+  it("sends exactly the service's own mutation shape", async () => {
+    const fake = createMailClientFake({
+      updateThread: async () => ({
+        apiVersion: 1,
+        thread: fakeThread({ starred: true }),
+      }),
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "update_mail_thread",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          threadId: "thread-alpha",
+          starred: true,
+        },
+        300,
+      ),
+    );
+
+    expect(fake.calls).toEqual([
+      { method: "listAccountCapabilities", args: [] },
+      {
+        method: "updateThread",
+        args: ["thread-alpha", { accountId: FAKE_ACCOUNT_ID, starred: true }],
+      },
+    ]);
+    expect(payload.thread.starred).toBe(true);
+  });
+
+  it("refuses two changes in one call before the client is touched", async () => {
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "update_mail_thread",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          threadId: "thread-alpha",
+          read: true,
+          starred: true,
+        },
+        301,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "one change per call",
+      reason: "read, starred",
+    });
+    expect(isError).toBe(true);
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("refuses no change at all", async () => {
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "update_mail_thread",
+        { accountId: FAKE_ACCOUNT_ID, threadId: "thread-alpha" },
+        302,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "one change per call",
+      reason: "pass one of read, starred, archive, trash, restore, spam",
+    });
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("offers no way to purge a thread", async () => {
+    const response = await POST(toolsListRequest(303));
+    const body = await response.text();
+
+    expect(body).toContain("update_mail_thread");
+    // Trash yes, purge no. A thread in the trash stays there until the person
+    // empties it themselves.
+    expect(body).not.toContain("purge_mail");
+    expect(body).not.toContain("empty_trash");
+  });
+
+  it("logs one activity line naming the thread and no subject", async () => {
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        updateThread: async () => ({
+          apiVersion: 1,
+          thread: fakeThread({ subject: "Quarterly invoice" }),
+        }),
+      }).client,
+    );
+
+    await toolPayload(
+      await callTool(
+        "update_mail_thread",
+        { accountId: FAKE_ACCOUNT_ID, threadId: "thread-alpha", trash: true },
+        304,
+      ),
+    );
+
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({
+      client: "Legacy token",
+      tool: "update_mail_thread",
+      accountId: FAKE_ACCOUNT_ID,
+      threadId: "thread-alpha",
+      outcome: "ok",
+    });
+    expect(JSON.stringify(entry)).not.toContain("Quarterly");
+  });
+
+  it("logs the refusal reason when the service refuses", async () => {
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        updateThread: async () => {
+          throw new BrainMailClientError(409, "mail_thread_stale");
+        },
+      }).client,
+    );
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "update_mail_thread",
+        { accountId: FAKE_ACCOUNT_ID, threadId: "thread-alpha", read: true },
+        305,
+      ),
+    );
+
+    expect(payload.reason).toBe("mail_thread_stale");
+    const [entry] = await readMcpActivity(1);
+    expect(entry.outcome).toBe("mail_thread_stale");
+  });
+
+  it("refuses an account whose service withholds thread mutations", async () => {
+    const fake = createMailClientFake({
+      listAccountCapabilities: async () => ({
+        apiVersion: 3,
+        accounts: [
+          fakeAccountV3(FAKE_ACCOUNT_ID, {
+            capabilities: { threadMutations: false },
+          }),
+        ],
+      }),
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "update_mail_thread",
+        { accountId: FAKE_ACCOUNT_ID, threadId: "thread-alpha", archive: true },
+        306,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "the mail service does not sort threads for this account",
+      reason: "thread_mutations_unavailable",
+    });
+    expect(isError).toBe(true);
+    expect(fake.calls.map((call) => call.method)).toEqual([
+      "listAccountCapabilities",
+    ]);
+    const [entry] = await readMcpActivity(1);
+    expect(entry.outcome).toBe("thread_mutations_unavailable");
+  });
+
+  it("marks the centre's mail row read when the agent marks the thread read", async () => {
+    await appendNotification({
+      id: mailNotificationId(FAKE_ACCOUNT_ID, "thread-alpha"),
+      kind: "mail-new",
+      at: "2026-09-14T09:00:00.000Z",
+      title: "One new letter",
+      href: "/mail",
+    });
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        updateThread: async () => ({
+          apiVersion: 1,
+          thread: fakeThread({ unread: false }),
+        }),
+      }).client,
+    );
+
+    await toolPayload(
+      await callTool(
+        "update_mail_thread",
+        { accountId: FAKE_ACCOUNT_ID, threadId: "thread-alpha", read: true },
+        307,
+      ),
+    );
+
+    await vi.waitFor(async () => {
+      const [row] = await listNotifications();
+      expect(row?.readAt).toBeDefined();
+    });
+  });
+
+  it("leaves the centre's row alone when the change is not a read", async () => {
+    await appendNotification({
+      id: mailNotificationId(FAKE_ACCOUNT_ID, "thread-alpha"),
+      kind: "mail-new",
+      at: "2026-09-14T09:00:00.000Z",
+      title: "One new letter",
+      href: "/mail",
+    });
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        updateThread: async () => ({
+          apiVersion: 1,
+          thread: fakeThread({ starred: true }),
+        }),
+      }).client,
+    );
+
+    await toolPayload(
+      await callTool(
+        "update_mail_thread",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          threadId: "thread-alpha",
+          starred: true,
+        },
+        308,
+      ),
+    );
+
+    const [row] = await listNotifications();
+    expect(row?.readAt).toBeUndefined();
+  });
+
+  it("refuses a brain:read grant before the client or the log is touched", async () => {
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "read-only-token",
+      clientId: "read-only-client",
+      scopes: ["brain:read"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const response = await callTool(
+      "update_mail_thread",
+      { accountId: FAKE_ACCOUNT_ID, threadId: "thread-alpha", read: true },
+      309,
+    );
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("WWW-Authenticate")).toContain(
+      'scope="brain:mail"',
+    );
+    expect(fake.calls).toEqual([]);
+    await expect(readMcpActivity(1)).resolves.toEqual([]);
+  });
 });

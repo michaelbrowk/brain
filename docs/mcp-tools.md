@@ -91,6 +91,30 @@ default). It answers `state` rather than holding the call open: `fetching`
 means call again, `transient` means the fetch failed and may succeed later,
 `permanent` means it will not, and `ready` carries `text` and `attachments`.
 
+## Mail, triage
+
+| Tool | Scope | Inputs | Answers | Refuses |
+| --- | --- | --- | --- | --- |
+| `update_mail_thread` | `brain:mail` | `accountId`, `threadId`, and exactly one of `read`, `starred`, `archive`, `trash`, `restore`, `spam` | `{ thread }`, the thread's row as it stands after the change | `one change per call`, naming either the fields that arrived together or the six to pick from; `thread_mutations_unavailable` when the service withholds them for that account; `thread not found`, plus the service's own codes |
+
+`trash` and `restore` take `true` and nothing else, because there is no second
+thing either word could mean. The other four take a boolean, so `read: false`
+puts a thread back to unread and `archive: false` brings it back to the Inbox.
+"Move" is one of these six: Brain has no custom folders, and this release adds
+none.
+
+The one-change rule is Brain's own, checked before the mail service is called,
+so the refusal names the fields the agent sent. It mirrors the PATCH the
+service accepts, which counts its keys and turns down a second action.
+
+A `read: true` also marks that thread's row read in the notification centre, on
+the same condition the Mail surface uses: a letter read is a letter read,
+whichever window read it. That mark never blocks the tool and never fails it,
+so a bell that is one row stale is not reported as a triage that did not land.
+
+Every call writes one activity line with the account, the thread and the
+outcome. A refused call writes one too, so the owner sees what was attempted.
+
 ## Notion import
 
 The nine `notion_*` tools are one guarded protocol, not nine independent
@@ -142,6 +166,6 @@ folder, in git or in a portable archive.
 
 ## Still to come in this release
 
-Mail triage, sending and attachments, the task write tools and the Settings
-view of the activity log land later on this branch. Their rows are added here
-as each one is registered, so this table and the server stay one description.
+Mail sending and attachments, the task write tools and the Settings view of the
+activity log land later on this branch. Their rows are added here as each one
+is registered, so this table and the server stay one description.

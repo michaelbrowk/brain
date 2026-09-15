@@ -5,8 +5,23 @@ import {
   createBrainMailClient,
   type PublicMailAccountV3,
 } from "@/lib/mail/brain-mail-client";
-import type { MailThreadListItem } from "@/lib/mail/message-types";
-import { hasScope, insufficientScope, refusal, text } from "./tool-kit";
+import type {
+  MailThreadListItem,
+  MailThreadMutationInput,
+} from "@/lib/mail/message-types";
+import {
+  appendMcpActivity,
+  type McpActivityEntry,
+} from "@/lib/mcp/activity-log";
+import { mailNotificationId } from "@/lib/notifications/ids";
+import { markNotificationsRead } from "@/lib/notifications/store";
+import {
+  clientNameOf,
+  hasScope,
+  insufficientScope,
+  refusal,
+  text,
+} from "./tool-kit";
 
 /** THE MAIL READS: ACCOUNTS, THREADS, SEARCH, ONE THREAD, ONE BODY.
  *
@@ -136,6 +151,104 @@ function byNewest(left: MailThreadListItem, right: MailThreadListItem): number {
 
 const sleep = (ms: number) =>
   new Promise((resolve) => setTimeout(resolve, ms));
+
+const TRIAGE_TOOL = "update_mail_thread";
+
+/** The six changes a triage call may carry, in the order a refusal names them
+ *  and the order the mutation is built in. There is no move, because Brain has
+ *  no custom folders: the six system mailboxes are the whole map. */
+const TRIAGE_FIELDS = [
+  "read",
+  "starred",
+  "archive",
+  "trash",
+  "restore",
+  "spam",
+] as const;
+
+type TriageField = (typeof TRIAGE_FIELDS)[number];
+
+interface TriageFields {
+  readonly read?: boolean;
+  readonly starred?: boolean;
+  readonly archive?: boolean;
+  readonly trash?: true;
+  readonly restore?: true;
+  readonly spam?: boolean;
+}
+
+/** One field and the account, and nothing else, because
+ *  `validateMailThreadMutationInput` counts the keys and refuses a third.
+ *  `null` when the caller named no change at all. */
+function triageMutation(
+  accountId: string,
+  input: TriageFields,
+): MailThreadMutationInput | null {
+  if (input.read !== undefined) return { accountId, read: input.read };
+  if (input.starred !== undefined) return { accountId, starred: input.starred };
+  if (input.archive !== undefined) return { accountId, archive: input.archive };
+  if (input.trash !== undefined) return { accountId, trash: input.trash };
+  if (input.restore !== undefined) return { accountId, restore: input.restore };
+  if (input.spam !== undefined) return { accountId, spam: input.spam };
+  return null;
+}
+
+/** The outcome code for the log, beside the reason the agent is handed. An
+ *  error that is not the client's own is an outage on this side of the
+ *  boundary, and the log says so rather than naming a cause it guessed. */
+function mailOutcome(error: unknown): string {
+  return error instanceof BrainMailClientError
+    ? error.code
+    : "mail_service_unavailable";
+}
+
+/** Every tool call that CHANGES something writes one line. Reads write none:
+ *  an agent reading mail is the ordinary case and a log that recorded it would
+ *  bury the sends. */
+async function logMailActivity(
+  extra: { authInfo?: { clientId?: string } },
+  tool: string,
+  target: Pick<
+    McpActivityEntry,
+    "accountId" | "threadId" | "messageId" | "attachmentId" | "page" | "operationId"
+  >,
+  outcome: string,
+): Promise<void> {
+  await appendMcpActivity({
+    at: new Date().toISOString(),
+    client: await clientNameOf(extra),
+    tool,
+    ...target,
+    outcome,
+  });
+}
+
+/** Reading a letter in Mail clears its row in the notification centre, and
+ *  opening that row in the centre marks the letter read: the two are one state
+ *  seen from two places (`components/mail-surface-client.ts`). The browser
+ *  moves it on a `read: true` PATCH, and an agent that did not would leave the
+ *  bell showing rows for letters it has already read and acted on.
+ *
+ *  Fire and forget, on the same condition, for the reason the browser gives:
+ *  the mail has already changed, and a bell that is one row stale is not a
+ *  reason to tell the agent its triage failed. */
+async function markCentreRead(
+  accountId: string,
+  threadId: string,
+): Promise<void> {
+  try {
+    await markNotificationsRead(
+      [mailNotificationId(accountId, threadId)],
+      new Date().toISOString(),
+    );
+  } catch (cause) {
+    // `mailNotificationId` throws on an id it cannot encode, and the store can
+    // fail on a state directory it cannot write. Neither is the agent's
+    // problem, and neither is a reason to lose the triage that landed.
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    console.warn(`[brain/mcp] notification row left unread: ${reason}`);
+  }
+}
 
 export function registerMailTools(server: McpToolServer): void {
   server.tool(
@@ -342,6 +455,84 @@ export function registerMailTools(server: McpToolServer): void {
           })),
         });
       } catch (error) {
+        return mailRefusal(error);
+      }
+    },
+  );
+
+  server.tool(
+    TRIAGE_TOOL,
+    "Sort one thread: mark it read or unread, star it, archive it, move it to trash or spam, or restore it from either. Exactly one of the six per call, which is the shape the service's own PATCH takes. There is no purge: a thread in the trash stays there until the person empties it.",
+    {
+      accountId: z.string(),
+      threadId: z.string(),
+      read: z.boolean().optional(),
+      starred: z.boolean().optional(),
+      archive: z.boolean().optional(),
+      trash: z.literal(true).optional().describe("true moves it to the trash"),
+      restore: z
+        .literal(true)
+        .optional()
+        .describe("true takes it back out of the trash or the spam folder"),
+      spam: z.boolean().optional(),
+    },
+    async (input, extra) => {
+      if (!hasScope(extra, "brain:mail")) return insufficientScope("brain:mail");
+      const { accountId, threadId } = input;
+      // One line per call, whatever became of it, because the owner reading
+      // the log wants the attempt as much as the change. A state directory
+      // that cannot be written must never turn a completed triage into a
+      // failed tool call, so every call site swallows its own failure.
+      const log = (outcome: string) =>
+        logMailActivity(extra, TRIAGE_TOOL, { accountId, threadId }, outcome).catch(
+          () => undefined,
+        );
+
+      // Brain's own rule, enforced before the client, so the refusal names the
+      // fields the agent sent rather than arriving as a generic
+      // `mail_request_invalid` from the service.
+      const given = TRIAGE_FIELDS.filter(
+        (field: TriageField) => input[field] !== undefined,
+      );
+      if (given.length > 1) {
+        await log("too_many_changes");
+        return refusal("one change per call", given.join(", "));
+      }
+      const mutation = triageMutation(accountId, input);
+      if (mutation === null) {
+        await log("no_change");
+        return refusal(
+          "one change per call",
+          `pass one of ${TRIAGE_FIELDS.join(", ")}`,
+        );
+      }
+
+      try {
+        const client = createBrainMailClient();
+        // The service withholds thread mutations per account, and the code it
+        // coins for a thread that was never going to move reads as a problem
+        // with the thread. Ask first, so the reason names the account. An
+        // account this host does not know is left to the service, whose
+        // `mail_account_not_found` is the truthful answer.
+        const status = await client.listAccountCapabilities();
+        const account = status.accounts.find(
+          (held) => held.accountId === accountId,
+        );
+        if (account && !account.capabilities.threadMutations) {
+          await log("thread_mutations_unavailable");
+          return refusal(
+            "the mail service does not sort threads for this account",
+            "thread_mutations_unavailable",
+          );
+        }
+        const result = await client.updateThread(threadId, mutation);
+        if ("read" in mutation && mutation.read === true) {
+          void markCentreRead(accountId, threadId);
+        }
+        await log("ok");
+        return text({ thread: result.thread });
+      } catch (error) {
+        await log(mailOutcome(error));
         return mailRefusal(error);
       }
     },

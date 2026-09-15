@@ -119,6 +119,7 @@ import {
   appendNotification,
   listNotifications,
 } from "@/lib/notifications/store";
+import { searchNotes } from "@/lib/search";
 
 const notionId = "a".repeat(32);
 const sourceHash = "b".repeat(64);
@@ -152,6 +153,22 @@ async function toolPayload(response: Response) {
   };
   return {
     payload: JSON.parse(envelope.result?.content?.[0]?.text ?? "null"),
+    isError: envelope.result?.isError ?? false,
+  };
+}
+
+/** A rethrow, unlike every refusal above, is not `text()`'s JSON: the SDK
+ *  hands a thrown error's own `.message` to the agent verbatim, so
+ *  `toolPayload`'s `JSON.parse` has nothing to parse. This reads the same
+ *  envelope without it, for the one place a test wants the raw sentence. */
+async function rawToolText(response: Response) {
+  const body = await response.text();
+  const dataLine = body.split("\n").find((line) => line.startsWith("data: "));
+  const envelope = JSON.parse(dataLine?.slice(6) ?? body) as {
+    result?: { content?: Array<{ text?: string }>; isError?: boolean };
+  };
+  return {
+    text: envelope.result?.content?.[0]?.text ?? "",
     isError: envelope.result?.isError ?? false,
   };
 }
@@ -734,6 +751,72 @@ describe("Notion MCP route validation", () => {
     }
   });
 
+  /** `search` WAS THE ONE PAGE TOOL NOT WRAPPED IN `pageTool`.
+   *
+   *  `searchNotes` reads the store the same way the other page tools do, so
+   *  a notes-folder failure inside it used to reach the agent as the SDK's
+   *  verbatim transport error rather than the `store_failed` shape above. */
+  it("answers a store failure on search the same way", async () => {
+    vi.mocked(searchNotes).mockRejectedValue(
+      new Error("EACCES: permission denied, scandir '/notes/pages'"),
+    );
+
+    const { payload, isError } = await toolPayload(
+      await callTool("search", { query: "anything" }, 107),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "the notes folder could not answer",
+      reason: "store_failed",
+    });
+    expect(JSON.stringify(payload)).not.toContain("/notes/");
+  });
+
+  /** THE NOTION_* CARVE-OUT KEEPS THE THROW, NOT THE PATH.
+   *
+   *  The nine `notion_*` tools rethrow a store failure so the import driver's
+   *  abort-and-retry still fires, and used to rethrow the store's own Node
+   *  `fs` message, naming the notes folder's absolute path. Pinned on one of
+   *  the nine: the driver only needs the throw, never the path. */
+  it("rethrows a notion store failure worded in Brain's own sentence, never the path", async () => {
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "import-token",
+      clientId: "import-client",
+      scopes: ["brain:read", "brain:import"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+    mocks.getStore.mockResolvedValue({
+      inspectNotionPage: vi
+        .fn()
+        .mockRejectedValue(
+          new Error("ENOSPC: no space left on device, write '/notes/.brain/lock'"),
+        ),
+    });
+
+    const response = await POST(
+      new Request("https://brain.example.test/api/mcp", {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: "Bearer import-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 108,
+          method: "tools/call",
+          params: { name: "notion_find_page", arguments: { notionId } },
+        }),
+      }),
+    );
+
+    const { text: message, isError } = await rawToolText(response);
+    expect(isError).toBe(true);
+    expect(message).toBe("Brain could not read the notes folder");
+    expect(message).not.toContain("/notes/");
+  });
+
   it("canonicalizes exact same-origin page links at all normal MCP write boundaries", async () => {
     const writePage = vi.fn().mockResolvedValue({ id: "write-target" });
     const appendPage = vi.fn().mockResolvedValue({ id: "append-target" });
@@ -1138,6 +1221,31 @@ describe("the task read tools", () => {
       list: "today",
       category: "home",
     });
+  });
+
+  /** `taskRead` ANSWERS A STORE FAILURE THE SAME WAY THE PAGE TOOLS DO.
+   *
+   *  A store that cannot start throws before `listTasks` or `getTask` is
+   *  ever called, and the wrapper is the one place that catches it for every
+   *  read this file registers through it. */
+  it("answers a store failure on a task read with a code and no path", async () => {
+    mocks.getStore.mockRejectedValue(
+      Object.assign(
+        new Error("EACCES: permission denied, scandir '/notes/_tasks'"),
+        { code: "EACCES" },
+      ),
+    );
+
+    const { payload, isError } = await toolPayload(
+      await callTool("list_tasks", { list: "inbox" }, 45),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "the notes folder could not answer",
+      reason: "store_failed",
+    });
+    expect(JSON.stringify(payload)).not.toContain("/notes/");
   });
 
   it("reads one task and says which page it is linked to", async () => {
@@ -3208,6 +3316,41 @@ describe("save_mail_attachment", () => {
     expect(entry).toMatchObject({ outcome: "blocked_mime" });
   });
 
+  /** `getStore()` ITSELF CAN FAIL, BEFORE ANY PAGE OR ATTACHMENT WORK STARTS.
+   *
+   *  It sat outside every try, so a store that would not even start answered
+   *  the agent the raw Node message and wrote no line at all, the exact pair
+   *  of defects the store failures above are guarded against. */
+  it("answers a failed getStore() with a code, no path, and one line", async () => {
+    mocks.getStore.mockRejectedValue(
+      Object.assign(
+        new Error("EACCES: permission denied, open '/notes/.brain/journal'"),
+        { code: "EACCES" },
+      ),
+    );
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "save_mail_attachment",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          attachmentId: "attachment-eta",
+          page: "page-one",
+        },
+        506,
+      ),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "the notes folder could not answer",
+      reason: "store_failed",
+    });
+    expect(JSON.stringify(payload)).not.toContain("/notes/");
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({ outcome: "store_failed" });
+  });
+
   /** The store's own refusals are answered in the store's words. Everything
    *  else it can throw is a Node `fs` error carrying the absolute path of the
    *  notes folder, and it used to leave as a transport error with that message
@@ -3626,11 +3769,13 @@ describe("save_mail_attachment", () => {
     );
 
     // A mistyped page id is the common case and costs nothing to answer, so
-    // it must not cost a whole download and leave a file nothing links.
+    // it must not cost a whole download and leave a file nothing links. The
+    // reason is the code an agent branches on, the same one the append
+    // branch below answers with, never the page id.
     expect(isError).toBe(true);
     expect(payload).toEqual({
       error: "page not found",
-      reason: "page-gone",
+      reason: "page_not_found",
     });
     expect(readPage).toHaveBeenCalledWith("page-gone");
     expect(fake.calls).toEqual([]);
@@ -6139,6 +6284,47 @@ describe("outgoing attachments", () => {
     expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
   });
 
+  /** `getStore()` ITSELF CAN FAIL, INSIDE `resolveOutgoingAttachments`, BEFORE
+   *  A PAGE OR A FILE IS READ.
+   *
+   *  The account check still costs one round trip (`admitAccount`'s own,
+   *  before the resolver runs), but it sat outside every try in the resolver
+   *  itself, so a store that would not even start answered
+   *  `mail_service_unavailable`, naming a subsystem that had nothing to do
+   *  with the failure. `sendMessage` never fires either way. */
+  it("answers a failed getStore() as a store failure, not a mail-service outage", async () => {
+    mocks.getStore.mockRejectedValue(
+      Object.assign(
+        new Error("EACCES: permission denied, open '/notes/.brain/journal'"),
+        { code: "EACCES" },
+      ),
+    );
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "s",
+          text: "t",
+          idempotencyKey: KEY,
+          attachments: [{ page: "page-one", name: NAME }],
+        },
+        606,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "the notes folder could not answer",
+      reason: "store_failed",
+    });
+    expect(JSON.stringify(payload)).not.toContain("/notes/");
+    expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
+  });
+
   it("refuses a type that cannot travel in a MIME header", async () => {
     storeHolding(pageHolding(NAME), {
       [NAME]: {
@@ -6248,6 +6434,65 @@ describe("outgoing attachments", () => {
     });
     expect(entry.attachmentId).toBeUndefined();
   });
+
+  /** `sendFingerprint` FOLDS THE ATTACHMENT REFS IN, NOT JUST THE WORDS.
+   *
+   *  Two sends of the same words with different files attached are different
+   *  messages. An "unknown" outcome for the first must not read a fresh key
+   *  sending the second, different-attachment message as the same duplicate
+   *  the memo is holding. */
+  it("does not read an unknown send with a different attachment as the same duplicate", async () => {
+    storeHolding(pageHolding(NAME, SECOND), {
+      [NAME]: { data: new Uint8Array([1, 2, 3]), mimeType: "application/pdf" },
+      [SECOND]: { data: new Uint8Array([4, 5, 6]), mimeType: "application/pdf" },
+    });
+    const stuck = createMailClientFake({
+      sendMessage: async () => {
+        throw new BrainMailClientError(503, "mail_send_service_unavailable", {
+          enqueued: true,
+        });
+      },
+    });
+    mocks.createBrainMailClient.mockReturnValue(stuck.client);
+
+    const held = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["reader@example.net"],
+          subject: "Same words",
+          text: "one line",
+          idempotencyKey: "mcp-key-refs-first01",
+          attachments: [{ page: "page-one", name: NAME }],
+        },
+        620,
+      ),
+    );
+    expect(held.isError).toBe(false);
+    expect(held.payload).toMatchObject({ state: "unknown", retry: "same-key" });
+
+    const second = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(second.client);
+    const fresh = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["reader@example.net"],
+          subject: "Same words",
+          text: "one line",
+          idempotencyKey: "mcp-key-refs-fresh01",
+          attachments: [{ page: "page-one", name: SECOND }],
+        },
+        621,
+      ),
+    );
+
+    expect(fresh.isError).toBe(false);
+    expect(second.calls.some((call) => call.method === "sendMessage")).toBe(true);
+  });
+
   it("sends one attachment-carrying message at a time", async () => {
     const events: string[] = [];
     let releaseFirst = () => {};

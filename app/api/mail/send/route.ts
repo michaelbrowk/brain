@@ -41,6 +41,17 @@ export async function POST(request: Request) {
     place that says what a send request is, and its refusal names the request
     rather than an origin this route invented for it.
   */
+  // `attachments` is a required field on the wire, and the composer always
+  // sends it empty: it has no attachment UI yet. A non-empty array is a body
+  // this lane did not build, refused here rather than left open for a door
+  // the composer does not walk through today.
+  const bodyAttachments =
+    typeof input === "object" && input !== null && !Array.isArray(input)
+      ? (input as Record<string, unknown>).attachments
+      : undefined;
+  if (Array.isArray(bodyAttachments) && bodyAttachments.length > 0) {
+    return mailApiBodyError(undefined, "attachments_not_supported", 1);
+  }
   const owned: unknown =
     typeof input === "object" && input !== null && !Array.isArray(input)
       ? { ...(input as Record<string, unknown>), origin: "app" }

@@ -13,7 +13,7 @@ import {
   isNotFound,
   type ReadAttachmentResult,
 } from "@/lib/store";
-import { refusal } from "./tool-kit";
+import { refusal, STORE_FAILED } from "./tool-kit";
 
 /** A PAGE'S OWN FILES ONTO A MESSAGE, AND NOTHING ELSE.
  *
@@ -137,7 +137,20 @@ export async function resolveOutgoingAttachments(
   budget: number = MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes,
 ): Promise<ResolvedAttachments> {
   if (refs.length === 0) return { attachments: [] };
-  const store = await getStore();
+  let store: Awaited<ReturnType<typeof getStore>>;
+  try {
+    store = await getStore();
+  } catch {
+    // Same failure as the page and attachment reads below: a Node `fs` error
+    // naming the notes folder's absolute path. Left unguarded, the send
+    // tool's own catch folds this into `mail_service_unavailable`, naming a
+    // subsystem that was never asked for anything.
+    return refuse(
+      "the notes folder could not answer",
+      STORE_FAILED,
+      STORE_FAILED,
+    );
+  }
   const shownBy = new Map<string, Set<string>>();
   const files: { name: string; mimeType: string; data: Uint8Array }[] = [];
   let remaining = budget;

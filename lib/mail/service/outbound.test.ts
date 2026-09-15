@@ -262,6 +262,29 @@ describe("provider-neutral mail send service", () => {
     expect(failure.enqueued).toBe(false);
   });
 
+  /** THE STORE ANSWERING A SUBMISSION THIS REQUEST DOES NOT RECOGNISE.
+   *
+   *  Something is already durable under the key by the time `enqueue`
+   *  returns, whatever it says, so this branch of the same rule marks
+   *  `enqueued` too. */
+  it("marks a submission mismatch from the store as enqueued too", async () => {
+    const store: MailSendStore = {
+      enqueue: async (submission) => ({
+        created: true,
+        submission: { ...submission, accountId: "a-different-account" },
+      }),
+      readByOperationId: async () => null,
+      compareAndSwap: async () => false,
+    };
+    const service = serviceFixture(store, acceptedProvider());
+
+    const failure = await service.send(composeInput(), request()).catch((e) => e);
+
+    expect(failure).toBeInstanceOf(MailSendError);
+    expect(failure.code).toBe("mail_send_service_unavailable");
+    expect(failure.enqueued).toBe(true);
+  });
+
   it("sends once, persists the result, and deduplicates the same request", async () => {
     const store = new MemoryMailSendStore();
     let rawReference: Buffer | null = null;

@@ -39,6 +39,7 @@ import { verifyMcpBearerToken } from "@/lib/oauth/server";
 import {
   hasScope,
   insufficientScope,
+  STORE_FAILED,
   storeFailed,
   text,
   toolScopeOf,
@@ -72,6 +73,24 @@ function pageTool<Args extends unknown[], Answer>(
       return storeFailed();
     }
   };
+}
+
+/** WHAT A NOTION_* RETHROW CARRIES, ONCE EVERY NAMED REFUSAL ABOVE HAS
+ *  ALREADY RETURNED.
+ *
+ *  The nine `notion_*` tools answer `{ error, code }` for the failures they
+ *  named and rethrow everything else, because the import driver reads a
+ *  throw as abort-and-retry and reads a return as a refusal to reason about.
+ *  What reaches this by the time control falls through is the store itself
+ *  failing, the same Node `fs` message that carries the absolute path of the
+ *  notes folder `pageTool` keeps from the other tools. The driver only cares
+ *  that the call threw, never what the message said, so the wording changes
+ *  here and the throw-vs-return protocol does not. */
+function notionStoreFailure(error: unknown): Error {
+  return Object.assign(new Error("Brain could not read the notes folder"), {
+    code: STORE_FAILED,
+    cause: error,
+  });
 }
 
 const handler = createMcpHandler(
@@ -256,7 +275,7 @@ const handler = createMcpHandler(
         } catch (error) {
           if (isNotionImportConflict(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -278,7 +297,7 @@ const handler = createMcpHandler(
           if (isNotFound(error)) return text({ candidate: null });
           if (isNotionImportConflict(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -305,7 +324,7 @@ const handler = createMcpHandler(
             return text({ error: "Brain page not found", code: "not_found" });
           if (isNotionImportConflict(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -347,7 +366,7 @@ const handler = createMcpHandler(
           }
           if (isNotionImportConflict(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -395,7 +414,7 @@ const handler = createMcpHandler(
         } catch (error) {
           if (isNotionImportConflict(error) || isAttachmentValidation(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         } finally {
           releaseUpload();
         }
@@ -416,7 +435,7 @@ const handler = createMcpHandler(
         } catch (error) {
           if (isNotionImportConflict(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -437,7 +456,7 @@ const handler = createMcpHandler(
             return text({ error: "notion page not found", code: "not_found" });
           if (isNotionImportConflict(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -460,7 +479,7 @@ const handler = createMcpHandler(
             return text({ error: error.message, code: error.code });
           if (isAttachmentValidation(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -481,7 +500,7 @@ const handler = createMcpHandler(
             return text({ error: "notion page not reserved", code: "not_found" });
           if (isNotionImportConflict(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -573,7 +592,7 @@ const handler = createMcpHandler(
       "search",
       "Full-text search across all pages. Returns matching pages with snippets.",
       { query: z.string() },
-      async ({ query }) => text(await searchNotes(query)),
+      pageTool(async ({ query }) => text(await searchNotes(query))),
     );
   },
   {

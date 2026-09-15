@@ -222,7 +222,17 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
         return insufficientScope("brain:write");
       }
 
-      const store = await getStore();
+      let store: Awaited<ReturnType<typeof getStore>>;
+      try {
+        store = await getStore();
+      } catch {
+        // Getting the store can fail before any page or attachment work
+        // starts, and it is the same Node `fs` error the reads and the save
+        // below already turn into Brain's own words. Guarded here so it
+        // writes a line instead of reaching the agent as a transport error.
+        await log(STORE_FAILED);
+        return storeFailed();
+      }
       // The page before the bytes. A mistyped page id is the common case, it
       // costs one `index.md` read to answer, and answering it after the
       // download means a whole file over the socket and an orphan in the
@@ -236,7 +246,7 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
         } catch (error) {
           if (isNotFound(error)) {
             await log("page_not_found");
-            return refusal("page not found", page);
+            return refusal("page not found", "page_not_found");
           }
           // A store failure is the store's, answered in Brain's own words:
           // the thrown message is a Node `fs` error and carries the absolute

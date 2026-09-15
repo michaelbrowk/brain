@@ -89,6 +89,15 @@ describe("the browser's own send route", () => {
     expect((sendMessage.mock.calls[0][0] as MailSendInput).origin).toBe("app");
   });
 
+  it("refuses a body that carries attachments, which the composer has none of yet", async () => {
+    const response = await post(composed({ attachments: [{ name: "a" }] }));
+
+    expect(response.status).toBe(400);
+    expect(sendMessage).not.toHaveBeenCalled();
+    const body = (await response.json()) as { error: { code: string } };
+    expect(body.error.code).toBe("attachments_not_supported");
+  });
+
   it("hands a body that is not an object to the service unchanged", async () => {
     // The codec is the one place that says what a send request is, and a
     // refusal from it names the request rather than an origin the route

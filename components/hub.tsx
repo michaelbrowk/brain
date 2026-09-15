@@ -6,7 +6,6 @@ import { DEFAULT_PAGE_ICON } from "@/lib/constants";
 import type { TreeNode } from "@/lib/store/types";
 import { DUR, EASE_OUT, SPRING_PANEL } from "@/lib/motion";
 import { HubMail } from "./hub-mail";
-import { HubNotifications } from "./hub-notifications";
 import { HubRow } from "./hub-row";
 import { HUB_CAPTURE_FLIGHT_ID, HubToday } from "./hub-today";
 import { TaskRequestError, createTask, localDay, mutateTasks } from "./tasks-client";
@@ -229,10 +228,8 @@ export function Hub({
   onSelect,
   onCreate,
   taskRefreshToken = 0,
-  notificationRefreshToken = 0,
   onOpenTasks,
   onOpenMail,
-  onNavigateNotification,
   onToast,
   pageTitleOf,
 }: {
@@ -242,14 +239,8 @@ export function Hub({
   /** The shell's count of task events this tab did not write. Shared with the
    *  sidebar count and the Tasks surface, so the three are one request. */
   taskRefreshToken?: number;
-  /** The same, for the centre. The bell in the sidebar head subscribes with
-   *  this one too, so the two are one request. */
-  notificationRefreshToken?: number;
   onOpenTasks?: () => void;
   onOpenMail?: () => void;
-  /** Opens a notification's destination. Absent, the block below draws
-   *  nothing: a row that leads nowhere is worse than no row. */
-  onNavigateNotification?: (href: string) => void;
   onToast?: (title: string, options?: ToastOptions) => void;
   /** A note's title by id. A detached task's row names the note its line left,
    *  and Home reads it from the same lookup the Tasks column does. */
@@ -493,17 +484,12 @@ export function Hub({
 
   return (
     <div className="brain-page-top mx-auto max-w-[720px] px-5 pb-40 md:px-6">
-      {/* THE FIRST THING ON HOME, AND ONLY WHEN THERE IS SOMETHING.
-          The six tab slots are full and stay full (spec §10), so the phone's
-          way into the centre is this row. It draws nothing at all with
-          nothing unread, which is why it can stand above the capture field
-          without taking the page's opening line away from it. */}
-      {onNavigateNotification && (
-        <HubNotifications
-          onNavigate={onNavigateNotification}
-          refreshToken={notificationRefreshToken}
-        />
-      )}
+      {/* NOTHING STANDS ABOVE THE CAPTURE FIELD, at any width. Home opened
+          with up to three unread rows on a phone for one release, and the
+          first thing on the page was the centre's list rather than the
+          field. Push is the phone's signal, the mail block further down
+          names the new letters, and the centre is a desktop object under the
+          sidebar's bell. */}
       {/* quick capture — a thought needs no destination: a Field 32 on
           paper (hairline ring, blue on focus), and one trailing control for
           the one destination that is not a page */}

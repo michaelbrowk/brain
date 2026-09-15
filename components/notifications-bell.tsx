@@ -145,8 +145,14 @@ export function NotificationsBell({
   return (
     <Dropdown.Root>
       <Dropdown.Trigger asChild>
+        {/* 34, WHICH IS NEW PAGE'S SIZE. It stood at 28 beside a 34 circle
+            with 4px between them, so the head's two controls differed in size
+            by a fifth and touched: what was drawn was one lopsided object
+            rather than a pair, and the smaller half was the one a reader is
+            asked to notice. Same box, same glyph size, 12px of air, and the
+            count comes inside the box with them. */}
         <IconButton
-          size={28}
+          size={34}
           className="relative"
           aria-label={unread > 0 ? `Notifications, ${unread} unread` : "Notifications"}
         >

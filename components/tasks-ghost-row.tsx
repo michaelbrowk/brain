@@ -6,6 +6,20 @@ import { whenLabel } from "./tasks-lists";
 import { TasksWhenPicker, type WhenValue } from "./tasks-when-picker";
 import { Icon } from "./ui/icon";
 
+/** The last request this row has already turned into a focus. Module scope,
+ *  not a ref: the row (and the surface around it) fully remounts on every
+ *  entry to Tasks, so a ref would reset with it, and every later arrival
+ *  (the sidebar row, the tab bar's Tasks slot, the back button) would steal
+ *  the caret back, keyboard included on a phone. This is what a fresh mount
+ *  checks against, the same way `mail-commands.ts`'s latch outlives the
+ *  surface that reads it. */
+let lastFocusedCaptureRequest = 0;
+
+/** Reset between tests: the module value outlives a render root. */
+export function resetTaskCaptureFocus(): void {
+  lastFocusedCaptureRequest = 0;
+}
+
 /** THE FIRST ROW OF EVERY LIST.
  *
  *  A capsule the size of a task with an outlined box and the placeholder
@@ -44,7 +58,8 @@ export function TasksGhostRow({
   });
 
   useEffect(() => {
-    if (captureRequest === 0) return;
+    if (captureRequest === 0 || captureRequest === lastFocusedCaptureRequest) return;
+    lastFocusedCaptureRequest = captureRequest;
     inputRef.current?.focus();
   }, [captureRequest]);
 

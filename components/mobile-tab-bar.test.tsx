@@ -11,10 +11,22 @@
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { TEMPLATES } from "@/lib/templates";
 import { MobileTabBar } from "./mobile-tab-bar";
+import { resetMailComposeAvailable } from "./mail-compose-available";
 
-function render(root: Root, hidden: boolean, onNew = vi.fn()) {
-  return act(() =>
+vi.mock("framer-motion", () => import("@/test/framer-motion-mock"));
+
+async function render(
+  root: Root,
+  hidden: boolean,
+  handlers: {
+    onNew?: (template: (typeof TEMPLATES)[number]) => void;
+    onNewTask?: () => void;
+    onNewMessage?: () => void;
+  } = {},
+) {
+  await act(async () =>
     root.render(
       <MobileTabBar
         homeActive
@@ -26,12 +38,19 @@ function render(root: Root, hidden: boolean, onNew = vi.fn()) {
         onHome={() => {}}
         onSearch={() => {}}
         onTasks={() => {}}
-        onNew={onNew}
+        onNew={handlers.onNew ?? (() => {})}
+        onNewTask={handlers.onNewTask ?? (() => {})}
+        onNewMessage={handlers.onNewMessage ?? (() => {})}
         onPages={() => {}}
         onMail={() => {}}
       />,
     ),
   );
+  for (let round = 0; round < 4; round += 1) {
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
 }
 
 describe("the phone's bottom line", () => {
@@ -39,6 +58,49 @@ describe("the phone's bottom line", () => {
   let root: Root;
 
   beforeEach(() => {
+    (
+      globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    resetMailComposeAvailable();
+    // the bar is a phone object, and the menu under its plus takes the sheet
+    // form on the same query every other sheet in the product reads
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(max-width: 767px)",
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        ({ ok: true, status: 200, json: async () => ({ apiVersion: 2, accounts: [] }) }) as Response,
+      ),
+    );
+    // Radix's popper measures its content and captures the pointer; jsdom
+    // ships neither.
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    vi.stubGlobal("PointerEvent", MouseEvent);
+    for (const name of ["hasPointerCapture", "setPointerCapture", "releasePointerCapture"]) {
+      Object.defineProperty(HTMLElement.prototype, name, {
+        configurable: true,
+        value: () => (name === "hasPointerCapture" ? false : undefined),
+      });
+    }
+    Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+      configurable: true,
+      value: () => undefined,
+    });
     host = document.createElement("div");
     document.body.append(host);
     root = createRoot(host);
@@ -47,6 +109,11 @@ describe("the phone's bottom line", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     host.remove();
+    document
+      .querySelectorAll("[data-radix-popper-content-wrapper]")
+      .forEach((element) => element.remove());
+    resetMailComposeAvailable();
+    vi.unstubAllGlobals();
   });
 
   const bar = () => document.querySelector<HTMLElement>(".brain-mobile-tabbar")!;
@@ -64,7 +131,8 @@ describe("the phone's bottom line", () => {
     // the bar is still the navigation and the plus is not part of it
     expect(bar().getAttribute("aria-label")).toBe("Primary");
     expect(plus().closest("nav")).toBeNull();
-    expect(plus().getAttribute("aria-label")).toBe("New page");
+    expect(plus().getAttribute("aria-label")).toBe("New");
+    expect(plus().getAttribute("aria-haspopup")).toBe("menu");
     expect(plus().querySelector("svg")).not.toBeNull();
     expect(plus().textContent).toBe("");
     // `brain-touch-min` pins anything it is on to `position: relative`
@@ -87,7 +155,7 @@ describe("the phone's bottom line", () => {
       "tasks",
       "pages",
       "mail",
-      "New page",
+      "New",
     ]);
     expect(bar().compareDocumentPosition(plus())).toBe(
       Node.DOCUMENT_POSITION_FOLLOWING,
@@ -117,10 +185,54 @@ describe("the phone's bottom line", () => {
     expect(plus().hasAttribute("data-hidden")).toBe(false);
   });
 
-  it("keeps New page on the same handler it had inside the bar", async () => {
+  it("opens the New menu as a sheet instead of making a page outright", async () => {
     const onNew = vi.fn();
-    await render(root, false, onNew);
-    await act(async () => plus().click());
+    const onNewTask = vi.fn();
+    await render(root, false, { onNew, onNewTask });
+
+    await act(async () => {
+      plus().dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // a press on the plus makes nothing by itself now
+    expect(onNew).not.toHaveBeenCalled();
+
+    const sheet = document.querySelector<HTMLElement>(".brain-menu")!;
+    expect(sheet).not.toBeNull();
+    expect(sheet.classList.contains("brain-menu-sheet")).toBe(true);
+    expect(sheet.querySelector(".brain-composer-grip")).not.toBeNull();
+
+    const row = (name: string) =>
+      [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].find(
+        (node) => (node.textContent ?? "").trim() === name,
+      );
+    expect(row("Task")).not.toBeUndefined();
+    expect(row("Blank page")).not.toBeUndefined();
+
+    await act(async () => row("Blank page")!.click());
     expect(onNew).toHaveBeenCalledTimes(1);
+    expect(onNew.mock.calls[0][0].id).toBe("blank");
+
+    await act(async () => {
+      plus().dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    // Task runs once Radix has released the menu, so the caret it asks for is
+    // not taken back by the focus scope on its way out
+    await act(async () => row("Task")!.click());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(onNewTask).toHaveBeenCalledTimes(1);
   });
 });

@@ -566,14 +566,15 @@ describe("mobile navigation surfaces", () => {
 
     // The plus is not a tab and does not live in the bar: it is its own
     // object standing at the other inset, wordless, and it carries the name
-    // the desktop circle carries for the same act.
+    // the desktop circle carries for the same act: "New", because what it
+    // opens is the menu that names the act, not a page outright.
     const bars = document.querySelectorAll(".brain-mobile-tabbar");
     expect(bars).toHaveLength(1);
     const plus = document.querySelectorAll<HTMLButtonElement>(
       ".brain-mobile-new",
     );
     expect(plus).toHaveLength(1);
-    expect(plus[0].getAttribute("aria-label")).toBe("New page");
+    expect(plus[0].getAttribute("aria-label")).toBe("New");
     expect(plus[0].getAttribute("data-mobile-tab")).toBeNull();
     expect(bars[0].contains(plus[0])).toBe(false);
     expect(bars[0].nextElementSibling).toBe(plus[0]);
@@ -594,7 +595,7 @@ describe("mobile navigation surfaces", () => {
     );
     expect(
       group.map((el) => el.dataset.mobileTab ?? el.getAttribute("aria-label")),
-    ).toEqual(["home", "search", "tasks", "pages", "mail", "New page"]);
+    ).toEqual(["home", "search", "tasks", "pages", "mail", "New"]);
     expect(group.every((el) => el.tabIndex === 0)).toBe(true);
   });
 

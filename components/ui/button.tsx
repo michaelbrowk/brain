@@ -50,15 +50,20 @@ export function Button({
   );
 }
 
-/** Icon-only button. v2 sizes are capsules: 28 in rows and menus, 36 inside
- *  a toolbar pill (`.icon-btn` in globals.css: hover tint + icon ink-2 → ink,
- *  press .90). "sm" / "md" are the v1 squares the old UI still uses. */
+/** Icon-only button. v2 sizes are capsules: 28 in rows and menus, 34 beside
+ *  the accent circle, 36 inside a toolbar pill (`.icon-btn` in globals.css:
+ *  hover tint + icon ink-2 → ink, press .90). 34 exists because the sidebar
+ *  head stands this atom next to `Button variant="accent"`, which is 34, and a
+ *  pair of controls that mean the same kind of thing cannot be two sizes; it
+ *  is the atom's size rather than a class at that one call site so the hover,
+ *  the press and the focus ring stay the family's. "sm" / "md" are the v1
+ *  squares the old UI still uses. */
 export function IconButton({
   className = "",
   size = "md",
   ...props
-}: HTMLMotionProps<"button"> & { size?: "sm" | "md" | 28 | 36 }) {
-  if (size === 28 || size === 36) {
+}: HTMLMotionProps<"button"> & { size?: "sm" | "md" | 28 | 34 | 36 }) {
+  if (size === 28 || size === 34 || size === 36) {
     return (
       <motion.button
         data-size={size}

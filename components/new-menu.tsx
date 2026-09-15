@@ -143,7 +143,35 @@ export function NewMenu({
         setOpen(true);
       }}
     >
-      <Dropdown.Trigger asChild>{children}</Dropdown.Trigger>
+      <Dropdown.Trigger
+        asChild
+        // THE SHEET OPENS ON THE LIFT, NOT ON THE PRESS.
+        //
+        // Radix opens a dropdown on `pointerdown` and picks a row on the press
+        // that follows, which is the right pair for a menu that drops below its
+        // trigger: nothing of it is ever under the press that asked for it. The
+        // sheet is the other shape. It rises from the bottom edge and lands
+        // over the plus, so the end of the tap that opened it came down on
+        // whichever row had arrived at those coordinates, which on a phone is
+        // the last template every time: a reader who pressed the plus was
+        // handed a Reading notes page and never saw the menu.
+        //
+        // So below md the press opens nothing and the lift opens the sheet,
+        // which is what the When picker's popover does on the same breakpoint
+        // and the reason it never had this. Radix's own handler reads
+        // `defaultPrevented` and stands down; the focus it would have held back
+        // is held back by the same line.
+        onPointerDown={(event) => {
+          if (sheet) event.preventDefault();
+        }}
+        onClick={() => {
+          if (!sheet || open) return;
+          sheetY.set(0);
+          setOpen(true);
+        }}
+      >
+        {children}
+      </Dropdown.Trigger>
       <Dropdown.Portal>
         {/* regular material r14, materialized by a keyframe on data-state.
             `asChild` below md makes the CONTENT the moving element, so what

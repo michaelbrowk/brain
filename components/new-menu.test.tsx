@@ -167,13 +167,24 @@ async function render(props: Partial<React.ComponentProps<typeof NewMenu>> = {})
 
 const trigger = () => host.querySelector<HTMLButtonElement>('[aria-label="New"]')!;
 
-/** Radix opens a dropdown on `pointerdown`, not on `click`. */
-const open = async () => {
+/** The press alone. Radix opens a dropdown on `pointerdown`, and below md the
+ *  sheet stands the handler down and waits for the lift. */
+const press = async () => {
   await act(async () => {
     trigger().dispatchEvent(
       new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
     );
   });
+  await act(async () => {
+    await Promise.resolve();
+  });
+};
+
+/** The whole gesture: the press, then the click the browser fires when the
+ *  reader lets go. The menu is up either way by the end of it. */
+const open = async () => {
+  await press();
+  await act(async () => trigger().click());
   await act(async () => {
     await Promise.resolve();
   });
@@ -277,6 +288,14 @@ describe("the New menu", () => {
     expect(menu().classList.contains("brain-menu-sheet")).toBe(false);
     expect(document.querySelector(".brain-composer-grip")).toBeNull();
   });
+
+  it("opens on the press, where nothing of it is under the pointer", async () => {
+    // A menu that drops BELOW its trigger is off the press's path, so it keeps
+    // Radix's own gesture and a mouse gets its rows the moment it goes down.
+    await render();
+    await press();
+    expect(document.querySelector(".brain-menu")).not.toBeNull();
+  });
 });
 
 describe("the New menu on a phone", () => {
@@ -306,5 +325,25 @@ describe("the New menu on a phone", () => {
       "Message",
       ...TEMPLATES.map((template) => `${template.emoji}${template.name}`),
     ]);
+  });
+
+  /** THE SHEET ARRIVES UNDER THE FINGER THAT OPENED IT.
+   *
+   *  Radix opens on `pointerdown` and picks a row on the press that follows. A
+   *  menu that drops below its trigger is never under the press that asked for
+   *  it; the sheet rises over the plus, so the end of that one tap came down on
+   *  whichever row had arrived at those coordinates and made a page the reader
+   *  never chose. So the press opens nothing and the lift opens the sheet, the
+   *  gesture the When picker's popover already takes on this breakpoint. */
+  it("opens on the lift and not on the press", async () => {
+    await render();
+    await press();
+    expect(document.querySelector(".brain-menu")).toBeNull();
+
+    await act(async () => trigger().click());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(menu().classList.contains("brain-menu-sheet")).toBe(true);
   });
 });

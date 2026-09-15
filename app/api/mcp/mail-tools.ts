@@ -6,9 +6,13 @@ import {
   type PublicMailAccountV3,
 } from "@/lib/mail/brain-mail-client";
 import type {
+  MailMailboxAvailability,
+  MailSearchIndexStatus,
   MailThreadListItem,
   MailThreadMutationInput,
 } from "@/lib/mail/message-types";
+import { sanitizeSnippet } from "@/lib/mail/reader-content";
+import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
 import {
   appendMcpActivity,
   type McpActivityEntry,
@@ -33,6 +37,11 @@ import {
  *  The client is built per call rather than once per module, because a tool
  *  that held one open would keep a socket path from before the service was
  *  reconfigured, and because a test replaces the factory.
+ *
+ *  Each tool's own `hasScope` check is a second lock, not the only one:
+ *  `toolScopeOf` in `tool-kit.ts` already refuses an ungranted call at the
+ *  route, before any handler runs. The in-tool check stays so a tool that
+ *  ever moves outside that gate is still refused here.
  */
 
 type McpToolServer = Parameters<Parameters<typeof createMcpHandler>[0]>[0];
@@ -57,29 +66,67 @@ const DEFAULT_WAIT_MS = 8000;
 const MAX_WAIT_MS = 20_000;
 const POLL_INTERVAL_MS = 400;
 
-/** The service's own code, handed over as a reason an agent can act on. A
- *  throw here would arrive at the agent as a transport error with no code at
- *  all, and the agent would retry a permanent refusal forever. Anything that
- *  is not the client's own error is an outage as far as the agent is
- *  concerned, and its wording stays on this side of the boundary. */
-function mailRefusal(error: unknown) {
+/** The client's own shapes (`lib/mail/message-codec.ts`), repeated here so a
+ *  malformed id is refused by Brain, naming the field, rather than reaching
+ *  the client only to come back as "the mail service refused this request"
+ *  about a service that was never asked. */
+const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
+const SAFE_MAIL_RESOURCE_ID = /^[A-Za-z0-9_-]{1,255}$/;
+
+function invalidId(label: string, reason: string) {
+  return refusal(`that ${label} is not valid`, reason);
+}
+
+/** The service's own code, handed over as a reason an agent can act on.
+ *  Shared by `mailRefusal`, the whole-tool answer, and the per-account entry
+ *  a merged search reports for the accounts that did not come back. */
+function mailRefusalFields(error: unknown): { error: string; reason: string } {
   if (error instanceof BrainMailClientError) {
     if (error.code === "mail_service_unavailable") {
-      return refusal("the mail service is unavailable", error.code);
+      return { error: "the mail service is unavailable", reason: error.code };
     }
     if (error.code === "mail_account_not_found") {
-      return refusal("account not found", error.code);
+      return { error: "account not found", reason: error.code };
     }
     if (error.code === "mail_thread_not_found") {
-      return refusal("thread not found", error.code);
+      return { error: "thread not found", reason: error.code };
     }
     if (error.code === "mail_account_reauth_required") {
-      return refusal("this account needs to be reconnected", error.code);
+      return {
+        error: "this account needs to be reconnected",
+        reason: error.code,
+      };
     }
-    return refusal("the mail service refused this request", error.code);
+    return { error: "the mail service refused this request", reason: error.code };
   }
-  return refusal("the mail service is unavailable", "mail_service_unavailable");
+  return {
+    error: "the mail service is unavailable",
+    reason: "mail_service_unavailable",
+  };
 }
+
+/** A throw here would arrive at the agent as a transport error with no code
+ *  at all, and the agent would retry a permanent refusal forever. Anything
+ *  that is not the client's own error is an outage as far as the agent is
+ *  concerned, and its wording stays on this side of the boundary. */
+function mailRefusal(error: unknown) {
+  const fields = mailRefusalFields(error);
+  return refusal(fields.error, fields.reason);
+}
+
+/** One queried account's own state in a merged search: either the page it
+ *  answered, carrying the same completeness signals the browser reads, or
+ *  the reason it did not answer at all. An agent reading `threads` alone
+ *  cannot tell an empty mailbox from one still indexing or one account down;
+ *  this is what tells it. */
+type SearchAccountStatus =
+  | {
+      readonly accountId: string;
+      readonly availability: MailMailboxAvailability;
+      readonly indexStatus: MailSearchIndexStatus;
+      readonly resultsTruncated: boolean;
+    }
+  | { readonly accountId: string; readonly error: string; readonly reason: string };
 
 /** The service reports sending as one boolean, so the reason it is false is
  *  Brain's own read. Reconnection comes first because it is the one the owner
@@ -136,6 +183,27 @@ function decodeSearchCursor(cursor: string): SearchCursor | null {
     per[accountId] = entry;
   }
   return per;
+}
+
+/** The words in an HTML-only message, for the one shape the service's own
+ *  extraction misses: an HTML part nested inside a multipart container with
+ *  no text sibling. `html` here is already sanitizer output handed back by
+ *  the client, so stripping its tags cannot expose anything active. Block
+ *  boundaries become line breaks first, so paragraphs stay apart rather than
+ *  running together, and each line is cleaned the way a snippet is: entities
+ *  decoded, zero-width marks and image markers dropped. The markup itself is
+ *  never in the answer. */
+function textFromSanitizedHtml(html: string): string | null {
+  const withLineBreaks = html.replace(
+    /<\/?(?:p|div|br|li|tr|h[1-6]|blockquote)\b[^>]*>/gi,
+    "\n",
+  );
+  const lines = withLineBreaks
+    .replace(/<[^>]*>/g, " ")
+    .split("\n")
+    .map((line) => sanitizeSnippet(line))
+    .filter((line) => line.length > 0);
+  return lines.length === 0 ? null : lines.join("\n");
 }
 
 /** A total order, so two pages of the same search always merge the same way.
@@ -280,6 +348,9 @@ export function registerMailTools(server: McpToolServer): void {
     },
     async ({ accountId, mailbox, view, cursor, limit }, extra) => {
       if (!hasScope(extra, "brain:mail")) return insufficientScope("brain:mail");
+      if (!SAFE_ACCOUNT_ID.test(accountId)) {
+        return invalidId("account id", "invalid_account_id");
+      }
       try {
         const page = await createBrainMailClient().listMailboxThreads(
           accountId,
@@ -290,7 +361,11 @@ export function registerMailTools(server: McpToolServer): void {
             view: view ?? null,
           },
         );
-        return text({ threads: page.items, nextCursor: page.nextCursor });
+        return text({
+          threads: page.items,
+          nextCursor: page.nextCursor,
+          availability: page.availability,
+        });
       } catch (error) {
         return mailRefusal(error);
       }
@@ -314,6 +389,12 @@ export function registerMailTools(server: McpToolServer): void {
     },
     async ({ query, accountId, mailbox, cursor, limit }, extra) => {
       if (!hasScope(extra, "brain:mail")) return insufficientScope("brain:mail");
+      if (accountId !== undefined && !SAFE_ACCOUNT_ID.test(accountId)) {
+        return invalidId("account id", "invalid_account_id");
+      }
+      if (normalizeMailSearchQueryText(query) === null) {
+        return refusal("that search query is empty or too long", "invalid_query");
+      }
       const mailboxId = mailbox ?? DEFAULT_MAILBOX;
       const pageLimit = limit ?? DEFAULT_LIMIT;
       try {
@@ -326,7 +407,13 @@ export function registerMailTools(server: McpToolServer): void {
             cursor: cursor ?? null,
             limit: pageLimit,
           });
-          return text({ threads: page.items, nextCursor: page.nextCursor });
+          return text({
+            threads: page.items,
+            nextCursor: page.nextCursor,
+            availability: page.availability,
+            indexStatus: page.indexStatus,
+            resultsTruncated: page.resultsTruncated,
+          });
         }
         const accountIds = (await client.listAccounts()).accounts.map(
           (account) => account.accountId,
@@ -343,6 +430,7 @@ export function registerMailTools(server: McpToolServer): void {
         }
         const items: MailThreadListItem[] = [];
         const next: SearchCursor = {};
+        const accounts: SearchAccountStatus[] = [];
         for (const id of accountIds) {
           const named =
             per !== null && Object.prototype.hasOwnProperty.call(per, id);
@@ -353,21 +441,35 @@ export function registerMailTools(server: McpToolServer): void {
             next[id] = null;
             continue;
           }
-          const page = await client.searchThreads({
-            accountId: id,
-            mailboxId,
-            query,
-            cursor: named ? (per?.[id] ?? null) : null,
-            limit: pageLimit,
-          });
-          items.push(...page.items);
-          next[id] = page.nextCursor;
+          try {
+            const page = await client.searchThreads({
+              accountId: id,
+              mailboxId,
+              query,
+              cursor: named ? (per?.[id] ?? null) : null,
+              limit: pageLimit,
+            });
+            items.push(...page.items);
+            next[id] = page.nextCursor;
+            accounts.push({
+              accountId: id,
+              availability: page.availability,
+              indexStatus: page.indexStatus,
+              resultsTruncated: page.resultsTruncated,
+            });
+          } catch (error) {
+            // One account down does not take the merge with it. `next` keeps
+            // no entry for this account, so a cursor built from this answer
+            // asks it again from the start rather than marking it exhausted.
+            accounts.push({ accountId: id, ...mailRefusalFields(error) });
+          }
         }
         items.sort(byNewest);
         const exhausted = Object.values(next).every((value) => value === null);
         return text({
           threads: items,
           nextCursor: exhausted ? null : encodeSearchCursor(next),
+          accounts,
         });
       } catch (error) {
         return mailRefusal(error);
@@ -381,6 +483,12 @@ export function registerMailTools(server: McpToolServer): void {
     { accountId: z.string(), threadId: z.string() },
     async ({ accountId, threadId }, extra) => {
       if (!hasScope(extra, "brain:mail")) return insufficientScope("brain:mail");
+      if (!SAFE_ACCOUNT_ID.test(accountId)) {
+        return invalidId("account id", "invalid_account_id");
+      }
+      if (!SAFE_MAIL_RESOURCE_ID.test(threadId)) {
+        return invalidId("thread id", "invalid_thread_id");
+      }
       try {
         const detail = await createBrainMailClient().getThread(
           accountId,
@@ -423,6 +531,12 @@ export function registerMailTools(server: McpToolServer): void {
     },
     async ({ accountId, messageId, wait }, extra) => {
       if (!hasScope(extra, "brain:mail")) return insufficientScope("brain:mail");
+      if (!SAFE_ACCOUNT_ID.test(accountId)) {
+        return invalidId("account id", "invalid_account_id");
+      }
+      if (!SAFE_MAIL_RESOURCE_ID.test(messageId)) {
+        return invalidId("message id", "invalid_message_id");
+      }
       try {
         const client = createBrainMailClient();
         // The body cache drops rows outside the three-newest-Inbox cohort
@@ -441,12 +555,19 @@ export function registerMailTools(server: McpToolServer): void {
         if (content.state !== "ready") {
           return text({ state: content.state, attachments: [] });
         }
-        // `htmlBody` is never read. When a message carried only an HTML part
-        // the service's own extraction has already put the words in
-        // `textBody`, so an agent gets what a person reads.
+        // The service's own extraction fills `textBody` for almost every
+        // HTML-only message. The one shape it misses, an HTML part nested in
+        // a multipart container with no text sibling, is handled here: Brain
+        // derives the words itself from the sanitized `htmlBody` and answers
+        // those. Raw markup never crosses this boundary either way.
+        const messageText =
+          content.textBody ??
+          (content.htmlBody === null
+            ? null
+            : textFromSanitizedHtml(content.htmlBody));
         return text({
           state: content.state,
-          text: content.textBody,
+          text: messageText,
           attachments: content.attachments.map((attachment) => ({
             attachmentId: attachment.attachmentId,
             filename: attachment.filename,

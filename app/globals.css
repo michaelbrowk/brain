@@ -2157,13 +2157,13 @@ html[data-kbd] [contenteditable]:focus-visible {
     animation: when-sheet-hold 300ms linear both;
   }
 }
-/* Share popover: the share card as a ledger on paper (DESIGN.md v2, §12
-   Menu / popover). The regular material survives as a 6px sleeve (popover
-   14 = plate 8 + padding 6) around an opaque paper plate, so the sentence,
-   the rows and the field stand on paper and never on a backdrop layer
-   (ban #2). Same materialize canon as .brain-menu: Radix data-state drives
-   the keyframes, the edge-light rides ::before and arrives at 60%, exit
-   retraces in 120ms. */
+/* Share popover: the share card as a ledger on glass (DESIGN.md v2, §12
+   Menu / popover). The regular material is a 6px sleeve at r14, and the
+   rows stand directly on it, separated by the house hairline the way
+   .brain-menu's rows and the notifications centre already do. Same
+   materialize canon as .brain-menu: Radix data-state drives the keyframes,
+   the edge-light rides ::before and arrives at 60%, exit retraces in
+   120ms. */
 .brain-share-popover {
   position: relative;
   isolation: isolate;
@@ -2202,18 +2202,13 @@ html[data-kbd] [contenteditable]:focus-visible {
   animation: materialize-out 120ms ease-in both;
 }
 
-/* The paper plate: r8 concentric inside the r14 sleeve, with the rim a
-   small paper object takes. Inside the phone sheet it is r10, the control
-   radius the sheet's 20 is derived from (10 + padding 10). */
+/* The card's content wrapper: r8 concentric inside the r14 sleeve, clipping
+   the reveal's overflow. No fill of its own: it takes the popover's glass
+   (or, in the phone sheet, .brain-dialog's thick material) straight
+   through, same as .brain-menu-item takes .brain-menu's. */
 .brain-share-plate {
   overflow: hidden;
   border-radius: var(--r-block);
-  background: var(--paper);
-  box-shadow: 0 0 0 0.5px var(--fill-rim);
-  color: var(--ink);
-  --kbd-fill: var(--fill-kbd-paper);
-  --kbd-rim: none;
-  --skeleton-fill: var(--fill-skeleton-paper);
 }
 [data-share-mobile-surface] .brain-share-plate {
   border-radius: var(--r-control);

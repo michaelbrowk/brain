@@ -1,11 +1,31 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { act, type ComponentProps } from "react";
 import { createRoot, hydrateRoot, type Root } from "react-dom/client";
 import { renderToString } from "react-dom/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ShareScopeSnapshot } from "@/lib/store/types";
 import { SharePopover } from "./share-popover";
+
+const css = readFileSync(
+  path.join(path.resolve(__dirname, ".."), "app/globals.css"),
+  "utf8",
+);
+
+/** Lifts one flat top-level rule (`selector { ... }`) out of `globals.css`
+ *  by its exact selector, so a computed-style assertion reads the real
+ *  cascade rather than a hand-typed stand-in (the tasks-when-picker.test.tsx
+ *  canon). Anchored at a line start so `.brain-share-plate` never matches
+ *  `[data-share-mobile-surface] .brain-share-plate` or a `::before` /
+ *  `[data-state]` variant of the same class. */
+function cssRule(selector: string): string {
+  const escaped = selector.replace(/\./g, "\\.");
+  const match = css.match(new RegExp(`(?:^|\\n)${escaped}\\s*\\{([^}]*)\\}`));
+  if (!match) throw new Error(`no ${selector} rule in app/globals.css`);
+  return `${selector} {${match[1]}}`;
+}
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
@@ -255,10 +275,28 @@ describe("SharePopover redesign", () => {
     // transform-origin comes from the class (the Radix CSS variable), never
     // an inline style
     expect(surface.style.transformOrigin).toBe("");
-    // the glass is a sleeve: everything readable stands on the paper plate
+    // the glass is a sleeve: everything readable stands right on it, the
+    // content wrapper carrying no fill of its own
     const plate = surface.firstElementChild as HTMLElement;
     expect(plate.className).toBe("brain-share-plate");
     expect(plate.contains(document.body.querySelector("h2"))).toBe(true);
+    const style = document.createElement("style");
+    style.textContent = [
+      cssRule(".brain-share-popover"),
+      cssRule(".brain-share-plate"),
+    ].join("\n");
+    document.head.append(style);
+    try {
+      // the sleeve keeps the regular material
+      expect(getComputedStyle(surface).background).toBe("var(--glass-reg)");
+      // and the wrapper inside it declares no background of its own: a
+      // regression here means the white card from the popover screenshot
+      // (тут лишняя белая подложка) is back
+      expect(getComputedStyle(plate).background).toBe("");
+      expect(getComputedStyle(plate).backgroundColor).toBe("rgba(0, 0, 0, 0)");
+    } finally {
+      style.remove();
+    }
     await act(async () => {
       document.dispatchEvent(
         new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),

@@ -120,24 +120,36 @@ export function mailOutcome(error: unknown): string {
  *  proposal, enqueues it durably and only then delivers
  *  (`lib/mail/service/outbound.ts`), so a client that stopped waiting has no
  *  idea which side of the enqueue it stopped on, and the outbox will deliver
- *  what it holds. */
+ *  what it holds.
+ *
+ *  `mail_service_invalid_response` is here because every path that raises it
+ *  runs after the request was written in full: the service answered with a
+ *  body this client could not validate, or the response was cut off part way
+ *  (`lib/mail/brain-mail-client.ts`). That is no less ambiguous than a
+ *  timeout. */
 const AMBIGUOUS_SEND_CODES: ReadonlySet<string> = new Set([
   "mail_service_timeout",
   "mail_request_cancelled",
+  "mail_service_invalid_response",
 ]);
 
 /** Whether a failure from the send call itself leaves the message's fate
  *  unknown. Only a throw from `sendMessage` may be asked: a failure before it
  *  told the service nothing to send.
  *
- *  Anything that is not the client's own error counts as unknown too. A
- *  socket that died after the body was written throws that way, and for a
- *  message in the owner's name the safe reading of a failure nobody has a
- *  code for is "it may have gone out". */
+ *  Three things read as unknown. One of the codes above. Any client error
+ *  raised once the request body had reached the socket, which is what
+ *  `requestSent` carries: `mail_service_unavailable` is one code for a socket
+ *  that never connected and one that died with the message already written,
+ *  and only the client knows which happened. And anything that is not the
+ *  client's own error at all, because for a message in the owner's name the
+ *  safe reading of a failure nobody has a code for is "it may have gone out".
+ *
+ *  What stays a refusal is a failure before anything was sent: a connection
+ *  refused, a validation Brain made itself, the owner's kill switch. */
 export function isAmbiguousSendFailure(error: unknown): boolean {
-  return error instanceof BrainMailClientError
-    ? AMBIGUOUS_SEND_CODES.has(error.code)
-    : true;
+  if (!(error instanceof BrainMailClientError)) return true;
+  return AMBIGUOUS_SEND_CODES.has(error.code) || error.requestSent;
 }
 
 /** Every field a mail or task line may name. All of them are optional on

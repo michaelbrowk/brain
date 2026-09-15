@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import {
@@ -289,33 +290,133 @@ function admitRecipients(recipients: Recipients) {
 /** The two body caps the codec holds, checked here so a message one byte
  *  over the line is refused with its own measurement rather than as a
  *  request the service could not read. A NUL is refused for the same
- *  reason: `boundedString` treats it as a broken string. */
+ *  reason: `boundedString` treats it as a broken string.
+ *
+ *  Each rule hands back its own outcome as well as its refusal. The caller
+ *  used to log every one of these as `body_too_long`, so the owner's log
+ *  named the wrong cause for the attempt they would most want to read. */
 function admitBody(subject: string, body: string) {
   if (subject.includes("\u0000") || body.includes("\u0000")) {
-    return refusal(
-      "that message holds a null byte",
-      "subject and text are plain text",
-    );
+    return {
+      refused: refusal(
+        "that message holds a null byte",
+        "subject and text are plain text",
+      ),
+      outcome: "null_byte",
+    };
   }
   if (CONTROL_CHARACTERS.test(subject)) {
-    return refusal(
-      "that subject holds a control character",
-      "a subject is one line of plain text",
-    );
+    return {
+      refused: refusal(
+        "that subject holds a control character",
+        "a subject is one line of plain text",
+      ),
+      outcome: "subject_control_character",
+    };
   }
   if (Buffer.byteLength(subject) > MAX_SUBJECT_BYTES) {
-    return refusal(
-      "that subject is too long",
-      `subject is at most ${MAX_SUBJECT_BYTES} bytes`,
-    );
+    return {
+      refused: refusal(
+        "that subject is too long",
+        `subject is at most ${MAX_SUBJECT_BYTES} bytes`,
+      ),
+      outcome: "subject_too_long",
+    };
   }
   if (Buffer.byteLength(body) > MAX_TEXT_BYTES) {
-    return refusal(
-      "that message is too long",
-      `text is at most ${MAX_TEXT_BYTES} bytes`,
-    );
+    return {
+      refused: refusal(
+        "that message is too long",
+        `text is at most ${MAX_TEXT_BYTES} bytes`,
+      ),
+      outcome: "body_too_long",
+    };
   }
   return null;
+}
+
+/** HOW LONG AN UNKNOWN SEND IS REMEMBERED, AND WHY IT IS REMEMBERED AT ALL.
+ *
+ *  A send that answered `state: "unknown"` may be on its way. The answer says
+ *  to ask again with the same key, which replays the first send instead of
+ *  making a second one, and that sentence was the whole of the protection: an
+ *  agent that reached for a fresh key instead put a second copy of the
+ *  message in somebody's inbox, with nothing in Brain to notice.
+ *
+ *  Ten minutes covers the retry an agent makes after reading the answer, and
+ *  is short enough that a person deliberately sending the same message twice
+ *  is not held up. The memory is this process's own: it is a guard rail on a
+ *  mistake made in one conversation, not a durable record. */
+const UNKNOWN_SEND_MEMORY_MS = 10 * 60 * 1000;
+
+/** One entry per unknown send in the window. Bounded so that an agent
+ *  producing them cannot grow the map without end. */
+const UNKNOWN_SEND_MEMORY_MAX = 50;
+
+interface UnknownSend {
+  readonly idempotencyKey: string;
+  readonly at: number;
+}
+
+const unknownSends = new Map<string, UnknownSend>();
+
+/** The message rather than the call: the account, the three recipient lists,
+ *  the subject and the body. Two sends agreeing on all of those are the same
+ *  message however each was composed. Only the digest is kept, so nothing
+ *  written stays in this process's memory after the send. */
+function sendFingerprint(
+  accountId: string,
+  recipients: Recipients,
+  subject: string,
+  body: string,
+): string {
+  const hash = createHash("sha256");
+  for (const part of [
+    accountId,
+    recipients.to.join(","),
+    recipients.cc.join(","),
+    recipients.bcc.join(","),
+    subject,
+    body,
+  ]) {
+    hash.update(part);
+    hash.update("\u0000");
+  }
+  return hash.digest("hex");
+}
+
+/** A fresh key on a message whose first attempt may already be on its way.
+ *  Refused, naming the one key that answers the first send rather than making
+ *  a second. The same key is exactly the retry the unknown answer asked for,
+ *  so it is never held up. */
+function admitNotDuplicate(fingerprint: string, idempotencyKey: string) {
+  const now = Date.now();
+  for (const [held, send] of unknownSends) {
+    if (now - send.at >= UNKNOWN_SEND_MEMORY_MS) unknownSends.delete(held);
+  }
+  const held = unknownSends.get(fingerprint);
+  if (!held || held.idempotencyKey === idempotencyKey) return null;
+  return refusal(
+    `that message may already be on its way under idempotencyKey ${held.idempotencyKey}, so ask again with that key or read get_mail_send_status rather than sending a second copy`,
+    "possible_duplicate",
+  );
+}
+
+/** The first unknown attempt is the one whose key can replay, so a later one
+ *  never overwrites it. */
+function rememberUnknownSend(fingerprint: string, idempotencyKey: string): void {
+  if (unknownSends.has(fingerprint)) return;
+  if (unknownSends.size >= UNKNOWN_SEND_MEMORY_MAX) {
+    const oldest = unknownSends.keys().next();
+    if (!oldest.done) unknownSends.delete(oldest.value);
+  }
+  unknownSends.set(fingerprint, { idempotencyKey, at: Date.now() });
+}
+
+/** A send that answered is a send whose fate is known, whichever key it went
+ *  under, so there is nothing left to warn the next call about. */
+function forgetUnknownSend(fingerprint: string): void {
+  unknownSends.delete(fingerprint);
 }
 
 type AdmittedAccount =
@@ -461,8 +562,8 @@ export function registerMailSendTools(server: McpToolServer): void {
       }
       const badBody = admitBody(subject, body);
       if (badBody) {
-        await log("body_too_long");
-        return badBody;
+        await log(badBody.outcome);
+        return badBody.refused;
       }
       const badRefs = admitAttachmentRefs(refs);
       if (badRefs) {
@@ -470,6 +571,15 @@ export function registerMailSendTools(server: McpToolServer): void {
         return badRefs.refused;
       }
       marks = attachmentActivityFields(refs, { named: true });
+
+      // The last check before anything is built: a message this process has
+      // already put on the wire once, under a key that cannot replay it.
+      const fingerprint = sendFingerprint(accountId, recipients, subject, body);
+      const duplicate = admitNotDuplicate(fingerprint, idempotencyKey);
+      if (duplicate) {
+        await log("possible_duplicate");
+        return duplicate;
+      }
 
       try {
         const client = createBrainMailClient();
@@ -500,10 +610,12 @@ export function registerMailSendTools(server: McpToolServer): void {
           return carried.refused;
         }
         if ("unknown" in carried) {
+          rememberUnknownSend(fingerprint, idempotencyKey);
           await log("unknown");
           return unknownSend(idempotencyKey, carried.unknown);
         }
         const result = carried.result;
+        forgetUnknownSend(fingerprint);
         await recordSend(extra, accountId, result.operationId);
         await log("ok", result.operationId);
         return text({
@@ -595,8 +707,8 @@ export function registerMailSendTools(server: McpToolServer): void {
       const settings = gate.settings;
       const badBody = admitBody("", body);
       if (badBody) {
-        await log("body_too_long");
-        return badBody;
+        await log(badBody.outcome);
+        return badBody.refused;
       }
       const badRefs = admitAttachmentRefs(refs);
       if (badRefs) {
@@ -651,8 +763,21 @@ export function registerMailSendTools(server: McpToolServer): void {
         const subject = repliedSubject(target.subject);
         const badSubject = admitBody(subject, "");
         if (badSubject) {
-          await log("subject_too_long");
-          return badSubject;
+          await log(badSubject.outcome);
+          return badSubject.refused;
+        }
+        // The recipients and the subject are the provider's, so the
+        // fingerprint of a reply is only knowable here.
+        const fingerprint = sendFingerprint(
+          accountId,
+          recipients,
+          subject,
+          body,
+        );
+        const duplicate = admitNotDuplicate(fingerprint, idempotencyKey);
+        if (duplicate) {
+          await log("possible_duplicate");
+          return duplicate;
         }
         const carried = await carrySend(client, refs, (attachments) => ({
           accountId,
@@ -673,10 +798,12 @@ export function registerMailSendTools(server: McpToolServer): void {
           return carried.refused;
         }
         if ("unknown" in carried) {
+          rememberUnknownSend(fingerprint, idempotencyKey);
           await log("unknown");
           return unknownSend(idempotencyKey, carried.unknown);
         }
         const result = carried.result;
+        forgetUnknownSend(fingerprint);
         await recordSend(extra, accountId, result.operationId);
         await log("ok", result.operationId);
         return text({

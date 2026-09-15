@@ -1109,6 +1109,32 @@ describe("Brain Mail Unix-socket client", () => {
       stderr.mockRestore();
     }
   });
+
+  it("says whether the request had gone out when the socket died", async () => {
+    // `mail_service_unavailable` is one code for two different worlds, and a
+    // caller sending mail in the owner's name has to tell them apart: a
+    // socket that never connected told the service nothing, one that died
+    // after the body was written may have handed it the message.
+    const { socketPath } = await startServer(async (request, response) => {
+      await readBody(request);
+      request.socket.destroy();
+      response.destroy();
+    });
+    const died = createBrainMailClient({ socketPath });
+
+    await expect(died.status()).rejects.toMatchObject({
+      code: "mail_service_unavailable",
+      requestSent: true,
+    });
+
+    const absent = createBrainMailClient({
+      socketPath: path.join(path.dirname(socketPath), "nothing-here.sock"),
+    });
+    await expect(absent.status()).rejects.toMatchObject({
+      code: "mail_service_unavailable",
+      requestSent: false,
+    });
+  });
 });
 
 function attachmentHeaders(bytes: number): Record<string, string> {

@@ -289,12 +289,26 @@ export interface MailAccountPatchInputV2 {
 export class BrainMailClientError extends Error {
   readonly status: number;
   readonly code: string;
+  /** Whether the request body had reached the socket before this failed.
+   *
+   *  `mail_service_unavailable` covers two different worlds: a socket that
+   *  never connected, where the service was told nothing, and one that died
+   *  after the body was written, where it may have the message already. The
+   *  code cannot tell them apart and a caller sending mail in the owner's
+   *  name has to. False whenever nothing was written, which is the safe
+   *  reading for every failure raised before the request went out. */
+  readonly requestSent: boolean;
 
-  constructor(status: number, code: string) {
+  constructor(
+    status: number,
+    code: string,
+    options: { readonly requestSent?: boolean } = {},
+  ) {
     super(code);
     this.name = "BrainMailClientError";
     this.status = status;
     this.code = code;
+    this.requestSent = options.requestSent === true;
   }
 }
 
@@ -1193,6 +1207,11 @@ async function requestMailService<T>(
   return new Promise<T>((resolve, reject) => {
     let settled = false;
     let absoluteTimer: ReturnType<typeof setTimeout> | undefined;
+    // Set once the request body has left this process for the socket. It is
+    // what separates a socket that never connected from one that died with
+    // the message already written, which `BrainMailClientError.requestSent`
+    // then carries to the send tools.
+    let requestSent = false;
     let requestBodyWiped = false;
     const wipeRequestBody = () => {
       if (requestBodyWiped || encoded === undefined) return;
@@ -1319,7 +1338,13 @@ async function requestMailService<T>(
           });
           response.once("error", () => {
             wipeResponseChunks();
-            fail(serviceUnavailable());
+            // The response had started, so the request is long gone and the
+            // service may have acted on it.
+            fail(
+              new BrainMailClientError(503, "mail_service_unavailable", {
+                requestSent: true,
+              }),
+            );
           });
           response.once("aborted", () => {
             wipeResponseChunks();
@@ -1342,11 +1367,19 @@ async function requestMailService<T>(
           new BrainMailClientError(
             code === "mail_request_cancelled" ? 408 : 503,
             code,
+            { requestSent },
           ),
         );
       });
-      if (encoded !== undefined) request.end(encoded, wipeRequestBody);
-      else request.end();
+      const sent = () => {
+        requestSent = true;
+      };
+      if (encoded !== undefined)
+        request.end(encoded, () => {
+          sent();
+          wipeRequestBody();
+        });
+      else request.end(sent);
     } catch {
       wipeRequestBody();
       fail(serviceUnavailable());

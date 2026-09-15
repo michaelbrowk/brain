@@ -143,7 +143,7 @@ log that recorded every read would bury the sends.
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
 | `list_mail_accounts` | `brain:mail` | none | `{ accounts }`, each `accountId`, `address`, `displayName`, `provider`, `canSend`, and `sendBlockedReason` only when it cannot send | nothing of its own |
-| `list_mail_threads` | `brain:mail` | `accountId`, `mailbox?`, `view?`, `cursor?`, `limit?` | `{ threads, nextCursor, availability }`, threads newest first with subject, participants, last message time, unread, starred, size, list flag and category. `availability` says whether the mailbox itself answered or why it did not | `invalid_account_id`, `account not found`, and any other code the service coined, as `the mail service refused this request` with that code as the reason |
+| `list_mail_threads` | `brain:mail` | `accountId`, `mailbox?`, `view?`, `cursor?`, `limit?` | `{ threads, nextCursor, availability }`, threads newest first with subject, participants, last message time, unread, starred, size, list flag and category. `availability` says whether the mailbox itself answered or why it did not | `invalid_account_id`, `account not found`, and any other code the service coined, as its own sentence where one mail tool coined it for all of them and otherwise `the mail service refused this request`, with the code as the reason either way |
 | `search_mail` | `brain:mail` | `query`, `accountId?`, `mailbox?`, `cursor?`, `limit?` | one account: `{ threads, nextCursor, availability, indexStatus, resultsTruncated }`. Every account: `{ threads, nextCursor, accounts }`, `accounts` holding each queried account's own `availability`, `indexStatus` and `resultsTruncated`, or `error` and `reason` for one that did not answer | `invalid_account_id`, `invalid_query`, `that cursor is not usable any more` (`stale_cursor`), plus the service's own codes |
 | `get_mail_thread` | `brain:mail` | `accountId`, `threadId` | `{ thread, messages }`, each message's `messageId`, `from`, `to`, `cc`, `subject`, `sentAt`, `unread`, `snippet`, `hasAttachments` and `bodyCached` | `invalid_account_id`, `invalid_thread_id`, `thread not found`, plus the service's own codes |
 | `read_mail_message` | `brain:mail` | `accountId`, `messageId`, `wait?` | `{ state, text?, attachments }`, each attachment's `attachmentId`, `filename`, `mimeType` and `bytes` | `invalid_account_id`, `invalid_message_id`, the service's own codes |
@@ -218,7 +218,7 @@ owner sees what was attempted.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent sending is off`. `invalid_account_id`. `to is empty`. `that is too many recipients` over 100 across the three fields. `that is not an address` naming the field and index, and `that address is listed twice` the same way. `that message is too long` and `that subject is too long`, each naming its cap. `that subject holds a control character`. `that message holds a null byte`. `account not found`. `cannot send from this account` with the blocked reason. `too many attachments`, `that is not an attachment name`, `page not found`, `that page does not hold that file`, `that file is gone`, `those attachments are too large`, `that file cannot be sent`, `page_changed`, `attachment_read_failed`. Plus the service's own codes. A send that timed out is not refused: see the `state` unknown answer below |
+| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent sending is off`. `invalid_account_id`. `to is empty`. `that is too many recipients` over 100 across the three fields. `that is not an address` naming the field and index, and `that address is listed twice` the same way. `that message is too long` and `that subject is too long`, each naming its cap. `that subject holds a control character`. `that message holds a null byte`. `possible_duplicate`, for a fresh key on a message an unknown send may already have sent. `account not found`. `cannot send from this account` with the blocked reason. `too many attachments`, `that is not an attachment name`, `page not found`, `that page does not hold that file`, `that file is gone`, `those attachments are too large`, `that file cannot be sent`, `page_changed`, `attachment_read_failed`. Plus the service's own codes. A send that timed out is not refused: see the `state` unknown answer below |
 | `reply_mail` | `brain:mail:send` | `accountId`, `threadId`, `messageId`, `replyAll?`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`, the reply threaded by the service onto the message named | everything `send_mail` refuses, plus `invalid_thread_id`, `invalid_message_id`, `that message is not in that thread`, and `there is no one to reply to` when the message names this account and no one else. A `to`, `cc`, `bcc` or `subject` is an unknown argument and is refused by the schema |
 | `get_mail_send_status` | `brain:mail:send` | `operationId`, `accountId?` | `{ operationId, status, threadId }`. `threadId` is the thread the Sent copy landed in, or `null`. With `accountId` given, a send the tool never got an answer for gets its Sent-row mark written here | `invalid_operation_id`, `invalid_account_id`, `no send with that id`, the service's own codes |
 
@@ -239,9 +239,13 @@ the provider has a Sent copy, and on an account with no Sent folder it stays
 `null` for good.
 
 A send whose answer never comes back is not a refusal. The mail service
-enqueues the message durably before it delivers, so a request that timed out
-or was cancelled is as likely to have gone out as not, and `send_mail` and
-`reply_mail` answer
+enqueues the message durably before it delivers, so a request whose answer
+was lost is as likely to have gone out as not. That is every failure raised
+once the request had left this host: a timeout, a cancellation, a reply the
+client could not validate, and a socket that died with the message already
+written. Only a failure before anything was sent stays a refusal, a
+connection refused or a check Brain made itself. `send_mail` and `reply_mail`
+answer
 
 ```json
 { "state": "unknown", "idempotencyKey": "...", "operationId": null, "retry": "same-key" }
@@ -255,6 +259,14 @@ The activity line for that call reads `unknown`, so the owner's log
 distinguishes a send that did not happen from one nobody knows about. The
 answer carries no `error` and is not marked as one: only a failure the service
 named is a refusal.
+
+A fresh key on that same message is refused for ten minutes. Brain keeps the
+fingerprint of an unknown send in memory, the account with the recipients, the
+subject and the body, and answers `possible_duplicate` to a second send of the
+same message under a different key, naming the key that can replay it. The
+same key is never held up, because it is the retry the unknown answer asked
+for, and a send that answers clears the memory. It is a guard rail on one
+conversation's mistake rather than a durable record: a restart forgets it.
 
 A send with no answer wrote no mark either, because the tool never learned an
 operation id, so the Sent row has nothing to caption. Passing `accountId` to

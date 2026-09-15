@@ -4466,6 +4466,203 @@ describe("the mail send tools", () => {
     expect(isError).toBe(true);
   });
 
+  it("answers unknown when the service answered with a body it could not read", async () => {
+    // Raised only after the request was written in full, so it is no less
+    // ambiguous than a timeout. It used to come back in the one sentence an
+    // agent reads as "nothing happened, send it again".
+    const fake = createMailClientFake({
+      sendMessage: async () => {
+        throw new BrainMailClientError(502, "mail_service_invalid_response");
+      },
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["reader@example.net"],
+          subject: "Invalid",
+          text: "one line",
+          idempotencyKey: "mcp-key-invalid-001",
+        },
+        430,
+      ),
+    );
+
+    expect(isError).toBe(false);
+    expect(payload).toMatchObject({
+      state: "unknown",
+      retry: "same-key",
+      reason: "mail_service_invalid_response",
+    });
+  });
+
+  it("splits a socket that died after the write from one that never connected", async () => {
+    const died = createMailClientFake({
+      sendMessage: async () => {
+        throw new BrainMailClientError(503, "mail_service_unavailable", {
+          requestSent: true,
+        });
+      },
+    });
+    mocks.createBrainMailClient.mockReturnValue(died.client);
+
+    const after = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["reader@example.net"],
+          subject: "Died",
+          text: "one line",
+          idempotencyKey: "mcp-key-died-00001",
+        },
+        431,
+      ),
+    );
+    expect(after.isError).toBe(false);
+    expect(after.payload).toMatchObject({
+      state: "unknown",
+      retry: "same-key",
+      reason: "mail_service_unavailable",
+    });
+
+    const never = createMailClientFake({
+      sendMessage: async () => {
+        throw new BrainMailClientError(503, "mail_service_unavailable");
+      },
+    });
+    mocks.createBrainMailClient.mockReturnValue(never.client);
+
+    const before = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["reader@example.net"],
+          subject: "Never",
+          text: "one line",
+          idempotencyKey: "mcp-key-never-0001",
+        },
+        432,
+      ),
+    );
+    // Nothing reached the service, so this is a refusal and a fresh key is
+    // the right retry.
+    expect(before.isError).toBe(true);
+    expect(before.payload).toEqual({
+      error: "the mail service is unavailable",
+      reason: "mail_service_unavailable",
+    });
+  });
+
+  it("refuses a fresh key on a message an unknown send may already have sent", async () => {
+    const timedOut = createMailClientFake({
+      sendMessage: async () => {
+        throw new BrainMailClientError(504, "mail_service_timeout");
+      },
+    });
+    mocks.createBrainMailClient.mockReturnValue(timedOut.client);
+
+    const message = {
+      accountId: FAKE_ACCOUNT_ID,
+      to: ["twice@example.net"],
+      subject: "Only once",
+      text: "one line",
+    };
+    await toolPayload(
+      await callTool(
+        "send_mail",
+        { ...message, idempotencyKey: "mcp-key-first-0001" },
+        433,
+      ),
+    );
+
+    const second = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(second.client);
+    const duplicate = await toolPayload(
+      await callTool(
+        "send_mail",
+        { ...message, idempotencyKey: "mcp-key-second-001" },
+        434,
+      ),
+    );
+
+    expect(duplicate.isError).toBe(true);
+    expect(duplicate.payload).toEqual({
+      error:
+        "that message may already be on its way under idempotencyKey mcp-key-first-0001, so ask again with that key or read get_mail_send_status rather than sending a second copy",
+      reason: "possible_duplicate",
+    });
+    expect(second.calls.map((call) => call.method)).not.toContain("sendMessage");
+    const [entry] = await readMcpActivity(1);
+    expect(entry.outcome).toBe("possible_duplicate");
+
+    // The key the answer named is the retry the answer asked for, so it goes
+    // through, and a message that is not the same one is never held up.
+    const replay = await toolPayload(
+      await callTool(
+        "send_mail",
+        { ...message, idempotencyKey: "mcp-key-first-0001" },
+        435,
+      ),
+    );
+    expect(replay.isError).toBe(false);
+    expect(replay.payload).toMatchObject({ operationId: "send-alpha" });
+
+    const other = await toolPayload(
+      await callTool(
+        "send_mail",
+        { ...message, text: "another line", idempotencyKey: "mcp-key-other-0001" },
+        436,
+      ),
+    );
+    expect(other.isError).toBe(false);
+  });
+
+  it("forgets an unknown send once ten minutes have passed", async () => {
+    const timedOut = createMailClientFake({
+      sendMessage: async () => {
+        throw new BrainMailClientError(504, "mail_service_timeout");
+      },
+    });
+    mocks.createBrainMailClient.mockReturnValue(timedOut.client);
+
+    const message = {
+      accountId: FAKE_ACCOUNT_ID,
+      to: ["later@example.net"],
+      subject: "Later",
+      text: "one line",
+    };
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-09-14T09:00:00.000Z"));
+      await toolPayload(
+        await callTool(
+          "send_mail",
+          { ...message, idempotencyKey: "mcp-key-early-0001" },
+          437,
+        ),
+      );
+
+      vi.setSystemTime(new Date("2026-09-14T09:10:01.000Z"));
+      mocks.createBrainMailClient.mockReturnValue(createMailClientFake().client);
+      const later = await toolPayload(
+        await callTool(
+          "send_mail",
+          { ...message, idempotencyKey: "mcp-key-late-00001" },
+          438,
+        ),
+      );
+      expect(later.isError).toBe(false);
+      expect(later.payload).toMatchObject({ operationId: "send-alpha" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("records the send mark and one activity line, with no subject or address", async () => {
     mocks.createBrainMailClient.mockReturnValue(createMailClientFake().client);
 
@@ -4728,7 +4925,16 @@ describe("the mail send tools", () => {
       created: false,
       status: "sent",
     });
-    expect(await readAgentSends()).toHaveLength(1);
+    // And the replay's own mark keeps the thread the status call resolved, so
+    // the Sent row's caption does not go out and come back.
+    expect(await readAgentSends()).toEqual([
+      {
+        operationId: "send-alpha",
+        accountId: FAKE_ACCOUNT_ID,
+        clientName: "Legacy token",
+        threadId: "thread-sent",
+      },
+    ]);
   });
 
   it("still refuses when the account list times out, because nothing was sent", async () => {
@@ -4790,6 +4996,10 @@ describe("the mail send tools", () => {
       reason: "a subject is one line of plain text",
     });
     expect(fake.calls).toEqual([]);
+    // The owner's log names the rule that refused, not the last one in the
+    // function: a header injection and a long body read the same otherwise.
+    const [entry] = await readMcpActivity(1);
+    expect(entry.outcome).toBe("subject_control_character");
   });
 
   it("names a malformed account id, an oversized subject and a null byte", async () => {

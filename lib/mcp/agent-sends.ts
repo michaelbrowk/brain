@@ -93,19 +93,25 @@ function enqueue<T>(work: () => Promise<T>): Promise<T> {
 export async function recordAgentSend(
   send: Omit<McpAgentSend, "threadId">,
 ): Promise<void> {
-  const mark: McpAgentSend = {
-    operationId: send.operationId,
-    accountId: send.accountId,
-    clientName: send.clientName,
-    threadId: null,
-  };
   const dir = mcpStateDirectory();
   await enqueue(async () => {
-    const marks = (await readMarks(dir)).filter(
-      (held) => held.operationId !== mark.operationId,
+    const marks = await readMarks(dir);
+    // A replay under the same key records the same operation a second time.
+    // The thread that was resolved for it in between is the whole point of
+    // the mark, so it is carried onto the fresh one rather than cleared and
+    // waited for again.
+    const held = marks.find((mark) => mark.operationId === send.operationId);
+    const mark: McpAgentSend = {
+      operationId: send.operationId,
+      accountId: send.accountId,
+      clientName: send.clientName,
+      threadId: held?.threadId ?? null,
+    };
+    const rest = marks.filter(
+      (other) => other.operationId !== mark.operationId,
     );
-    marks.push(mark);
-    await writeMarks(dir, marks.slice(-MCP_AGENT_SEND_MAX));
+    rest.push(mark);
+    await writeMarks(dir, rest.slice(-MCP_AGENT_SEND_MAX));
   });
 }
 

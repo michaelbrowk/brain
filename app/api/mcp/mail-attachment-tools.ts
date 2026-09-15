@@ -61,8 +61,12 @@ const SAVE_CAP_BYTES = Math.min(
 const SAVE_CAP_REASON = `${Math.floor(SAVE_CAP_BYTES / (1024 * 1024))} MiB is the limit`;
 const TOO_LARGE = "that file is too large for a note";
 
-function invalidId(label: string, reason: string) {
-  return refusal(`that ${label} is not valid`, reason);
+/** The sentence names the field and the reason names the code, the way the
+ *  read, triage and send tools name theirs. The shape each id wants is in the
+ *  tool's own description and in `docs/mcp-tools.md`: a refusal is where an
+ *  agent branches, not where it learns a regular expression. */
+function invalidId(label: string, code: string) {
+  return refusal(`that ${label} is not valid`, code);
 }
 
 /** Drain into memory, but never past the cap: a file over it is abandoned
@@ -179,22 +183,13 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
       // issued names no target, nothing has happened yet, and an unbounded
       // string must not reach a log that counts lines.
       if (!SAFE_ACCOUNT_ID.test(accountId)) {
-        return invalidId(
-          "account id",
-          "an account id reads account-a and 32 hexadecimal characters",
-        );
+        return invalidId("account id", "invalid_account_id");
       }
       if (!SAFE_MAIL_RESOURCE_ID.test(attachmentId)) {
-        return invalidId(
-          "attachment id",
-          "an attachment id is up to 255 letters, digits, dashes or underscores",
-        );
+        return invalidId("attachment id", "invalid_attachment_id");
       }
       if (!SAFE_PAGE_ID.test(page)) {
-        return invalidId(
-          "page id",
-          "a page id is up to 128 characters and holds no control characters",
-        );
+        return invalidId("page id", "invalid_page_id");
       }
 
       // One line per call that got as far as the work, refusals included,

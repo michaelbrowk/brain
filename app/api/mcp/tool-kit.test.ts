@@ -99,9 +99,13 @@ describe("the answer shapes", () => {
     });
   });
 
-  it("leaves the reason out when there is none", () => {
-    expect(JSON.parse(refusal("no such account").content[0].text)).toEqual({
+  it("carries a reason on every refusal, so an agent branches on one field", () => {
+    // The shape is not optional any more: the task tools used to answer a
+    // bare code in `error`, and an agent had three shapes to tell apart on
+    // one endpoint.
+    expect(JSON.parse(refusal("no such account", "account_not_found").content[0].text)).toEqual({
       error: "no such account",
+      reason: "account_not_found",
     });
   });
 
@@ -110,7 +114,7 @@ describe("the answer shapes", () => {
     expect(answer.isError).toBe(true);
     expect(JSON.parse(answer.content[0].text)).toEqual({
       error: "This connection does not have permission for this tool.",
-      code: "insufficient_scope",
+      reason: "insufficient_scope",
       requiredScope: "brain:mail:send",
     });
   });

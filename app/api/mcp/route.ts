@@ -133,8 +133,18 @@ const handler = createMcpHandler(
             ),
           );
         } catch (e) {
+          // A refusal Brain decided on, in the shape every other one answers
+          // in. It used to answer with no `isError` and no `reason`, so an
+          // agent branching on either took a conflict for a write.
           if (isRevConflict(e))
-            return text({ error: "rev conflict — re-read the page", currentRev: e.currentRev });
+            return {
+              ...text({
+                error: "rev conflict — re-read the page",
+                reason: "rev_conflict",
+                currentRev: e.currentRev,
+              }),
+              isError: true as const,
+            };
           throw e;
         }
       },
@@ -466,7 +476,7 @@ const handler = createMcpHandler(
             ...text({
               error:
                 "public sharing must be enabled by the owner after scope disclosure",
-              code: "share_disclosure_required",
+              reason: "share_disclosure_required",
             }),
             isError: true,
           };

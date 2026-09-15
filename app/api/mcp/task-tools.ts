@@ -90,7 +90,10 @@ interface TaskAnswer {
 
 const ok = (data: unknown): TaskAnswer => ({ answer: text(data), outcome: "ok" });
 
-const no = (outcome: string, error: string, reason?: string): TaskAnswer => ({
+/** `outcome` is the code the log groups on, `error` the sentence the agent
+ *  reads, and `reason` what names the cause: the same code again where the
+ *  outcome is one, and the record's own words where the store decided. */
+const no = (outcome: string, error: string, reason: string): TaskAnswer => ({
   answer: refusal(error, reason),
   outcome,
 });
@@ -105,9 +108,12 @@ function taskRefusal(error: unknown): TaskAnswer {
   if (isTaskConflict(error)) {
     return {
       answer: {
+        // The store's own sentence, in the field every sentence on this
+        // endpoint is in, and the code beside it. `currentWhen` rides along
+        // because a caller that re-reads needs it.
         ...text({
-          error: "conflict",
-          reason: error.message,
+          error: error.message,
+          reason: "conflict",
           currentWhen: error.currentWhen,
         }),
         isError: true,
@@ -118,7 +124,7 @@ function taskRefusal(error: unknown): TaskAnswer {
   if (isTaskValidation(error)) {
     return no("refused", "that task change was refused", error.message);
   }
-  if (isNotFound(error)) return no("not_found", "not_found");
+  if (isNotFound(error)) return no("not_found", "no task with that id", "not_found");
   throw error;
 }
 
@@ -323,7 +329,9 @@ export function registerTaskTools(server: McpToolServer): void {
             "unexpected_category",
           );
         }
-        if (!TASK_ID_RE.test(page)) return refusal("bad_page");
+        if (!TASK_ID_RE.test(page)) {
+          return refusal("that page id is not valid", "bad_page");
+        }
         const store = await getStore();
         return text({ tasks: store.pageTasks(page) });
       }
@@ -331,7 +339,7 @@ export function registerTaskTools(server: McpToolServer): void {
         return refusal("name one list, or one page", "missing_list");
       }
       if (today !== undefined && !TASK_DAY_RE.test(today)) {
-        return refusal("bad_today");
+        return refusal("that day is not written as YYYY-MM-DD", "bad_today");
       }
       if (list === "inbox") {
         const store = await getStore();
@@ -348,7 +356,10 @@ export function registerTaskTools(server: McpToolServer): void {
       // `doneAt` is one UTC instant and the Logbook day it falls on is the
       // caller's, so the logbook cannot be answered without their offset.
       if (list === "logbook" && day.offsetMinutes === undefined) {
-        return refusal("bad_offset");
+        return refusal(
+          "the logbook needs the caller's own UTC offset",
+          "bad_offset",
+        );
       }
       const store = await getStore();
       // THE LOGBOOK IS ENTRIES, NOT RECORDS. A repeating task finished on
@@ -380,14 +391,18 @@ export function registerTaskTools(server: McpToolServer): void {
     "Read one task record, including whether its note line was removed and which page it is linked to.",
     { id: z.string() },
     async ({ id }) => {
-      if (!TASK_ID_RE.test(id)) return refusal("bad_id");
+      if (!TASK_ID_RE.test(id)) {
+        return refusal("that task id is not valid", "bad_id");
+      }
       const store = await getStore();
       const task = store.getTask(id);
-      if (!task) return refusal("not_found");
+      if (!task) return refusal("no task with that id", "not_found");
       // A trashed page's tasks are hidden from every list, so reading one by
       // id answers the same way rather than handing back a row the surface
       // would never show.
-      if (store.taskPageTrashed(id)) return refusal("page_trashed");
+      if (store.taskPageTrashed(id)) {
+        return refusal("that task's page is in the trash", "page_trashed");
+      }
       return text({ task });
     },
   );
@@ -450,7 +465,9 @@ export function registerTaskTools(server: McpToolServer): void {
     },
     async ({ page, line, when, time, evening, deadline, category }, extra) =>
       taskWrite(extra, "promote_task_line", async (marks) => {
-        if (!TASK_ID_RE.test(page)) return no("bad_page", "bad_page");
+        if (!TASK_ID_RE.test(page)) {
+          return no("bad_page", "that page id is not valid", "bad_page");
+        }
         marks.page = page;
         const store = await getStore();
         // THE SAME ANCHOR THE EDITOR BUILDS, from the same function over the
@@ -542,7 +559,9 @@ export function registerTaskTools(server: McpToolServer): void {
       extra,
     ) =>
       taskWrite(extra, "update_task", async (marks) => {
-        if (!TASK_ID_RE.test(id)) return no("bad_id", "bad_id");
+        if (!TASK_ID_RE.test(id)) {
+          return no("bad_id", "that task id is not valid", "bad_id");
+        }
         marks.task = id;
         const store = await getStore();
         const patch: UpdateTaskPatch = {
@@ -584,7 +603,9 @@ export function registerTaskTools(server: McpToolServer): void {
     },
     async ({ id, today, offsetMinutes, expectedWhen }, extra) =>
       taskWrite(extra, "complete_task", async (marks) => {
-        if (!TASK_ID_RE.test(id)) return no("bad_id", "bad_id");
+        if (!TASK_ID_RE.test(id)) {
+          return no("bad_id", "that task id is not valid", "bad_id");
+        }
         marks.task = id;
         const store = await getStore();
         const task = await store.updateTask(id, {
@@ -618,7 +639,9 @@ export function registerTaskTools(server: McpToolServer): void {
     },
     async ({ id, today, offsetMinutes }, extra) =>
       taskWrite(extra, "reopen_task", async (marks) => {
-        if (!TASK_ID_RE.test(id)) return no("bad_id", "bad_id");
+        if (!TASK_ID_RE.test(id)) {
+          return no("bad_id", "that task id is not valid", "bad_id");
+        }
         marks.task = id;
         const store = await getStore();
         const task = await store.updateTask(id, {
@@ -643,7 +666,9 @@ export function registerTaskTools(server: McpToolServer): void {
     },
     async ({ id }, extra) =>
       taskWrite(extra, "delete_task", async (marks) => {
-        if (!TASK_ID_RE.test(id)) return no("bad_id", "bad_id");
+        if (!TASK_ID_RE.test(id)) {
+          return no("bad_id", "that task id is not valid", "bad_id");
+        }
         marks.task = id;
         const store = await getStore();
         await store.deleteTask(id, "claude");

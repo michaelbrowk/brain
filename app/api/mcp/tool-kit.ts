@@ -18,19 +18,35 @@ export const text = (data: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
 });
 
-/** A domain refusal an agent can read: never a thrown JSON-RPC error, because
- *  a transport error arrives without a reason and the agent retries blind. */
-export function refusal(error: string, reason?: string) {
-  return {
-    ...text(reason === undefined ? { error } : { error, reason }),
-    isError: true as const,
-  };
+/** THE ONE SHAPE EVERY REFUSAL ON THIS ENDPOINT ANSWERS IN.
+ *
+ *  `{ error, reason }` with `isError` set, never a thrown JSON-RPC error: a
+ *  transport error arrives without a reason and the agent retries blind.
+ *
+ *  `error` is the sentence, and `reason` is the machine code where the
+ *  refusal has one, or else the field, the id or the measurement that names
+ *  the cause. Both are required, because the three tool families each used to
+ *  fill them their own way: the mail tools put a code in `reason`, the
+ *  attachment save put prose there, and the task tools put the code in
+ *  `error` with no `reason` at all. An agent could not branch on one field
+ *  across the endpoint. Making `reason` required is what keeps the next tool
+ *  from inventing a fourth way.
+ *
+ *  A refusal that carries more than the two fields (`currentRev`,
+ *  `currentWhen`) spreads them beside these, rather than folding them into
+ *  the sentence. */
+export function refusal(error: string, reason: string) {
+  return { ...text({ error, reason }), isError: true as const };
 }
 
+/** The permission answer, in the same two fields every refusal uses, with the
+ *  scope it wanted beside them. The `insufficient_scope` word itself is the
+ *  OAuth one, and the 403 this endpoint answers at the HTTP level
+ *  (`lib/oauth/http.ts`) keeps its own RFC 6750 body. */
 export const insufficientScope = (scope: McpToolScope) => ({
   ...text({
     error: "This connection does not have permission for this tool.",
-    code: "insufficient_scope",
+    reason: "insufficient_scope",
     requiredScope: scope,
   }),
   isError: true,

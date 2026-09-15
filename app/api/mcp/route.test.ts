@@ -19,7 +19,8 @@ vi.mock("@/lib/store", () => ({
     e instanceof Error && e.name === "AttachmentValidationError",
   isNotFound: (e: unknown) => e instanceof Error && e.name === "NotFoundError",
   isNotionImportConflict: () => false,
-  isRevConflict: () => false,
+  isRevConflict: (e: unknown) =>
+    e instanceof Error && e.name === "RevConflictError",
   isTaskConflict: (e: unknown) =>
     e instanceof Error && e.name === "TaskConflictError",
   isTaskValidation: (e: unknown) =>
@@ -43,6 +44,15 @@ vi.mock("@/lib/store", () => ({
     constructor(public reason: string) {
       super(reason);
       this.name = "TaskValidationError";
+    }
+  },
+  RevConflictError: class RevConflictError extends Error {
+    constructor(
+      public currentRev: string,
+      public expectedRev: string,
+    ) {
+      super("rev conflict");
+      this.name = "RevConflictError";
     }
   },
   TaskConflictError: class TaskConflictError extends Error {
@@ -472,7 +482,7 @@ describe("Notion MCP route validation", () => {
       payload: {
         error:
           "public sharing must be enabled by the owner after scope disclosure",
-        code: "share_disclosure_required",
+        reason: "share_disclosure_required",
       },
       isError: true,
     });
@@ -565,6 +575,33 @@ describe("Notion MCP route validation", () => {
       undefined,
       "claude",
     );
+  });
+
+  it("marks write_page's rev conflict as the refusal it is", async () => {
+    // The one refusal on this endpoint that used to answer as a success: an
+    // agent reading `isError` saw none and took the conflict for a write.
+    const { RevConflictError } = (await import("@/lib/store")) as unknown as {
+      RevConflictError: new (currentRev: string, expectedRev: string) => Error;
+    };
+    const writePage = vi
+      .fn()
+      .mockRejectedValue(new RevConflictError("rev-2", "rev-1"));
+    mocks.getStore.mockResolvedValue({ writePage });
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "write_page",
+        { id: "write-target", markdown: "# one", rev: "rev-1" },
+        104,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "rev conflict — re-read the page",
+      reason: "rev_conflict",
+      currentRev: "rev-2",
+    });
+    expect(isError).toBe(true);
   });
 
   it("canonicalizes exact same-origin page links at all normal MCP write boundaries", async () => {
@@ -865,7 +902,10 @@ describe("the task read tools", () => {
     const { payload } = await toolPayload(
       await callTool("list_tasks", { list: "logbook", today: TODAY }, 10),
     );
-    expect(payload).toEqual({ error: "bad_offset" });
+    expect(payload).toEqual({
+      error: "the logbook needs the caller's own UTC offset",
+      reason: "bad_offset",
+    });
     expect(mocks.getStore).not.toHaveBeenCalled();
   });
 
@@ -933,7 +973,10 @@ describe("the task read tools", () => {
     const { payload } = await toolPayload(
       await callTool("list_tasks", { list: "today", today: "2026-9-1" }, 2),
     );
-    expect(payload).toEqual({ error: "bad_today" });
+    expect(payload).toEqual({
+      error: "that day is not written as YYYY-MM-DD",
+      reason: "bad_today",
+    });
     expect(mocks.getStore).not.toHaveBeenCalled();
   });
 
@@ -991,7 +1034,10 @@ describe("the task read tools", () => {
       await callTool("get_task", { id: TASK_ID }, 6),
     );
 
-    expect(payload).toEqual({ error: "page_trashed" });
+    expect(payload).toEqual({
+      error: "that task's page is in the trash",
+      reason: "page_trashed",
+    });
   });
 
   it("answers not_found for an unknown id and bad_id for one that is not a task id", async () => {
@@ -1003,12 +1049,18 @@ describe("the task read tools", () => {
     const missing = await toolPayload(
       await callTool("get_task", { id: "task-missing" }, 7),
     );
-    expect(missing.payload).toEqual({ error: "not_found" });
+    expect(missing.payload).toEqual({
+      error: "no task with that id",
+      reason: "not_found",
+    });
 
     const bad = await toolPayload(
       await callTool("get_task", { id: "../escape" }, 8),
     );
-    expect(bad.payload).toEqual({ error: "bad_id" });
+    expect(bad.payload).toEqual({
+      error: "that task id is not valid",
+      reason: "bad_id",
+    });
   });
 
   it("registers the task write tools under brain:write", async () => {
@@ -1449,8 +1501,8 @@ describe("the task write tools", () => {
       ),
     );
     expect(moved.payload).toEqual({
-      error: "conflict",
-      reason: "the task has moved",
+      error: "the task has moved",
+      reason: "conflict",
       currentWhen: "2026-09-20",
     });
     expect(moved.isError).toBe(true);
@@ -1461,7 +1513,10 @@ describe("the task write tools", () => {
     const missing = await toolPayload(
       await callTool("delete_task", { id: "task-missing" }, 716),
     );
-    expect(missing.payload).toEqual({ error: "not_found" });
+    expect(missing.payload).toEqual({
+      error: "no task with that id",
+      reason: "not_found",
+    });
     expect(missing.isError).toBe(true);
   });
 
@@ -1555,7 +1610,10 @@ describe("the task write tools", () => {
       await callTool("delete_task", { id: "../escape" }, 726),
     );
 
-    expect(payload).toEqual({ error: "bad_id" });
+    expect(payload).toEqual({
+      error: "that task id is not valid",
+      reason: "bad_id",
+    });
     expect(mocks.getStore).not.toHaveBeenCalled();
   });
 
@@ -1572,7 +1630,10 @@ describe("the task write tools", () => {
       ),
     );
 
-    expect(payload).toEqual({ error: "bad_page" });
+    expect(payload).toEqual({
+      error: "that page id is not valid",
+      reason: "bad_page",
+    });
     expect(mocks.getStore).not.toHaveBeenCalled();
   });
 
@@ -1666,19 +1727,28 @@ describe("the task write tools", () => {
     const badToday = await toolPayload(
       await callTool("list_tasks", { list: "today", today: "2026-9-1" }, 744),
     );
-    expect(badToday.payload).toEqual({ error: "bad_today" });
+    expect(badToday.payload).toEqual({
+      error: "that day is not written as YYYY-MM-DD",
+      reason: "bad_today",
+    });
     expect(badToday.isError).toBe(true);
 
     const badOffset = await toolPayload(
       await callTool("list_tasks", { list: "logbook", today: TODAY }, 745),
     );
-    expect(badOffset.payload).toEqual({ error: "bad_offset" });
+    expect(badOffset.payload).toEqual({
+      error: "the logbook needs the caller's own UTC offset",
+      reason: "bad_offset",
+    });
     expect(badOffset.isError).toBe(true);
 
     const badId = await toolPayload(
       await callTool("get_task", { id: "../escape" }, 746),
     );
-    expect(badId.payload).toEqual({ error: "bad_id" });
+    expect(badId.payload).toEqual({
+      error: "that task id is not valid",
+      reason: "bad_id",
+    });
     expect(badId.isError).toBe(true);
 
     mocks.getStore.mockResolvedValue({
@@ -1687,7 +1757,10 @@ describe("the task write tools", () => {
     const notFound = await toolPayload(
       await callTool("get_task", { id: "task-missing" }, 747),
     );
-    expect(notFound.payload).toEqual({ error: "not_found" });
+    expect(notFound.payload).toEqual({
+      error: "no task with that id",
+      reason: "not_found",
+    });
     expect(notFound.isError).toBe(true);
 
     mocks.getStore.mockResolvedValue({
@@ -1697,7 +1770,10 @@ describe("the task write tools", () => {
     const trashed = await toolPayload(
       await callTool("get_task", { id: TASK_ID }, 748),
     );
-    expect(trashed.payload).toEqual({ error: "page_trashed" });
+    expect(trashed.payload).toEqual({
+      error: "that task's page is in the trash",
+      reason: "page_trashed",
+    });
     expect(trashed.isError).toBe(true);
   });
 
@@ -3329,12 +3405,53 @@ describe("save_mail_attachment", () => {
 
     expect(payload).toEqual({
       error: "that account id is not valid",
-      reason: "an account id reads account-a and 32 hexadecimal characters",
+      reason: "invalid_account_id",
     });
     expect(fake.calls).toEqual([]);
     // Nothing happened and the id is not one Brain ever issued, so there is
     // nothing worth a line and nothing unbounded may reach one.
     await expect(readMcpActivity(1)).resolves.toEqual([]);
+  });
+
+  it("names its other two bad ids with a code, the way its siblings do", async () => {
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const badAttachment = await toolPayload(
+      await callTool(
+        "save_mail_attachment",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          attachmentId: "attachment alpha",
+          page: "page-one",
+        },
+        513,
+      ),
+    );
+    expect(badAttachment.payload).toEqual({
+      error: "that attachment id is not valid",
+      reason: "invalid_attachment_id",
+    });
+    expect(badAttachment.isError).toBe(true);
+
+    const badPage = await toolPayload(
+      await callTool(
+        "save_mail_attachment",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          attachmentId: "attachment-alpha",
+          // A control character, which is the one thing a page id may not hold.
+          page: "page\u0001one",
+        },
+        514,
+      ),
+    );
+    expect(badPage.payload).toEqual({
+      error: "that page id is not valid",
+      reason: "invalid_page_id",
+    });
+    expect(badPage.isError).toBe(true);
+    expect(fake.calls).toEqual([]);
   });
 
   it("refuses a grant that reads mail but cannot write a note", async () => {
@@ -3360,7 +3477,7 @@ describe("save_mail_attachment", () => {
     );
 
     expect(payload).toMatchObject({
-      code: "insufficient_scope",
+      reason: "insufficient_scope",
       requiredScope: "brain:write",
     });
     expect(isError).toBe(true);

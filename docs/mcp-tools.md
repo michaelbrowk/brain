@@ -5,8 +5,8 @@ what it takes, what it answers and what it turns down. Connecting and
 authorizing is `docs/mcp-oauth.md`.
 
 Two rules hold for every row. An answer is JSON in one text block, so a client
-parses `content[0].text` and nothing else. A refusal Brain decided on is a
-`{ error, reason? }` object with `isError` set, not a transport error, so the
+parses `content[0].text` and nothing else. A refusal Brain decided on is an
+`{ error, reason }` object with `isError` set, not a transport error, so the
 agent reads why and stops rather than retrying blind. A transport error from
 this endpoint is a bug.
 
@@ -23,12 +23,14 @@ write implies read, and mail never implies write.
 Four rules no single row states.
 
 - **A refusal is an answer, not an error.** Read it and do not retry a
-  permanent one. The one field that is always a machine code is `reason` on a
-  refusal the mail service itself coined. Elsewhere the two fields split by
-  tool: a task refusal puts its code in `error` and often carries no `reason`
-  at all, while a mail refusal Brain decided on puts a sentence in `error` and
-  the field, the id or the measurement in `reason`. Branch on the whole
-  answer, not on one field of it.
+  permanent one. Every tool but the `notion_*` family answers the same two
+  fields: `error` is the sentence and `reason` is what names the cause, which
+  is the machine code wherever the refusal has one and otherwise the field,
+  the id or the measurement. Branch on `reason`. A refusal with more to hand
+  back puts it in a third field beside those two, `currentRev` on a
+  `write_page` conflict and `currentWhen` on a task one. The import tools keep
+  the `{ error, code }` their own contract has, which `docs/notion-import.md`
+  owns.
 - **`read_mail_message` may answer `state: "fetching"`.** Call it again. Each
   call re-records the demand that keeps the body in the service's cache, so an
   agent that stops asking loses the body it was waiting for.
@@ -48,7 +50,7 @@ Four rules no single row states.
 | `list_tree` | | none | the whole page tree: ids, titles, icons, nesting | nothing |
 | `read_page` | | `id` | the page's meta, its markdown and its `rev` | an id that is not a page surfaces as a transport error today rather than an `{ error }` answer |
 | `search` | | `query` | matching pages with snippets | nothing |
-| `write_page` | `brain:write` | `id`, `markdown`, `rev?` | the written page's meta and new `rev` | `rev conflict`, with `currentRev` to re-read from |
+| `write_page` | `brain:write` | `id`, `markdown`, `rev?` | the written page's meta and new `rev` | `rev_conflict`, with `currentRev` to re-read from |
 | `append_page` | `brain:write` | `id`, `markdown` | the page's meta after the append | nothing of its own |
 | `create_page` | `brain:write` | `title`, `parentId?`, `markdown?`, `icon?`, `status?` | the new page's meta, including its id | `parent not found`, and it says the page was not created so the client does not retry at the root |
 | `update_meta` | `brain:write` | `id`, `title?`, `icon?`, `category?`, `status?`, `view?`, `public?` | the page's meta after the change | `public: true`, with `share_disclosure_required`: only the owner's own disclosure flow turns sharing on |
@@ -91,6 +93,9 @@ record's id, the note's id for a promote, and the outcome. No title enters it.
 | `complete_task` | `brain:write` | `id`, `today`, `offsetMinutes?`, `expectedWhen?` | `{ task, list }`, where `list` is the list the record is in for that day, which is the list it was already in | `bad_id`, `not_found`, and `conflict` with `currentWhen` when a repeating task has moved since the caller last read it |
 | `reopen_task` | `brain:write` | `id`, `today`, `offsetMinutes?` | `{ task, list }`. Unticking a repeating task restores the instance its newest completion came from | `bad_id`, `not_found`, `conflict` |
 | `delete_task` | `brain:write` | `id` | `{ ok: true }`. A linked task's checkbox line stays in its note, and the record that pointed at it is what goes | `bad_id`, `not_found` |
+
+Every code named in the task rows above is the `reason` on the refusal, with
+the sentence beside it in `error`.
 
 `list_tasks` with `page` answers a different question, so it takes nothing
 else. It hands back `{ tasks }`: every record that note owns, linked and
@@ -339,7 +344,7 @@ three names before it is cut, and a cut is marked.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type }`, the saved file as the note store named it | `that account id is not valid`, `that attachment id is not valid` and `that page id is not valid`, each naming the shape it wanted rather than a code. `page not found`, before anything is downloaded. `that file is too large for a note`, naming the cap. `that file cannot be saved into a note`, naming the executable extension. Whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`). Plus the service's own codes |
+| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type }`, the saved file as the note store named it | `invalid_account_id`, `invalid_attachment_id` and `invalid_page_id`, the codes its sibling mail tools use. `page not found`, before anything is downloaded. `that file is too large for a note`, naming the cap. `that file cannot be saved into a note`, naming the executable extension. Whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`). Plus the service's own codes |
 
 It is the one mail tool that writes a note, so it asks for `brain:write`
 beside `brain:mail`. A grant that reads mail and cannot edit notes is refused

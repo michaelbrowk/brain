@@ -27,9 +27,9 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import { createPortal } from "react-dom";
 import { Icon } from "../ui/icon";
 import { DUR, EASE_OUT } from "@/lib/motion";
-import { notifyNestedTableBlocked } from "@/lib/editor-events";
+import { EDITOR_DOC_CHANGED_EVENT, notifyNestedTableBlocked } from "@/lib/editor-events";
 import { isInTable } from "./table-guard";
-import { isTaskLine, toggleTaskCommand } from "./task-checkbox";
+import { selectionIsTask, toggleTaskCommand } from "./task-checkbox";
 
 const COLORS = [
   "red",
@@ -140,9 +140,10 @@ export function selectionIsInTable(state: Pick<EditorState, "selection">): boole
   return isInTable(state.selection.$from) || isInTable(state.selection.$to);
 }
 
-export function selectionIsTask(state: Pick<EditorState, "selection">): boolean {
-  return isTaskLine(state.selection.$from) || isTaskLine(state.selection.$to);
-}
+/** Whether every line the selection touches is already a task. It lives with
+ *  the command that acts on those lines, so the pressed state this toolbar
+ *  draws and the press behind it read the same blocks. */
+export { selectionIsTask };
 
 /** The browser can keep a painted DOM range after the editor loses focus, and
  * ProseMirror keeps a NodeSelection after a block drag. Neither is an active
@@ -295,6 +296,13 @@ export function FloatingToolbar({
         return;
       }
 
+      // The line the selection sits in, BEFORE anything about where the bar
+      // goes. A press rewrites the block under a caret that has not moved, so
+      // the rect can be stale or gone while the pressed state is still owed
+      // an answer.
+      setInTable(currentSelectionIsInTable());
+      setTaskActive(currentSelectionIsTask());
+
       const rect = firstVisibleSelectionRect(range);
       if (!rect) {
         setPos(null);
@@ -306,8 +314,6 @@ export function FloatingToolbar({
         return;
       }
 
-      setInTable(currentSelectionIsInTable());
-      setTaskActive(currentSelectionIsTask());
       // touch: don't chase the selection — dock at the bottom (rendered fixed)
       if (isMobile) {
         setPos({ mobile: true, top: 0, left: 0 });
@@ -332,6 +338,9 @@ export function FloatingToolbar({
 
   useEffect(() => {
     document.addEventListener("selectionchange", update);
+    // The editor's own transactions, for the press that changes the line
+    // without moving the browser's selection.
+    window.addEventListener(EDITOR_DOC_CHANGED_EVENT, update);
     document.addEventListener("focusin", update);
     document.addEventListener("focusout", update);
     document.addEventListener("scroll", update, true);
@@ -341,6 +350,7 @@ export function FloatingToolbar({
     vv?.addEventListener("scroll", update);
     return () => {
       document.removeEventListener("selectionchange", update);
+      window.removeEventListener(EDITOR_DOC_CHANGED_EVENT, update);
       document.removeEventListener("focusin", update);
       document.removeEventListener("focusout", update);
       document.removeEventListener("scroll", update, true);
@@ -666,6 +676,10 @@ export function FloatingToolbar({
                   </TB>
                   <TB
                     label="Task"
+                    // Two controls are named Task, and both are right: this
+                    // one turns the line the caret is in into a checkbox, the
+                    // slash menu's inserts one. The tooltip says which.
+                    title="Task line"
                     active={taskActive}
                     pressed={taskActive}
                     onRun={() => run(toggleTaskCommand.key)}
@@ -717,12 +731,16 @@ function TB({
   active = false,
   disabled = false,
   pressed,
+  title,
 }: {
   label: string;
   onRun: () => void;
   children: React.ReactNode;
   active?: boolean;
   disabled?: boolean;
+  /** The tooltip, when it should read more plainly than the accessible name.
+   *  Omitted, the two say the same thing. */
+  title?: string;
   /** Renders `aria-pressed`, for a control that is a real toggle of document
    *  state (unlike `active`, which only decides the highlight). Omitted, a
    *  button stays out of the toggle role entirely. */
@@ -733,7 +751,7 @@ function TB({
       aria-label={label}
       aria-pressed={pressed}
       aria-disabled={disabled}
-      title={label}
+      title={title ?? label}
       // preventDefault on mousedown keeps the text selection alive
       onMouseDown={(e) => e.preventDefault()}
       onClick={() => {

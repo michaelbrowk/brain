@@ -19,3 +19,15 @@ export function notifyNestedTableBlocked() {
  *  knows a `type: "task"` event arrived and that it was not this tab's own
  *  write. */
 export const TASKS_CHANGED_EVENT = "brain:tasks-changed";
+
+/** The open note's document changed. Dispatched on `window` by the editor
+ *  itself, for the surfaces that float over the canvas and read the line the
+ *  caret is in: `selectionchange` never fires for a press that rewrites the
+ *  block under a caret that has not moved, so a toggle read its own result
+ *  one gesture late. */
+export const EDITOR_DOC_CHANGED_EVENT = "brain:editor-doc-changed";
+
+export function notifyEditorDocChanged() {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(EDITOR_DOC_CHANGED_EVENT));
+}

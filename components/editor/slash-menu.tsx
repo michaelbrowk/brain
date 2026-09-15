@@ -418,6 +418,24 @@ export function SlashMenu({
           return;
         }
       }
+      // The Task command takes the trigger's own range instead of finding the
+      // line already emptied: the deletion and the conversion are then one
+      // transaction, one undo brings back both, and a conversion that cannot
+      // happen leaves the typed words where the reader left them.
+      if (item.command === ensureTaskCommand) {
+        let trigger: { from: number; to: number } | null = null;
+        ed.action((ctx) => {
+          const view = ctx.get(editorViewCtx);
+          const { state: s } = view;
+          const from = s.selection.$from.start();
+          const to = s.selection.$from.pos;
+          trigger = to > from ? { from, to } : null;
+          view.focus();
+        });
+        ed.action(callCommand(ensureTaskCommand.key, trigger));
+        setState(null);
+        return;
+      }
       // delete the "/query" (positions from the LIVE view state), then run the
       // block command — reading `command.key` NOW that the editor is initialized
       ed.action((ctx) => {

@@ -45,6 +45,52 @@ day it falls on is the caller's.
 | `list_tasks` | | `list`, `today?`, `offsetMinutes?`, `category?` | `{ tasks }` for every list but the logbook, which answers `{ entries }`, one per completion, each with its own `key` | a missing `today` on any list but the inbox, a `today` that is not `YYYY-MM-DD` (`bad_today`), a logbook read with no `offsetMinutes` (`bad_offset`) |
 | `get_task` | | `id` | `{ task }`, including whether its note line was removed and which page it is linked to | `bad_id`, `not_found`, `page_trashed` |
 
+## Mail, reading
+
+Every mail tool talks to the mail service in process over its Unix socket.
+None of them goes through `/api/mail/*`, which is same-origin gated for the
+browser. When the service is down the answer is one refusal,
+`the mail service is unavailable` with reason `mail_service_unavailable`, and
+nothing of the underlying failure is in it.
+
+`mailbox` is one of the six system mailboxes (`inbox`, `all`, `sent`,
+`starred`, `spam`, `trash`) and defaults to `inbox`. There are no custom
+folders. `view` narrows a mailbox to `unread`, `attachments`, `lists` or
+`people`. `limit` runs 1 to 50 and defaults to 25. A page is handed back by
+passing its `nextCursor` as the next call's `cursor`.
+
+No tool answers HTML. A message that arrived as HTML alone is answered with
+the text the service extracted from it.
+
+| Tool | Scope | Inputs | Answers | Refuses |
+| --- | --- | --- | --- | --- |
+| `list_mail_accounts` | `brain:mail` | none | `{ accounts }`, each `accountId`, `address`, `displayName`, `provider`, `canSend`, and `sendBlockedReason` only when it cannot send | nothing of its own |
+| `list_mail_threads` | `brain:mail` | `accountId`, `mailbox?`, `view?`, `cursor?`, `limit?` | `{ threads, nextCursor }`, newest first, each thread's subject, participants, last message time, unread, starred, size, list flag and category | `account not found`, and any other code the service coined, as `the mail service refused this request` with that code as the reason |
+| `search_mail` | `brain:mail` | `query`, `accountId?`, `mailbox?`, `cursor?`, `limit?` | `{ threads, nextCursor }` over cached headers and previews only | `that cursor is not usable any more` (`stale_cursor`), plus the service's own codes |
+| `get_mail_thread` | `brain:mail` | `accountId`, `threadId` | `{ thread, messages }`, each message's `messageId`, `from`, `to`, `cc`, `subject`, `sentAt`, `unread`, `snippet`, `hasAttachments` and `bodyCached` | `thread not found`, plus the service's own codes |
+| `read_mail_message` | `brain:mail` | `accountId`, `messageId`, `wait?` | `{ state, text?, attachments }`, each attachment's `attachmentId`, `filename`, `mimeType` and `bytes` | the service's own codes |
+
+`sendBlockedReason` is Brain's own read of a `canSend: false`, because the
+service reports sending as one boolean. `account_reauth_required` is the
+account waiting to be reconnected, `smtp_not_configured` is an IMAP account
+that was never given an SMTP endpoint, and `smtp_relay_unavailable` is an
+account that has one this host cannot reach.
+
+`search_mail` with no `accountId` runs the search on every connected account,
+merges the results newest first with the thread id breaking a tie, and answers
+one opaque cursor holding a cursor per account. `limit` is per account, so a
+merged page can hold up to `limit` threads for each of them. An account the
+previous page ran to the end is not asked again. A cursor naming an account
+that is no longer connected is refused rather than silently narrowed, and a
+cursor from a merged search is not a cursor a single-account search accepts.
+
+`read_mail_message` records the body demand with the service first, because the
+body cache drops a message outside the newest-Inbox cohort unless something is
+holding it, and then polls for up to `wait` milliseconds (0 to 20000, 8000 by
+default). It answers `state` rather than holding the call open: `fetching`
+means call again, `transient` means the fetch failed and may succeed later,
+`permanent` means it will not, and `ready` carries `text` and `attachments`.
+
 ## Notion import
 
 The nine `notion_*` tools are one guarded protocol, not nine independent
@@ -96,6 +142,6 @@ folder, in git or in a portable archive.
 
 ## Still to come in this release
 
-The mail tools, the task write tools and the Settings view of the activity log
-land later on this branch. Their rows are added here as each one is
-registered, so this table and the server stay one description.
+Mail triage, sending and attachments, the task write tools and the Settings
+view of the activity log land later on this branch. Their rows are added here
+as each one is registered, so this table and the server stay one description.

@@ -293,6 +293,7 @@ export function CommandPalette({
   onOpenMail,
   onOpenTasks,
   onNewTask,
+  onNewMessage,
   onOpenTrash,
   onOpenSettings,
   onToggleTheme,
@@ -313,6 +314,7 @@ export function CommandPalette({
   onOpenMail?: () => void | Promise<void>;
   onOpenTasks?: () => void | Promise<void>;
   onNewTask?: () => void | Promise<void>;
+  onNewMessage?: () => void | Promise<void>;
   onOpenTrash?: () => void | Promise<void>;
   onOpenSettings?: () => void | Promise<void>;
   onToggleTheme?: () => void | Promise<void>;
@@ -414,6 +416,21 @@ export function CommandPalette({
         run: onNewTask,
       });
     }
+    if (onNewMessage) {
+      // THE THIRD CREATE, WHEREVER THE OTHER TWO ARE. "Compose message" is a
+      // row of the /mail route's own list, so from a page, which is where a
+      // writer most often decides to send one, the palette offered a page and
+      // a task and nothing else. This one carries the shell's seam: it opens
+      // Mail and leaves the ask standing. The pen and not the plus, the glyph
+      // mail's own Compose pill wears.
+      items.push({
+        id: "new-message",
+        label: "New message",
+        icon: "pen-new-square-linear",
+        keywords: ["mail", "email", "write", "send", "compose"],
+        run: onNewMessage,
+      });
+    }
     if (onOpenTrash) {
       items.push({
         id: "open-trash",
@@ -448,6 +465,7 @@ export function CommandPalette({
     onNewChild,
     onNewPage,
     onNewTask,
+    onNewMessage,
     onToday,
     onOpenMail,
     onOpenTasks,

@@ -2130,6 +2130,33 @@ html[data-kbd] [contenteditable]:focus-visible {
   letter-spacing: 0.06px;
   color: var(--ink-2);
 }
+/* A MENU AS A SHEET, below md.
+   The New menu under the phone's plus takes the form the When picker and the
+   composer already take there, for the same reason: a 210px popover hanging
+   off a control at the bottom inset is a pointer object, and a thumb wants a
+   full line and a grip. Same material, same rows, same order, because a sheet
+   is a shape and not a second menu.
+   FULL WIDTH ON THE INSET: `.brain-menu`'s `min-width` is a menu's floor and
+   has to come off before a percentage means anything on a shrink-to-fit box.
+   ONE OBJECT, ONE ANIMATION: the material moves nothing, framer carries the
+   travel (`components/new-menu.tsx`), and what holds the node while the exit
+   plays is the hold keyframe the When picker's sheet already uses: one
+   keyframe, two sheets, and reduced motion collapses it through the global
+   rule so the sheet goes at once. */
+@media (max-width: 767px) {
+  .brain-menu.brain-menu-sheet {
+    min-width: 0;
+    width: calc(100vw - 16px);
+  }
+  .brain-menu.brain-menu-sheet[data-state="open"],
+  .brain-menu.brain-menu-sheet[data-state="open"]::before,
+  .brain-menu.brain-menu-sheet[data-state="closed"]::before {
+    animation: none;
+  }
+  .brain-menu.brain-menu-sheet[data-state="closed"] {
+    animation: when-sheet-hold 300ms linear both;
+  }
+}
 /* Share popover: the share card as a ledger on paper (DESIGN.md v2, §12
    Menu / popover). The regular material survives as a 6px sleeve (popover
    14 = plate 8 + padding 6) around an opaque paper plate, so the sentence,

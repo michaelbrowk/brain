@@ -27,13 +27,13 @@ import {
 } from "../settings/sections";
 import { useUpdateStatus } from "../settings/use-update-status";
 import { Icon } from "../ui/icon";
-import { Kbd, useShortcutTitle } from "../ui/primitives";
+import { Kbd } from "../ui/primitives";
 import { Button, IconButton } from "../ui/button";
 import { Chip } from "../ui/chip";
 import { useScrollEdge } from "../ui/scroll-edge";
 import { ThemeToggle } from "../theme-toggle";
 import { SortableTree, type TreeHandlers } from "../tree/sortable-tree";
-import { TemplateMenu } from "../template-menu";
+import { NewMenu } from "../new-menu";
 import {
   acceptExternalPageRefNesting,
   BRAIN_PAGE_REF_DRAG_MIME,
@@ -77,6 +77,12 @@ export interface ShellSidebarProps {
   onOpenDailyPage: () => void;
   onOpenMail: () => void;
   onOpenTasks: () => void;
+  /** The head's plus offers three nouns, and two of them are not pages. Task
+   *  opens the Tasks surface with the caret in its capture row; Message opens
+   *  Mail with a blank composer up. Both are the shell's, because both
+   *  navigate, and both are the rows the palette runs from its own list. */
+  onNewTask: () => void;
+  onNewMessage: () => void;
   /** Opens a notification's destination. The bell is here rather than in the
    *  shell's own chrome because the head is where this panel's two standing
    *  controls already live, and "+" needs a neighbour, not a second row. */
@@ -125,6 +131,8 @@ export function ShellSidebar({
   onOpenDailyPage,
   onOpenMail,
   onOpenTasks,
+  onNewTask,
+  onNewMessage,
   onNavigateNotification,
   notificationRefreshToken = 0,
   tasksOpenTodayCount,
@@ -146,7 +154,6 @@ export function ShellSidebar({
 }: ShellSidebarProps) {
   const reduce = useReducedMotion();
   const update = useUpdateStatus();
-  const newPageTitle = useShortcutTitle("New page", "⌘⌥N");
   const mailOpen = surface === "mail";
   const tasksOpen = surface === "tasks";
   const settingsOpen = surface === "settings";
@@ -184,6 +191,15 @@ export function ShellSidebar({
             the mail column where it belongs. Settings still draws no primary:
             nothing there is a create.
 
+            WHAT IT MAKES IS THREE NOUNS, and it is still one thing. The menu
+            under it offers a task, a message and a page, because Brain keeps
+            three kinds of thing and only one of them had a button: a task
+            meant knowing Tasks has a field at the top of a list, a message
+            meant knowing Mail has a pill inside its own column. The circle
+            still means MAKE SOMETHING and the menu is where the something is
+            named, so the button's own label is "New" and not "New page".
+            ⌘⌥N is unchanged and still makes a page outright.
+
             THE GLYPH FOLLOWS. It wore the composing pen, which is the glyph
             mail's own Compose pill wears — same drawing, one screen, 370px
             apart at lg and both wordless. That was harmless while both meant
@@ -193,9 +209,9 @@ export function ShellSidebar({
             tree and says nothing.
 
             It takes the plus, which is what this system draws for making a
-            page everywhere else: the template menu this button opens wears it
-            on the blank entry, and the tree row menu wears it on "New page
-            inside". A page glyph would have named the noun — and
+            thing everywhere else: the menu this button opens wears it on the
+            blank page entry, and the tree row menu wears it on "New page
+            inside". A page glyph would have named one noun of three, and
             `document-text`, the noun, is the very next slot in the mobile tab
             bar, under the word "Pages". The mark for the ACT was already here.
 
@@ -223,15 +239,15 @@ export function ShellSidebar({
             refreshToken={notificationRefreshToken}
           />
           {settingsOpen ? null : (
-            <TemplateMenu onPick={(t) => onCreatePage(selectedId, t)}>
-              <Button
-                variant="accent"
-                aria-label="New page"
-                title={newPageTitle}
-              >
+            <NewMenu
+              onPickTemplate={(t) => onCreatePage(selectedId, t)}
+              onNewTask={onNewTask}
+              onNewMessage={onNewMessage}
+            >
+              <Button variant="accent" aria-label="New" title="New">
                 <Icon name="add-linear" size={17} />
               </Button>
-            </TemplateMenu>
+            </NewMenu>
           )}
         </div>
       </div>

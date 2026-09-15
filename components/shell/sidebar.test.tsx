@@ -43,6 +43,8 @@ function sidebarProps(
     onOpenDailyPage: vi.fn(),
     onOpenMail: vi.fn(),
     onOpenTasks: vi.fn(),
+    onNewTask: vi.fn(),
+    onNewMessage: vi.fn(),
     onNavigateNotification: vi.fn(),
     onSelect: vi.fn(),
     onToggleExpand: vi.fn(),
@@ -301,7 +303,7 @@ describe("ShellSidebar head", () => {
 
   const head = () => document.querySelector<HTMLElement>(".brain-sidebar-head")!;
   const bell = () => head().querySelector<HTMLButtonElement>('[aria-label^="Notifications"]')!;
-  const plus = () => head().querySelector<HTMLButtonElement>('[aria-label="New page"]')!;
+  const plus = () => head().querySelector<HTMLButtonElement>('[aria-label="New"]')!;
 
   it("draws the bell and the plus at one size", async () => {
     await render();
@@ -352,12 +354,13 @@ describe("ShellSidebar head", () => {
     expect(badge).toContain("pointer-events: none");
   });
 
-  it("draws no create on Settings, and keeps the bell there", async () => {
+  it("names the plus for the menu it opens, and draws none on Settings", async () => {
     await render();
+    expect(plus().getAttribute("aria-label")).toBe("New");
     expect(plus().getAttribute("aria-haspopup")).toBe("menu");
 
     await render({ surface: "settings", settingsSection: "appearance" });
-    expect(head().querySelector('[aria-label="New page"]')).toBeNull();
+    expect(head().querySelector('[aria-label="New"]')).toBeNull();
     // the bell stands there: a reminder fires whatever surface is open
     expect(head().querySelector('[aria-label^="Notifications"]')).not.toBeNull();
   });

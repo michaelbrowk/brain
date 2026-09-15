@@ -713,49 +713,48 @@ describe("a history row", () => {
  *  `components/tasks-when-picker.tsx` is the control at every width, and
  *  `ops/design-guardrails.test.ts` refuses a second one under `app/`,
  *  `components/` and `lib/`. */
+/** `hover: hover` or not, the chip opens the same control: the branch that
+ *  read it is deleted. One stub, so the cases that open the picker run on a
+ *  `matchMedia` that exists rather than on jsdom's absent one. */
+const stubHover = (hover = true, sheet = false) => {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: query === "(hover: hover)" ? hover : sheet && query === "(max-width: 767px)",
+    media: query,
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  }));
+};
+
+/** The detailed path's commit. A grid pick moves the picker's own value; Done
+ *  is what sends it, and what closes the popover before the row folds. */
+const pressDone = async () => {
+  await act(async () => {
+    document.querySelector<HTMLElement>("[data-when-done]")?.click();
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+};
+
+const openMenu = async () => {
+  const chip = [...document.querySelectorAll<HTMLElement>(".chip")].find((node) =>
+    node.getAttribute("aria-label")?.startsWith("When:"),
+  );
+  if (!chip) throw new Error("no When chip on the expanded row");
+  await act(async () => {
+    chip.dispatchEvent(pointer("pointerdown"));
+    chip.click();
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+};
+
 describe("the When chip's picker", () => {
-  /** `hover: hover` or not, the chip opens the same control: the branch that
-   *  read it is deleted. One stub, so the cases below run on a `matchMedia`
-   *  that exists rather than on jsdom's absent one. */
-  const stubHover = (hover = true, sheet = false) => {
-    vi.stubGlobal("matchMedia", (query: string) => ({
-      matches:
-        query === "(hover: hover)" ? hover : sheet && query === "(max-width: 767px)",
-      media: query,
-      onchange: null,
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-      addListener: vi.fn(),
-      removeListener: vi.fn(),
-      dispatchEvent: vi.fn(),
-    }));
-  };
-
-  /** The detailed path's commit. A grid pick moves the picker's own value; Done
-   *  is what sends it, and what closes the popover before the row folds. */
-  const pressDone = async () => {
-    await act(async () => {
-      document.querySelector<HTMLElement>("[data-when-done]")?.click();
-    });
-    await act(async () => {
-      await Promise.resolve();
-    });
-  };
-
-  const openMenu = async () => {
-    const chip = [...document.querySelectorAll<HTMLElement>(".chip")].find(
-      (node) => node.getAttribute("aria-label")?.startsWith("When:"),
-    );
-    if (!chip) throw new Error("no When chip on the expanded row");
-    await act(async () => {
-      chip.dispatchEvent(pointer("pointerdown"));
-      chip.click();
-    });
-    await act(async () => {
-      await Promise.resolve();
-    });
-  };
-
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -795,6 +794,67 @@ describe("the When chip's picker", () => {
 
     expect(document.querySelector(".brain-when-picker")).toBeNull();
     expect(calls.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  /** A DAY IN THE GRID CLOSED THE CALENDAR AND SAVED NOTHING.
+   *
+   *  The panel is portalled to the end of the document and React carries its
+   *  clicks up the ROW's tree all the same, so `openRow` heard a day cell as a
+   *  second press on the row and folded it. The chips went, the picker went
+   *  with them, and a teardown that is not a close throws the reader's day
+   *  away: the one path the detailed contract rests on, with nothing filed and
+   *  nothing said. The case above cannot see it, because `expanded` is a prop
+   *  in this harness and the fold it asks for never arrives. This one watches
+   *  the ask. */
+  it("hears a press in the calendar as the calendar's and not as the row's", async () => {
+    stubHover();
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await openMenu();
+    calls.expand.mockClear();
+    calls.select.mockClear();
+
+    await act(async () => {
+      document.querySelector<HTMLElement>('[data-day="2026-09-20"]')?.click();
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    expect(calls.select).not.toHaveBeenCalled();
+    expect(document.querySelector(".brain-when-picker")).not.toBeNull();
+    // and the cell the reader pressed wears the ink capsule, which is the
+    // whole of what the press was for
+    expect(
+      document
+        .querySelector('[data-day="2026-09-20"]')
+        ?.getAttribute("aria-selected"),
+    ).toBe("true");
+  });
+
+  it("hears the repeat menu and the category popover the same way", async () => {
+    // EVERY PANEL A CHIP OPENS IS PORTALLED, so the rule cannot be about the
+    // calendar. A press in any of them is a press on the control that opened
+    // it, and the row it is drawn over answers none of them.
+    stubHover();
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    const repeat = [...document.querySelectorAll<HTMLElement>(".chip")].find((node) =>
+      (node.textContent ?? "").includes("Repeat"),
+    )!;
+    await act(async () => {
+      repeat.dispatchEvent(pointer("pointerdown"));
+      repeat.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const option = document.querySelector<HTMLElement>("[role='menuitemradio']");
+    expect(option).not.toBeNull();
+    calls.expand.mockClear();
+
+    await act(async () => {
+      option?.click();
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    expect(calls.patch).toHaveBeenCalledTimes(1);
   });
 
   /** I6. THE REPEAT MENU STATES ITS RULE, WHOLE.

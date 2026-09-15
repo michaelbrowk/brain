@@ -396,6 +396,21 @@ export function TasksRow({
   });
 
   const openRow = (event: React.MouseEvent) => {
+    // A PRESS INSIDE A PANEL THIS ROW OPENED IS NOT A PRESS ON THIS ROW.
+    //
+    // The When picker, the deadline picker, the repeat menu and the category
+    // popover are all PORTALLED to the end of the document, and React carries
+    // an event from a portal up the tree the portal was DECLARED in. So a day
+    // in the calendar arrived here as a second press on the row, this handler
+    // folded it, the chips went and the picker went with them, and a teardown
+    // that is not a close throws the reader's day away: the panel shut and
+    // nothing was saved. The `data-task-control` guard below could not see it,
+    // because that guard walks the DOM and the portal has left it.
+    //
+    // Containment is the question both guards are asking, and it is the one
+    // the portal breaks. Asked of the row's own element it answers for every
+    // panel a chip opens, the ones here now and the ones added later.
+    if (!event.currentTarget.contains(event.target as Node)) return;
     if ((event.target as HTMLElement).closest("[data-task-control]")) return;
     // A history row answers NOTHING, and says so before it is pressed: no
     // hover fill, no pointer cursor, a drawn check instead of a box. Its chips

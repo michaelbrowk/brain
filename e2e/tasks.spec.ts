@@ -8,11 +8,16 @@
 // alone merges; a tick on a line that tab moved is the 409 it has always been,
 // shown as the conflict banner and never softened into a toast.
 //
-// ALL FOUR ARE `@release`. `ci.yml` runs the browser steps only on a push, and
-// both it and `release.yml` run `playwright test --grep @release`, so an
-// untagged test here would run in the weekly `e2e-full` job and nowhere else:
-// the merge, the branch's one deliberate loosening of the 409 contract, would
-// ship with no browser-level guard at any release from here on.
+// EVERY TEST IN THIS FILE IS `@release`. `ci.yml` runs the browser steps only
+// on a push, and both it and `release.yml` run `playwright test --grep
+// @release`, so an untagged test here would run in the weekly `e2e-full` job
+// and nowhere else: the merge, the branch's one deliberate loosening of the 409
+// contract, would ship with no browser-level guard at any release from here on.
+//
+// The ones at the foot are the row's own gestures rather than the link to a
+// note, and they are here because they are only reachable in a browser: the
+// unit harness drives `expanded` as a prop, so a fold the row ASKS for never
+// arrives there, and jsdom has no layout for a clip box to cut anything in.
 //
 // The second tab's SSE stream is blocked on purpose. That is not a convenience:
 // it is the scenario. Somebody ticks a checkbox on their phone while the same
@@ -153,6 +158,31 @@ async function completeFromTasks(page: Page, title: string, taskId: string) {
     row.getByRole("checkbox", { name: title }).click(),
   ]);
   expect(response.status()).toBe(200);
+}
+
+/** A task with no note behind it, filed on today, for the cases about the row
+ *  itself rather than about the link to a checkbox. */
+async function createTask(page: Page, title: string): Promise<string> {
+  const created = await browserJson(page, "/api/tasks", {
+    method: "POST",
+    body: { title, when: localToday() },
+  });
+  expect(created.ok, JSON.stringify(created.body)).toBeTruthy();
+  return (created.body as { task: { id: string } }).task.id;
+}
+
+/** Open a task's row on the Tasks surface and expand it, which is what draws
+ *  the chip row every case below reads. */
+async function expandRow(page: Page, id: string, title: string) {
+  await page.goto("/tasks");
+  const row = page.locator(`[data-task-id="${id}"]`);
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await row.getByText(title, { exact: true }).click();
+  await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(1);
+  // The reveal is a spring from height 0, so the chips are still growing for a
+  // frame or two after the attribute lands.
+  await page.waitForTimeout(500);
+  return row;
 }
 
 /** Type at the end of a paragraph without touching any other line. */
@@ -401,4 +431,49 @@ test("@release consecutive task lines sit as close together as consecutive bulle
     nodes.map((node) => node.getBoundingClientRect().top),
   );
   expect(tops[1] - tops[0]).toBeLessThanOrEqual(32);
+});
+
+/* ── The row and the panels it opens ──────────────────────────────────────────
+ *
+ * Three answers the row got wrong on 0.10.6, all of them only reachable with a
+ * real row under a real pointer: the unit harness drives `expanded` as a prop,
+ * so a fold the row ASKS for never arrives there, and jsdom has no layout for
+ * a clip box to cut anything in.
+ */
+
+test("@release a day in the calendar keeps the panel open and the row expanded", async ({
+  page,
+}) => {
+  // The panel is portalled to the end of the document and React carries its
+  // clicks up the ROW's tree all the same, so a day cell reached the row's own
+  // press handler, which folded the row. The chips went, the picker went with
+  // them, and a teardown that is not a close throws the day away: the panel
+  // shut and nothing was saved.
+  test.setTimeout(60_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const id = await createTask(page, "Water the plants");
+  const row = await expandRow(page, id, "Water the plants");
+
+  await row.getByRole("button", { name: /^When:/ }).click();
+  const panel = page.getByRole("dialog", { name: /^When:/ });
+  await expect(panel).toBeVisible();
+
+  const cell = panel.getByRole("gridcell", { name: /^\w+day 20 / });
+  await cell.click();
+
+  // The panel stands, the cell takes the ink capsule, and nothing has gone to
+  // the route: the grid edits the panel's own value and Done is what sends it.
+  await expect(panel).toBeVisible();
+  await expect(cell).toHaveAttribute("aria-selected", "true");
+  await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(1);
+
+  await panel.getByRole("button", { name: "Done" }).click();
+  await expect(panel).toHaveCount(0);
+  await expect
+    .poll(async () => {
+      const read = await browserJson(page, `/api/tasks/${id}`);
+      return (read.body as { task?: { when?: string } })?.task?.when ?? null;
+    }, { timeout: 15_000 })
+    .toMatch(/-20$/);
 });

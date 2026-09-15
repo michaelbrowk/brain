@@ -152,6 +152,7 @@ function toolsListRequest(id: number) {
 describe("Notion MCP route validation", () => {
   beforeEach(() => {
     mocks.getStore.mockReset();
+    mocks.createBrainMailClient.mockReset();
     mocks.verifyMcpBearerToken.mockReset();
     mocks.verifyMcpBearerToken.mockImplementation(async (token?: string) => {
       if (token === "read-only-token") {
@@ -258,10 +259,34 @@ describe("Notion MCP route validation", () => {
         read: "ready",
         write: "not_authorized",
         import: "not_authorized",
+        mail: "not_authorized",
+        mailSend: "not_authorized",
       },
       rootPageCount: 2,
       scopes: ["brain:read"],
       changedPages: 0,
+    });
+  });
+
+  it("reports mail and send access the same way it reports write and import", async () => {
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "mail-only-token",
+      clientId: "mail-only-client",
+      scopes: ["brain:read", "brain:mail", "brain:mail:send"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+    mocks.getStore.mockResolvedValue({ getTree: vi.fn().mockReturnValue([]) });
+
+    const { payload } = await toolPayload(
+      await callTool("connection_check", {}, 47),
+    );
+
+    expect(payload.access).toEqual({
+      read: "ready",
+      write: "not_authorized",
+      import: "not_authorized",
+      mail: "authorized",
+      mailSend: "authorized",
     });
   });
 
@@ -317,6 +342,85 @@ describe("Notion MCP route validation", () => {
       'scope="brain:read brain:write brain:import brain:mail brain:mail:send"',
     );
     expect(mocks.getStore).not.toHaveBeenCalled();
+  });
+
+  it("refuses a batch that mixes a permitted tool with one the grant lacks", async () => {
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "mail-only-token",
+      clientId: "mail-only-client",
+      scopes: ["brain:read", "brain:mail"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+
+    const response = await POST(
+      new Request("https://brain.example.test/api/mcp", {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: "Bearer mail-only-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify([
+          {
+            jsonrpc: "2.0",
+            id: 500,
+            method: "tools/call",
+            params: { name: "send_mail", arguments: {} },
+          },
+          {
+            jsonrpc: "2.0",
+            id: 501,
+            method: "tools/call",
+            params: {
+              name: "list_mail_threads",
+              arguments: { accountId: FAKE_ACCOUNT_ID },
+            },
+          },
+        ]),
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("WWW-Authenticate")).toContain(
+      'scope="brain:mail:send"',
+    );
+    expect(mocks.createBrainMailClient).not.toHaveBeenCalled();
+  });
+
+  it("passes a single call from a grant holding only the scope that tool needs", async () => {
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "mail-only-token",
+      clientId: "mail-only-client",
+      scopes: ["brain:read", "brain:mail"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const response = await callTool(
+      "list_mail_threads",
+      { accountId: FAKE_ACCOUNT_ID },
+      502,
+    );
+
+    expect(response.status).toBe(200);
+  });
+
+  it("refuses send_mail alone with its own scope, not mail's", async () => {
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "mail-only-token",
+      clientId: "mail-only-client",
+      scopes: ["brain:read", "brain:mail"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+
+    const response = await callTool("send_mail", {}, 503);
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("WWW-Authenticate")).toContain(
+      'scope="brain:mail:send"',
+    );
+    expect(mocks.createBrainMailClient).not.toHaveBeenCalled();
   });
 
   it("rejects a valid bearer followed by extra authorization data", async () => {

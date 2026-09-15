@@ -64,7 +64,7 @@ const handler = createMcpHandler(
 
     server.tool(
       "connection_check",
-      "Verify this MCP connection can authenticate and read Brain without changing any pages. Reports whether write and import access are authorized, but does not exercise those permissions.",
+      "Verify this MCP connection can authenticate and read Brain without changing any pages. Reports whether write, import, and mail access are authorized, but does not exercise those permissions.",
       {},
       async (_input, extra) => {
         const store = await getStore();
@@ -82,6 +82,10 @@ const handler = createMcpHandler(
               ? "authorized"
               : "not_authorized",
             import: scopes.includes("brain:import")
+              ? "authorized"
+              : "not_authorized",
+            mail: scopes.includes("brain:mail") ? "authorized" : "not_authorized",
+            mailSend: scopes.includes("brain:mail:send")
               ? "authorized"
               : "not_authorized",
           },
@@ -541,10 +545,13 @@ const handler = createMcpHandler(
 
 const authenticatedHandler = withMcpAuth(
   async (request) => {
-    const requiredScope = await requiredToolScope(request);
+    const requiredScopes = await requiredToolScopes(request);
     const auth = (request as Request & { auth?: { scopes: string[] } }).auth;
-    if (requiredScope && !auth?.scopes.includes(requiredScope)) {
-      return mcpInsufficientScopeResponse(requiredScope);
+    const missingScope = requiredScopes.find(
+      (scope) => !auth?.scopes.includes(scope),
+    );
+    if (missingScope) {
+      return mcpInsufficientScopeResponse(missingScope);
     }
     return handler(request);
   },
@@ -564,16 +571,23 @@ async function routeHandler(request: Request): Promise<Response> {
   );
 }
 
-async function requiredToolScope(request: Request): Promise<McpScope | null> {
-  if (request.method !== "POST") return null;
+/** Every scope a batch's tool calls need, not only the last one named. A
+ *  request body is either one JSON-RPC message or an array of them, and a
+ *  grant must hold every scope any call in the batch needs before the batch
+ *  runs at all. Import is still an early return: it is the widest scope in
+ *  play, and a batch never mixes an import tool with a mail or write tool in
+ *  practice, so returning as soon as one is seen keeps the common case cheap
+ *  without changing what a well-formed batch is refused for. */
+async function requiredToolScopes(request: Request): Promise<McpScope[]> {
+  if (request.method !== "POST") return [];
   let payload: unknown;
   try {
     payload = await request.clone().json();
   } catch {
-    return null;
+    return [];
   }
   const messages = Array.isArray(payload) ? payload : [payload];
-  let required: McpScope | null = null;
+  const required: McpScope[] = [];
   for (const message of messages) {
     if (!message || typeof message !== "object") continue;
     const value = message as {
@@ -584,8 +598,8 @@ async function requiredToolScope(request: Request): Promise<McpScope | null> {
       continue;
     }
     const scope = toolScopeOf(value.params.name);
-    if (scope === "brain:import") return scope;
-    if (scope) required = scope;
+    if (scope === "brain:import") return [scope];
+    if (scope && !required.includes(scope)) required.push(scope);
   }
   return required;
 }

@@ -297,6 +297,7 @@ unusual-looking pin is worth much less than a knowingly vulnerable parser.
 | `BRAIN_NOTIFICATIONS_STATE_DIR` | Where the notification centre keeps its rows (default `/var/lib/brain/notifications`) |
 | `BRAIN_REMINDERS`    | `0` stops the reminder scan and the new-mail poll (default: on) |
 | `BRAIN_PUSH_STATE_DIR` | Where push keys and device subscriptions live (default `/var/lib/brain/push`) |
+| `BRAIN_MCP_STATE_DIR` | Where the MCP agent activity log, toggles and send marks live (default `/var/lib/brain/mcp`) |
 
 Human access = password → signed httpOnly cookie. MCP clients connect to
 `/api/mcp`, discover Brain OAuth automatically, and open a Brain consent screen.

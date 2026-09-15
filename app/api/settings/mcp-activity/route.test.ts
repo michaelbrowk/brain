@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import * as activityLog from "@/lib/mcp/activity-log";
 import { appendMcpActivity } from "@/lib/mcp/activity-log";
 import { DELETE, GET, SHOWN } from "./route";
 
@@ -56,5 +57,42 @@ describe("the agent activity route", () => {
     expect(cleared.status).toBe(200);
     expect(await cleared.json()).toEqual({ ok: true });
     expect(await (await GET()).json()).toEqual({ entries: [] });
+  });
+
+  it("answers a sentence and a code when the read itself throws", async () => {
+    // `readMcpActivity` swallows its own read failures lower down, so nothing
+    // in the shipped stack reaches this branch: the stand-in is what proves
+    // the rejection becomes an answer rather than an unhandled one.
+    const read = vi
+      .spyOn(activityLog, "readMcpActivity")
+      .mockRejectedValue(new Error("EIO: /srv/brain/state/mcp-activity.jsonl"));
+    try {
+      const answer = await GET();
+      expect(answer.status).toBe(500);
+      const body = await answer.json();
+      expect(body).toEqual({
+        error: "couldn't read the agent activity log",
+        reason: "activity_read_failed",
+      });
+      expect(JSON.stringify(body)).not.toContain("/srv/brain/state");
+    } finally {
+      read.mockRestore();
+    }
+  });
+
+  it("answers a sentence and a code when the clear itself throws", async () => {
+    const clear = vi
+      .spyOn(activityLog, "clearMcpActivity")
+      .mockRejectedValue(new Error("EACCES: /srv/brain/state"));
+    try {
+      const answer = await DELETE();
+      expect(answer.status).toBe(500);
+      expect(await answer.json()).toEqual({
+        error: "couldn't clear the agent activity log",
+        reason: "activity_clear_failed",
+      });
+    } finally {
+      clear.mockRestore();
+    }
   });
 });

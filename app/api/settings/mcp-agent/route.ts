@@ -1,5 +1,8 @@
 import { NextResponse } from "next/server";
-import { readAgentSettings, writeAgentSettings } from "@/lib/mcp/agent-settings";
+import {
+  readAgentSettingsState,
+  writeAgentSettings,
+} from "@/lib/mcp/agent-settings";
 import { readBoundedText } from "@/lib/oauth/http";
 
 export const dynamic = "force-dynamic";
@@ -16,7 +19,12 @@ export const dynamic = "force-dynamic";
 const MAX_BODY_BYTES = 256;
 
 export async function GET() {
-  return NextResponse.json(await readAgentSettings());
+  // `unreadable` travels with the two switches because the screen has to say
+  // the same thing the tools do. A settings file this process cannot read
+  // makes `send_mail` and `reply_mail` refuse, and the screen used to draw
+  // the on-by-default beside that refusal.
+  const state = await readAgentSettingsState();
+  return NextResponse.json({ ...state.settings, unreadable: state.unreadable });
 }
 
 export async function PUT(request: Request) {
@@ -34,12 +42,15 @@ export async function PUT(request: Request) {
     ) {
       return NextResponse.json({ error: "bad request" }, { status: 400 });
     }
-    return NextResponse.json(
-      await writeAgentSettings({
+    // A write leaves a file this process just wrote, so nothing is unreadable
+    // from here on and the screen can stop saying so.
+    return NextResponse.json({
+      ...(await writeAgentSettings({
         tellRecipients: body.tellRecipients,
         allowSending: body.allowSending,
-      }),
-    );
+      })),
+      unreadable: false,
+    });
   } catch {
     return NextResponse.json({ error: "bad request" }, { status: 400 });
   }

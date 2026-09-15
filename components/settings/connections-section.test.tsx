@@ -17,7 +17,7 @@ let host: HTMLDivElement;
 let root: Root;
 let connectedApps: unknown[];
 let entries: unknown[];
-let agent: { tellRecipients: boolean; allowSending: boolean };
+let agent: { tellRecipients: boolean; allowSending: boolean; unreadable?: boolean };
 let agentWrites: string[];
 let activityMethods: string[];
 let agentWriteFails: boolean;
@@ -264,9 +264,31 @@ describe("Settings → Connections, the agent rows", () => {
 
   it("gives 'no apps connected' the same empty-state shape 'no activity' already has", async () => {
     await render();
+    // Scoped to the empty block itself. The group's own refresh button is an
+    // icon inside the same section, so asking the section for any `svg` at
+    // all was true whether or not the empty row had one.
     const appsGroup = settingsGroup("Connected apps");
-    expect(appsGroup.querySelector("svg")).not.toBeNull();
-    expect(appsGroup.textContent).toContain("No apps connected with OAuth yet");
+    const empty = [...appsGroup.querySelectorAll<HTMLElement>("div")].find((node) =>
+      [...node.children].some(
+        (child) =>
+          child.tagName === "P" &&
+          child.textContent === "No apps connected with OAuth yet",
+      ),
+    );
+    expect(empty).toBeTruthy();
+    expect(empty!.querySelector("svg")).not.toBeNull();
+  });
+
+  it("says sending is off when the file holding the switches cannot be read", async () => {
+    // The tools fail closed on an unreadable settings file. The screen they
+    // name in that refusal used to draw the on-by-default beside it.
+    agent = { tellRecipients: false, allowSending: true, unreadable: true };
+    await render();
+
+    expect(radio("Let agents send mail", "Off").getAttribute("aria-checked")).toBe(
+      "true",
+    );
+    expect(text()).toContain("every agent send is refused until you set it again");
   });
 
   it("does not warn React about a duplicate key when two lines land in the same millisecond", async () => {

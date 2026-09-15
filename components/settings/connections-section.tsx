@@ -53,11 +53,21 @@ type McpActivityEntry = {
   outcome: string;
 };
 type McpAgentSettings = { tellRecipients: boolean; allowSending: boolean };
+/** The switches as the route answers them, with the one thing that is not a
+ *  switch: whether the file holding them could be read at all. */
+type McpAgentState = McpAgentSettings & { unreadable: boolean };
 
 const MCP_CONNECTION_CHECK_PROMPT =
   "Use Brain's connection_check tool and tell me whether read and write access are active. Do not change any pages.";
 
 const SAVE_FAILED = "Couldn't save that. Try again.";
+/** What the send tools do with an unreadable settings file, said on the
+ *  screen they point the owner at. A switch whose whole purpose is to stop an
+ *  agent fails closed, so the row reads Off and says why until it is set
+ *  again. */
+const SENDING_HINT = "Off refuses every agent send before the mail service is reached";
+const SENDING_UNREADABLE_HINT =
+  "The saved switch could not be read, so every agent send is refused until you set it again";
 const NO_APPS = "No apps connected with OAuth yet";
 const NO_ACTIVITY = "No agent activity yet";
 
@@ -107,9 +117,10 @@ export function ConnectionsSection({
   const [activity, setActivity] = useState<McpActivityEntry[]>([]);
   // The documented defaults stand in while the read is in flight, so the
   // switches never draw in a position the server never held.
-  const [agent, setAgent] = useState<McpAgentSettings>({
+  const [agent, setAgent] = useState<McpAgentState>({
     tellRecipients: false,
     allowSending: true,
+    unreadable: false,
   });
   const [savingAgent, setSavingAgent] = useState(false);
 
@@ -171,10 +182,11 @@ export function ConnectionsSection({
     try {
       const answer = await fetch("/api/settings/mcp-agent");
       if (!answer.ok) throw new Error(String(answer.status));
-      const body = (await answer.json()) as McpAgentSettings;
+      const body = (await answer.json()) as McpAgentState;
       setAgent({
         tellRecipients: body.tellRecipients === true,
         allowSending: body.allowSending === true,
+        unreadable: body.unreadable === true,
       });
     } catch {
       // keep the defaults already on screen
@@ -220,21 +232,25 @@ export function ConnectionsSection({
     if (savingAgent) return;
     const previous = agent;
     setSavingAgent(true);
-    setAgent(next);
+    setAgent({ ...next, unreadable: false });
     try {
       const response = await fetch("/api/settings/mcp-agent", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(next),
+        body: JSON.stringify({
+          tellRecipients: next.tellRecipients,
+          allowSending: next.allowSending,
+        }),
       });
       if (!response.ok) throw new Error(String(response.status));
       // Adopted the way `notifications-section.tsx`'s own switches adopt
       // theirs: the route echoes what it wrote, and that is the value on
       // screen from here, not the optimistic guess that is already showing.
-      const body = (await response.json()) as McpAgentSettings;
+      const body = (await response.json()) as McpAgentState;
       setAgent({
         tellRecipients: body.tellRecipients === true,
         allowSending: body.allowSending === true,
+        unreadable: body.unreadable === true,
       });
       onToast(said);
     } catch {
@@ -428,11 +444,11 @@ export function ConnectionsSection({
         </SettingsRow>
         <SettingsRow
           label="Let agents send mail"
-          hint="Off refuses every agent send before the mail service is reached"
+          hint={agent.unreadable ? SENDING_UNREADABLE_HINT : SENDING_HINT}
         >
           <Segmented
             label="Let agents send mail"
-            value={agent.allowSending ? "on" : "off"}
+            value={agent.allowSending && !agent.unreadable ? "on" : "off"}
             disabled={savingAgent}
             options={[
               { value: "off", label: "Off" },

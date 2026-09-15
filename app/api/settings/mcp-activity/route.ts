@@ -16,7 +16,13 @@ export async function GET() {
   try {
     return NextResponse.json({ entries: await readMcpActivity(SHOWN) });
   } catch {
-    return NextResponse.json({ error: "couldn't read the agent activity log" }, { status: 500 });
+    // The thrown message is a Node `fs` error and names the state directory,
+    // so the sentence is Brain's own and the code is what the screen branches
+    // on, the way every MCP refusal answers.
+    return NextResponse.json(
+      { error: "couldn't read the agent activity log", reason: "activity_read_failed" },
+      { status: 500 },
+    );
   }
 }
 
@@ -25,6 +31,9 @@ export async function DELETE() {
     await clearMcpActivity();
     return NextResponse.json({ ok: true });
   } catch {
-    return NextResponse.json({ error: "couldn't clear the agent activity log" }, { status: 500 });
+    return NextResponse.json(
+      { error: "couldn't clear the agent activity log", reason: "activity_clear_failed" },
+      { status: 500 },
+    );
   }
 }

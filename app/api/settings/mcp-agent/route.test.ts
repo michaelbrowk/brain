@@ -28,7 +28,11 @@ describe("the agent settings route", () => {
   it("answers the documented defaults before anything is written", async () => {
     const answer = await GET();
     expect(answer.status).toBe(200);
-    expect(await answer.json()).toEqual({ tellRecipients: false, allowSending: true });
+    expect(await answer.json()).toEqual({
+      tellRecipients: false,
+      allowSending: true,
+      unreadable: false,
+    });
   });
 
   it("writes both switches and reads them back", async () => {
@@ -36,10 +40,15 @@ describe("the agent settings route", () => {
       put(JSON.stringify({ tellRecipients: true, allowSending: false })),
     );
     expect(written.status).toBe(200);
-    expect(await written.json()).toEqual({ tellRecipients: true, allowSending: false });
+    expect(await written.json()).toEqual({
+      tellRecipients: true,
+      allowSending: false,
+      unreadable: false,
+    });
     expect(await (await GET()).json()).toEqual({
       tellRecipients: true,
       allowSending: false,
+      unreadable: false,
     });
   });
 
@@ -58,6 +67,30 @@ describe("the agent settings route", () => {
     expect(await (await GET()).json()).toEqual({
       tellRecipients: false,
       allowSending: true,
+      unreadable: false,
+    });
+  });
+
+  it("says so when the file holding the switches cannot be read", async () => {
+    // The screen has to say what the tools do. With this file unreadable both
+    // write tools refuse, so a screen drawing the on-by-default beside that
+    // refusal would be telling the owner the opposite of the truth.
+    await fs.writeFile(path.join(root, "agent-settings.json"), "{not json", {
+      mode: 0o600,
+    });
+
+    expect(await (await GET()).json()).toEqual({
+      tellRecipients: false,
+      allowSending: true,
+      unreadable: true,
+    });
+
+    // Writing the file again is what clears it.
+    await PUT(put(JSON.stringify({ tellRecipients: false, allowSending: true })));
+    expect(await (await GET()).json()).toEqual({
+      tellRecipients: false,
+      allowSending: true,
+      unreadable: false,
     });
   });
 

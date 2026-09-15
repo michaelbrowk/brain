@@ -1,13 +1,21 @@
 "use client";
 
 // Connections: the MCP endpoint, OAuth connect, the legacy bearer token,
-// connected apps, and the AI-requests note. Session controls live in
-// Account.
+// connected apps, what agents may do, what they did, and the AI-requests
+// note. Session controls live in Account.
+//
+// The two agent switches sit here rather than in Notifications because they
+// gate what a grant may do, which is what every other row on this surface is
+// about; the bell's surface is about what reaches this instance from outside
+// it. And the log a person acts on is two rows above the control they act
+// with.
 
 import { useCallback, useEffect, useState } from "react";
+import { formatAgo } from "@/lib/format-ago";
 import { Button, IconButton } from "../ui/button";
+import { Empty } from "../ui/empty";
 import { Icon } from "../ui/icon";
-import { SettingsGroup, SettingsRow, CopyRow } from "./shared";
+import { SettingsGroup, SettingsRow, CopyRow, Segmented } from "./shared";
 
 type ConnectedApp = {
   grantId: string;
@@ -26,15 +34,54 @@ type McpSettings = {
 };
 type McpStatus = "idle" | "loading" | "ready" | "error";
 
+/** One line of the agent log, the shape `lib/mcp/activity-log.ts` writes.
+ *  Declared here rather than imported, the way `ConnectedApp` above is: that
+ *  module opens files, and a client component has no business importing it
+ *  even for a type. */
+type McpActivityEntry = {
+  at: string;
+  client: string;
+  tool: string;
+  accountId?: string;
+  threadId?: string;
+  messageId?: string;
+  attachmentId?: string;
+  page?: string;
+  task?: string;
+  operationId?: string;
+  change?: string;
+  outcome: string;
+};
+type McpAgentSettings = { tellRecipients: boolean; allowSending: boolean };
+
 const MCP_CONNECTION_CHECK_PROMPT =
   "Use Brain's connection_check tool and tell me whether read and write access are active. Do not change any pages.";
 
+const SAVE_FAILED = "Couldn't save that. Try again.";
+const NO_ACTIVITY = "No agent activity yet";
+
+/** Brain is a single-owner service, so an owner write grant reaches the whole
+ *  owner API whatever words were stored on it (`ownerEffectiveScopes`).
+ *  `listConnectedApps` sends what a grant can reach rather than what it asked
+ *  for, because the one screen a person revokes from must not understate what
+ *  it is revoking: a grant minted before 0.11.0 can send mail. */
 function mcpScopeLabel(scope: ConnectedApp["scopes"][number]): string {
   if (scope === "brain:read") return "Read";
   if (scope === "brain:write") return "Write";
   if (scope === "brain:mail") return "Mail";
   if (scope === "brain:mail:send") return "Send mail";
   return "Import";
+}
+
+/** The second line of a log row: which mutation, which account, how it ended.
+ *  The account is a 32-hex id, shown by its head the way the legacy bearer
+ *  token above is, because the whole string names nothing a person reads. */
+function activityDetail(entry: McpActivityEntry): string {
+  const parts: string[] = [];
+  if (entry.change) parts.push(entry.change);
+  if (entry.accountId) parts.push(`${entry.accountId.slice(0, 12)}…`);
+  parts.push(entry.outcome);
+  return parts.join(" · ");
 }
 
 export function ConnectionsSection({
@@ -45,6 +92,14 @@ export function ConnectionsSection({
   const [mcp, setMcp] = useState<McpSettings | null>(null);
   const [mcpStatus, setMcpStatus] = useState<McpStatus>("idle");
   const [revokingGrant, setRevokingGrant] = useState<string | null>(null);
+  const [activity, setActivity] = useState<McpActivityEntry[]>([]);
+  // The documented defaults stand in while the read is in flight, so the
+  // switches never draw in a position the server never held.
+  const [agent, setAgent] = useState<McpAgentSettings>({
+    tellRecipients: false,
+    allowSending: true,
+  });
+  const [savingAgent, setSavingAgent] = useState(false);
 
   const loadMcp = useCallback(async () => {
     setMcpStatus("loading");
@@ -88,12 +143,41 @@ export function ConnectionsSection({
     }
   }, []);
 
+  const loadAgent = useCallback(async () => {
+    // Neither read blanks the section when it fails. A log that cannot be read
+    // says so with its empty row, and the switches keep the documented
+    // defaults: this is the surface a person opens to understand a connection,
+    // and a blank one explains nothing.
+    try {
+      const answer = await fetch("/api/settings/mcp-activity");
+      if (!answer.ok) throw new Error(String(answer.status));
+      const body = (await answer.json()) as { entries: McpActivityEntry[] };
+      setActivity(Array.isArray(body.entries) ? body.entries : []);
+    } catch {
+      setActivity([]);
+    }
+    try {
+      const answer = await fetch("/api/settings/mcp-agent");
+      if (!answer.ok) throw new Error(String(answer.status));
+      const body = (await answer.json()) as McpAgentSettings;
+      setAgent({
+        tellRecipients: body.tellRecipients === true,
+        allowSending: body.allowSending === true,
+      });
+    } catch {
+      // keep the defaults already on screen
+    }
+  }, []);
+
   // The section mounts on each visit, so a deferred load per mount keeps the
   // per-visit refresh behaviour the dialog had.
   useEffect(() => {
-    const timer = window.setTimeout(() => void loadMcp(), 0);
+    const timer = window.setTimeout(() => {
+      void loadMcp();
+      void loadAgent();
+    }, 0);
     return () => window.clearTimeout(timer);
-  }, [loadMcp]);
+  }, [loadMcp, loadAgent]);
 
   const revokeConnectedApp = async (grantId: string) => {
     if (!mcp || revokingGrant) return;
@@ -114,6 +198,41 @@ export function ConnectionsSection({
       onToast("Couldn't revoke access. Try again.");
     } finally {
       setRevokingGrant(null);
+    }
+  };
+
+  /** Each switch says what it now means rather than that it was saved: the
+   *  owner threw it to change what an agent may do, and the sentence is the
+   *  new rule. */
+  const saveAgent = async (next: McpAgentSettings, said: string) => {
+    if (savingAgent) return;
+    const previous = agent;
+    setSavingAgent(true);
+    setAgent(next);
+    try {
+      const response = await fetch("/api/settings/mcp-agent", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(next),
+      });
+      if (!response.ok) throw new Error(String(response.status));
+      onToast(said);
+    } catch {
+      setAgent(previous);
+      onToast(SAVE_FAILED);
+    } finally {
+      setSavingAgent(false);
+    }
+  };
+
+  const clearActivity = async () => {
+    try {
+      const response = await fetch("/api/settings/mcp-activity", { method: "DELETE" });
+      if (!response.ok) throw new Error(String(response.status));
+      setActivity([]);
+      onToast("Agent activity cleared");
+    } catch {
+      onToast(SAVE_FAILED);
     }
   };
 
@@ -256,6 +375,93 @@ export function ConnectionsSection({
             >
               {revokingGrant === app.grantId ? "Revoking…" : "Revoke"}
             </Button>
+          </div>
+        ))}
+      </SettingsGroup>
+      <SettingsGroup
+        title="What agents may do"
+        description="Narrow a connection without revoking it"
+      >
+        <SettingsRow
+          label="Tell recipients when an agent writes"
+          hint="Adds a line to the outgoing message saying an agent wrote it"
+        >
+          <Segmented
+            label="Tell recipients when an agent writes"
+            value={agent.tellRecipients ? "on" : "off"}
+            disabled={savingAgent}
+            options={[
+              { value: "off", label: "Off" },
+              { value: "on", label: "On" },
+            ]}
+            onChange={(next) =>
+              void saveAgent(
+                { ...agent, tellRecipients: next === "on" },
+                next === "on" ? "Recipients will be told" : "Recipients will not be told",
+              )
+            }
+          />
+        </SettingsRow>
+        <SettingsRow
+          label="Let agents send mail"
+          hint="Off refuses every agent send before the mail service is reached"
+        >
+          <Segmented
+            label="Let agents send mail"
+            value={agent.allowSending ? "on" : "off"}
+            disabled={savingAgent}
+            options={[
+              { value: "off", label: "Off" },
+              { value: "on", label: "On" },
+            ]}
+            onChange={(next) =>
+              void saveAgent(
+                { ...agent, allowSending: next === "on" },
+                next === "on" ? "Agents can send mail" : "Agents can no longer send mail",
+              )
+            }
+          />
+        </SettingsRow>
+      </SettingsGroup>
+      <SettingsGroup
+        title="Agent activity"
+        description="What agents changed through MCP. Reads are not listed"
+        action={
+          <Button
+            variant="quiet"
+            aria-label="Clear agent activity"
+            disabled={activity.length === 0}
+            onClick={() => void clearActivity()}
+          >
+            Clear
+          </Button>
+        }
+      >
+        {/* the ring always holds a row, the same rule the grants keep above */}
+        {activity.length === 0 && (
+          <SettingsRow stack>
+            <Empty icon="history-2-linear" title={NO_ACTIVITY} className="py-2" />
+          </SettingsRow>
+        )}
+        {activity.map((entry) => (
+          <div
+            key={`${entry.at}|${entry.tool}|${entry.outcome}`}
+            data-testid="mcp-activity-row"
+            className="brain-settings-row"
+            data-lead=""
+          >
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-table text-ink-2">
+                {entry.client} · {entry.tool}
+              </p>
+              <p className="truncate text-caption text-ink-3">{activityDetail(entry)}</p>
+            </div>
+            <time
+              dateTime={entry.at}
+              className="text-caption shrink-0 tabular-nums text-ink-3"
+            >
+              {formatAgo(entry.at, { compact: true })}
+            </time>
           </div>
         ))}
       </SettingsGroup>

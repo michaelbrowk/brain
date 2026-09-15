@@ -7,14 +7,23 @@ const mocks = vi.hoisted(() => ({
   getStore: vi.fn(),
   verifyMcpBearerToken: vi.fn(),
   createBrainMailClient: vi.fn(),
+  readTimeZone: vi.fn(),
 }));
 
 vi.mock("@/lib/store", () => ({
   getStore: mocks.getStore,
   isAttachmentValidation: () => false,
-  isNotFound: () => false,
+  // The three task predicates and `isNotFound` read the error's own name, the
+  // way the real ones do, because the task tools branch on all four and a
+  // stand-in that always answered false would turn every refusal the store
+  // decided on into a transport error.
+  isNotFound: (e: unknown) => e instanceof Error && e.name === "NotFoundError",
   isNotionImportConflict: () => false,
   isRevConflict: () => false,
+  isTaskConflict: (e: unknown) =>
+    e instanceof Error && e.name === "TaskConflictError",
+  isTaskValidation: (e: unknown) =>
+    e instanceof Error && e.name === "TaskValidationError",
   redactPage: (value: unknown) => value,
   redactPageMeta: (value: unknown) => value,
   AttachmentValidationError: class AttachmentValidationError extends Error {
@@ -24,8 +33,33 @@ vi.mock("@/lib/store", () => ({
       this.code = code;
     }
   },
+  NotFoundError: class NotFoundError extends Error {
+    constructor(public id: string) {
+      super(`page not found: ${id}`);
+      this.name = "NotFoundError";
+    }
+  },
+  TaskValidationError: class TaskValidationError extends Error {
+    constructor(public reason: string) {
+      super(reason);
+      this.name = "TaskValidationError";
+    }
+  },
+  TaskConflictError: class TaskConflictError extends Error {
+    constructor(
+      public reason: string,
+      public currentWhen: string | undefined,
+    ) {
+      super(reason);
+      this.name = "TaskConflictError";
+    }
+  },
   MAX_ATTACHMENT_BYTES: 10 * 1024 * 1024,
 }));
+// The one owner setting a task tool reads. Mocked rather than written to a
+// state directory so a test says what zone is captured in its own body, and so
+// a machine with a zone already captured cannot change what a test means.
+vi.mock("@/lib/owner-settings", () => ({ readTimeZone: mocks.readTimeZone }));
 vi.mock("@/lib/search", () => ({ searchNotes: vi.fn() }));
 vi.mock("@/lib/emoji-llm", () => ({ smartEmoji: vi.fn() }));
 vi.mock("@/lib/oauth/server", () => ({
@@ -50,6 +84,13 @@ import {
   fakeThread,
 } from "./mail-client-fake";
 import { BrainMailClientError } from "@/lib/mail/brain-mail-client";
+import {
+  NotFoundError,
+  TaskConflictError,
+  TaskValidationError,
+} from "@/lib/store";
+import { hashTaskText, parseTaskLines } from "@/lib/tasks/task-lines";
+import { toolScopeOf } from "./tool-kit";
 import { readMcpActivity } from "@/lib/mcp/activity-log";
 import { mailNotificationId } from "@/lib/notifications/ids";
 import {
@@ -619,6 +660,16 @@ describe("Notion MCP route validation", () => {
   });
 });
 
+/** The six names `WRITE_TOOLS` already carried before any of them existed. */
+const TASK_WRITE_TOOLS = [
+  "create_task",
+  "promote_task_line",
+  "update_task",
+  "complete_task",
+  "reopen_task",
+  "delete_task",
+] as const;
+
 describe("the task read tools", () => {
   const TODAY = "2026-09-13";
   const TASK_ID = "task-alpha";
@@ -635,6 +686,10 @@ describe("the task read tools", () => {
 
   beforeEach(() => {
     mocks.getStore.mockReset();
+    mocks.readTimeZone.mockReset();
+    // Nothing captured, which is what a fresh instance has until a browser
+    // opens Settings, Account.
+    mocks.readTimeZone.mockResolvedValue(null);
     mocks.verifyMcpBearerToken.mockReset();
     mocks.verifyMcpBearerToken.mockResolvedValue({
       token: "test-machine-token",
@@ -649,14 +704,46 @@ describe("the task read tools", () => {
 
   afterEach(() => vi.unstubAllEnvs());
 
-  it("refuses every derived list without the caller's own date", async () => {
+  it("refuses every derived list with no date and no zone to derive one", async () => {
     for (const list of ["today", "upcoming", "someday", "logbook"]) {
       const { payload } = await toolPayload(
         await callTool("list_tasks", { list }, 1),
       );
-      expect(payload.error).toContain("today is required for this list");
+      expect(payload).toEqual({
+        error: "this list needs a day and no time zone is captured yet",
+        reason: "pass today as YYYY-MM-DD, or set the zone in Settings, Account",
+      });
       expect(mocks.getStore).not.toHaveBeenCalled();
     }
+  });
+
+  it("derives the day and the offset from the owner's own zone", async () => {
+    // An agent has no browser and no zone of its own. Brain has one now, so a
+    // caller that leaves `today` out gets the owner's day rather than UTC's,
+    // which is a different day for four hours of every one in Asia/Dubai.
+    mocks.readTimeZone.mockResolvedValue("Asia/Dubai");
+    const listTasks = vi.fn().mockReturnValue([]);
+    mocks.getStore.mockResolvedValue({ listTasks });
+
+    await toolPayload(await callTool("list_tasks", { list: "today" }, 13));
+
+    const [day, filter] = listTasks.mock.calls[0] as [string, unknown];
+    expect(day).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    // Dubai keeps one offset all year, so the derived one is the same number
+    // whatever day this test runs on.
+    expect(filter).toEqual({ list: "today", offsetMinutes: 240 });
+  });
+
+  it("keeps the caller's own date ahead of the zone's", async () => {
+    mocks.readTimeZone.mockResolvedValue("Asia/Dubai");
+    const listTasks = vi.fn().mockReturnValue([]);
+    mocks.getStore.mockResolvedValue({ listTasks });
+
+    await toolPayload(
+      await callTool("list_tasks", { list: "today", today: TODAY }, 14),
+    );
+
+    expect(listTasks.mock.calls[0][0]).toBe(TODAY);
   });
 
   it("refuses the logbook without the caller's own offset", async () => {
@@ -809,33 +896,573 @@ describe("the task read tools", () => {
     expect(bad.payload).toEqual({ error: "bad_id" });
   });
 
-  it("registers no task write tool", async () => {
-    const response = await POST(
-      new Request("https://brain.example.test/api/mcp", {
-        method: "POST",
-        headers: {
-          accept: "application/json, text/event-stream",
-          authorization: "Bearer test-machine-token",
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 9,
-          method: "tools/list",
-          params: {},
-        }),
-      }),
-    );
+  it("registers the task write tools under brain:write", async () => {
+    const response = await POST(toolsListRequest(9));
     const body = await response.text();
 
     expect(body).toContain("list_tasks");
     expect(body).toContain("get_task");
-    // Deferred on purpose. An agent that wants a task writes a checkbox line
-    // into a page and the person promotes it.
-    expect(body).not.toContain("create_task");
-    expect(body).not.toContain("update_task");
-    expect(body).not.toContain("complete_task");
+    // Reversed in 0.11.0. An agent that wants a task makes one. The promote
+    // gesture is still how a person turns a line into a record, and
+    // promote_task_line is that same gesture, with the same anchor.
+    for (const name of TASK_WRITE_TOOLS) {
+      expect(body).toContain(name);
+      expect(toolScopeOf(name)).toBe("brain:write");
+    }
   });
+});
+
+describe("the task write tools", () => {
+  const TODAY = "2026-09-14";
+  const TASK_ID = "task-alpha";
+  const PAGE_ID = "page-one";
+  // One fixed directory, the way `lib/mcp/activity-log.test.ts` takes one, so
+  // the line a write leaves behind is read back rather than mocked away.
+  const stateRoot = path.join(os.tmpdir(), "brain-mcp-task-tools-test");
+
+  const view = (overrides: Record<string, unknown> = {}) => ({
+    id: TASK_ID,
+    title: "Water the plants",
+    done: false,
+    created: "2026-09-14T09:00:00.000Z",
+    updated: "2026-09-14T09:00:00.000Z",
+    ...overrides,
+  });
+
+  const argsFor = (name: string): Record<string, unknown> => {
+    if (name === "create_task") return { title: "Water the plants" };
+    if (name === "promote_task_line") return { page: PAGE_ID, line: 0 };
+    if (name === "update_task") return { id: TASK_ID, title: "Water them" };
+    if (name === "delete_task") return { id: TASK_ID };
+    return { id: TASK_ID, today: TODAY };
+  };
+
+  beforeEach(async () => {
+    await fs.rm(stateRoot, { recursive: true, force: true });
+    mocks.getStore.mockReset();
+    mocks.readTimeZone.mockReset();
+    mocks.readTimeZone.mockResolvedValue(null);
+    mocks.verifyMcpBearerToken.mockReset();
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "test-machine-token",
+      clientId: "legacy-client",
+      scopes: ["brain:read", "brain:write"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+    vi.stubEnv("MCP_TOKEN", "test-machine-token");
+    vi.stubEnv("AUTH_SECRET", "test-auth-secret-with-at-least-32-bytes");
+    vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "https://brain.example.test");
+    vi.stubEnv("BRAIN_MCP_STATE_DIR", stateRoot);
+    vi.stubEnv("BRAIN_OAUTH_STATE_DIR", path.join(stateRoot, "oauth"));
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(stateRoot, { recursive: true, force: true });
+  });
+
+  it("creates an unlinked task and never a linked one", async () => {
+    const createTask = vi.fn().mockResolvedValue(view());
+    mocks.getStore.mockResolvedValue({ createTask });
+
+    await toolPayload(
+      await callTool(
+        "create_task",
+        { title: "Water the plants", when: TODAY, category: "home" },
+        700,
+      ),
+    );
+
+    expect(createTask).toHaveBeenCalledWith({
+      title: "Water the plants",
+      when: TODAY,
+      category: "home",
+      src: "claude",
+    });
+    // A linked task is made by promote_task_line and by nothing else.
+    expect(createTask.mock.calls[0][0]).not.toHaveProperty("page");
+    expect(createTask.mock.calls[0][0]).not.toHaveProperty("anchor");
+  });
+
+  it("passes time and evening through to the store", async () => {
+    const createTask = vi.fn().mockResolvedValue(view());
+    mocks.getStore.mockResolvedValue({ createTask });
+
+    await toolPayload(
+      await callTool(
+        "create_task",
+        { title: "Call the bank", when: TODAY, time: "14:30", evening: true },
+        701,
+      ),
+    );
+
+    expect(createTask).toHaveBeenCalledWith({
+      title: "Call the bank",
+      when: TODAY,
+      time: "14:30",
+      evening: true,
+      src: "claude",
+    });
+  });
+
+  it("takes a clock as HH:MM and never as the YAML integer", async () => {
+    // `time: 905` is read back as 15:05 by the record's own preprocessor, and
+    // that ambiguity is there to rescue a hand-edited file, not to be a value
+    // an agent may send.
+    const createTask = vi.fn();
+    mocks.getStore.mockResolvedValue({ createTask });
+
+    const response = await callTool(
+      "create_task",
+      { title: "Call the bank", when: TODAY, time: 905 },
+      702,
+    );
+
+    expect(await response.text()).toContain("Invalid arguments");
+    expect(createTask).not.toHaveBeenCalled();
+  });
+
+  it("hands back the store's own words when a clock has no day", async () => {
+    const createTask = vi
+      .fn()
+      .mockRejectedValue(
+        new TaskValidationError("time needs a day to be a time on"),
+      );
+    mocks.getStore.mockResolvedValue({ createTask });
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "create_task",
+        { title: "Call the bank", when: "someday", time: "14:30" },
+        703,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "that task change was refused",
+      reason: "time needs a day to be a time on",
+    });
+    expect(isError).toBe(true);
+  });
+
+  it("keeps remindedAt and expectedWhen off update_task", async () => {
+    // `remindedAt` is written by `markTaskReminded` alone, because a patch
+    // clears it whenever the day or the clock moves. The way to stop a
+    // reminder is to clear `time`. `expectedWhen` is a completion's check and
+    // update_task carries no completion, so it would be inert here.
+    const updateTask = vi.fn();
+    mocks.getStore.mockResolvedValue({ updateTask });
+
+    for (const [index, field] of [
+      { remindedAt: "2026-09-14T09:00:00.000Z" },
+      { expectedWhen: TODAY },
+    ].entries()) {
+      const response = await callTool(
+        "update_task",
+        { id: TASK_ID, ...field },
+        704 + index,
+      );
+      expect(await response.text()).toContain("Invalid arguments");
+    }
+    expect(updateTask).not.toHaveBeenCalled();
+  });
+
+  it("builds the editor's anchor for a line number", async () => {
+    const markdown = "# Notes\n\n- [ ] water the plants\n- [x] call the bank\n";
+    const createTask = vi.fn().mockResolvedValue(view());
+    mocks.getStore.mockResolvedValue({
+      readPage: vi
+        .fn()
+        .mockResolvedValue({ meta: { id: PAGE_ID }, markdown, rev: "rev-1" }),
+      pageTasks: vi.fn().mockReturnValue([]),
+      createTask,
+    });
+
+    await toolPayload(
+      await callTool("promote_task_line", { page: PAGE_ID, line: 2 }, 706),
+    );
+
+    // The exact object `components/editor/task-checkbox.ts:1217-1234` builds.
+    const lines = parseTaskLines(markdown);
+    expect(createTask).toHaveBeenCalledWith({
+      title: lines[0].normalized,
+      page: PAGE_ID,
+      anchor: {
+        text: lines[0].normalized,
+        hash: lines[0].hash,
+        ordinal: lines[0].ordinal,
+        line: lines[0].index,
+      },
+      src: "claude",
+    });
+  });
+
+  it("inherits the note's category, and yields to one the caller names", async () => {
+    const markdown = "- [ ] water the plants\n";
+    const createTask = vi.fn().mockResolvedValue(view());
+    mocks.getStore.mockResolvedValue({
+      readPage: vi.fn().mockResolvedValue({
+        meta: { id: PAGE_ID, category: "home" },
+        markdown,
+        rev: "rev-1",
+      }),
+      pageTasks: vi.fn().mockReturnValue([]),
+      createTask,
+    });
+
+    await toolPayload(
+      await callTool("promote_task_line", { page: PAGE_ID, line: 0 }, 707),
+    );
+    expect(createTask.mock.calls[0][0].category).toBe("home");
+
+    await toolPayload(
+      await callTool(
+        "promote_task_line",
+        { page: PAGE_ID, line: 0, category: "errands", when: TODAY },
+        708,
+      ),
+    );
+    expect(createTask.mock.calls[1][0]).toMatchObject({
+      category: "errands",
+      when: TODAY,
+    });
+  });
+
+  it("finds the same line by its text, whitespace collapsed", async () => {
+    const markdown = "- [ ] water  the   plants\n";
+    const createTask = vi.fn().mockResolvedValue(view());
+    mocks.getStore.mockResolvedValue({
+      readPage: vi
+        .fn()
+        .mockResolvedValue({ meta: { id: PAGE_ID }, markdown, rev: "rev-1" }),
+      pageTasks: vi.fn().mockReturnValue([]),
+      createTask,
+    });
+
+    await toolPayload(
+      await callTool(
+        "promote_task_line",
+        { page: PAGE_ID, line: "water the plants" },
+        709,
+      ),
+    );
+
+    const lines = parseTaskLines(markdown);
+    expect(createTask.mock.calls[0][0].anchor).toEqual({
+      text: lines[0].normalized,
+      hash: lines[0].hash,
+      ordinal: 0,
+      line: 0,
+    });
+  });
+
+  it("refuses a line that is not a checkbox", async () => {
+    const createTask = vi.fn();
+    mocks.getStore.mockResolvedValue({
+      readPage: vi.fn().mockResolvedValue({
+        meta: { id: PAGE_ID },
+        markdown: "only a paragraph\n",
+        rev: "rev-1",
+      }),
+      pageTasks: vi.fn().mockReturnValue([]),
+      createTask,
+    });
+
+    const { payload } = await toolPayload(
+      await callTool("promote_task_line", { page: PAGE_ID, line: 0 }, 710),
+    );
+
+    expect(payload).toEqual({
+      error: "that line is not a checkbox",
+      reason: "line 0",
+    });
+    expect(createTask).not.toHaveBeenCalled();
+  });
+
+  it("refuses a line that already has a record", async () => {
+    const createTask = vi.fn();
+    mocks.getStore.mockResolvedValue({
+      readPage: vi.fn().mockResolvedValue({
+        meta: { id: PAGE_ID },
+        markdown: "- [ ] water the plants\n",
+        rev: "rev-1",
+      }),
+      pageTasks: vi.fn().mockReturnValue([
+        view({
+          id: "task-beta",
+          page: PAGE_ID,
+          anchor: {
+            text: "water the plants",
+            hash: hashTaskText("water the plants"),
+            ordinal: 0,
+            line: 0,
+          },
+        }),
+      ]),
+      createTask,
+    });
+
+    const { payload } = await toolPayload(
+      await callTool("promote_task_line", { page: PAGE_ID, line: 0 }, 711),
+    );
+
+    expect(payload).toEqual({
+      error: "that line already has a task",
+      reason: "task-beta",
+    });
+    expect(createTask).not.toHaveBeenCalled();
+  });
+
+  it("refuses a text that names two lines rather than guessing", async () => {
+    const createTask = vi.fn();
+    mocks.getStore.mockResolvedValue({
+      readPage: vi.fn().mockResolvedValue({
+        meta: { id: PAGE_ID },
+        markdown: "- [ ] water the plants\n- [ ] water the plants\n",
+        rev: "rev-1",
+      }),
+      pageTasks: vi.fn().mockReturnValue([]),
+      createTask,
+    });
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "promote_task_line",
+        { page: PAGE_ID, line: "water the plants" },
+        712,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "that line appears more than once, pass its line number",
+      reason: "lines 0, 1",
+    });
+    expect(createTask).not.toHaveBeenCalled();
+  });
+
+  it("refuses an empty line", async () => {
+    const createTask = vi.fn();
+    mocks.getStore.mockResolvedValue({
+      readPage: vi.fn().mockResolvedValue({
+        meta: { id: PAGE_ID },
+        markdown: "- [ ] <br />\n",
+        rev: "rev-1",
+      }),
+      pageTasks: vi.fn().mockReturnValue([]),
+      createTask,
+    });
+
+    const { payload } = await toolPayload(
+      await callTool("promote_task_line", { page: PAGE_ID, line: 0 }, 713),
+    );
+
+    expect(payload).toEqual({
+      error: "that line is empty",
+      reason: "write the line first",
+    });
+    expect(createTask).not.toHaveBeenCalled();
+  });
+
+  it("maps the store's three error classes", async () => {
+    mocks.getStore.mockResolvedValue({
+      updateTask: vi
+        .fn()
+        .mockRejectedValue(new TaskValidationError("a repeat cannot be linked")),
+    });
+    const refused = await toolPayload(
+      await callTool(
+        "update_task",
+        { id: TASK_ID, repeat: { freq: "daily" } },
+        714,
+      ),
+    );
+    expect(refused.payload).toEqual({
+      error: "that task change was refused",
+      reason: "a repeat cannot be linked",
+    });
+    expect(refused.isError).toBe(true);
+
+    mocks.getStore.mockResolvedValue({
+      updateTask: vi
+        .fn()
+        .mockRejectedValue(
+          new TaskConflictError("the task has moved", "2026-09-20"),
+        ),
+    });
+    const moved = await toolPayload(
+      await callTool(
+        "complete_task",
+        { id: TASK_ID, today: TODAY, expectedWhen: TODAY },
+        715,
+      ),
+    );
+    expect(moved.payload).toEqual({
+      error: "conflict",
+      reason: "the task has moved",
+      currentWhen: "2026-09-20",
+    });
+    expect(moved.isError).toBe(true);
+
+    mocks.getStore.mockResolvedValue({
+      deleteTask: vi.fn().mockRejectedValue(new NotFoundError("task-missing")),
+    });
+    const missing = await toolPayload(
+      await callTool("delete_task", { id: "task-missing" }, 716),
+    );
+    expect(missing.payload).toEqual({ error: "not_found" });
+    expect(missing.isError).toBe(true);
+  });
+
+  it("completes with the caller's own day and refuses without one", async () => {
+    const updateTask = vi.fn().mockResolvedValue(view({ done: true }));
+    mocks.getStore.mockResolvedValue({ updateTask });
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "complete_task",
+        { id: TASK_ID, today: TODAY, offsetMinutes: 240 },
+        717,
+      ),
+    );
+    expect(updateTask).toHaveBeenCalledWith(TASK_ID, {
+      done: true,
+      today: TODAY,
+      src: "claude",
+    });
+    // A COMPLETION STAYS WHERE IT WAS until the day changes, so the answer
+    // says which list the record is in rather than leaving an agent to assume
+    // it left one.
+    expect(payload.list).toBe("logbook");
+
+    const response = await callTool("complete_task", { id: TASK_ID }, 718);
+    expect(await response.text()).toContain("Invalid arguments");
+  });
+
+  it("reopens with the caller's own day", async () => {
+    const updateTask = vi.fn().mockResolvedValue(view({ when: TODAY }));
+    mocks.getStore.mockResolvedValue({ updateTask });
+
+    const { payload } = await toolPayload(
+      await callTool("reopen_task", { id: TASK_ID, today: TODAY }, 719),
+    );
+
+    expect(updateTask).toHaveBeenCalledWith(TASK_ID, {
+      done: false,
+      today: TODAY,
+      src: "claude",
+    });
+    expect(payload.list).toBe("today");
+  });
+
+  it("deletes one task and answers ok", async () => {
+    const deleteTask = vi.fn().mockResolvedValue(undefined);
+    mocks.getStore.mockResolvedValue({ deleteTask });
+
+    const { payload } = await toolPayload(
+      await callTool("delete_task", { id: TASK_ID }, 720),
+    );
+
+    expect(payload).toEqual({ ok: true });
+    expect(deleteTask).toHaveBeenCalledWith(TASK_ID, "claude");
+  });
+
+  it("answers every record on one page and takes none of the four beside it", async () => {
+    const pageTasks = vi.fn().mockReturnValue([view({ page: PAGE_ID })]);
+    const listTasks = vi.fn();
+    mocks.getStore.mockResolvedValue({ pageTasks, listTasks });
+
+    const { payload } = await toolPayload(
+      await callTool("list_tasks", { page: PAGE_ID }, 721),
+    );
+    expect(payload.tasks).toHaveLength(1);
+    expect(pageTasks).toHaveBeenCalledWith(PAGE_ID);
+    expect(listTasks).not.toHaveBeenCalled();
+
+    // The same four the HTTP route refuses beside `?page=`, with its own
+    // reasons: a page lookup has to be complete, because the editor draws a
+    // word on every task line whatever state its record is in.
+    const beside: Array<[Record<string, unknown>, string]> = [
+      [{ list: "today" }, "unexpected_list"],
+      [{ today: TODAY }, "unexpected_today"],
+      [{ offsetMinutes: 240 }, "unexpected_offset"],
+      [{ category: "home" }, "unexpected_category"],
+    ];
+    for (const [index, [extra, reason]] of beside.entries()) {
+      const both = await toolPayload(
+        await callTool("list_tasks", { page: PAGE_ID, ...extra }, 722 + index),
+      );
+      expect(both.payload.reason).toBe(reason);
+      expect(both.isError).toBe(true);
+    }
+  });
+
+  it("refuses a bad id before the store", async () => {
+    mocks.getStore.mockReset();
+
+    const { payload } = await toolPayload(
+      await callTool("delete_task", { id: "../escape" }, 726),
+    );
+
+    expect(payload).toEqual({ error: "bad_id" });
+    expect(mocks.getStore).not.toHaveBeenCalled();
+  });
+
+  it("writes one activity line per write, carrying ids and no title", async () => {
+    const createTask = vi.fn().mockResolvedValue(view());
+    mocks.getStore.mockResolvedValue({
+      readPage: vi.fn().mockResolvedValue({
+        meta: { id: PAGE_ID },
+        markdown: "- [ ] water the plants\n",
+        rev: "rev-1",
+      }),
+      pageTasks: vi.fn().mockReturnValue([]),
+      createTask,
+      deleteTask: vi.fn().mockRejectedValue(new NotFoundError("task-missing")),
+    });
+
+    await toolPayload(
+      await callTool("promote_task_line", { page: PAGE_ID, line: 0 }, 727),
+    );
+    await toolPayload(await callTool("delete_task", { id: "task-missing" }, 728));
+
+    const entries = await readMcpActivity(10);
+    expect(entries).toHaveLength(2);
+    // Newest first.
+    expect(entries[0]).toMatchObject({
+      tool: "delete_task",
+      task: "task-missing",
+      outcome: "not_found",
+    });
+    expect(entries[1]).toMatchObject({
+      tool: "promote_task_line",
+      task: TASK_ID,
+      page: PAGE_ID,
+      outcome: "ok",
+    });
+    expect(JSON.stringify(entries)).not.toContain("Water the plants");
+    expect(JSON.stringify(entries)).not.toContain("water the plants");
+  });
+
+  it.each(TASK_WRITE_TOOLS)(
+    "refuses %s on a brain:read grant before the store",
+    async (name) => {
+      mocks.verifyMcpBearerToken.mockResolvedValue({
+        token: "test-machine-token",
+        clientId: "legacy-client",
+        scopes: ["brain:read"],
+        resource: new URL("https://brain.example.test/api/mcp"),
+      });
+      mocks.getStore.mockReset();
+
+      const response = await callTool(name, argsFor(name), 729);
+
+      expect(response.status).toBe(403);
+      expect(response.headers.get("WWW-Authenticate")).toContain(
+        'scope="brain:write"',
+      );
+      expect(mocks.getStore).not.toHaveBeenCalled();
+    },
+  );
 });
 
 /** Two accounts, one page each. Account A has a second page and account B does

@@ -1171,6 +1171,35 @@ describe("the task write tools", () => {
     expect(updateTask).not.toHaveBeenCalled();
   });
 
+  it("clears a field with null, leaves an unnamed one alone, and refuses a false evening", async () => {
+    const updateTask = vi.fn().mockResolvedValue(view());
+    mocks.getStore.mockResolvedValue({ updateTask });
+
+    await toolPayload(
+      await callTool(
+        "update_task",
+        { id: TASK_ID, when: TODAY, time: null, evening: null },
+        705,
+      ),
+    );
+    expect(updateTask).toHaveBeenCalledWith(TASK_ID, {
+      when: TODAY,
+      time: null,
+      evening: null,
+      src: "claude",
+    });
+
+    // `false` is a second spelling of the absence, and the record holds
+    // `true` or nothing.
+    const response = await callTool(
+      "update_task",
+      { id: TASK_ID, when: TODAY, evening: false },
+      706,
+    );
+    expect(await response.text()).toContain("Invalid arguments");
+    expect(updateTask).toHaveBeenCalledTimes(1);
+  });
+
   it("builds the editor's anchor for a line number", async () => {
     const markdown = "# Notes\n\n- [ ] water the plants\n- [x] call the bank\n";
     const createTask = vi.fn().mockResolvedValue(view());

@@ -1,10 +1,11 @@
 import { serializerCtx } from "@milkdown/kit/core";
 import { listItemSchema } from "@milkdown/kit/preset/commonmark";
 import { keymap } from "@milkdown/kit/prose/keymap";
-import type { Node as ProseNode } from "@milkdown/kit/prose/model";
-import { splitListItem } from "@milkdown/kit/prose/schema-list";
-import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
+import type { Node as ProseNode, NodeType, ResolvedPos } from "@milkdown/kit/prose/model";
+import { liftListItem, splitListItem, wrapRangeInList } from "@milkdown/kit/prose/schema-list";
+import { EditorState, Plugin, PluginKey, TextSelection } from "@milkdown/kit/prose/state";
 import type { Command, Transaction } from "@milkdown/kit/prose/state";
+import { canSplit } from "@milkdown/kit/prose/transform";
 import { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
 import type {
   EditorView,
@@ -12,7 +13,7 @@ import type {
   NodeViewConstructor,
   ViewMutationRecord,
 } from "@milkdown/kit/prose/view";
-import { $prose, $view } from "@milkdown/kit/utils";
+import { $command, $prose, $view } from "@milkdown/kit/utils";
 
 import { localDay, onDayChange } from "@/components/tasks-client";
 import {
@@ -25,7 +26,7 @@ import { dayLabel } from "@/components/tasks-lists";
 import { renderWhenPicker, type WhenValue } from "@/components/tasks-when-picker";
 import { SOLAR } from "@/components/ui/solar-icons.generated";
 import { apiFetch } from "@/lib/client";
-import { TASKS_CHANGED_EVENT } from "@/lib/editor-events";
+import { notifyEditorDocChanged, TASKS_CHANGED_EVENT } from "@/lib/editor-events";
 import { classifyInternalPageLink } from "@/lib/internal-page-link";
 import { DUR } from "@/lib/motion";
 import { isLinkedTask, type TaskView } from "@/lib/tasks/model";
@@ -65,7 +66,7 @@ export const taskCheckboxView = $view(listItemSchema.node, () =>
     // the preset's markup here to drift. ProseMirror reads the absent spec
     // and takes the default path; the constructor's type says it always
     // returns a view, which is the one place this has to say otherwise.
-    if (initial.attrs.checked == null) return undefined as unknown as NodeView;
+    if (!isTaskItem(initial)) return undefined as unknown as NodeView;
 
     const dom = document.createElement("li");
     dom.className = "brain-task-item";
@@ -78,7 +79,7 @@ export const taskCheckboxView = $view(listItemSchema.node, () =>
       const pos = getPos();
       if (pos == null) return;
       const node = view.state.doc.nodeAt(pos);
-      if (!node || node.type.name !== "list_item" || node.attrs.checked == null) return;
+      if (!node || !isTaskItem(node)) return;
       view.dispatch(
         view.state.tr.setNodeMarkup(pos, undefined, {
           ...node.attrs,
@@ -117,7 +118,7 @@ export const taskCheckboxView = $view(listItemSchema.node, () =>
         // A bullet that becomes a task, or a task that becomes a bullet, is a
         // different control. Refusing the update has ProseMirror build the
         // right one from scratch.
-        if (node.type.name !== "list_item" || node.attrs.checked == null) return false;
+        if (!isTaskItem(node)) return false;
         render(node);
         return true;
       },
@@ -320,7 +321,7 @@ function taskItemsOf(doc: ProseNode): TaskItem[] {
     // one. Returning false keeps `descendants` from walking the inline
     // content, which is most of a note by count, so this walk is block level.
     if (node.isTextblock) return false;
-    if (node.type.name !== "list_item" || node.attrs.checked == null) return;
+    if (!isTaskItem(node)) return;
     const line = node.firstChild;
     if (!line || !line.isTextblock) return;
     found.push({
@@ -1305,4 +1306,386 @@ async function pageCategory(page: string): Promise<string | null> {
   }
 }
 
-export const taskCheckbox = [taskCheckboxView, taskSplitKeymap, taskPromote];
+/* ── The Task command ───────────────────────────────────────────────────── */
+
+/** A task item, and not a plain bullet: the gfm preset leaves `checked` null
+ *  on a bullet and sets a boolean on a task. THE one reading of that
+ *  question, and every site in this file that asks it comes here: the
+ *  NodeView, the promote walk that counts the items, and the targets a press
+ *  collects. No two of them can answer differently about the same item.
+ *  Whether a task is DONE is a different question, and reads `=== true`. */
+function isTaskItem(node: ProseNode): boolean {
+  return node.type.name === "list_item" && node.attrs.checked != null;
+}
+
+/** Whether a resolved position sits inside a blockquote. Walks the ancestor
+ *  chain the way `isInTable` walks it for table context. */
+export function isInQuote($pos: ResolvedPos): boolean {
+  for (let depth = $pos.depth; depth > 0; depth -= 1) {
+    if ($pos.node(depth).type.name === "blockquote") return true;
+  }
+  return false;
+}
+
+/** A TASK LINE CANNOT LIVE INSIDE A QUOTE.
+ *
+ *  `> * [ ] x` is a checkbox to the editor and prose to `TASK_LINE_RE`, whose
+ *  `^\s*[-*+]` has no room for the `>`. One quoted task line on a page is
+ *  enough for `promoteLine`'s `lines.length !== items.length` guard to fire,
+ *  and every + Task on that page then answers "This note could not be read".
+ *
+ *  So both controls refuse it, the way they already refuse a table: the
+ *  toolbar's button is disabled and says why, and the slash menu has no Task
+ *  row inside a quote. The command refuses it again for anything that reaches
+ *  it another way. */
+export function selectionIsInQuote(state: Pick<EditorState, "selection">): boolean {
+  return isInQuote(state.selection.$from) || isInQuote(state.selection.$to);
+}
+
+/** The depth of the nearest `list_item` above a position, or -1 for a block
+ *  standing in no list at all. */
+function listItemDepth($pos: ResolvedPos): number {
+  for (let depth = $pos.depth; depth > 0; depth -= 1) {
+    if ($pos.node(depth).type.name === "list_item") return depth;
+  }
+  return -1;
+}
+
+/** The range of the slash trigger a menu pick leaves behind, handed to the
+ *  command rather than deleted before it.
+ *
+ *  The deletion and the conversion then land in ONE transaction: the typed
+ *  `/task` and the line it became come back together on a single undo, and
+ *  the words are never gone while the conversion is still deciding. */
+export interface TaskTrigger {
+  from: number;
+  to: number;
+}
+
+/** One line a press acts on.
+ *
+ *  A list item IS the line, and the press changes that item: the siblings
+ *  above and below it are no part of the press. A textblock standing in no
+ *  item is a line with no item yet, and the press gives it one.
+ *
+ *  A joined block range is what used to reach past the selection. It runs
+ *  from the first block of the range to the last, so a press on the second
+ *  bullet of a list took the first one with it and nested the second. */
+type TaskTarget =
+  | { kind: "item"; pos: number; task: boolean; ordered: boolean }
+  | { kind: "block"; pos: number; end: number };
+
+/** Nothing sane nests a list this deep. The bound is here so a schema that
+ *  surprises the lift ends the loop rather than the session. */
+const MAX_LIFTS = 12;
+
+/** What a list item looks like once it stands in a bullet list. An ordered
+ *  item carries its number in `label` and `ordered` in `listType`, and both
+ *  have to follow the item into its new list, or it draws a `1.` beside its
+ *  own checkbox. */
+const BULLET_ITEM_ATTRS = { label: "•", listType: "bullet" };
+
+/** The lines the selection touches, in document order, and nothing else. */
+function taskTargets(doc: ProseNode, from: number, to: number): TaskTarget[] {
+  const targets: TaskTarget[] = [];
+  const seen = new Set<number>();
+  doc.nodesBetween(from, to, (node, pos) => {
+    if (!node.isTextblock) return true;
+    const $block = doc.resolve(pos);
+    if ($block.parent.type.name !== "list_item") {
+      // A heading, a code block, a math block: a line the press leaves where
+      // it is. A heading pressed on its own is already left alone, because a
+      // `list_item` wants a paragraph first and the wrap refuses, so one
+      // caught in a longer selection is left alone too rather than swallowed
+      // as the second block of the task above it.
+      if (node.type.name !== "paragraph") return false;
+      targets.push({ kind: "block", pos, end: pos + node.nodeSize });
+      return false;
+    }
+    // An item with two paragraphs in it is still one line, and one press.
+    const itemPos = $block.before($block.depth);
+    if (seen.has(itemPos)) return false;
+    seen.add(itemPos);
+    targets.push({
+      kind: "item",
+      pos: itemPos,
+      task: isTaskItem($block.parent),
+      ordered: $block.node($block.depth - 1).type.name === "ordered_list",
+    });
+    return false;
+  });
+  return targets;
+}
+
+/** Whether every line the selection touches is already a task.
+ *
+ *  What the toolbar's `aria-pressed` says AND what decides which way a press
+ *  goes, read off the same lines by the same walk, so the button and the
+ *  action cannot disagree about a selection that spans a task and a
+ *  paragraph. */
+export function selectionIsTask(state: Pick<EditorState, "doc" | "selection">): boolean {
+  const targets = taskTargets(state.doc, state.selection.from, state.selection.to);
+  return targets.length > 0 && targets.every((t) => t.kind === "item" && t.task);
+}
+
+/** A bullet item becomes a task where it stands: one attribute on the item
+ *  that is already there. No wrap, so it cannot nest, and no range, so the
+ *  sibling above it is no part of the press.
+ *
+ *  `rebullet` is for an item fresh out of an ordered list and nothing
+ *  else: the attributes an item already sitting in a bullet list carries are
+ *  its own, and a press has no business rewriting them. */
+function markItemAsTask(tr: Transaction, pos: number, rebullet = false) {
+  const node = tr.doc.nodeAt(pos);
+  if (!node || node.type.name !== "list_item") return;
+  tr.setNodeMarkup(pos, undefined, {
+    ...node.attrs,
+    ...(rebullet ? BULLET_ITEM_ATTRS : {}),
+    checked: false,
+  });
+}
+
+/** `checked: false` on the items a wrap created, and on nothing else. */
+function markNewItemsAsTask(tr: Transaction, from: number, to: number) {
+  const positions: number[] = [];
+  tr.doc.nodesBetween(from, to, (node, pos) => {
+    if (node.type.name === "list_item" && !isTaskItem(node)) positions.push(pos);
+  });
+  for (const pos of positions) markItemAsTask(tr, pos);
+}
+
+/** A run of adjacent blocks becomes one list of task items. Adjacent, so one
+ *  wrap covers the run rather than leaving a list per line, and bounded by
+ *  the run, so a list standing beside it keeps its own items. */
+function wrapBlocksAsTasks(
+  tr: Transaction,
+  from: number,
+  to: number,
+  bulletListType: NodeType,
+) {
+  const range = tr.doc.resolve(from + 1).blockRange(tr.doc.resolve(to - 1));
+  if (!range) return;
+  const base = tr.steps.length;
+  if (!wrapRangeInList(tr, range, bulletListType)) return;
+  const moved = tr.mapping.slice(base);
+  markNewItemsAsTask(tr, moved.map(range.start, -1), moved.map(range.end, 1));
+}
+
+/** An ordered item becomes a bullet task item at the same depth.
+ *
+ *  The list is split around the item the way a lift splits one, and the piece
+ *  left holding the item becomes a bullet list. `1. [ ] text` is not a task
+ *  line to `TASK_LINE_RE`, so writing one drew a checkbox that
+ *  `parseTaskLines` could not see: the counts disagreed and every + Task on
+ *  the page answered "This note could not be read". */
+function convertOrderedItem(
+  tr: Transaction,
+  pos: number,
+  bulletListType: NodeType,
+): number | null {
+  const item = tr.doc.nodeAt(pos);
+  if (!item) return null;
+  const $item = tr.doc.resolve(pos);
+  const list = $item.parent;
+  const index = $item.index();
+  const base = tr.steps.length;
+  // The later split first, so it does not move the earlier one.
+  const end = pos + item.nodeSize;
+  const tailSplit = index < list.childCount - 1 && canSplit(tr.doc, end, 1);
+  if (tailSplit) tr.split(end, 1);
+  if (index > 0 && canSplit(tr.doc, pos, 1)) tr.split(pos, 1);
+  const itemPos = tr.mapping.slice(base).map(pos);
+  const $now = tr.doc.resolve(itemPos);
+  if ($now.parent.type.name !== "ordered_list") return itemPos;
+  if (tailSplit) keepTailCounting(tr, $now, list.attrs.order, index);
+  tr.setNodeMarkup($now.before($now.depth), bulletListType, { spread: list.attrs.spread });
+  return itemPos;
+}
+
+/** The piece of an ordered list below the press goes on counting.
+ *
+ *  `tr.split` copies the list's own attributes, `order` among them, so the
+ *  tail restarted at the number the head began with: `3. / 4. / 5.` with the
+ *  middle line pressed read `3.`, the task, `3.`. The line that left is not a
+ *  numbered line any more, so the count carries on over the lines that are:
+ *  `3.`, the task, `4.`. The preset's own `syncListOrderPlugin` reads `order`
+ *  back off the list and relabels the items under it. */
+function keepTailCounting(
+  tr: Transaction,
+  $item: ResolvedPos,
+  order: unknown,
+  index: number,
+) {
+  const tailPos = $item.after($item.depth);
+  const tail = tr.doc.nodeAt(tailPos);
+  if (!tail || tail.type.name !== "ordered_list") return;
+  tr.setNodeMarkup(tailPos, undefined, {
+    ...tail.attrs,
+    order: (typeof order === "number" ? order : 1) + index,
+  });
+}
+
+/** The siblings BELOW the pressed item stay in the list they were in.
+ *
+ *  `liftListItem` hands the items following the one it lifts to that item as
+ *  children, which is right for the one lift it performs. The next lift then
+ *  carried them out of the parent with it, so a press on one nested task took
+ *  the two below it up a level with it, and neither was ever selected.
+ *
+ *  Moving them above the pressed item first leaves the lift nothing borrowed
+ *  to carry. Only a nested list borrows: a list standing in no item splits
+ *  around the lifted line instead, and its siblings keep their depth and
+ *  their order both. */
+function hoistFollowingSiblings(tr: Transaction, $inside: ResolvedPos): void {
+  const depth = listItemDepth($inside);
+  if (depth < 2 || $inside.node(depth - 2).type.name !== "list_item") return;
+  const itemEnd = $inside.after(depth);
+  const listEnd = $inside.end(depth - 1);
+  if (itemEnd >= listEnd) return;
+  const tail = tr.doc.slice(itemEnd, listEnd).content;
+  tr.delete(itemEnd, listEnd);
+  tr.insert($inside.before(depth), tail);
+}
+
+/** A task item becomes a paragraph, however deep it sat, on ONE press.
+ *
+ *  A single lift only outdents a nested item, which left the line a task one
+ *  level out: pressed, pressed again, still a checkbox. The item's own
+ *  children come out with it and stand as a list under the paragraph. */
+function liftItemToParagraph(tr: Transaction, pos: number, listItemType: NodeType) {
+  let blockPos = pos + 1;
+  for (let lift = 0; lift < MAX_LIFTS; lift += 1) {
+    if (blockPos + 1 > tr.doc.content.size) return;
+    let $inside = tr.doc.resolve(blockPos + 1);
+    if (listItemDepth($inside) < 0) return;
+    const hoisted = tr.steps.length;
+    hoistFollowingSiblings(tr, $inside);
+    if (tr.steps.length !== hoisted) {
+      blockPos = tr.mapping.slice(hoisted).map(blockPos);
+      $inside = tr.doc.resolve(blockPos + 1);
+    }
+    const base = tr.steps.length;
+    // A bare state over the transaction's own document: `liftListItem` reads
+    // a selection and writes steps, and the steps it writes are against this
+    // document, so they belong in this transaction. One press, one undo.
+    const bare = EditorState.create({
+      doc: tr.doc,
+      selection: TextSelection.near($inside),
+    });
+    liftListItem(listItemType)(bare, (sub) => {
+      for (const step of sub.steps) tr.step(step);
+    });
+    if (tr.steps.length === base) return;
+    blockPos = tr.mapping.slice(base).map(blockPos);
+  }
+}
+
+/** The press, both routes.
+ *
+ *  The rule the whole of it serves: the command acts on the blocks the
+ *  selection touches, in place, and nowhere else. A paragraph gains a task
+ *  item, a bullet becomes one where it stands, an ordered item moves to a
+ *  bullet list at its own depth, and a task goes back to a paragraph.
+ *
+ *  `mode` decides only what a line that is ALREADY a task does: the slash
+ *  menu's Task leaves it alone, the toolbar's Task takes it back. */
+function taskCommand(mode: "ensure" | "toggle", trigger: TaskTrigger | null): Command {
+  return (state, dispatch) => {
+    const bulletListType = state.schema.nodes.bullet_list;
+    const listItemType = state.schema.nodes.list_item;
+    if (!bulletListType || !listItemType) return false;
+
+    // Refused whole, and before the trigger is touched: the `/task` the
+    // reader typed stays on the line rather than being deleted for a
+    // conversion that cannot happen.
+    if (selectionIsInQuote(state)) return false;
+
+    const tr = state.tr;
+    if (trigger !== null && trigger.to > trigger.from && trigger.to <= tr.doc.content.size) {
+      tr.delete(trigger.from, trigger.to);
+    }
+    const targets = taskTargets(tr.doc, tr.selection.from, tr.selection.to);
+    if (targets.length === 0) return false;
+
+    // One answer for the whole selection. Every line a task means the press
+    // takes them all back to paragraphs; anything else means it makes them
+    // all tasks. `selectionIsTask` asks the same question of the same lines.
+    const lift = mode === "toggle" && selectionIsTask({ doc: tr.doc, selection: tr.selection });
+    const steps = tr.steps.length;
+
+    // Backwards through the document, so converting one line never moves a
+    // line still waiting for its own conversion.
+    for (let i = targets.length - 1; i >= 0; i -= 1) {
+      const target = targets[i];
+      if (target.kind === "item") {
+        if (lift) {
+          liftItemToParagraph(tr, target.pos, listItemType);
+          continue;
+        }
+        // Already a task: nothing to do, and `checked: true` is not something
+        // a press that leaves the line a task may drop on the floor.
+        if (target.task) continue;
+        if (!target.ordered) {
+          markItemAsTask(tr, target.pos);
+          continue;
+        }
+        const moved = convertOrderedItem(tr, target.pos, bulletListType);
+        if (moved !== null) markItemAsTask(tr, moved, true);
+        continue;
+      }
+      if (lift) continue;
+      let first = i;
+      let firstPos = target.pos;
+      while (first > 0) {
+        const previous = targets[first - 1];
+        if (previous.kind !== "block" || previous.end !== firstPos) break;
+        firstPos = previous.pos;
+        first -= 1;
+      }
+      wrapBlocksAsTasks(tr, firstPos, target.end, bulletListType);
+      i = first;
+    }
+
+    if (tr.steps.length === steps && !tr.docChanged) return mode === "ensure";
+    if (dispatch) dispatch(tr.scrollIntoView());
+    return true;
+  };
+}
+
+/** A transaction landed in the editor.
+ *
+ *  A press changes the document without moving the browser's own selection,
+ *  and `selectionchange` was all the floating toolbar listened to. So the
+ *  Task button stayed unpressed on the very line it had turned into a task.
+ *  This says the document moved; the toolbar re-reads the line from it. */
+const taskDocNotifier = $prose(
+  () =>
+    new Plugin({
+      view: () => ({
+        update: (view, previous) => {
+          if (previous.doc.eq(view.state.doc)) return;
+          notifyEditorDocChanged();
+        },
+      }),
+    }),
+);
+
+/** The slash menu's Task item: make the lines the selection touches tasks,
+ *  and leave a line that is one exactly as it is. Takes the trigger's own
+ *  range so the `/task` and the line it becomes are one transaction. */
+export const ensureTaskCommand = $command(
+  "EnsureTask",
+  () => (trigger?: TaskTrigger | null) => taskCommand("ensure", trigger ?? null),
+);
+/** The floating toolbar's Task button: task on the first press, paragraph on
+ *  the second, whatever list the line was standing in. */
+export const toggleTaskCommand = $command("ToggleTask", () => () => taskCommand("toggle", null));
+
+export const taskCheckbox = [
+  taskCheckboxView,
+  taskSplitKeymap,
+  taskPromote,
+  taskDocNotifier,
+  ensureTaskCommand,
+  toggleTaskCommand,
+];

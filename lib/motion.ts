@@ -94,6 +94,21 @@ export const SHEET_ENTER_Y = 48;
  *  "capsule + 40 to the pixel" claim needed all three to agree. */
 export const CHIP_ROW_AIR = 6;
 
+/** How far the reveal's clip box stands off the chips it is drawn around, in
+ *  px. The row grows from height 0, so the box has to clip while that plays;
+ *  it hugged the chips exactly, so it went on clipping at rest, and every
+ *  chip's focus ring came back as two slivers on its left and right edges with
+ *  its top and bottom cut away.
+ *
+ *  FIVE IS THE RING'S OWN REACH: a 3px outline at 2px of offset, which is what
+ *  `html[data-kbd] :focus-visible` draws in `app/globals.css`. The vertical
+ *  half is padding that travels with the reveal, since a padding drawn at chip
+ *  height 0 steps the capsule open before it grows, and it comes off
+ *  `CHIP_ROW_AIR` so the air a reader sees is the same 6 it was. The sideways
+ *  half is static, in the stylesheet, pulled back by a negative margin so the
+ *  first chip still starts on the text rule. */
+export const CHIP_ROW_RING = 5;
+
 /** Press: scale on pointer-down, 100ms ease-out; hover fills 80ms in / 160ms out. */
 export const PRESS = { scale: 0.97, duration: 0.1 } as const;
 export const PRESS_ICON = { scale: 0.9, duration: 0.1 } as const;

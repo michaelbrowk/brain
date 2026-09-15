@@ -50,6 +50,14 @@ export function CategoryPicker({
           <button
             type="button"
             className="chip"
+            /* THE ROW MUST NOT HEAR THIS PRESS AS ITS OWN. Every other chip
+               on the expanded row carries the mark and this one did not, so
+               the row's press handler ran on the way up and folded the row:
+               the list never opened and the reader lost the row they were in.
+               The containment guard cannot answer for it, since this trigger
+               sits inside the row rather than in the portal its panel goes
+               to. */
+            data-task-control
             {...(value ? { "aria-label": `Category: ${value}` } : {})}
           >
             {value ?? "+ Category"}

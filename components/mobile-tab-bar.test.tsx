@@ -185,19 +185,27 @@ describe("the phone's bottom line", () => {
     expect(plus().hasAttribute("data-hidden")).toBe(false);
   });
 
-  it("opens the New menu as a sheet instead of making a page outright", async () => {
-    const onNew = vi.fn();
-    const onNewTask = vi.fn();
-    await render(root, false, { onNew, onNewTask });
-
+  /** THE WHOLE TAP, down and up. The sheet rises over the plus, so it opens on
+   *  the lift rather than on the press and a `pointerdown` alone leaves the
+   *  line as it was (`components/new-menu.tsx`). */
+  const tap = async () => {
     await act(async () => {
       plus().dispatchEvent(
         new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
       );
     });
+    await act(async () => plus().click());
     await act(async () => {
       await Promise.resolve();
     });
+  };
+
+  it("opens the New menu as a sheet instead of making a page outright", async () => {
+    const onNew = vi.fn();
+    const onNewTask = vi.fn();
+    await render(root, false, { onNew, onNewTask });
+
+    await tap();
 
     // a press on the plus makes nothing by itself now
     expect(onNew).not.toHaveBeenCalled();
@@ -218,14 +226,7 @@ describe("the phone's bottom line", () => {
     expect(onNew).toHaveBeenCalledTimes(1);
     expect(onNew.mock.calls[0][0].id).toBe("blank");
 
-    await act(async () => {
-      plus().dispatchEvent(
-        new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
-      );
-    });
-    await act(async () => {
-      await Promise.resolve();
-    });
+    await tap();
     // Task runs once Radix has released the menu, so the caret it asks for is
     // not taken back by the focus scope on its way out
     await act(async () => row("Task")!.click());

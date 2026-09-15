@@ -31,7 +31,7 @@ const pressAnimate = vi.fn(() => ({ stop: () => {} }));
 vi.mock("framer-motion/dom", () => ({ animate: pressAnimate }));
 
 const { TasksRow, foldRow, WRITE_AT_MS: WRITE_AT } = await import("./tasks-row");
-const { CHIP_ROW_AIR, DUR } = await import("@/lib/motion");
+const { CHIP_ROW_AIR, CHIP_ROW_RING, DUR } = await import("@/lib/motion");
 const { renderTaskCheck, renderTaskCheckbox } = await import("./tasks-checkbox");
 const { SOLAR } = await import("./ui/solar-icons.generated");
 const { doneTimeOf } = await import("./tasks-lists");
@@ -509,10 +509,13 @@ describe("the expansion", () => {
     // THE AIR IS ONE NUMBER IN ONE PLACE, and it travels with the reveal. It
     // was three literals (a margin here, a padding on the capsule and the
     // number in the component) and the padding drew its 6px at chip height 0,
-    // so the capsule stepped open before it grew. Nothing in the stylesheet
-    // holds either side of it now.
+    // so the capsule stepped open before it grew. Neither side of it is held
+    // in the stylesheet.
     expect(ruleFor(css, ".brain-task-row[data-expanded]")).not.toContain("padding-bottom");
-    expect(ruleFor(css, ".brain-task-chips")).not.toContain("margin");
+    const chipRule = ruleFor(css, ".brain-task-chips");
+    expect(chipRule).not.toContain("margin-top");
+    expect(chipRule).not.toContain("margin-bottom");
+    expect(chipRule).not.toContain("margin-block");
 
     await renderRows([task("a", { when: TODAY })], { expanded: true });
     const chips = renders.find(
@@ -522,13 +525,51 @@ describe("the expansion", () => {
       height: 0,
       marginTop: 0,
       marginBottom: 0,
+      paddingTop: 0,
+      paddingBottom: 0,
     });
     expect(chips?.motion.animate).toMatchObject({
       height: "auto",
-      marginTop: CHIP_ROW_AIR,
-      marginBottom: CHIP_ROW_AIR,
+      marginTop: CHIP_ROW_AIR - CHIP_ROW_RING,
+      marginBottom: CHIP_ROW_AIR - CHIP_ROW_RING,
+      paddingTop: CHIP_ROW_RING,
+      paddingBottom: CHIP_ROW_RING,
     });
     expect(CHIP_ROW_AIR).toBe(6);
+  });
+
+  /** THE REVEAL'S CLIP KEPT NO DISTANCE FROM THE CHIPS.
+   *
+   *  The chip row grows from height 0, so it has to clip while that plays.
+   *  Its box hugged the chips exactly, so it went on clipping at rest: a
+   *  chip's focus ring (3px at +2 offset, five pixels of reach) came back as
+   *  two slivers on its left and right edges with its top and its bottom cut
+   *  away, and the rim and the drop shadow every chip carries were shaved off
+   *  with them. Every chip in the row, every time. The room is the ring's own
+   *  reach, taken back on the outside so the first chip still starts on the
+   *  text rule and the capsule is the height it always was. */
+  it("keeps the reveal's clip off the chips it is drawn around", async () => {
+    const rule = ruleFor(css, ".brain-task-chips");
+    expect(rule).toContain("overflow: hidden");
+    // Sideways is static, because no margin travels on that axis.
+    expect(rule).toContain(`padding-inline: ${CHIP_ROW_RING}px`);
+    expect(rule).toContain(`margin-inline: -${CHIP_ROW_RING}px`);
+    // The ring's reach: the outline's own width plus its offset, and the one
+    // place either of them is declared.
+    const ring = ruleFor(css, "html[data-kbd] :focus-visible");
+    expect(ring).toContain("outline: 3px solid var(--blue-ring)");
+    expect(ring).toContain("outline-offset: 2px");
+    expect(CHIP_ROW_RING).toBe(5);
+
+    // And the air a reader sees is the 6 it has always been: what the padding
+    // takes, the margin gives back.
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    const chips = renders.find(
+      (render) => String(render.props.className) === "brain-task-chips",
+    );
+    const animate = chips?.motion.animate as Record<string, number>;
+    expect(animate.paddingTop + animate.marginTop).toBe(CHIP_ROW_AIR);
+    expect(animate.paddingBottom + animate.marginBottom).toBe(CHIP_ROW_AIR);
   });
 
   it("offers no deadline on a someday task", async () => {
@@ -713,49 +754,48 @@ describe("a history row", () => {
  *  `components/tasks-when-picker.tsx` is the control at every width, and
  *  `ops/design-guardrails.test.ts` refuses a second one under `app/`,
  *  `components/` and `lib/`. */
+/** `hover: hover` or not, the chip opens the same control: the branch that
+ *  read it is deleted. One stub, so the cases that open the picker run on a
+ *  `matchMedia` that exists rather than on jsdom's absent one. */
+const stubHover = (hover = true, sheet = false) => {
+  vi.stubGlobal("matchMedia", (query: string) => ({
+    matches: query === "(hover: hover)" ? hover : sheet && query === "(max-width: 767px)",
+    media: query,
+    onchange: null,
+    addEventListener: vi.fn(),
+    removeEventListener: vi.fn(),
+    addListener: vi.fn(),
+    removeListener: vi.fn(),
+    dispatchEvent: vi.fn(),
+  }));
+};
+
+/** The detailed path's commit. A grid pick moves the picker's own value; Done
+ *  is what sends it, and what closes the popover before the row folds. */
+const pressDone = async () => {
+  await act(async () => {
+    document.querySelector<HTMLElement>("[data-when-done]")?.click();
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+};
+
+const openMenu = async () => {
+  const chip = [...document.querySelectorAll<HTMLElement>(".chip")].find((node) =>
+    node.getAttribute("aria-label")?.startsWith("When:"),
+  );
+  if (!chip) throw new Error("no When chip on the expanded row");
+  await act(async () => {
+    chip.dispatchEvent(pointer("pointerdown"));
+    chip.click();
+  });
+  await act(async () => {
+    await Promise.resolve();
+  });
+};
+
 describe("the When chip's picker", () => {
-  /** `hover: hover` or not, the chip opens the same control: the branch that
-   *  read it is deleted. One stub, so the cases below run on a `matchMedia`
-   *  that exists rather than on jsdom's absent one. */
-  const stubHover = (hover = true, sheet = false) => {
-    vi.stubGlobal("matchMedia", (query: string) => ({
-      matches:
-        query === "(hover: hover)" ? hover : sheet && query === "(max-width: 767px)",
-      media: query,
-      onchange: null,
-      addEventListener: vi.fn(),
-      removeEventListener: vi.fn(),
-      addListener: vi.fn(),
-      removeListener: vi.fn(),
-      dispatchEvent: vi.fn(),
-    }));
-  };
-
-  /** The detailed path's commit. A grid pick moves the picker's own value; Done
-   *  is what sends it, and what closes the popover before the row folds. */
-  const pressDone = async () => {
-    await act(async () => {
-      document.querySelector<HTMLElement>("[data-when-done]")?.click();
-    });
-    await act(async () => {
-      await Promise.resolve();
-    });
-  };
-
-  const openMenu = async () => {
-    const chip = [...document.querySelectorAll<HTMLElement>(".chip")].find(
-      (node) => node.getAttribute("aria-label")?.startsWith("When:"),
-    );
-    if (!chip) throw new Error("no When chip on the expanded row");
-    await act(async () => {
-      chip.dispatchEvent(pointer("pointerdown"));
-      chip.click();
-    });
-    await act(async () => {
-      await Promise.resolve();
-    });
-  };
-
   afterEach(() => {
     vi.unstubAllGlobals();
   });
@@ -795,6 +835,97 @@ describe("the When chip's picker", () => {
 
     expect(document.querySelector(".brain-when-picker")).toBeNull();
     expect(calls.reschedule).toHaveBeenCalledTimes(1);
+  });
+
+  /** A DAY IN THE GRID CLOSED THE CALENDAR AND SAVED NOTHING.
+   *
+   *  The panel is portalled to the end of the document and React carries its
+   *  clicks up the ROW's tree all the same, so `openRow` heard a day cell as a
+   *  second press on the row and folded it. The chips went, the picker went
+   *  with them, and a teardown that is not a close throws the reader's day
+   *  away: the one path the detailed contract rests on, with nothing filed and
+   *  nothing said. The case above cannot see it, because `expanded` is a prop
+   *  in this harness and the fold it asks for never arrives. This one watches
+   *  the ask. */
+  it("hears a press in the calendar as the calendar's and not as the row's", async () => {
+    stubHover();
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await openMenu();
+    calls.expand.mockClear();
+    calls.select.mockClear();
+
+    await act(async () => {
+      document.querySelector<HTMLElement>('[data-day="2026-09-20"]')?.click();
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    expect(calls.select).not.toHaveBeenCalled();
+    expect(document.querySelector(".brain-when-picker")).not.toBeNull();
+    // and the cell the reader pressed wears the ink capsule, which is the
+    // whole of what the press was for
+    expect(
+      document
+        .querySelector('[data-day="2026-09-20"]')
+        ?.getAttribute("aria-selected"),
+    ).toBe("true");
+  });
+
+  it("hears the repeat menu and the category popover the same way", async () => {
+    // EVERY PANEL A CHIP OPENS IS PORTALLED, so the rule cannot be about the
+    // calendar. A press in any of them is a press on the control that opened
+    // it, and the row it is drawn over answers none of them.
+    stubHover();
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    const repeat = [...document.querySelectorAll<HTMLElement>(".chip")].find((node) =>
+      (node.textContent ?? "").includes("Repeat"),
+    )!;
+    await act(async () => {
+      repeat.dispatchEvent(pointer("pointerdown"));
+      repeat.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const option = document.querySelector<HTMLElement>("[role='menuitemradio']");
+    expect(option).not.toBeNull();
+    calls.expand.mockClear();
+
+    await act(async () => {
+      option?.click();
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    expect(calls.patch).toHaveBeenCalledTimes(1);
+
+    // AND THE CATEGORY CHIP, WHICH IS THE ONE THAT DID NOT CARRY THE MARK.
+    // Its trigger is INSIDE the row, so containment passes it and the row read
+    // the press as a second press on itself: the row folded and the list never
+    // opened, which is the bug Michael wrote in about, one chip along.
+    calls.expand.mockClear();
+    calls.patch.mockClear();
+    const category = [...document.querySelectorAll<HTMLElement>(".chip")].find((node) =>
+      (node.textContent ?? "").includes("Category"),
+    )!;
+    await act(async () => {
+      category.dispatchEvent(pointer("pointerdown"));
+      category.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    const suggestion = [
+      ...document.querySelectorAll<HTMLElement>(".brain-menu-item"),
+    ].find((node) => node.textContent === "Work");
+    expect(suggestion).toBeDefined();
+
+    await act(async () => {
+      suggestion?.click();
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    expect(calls.patch).toHaveBeenCalledWith(expect.anything(), { category: "Work" });
   });
 
   /** I6. THE REPEAT MENU STATES ITS RULE, WHOLE.
@@ -1176,19 +1307,22 @@ describe("reduced motion", () => {
     // the capsule stopped carrying a padding, and the stylesheet holds neither
     // any more, so an expanded row under this setting would lose its 6px above
     // and below if the reduced branch dropped them. It lands at rest instead
-    // of growing: no height here, on either frame.
+    // of growing: no height here, on either frame. The air is split between a
+    // padding and a margin so the clip stands off the chips, and the reduced
+    // branch has to land BOTH halves or the room the ring needs is only there
+    // for a reader who did not ask for less motion.
     await renderRows([task("a", { when: TODAY })], { expanded: true });
     const chips = renders.find(
       (render) => String(render.props.className) === "brain-task-chips",
     );
-    expect(chips?.motion.initial).toMatchObject({
-      marginTop: CHIP_ROW_AIR,
-      marginBottom: CHIP_ROW_AIR,
-    });
-    expect(chips?.motion.animate).toMatchObject({
-      marginTop: CHIP_ROW_AIR,
-      marginBottom: CHIP_ROW_AIR,
-    });
+    const rest = {
+      paddingTop: CHIP_ROW_RING,
+      paddingBottom: CHIP_ROW_RING,
+      marginTop: CHIP_ROW_AIR - CHIP_ROW_RING,
+      marginBottom: CHIP_ROW_AIR - CHIP_ROW_RING,
+    };
+    expect(chips?.motion.initial).toMatchObject(rest);
+    expect(chips?.motion.animate).toMatchObject(rest);
     expect(chips?.motion.initial).not.toHaveProperty("height");
     expect(chips?.motion.animate).not.toHaveProperty("height");
   });
@@ -1249,16 +1383,270 @@ describe("reduced motion", () => {
   });
 });
 
+/** THE ROW FOLDS WHEN THE READER LOOKS AWAY.
+ *
+ *  An expanded row was the one thing on this surface that a press elsewhere
+ *  could not end. It kept its chips and its tint through a press on the empty
+ *  page below the list, on the header, on the capture field, and the only ways
+ *  back were Escape and a second press on the row itself. Things folds the row
+ *  on the press that lands outside it, and so does this. */
+describe("the fold on a press outside", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const elsewhere = () => {
+    const node = document.createElement("button");
+    document.body.append(node);
+    return node;
+  };
+
+  it("folds on a pointer press that lands outside the row", async () => {
+    // A PRESS IS A POINTER THAT GOES DOWN AND COMES BACK UP IN THE SAME PLACE.
+    // The decision is taken on the way down, where a layer of the row's own is
+    // still standing to be seen, and it is spent on the lift.
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    calls.expand.mockClear();
+    const away = elsewhere();
+
+    await act(async () => {
+      away.dispatchEvent(pointer("pointerdown", { clientX: 40, clientY: 400 }));
+      away.dispatchEvent(pointer("pointerup", { clientX: 40, clientY: 400 }));
+    });
+
+    expect(calls.expand).toHaveBeenCalledWith(null);
+    away.remove();
+  });
+
+  it("leaves the row standing when the press outside travels into a scroll", async () => {
+    // `pointerdown` IS THE FIRST EVENT OF A TOUCH SCROLL. Folding on it meant
+    // a finger dragged down the list took the row with it, on the one device
+    // where scrolling is how a reader gets anywhere.
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    calls.expand.mockClear();
+    const away = elsewhere();
+
+    await act(async () => {
+      away.dispatchEvent(pointer("pointerdown", { clientX: 40, clientY: 400 }));
+      away.dispatchEvent(pointer("pointermove", { clientX: 42, clientY: 340 }));
+      away.dispatchEvent(pointer("pointerup", { clientX: 42, clientY: 340 }));
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    away.remove();
+  });
+
+  it("leaves the row standing when the browser takes the gesture for its scroll", async () => {
+    // Chrome hands the finger to the compositor and tells the page so with
+    // `pointercancel`, which can arrive before the travel does.
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    calls.expand.mockClear();
+    const away = elsewhere();
+
+    await act(async () => {
+      away.dispatchEvent(pointer("pointerdown", { clientX: 40, clientY: 400 }));
+      away.dispatchEvent(pointer("pointercancel", { clientX: 40, clientY: 400 }));
+      away.dispatchEvent(pointer("pointerup", { clientX: 40, clientY: 400 }));
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    away.remove();
+  });
+
+  it("folds when the focus leaves the row", async () => {
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    calls.expand.mockClear();
+    const away = elsewhere();
+
+    await act(async () => {
+      away.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    });
+
+    expect(calls.expand).toHaveBeenCalledWith(null);
+    away.remove();
+  });
+
+  it("reads a focus that falls to the body as nowhere, not as somewhere else", async () => {
+    // A LAYER CLOSING ON ESCAPE DROPS THE FOCUS ON THE BODY on its way back to
+    // the chip that opened it, and a row that folded there took the reader's
+    // row away on the key that was asked to close the panel. One dismissal per
+    // key, the way there is one per press: the panel goes, and the row is the
+    // next Escape.
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    calls.expand.mockClear();
+
+    await act(async () => {
+      document.body.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+  });
+
+  it("leaves a press inside the row to the row's own handler", async () => {
+    // The row already answers a press on itself: it folds on the second one
+    // and puts the caret in the title on a press of the words. Two answers to
+    // one press is the shape this must not have.
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    calls.expand.mockClear();
+
+    await act(async () => {
+      row().dispatchEvent(pointer("pointerdown"));
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+  });
+
+  it("folds on nothing while a panel the row opened is standing", async () => {
+    // A PANEL THE ROW OPENED IS PART OF THE ROW, and it is portalled out of
+    // the row's own element, so containment cannot say so: what says so is
+    // Radix's flag on the chip that opened it. The press that dismisses a
+    // layer belongs to that layer, and a row that folded on the same one would
+    // take the picker out from under the write it commits as it goes.
+    stubHover();
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await openMenu();
+    calls.expand.mockClear();
+    const away = elsewhere();
+
+    await act(async () => {
+      away.dispatchEvent(pointer("pointerdown"));
+      away.dispatchEvent(pointer("pointerup"));
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    away.remove();
+  });
+
+  it("listens for none of it while the row is folded", async () => {
+    await renderRows([task("a", { when: TODAY })]);
+    calls.expand.mockClear();
+    const away = elsewhere();
+
+    await act(async () => {
+      away.dispatchEvent(pointer("pointerdown"));
+      away.dispatchEvent(pointer("pointerup"));
+      away.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    away.remove();
+  });
+});
+
 /** D5. THE SELECTION IS A PLACE, NOT AN EMPHASIS.
  *
  *  None of the six shell contract fixtures draws a task row, so the quiet
  *  focus is asserted through the rules the row computes for itself. */
 describe("the quiet focus (D5)", () => {
+  /** The one selector that paints the cursor, spelled once. */
+  const CURSOR_FILL =
+    '.brain-tasks:is(:focus-within, :has([data-state="open"])) ' +
+    ".brain-task-row:not([data-expanded]) > .tree-row-capsule";
+
   it("draws the selection at the sidebar's hover tint and not the grey fill", () => {
-    const rule = ruleFor(css, ".brain-task-row > .tree-row-capsule");
+    const rule = ruleFor(css, CURSOR_FILL);
     expect(rule).toContain("background-color: var(--fill-glass-hover)");
     expect(rule).not.toContain("--fill-glass-selected");
     expect(rule).not.toContain("box-shadow");
+  });
+
+  /** THE CURSOR IS DRAWN WHILE THE COLUMN IS HOLDING IT.
+   *
+   *  The capsule was painted off `data-selected` alone, so a row kept the tint
+   *  through a press anywhere else on the page: the chips went with the fold
+   *  and the grey capsule stayed, which reads as the task still having the
+   *  focus it was asked to give up. The attribute is D5's roving cursor and it
+   *  does not move; what moves is the paint. The place is remembered while
+   *  nothing draws it, so a Tab back into the column puts the capsule on the
+   *  same row. */
+  it("paints the cursor only while the column holds the focus", () => {
+    // The capsule's BOX is unconditional. Its fill is not.
+    const box = ruleFor(css, ".brain-task-row > .tree-row-capsule");
+    expect(box).toContain("position: absolute");
+    expect(box).not.toContain("background-color");
+    // And a panel the column opened counts as the column: Radix moves the
+    // focus into a portal, and a cursor that blinked out every time the list
+    // menu opened would be the same bug one gesture along.
+    expect(css).toContain(CURSOR_FILL);
+    // An expanded row is excluded by name, because it wears the one fill of
+    // I1 and this rule out-weighs the transparency that keeps it to one.
+    expect(ruleFor(css, ".brain-task-row[data-expanded] > .tree-row-capsule")).toContain(
+      "background-color: transparent",
+    );
+  });
+
+  /** THE ROW HOLDS THE FOCUS THE CURSOR STANDS ON.
+   *
+   *  Nothing in the column was focusable, so a press on a row sent the focus to
+   *  `.brain-main` and `:focus-within` was false in the one case it has to be
+   *  true. The row is the holder: script-focusable and out of the Tab order,
+   *  the roving convention the picker's own grid cells use. */
+  it("takes the focus when the cursor lands on it", async () => {
+    await renderRows([task("a", { when: TODAY })]);
+    expect(row().tabIndex).toBe(-1);
+    expect(document.activeElement).not.toBe(row());
+
+    await renderRows([task("a", { when: TODAY })], { selected: true });
+    expect(document.activeElement).toBe(row());
+  });
+
+  it("never takes it off a control already inside it", async () => {
+    // The caret in the title and a chip the reader is holding are both inside
+    // the row, so the row is already holding the focus it would be asked to
+    // take. Pulling it up to the row would close a menu mid-gesture.
+    await renderRows([task("b", { when: TODAY })], { expanded: true });
+    const chip = document.querySelector<HTMLElement>(".chip");
+    chip?.focus();
+    expect(document.activeElement).toBe(chip);
+
+    await renderRows([task("b", { when: TODAY })], { expanded: true, selected: true });
+
+    expect(document.activeElement).toBe(chip);
+  });
+
+  it("takes the focus back when the fold pulls the chips out from under it", async () => {
+    // ESCAPE WITH THE FOCUS ON A CHIP. The row folds, the chips go, and the
+    // focus goes with them: the column stopped holding it, so the fill went
+    // out with nothing pressed, and under a mouse there is no ring either. The
+    // reader was left with neither, on a row the cursor is still standing on.
+    await renderRows([task("a", { when: TODAY })], { expanded: true, selected: true });
+    const chip = document.querySelector<HTMLElement>(".chip");
+    chip?.focus();
+    expect(document.activeElement).toBe(chip);
+
+    await renderRows([task("a", { when: TODAY })], { selected: true });
+
+    expect(document.activeElement).toBe(row());
+  });
+
+  it("leaves the focus where a press outside put it", async () => {
+    // The other half of the same rule: what a press takes away is the paint,
+    // and a row that grabbed the focus back would paint itself again over the
+    // gesture that was asked to end it.
+    await renderRows([task("a", { when: TODAY })], { expanded: true, selected: true });
+    const chip = document.querySelector<HTMLElement>(".chip");
+    chip?.focus();
+    const away = document.createElement("button");
+    document.body.append(away);
+
+    await act(async () => {
+      away.dispatchEvent(pointer("pointerdown", { clientX: 40, clientY: 400 }));
+      away.dispatchEvent(pointer("pointerup", { clientX: 40, clientY: 400 }));
+    });
+    expect(calls.expand).toHaveBeenCalledWith(null);
+    await renderRows([task("a", { when: TODAY })], { selected: true });
+
+    expect(document.activeElement).not.toBe(row());
+    away.remove();
+  });
+
+  it("wears one ring and not two, at the cursor's own inset offset", () => {
+    // A focusable row answers the global ring at +2 as well as the cursor's
+    // own at -3, and two outlines on one capsule is two rings. The offset is
+    // the whole of the override: the colour and the width stay the global's.
+    const rule = ruleFor(css, "html[data-kbd] .brain-task-row:focus-visible");
+    expect(rule).toContain("outline-offset: -3px");
+    expect(rule).not.toContain("outline:");
   });
 
   it("leaves the title's weight alone", () => {

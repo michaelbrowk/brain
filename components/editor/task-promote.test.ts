@@ -5,13 +5,14 @@ import { commonmark } from "@milkdown/kit/preset/commonmark";
 import { gfm } from "@milkdown/kit/preset/gfm";
 import { TextSelection } from "@milkdown/kit/prose/state";
 import type { EditorView } from "@milkdown/kit/prose/view";
-import { getMarkdown } from "@milkdown/kit/utils";
+import { callCommand, getMarkdown } from "@milkdown/kit/utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetTasksStore } from "@/components/tasks-client";
 import { hashTaskText, normalizeTaskText } from "@/lib/tasks/task-lines";
 
 import {
+  ensureTaskCommand,
   PROMOTE_MENU_CLASS,
   TASK_MARK_CLASS,
   TASKS_CHANGED_EVENT,
@@ -264,6 +265,43 @@ afterEach(async () => {
   document.body.replaceChildren();
   vi.unstubAllGlobals();
   vi.useRealTimers();
+});
+
+describe("the slash menu's Task item", () => {
+  it("turns the triggering line into an unchecked task with +Task available", async () => {
+    // The line the slash menu leaves behind once the popup runs the generic
+    // command branch: the "/task" trigger text deleted, cursor where it was.
+    const view = await mountEditor("/task\n");
+    const end = 1 + view.state.doc.firstChild!.content.size;
+    view.dispatch(view.state.tr.delete(1, end));
+    editors.get(view)!.action(callCommand(ensureTaskCommand.key));
+
+    const listItem = view.state.doc.firstChild?.firstChild;
+    expect(listItem?.type.name).toBe("list_item");
+    expect(listItem?.attrs.checked).toBe(false);
+    expect(view.dom.querySelector("button[role='checkbox']")?.getAttribute("aria-checked")).toBe(
+      "false",
+    );
+
+    // The caret lands after the box, ready for the task's own words. The
+    // ghost has nothing to name a task after until there are some.
+    view.dispatch(view.state.tr.insertText("water the plants", view.state.selection.from));
+    expect(serialize(view)).toBe("* [ ] water the plants\n");
+
+    hover(view, 0);
+    expect(shownMarks(view).map((mark) => mark.textContent)).toEqual(["+ Task"]);
+  });
+
+  it("leaves a line that is already a task exactly as it is", async () => {
+    const view = await mountEditor("- [x] call the bank\n");
+    caretInLine(view, 0);
+    const before = serialize(view);
+
+    editors.get(view)!.action(callCommand(ensureTaskCommand.key));
+
+    expect(serialize(view)).toBe(before);
+    expect(items(view)).toHaveLength(1);
+  });
 });
 
 describe("the + Task gesture", () => {

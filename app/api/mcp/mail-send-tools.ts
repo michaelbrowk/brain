@@ -22,6 +22,13 @@ import {
 import { recordAgentSend, resolveAgentSendThread } from "@/lib/mcp/agent-sends";
 import { readAgentSettings } from "@/lib/mcp/agent-settings";
 import {
+  admitAttachmentRefs,
+  attachmentActivityFields,
+  attachmentRefSchema,
+  resolveOutgoingAttachments,
+  type OutgoingAttachmentRef,
+} from "./mail-send-attachments";
+import {
   clientNameOf,
   hasScope,
   insufficientScope,
@@ -167,11 +174,16 @@ function sendOutcome(error: unknown): string {
 
 /** One line per send attempt, whatever became of it, because the owner
  *  reading the log wants the attempt as much as the message. The target
- *  carries ids only: never a subject, an address or a body. */
+ *  carries ids only: never a subject, an address or a body. The two
+ *  attachment fields are the store's own names and a count, which say which
+ *  file left the notes folder and nothing about what is in it. */
 async function logSendActivity(
   extra: { authInfo?: { clientId?: string } },
   tool: string,
-  target: Pick<McpActivityEntry, "accountId" | "threadId" | "operationId">,
+  target: Pick<
+    McpActivityEntry,
+    "accountId" | "threadId" | "operationId" | "attachmentId" | "change"
+  >,
   outcome: string,
 ): Promise<void> {
   await appendMcpActivity({
@@ -337,13 +349,34 @@ export function registerMailSendTools(server: McpToolServer): void {
           subject: z.string(),
           text: z.string(),
           idempotencyKey: idempotencyKeySchema,
+          attachments: z
+            .array(attachmentRefSchema)
+            .optional()
+            .describe(
+              "Files a page of yours already shows, each named by that page and the file's own name in it. Nothing else can be attached.",
+            ),
         })
         .strict(),
     },
-    async ({ accountId, to, cc, bcc, subject, text: body, idempotencyKey }, extra) => {
+    async (
+      {
+        accountId,
+        to,
+        cc,
+        bcc,
+        subject,
+        text: body,
+        idempotencyKey,
+        attachments: attachmentRefs,
+      },
+      extra,
+    ) => {
       if (!hasScope(extra, "brain:mail:send")) {
         return insufficientScope("brain:mail:send");
       }
+      const refs: readonly OutgoingAttachmentRef[] = attachmentRefs ?? [];
+      // The count from the first line, the names only once they are names.
+      let marks = attachmentActivityFields(refs, { named: false });
       // A state directory that cannot be written must never turn a completed
       // send into a failed tool call, so every call site swallows its own
       // failure.
@@ -351,7 +384,7 @@ export function registerMailSendTools(server: McpToolServer): void {
         logSendActivity(
           extra,
           SEND_TOOL,
-          { accountId, ...(operationId ? { operationId } : {}) },
+          { accountId, ...marks, ...(operationId ? { operationId } : {}) },
           outcome,
         ).catch(() => undefined);
 
@@ -384,6 +417,12 @@ export function registerMailSendTools(server: McpToolServer): void {
         await log("body_too_long");
         return badBody;
       }
+      const badRefs = admitAttachmentRefs(refs);
+      if (badRefs) {
+        await log(badRefs.outcome);
+        return badRefs.refused;
+      }
+      marks = attachmentActivityFields(refs, { named: true });
 
       try {
         const client = createBrainMailClient();
@@ -391,6 +430,14 @@ export function registerMailSendTools(server: McpToolServer): void {
         if ("refused" in admitted) {
           await log(admitted.outcome);
           return admitted.refused;
+        }
+        // The notes folder is read last, after every refusal that costs
+        // nothing and after the account is known to be able to send, so the
+        // bytes are held for as short a time as the path allows.
+        const resolved = await resolveOutgoingAttachments(refs);
+        if ("refused" in resolved) {
+          await log(resolved.outcome);
+          return resolved.refused;
         }
         const input: MailSendInput = {
           accountId,
@@ -402,10 +449,7 @@ export function registerMailSendTools(server: McpToolServer): void {
           subject,
           text: body,
           replyToMessageId: null,
-          // Task 7 fills this from a page's own attachments. Everything
-          // downstream of here already carries them: the field, the codec,
-          // the multipart writer and the 10 MiB cap all landed in Task 4.
-          attachments: [],
+          attachments: resolved.attachments,
           origin: "mcp",
           agentLine: settings.tellRecipients,
         };
@@ -440,21 +484,42 @@ export function registerMailSendTools(server: McpToolServer): void {
             .describe("true keeps the To and Cc of the message being answered"),
           text: z.string(),
           idempotencyKey: idempotencyKeySchema,
+          attachments: z
+            .array(attachmentRefSchema)
+            .optional()
+            .describe(
+              "Files a page of yours already shows, each named by that page and the file's own name in it. Nothing else can be attached.",
+            ),
         })
         .strict(),
     },
     async (
-      { accountId, threadId, messageId, replyAll, text: body, idempotencyKey },
+      {
+        accountId,
+        threadId,
+        messageId,
+        replyAll,
+        text: body,
+        idempotencyKey,
+        attachments: attachmentRefs,
+      },
       extra,
     ) => {
       if (!hasScope(extra, "brain:mail:send")) {
         return insufficientScope("brain:mail:send");
       }
+      const refs: readonly OutgoingAttachmentRef[] = attachmentRefs ?? [];
+      let marks = attachmentActivityFields(refs, { named: false });
       const log = (outcome: string, operationId?: string) =>
         logSendActivity(
           extra,
           REPLY_TOOL,
-          { accountId, threadId, ...(operationId ? { operationId } : {}) },
+          {
+            accountId,
+            threadId,
+            ...marks,
+            ...(operationId ? { operationId } : {}),
+          },
           outcome,
         ).catch(() => undefined);
 
@@ -483,6 +548,12 @@ export function registerMailSendTools(server: McpToolServer): void {
         await log("body_too_long");
         return badBody;
       }
+      const badRefs = admitAttachmentRefs(refs);
+      if (badRefs) {
+        await log(badRefs.outcome);
+        return badRefs.refused;
+      }
+      marks = attachmentActivityFields(refs, { named: true });
 
       try {
         const client = createBrainMailClient();
@@ -533,6 +604,11 @@ export function registerMailSendTools(server: McpToolServer): void {
           await log("subject_too_long");
           return badSubject;
         }
+        const resolved = await resolveOutgoingAttachments(refs);
+        if ("refused" in resolved) {
+          await log(resolved.outcome);
+          return resolved.refused;
+        }
         const input: MailSendInput = {
           accountId,
           idempotencyKey,
@@ -543,8 +619,7 @@ export function registerMailSendTools(server: McpToolServer): void {
           subject,
           text: body,
           replyToMessageId: messageId,
-          // Task 7 fills this the same way it fills a compose.
-          attachments: [],
+          attachments: resolved.attachments,
           origin: "mcp",
           agentLine: settings.tellRecipients,
         };

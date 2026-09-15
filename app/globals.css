@@ -1437,6 +1437,14 @@ html[data-kbd] [contenteditable]:focus-visible {
   width: 28px;
   height: 28px;
 }
+/* 34 is the accent circle's size, and this atom takes it where it stands
+   beside one: the sidebar head holds the bell and New page on one line, and a
+   28 capsule next to a 34 circle read as one lopsided object rather than as a
+   pair. */
+.icon-btn[data-size="34"] {
+  width: 34px;
+  height: 34px;
+}
 .icon-btn[data-size="36"] {
   width: 36px;
   height: 36px;
@@ -2121,6 +2129,33 @@ html[data-kbd] [contenteditable]:focus-visible {
   line-height: 18px;
   letter-spacing: 0.06px;
   color: var(--ink-2);
+}
+/* A MENU AS A SHEET, below md.
+   The New menu under the phone's plus takes the form the When picker and the
+   composer already take there, for the same reason: a 210px popover hanging
+   off a control at the bottom inset is a pointer object, and a thumb wants a
+   full line and a grip. Same material, same rows, same order, because a sheet
+   is a shape and not a second menu.
+   FULL WIDTH ON THE INSET: `.brain-menu`'s `min-width` is a menu's floor and
+   has to come off before a percentage means anything on a shrink-to-fit box.
+   ONE OBJECT, ONE ANIMATION: the material moves nothing, framer carries the
+   travel (`components/new-menu.tsx`), and what holds the node while the exit
+   plays is the hold keyframe the When picker's sheet already uses: one
+   keyframe, two sheets, and reduced motion collapses it through the global
+   rule so the sheet goes at once. */
+@media (max-width: 767px) {
+  .brain-menu.brain-menu-sheet {
+    min-width: 0;
+    width: calc(100vw - 16px);
+  }
+  .brain-menu.brain-menu-sheet[data-state="open"],
+  .brain-menu.brain-menu-sheet[data-state="open"]::before,
+  .brain-menu.brain-menu-sheet[data-state="closed"]::before {
+    animation: none;
+  }
+  .brain-menu.brain-menu-sheet[data-state="closed"] {
+    animation: when-sheet-hold 300ms linear both;
+  }
 }
 /* Share popover: the share card as a ledger on paper (DESIGN.md v2, §12
    Menu / popover). The regular material survives as a 6px sleeve (popover
@@ -3435,23 +3470,26 @@ a.brain-share-url:active {
   color: var(--ink-2);
 }
 /* THE COUNT ON THE BELL.
-   It rides the 28 control rather than standing beside it: the head is 36 tall
+   It rides the 34 control rather than standing beside it: the head is 36 tall
    with the wordmark and New page in it already, and there is no third slot.
-   `pointer-events: none` keeps the whole 28 box the press target under it.
+   `pointer-events: none` keeps the whole 34 box the press target under it.
    Ink and paper, no hue. §2 gives red to destructive text and errors, says
    never a red fill, and keeps hue out of the chrome. What carries the
    signal beside the number is the bell itself going bold. The box is set here
    rather than left to `text-label`, whose 18px line is taller than a corner
-   badge on a 28 control: the utility gives the family, size, weight and
+   badge on a 34 control: the utility gives the family, size, weight and
    tracking, this gives the 16 it has to fit in. */
 .brain-bell-badge {
   position: absolute;
-  /* THE CORNER, CLEAR OF THE CROWN. The 17px glyph is centred in a 28 box, so
-     its dome runs to about 5px from the top edge; at -1px the badge landed on
-     it and the pair grew together. Out to the control's own corner the badge
-     rides the box rather than the bell. */
-  top: -3px;
-  right: -3px;
+  /* THE CORNER, CLEAR OF THE CROWN. The 17px glyph is centred in the control,
+     so its dome runs to about 5px from the top edge of a 28 box and the badge
+     had to hang 3px out on both sides to clear it. The control is 34 now, and
+     those 3px on each side ARE the hang: the same air around the same glyph,
+     inside the button's own box. So the corner is the box's corner, the badge
+     stops reaching into the 12px of air beside New page, and its clearance
+     from the crown is the figure that was measured on the 28. */
+  top: 0;
+  right: 0;
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
@@ -6057,7 +6095,7 @@ html[data-kbd] .brain-task-row[data-selected] {
   transition: color 160ms var(--ease-out) 100ms;
 }
 .brain-task-row[data-done] .brain-task-title {
-  color: var(--ink-2);
+  color: var(--ink-3);
 }
 /* A COMPLETED ROW ANSWERS ITS CHECKBOX AND NOTHING ELSE. The same refusal
    `[data-historic]` makes and at the same weight, so it beats the hover and

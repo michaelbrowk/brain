@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TreeNode } from "@/lib/store/types";
 import { apiFetch } from "@/lib/client";
 import { MobilePagesView } from "./mobile-pages-view";
+import { resetNotificationsStore } from "./notifications-client";
 import { resetUpdateStatusForTests } from "./settings/use-update-status";
 import { Shell } from "./shell";
 
@@ -183,6 +184,7 @@ describe("mobile navigation surfaces", () => {
     ).IS_REACT_ACT_ENVIRONMENT = true;
     localStorage.clear();
     resetUpdateStatusForTests();
+    resetNotificationsStore();
     apiFetchMock.mockReset();
     apiFetchMock.mockImplementation(async (input) => {
       const url = String(input);
@@ -232,6 +234,7 @@ describe("mobile navigation surfaces", () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     host.remove();
+    resetNotificationsStore();
     window.history.replaceState(null, "", "/");
     vi.restoreAllMocks();
     vi.unstubAllGlobals();
@@ -493,6 +496,53 @@ describe("mobile navigation surfaces", () => {
     expect(tab("home").getAttribute("aria-current")).toBe("page");
   });
 
+  it("opens Home at the capture field, with nothing above it, whatever the centre holds", async () => {
+    // WHAT THE PHONE'S SIGNAL IS NOW. Home used to open with up to three
+    // unread rows, so the first thing on the page was the centre's list and
+    // not the field. Push tells a phone something arrived, Mail's own block
+    // further down Home already names the new letters, and the field keeps
+    // the opening line it was built for.
+    const centre = [
+      {
+        id: "task-reminder:task-1:2026-09-15T13:00",
+        kind: "task-reminder",
+        at: "2026-09-15T12:00:00.000Z",
+        title: "Water the plants",
+        body: "13:00",
+        href: "/tasks",
+      },
+      {
+        id: "mail-new:account-adeadbeefdeadbeefdeadbeefdeadbeef:7468726561642d6f6e65",
+        kind: "mail-new",
+        at: "2026-09-15T11:00:00.000Z",
+        title: "Ana Silva",
+        body: "Lunch on Friday",
+        href: "/mail",
+      },
+    ];
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url === "/api/tree") return response({ tree: [] });
+      if (url === "/api/notifications")
+        return response({ notifications: centre, unread: centre.length });
+      throw new Error(`unexpected request: ${url}`);
+    });
+
+    await act(async () => root.render(<Shell tree={[]} initialSelectedId={null} />));
+    await settle();
+
+    expect(document.querySelector("[data-hub-notifications]")).toBeNull();
+    expect(document.querySelectorAll("[data-hub-notification-row]")).toHaveLength(0);
+    expect(document.body.textContent).not.toContain("Water the plants");
+
+    // and the field is what Home opens with, not merely what it holds
+    const column = document.querySelector(".brain-page-top") as HTMLElement;
+    expect(column).not.toBeNull();
+    const field = column.querySelector('input[aria-label="New thought"]');
+    expect(field).not.toBeNull();
+    expect(column.firstElementChild?.contains(field as Node)).toBe(true);
+  });
+
   it("stands five slots, Home, Search, Tasks, Pages, Mail, and one New page beside them", async () => {
     await act(async () => root.render(<Shell tree={[]} />));
     await settle();
@@ -516,14 +566,15 @@ describe("mobile navigation surfaces", () => {
 
     // The plus is not a tab and does not live in the bar: it is its own
     // object standing at the other inset, wordless, and it carries the name
-    // the desktop circle carries for the same act.
+    // the desktop circle carries for the same act: "New", because what it
+    // opens is the menu that names the act, not a page outright.
     const bars = document.querySelectorAll(".brain-mobile-tabbar");
     expect(bars).toHaveLength(1);
     const plus = document.querySelectorAll<HTMLButtonElement>(
       ".brain-mobile-new",
     );
     expect(plus).toHaveLength(1);
-    expect(plus[0].getAttribute("aria-label")).toBe("New page");
+    expect(plus[0].getAttribute("aria-label")).toBe("New");
     expect(plus[0].getAttribute("data-mobile-tab")).toBeNull();
     expect(bars[0].contains(plus[0])).toBe(false);
     expect(bars[0].nextElementSibling).toBe(plus[0]);
@@ -544,7 +595,7 @@ describe("mobile navigation surfaces", () => {
     );
     expect(
       group.map((el) => el.dataset.mobileTab ?? el.getAttribute("aria-label")),
-    ).toEqual(["home", "search", "tasks", "pages", "mail", "New page"]);
+    ).toEqual(["home", "search", "tasks", "pages", "mail", "New"]);
     expect(group.every((el) => el.tabIndex === 0)).toBe(true);
   });
 

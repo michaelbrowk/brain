@@ -25,7 +25,13 @@ import {
   type MailReaderAction,
   type MailReaderState,
 } from "./mail-reader";
-import { onMailCommand } from "./mail-commands";
+import {
+  clearComposeRequest,
+  emitMailCommand,
+  onMailCommand,
+  pendingComposeRequest,
+  subscribeComposeRequest,
+} from "./mail-commands";
 import {
   clearOpenThreadRequest,
   defaultMailSurfaceClient,
@@ -4189,6 +4195,29 @@ export function MailSurface({
       }),
     [openDrafts, selectAccount, selectMailbox, selectView, startCompose],
   );
+
+  /** THE COMPOSE ASK THAT ARRIVED BEFORE THIS SURFACE DID.
+   *
+   *  The New menu's Message row is drawn on every surface, so from a page or
+   *  from Home the shell opens Mail and leaves an ask standing; a command
+   *  event would have been shouted at a room nobody was in yet. The latch is
+   *  taken the moment there are accounts to compose from, which is why the
+   *  effect is keyed on `accountsState` and not on mount, and it is taken
+   *  exactly once, because it is cleared before anything is opened.
+   *
+   *  What it then does is emit the command, so the unified branch, the
+   *  capability gates and the toast for an account that cannot send are the
+   *  ones the palette's Compose already goes through. One compose path. */
+  useEffect(() => {
+    const take = () => {
+      if (!pendingComposeRequest()) return;
+      if (accountsStateRef.current.kind !== "ready") return;
+      clearComposeRequest();
+      emitMailCommand("compose");
+    };
+    take();
+    return subscribeComposeRequest(take);
+  }, [accountsState]);
 
   if (accountsState.kind === "loading") {
     return <MailSurfaceSkeleton />;

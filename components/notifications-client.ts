@@ -6,9 +6,8 @@ import { mailNotificationId } from "@/lib/notifications/ids";
 
 /** ONE FETCH OF THE CENTRE, READ BY EVERYTHING THAT DRAWS IT.
  *
- *  The bell carries the count, the menu under it carries the rows, and Home's
- *  first row on a phone carries the first three of the same ones. All of that
- *  is one question asked of one file, so it is asked once and the answer lives
+ *  The bell carries the count and the menu under it carries the rows. Both are
+ *  one question asked of one file, so it is asked once and the answer lives
  *  here. A second request for the number would answer at a different instant
  *  from the rows beside it, and a row marked read has to decrement the badge
  *  ONCE rather than once per source.

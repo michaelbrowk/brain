@@ -5926,11 +5926,11 @@ test("@mobile Pages and Search are accessible mobile-only surfaces", async ({
     // The plus is the line's second object, not a sixth tab: its own button
     // at the other inset, standing on the bar's own line and its own height.
     await expect(plus).toBeVisible();
-    await expect(plus).toHaveAttribute("aria-label", "New page");
+    await expect(plus).toHaveAttribute("aria-label", "New");
     const barBox = await tabbar.boundingBox();
     const plusBox = await plus.boundingBox();
     expect(barBox, "the tab bar has no box").not.toBeNull();
-    expect(plusBox, "the New page circle has no box").not.toBeNull();
+    expect(plusBox, "the New circle has no box").not.toBeNull();
     expect(Math.round(plusBox?.height ?? 0)).toBe(Math.round(barBox?.height ?? 0));
     expect(Math.round(plusBox?.width ?? 0)).toBe(Math.round(plusBox?.height ?? 0));
     expect(Math.round(plusBox?.y ?? 0)).toBe(Math.round(barBox?.y ?? 0));

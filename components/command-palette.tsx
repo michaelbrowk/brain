@@ -293,6 +293,7 @@ export function CommandPalette({
   onOpenMail,
   onOpenTasks,
   onNewTask,
+  onNewMessage,
   onOpenTrash,
   onOpenSettings,
   onToggleTheme,
@@ -313,6 +314,7 @@ export function CommandPalette({
   onOpenMail?: () => void | Promise<void>;
   onOpenTasks?: () => void | Promise<void>;
   onNewTask?: () => void | Promise<void>;
+  onNewMessage?: () => void | Promise<void>;
   onOpenTrash?: () => void | Promise<void>;
   onOpenSettings?: () => void | Promise<void>;
   onToggleTheme?: () => void | Promise<void>;
@@ -334,6 +336,13 @@ export function CommandPalette({
   const rawQuery = query.trim();
   const { filter: activeFilter, text: q } = useMemo(() => parsePaletteQuery(query), [query]);
   const hasPageFilter = activeFilter !== null;
+  // Evaluated while open, so the list rebuilds against the current route.
+  // Read here (ahead of `actions`) because Mail's own "Compose message" row
+  // and the global "New message" row are the same act, and a route that
+  // already carries one must not offer the other beside it.
+  const path = open && typeof window !== "undefined" ? window.location.pathname : "";
+  const mailOpen = path === "/mail";
+  const tasksOpen = path.startsWith("/tasks");
   const actions = useMemo(() => {
     const items: PaletteAction[] = [];
     if (onNewPage) {
@@ -414,6 +423,23 @@ export function CommandPalette({
         run: onNewTask,
       });
     }
+    if (onNewMessage && !mailOpen) {
+      // THE THIRD CREATE, WHEREVER THE OTHER TWO ARE. "Compose message" is a
+      // row of the /mail route's own list, so from a page, which is where a
+      // writer most often decides to send one, the palette offered a page and
+      // a task and nothing else. This one carries the shell's seam: it opens
+      // Mail and leaves the ask standing. The pen and not the plus, the glyph
+      // mail's own Compose pill wears. On `/mail` the route's own "Compose
+      // message" already names the same act, so this row stands down rather
+      // than offer the reader two rows for one act.
+      items.push({
+        id: "new-message",
+        label: "New message",
+        icon: "pen-new-square-linear",
+        keywords: ["mail", "email", "write", "send", "compose"],
+        run: onNewMessage,
+      });
+    }
     if (onOpenTrash) {
       items.push({
         id: "open-trash",
@@ -444,10 +470,12 @@ export function CommandPalette({
     return items;
   }, [
     hasCurrent,
+    mailOpen,
     onHome,
     onNewChild,
     onNewPage,
     onNewTask,
+    onNewMessage,
     onToday,
     onOpenMail,
     onOpenTasks,
@@ -465,10 +493,6 @@ export function CommandPalette({
       ),
     );
   }, [actions, hasPageFilter, q]);
-  // Evaluated while open, so the list rebuilds against the current route.
-  const path = open && typeof window !== "undefined" ? window.location.pathname : "";
-  const mailOpen = path === "/mail";
-  const tasksOpen = path.startsWith("/tasks");
   const routeActions = useMemo<PaletteAction[]>(() => {
     if (mailOpen) {
       return MAIL_PALETTE_ACTIONS.map((action) => ({

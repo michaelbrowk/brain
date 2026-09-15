@@ -6138,7 +6138,19 @@ html[data-kbd] .brain-task-row[data-selected] {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  /* The reveal is a height from 0, so the chips are clipped while it plays. */
+  /* THE CLIP KEEPS ITS DISTANCE FROM THE CHIPS. The reveal is a height from 0,
+     so the chips have to be clipped while it plays; the box hugged them
+     exactly, so it went on clipping at rest, and every chip's focus ring
+     (3px at +2, five pixels of reach) came back as two slivers on its left and
+     right edges with its top and bottom cut away, the rim and the drop shadow
+     shaved off with them. The room is that reach, and it is taken straight
+     back on the outside so the first chip still starts on the text rule and
+     the capsule is the height it always was. The vertical half travels with
+     the reveal from `CHIP_ROW_RING` in `lib/motion.ts`, because a padding
+     drawn at chip height 0 steps the capsule open before it grows; this axis
+     animates nothing, so it is declared here. */
+  padding-inline: 5px;
+  margin-inline: -5px;
   overflow: hidden;
 }
 /* One chip wider than the row it is on is capped by the row rather than

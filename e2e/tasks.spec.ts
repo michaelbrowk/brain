@@ -477,3 +477,76 @@ test("@release a day in the calendar keeps the panel open and the row expanded",
     }, { timeout: 15_000 })
     .toMatch(/-20$/);
 });
+
+test("@release every chip stays inside the expanded row, with room for its ring", async ({
+  page,
+}) => {
+  // The chip row grows from height 0, so it clips while that plays; its box
+  // hugged the chips exactly, so it went on clipping at rest and cut every
+  // chip's focus ring down to two slivers on its left and right edges. Both
+  // halves are read here: nothing reaches past the capsule, and the clip box
+  // keeps the ring's own five pixels on all four sides.
+  test.setTimeout(90_000);
+  await login(page);
+  const id = await createTask(page, "Chip geometry");
+
+  for (const width of [1440, 1024, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    const row = await expandRow(page, id, "Chip geometry");
+    const measured = await row.evaluate((node) => {
+      const capsule = node.querySelector(".brain-task-row") as HTMLElement;
+      const chips = node.querySelector(".brain-task-chips") as HTMLElement;
+      const style = getComputedStyle(capsule);
+      const box = capsule.getBoundingClientRect();
+      const clip = chips.getBoundingClientRect();
+      const kids = [...chips.children].map((child) => {
+        const rect = child.getBoundingClientRect();
+        return {
+          word: (child.textContent ?? "").trim(),
+          left: rect.left,
+          right: rect.right,
+          top: rect.top,
+          bottom: rect.bottom,
+          lines: 1,
+        };
+      });
+      return {
+        inner: {
+          left: box.left + parseFloat(style.paddingLeft),
+          right: box.right - parseFloat(style.paddingRight),
+        },
+        capsuleBottom: box.bottom,
+        clip,
+        kids,
+        // A chip never breaks its own word across two lines: the ROW wraps.
+        wrapped: new Set(kids.map((kid) => Math.round(kid.top))).size,
+        scrollPast: chips.scrollWidth - chips.clientWidth,
+      };
+    });
+
+    expect(measured.kids.length, `chips at ${width}`).toBeGreaterThanOrEqual(4);
+    expect(measured.scrollPast, `no chip runs past the row at ${width}`).toBe(0);
+    for (const chip of measured.kids) {
+      expect(chip.right, `${chip.word} at ${width}`).toBeLessThanOrEqual(
+        measured.inner.right + 0.5,
+      );
+      expect(chip.left, `${chip.word} at ${width}`).toBeGreaterThanOrEqual(
+        measured.inner.left - 0.5,
+      );
+      expect(chip.bottom, `${chip.word} at ${width}`).toBeLessThanOrEqual(
+        measured.capsuleBottom + 0.5,
+      );
+      // THE CLIP BOX KEEPS ITS DISTANCE. Five pixels is the ring's reach: a
+      // 3px outline at 2px of offset.
+      expect(chip.top - measured.clip.top, `ring room over ${chip.word}`)
+        .toBeGreaterThanOrEqual(5);
+      expect(measured.clip.bottom - chip.bottom, `ring room under ${chip.word}`)
+        .toBeGreaterThanOrEqual(5);
+      expect(chip.left - measured.clip.left, `ring room left of ${chip.word}`)
+        .toBeGreaterThanOrEqual(5);
+    }
+    // 390 is the width the four of them do not fit on one line at, and the row
+    // is what wraps there.
+    expect(measured.wrapped, `lines at ${width}`).toBe(width === 390 ? 2 : 1);
+  }
+});

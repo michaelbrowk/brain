@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   CHIP_ROW_AIR,
+  CHIP_ROW_RING,
   DUR,
   EASE_OUT,
   HOVER,
@@ -65,6 +66,25 @@ import { Icon } from "./ui/icon";
 
 /** The one flowing selection capsule of the column. */
 export const TASKS_SELECT_LAYOUT_ID = "tasks-select";
+
+/** THE CHIP ROW'S BOX, OPEN AND SHUT. The air above and below the chips is
+ *  `CHIP_ROW_AIR`, and it is split between the element's padding and its
+ *  margin: the padding is inside the box that clips the reveal, so the chips
+ *  stand `CHIP_ROW_RING` clear of the clip's edge and a focus ring on one has
+ *  room to draw. Both sides travel from 0 with the reveal, so the capsule
+ *  grows once instead of stepping open first. */
+const CHIP_ROW_OPEN = {
+  paddingTop: CHIP_ROW_RING,
+  paddingBottom: CHIP_ROW_RING,
+  marginTop: CHIP_ROW_AIR - CHIP_ROW_RING,
+  marginBottom: CHIP_ROW_AIR - CHIP_ROW_RING,
+} as const;
+const CHIP_ROW_SHUT = {
+  paddingTop: 0,
+  paddingBottom: 0,
+  marginTop: 0,
+  marginBottom: 0,
+} as const;
 
 /** The hold: 100ms for the box to settle, then 1200 the row does not move. */
 const SETTLE_MS = 100;
@@ -662,29 +682,36 @@ export function TasksRow({
                    was `padding-bottom` on the capsule, applied in the frame the
                    attribute was, and padding on a box drawn at chip height 0
                    steps the row open 6px before it grows. It is this element's
-                   margin now, animated from 0 like the air above it, so the
-                   capsule moves once. */
+                   own box now, animated from 0 like the air above it, so the
+                   capsule moves once.
+
+                   AND IT IS SPLIT IN TWO, because this box CLIPS. Five of the
+                   six are the element's padding and the sixth is its margin,
+                   which puts the clip's edge five pixels off the chips rather
+                   than flush against them: a chip's focus ring reaches exactly
+                   that far, and flush it came back as two slivers on the
+                   chip's left and right edges. The reader sees the same 6 they
+                   always did, since what the padding takes the margin gives
+                   back. `lib/motion.ts` holds both numbers. */
                 <motion.span
                   className="brain-task-chips"
                   initial={
                     reduce
-                      ? { opacity: 0, marginTop: CHIP_ROW_AIR, marginBottom: CHIP_ROW_AIR }
+                      ? { opacity: 0, ...CHIP_ROW_OPEN }
                       : {
                           opacity: 0,
                           height: 0,
-                          marginTop: 0,
-                          marginBottom: 0,
+                          ...CHIP_ROW_SHUT,
                           y: -4,
                         }
                   }
                   animate={
                     reduce
-                      ? { opacity: 1, marginTop: CHIP_ROW_AIR, marginBottom: CHIP_ROW_AIR }
+                      ? { opacity: 1, ...CHIP_ROW_OPEN }
                       : {
                           opacity: 1,
                           height: "auto",
-                          marginTop: CHIP_ROW_AIR,
-                          marginBottom: CHIP_ROW_AIR,
+                          ...CHIP_ROW_OPEN,
                           y: 0,
                         }
                   }
@@ -694,8 +721,7 @@ export function TasksRow({
                       : {
                           opacity: 0,
                           height: 0,
-                          marginTop: 0,
-                          marginBottom: 0,
+                          ...CHIP_ROW_SHUT,
                           transition: { duration: DUR.fast, ease: "easeIn" },
                         }
                   }

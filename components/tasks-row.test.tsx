@@ -31,7 +31,7 @@ const pressAnimate = vi.fn(() => ({ stop: () => {} }));
 vi.mock("framer-motion/dom", () => ({ animate: pressAnimate }));
 
 const { TasksRow, foldRow, WRITE_AT_MS: WRITE_AT } = await import("./tasks-row");
-const { CHIP_ROW_AIR, DUR } = await import("@/lib/motion");
+const { CHIP_ROW_AIR, CHIP_ROW_RING, DUR } = await import("@/lib/motion");
 const { renderTaskCheck, renderTaskCheckbox } = await import("./tasks-checkbox");
 const { SOLAR } = await import("./ui/solar-icons.generated");
 const { doneTimeOf } = await import("./tasks-lists");
@@ -509,10 +509,13 @@ describe("the expansion", () => {
     // THE AIR IS ONE NUMBER IN ONE PLACE, and it travels with the reveal. It
     // was three literals (a margin here, a padding on the capsule and the
     // number in the component) and the padding drew its 6px at chip height 0,
-    // so the capsule stepped open before it grew. Nothing in the stylesheet
-    // holds either side of it now.
+    // so the capsule stepped open before it grew. Neither side of it is held
+    // in the stylesheet.
     expect(ruleFor(css, ".brain-task-row[data-expanded]")).not.toContain("padding-bottom");
-    expect(ruleFor(css, ".brain-task-chips")).not.toContain("margin");
+    const chipRule = ruleFor(css, ".brain-task-chips");
+    expect(chipRule).not.toContain("margin-top");
+    expect(chipRule).not.toContain("margin-bottom");
+    expect(chipRule).not.toContain("margin-block");
 
     await renderRows([task("a", { when: TODAY })], { expanded: true });
     const chips = renders.find(
@@ -522,13 +525,51 @@ describe("the expansion", () => {
       height: 0,
       marginTop: 0,
       marginBottom: 0,
+      paddingTop: 0,
+      paddingBottom: 0,
     });
     expect(chips?.motion.animate).toMatchObject({
       height: "auto",
-      marginTop: CHIP_ROW_AIR,
-      marginBottom: CHIP_ROW_AIR,
+      marginTop: CHIP_ROW_AIR - CHIP_ROW_RING,
+      marginBottom: CHIP_ROW_AIR - CHIP_ROW_RING,
+      paddingTop: CHIP_ROW_RING,
+      paddingBottom: CHIP_ROW_RING,
     });
     expect(CHIP_ROW_AIR).toBe(6);
+  });
+
+  /** THE REVEAL'S CLIP KEPT NO DISTANCE FROM THE CHIPS.
+   *
+   *  The chip row grows from height 0, so it has to clip while that plays.
+   *  Its box hugged the chips exactly, so it went on clipping at rest: a
+   *  chip's focus ring (3px at +2 offset, five pixels of reach) came back as
+   *  two slivers on its left and right edges with its top and its bottom cut
+   *  away, and the rim and the drop shadow every chip carries were shaved off
+   *  with them. Every chip in the row, every time. The room is the ring's own
+   *  reach, taken back on the outside so the first chip still starts on the
+   *  text rule and the capsule is the height it always was. */
+  it("keeps the reveal's clip off the chips it is drawn around", async () => {
+    const rule = ruleFor(css, ".brain-task-chips");
+    expect(rule).toContain("overflow: hidden");
+    // Sideways is static, because no margin travels on that axis.
+    expect(rule).toContain(`padding-inline: ${CHIP_ROW_RING}px`);
+    expect(rule).toContain(`margin-inline: -${CHIP_ROW_RING}px`);
+    // The ring's reach: the outline's own width plus its offset, and the one
+    // place either of them is declared.
+    const ring = ruleFor(css, "html[data-kbd] :focus-visible");
+    expect(ring).toContain("outline: 3px solid var(--blue-ring)");
+    expect(ring).toContain("outline-offset: 2px");
+    expect(CHIP_ROW_RING).toBe(5);
+
+    // And the air a reader sees is the 6 it has always been: what the padding
+    // takes, the margin gives back.
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    const chips = renders.find(
+      (render) => String(render.props.className) === "brain-task-chips",
+    );
+    const animate = chips?.motion.animate as Record<string, number>;
+    expect(animate.paddingTop + animate.marginTop).toBe(CHIP_ROW_AIR);
+    expect(animate.paddingBottom + animate.marginBottom).toBe(CHIP_ROW_AIR);
   });
 
   it("offers no deadline on a someday task", async () => {
@@ -1236,19 +1277,22 @@ describe("reduced motion", () => {
     // the capsule stopped carrying a padding, and the stylesheet holds neither
     // any more, so an expanded row under this setting would lose its 6px above
     // and below if the reduced branch dropped them. It lands at rest instead
-    // of growing: no height here, on either frame.
+    // of growing: no height here, on either frame. The air is split between a
+    // padding and a margin so the clip stands off the chips, and the reduced
+    // branch has to land BOTH halves or the room the ring needs is only there
+    // for a reader who did not ask for less motion.
     await renderRows([task("a", { when: TODAY })], { expanded: true });
     const chips = renders.find(
       (render) => String(render.props.className) === "brain-task-chips",
     );
-    expect(chips?.motion.initial).toMatchObject({
-      marginTop: CHIP_ROW_AIR,
-      marginBottom: CHIP_ROW_AIR,
-    });
-    expect(chips?.motion.animate).toMatchObject({
-      marginTop: CHIP_ROW_AIR,
-      marginBottom: CHIP_ROW_AIR,
-    });
+    const rest = {
+      paddingTop: CHIP_ROW_RING,
+      paddingBottom: CHIP_ROW_RING,
+      marginTop: CHIP_ROW_AIR - CHIP_ROW_RING,
+      marginBottom: CHIP_ROW_AIR - CHIP_ROW_RING,
+    };
+    expect(chips?.motion.initial).toMatchObject(rest);
+    expect(chips?.motion.animate).toMatchObject(rest);
     expect(chips?.motion.initial).not.toHaveProperty("height");
     expect(chips?.motion.animate).not.toHaveProperty("height");
   });

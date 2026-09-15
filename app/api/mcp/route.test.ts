@@ -95,6 +95,7 @@ import {
 } from "@/lib/store";
 import { hashTaskText, parseTaskLines } from "@/lib/tasks/task-lines";
 import { toolScopeOf } from "./tool-kit";
+import { dayInZone, flushTaskActivityForTests } from "./task-tools";
 import { readMcpActivity } from "@/lib/mcp/activity-log";
 import { readAgentSends, recordAgentSend } from "@/lib/mcp/agent-sends";
 import { writeAgentSettings } from "@/lib/mcp/agent-settings";
@@ -1027,9 +1028,10 @@ describe("the task write tools", () => {
   const TODAY = "2026-09-14";
   const TASK_ID = "task-alpha";
   const PAGE_ID = "page-one";
-  // One fixed directory, the way `lib/mcp/activity-log.test.ts` takes one, so
-  // the line a write leaves behind is read back rather than mocked away.
-  const stateRoot = path.join(os.tmpdir(), "brain-mcp-task-tools-test");
+  // A fresh directory per test, the way `save_mail_attachment` below takes
+  // one: a fixed path collides across concurrent vitest processes, which is
+  // what made `lib/mcp/activity-log.test.ts` flaky under parallel load.
+  let stateRoot: string;
 
   const view = (overrides: Record<string, unknown> = {}) => ({
     id: TASK_ID,
@@ -1049,7 +1051,9 @@ describe("the task write tools", () => {
   };
 
   beforeEach(async () => {
-    await fs.rm(stateRoot, { recursive: true, force: true });
+    stateRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "brain-mcp-task-tools-"),
+    );
     mocks.getStore.mockReset();
     mocks.readTimeZone.mockReset();
     mocks.readTimeZone.mockResolvedValue(null);
@@ -1068,6 +1072,11 @@ describe("the task write tools", () => {
   });
 
   afterEach(async () => {
+    // The activity line is fire and forget, so a write a test triggered can
+    // still be in flight when the next test's beforeEach points the state
+    // directory somewhere else. Wait for it to land in this test's own
+    // directory before that directory goes away.
+    await flushTaskActivityForTests();
     vi.unstubAllEnvs();
     await fs.rm(stateRoot, { recursive: true, force: true });
   });
@@ -1547,6 +1556,23 @@ describe("the task write tools", () => {
     expect(mocks.getStore).not.toHaveBeenCalled();
   });
 
+  it("refuses a bad page before the store, named the way list_tasks names it", async () => {
+    // list_tasks answers `bad_page` for the same malformed id, and
+    // promote_task_line used to answer `bad_id` for it: one mistake, one name.
+    mocks.getStore.mockReset();
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "promote_task_line",
+        { page: "../escape", line: 0 },
+        740,
+      ),
+    );
+
+    expect(payload).toEqual({ error: "bad_page" });
+    expect(mocks.getStore).not.toHaveBeenCalled();
+  });
+
   it("writes one activity line per write, carrying ids and no title", async () => {
     const createTask = vi.fn().mockResolvedValue(view());
     mocks.getStore.mockResolvedValue({
@@ -1560,10 +1586,14 @@ describe("the task write tools", () => {
       deleteTask: vi.fn().mockRejectedValue(new NotFoundError("task-missing")),
     });
 
+    // The append is fire and forget, and two calls' lines race unless a test
+    // waits for the first to land before firing the second.
     await toolPayload(
       await callTool("promote_task_line", { page: PAGE_ID, line: 0 }, 727),
     );
+    await flushTaskActivityForTests();
     await toolPayload(await callTool("delete_task", { id: "task-missing" }, 728));
+    await flushTaskActivityForTests();
 
     const entries = await readMcpActivity(10);
     expect(entries).toHaveLength(2);
@@ -1581,6 +1611,125 @@ describe("the task write tools", () => {
     });
     expect(JSON.stringify(entries)).not.toContain("Water the plants");
     expect(JSON.stringify(entries)).not.toContain("water the plants");
+  });
+
+  it("carries the changed fields on update_task's activity line, joined when several", async () => {
+    const updateTask = vi.fn().mockResolvedValue(view());
+    mocks.getStore.mockResolvedValue({ updateTask });
+
+    // Each write's line is fire and forget, so the two calls' lines race
+    // unless a test waits for the first to land before firing the second.
+    await toolPayload(
+      await callTool("update_task", { id: TASK_ID, title: "Water them" }, 741),
+    );
+    await flushTaskActivityForTests();
+    await toolPayload(
+      await callTool(
+        "update_task",
+        { id: TASK_ID, when: TODAY, time: "14:30" },
+        742,
+      ),
+    );
+    await flushTaskActivityForTests();
+
+    const entries = await readMcpActivity(2);
+    expect(entries).toHaveLength(2);
+    // Newest first: the second call's two fields, in the schema's own order.
+    expect(entries[0]).toMatchObject({
+      tool: "update_task",
+      change: "when+time",
+    });
+    expect(entries[1]).toMatchObject({ tool: "update_task", change: "title" });
+  });
+
+  it("answers complete_task's list from the owner's zone, never a bare UTC 0", async () => {
+    // A Dubai completion at 01:30 local is 21:30Z the day before. A bare UTC
+    // 0 would read that instant as the day before and answer logbook for a
+    // task the owner's own screen still shows in Today.
+    mocks.readTimeZone.mockResolvedValue("Asia/Dubai");
+    const updateTask = vi.fn().mockResolvedValue(
+      view({ when: TODAY, done: true, doneAt: "2026-09-13T21:30:00.000Z" }),
+    );
+    mocks.getStore.mockResolvedValue({ updateTask });
+
+    const { payload } = await toolPayload(
+      await callTool("complete_task", { id: TASK_ID, today: TODAY }, 743),
+    );
+
+    expect(payload.list).toBe("today");
+  });
+
+  it("answers the moved read refusals with isError, as the doc row promises", async () => {
+    const badToday = await toolPayload(
+      await callTool("list_tasks", { list: "today", today: "2026-9-1" }, 744),
+    );
+    expect(badToday.payload).toEqual({ error: "bad_today" });
+    expect(badToday.isError).toBe(true);
+
+    const badOffset = await toolPayload(
+      await callTool("list_tasks", { list: "logbook", today: TODAY }, 745),
+    );
+    expect(badOffset.payload).toEqual({ error: "bad_offset" });
+    expect(badOffset.isError).toBe(true);
+
+    const badId = await toolPayload(
+      await callTool("get_task", { id: "../escape" }, 746),
+    );
+    expect(badId.payload).toEqual({ error: "bad_id" });
+    expect(badId.isError).toBe(true);
+
+    mocks.getStore.mockResolvedValue({
+      getTask: vi.fn().mockReturnValue(null),
+    });
+    const notFound = await toolPayload(
+      await callTool("get_task", { id: "task-missing" }, 747),
+    );
+    expect(notFound.payload).toEqual({ error: "not_found" });
+    expect(notFound.isError).toBe(true);
+
+    mocks.getStore.mockResolvedValue({
+      getTask: vi.fn().mockReturnValue(view({ page: PAGE_ID })),
+      taskPageTrashed: vi.fn().mockReturnValue(true),
+    });
+    const trashed = await toolPayload(
+      await callTool("get_task", { id: TASK_ID }, 748),
+    );
+    expect(trashed.payload).toEqual({ error: "page_trashed" });
+    expect(trashed.isError).toBe(true);
+  });
+
+  it("computes dayInZone's day and offset across DST, a half-hour zone and the antimeridian", () => {
+    const cases: Array<[string, string, string, number]> = [
+      // Berlin's spring-forward: the hour that does not exist splits one
+      // instant from the next into two offsets a minute apart.
+      ["Europe/Berlin", "2026-03-29T00:30:00.000Z", "2026-03-29", 60],
+      ["Europe/Berlin", "2026-03-29T01:30:00.000Z", "2026-03-29", 120],
+      // Berlin's fall-back: two different instants both read as local 02:30,
+      // told apart only by their offset.
+      ["Europe/Berlin", "2026-10-25T00:30:00.000Z", "2026-10-25", 120],
+      ["Europe/Berlin", "2026-10-25T01:30:00.000Z", "2026-10-25", 60],
+      // The Los Angeles local-midnight boundary, in both seasons.
+      ["America/Los_Angeles", "2026-06-15T06:59:59.000Z", "2026-06-14", -420],
+      ["America/Los_Angeles", "2026-06-15T07:00:00.000Z", "2026-06-15", -420],
+      ["America/Los_Angeles", "2026-01-15T07:59:00.000Z", "2026-01-14", -480],
+      ["America/Los_Angeles", "2026-01-15T08:00:00.000Z", "2026-01-15", -480],
+      // A half-hour zone, and the far side of the date line at exactly
+      // MAX_OFFSET_MINUTES.
+      ["Asia/Kolkata", "2026-06-15T18:35:00.000Z", "2026-06-16", 330],
+      ["Pacific/Kiritimati", "2026-06-15T10:00:00.000Z", "2026-06-16", 840],
+    ];
+    for (const [zone, instant, today, offsetMinutes] of cases) {
+      expect(dayInZone(zone, new Date(instant))).toEqual({
+        today,
+        offsetMinutes,
+      });
+    }
+  });
+
+  it("answers null for a zone the platform cannot read", () => {
+    expect(
+      dayInZone("Not/AZone", new Date("2026-06-15T10:00:00.000Z")),
+    ).toBeNull();
   });
 
   it.each(TASK_WRITE_TOOLS)(

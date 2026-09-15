@@ -123,10 +123,13 @@ function taskRefusal(error: unknown): TaskAnswer {
 }
 
 /** The ids one write touched. A tool fills them in as it learns them, so a
- *  create logs the record it minted and a refusal logs only what it knew. */
+ *  create logs the record it minted and a refusal logs only what it knew.
+ *  `change` is `update_task`'s own: the field names its patch carried, in the
+ *  schema's own order, joined with "+". */
 interface TaskMarks {
   task?: string;
   page?: string;
+  change?: string;
 }
 
 async function logTaskWrite(
@@ -150,17 +153,37 @@ async function logTaskWrite(
       tool,
       ...(marks.task !== undefined ? { task: marks.task } : {}),
       ...(marks.page !== undefined ? { page: marks.page } : {}),
+      ...(marks.change !== undefined ? { change: marks.change } : {}),
       outcome,
     });
-  } catch {
+  } catch (cause) {
     // The write already landed. A log line that cannot be appended must not
     // turn a task that exists into a transport error, because the agent would
-    // retry it and make a second one.
+    // retry it and make a second one. Logged so a dropped line is at least
+    // visible on the server's own console.
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    console.warn(`[brain/mcp] task activity line dropped: ${reason}`);
   }
 }
 
+/** The log writes currently in flight. A write reads the state directory from
+ *  the environment on its own turn, well after the tool's answer went out, so
+ *  a test that swaps the directory between two writes needs a way to wait for
+ *  the earlier one to land first. Nothing outside a test reads this. */
+const pendingActivityWrites = new Set<Promise<void>>();
+
+/** Waits for every task activity line in flight to land. A test's own
+ *  `afterEach` calls this before it tears down the state directory the write
+ *  reads, so a write a test fired is never orphaned into the next test's
+ *  fresh one. */
+export async function flushTaskActivityForTests(): Promise<void> {
+  await Promise.all(pendingActivityWrites);
+}
+
 /** Every task write runs through here: the scope check, the store's refusals
- *  turned into readable ones, and one activity line whatever the outcome. */
+ *  turned into readable ones, and one activity line whatever the outcome. The
+ *  line is fire and forget: an agent waiting on a task write is not made to
+ *  wait on the log append behind it too. */
 async function taskWrite(
   extra: ToolExtra,
   tool: string,
@@ -174,7 +197,9 @@ async function taskWrite(
   } catch (error) {
     result = taskRefusal(error);
   }
-  await logTaskWrite(extra, tool, marks, result.outcome);
+  const write = logTaskWrite(extra, tool, marks, result.outcome);
+  pendingActivityWrites.add(write);
+  void write.finally(() => pendingActivityWrites.delete(write));
   return result.answer;
 }
 
@@ -182,7 +207,7 @@ async function taskWrite(
  *  captured. `Intl` is the whole calendar: a zone's offset moves twice a year,
  *  so a stored number would be wrong for half of it. Null for a zone the
  *  platform cannot read, which is the same answer as no zone at all. */
-function dayInZone(
+export function dayInZone(
   zone: string,
   now: Date,
 ): { today: string; offsetMinutes: number } | null {
@@ -306,7 +331,7 @@ export function registerTaskTools(server: McpToolServer): void {
         return refusal("name one list, or one page", "missing_list");
       }
       if (today !== undefined && !TASK_DAY_RE.test(today)) {
-        return text({ error: "bad_today" });
+        return refusal("bad_today");
       }
       if (list === "inbox") {
         const store = await getStore();
@@ -323,7 +348,7 @@ export function registerTaskTools(server: McpToolServer): void {
       // `doneAt` is one UTC instant and the Logbook day it falls on is the
       // caller's, so the logbook cannot be answered without their offset.
       if (list === "logbook" && day.offsetMinutes === undefined) {
-        return text({ error: "bad_offset" });
+        return refusal("bad_offset");
       }
       const store = await getStore();
       // THE LOGBOOK IS ENTRIES, NOT RECORDS. A repeating task finished on
@@ -355,14 +380,14 @@ export function registerTaskTools(server: McpToolServer): void {
     "Read one task record, including whether its note line was removed and which page it is linked to.",
     { id: z.string() },
     async ({ id }) => {
-      if (!TASK_ID_RE.test(id)) return text({ error: "bad_id" });
+      if (!TASK_ID_RE.test(id)) return refusal("bad_id");
       const store = await getStore();
       const task = store.getTask(id);
-      if (!task) return text({ error: "not_found" });
+      if (!task) return refusal("not_found");
       // A trashed page's tasks are hidden from every list, so reading one by
       // id answers the same way rather than handing back a row the surface
       // would never show.
-      if (store.taskPageTrashed(id)) return text({ error: "page_trashed" });
+      if (store.taskPageTrashed(id)) return refusal("page_trashed");
       return text({ task });
     },
   );
@@ -407,7 +432,7 @@ export function registerTaskTools(server: McpToolServer): void {
     "promote_task_line",
     {
       description:
-        "Turn one checkbox line of a note into a task linked to that line. `line` is a zero-based markdown line number, or the line's own text with runs of whitespace collapsed. The note's category is inherited unless one is named here. The line keeps owning the task's title and its completion.",
+        "Turn one checkbox line of a note into a task linked to that line. `line` is a zero-based markdown line number, or the line's own text with runs of whitespace collapsed. The note's category is inherited unless one is named here. The line keeps owning the task's title and its completion. Takes no `rev`: the anchor is built from the note as read a moment before the record is made, the same window the editor's own promote gesture has, and a later edit to the line is repaired on the next reconcile.",
       inputSchema: z
         .object({
           page: z.string(),
@@ -425,7 +450,7 @@ export function registerTaskTools(server: McpToolServer): void {
     },
     async ({ page, line, when, time, evening, deadline, category }, extra) =>
       taskWrite(extra, "promote_task_line", async (marks) => {
-        if (!TASK_ID_RE.test(page)) return no("bad_id", "bad_id");
+        if (!TASK_ID_RE.test(page)) return no("bad_page", "bad_page");
         marks.page = page;
         const store = await getStore();
         // THE SAME ANCHOR THE EDITOR BUILDS, from the same function over the
@@ -465,6 +490,7 @@ export function registerTaskTools(server: McpToolServer): void {
         // `hashTaskText` is not called here: `parseTaskLines` already put the
         // hash on the line, and taking it again would be a second place that
         // could disagree about which bytes were hashed.
+        const inheritedCategory = categoryOf(note.meta);
         const task = await store.createTask({
           title: target.normalized,
           page,
@@ -483,8 +509,8 @@ export function registerTaskTools(server: McpToolServer): void {
           // to land in one place.
           ...(category !== undefined
             ? { category }
-            : categoryOf(note.meta) !== undefined
-              ? { category: categoryOf(note.meta) as string }
+            : inheritedCategory !== undefined
+              ? { category: inheritedCategory }
               : {}),
           src: "claude",
         });
@@ -529,6 +555,13 @@ export function registerTaskTools(server: McpToolServer): void {
           ...(repeat !== undefined ? { repeat } : {}),
           src: "claude",
         };
+        // The field names the patch carries, in the schema's own order
+        // (`Object.keys` walks a string-keyed object in insertion order), so
+        // a person scanning the log can tell a retitle from a reschedule
+        // without opening the record.
+        marks.change = Object.keys(patch)
+          .filter((key) => key !== "src")
+          .join("+");
         return ok({ task: await store.updateTask(id, patch) });
       }),
   );
@@ -560,7 +593,11 @@ export function registerTaskTools(server: McpToolServer): void {
           ...(expectedWhen !== undefined ? { expectedWhen } : {}),
           src: "claude",
         });
-        return ok({ task, list: listOf(task, today, offsetMinutes ?? 0) });
+        // The caller's own offset when it gave one, else the owner's zone
+        // through the same fallback list_tasks uses, never a bare UTC 0: a
+        // completion near local midnight would read the wrong day under it.
+        const day = await callerDay(today, offsetMinutes);
+        return ok({ task, list: listOf(task, today, day.offsetMinutes) });
       }),
   );
 
@@ -589,7 +626,11 @@ export function registerTaskTools(server: McpToolServer): void {
           today,
           src: "claude",
         });
-        return ok({ task, list: listOf(task, today, offsetMinutes ?? 0) });
+        // `listOf` does not read the offset once `done` is false, but the
+        // same fallback as complete_task keeps the two answers derived one
+        // way rather than two.
+        const day = await callerDay(today, offsetMinutes);
+        return ok({ task, list: listOf(task, today, day.offsetMinutes) });
       }),
   );
 

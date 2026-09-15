@@ -103,6 +103,7 @@ import {
   TaskConflictError,
   TaskValidationError,
 } from "@/lib/store";
+import { LEGACY_BEARER_SCOPES } from "@/lib/oauth/config";
 import { hashTaskText, parseTaskLines } from "@/lib/tasks/task-lines";
 import { toolScopeOf } from "./tool-kit";
 import { dayInZone, flushTaskActivityForTests } from "./task-tools";
@@ -309,6 +310,54 @@ describe("Notion MCP route validation", () => {
       mail: "authorized",
       mailSend: "authorized",
     });
+  });
+
+  /** THE TWO BEARERS, SIDE BY SIDE, THROUGH THE ONE GATE.
+   *
+   *  The scope set comes from `LEGACY_BEARER_SCOPES` rather than from words
+   *  typed here, so a mail name appended to that list breaks this pin instead
+   *  of quietly opening the mailbox to an env var. The owner grant beneath it
+   *  is the path that is meant to reach mail: a consent screen was shown, a
+   *  row stands under Connected apps, and Revoke ends it. */
+  it("refuses a mail tool to the legacy bearer and allows it to an owner grant", async () => {
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "test-machine-token",
+      clientId: "brain-legacy-bearer",
+      scopes: [...LEGACY_BEARER_SCOPES],
+      resource: new URL("https://brain.example.test/api/mcp"),
+      extra: { legacy: true },
+    });
+    const refused = await callTool("list_mail_accounts", {}, 470);
+    expect(refused.status).toBe(403);
+    expect(refused.headers.get("WWW-Authenticate")).toContain(
+      'scope="brain:mail"',
+    );
+    expect(mocks.createBrainMailClient).not.toHaveBeenCalled();
+
+    // And the same bearer's own connection report says so rather than
+    // advertising a mailbox it cannot open.
+    mocks.getStore.mockResolvedValue({ getTree: vi.fn().mockReturnValue([]) });
+    const { payload } = await toolPayload(
+      await callTool("connection_check", {}, 471),
+    );
+    expect(payload.access).toMatchObject({
+      write: "authorized",
+      import: "authorized",
+      mail: "not_authorized",
+      mailSend: "not_authorized",
+    });
+    expect(payload.scopes).toEqual([...LEGACY_BEARER_SCOPES]);
+
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "owner-grant-token",
+      clientId: "owner-grant-client",
+      scopes: ["brain:read", "brain:write", "brain:import", "brain:mail", "brain:mail:send"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+    mocks.createBrainMailClient.mockReturnValue(createMailClientFake().client);
+    const allowed = await toolPayload(await callTool("list_mail_accounts", {}, 472));
+    expect(allowed.isError).toBe(false);
+    expect(allowed.payload.accounts).toBeInstanceOf(Array);
   });
 
   it("returns an import-specific HTTP challenge before a Notion tool runs", async () => {

@@ -23,6 +23,22 @@ export const MCP_CONNECTION_SCOPES = [
   "brain:mail:send",
 ] as const;
 
+// WHAT THE STATIC `MCP_TOKEN` BEARER REACHES, SPELLED OUT RATHER THAN DERIVED.
+//
+// The legacy bearer is the one credential the owner never approved on a
+// screen: it comes out of an env var, owns no row under Connected apps, has no
+// Revoke button and no expiry, so taking it back means editing
+// `/etc/brain/brain.env` and restarting. Building its set from `MCP_SCOPES`
+// meant every name appended to that list widened it in silence, which is how
+// 0.11.0 would have handed a machine token mail read and mail send in the
+// owner's name off an upgrade alone. This is the pre-0.11 set and it stays
+// that: mail is reached through a grant the consent screen showed.
+export const LEGACY_BEARER_SCOPES = [
+  "brain:read",
+  "brain:write",
+  "brain:import",
+] as const;
+
 export type McpScope = (typeof MCP_SCOPES)[number];
 
 export const MCP_SCOPE_LABELS: Record<McpScope, string> = {

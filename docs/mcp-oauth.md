@@ -44,7 +44,12 @@ discover the remaining endpoints automatically.
   `brain:import` as a second barrier in front of the import surface. The same
   widening now reaches the two mail scopes, which is deliberate: an owner
   connection made before mail existed gets the mail tools on upgrade without a
-  second consent screen, and a read-only grant still gets neither.
+  second consent screen, and a read-only grant still gets neither. The widening
+  is a rule about **grants**, and an OAuth grant is a screen the owner
+  approved, a row under Connected apps and a Revoke button. The static
+  `MCP_TOKEN` bearer is none of those and is not widened: it keeps
+  `LEGACY_BEARER_SCOPES` (`brain:read`, `brain:write`, `brain:import`) and
+  reaches no mail tool.
 - Settings lists active connected apps by grant. Revoking one grant immediately
   invalidates its access and refresh tokens. A recognized valid token returns
   success only after the revocation state is durably written; transient state
@@ -108,9 +113,19 @@ mutates production nginx or Cloudflare configuration.
 - Token exchange: `/oauth/token`
 - Revocation: `/oauth/revoke`
 
-The older `MCP_TOKEN` remains a full-access compatibility credential during the
-migration. It is not returned by OAuth and should be retired only after every
-real client has completed an OAuth connect/read/write check.
+The older `MCP_TOKEN` remains a notes compatibility credential during the
+migration: `brain:read`, `brain:write` and `brain:import`, the set it held
+before 0.11.0, spelled out as `LEGACY_BEARER_SCOPES` in `lib/oauth/config.ts`.
+**It cannot read mail and it cannot send mail.** A mail tool answers it HTTP
+`403` with `scope="brain:mail"`, and its own `connection_check` reports
+`mail: "not_authorized"`. The two mail scopes are reached only through an OAuth
+grant the owner approved on the consent screen, which owns a row under
+Settings → Connections and a Revoke button; this static bearer owns neither, so
+widening it would be access nobody agreed to and nobody could take back short
+of editing `/etc/brain/brain.env` and restarting. To give an agent mail,
+connect it over OAuth and approve "Read and sort your mail", or "Send mail as
+you" as well. `MCP_TOKEN` is not returned by OAuth and should be retired only
+after every real client has completed an OAuth connect/read/write check.
 
 ## Rollout check
 
@@ -133,8 +148,11 @@ real client has completed an OAuth connect/read/write check.
 6. Rotate one test refresh token repeatedly, replay an older generation, and
    confirm only that app is revoked while a second app still refreshes.
 7. Restart `brain.service`; discovery, an unreplayed existing refresh, and
-   revocation must still work. The legacy token remains unchanged during this
-   rollout.
+   revocation must still work. The legacy token keeps the notes scopes it had
+   before this rollout and gains neither mail scope: confirm that
+   `list_mail_accounts` on `MCP_TOKEN` answers HTTP `403` with exact
+   `scope="brain:mail"`, and that its `connection_check` reports
+   `mail: "not_authorized"` and `mailSend: "not_authorized"`.
 8. Connect read-only again and confirm the bootstrap challenge advertises
    `scope="brain:read brain:write brain:import brain:mail brain:mail:send"`,
    that a mail tool returns HTTP `403` with exact `scope="brain:mail"`, and

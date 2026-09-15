@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -318,44 +319,101 @@ describe("the MCP activity log", () => {
     expect(Buffer.byteLength(line, "utf8")).toBeLessThan(MCP_ACTIVITY_MAX_LINE_BYTES);
   });
 
-  it(
-    "keeps an append near the line cap close to the cost of an append on an empty log",
-    async () => {
-      // A coarse assertion, not a benchmark: before the cached count this
-      // call re-read and re-parsed nearly the whole file, measured at 0.31ms
-      // empty against 7.96ms at 1999 lines, about 25x. The cache keeps every
-      // append a single O_APPEND write regardless of where the log stands.
-      const emptyStart = performance.now();
-      await appendMcpActivity({
+  it("reads the whole file only when a stat says it changed", async () => {
+    // The cost this cache exists to remove, pinned by counting reads rather
+    // than by timing one: the old code read and re-parsed the whole file on
+    // every append, which a clock on a fast local disk does not separate
+    // from a single O_APPEND write. A read is either made or it is not.
+    const readFile = vi.spyOn(fs, "readFile");
+    const write = (task: string) =>
+      appendMcpActivity({
         at: "2026-09-14T09:00:00.000Z",
         client: "Claude",
         tool: "get_task",
-        task: "task-0",
+        task,
         outcome: "ok",
       });
-      const emptyMs = performance.now() - emptyStart;
+    try {
+      await write("task-0");
+      // One read on the first touch, to count what was already there.
+      expect(readFile).toHaveBeenCalledTimes(1);
 
-      for (let i = 1; i < MCP_ACTIVITY_MAX_LINES - 1; i += 1) {
-        await appendMcpActivity({
+      readFile.mockClear();
+      for (let i = 1; i < 50; i += 1) await write(`task-${i}`);
+      expect(readFile).not.toHaveBeenCalled();
+
+      // A line this process did not write moves the file's size, and the
+      // next append's stat is what notices. It costs one read, once.
+      await fs.appendFile(
+        path.join(root, MCP_ACTIVITY_FILE),
+        JSON.stringify({
           at: "2026-09-14T09:00:00.000Z",
           client: "Claude",
           tool: "get_task",
-          task: `task-${i}`,
+          task: "task-sibling",
+          outcome: "ok",
+        }) + "\n",
+        "utf8",
+      );
+      readFile.mockClear();
+      await write("task-after");
+      expect(readFile).toHaveBeenCalledTimes(1);
+
+      readFile.mockClear();
+      await write("task-later");
+      expect(readFile).not.toHaveBeenCalled();
+    } finally {
+      readFile.mockRestore();
+    }
+  });
+
+  it(
+    "trims at the cap after a second process appended to the same file",
+    async () => {
+      // Two OS processes on one state directory is the case the cached count
+      // used to sail past: neither ever saw the other's lines, so neither
+      // reached the cap and the file grew without a bound. The child below
+      // writes the way an append does, through the same file, and this
+      // process has a warm cache before it runs.
+      const write = (task: string) =>
+        appendMcpActivity({
+          at: "2026-09-14T09:00:00.000Z",
+          client: "Claude",
+          tool: "get_task",
+          task,
           outcome: "ok",
         });
-      }
+      await write("task-first");
 
-      const lateStart = performance.now();
-      await appendMcpActivity({
-        at: "2026-09-14T09:00:00.000Z",
-        client: "Claude",
-        tool: "get_task",
-        task: "task-late",
-        outcome: "ok",
-      });
-      const lateMs = performance.now() - lateStart;
+      const file = path.join(root, MCP_ACTIVITY_FILE);
+      execFileSync(process.execPath, [
+        "-e",
+        [
+          "const fs = require('node:fs');",
+          "const [file, count] = process.argv.slice(1);",
+          "let out = '';",
+          "for (let i = 0; i < Number(count); i += 1) {",
+          "  out += JSON.stringify({",
+          "    at: '2026-09-14T09:00:00.000Z',",
+          "    client: 'Claude',",
+          "    tool: 'get_task',",
+          "    task: 'task-sibling-' + i,",
+          "    outcome: 'ok',",
+          "  }) + '\\n';",
+          "}",
+          "fs.appendFileSync(file, out);",
+        ].join("\n"),
+        file,
+        String(MCP_ACTIVITY_MAX_LINES + 4),
+      ]);
 
-      expect(lateMs).toBeLessThan(Math.max(emptyMs * 2, 5));
+      await write("task-last");
+
+      const raw = await fs.readFile(file, "utf8");
+      expect(raw.trimEnd().split("\n")).toHaveLength(MCP_ACTIVITY_MAX_LINES);
+      expect(raw).not.toContain("task-first");
+      const entries = await readMcpActivity(1);
+      expect(entries[0].task).toBe("task-last");
     },
     15_000,
   );

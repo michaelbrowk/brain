@@ -248,25 +248,54 @@ function enqueue<T>(work: () => Promise<T>): Promise<T> {
   return run;
 }
 
-interface DirectoryState {
+interface DirectoryCounts {
   lines: number;
   bytes: number;
 }
+
+/** What the file looked like from outside at the moment this process last
+ *  left it: the two numbers a `stat` answers. */
+interface FileStamp {
+  size: number;
+  mtimeMs: number;
+}
+
+type DirectoryState = DirectoryCounts & FileStamp;
 
 /** The cost `appendMcpActivity` used to pay on every call: a full read, a
  *  full parse and a full re-count, which is why a call at line 1999 cost 8ms
  *  against 0.3ms at an empty log. Keyed by directory because a test
  *  redirects it per run and a production process never does; one process
- *  never holds more than a couple of entries either way. Populated by the
- *  first append after this process starts, so a file another process wrote
- *  to, or a test seeded directly, is still counted correctly the first time
- *  this process touches it. */
+ *  never holds more than a couple of entries either way.
+ *
+ *  The counts are this process's own belief, and `size` and `mtimeMs` are
+ *  what makes that belief checkable. Every append stats the file first: two
+ *  numbers that still match means nothing else has written since, and the
+ *  cached counts stand. One that has moved means a sibling process on the
+ *  same state directory appended, and the counts are built again from the
+ *  file. Two `pnpm dev` instances under one uid share a state directory
+ *  (`state-dir.ts`), so this is reachable outside a test, and without the
+ *  check neither process would ever see the cap. */
 const directoryState = new Map<string, DirectoryState>();
 
-function stateFromLines(lines: readonly string[]): DirectoryState {
+function countsFromLines(lines: readonly string[]): DirectoryCounts {
   let bytes = 0;
   for (const raw of lines) bytes += Buffer.byteLength(raw, "utf8") + 1;
   return { lines: lines.length, bytes };
+}
+
+/** The file as it stands, or the zeroes that stand for "nothing this cache
+ *  could be holding": a log nobody has written yet, and a file this process
+ *  cannot stat, both send the append down the counting path. */
+async function stampOf(dir: string): Promise<FileStamp> {
+  try {
+    const stats = await fs.stat(
+      /* turbopackIgnore: true */ path.join(dir, MCP_ACTIVITY_FILE),
+    );
+    return { size: stats.size, mtimeMs: stats.mtimeMs };
+  } catch {
+    return { size: 0, mtimeMs: 0 };
+  }
 }
 
 export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> {
@@ -274,14 +303,22 @@ export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> 
   const line = JSON.stringify(closedEntry(entry));
   const lineBytes = Buffer.byteLength(line, "utf8") + 1;
   await enqueue(async () => {
+    // Taken before the read below, never after: a stamp older than the lines
+    // this turn counted only costs one more read on the next append, while a
+    // stamp newer than them would hide a write that landed in between.
+    const stamp = await stampOf(dir);
     let state = directoryState.get(dir);
     // A line this process cannot parse back never reaches `readMcpActivity`,
     // so it is not one of the log's slots; kept only for the rare rewrite
     // below, which drops it rather than carrying it forward forever.
     let validLines: string[] | null = null;
-    if (state === undefined) {
+    if (
+      state === undefined ||
+      state.size !== stamp.size ||
+      state.mtimeMs !== stamp.mtimeMs
+    ) {
       validLines = (await readLines(dir)).filter((raw) => parseLine(raw) !== null);
-      state = stateFromLines(validLines);
+      state = { ...countsFromLines(validLines), ...stamp };
       directoryState.set(dir, state);
     }
 
@@ -293,13 +330,19 @@ export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> 
       }
       validLines.push(line);
       let trimmed = validLines.slice(-MCP_ACTIVITY_MAX_LINES);
-      let trimmedState = stateFromLines(trimmed);
-      while (trimmed.length > 0 && trimmedState.bytes > MCP_ACTIVITY_MAX_FILE_BYTES) {
+      let trimmedCounts = countsFromLines(trimmed);
+      while (trimmed.length > 0 && trimmedCounts.bytes > MCP_ACTIVITY_MAX_FILE_BYTES) {
         trimmed = trimmed.slice(1);
-        trimmedState = stateFromLines(trimmed);
+        trimmedCounts = countsFromLines(trimmed);
       }
       await rewrite(dir, trimmed);
-      directoryState.set(dir, trimmedState);
+      // A rewrite replaces the file, so its size is the bytes just counted
+      // and only the mtime has to be asked for.
+      directoryState.set(dir, {
+        ...trimmedCounts,
+        size: trimmedCounts.bytes,
+        mtimeMs: (await stampOf(dir)).mtimeMs,
+      });
       return;
     }
 
@@ -307,8 +350,8 @@ export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> 
     // crash that loses the last few lines, or leaves half of one behind, costs
     // a record of what happened and nothing a person wrote. `readMcpActivity`
     // drops a line it cannot parse, so a torn tail reads as absent. Bounded
-    // and O(1) in the file's size: no read happens on this path, only the
-    // one cached count and byte total, updated below.
+    // and O(1) in the file's size: this path reads none of it, only the two
+    // stats around the write and the cached counts updated below.
     await fs.mkdir(/* turbopackIgnore: true */ dir, { recursive: true, mode: 0o700 });
     const file = path.join(dir, MCP_ACTIVITY_FILE);
     const handle = await fs.open(/* turbopackIgnore: true */ file, "a", 0o600);
@@ -319,9 +362,19 @@ export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> 
     }
     // The open mode above applies only when this call created the file, and it
     // is still cut by the umask. Set it either way, as every state writer here
-    // does.
+    // does. A chmod moves the ctime and leaves the mtime alone, so the stamp
+    // read after it is still the one this append landed on.
     await fs.chmod(/* turbopackIgnore: true */ file, 0o600);
-    directoryState.set(dir, { lines: state.lines + 1, bytes: state.bytes + lineBytes });
+    // The size is computed rather than asked for: what the stat at the top of
+    // this turn saw, plus the line just written. A sibling process that wrote
+    // in between leaves the real file bigger than that, which is exactly the
+    // mismatch the next append reads and counts again on.
+    directoryState.set(dir, {
+      lines: state.lines + 1,
+      bytes: state.bytes + lineBytes,
+      size: stamp.size + lineBytes,
+      mtimeMs: (await stampOf(dir)).mtimeMs,
+    });
   });
 }
 
@@ -341,6 +394,11 @@ export async function clearMcpActivity(): Promise<void> {
   const dir = mcpStateDirectory();
   await enqueue(async () => {
     await rewrite(dir, []);
-    directoryState.set(dir, { lines: 0, bytes: 0 });
+    directoryState.set(dir, {
+      lines: 0,
+      bytes: 0,
+      size: 0,
+      mtimeMs: (await stampOf(dir)).mtimeMs,
+    });
   });
 }

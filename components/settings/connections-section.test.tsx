@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 // The section a person opens after handing an agent their mail: what each
-// grant can actually do, the two switches that narrow it without revoking
+// grant can reach, the two switches that narrow it without revoking
 // anything, and the log of what agents changed.
 
 import { act } from "react";
@@ -24,7 +24,7 @@ let agentWriteFails: boolean;
 let activityLoadFails: boolean;
 /** Set by a test that wants the write to answer something other than what it
  *  was sent, so an "adopts the echo" test can tell that apart from an
- *  "adopts what it optimistically set" one — the two look identical when the
+ *  "adopts what it optimistically set" one, which look identical when the
  *  route always echoes the request body back unchanged. */
 let agentEchoOverride: Partial<{ tellRecipients: boolean; allowSending: boolean }> | null;
 

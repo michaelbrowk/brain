@@ -7,7 +7,6 @@ import {
   MCP_AGENT_SEND_MAX,
   readAgentSends,
   recordAgentSend,
-  resolveAgentSendThread,
 } from "@/lib/mcp/agent-sends";
 
 const { getSendOperation } = vi.hoisted(() => ({ getSendOperation: vi.fn() }));
@@ -64,6 +63,26 @@ beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-agent-marks-route-"));
   vi.stubEnv("BRAIN_MCP_STATE_DIR", root);
 });
+
+/** A marks file holding `count` already-resolved marks, written once. The
+ *  route reads the file it finds, so a seeded one and a made one are the same
+ *  thing to it, and a test about eviction need not pay for the writes. */
+async function seedResolvedMarks(count: number): Promise<void> {
+  const { MCP_AGENT_SENDS_FILE } = await import("@/lib/mcp/agent-sends");
+  await fs.mkdir(root, { recursive: true, mode: 0o700 });
+  await fs.writeFile(
+    path.join(root, MCP_AGENT_SENDS_FILE),
+    JSON.stringify(
+      Array.from({ length: count }, (_, index) => ({
+        operationId: `send-fresh-${index}`,
+        accountId: ACCOUNT,
+        clientName: "Claude",
+        threadId: `thread-fresh-${index}`,
+      })),
+    ) + "\n",
+    { mode: 0o600 },
+  );
+}
 
 afterEach(async () => {
   vi.unstubAllEnvs();
@@ -154,13 +173,11 @@ describe("the agent send marks route", () => {
     expect(getSendOperation).toHaveBeenCalledTimes(1);
 
     // Crowd send-old's mark out of the 200-entry file with newer, already
-    // resolved sends — the same rotation every mark gets. None of these
-    // touch getSendOperation: they arrive with a thread already on them.
-    for (let index = 0; index < MCP_AGENT_SEND_MAX; index += 1) {
-      const operationId = `send-fresh-${index}`;
-      await recordAgentSend({ operationId, accountId: ACCOUNT, clientName: "Claude" });
-      await resolveAgentSendThread(operationId, `thread-fresh-${index}`);
-    }
+    // resolved sends, the same rotation every mark gets. None of these touch
+    // getSendOperation: they arrive with a thread already on them. Seeded in
+    // one write, because this test is about what the memo does with an
+    // evicted id and not about the writer that evicts it.
+    await seedResolvedMarks(MCP_AGENT_SEND_MAX);
     expect((await readAgentSends()).some((mark) => mark.operationId === "send-old")).toBe(false);
 
     // A request today reads the file and intersects `settled` with it, so an
@@ -174,10 +191,7 @@ describe("the agent send marks route", () => {
     getSendOperation.mockClear();
     await get();
     expect(getSendOperation).toHaveBeenCalledWith("send-old", expect.anything());
-    // 400 marks written one after another, because the module serialises its
-    // writers and each one is a read, an atomic write and a chmod. Well under
-    // the default alone and over it when several suites run at once.
-  }, 20_000);
+  });
 
   it("resolves pending marks with a small concurrency, not one at a time", async () => {
     const { AGENT_MARKS_RESOLVE_CONCURRENCY } = await import("./route");
@@ -206,7 +220,7 @@ describe("the agent send marks route", () => {
     await waitFor(() => started.length === AGENT_MARKS_RESOLVE_CONCURRENCY);
     expect(started).toEqual(["send-0", "send-1", "send-2", "send-3", "send-4"]);
 
-    // A sixth only starts once a lane frees — the concurrency cap doing its
+    // A sixth only starts once a lane frees, the concurrency cap doing its
     // job rather than eight round trips firing at once.
     let released = 0;
     while (released < total) {

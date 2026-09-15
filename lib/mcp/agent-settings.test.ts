@@ -11,8 +11,10 @@ import {
 
 let root: string;
 
-beforeEach(() => {
-  root = path.join(os.tmpdir(), "brain-mcp-settings-test");
+beforeEach(async () => {
+  // A private directory per test. A fixed path is shared with every other
+  // vitest worker on the machine, which reads as this test's own state.
+  root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-settings-test-"));
   vi.stubEnv("BRAIN_MCP_STATE_DIR", root);
 });
 

@@ -21,7 +21,8 @@ export const dynamic = "force-dynamic";
  *  no Sent copy. Asked once per process, then left alone, so a caption that is
  *  not coming costs one round trip rather than one on every visit to Sent.
  *
- *  Bounded by intersecting with the ids `readAgentSends` just answered: the
+ *  Bounded by intersecting with the ids `readAgentSends` answered a moment
+ *  ago: the
  *  marks file itself is capped at 200 and rotates, but nothing else ever
  *  removed an id from here, so a long-lived process would otherwise remember
  *  every operation it had ever settled. */
@@ -35,7 +36,7 @@ const RESOLVES_PER_REQUEST = 25;
 /** How many resolves run at once. One at a time made a cold Sent open wait
  *  out up to 25 sequential round trips before the first caption landed; all
  *  25 at once would open 25 sockets on one page open. Five keeps a slow mail
- *  service off the other lanes without making a burst of it — the same
+ *  service off the other lanes without making a burst of it, the same
  *  shape `lib/push/send.ts`'s `PUSH_SEND_CONCURRENCY` uses. */
 export const AGENT_MARKS_RESOLVE_CONCURRENCY = 5;
 

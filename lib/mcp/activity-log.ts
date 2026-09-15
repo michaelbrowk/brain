@@ -336,7 +336,7 @@ export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> 
         trimmedCounts = countsFromLines(trimmed);
       }
       await rewrite(dir, trimmed);
-      // A rewrite replaces the file, so its size is the bytes just counted
+      // A rewrite replaces the file, so its size is the bytes counted above
       // and only the mtime has to be asked for.
       directoryState.set(dir, {
         ...trimmedCounts,
@@ -366,7 +366,7 @@ export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> 
     // read after it is still the one this append landed on.
     await fs.chmod(/* turbopackIgnore: true */ file, 0o600);
     // The size is computed rather than asked for: what the stat at the top of
-    // this turn saw, plus the line just written. A sibling process that wrote
+    // this turn saw, plus the line this turn wrote. A sibling process that
     // in between leaves the real file bigger than that, which is exactly the
     // mismatch the next append reads and counts again on.
     directoryState.set(dir, {

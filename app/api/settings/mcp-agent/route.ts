@@ -42,8 +42,8 @@ export async function PUT(request: Request) {
     ) {
       return NextResponse.json({ error: "bad request" }, { status: 400 });
     }
-    // A write leaves a file this process just wrote, so nothing is unreadable
-    // from here on and the screen can stop saying so.
+    // A write leaves a file this process has written, so nothing is
+    // unreadable from here on and the screen can stop saying so.
     return NextResponse.json({
       ...(await writeAgentSettings({
         tellRecipients: body.tellRecipients,

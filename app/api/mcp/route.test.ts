@@ -2620,7 +2620,7 @@ describe("the mail read tools", () => {
 describe("save_mail_attachment", () => {
   let stateRoot: string;
 
-  /** Nine bytes that really are a PDF, because the note store checks the
+  /** Nine bytes a PDF reader would accept, because the note store checks the
    *  first bytes against the type they claim and a fixture of letters would
    *  be refused for a reason this suite is not about. */
   const PDF_BYTES = new Uint8Array([
@@ -3603,10 +3603,11 @@ describe("update_mail_thread", () => {
   let centreRoot: string;
 
   beforeEach(async () => {
-    stateRoot = path.join(os.tmpdir(), "brain-mcp-triage-state-test");
-    centreRoot = path.join(os.tmpdir(), "brain-mcp-triage-centre-test");
-    await fs.rm(stateRoot, { recursive: true, force: true });
-    await fs.rm(centreRoot, { recursive: true, force: true });
+    // A private directory per test, the way the rest of this file and
+    // `lib/mcp` make theirs: a fixed path is one worker away from reading a
+    // sibling's leftovers as its own data.
+    stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-triage-state-"));
+    centreRoot = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-triage-centre-"));
     mocks.getStore.mockReset();
     mocks.createBrainMailClient.mockReset();
     mocks.verifyMcpBearerToken.mockReset();
@@ -3975,8 +3976,7 @@ describe("the mail send tools", () => {
   let stateRoot: string;
 
   beforeEach(async () => {
-    stateRoot = path.join(os.tmpdir(), "brain-mcp-send-state-test");
-    await fs.rm(stateRoot, { recursive: true, force: true });
+    stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-send-state-"));
     mocks.getStore.mockReset();
     mocks.createBrainMailClient.mockReset();
     mocks.verifyMcpBearerToken.mockReset();

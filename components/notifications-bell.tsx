@@ -36,8 +36,7 @@ import { ScrollEdge } from "./ui/scroll-edge";
 
 /** One glyph per kind. A reminder that fired wears the alarm, one that was
  *  missed wears the clock, and new mail wears the letter Mail wears
- *  everywhere else. Exported because Home's first row on a phone draws the
- *  same three kinds and a second table of them would drift. */
+ *  everywhere else. One table, read by every row the centre draws. */
 export const KIND_GLYPH: Record<NotificationRow["kind"], string> = {
   "task-reminder": "alarm-linear",
   "task-missed": "clock-circle-linear",
@@ -93,9 +92,10 @@ export function notificationHref(row: NotificationRow): string {
   return taskId === null ? row.href : `${TASKS_COLUMN}?task=${encodeURIComponent(taskId)}`;
 }
 
-/** WHAT A ROW DOES WHEN IT IS PRESSED, wherever it is drawn. The menu here and
- *  `components/hub-notifications.tsx` on a phone are two drawings of one list,
- *  and a second copy of this would be the place the two stopped agreeing. */
+/** WHAT A ROW DOES WHEN IT IS PRESSED. It is marked read, its thread is read
+ *  if it is a mail row, and the reader is taken where it points. It sits here
+ *  rather than inside the menu's own JSX because a press does three things and
+ *  a row is not the place to read them. */
 export function openNotificationRow(
   row: NotificationRow,
   onNavigate: (href: string) => void,

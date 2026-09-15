@@ -147,8 +147,8 @@ describe("a notification row's destination", () => {
       throw new Error(`unexpected request: ${url}`);
     });
     vi.stubGlobal("matchMedia", (query: string) => ({
-      // desktop viewport: the bell is in the sidebar head and Home draws no
-      // notification rows of its own
+      // desktop viewport: the bell is in the sidebar head, which is where the
+      // centre lives at every width. Home draws no notification rows.
       matches: false,
       media: query,
       onchange: null,

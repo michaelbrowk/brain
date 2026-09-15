@@ -5808,10 +5808,8 @@ export function Shell({
                 // subscribe with, so the three are one request and one
                 // optimistic commit rather than three answers to one question.
                 taskRefreshToken={taskSurfaceRevision}
-                notificationRefreshToken={notificationRevision}
                 onOpenTasks={openTasks}
                 onOpenMail={openMail}
-                onNavigateNotification={openNotification}
                 onToast={showToast}
                 pageTitleOf={pageTitleOf}
               />

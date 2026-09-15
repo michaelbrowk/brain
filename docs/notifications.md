@@ -68,9 +68,12 @@ it reads `99+`. The list opens on the menu material every other menu in Brain
 uses: the kind's glyph, the title, the body in quiet ink after it, and how long
 ago. "Mark all read" sits at the foot while anything is unread.
 
-**On a phone the centre is Home's first block**, up to three unread rows, and
-nothing at all when nothing is waiting. The six tab slots are full and stay
-full, so there is no bell to press there.
+**On a phone there is no bell and no rows.** The tab slots are full and stay
+full, so the centre is a desktop object: push is what tells a phone something
+arrived, and Mail's own block on Home names the new letters. Nothing stands
+above Home's capture field at any width. Home carried up to three unread rows
+for one release, which put the centre's list where the page's opening line
+belongs.
 
 **Opening a row marks it read and goes where it points.** A task row opens
 Tasks with that task selected. A mail row opens Mail with that thread selected,

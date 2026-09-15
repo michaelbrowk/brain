@@ -3,7 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MailSendOperation, MailSendStatus } from "@/lib/mail/message-types";
-import { readAgentSends, recordAgentSend } from "@/lib/mcp/agent-sends";
+import {
+  MCP_AGENT_SEND_MAX,
+  readAgentSends,
+  recordAgentSend,
+  resolveAgentSendThread,
+} from "@/lib/mcp/agent-sends";
 
 const { getSendOperation } = vi.hoisted(() => ({ getSendOperation: vi.fn() }));
 
@@ -12,6 +17,25 @@ vi.mock("@/lib/mail/brain-mail-client", () => ({
 }));
 
 const ACCOUNT = "account-a00000000000000000000000000000000";
+
+/** A watcher list an injected resolve announces on, so a test waits for the
+ *  step it needs rather than for a timer. Mirrors `lib/push/send.ts`'s own
+ *  concurrency test: a `setTimeout(0)` here would race the lanes' own
+ *  microtasks and fail intermittently. */
+const watchers = new Set<() => void>();
+const announce = () => {
+  for (const watcher of [...watchers]) watcher();
+};
+const waitFor = (ready: () => boolean) =>
+  new Promise<void>((resolve) => {
+    const watcher = () => {
+      if (!ready()) return;
+      watchers.delete(watcher);
+      resolve();
+    };
+    watchers.add(watcher);
+    watcher();
+  });
 
 let root: string;
 
@@ -120,5 +144,81 @@ describe("the agent send marks route", () => {
     expect(await get()).toEqual({
       marks: [{ accountId: ACCOUNT, threadId: "thread-fine", clientName: "Claude" }],
     });
+  });
+
+  it("stops remembering an id once its mark rotates out of the file", async () => {
+    await recordAgentSend({ operationId: "send-old", accountId: ACCOUNT, clientName: "Claude" });
+    getSendOperation.mockResolvedValue(operation("send-old", "sent", null));
+
+    expect(await get()).toEqual({ marks: [] });
+    expect(getSendOperation).toHaveBeenCalledTimes(1);
+
+    // Crowd send-old's mark out of the 200-entry file with newer, already
+    // resolved sends — the same rotation every mark gets. None of these
+    // touch getSendOperation: they arrive with a thread already on them.
+    for (let index = 0; index < MCP_AGENT_SEND_MAX; index += 1) {
+      const operationId = `send-fresh-${index}`;
+      await recordAgentSend({ operationId, accountId: ACCOUNT, clientName: "Claude" });
+      await resolveAgentSendThread(operationId, `thread-fresh-${index}`);
+    }
+    expect((await readAgentSends()).some((mark) => mark.operationId === "send-old")).toBe(false);
+
+    // A request today reads the file and intersects `settled` with it, so an
+    // id whose mark is gone leaves the memo too.
+    await get();
+
+    // send-old rotates back in. If `settled` had kept it forever this would
+    // never be asked again; it left with the eviction, so it is eligible
+    // once more.
+    await recordAgentSend({ operationId: "send-old", accountId: ACCOUNT, clientName: "Claude" });
+    getSendOperation.mockClear();
+    await get();
+    expect(getSendOperation).toHaveBeenCalledWith("send-old", expect.anything());
+  });
+
+  it("resolves pending marks with a small concurrency, not one at a time", async () => {
+    const { AGENT_MARKS_RESOLVE_CONCURRENCY } = await import("./route");
+    const total = 8;
+    for (let index = 0; index < total; index += 1) {
+      await recordAgentSend({
+        operationId: `send-${index}`,
+        accountId: ACCOUNT,
+        clientName: "Claude",
+      });
+    }
+    const started: string[] = [];
+    const gates: Array<() => void> = [];
+    getSendOperation.mockImplementation(
+      (operationId: string) =>
+        new Promise<MailSendOperation>((resolve) => {
+          started.push(operationId);
+          gates.push(() => resolve(operation(operationId, "sent", `thread-for-${operationId}`)));
+          announce();
+        }),
+    );
+
+    const { GET } = await import("./route");
+    const answer = GET(new Request("https://brain.test/api/mail/agent-marks"));
+
+    await waitFor(() => started.length === AGENT_MARKS_RESOLVE_CONCURRENCY);
+    expect(started).toEqual(["send-0", "send-1", "send-2", "send-3", "send-4"]);
+
+    // A sixth only starts once a lane frees — the concurrency cap doing its
+    // job rather than eight round trips firing at once.
+    let released = 0;
+    while (released < total) {
+      gates[released]!();
+      released += 1;
+      if (started.length < total) {
+        await waitFor(
+          () => started.length === Math.min(total, AGENT_MARKS_RESOLVE_CONCURRENCY + released),
+        );
+      }
+    }
+
+    const response = await answer;
+    expect(response.status).toBe(200);
+    const body = (await response.json()) as { marks: unknown[] };
+    expect(body.marks).toHaveLength(total);
   });
 });

@@ -232,7 +232,13 @@ export function MailRow({
             )}
           </span>
           {sentByAgent !== undefined && (
-            <span className="text-caption shrink-0 truncate text-ink-3">
+            // Bounded the way the account word above is: `shrink-0` with an
+            // auto width makes `truncate` inert, and a registered client
+            // name may run to 120 characters (`lib/oauth/state.ts`). 28ch
+            // clears the common case ("Sent by Claude Code") whole and
+            // ellipses the rest, so the app's name yields instead of the
+            // subject.
+            <span className="text-caption max-w-[28ch] shrink-0 truncate text-ink-3">
               Sent by {sentByAgent}
             </span>
           )}

@@ -10,10 +10,14 @@ export const dynamic = "force-dynamic";
  *  The log holds 2000 lines. Fifty is what a person reads in one pass, and
  *  the answer is newest first, so the last thing an agent did is the first
  *  line on the screen. */
-const SHOWN = 50;
+export const SHOWN = 50;
 
 export async function GET() {
-  return NextResponse.json({ entries: await readMcpActivity(SHOWN) });
+  try {
+    return NextResponse.json({ entries: await readMcpActivity(SHOWN) });
+  } catch {
+    return NextResponse.json({ error: "couldn't read the agent activity log" }, { status: 500 });
+  }
 }
 
 export async function DELETE() {

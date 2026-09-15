@@ -22,6 +22,11 @@ let agentWrites: string[];
 let activityMethods: string[];
 let agentWriteFails: boolean;
 let activityLoadFails: boolean;
+/** Set by a test that wants the write to answer something other than what it
+ *  was sent, so an "adopts the echo" test can tell that apart from an
+ *  "adopts what it optimistically set" one — the two look identical when the
+ *  route always echoes the request body back unchanged. */
+let agentEchoOverride: Partial<{ tellRecipients: boolean; allowSending: boolean }> | null;
 
 function response(body: unknown, status = 200): Response {
   return { ok: status >= 200 && status < 300, status, json: async () => body } as Response;
@@ -38,6 +43,7 @@ beforeEach(() => {
   activityMethods = [];
   agentWriteFails = false;
   activityLoadFails = false;
+  agentEchoOverride = null;
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -67,7 +73,7 @@ beforeEach(() => {
         if (agentWriteFails) return response(null, 500);
         agentWrites.push(String(init!.body));
         agent = JSON.parse(String(init!.body)) as typeof agent;
-        return response(agent);
+        return response(agentEchoOverride ? { ...agent, ...agentEchoOverride } : agent);
       }
       throw new Error(`unexpected request: ${url}`);
     }),
@@ -100,6 +106,14 @@ const text = () => host.textContent ?? "";
 const activityRows = () => [
   ...host.querySelectorAll<HTMLElement>('[data-testid="mcp-activity-row"]'),
 ];
+
+function settingsGroup(title: string): HTMLElement {
+  const found = [...host.querySelectorAll<HTMLElement>("section")].find(
+    (section) => section.querySelector("h3")?.textContent === title,
+  );
+  if (!found) throw new Error(`No settings group titled ${title}`);
+  return found;
+}
 
 function group(label: string): HTMLElement {
   const found = [...host.querySelectorAll<HTMLElement>('[role="radiogroup"]')].find(
@@ -246,5 +260,79 @@ describe("Settings → Connections, the agent rows", () => {
     await render();
     expect(text()).toContain("No agent activity yet");
     expect(radio("Let agents send mail", "On")).toBeTruthy();
+  });
+
+  it("gives 'no apps connected' the same empty-state shape 'no activity' already has", async () => {
+    await render();
+    const appsGroup = settingsGroup("Connected apps");
+    expect(appsGroup.querySelector("svg")).not.toBeNull();
+    expect(appsGroup.textContent).toContain("No apps connected with OAuth yet");
+  });
+
+  it("does not warn React about a duplicate key when two lines land in the same millisecond", async () => {
+    entries = [
+      {
+        at: "2026-09-14T09:00:00.000Z",
+        client: "Claude",
+        tool: "update_mail_thread",
+        accountId: ACCOUNT,
+        threadId: "thread-alpha",
+        change: "archive",
+        outcome: "ok",
+      },
+      {
+        at: "2026-09-14T09:00:00.000Z",
+        client: "Claude",
+        tool: "update_mail_thread",
+        accountId: ACCOUNT,
+        threadId: "thread-beta",
+        change: "archive",
+        outcome: "ok",
+      },
+    ];
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => {});
+    await render();
+    expect(activityRows()).toHaveLength(2);
+    expect(
+      consoleError.mock.calls.some((call) =>
+        call.some((value) => String(value).toLowerCase().includes("same key")),
+      ),
+    ).toBe(false);
+    consoleError.mockRestore();
+  });
+
+  it("names the thread a mail triage line touched, and the task a task line touched", async () => {
+    entries = [
+      {
+        at: "2026-09-14T09:00:01.000Z",
+        client: "Claude",
+        tool: "update_mail_thread",
+        accountId: ACCOUNT,
+        threadId: "thread-a0123456789abc",
+        change: "archive",
+        outcome: "ok",
+      },
+      {
+        at: "2026-09-14T09:00:00.000Z",
+        client: "Claude",
+        tool: "update_task",
+        task: "task-a0123456789abc",
+        outcome: "ok",
+      },
+    ];
+    await render();
+    const rows = activityRows();
+    expect(rows[0]!.textContent).toContain("thread-a01");
+    expect(rows[1]!.textContent).toContain("task-a01");
+  });
+
+  it("adopts the settings the write echoes back, not only what it optimistically set", async () => {
+    agentEchoOverride = { tellRecipients: true };
+    await render();
+    await act(async () => radio("Let agents send mail", "Off").click());
+    expect(radio("Let agents send mail", "Off").getAttribute("aria-checked")).toBe("true");
+    expect(
+      radio("Tell recipients when an agent writes", "On").getAttribute("aria-checked"),
+    ).toBe("true");
   });
 });

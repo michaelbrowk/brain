@@ -220,4 +220,29 @@ describe("MailRow", () => {
     const plain = await render(makeThread());
     expect(plain.textContent).not.toContain("Sent by");
   });
+
+  it("bounds a long client name so the subject keeps its line", async () => {
+    // A registered client name may run to 120 characters
+    // (lib/oauth/state.ts). `shrink-0` with no bound left `truncate` inert.
+    const longName = "Claude Code Desktop for macOS, ".repeat(4).trim().slice(0, 120);
+    expect(longName).toHaveLength(120);
+    await act(async () =>
+      root.render(
+        <MailRow
+          thread={makeThread()}
+          active={false}
+          timeLabel="18:24"
+          sentByAgent={longName}
+          onSelect={() => {}}
+        />,
+      ),
+    );
+    const caption = [...host.querySelectorAll("span")].find((span) =>
+      span.textContent?.startsWith("Sent by"),
+    );
+    expect(caption).toBeTruthy();
+    expect(caption!.className).toContain("max-w-[28ch]");
+    expect(caption!.className).toContain("truncate");
+    expect(caption!.textContent).toBe(`Sent by ${longName}`);
+  });
 });

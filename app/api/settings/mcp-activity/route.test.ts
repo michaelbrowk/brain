@@ -3,11 +3,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { appendMcpActivity } from "@/lib/mcp/activity-log";
-import { DELETE, GET } from "./route";
-
-/** The count the route answers with, held here as a literal because a Next
- *  route module may export nothing but its handlers and its config. */
-const SHOWN = 50;
+import { DELETE, GET, SHOWN } from "./route";
 
 const ACCOUNT = "account-a00000000000000000000000000000000";
 

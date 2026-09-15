@@ -58,6 +58,7 @@ const MCP_CONNECTION_CHECK_PROMPT =
   "Use Brain's connection_check tool and tell me whether read and write access are active. Do not change any pages.";
 
 const SAVE_FAILED = "Couldn't save that. Try again.";
+const NO_APPS = "No apps connected with OAuth yet";
 const NO_ACTIVITY = "No agent activity yet";
 
 /** Brain is a single-owner service, so an owner write grant reaches the whole
@@ -73,13 +74,24 @@ function mcpScopeLabel(scope: ConnectedApp["scopes"][number]): string {
   return "Import";
 }
 
-/** The second line of a log row: which mutation, which account, how it ended.
- *  The account is a 32-hex id, shown by its head the way the legacy bearer
- *  token above is, because the whole string names nothing a person reads. */
+/** Which record a line touched, if it names one: the thread a mail triage
+ *  changed, or the page or task a task write changed. Shown by its head the
+ *  same way the account id is, so a line like `update_task` says what it
+ *  touched instead of ending at the outcome. */
+function activityTarget(entry: McpActivityEntry): string | undefined {
+  return entry.threadId ?? entry.page ?? entry.task;
+}
+
+/** The second line of a log row: which mutation, which account, which
+ *  record, how it ended. The account and the record are shown by their
+ *  head, the way the legacy bearer token above is, because the whole string
+ *  names nothing a person reads. */
 function activityDetail(entry: McpActivityEntry): string {
   const parts: string[] = [];
   if (entry.change) parts.push(entry.change);
   if (entry.accountId) parts.push(`${entry.accountId.slice(0, 12)}…`);
+  const target = activityTarget(entry);
+  if (target) parts.push(`${target.slice(0, 12)}…`);
   parts.push(entry.outcome);
   return parts.join(" · ");
 }
@@ -216,6 +228,14 @@ export function ConnectionsSection({
         body: JSON.stringify(next),
       });
       if (!response.ok) throw new Error(String(response.status));
+      // Adopted the way `notifications-section.tsx`'s own switches adopt
+      // theirs: the route echoes what it wrote, and that is the value on
+      // screen from here, not the optimistic guess that is already showing.
+      const body = (await response.json()) as McpAgentSettings;
+      setAgent({
+        tellRecipients: body.tellRecipients === true,
+        allowSending: body.allowSending === true,
+      });
       onToast(said);
     } catch {
       setAgent(previous);
@@ -348,13 +368,17 @@ export function ConnectionsSection({
         }
       >
         {/* the ring always holds a row — an empty group collapses into a
-            stray hairline while the settings load or fail */}
+            stray hairline while the settings load or fail. Same shape the
+            Agent activity group below uses, so the pane keeps one
+            empty-state grammar rather than two. */}
         {(mcp?.connectedApps.length ?? 0) === 0 && (
-          <div className="brain-settings-row">
-            <p className="text-table text-ink-3">
-              {mcp ? "No apps connected with OAuth yet" : "…"}
-            </p>
-          </div>
+          <SettingsRow stack>
+            <Empty
+              icon="plug-circle-linear"
+              title={mcp ? NO_APPS : "…"}
+              className="py-2"
+            />
+          </SettingsRow>
         )}
         {mcp?.connectedApps.map((app) => (
           <div key={app.grantId} className="brain-settings-row" data-lead="">
@@ -443,9 +467,13 @@ export function ConnectionsSection({
             <Empty icon="history-2-linear" title={NO_ACTIVITY} className="py-2" />
           </SettingsRow>
         )}
-        {activity.map((entry) => (
+        {activity.map((entry, index) => (
           <div
-            key={`${entry.at}|${entry.tool}|${entry.outcome}`}
+            // The list is replaced wholesale on every load and clear, never
+            // patched in place, so the index is safe here and closes the gap
+            // `at` alone leaves: a batch can write two lines with the same
+            // millisecond, tool and outcome.
+            key={`${entry.at}|${entry.tool}|${entry.outcome}|${index}`}
             data-testid="mcp-activity-row"
             className="brain-settings-row"
             data-lead=""

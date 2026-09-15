@@ -22,6 +22,7 @@ import { insertCalloutCommand } from "./callout";
 import { notifyNestedTableBlocked } from "@/lib/editor-events";
 import { insertToggleCommand } from "./toggle";
 import { insertMathBlockCommand } from "./math";
+import { ensureTaskCommand, isInQuote } from "./task-checkbox";
 import {
   attachmentMarkdown,
   uploadAttachment,
@@ -83,6 +84,7 @@ const ITEMS: Item[] = [
   { label: "Heading 3", icon: "text-bold-linear", glyph: "H3", keywords: "h3 heading", command: wrapInHeadingCommand, payload: 3 },
   { label: "Bullet list", icon: "list-linear", keywords: "bullet list unordered", command: wrapInBulletListCommand },
   { label: "Numbered list", icon: "list-arrow-down-linear", keywords: "numbered ordered list", command: wrapInOrderedListCommand },
+  { label: "Task", icon: "checklist-linear", keywords: "task todo to-do checkbox check задача чекбокс", command: ensureTaskCommand },
   { label: "Quote", icon: "text-field-linear", keywords: "quote blockquote", command: wrapInBlockquoteCommand },
   { label: "Callout", icon: "sticker-smile-circle-2-linear", keywords: "callout note tip info", command: insertCalloutCommand },
   { label: "Toggle", icon: "alt-arrow-right-linear", keywords: "toggle collapsible details disclosure", command: insertToggleCommand },
@@ -116,6 +118,26 @@ export function slashMenuItems({ ai, upload, createPage }: SlashMenuCapabilities
   );
 }
 
+/** The rows a menu opened HERE offers, and what the reader typed after the
+ *  slash narrows them to.
+ *
+ *  A table refuses a nested table. A quote refuses a task: `> * [ ] x` draws
+ *  a checkbox `parseTaskLines` cannot see, and one of those on a page refuses
+ *  + Task for the whole note. The row is absent rather than present and
+ *  answering nothing. */
+export function visibleSlashItems(
+  items: ReturnType<typeof slashMenuItems>,
+  context: { query: string; inTable: boolean; inQuote: boolean },
+): ReturnType<typeof slashMenuItems> {
+  const query = context.query.toLowerCase();
+  return items.filter(
+    (item) =>
+      (!context.inTable || item.command !== insertTableCommand) &&
+      (!context.inQuote || item.command !== ensureTaskCommand) &&
+      (query ? item.keywords.includes(query) || item.label.toLowerCase().includes(query) : true),
+  );
+}
+
 async function askAi(mode: "continue", text: string): Promise<string> {
   try {
     const res = await apiFetch("/api/ai", {
@@ -139,6 +161,7 @@ interface State {
   query: string;
   from: number; // doc pos of the "/" so we can delete it
   inTable: boolean;
+  inQuote: boolean;
 }
 
 /** menu max height (max-h-[280px]) + breathing room */
@@ -194,10 +217,12 @@ export function SlashMenu({
       const ed = getEditor();
       let from = -1;
       let inTable = false;
+      let inQuote = false;
       ed?.action((ctx) => {
         const view = ctx.get(editorViewCtx);
         from = view.state.selection.$from.start();
         const $from = view.state.selection.$from;
+        inQuote = isInQuote($from);
         for (let depth = $from.depth; depth >= 0; depth -= 1) {
           const name = $from.node(depth).type.name;
           if (name === "table" || name === "table_cell" || name === "table_header") {
@@ -213,6 +238,7 @@ export function SlashMenu({
         query: m[1],
         from,
         inTable,
+        inQuote,
         ...(flip
           ? { bottom: r.bottom - rect.top + 6 }
           : { top: rect.bottom - r.top + 6 }),
@@ -230,17 +256,7 @@ export function SlashMenu({
   }, [update]);
 
   const results = useMemo(
-    () =>
-      state
-        ? slashMenuItems({ ai, upload, createPage }).filter(
-            (i) =>
-              (!state.inTable || i.command !== insertTableCommand) &&
-              (state.query
-                ? i.keywords.includes(state.query.toLowerCase()) ||
-                  i.label.toLowerCase().includes(state.query.toLowerCase())
-                : true),
-          )
-        : [],
+    () => (state ? visibleSlashItems(slashMenuItems({ ai, upload, createPage }), state) : []),
     [state, ai, upload, createPage],
   );
 
@@ -415,6 +431,24 @@ export function SlashMenu({
           setState(null);
           return;
         }
+      }
+      // The Task command takes the trigger's own range instead of finding the
+      // line already emptied: the deletion and the conversion are then one
+      // transaction, one undo brings back both, and a conversion that cannot
+      // happen leaves the typed words where the reader left them.
+      if (item.command === ensureTaskCommand) {
+        let trigger: { from: number; to: number } | null = null;
+        ed.action((ctx) => {
+          const view = ctx.get(editorViewCtx);
+          const { state: s } = view;
+          const from = s.selection.$from.start();
+          const to = s.selection.$from.pos;
+          trigger = to > from ? { from, to } : null;
+          view.focus();
+        });
+        ed.action(callCommand(ensureTaskCommand.key, trigger));
+        setState(null);
+        return;
       }
       // delete the "/query" (positions from the LIVE view state), then run the
       // block command — reading `command.key` NOW that the editor is initialized

@@ -2,13 +2,16 @@
 
 import { act, createRef } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { Schema } from "@milkdown/kit/prose/model";
 import {
   AllSelection,
+  EditorState,
   NodeSelection,
   TextSelection,
-  type EditorState,
 } from "@milkdown/kit/prose/state";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+
+import { EDITOR_DOC_CHANGED_EVENT } from "@/lib/editor-events";
 
 const milkdown = vi.hoisted(() => ({ getEditor: vi.fn() }));
 
@@ -22,42 +25,69 @@ import {
   FloatingToolbar,
   placeFloatingToolbar,
   selectionRectIntersectsViewport,
+  selectionIsInQuote,
   selectionIsInTable,
+  selectionIsTask,
   selectionOwnsFloatingToolbar,
 } from "./floating-toolbar";
 
-function resolvedPosition(names: string[]) {
-  return {
-    depth: names.length - 1,
-    node: (depth: number) => ({ type: { name: names[depth] } }),
-  };
+/** A schema small enough to read and real enough to resolve a position in.
+ *  The toolbar asks the DOCUMENT which lines the selection touches, so a
+ *  stubbed `$from` would only ever be testing the stub. */
+const schema = new Schema({
+  nodes: {
+    doc: { content: "block+" },
+    paragraph: { content: "inline*", group: "block" },
+    blockquote: { content: "block+", group: "block" },
+    bullet_list: { content: "list_item+", group: "block" },
+    list_item: { content: "block+", attrs: { checked: { default: null } }, defining: true },
+    table: { content: "table_row+", group: "block" },
+    table_row: { content: "table_cell+" },
+    table_cell: { content: "block+" },
+    text: { group: "inline" },
+  },
+});
+
+function documentFor(inTable: boolean, task: boolean, quote: boolean) {
+  const nodes = schema.nodes;
+  const line = nodes.paragraph.create(null, schema.text("selected editor text"));
+  if (quote) {
+    return nodes.doc.create(null, nodes.blockquote.create(null, line));
+  }
+  if (inTable) {
+    return nodes.doc.create(
+      null,
+      nodes.table.create(null, nodes.table_row.create(null, nodes.table_cell.create(null, line))),
+    );
+  }
+  if (task) {
+    return nodes.doc.create(
+      null,
+      nodes.bullet_list.create(null, nodes.list_item.create({ checked: false }, line)),
+    );
+  }
+  return nodes.doc.create(null, line);
 }
 
 function editorState(
   inTable: boolean,
   selectionType: "text" | "node" | "all" = "text",
   empty = false,
+  task = false,
+  quote = false,
 ): EditorState {
-  const names = inTable
-    ? ["doc", "table", "table_row", "table_cell", "paragraph"]
-    : ["doc", "paragraph"];
-  const $pos = resolvedPosition(names);
-  const selection = {
-    $from: $pos,
-    $to: $pos,
-    from: 1,
-    to: empty ? 1 : 5,
-    empty,
-  };
-  Object.setPrototypeOf(
-    selection,
-    selectionType === "text"
-      ? TextSelection.prototype
-      : selectionType === "all"
-        ? AllSelection.prototype
-        : NodeSelection.prototype,
-  );
-  return { selection } as unknown as EditorState;
+  const doc = documentFor(inTable, task, quote);
+  let line = 0;
+  doc.descendants((node, pos) => {
+    if (line === 0 && node.isTextblock) line = pos + 1;
+  });
+  const selection =
+    selectionType === "all"
+      ? new AllSelection(doc)
+      : selectionType === "node"
+        ? NodeSelection.create(doc, line - 1)
+        : TextSelection.create(doc, line, empty ? line : line + 8);
+  return EditorState.create({ doc, selection });
 }
 
 async function settle() {
@@ -315,6 +345,60 @@ describe("FloatingToolbar", () => {
     expect(document.body.querySelector('[role="toolbar"]')).not.toBeNull();
   });
 
+  it("presses the Task button only while the line is already a task, both ways", async () => {
+    await renderWithSelection(false);
+    const taskButton = () =>
+      document.body.querySelector('[aria-label="Task"]') as HTMLButtonElement;
+    expect(taskButton()).not.toBeNull();
+    expect(taskButton().getAttribute("aria-pressed")).toBe("false");
+    // Two controls are named Task, one here and one in the slash menu. The
+    // names stay; the tooltip says which line this one acts on.
+    expect(taskButton().getAttribute("title")).toBe("Task line");
+
+    view.state = editorState(false, "text", false, true);
+    await act(async () => document.dispatchEvent(new Event("selectionchange")));
+    await settle();
+    expect(taskButton().getAttribute("aria-pressed")).toBe("true");
+
+    view.state = editorState(false);
+    await act(async () => document.dispatchEvent(new Event("selectionchange")));
+    await settle();
+    expect(taskButton().getAttribute("aria-pressed")).toBe("false");
+  });
+
+  it("refuses the Task button inside a quote, and says why", async () => {
+    await renderWithSelection(false);
+    const taskButton = () =>
+      document.body.querySelector('[aria-label="Task"]') as HTMLButtonElement;
+    expect(taskButton().getAttribute("aria-disabled")).toBe("false");
+
+    view.state = editorState(false, "text", false, false, true);
+    await act(async () => document.dispatchEvent(new Event("selectionchange")));
+    await settle();
+
+    expect(taskButton().getAttribute("aria-disabled")).toBe("true");
+    expect(taskButton().getAttribute("title")).toBe("A task cannot live inside a quote");
+
+    editor.action.mockClear();
+    await click(taskButton());
+    expect(editor.action).not.toHaveBeenCalled();
+  });
+
+  it("re-reads the pressed state from the editor's own transaction", async () => {
+    await renderWithSelection(false);
+    const taskButton = () =>
+      document.body.querySelector('[aria-label="Task"]') as HTMLButtonElement;
+    expect(taskButton().getAttribute("aria-pressed")).toBe("false");
+
+    // The press rewrites the block under a caret that has not moved, so the
+    // browser fires no `selectionchange` and the button used to keep saying
+    // unpressed about the line it had turned into a task a moment before.
+    view.state = editorState(false, "text", false, true);
+    await act(async () => window.dispatchEvent(new CustomEvent(EDITOR_DOC_CHANGED_EVENT)));
+    await settle();
+    expect(taskButton().getAttribute("aria-pressed")).toBe("true");
+  });
+
   it("ignores the NodeSelection left behind by a block drag", async () => {
     await renderWithSelection(false);
     expect(document.body.querySelector('[role="toolbar"]')).not.toBeNull();
@@ -330,6 +414,16 @@ describe("floating toolbar geometry", () => {
   it("detects table ancestors at either selection edge", () => {
     expect(selectionIsInTable(editorState(true))).toBe(true);
     expect(selectionIsInTable(editorState(false))).toBe(false);
+  });
+
+  it("detects a quote ancestor at either selection edge", () => {
+    expect(selectionIsInQuote(editorState(false, "text", false, false, true))).toBe(true);
+    expect(selectionIsInQuote(editorState(false))).toBe(false);
+  });
+
+  it("detects a task-item ancestor at either selection edge", () => {
+    expect(selectionIsTask(editorState(false, "text", false, true))).toBe(true);
+    expect(selectionIsTask(editorState(false))).toBe(false);
   });
 
   it("requires a focused, non-empty text selection", () => {

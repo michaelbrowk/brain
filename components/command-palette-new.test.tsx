@@ -6,8 +6,9 @@
 // typed rather than pointed at, so it lists the same three wherever it lists
 // the first of them. "Compose message" was a mail-route row and could not be
 // reached from a page, which is the one place a writer is most likely to want
-// it. It keeps its place on the route as well: on /mail the row is the mail
-// bus's, and off it the row is the shell's.
+// it. One row per act, though: on /mail the route's own Compose message row
+// already names it, so the global New message row stands down there and
+// stands everywhere else.
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -126,12 +127,12 @@ describe("CommandPalette creates", () => {
     expect(action("New message")).toBeNull();
   });
 
-  it("leaves the mail route's own Compose row alone", async () => {
+  it("stands down on /mail, where the route's own Compose row already names the act", async () => {
     window.history.replaceState({}, "", "/mail");
     await renderPalette({ onNewPage: vi.fn(), onNewMessage: vi.fn() });
 
-    // the route row and the shell row are two different seams and both stand
+    // one row per act: the route row stands, the global one does not double it
     expect(action("Compose message")).not.toBeNull();
-    expect(action("New message")).not.toBeNull();
+    expect(action("New message")).toBeNull();
   });
 });

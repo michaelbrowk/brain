@@ -10,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { apiFetch } from "@/lib/client";
 import { resetTasksStore } from "./tasks-client";
 import { resetMailComposeAvailable } from "./mail-compose-available";
+import { resetTaskCaptureFocus } from "./tasks-ghost-row";
 import { Shell } from "./shell";
 
 vi.mock("@/lib/client", () => ({
@@ -117,6 +118,7 @@ describe("tasks surface navigation (desktop)", () => {
     localStorage.clear();
     apiFetchMock.mockReset();
     resetTasksStore();
+    resetTaskCaptureFocus();
     apiFetchMock.mockImplementation(async (input) => {
       const url = String(input);
       if (url === "/api/tree") return response({ tree: [] });
@@ -319,6 +321,40 @@ describe("tasks surface navigation (desktop)", () => {
     );
     expect(capture.placeholder).toBe("New task…");
     expect(document.activeElement).toBe(capture);
+  });
+
+  it("does not steal the caret on a later visit after one Task press", async () => {
+    window.history.replaceState({}, "", "/");
+
+    await act(async () => root.render(<Shell tree={[]} initialSelectedId={null} />));
+    await settle();
+
+    await openNewMenu();
+    await act(async () => menuRow("Task")!.click());
+    await findLazy(surfaceBody, "tasks surface after the Task row");
+    await findLazy(
+      () => document.querySelector<HTMLInputElement>('input[aria-label="New task"]'),
+      "the capture row on the first visit",
+    );
+
+    // leave Tasks the way a reader would, with Back
+    await act(async () => {
+      window.history.replaceState({}, "", "/");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await settle();
+    expect(surfaceBody()).toBeNull();
+
+    // and come straight back through the sidebar row, not the plus: the
+    // request that focused the row the first time must not fire again
+    await act(async () => navRow("Tasks")?.click());
+    await findLazy(surfaceBody, "tasks surface after the second visit");
+
+    const capture = await findLazy(
+      () => document.querySelector<HTMLInputElement>('input[aria-label="New task"]'),
+      "the capture row on the second visit",
+    );
+    expect(document.activeElement).not.toBe(capture);
   });
 
   it("does the same from Settings, where the plus is not drawn", async () => {

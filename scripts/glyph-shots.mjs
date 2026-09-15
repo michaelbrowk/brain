@@ -75,17 +75,17 @@ for (const scheme of passes.includes("desktop") ? ["light", "dark"] : []) {
   await login(page);
 
   // 1 — the sidebar's accent create button, the control the rule came from
-  const create = page.getByRole("button", { name: "New page", exact: true }).first();
+  const create = page.getByRole("button", { name: "New", exact: true }).first();
   await create.waitFor();
   await page.waitForTimeout(600);
   await shot(page, create, "sidebar-create", scheme);
 
-  // 2 — the template menu it opens: the blank entry wears the same mark
+  // 2 — the New menu it opens: the blank entry wears the same mark
   await create.click();
   const blank = page.getByRole("menuitem", { name: "Blank page" });
   await blank.waitFor();
   await page.waitForTimeout(400);
-  await shot(page, blank, "template-menu", scheme);
+  await shot(page, blank, "new-menu", scheme);
   await blank.click();
   await page.waitForURL(/\/p\//, { timeout: 30_000 });
   await page.waitForTimeout(1_200);

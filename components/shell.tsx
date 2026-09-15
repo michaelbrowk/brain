@@ -337,6 +337,8 @@ export function Shell({
   // the repeat rule advancing one). The surface refetches on it.
   const [taskSurfaceRevision, setTaskSurfaceRevision] = useState(0);
   // Bumped by "New task": the surface puts the caret in its capture field.
+  // Consumed once by the ghost row itself (`tasks-ghost-row.tsx`), which
+  // remembers the last request it already turned into a focus.
   const [taskCaptureRequest, setTaskCaptureRequest] = useState(0);
   // Bumped by a notification written anywhere but this tab (the reminder scan,
   // the mail poll, another tab's read). The bell and Home's first row refetch

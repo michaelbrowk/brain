@@ -38,6 +38,7 @@ import {
 } from "@/lib/oauth/http";
 import { verifyMcpBearerToken } from "@/lib/oauth/server";
 import { hasScope, insufficientScope, text, toolScopeOf } from "./tool-kit";
+import { registerMailTools } from "./mail-tools";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -54,6 +55,11 @@ const ANY_DAY = "1970-01-01";
 
 const handler = createMcpHandler(
   (server) => {
+    // The mail tools live in their own module because this file is already
+    // long enough. Their scope gate is `toolScopeOf` in `tool-kit.ts`, which
+    // runs off the tool name before this handler is reached.
+    registerMailTools(server);
+
     server.tool(
       "list_tree",
       "List the full page tree of the notebook (ids, titles, icons, nesting).",

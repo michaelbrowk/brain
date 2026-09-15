@@ -1,6 +1,7 @@
 "use client";
 
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
+import { useEffect, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { DUR, EASE_OUT } from "@/lib/motion";
 import { Button, IconButton } from "./ui/button";
@@ -77,6 +78,7 @@ export function MailThreadList({
   onOpenSettings: (invoker: HTMLElement, accountId?: string) => void;
 }) {
   const reduce = useReducedMotion();
+  const agentThreads = useAgentSentThreads(selectedMailboxId, selectedAccountId);
   const selectedAccount = accounts.find(
     (account) => account.accountId === selectedAccountId,
   );
@@ -284,6 +286,7 @@ export function MailThreadList({
                       thread={thread}
                       active={thread.threadId === selectedThreadId}
                       sizeMode={threadSort === "size"}
+                      sentByAgent={agentThreads.get(thread.threadId)}
                       onSelect={() => onSelectThread(thread)}
                     />
                   </motion.div>
@@ -327,11 +330,13 @@ function ThreadRow({
   thread,
   active,
   sizeMode,
+  sentByAgent,
   onSelect,
 }: {
   thread: MailThreadListItem;
   active: boolean;
   sizeMode: boolean;
+  sentByAgent?: string;
   onSelect: () => void;
 }) {
   return (
@@ -340,9 +345,65 @@ function ThreadRow({
       active={active}
       timeLabel={formatThreadTime(thread.lastMessageAt)}
       sizeLabel={sizeMode ? formatSizeBytes(thread.sizeBytes) : undefined}
+      sentByAgent={sentByAgent}
       onSelect={onSelect}
     />
   );
+}
+
+/**
+ * Which threads in this Sent mailbox an agent put on the wire, thread id to
+ * the app's name. Asked once when Sent opens and once more when the account
+ * changes, never on a poll and never in another mailbox: the marks change
+ * only when an agent sends, and a caption is not worth a request per render.
+ * A failed read leaves the map empty and every row draws as it does today.
+ */
+const NO_AGENT_MARKS: ReadonlyMap<string, string> = new Map();
+
+function useAgentSentThreads(
+  mailboxId: MailSystemMailbox,
+  accountId: string,
+): ReadonlyMap<string, string> {
+  const [fetched, setFetched] = useState<{
+    accountId: string;
+    marks: ReadonlyMap<string, string>;
+  } | null>(null);
+
+  useEffect(() => {
+    if (mailboxId !== "sent") return;
+    let alive = true;
+    void (async () => {
+      try {
+        const answer = await fetch("/api/mail/agent-marks");
+        if (!answer.ok) throw new Error(String(answer.status));
+        const body = (await answer.json()) as {
+          marks: Array<{ accountId: string; threadId: string; clientName: string }>;
+        };
+        if (!alive) return;
+        setFetched({
+          accountId,
+          marks: new Map(
+            body.marks
+              .filter((mark) => mark.accountId === accountId)
+              .map((mark) => [mark.threadId, mark.clientName]),
+          ),
+        });
+      } catch {
+        if (alive) setFetched({ accountId, marks: NO_AGENT_MARKS });
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, [mailboxId, accountId]);
+
+  // What was fetched is held rather than cleared when the mailbox changes: a
+  // setState in an effect body is a cascading render. The answer carries the
+  // account it was read for, so a map belonging to another account or another
+  // mailbox is never the one returned.
+  return mailboxId === "sent" && fetched?.accountId === accountId
+    ? fetched.marks
+    : NO_AGENT_MARKS;
 }
 
 const MAIL_THREAD_SORTS: readonly MailThreadSort[] = [

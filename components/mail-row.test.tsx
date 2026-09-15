@@ -203,4 +203,21 @@ describe("MailRow", () => {
     expect(row.textContent).toContain("Your ticket");
     expect(row.textContent).not.toContain("[Quarry Hall]");
   });
+
+  it("captions a row an agent sent, and says nothing on a row it did not", async () => {
+    await act(async () =>
+      root.render(
+        <MailRow
+          thread={makeThread()}
+          active={false}
+          timeLabel="18:24"
+          sentByAgent="Claude"
+          onSelect={() => {}}
+        />,
+      ),
+    );
+    expect(host.querySelector("button")!.textContent).toContain("Sent by Claude");
+    const plain = await render(makeThread());
+    expect(plain.textContent).not.toContain("Sent by");
+  });
 });

@@ -135,6 +135,7 @@ export function MailRow({
   account,
   sizeLabel,
   timeLabel,
+  sentByAgent,
   onSelect,
 }: {
   thread: MailThreadListItem;
@@ -146,6 +147,12 @@ export function MailRow({
   /** Replaces the time while the single-account list is sorted by size. */
   sizeLabel?: string;
   timeLabel: string;
+  /** The app that put this message on the wire, on a Sent row only. Read at
+   *  render from Brain's own send marks and never stored on the thread: the
+   *  mail service holds mail, and which app asked for a send is Brain's
+   *  business. Absent everywhere else, because a thread the agent sent that
+   *  has since been replied to is a conversation, not an agent's message. */
+  sentByAgent?: string;
   onSelect: () => void;
 }) {
   const subject = stripSubjectSenderPrefix(thread.subject, thread.participants);
@@ -224,6 +231,11 @@ export function MailRow({
               </span>
             )}
           </span>
+          {sentByAgent !== undefined && (
+            <span className="text-caption shrink-0 truncate text-ink-3">
+              Sent by {sentByAgent}
+            </span>
+          )}
           {thread.hasAttachments && (
             <>
               <Icon

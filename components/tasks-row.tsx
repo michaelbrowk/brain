@@ -402,6 +402,8 @@ export function TasksRow({
     task,
   });
 
+  useFoldOnOutside({ expanded, element: wrapRef, onExpand });
+
   const swipeHandlers = useSwipe({
     x,
     reduce,
@@ -885,6 +887,58 @@ function WhenChip({
       }
     />
   );
+}
+
+/** THE ROW FOLDS WHEN THE READER LOOKS AWAY.
+ *
+ *  An expanded row was the one thing on this surface a press elsewhere could
+ *  not end. It kept its chips and its tint through a press on the page below
+ *  the list, on the header, on the capture field, on another row, and the only
+ *  ways back were Escape and a second press on the row itself. Things folds the
+ *  row on the press that lands outside it, and so does this. The keyboard
+ *  leaves the same way: focus that lands somewhere else is a reader who has
+ *  gone somewhere else.
+ *
+ *  A PANEL THE ROW OPENED IS PART OF THE ROW. The picker, the repeat menu and
+ *  the category popover are portalled out of the row's own element, so
+ *  containment cannot answer for them; what answers is the chip that opened
+ *  one, which Radix flags `data-state="open"` for as long as its layer stands.
+ *  While one does, this folds NOTHING, wherever the press lands. The press that
+ *  dismisses a layer belongs to that layer, and the picker commits what the
+ *  reader settled on as it goes: a row that folded on the same press would take
+ *  the panel out from under that write. One dismissal per press, and the row is
+ *  the next one.
+ *
+ *  `pointerdown` and not `click`, because the layer above reads the same event
+ *  and a fold that waited for the click would land after the panel had already
+ *  answered it. Capture, so a handler that stops propagation on its way up
+ *  cannot take the row's own answer with it. */
+function useFoldOnOutside({
+  expanded,
+  element,
+  onExpand,
+}: {
+  expanded: boolean;
+  element: React.RefObject<HTMLLIElement | null>;
+  onExpand: (id: string | null) => void;
+}) {
+  useEffect(() => {
+    if (!expanded) return;
+    const away = (event: Event) => {
+      const row = element.current;
+      const target = event.target;
+      if (row === null || !(target instanceof Node)) return;
+      if (row.contains(target)) return;
+      if (row.querySelector("[data-state='open']") !== null) return;
+      onExpand(null);
+    };
+    document.addEventListener("pointerdown", away, true);
+    document.addEventListener("focusin", away, true);
+    return () => {
+      document.removeEventListener("pointerdown", away, true);
+      document.removeEventListener("focusin", away, true);
+    };
+  }, [element, expanded, onExpand]);
 }
 
 /** THE ROW'S KEYS ARE UNMODIFIED LETTERS, not browser chords.

@@ -1353,6 +1353,99 @@ describe("reduced motion", () => {
   });
 });
 
+/** THE ROW FOLDS WHEN THE READER LOOKS AWAY.
+ *
+ *  An expanded row was the one thing on this surface that a press elsewhere
+ *  could not end. It kept its chips and its tint through a press on the empty
+ *  page below the list, on the header, on the capture field, and the only ways
+ *  back were Escape and a second press on the row itself. Things folds the row
+ *  on the press that lands outside it, and so does this. */
+describe("the fold on a press outside", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  const elsewhere = () => {
+    const node = document.createElement("button");
+    document.body.append(node);
+    return node;
+  };
+
+  it("folds on a pointer press that lands outside the row", async () => {
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    calls.expand.mockClear();
+    const away = elsewhere();
+
+    await act(async () => {
+      away.dispatchEvent(pointer("pointerdown"));
+    });
+
+    expect(calls.expand).toHaveBeenCalledWith(null);
+    away.remove();
+  });
+
+  it("folds when the focus leaves the row", async () => {
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    calls.expand.mockClear();
+    const away = elsewhere();
+
+    await act(async () => {
+      away.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    });
+
+    expect(calls.expand).toHaveBeenCalledWith(null);
+    away.remove();
+  });
+
+  it("leaves a press inside the row to the row's own handler", async () => {
+    // The row already answers a press on itself: it folds on the second one
+    // and puts the caret in the title on a press of the words. Two answers to
+    // one press is the shape this must not have.
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    calls.expand.mockClear();
+
+    await act(async () => {
+      row().dispatchEvent(pointer("pointerdown"));
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+  });
+
+  it("folds on nothing while a panel the row opened is standing", async () => {
+    // A PANEL THE ROW OPENED IS PART OF THE ROW, and it is portalled out of
+    // the row's own element, so containment cannot say so: what says so is
+    // Radix's flag on the chip that opened it. The press that dismisses a
+    // layer belongs to that layer, and a row that folded on the same one would
+    // take the picker out from under the write it commits as it goes.
+    stubHover();
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    await openMenu();
+    calls.expand.mockClear();
+    const away = elsewhere();
+
+    await act(async () => {
+      away.dispatchEvent(pointer("pointerdown"));
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    away.remove();
+  });
+
+  it("listens for none of it while the row is folded", async () => {
+    await renderRows([task("a", { when: TODAY })]);
+    calls.expand.mockClear();
+    const away = elsewhere();
+
+    await act(async () => {
+      away.dispatchEvent(pointer("pointerdown"));
+      away.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    away.remove();
+  });
+});
+
 /** D5. THE SELECTION IS A PLACE, NOT AN EMPHASIS.
  *
  *  None of the six shell contract fixtures draws a task row, so the quiet

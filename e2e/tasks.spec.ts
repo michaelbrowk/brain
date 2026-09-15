@@ -14,7 +14,7 @@
 // and nowhere else: the merge, the branch's one deliberate loosening of the 409
 // contract, would ship with no browser-level guard at any release from here on.
 //
-// The ones at the foot are the row's own gestures rather than the link to a
+// The three at the foot are the row's own gestures rather than the link to a
 // note, and they are here because they are only reachable in a browser: the
 // unit harness drives `expanded` as a prop, so a fold the row ASKS for never
 // arrives there, and jsdom has no layout for a clip box to cut anything in.
@@ -549,4 +549,28 @@ test("@release every chip stays inside the expanded row, with room for its ring"
     // is what wraps there.
     expect(measured.wrapped, `lines at ${width}`).toBe(width === 390 ? 2 : 1);
   }
+});
+
+test("@release an expanded row folds on a press outside it", async ({ page }) => {
+  // It kept its chips and its tint through a press anywhere else on the page,
+  // and the only ways back were Escape and a second press on the row itself.
+  test.setTimeout(60_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const id = await createTask(page, "Stays expanded");
+  const row = await expandRow(page, id, "Stays expanded");
+  const capsule = row.locator(".brain-task-row[data-expanded]");
+
+  // A panel the row opened is part of the row: the press that dismisses it
+  // belongs to the panel, and the row stands.
+  await row.getByRole("button", { name: /^When:/ }).click();
+  await expect(page.getByRole("dialog", { name: /^When:/ })).toBeVisible();
+  await page.mouse.click(1380, 760);
+  await expect(page.getByRole("dialog", { name: /^When:/ })).toHaveCount(0);
+  await expect(capsule).toHaveCount(1);
+
+  // With nothing open over it, the same press folds it.
+  await page.mouse.click(1380, 760);
+  await expect(capsule).toHaveCount(0);
+  await expect(row.locator(".brain-task-chips")).toHaveCount(0);
 });

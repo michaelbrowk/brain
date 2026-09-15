@@ -6057,7 +6057,7 @@ html[data-kbd] .brain-task-row[data-selected] {
   transition: color 160ms var(--ease-out) 100ms;
 }
 .brain-task-row[data-done] .brain-task-title {
-  color: var(--ink-2);
+  color: var(--ink-3);
 }
 /* A COMPLETED ROW ANSWERS ITS CHECKBOX AND NOTHING ELSE. The same refusal
    `[data-historic]` makes and at the same weight, so it beats the hover and

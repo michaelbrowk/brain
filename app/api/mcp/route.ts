@@ -93,6 +93,23 @@ function notionStoreFailure(error: unknown): Error {
   });
 }
 
+/** GETSTORE(), FOR THE NINE NOTION TOOLS ALONE.
+ *
+ *  Every one of the nine calls `getStore()` before its own try block, so a
+ *  rejection from `getStore()` itself used to skip `notionStoreFailure`
+ *  entirely and reach the agent as the store's raw Node `fs` message, naming
+ *  the notes folder's absolute path. This wraps the acquisition in the same
+ *  sentence and code the try block's own catch already answers with, so the
+ *  nine tools stay uniform: whichever step fails, the throw carries Brain's
+ *  own wording, never the store's. */
+async function acquireStoreForImport() {
+  try {
+    return await getStore();
+  } catch (error) {
+    throw notionStoreFailure(error);
+  }
+}
+
 const handler = createMcpHandler(
   (server) => {
     // The mail tools and the task tools live in their own modules because this
@@ -267,7 +284,7 @@ const handler = createMcpHandler(
       },
       async ({ notionId, reservationToken }, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text({
             page: await store.inspectNotionPage(notionId, reservationToken),
@@ -288,7 +305,7 @@ const handler = createMcpHandler(
       },
       async ({ pageId }, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text({
             candidate: await store.inspectNotionCandidate(pageId),
@@ -310,7 +327,7 @@ const handler = createMcpHandler(
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text(await store.adoptNotionImport(input));
         } catch (error) {
@@ -337,7 +354,7 @@ const handler = createMcpHandler(
       },
       async ({ notionId, sourceHash, parentId, beforeId, ...rest }, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text(
             await store.reserveNotionImport({
@@ -387,7 +404,7 @@ const handler = createMcpHandler(
         dataBase64,
       }, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         const releaseUpload = acquireNotionUploadSlot();
         if (!releaseUpload) {
           return text({
@@ -429,7 +446,7 @@ const handler = createMcpHandler(
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text(await store.verifyNotionAttachment(input));
         } catch (error) {
@@ -448,7 +465,7 @@ const handler = createMcpHandler(
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text(await store.verifyFinalizedNotionAttachment(input));
         } catch (error) {
@@ -469,7 +486,7 @@ const handler = createMcpHandler(
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text(await store.finalizeNotionImport(input));
         } catch (error) {
@@ -492,7 +509,7 @@ const handler = createMcpHandler(
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text(await store.abortNotionImport(input));
         } catch (error) {

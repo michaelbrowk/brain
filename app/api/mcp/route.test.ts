@@ -817,6 +817,119 @@ describe("Notion MCP route validation", () => {
     expect(message).not.toContain("/notes/");
   });
 
+  /** THE CARVE-OUT COVERS GETSTORE() ITSELF, NOT ONLY THE STORE'S OWN
+   *  METHODS.
+   *
+   *  All nine `notion_*` tools used to call `getStore()` before their own
+   *  try block, so a rejection from `getStore()` itself, rather than from
+   *  `inspectNotionPage` or one of its siblings, skipped `notionStoreFailure`
+   *  entirely and reached the agent as the store's raw Node `fs` message,
+   *  naming the notes folder's absolute path. Pinned on all nine, the same
+   *  argument shapes the "before Store access" table above already uses. */
+  it.each([
+    ["notion_find_page", { notionId }],
+    ["notion_inspect_candidate", { pageId: "brain-page" }],
+    [
+      "notion_adopt_page",
+      {
+        pageId: "brain-page",
+        notionId,
+        sourceHash,
+        conversionHash,
+        expectedRev: "rev-1",
+        expectedParentId: null,
+        expectedBeforeId: null,
+      },
+    ],
+    [
+      "notion_reserve_page",
+      {
+        notionId,
+        sourceHash,
+        parentId: null,
+        beforeId: null,
+        title: "Page",
+        reservationToken,
+      },
+    ],
+    [
+      "notion_upload_attachment",
+      {
+        notionId,
+        sourceHash,
+        expectedSha256: conversionHash,
+        reservationToken,
+        originalName: "asset.png",
+        mimeType: "image/png",
+        dataBase64: "AQID",
+      },
+    ],
+    [
+      "notion_verify_attachment",
+      {
+        notionId,
+        sourceHash,
+        reservationToken,
+        url: "/_attachments-v2/" + conversionHash + ".png",
+      },
+    ],
+    [
+      "notion_verify_finalized_attachment",
+      {
+        notionId,
+        sourceHash,
+        conversionHash,
+        url: "/_attachments-v2/" + conversionHash + ".png",
+      },
+    ],
+    [
+      "notion_finalize_page",
+      {
+        notionId,
+        sourceHash,
+        conversionHash,
+        reservationToken,
+        markdown: "body",
+      },
+    ],
+    ["notion_abort_page", { notionId, sourceHash, reservationToken }],
+  ] as const)(
+    "rethrows a getStore() failure on %s worded in Brain's own sentence, never the path",
+    async (name, input) => {
+      mocks.verifyMcpBearerToken.mockResolvedValue({
+        token: "import-token",
+        clientId: "import-client",
+        scopes: ["brain:read", "brain:import"],
+        resource: new URL("https://brain.example.test/api/mcp"),
+      });
+      mocks.getStore.mockRejectedValue(
+        new Error("EACCES: permission denied, scandir '/notes/pages'"),
+      );
+
+      const response = await POST(
+        new Request("https://brain.example.test/api/mcp", {
+          method: "POST",
+          headers: {
+            accept: "application/json, text/event-stream",
+            authorization: "Bearer import-token",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 110,
+            method: "tools/call",
+            params: { name, arguments: input },
+          }),
+        }),
+      );
+
+      const { text: message, isError } = await rawToolText(response);
+      expect(isError).toBe(true);
+      expect(message).toBe("Brain could not read the notes folder");
+      expect(message).not.toContain("/notes/");
+    },
+  );
+
   it("canonicalizes exact same-origin page links at all normal MCP write boundaries", async () => {
     const writePage = vi.fn().mockResolvedValue({ id: "write-target" });
     const appendPage = vi.fn().mockResolvedValue({ id: "append-target" });
@@ -1022,6 +1135,27 @@ describe("Notion MCP route validation", () => {
     expect(response.status).toBe(200);
     expect(body).toContain("Invalid arguments");
     expect(mocks.getStore).not.toHaveBeenCalled();
+  });
+
+  /** THE STATIC SWEEP THE LIVE PROBES ABOVE CANNOT REPLACE.
+   *
+   *  The nine live tests above pin the behavior for the arguments they pass.
+   *  This pins the source itself: nothing in the nine `notion_*` handlers may
+   *  call `getStore()` directly again, because a new handler, or a merge that
+   *  reintroduces one, would not touch any of those nine tests' mocks and
+   *  would pass silently. Reading the file rather than importing it, so the
+   *  assertion is about what the source says, not what one input happens to
+   *  exercise. */
+  it("calls getStore() only through acquireStoreForImport() inside the nine notion_* handlers", async () => {
+    const source = await fs.readFile(new URL("./route.ts", import.meta.url), "utf8");
+    const notionHandlers = source.slice(
+      source.indexOf('server.registerTool(\n      "notion_find_page"'),
+      source.indexOf('server.tool(\n      "update_meta"'),
+    );
+    expect(notionHandlers).toContain("notion_abort_page");
+    const bareGetStoreCalls = notionHandlers.match(/\bgetStore\(\)/g) ?? [];
+    expect(bareGetStoreCalls).toEqual([]);
+    expect(notionHandlers.match(/\bacquireStoreForImport\(\)/g)).toHaveLength(9);
   });
 });
 

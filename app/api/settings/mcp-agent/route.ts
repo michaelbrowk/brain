@@ -27,28 +27,49 @@ export async function GET() {
   return NextResponse.json({ ...state.settings, unreadable: state.unreadable });
 }
 
+const SWITCHES = ["tellRecipients", "allowSending"] as const;
+
+/** ONE SWITCH IS ONE FIELD.
+ *
+ *  A body names the switch the owner threw and nothing else. It used to have
+ *  to carry both, which made the screen send a value it was only standing in
+ *  for: with the settings file unreadable the reader answers the documented
+ *  defaults, so flipping "Tell recipients" wrote `allowSending: true` back and
+ *  turned sending on again, with no toast and no row saying so.
+ *
+ *  A body naming neither switch is refused rather than written as a no-op: it
+ *  is a client that meant something this route cannot tell. */
 export async function PUT(request: Request) {
   try {
     const body: unknown = JSON.parse(await readBoundedText(request, MAX_BODY_BYTES));
+    if (typeof body !== "object" || body === null || Array.isArray(body)) {
+      return NextResponse.json({ error: "bad request" }, { status: 400 });
+    }
+    const named = Object.keys(body);
+    const known: readonly string[] = SWITCHES;
     if (
-      typeof body !== "object" ||
-      body === null ||
-      Array.isArray(body) ||
-      Object.keys(body).length !== 2 ||
-      !("tellRecipients" in body) ||
-      !("allowSending" in body) ||
-      typeof body.tellRecipients !== "boolean" ||
-      typeof body.allowSending !== "boolean"
+      named.length === 0 ||
+      named.some((key) => !known.includes(key)) ||
+      SWITCHES.some(
+        (key) => key in body && typeof (body as Record<string, unknown>)[key] !== "boolean",
+      )
     ) {
       return NextResponse.json({ error: "bad request" }, { status: 400 });
     }
+    const patch = body as Partial<Record<(typeof SWITCHES)[number], boolean>>;
+    const state = await readAgentSettingsState();
+    // THE BASE IS WHAT THE TOOLS ARE DOING, NOT WHAT THE FILE SAYS. An
+    // unreadable file already refuses every agent send, so that is the value a
+    // write naming the other switch preserves; taking the reader's
+    // on-by-default here would be the same resurrection in one fewer place.
+    const base = {
+      ...state.settings,
+      ...(state.unreadable ? { allowSending: false } : {}),
+    };
     // A write leaves a file this process has written, so nothing is
     // unreadable from here on and the screen can stop saying so.
     return NextResponse.json({
-      ...(await writeAgentSettings({
-        tellRecipients: body.tellRecipients,
-        allowSending: body.allowSending,
-      })),
+      ...(await writeAgentSettings({ ...base, ...patch })),
       unreadable: false,
     });
   } catch {

@@ -52,10 +52,58 @@ describe("the agent settings route", () => {
     });
   });
 
-  it("takes exactly the two keys, as booleans", async () => {
+  /** ONE SWITCH IS ONE FIELD. The screen throws one row at a time, and a body
+   *  carrying the other row's value is the screen writing back a value it was
+   *  only standing in for. */
+  it("writes one named switch and leaves the other where it was", async () => {
+    const written = await PUT(put(JSON.stringify({ tellRecipients: true })));
+    expect(written.status).toBe(200);
+    expect(await written.json()).toEqual({
+      tellRecipients: true,
+      allowSending: true,
+      unreadable: false,
+    });
+    const second = await PUT(put(JSON.stringify({ allowSending: false })));
+    expect(await second.json()).toEqual({
+      tellRecipients: true,
+      allowSending: false,
+      unreadable: false,
+    });
+    expect(await (await GET()).json()).toEqual({
+      tellRecipients: true,
+      allowSending: false,
+      unreadable: false,
+    });
+  });
+
+  /** A file this process could not read is a file whose sending switch is
+   *  already refusing every send. A write naming the other switch keeps that
+   *  rather than folding in the on-by-default the reader hands back for an
+   *  unreadable file. */
+  it("keeps sending off when a write naming the other switch lands on an unreadable file", async () => {
+    await fs.writeFile(path.join(root, "agent-settings.json"), "{not json", {
+      mode: 0o600,
+    });
+
+    const written = await PUT(put(JSON.stringify({ tellRecipients: true })));
+    expect(await written.json()).toEqual({
+      tellRecipients: true,
+      allowSending: false,
+      unreadable: false,
+    });
+    expect(await (await GET()).json()).toEqual({
+      tellRecipients: true,
+      allowSending: false,
+      unreadable: false,
+    });
+  });
+
+  it("takes only the two known keys, as booleans, and at least one of them", async () => {
     for (const body of [
-      JSON.stringify({ tellRecipients: true }),
+      JSON.stringify({}),
+      JSON.stringify({ allowSending: 1 }),
       JSON.stringify({ tellRecipients: true, allowSending: "yes" }),
+      JSON.stringify({ extra: true }),
       JSON.stringify({ tellRecipients: true, allowSending: false, extra: 1 }),
       JSON.stringify([true, false]),
       "not json",

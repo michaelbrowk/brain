@@ -72,7 +72,13 @@ beforeEach(() => {
         if (method === "GET") return response(agent);
         if (agentWriteFails) return response(null, 500);
         agentWrites.push(String(init!.body));
-        agent = JSON.parse(String(init!.body)) as typeof agent;
+        // The route merges one named field onto what it holds, so the fake
+        // does too: a body naming one switch must not blank the other.
+        agent = {
+          ...agent,
+          ...(JSON.parse(String(init!.body)) as Partial<typeof agent>),
+          unreadable: false,
+        };
         return response(agentEchoOverride ? { ...agent, ...agentEchoOverride } : agent);
       }
       throw new Error(`unexpected request: ${url}`);
@@ -238,12 +244,21 @@ describe("Settings → Connections, the agent rows", () => {
     const toasts: string[] = [];
     await render((title) => toasts.push(title));
     await act(async () => radio("Let agents send mail", "Off").click());
-    expect(JSON.parse(agentWrites[0]!)).toEqual({
-      tellRecipients: false,
-      allowSending: false,
-    });
+    expect(JSON.parse(agentWrites[0]!)).toEqual({ allowSending: false });
     expect(toasts).toContain("Agents can no longer send mail");
     expect(radio("Let agents send mail", "Off").getAttribute("aria-checked")).toBe("true");
+  });
+
+  /** ONE SWITCH WRITES ONE FIELD.
+   *
+   *  The request used to carry both, spread off the state on screen, so a
+   *  value the screen was only standing in for was written back as though the
+   *  owner had set it. */
+  it("names only the switch that was thrown", async () => {
+    await render();
+    await act(async () => radio("Tell recipients when an agent writes", "On").click());
+    expect(JSON.parse(agentWrites[0]!)).toEqual({ tellRecipients: true });
+    expect(agentWrites.every((body) => !body.includes("allowSending"))).toBe(true);
   });
 
   it("puts a switch back where it was when the write fails", async () => {
@@ -288,7 +303,27 @@ describe("Settings → Connections, the agent rows", () => {
     expect(radio("Let agents send mail", "Off").getAttribute("aria-checked")).toBe(
       "true",
     );
-    expect(text()).toContain("every agent send is refused until you set it again");
+    expect(text()).toContain("every agent send is refused");
+  });
+
+  /** NEITHER SWITCH WRITES OVER A FILE NOBODY COULD READ.
+   *
+   *  The values on screen are the documented defaults standing in for a file
+   *  that did not answer, so writing any of them back is writing a guess. The
+   *  kill switch is the one that matters: flipping the other row used to send
+   *  `allowSending: true` off that guess and turn sending back on with no
+   *  toast and no row saying so. */
+  it("sends nothing while the file holding the switches cannot be read", async () => {
+    agent = { tellRecipients: false, allowSending: true, unreadable: true };
+    await render();
+
+    expect(radio("Tell recipients when an agent writes", "On").disabled).toBe(true);
+    expect(radio("Let agents send mail", "On").disabled).toBe(true);
+    await act(async () => radio("Tell recipients when an agent writes", "On").click());
+    expect(agentWrites).toEqual([]);
+    expect(radio("Let agents send mail", "Off").getAttribute("aria-checked")).toBe(
+      "true",
+    );
   });
 
   it("does not warn React about a duplicate key when two lines land in the same millisecond", async () => {

@@ -63,11 +63,15 @@ const MCP_CONNECTION_CHECK_PROMPT =
 const SAVE_FAILED = "Couldn't save that. Try again.";
 /** What the send tools do with an unreadable settings file, said on the
  *  screen they point the owner at. A switch whose whole purpose is to stop an
- *  agent fails closed, so the row reads Off and says why until it is set
- *  again. */
+ *  agent fails closed, so the row reads Off and says why.
+ *
+ *  Both rows carry the sentence while the file is unreadable, and both are
+ *  held still: the values on screen are the documented defaults standing in
+ *  for a file that did not answer, so a write of either of them is a write of
+ *  a guess. */
 const SENDING_HINT = "Off refuses every agent send before the mail service is reached";
-const SENDING_UNREADABLE_HINT =
-  "The saved switch could not be read, so every agent send is refused until you set it again";
+const UNREADABLE_HINT =
+  "The saved switches could not be read, so every agent send is refused and neither switch can be set until Brain can read that file again";
 const NO_APPS = "No apps connected with OAuth yet";
 const NO_ACTIVITY = "No agent activity yet";
 
@@ -227,20 +231,21 @@ export function ConnectionsSection({
 
   /** Each switch says what it now means rather than that it was saved: the
    *  owner threw it to change what an agent may do, and the sentence is the
-   *  new rule. */
-  const saveAgent = async (next: McpAgentSettings, said: string) => {
-    if (savingAgent) return;
+   *  new rule.
+   *
+   *  The request names the one switch that was thrown. It used to carry both,
+   *  spread off the state on screen, so throwing one row wrote the other row's
+   *  drawn value back as though the owner had set it. */
+  const saveAgent = async (patch: Partial<McpAgentSettings>, said: string) => {
+    if (savingAgent || agent.unreadable) return;
     const previous = agent;
     setSavingAgent(true);
-    setAgent({ ...next, unreadable: false });
+    setAgent({ ...agent, ...patch, unreadable: false });
     try {
       const response = await fetch("/api/settings/mcp-agent", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          tellRecipients: next.tellRecipients,
-          allowSending: next.allowSending,
-        }),
+        body: JSON.stringify(patch),
       });
       if (!response.ok) throw new Error(String(response.status));
       // Adopted the way `notifications-section.tsx`'s own switches adopt
@@ -424,19 +429,23 @@ export function ConnectionsSection({
       >
         <SettingsRow
           label="Tell recipients when an agent writes"
-          hint="Adds a line to the outgoing message saying an agent wrote it"
+          hint={
+            agent.unreadable
+              ? UNREADABLE_HINT
+              : "Adds a line to the outgoing message saying an agent wrote it"
+          }
         >
           <Segmented
             label="Tell recipients when an agent writes"
             value={agent.tellRecipients ? "on" : "off"}
-            disabled={savingAgent}
+            disabled={savingAgent || agent.unreadable}
             options={[
               { value: "off", label: "Off" },
               { value: "on", label: "On" },
             ]}
             onChange={(next) =>
               void saveAgent(
-                { ...agent, tellRecipients: next === "on" },
+                { tellRecipients: next === "on" },
                 next === "on" ? "Recipients will be told" : "Recipients will not be told",
               )
             }
@@ -444,19 +453,19 @@ export function ConnectionsSection({
         </SettingsRow>
         <SettingsRow
           label="Let agents send mail"
-          hint={agent.unreadable ? SENDING_UNREADABLE_HINT : SENDING_HINT}
+          hint={agent.unreadable ? UNREADABLE_HINT : SENDING_HINT}
         >
           <Segmented
             label="Let agents send mail"
             value={agent.allowSending && !agent.unreadable ? "on" : "off"}
-            disabled={savingAgent}
+            disabled={savingAgent || agent.unreadable}
             options={[
               { value: "off", label: "Off" },
               { value: "on", label: "On" },
             ]}
             onChange={(next) =>
               void saveAgent(
-                { ...agent, allowSending: next === "on" },
+                { allowSending: next === "on" },
                 next === "on" ? "Agents can send mail" : "Agents can no longer send mail",
               )
             }

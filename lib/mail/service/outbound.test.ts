@@ -241,7 +241,7 @@ describe("provider-neutral mail send service", () => {
     expect(failure).toBeInstanceOf(MailSendError);
     expect(failure.code).toBe("mail_send_service_unavailable");
     expect(failure.enqueued).toBe(true);
-    // And the message really is durable, which is what the flag claims.
+    // And the message is durable, which is what the flag claims.
     expect(kept.first()).toMatchObject({ status: "queued" });
   });
 

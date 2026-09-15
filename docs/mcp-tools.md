@@ -251,7 +251,11 @@ enqueues the message durably before it delivers, so a request whose answer
 was lost is as likely to have gone out as not. That is every failure raised
 once the request had left this host: a timeout, a cancellation, a reply the
 client could not validate, and a socket that died with the message already
-written. Only a failure before anything was sent stays a refusal, a
+written. It is also every failure the **service** raised after it had made the
+message durable, which is the one case where the socket looks healthy from
+Brain's side: the service answers those with `enqueued: true` beside the code
+in its error body, and the tool reads that as unknown rather than as a
+refusal. Only a failure before anything was sent stays a refusal, a
 connection refused or a check Brain made itself. `send_mail` and `reply_mail`
 answer
 

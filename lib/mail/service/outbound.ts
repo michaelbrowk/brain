@@ -44,10 +44,36 @@ export type MailSendErrorCode =
   | "mail_send_service_unavailable";
 
 export class MailSendError extends Error {
-  constructor(readonly code: MailSendErrorCode) {
+  /** WHETHER THE MESSAGE WAS ALREADY DURABLE WHEN THIS FAILED.
+   *
+   *  `send` enqueues the proposal and only then delivers, so a failure on
+   *  either side of that line means something different to the caller: before
+   *  it, nothing happened and a fresh idempotency key is safe; after it, the
+   *  outbox holds the message and will deliver it, so a fresh key sends the
+   *  recipient two copies. The socket is fine in both cases, so nothing above
+   *  this service can tell them apart. False unless the throw sits after the
+   *  enqueue, which is the safe reading of a failure nobody marked. */
+  readonly enqueued: boolean;
+
+  constructor(
+    readonly code: MailSendErrorCode,
+    options: { readonly enqueued?: boolean } = {},
+  ) {
     super(code);
     this.name = "MailSendError";
+    this.enqueued = options.enqueued === true;
   }
+}
+
+/** The same failure, told from after the durable enqueue. Anything that is not
+ *  this service's own error is an outage as far as the caller is concerned,
+ *  and it is no less enqueued for being untyped. */
+function afterEnqueue(error: unknown): MailSendError {
+  if (error instanceof MailSendError && error.enqueued) return error;
+  return new MailSendError(
+    error instanceof MailSendError ? error.code : "mail_send_service_unavailable",
+    { enqueued: true },
+  );
 }
 
 export interface MailSendRequestContext {
@@ -282,12 +308,27 @@ export class ProviderNeutralMailSendService implements MailSendService {
       enqueued.submission.idempotencyKey !== input.idempotencyKey ||
       enqueued.submission.requestFingerprint !== proposal.requestFingerprint
     ) {
-      throw new MailSendError("mail_send_service_unavailable");
+      // The store answered with a submission this request does not recognise.
+      // Something is durable under this key, and this is the wrong side of the
+      // enqueue to tell the caller nothing happened.
+      throw new MailSendError("mail_send_service_unavailable", {
+        enqueued: true,
+      });
     }
 
-    const final = provider
-      ? await this.deliverIfAvailable(enqueued.submission, provider, request)
-      : enqueued.submission;
+    // EVERYTHING BELOW RUNS AFTER THE MESSAGE IS DURABLE. The lease, the
+    // provider call, the state writes around it: each of them can fail, and
+    // each failure leaves the outbox holding a message it will deliver. The
+    // caller is told that much rather than being handed a bare 503 it reads
+    // as "nothing happened, send it again".
+    let final: StoredMailSendSubmission;
+    try {
+      final = provider
+        ? await this.deliverIfAvailable(enqueued.submission, provider, request)
+        : enqueued.submission;
+    } catch (error) {
+      throw afterEnqueue(error);
+    }
     return Object.freeze({
       apiVersion: 1,
       operationId: final.operationId,

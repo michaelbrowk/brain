@@ -15,6 +15,7 @@ import {
   type MailAccountConnectInput,
   type MailAccountStatus,
 } from "./brain-mail-client";
+import type { MailSendInput } from "./message-types";
 import {
   MAIL_ACCOUNT_CAPABILITIES_CONTRACT_HEADER,
   MAIL_ACCOUNT_CAPABILITIES_CONTRACT_VALUE,
@@ -1135,7 +1136,59 @@ describe("Brain Mail Unix-socket client", () => {
       requestSent: false,
     });
   });
+
+  /** `requestSent` answers "did the service hear us". `enqueued` answers the
+   *  question after it: the service heard us, made the message durable, and
+   *  then failed. Only the service knows that, so the client carries what it
+   *  says rather than reading it off a status code. */
+  it("carries the service's own enqueued flag onto the error", async () => {
+    const bodies: unknown[] = [
+      {
+        apiVersion: 1,
+        error: { code: "mail_send_service_unavailable", enqueued: true },
+      },
+      { apiVersion: 1, error: { code: "mail_send_service_unavailable" } },
+      {
+        apiVersion: 1,
+        error: { code: "mail_send_service_unavailable", enqueued: "yes" },
+      },
+    ];
+    const { socketPath } = await startServer((_request, response) => {
+      writeJson(response, 503, bodies.shift());
+    });
+    const client = createBrainMailClient({ socketPath });
+
+    await expect(client.sendMessage(sendInput())).rejects.toMatchObject({
+      code: "mail_send_service_unavailable",
+      enqueued: true,
+    });
+    await expect(client.sendMessage(sendInput())).rejects.toMatchObject({
+      code: "mail_send_service_unavailable",
+      enqueued: false,
+    });
+    // Anything but the flag itself is a body this client does not understand.
+    await expect(client.sendMessage(sendInput())).rejects.toMatchObject({
+      code: "mail_service_invalid_response",
+    });
+  });
 });
+
+function sendInput(): MailSendInput {
+  return {
+    accountId: "account-a0123456789abcdef0123456789abcdef",
+    idempotencyKey: "compose-action-01",
+    mode: "compose",
+    to: ["friend@example.net"],
+    cc: [],
+    bcc: [],
+    subject: "Hello",
+    text: "Body",
+    replyToMessageId: null,
+    attachments: [],
+    origin: "mcp",
+    agentLine: false,
+  };
+}
 
 function attachmentHeaders(bytes: number): Record<string, string> {
   return {

@@ -137,7 +137,10 @@ const AMBIGUOUS_SEND_CODES: ReadonlySet<string> = new Set([
  *  unknown. Only a throw from `sendMessage` may be asked: a failure before it
  *  told the service nothing to send.
  *
- *  Three things read as unknown. One of the codes above. Any client error
+ *  Four things read as unknown. One of the codes above. A failure the service
+ *  marked `enqueued`, which is the one case where the socket looks perfectly
+ *  healthy from here: the request was answered, the code is the same one an
+ *  outage carries, and the outbox is holding the message. Any client error
  *  raised once the request body had reached the socket, which is what
  *  `requestSent` carries: `mail_service_unavailable` is one code for a socket
  *  that never connected and one that died with the message already written,
@@ -149,7 +152,9 @@ const AMBIGUOUS_SEND_CODES: ReadonlySet<string> = new Set([
  *  refused, a validation Brain made itself, the owner's kill switch. */
 export function isAmbiguousSendFailure(error: unknown): boolean {
   if (!(error instanceof BrainMailClientError)) return true;
-  return AMBIGUOUS_SEND_CODES.has(error.code) || error.requestSent;
+  return (
+    AMBIGUOUS_SEND_CODES.has(error.code) || error.enqueued || error.requestSent
+  );
 }
 
 /** Every field a mail or task line may name. All of them are optional on

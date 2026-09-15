@@ -192,9 +192,56 @@ describe("provider-neutral mail send service", () => {
       providers: [],
       now: () => now,
     });
-    await expect(service.send(composeInput(), request())).rejects.toEqual(
-      new MailSendError("mail_send_service_unavailable"),
-    );
+    const refused = await service.send(composeInput(), request()).catch((e) => e);
+    expect(refused).toEqual(new MailSendError("mail_send_service_unavailable"));
+    // Nothing was written, so a caller may say "refused" and use a fresh key.
+    expect(refused.enqueued).toBe(false);
+  });
+
+  /** WHICH SIDE OF THE ENQUEUE A FAILURE FELL ON.
+   *
+   *  `/v1/send` makes the message durable and only then delivers, so a failure
+   *  after that point is not "nothing happened": the outbox holds the message
+   *  and will send it. The service is the only thing that knows which side it
+   *  was, and it used to answer both with the same bare 503, which a caller
+   *  reads as a refusal and answers with a fresh key. Two copies. */
+  it("marks a failure raised after the durable enqueue as enqueued", async () => {
+    const kept = new MemoryMailSendStore();
+    const store: MailSendStore = {
+      enqueue: (submission) => kept.enqueue(submission),
+      readByOperationId: (operationId) => kept.readByOperationId(operationId),
+      // The outbox write that claims the operation for this attempt. It runs
+      // after the enqueue and before the provider is called.
+      compareAndSwap: async () => {
+        throw new Error("outbox write failed");
+      },
+    };
+    const service = serviceFixture(store, acceptedProvider());
+
+    const failure = await service.send(composeInput(), request()).catch((e) => e);
+
+    expect(failure).toBeInstanceOf(MailSendError);
+    expect(failure.code).toBe("mail_send_service_unavailable");
+    expect(failure.enqueued).toBe(true);
+    // And the message really is durable, which is what the flag claims.
+    expect(kept.first()).toMatchObject({ status: "queued" });
+  });
+
+  /** The enqueue itself failing is the other side of the same line. */
+  it("leaves a failure raised by the enqueue itself unmarked", async () => {
+    const store: MailSendStore = {
+      enqueue: async () => {
+        throw new Error("outbox write failed");
+      },
+      readByOperationId: async () => null,
+      compareAndSwap: async () => false,
+    };
+    const service = serviceFixture(store, acceptedProvider());
+
+    const failure = await service.send(composeInput(), request()).catch((e) => e);
+
+    expect(failure.code).toBe("mail_send_service_unavailable");
+    expect(failure.enqueued).toBe(false);
   });
 
   it("sends once, persists the result, and deduplicates the same request", async () => {

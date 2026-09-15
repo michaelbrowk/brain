@@ -4896,6 +4896,61 @@ describe("the mail send tools", () => {
     });
   });
 
+  /** THE SERVICE SAYS WHICH SIDE OF THE ENQUEUE IT FAILED ON.
+   *
+   *  `/v1/send` makes the message durable before it delivers, so a failure
+   *  after that point is not "nothing happened": the outbox holds the message.
+   *  The socket was fine, so `requestSent` alone could not tell this apart
+   *  from a refusal, and a refusal is the one answer that sends the agent back
+   *  with a fresh key. */
+  it("answers unknown when the service failed after it made the message durable", async () => {
+    const enqueued = createMailClientFake({
+      sendMessage: async () => {
+        throw new BrainMailClientError(503, "mail_send_service_unavailable", {
+          enqueued: true,
+        });
+      },
+    });
+    mocks.createBrainMailClient.mockReturnValue(enqueued.client);
+
+    const message = {
+      accountId: FAKE_ACCOUNT_ID,
+      to: ["durable@example.net"],
+      subject: "Held",
+      text: "one line",
+    };
+    const held = await toolPayload(
+      await callTool(
+        "send_mail",
+        { ...message, idempotencyKey: "mcp-key-held-00001" },
+        437,
+      ),
+    );
+
+    expect(held.isError).toBe(false);
+    expect(held.payload).toMatchObject({
+      state: "unknown",
+      retry: "same-key",
+      idempotencyKey: "mcp-key-held-00001",
+      reason: "mail_send_service_unavailable",
+    });
+
+    // And the memo is armed, so a fresh key for the same message is held.
+    const second = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(second.client);
+    const fresh = await toolPayload(
+      await callTool(
+        "send_mail",
+        { ...message, idempotencyKey: "mcp-key-fresh-0001" },
+        438,
+      ),
+    );
+    expect(fresh.isError).toBe(true);
+    expect(fresh.payload.reason).toBe("possible_duplicate");
+    expect(fresh.payload.error).toContain("mcp-key-held-00001");
+    expect(second.calls.map((call) => call.method)).not.toContain("sendMessage");
+  });
+
   it("refuses a fresh key on a message an unknown send may already have sent", async () => {
     const timedOut = createMailClientFake({
       sendMessage: async () => {

@@ -618,6 +618,13 @@ keeps one deterministic order across replays. With the owner's toggle on,
 `agentLine` appends one last body line, `Sent by an agent through Brain.`, and
 only for an agent's message. A message a person typed carries neither.
 
+The origin is stamped by whoever took the request, never read off a body. The
+MCP tools write the literal `"mcp"` and their schemas refuse the field as an
+unknown argument; `app/api/mail/send/route.ts` writes the literal `"app"` over
+whatever the browser posted. That is what makes the header worth filtering on:
+nothing a caller can say puts an agent's mark on the owner's own message, or
+takes it off an agent's.
+
 Both shapes are written as buffers end to end, and only one message is built at
 a time for the whole process. A send at the attachment cap holds the decoded
 files and the finished message together, so two overlapping builds would cross

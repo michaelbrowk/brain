@@ -28,8 +28,25 @@ export async function POST(request: Request) {
   } catch (error) {
     return mailApiBodyError(error, "mail_send_request_invalid", 1);
   }
+  /*
+    `origin` is Brain's own record of who wrote a message: "mcp" is what earns
+    the outbound MIME its `X-Brain-Agent` header, and it is what a person
+    filters an agent's mail on. It is not the caller's to claim. Everything
+    that reaches this route came through `hasExactSameOrigin`, so it is the
+    owner's own browser, and the route stamps "app" itself whatever the body
+    said. `agentLine` needs an "mcp" origin to do anything service-side, so
+    the recipient-visible line goes with it.
+
+    A body that is not an object is passed on untouched: the codec is the one
+    place that says what a send request is, and its refusal names the request
+    rather than an origin this route invented for it.
+  */
+  const owned: unknown =
+    typeof input === "object" && input !== null && !Array.isArray(input)
+      ? { ...(input as Record<string, unknown>), origin: "app" }
+      : input;
   return runMailApiAction(
-    () => createBrainMailClient().sendMessage(input as MailSendInput, request.signal),
+    () => createBrainMailClient().sendMessage(owned as MailSendInput, request.signal),
     1,
   );
 }

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   MAIL_SEND_ATTACHMENT_LIMITS,
+  mailSendAttachmentBytes,
   validateMailSendAttachments,
 } from "./send-attachment-codec";
 
@@ -130,6 +131,11 @@ const cases: readonly {
     make: () => "not an array",
     accepted: false,
   },
+  {
+    name: "an empty payload, which is a zero byte part",
+    make: () => [attachment({ dataBase64: "" })],
+    accepted: true,
+  },
 ];
 
 describe("outgoing attachment codec", () => {
@@ -146,11 +152,21 @@ describe("outgoing attachment codec", () => {
     expect(result).toEqual(value);
   });
 
+  it("reads a decoded size off the base64 length", () => {
+    expect(mailSendAttachmentBytes("")).toBe(0);
+    expect(mailSendAttachmentBytes(THREE_BYTES)).toBe(3);
+    expect(mailSendAttachmentBytes(payloadOf(1))).toBe(1);
+    expect(mailSendAttachmentBytes(payloadOf(2))).toBe(2);
+    // A length that is not a whole number of groups cannot reach the
+    // validator, and the exported reader still answers a whole number.
+    expect(Number.isInteger(mailSendAttachmentBytes("AAAAA"))).toBe(true);
+  });
+
   it("pins the three caps a sender and a tool both read", () => {
     expect(MAIL_SEND_ATTACHMENT_LIMITS).toEqual({
       maxCount: 10,
       maxFilenameBytes: 255,
-      maxTotalBytes: 26_214_400,
+      maxTotalBytes: 10_485_760,
     });
   });
 });

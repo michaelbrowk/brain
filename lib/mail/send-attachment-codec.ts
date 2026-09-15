@@ -8,8 +8,18 @@
 export const MAIL_SEND_ATTACHMENT_LIMITS = Object.freeze({
   maxCount: 10,
   maxFilenameBytes: 255,
-  /** 25 MiB of payload, which the 26 MiB raw-message cap leaves room for. */
-  maxTotalBytes: 26_214_400,
+  /**
+   * 10 MiB of decoded payload per message, the one number every other
+   * outgoing cap is derived from. What sets it is the service's memory
+   * contract rather than what a provider would accept: `MemoryHigh=192M` and
+   * `MemoryMax=256M` in `ops/brain-mail.service`, measured on 2026-09-15 at
+   * 155 MiB peak RSS for one send of 10 MiB against a 37.5 MiB bare-node
+   * baseline. `MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes` follows from it:
+   * base64 at 76 columns multiplies a payload by 1.3684, so 10 MiB of files
+   * becomes 13.68 MiB of parts, and the 1 MiB text part and the headers take
+   * the finished message to the 18 MiB stated there.
+   */
+  maxTotalBytes: 10_485_760,
 });
 
 export interface MailSendAttachment {
@@ -92,8 +102,10 @@ export function validateMailSendAttachments(
 }
 
 /**
- * The decoded size read off the base64 length. Decoding 25 MiB to measure it
- * is the allocation the cap exists to prevent.
+ * The decoded size read off the base64 length. Decoding 10 MiB to measure it
+ * is the allocation the cap exists to prevent. The group count is floored
+ * because the function is exported for a tool to size a file, and a length
+ * that is not a whole number of groups would otherwise answer a fraction.
  */
 export function mailSendAttachmentBytes(dataBase64: string): number {
   const padding = dataBase64.endsWith("==")
@@ -101,5 +113,5 @@ export function mailSendAttachmentBytes(dataBase64: string): number {
     : dataBase64.endsWith("=")
       ? 1
       : 0;
-  return (dataBase64.length / 4) * 3 - padding;
+  return Math.floor(dataBase64.length / 4) * 3 - padding;
 }

@@ -1,5 +1,15 @@
 import { MAIL_RESOURCE_LIMITS, admitOutgoingRawMessage } from "../security";
 import type { MailEnvelope } from "../ports";
+import {
+  MAIL_SEND_ATTACHMENT_LIMITS,
+  isSafeAttachmentFilename,
+  isSafeAttachmentMimeType,
+} from "../send-attachment-codec";
+import {
+  buildMultipartBody,
+  multipartBoundary,
+  type OutboundAttachmentPart,
+} from "./outbound-attachments";
 
 const MAX_ADDRESS_BYTES = 254;
 const MAX_SUBJECT_BYTES = 998;
@@ -8,6 +18,8 @@ const MAX_REFERENCE_COUNT = 50;
 const MAX_REFERENCE_BYTES = 32 * 1024;
 const MAX_MESSAGE_ID_BYTES = 998;
 const MAX_ENCODED_WORD_PAYLOAD_BYTES = 42;
+/** The only string any tool in this release adds to a body. */
+const AGENT_BODY_LINE = "Sent by an agent through Brain.";
 const CRLF = Buffer.from("\r\n", "ascii");
 const HEADER_BODY_SEPARATOR = Buffer.from("\r\n\r\n", "ascii");
 
@@ -26,7 +38,12 @@ export interface OutboundMessageSource {
   readonly messageId: string;
   readonly createdAt: number;
   readonly reply: OutboundReplyHeaders | null;
+  readonly attachments: readonly OutboundAttachmentPart[];
+  readonly origin: MailSendOrigin;
+  readonly agentLine: boolean;
 }
+
+export type MailSendOrigin = "app" | "mcp";
 
 export interface BuiltOutboundMessage {
   readonly envelope: MailEnvelope;
@@ -47,6 +64,9 @@ export function buildOutboundRfc2822(
   const messageId = validateMessageId(source.messageId, "Message-ID", 254);
   const createdAt = validateTimestamp(source.createdAt);
   const reply = validateReplyHeaders(source.reply);
+  const attachments = validateAttachmentParts(source.attachments);
+  const origin = validateOrigin(source.origin);
+  const agentLine = validateAgentLine(source.agentLine);
 
   const headers: string[] = [
     `From: ${envelope.from}`,
@@ -64,10 +84,26 @@ export function buildOutboundRfc2822(
     headers.push(foldReferencesHeader(reply.references));
   }
   headers.push("MIME-Version: 1.0");
-  headers.push('Content-Type: text/plain; charset="UTF-8"');
-  headers.push("Content-Transfer-Encoding: base64");
+  // After MIME-Version and before the content headers, so the header block
+  // keeps one deterministic order across replays.
+  if (origin === "mcp") headers.push("X-Brain-Agent: mcp");
 
-  const encodedBody = wrapBase64(Buffer.from(normalizeLineEndings(text), "utf8"));
+  const body =
+    origin === "mcp" && agentLine ? `${text}\n\n${AGENT_BODY_LINE}` : text;
+  let encodedBody: string;
+  if (attachments.length === 0) {
+    headers.push('Content-Type: text/plain; charset="UTF-8"');
+    headers.push("Content-Transfer-Encoding: base64");
+    encodedBody = wrapBase64(Buffer.from(normalizeLineEndings(body), "utf8"));
+  } else {
+    const boundary = multipartBoundary(messageId);
+    headers.push(`Content-Type: multipart/mixed; boundary="${boundary}"`);
+    encodedBody = buildMultipartBody(
+      normalizeLineEndings(body),
+      attachments,
+      boundary,
+    ).toString("utf8");
+  }
   const rawRfc2822 = Buffer.from(
     `${headers.join("\r\n")}\r\n\r\n${encodedBody}\r\n`,
     "utf8",
@@ -174,6 +210,54 @@ function validateAddress(value: unknown): string {
     !/^[^<>\s@]+@[^<>\s@]+$/.test(value)
   ) {
     throw new Error("mail address is invalid or unsafe");
+  }
+  return value;
+}
+
+/**
+ * The byte total is not checked here. The codec caps the payload on the way
+ * in and `admitOutgoingRawMessage` caps the finished message, so one layer
+ * owns each limit and a single oversized file still reports the message cap.
+ */
+function validateAttachmentParts(
+  value: unknown,
+): readonly OutboundAttachmentPart[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > MAIL_SEND_ATTACHMENT_LIMITS.maxCount
+  ) {
+    throw new Error("outbound attachments are invalid");
+  }
+  return Object.freeze(
+    value.map((entry) => {
+      if (
+        !isRecord(entry) ||
+        Reflect.ownKeys(entry).length !== 3 ||
+        !isSafeAttachmentFilename(entry.filename) ||
+        !isSafeAttachmentMimeType(entry.mimeType) ||
+        !Buffer.isBuffer(entry.bytes)
+      ) {
+        throw new Error("outbound attachments are invalid");
+      }
+      return Object.freeze({
+        filename: entry.filename,
+        mimeType: entry.mimeType,
+        bytes: entry.bytes,
+      });
+    }),
+  );
+}
+
+function validateOrigin(value: unknown): MailSendOrigin {
+  if (value !== "app" && value !== "mcp") {
+    throw new Error("outbound message origin is invalid");
+  }
+  return value;
+}
+
+function validateAgentLine(value: unknown): boolean {
+  if (typeof value !== "boolean") {
+    throw new Error("outbound message agent line is invalid");
   }
   return value;
 }

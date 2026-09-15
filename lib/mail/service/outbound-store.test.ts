@@ -3118,6 +3118,9 @@ function draftSubmissionFixture(
             inReplyTo: threading.rfcMessageId!,
             references: threading.references,
           },
+    attachments: [],
+    origin: "app",
+    agentLine: false,
   });
   try {
     return Object.freeze({

@@ -2771,6 +2771,9 @@ function draftMatchesSubmission(
               inReplyTo: threading.rfcMessageId!,
               references: threading.references,
             },
+      attachments: [],
+      origin: "app",
+      agentLine: false,
     });
     expectedRaw = built.rawRfc2822;
     return (

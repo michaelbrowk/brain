@@ -802,6 +802,9 @@ export function createMailSendSubmissionProposal(options: {
       messageId,
       createdAt: options.createdAt,
       reply: reply === null ? null : toReplyHeaders(reply),
+      attachments: [],
+      origin: "app",
+      agentLine: false,
     });
     rawRfc2822 = built.rawRfc2822;
     return freezeSubmission({

@@ -36,6 +36,23 @@ const MIME_TYPE =
   /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/;
 const STANDARD_BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 
+/**
+ * The two rules the service's MIME writer relies on as well, exported so one
+ * list decides what may reach a header rather than two that drift.
+ */
+export function isSafeAttachmentFilename(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    Buffer.byteLength(value) <= MAIL_SEND_ATTACHMENT_LIMITS.maxFilenameBytes &&
+    !UNSAFE_FILENAME.test(value)
+  );
+}
+
+export function isSafeAttachmentMimeType(value: unknown): value is string {
+  return typeof value === "string" && MIME_TYPE.test(value);
+}
+
 export function validateMailSendAttachments(
   value: unknown,
 ): readonly MailSendAttachment[] {
@@ -57,12 +74,8 @@ export function validateMailSendAttachments(
     }
     const { filename, mimeType, dataBase64 } = entry as Record<string, unknown>;
     if (
-      typeof filename !== "string" ||
-      filename.length === 0 ||
-      Buffer.byteLength(filename) > MAIL_SEND_ATTACHMENT_LIMITS.maxFilenameBytes ||
-      UNSAFE_FILENAME.test(filename) ||
-      typeof mimeType !== "string" ||
-      !MIME_TYPE.test(mimeType) ||
+      !isSafeAttachmentFilename(filename) ||
+      !isSafeAttachmentMimeType(mimeType) ||
       typeof dataBase64 !== "string" ||
       dataBase64.length % 4 !== 0 ||
       !STANDARD_BASE64.test(dataBase64)

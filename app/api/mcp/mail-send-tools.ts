@@ -1,7 +1,6 @@
 import type { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import {
-  BrainMailClientError,
   createBrainMailClient,
   type BrainMailClient,
   type PublicMailAccountV3,
@@ -15,10 +14,6 @@ import {
   deriveReplyAllRecipients,
   deriveReplyRecipients,
 } from "@/lib/mail/reply-forward";
-import {
-  appendMcpActivity,
-  type McpActivityEntry,
-} from "@/lib/mcp/activity-log";
 import { recordAgentSend, resolveAgentSendThread } from "@/lib/mcp/agent-sends";
 import { readAgentSettings } from "@/lib/mcp/agent-settings";
 import {
@@ -28,6 +23,13 @@ import {
   resolveOutgoingAttachments,
   type OutgoingAttachmentRef,
 } from "./mail-send-attachments";
+import {
+  logMailActivity,
+  mailOutcome,
+  mailRefusal,
+  sendBlockedReasonOf,
+  type McpActivityTarget,
+} from "./mail-tool-kit";
 import {
   clientNameOf,
   hasScope,
@@ -90,123 +92,16 @@ const MAX_RECIPIENTS = 100;
 const MAX_SUBJECT_BYTES = 998;
 const MAX_TEXT_BYTES = 1024 * 1024;
 
-/** The same three shapes `mail-tools.ts` keeps for the read and triage tools.
- *  They are repeated rather than imported while both modules are being
- *  written in the same round; lifting them into `tool-kit.ts` is one move
- *  once the mail modules are quiet. */
-
-/** The service's own code, handed over as a reason an agent can act on. The
- *  send codes come first because they are the ones a send can produce, and
- *  the two an agent can do something about are named in words. */
-function sendRefusalFields(error: unknown): { error: string; reason: string } {
-  if (error instanceof BrainMailClientError) {
-    if (error.code === "mail_send_idempotency_conflict") {
-      return {
-        error: "that idempotency key was used for a different message",
-        reason: error.code,
-      };
-    }
-    if (error.code === "mail_send_rate_limited") {
-      return {
-        error: "the mail service is rate limiting sends",
-        reason: error.code,
-      };
-    }
-    if (error.code === "mail_send_service_unavailable") {
-      return { error: "sending is unavailable right now", reason: error.code };
-    }
-    if (
-      error.code === "mail_send_account_reauth_required" ||
-      error.code === "mail_account_reauth_required"
-    ) {
-      return {
-        error: "this account needs to be reconnected",
-        reason: error.code,
-      };
-    }
-    if (error.code === "mail_send_reply_target_not_found") {
-      return {
-        error: "the message being replied to is gone",
-        reason: error.code,
-      };
-    }
-    if (error.code === "mail_send_operation_not_found") {
-      return { error: "no send with that id", reason: error.code };
-    }
-    if (
-      error.code === "mail_send_account_not_found" ||
-      error.code === "mail_account_not_found"
-    ) {
-      return { error: "account not found", reason: error.code };
-    }
-    if (error.code === "mail_thread_not_found") {
-      return { error: "thread not found", reason: error.code };
-    }
-    if (error.code === "mail_service_unavailable") {
-      return { error: "the mail service is unavailable", reason: error.code };
-    }
-    return {
-      error: "the mail service refused this request",
-      reason: error.code,
-    };
-  }
-  return {
-    error: "the mail service is unavailable",
-    reason: "mail_service_unavailable",
-  };
-}
-
-/** A throw here would arrive at the agent as a transport error with no code
- *  at all, and the agent would retry a permanent refusal forever. Anything
- *  that is not the client's own error is an outage as far as the agent is
- *  concerned, and its wording stays on this side of the boundary. */
-function sendRefusal(error: unknown) {
-  const fields = sendRefusalFields(error);
-  return refusal(fields.error, fields.reason);
-}
-
-/** The same error as one code, for the log. */
-function sendOutcome(error: unknown): string {
-  return error instanceof BrainMailClientError
-    ? error.code
-    : "mail_service_unavailable";
-}
-
-/** One line per send attempt, whatever became of it, because the owner
- *  reading the log wants the attempt as much as the message. The target
- *  carries ids only: never a subject, an address or a body. The two
- *  attachment fields are the store's own names and a count, which say which
- *  file left the notes folder and nothing about what is in it. */
-async function logSendActivity(
-  extra: { authInfo?: { clientId?: string } },
-  tool: string,
-  target: Pick<
-    McpActivityEntry,
-    "accountId" | "threadId" | "operationId" | "attachmentId" | "change"
-  >,
-  outcome: string,
-): Promise<void> {
-  await appendMcpActivity({
-    at: new Date().toISOString(),
-    client: await clientNameOf(extra),
-    tool,
-    ...target,
-    outcome,
-  });
-}
-
-/** The service reports sending as one boolean, so the reason it is false is
- *  Brain's own read, the same derivation `list_mail_accounts` answers with.
- *  Reconnection comes first because it is the one the owner can act on
- *  today; an IMAP account with no SMTP endpoint was never set up to send;
- *  anything left is the relay this host cannot reach. */
-function sendBlockedReasonOf(account: PublicMailAccountV3): string {
-  if (account.status === "reauth_required") return "account_reauth_required";
-  if (account.providerKind === "imap" && account.smtp === undefined) {
-    return "smtp_not_configured";
-  }
-  return "smtp_relay_unavailable";
-}
+/** The fields a send's own line names, out of everything a mail line may
+ *  carry. One line per send attempt, whatever became of it, because the owner
+ *  reading the log wants the attempt as much as the message. Ids only: never
+ *  a subject, an address or a body. The two attachment fields are the store's
+ *  own names and a count, which say which file left the notes folder and
+ *  nothing about what is in it. */
+type SendActivityTarget = Pick<
+  McpActivityTarget,
+  "accountId" | "threadId" | "operationId" | "attachmentId" | "change"
+>;
 
 interface Recipients {
   readonly to: readonly string[];
@@ -380,13 +275,16 @@ export function registerMailSendTools(server: McpToolServer): void {
       // A state directory that cannot be written must never turn a completed
       // send into a failed tool call, so every call site swallows its own
       // failure.
-      const log = (outcome: string, operationId?: string) =>
-        logSendActivity(
-          extra,
-          SEND_TOOL,
-          { accountId, ...marks, ...(operationId ? { operationId } : {}) },
-          outcome,
-        ).catch(() => undefined);
+      const log = (outcome: string, operationId?: string) => {
+        const target: SendActivityTarget = {
+          accountId,
+          ...marks,
+          ...(operationId ? { operationId } : {}),
+        };
+        return logMailActivity(extra, SEND_TOOL, target, outcome).catch(
+          () => undefined,
+        );
+      };
 
       // The owner's kill switch, read before anything else, so a grant that
       // can still read mail reaches no part of the send path.
@@ -462,8 +360,8 @@ export function registerMailSendTools(server: McpToolServer): void {
           status: result.status,
         });
       } catch (error) {
-        await log(sendOutcome(error));
-        return sendRefusal(error);
+        await log(mailOutcome(error));
+        return mailRefusal(error);
       }
     },
   );
@@ -510,18 +408,17 @@ export function registerMailSendTools(server: McpToolServer): void {
       }
       const refs: readonly OutgoingAttachmentRef[] = attachmentRefs ?? [];
       let marks = attachmentActivityFields(refs, { named: false });
-      const log = (outcome: string, operationId?: string) =>
-        logSendActivity(
-          extra,
-          REPLY_TOOL,
-          {
-            accountId,
-            threadId,
-            ...marks,
-            ...(operationId ? { operationId } : {}),
-          },
-          outcome,
-        ).catch(() => undefined);
+      const log = (outcome: string, operationId?: string) => {
+        const target: SendActivityTarget = {
+          accountId,
+          threadId,
+          ...marks,
+          ...(operationId ? { operationId } : {}),
+        };
+        return logMailActivity(extra, REPLY_TOOL, target, outcome).catch(
+          () => undefined,
+        );
+      };
 
       const settings = await readAgentSettings();
       if (!settings.allowSending) {
@@ -632,8 +529,8 @@ export function registerMailSendTools(server: McpToolServer): void {
           status: result.status,
         });
       } catch (error) {
-        await log(sendOutcome(error));
-        return sendRefusal(error);
+        await log(mailOutcome(error));
+        return mailRefusal(error);
       }
     },
   );
@@ -676,7 +573,7 @@ export function registerMailSendTools(server: McpToolServer): void {
           threadId: operation.threadId,
         });
       } catch (error) {
-        return sendRefusal(error);
+        return mailRefusal(error);
       }
     },
   );

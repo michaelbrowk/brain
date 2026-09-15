@@ -3105,6 +3105,40 @@ describe("save_mail_attachment", () => {
     expect(entry).toMatchObject({ outcome: "mail_service_unavailable" });
   });
 
+  it("tells the agent to reconnect the account in the words every mail tool uses", async () => {
+    const saveAttachment = vi.fn();
+    mocks.getStore.mockResolvedValue({ saveAttachment, appendPage: vi.fn() });
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        downloadAttachment: async () => {
+          throw new BrainMailClientError(401, "mail_account_reauth_required");
+        },
+      }).client,
+    );
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "save_mail_attachment",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          attachmentId: "attachment-alpha",
+          page: "page-one",
+        },
+        515,
+      ),
+    );
+
+    // One code, one sentence, whichever mail tool met it: an agent that can
+    // act on a reconnection in `get_mail_thread` has to be told the same
+    // thing here.
+    expect(payload).toEqual({
+      error: "this account needs to be reconnected",
+      reason: "mail_account_reauth_required",
+    });
+    expect(isError).toBe(true);
+    expect(saveAttachment).not.toHaveBeenCalled();
+  });
+
   it("refuses an account id Brain never minted before the client is touched", async () => {
     const fake = createMailClientFake();
     mocks.createBrainMailClient.mockReturnValue(fake.client);

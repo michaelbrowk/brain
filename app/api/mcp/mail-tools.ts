@@ -1,7 +1,6 @@
 import type { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import {
-  BrainMailClientError,
   createBrainMailClient,
   type PublicMailAccountV3,
 } from "@/lib/mail/brain-mail-client";
@@ -13,19 +12,16 @@ import type {
 } from "@/lib/mail/message-types";
 import { sanitizeSnippet } from "@/lib/mail/reader-content";
 import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
-import {
-  appendMcpActivity,
-  type McpActivityEntry,
-} from "@/lib/mcp/activity-log";
 import { mailNotificationId } from "@/lib/notifications/ids";
 import { markNotificationsRead } from "@/lib/notifications/store";
 import {
-  clientNameOf,
-  hasScope,
-  insufficientScope,
-  refusal,
-  text,
-} from "./tool-kit";
+  logMailActivity,
+  mailOutcome,
+  mailRefusal,
+  mailRefusalFields,
+  sendBlockedReasonOf,
+} from "./mail-tool-kit";
+import { hasScope, insufficientScope, refusal, text } from "./tool-kit";
 
 /** THE MAIL READS: ACCOUNTS, THREADS, SEARCH, ONE THREAD, ONE BODY.
  *
@@ -77,43 +73,6 @@ function invalidId(label: string, reason: string) {
   return refusal(`that ${label} is not valid`, reason);
 }
 
-/** The service's own code, handed over as a reason an agent can act on.
- *  Shared by `mailRefusal`, the whole-tool answer, and the per-account entry
- *  a merged search reports for the accounts that did not come back. */
-function mailRefusalFields(error: unknown): { error: string; reason: string } {
-  if (error instanceof BrainMailClientError) {
-    if (error.code === "mail_service_unavailable") {
-      return { error: "the mail service is unavailable", reason: error.code };
-    }
-    if (error.code === "mail_account_not_found") {
-      return { error: "account not found", reason: error.code };
-    }
-    if (error.code === "mail_thread_not_found") {
-      return { error: "thread not found", reason: error.code };
-    }
-    if (error.code === "mail_account_reauth_required") {
-      return {
-        error: "this account needs to be reconnected",
-        reason: error.code,
-      };
-    }
-    return { error: "the mail service refused this request", reason: error.code };
-  }
-  return {
-    error: "the mail service is unavailable",
-    reason: "mail_service_unavailable",
-  };
-}
-
-/** A throw here would arrive at the agent as a transport error with no code
- *  at all, and the agent would retry a permanent refusal forever. Anything
- *  that is not the client's own error is an outage as far as the agent is
- *  concerned, and its wording stays on this side of the boundary. */
-function mailRefusal(error: unknown) {
-  const fields = mailRefusalFields(error);
-  return refusal(fields.error, fields.reason);
-}
-
 /** One queried account's own state in a merged search: either the page it
  *  answered, carrying the same completeness signals the browser reads, or
  *  the reason it did not answer at all. An agent reading `threads` alone
@@ -128,23 +87,14 @@ type SearchAccountStatus =
     }
   | { readonly accountId: string; readonly error: string; readonly reason: string };
 
-/** The service reports sending as one boolean, so the reason it is false is
- *  Brain's own read. Reconnection comes first because it is the one the owner
- *  can act on today; an IMAP account with no SMTP endpoint was never set up to
- *  send; anything left is the relay this host cannot reach. */
-function sendBlockedReasonOf(account: PublicMailAccountV3): string | null {
-  if (account.capabilities.send) return null;
-  if (account.status === "reauth_required") return "account_reauth_required";
-  if (account.providerKind === "imap" && account.smtp === undefined) {
-    return "smtp_not_configured";
-  }
-  return "smtp_relay_unavailable";
-}
-
 /** Brain's shape, not the service's. One address field, named `address`,
- *  because it is the only address any mail tool ever answers with. */
+ *  because it is the only address any mail tool ever answers with. An account
+ *  that can send names no reason, which is why the shared derivation is asked
+ *  only once the capability says it cannot. */
 function mcpAccount(account: PublicMailAccountV3) {
-  const sendBlockedReason = sendBlockedReasonOf(account);
+  const sendBlockedReason = account.capabilities.send
+    ? null
+    : sendBlockedReasonOf(account);
   return {
     accountId: account.accountId,
     address: account.emailAddress,
@@ -269,45 +219,6 @@ function triageMutation(
   if (input.restore === true) return { accountId, restore: true };
   if (input.spam !== undefined) return { accountId, spam: input.spam };
   return null;
-}
-
-/** The outcome code for the log, beside the reason the agent is handed. An
- *  error that is not the client's own is an outage on this side of the
- *  boundary, and the log says so rather than naming a cause it guessed. */
-function mailOutcome(error: unknown): string {
-  return error instanceof BrainMailClientError
-    ? error.code
-    : "mail_service_unavailable";
-}
-
-/** Every tool call that CHANGES something writes one line. Reads write none:
- *  an agent reading mail is the ordinary case and a log that recorded it would
- *  bury the sends. `change` and `task` are on the `Pick` so a caller can name
- *  which mutation ran (`task` is unused here; it exists for Task 8's task
- *  tools to reuse this helper without widening it again). */
-async function logMailActivity(
-  extra: { authInfo?: { clientId?: string } },
-  tool: string,
-  target: Pick<
-    McpActivityEntry,
-    | "accountId"
-    | "threadId"
-    | "messageId"
-    | "attachmentId"
-    | "page"
-    | "task"
-    | "operationId"
-    | "change"
-  >,
-  outcome: string,
-): Promise<void> {
-  await appendMcpActivity({
-    at: new Date().toISOString(),
-    client: await clientNameOf(extra),
-    tool,
-    ...target,
-    outcome,
-  });
 }
 
 /** Reading a letter in Mail clears its row in the notification centre, and

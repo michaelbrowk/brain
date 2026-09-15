@@ -1,9 +1,6 @@
 import type { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
-import {
-  BrainMailClientError,
-  createBrainMailClient,
-} from "@/lib/mail/brain-mail-client";
+import { createBrainMailClient } from "@/lib/mail/brain-mail-client";
 import { MAIL_RESOURCE_LIMITS } from "@/lib/mail/security";
 import {
   getStore,
@@ -12,14 +9,8 @@ import {
   MAX_ATTACHMENT_BYTES,
   type SavedAttachment,
 } from "@/lib/store";
-import { appendMcpActivity } from "@/lib/mcp/activity-log";
-import {
-  clientNameOf,
-  hasScope,
-  insufficientScope,
-  refusal,
-  text,
-} from "./tool-kit";
+import { logMailActivity, mailOutcome, mailRefusal } from "./mail-tool-kit";
+import { hasScope, insufficientScope, refusal, text } from "./tool-kit";
 
 /** ONE INCOMING ATTACHMENT, INTO A NOTE'S OWN FILES.
  *
@@ -41,8 +32,6 @@ import {
  */
 
 type McpToolServer = Parameters<Parameters<typeof createMcpHandler>[0]>[0];
-
-type ToolExtra = { authInfo?: { scopes: string[]; clientId?: string } };
 
 const TOOL = "save_mail_attachment";
 
@@ -69,50 +58,6 @@ const TOO_LARGE = "that file is too large for a note";
 
 function invalidId(label: string, reason: string) {
   return refusal(`that ${label} is not valid`, reason);
-}
-
-/** A throw here would arrive at the agent as a transport error with no code
- *  at all, and the agent would retry a permanent refusal forever. Anything
- *  that is not the client's own error is an outage as far as the agent is
- *  concerned, and its wording stays on this side of the boundary. The three
- *  sentences match `mail-tools.ts`, because one code should read the same
- *  whichever tool met it. */
-function mailRefusal(error: unknown) {
-  if (error instanceof BrainMailClientError) {
-    if (error.code === "mail_service_unavailable") {
-      return refusal("the mail service is unavailable", error.code);
-    }
-    if (error.code === "mail_account_not_found") {
-      return refusal("account not found", error.code);
-    }
-    return refusal("the mail service refused this request", error.code);
-  }
-  return refusal("the mail service is unavailable", "mail_service_unavailable");
-}
-
-/** The same error as one code, for the log. */
-function mailOutcome(error: unknown): string {
-  return error instanceof BrainMailClientError
-    ? error.code
-    : "mail_service_unavailable";
-}
-
-/** One line per call that got as far as the work, refusals included, because
- *  the owner reading the log wants the attempt as much as the save. It names
- *  the account, the attachment and the page, and never the filename: that is
- *  the sender's own prose. */
-async function logActivity(
-  extra: ToolExtra,
-  target: { accountId: string; attachmentId: string; page: string },
-  outcome: string,
-): Promise<void> {
-  await appendMcpActivity({
-    at: new Date().toISOString(),
-    client: await clientNameOf(extra),
-    tool: TOOL,
-    ...target,
-    outcome,
-  });
 }
 
 /** Drain into memory, but never past the cap: a file over it is abandoned
@@ -223,10 +168,17 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
         );
       }
 
+      // One line per call that got as far as the work, refusals included,
+      // because the owner reading the log wants the attempt as much as the
+      // save. It names the account, the attachment and the page, and never
+      // the filename: that is the sender's own prose.
       const log = (outcome: string) =>
-        logActivity(extra, { accountId, attachmentId, page }, outcome).catch(
-          () => undefined,
-        );
+        logMailActivity(
+          extra,
+          TOOL,
+          { accountId, attachmentId, page },
+          outcome,
+        ).catch(() => undefined);
 
       // The route's gate already refused a grant without `brain:mail`. This
       // second lock is what stops a mail reader writing a note.

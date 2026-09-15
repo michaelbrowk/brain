@@ -240,14 +240,24 @@ interface TriageFields {
   readonly read?: boolean;
   readonly starred?: boolean;
   readonly archive?: boolean;
-  readonly trash?: true;
-  readonly restore?: true;
+  readonly trash?: boolean;
+  readonly restore?: boolean;
   readonly spam?: boolean;
 }
 
+/** `trash` and `restore` move a thread one way. `false` names no second
+ *  thing either word could mean, and left to the schema it fails as
+ *  mcp-handler's own `-32602` text rather than the `{ error, reason }` shape
+ *  every other refusal in this tool answers. The schema takes a plain
+ *  boolean so that refusal can be written here instead. */
+const TRUE_ONLY_FIELDS = ["trash", "restore"] as const;
+
 /** One field and the account, and nothing else, because
  *  `validateMailThreadMutationInput` counts the keys and refuses a third.
- *  `null` when the caller named no change at all. */
+ *  `null` when the caller named no change at all. Reached only once `trash`
+ *  and `restore` are known to be `true` or absent, so the `=== true` checks
+ *  below narrow the type `MailThreadMutationInput` needs without repeating
+ *  that refusal here. */
 function triageMutation(
   accountId: string,
   input: TriageFields,
@@ -255,8 +265,8 @@ function triageMutation(
   if (input.read !== undefined) return { accountId, read: input.read };
   if (input.starred !== undefined) return { accountId, starred: input.starred };
   if (input.archive !== undefined) return { accountId, archive: input.archive };
-  if (input.trash !== undefined) return { accountId, trash: input.trash };
-  if (input.restore !== undefined) return { accountId, restore: input.restore };
+  if (input.trash === true) return { accountId, trash: true };
+  if (input.restore === true) return { accountId, restore: true };
   if (input.spam !== undefined) return { accountId, spam: input.spam };
   return null;
 }
@@ -272,13 +282,22 @@ function mailOutcome(error: unknown): string {
 
 /** Every tool call that CHANGES something writes one line. Reads write none:
  *  an agent reading mail is the ordinary case and a log that recorded it would
- *  bury the sends. */
+ *  bury the sends. `change` and `task` are on the `Pick` so a caller can name
+ *  which mutation ran (`task` is unused here; it exists for Task 8's task
+ *  tools to reuse this helper without widening it again). */
 async function logMailActivity(
   extra: { authInfo?: { clientId?: string } },
   tool: string,
   target: Pick<
     McpActivityEntry,
-    "accountId" | "threadId" | "messageId" | "attachmentId" | "page" | "operationId"
+    | "accountId"
+    | "threadId"
+    | "messageId"
+    | "attachmentId"
+    | "page"
+    | "task"
+    | "operationId"
+    | "change"
   >,
   outcome: string,
 ): Promise<void> {
@@ -312,8 +331,15 @@ async function markCentreRead(
   } catch (cause) {
     // `mailNotificationId` throws on an id it cannot encode, and the store can
     // fail on a state directory it cannot write. Neither is the agent's
-    // problem, and neither is a reason to lose the triage that landed.
-    const reason = cause instanceof Error ? cause.message : String(cause);
+    // problem, and neither is a reason to lose the triage that landed. The
+    // process log gets a code, not the thrown message: an fs failure's own
+    // `code` when there is one, and a fixed fallback otherwise, so this line
+    // never carries an id or a path into a log a person other than the
+    // operator might read.
+    const reason =
+      cause instanceof Error && typeof (cause as NodeJS.ErrnoException).code === "string"
+        ? (cause as NodeJS.ErrnoException).code
+        : "centre_mark_failed";
     console.warn(`[brain/mcp] notification row left unread: ${reason}`);
   }
 }
@@ -590,24 +616,65 @@ export function registerMailTools(server: McpToolServer): void {
       read: z.boolean().optional(),
       starred: z.boolean().optional(),
       archive: z.boolean().optional(),
-      trash: z.literal(true).optional().describe("true moves it to the trash"),
-      restore: z
-        .literal(true)
+      trash: z
+        .boolean()
         .optional()
-        .describe("true takes it back out of the trash or the spam folder"),
+        .describe("true moves it to the trash; false is refused, pass restore: true instead"),
+      restore: z
+        .boolean()
+        .optional()
+        .describe("true takes it back out of the trash or the spam folder; false is refused"),
       spam: z.boolean().optional(),
     },
     async (input, extra) => {
       if (!hasScope(extra, "brain:mail")) return insufficientScope("brain:mail");
       const { accountId, threadId } = input;
+
+      // The same validators the read tools use, and for the same reason: an
+      // id this shape cannot be real, so it is refused here rather than
+      // reaching the mail client only to fail there, or reaching the
+      // activity log unbounded. Nothing below this point, including the log,
+      // ever sees an id that failed this check.
+      if (!SAFE_ACCOUNT_ID.test(accountId)) {
+        return invalidId("account id", "invalid_account_id");
+      }
+      if (!SAFE_MAIL_RESOURCE_ID.test(threadId)) {
+        return invalidId("thread id", "invalid_thread_id");
+      }
+
       // One line per call, whatever became of it, because the owner reading
       // the log wants the attempt as much as the change. A state directory
       // that cannot be written must never turn a completed triage into a
       // failed tool call, so every call site swallows its own failure.
-      const log = (outcome: string) =>
-        logMailActivity(extra, TRIAGE_TOOL, { accountId, threadId }, outcome).catch(
-          () => undefined,
-        );
+      //
+      // Awaited rather than fire-and-forget: `appendMcpActivity` is one
+      // bounded O_APPEND write on the common path (the id checks above keep
+      // every field here small), so the wait this adds to a triage call is
+      // the cost of one write, not the read-and-rewrite the log used to pay
+      // near its cap.
+      const log = (outcome: string, change?: string) =>
+        logMailActivity(
+          extra,
+          TRIAGE_TOOL,
+          change === undefined ? { accountId, threadId } : { accountId, threadId, change },
+          outcome,
+        ).catch(() => undefined);
+
+      // `trash` and `restore` mean one thing each. `false` is refused here,
+      // with the shape every other refusal in this tool answers, rather than
+      // left to the schema, where it would fail as mcp-handler's own
+      // `-32602` text.
+      for (const field of TRUE_ONLY_FIELDS) {
+        if (input[field] === false) {
+          await log(`${field}_is_true_only`, field);
+          return refusal(
+            field === "trash"
+              ? "trash takes true or nothing; to take a thread out of the trash pass restore: true"
+              : "restore takes true or nothing",
+            `${field}_is_true_only`,
+          );
+        }
+      }
 
       // Brain's own rule, enforced before the client, so the refusal names the
       // fields the agent sent rather than arriving as a generic
@@ -627,6 +694,7 @@ export function registerMailTools(server: McpToolServer): void {
           `pass one of ${TRIAGE_FIELDS.join(", ")}`,
         );
       }
+      const change = given[0];
 
       try {
         const client = createBrainMailClient();
@@ -640,20 +708,25 @@ export function registerMailTools(server: McpToolServer): void {
           (held) => held.accountId === accountId,
         );
         if (account && !account.capabilities.threadMutations) {
-          await log("thread_mutations_unavailable");
+          // The same code the wire uses for this condition
+          // (`lib/mail/service/http.ts`, `mail_provider_mutation_unsupported`
+          // mapped to the 409 `mail_thread_mutation_unsupported`), so an
+          // agent branches on one string whether this pre-check catches it or
+          // the service does.
+          await log("mail_thread_mutation_unsupported", change);
           return refusal(
             "the mail service does not sort threads for this account",
-            "thread_mutations_unavailable",
+            "mail_thread_mutation_unsupported",
           );
         }
         const result = await client.updateThread(threadId, mutation);
         if ("read" in mutation && mutation.read === true) {
           void markCentreRead(accountId, threadId);
         }
-        await log("ok");
+        await log("ok", change);
         return text({ thread: result.thread });
       } catch (error) {
-        await log(mailOutcome(error));
+        await log(mailOutcome(error), change);
         return mailRefusal(error);
       }
     },

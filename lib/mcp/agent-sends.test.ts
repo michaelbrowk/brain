@@ -14,8 +14,11 @@ const ACCOUNT = "account-a00000000000000000000000000000000";
 
 let root: string;
 
-beforeEach(() => {
-  root = path.join(os.tmpdir(), "brain-mcp-sends-test");
+beforeEach(async () => {
+  // A fixed path collides across concurrent vitest processes: a sibling
+  // suite's leftovers land in this directory and this test reads them back
+  // as its own.
+  root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-sends-test-"));
   vi.stubEnv("BRAIN_MCP_STATE_DIR", root);
 });
 

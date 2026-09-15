@@ -4,6 +4,8 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MCP_ACTIVITY_FILE,
+  MCP_ACTIVITY_MAX_FILE_BYTES,
+  MCP_ACTIVITY_MAX_LINE_BYTES,
   MCP_ACTIVITY_MAX_LINES,
   appendMcpActivity,
   clearMcpActivity,
@@ -15,8 +17,13 @@ const ACCOUNT = "account-a00000000000000000000000000000000";
 
 let root: string;
 
-beforeEach(() => {
-  root = path.join(os.tmpdir(), "brain-mcp-activity-test");
+beforeEach(async () => {
+  // A fixed path collides across concurrent vitest processes (another
+  // worker's leftovers show up as this test's data) and, now that a
+  // directory's line count and byte total are cached in module state keyed
+  // by this path, a reused literal would also carry a stale count from the
+  // previous test in this same file into the next one.
+  root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-activity-test-"));
   vi.stubEnv("BRAIN_MCP_STATE_DIR", root);
 });
 
@@ -81,21 +88,29 @@ describe("the MCP activity log", () => {
     expect(await readMcpActivity(50)).toEqual([]);
   });
 
-  it("drops the oldest line at the cap and never grows past it", async () => {
-    for (let i = 0; i < MCP_ACTIVITY_MAX_LINES + 10; i += 1) {
-      await appendMcpActivity({
-        at: "2026-09-14T09:00:00.000Z",
-        client: "Claude",
-        tool: "get_task",
-        task: `task-${i}`,
-        outcome: "ok",
-      });
-    }
-    const raw = await fs.readFile(path.join(root, MCP_ACTIVITY_FILE), "utf8");
-    expect(raw.trimEnd().split("\n")).toHaveLength(MCP_ACTIVITY_MAX_LINES);
-    const entries = await readMcpActivity(MCP_ACTIVITY_MAX_LINES);
-    expect(entries.at(-1)?.task).toBe("task-10");
-  });
+  it(
+    "drops the oldest line at the cap and never grows past it",
+    async () => {
+      for (let i = 0; i < MCP_ACTIVITY_MAX_LINES + 10; i += 1) {
+        await appendMcpActivity({
+          at: "2026-09-14T09:00:00.000Z",
+          client: "Claude",
+          tool: "get_task",
+          task: `task-${i}`,
+          outcome: "ok",
+        });
+      }
+      const raw = await fs.readFile(path.join(root, MCP_ACTIVITY_FILE), "utf8");
+      expect(raw.trimEnd().split("\n")).toHaveLength(MCP_ACTIVITY_MAX_LINES);
+      const entries = await readMcpActivity(MCP_ACTIVITY_MAX_LINES);
+      expect(entries.at(-1)?.task).toBe("task-10");
+    },
+    // 2010 real appends: cheap alone (the O(1) cache keeps each one a single
+    // O_APPEND write), but this file now runs several such tests, and a
+    // sibling test file's own heavy loop can starve this one's event loop
+    // under a full parallel run. The default 5000ms has flaked here before.
+    15_000,
+  );
 
   it("reads no more than the limit asked for", async () => {
     for (const task of ["task-alpha", "task-beta", "task-gamma"]) {
@@ -267,4 +282,114 @@ describe("the MCP activity log", () => {
     );
     expect(await readMcpActivity(50)).toHaveLength(4);
   });
+
+  it("truncates an oversized field with a marker instead of spending the log's budget on it", async () => {
+    // A caller that skipped its own id validation, or one that never had
+    // any, is the case this line exists for: the field is cut and marked,
+    // never carried through whole and never dropped.
+    await appendMcpActivity({
+      at: "2026-09-14T09:00:00.000Z",
+      client: "Claude",
+      tool: "update_mail_thread",
+      accountId: "a".repeat(200_000),
+      threadId: "thread-alpha",
+      outcome: "ok",
+    });
+    const raw = await fs.readFile(path.join(root, MCP_ACTIVITY_FILE), "utf8");
+    const [line] = raw.trimEnd().split("\n");
+    expect(Buffer.byteLength(line, "utf8")).toBeLessThan(1000);
+    const [entry] = await readMcpActivity(1);
+    expect(entry.accountId?.length).toBeLessThan(300);
+    expect(entry.accountId?.endsWith("...(cut)")).toBe(true);
+  });
+
+  it("writes a legal call's line comfortably under the per-line byte cap", async () => {
+    await appendMcpActivity({
+      at: "2026-09-14T09:00:00.000Z",
+      client: "Claude",
+      tool: "update_mail_thread",
+      accountId: ACCOUNT,
+      threadId: "thread-alpha",
+      change: "starred",
+      outcome: "ok",
+    });
+    const raw = await fs.readFile(path.join(root, MCP_ACTIVITY_FILE), "utf8");
+    const [line] = raw.trimEnd().split("\n");
+    expect(Buffer.byteLength(line, "utf8")).toBeLessThan(MCP_ACTIVITY_MAX_LINE_BYTES);
+  });
+
+  it(
+    "keeps an append near the line cap close to the cost of an append on an empty log",
+    async () => {
+      // A coarse assertion, not a benchmark: before the cached count this
+      // call re-read and re-parsed nearly the whole file, measured at 0.31ms
+      // empty against 7.96ms at 1999 lines, about 25x. The cache keeps every
+      // append a single O_APPEND write regardless of where the log stands.
+      const emptyStart = performance.now();
+      await appendMcpActivity({
+        at: "2026-09-14T09:00:00.000Z",
+        client: "Claude",
+        tool: "get_task",
+        task: "task-0",
+        outcome: "ok",
+      });
+      const emptyMs = performance.now() - emptyStart;
+
+      for (let i = 1; i < MCP_ACTIVITY_MAX_LINES - 1; i += 1) {
+        await appendMcpActivity({
+          at: "2026-09-14T09:00:00.000Z",
+          client: "Claude",
+          tool: "get_task",
+          task: `task-${i}`,
+          outcome: "ok",
+        });
+      }
+
+      const lateStart = performance.now();
+      await appendMcpActivity({
+        at: "2026-09-14T09:00:00.000Z",
+        client: "Claude",
+        tool: "get_task",
+        task: "task-late",
+        outcome: "ok",
+      });
+      const lateMs = performance.now() - lateStart;
+
+      expect(lateMs).toBeLessThan(Math.max(emptyMs * 2, 5));
+    },
+    15_000,
+  );
+
+  it(
+    "trims by file size before the line count when every line stays near its own bound",
+    async () => {
+      const filler = (n: number) => "x".repeat(n);
+      const nearMaxEntry = {
+        at: "2026-09-14T09:00:00.000Z",
+        client: filler(120),
+        tool: filler(80),
+        accountId: filler(200),
+        threadId: filler(200),
+        messageId: filler(200),
+        attachmentId: filler(200),
+        page: filler(200),
+        task: filler(200),
+        operationId: filler(200),
+        change: filler(64),
+        outcome: "ok",
+      };
+      // A handful of lines past where the byte cap trips, so the boundary is
+      // crossed without paying for many more full-file rewrites than the
+      // point being pinned needs.
+      const linesToWrite = Math.ceil(MCP_ACTIVITY_MAX_FILE_BYTES / 1800) + 5;
+      for (let i = 0; i < linesToWrite; i += 1) {
+        await appendMcpActivity(nearMaxEntry);
+      }
+      const stat = await fs.stat(path.join(root, MCP_ACTIVITY_FILE));
+      expect(stat.size).toBeLessThanOrEqual(MCP_ACTIVITY_MAX_FILE_BYTES);
+      const entries = await readMcpActivity(MCP_ACTIVITY_MAX_LINES);
+      expect(entries.length).toBeLessThan(linesToWrite);
+    },
+    15_000,
+  );
 });

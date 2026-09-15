@@ -20,9 +20,26 @@ export { mcpStateDirectory } from "./state-dir";
 
 export const MCP_ACTIVITY_FILE = "mcp-activity.jsonl";
 
-/** 2000 lines of ids is under 400 KB, which is small enough to read whole on
- *  every append and still be the file a person scrolls. */
+/** 2000 lines of ids is under 400 KB in the ordinary case, which is small
+ *  enough to be the file a person scrolls. `MCP_ACTIVITY_MAX_FILE_BYTES`
+ *  below is the second cap for the case a caller's fields are all near their
+ *  own bound at once. */
 export const MCP_ACTIVITY_MAX_LINES = 2000;
+
+/** Every field on a line is bounded (below), so the ordinary line is a few
+ *  hundred bytes. This is the backstop for the line those bounds still miss:
+ *  a caller whose fields are mostly multi-byte characters, where a character
+ *  count under the field caps can still add up to several times as many
+ *  UTF-8 bytes. `boundLine` shrinks fields until the serialized line fits
+ *  under this, rather than ever dropping one. */
+export const MCP_ACTIVITY_MAX_LINE_BYTES = 4096;
+
+/** The file cap beside the line-count cap. 2000 lines at the ordinary size is
+ *  nowhere near this; it exists for the caller that keeps every line near its
+ *  own per-line bound, where the line-count cap alone would still let the
+ *  file grow past what a person scrolls. Trimming checks both caps and stops
+ *  removing lines only once neither is exceeded. */
+export const MCP_ACTIVITY_MAX_FILE_BYTES = 512 * 1024;
 
 /** An outcome is a code, not a sentence a mail server wrote. Bounded and
  *  reduced to letters, digits, spaces and the three punctuation marks an id or
@@ -36,6 +53,26 @@ const MAX_OUTCOME_LENGTH = 120;
  *  way `outcome` is, so a caller that passed a sentence by mistake cannot
  *  make the line unreadable. */
 const MAX_CHANGE_LENGTH = 64;
+
+/** Every id-shaped optional field, the grant's client name and the tool name
+ *  itself: generous enough that a real id never notices, and finite so a
+ *  caller that skipped its own validation cannot spend the log's byte budget
+ *  on one line. `lib/mcp/activity-log.ts`'s own callers validate their ids
+ *  before this is ever reached; this is the second lock, for the caller that
+ *  does not. */
+const MAX_ID_FIELD_CHARS = 200;
+const MAX_CLIENT_CHARS = 120;
+const MAX_TOOL_CHARS = 80;
+const MAX_AT_CHARS = 64;
+
+/** Marks a field as shortened rather than whole, so a line that hit the cap
+ *  reads as cut, not as a shorter id that happens to look real. */
+const TRUNCATION_MARK = "...(cut)";
+
+/** The byte budget every shrinkable field is cut to in `boundLine`'s backstop
+ *  pass. Small enough that the full set of fields at this size is always
+ *  under `MCP_ACTIVITY_MAX_LINE_BYTES`, so that pass never has to loop. */
+const LINE_BACKSTOP_FIELD_BYTES = 64;
 
 export interface McpActivityEntry {
   readonly at: string; // ISO instant
@@ -72,22 +109,83 @@ function tidyOutcome(value: string): string {
     .slice(0, MAX_OUTCOME_LENGTH);
 }
 
-/** Copy the named fields and nothing else. */
+/** Cut `value` to at most `maxChars` UTF-16 code units, marking a cut rather
+ *  than leaving one silent. Character count, not bytes: this is the primary
+ *  bound every field gets, cheap and predictable; `boundLine` below is the
+ *  byte-accurate backstop for the multi-byte case this one can still miss. */
+function boundChars(value: string, maxChars: number): string {
+  if (value.length <= maxChars) return value;
+  const keep = Math.max(0, maxChars - TRUNCATION_MARK.length);
+  return value.slice(0, keep) + TRUNCATION_MARK;
+}
+
+/** Cut `value` to at most `maxBytes` UTF-8 bytes, marking a cut. Removes one
+ *  UTF-16 code unit at a time rather than computing an offset, so a
+ *  surrogate pair is never split; the loop runs at most `value.length` times,
+ *  and every caller here has already run its value through `boundChars`
+ *  first, so that length is already small. */
+function boundBytes(value: string, maxBytes: number): string {
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
+  const markBytes = Buffer.byteLength(TRUNCATION_MARK, "utf8");
+  const budget = Math.max(0, maxBytes - markBytes);
+  let cut = value;
+  while (cut.length > 0 && Buffer.byteLength(cut, "utf8") > budget) {
+    cut = cut.slice(0, -1);
+  }
+  return cut + TRUNCATION_MARK;
+}
+
+/** The fields a line can still be over budget on after `boundChars`: every
+ *  one whose bytes can run ahead of its character count. `outcome` is not
+ *  here because `tidyOutcome` already strips it to ASCII. */
+const LINE_SHRINKABLE_FIELDS = [
+  "at",
+  "client",
+  "tool",
+  "change",
+  ...OPTIONAL_FIELDS,
+] as const;
+
+/** The line-level backstop. Ordinary content never reaches this: every field
+ *  is already bounded in characters by the time this runs, and for ASCII
+ *  content that bound is a byte bound too. It exists for the field that is
+ *  mostly multi-byte characters, where a character count under the cap can
+ *  still serialize to several times as many bytes. A flat, small per-field
+ *  byte budget on every shrinkable field guarantees the line fits by
+ *  construction, so there is nothing to loop or measure twice. */
+function boundLine(out: Record<string, string>): Record<string, string> {
+  if (Buffer.byteLength(JSON.stringify(out), "utf8") <= MCP_ACTIVITY_MAX_LINE_BYTES) {
+    return out;
+  }
+  for (const field of LINE_SHRINKABLE_FIELDS) {
+    const value = out[field];
+    if (value !== undefined) out[field] = boundBytes(value, LINE_BACKSTOP_FIELD_BYTES);
+  }
+  return out;
+}
+
+/** Copy the named fields and nothing else, every one of them bounded. A field
+ *  a caller sends unbounded, an id above all, must never turn one line into
+ *  the log's whole byte budget: `MCP_ACTIVITY_MAX_LINES` counts lines on the
+ *  reading that each one costs a bounded, small number of bytes, and that
+ *  reading has to hold here for it to hold anywhere. */
 function closedEntry(entry: McpActivityEntry): McpActivityEntry {
   const out: Record<string, string> = {
-    at: String(entry.at),
-    client: String(entry.client),
-    tool: String(entry.tool),
+    at: boundChars(String(entry.at), MAX_AT_CHARS),
+    client: boundChars(String(entry.client), MAX_CLIENT_CHARS),
+    tool: boundChars(String(entry.tool), MAX_TOOL_CHARS),
   };
   for (const field of OPTIONAL_FIELDS) {
     const value = entry[field];
-    if (typeof value === "string" && value.length > 0) out[field] = value;
+    if (typeof value === "string" && value.length > 0) {
+      out[field] = boundChars(value, MAX_ID_FIELD_CHARS);
+    }
   }
   if (typeof entry.change === "string" && entry.change.length > 0) {
     out.change = entry.change.slice(0, MAX_CHANGE_LENGTH);
   }
   out.outcome = tidyOutcome(String(entry.outcome));
-  return out as unknown as McpActivityEntry;
+  return boundLine(out) as unknown as McpActivityEntry;
 }
 
 function parseLine(line: string): McpActivityEntry | null {
@@ -136,7 +234,9 @@ async function rewrite(dir: string, lines: string[]): Promise<void> {
 
 /** One writer at a time, the way `OAuthStateStore` serialises its own file.
  *  Two tools finishing together would otherwise read the same tail and one
- *  would write the other's line away. */
+ *  would write the other's line away. Also what makes the cache below safe
+ *  to read and write without its own lock: every turn that touches it runs
+ *  to completion before the next one starts. */
 let queue: Promise<void> = Promise.resolve();
 
 function enqueue<T>(work: () => Promise<T>): Promise<T> {
@@ -148,25 +248,67 @@ function enqueue<T>(work: () => Promise<T>): Promise<T> {
   return run;
 }
 
+interface DirectoryState {
+  lines: number;
+  bytes: number;
+}
+
+/** The cost `appendMcpActivity` used to pay on every call: a full read, a
+ *  full parse and a full re-count, which is why a call at line 1999 cost 8ms
+ *  against 0.3ms at an empty log. Keyed by directory because a test
+ *  redirects it per run and a production process never does; one process
+ *  never holds more than a couple of entries either way. Populated by the
+ *  first append after this process starts, so a file another process wrote
+ *  to, or a test seeded directly, is still counted correctly the first time
+ *  this process touches it. */
+const directoryState = new Map<string, DirectoryState>();
+
+function stateFromLines(lines: readonly string[]): DirectoryState {
+  let bytes = 0;
+  for (const raw of lines) bytes += Buffer.byteLength(raw, "utf8") + 1;
+  return { lines: lines.length, bytes };
+}
+
 export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> {
   const dir = mcpStateDirectory();
   const line = JSON.stringify(closedEntry(entry));
+  const lineBytes = Buffer.byteLength(line, "utf8") + 1;
   await enqueue(async () => {
+    let state = directoryState.get(dir);
     // A line this process cannot parse back never reaches `readMcpActivity`,
-    // so it is not one of the log's 2000 slots. Drop it here rather than
-    // counting it: the cap stays a count of real entries, and whenever a trim
-    // does run it rewrites the file without the corrupt line rather than
-    // carrying it forward forever.
-    const lines = (await readLines(dir)).filter((raw) => parseLine(raw) !== null);
-    if (lines.length + 1 > MCP_ACTIVITY_MAX_LINES) {
-      lines.push(line);
-      await rewrite(dir, lines.slice(-MCP_ACTIVITY_MAX_LINES));
+    // so it is not one of the log's slots; kept only for the rare rewrite
+    // below, which drops it rather than carrying it forward forever.
+    let validLines: string[] | null = null;
+    if (state === undefined) {
+      validLines = (await readLines(dir)).filter((raw) => parseLine(raw) !== null);
+      state = stateFromLines(validLines);
+      directoryState.set(dir, state);
+    }
+
+    const overLineCap = state.lines + 1 > MCP_ACTIVITY_MAX_LINES;
+    const overByteCap = state.bytes + lineBytes > MCP_ACTIVITY_MAX_FILE_BYTES;
+    if (overLineCap || overByteCap) {
+      if (validLines === null) {
+        validLines = (await readLines(dir)).filter((raw) => parseLine(raw) !== null);
+      }
+      validLines.push(line);
+      let trimmed = validLines.slice(-MCP_ACTIVITY_MAX_LINES);
+      let trimmedState = stateFromLines(trimmed);
+      while (trimmed.length > 0 && trimmedState.bytes > MCP_ACTIVITY_MAX_FILE_BYTES) {
+        trimmed = trimmed.slice(1);
+        trimmedState = stateFromLines(trimmed);
+      }
+      await rewrite(dir, trimmed);
+      directoryState.set(dir, trimmedState);
       return;
     }
+
     // One O_APPEND write, no rename and no fsync. A log line is not a note: a
     // crash that loses the last few lines, or leaves half of one behind, costs
     // a record of what happened and nothing a person wrote. `readMcpActivity`
-    // drops a line it cannot parse, so a torn tail reads as absent.
+    // drops a line it cannot parse, so a torn tail reads as absent. Bounded
+    // and O(1) in the file's size: no read happens on this path, only the
+    // one cached count and byte total, updated below.
     await fs.mkdir(/* turbopackIgnore: true */ dir, { recursive: true, mode: 0o700 });
     const file = path.join(dir, MCP_ACTIVITY_FILE);
     const handle = await fs.open(/* turbopackIgnore: true */ file, "a", 0o600);
@@ -179,6 +321,7 @@ export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> 
     // is still cut by the umask. Set it either way, as every state writer here
     // does.
     await fs.chmod(/* turbopackIgnore: true */ file, 0o600);
+    directoryState.set(dir, { lines: state.lines + 1, bytes: state.bytes + lineBytes });
   });
 }
 
@@ -196,5 +339,8 @@ export async function readMcpActivity(limit: number): Promise<McpActivityEntry[]
 
 export async function clearMcpActivity(): Promise<void> {
   const dir = mcpStateDirectory();
-  await enqueue(() => rewrite(dir, []));
+  await enqueue(async () => {
+    await rewrite(dir, []);
+    directoryState.set(dir, { lines: 0, bytes: 0 });
+  });
 }

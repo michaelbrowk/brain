@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { threadId as currentThreadId } from "node:worker_threads";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { OAuthRequestError, type McpScope } from "./config";
+import { MCP_SCOPES, OAuthRequestError, type McpScope } from "./config";
 import {
   migrateOAuthStateForward,
   nextRefreshGeneration,
@@ -178,6 +178,19 @@ describe("durable OAuth state", () => {
 
     expect(apps).toHaveLength(1);
     expect(apps[0].scopes).toEqual(["brain:read", "brain:mail", "brain:mail:send"]);
+  });
+
+  it("lists what an owner write grant can reach, not only the words stored on it", async () => {
+    // `ownerEffectiveScopes` treats a verified owner write grant as the whole
+    // owner API, so a grant minted before the mail scopes existed reaches mail
+    // with no second consent. Settings has to say that, or the one screen a
+    // person revokes from is the one screen understating what it is revoking.
+    const client = await register(store);
+    await authorize(store, client.id, "w".repeat(43), ["brain:read", "brain:write"]);
+
+    const apps = await store.listConnectedApps();
+
+    expect(apps[0].scopes).toEqual([...MCP_SCOPES]);
   });
 
   it("evicts the oldest unused DCR client when the bounded registry is full", async () => {
@@ -355,6 +368,14 @@ describe("durable OAuth state", () => {
     expect(claims).toHaveLength(1);
     expect(claims[0]).not.toBe(firstClaim);
     await expect(fs.lstat(path.join(stateDirectory, claims[0]))).resolves.toBeDefined();
+  });
+
+  it("creates the state directory even when its parent does not exist yet", async () => {
+    // clientNameOf (app/api/mcp/tool-kit.ts) reaches getClient on a fresh
+    // process before anything else has created BRAIN_OAUTH_STATE_DIR's
+    // parent. A plain mkdir throws ENOENT there; recursive does not.
+    const nested = new OAuthStateStore(path.join(root, "missing-parent", "oauth"));
+    await expect(nested.getClient("none")).resolves.toBeNull();
   });
 
   it("migrates a state file forward and refuses a future version", () => {

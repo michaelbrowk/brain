@@ -5862,15 +5862,38 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
   inset: 0;
   z-index: -1;
   border-radius: inherit;
-  background-color: var(--fill-glass-hover);
   pointer-events: none;
 }
+/* AND IT IS PAINTED ONLY WHILE THE COLUMN IS HOLDING IT.
+   The fill sat on the box above, off `data-selected` alone, so a row kept the
+   tint through a press anywhere else on the page: the chips went with the fold
+   and the grey capsule stayed, which reads as the task still holding the focus
+   it was asked to give up. The cursor itself does not move. `data-selected` is
+   D5's roving attribute and stays exactly where the reader left it, so a Tab
+   back into the column puts the capsule on the same row; what the press takes
+   away is the paint.
+   A PANEL THE COLUMN OPENED COUNTS AS THE COLUMN. Radix moves the focus into a
+   portal at the end of the document, so `:focus-within` alone would blink the
+   cursor out every time the list menu opened. `data-state` on the trigger,
+   which is inside the column, is what says a layer of its own is standing.
+   The expanded row is excluded by name: it wears the one fill of I1, and this
+   rule out-weighs the transparency that keeps it to one. */
+.brain-tasks:is(:focus-within, :has([data-state="open"])) .brain-task-row:not([data-expanded]) > .tree-row-capsule {
+  background-color: var(--fill-glass-hover);
+}
 /* And the ring, keyboard only, as everywhere else. Inset by 3 so it never
-   clips on the column's edge, the `.focus-inset` convention. The row is not
-   the focused element — the selection is a roving attribute, the way the
-   palette's is — so the modality gate is `html[data-kbd]` alone. */
+   clips on the column's edge, the `.focus-inset` convention. The selection is
+   a roving attribute, the way the palette's is, so the modality gate is
+   `html[data-kbd]` alone. */
 html[data-kbd] .brain-task-row[data-selected] {
   outline: 3px solid var(--blue-ring);
+  outline-offset: -3px;
+}
+/* The row is a focus HOLDER now, so it answers the GLOBAL ring at +2 as well
+   as the cursor's own at -3, and two outlines on one capsule is two rings.
+   The offset is the whole of the override: the colour and the width stay the
+   global's, and the ring lands where the rule above already puts it. */
+html[data-kbd] .brain-task-row:focus-visible {
   outline-offset: -3px;
 }
 .brain-task-row_ghost,
@@ -6138,7 +6161,19 @@ html[data-kbd] .brain-task-row[data-selected] {
   flex-wrap: wrap;
   align-items: center;
   gap: 6px;
-  /* The reveal is a height from 0, so the chips are clipped while it plays. */
+  /* THE CLIP KEEPS ITS DISTANCE FROM THE CHIPS. The reveal is a height from 0,
+     so the chips have to be clipped while it plays; the box hugged them
+     exactly, so it went on clipping at rest, and every chip's focus ring
+     (3px at +2, five pixels of reach) came back as two slivers on its left and
+     right edges with its top and bottom cut away, the rim and the drop shadow
+     shaved off with them. The room is that reach, and it is taken straight
+     back on the outside so the first chip still starts on the text rule and
+     the capsule is the height it always was. The vertical half travels with
+     the reveal from `CHIP_ROW_RING` in `lib/motion.ts`, because a padding
+     drawn at chip height 0 steps the capsule open before it grows; this axis
+     animates nothing, so it is declared here. */
+  padding-inline: 5px;
+  margin-inline: -5px;
   overflow: hidden;
 }
 /* One chip wider than the row it is on is capped by the row rather than

@@ -11,6 +11,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   CHIP_ROW_AIR,
+  CHIP_ROW_RING,
   DUR,
   EASE_OUT,
   HOVER,
@@ -66,6 +67,25 @@ import { Icon } from "./ui/icon";
 /** The one flowing selection capsule of the column. */
 export const TASKS_SELECT_LAYOUT_ID = "tasks-select";
 
+/** THE CHIP ROW'S BOX, OPEN AND SHUT. The air above and below the chips is
+ *  `CHIP_ROW_AIR`, and it is split between the element's padding and its
+ *  margin: the padding is inside the box that clips the reveal, so the chips
+ *  stand `CHIP_ROW_RING` clear of the clip's edge and a focus ring on one has
+ *  room to draw. Both sides travel from 0 with the reveal, so the capsule
+ *  grows once instead of stepping open first. */
+const CHIP_ROW_OPEN = {
+  paddingTop: CHIP_ROW_RING,
+  paddingBottom: CHIP_ROW_RING,
+  marginTop: CHIP_ROW_AIR - CHIP_ROW_RING,
+  marginBottom: CHIP_ROW_AIR - CHIP_ROW_RING,
+} as const;
+const CHIP_ROW_SHUT = {
+  paddingTop: 0,
+  paddingBottom: 0,
+  marginTop: 0,
+  marginBottom: 0,
+} as const;
+
 /** The hold: 100ms for the box to settle, then 1200 the row does not move. */
 const SETTLE_MS = 100;
 const HOLD_MS = 1200;
@@ -85,6 +105,13 @@ const COMMIT_PX = 120;
 const COMMIT_VELOCITY = 800;
 /** Past the column's own edge; the fold takes the height from there. */
 const EXIT_PX = 420;
+
+/** How far a press outside the row may travel and still be a press. A finger
+ *  scrolling the list starts with the same `pointerdown` a tap does, so a fold
+ *  spent on the way down folded the row every time the reader scrolled past
+ *  it. Eight is the travel a browser itself allows before it calls a touch a
+ *  drag. */
+const PRESS_SLOP_PX = 8;
 
 export type FoldDirection = "up" | "down";
 
@@ -210,6 +237,7 @@ export function TasksRow({
 }: TasksRowProps) {
   const key = rowKey ?? task.id;
   const wrapRef = useRef<HTMLLIElement | null>(null);
+  const rowRef = useRef<HTMLDivElement | null>(null);
   const boxRef = useRef<HTMLButtonElement | null>(null);
   const holdRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [holding, setHolding] = useState(false);
@@ -382,6 +410,13 @@ export function TasksRow({
     task,
   });
 
+  // A FOLD THE READER PRESSED FOR LEAVES THE FOCUS WHERE THE PRESS PUT IT, and
+  // every other fold hands it back to the row. The two hooks below are the two
+  // ends of that one sentence, so the fold says which kind it was.
+  const foldedAwayRef = useRef(false);
+  useFoldOnOutside({ expanded, element: wrapRef, onExpand, foldedAwayRef });
+  useCursorFocus({ selected, expanded, element: rowRef, foldedAwayRef });
+
   const swipeHandlers = useSwipe({
     x,
     reduce,
@@ -396,6 +431,21 @@ export function TasksRow({
   });
 
   const openRow = (event: React.MouseEvent) => {
+    // A PRESS INSIDE A PANEL THIS ROW OPENED IS NOT A PRESS ON THIS ROW.
+    //
+    // The When picker, the deadline picker, the repeat menu and the category
+    // popover are all PORTALLED to the end of the document, and React carries
+    // an event from a portal up the tree the portal was DECLARED in. So a day
+    // in the calendar arrived here as a second press on the row, this handler
+    // folded it, the chips went and the picker went with them, and a teardown
+    // that is not a close throws the reader's day away: the panel shut and
+    // nothing was saved. The `data-task-control` guard below could not see it,
+    // because that guard walks the DOM and the portal has left it.
+    //
+    // Containment is the question both guards are asking, and it is the one
+    // the portal breaks. Asked of the row's own element it answers for every
+    // panel a chip opens, the ones here now and the ones added later.
+    if (!event.currentTarget.contains(event.target as Node)) return;
     if ((event.target as HTMLElement).closest("[data-task-control]")) return;
     // A history row answers NOTHING, and says so before it is pressed: no
     // hover fill, no pointer cursor, a drawn check instead of a box. Its chips
@@ -497,7 +547,14 @@ export function TasksRow({
           )}
         </AnimatePresence>
         <motion.div
+          ref={rowRef}
           className="brain-task-row"
+          // THE CURSOR HOLDS THE FOCUS IT STANDS ON. Script-focusable and out
+          // of the Tab order, the roving convention the picker's grid cells
+          // use: nothing in this column was focusable, so a press on a row sent
+          // the focus up to `.brain-main` and the column read as empty in the
+          // one case it has to read as held.
+          tabIndex={-1}
           data-selected={selected ? "" : undefined}
           data-expanded={expanded ? "" : undefined}
           data-done={task.done ? "" : undefined}
@@ -647,29 +704,36 @@ export function TasksRow({
                    was `padding-bottom` on the capsule, applied in the frame the
                    attribute was, and padding on a box drawn at chip height 0
                    steps the row open 6px before it grows. It is this element's
-                   margin now, animated from 0 like the air above it, so the
-                   capsule moves once. */
+                   own box now, animated from 0 like the air above it, so the
+                   capsule moves once.
+
+                   AND IT IS SPLIT IN TWO, because this box CLIPS. Five of the
+                   six are the element's padding and the sixth is its margin,
+                   which puts the clip's edge five pixels off the chips rather
+                   than flush against them: a chip's focus ring reaches exactly
+                   that far, and flush it came back as two slivers on the
+                   chip's left and right edges. The reader sees the same 6 they
+                   always did, since what the padding takes the margin gives
+                   back. `lib/motion.ts` holds both numbers. */
                 <motion.span
                   className="brain-task-chips"
                   initial={
                     reduce
-                      ? { opacity: 0, marginTop: CHIP_ROW_AIR, marginBottom: CHIP_ROW_AIR }
+                      ? { opacity: 0, ...CHIP_ROW_OPEN }
                       : {
                           opacity: 0,
                           height: 0,
-                          marginTop: 0,
-                          marginBottom: 0,
+                          ...CHIP_ROW_SHUT,
                           y: -4,
                         }
                   }
                   animate={
                     reduce
-                      ? { opacity: 1, marginTop: CHIP_ROW_AIR, marginBottom: CHIP_ROW_AIR }
+                      ? { opacity: 1, ...CHIP_ROW_OPEN }
                       : {
                           opacity: 1,
                           height: "auto",
-                          marginTop: CHIP_ROW_AIR,
-                          marginBottom: CHIP_ROW_AIR,
+                          ...CHIP_ROW_OPEN,
                           y: 0,
                         }
                   }
@@ -679,8 +743,7 @@ export function TasksRow({
                       : {
                           opacity: 0,
                           height: 0,
-                          marginTop: 0,
-                          marginBottom: 0,
+                          ...CHIP_ROW_SHUT,
                           transition: { duration: DUR.fast, ease: "easeIn" },
                         }
                   }
@@ -844,6 +907,214 @@ function WhenChip({
       }
     />
   );
+}
+
+/** THE ROW FOLDS WHEN THE READER LOOKS AWAY.
+ *
+ *  An expanded row was the one thing on this surface a press elsewhere could
+ *  not end. It kept its chips and its tint through a press on the page below
+ *  the list, on the header, on the capture field, on another row, and the only
+ *  ways back were Escape and a second press on the row itself. Things folds the
+ *  row on the press that lands outside it, and so does this. The keyboard
+ *  leaves the same way: focus that lands somewhere else is a reader who has
+ *  gone somewhere else.
+ *
+ *  A PANEL THE ROW OPENED IS PART OF THE ROW. The picker, the repeat menu and
+ *  the category popover are portalled out of the row's own element, so
+ *  containment cannot answer for them; what answers is the chip that opened
+ *  one, which Radix flags `data-state="open"` for as long as its layer stands.
+ *  While one does, this folds NOTHING, wherever the press lands. The press that
+ *  dismisses a layer belongs to that layer, and the picker commits what the
+ *  reader settled on as it goes: a row that folded on the same press would take
+ *  the panel out from under that write. One dismissal per press, and the row is
+ *  the next one.
+ *
+ *  THE QUESTION IS ASKED ON THE WAY DOWN AND ANSWERED ON THE LIFT. A press
+ *  that dismisses a layer belongs to that layer, and the layer reads
+ *  `pointerdown`: by the click the flag is already gone and the row would fold
+ *  on the gesture that closed the panel. So the row decides at `pointerdown`,
+ *  while the flag is still there to be read, and spends the decision at
+ *  `pointerup`.
+ *
+ *  It has to wait, because `pointerdown` IS THE FIRST EVENT OF A TOUCH SCROLL.
+ *  A finger dragged down the list to read what is under it folded the row on
+ *  the way past, on the one device where scrolling is how a reader gets
+ *  anywhere. A gesture that travels more than `PRESS_SLOP_PX`, or that the
+ *  browser takes for its own scroll (`pointercancel`), is not a press and ends
+ *  nothing. A wheel never reaches here at all: it fires no pointer event.
+ *
+ *  Capture, so a handler that stops propagation on its way up cannot take the
+ *  row's own answer with it. */
+function useFoldOnOutside({
+  expanded,
+  element,
+  onExpand,
+  foldedAwayRef,
+}: {
+  expanded: boolean;
+  element: React.RefObject<HTMLLIElement | null>;
+  onExpand: (id: string | null) => void;
+  /** Raised for the fold this hook asks for, and read by `useCursorFocus`: a
+   *  reader who pressed somewhere else has taken the focus with them. */
+  foldedAwayRef: React.RefObject<boolean>;
+}) {
+  useEffect(() => {
+    if (!expanded) return;
+    // HOW THIS EXPANSION ENDS, for whoever asks after it has. A new expansion
+    // is a new fold to come, so the answer starts blank here rather than being
+    // consumed by the first reader of it.
+    foldedAwayRef.current = false;
+    const fold = () => {
+      foldedAwayRef.current = true;
+      onExpand(null);
+    };
+    const outside = (target: EventTarget | null) => {
+      const row = element.current;
+      if (row === null || !(target instanceof Node)) return false;
+      if (row.contains(target)) return false;
+      return row.querySelector("[data-state='open']") === null;
+    };
+
+    /** Where the pointer went down, while it is still a press. */
+    let press: { id: number; x: number; y: number } | null = null;
+    const travelled = (event: PointerEvent) =>
+      press === null ||
+      event.pointerId !== press.id ||
+      Math.hypot(event.clientX - press.x, event.clientY - press.y) > PRESS_SLOP_PX;
+
+    const down = (event: Event) => {
+      const pointer = event as PointerEvent;
+      press = outside(event.target)
+        ? { id: pointer.pointerId, x: pointer.clientX, y: pointer.clientY }
+        : null;
+    };
+    const move = (event: Event) => {
+      if (press !== null && travelled(event as PointerEvent)) press = null;
+    };
+    const up = (event: Event) => {
+      const held = press !== null && !travelled(event as PointerEvent);
+      press = null;
+      if (held) fold();
+    };
+    const cancel = () => {
+      press = null;
+    };
+    const leave = (event: Event) => {
+      // FOCUS ON THE BODY IS THE ABSENCE OF FOCUS, not a place the reader
+      // went. A layer closing on Escape drops it there on its way back to the
+      // chip that opened it, and a row that folded on that took the reader's
+      // row away with the key that was asked to close the panel.
+      const target = event.target;
+      if (target === document.body || target === document.documentElement) return;
+      if (outside(target)) fold();
+    };
+
+    document.addEventListener("pointerdown", down, true);
+    document.addEventListener("pointermove", move, true);
+    document.addEventListener("pointerup", up, true);
+    document.addEventListener("pointercancel", cancel, true);
+    document.addEventListener("focusin", leave, true);
+    return () => {
+      document.removeEventListener("pointerdown", down, true);
+      document.removeEventListener("pointermove", move, true);
+      document.removeEventListener("pointerup", up, true);
+      document.removeEventListener("pointercancel", cancel, true);
+      document.removeEventListener("focusin", leave, true);
+    };
+  }, [element, expanded, foldedAwayRef, onExpand]);
+}
+
+/** THE CURSOR HOLDS THE FOCUS IT STANDS ON.
+ *
+ *  The capsule is painted while the column holds the focus and not otherwise
+ *  (`app/globals.css`), which is what takes the tint off a row the reader has
+ *  pressed away from. That rule needs the column to be able to HOLD focus, and
+ *  nothing in it could: a press on a row sent the focus up to `.brain-main`,
+ *  and an arrow key from a cold page moved the cursor with the focus still on
+ *  the body. So the row takes it when the cursor arrives, which also gives the
+ *  arrows something a screen reader can follow.
+ *
+ *  NEVER OFF A CONTROL ALREADY INSIDE THE ROW. The caret in the title lands in
+ *  the same commit the selection does, and a chip the reader is holding has a
+ *  menu open under it. The row is holding the focus either way, so there is
+ *  nothing here to take.
+ *
+ *  AND IT TAKES IT BACK WHEN THE FOLD PULLS THE CHIPS OUT FROM UNDER IT.
+ *  Escape with the focus on a chip folded the row, the chip went, and the
+ *  focus fell to the body: the column stopped holding it, so the cursor's fill
+ *  went out with nothing pressed, and under a mouse there is no ring to stand
+ *  in for it. The reader was left with neither, on a row the cursor had not
+ *  moved off. The row is a focus holder, so it holds it.
+ *
+ *  Not when the reader pressed somewhere else. That fold is the one gesture
+ *  whose whole point is that the paint goes, and a row that grabbed the focus
+ *  back would repaint itself over it. `foldedAwayRef` is what the press says so
+ *  with.
+ *
+ *  `preventScroll`, because the column already scrolls the row it was ASKED to
+ *  show (`useNamedTask` in `components/tasks-surface.tsx`) and the cursor moving
+ *  under the arrows scrolled nothing before this. */
+function useCursorFocus({
+  selected,
+  expanded,
+  element,
+  foldedAwayRef,
+}: {
+  selected: boolean;
+  expanded: boolean;
+  element: React.RefObject<HTMLDivElement | null>;
+  foldedAwayRef: React.RefObject<boolean>;
+}) {
+  useEffect(() => {
+    if (!selected) return;
+    const row = element.current;
+    if (row === null || row.contains(document.activeElement)) return;
+    row.focus({ preventScroll: true });
+  }, [element, selected]);
+
+  // THE FOLD'S OWN MOMENT. The chips are still in the document while their exit
+  // plays, so the focus is either on one of them or already on the body it
+  // fell to. Anywhere else is a reader who has gone somewhere else, and that
+  // focus is theirs.
+  useEffect(() => {
+    if (expanded || !selected || foldedAwayRef.current) return;
+    const row = element.current;
+    if (row === null) return;
+    const holder = document.activeElement;
+    const lost = holder === null || holder === document.body || row.contains(holder);
+    if (!lost || holder === row) return;
+    row.focus({ preventScroll: true });
+  }, [element, expanded, foldedAwayRef, selected]);
+
+  // AND THE MOMENT A PANEL THAT OUTLIVED THE FOLD LETS GO. Escape with the
+  // calendar up closes the panel and folds the row on the one key, and the
+  // panel is portalled and keeps its node for the exit keyframe: the focus is
+  // still on a day cell when the fold commits and falls to nothing a moment
+  // later, which Chrome reports as a `focusout` with nowhere to go. A press
+  // outside never looks like this, since the press puts the focus on what it
+  // landed on. Read on the next frame, off the row's own attribute, so a
+  // second reader of the focus wins it and an open row keeps its panel.
+  useEffect(() => {
+    if (!selected) return;
+    let frame = 0;
+    const fell = (event: Event) => {
+      if ((event as FocusEvent).relatedTarget !== null) return;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const row = element.current;
+        if (row === null || !row.isConnected) return;
+        if (row.hasAttribute("data-expanded") || foldedAwayRef.current) return;
+        const holder = document.activeElement;
+        if (holder !== null && holder !== document.body) return;
+        row.focus({ preventScroll: true });
+      });
+    };
+    document.addEventListener("focusout", fell, true);
+    return () => {
+      document.removeEventListener("focusout", fell, true);
+      cancelAnimationFrame(frame);
+    };
+  }, [element, foldedAwayRef, selected]);
 }
 
 /** THE ROW'S KEYS ARE UNMODIFIED LETTERS, not browser chords.

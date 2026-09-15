@@ -6262,9 +6262,14 @@ test("@mobile Search hands focus to Home and a newly created page", async ({
     const body = response.request().postDataJSON() as { parentId?: string | null };
     return body.parentId === null;
   });
-  await searchView
-    .getByRole("button", { name: "New page", exact: true })
-    .click();
+  // The plus makes nothing by itself. It opens the New menu as a sheet, where
+  // a page is one of the three things the button now offers, so a blank page
+  // is the "Blank page" row of the Page group and the press that reaches this
+  // route is that row's. A real tap and not a dispatched press: the sheet
+  // rises over the plus, and the lift of the tap that opens it used to land on
+  // whichever row had arrived there.
+  await searchView.getByRole("button", { name: "New", exact: true }).tap();
+  await page.getByRole("menuitem", { name: "Blank page", exact: true }).tap();
   const response = await createdResponse;
   expect(response.ok()).toBeTruthy();
   const created = (await response.json()) as { id: string };

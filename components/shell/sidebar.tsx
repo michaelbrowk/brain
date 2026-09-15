@@ -208,7 +208,16 @@ export function ShellSidebar({
             Settings too, where the circle is not: "nothing there is a create"
             is an argument about creating, and a reminder can fire while a
             person is reading Settings. */}
-        <div className="flex items-center gap-1">
+        {/* ONE PAIR, NOT TWO NEIGHBOURS. gap-1 was 4px between a 28 capsule
+            and a 34 circle, so the two controls in this head touched and
+            differed in size, and the smaller of them was the one carrying a
+            count. 12 is the air, and both are 34. The row is still 36 tall and
+            the sidebar is still 280: 280 − 24 of panel padding − 6 of head
+            padding leaves 250 for the line, the pair takes 80 of it, and the
+            wordmark's box (6 + 18 + 8 + "Brain" at H3 + 6) measures 74.4 at
+            1440, so 95.6 is spare, and the wordmark is the only thing here
+            that can grow. */}
+        <div className="flex items-center gap-3">
           <NotificationsBell
             onNavigate={onNavigateNotification}
             refreshToken={notificationRefreshToken}

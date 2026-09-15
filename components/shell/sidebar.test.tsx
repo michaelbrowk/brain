@@ -1,5 +1,7 @@
 // @vitest-environment jsdom
 
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -221,5 +223,142 @@ describe("ShellSidebar tasks row", () => {
     expect(dot?.closest("button.tree-row")?.textContent).toContain("Settings");
     const count = document.querySelector(".tree-row-count");
     expect(count?.closest("button.tree-row")?.textContent).toContain("Tasks");
+  });
+});
+
+// THE HEAD OF THE PANEL: a wordmark and a pair of controls.
+//
+// The pair is the point. The bell was a 28 capsule standing 4px from a 34
+// circle, so two controls that do the same KIND of thing were drawn at two
+// sizes with no air between them and read as one lopsided object, and the
+// smaller of the two was the one carrying a number. Both are 34 now, the air
+// is 12, and the count comes inside the bell's own box rather than hanging out
+// of it into that air.
+
+const CSS = readFileSync(path.join(process.cwd(), "app", "globals.css"), "utf8");
+
+/** One CSS rule's body, by its exact selector line. */
+function cssRule(selector: string): string {
+  const at = CSS.indexOf(`\n${selector} {`);
+  if (at === -1) throw new Error(`no rule for ${selector}`);
+  const start = CSS.indexOf("{", at);
+  return CSS.slice(start + 1, CSS.indexOf("}", start));
+}
+
+describe("ShellSidebar head", () => {
+  let host: HTMLDivElement;
+  let root: Root;
+
+  beforeEach(() => {
+    (
+      globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    harness.reduce = false;
+    renders.length = 0;
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: false,
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ notifications: [], unread: 0 }),
+      })) as unknown as typeof fetch,
+    );
+    host = document.createElement("div");
+    document.body.appendChild(host);
+    root = createRoot(host);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    host.remove();
+    vi.unstubAllGlobals();
+  });
+
+  async function render(overrides: Partial<ShellSidebarProps> = {}) {
+    await act(async () => root.render(<ShellSidebar {...sidebarProps(overrides)} />));
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
+
+  const head = () => document.querySelector<HTMLElement>(".brain-sidebar-head")!;
+  const bell = () => head().querySelector<HTMLButtonElement>('[aria-label^="Notifications"]')!;
+  const plus = () => head().querySelector<HTMLButtonElement>('[aria-label="New page"]')!;
+
+  it("draws the bell and the plus at one size", async () => {
+    await render();
+
+    // the plus is `.btn-accent`, which globals.css sizes at 34
+    expect(plus().classList.contains("btn-accent")).toBe(true);
+    expect(cssRule(".btn-accent")).toContain("width: 34px");
+
+    // the bell is the same family at the same size, and takes it from the
+    // atom rather than from a class written once at this call site
+    expect(bell().classList.contains("icon-btn")).toBe(true);
+    expect(bell().dataset.size).toBe("34");
+    expect(cssRule('.icon-btn[data-size="34"]')).toContain("width: 34px");
+    expect(cssRule('.icon-btn[data-size="34"]')).toContain("height: 34px");
+  });
+
+  it("puts twelve of air between them", async () => {
+    await render();
+
+    const pair = bell().parentElement!;
+    expect(pair).toBe(plus().parentElement);
+    // Tailwind's gap-3 is 0.75rem, which is 12 at the root size
+    expect(pair.className.split(/\s+/)).toContain("gap-3");
+    expect(pair.className.split(/\s+/)).not.toContain("gap-1");
+  });
+
+  it("keeps the 36 row, with room to spare", async () => {
+    await render();
+
+    // 280 sidebar − 24 panel padding − 6 head padding = 250 for the line. The
+    // pair takes 34 + 12 + 34 = 80 and the wordmark's box measures 82 at 1440
+    // (6 + 18 + 8 + "Brain" at H3 + 6), so 88 is spare and the wordmark is the
+    // only thing here that can grow.
+    expect(cssRule(".brain-sidebar-head")).toContain("height: 36px");
+    expect(head().querySelector(".brain-wordmark")).not.toBeNull();
+  });
+
+  it("brings the count inside the bell's own box", async () => {
+    const badge = cssRule(".brain-bell-badge");
+    // At 28 the badge hung 3px out of the control on both sides to clear the
+    // crown. The 34 box IS that hang, so the corner is the box's own corner
+    // and the clearance measured on the 28 is unchanged.
+    expect(badge).toMatch(/\btop: 0;/);
+    expect(badge).toMatch(/\bright: 0;/);
+    expect(badge).not.toContain("-3px");
+    // the paper ring that keeps two ink shapes two, and the press target
+    expect(badge).toContain("box-shadow: 0 0 0 2px var(--paper)");
+    expect(badge).toContain("pointer-events: none");
+  });
+
+  it("draws no create on Settings, and keeps the bell there", async () => {
+    await render();
+    expect(plus().getAttribute("aria-haspopup")).toBe("menu");
+
+    await render({ surface: "settings", settingsSection: "appearance" });
+    expect(head().querySelector('[aria-label="New page"]')).toBeNull();
+    // the bell stands there: a reminder fires whatever surface is open
+    expect(head().querySelector('[aria-label^="Notifications"]')).not.toBeNull();
   });
 });

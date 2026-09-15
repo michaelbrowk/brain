@@ -12,9 +12,10 @@ export const MAIL_SEND_ATTACHMENT_LIMITS = Object.freeze({
    * 10 MiB of decoded payload per message, the one number every other
    * outgoing cap is derived from. What sets it is the service's memory
    * contract rather than what a provider would accept: `MemoryHigh=192M` and
-   * `MemoryMax=256M` in `ops/brain-mail.service`, measured on 2026-09-15 at
-   * 155 MiB peak RSS for one send of 10 MiB against a 37.5 MiB bare-node
-   * baseline. `MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes` follows from it:
+   * `MemoryMax=256M` in `ops/brain-mail.service`, measured twice on
+   * 2026-09-15 at 155 and 165 MiB peak RSS for one send of 10 MiB against a
+   * 37.5 MiB bare-node baseline. 165 is the number to hold against
+   * `MemoryMax`, which leaves about 90 MiB of margin. `MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes` follows from it:
    * base64 at 76 columns multiplies a payload by 1.3684, so 10 MiB of files
    * becomes 13.68 MiB of parts, and the 1 MiB text part and the headers take
    * the finished message to the 18 MiB stated there.

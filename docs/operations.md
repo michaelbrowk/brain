@@ -417,6 +417,12 @@ Verify the limit through Cloudflare and Nginx with a disposable near-25 MiB
 file before a bulk import. The application admits one body stream at a time and
 returns `429` with `Retry-After` to parallel upload attempts.
 
+`POST /api/mail/send` has its own body cap, `MAX_SEND_REQUEST_BYTES` at
+24 MiB, and it only applies to a request the edge let through: it sits under
+the server-level `client_max_body_size`, 101m in the reference vhost and 30m
+as measured on the droplet. Lowering either below 24 MiB turns an agent's
+attachment send into a `413` the application never sees and cannot explain.
+
 ### What a move writes
 
 A page's children are blocks of its body, so a move between parents is two

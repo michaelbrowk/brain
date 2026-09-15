@@ -302,7 +302,8 @@ unusual-looking pin is worth much less than a knowingly vulnerable parser.
 Human access = password → signed httpOnly cookie. MCP clients connect to
 `/api/mcp`, discover Brain OAuth automatically, and open a Brain consent screen.
 The legacy bearer token remains available only as a migration path. Details and
-the operator checklist are in `docs/mcp-oauth.md`.
+the operator checklist are in `docs/mcp-oauth.md`; every tool, its scope, its
+inputs and its refusals are in `docs/mcp-tools.md`.
 
 ## Smart sort
 

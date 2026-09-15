@@ -28,13 +28,23 @@ discover the remaining endpoints automatically.
   covers page mutations. `brain:import` includes write and is the scope the
   guarded Notion import tools and the binary import-upload route are declared
   against.
+- `brain:mail` covers reading and sorting mail and saving one of its
+  attachments into a note. `brain:mail:send` covers putting a message on the
+  wire and includes `brain:mail`. Mail is a second axis, not a step above
+  writing: `brain:mail` includes `brain:read`, because a mail reader has to
+  name a page to save an attachment into, and it does not include
+  `brain:write`. A grant that sorts mail cannot edit notes. Which tool sits
+  under which scope is in `docs/mcp-tools.md`.
 - **A `brain:write` grant reaches the import tools as well.** Brain is a
   single-owner service, and `ownerEffectiveScopes` in `lib/oauth/config.ts`
   widens any verified write grant to the full scope set when an access token is
   introspected, so the import tools accept it. The distinction the code enforces
   today is read-only versus writing, not writing versus importing: a read-only
   grant stays read-only, and everything above it can import. Do not treat
-  `brain:import` as a second barrier in front of the import surface.
+  `brain:import` as a second barrier in front of the import surface. The same
+  widening now reaches the two mail scopes, which is deliberate: an owner
+  connection made before mail existed gets the mail tools on upgrade without a
+  second consent screen, and a read-only grant still gets neither.
 - Settings lists active connected apps by grant. Revoking one grant immediately
   invalidates its access and refresh tokens. A recognized valid token returns
   success only after the revocation state is durably written; transient state
@@ -125,6 +135,11 @@ real client has completed an OAuth connect/read/write check.
 7. Restart `brain.service`; discovery, an unreplayed existing refresh, and
    revocation must still work. The legacy token remains unchanged during this
    rollout.
+8. Connect read-only again and confirm the bootstrap challenge advertises
+   `scope="brain:read brain:write brain:import brain:mail brain:mail:send"`,
+   that a mail tool returns HTTP `403` with exact `scope="brain:mail"`, and
+   that `/var/lib/brain/mcp` is private to the `brain` service user with its
+   files mode `0600`.
 
 Rollback is code-only: switch to the prior immutable release. Keep
 `/var/lib/brain/oauth` in place so a forward retry does not silently forget

@@ -13,7 +13,9 @@ type ConnectedApp = {
   grantId: string;
   clientId: string;
   clientName: string;
-  scopes: Array<"brain:read" | "brain:write" | "brain:import">;
+  scopes: Array<
+    "brain:read" | "brain:write" | "brain:import" | "brain:mail" | "brain:mail:send"
+  >;
   connectedAt: number;
 };
 type McpSettings = {
@@ -30,6 +32,8 @@ const MCP_CONNECTION_CHECK_PROMPT =
 function mcpScopeLabel(scope: ConnectedApp["scopes"][number]): string {
   if (scope === "brain:read") return "Read";
   if (scope === "brain:write") return "Write";
+  if (scope === "brain:mail") return "Mail";
+  if (scope === "brain:mail:send") return "Send mail";
   return "Import";
 }
 

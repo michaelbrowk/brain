@@ -167,7 +167,7 @@ export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> 
 }
 
 /** Newest first, because that is the order the Settings list shows and the
- *  order a person asking "what did it do just now" reads in. */
+ *  order a person asking "what has it been doing" reads in. */
 export async function readMcpActivity(limit: number): Promise<McpActivityEntry[]> {
   if (limit <= 0) return [];
   const entries: McpActivityEntry[] = [];

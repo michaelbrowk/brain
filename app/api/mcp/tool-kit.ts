@@ -44,7 +44,14 @@ export function hasScope(
 }
 
 /** The grant's own name, for the activity log and the Sent-row caption. Never
- *  the client id: a person reading the log wants the name they approved. */
+ *  the client id: a person reading the log wants the name they approved.
+ *
+ *  Not memoised: `extra` is rebuilt per tool call by the handler underneath,
+ *  with nothing shaped like a per-request context to hang a cache on, and a
+ *  batch is the only case where one request makes more than one of these
+ *  calls. Caching here would mean inventing that context first, for a read
+ *  that costs one already-open state file. Revisit if a request-scoped
+ *  object appears for another reason. */
 export async function clientNameOf(extra: {
   authInfo?: { clientId?: string };
 }): Promise<string> {

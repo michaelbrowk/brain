@@ -30,6 +30,13 @@ export const MCP_ACTIVITY_MAX_LINES = 2000;
  *  the address into the log. */
 const MAX_OUTCOME_LENGTH = 120;
 
+/** `change` is a short fixed token a caller names, not a place for prose:
+ *  which mutation a triage line ran (`read`, `archive`, `trash`, `restore`,
+ *  `spam`, `starred`) or which field a task write changed. Bounded the same
+ *  way `outcome` is, so a caller that passed a sentence by mistake cannot
+ *  make the line unreadable. */
+const MAX_CHANGE_LENGTH = 64;
+
 export interface McpActivityEntry {
   readonly at: string; // ISO instant
   readonly client: string; // the grant's client name, or "Legacy token"
@@ -41,6 +48,7 @@ export interface McpActivityEntry {
   readonly page?: string;
   readonly task?: string;
   readonly operationId?: string;
+  readonly change?: string; // which mutation or field, never free text
   readonly outcome: string; // "ok", or a refusal code
 }
 
@@ -74,6 +82,9 @@ function closedEntry(entry: McpActivityEntry): McpActivityEntry {
   for (const field of OPTIONAL_FIELDS) {
     const value = entry[field];
     if (typeof value === "string" && value.length > 0) out[field] = value;
+  }
+  if (typeof entry.change === "string" && entry.change.length > 0) {
+    out.change = entry.change.slice(0, MAX_CHANGE_LENGTH);
   }
   out.outcome = tidyOutcome(String(entry.outcome));
   return out as unknown as McpActivityEntry;
@@ -141,7 +152,12 @@ export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> 
   const dir = mcpStateDirectory();
   const line = JSON.stringify(closedEntry(entry));
   await enqueue(async () => {
-    const lines = await readLines(dir);
+    // A line this process cannot parse back never reaches `readMcpActivity`,
+    // so it is not one of the log's 2000 slots. Drop it here rather than
+    // counting it: the cap stays a count of real entries, and whenever a trim
+    // does run it rewrites the file without the corrupt line rather than
+    // carrying it forward forever.
+    const lines = (await readLines(dir)).filter((raw) => parseLine(raw) !== null);
     if (lines.length + 1 > MCP_ACTIVITY_MAX_LINES) {
       lines.push(line);
       await rewrite(dir, lines.slice(-MCP_ACTIVITY_MAX_LINES));

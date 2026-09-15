@@ -165,6 +165,21 @@ describe("durable OAuth state", () => {
     await expect(active(reopened, third.refresh)).resolves.toBe(true);
   });
 
+  it("persists a grant carrying a mail scope and reads it back through a fresh store", async () => {
+    const client = await register(store);
+    await authorize(store, client.id, "m".repeat(43), [
+      "brain:read",
+      "brain:mail",
+      "brain:mail:send",
+    ]);
+
+    const reopened = new OAuthStateStore(stateDirectory);
+    const apps = await reopened.listConnectedApps();
+
+    expect(apps).toHaveLength(1);
+    expect(apps[0].scopes).toEqual(["brain:read", "brain:mail", "brain:mail:send"]);
+  });
+
   it("evicts the oldest unused DCR client when the bounded registry is full", async () => {
     const first = await store.registerClient({
       name: "Old unused client",

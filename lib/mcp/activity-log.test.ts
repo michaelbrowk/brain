@@ -54,6 +54,29 @@ describe("the MCP activity log", () => {
     expect(entries[1].operationId).toBe("send-alpha");
   });
 
+  it("round-trips which mutation ran, bounded at 64 characters", async () => {
+    await appendMcpActivity({
+      at: "2026-09-14T09:00:00.000Z",
+      client: "Claude",
+      tool: "update_mail_thread",
+      accountId: ACCOUNT,
+      threadId: "thread-alpha",
+      change: "starred",
+      outcome: "ok",
+    });
+    await appendMcpActivity({
+      at: "2026-09-14T09:00:01.000Z",
+      client: "Claude",
+      tool: "update_task",
+      task: "task-alpha",
+      change: "c".repeat(80),
+      outcome: "ok",
+    });
+    const entries = await readMcpActivity(50);
+    expect(entries[1].change).toBe("starred");
+    expect(entries[0].change).toHaveLength(64);
+  });
+
   it("answers nothing before anything has been written", async () => {
     expect(await readMcpActivity(50)).toEqual([]);
   });
@@ -138,6 +161,44 @@ describe("the MCP activity log", () => {
     expect((await fs.stat(path.join(root, MCP_ACTIVITY_FILE))).mode & 0o777).toBe(0o600);
   });
 
+  it("chmods the file on the ordinary append path", async () => {
+    const chmod = vi.spyOn(fs, "chmod");
+    await appendMcpActivity({
+      at: "2026-09-14T09:00:00.000Z",
+      client: "Claude",
+      tool: "get_task",
+      task: "task-alpha",
+      outcome: "ok",
+    });
+    expect(chmod).toHaveBeenCalledWith(path.join(root, MCP_ACTIVITY_FILE), 0o600);
+  });
+
+  it("chmods the file again after a trim", async () => {
+    await fs.mkdir(root, { recursive: true, mode: 0o700 });
+    const seeded =
+      Array.from({ length: MCP_ACTIVITY_MAX_LINES }, (_, i) =>
+        JSON.stringify({
+          at: "2026-09-14T09:00:00.000Z",
+          client: "Claude",
+          tool: "get_task",
+          task: `task-${i}`,
+          outcome: "ok",
+        }),
+      ).join("\n") + "\n";
+    await fs.writeFile(path.join(root, MCP_ACTIVITY_FILE), seeded, { mode: 0o600 });
+
+    const chmod = vi.spyOn(fs, "chmod");
+    await appendMcpActivity({
+      at: "2026-09-14T09:00:00.000Z",
+      client: "Claude",
+      tool: "get_task",
+      task: "task-over",
+      outcome: "ok",
+    });
+
+    expect(chmod).toHaveBeenCalledWith(path.join(root, MCP_ACTIVITY_FILE), 0o600);
+  });
+
   it("survives a corrupt line rather than losing the file", async () => {
     await fs.mkdir(root, { recursive: true, mode: 0o700 });
     await fs.writeFile(path.join(root, MCP_ACTIVITY_FILE), "{not json\n", { mode: 0o600 });
@@ -149,6 +210,35 @@ describe("the MCP activity log", () => {
       outcome: "ok",
     });
     expect(await readMcpActivity(50)).toHaveLength(1);
+  });
+
+  it("does not let a corrupt line take one of the cap's slots", async () => {
+    await fs.mkdir(root, { recursive: true, mode: 0o700 });
+    const seeded =
+      Array.from({ length: MCP_ACTIVITY_MAX_LINES - 1 }, (_, i) =>
+        JSON.stringify({
+          at: "2026-09-14T09:00:00.000Z",
+          client: "Claude",
+          tool: "get_task",
+          task: `task-${i}`,
+          outcome: "ok",
+        }),
+      ).join("\n") + "\n";
+    await fs.writeFile(path.join(root, MCP_ACTIVITY_FILE), seeded, { mode: 0o600 });
+    await fs.appendFile(path.join(root, MCP_ACTIVITY_FILE), "{not json\n", "utf8");
+
+    await appendMcpActivity({
+      at: "2026-09-14T09:00:00.000Z",
+      client: "Claude",
+      tool: "get_task",
+      task: "boundary-task",
+      outcome: "ok",
+    });
+
+    const entries = await readMcpActivity(MCP_ACTIVITY_MAX_LINES);
+    expect(entries).toHaveLength(MCP_ACTIVITY_MAX_LINES);
+    expect(entries[0].task).toBe("boundary-task");
+    expect(entries.map((entry) => entry.task)).toContain("task-0");
   });
 
   it("clears to nothing and stays readable", async () => {

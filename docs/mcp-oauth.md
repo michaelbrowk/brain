@@ -141,6 +141,14 @@ real client has completed an OAuth connect/read/write check.
    that `/var/lib/brain/mcp` is private to the `brain` service user with its
    files mode `0600`.
 
-Rollback is code-only: switch to the prior immutable release. Keep
-`/var/lib/brain/oauth` in place so a forward retry does not silently forget
-owner grants. The prior release ignores this directory.
+Rollback is code-only, with one condition. Before any client has consented to
+`brain:mail` or `brain:mail:send`, switch to the prior immutable release and
+keep `/var/lib/brain/oauth` in place so a forward retry does not silently
+forget owner grants; the prior release ignores this directory. Once one grant
+has stored either mail scope, that stops being safe: the prior release's
+scope validator does not know the two mail scopes, so it refuses the whole
+state file on read, every grant in it, not only the mail one, rather than
+loading it. From that point, stay on 0.11.0 or later. Revoking the mail-scoped
+grant in Settings → Connections is not an immediate fix: a revoked grant keeps
+its stored scopes for 24 hours before Brain prunes it, so the state file is
+still unreadable by the prior release during that window.

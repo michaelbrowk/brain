@@ -141,25 +141,32 @@ means it will not, and `ready` carries `text` and `attachments`.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `update_mail_thread` | `brain:mail` | `accountId`, `threadId`, and exactly one of `read`, `starred`, `archive`, `trash`, `restore`, `spam` | `{ thread }`, the thread's row as it stands after the change | `one change per call`, naming either the fields that arrived together or the six to pick from; `thread_mutations_unavailable` when the service withholds them for that account; `thread not found`, plus the service's own codes |
+| `update_mail_thread` | `brain:mail` | `accountId`, `threadId`, and exactly one of `read`, `starred`, `archive`, `trash`, `restore`, `spam` | `{ thread }`, the thread's row as it stands after the change | `invalid_account_id`, `invalid_thread_id`; `trash_is_true_only` and `restore_is_true_only`, `false` naming no second thing either word could mean; `one change per call`, naming either the fields that arrived together or the six to pick from; `mail_thread_mutation_unsupported` when the service withholds them for that account, the same code the wire uses for the folderless case; `thread not found`, plus the service's own codes |
 
 `trash` and `restore` take `true` and nothing else, because there is no second
-thing either word could mean. The other four take a boolean, so `read: false`
-puts a thread back to unread and `archive: false` brings it back to the Inbox.
-"Move" is one of these six: Brain has no custom folders, and this release adds
-none.
+thing either word could mean. `false` on either is refused rather than
+accepted and ignored, naming the field and pointing at `restore: true` for the
+agent that reached for `trash: false` to mean "take it out of the trash". The
+other four take a boolean, so `read: false` puts a thread back to unread and
+`archive: false` brings it back to the Inbox. "Move" is one of these six:
+Brain has no custom folders, and this release adds none.
 
 The one-change rule is Brain's own, checked before the mail service is called,
 so the refusal names the fields the agent sent. It mirrors the PATCH the
 service accepts, which counts its keys and turns down a second action.
+
+`accountId` and `threadId` are checked against the same shapes the read tools
+check, before anything else runs: a malformed id is refused here, naming the
+field, rather than reaching the mail client or the activity log.
 
 A `read: true` also marks that thread's row read in the notification centre, on
 the same condition the Mail surface uses: a letter read is a letter read,
 whichever window read it. That mark never blocks the tool and never fails it,
 so a bell that is one row stale is not reported as a triage that did not land.
 
-Every call writes one activity line with the account, the thread and the
-outcome. A refused call writes one too, so the owner sees what was attempted.
+Every call writes one activity line with the account, the thread, which of the
+six fields changed and the outcome. A refused call writes one too, so the
+owner sees what was attempted.
 
 ## Mail, sending
 
@@ -310,12 +317,15 @@ a gap.
 
 ## Activity
 
-Brain keeps an append-only log of what a connection did, capped at 2000 lines.
-A line holds the time, the app's name the owner approved, the tool, the ids it
-touched and an outcome code. There is no field a subject, an address, a body
-or a title can enter through, and an outcome is reduced to letters, digits and
-the punctuation an id or a hostname needs, so a refusal reason that quoted an
-address cannot carry the address into the log.
+Brain keeps an append-only log of what a connection did, capped at 2000 lines
+and at 512 KiB, whichever a line reaches first. A line holds the time, the
+app's name the owner approved, the tool, the ids it touched, which field
+changed on a triage or a task write and an outcome code. There is no field a
+subject, an address, a body or a title can enter through, an outcome is
+reduced to letters, digits and the punctuation an id or a hostname needs, and
+every other field is bounded on its own: a caller that hands over an id far
+past its real shape gets that field back cut and marked rather than the whole
+line, so one call cannot spend the log's budget on itself.
 
 The log lives in the MCP state directory (`BRAIN_MCP_STATE_DIR`,
 `/var/lib/brain/mcp` in production), beside the owner's agent toggles and the

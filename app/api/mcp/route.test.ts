@@ -3337,6 +3337,7 @@ describe("update_mail_thread", () => {
       tool: "update_mail_thread",
       accountId: FAKE_ACCOUNT_ID,
       threadId: "thread-alpha",
+      change: "trash",
       outcome: "ok",
     });
     expect(JSON.stringify(entry)).not.toContain("Quarterly");
@@ -3387,14 +3388,19 @@ describe("update_mail_thread", () => {
 
     expect(payload).toEqual({
       error: "the mail service does not sort threads for this account",
-      reason: "thread_mutations_unavailable",
+      // The same code the wire uses for the folderless-server case
+      // (`lib/mail/service/http.ts`'s `mail_thread_mutation_unsupported`), so
+      // an agent branches on one string whether this pre-check catches it or
+      // the service does.
+      reason: "mail_thread_mutation_unsupported",
     });
     expect(isError).toBe(true);
     expect(fake.calls.map((call) => call.method)).toEqual([
       "listAccountCapabilities",
     ]);
     const [entry] = await readMcpActivity(1);
-    expect(entry.outcome).toBe("thread_mutations_unavailable");
+    expect(entry.outcome).toBe("mail_thread_mutation_unsupported");
+    expect(entry.change).toBe("archive");
   });
 
   it("marks the centre's mail row read when the agent marks the thread read", async () => {
@@ -3483,6 +3489,80 @@ describe("update_mail_thread", () => {
     );
     expect(fake.calls).toEqual([]);
     await expect(readMcpActivity(1)).resolves.toEqual([]);
+  });
+
+  it("refuses a 200 KB account id before the client or the log is touched", async () => {
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "update_mail_thread",
+        {
+          accountId: "a".repeat(200_000),
+          threadId: "thread-alpha",
+          read: true,
+        },
+        310,
+      ),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "that account id is not valid",
+      reason: "invalid_account_id",
+    });
+    // An id Brain never issued names no target, so nothing happened worth a
+    // line, and nothing this size may reach a log that counts lines.
+    expect(fake.calls).toEqual([]);
+    await expect(readMcpActivity(1)).resolves.toEqual([]);
+  });
+
+  it("refuses a 200 KB thread id before the client or the log is touched", async () => {
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "update_mail_thread",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          threadId: "b".repeat(200_000),
+          read: true,
+        },
+        311,
+      ),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "that thread id is not valid",
+      reason: "invalid_thread_id",
+    });
+    expect(fake.calls).toEqual([]);
+    await expect(readMcpActivity(1)).resolves.toEqual([]);
+  });
+
+  it("names the field that changed on a read as well as on a trash", async () => {
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        updateThread: async () => ({
+          apiVersion: 1,
+          thread: fakeThread({ unread: false }),
+        }),
+      }).client,
+    );
+
+    await toolPayload(
+      await callTool(
+        "update_mail_thread",
+        { accountId: FAKE_ACCOUNT_ID, threadId: "thread-alpha", read: true },
+        312,
+      ),
+    );
+
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({ change: "read", outcome: "ok" });
   });
 });
 

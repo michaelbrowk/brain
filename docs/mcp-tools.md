@@ -220,6 +220,39 @@ neither toggle gates it: a send already made can always be asked about.
 Outgoing attachments are not part of these tools yet. They are named from a
 page's own files and land later on this branch.
 
+## Mail, an attachment into a note
+
+| Tool | Scope | Inputs | Answers | Refuses |
+| --- | --- | --- | --- | --- |
+| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type }`, the saved file as the note store named it | `that file is too large for a note`, naming the cap; whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`); `page not found`, which also says the file is saved and no line was added; `invalid_account_id`, `invalid_attachment_id`, `invalid_page_id`; plus the service's own codes |
+
+It is the one mail tool that writes a note, so it asks for `brain:write`
+beside `brain:mail`. A grant that reads mail and cannot edit notes is refused
+before the mail client is built.
+
+Two caps apply and the smaller one wins. The mail service hands out no more
+than 40 MiB from a mailbox, the notes folder takes no more than 25 MiB, and
+the download is bounded to the smaller number as it is read: a file over the
+cap is abandoned part-way rather than held whole in memory and then turned
+down. The note store checks the rest, the same checks an upload from the
+browser meets: the blocked types, and the first bytes against the type the
+file claims.
+
+The file is named from the message's own `Content-Disposition`, the RFC 5987
+form first. The store keeps that as display metadata only and mints its own
+name for the file on disk.
+
+With `append` true, the default, one Markdown line is added to the page: an
+image is shown, anything else is linked. The filename is escaped into the
+link's label, because it is the sender's prose and an unescaped bracket in it
+would close the link early. The page's `updatedBy` becomes `claude`, as with
+every MCP write. With `append` false nothing is written to the page, and a
+file no page links is collected by the attachment sweep a day later, so an
+agent that passes it has to write its own line.
+
+One activity line per call names the account, the attachment and the page,
+never the filename.
+
 ## Notion import
 
 The nine `notion_*` tools are one guarded protocol, not nine independent
@@ -271,6 +304,6 @@ folder, in git or in a portable archive.
 
 ## Still to come in this release
 
-Mail attachments, in and out, and the Settings view of the activity log land
-later on this branch. Their rows are added here as each one
-is registered, so this table and the server stay one description.
+Outgoing attachments and the Settings view of the activity log land later on
+this branch. Their rows are added here as each one is registered, so this
+table and the server stay one description.

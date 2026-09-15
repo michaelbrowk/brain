@@ -197,7 +197,7 @@ passes.
 | HTML | Sanitized, remote content blocked, sandboxed, strict CSP |
 | Attachments | Download by default. Only verified CID raster images may render inline |
 | Sender-icon egress | Deliberate, documented exception: the Brain app, never the mail service, may resolve DNS and open TLS to a sender's own domain to fetch its `/favicon.ico`, server-side and SSRF-guarded, cached on disk under an LRU cap. Sender domains are the only data that leaves; message content, addresses, and subjects never do |
-| Capacity | Separate receive, 1 MiB MVP send, relay-frame, parser, connection, queue, cache, temp, WAL, and process limits sized for a handful of accounts on a small host shared with the rest of Brain |
+| Capacity | Separate receive, 26 MiB send, relay-frame, parser, connection, queue, cache, temp, WAL, and process limits sized for a handful of accounts on a small host shared with the rest of Brain |
 | PR0 dependencies | None added |
 
 ## 3. Build versus buy
@@ -535,7 +535,7 @@ The current DigitalOcean runtime is receive-capable but not send-capable. A read
 
 Until a separately reviewed egress route exists, health reports `receiveReadiness: "ready"` and `sendReadiness: "egress_blocked"`, but never fully `ready`. The selected candidate is a dedicated Cloudflare Worker that acts only as an authenticated WebSocket-to-raw-TCP relay. It receives no SMTP password, hostname fallback, MIME metadata, or send instruction. Brain signs a fresh 256-bit Worker challenge together with protocol version and audience, the explicit `authenticated_byte_relay` route, exact validated literal address and family, port, target expiry, session, attempt, and deadline. The issued challenge remains trusted connection-local Worker state; the returned envelope must echo it exactly, and the Worker verifies the canonical payload with a constant-time HMAC comparison. A response signed for another WebSocket is rejected even inside the five-second challenge lifetime. The Worker consumes the challenge before independently rejecting non-public addresses and every port except 465 and 587, and only then opens one raw TCP socket with `secureTransport: "off"`.
 
-The relay protocol allows one TCP socket, no reconnect, no retry, a 60-second absolute deadline, frames no larger than 16 KiB, no more than 2 MiB total client-to-TCP bytes, no more than 128 KiB server-to-client bytes, one unacknowledged frame in each direction, and monotonic sequence numbers. The 2 MiB tunnel ceiling leaves bounded room above the 1 MiB MIME cap for SMTP commands, dot-stuffing, and TLS records. A write acknowledgement is emitted only after the underlying writer accepts that frame. Production adds Cloudflare Access Service Auth in front of the challenge HMAC. A staging preview may use HMAC alone only for a short feasibility run. Direct DigitalOcean SMTP fallback is forbidden.
+The relay protocol allows one TCP socket, no reconnect, no retry, a 60-second absolute deadline, frames no larger than 16 KiB, no more than 2 MiB total client-to-TCP bytes, no more than 128 KiB server-to-client bytes, one unacknowledged frame in each direction, and monotonic sequence numbers. The 2 MiB tunnel ceiling is not raised with the outgoing message cap, so a message with attachments reaches a Gmail account and is refused at the relay for an IMAP account until the relay's own budget moves. A write acknowledgement is emitted only after the underlying writer accepts that frame. Production adds Cloudflare Access Service Auth in front of the challenge HMAC. A staging preview may use HMAC alone only for a short feasibility run. Direct DigitalOcean SMTP fallback is forbidden.
 
 This route remains conditional until a deployed Free Worker proves literal IPv4/IPv6 dialing, port 465, port 587 with STARTTLS, inner hostname/certificate failure before AUTH, disconnect semantics, and a 1 MiB message below the 10 ms CPU limit. Cloudflare documents `remoteAddress` as nullable and does not promise a stable egress prefix, so the canary must also prove the actual provider accepts the connection. Oracle or Lightsail remains an operator fallback only if the free canary fails. No cloud resource is created by PR0.
 
@@ -603,6 +603,21 @@ State:
 | `partially_sent` | At least one recipient accepted, at least one rejected, and Sent copy stored | Never retry the original envelope |
 | `failed` | Permanent rejection | No |
 
+`buildOutboundRfc2822` writes one of two shapes. With no attachments it is the
+single `text/plain` part it has always been, byte for byte, because every Sent
+copy and every replay check compares those bytes. With attachments it is
+`multipart/mixed`: the text part first, then one base64 part per file carrying
+`Content-Disposition: attachment` with the RFC 5987 filename form the download
+path already emits. The boundary is derived from the immutable Message-ID
+(`multipartBoundary`), not from randomness, because `draftMatchesSubmission`
+rebuilds the whole message and compares it to the stored one.
+
+A send carries who wrote it. `origin: "mcp"` adds the header `X-Brain-Agent:
+mcp` after `MIME-Version` and before the content headers, so the header block
+keeps one deterministic order across replays. With the owner's toggle on,
+`agentLine` appends one last body line, `Sent by an agent through Brain.`, and
+only for an agent's message. A message a person typed carries neither.
+
 The request fingerprint (`fingerprintMailSendInput`) is a SHA-256 over exactly
 the caller's own submission, in this order:
 
@@ -612,6 +627,14 @@ the caller's own submission, in this order:
 - subject
 - body text
 - in-reply-to message ID
+- origin, `app` or `mcp`
+- the recipient-visible agent line flag
+- each attachment's filename, MIME type and base64 length
+
+The three newest inputs are appended, never reordered, so a fingerprint stored
+before they existed keeps meaning what it meant. An attachment contributes its
+base64 length rather than its bytes because the raw MIME's own SHA-256 is
+compared field by field on every replay, so the content is already covered.
 
 Operation ID, idempotency key, provider kind, created-at and the built message
 are not fingerprint inputs. They are immutable fields of the queued record,
@@ -695,7 +718,8 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 | --- | ---: |
 | Accounts | 7 |
 | Incoming raw message | 40 MiB |
-| Outgoing raw message, MVP | 1 MiB |
+| Outgoing raw message | 26 MiB |
+| Outgoing attachments | 25 MiB total, 10 files |
 | Relay frame | 16 KiB |
 | Relay client bytes | 2 MiB per tunnel, including SMTP/TLS overhead |
 | Relay server bytes | 128 KiB |

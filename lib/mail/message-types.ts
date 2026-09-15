@@ -1,3 +1,5 @@
+import type { MailSendAttachment } from "./send-attachment-codec";
+
 /**
  * cache_full is a projection of backoff for a full local message cache. It is
  * a persistent local stall, so the UI must not present it as a provider retry.
@@ -179,6 +181,7 @@ export type MailThreadMutationInput =
   | { readonly accountId: string; readonly starred: boolean };
 
 export type MailSendMode = "compose" | "reply";
+export type MailSendOrigin = "app" | "mcp";
 export type MailSendStatus =
   | "queued"
   | "sending"
@@ -196,6 +199,12 @@ export interface MailSendInput {
   readonly subject: string;
   readonly text: string;
   readonly replyToMessageId: string | null;
+  /** Files from a page's own attachments. The composer sends none today. */
+  readonly attachments: readonly MailSendAttachment[];
+  /** Who wrote it. Only "mcp" earns the X-Brain-Agent header. */
+  readonly origin: MailSendOrigin;
+  /** Adds the recipient-visible line, and only for an agent's message. */
+  readonly agentLine: boolean;
 }
 
 export interface MailSendResult {
@@ -209,4 +218,6 @@ export interface MailSendOperation {
   readonly apiVersion: 1;
   readonly operationId: string;
   readonly status: MailSendStatus;
+  /** The Sent copy's thread once a provider has one, so a caller can find it. */
+  readonly threadId: string | null;
 }

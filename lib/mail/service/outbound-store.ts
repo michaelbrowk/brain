@@ -2772,8 +2772,8 @@ function draftMatchesSubmission(
               references: threading.references,
             },
       attachments: [],
-      origin: "app",
-      agentLine: false,
+      origin: input.origin,
+      agentLine: input.agentLine,
     });
     expectedRaw = built.rawRfc2822;
     return (

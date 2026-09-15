@@ -1346,10 +1346,11 @@ function readSendOperation(
   expectedOperationId: string,
 ): MailSendOperation {
   if (
-    !isExactRecord(value, ["apiVersion", "operationId", "status"]) ||
+    !isExactRecord(value, ["apiVersion", "operationId", "status", "threadId"]) ||
     value.apiVersion !== 1 ||
     value.operationId !== expectedOperationId ||
-    !isDraftSendStatus(value.status)
+    !isDraftSendStatus(value.status) ||
+    !isNullableThreadId(value.threadId)
   ) {
     throw new Error("invalid mail send operation");
   }
@@ -1357,7 +1358,12 @@ function readSendOperation(
     apiVersion: 1,
     operationId: expectedOperationId,
     status: value.status,
+    threadId: value.threadId,
   };
+}
+
+function isNullableThreadId(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
 }
 
 function readSyncResult(value: unknown): void {

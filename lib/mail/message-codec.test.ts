@@ -165,6 +165,9 @@ describe("Mail message boundary codec", () => {
       subject: "Hello",
       text: "Body",
       replyToMessageId: null,
+      attachments: [],
+      origin: "app",
+      agentLine: false,
     });
     expect(compose.to).toEqual(["person@example.test"]);
 

@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { MailSendInput } from "../message-types";
 import {
+  createMailSendSubmissionProposal,
+  fingerprintMailSendInput,
   MailSendError,
   ProviderNeutralMailSendService,
   validateMailSendInput,
@@ -34,10 +36,98 @@ describe("mail send input", () => {
       { ...composeInput(), mode: "reply", replyToMessageId: null },
     ],
     ["no recipient", { ...composeInput(), to: [] }],
+    ["an origin nothing produces", { ...composeInput(), origin: "cron" }],
+    ["an agent line that is not a flag", { ...composeInput(), agentLine: "yes" }],
+    [
+      "an attachment naming a path",
+      {
+        ...composeInput(),
+        attachments: [
+          {
+            filename: "a/b.pdf",
+            mimeType: "application/pdf",
+            dataBase64: "AQID",
+          },
+        ],
+      },
+    ],
   ])("rejects %s", (_name, value) => {
     expect(() => validateMailSendInput(value)).toThrow(
       new MailSendError("mail_send_request_invalid"),
     );
+  });
+});
+
+describe("outgoing attachments and the agent mark on a proposal", () => {
+  const account = {
+    accountId,
+    providerKind: "gmail",
+    emailAddress: "me@example.com",
+    status: "connected",
+  } as const;
+
+  function proposalFor(input: MailSendInput) {
+    return createMailSendSubmissionProposal({
+      account,
+      input: validateMailSendInput(input),
+      reply: null,
+      operationId: "send-00000000-0000-4000-8000-000000000001",
+      createdAt: now,
+    });
+  }
+
+  function rawOf(submission: { readonly message: { readonly rawRfc2822Base64Url: string } }) {
+    return Buffer.from(submission.message.rawRfc2822Base64Url, "base64url").toString(
+      "utf8",
+    );
+  }
+
+  it("carries a page's file into the multipart body the provider submits", () => {
+    const raw = rawOf(
+      proposalFor({
+        ...composeInput(),
+        attachments: [
+          {
+            filename: "invoice.pdf",
+            mimeType: "application/pdf",
+            dataBase64: Buffer.from("PDF-BYTES").toString("base64"),
+          },
+        ],
+      }),
+    );
+    expect(raw).toContain("Content-Type: multipart/mixed; boundary=");
+    expect(raw).toContain('Content-Disposition: attachment; filename="invoice.pdf"');
+    expect(raw).toContain(Buffer.from("PDF-BYTES").toString("base64"));
+  });
+
+  it("marks an agent's own message and leaves a person's unmarked", () => {
+    expect(rawOf(proposalFor({ ...composeInput(), origin: "mcp" }))).toContain(
+      "X-Brain-Agent: mcp\r\n",
+    );
+    expect(rawOf(proposalFor(composeInput()))).not.toContain("X-Brain-Agent");
+  });
+
+  it("separates two sends that differ only in the three new fields", () => {
+    const person = fingerprintMailSendInput(validateMailSendInput(composeInput()));
+    const agent = fingerprintMailSendInput(
+      validateMailSendInput({ ...composeInput(), origin: "mcp" }),
+    );
+    const told = fingerprintMailSendInput(
+      validateMailSendInput({ ...composeInput(), origin: "mcp", agentLine: true }),
+    );
+    const withFile = fingerprintMailSendInput(
+      validateMailSendInput({
+        ...composeInput(),
+        attachments: [
+          {
+            filename: "invoice.pdf",
+            mimeType: "application/pdf",
+            dataBase64: "AQID",
+          },
+        ],
+      }),
+    );
+    expect(new Set([person, agent, told, withFile]).size).toBe(4);
   });
 });
 
@@ -75,6 +165,7 @@ describe("provider-neutral mail send service", () => {
       apiVersion: 1,
       operationId: queued.operationId,
       status: "queued",
+      threadId: null,
     });
     expect(store.first()).toMatchObject({
       providerKind: "imap",
@@ -143,6 +234,7 @@ describe("provider-neutral mail send service", () => {
       apiVersion: 1,
       operationId: first.operationId,
       status: "sent",
+      threadId: "gmail-thread-1",
     });
   });
 
@@ -383,6 +475,7 @@ describe("provider-neutral mail send service", () => {
       apiVersion: 1,
       operationId,
       status: "failed",
+      threadId: null,
     });
   });
 
@@ -466,6 +559,9 @@ function composeInput(): MailSendInput {
     subject: "Hello",
     text: "Body",
     replyToMessageId: null,
+    attachments: [],
+    origin: "app",
+    agentLine: false,
   };
 }
 

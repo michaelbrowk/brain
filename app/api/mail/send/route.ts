@@ -9,7 +9,9 @@ import type { MailSendInput } from "@/lib/mail/message-types";
 
 export const dynamic = "force-dynamic";
 
-const MAX_SEND_REQUEST_BYTES = 1_200_000;
+// Kept in step with MAIL_SERVICE_HTTP_LIMITS.maxSendBodyBytes so the browser's
+// own route admits the same message the service does.
+const MAX_SEND_REQUEST_BYTES = 40 * 1024 * 1024;
 
 export async function POST(request: Request) {
   const rejected = validateMailMutationRequest(

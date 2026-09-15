@@ -3101,6 +3101,9 @@ function draftSubmissionFixture(
     subject: draft.subject,
     text: draft.text,
     replyToMessageId: replyMode ? draft.intent.sourceMessageId : null,
+    attachments: [],
+    origin: "app",
+    agentLine: false,
   });
   const built = buildOutboundRfc2822({
     from: seed.message.envelope.from,

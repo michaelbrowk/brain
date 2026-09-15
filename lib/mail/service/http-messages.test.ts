@@ -1048,6 +1048,7 @@ function sendServiceFixture(): MailSendService & Record<string, ReturnType<typeo
       apiVersion: 1,
       operationId: OPERATION_ID,
       status: "sent",
+      threadId: null,
     })),
   } as MailSendService & Record<string, ReturnType<typeof vi.fn>>;
 }
@@ -1198,6 +1199,9 @@ function sendInput() {
     subject: "Hello",
     text: "Body",
     replyToMessageId: null,
+    attachments: [],
+    origin: "app",
+    agentLine: false,
   } as const;
 }
 

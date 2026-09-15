@@ -178,6 +178,11 @@ export function MailComposer({
       subject,
       text,
       replyToMessageId: initialDraft.replyToMessageId,
+      // The composer has no attachment control in this release, and a message
+      // a person typed is never marked as an agent's.
+      attachments: [],
+      origin: "app",
+      agentLine: false,
     });
   };
 

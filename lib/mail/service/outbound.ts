@@ -6,6 +6,10 @@ import type {
   MailSendResult,
   MailSendStatus,
 } from "../message-types";
+import {
+  validateMailSendAttachments,
+  type MailSendAttachment,
+} from "../send-attachment-codec";
 import type { MailEnvelope } from "../ports";
 import {
   buildOutboundRfc2822,
@@ -624,15 +628,20 @@ export function validateMailSendInput(value: unknown): MailSendInput {
   if (
     !isExactRecord(value, [
       "accountId",
+      "agentLine",
+      "attachments",
       "bcc",
       "cc",
       "idempotencyKey",
       "mode",
+      "origin",
       "replyToMessageId",
       "subject",
       "text",
       "to",
     ]) ||
+    (value.origin !== "app" && value.origin !== "mcp") ||
+    typeof value.agentLine !== "boolean" ||
     typeof value.accountId !== "string" ||
     !ACCOUNT_ID_PATTERN.test(value.accountId) ||
     typeof value.idempotencyKey !== "string" ||
@@ -663,6 +672,7 @@ export function validateMailSendInput(value: unknown): MailSendInput {
     seen.add(normalized);
   }
   const replyToMessageId = validateReplyTarget(value.replyToMessageId, value.mode);
+  const attachments = validateSendAttachments(value.attachments);
   return Object.freeze({
     accountId: value.accountId,
     idempotencyKey: value.idempotencyKey,
@@ -673,7 +683,20 @@ export function validateMailSendInput(value: unknown): MailSendInput {
     subject: value.subject,
     text: value.text,
     replyToMessageId,
+    attachments,
+    origin: value.origin,
+    agentLine: value.agentLine,
   });
+}
+
+function validateSendAttachments(
+  value: unknown,
+): readonly MailSendAttachment[] {
+  try {
+    return validateMailSendAttachments(value);
+  } catch {
+    throw new MailSendError("mail_send_request_invalid");
+  }
 }
 
 export function validateMailSendOperationId(value: unknown): string {
@@ -775,6 +798,17 @@ export function fingerprintMailSendInput(input: MailSendInput): string {
         input.subject,
         input.text,
         input.replyToMessageId,
+        // Appended, never reordered: an existing stored fingerprint must keep
+        // meaning what it meant. The base64 length rather than the bytes,
+        // because the raw MIME's own sha256 already covers the content and a
+        // 25 MiB stringify per replay check is not worth repeating.
+        input.origin,
+        input.agentLine,
+        input.attachments.map((attachment) => [
+          attachment.filename,
+          attachment.mimeType,
+          attachment.dataBase64.length,
+        ]),
       ]),
     )
     .digest("hex");
@@ -791,6 +825,13 @@ export function createMailSendSubmissionProposal(options: {
   const reply =
     options.reply === null ? null : validateReplyContext(options.reply);
   let rawRfc2822: Buffer | null = null;
+  // Decoded here, next to the wipe that follows, so somebody's invoice never
+  // outlives the one call that needed it.
+  const attachments = options.input.attachments.map((attachment) => ({
+    filename: attachment.filename,
+    mimeType: attachment.mimeType,
+    bytes: Buffer.from(attachment.dataBase64, "base64"),
+  }));
   try {
     const built = buildOutboundRfc2822({
       from: options.account.emailAddress,
@@ -802,9 +843,9 @@ export function createMailSendSubmissionProposal(options: {
       messageId,
       createdAt: options.createdAt,
       reply: reply === null ? null : toReplyHeaders(reply),
-      attachments: [],
-      origin: "app",
-      agentLine: false,
+      attachments,
+      origin: options.input.origin,
+      agentLine: options.input.agentLine,
     });
     rawRfc2822 = built.rawRfc2822;
     return freezeSubmission({
@@ -836,6 +877,7 @@ export function createMailSendSubmissionProposal(options: {
     });
   } finally {
     rawRfc2822?.fill(0);
+    for (const attachment of attachments) attachment.bytes.fill(0);
   }
 }
 
@@ -948,6 +990,10 @@ function toPublicOperation(value: StoredMailSendSubmission): MailSendOperation {
     apiVersion: 1,
     operationId: value.operationId,
     status: value.status,
+    // The provider's own thread for the Sent copy. First-party SMTP acceptance
+    // issues no ids, so an IMAP account answers null and a caller that wants
+    // the thread has to find it after the next sync.
+    threadId: value.providerThreadId,
   });
 }
 

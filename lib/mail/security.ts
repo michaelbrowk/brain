@@ -62,7 +62,10 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
   concurrentFetchStreams: 2,
   concurrentMimeParsers: 2,
   concurrentSmtpSubmissions: 1,
-  outgoingRawMessageBytes: 1024 * 1024,
+  /* 25 MiB of attachments plus the text and base64's expansion. The tunnel
+   * ceiling below is deliberately not raised with it: a message this size
+   * reaches a Gmail account and is refused at the relay for an IMAP one. */
+  outgoingRawMessageBytes: 26 * 1024 * 1024,
   egressTunnelFrameBytes: 16 * 1024,
   egressTunnelClientBytes: 2 * 1024 * 1024,
   egressTunnelServerBytes: 128 * 1024,

@@ -1451,11 +1451,79 @@ describe("the fold on a press outside", () => {
  *  None of the six shell contract fixtures draws a task row, so the quiet
  *  focus is asserted through the rules the row computes for itself. */
 describe("the quiet focus (D5)", () => {
+  /** The one selector that paints the cursor, spelled once. */
+  const CURSOR_FILL =
+    '.brain-tasks:is(:focus-within, :has([data-state="open"])) ' +
+    ".brain-task-row:not([data-expanded]) > .tree-row-capsule";
+
   it("draws the selection at the sidebar's hover tint and not the grey fill", () => {
-    const rule = ruleFor(css, ".brain-task-row > .tree-row-capsule");
+    const rule = ruleFor(css, CURSOR_FILL);
     expect(rule).toContain("background-color: var(--fill-glass-hover)");
     expect(rule).not.toContain("--fill-glass-selected");
     expect(rule).not.toContain("box-shadow");
+  });
+
+  /** THE CURSOR IS DRAWN WHILE THE COLUMN IS HOLDING IT.
+   *
+   *  The capsule was painted off `data-selected` alone, so a row kept the tint
+   *  through a press anywhere else on the page: the chips went with the fold
+   *  and the grey capsule stayed, which reads as the task still having the
+   *  focus it was asked to give up. The attribute is D5's roving cursor and it
+   *  does not move; what moves is the paint. The place is remembered while
+   *  nothing draws it, so a Tab back into the column puts the capsule on the
+   *  same row. */
+  it("paints the cursor only while the column holds the focus", () => {
+    // The capsule's BOX is unconditional. Its fill is not.
+    const box = ruleFor(css, ".brain-task-row > .tree-row-capsule");
+    expect(box).toContain("position: absolute");
+    expect(box).not.toContain("background-color");
+    // And a panel the column opened counts as the column: Radix moves the
+    // focus into a portal, and a cursor that blinked out every time the list
+    // menu opened would be the same bug one gesture along.
+    expect(css).toContain(CURSOR_FILL);
+    // An expanded row is excluded by name, because it wears the one fill of
+    // I1 and this rule out-weighs the transparency that keeps it to one.
+    expect(ruleFor(css, ".brain-task-row[data-expanded] > .tree-row-capsule")).toContain(
+      "background-color: transparent",
+    );
+  });
+
+  /** THE ROW HOLDS THE FOCUS THE CURSOR STANDS ON.
+   *
+   *  Nothing in the column was focusable, so a press on a row sent the focus to
+   *  `.brain-main` and `:focus-within` was false in the one case it has to be
+   *  true. The row is the holder: script-focusable and out of the Tab order,
+   *  the roving convention the picker's own grid cells use. */
+  it("takes the focus when the cursor lands on it", async () => {
+    await renderRows([task("a", { when: TODAY })]);
+    expect(row().tabIndex).toBe(-1);
+    expect(document.activeElement).not.toBe(row());
+
+    await renderRows([task("a", { when: TODAY })], { selected: true });
+    expect(document.activeElement).toBe(row());
+  });
+
+  it("never takes it off a control already inside it", async () => {
+    // The caret in the title and a chip the reader is holding are both inside
+    // the row, so the row is already holding the focus it would be asked to
+    // take. Pulling it up to the row would close a menu mid-gesture.
+    await renderRows([task("b", { when: TODAY })], { expanded: true });
+    const chip = document.querySelector<HTMLElement>(".chip");
+    chip?.focus();
+    expect(document.activeElement).toBe(chip);
+
+    await renderRows([task("b", { when: TODAY })], { expanded: true, selected: true });
+
+    expect(document.activeElement).toBe(chip);
+  });
+
+  it("wears one ring and not two, at the cursor's own inset offset", () => {
+    // A focusable row answers the global ring at +2 as well as the cursor's
+    // own at -3, and two outlines on one capsule is two rings. The offset is
+    // the whole of the override: the colour and the width stay the global's.
+    const rule = ruleFor(css, "html[data-kbd] .brain-task-row:focus-visible");
+    expect(rule).toContain("outline-offset: -3px");
+    expect(rule).not.toContain("outline:");
   });
 
   it("leaves the title's weight alone", () => {

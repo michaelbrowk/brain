@@ -230,6 +230,7 @@ export function TasksRow({
 }: TasksRowProps) {
   const key = rowKey ?? task.id;
   const wrapRef = useRef<HTMLLIElement | null>(null);
+  const rowRef = useRef<HTMLDivElement | null>(null);
   const boxRef = useRef<HTMLButtonElement | null>(null);
   const holdRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [holding, setHolding] = useState(false);
@@ -403,6 +404,7 @@ export function TasksRow({
   });
 
   useFoldOnOutside({ expanded, element: wrapRef, onExpand });
+  useCursorFocus({ selected, element: rowRef });
 
   const swipeHandlers = useSwipe({
     x,
@@ -534,7 +536,14 @@ export function TasksRow({
           )}
         </AnimatePresence>
         <motion.div
+          ref={rowRef}
           className="brain-task-row"
+          // THE CURSOR HOLDS THE FOCUS IT STANDS ON. Script-focusable and out
+          // of the Tab order, the roving convention the picker's grid cells
+          // use: nothing in this column was focusable, so a press on a row sent
+          // the focus up to `.brain-main` and the column read as empty in the
+          // one case it has to read as held.
+          tabIndex={-1}
           data-selected={selected ? "" : undefined}
           data-expanded={expanded ? "" : undefined}
           data-done={task.done ? "" : undefined}
@@ -939,6 +948,39 @@ function useFoldOnOutside({
       document.removeEventListener("focusin", away, true);
     };
   }, [element, expanded, onExpand]);
+}
+
+/** THE CURSOR HOLDS THE FOCUS IT STANDS ON.
+ *
+ *  The capsule is painted while the column holds the focus and not otherwise
+ *  (`app/globals.css`), which is what takes the tint off a row the reader has
+ *  pressed away from. That rule needs the column to be able to HOLD focus, and
+ *  nothing in it could: a press on a row sent the focus up to `.brain-main`,
+ *  and an arrow key from a cold page moved the cursor with the focus still on
+ *  the body. So the row takes it when the cursor arrives, which also gives the
+ *  arrows something a screen reader can follow.
+ *
+ *  NEVER OFF A CONTROL ALREADY INSIDE THE ROW. The caret in the title lands in
+ *  the same commit the selection does, and a chip the reader is holding has a
+ *  menu open under it. The row is holding the focus either way, so there is
+ *  nothing here to take.
+ *
+ *  `preventScroll`, because the column already scrolls the row it was ASKED to
+ *  show (`useNamedTask` in `components/tasks-surface.tsx`) and the cursor moving
+ *  under the arrows scrolled nothing before this. */
+function useCursorFocus({
+  selected,
+  element,
+}: {
+  selected: boolean;
+  element: React.RefObject<HTMLDivElement | null>;
+}) {
+  useEffect(() => {
+    if (!selected) return;
+    const row = element.current;
+    if (row === null || row.contains(document.activeElement)) return;
+    row.focus({ preventScroll: true });
+  }, [element, selected]);
 }
 
 /** THE ROW'S KEYS ARE UNMODIFIED LETTERS, not browser chords.

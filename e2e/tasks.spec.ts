@@ -574,3 +574,54 @@ test("@release an expanded row folds on a press outside it", async ({ page }) =>
   await expect(capsule).toHaveCount(0);
   await expect(row.locator(".brain-task-chips")).toHaveCount(0);
 });
+
+test("@release the cursor's capsule is drawn only while the column holds the focus", async ({
+  page,
+}) => {
+  // Michael's "с задачи должен сниматься фокус" is this half of it: the chips
+  // went with the fold and the grey capsule stayed, which reads as the task
+  // still holding the focus it was asked to give up. The cursor itself does
+  // not move, so a Tab back into the column finds it where it was.
+  test.setTimeout(60_000);
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await login(page);
+  const id = await createTask(page, "Cursor capsule");
+  await page.goto("/tasks");
+  const row = page.locator(`[data-task-id="${id}"]`);
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  // A press puts the cursor on the row and opens it; Escape folds it and
+  // leaves the cursor standing. An OPEN row wears the one fill of I1 and its
+  // capsule draws nothing, so the cursor's own tint is only readable folded.
+  await row.getByText("Cursor capsule", { exact: true }).click();
+  await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(1);
+  await page.keyboard.press("Escape");
+  await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(0);
+
+  /** Whether this row is wearing the cursor's fill. */
+  const tinted = () =>
+    row.evaluate((node) => {
+      const capsule = node.querySelector(
+        ".brain-task-row[data-selected] > .tree-row-capsule",
+      );
+      if (capsule === null) return false;
+      const paint = getComputedStyle(capsule).backgroundColor;
+      return paint !== "transparent" && !/,\s*0\)$/.test(paint);
+    });
+  const cursorHeld = () => row.locator(".brain-task-row[data-selected]").count();
+
+  expect(await tinted()).toBe(true);
+  expect(await cursorHeld()).toBe(1);
+
+  // A press outside takes the focus with it, so the tint goes. The cursor
+  // stays exactly where the reader left it.
+  await page.mouse.click(1380, 780);
+  await page.waitForTimeout(400);
+  expect(await tinted()).toBe(false);
+  expect(await cursorHeld()).toBe(1);
+
+  // And a Tab back into the column puts it on the same row.
+  await page.keyboard.press("Tab");
+  await page.waitForTimeout(400);
+  expect(await tinted()).toBe(true);
+  expect(await cursorHeld()).toBe(1);
+});

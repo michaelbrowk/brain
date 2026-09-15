@@ -807,7 +807,7 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 
 The two outgoing rows are set by the process contract three rows above them, not by what a provider would accept. `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes` is the one number: 5 MiB of decoded attachments per message.
 
-The figure was 10 MiB until 2026-09-15. That number came from a measurement that stopped at the MIME build, and the build is not where the peak is. A send holds the finished message twice more after it: `rawRfc2822Base64Url` is the whole message as a string on the submission record, and `JSON.stringify` makes a second copy of that string for the outbox row. Measured again through the path a request actually runs, the body off the socket, `JSON.parse`, `validateMailSendInput`, the build, and `store.enqueue` into SQLite, five runs each on Node 22 against a 39 MiB bare-node baseline:
+The figure was 10 MiB until 2026-09-15. That number came from a measurement that stopped at the MIME build, and the build is not where the peak is. A send holds the finished message twice more after it: `rawRfc2822Base64Url` is the whole message as a string on the submission record, and `JSON.stringify` makes a second copy of that string for the outbox row. Measured again through the path a request runs, the body off the socket, `JSON.parse`, `validateMailSendInput`, the build, and `store.enqueue` into SQLite, five runs each on Node 22 against a 39 MiB bare-node baseline:
 
 | Attachment payload | Through the build | Built and enqueued | Read back to deliver |
 | ---: | ---: | ---: | ---: |

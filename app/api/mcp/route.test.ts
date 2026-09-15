@@ -3264,6 +3264,87 @@ describe("save_mail_attachment", () => {
     expect(entry).toMatchObject({ page: "page-gone", outcome: "page_not_found" });
   });
 
+  it("answers a notes-folder failure in Brain's words, with a line", async () => {
+    // The store's own message is a Node `fs` error and carries the absolute
+    // path of the notes folder. It used to be rethrown, so it reached the
+    // agent as a transport error with the path in it and nothing in the
+    // owner's log to say the call had happened.
+    const readPage = vi
+      .fn()
+      .mockRejectedValue(new Error("EIO: /srv/brain/notes/page-one.md"));
+    const saveAttachment = vi.fn();
+    mocks.getStore.mockResolvedValue({
+      readPage,
+      saveAttachment,
+      appendPage: vi.fn(),
+    });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "save_mail_attachment",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          attachmentId: "attachment-alpha",
+          page: "page-one",
+        },
+        517,
+      ),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "that page could not be read",
+      reason: "page_read_failed",
+    });
+    expect(JSON.stringify(payload)).not.toContain("/srv/brain/notes");
+    expect(fake.calls).toEqual([]);
+    expect(saveAttachment).not.toHaveBeenCalled();
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({ page: "page-one", outcome: "page_read_failed" });
+  });
+
+  it("bounds the name a message gave the file at 255 bytes", async () => {
+    const saveAttachment = vi
+      .fn()
+      .mockResolvedValue({ url: "/_attachments-v2/hhhh.pdf", name: "hhhh.pdf", size: 9, type: "application/pdf" });
+    mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
+      saveAttachment,
+      appendPage: vi.fn(),
+    });
+    // The client already refuses a Content-Disposition over 180 bytes, so
+    // this cap is this module's own and nothing else holds it.
+    const long = "n".repeat(300);
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        downloadAttachment: async () => ({
+          contentType: "application/pdf",
+          contentDisposition: `attachment; filename*=UTF-8''${long}.pdf`,
+          bytes: PDF_BYTES.byteLength,
+          body: streamOf(PDF_BYTES),
+        }),
+      }).client,
+    );
+
+    await toolPayload(
+      await callTool(
+        "save_mail_attachment",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          attachmentId: "attachment-alpha",
+          page: "page-one",
+        },
+        519,
+      ),
+    );
+
+    const [[file]] = saveAttachment.mock.calls;
+    expect(Buffer.byteLength(file.originalName)).toBeLessThanOrEqual(255);
+    expect(file.originalName.startsWith("nnn")).toBe(true);
+  });
+
   it("reads no page when the caller asks for no line", async () => {
     const readPage = readsPageOne();
     mocks.getStore.mockResolvedValue({

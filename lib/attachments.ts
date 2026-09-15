@@ -166,6 +166,12 @@ const EXECUTABLE_ATTACHMENT_EXTENSIONS: ReadonlySet<string> = new Set([
   ".app",
   ".dmg",
   ".pkg",
+  // Windows shell and script hosts. `.lnk` is here because it names a target
+  // the sender chose and runs it with whatever arguments they wrote, which is
+  // the same provenance problem the rest of this list is about.
+  ".vbs",
+  ".lnk",
+  ".hta",
 ]);
 
 export function isExecutableAttachmentExtension(extension: string): boolean {

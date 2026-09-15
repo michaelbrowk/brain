@@ -356,7 +356,7 @@ three names before it is cut, and a cut is marked.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type }`, the saved file as the note store named it | `invalid_account_id`, `invalid_attachment_id` and `invalid_page_id`, the codes its sibling mail tools use. `page not found`, before anything is downloaded. `that file is too large for a note`, naming the cap. `that file cannot be saved into a note`, naming the executable extension. Whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`). Plus the service's own codes |
+| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type }`, the saved file as the note store named it | `invalid_account_id`, `invalid_attachment_id` and `invalid_page_id`, the codes its sibling mail tools use. `page not found`, before anything is downloaded, and `page_read_failed` for a notes folder that could not answer, in Brain's own words rather than the store's. `that file is too large for a note`, naming the cap. `that file cannot be saved into a note`, naming the executable extension. Whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`). Plus the service's own codes |
 
 It is the one mail tool that writes a note, so it asks for `brain:write`
 beside `brain:mail`. A grant that reads mail and cannot edit notes is refused
@@ -379,7 +379,7 @@ file claims.
 
 One check is this path's own, and the owner's own uploads do not meet it. A
 file whose stored name would end `.exe`, `.dll`, `.com`, `.scr`, `.bat`,
-`.cmd`, `.ps1`, `.msi`, `.jar`, `.sh`, `.app`, `.dmg` or `.pkg` is refused,
+`.cmd`, `.ps1`, `.msi`, `.jar`, `.sh`, `.app`, `.dmg`, `.pkg`, `.vbs`, `.lnk` or `.hta` is refused,
 whatever type the message claimed for it. A person dragging an installer into
 their own note chose both the bytes and the name. Here a remote sender chose
 both and an agent decided to keep them, and that is the difference the rule is

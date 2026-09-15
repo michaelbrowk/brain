@@ -57,6 +57,9 @@ describe("the extensions a message may not hand an agent", () => {
     "app",
     "dmg",
     "pkg",
+    "vbs",
+    "lnk",
+    "hta",
   ])("names .%s as one a person has to choose for themselves", (extension) => {
     expect(isExecutableAttachmentExtension(`.${extension}`)).toBe(true);
     // The store lowercases the extension it mints, and a sender can write a

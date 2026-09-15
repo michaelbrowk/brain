@@ -185,6 +185,26 @@ describe("Brain portable packages", () => {
     );
   });
 
+  it("names an asset's type from the one extension list", async () => {
+    // The manifest's `mimeType` is what `store.saveAttachment` is handed on
+    // import, and the store turns some types down. Nothing asserted it, so a
+    // change to the shared list could have made an exported file
+    // unimportable without a red test anywhere.
+    const source = await temporaryStore();
+    const page = await source.createPage(null, "With an asset");
+    const attachment = await source.saveAttachment({
+      data: new TextEncoder().encode("portable attachment"),
+      originalName: "evidence.txt",
+      mimeType: "text/plain",
+    });
+    await source.writePage(page.id, `[Evidence](${attachment.url})`);
+
+    const exported = await buildPortableArchive(source, { rootId: page.id });
+    expect(exported.manifest.attachments).toEqual([
+      expect.objectContaining({ mimeType: "text/plain" }),
+    ]);
+  });
+
   it("stamps version 2 on a new export", async () => {
     const source = await temporaryStore();
     await source.createPage(null, "Only Page");

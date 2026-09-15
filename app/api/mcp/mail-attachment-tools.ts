@@ -227,9 +227,18 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
         try {
           await store.readPage(page);
         } catch (error) {
-          if (!isNotFound(error)) throw error;
-          await log("page_not_found");
-          return refusal("page not found", page);
+          if (isNotFound(error)) {
+            await log("page_not_found");
+            return refusal("page not found", page);
+          }
+          // A store failure is the store's, answered in Brain's own words:
+          // the thrown message is a Node `fs` error and carries the absolute
+          // path of the notes folder, which this module holds no part of. It
+          // is a refusal like any other, so it writes its line as well; a
+          // rethrow reached the agent as a transport error with nothing in
+          // the owner's log to say a call had happened at all.
+          await log("page_read_failed");
+          return refusal("that page could not be read", "page_read_failed");
         }
       }
 

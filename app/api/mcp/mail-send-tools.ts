@@ -28,6 +28,7 @@ import {
 import {
   admitAttachmentRefs,
   attachmentActivityFields,
+  attachmentBudgetOf,
   attachmentRefSchema,
   resolveOutgoingAttachments,
   type OutgoingAttachmentRef,
@@ -213,10 +214,14 @@ type CarriedSend =
 async function carrySend(
   client: BrainMailClient,
   refs: readonly OutgoingAttachmentRef[],
+  account: PublicMailAccountV3,
   build: (attachments: MailSendInput["attachments"]) => MailSendInput,
 ): Promise<CarriedSend> {
   return inAttachmentSendTurn(refs.length, async () => {
-    const resolved = await resolveOutgoingAttachments(refs);
+    const resolved = await resolveOutgoingAttachments(
+      refs,
+      attachmentBudgetOf(account.providerKind),
+    );
     if ("refused" in resolved) return resolved;
     try {
       return { result: await client.sendMessage(build(resolved.attachments)) };
@@ -592,20 +597,25 @@ export function registerMailSendTools(server: McpToolServer): void {
         // The notes folder is read last, after every refusal that costs
         // nothing and after the account is known to be able to send, so the
         // bytes are held for as short a time as the path allows.
-        const carried = await carrySend(client, refs, (attachments) => ({
-          accountId,
-          idempotencyKey,
-          mode: "compose",
-          to: recipients.to,
-          cc: recipients.cc,
-          bcc: recipients.bcc,
-          subject,
-          text: body,
-          replyToMessageId: null,
-          attachments,
-          origin: "mcp",
-          agentLine: settings.tellRecipients,
-        }));
+        const carried = await carrySend(
+          client,
+          refs,
+          admitted.account,
+          (attachments) => ({
+            accountId,
+            idempotencyKey,
+            mode: "compose",
+            to: recipients.to,
+            cc: recipients.cc,
+            bcc: recipients.bcc,
+            subject,
+            text: body,
+            replyToMessageId: null,
+            attachments,
+            origin: "mcp",
+            agentLine: settings.tellRecipients,
+          }),
+        );
         if ("refused" in carried) {
           await log(carried.outcome);
           return carried.refused;
@@ -780,7 +790,7 @@ export function registerMailSendTools(server: McpToolServer): void {
           await log("possible_duplicate");
           return duplicate;
         }
-        const carried = await carrySend(client, refs, (attachments) => ({
+        const carried = await carrySend(client, refs, account, (attachments) => ({
           accountId,
           idempotencyKey,
           mode: "reply",

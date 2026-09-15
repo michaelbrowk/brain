@@ -35,6 +35,7 @@ import {
   validateSmtpEgressTunnelOpenRequest,
   validateSmtpEgressTunnelProof,
 } from "./security";
+import { MAIL_SEND_ATTACHMENT_LIMITS } from "./send-attachment-codec";
 
 describe("mail security and resource contracts", () => {
   it("keeps the personal-mail workload inside the shared droplet budget", () => {
@@ -54,7 +55,18 @@ describe("mail security and resource contracts", () => {
       outgoingRawMessageBytes: 10 * 1024 * 1024,
       egressTunnelFrameBytes: 16 * 1024,
       egressTunnelClientBytes: 2 * 1024 * 1024,
+      egressTunnelAttachmentBytes: 1024 * 1024,
     });
+    // The relay's own allowance has to leave room for the body, the headers
+    // and the SMTP conversation inside the tunnel it is read out of, or an
+    // account admitted above the socket is refused a layer down with no size
+    // named, which is the failure this allowance exists to prevent.
+    expect(
+      Math.ceil(MAIL_RESOURCE_LIMITS.egressTunnelAttachmentBytes * 1.3684),
+    ).toBeLessThan(MAIL_RESOURCE_LIMITS.egressTunnelClientBytes);
+    expect(MAIL_RESOURCE_LIMITS.egressTunnelAttachmentBytes).toBeLessThan(
+      MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes,
+    );
     expect(MAIL_PARSER_PROCESS_LIMITS.memoryMaxBytes).toBeLessThan(
       MAIL_PROCESS_LIMITS.memoryMaxBytes,
     );

@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { referencedAttachmentNames } from "@/lib/attachments";
+import { MAIL_RESOURCE_LIMITS } from "@/lib/mail/security";
 import {
   isSafeAttachmentFilename,
   isSafeAttachmentMimeType,
@@ -49,6 +50,23 @@ const ATTACHMENT_NAME_RE = /^[A-Za-z0-9_-]{6,}\.[A-Za-z0-9][A-Za-z0-9_-]{0,31}$/
 /** The one outgoing number, from the codec both sides share, said in the
  *  unit an owner reads a refusal in. */
 const TOTAL_CAP_MIB = MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes / (1024 * 1024);
+const RELAY_CAP_MIB =
+  MAIL_RESOURCE_LIMITS.egressTunnelAttachmentBytes / (1024 * 1024);
+
+/** What this account may carry in files.
+ *
+ *  A Gmail account hands its message to a provider API and carries the whole
+ *  outgoing cap. An IMAP account's SMTP session leaves through the Cloudflare
+ *  relay, whose tunnel holds `egressTunnelClientBytes` of finished message,
+ *  and `egressTunnelAttachmentBytes` is what that ceiling leaves for files.
+ *  Without this the difference is learned as a relay failure, after the bytes
+ *  are read, the MIME is built and the message is in the outbox, and the
+ *  answer names neither the account nor a size. */
+export function attachmentBudgetOf(providerKind: "gmail" | "imap"): number {
+  return providerKind === "imap"
+    ? MAIL_RESOURCE_LIMITS.egressTunnelAttachmentBytes
+    : MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes;
+}
 
 export const attachmentRefSchema = z
   .object({
@@ -116,12 +134,13 @@ export function admitAttachmentRefs(
  *  down off its size without being read. */
 export async function resolveOutgoingAttachments(
   refs: readonly OutgoingAttachmentRef[],
+  budget: number = MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes,
 ): Promise<ResolvedAttachments> {
   if (refs.length === 0) return { attachments: [] };
   const store = await getStore();
   const shownBy = new Map<string, Set<string>>();
   const files: { name: string; mimeType: string; data: Uint8Array }[] = [];
-  let remaining = MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes;
+  let remaining = budget;
 
   for (const ref of refs) {
     let shown = shownBy.get(ref.page);
@@ -171,11 +190,22 @@ export async function resolveOutgoingAttachments(
       return refuse("that file is gone", ref.name, "attachment_missing");
     }
     if (read.kind === "too_large") {
-      return refuse(
-        "those attachments are too large",
-        `${TOTAL_CAP_MIB} MiB is the limit for one message`,
-        "attachments_too_large",
-      );
+      // Which ceiling was hit is the whole point of the answer: a message the
+      // outgoing cap would have carried, refused because this account sends
+      // through the relay, has to say so and name both figures, or the agent
+      // reads a 5 MiB limit in the tool reference and cannot tell why 2 MiB
+      // of files was turned down.
+      return budget < MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes
+        ? refuse(
+            "those attachments are too large for this account",
+            `${RELAY_CAP_MIB} MiB is the limit for one message from an IMAP account, whose relay carries ${MAIL_RESOURCE_LIMITS.egressTunnelClientBytes / (1024 * 1024)} MiB of finished message, against ${TOTAL_CAP_MIB} MiB from a Gmail account`,
+            "attachments_too_large_for_account",
+          )
+        : refuse(
+            "those attachments are too large",
+            `${TOTAL_CAP_MIB} MiB is the limit for one message`,
+            "attachments_too_large",
+          );
     }
     if (!isSafeAttachmentMimeType(read.mimeType)) {
       return refuse(

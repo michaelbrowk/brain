@@ -218,7 +218,7 @@ owner sees what was attempted.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent sending is off`. `invalid_account_id`. `to is empty`. `that is too many recipients` over 100 across the three fields. `that is not an address` naming the field and index, and `that address is listed twice` the same way. `that message is too long` and `that subject is too long`, each naming its cap. `that subject holds a control character`. `that message holds a null byte`. `possible_duplicate`, for a fresh key on a message an unknown send may already have sent. `account not found`. `cannot send from this account` with the blocked reason. `too many attachments`, `that is not an attachment name`, `page not found`, `that page does not hold that file`, `that file is gone`, `those attachments are too large`, `that file cannot be sent`, `page_changed`, `attachment_read_failed`. Plus the service's own codes. A send that timed out is not refused: see the `state` unknown answer below |
+| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent sending is off`. `invalid_account_id`. `to is empty`. `that is too many recipients` over 100 across the three fields. `that is not an address` naming the field and index, and `that address is listed twice` the same way. `that message is too long` and `that subject is too long`, each naming its cap. `that subject holds a control character`. `that message holds a null byte`. `possible_duplicate`, for a fresh key on a message an unknown send may already have sent. `account not found`. `cannot send from this account` with the blocked reason. `too many attachments`, `that is not an attachment name`, `page not found`, `that page does not hold that file`, `that file is gone`, `those attachments are too large`, `those attachments are too large for this account` for an IMAP account over its relay's own figure, `that file cannot be sent`, `page_changed`, `attachment_read_failed`. Plus the service's own codes. A send that timed out is not refused: see the `state` unknown answer below |
 | `reply_mail` | `brain:mail:send` | `accountId`, `threadId`, `messageId`, `replyAll?`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`, the reply threaded by the service onto the message named | everything `send_mail` refuses, plus `invalid_thread_id`, `invalid_message_id`, `that message is not in that thread`, and `there is no one to reply to` when the message names this account and no one else. A `to`, `cc`, `bcc` or `subject` is an unknown argument and is refused by the schema |
 | `get_mail_send_status` | `brain:mail:send` | `operationId`, `accountId?` | `{ operationId, status, threadId }`. `threadId` is the thread the Sent copy landed in, or `null`. With `accountId` given, a send the tool never got an answer for gets its Sent-row mark written here | `invalid_operation_id`, `invalid_account_id`, `no send with that id`, the service's own codes |
 
@@ -323,10 +323,18 @@ exists, because a page id the agent can read would otherwise be a key to every
 file in the notes folder. What an agent can send is what the note it named
 already shows, which is what a person could forward by opening that note.
 
-Ten files and 5 MiB of them are the limits for one message. Each file is read
-against what is left of that budget and the total is summed as it goes, so a
-set over the cap is turned down before a single byte is encoded and a file
-above the budget is turned down without being read at all. The bytes reach the
+Ten files and 5 MiB of them are the limits for one message from a Gmail
+account. An IMAP account's limit is 1 MiB, because its SMTP session leaves
+through a relay whose tunnel carries 2 MiB of finished message and base64
+turns a megabyte of files into 1.37 MiB of it. `list_mail_accounts` reports
+which kind each account is, under `provider`. A set above the account's own
+figure is refused with `those attachments are too large for this account`,
+naming both numbers, and it is refused in Brain before the mail service is
+asked for anything.
+
+Each file is read against what is left of that budget and the total is summed
+as it goes, so a set over the cap is turned down before a single byte is
+encoded and a file above the budget is turned down without being read at all. The bytes reach the
 message through the note store, the one module that touches the notes
 filesystem, and never through a temporary file. A file's type is the one its
 name records, and a type a MIME header cannot carry is refused with that as

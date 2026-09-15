@@ -79,6 +79,7 @@ import {
   type DialogFocusLease,
 } from "./ui/dialog-focus-return";
 import type { Template } from "@/lib/templates";
+import { requestCompose } from "./mail-commands";
 import { StickersLayer, stickerPrintCanvasHeight } from "./stickers";
 import type { Sticker } from "@/lib/store/types";
 import {
@@ -336,6 +337,8 @@ export function Shell({
   // the repeat rule advancing one). The surface refetches on it.
   const [taskSurfaceRevision, setTaskSurfaceRevision] = useState(0);
   // Bumped by "New task": the surface puts the caret in its capture field.
+  // Consumed once by the ghost row itself (`tasks-ghost-row.tsx`), which
+  // remembers the last request it already turned into a focus.
   const [taskCaptureRequest, setTaskCaptureRequest] = useState(0);
   // Bumped by a notification written anywhere but this tab (the reminder scan,
   // the mail poll, another tab's read). The bell and Home's first row refetch
@@ -1637,12 +1640,24 @@ export function Shell({
     [],
   );
 
-  /** "New task" from the palette: the surface is where a task is written, so
-   *  open it and ask it for the caret. */
+  /** "New task" from the palette and from the head's plus: the surface is
+   *  where a task is written, so open it and ask it for the caret. The list
+   *  is whatever was last open there (Today until somebody picks another), so
+   *  the row lands where the reader was looking rather than in a list they
+   *  have to go and find. */
   const newTask = useCallback(() => {
     openTasks();
     setTaskCaptureRequest((request) => request + 1);
   }, [openTasks]);
+
+  /** "New message", the same way: the composer belongs to Mail's own column,
+   *  so open Mail and leave the ask standing. The surface takes it when it has
+   *  an account to send from, through the same gates the palette's Compose
+   *  goes through (`components/mail-commands.ts`). */
+  const newMessage = useCallback(() => {
+    openMail();
+    requestCompose();
+  }, [openMail]);
 
   // browser back/forward moves between pages, mail, tasks, and settings
   useEffect(() => {
@@ -5312,10 +5327,20 @@ export function Shell({
       if (mobileViewport) focusMobileHomeAfterTransition();
     },
     onSearch: openPalette,
-    onNew: () => {
+    onNew: (template: Template) => {
       if (paletteOpen) closePaletteForNavigation();
       setMobilePagesOpen(false);
-      void runOverlayNavigation(() => createPage(null));
+      void runOverlayNavigation(() => createPage(null, template));
+    },
+    onNewTask: () => {
+      if (paletteOpen) closePaletteForNavigation();
+      setMobilePagesOpen(false);
+      newTask();
+    },
+    onNewMessage: () => {
+      if (paletteOpen) closePaletteForNavigation();
+      setMobilePagesOpen(false);
+      newMessage();
     },
     onPages: openMobilePages,
     onMail: () => {
@@ -5351,6 +5376,7 @@ export function Shell({
       onOpenMail={openMail}
       onOpenTasks={openTasks}
       onNewTask={newTask}
+      onNewMessage={newMessage}
       onOpenTrash={() => setTrashOpen(true)}
       onOpenSettings={openSettings}
       onToggleTheme={toggleTheme}
@@ -5531,6 +5557,8 @@ export function Shell({
         onOpenDailyPage={openDailyPage}
         onOpenMail={openMail}
         onOpenTasks={openTasks}
+        onNewTask={newTask}
+        onNewMessage={newMessage}
         onNavigateNotification={openNotification}
         notificationRefreshToken={notificationRevision}
         tasksOpenTodayCount={tasksOpenToday}

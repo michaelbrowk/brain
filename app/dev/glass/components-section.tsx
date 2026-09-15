@@ -579,7 +579,7 @@ function More() {
 }
 
 /** A live Radix dropdown on the menu classes — the same DOM the app's
- *  row-menu / page-actions-menu / template-menu / mail-nav render. */
+ *  row-menu / page-actions-menu / new-menu / mail-nav render. */
 function StandMenu({ children }: { children: React.ReactNode }) {
   return (
     <Dropdown.Root>

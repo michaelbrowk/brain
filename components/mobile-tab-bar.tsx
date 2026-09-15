@@ -1,6 +1,8 @@
 "use client";
 
 import type { RefObject } from "react";
+import type { Template } from "@/lib/templates";
+import { NewMenu } from "./new-menu";
 import { Icon } from "./ui/icon";
 
 interface MobileTabBarProps {
@@ -15,7 +17,11 @@ interface MobileTabBarProps {
   onHome: () => void;
   onSearch: (invoker: HTMLElement) => void;
   onTasks: () => void;
-  onNew: () => void;
+  /** One of the three creates the plus offers; the page one carries the
+   *  template the menu's Page group picked. */
+  onNew: (template: Template) => void;
+  onNewTask: () => void;
+  onNewMessage: () => void;
   onPages: (invoker: HTMLElement) => void;
   onMail: () => void;
 }
@@ -39,9 +45,10 @@ const items = [
 /** Mobile-first primary navigation: TWO objects on one line at the bottom
  *  inset, both 54 tall. The bar stands on the left inset, sized by its five
  *  slots rather than by the window (DESIGN.md v2 → Geometry: what floats is
- *  sized by its content); New page stands on the right one as an ink circle,
+ *  sized by its content); New stands on the right one as an ink circle,
  *  the surface's one ink-filled control (§2 → Primary), wearing the bare plus
- *  the desktop circle wears for the same act. New was a slot in the middle of
+ *  the desktop circle wears for the same act and opening the same menu it
+ *  opens: a task, a message or a page. New was a slot in the middle of
  *  the bar, which put a create between two destinations and asked a run of
  *  six identical cells to say that one of them was not navigation.
  *
@@ -70,6 +77,8 @@ export function MobileTabBar({
   onSearch,
   onTasks,
   onNew,
+  onNewTask,
+  onNewMessage,
   onPages,
   onMail,
 }: MobileTabBarProps) {
@@ -123,8 +132,8 @@ export function MobileTabBar({
           })}
         </div>
       </nav>
-      {/* The plus is the mark this system draws for making a page (the
-          template menu, the tree row menu, the desktop circle), with nothing
+      {/* The plus is the mark this system draws for making a thing (the New
+          menu, the tree row menu, the desktop circle), with nothing
           drawn around it: the button is already the shape (DESIGN.md §10 ban
           13). It was the composing pen, and on a phone with mail open that
           pen also sits on the account row above: two wordless controls, one
@@ -136,19 +145,30 @@ export function MobileTabBar({
           pins anything it is on to `position: relative` unless the element
           says it is placed itself, and without it the circle drops out of the
           line and lands wherever the flow leaves it. */}
-      <button
-        type="button"
-        aria-label="New page"
-        aria-hidden={hidden || undefined}
-        data-hidden={hidden ? "" : undefined}
-        tabIndex={hidden ? -1 : undefined}
-        onClick={onNew}
-        className="brain-mobile-new fixed brain-touch-min focus-inset"
+      {/* IT OPENS THE MENU THE SIDEBAR'S CIRCLE OPENS, as a sheet above the
+          line. One control, one offer, two widths: a phone that made a page
+          outright while the desktop asked which of three things to make would
+          be two products wearing one plus. The sheet form is the menu's own
+          (`new-menu.tsx`), the form the When picker and the composer already
+          take below md. */}
+      <NewMenu
+        onPickTemplate={onNew}
+        onNewTask={onNewTask}
+        onNewMessage={onNewMessage}
       >
-        <span className="brain-mobile-new-circle" aria-hidden>
-          <Icon name="add" size={17} />
-        </span>
-      </button>
+        <button
+          type="button"
+          aria-label="New"
+          aria-hidden={hidden || undefined}
+          data-hidden={hidden ? "" : undefined}
+          tabIndex={hidden ? -1 : undefined}
+          className="brain-mobile-new fixed brain-touch-min focus-inset"
+        >
+          <span className="brain-mobile-new-circle" aria-hidden>
+            <Icon name="add" size={17} />
+          </span>
+        </button>
+      </NewMenu>
     </>
   );
 }

@@ -21,7 +21,7 @@ type Overlap = ShareScopeSnapshot["overlappingRoots"][number];
 /* The ledger's registers come from the utilities, so the guardrails keep
    them on the ladder: the head is the Subheading (the dialog title's
    register), a label and a value share Table at 500 and differ by colour,
-   a note is Caption in ink-3, which is legal on paper. */
+   a note is Caption in ink-3. */
 const HEAD = "brain-share-head text-subheading text-ink";
 const LABEL = "brain-share-row-label text-table font-medium text-ink-2";
 const VALUE = "brain-share-row-value text-table font-medium text-ink";
@@ -34,7 +34,7 @@ const EXPIRY_OPTIONS: Array<{ value: ExpiryChoice; label: string }> = [
   { value: "30", label: "30 days" },
 ];
 
-/** The share card is a ledger on paper: one status sentence at the head,
+/** The share card is a ledger on glass: one status sentence at the head,
  *  then a row per fact or setting with a hairline between them, and the
  *  action as the last row. One surface moves from the private review to
  *  management, and the revoke confirmation takes the last row's place. */
@@ -402,7 +402,8 @@ export function SharePopover({
       />
     );
 
-  // the paper plate: everything readable stands on it, never on the glass
+  // the content wrapper: clips the reveal, carries no fill of its own, so
+  // everything readable stands right on the glass
   const surfaceBody = (
     <div className="brain-share-plate">
       {view}

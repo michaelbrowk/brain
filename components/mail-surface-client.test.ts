@@ -769,7 +769,12 @@ describe("defaultMailSurfaceClient drafts", () => {
 
   it("reads a send operation to its current status", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
-      response({ apiVersion: 1, operationId: SEND_OPERATION_ID, status: "failed" }),
+      response({
+        apiVersion: 1,
+        operationId: SEND_OPERATION_ID,
+        status: "failed",
+        threadId: null,
+      }),
     );
     vi.stubGlobal("fetch", fetchMock);
 
@@ -779,6 +784,7 @@ describe("defaultMailSurfaceClient drafts", () => {
       apiVersion: 1,
       operationId: SEND_OPERATION_ID,
       status: "failed",
+      threadId: null,
     });
     expect(fetchMock).toHaveBeenCalledWith(
       `/api/mail/send/${SEND_OPERATION_ID}`,

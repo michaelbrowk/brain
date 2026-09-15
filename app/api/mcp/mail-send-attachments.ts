@@ -159,8 +159,8 @@ export async function resolveOutgoingAttachments(
         // involved.
         return refuse(
           "that page could not be read",
-          "page_changed",
-          "page_changed",
+          "page_read_failed",
+          "page_read_failed",
         );
       }
       shownBy.set(ref.page, shown);

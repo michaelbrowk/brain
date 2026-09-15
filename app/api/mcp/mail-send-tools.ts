@@ -97,8 +97,11 @@ const idempotencyKeySchema = z
  *  never part of an address here. Validating twice with one rule is the
  *  point. The agent gets a refusal naming the field, and the codec and the
  *  service still refuse on their own if anything slips past. */
-const ADDRESS_RE = /^[^<>@\s]+@[^<>@.\s]+(?:\.[^<>@.\s]+)+$/;
-const MAX_ADDRESS_BYTES = 320;
+const ADDRESS_RE = /^[^<>@\s\u0000-\u0020\u007f]+@[^<>@.\s\u0000-\u0020\u007f]+(?:\.[^<>@.\s\u0000-\u0020\u007f]+)+$/;
+// The service's own figure (`outbound-message.ts`). It used to be 320 here, so
+// an address between the two was admitted by the gate that names the field and
+// refused three layers down in the words of a generic service failure.
+const MAX_ADDRESS_BYTES = 254;
 const MAX_RECIPIENTS = 100;
 const MAX_SUBJECT_BYTES = 998;
 const MAX_TEXT_BYTES = 1024 * 1024;
@@ -146,11 +149,15 @@ type SendingGate =
  *  written yet is the first run, and the defaults are the answer. */
 async function admitSending(): Promise<SendingGate> {
   const state = await readAgentSettingsState();
+  // The code goes in `reason`, which is the field `docs/mcp-tools.md` tells an
+  // agent to branch on, and the sentence carries the instruction. Prose in
+  // `reason` left the two refusals looking like two different kinds of thing
+  // while the log beside them already held one clean code each.
   if (state.unreadable) {
     return {
       refused: refusal(
-        "agent sending is off",
-        "the switch could not be read, set it again in Settings, Connections",
+        "agent sending is off, the switch could not be read, so set it again in Settings, Connections",
+        "agent_settings_unreadable",
       ),
       outcome: "agent_settings_unreadable",
     };
@@ -158,8 +165,8 @@ async function admitSending(): Promise<SendingGate> {
   if (!state.settings.allowSending) {
     return {
       refused: refusal(
-        "agent sending is off",
-        "turn it on in Settings, Connections",
+        "agent sending is off, turn it on in Settings, Connections",
+        "agent_sending_off",
       ),
       outcome: "agent_sending_off",
     };
@@ -367,14 +374,20 @@ interface UnknownSend {
 const unknownSends = new Map<string, UnknownSend>();
 
 /** The message rather than the call: the account, the three recipient lists,
- *  the subject and the body. Two sends agreeing on all of those are the same
- *  message however each was composed. Only the digest is kept, so nothing
- *  written stays in this process's memory after the send. */
+ *  the subject, the body and the files it carries. Two sends agreeing on all
+ *  of those are the same message however each was composed. The files are in
+ *  because a second send of the same words with a different file attached is a
+ *  different message, and leaving them out held it for ten minutes as a
+ *  duplicate of the first. The refs are what the tool was given, page and
+ *  name: the bytes are not read here and are not this guard rail's business.
+ *  Only the digest is kept, so nothing written stays in this process's memory
+ *  after the send. */
 function sendFingerprint(
   accountId: string,
   recipients: Recipients,
   subject: string,
   body: string,
+  refs: readonly OutgoingAttachmentRef[],
 ): string {
   const hash = createHash("sha256");
   for (const part of [
@@ -384,6 +397,7 @@ function sendFingerprint(
     recipients.bcc.join(","),
     subject,
     body,
+    refs.map((ref) => `${ref.page}/${ref.name}`).join(","),
   ]) {
     hash.update(part);
     hash.update("\u0000");
@@ -580,7 +594,13 @@ export function registerMailSendTools(server: McpToolServer): void {
 
       // The last check before anything is built: a message this process has
       // already put on the wire once, under a key that cannot replay it.
-      const fingerprint = sendFingerprint(accountId, recipients, subject, body);
+      const fingerprint = sendFingerprint(
+        accountId,
+        recipients,
+        subject,
+        body,
+        refs,
+      );
       const duplicate = admitNotDuplicate(fingerprint, idempotencyKey);
       if (duplicate) {
         await log("possible_duplicate");
@@ -784,6 +804,7 @@ export function registerMailSendTools(server: McpToolServer): void {
           recipients,
           subject,
           body,
+          refs,
         );
         const duplicate = admitNotDuplicate(fingerprint, idempotencyKey);
         if (duplicate) {

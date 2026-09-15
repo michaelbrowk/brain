@@ -229,7 +229,7 @@ owner sees what was attempted.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent sending is off`. `invalid_account_id`. `to is empty`. `that is too many recipients` over 100 across the three fields. `that is not an address` naming the field and index, and `that address is listed twice` the same way. `that message is too long` and `that subject is too long`, each naming its cap. `that subject holds a control character`. `that message holds a null byte`. `possible_duplicate`, for a fresh key on a message an unknown send may already have sent. `account not found`. `cannot send from this account` with the blocked reason. `too many attachments`, `that is not an attachment name`, `page not found`, `that page does not hold that file`, `that file is gone`, `those attachments are too large`, `those attachments are too large for this account` for an IMAP account over its relay's own figure, `that file cannot be sent`, `page_changed`, `attachment_read_failed`. Plus the service's own codes. A send that timed out is not refused: see the `state` unknown answer below |
+| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent_sending_off` and `agent_settings_unreadable`, both naming Settings, Connections in the sentence. `invalid_account_id`. `to is empty`. `that is too many recipients` over 100 across the three fields. `that is not an address` naming the field and index, and `that address is listed twice` the same way. `that message is too long` and `that subject is too long`, each naming its cap. `that subject holds a control character`. `that message holds a null byte`. `possible_duplicate`, for a fresh key on a message an unknown send may already have sent. `account not found`. `cannot send from this account` with the blocked reason. `too many attachments`, `that is not an attachment name`, `page not found`, `that page does not hold that file`, `that file is gone`, `those attachments are too large`, `those attachments are too large for this account` for an IMAP account over its relay's own figure, `that file cannot be sent`, `page_read_failed`, `attachment_read_failed`. Plus the service's own codes. A send that timed out is not refused: see the `state` unknown answer below |
 | `reply_mail` | `brain:mail:send` | `accountId`, `threadId`, `messageId`, `replyAll?`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`, the reply threaded by the service onto the message named | everything `send_mail` refuses, plus `invalid_thread_id`, `invalid_message_id`, `that message is not in that thread`, and `there is no one to reply to` when the message names this account and no one else. A `to`, `cc`, `bcc` or `subject` is an unknown argument and is refused by the schema |
 | `get_mail_send_status` | `brain:mail:send` | `operationId`, `accountId?` | `{ operationId, status, threadId }`. `threadId` is the thread the Sent copy landed in, or `null`. With `accountId` given, a send the tool never got an answer for gets its Sent-row mark written here | `invalid_operation_id`, `invalid_account_id`, `no send with that id`, the service's own codes |
 
@@ -317,8 +317,8 @@ written. None of this is visible to the recipient.
 
 Two toggles in Settings, Connections govern the pair. "Let agents send mail" is
 on by default. With it off, `send_mail` and `reply_mail` answer
-`agent sending is off` with `turn it on in Settings, Connections` before the
-mail client is built, and reading mail is unaffected. "Tell recipients when an
+`agent_sending_off`, whose sentence says to turn it on in Settings,
+Connections, before the mail client is built, and reading mail is unaffected. "Tell recipients when an
 agent writes" is off by default. With it on, the outgoing message carries one
 plain last line, `Sent by an agent through Brain.`. `get_mail_send_status` is a
 read and neither toggle gates it: a send already made can always be asked
@@ -364,7 +364,8 @@ copy for the length of somebody else's send. It waits, it is never refused,
 and a message with no files is not held up at all.
 
 A failure in the notes folder is answered as one. A page that cannot be read
-answers `page_changed` and a file that changed while it was being read answers
+answers `page_read_failed`, the same code `save_mail_attachment` uses for the
+same failure, and a file that changed while it was being read answers
 `attachment_read_failed`, each with the mail service untouched and the same
 code in the activity line, so the owner's log never names a subsystem that was
 not involved.
@@ -388,8 +389,8 @@ before the mail client is built.
 The page is read before the download. A mistyped page id is the common case
 and costs one file read to answer, where answering it afterwards costs a whole
 file over the socket and leaves one nothing links. The append keeps its own
-not-found branch for the page deleted in between, and that one does say the
-file is saved and no line was added. With `append` false there is no line to
+not-found branch for the page deleted in between: that one answers
+`page_not_found` and its sentence names the url the file was saved at. With `append` false there is no line to
 write, so the page is not read at all.
 
 Two caps apply and the smaller one wins. The mail service hands out no more

@@ -130,6 +130,24 @@ describe("outgoing attachments and the agent mark on a proposal", () => {
     );
     expect(new Set([person, agent, told, withFile]).size).toBe(4);
   });
+
+  /** Two different files of the same size used to fold to the same
+   *  fingerprint, so a second send under the first key replayed the first
+   *  message instead of being refused as a conflict: the caller reads
+   *  `created: false` and believes the message it wrote went out. */
+  it("separates two files of the same size under one key", () => {
+    const fingerprintWith = (dataBase64: string) =>
+      fingerprintMailSendInput(
+        validateMailSendInput({
+          ...composeInput(),
+          attachments: [
+            { filename: "invoice.pdf", mimeType: "application/pdf", dataBase64 },
+          ],
+        }),
+      );
+
+    expect(fingerprintWith("AQID")).not.toEqual(fingerprintWith("BAUG"));
+  });
 });
 
 describe("provider-neutral mail send service", () => {

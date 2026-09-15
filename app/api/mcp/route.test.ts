@@ -1511,6 +1511,25 @@ describe("the task write tools", () => {
       reason: "line 0",
     });
     expect(createTask).not.toHaveBeenCalled();
+
+    // The line's own text is a line of somebody's note, so it is bounded on
+    // the way in and bounded again on the way back out: the refusal used to
+    // echo whatever string arrived, whole.
+    const long = await toolPayload(
+      await callTool(
+        "promote_task_line",
+        { page: PAGE_ID, line: "n".repeat(400) },
+        711,
+      ),
+    );
+    expect(long.payload.reason).toHaveLength(80);
+
+    const enormous = await callTool(
+      "promote_task_line",
+      { page: PAGE_ID, line: "n".repeat(5000) },
+      712,
+    );
+    expect(await enormous.text()).toContain("Invalid arguments");
   });
 
   it("refuses a line that already has a record", async () => {
@@ -3537,8 +3556,9 @@ describe("save_mail_attachment", () => {
     );
 
     expect(payload).toEqual({
-      error: "page not found",
-      reason: "the file is saved at /_attachments-v2/ffff.pdf and no line was added",
+      error:
+        "page not found, the file is saved at /_attachments-v2/ffff.pdf and no line was added",
+      reason: "page_not_found",
     });
     expect(isError).toBe(true);
     const [entry] = await readMcpActivity(1);
@@ -4440,8 +4460,8 @@ describe("the mail send tools", () => {
     );
 
     expect(payload).toEqual({
-      error: "agent sending is off",
-      reason: "turn it on in Settings, Connections",
+      error: "agent sending is off, turn it on in Settings, Connections",
+      reason: "agent_sending_off",
     });
     expect(isError).toBe(true);
     expect(fake.calls).toEqual([]);
@@ -4469,8 +4489,8 @@ describe("the mail send tools", () => {
     );
 
     expect(payload).toEqual({
-      error: "agent sending is off",
-      reason: "turn it on in Settings, Connections",
+      error: "agent sending is off, turn it on in Settings, Connections",
+      reason: "agent_sending_off",
     });
     expect(fake.calls).toEqual([]);
   });
@@ -4597,6 +4617,32 @@ describe("the mail send tools", () => {
       error: "that is not an address",
       reason: "cc[0]",
     });
+
+    // THREE RULES, ONE ANSWER. The codec bans every control character and the
+    // service caps an address at 254 bytes; this gate used to admit both and
+    // let them come back three layers down as a generic service refusal.
+    for (const [address, id] of [
+      ["friend\u0007@example.net", 409],
+      [`${"a".repeat(250)}@example.net`, 410],
+    ] as const) {
+      const admitted = await toolPayload(
+        await callTool(
+          "send_mail",
+          {
+            accountId: FAKE_ACCOUNT_ID,
+            to: [address],
+            subject: "Hello",
+            text: "x",
+            idempotencyKey: KEY,
+          },
+          id,
+        ),
+      );
+      expect(admitted.payload).toEqual({
+        error: "that is not an address",
+        reason: "to[0]",
+      });
+    }
     expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
   });
 
@@ -5621,8 +5667,9 @@ describe("the mail send tools", () => {
     // unreadable file away from being on again.
     expect(isError).toBe(true);
     expect(payload).toEqual({
-      error: "agent sending is off",
-      reason: "the switch could not be read, set it again in Settings, Connections",
+      error:
+        "agent sending is off, the switch could not be read, so set it again in Settings, Connections",
+      reason: "agent_settings_unreadable",
     });
     expect(fake.calls).toEqual([]);
     const [entry] = await readMcpActivity(1);
@@ -6302,14 +6349,14 @@ describe("outgoing attachments", () => {
     expect(isError).toBe(true);
     expect(payload).toEqual({
       error: "that page could not be read",
-      reason: "page_changed",
+      reason: "page_read_failed",
     });
     // The mail service was never asked to send anything, so neither the
     // answer nor the owner's log may name it.
     expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
     expect(readAttachment).not.toHaveBeenCalled();
     const [entry] = await readMcpActivity(1);
-    expect(entry.outcome).toBe("page_changed");
+    expect(entry.outcome).toBe("page_read_failed");
   });
 
   it("names the notes folder when a file changes while it is being read", async () => {

@@ -91,11 +91,14 @@ describe("the answer shapes", () => {
   });
 
   it("marks a domain refusal as an error an agent can read", () => {
-    const answer = refusal("agent sending is off", "turn it on in Settings, Connections");
+    const answer = refusal(
+      "agent sending is off, turn it on in Settings, Connections",
+      "agent_sending_off",
+    );
     expect(answer.isError).toBe(true);
     expect(JSON.parse(answer.content[0].text)).toEqual({
-      error: "agent sending is off",
-      reason: "turn it on in Settings, Connections",
+      error: "agent sending is off, turn it on in Settings, Connections",
+      reason: "agent_sending_off",
     });
   });
 

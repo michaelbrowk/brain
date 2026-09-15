@@ -44,6 +44,10 @@ type ToolExtra = { authInfo?: { scopes: string[]; clientId?: string } };
 
 const TASK_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+/** The longest line text `promote_task_line` will look for. A checkbox line
+ *  of a note, with room to spare. */
+const MAX_LINE_TEXT = 2000;
+
 /** Real UTC offsets run from -12:00 to +14:00. */
 const MAX_OFFSET_MINUTES = 840;
 
@@ -491,7 +495,10 @@ export function registerTaskTools(server: McpToolServer): void {
           page: z.string(),
           line: z.union([
             z.number().int().min(0).max(1_000_000),
-            z.string().min(1),
+            // A line of somebody's note, not a document: bounded so an agent
+            // cannot hand this tool a megabyte to normalise and then read back
+            // in a refusal.
+            z.string().min(1).max(MAX_LINE_TEXT),
           ]),
           when: fields.when,
           time: timeSchema.optional(),
@@ -522,7 +529,11 @@ export function registerTaskTools(server: McpToolServer): void {
                 (candidate) => candidate.normalized === normalizeTaskText(line),
               );
         if (found.length === 0) {
-          return no("no_line", "that line is not a checkbox", `line ${line}`);
+          return no(
+            "no_line",
+            "that line is not a checkbox",
+            typeof line === "number" ? `line ${line}` : line.slice(0, 80),
+          );
         }
         if (found.length > 1) {
           return no(

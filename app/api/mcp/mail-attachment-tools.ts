@@ -330,9 +330,11 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
       } catch (error) {
         if (isNotFound(error)) {
           await log("not_found");
+          // The url belongs in the sentence: `reason` is the field an agent
+          // branches on, and a different url each time is not a branch.
           return refusal(
-            "page not found",
-            `the file is saved at ${saved.url} and no line was added`,
+            `page not found, the file is saved at ${saved.url} and no line was added`,
+            "page_not_found",
           );
         }
         // The file is in the notes folder by now and the line is not, which

@@ -840,15 +840,17 @@ export function fingerprintMailSendInput(input: MailSendInput): string {
         input.text,
         input.replyToMessageId,
         // Appended, never reordered: an existing stored fingerprint must keep
-        // meaning what it meant. The base64 length rather than the bytes,
-        // because the raw MIME's own sha256 already covers the content and a
-        // 25 MiB stringify per replay check is not worth repeating.
+        // meaning what it meant. Each file is its own digest rather than the
+        // whole base64, so the stringify above stays small; it used to be the
+        // base64 LENGTH, which made two different files of the same size one
+        // message, and a second send under the first key replayed the first
+        // message instead of being refused as a conflict.
         input.origin,
         input.agentLine,
         input.attachments.map((attachment) => [
           attachment.filename,
           attachment.mimeType,
-          attachment.dataBase64.length,
+          createHash("sha256").update(attachment.dataBase64).digest("hex"),
         ]),
       ]),
     )

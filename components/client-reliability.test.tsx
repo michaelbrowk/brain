@@ -325,7 +325,7 @@ describe("client reliability states", () => {
 
   it("validates MCP settings and offers a working retry", async () => {
     // The section also loads the agent switches and the activity log on
-    // mount (`/api/settings/mcp-agent`, `/api/settings/mcp-activity`) — this
+    // mount (`/api/settings/mcp-agent`, `/api/settings/mcp-activity`). This
     // double answers those quietly, the way `connections-section.test.tsx`
     // does, so only the endpoint under test (`/api/settings/mcp`) drives the
     // three responses below: the initial failure, the retry, the refresh.

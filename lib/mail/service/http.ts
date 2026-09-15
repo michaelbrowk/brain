@@ -220,17 +220,24 @@ class MailHttpError extends Error {
   readonly status: number;
   readonly code: MailServiceErrorCode;
   readonly closeConnection: boolean;
+  /** Set only by a send that failed after the message was made durable. It
+   *  rides on the answer because nothing above this socket can work it out:
+   *  the request was answered, the code is the same one an outage carries,
+   *  and only the outbox knows it is holding the message. */
+  readonly enqueued: boolean;
 
   constructor(
     status: number,
     code: MailServiceErrorCode,
     closeConnection = false,
+    enqueued = false,
   ) {
     super(code);
     this.name = "MailHttpError";
     this.status = status;
     this.code = code;
     this.closeConnection = closeConnection;
+    this.enqueued = enqueued;
   }
 }
 
@@ -1014,7 +1021,12 @@ async function handleRequest(
     }
     writeJson(response, httpError.status, {
       apiVersion: 1,
-      error: { code: httpError.code },
+      // The field is present only when it is true, so every other failure
+      // keeps the exact body it has always answered with.
+      error: {
+        code: httpError.code,
+        ...(httpError.enqueued ? { enqueued: true } : {}),
+      },
     });
     logRequestFailure(httpError, requestPhase, requestAccountId);
   }
@@ -1486,26 +1498,28 @@ function toHttpError(error: unknown): MailHttpError {
     );
   }
   if (error instanceof MailSendError) {
+    // `enqueued` travels with every status this error can take: a 409 or a
+    // 429 raised after the enqueue is as durable as the 503 below it.
     if (error.code === "mail_send_request_invalid") {
-      return new MailHttpError(400, error.code);
+      return new MailHttpError(400, error.code, false, error.enqueued);
     }
     if (
       error.code === "mail_send_account_not_found" ||
       error.code === "mail_send_reply_target_not_found" ||
       error.code === "mail_send_operation_not_found"
     ) {
-      return new MailHttpError(404, error.code);
+      return new MailHttpError(404, error.code, false, error.enqueued);
     }
     if (
       error.code === "mail_send_account_reauth_required" ||
       error.code === "mail_send_idempotency_conflict"
     ) {
-      return new MailHttpError(409, error.code);
+      return new MailHttpError(409, error.code, false, error.enqueued);
     }
     if (error.code === "mail_send_rate_limited") {
-      return new MailHttpError(429, error.code);
+      return new MailHttpError(429, error.code, false, error.enqueued);
     }
-    return new MailHttpError(503, error.code, true);
+    return new MailHttpError(503, error.code, true, error.enqueued);
   }
   if (error instanceof MailContentServiceError) {
     if (error.code === "mail_content_request_invalid") {

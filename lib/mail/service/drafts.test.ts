@@ -191,6 +191,7 @@ describe("provider-neutral draft service", () => {
       apiVersion: 1 as const,
       operationId: SEND_OPERATION_ID,
       status: "sent" as const,
+      threadId: null,
     }));
     const service = createService(reopened, { sender: { processOperation: processor } });
     await expect(service.send(mutation, requestContext())).resolves.toEqual({
@@ -208,7 +209,12 @@ describe("provider-neutral draft service", () => {
   it("replays an accepted send after the account later requires reauthentication", async () => {
     let account = gmailAccount();
     const processor = vi.fn(async (operationId: string) =>
-      Object.freeze({ apiVersion: 1 as const, operationId, status: "queued" as const }),
+      Object.freeze({
+        apiVersion: 1 as const,
+        operationId,
+        status: "queued" as const,
+        threadId: null,
+      }),
     );
     const fixture = await createFixture({
       accounts: {
@@ -325,13 +331,17 @@ describe("provider-neutral draft service", () => {
     await fixture.store.close();
   });
 
-  it("returns permanent validation when a valid draft expands beyond the MIME limit", async () => {
+  it("sends a draft whose MIME passes the raised outgoing cap", async () => {
+    // 900 KiB of text expands past the 1 MiB raw limit this path used to
+    // carry. The cap is 26 MiB now, so the same draft reaches the outbox.
+    // The refusal that limit produced is still pinned on the recipient and
+    // state paths below.
     const fixture = await createFixture();
     await fixture.service.create(
       {
         ...createInput(),
         to: "friend@example.test",
-        subject: "Too large to send",
+        subject: "Large but sendable",
         text: "x".repeat(900 * 1024),
       },
       requestContext(),
@@ -339,13 +349,9 @@ describe("provider-neutral draft service", () => {
 
     await expect(
       fixture.service.send(sendMutation(), requestContext()),
-    ).rejects.toEqual(new MailDraftError("mail_draft_request_invalid"));
-    await expect(
-      fixture.store.readDraft(ACCOUNT_ID, DRAFT_ID),
-    ).resolves.toMatchObject({ revision: 0, state: "editing" });
-    await expect(
-      fixture.store.readByOperationId(SEND_OPERATION_ID),
-    ).resolves.toBeNull();
+    ).resolves.toMatchObject({ created: true });
+    const stored = await fixture.store.readByOperationId(SEND_OPERATION_ID);
+    expect(stored?.message.rawRfc2822Bytes).toBeGreaterThan(1024 * 1024);
     await fixture.store.close();
   });
 
@@ -754,7 +760,12 @@ function createService(
   };
   const sender: MailDraftSendProcessor = options.sender ?? {
     async processOperation(operationId) {
-      return Object.freeze({ apiVersion: 1, operationId, status: "queued" });
+      return Object.freeze({
+        apiVersion: 1,
+        operationId,
+        status: "queued",
+        threadId: null,
+      });
     },
   };
   return new ProviderNeutralMailDraftService({

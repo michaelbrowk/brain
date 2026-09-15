@@ -197,7 +197,7 @@ passes.
 | HTML | Sanitized, remote content blocked, sandboxed, strict CSP |
 | Attachments | Download by default. Only verified CID raster images may render inline |
 | Sender-icon egress | Deliberate, documented exception: the Brain app, never the mail service, may resolve DNS and open TLS to a sender's own domain to fetch its `/favicon.ico`, server-side and SSRF-guarded, cached on disk under an LRU cap. Sender domains are the only data that leaves; message content, addresses, and subjects never do |
-| Capacity | Separate receive, 1 MiB MVP send, relay-frame, parser, connection, queue, cache, temp, WAL, and process limits sized for a handful of accounts on a small host shared with the rest of Brain |
+| Capacity | Separate receive, 10 MiB send, relay-frame, parser, connection, queue, cache, temp, WAL, and process limits sized for a handful of accounts on a small host shared with the rest of Brain |
 | PR0 dependencies | None added |
 
 ## 3. Build versus buy
@@ -267,7 +267,7 @@ The service socket is not bound to TCP. Nginx and Cloudflare never expose it. A 
 
 PR2 fixes the service-shell limits below. The process fails closed unless systemd passes exactly one descriptor named `brain-mail` as file descriptor 3. It never binds a path, listens on TCP, or unlinks the socket.
 
-The immutable Brain release remains `root:brain` and is never made readable by the `brain-mail` identity. Immediately before service start, a root-owned helper resolves one immutable release and projects exactly 60 allowlisted compiled Mail files across four allowlisted directories into `/run/brain-mail-runtime/current`. The frozen release also carries generated third-party notices. The set includes twelve Gmail OAuth, API, sync, send, and content modules under `providers/gmail`, the custom-domain Inbox sync, thread-mutation, and raw-message content adapter under `providers/imap`, plus the provider-neutral message cache, background sync, durable outbox, dormant draft contracts, local search, content cache, bounded raster inspector, MIME client modules, and the optional SMTP runtime bundle. ImapFlow, `ws`, and the SMTP transport are bundled into audited runtime artifacts, and `jose` is bundled into the Gmail OAuth module, so the isolated runtime does not read the application `node_modules` tree. That projection is `root:brain-mail-runtime`, directories are `0550`, files are `0440`, and the service has read-only membership in that dedicated group. The same group receives execute-only traversal on `/opt/brain` so the process can reach the separately root-owned Node runtime, but it cannot list the directory or traverse the `root:brain` release and notes directories. `/etc/brain` and `/opt/brain/notes` are also hidden from the Mail namespace. The main Brain unit remains unchanged until the staged `brain-mail-client` drop-in is deliberately installed through the operations gate.
+The immutable Brain release remains `root:brain` and is never made readable by the `brain-mail` identity. Immediately before service start, a root-owned helper resolves one immutable release and projects exactly 62 allowlisted compiled Mail files across four allowlisted directories into `/run/brain-mail-runtime/current`. The frozen release also carries generated third-party notices. The set includes twelve Gmail OAuth, API, sync, send, and content modules under `providers/gmail`, the custom-domain Inbox sync, thread-mutation, and raw-message content adapter under `providers/imap`, plus the provider-neutral message cache, background sync, durable outbox, dormant draft contracts, local search, content cache, bounded raster inspector, MIME client modules, and the optional SMTP runtime bundle. ImapFlow, `ws`, and the SMTP transport are bundled into audited runtime artifacts, and `jose` is bundled into the Gmail OAuth module, so the isolated runtime does not read the application `node_modules` tree. That projection is `root:brain-mail-runtime`, directories are `0550`, files are `0440`, and the service has read-only membership in that dedicated group. The same group receives execute-only traversal on `/opt/brain` so the process can reach the separately root-owned Node runtime, but it cannot list the directory or traverse the `root:brain` release and notes directories. `/etc/brain` and `/opt/brain/notes` are also hidden from the Mail namespace. The main Brain unit remains unchanged until the staged `brain-mail-client` drop-in is deliberately installed through the operations gate.
 
 | Boundary | Limit |
 | --- | ---: |
@@ -535,7 +535,7 @@ The current DigitalOcean runtime is receive-capable but not send-capable. A read
 
 Until a separately reviewed egress route exists, health reports `receiveReadiness: "ready"` and `sendReadiness: "egress_blocked"`, but never fully `ready`. The selected candidate is a dedicated Cloudflare Worker that acts only as an authenticated WebSocket-to-raw-TCP relay. It receives no SMTP password, hostname fallback, MIME metadata, or send instruction. Brain signs a fresh 256-bit Worker challenge together with protocol version and audience, the explicit `authenticated_byte_relay` route, exact validated literal address and family, port, target expiry, session, attempt, and deadline. The issued challenge remains trusted connection-local Worker state; the returned envelope must echo it exactly, and the Worker verifies the canonical payload with a constant-time HMAC comparison. A response signed for another WebSocket is rejected even inside the five-second challenge lifetime. The Worker consumes the challenge before independently rejecting non-public addresses and every port except 465 and 587, and only then opens one raw TCP socket with `secureTransport: "off"`.
 
-The relay protocol allows one TCP socket, no reconnect, no retry, a 60-second absolute deadline, frames no larger than 16 KiB, no more than 2 MiB total client-to-TCP bytes, no more than 128 KiB server-to-client bytes, one unacknowledged frame in each direction, and monotonic sequence numbers. The 2 MiB tunnel ceiling leaves bounded room above the 1 MiB MIME cap for SMTP commands, dot-stuffing, and TLS records. A write acknowledgement is emitted only after the underlying writer accepts that frame. Production adds Cloudflare Access Service Auth in front of the challenge HMAC. A staging preview may use HMAC alone only for a short feasibility run. Direct DigitalOcean SMTP fallback is forbidden.
+The relay protocol allows one TCP socket, no reconnect, no retry, a 60-second absolute deadline, frames no larger than 16 KiB, no more than 2 MiB total client-to-TCP bytes, no more than 128 KiB server-to-client bytes, one unacknowledged frame in each direction, and monotonic sequence numbers. The 2 MiB tunnel ceiling is not raised with the outgoing message cap, so a message with attachments reaches a Gmail account and is refused at the relay for an IMAP account until the relay's own budget moves. A write acknowledgement is emitted only after the underlying writer accepts that frame. Production adds Cloudflare Access Service Auth in front of the challenge HMAC. A staging preview may use HMAC alone only for a short feasibility run. Direct DigitalOcean SMTP fallback is forbidden.
 
 This route remains conditional until a deployed Free Worker proves literal IPv4/IPv6 dialing, port 465, port 587 with STARTTLS, inner hostname/certificate failure before AUTH, disconnect semantics, and a 1 MiB message below the 10 ms CPU limit. Cloudflare documents `remoteAddress` as nullable and does not promise a stable egress prefix, so the canary must also prove the actual provider accepts the connection. Oracle or Lightsail remains an operator fallback only if the free canary fails. No cloud resource is created by PR0.
 
@@ -603,6 +603,70 @@ State:
 | `partially_sent` | At least one recipient accepted, at least one rejected, and Sent copy stored | Never retry the original envelope |
 | `failed` | Permanent rejection | No |
 
+`buildOutboundRfc2822` writes one of two shapes. With no attachments it is the
+single `text/plain` part it has always been, byte for byte, because every Sent
+copy and every replay check compares those bytes. With attachments it is
+`multipart/mixed`: the text part first, then one base64 part per file carrying
+`Content-Disposition: attachment` with the RFC 5987 filename form the download
+path already emits. The boundary is derived from the immutable Message-ID
+(`multipartBoundary`), not from randomness, because `draftMatchesSubmission`
+rebuilds the whole message and compares it to the stored one.
+
+A send carries who wrote it. `origin: "mcp"` adds the header `X-Brain-Agent:
+mcp` after `MIME-Version` and before the content headers, so the header block
+keeps one deterministic order across replays. With the owner's toggle on,
+`agentLine` appends one last body line, `Sent by an agent through Brain.`, and
+only for an agent's message. A message a person typed carries neither.
+
+The origin is stamped by whoever took the request, never read off a body. The
+MCP tools write the literal `"mcp"` and their schemas refuse the field as an
+unknown argument; `app/api/mail/send/route.ts` writes the literal `"app"` over
+whatever the browser posted. That is what makes the header worth filtering on:
+nothing a caller can say puts an agent's mark on the owner's own message, or
+takes it off an agent's.
+
+Both shapes are written as buffers end to end, and only one message is built at
+a time for the whole process. A send at the attachment cap holds the decoded
+files and the finished message together, so two overlapping builds would cross
+the `MemoryMax=256 MiB` contract. Every build stands in one in-process queue,
+a person's, an agent's and a draft's alike.
+
+`MailSendOperation.threadId` is the provider's own thread for the Sent copy. It
+fills only on an accepted provider delivery, which means Gmail. First-party
+SMTP acceptance issues no provider ids, so on an IMAP account the field is null
+for the life of the operation and not merely until the next poll. A reader that
+joins a Sent-row caption on it has to treat an IMAP operation as no caption
+ever, rather than retrying until one appears.
+
+### The agent send path
+
+An MCP tool reaches the mail service the way the browser routes do, through
+`createBrainMailClient()` in process over the Unix socket. It never calls
+`/api/mail/*`. Those routes are same-origin gated for the browser and carry no
+bearer, so an agent reaching them would be refused by a check that was never
+about the agent. Nothing in `lib/mail/service/**` knows an MCP call from a
+browser one beyond the `origin` field above.
+
+The app's name never enters the service. `verifyMcpBearerToken` answers a
+client id and the name the owner approved lives in Brain's own OAuth state, so
+pushing it down the socket would put Brain-side prose into an artifact whose
+whole design is that it holds mail and nothing else. The service takes
+`origin: "mcp"` and no more. Brain keeps `{ operationId, accountId,
+clientName }` in `agent-sends.json` under `BRAIN_MCP_STATE_DIR`, capped at 200
+entries with the oldest dropped, and `GET /api/mail/agent-marks` resolves each
+unresolved mark once through `getSendOperation`, caching the `threadId` back.
+The Sent-row caption is that join, which is why the paragraph above about a
+null `threadId` decides whether a caption can ever appear.
+
+The 5 MiB outgoing attachment cap is this path's own limit and it is set by
+memory, not by a provider. `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes` is the
+one number every other outgoing cap derives from, and §11 records the
+measurement behind it. One MIME build at a time for the whole process is the
+other half of that contract: a send at the cap holds the decoded files and the
+finished message together, and two overlapping builds would cross
+`MemoryMax=256 MiB`. Brain takes the same turn on its own side before it reads
+a byte, so at most one encoded body exists above the socket as well.
+
 The request fingerprint (`fingerprintMailSendInput`) is a SHA-256 over exactly
 the caller's own submission, in this order:
 
@@ -612,6 +676,14 @@ the caller's own submission, in this order:
 - subject
 - body text
 - in-reply-to message ID
+- origin, `app` or `mcp`
+- the recipient-visible agent line flag
+- each attachment's filename, MIME type and base64 length
+
+The three newest inputs are appended, never reordered, so a fingerprint stored
+before they existed keeps meaning what it meant. An attachment contributes its
+base64 length rather than its bytes because the raw MIME's own SHA-256 is
+compared field by field on every replay, so the content is already covered.
 
 Operation ID, idempotency key, provider kind, created-at and the built message
 are not fingerprint inputs. They are immutable fields of the queued record,
@@ -695,7 +767,8 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 | --- | ---: |
 | Accounts | 7 |
 | Incoming raw message | 40 MiB |
-| Outgoing raw message, MVP | 1 MiB |
+| Outgoing raw message | 10 MiB |
+| Outgoing attachments | 5 MiB total, 10 files |
 | Relay frame | 16 KiB |
 | Relay client bytes | 2 MiB per tunnel, including SMTP/TLS overhead |
 | Relay server bytes | 128 KiB |
@@ -731,6 +804,23 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 | Process CPU/tasks | 35% CPU quota / 32 tasks contract |
 | Parser memory | `MemoryHigh=128 MiB`, `MemoryMax=192 MiB` contract |
 | Parser CPU/tasks/FDs | 20% CPU quota / 8 tasks / 64 file descriptors contract |
+
+The two outgoing rows are set by the process contract three rows above them, not by what a provider would accept. `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes` is the one number: 5 MiB of decoded attachments per message.
+
+The figure was 10 MiB until 2026-09-15. That number came from a measurement that stopped at the MIME build, and the build is not where the peak is. A send holds the finished message twice more after it: `rawRfc2822Base64Url` is the whole message as a string on the submission record, and `JSON.stringify` makes a second copy of that string for the outbox row. Measured again through the path a request runs, the body off the socket, `JSON.parse`, `validateMailSendInput`, the build, and `store.enqueue` into SQLite, five runs each on Node 22 against a 39 MiB bare-node baseline:
+
+| Attachment payload | Through the build | Built and enqueued | Read back to deliver |
+| ---: | ---: | ---: | ---: |
+| 5 MiB | 104.3 MiB | **173.0 MiB** | 80.2 MiB |
+| 6 MiB | 115.7 MiB | 179.3 MiB | 87.4 MiB |
+| 7 MiB | 127.4 MiB | 186.0 MiB, one run 201.3 | 94.7 MiB |
+| 10 MiB | 164.3 MiB | 278.4 MiB | 117.0 MiB |
+
+The middle column is the one the contract has to hold: `MemoryHigh=192M` and `MemoryMax=256M` in `ops/brain-mail.service`. 10 MiB crosses `MemoryMax`. 5 MiB is the largest figure whose every run stayed under `MemoryHigh` with room for the service's own resident set, about 19 MiB of it, and 83 MiB under `MemoryMax`. The deliver read-back is a later turn in the same process and never overlaps the build, so its own peak is not additive.
+
+Every other outgoing cap follows from that number. Base64 at 76 columns multiplies a payload by 1.3684, so 5 MiB of files becomes 6.84 MiB of MIME parts, the 1 MiB text part expands the same way, and the headers take the finished message to the 10 MiB `outgoingRawMessageBytes` states. The outbox row holds that message base64url'd, which is 4/3 of it and needs no JSON escaping, so `MAX_SERIALIZED_SUBMISSION_BYTES` in `outbound-store.ts` is that figure plus a megabyte for the envelope and the digests around it, written as arithmetic over `outgoingRawMessageBytes` rather than as a literal. The JSON body that carries the request is capped at 16 MiB, which is the base64 plus a text body escaped at its worst six bytes per source byte. The note store's own 25 MiB per-file cap is a different limit on a different path and does not move with these.
+
+What would buy the 10 MiB back is structural rather than numeric: the row stores the message as JSON text, so the whole thing is materialised twice to be written. A separate BLOB column holding `rawRfc2822` would remove both copies. That is a schema change and it is not in 0.11.0.
 
 One bound sits outside that file because it belongs to the browser rather than the service. `UNIFIED_FANOUT_LIMIT` in [`components/mail-surface.tsx`](../components/mail-surface.tsx) caps how many per-account requests the merged inbox has in flight at once, across its first load, its load-more, and its 60-second refresh. The merge itself is generic in the number of accounts, so the account cap can rise without it noticing, and the merged inbox is the one surface that asks every account at the same moment. The peak it makes stays at three however many accounts are connected, and the accounts waiting a turn read as pending rather than as empty or as failed.
 

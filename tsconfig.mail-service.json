@@ -15,6 +15,7 @@
   },
   "include": [
     "lib/mail/message-codec.ts",
+    "lib/mail/send-attachment-codec.ts",
     "lib/mail/search-query.ts",
     "lib/mail/message-types.ts",
     "lib/mail/ports.ts",

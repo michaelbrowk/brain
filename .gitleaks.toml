@@ -33,4 +33,12 @@ regexes = [
   '''ya29\.a0AfB4XvL2''',
   # lib/store/store.test.ts, the losing side of a reservation race.
   '''near_expiry_competitor_0001''',
+  # app/api/mcp/route.test.ts, the idempotency keys the mail send tools' tests
+  # hand to a fake client: five of the fourteen read as credentials to the
+  # generic-api-key rule. Each is pinned in full.
+  '''mcp-key-invalid-001''',
+  '''mcp-key-fresh-0001''',
+  '''mcp-key-second-001''',
+  '''mcp-key-other-0001''',
+  '''mcp-key-refs-fresh01''',
 ]

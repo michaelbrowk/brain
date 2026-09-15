@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { LEGACY_OWNER_SUBJECT } from "@/lib/auth";
+import { LEGACY_BEARER_SCOPES } from "./config";
 import {
   approveAuthorizationRequest,
   createAuthorizationRequestToken,
@@ -203,7 +204,13 @@ describe("Brain MCP OAuth server", () => {
     await expect(verifyMcpBearerToken(oldToken.access_token)).resolves.toBeUndefined();
     await expect(verifyMcpBearerToken(upgradedToken.access_token)).resolves.toMatchObject({
       clientId: client.id,
-      scopes: ["brain:read", "brain:write", "brain:import"],
+      scopes: [
+        "brain:read",
+        "brain:write",
+        "brain:import",
+        "brain:mail",
+        "brain:mail:send",
+      ],
     });
   });
 
@@ -230,7 +237,13 @@ describe("Brain MCP OAuth server", () => {
     expect(token.scope).toBe("brain:read brain:write");
     await expect(verifyMcpBearerToken(token.access_token)).resolves.toMatchObject({
       clientId: client.id,
-      scopes: ["brain:read", "brain:write", "brain:import"],
+      scopes: [
+        "brain:read",
+        "brain:write",
+        "brain:import",
+        "brain:mail",
+        "brain:mail:send",
+      ],
     });
   });
 
@@ -453,6 +466,47 @@ describe("Brain MCP OAuth server", () => {
       clientId: "brain-legacy-bearer",
       scopes: ["brain:read", "brain:write", "brain:import"],
     });
+  });
+
+  /** THE STATIC BEARER IS THE ONE CREDENTIAL NOBODY CONSENTED TO.
+   *
+   *  It comes out of an env var, owns no row under Connected apps, has no
+   *  Revoke button and no expiry, so taking it back means unsetting
+   *  `MCP_TOKEN` and restarting. A set built from `MCP_SCOPES` handed it the
+   *  two mail names the moment they were appended to that list: mail read and
+   *  mail send in the owner's name, off an upgrade alone. Its set is spelled
+   *  out now, and this is the pin on the spelling. */
+  it("never hands the legacy bearer a mail scope", async () => {
+    const legacy = await verifyMcpBearerToken("legacy-machine-token");
+    expect(legacy?.scopes).toEqual([...LEGACY_BEARER_SCOPES]);
+    expect(legacy?.scopes).not.toContain("brain:mail");
+    expect(legacy?.scopes).not.toContain("brain:mail:send");
+  });
+
+  /** The other half of the same rule: a grant the owner approved on the
+   *  consent screen does reach mail. */
+  it("hands an owner write grant the mail scopes the consent screen offered", async () => {
+    const client = await clientRegistration();
+    const verifier = "mail-grant-verifier".padEnd(43, "x");
+    const request = await parseAuthorizationRequest(
+      authorizationParams(client.id, verifier, "brain:write"),
+    );
+    const redirect = await approveAuthorizationRequest(
+      await createAuthorizationRequestToken(request),
+    );
+    const token = await exchangeOAuthToken(
+      new URLSearchParams({
+        grant_type: "authorization_code",
+        client_id: client.id,
+        code: redirect.searchParams.get("code")!,
+        redirect_uri: "https://client.example/callback",
+        code_verifier: verifier,
+        resource: "https://brain.example/api/mcp",
+      }),
+    );
+    const granted = await verifyMcpBearerToken(token.access_token);
+    expect(granted?.scopes).toContain("brain:mail");
+    expect(granted?.scopes).toContain("brain:mail:send");
   });
 
   it("revokes an access token and its refresh grant without revealing token validity", async () => {

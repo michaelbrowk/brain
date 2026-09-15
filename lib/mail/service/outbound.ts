@@ -6,6 +6,10 @@ import type {
   MailSendResult,
   MailSendStatus,
 } from "../message-types";
+import {
+  validateMailSendAttachments,
+  type MailSendAttachment,
+} from "../send-attachment-codec";
 import type { MailEnvelope } from "../ports";
 import {
   buildOutboundRfc2822,
@@ -40,10 +44,36 @@ export type MailSendErrorCode =
   | "mail_send_service_unavailable";
 
 export class MailSendError extends Error {
-  constructor(readonly code: MailSendErrorCode) {
+  /** WHETHER THE MESSAGE WAS ALREADY DURABLE WHEN THIS FAILED.
+   *
+   *  `send` enqueues the proposal and only then delivers, so a failure on
+   *  either side of that line means something different to the caller: before
+   *  it, nothing happened and a fresh idempotency key is safe; after it, the
+   *  outbox holds the message and will deliver it, so a fresh key sends the
+   *  recipient two copies. The socket is fine in both cases, so nothing above
+   *  this service can tell them apart. False unless the throw sits after the
+   *  enqueue, which is the safe reading of a failure nobody marked. */
+  readonly enqueued: boolean;
+
+  constructor(
+    readonly code: MailSendErrorCode,
+    options: { readonly enqueued?: boolean } = {},
+  ) {
     super(code);
     this.name = "MailSendError";
+    this.enqueued = options.enqueued === true;
   }
+}
+
+/** The same failure, told from after the durable enqueue. Anything that is not
+ *  this service's own error is an outage as far as the caller is concerned,
+ *  and it is no less enqueued for being untyped. */
+function afterEnqueue(error: unknown): MailSendError {
+  if (error instanceof MailSendError && error.enqueued) return error;
+  return new MailSendError(
+    error instanceof MailSendError ? error.code : "mail_send_service_unavailable",
+    { enqueued: true },
+  );
 }
 
 export interface MailSendRequestContext {
@@ -253,7 +283,7 @@ export class ProviderNeutralMailSendService implements MailSendService {
     const operationId = validateMailSendOperationId(this.createOperationId());
     let proposal: StoredMailSendSubmission;
     try {
-      proposal = createMailSendSubmissionProposal({
+      proposal = await buildMailSendSubmissionProposal({
         account,
         input,
         reply,
@@ -278,12 +308,27 @@ export class ProviderNeutralMailSendService implements MailSendService {
       enqueued.submission.idempotencyKey !== input.idempotencyKey ||
       enqueued.submission.requestFingerprint !== proposal.requestFingerprint
     ) {
-      throw new MailSendError("mail_send_service_unavailable");
+      // The store answered with a submission this request does not recognise.
+      // Something is durable under this key, and this is the wrong side of the
+      // enqueue to tell the caller nothing happened.
+      throw new MailSendError("mail_send_service_unavailable", {
+        enqueued: true,
+      });
     }
 
-    const final = provider
-      ? await this.deliverIfAvailable(enqueued.submission, provider, request)
-      : enqueued.submission;
+    // EVERYTHING BELOW RUNS AFTER THE MESSAGE IS DURABLE. The lease, the
+    // provider call, the state writes around it: each of them can fail, and
+    // each failure leaves the outbox holding a message it will deliver. The
+    // caller is told that much rather than being handed a bare 503 it reads
+    // as "nothing happened, send it again".
+    let final: StoredMailSendSubmission;
+    try {
+      final = provider
+        ? await this.deliverIfAvailable(enqueued.submission, provider, request)
+        : enqueued.submission;
+    } catch (error) {
+      throw afterEnqueue(error);
+    }
     return Object.freeze({
       apiVersion: 1,
       operationId: final.operationId,
@@ -624,15 +669,20 @@ export function validateMailSendInput(value: unknown): MailSendInput {
   if (
     !isExactRecord(value, [
       "accountId",
+      "agentLine",
+      "attachments",
       "bcc",
       "cc",
       "idempotencyKey",
       "mode",
+      "origin",
       "replyToMessageId",
       "subject",
       "text",
       "to",
     ]) ||
+    (value.origin !== "app" && value.origin !== "mcp") ||
+    typeof value.agentLine !== "boolean" ||
     typeof value.accountId !== "string" ||
     !ACCOUNT_ID_PATTERN.test(value.accountId) ||
     typeof value.idempotencyKey !== "string" ||
@@ -663,6 +713,7 @@ export function validateMailSendInput(value: unknown): MailSendInput {
     seen.add(normalized);
   }
   const replyToMessageId = validateReplyTarget(value.replyToMessageId, value.mode);
+  const attachments = validateSendAttachments(value.attachments);
   return Object.freeze({
     accountId: value.accountId,
     idempotencyKey: value.idempotencyKey,
@@ -673,7 +724,20 @@ export function validateMailSendInput(value: unknown): MailSendInput {
     subject: value.subject,
     text: value.text,
     replyToMessageId,
+    attachments,
+    origin: value.origin,
+    agentLine: value.agentLine,
   });
+}
+
+function validateSendAttachments(
+  value: unknown,
+): readonly MailSendAttachment[] {
+  try {
+    return validateMailSendAttachments(value);
+  } catch {
+    throw new MailSendError("mail_send_request_invalid");
+  }
 }
 
 export function validateMailSendOperationId(value: unknown): string {
@@ -775,23 +839,85 @@ export function fingerprintMailSendInput(input: MailSendInput): string {
         input.subject,
         input.text,
         input.replyToMessageId,
+        // Appended, never reordered: an existing stored fingerprint must keep
+        // meaning what it meant. Each file is its own digest rather than the
+        // whole base64, so the stringify above stays small; it used to be the
+        // base64 LENGTH, which made two different files of the same size one
+        // message, and a second send under the first key replayed the first
+        // message instead of being refused as a conflict.
+        input.origin,
+        input.agentLine,
+        input.attachments.map((attachment) => [
+          attachment.filename,
+          attachment.mimeType,
+          createHash("sha256").update(attachment.dataBase64).digest("hex"),
+        ]),
       ]),
     )
     .digest("hex");
 }
 
-export function createMailSendSubmissionProposal(options: {
+export interface MailSendSubmissionProposalOptions {
   readonly account: MailSendAccount;
   readonly input: MailSendInput;
   readonly reply: MailReplyContext | null;
   readonly operationId: string;
   readonly createdAt: number;
-}): StoredMailSendSubmission {
+}
+
+/**
+ * One outbound MIME build at a time, for the whole process. A send at the
+ * attachment cap holds the decoded files and the finished message at once, and
+ * the service runs under `MemoryHigh=192M`, so two builds overlapping is the
+ * difference between a send and a killed process. Every build stands in this
+ * queue: a person's, an agent's, and a draft's.
+ */
+let outboundBuildQueue: Promise<unknown> = Promise.resolve();
+
+export function runExclusiveOutboundBuild<T>(
+  build: () => T | Promise<T>,
+): Promise<T> {
+  const result = outboundBuildQueue.then(build, build);
+  // A failed build releases the queue like any other, and the rejection
+  // belongs to its own caller rather than to the send that comes next.
+  outboundBuildQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+/** `createMailSendSubmissionProposal`, taking its turn in that queue. */
+export function buildMailSendSubmissionProposal(
+  options: MailSendSubmissionProposalOptions,
+): Promise<StoredMailSendSubmission> {
+  return runExclusiveOutboundBuild(() =>
+    createMailSendSubmissionProposal(options),
+  );
+}
+
+export function createMailSendSubmissionProposal(
+  options: MailSendSubmissionProposalOptions,
+): StoredMailSendSubmission {
   const messageId = createMessageId(options.account, options.input.idempotencyKey);
   const reply =
     options.reply === null ? null : validateReplyContext(options.reply);
   let rawRfc2822: Buffer | null = null;
+  const attachments: {
+    readonly filename: string;
+    readonly mimeType: string;
+    readonly bytes: Buffer;
+  }[] = [];
   try {
+    // Decoded inside the try, so a throw part way down the list still leaves
+    // nothing decoded behind for the wipe below to miss.
+    for (const attachment of options.input.attachments) {
+      attachments.push({
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        bytes: Buffer.from(attachment.dataBase64, "base64"),
+      });
+    }
     const built = buildOutboundRfc2822({
       from: options.account.emailAddress,
       to: options.input.to,
@@ -802,6 +928,9 @@ export function createMailSendSubmissionProposal(options: {
       messageId,
       createdAt: options.createdAt,
       reply: reply === null ? null : toReplyHeaders(reply),
+      attachments,
+      origin: options.input.origin,
+      agentLine: options.input.agentLine,
     });
     rawRfc2822 = built.rawRfc2822;
     return freezeSubmission({
@@ -832,7 +961,12 @@ export function createMailSendSubmissionProposal(options: {
       updatedAt: options.createdAt,
     });
   } finally {
+    // The buffers go, the strings cannot: `rawRfc2822Base64Url` on the record
+    // this returns is the same payload as an immutable string, and it lives
+    // until the queued submission is written and collected. The wipe bounds
+    // how long the decoded copy exists, it does not erase the message.
     rawRfc2822?.fill(0);
+    for (const attachment of attachments) attachment.bytes.fill(0);
   }
 }
 
@@ -945,6 +1079,10 @@ function toPublicOperation(value: StoredMailSendSubmission): MailSendOperation {
     apiVersion: 1,
     operationId: value.operationId,
     status: value.status,
+    // The provider's own thread for the Sent copy. First-party SMTP acceptance
+    // issues no ids, so an IMAP account answers null and a caller that wants
+    // the thread has to find it after the next sync.
+    threadId: value.providerThreadId,
   });
 }
 

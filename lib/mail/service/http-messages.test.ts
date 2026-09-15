@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { MailSendService } from "./outbound";
+import { MailSendError, type MailSendService } from "./outbound";
 import {
   createBrainMailClient,
   SAFE_SERVICE_ERROR_CODES,
@@ -974,6 +974,42 @@ describe("brain-mail message HTTP surface", () => {
       body: { error: { code: "mail_send_service_unavailable" } },
     });
   });
+
+  /** The one thing only the service knows about a failed send: whether the
+   *  message was already durable when it failed. A client that reads a bare
+   *  503 as "nothing happened" sends the message a second time. */
+  it("says on the wire when a send failed after the message was made durable", async () => {
+    const send = sendServiceFixture();
+    (send.send as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new MailSendError("mail_send_service_unavailable", { enqueued: true }),
+    );
+    const socketPath = await startServer(messageServiceFixture(), send);
+
+    await expect(
+      requestJson(socketPath, "POST", "/v1/send", JSON.stringify(sendInput())),
+    ).resolves.toEqual({
+      status: 503,
+      body: {
+        apiVersion: 1,
+        error: { code: "mail_send_service_unavailable", enqueued: true },
+      },
+    });
+  });
+
+  it("leaves the field off a send that failed before anything was written", async () => {
+    const send = sendServiceFixture();
+    (send.send as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new MailSendError("mail_send_service_unavailable"),
+    );
+    const socketPath = await startServer(messageServiceFixture(), send);
+
+    await expect(
+      requestJson(socketPath, "POST", "/v1/send", JSON.stringify(sendInput())),
+    ).resolves.toEqual({
+      status: 503,
+      body: { apiVersion: 1, error: { code: "mail_send_service_unavailable" } },
+    });
+  });
 });
 
 function messageServiceFixture(): MailMessageService & Record<string, ReturnType<typeof vi.fn>> {
@@ -1048,6 +1084,7 @@ function sendServiceFixture(): MailSendService & Record<string, ReturnType<typeo
       apiVersion: 1,
       operationId: OPERATION_ID,
       status: "sent",
+      threadId: null,
     })),
   } as MailSendService & Record<string, ReturnType<typeof vi.fn>>;
 }
@@ -1198,6 +1235,9 @@ function sendInput() {
     subject: "Hello",
     text: "Body",
     replyToMessageId: null,
+    attachments: [],
+    origin: "app",
+    agentLine: false,
   } as const;
 }
 

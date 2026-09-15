@@ -28,13 +28,28 @@ discover the remaining endpoints automatically.
   covers page mutations. `brain:import` includes write and is the scope the
   guarded Notion import tools and the binary import-upload route are declared
   against.
+- `brain:mail` covers reading and sorting mail and saving one of its
+  attachments into a note. `brain:mail:send` covers putting a message on the
+  wire and includes `brain:mail`. Mail is a second axis, not a step above
+  writing: `brain:mail` includes `brain:read`, because a mail reader has to
+  name a page to save an attachment into, and it does not include
+  `brain:write`. A grant that sorts mail cannot edit notes. Which tool sits
+  under which scope is in `docs/mcp-tools.md`.
 - **A `brain:write` grant reaches the import tools as well.** Brain is a
   single-owner service, and `ownerEffectiveScopes` in `lib/oauth/config.ts`
   widens any verified write grant to the full scope set when an access token is
   introspected, so the import tools accept it. The distinction the code enforces
   today is read-only versus writing, not writing versus importing: a read-only
   grant stays read-only, and everything above it can import. Do not treat
-  `brain:import` as a second barrier in front of the import surface.
+  `brain:import` as a second barrier in front of the import surface. The same
+  widening now reaches the two mail scopes, which is deliberate: an owner
+  connection made before mail existed gets the mail tools on upgrade without a
+  second consent screen, and a read-only grant still gets neither. The widening
+  is a rule about **grants**, and an OAuth grant is a screen the owner
+  approved, a row under Connected apps and a Revoke button. The static
+  `MCP_TOKEN` bearer is none of those and is not widened: it keeps
+  `LEGACY_BEARER_SCOPES` (`brain:read`, `brain:write`, `brain:import`) and
+  reaches no mail tool.
 - Settings lists active connected apps by grant. Revoking one grant immediately
   invalidates its access and refresh tokens. A recognized valid token returns
   success only after the revocation state is durably written; transient state
@@ -98,9 +113,19 @@ mutates production nginx or Cloudflare configuration.
 - Token exchange: `/oauth/token`
 - Revocation: `/oauth/revoke`
 
-The older `MCP_TOKEN` remains a full-access compatibility credential during the
-migration. It is not returned by OAuth and should be retired only after every
-real client has completed an OAuth connect/read/write check.
+The older `MCP_TOKEN` remains a notes compatibility credential during the
+migration: `brain:read`, `brain:write` and `brain:import`, the set it held
+before 0.11.0, spelled out as `LEGACY_BEARER_SCOPES` in `lib/oauth/config.ts`.
+**It cannot read mail and it cannot send mail.** A mail tool answers it HTTP
+`403` with `scope="brain:mail"`, and its own `connection_check` reports
+`mail: "not_authorized"`. The two mail scopes are reached only through an OAuth
+grant the owner approved on the consent screen, which owns a row under
+Settings → Connections and a Revoke button; this static bearer owns neither, so
+widening it would be access nobody agreed to and nobody could take back short
+of editing `/etc/brain/brain.env` and restarting. To give an agent mail,
+connect it over OAuth and approve "Read and sort your mail", or "Send mail as
+you" as well. `MCP_TOKEN` is not returned by OAuth and should be retired only
+after every real client has completed an OAuth connect/read/write check.
 
 ## Rollout check
 
@@ -123,9 +148,36 @@ real client has completed an OAuth connect/read/write check.
 6. Rotate one test refresh token repeatedly, replay an older generation, and
    confirm only that app is revoked while a second app still refreshes.
 7. Restart `brain.service`; discovery, an unreplayed existing refresh, and
-   revocation must still work. The legacy token remains unchanged during this
-   rollout.
+   revocation must still work. The legacy token keeps the notes scopes it had
+   before this rollout and gains neither mail scope: confirm that
+   `list_mail_accounts` on `MCP_TOKEN` answers HTTP `403` with exact
+   `scope="brain:mail"`, and that its `connection_check` reports
+   `mail: "not_authorized"` and `mailSend: "not_authorized"`.
+8. Connect read-only again and confirm the bootstrap challenge advertises
+   `scope="brain:read brain:write brain:import brain:mail brain:mail:send"`,
+   that a mail tool returns HTTP `403` with exact `scope="brain:mail"`, and
+   that `/var/lib/brain/mcp` is private to the `brain` service user with its
+   files mode `0600`.
+9. Connect a test app with mail access and confirm the two axes stay apart. A
+   write tool must still be refused with exact `scope="brain:write"`, because
+   `brain:mail` does not include it. Then send one message to yourself with
+   `send_mail`, and check three things: the row in the Sent mailbox reads
+   "Sent by ‹client›" with the name from the consent screen, which is resolved
+   as that mailbox opens rather than polled, one line for that send appears under
+   Settings → Connections, and the received message carries an
+   `X-Brain-Agent: mcp` header and no extra body line. Turn "Let agents send
+   mail" off and confirm the next `send_mail` answers `agent sending is off`
+   while the mail reads keep working. A first-party SMTP account shows no
+   caption on its Sent row by design, so run this step on a Gmail account.
 
-Rollback is code-only: switch to the prior immutable release. Keep
-`/var/lib/brain/oauth` in place so a forward retry does not silently forget
-owner grants. The prior release ignores this directory.
+Rollback is code-only, with one condition. Before any client has consented to
+`brain:mail` or `brain:mail:send`, switch to the prior immutable release and
+keep `/var/lib/brain/oauth` in place so a forward retry does not silently
+forget owner grants; the prior release ignores this directory. Once one grant
+has stored either mail scope, that stops being safe: the prior release's
+scope validator does not know the two mail scopes, so it refuses the whole
+state file on read, every grant in it, not only the mail one, rather than
+loading it. From that point, stay on 0.11.0 or later. Revoking the mail-scoped
+grant in Settings → Connections is not an immediate fix: a revoked grant keeps
+its stored scopes for 24 hours before Brain prunes it, so the state file is
+still unreadable by the prior release during that window.

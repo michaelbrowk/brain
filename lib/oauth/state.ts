@@ -5,7 +5,7 @@ import path from "node:path";
 import { threadId } from "node:worker_threads";
 import { z } from "zod";
 import type { McpScope } from "./config";
-import { OAuthRequestError } from "./config";
+import { MCP_SCOPES, OAuthRequestError, ownerEffectiveScopes } from "./config";
 
 const MAX_CLIENTS = 128;
 const MAX_CODES = 256;
@@ -19,7 +19,10 @@ const OWNER_PREFIX = "process-owner-";
 const MAX_OWNER_CLAIMS = 32;
 const STATE_FILE = "state.json";
 
-const scopeSchema = z.enum(["brain:read", "brain:write", "brain:import"]);
+// Derived from the one scope list rather than spelled again. A second copy
+// here silently refuses every stored grant that carries a scope added to
+// `MCP_SCOPES`, which is a whole connection lost to a list nobody updated.
+const scopeSchema = z.enum(MCP_SCOPES);
 
 const clientSchema = z.object({
   id: z.string().min(16).max(128),
@@ -550,6 +553,13 @@ export class OAuthStateStore {
     );
   }
 
+  /** The scopes here are the EFFECTIVE ones, the same set `lib/oauth/server.ts`
+   *  hands a verified bearer, not the words stored on the grant. Brain is a
+   *  single-owner service, so an owner write grant reaches the whole owner API
+   *  whatever it asked for: a grant minted before the mail scopes existed can
+   *  read and send mail today. Settings is the one screen a person revokes
+   *  from, and a screen that understates what it is revoking is worse than no
+   *  screen. */
   async listConnectedApps(): Promise<ConnectedApp[]> {
     const state = await this.read();
     return Object.values(state.grants)
@@ -558,7 +568,7 @@ export class OAuthStateStore {
         grantId: grant.id,
         clientId: grant.clientId,
         clientName: state.clients[grant.clientId]?.name ?? "Unknown app",
-        scopes: [...grant.scopes],
+        scopes: ownerEffectiveScopes(grant.scopes),
         connectedAt: grant.createdAt,
       }))
       .sort((a, b) => b.connectedAt - a.connectedAt);
@@ -691,7 +701,10 @@ function constantTimeEqual(left: string, right: string): boolean {
 
 async function ensurePrivateStateDirectory(directory: string): Promise<void> {
   try {
-    await fs.mkdir(/* turbopackIgnore: true */ directory, { mode: 0o700 });
+    await fs.mkdir(/* turbopackIgnore: true */ directory, {
+      recursive: true,
+      mode: 0o700,
+    });
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }

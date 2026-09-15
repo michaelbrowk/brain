@@ -13,6 +13,7 @@ import { DatabaseSync } from "node:sqlite";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { MAIL_RESOURCE_LIMITS } from "../security";
+import { MAIL_SEND_ATTACHMENT_LIMITS } from "../send-attachment-codec";
 import {
   fingerprintMailDraftCreate,
   fingerprintMailDraftDelete,
@@ -98,6 +99,41 @@ describe("private durable mail outbox", () => {
     expect(metadata.mode & 0o077).toBe(0);
     await expect(readFile(databasePath)).resolves.toBeInstanceOf(Buffer);
     await reopened.close();
+  });
+
+  // The gap between the MIME writer and the outbox. Everything else in this
+  // file runs on a 53-byte body, so a row big enough to meet the serialized
+  // submission cap had never been written, and the branch shipped an
+  // attachment cap the store would not hold. A message at the cap has to
+  // reach the row and come back off it whole, or `rawRfc2822Base64Url` is
+  // not what the sender puts on the wire.
+  it("holds a message at the attachment cap and reads it back whole", async () => {
+    const fixture = await createStore();
+    const queued = cappedSubmissionFixture();
+    expect(queued.message.rawRfc2822Bytes).toBeGreaterThan(
+      MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes,
+    );
+    expect(queued.message.rawRfc2822Bytes).toBeLessThanOrEqual(
+      MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes,
+    );
+
+    await expect(fixture.store.enqueue(queued)).resolves.toEqual({
+      created: true,
+      submission: queued,
+    });
+    const readBack = await fixture.store.readByOperationId(queued.operationId);
+    expect(readBack).toEqual(queued);
+    expect(readBack?.message.rawRfc2822Base64Url).toBe(
+      queued.message.rawRfc2822Base64Url,
+    );
+    expect(
+      createHash("sha256")
+        .update(
+          Buffer.from(readBack?.message.rawRfc2822Base64Url ?? "", "base64url"),
+        )
+        .digest("hex"),
+    ).toBe(queued.message.rawRfc2822Sha256);
+    await fixture.store.close();
   });
 
   it("keeps Gmail rows byte-for-byte outside the SMTP ownership boundary", async () => {
@@ -1358,6 +1394,92 @@ describe("durable account-scoped mail drafts", () => {
       revision: 1,
       subject: draft.subject,
     });
+    await fixture.store.close();
+  });
+
+  // Step 7 of the plan, letting a draft carry attachments, was deferred: no
+  // path in the tree writes bytes into draft_attachments, so a draft that
+  // carried one would send without it. These two pin the refusals that hold
+  // the decision, because deleting either line leaves the suite green.
+  it("refuses to create a draft that already carries a file", async () => {
+    const fixture = await createStore();
+    const draft = storedDraftFixture({
+      attachments: Object.freeze([
+        draftAttachmentFixture(
+          "draft-attachment-00000000-0000-4000-8000-000000009001",
+        ),
+      ]),
+    });
+    await expect(
+      fixture.store.createDraft(
+        draft,
+        fingerprintMailDraftCreate(createInputFromFixture(draft)),
+      ),
+    ).rejects.toEqual(new MailDraftError("mail_draft_service_unavailable"));
+    await fixture.store.close();
+  });
+
+  it("refuses a draft send once the draft has grown a file the message cannot carry", async () => {
+    const fixture = await createStore();
+    const draft = storedDraftFixture({ to: "friend@example.com" });
+    await fixture.store.createDraft(
+      draft,
+      fingerprintMailDraftCreate(createInputFromFixture(draft)),
+    );
+    const database = openDatabase(fixture.cacheRoot);
+    try {
+      const attachment = draftAttachmentFixture(
+        "draft-attachment-00000000-0000-4000-8000-000000009002",
+      );
+      database
+        .prepare(
+          `INSERT INTO draft_attachments(
+             attachment_id, draft_id, account_id, filename, mime_type, bytes,
+             blob_sha256, blob_name, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          attachment.attachmentId,
+          draft.draftId,
+          FIRST_ACCOUNT,
+          attachment.filename,
+          attachment.mimeType,
+          attachment.bytes,
+          attachment.blobSha256,
+          attachment.blobName,
+          draft.updatedAt,
+        );
+    } finally {
+      database.close();
+    }
+    const submission = draftSubmissionFixture(draft, {
+      operationId: operationId(9_002),
+      idempotencyKey: "draft-attachment-send-1",
+      createdAt: draft.updatedAt + 1,
+      updatedAt: draft.updatedAt + 1,
+      nextAttemptAt: draft.updatedAt + 1,
+    });
+    const mutation = validateMailDraftMutationInput({
+      accountId: FIRST_ACCOUNT,
+      draftId: draft.draftId,
+      mutationId: draftMutationId(9_002),
+      expectedRevision: 0,
+      kind: "send",
+      sendIdempotencyKey: submission.idempotencyKey,
+      sendOperationId: submission.operationId,
+    });
+
+    await expect(
+      fixture.store.commitDraftSend(
+        mutation,
+        fingerprintMailDraftMutation(mutation),
+        submission,
+        submission.createdAt,
+      ),
+    ).rejects.toEqual(new MailDraftError("mail_draft_idempotency_conflict"));
+    await expect(
+      fixture.store.readByOperationId(submission.operationId),
+    ).resolves.toBeNull();
     await fixture.store.close();
   });
 
@@ -3080,6 +3202,61 @@ function submissionFixture(
   });
 }
 
+/** A real message at the outgoing attachment cap, built by the writer the
+ *  service builds with, so the row this enqueues is the row a send at the cap
+ *  would write. One file, because the cap is on the total and one part is the
+ *  cheapest way to reach it. */
+function cappedSubmissionFixture(): StoredMailSendSubmission {
+  const built = buildOutboundRfc2822({
+    from: "me@example.com",
+    to: ["friend@example.net"],
+    cc: [],
+    bcc: [],
+    subject: "At the cap",
+    text: "One line of body beside the file.\n",
+    messageId: "<brain.cap@example.com>",
+    createdAt: Date.parse("2026-07-15T10:00:00.000Z"),
+    reply: null,
+    attachments: [
+      {
+        filename: "payload.bin",
+        mimeType: "application/octet-stream",
+        bytes: Buffer.alloc(MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes, 7),
+      },
+    ],
+    origin: "mcp",
+    agentLine: false,
+  });
+  return submissionFixture({
+    idempotencyKey: "compose-at-the-cap",
+    message: Object.freeze({
+      messageId: built.messageId,
+      envelope: built.envelope,
+      providerThreadId: null,
+      rawRfc2822Base64Url: built.rawRfc2822.toString("base64url"),
+      rawRfc2822Bytes: built.rawRfc2822.byteLength,
+      rawRfc2822Sha256: createHash("sha256")
+        .update(built.rawRfc2822)
+        .digest("hex"),
+    }),
+  });
+}
+
+function draftAttachmentFixture(attachmentId: string) {
+  const digest = "c".repeat(64);
+  return Object.freeze({
+    accountId: FIRST_ACCOUNT,
+    draftId: draftId(1),
+    attachmentId,
+    filename: "invoice.pdf",
+    mimeType: "application/pdf",
+    bytes: 9,
+    blobSha256: digest,
+    blobName: `sha256-${digest}`,
+    createdAt: Date.parse("2026-07-20T01:00:00.000Z"),
+  });
+}
+
 function draftSubmissionFixture(
   draft: StoredMailDraft,
   override: Partial<StoredMailSendSubmission> = {},
@@ -3101,6 +3278,9 @@ function draftSubmissionFixture(
     subject: draft.subject,
     text: draft.text,
     replyToMessageId: replyMode ? draft.intent.sourceMessageId : null,
+    attachments: [],
+    origin: "app",
+    agentLine: false,
   });
   const built = buildOutboundRfc2822({
     from: seed.message.envelope.from,
@@ -3118,6 +3298,9 @@ function draftSubmissionFixture(
             inReplyTo: threading.rfcMessageId!,
             references: threading.references,
           },
+    attachments: [],
+    origin: "app",
+    agentLine: false,
   });
   try {
     return Object.freeze({

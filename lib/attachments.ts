@@ -104,6 +104,80 @@ export function canonicalAttachmentExtension(
   return ".bin";
 }
 
+/** The type a stored file is served and sent as, read off the name the store
+ *  minted for it. The extension is the only record of an attachment's type
+ *  once it is on disk: `canonicalAttachmentExtension` above chose it from the
+ *  type the file was accepted under, and nothing else about that type is
+ *  kept.
+ *
+ *  An extension outside this list answers `application/octet-stream`, and so
+ *  does `.svg`: the media route has never served an SVG as an image and this
+ *  list is that route's, so one answer decides what a file is called in a
+ *  response header, in a portable archive's manifest and in a MIME part an
+ *  agent attaches it to. `app/api/media/[name]/route.ts` and
+ *  `lib/portable/model.ts` read it here. */
+const ATTACHMENT_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  avif: "image/avif",
+  heic: "image/heic",
+  heif: "image/heif",
+  pdf: "application/pdf",
+  txt: "text/plain",
+  csv: "text/csv",
+  json: "application/json",
+  zip: "application/zip",
+};
+
+export function attachmentMimeTypeForName(name: string): string {
+  const extension = name.includes(".")
+    ? (name.split(".").at(-1) ?? "").toLowerCase()
+    : "";
+  return ATTACHMENT_MIME_BY_EXTENSION[extension] ?? "application/octet-stream";
+}
+
+/** The extensions an agent may not save into a note out of a message.
+ *
+ *  `BLOCKED_ATTACHMENT_MIME` and `ACTIVE_ATTACHMENT_EXTENSIONS` above are
+ *  about a file a browser could run while rendering a note. This list is
+ *  about a file a person could run after opening one, and it exists for a
+ *  provenance the upload path does not have: a remote sender picks the bytes
+ *  and the name, and an agent, not a person, decides to keep them. An owner
+ *  dragging `setup.exe` into their own note chose it, and that path is
+ *  unchanged.
+ *
+ *  Named by the extension the store would mint for the file, so a sender who
+ *  declares `application/octet-stream` and calls it `setup.exe` is turned
+ *  down on the `.exe`, whatever the type claimed. */
+const EXECUTABLE_ATTACHMENT_EXTENSIONS: ReadonlySet<string> = new Set([
+  ".exe",
+  ".dll",
+  ".com",
+  ".scr",
+  ".bat",
+  ".cmd",
+  ".ps1",
+  ".msi",
+  ".jar",
+  ".sh",
+  ".app",
+  ".dmg",
+  ".pkg",
+  // Windows shell and script hosts. `.lnk` is here because it names a target
+  // the sender chose and runs it with whatever arguments they wrote, which is
+  // the same provenance problem the rest of this list is about.
+  ".vbs",
+  ".lnk",
+  ".hta",
+]);
+
+export function isExecutableAttachmentExtension(extension: string): boolean {
+  return EXECUTABLE_ATTACHMENT_EXTENSIONS.has(extension.toLowerCase());
+}
+
 export function normalizeAttachmentDisplayName(originalName: string): string {
   return (
     originalName

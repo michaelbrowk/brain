@@ -91,6 +91,7 @@ describe("Brain Mail message API routes", () => {
             apiVersion: 1,
             operationId: OPERATION_ID,
             status: "sent",
+            threadId: null,
           });
         } else {
           writeJson(response, 404, { apiVersion: 1, error: { code: "mail_thread_not_found" } });
@@ -420,6 +421,9 @@ function sendFixture() {
     subject: "Hello",
     text: "Body",
     replyToMessageId: null,
+    attachments: [],
+    origin: "app",
+    agentLine: false,
   };
 }
 

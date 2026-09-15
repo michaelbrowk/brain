@@ -159,6 +159,7 @@ describe("MailThreadList", () => {
     await act(async () => root.unmount());
     host.remove();
     vi.restoreAllMocks();
+    vi.unstubAllGlobals();
   });
 
   it("marks a starred thread with the star glyph before the date", async () => {
@@ -320,6 +321,88 @@ describe("MailThreadList", () => {
     expect(
       document.body.querySelector('[aria-label^="Drafts"]'),
     ).toBeNull();
+  });
+
+  it("captions the Sent rows an agent put on the wire, and no others", async () => {
+    const marks = vi.fn(
+      async (input: RequestInfo | URL) =>
+        ({
+          ok: true,
+          status: 200,
+          url: String(input),
+          json: async () => ({
+            marks: [
+              {
+                accountId: account.accountId,
+                threadId: "t-1",
+                clientName: "Claude",
+              },
+            ],
+          }),
+        }) as Response,
+    );
+    vi.stubGlobal("fetch", marks);
+    await act(async () =>
+      root.render(
+        <MailThreadList
+          {...defaultProps(
+            readyState([
+              makeThread({ threadId: "t-1", subject: "Agent wrote this" }),
+              makeThread({ threadId: "t-2", subject: "I wrote this" }),
+            ]),
+          )}
+          selectedMailboxId="sent"
+        />,
+      ),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(marks.mock.calls[0]![0]).toBe("/api/mail/agent-marks");
+    expect(rowFor("Agent wrote this").textContent).toContain("Sent by Claude");
+    expect(rowFor("I wrote this").textContent).not.toContain("Sent by");
+  });
+
+  it("asks for no marks outside the Sent mailbox", async () => {
+    const marks = vi.fn();
+    vi.stubGlobal("fetch", marks);
+    await act(async () =>
+      root.render(
+        <MailThreadList
+          {...defaultProps(readyState([makeThread({ threadId: "t-1", subject: "Inbox one" })]))}
+        />,
+      ),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(marks).not.toHaveBeenCalled();
+  });
+
+  it("draws every row as it always did when the marks cannot be read", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new Error("offline");
+      }),
+    );
+    await act(async () =>
+      root.render(
+        <MailThreadList
+          {...defaultProps(readyState([makeThread({ threadId: "t-1", subject: "Sent one" })]))}
+          selectedMailboxId="sent"
+        />,
+      ),
+    );
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(rowFor("Sent one").textContent).not.toContain("Sent by");
   });
 
   it("formats thread sizes for the size column", () => {

@@ -4,6 +4,7 @@ import { jwtVerify, SignJWT } from "jose";
 import { z } from "zod";
 import { isOwnerSubject, OWNER_SUBJECT, verifyMcpToken } from "@/lib/auth";
 import {
+  LEGACY_BEARER_SCOPES,
   MCP_SCOPES,
   type McpScope,
   mcpResource,
@@ -590,11 +591,20 @@ export async function verifyMcpBearerToken(
   token: string | undefined,
 ): Promise<AuthInfo | undefined> {
   if (!token) return undefined;
+  // THE LEGACY PATH AND THE GRANT PATH ARE TWO SETS, NOT ONE.
+  //
+  // A static bearer nobody consented to keeps the notes scopes it has always
+  // had. `LEGACY_BEARER_SCOPES` is spelled out in `config.ts` for that reason:
+  // `[...MCP_SCOPES]` handed it whatever the newest release advertises, which
+  // is how appending the two mail names widened an env-var credential with no
+  // consent screen, no Connected apps row and no Revoke button behind it. The
+  // grant path below is where mail is reached, through `ownerEffectiveScopes`
+  // and a screen the owner approved.
   if (verifyMcpToken(`Bearer ${token}`)) {
     return {
       token,
       clientId: "brain-legacy-bearer",
-      scopes: [...MCP_SCOPES],
+      scopes: [...LEGACY_BEARER_SCOPES],
       resource: new URL(mcpResource()),
       extra: { legacy: true },
     };

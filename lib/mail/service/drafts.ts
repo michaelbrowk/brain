@@ -36,7 +36,7 @@ import type {
 import { parseMailRecipientFields } from "../recipients";
 import { mailAccountCapabilities } from "./account-types";
 import {
-  createMailSendSubmissionProposal,
+  buildMailSendSubmissionProposal,
   mailSendSubmissionReplayProposal,
   MailSendError,
   type MailReplyContext,
@@ -305,7 +305,7 @@ export class ProviderNeutralMailDraftService implements MailDraftService {
       }
       committedAt = this.readNow();
       try {
-        proposal = createMailSendSubmissionProposal({
+        proposal = await buildMailSendSubmissionProposal({
           account,
           input: mailSendInputFromDraft(draft, mutation.sendIdempotencyKey),
           reply: replyContextFromDraft(draft),
@@ -527,6 +527,11 @@ export function mailSendInputFromDraft(
       subject: draft.subject,
       text: draft.text,
       replyToMessageId: replyMode ? draft.intent.sourceMessageId : null,
+      // A draft is the composer's, and the composer sends no files and
+      // carries no agent mark. createDraft refuses a draft with attachments.
+      attachments: [],
+      origin: "app",
+      agentLine: false,
     });
   } catch {
     throw new MailDraftError("mail_draft_request_invalid");

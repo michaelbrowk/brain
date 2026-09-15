@@ -324,39 +324,52 @@ describe("client reliability states", () => {
   });
 
   it("validates MCP settings and offers a working retry", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockResolvedValueOnce(response({ error: "unavailable" }, 500))
-      .mockResolvedValueOnce(
-        response({
-          endpoint: "https://brain.test/api/mcp",
-          token: "secret-token",
-          oauth: {
-            issuer: "https://brain.test",
-            authorizationEndpoint: "https://brain.test/oauth/authorize",
+    // The section also loads the agent switches and the activity log on
+    // mount (`/api/settings/mcp-agent`, `/api/settings/mcp-activity`). This
+    // double answers those quietly, the way `connections-section.test.tsx`
+    // does, so only the endpoint under test (`/api/settings/mcp`) drives the
+    // three responses below: the initial failure, the retry, the refresh.
+    const mcpResponses = [
+      response({ error: "unavailable" }, 500),
+      response({
+        endpoint: "https://brain.test/api/mcp",
+        token: "secret-token",
+        oauth: {
+          issuer: "https://brain.test",
+          authorizationEndpoint: "https://brain.test/oauth/authorize",
+        },
+        connectedApps: [
+          {
+            grantId: "grant-a",
+            clientId: "client-a",
+            clientName: "Claude Code",
+            scopes: ["brain:read", "brain:write"],
+            connectedAt: 1_700_000_000_000,
           },
-          connectedApps: [
-            {
-              grantId: "grant-a",
-              clientId: "client-a",
-              clientName: "Claude Code",
-              scopes: ["brain:read", "brain:write"],
-              connectedAt: 1_700_000_000_000,
-            },
-          ],
-        }),
-      )
-      .mockResolvedValueOnce(
-        response({
-          endpoint: "https://brain.test/api/mcp",
-          token: "secret-token",
-          oauth: {
-            issuer: "https://brain.test",
-            authorizationEndpoint: "https://brain.test/oauth/authorize",
-          },
-          connectedApps: [],
-        }),
-      );
+        ],
+      }),
+      response({
+        endpoint: "https://brain.test/api/mcp",
+        token: "secret-token",
+        oauth: {
+          issuer: "https://brain.test",
+          authorizationEndpoint: "https://brain.test/oauth/authorize",
+        },
+        connectedApps: [],
+      }),
+    ];
+    const mcpCalls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url === "/api/settings/mcp") {
+        mcpCalls.push(url);
+        return mcpResponses[mcpCalls.length - 1] ?? response({ error: "exhausted" }, 500);
+      }
+      if (url === "/api/settings/mcp-activity") return response({ entries: [] });
+      if (url === "/api/settings/mcp-agent")
+        return response({ tellRecipients: false, allowSending: true, unreadable: false });
+      throw new Error(`unexpected request: ${url}`);
+    });
     vi.stubGlobal("fetch", fetchMock);
     await act(async () =>
       root.render(<ConnectionsSection onToast={() => {}} />),
@@ -399,7 +412,7 @@ describe("client reliability states", () => {
     await act(async () => refresh.click());
     await settle();
 
-    expect(fetchMock).toHaveBeenCalledTimes(3);
+    expect(mcpCalls).toHaveLength(3);
     expect(document.body.textContent).toContain("No apps connected with OAuth yet");
   });
 

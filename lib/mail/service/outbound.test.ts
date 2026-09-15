@@ -2,8 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { MailSendInput } from "../message-types";
 import {
+  createMailSendSubmissionProposal,
+  fingerprintMailSendInput,
   MailSendError,
   ProviderNeutralMailSendService,
+  runExclusiveOutboundBuild,
   validateMailSendInput,
   type MailReplyContextResolver,
   type MailSendAccountResolver,
@@ -34,10 +37,116 @@ describe("mail send input", () => {
       { ...composeInput(), mode: "reply", replyToMessageId: null },
     ],
     ["no recipient", { ...composeInput(), to: [] }],
+    ["an origin nothing produces", { ...composeInput(), origin: "cron" }],
+    ["an agent line that is not a flag", { ...composeInput(), agentLine: "yes" }],
+    [
+      "an attachment naming a path",
+      {
+        ...composeInput(),
+        attachments: [
+          {
+            filename: "a/b.pdf",
+            mimeType: "application/pdf",
+            dataBase64: "AQID",
+          },
+        ],
+      },
+    ],
   ])("rejects %s", (_name, value) => {
     expect(() => validateMailSendInput(value)).toThrow(
       new MailSendError("mail_send_request_invalid"),
     );
+  });
+});
+
+describe("outgoing attachments and the agent mark on a proposal", () => {
+  const account = {
+    accountId,
+    providerKind: "gmail",
+    emailAddress: "me@example.com",
+    status: "connected",
+  } as const;
+
+  function proposalFor(input: MailSendInput) {
+    return createMailSendSubmissionProposal({
+      account,
+      input: validateMailSendInput(input),
+      reply: null,
+      operationId: "send-00000000-0000-4000-8000-000000000001",
+      createdAt: now,
+    });
+  }
+
+  function rawOf(submission: { readonly message: { readonly rawRfc2822Base64Url: string } }) {
+    return Buffer.from(submission.message.rawRfc2822Base64Url, "base64url").toString(
+      "utf8",
+    );
+  }
+
+  it("carries a page's file into the multipart body the provider submits", () => {
+    const raw = rawOf(
+      proposalFor({
+        ...composeInput(),
+        attachments: [
+          {
+            filename: "invoice.pdf",
+            mimeType: "application/pdf",
+            dataBase64: Buffer.from("PDF-BYTES").toString("base64"),
+          },
+        ],
+      }),
+    );
+    expect(raw).toContain("Content-Type: multipart/mixed; boundary=");
+    expect(raw).toContain('Content-Disposition: attachment; filename="invoice.pdf"');
+    expect(raw).toContain(Buffer.from("PDF-BYTES").toString("base64"));
+  });
+
+  it("marks an agent's own message and leaves a person's unmarked", () => {
+    expect(rawOf(proposalFor({ ...composeInput(), origin: "mcp" }))).toContain(
+      "X-Brain-Agent: mcp\r\n",
+    );
+    expect(rawOf(proposalFor(composeInput()))).not.toContain("X-Brain-Agent");
+  });
+
+  it("separates two sends that differ only in the three new fields", () => {
+    const person = fingerprintMailSendInput(validateMailSendInput(composeInput()));
+    const agent = fingerprintMailSendInput(
+      validateMailSendInput({ ...composeInput(), origin: "mcp" }),
+    );
+    const told = fingerprintMailSendInput(
+      validateMailSendInput({ ...composeInput(), origin: "mcp", agentLine: true }),
+    );
+    const withFile = fingerprintMailSendInput(
+      validateMailSendInput({
+        ...composeInput(),
+        attachments: [
+          {
+            filename: "invoice.pdf",
+            mimeType: "application/pdf",
+            dataBase64: "AQID",
+          },
+        ],
+      }),
+    );
+    expect(new Set([person, agent, told, withFile]).size).toBe(4);
+  });
+
+  /** Two different files of the same size used to fold to the same
+   *  fingerprint, so a second send under the first key replayed the first
+   *  message instead of being refused as a conflict: the caller reads
+   *  `created: false` and believes the message it wrote went out. */
+  it("separates two files of the same size under one key", () => {
+    const fingerprintWith = (dataBase64: string) =>
+      fingerprintMailSendInput(
+        validateMailSendInput({
+          ...composeInput(),
+          attachments: [
+            { filename: "invoice.pdf", mimeType: "application/pdf", dataBase64 },
+          ],
+        }),
+      );
+
+    expect(fingerprintWith("AQID")).not.toEqual(fingerprintWith("BAUG"));
   });
 });
 
@@ -75,6 +184,7 @@ describe("provider-neutral mail send service", () => {
       apiVersion: 1,
       operationId: queued.operationId,
       status: "queued",
+      threadId: null,
     });
     expect(store.first()).toMatchObject({
       providerKind: "imap",
@@ -100,9 +210,79 @@ describe("provider-neutral mail send service", () => {
       providers: [],
       now: () => now,
     });
-    await expect(service.send(composeInput(), request())).rejects.toEqual(
-      new MailSendError("mail_send_service_unavailable"),
-    );
+    const refused = await service.send(composeInput(), request()).catch((e) => e);
+    expect(refused).toEqual(new MailSendError("mail_send_service_unavailable"));
+    // Nothing was written, so a caller may say "refused" and use a fresh key.
+    expect(refused.enqueued).toBe(false);
+  });
+
+  /** WHICH SIDE OF THE ENQUEUE A FAILURE FELL ON.
+   *
+   *  `/v1/send` makes the message durable and only then delivers, so a failure
+   *  after that point is not "nothing happened": the outbox holds the message
+   *  and will send it. The service is the only thing that knows which side it
+   *  was, and it used to answer both with the same bare 503, which a caller
+   *  reads as a refusal and answers with a fresh key. Two copies. */
+  it("marks a failure raised after the durable enqueue as enqueued", async () => {
+    const kept = new MemoryMailSendStore();
+    const store: MailSendStore = {
+      enqueue: (submission) => kept.enqueue(submission),
+      readByOperationId: (operationId) => kept.readByOperationId(operationId),
+      // The outbox write that claims the operation for this attempt. It runs
+      // after the enqueue and before the provider is called.
+      compareAndSwap: async () => {
+        throw new Error("outbox write failed");
+      },
+    };
+    const service = serviceFixture(store, acceptedProvider());
+
+    const failure = await service.send(composeInput(), request()).catch((e) => e);
+
+    expect(failure).toBeInstanceOf(MailSendError);
+    expect(failure.code).toBe("mail_send_service_unavailable");
+    expect(failure.enqueued).toBe(true);
+    // And the message is durable, which is what the flag claims.
+    expect(kept.first()).toMatchObject({ status: "queued" });
+  });
+
+  /** The enqueue itself failing is the other side of the same line. */
+  it("leaves a failure raised by the enqueue itself unmarked", async () => {
+    const store: MailSendStore = {
+      enqueue: async () => {
+        throw new Error("outbox write failed");
+      },
+      readByOperationId: async () => null,
+      compareAndSwap: async () => false,
+    };
+    const service = serviceFixture(store, acceptedProvider());
+
+    const failure = await service.send(composeInput(), request()).catch((e) => e);
+
+    expect(failure.code).toBe("mail_send_service_unavailable");
+    expect(failure.enqueued).toBe(false);
+  });
+
+  /** THE STORE ANSWERING A SUBMISSION THIS REQUEST DOES NOT RECOGNISE.
+   *
+   *  Something is already durable under the key by the time `enqueue`
+   *  returns, whatever it says, so this branch of the same rule marks
+   *  `enqueued` too. */
+  it("marks a submission mismatch from the store as enqueued too", async () => {
+    const store: MailSendStore = {
+      enqueue: async (submission) => ({
+        created: true,
+        submission: { ...submission, accountId: "a-different-account" },
+      }),
+      readByOperationId: async () => null,
+      compareAndSwap: async () => false,
+    };
+    const service = serviceFixture(store, acceptedProvider());
+
+    const failure = await service.send(composeInput(), request()).catch((e) => e);
+
+    expect(failure).toBeInstanceOf(MailSendError);
+    expect(failure.code).toBe("mail_send_service_unavailable");
+    expect(failure.enqueued).toBe(true);
   });
 
   it("sends once, persists the result, and deduplicates the same request", async () => {
@@ -143,6 +323,7 @@ describe("provider-neutral mail send service", () => {
       apiVersion: 1,
       operationId: first.operationId,
       status: "sent",
+      threadId: "gmail-thread-1",
     });
   });
 
@@ -383,6 +564,7 @@ describe("provider-neutral mail send service", () => {
       apiVersion: 1,
       operationId,
       status: "failed",
+      threadId: null,
     });
   });
 
@@ -455,6 +637,81 @@ describe("provider-neutral mail send service", () => {
   });
 });
 
+describe("one outbound build at a time", () => {
+  it("starts a build only once the build before it has ended", async () => {
+    const steps: string[] = [];
+    let releaseFirst!: () => void;
+    const firstDone = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = runExclusiveOutboundBuild(async () => {
+      steps.push("first in");
+      await firstDone;
+      steps.push("first out");
+      return 1;
+    });
+    const second = runExclusiveOutboundBuild(() => {
+      steps.push("second in");
+      return 2;
+    });
+
+    await Promise.resolve();
+    expect(steps).toEqual(["first in"]);
+    releaseFirst();
+    await expect(first).resolves.toBe(1);
+    await expect(second).resolves.toBe(2);
+    expect(steps).toEqual(["first in", "first out", "second in"]);
+  });
+
+  it("keeps the queue moving after a build throws", async () => {
+    const failed = runExclusiveOutboundBuild(() => {
+      throw new Error("build failed");
+    });
+    await expect(failed).rejects.toThrow("build failed");
+    await expect(runExclusiveOutboundBuild(() => "next")).resolves.toBe("next");
+  });
+
+  it("holds a second send's build until the first send has finished its own", async () => {
+    const store = new MemoryMailSendStore();
+    const enqueued: string[] = [];
+    const record = store.enqueue.bind(store);
+    vi.spyOn(store, "enqueue").mockImplementation(async (submission) => {
+      enqueued.push(submission.idempotencyKey);
+      return record(submission);
+    });
+    const service = serviceFixture(store, acceptedProvider());
+
+    let release!: () => void;
+    const held = runExclusiveOutboundBuild(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+
+    const first = service.send(
+      { ...composeInput(), idempotencyKey: "queued-send-one" },
+      request(),
+    );
+    const second = service.send(
+      {
+        ...composeInput(),
+        idempotencyKey: "queued-send-two",
+        text: "Second body",
+      },
+      request(),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(enqueued).toEqual([]);
+
+    release();
+    await held;
+    await Promise.all([first, second]);
+    expect(enqueued).toEqual(["queued-send-one", "queued-send-two"]);
+  });
+});
+
 function composeInput(): MailSendInput {
   return {
     accountId,
@@ -466,6 +723,9 @@ function composeInput(): MailSendInput {
     subject: "Hello",
     text: "Body",
     replyToMessageId: null,
+    attachments: [],
+    origin: "app",
+    agentLine: false,
   };
 }
 

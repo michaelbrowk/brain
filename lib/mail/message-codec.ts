@@ -22,6 +22,7 @@ import type {
   MailThreadView,
 } from "./message-types";
 import { normalizeMailSearchQueryText } from "./search-query";
+import { validateMailSendAttachments } from "./send-attachment-codec";
 
 const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
 const SAFE_RESOURCE_ID = /^[A-Za-z0-9_-]{1,255}$/;
@@ -233,10 +234,13 @@ export function validateMailSendInput(value: unknown): MailSendInput {
   if (
     !isRecordWithExactFields(value, [
       "accountId",
+      "agentLine",
+      "attachments",
       "bcc",
       "cc",
       "idempotencyKey",
       "mode",
+      "origin",
       "replyToMessageId",
       "subject",
       "text",
@@ -248,8 +252,16 @@ export function validateMailSendInput(value: unknown): MailSendInput {
   if (
     typeof value.idempotencyKey !== "string" ||
     !SAFE_IDEMPOTENCY_KEY.test(value.idempotencyKey) ||
-    (value.mode !== "compose" && value.mode !== "reply")
+    (value.mode !== "compose" && value.mode !== "reply") ||
+    (value.origin !== "app" && value.origin !== "mcp") ||
+    typeof value.agentLine !== "boolean"
   ) {
+    throw requestInvalid();
+  }
+  let attachments;
+  try {
+    attachments = validateMailSendAttachments(value.attachments);
+  } catch {
     throw requestInvalid();
   }
   const to = validateRecipients(value.to);
@@ -280,6 +292,9 @@ export function validateMailSendInput(value: unknown): MailSendInput {
     subject,
     text,
     replyToMessageId,
+    attachments,
+    origin: value.origin,
+    agentLine: value.agentLine,
   });
 }
 
@@ -501,8 +516,15 @@ export function validateMailSendResult(value: unknown): MailSendResult {
 
 export function validateMailSendOperation(value: unknown): MailSendOperation {
   if (
-    !isRecordWithExactFields(value, ["apiVersion", "operationId", "status"]) ||
-    value.apiVersion !== 1
+    !isRecordWithExactFields(value, [
+      "apiVersion",
+      "operationId",
+      "status",
+      "threadId",
+    ]) ||
+    value.apiVersion !== 1 ||
+    (value.threadId !== null &&
+      (typeof value.threadId !== "string" || !SAFE_RESOURCE_ID.test(value.threadId)))
   ) {
     throw responseInvalid();
   }
@@ -510,6 +532,7 @@ export function validateMailSendOperation(value: unknown): MailSendOperation {
     apiVersion: 1,
     operationId: validateResponseOperationId(value.operationId),
     status: validateSendStatus(value.status),
+    threadId: value.threadId,
   });
 }
 

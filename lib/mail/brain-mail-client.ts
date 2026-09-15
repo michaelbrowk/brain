@@ -289,12 +289,35 @@ export interface MailAccountPatchInputV2 {
 export class BrainMailClientError extends Error {
   readonly status: number;
   readonly code: string;
+  /** Whether the request body had reached the socket before this failed.
+   *
+   *  `mail_service_unavailable` covers two different worlds: a socket that
+   *  never connected, where the service was told nothing, and one that died
+   *  after the body was written, where it may have the message already. The
+   *  code cannot tell them apart and a caller sending mail in the owner's
+   *  name has to. False whenever nothing was written, which is the safe
+   *  reading for every failure raised before the request went out. */
+  readonly requestSent: boolean;
+  /** Whether the service had already made the message durable when it failed.
+   *
+   *  The next question after `requestSent`, and the one only the service can
+   *  answer: it heard the whole request, wrote the message into the outbox and
+   *  then failed, so the outbox will deliver it. The status code is the same
+   *  one a refusal carries, so this is read off the error body's own field and
+   *  never guessed. False for every failure the service did not mark. */
+  readonly enqueued: boolean;
 
-  constructor(status: number, code: string) {
+  constructor(
+    status: number,
+    code: string,
+    options: { readonly requestSent?: boolean; readonly enqueued?: boolean } = {},
+  ) {
     super(code);
     this.name = "BrainMailClientError";
     this.status = status;
     this.code = code;
+    this.requestSent = options.requestSent === true;
+    this.enqueued = options.enqueued === true;
   }
 }
 
@@ -1193,6 +1216,11 @@ async function requestMailService<T>(
   return new Promise<T>((resolve, reject) => {
     let settled = false;
     let absoluteTimer: ReturnType<typeof setTimeout> | undefined;
+    // Set once the request body has left this process for the socket. It is
+    // what separates a socket that never connected from one that died with
+    // the message already written, which `BrainMailClientError.requestSent`
+    // then carries to the send tools.
+    let requestSent = false;
     let requestBodyWiped = false;
     const wipeRequestBody = () => {
       if (requestBodyWiped || encoded === undefined) return;
@@ -1304,13 +1332,14 @@ async function requestMailService<T>(
             }
 
             try {
-              const code = validateServiceError(payload);
+              const refusal = validateServiceError(payload);
               fail(
                 new BrainMailClientError(
-                  code === "mail_service_timeout"
+                  refusal.code === "mail_service_timeout"
                     ? 504
                     : safeServiceStatus(status),
-                  code,
+                  refusal.code,
+                  { enqueued: refusal.enqueued },
                 ),
               );
             } catch {
@@ -1319,7 +1348,13 @@ async function requestMailService<T>(
           });
           response.once("error", () => {
             wipeResponseChunks();
-            fail(serviceUnavailable());
+            // The response had started, so the request is long gone and the
+            // service may have acted on it.
+            fail(
+              new BrainMailClientError(503, "mail_service_unavailable", {
+                requestSent: true,
+              }),
+            );
           });
           response.once("aborted", () => {
             wipeResponseChunks();
@@ -1342,11 +1377,19 @@ async function requestMailService<T>(
           new BrainMailClientError(
             code === "mail_request_cancelled" ? 408 : 503,
             code,
+            { requestSent },
           ),
         );
       });
-      if (encoded !== undefined) request.end(encoded, wipeRequestBody);
-      else request.end();
+      const sent = () => {
+        requestSent = true;
+      };
+      if (encoded !== undefined)
+        request.end(encoded, () => {
+          sent();
+          wipeRequestBody();
+        });
+      else request.end(sent);
     } catch {
       wipeRequestBody();
       fail(serviceUnavailable());
@@ -1432,12 +1475,13 @@ async function requestMailAttachment(
                 } catch {
                   throw invalidResponse();
                 }
-                const code = validateServiceError(payload);
+                const refusal = validateServiceError(payload);
                 throw new BrainMailClientError(
-                  code === "mail_service_timeout"
+                  refusal.code === "mail_service_timeout"
                     ? 504
                     : safeServiceStatus(status),
-                  code,
+                  refusal.code,
+                  { enqueued: refusal.enqueued },
                 );
               }
               const contentType = response.headers["content-type"];
@@ -2133,20 +2177,32 @@ function validateCapabilities(
   }
 }
 
-function validateServiceError(value: unknown): string {
+/** The service's error body: the code always, and on a send that failed after
+ *  the message was durable, `enqueued: true` beside it. The shape is still
+ *  exact, so `enqueued` is admitted as that one value and nothing else: a body
+ *  carrying anything different is one this client does not understand. */
+function validateServiceError(value: unknown): {
+  code: string;
+  enqueued: boolean;
+} {
   if (
     !isExactRecord(value, ["apiVersion", "error"]) ||
     value.apiVersion !== 1 ||
-    !isExactRecord(value.error, ["code"]) ||
+    !(
+      isExactRecord(value.error, ["code"]) ||
+      (isExactRecord(value.error, ["code", "enqueued"]) &&
+        value.error.enqueued === true)
+    ) ||
     typeof value.error.code !== "string"
   ) {
     throw invalidResponse();
   }
+  const enqueued = value.error.enqueued === true;
   if (value.error.code === "request_deadline_exceeded") {
-    return "mail_service_timeout";
+    return { code: "mail_service_timeout", enqueued };
   }
   if (!SAFE_SERVICE_ERROR_CODES.has(value.error.code)) throw invalidResponse();
-  return value.error.code;
+  return { code: value.error.code, enqueued };
 }
 
 function validateSocketPath(value: string): string {

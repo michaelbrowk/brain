@@ -1,0 +1,188 @@
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  MCP_AGENT_SENDS_FILE,
+  MCP_AGENT_SEND_MAX,
+  readAgentSends,
+  recordAgentSend,
+  recordAgentSendIfAbsent,
+  resolveAgentSendThread,
+} from "./agent-sends";
+
+const ACCOUNT = "account-a00000000000000000000000000000000";
+
+let root: string;
+
+beforeEach(async () => {
+  // A fixed path collides across concurrent vitest processes: a sibling
+  // suite's leftovers land in this directory and this test reads them back
+  // as its own.
+  root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-sends-test-"));
+  vi.stubEnv("BRAIN_MCP_STATE_DIR", root);
+});
+
+afterEach(async () => {
+  vi.unstubAllEnvs();
+  await fs.rm(root, { recursive: true, force: true });
+});
+
+/** A marks file holding `count` marks, written once. The module reads the
+ *  file it finds, so a seeded one and a made one are the same thing to it,
+ *  and a test about the cap need not pay for the writes. */
+async function seedMarks(count: number): Promise<void> {
+  await fs.mkdir(root, { recursive: true, mode: 0o700 });
+  await fs.writeFile(
+    path.join(root, MCP_AGENT_SENDS_FILE),
+    JSON.stringify(
+      Array.from({ length: count }, (_, index) => ({
+        operationId: `send-${index}`,
+        accountId: ACCOUNT,
+        clientName: "Claude",
+        threadId: null,
+      })),
+    ) + "\n",
+    { mode: 0o600 },
+  );
+}
+
+describe("the agent send marks", () => {
+  it("answers nothing before an agent has sent", async () => {
+    expect(await readAgentSends()).toEqual([]);
+  });
+
+  it("records a send with no thread yet", async () => {
+    await recordAgentSend({
+      operationId: "send-alpha",
+      accountId: ACCOUNT,
+      clientName: "Claude",
+    });
+    expect(await readAgentSends()).toEqual([
+      { operationId: "send-alpha", accountId: ACCOUNT, clientName: "Claude", threadId: null },
+    ]);
+  });
+
+  it("resolves one mark's thread and leaves the rest alone", async () => {
+    await recordAgentSend({
+      operationId: "send-alpha",
+      accountId: ACCOUNT,
+      clientName: "Claude",
+    });
+    await recordAgentSend({
+      operationId: "send-beta",
+      accountId: ACCOUNT,
+      clientName: "Claude",
+    });
+    await resolveAgentSendThread("send-beta", "thread-beta");
+    const marks = await readAgentSends();
+    expect(marks.find((mark) => mark.operationId === "send-alpha")?.threadId).toBeNull();
+    expect(marks.find((mark) => mark.operationId === "send-beta")?.threadId).toBe(
+      "thread-beta",
+    );
+  });
+
+  it("ignores a resolve for an operation it never recorded", async () => {
+    await resolveAgentSendThread("send-gamma", "thread-gamma");
+    expect(await readAgentSends()).toEqual([]);
+  });
+
+  it("records one mark per operation, not one per call", async () => {
+    await recordAgentSend({
+      operationId: "send-alpha",
+      accountId: ACCOUNT,
+      clientName: "Claude",
+    });
+    await recordAgentSend({
+      operationId: "send-alpha",
+      accountId: ACCOUNT,
+      clientName: "Claude",
+    });
+    expect(await readAgentSends()).toHaveLength(1);
+  });
+
+  it("fills in a mark a send could not write for itself", async () => {
+    await recordAgentSendIfAbsent({
+      operationId: "send-alpha",
+      accountId: ACCOUNT,
+      clientName: "Claude",
+    });
+    expect(await readAgentSends()).toEqual([
+      {
+        operationId: "send-alpha",
+        accountId: ACCOUNT,
+        clientName: "Claude",
+        threadId: null,
+      },
+    ]);
+  });
+
+  it("leaves a mark that is already there, thread and all", async () => {
+    await recordAgentSend({
+      operationId: "send-alpha",
+      accountId: ACCOUNT,
+      clientName: "Claude",
+    });
+    await resolveAgentSendThread("send-alpha", "thread-alpha");
+    await recordAgentSendIfAbsent({
+      operationId: "send-alpha",
+      accountId: ACCOUNT,
+      clientName: "Another app",
+    });
+    expect(await readAgentSends()).toEqual([
+      {
+        operationId: "send-alpha",
+        accountId: ACCOUNT,
+        clientName: "Claude",
+        threadId: "thread-alpha",
+      },
+    ]);
+  });
+
+  it("drops the oldest mark at the cap", async () => {
+    // Seeded in one write rather than made by 205 serial ones. The cap is a
+    // `slice` on the way out, so a full file and one more mark proves it in
+    // three filesystem round trips; the serialised writer has its own test
+    // above, which is where that belongs.
+    await seedMarks(MCP_AGENT_SEND_MAX);
+
+    await recordAgentSend({
+      operationId: "send-over",
+      accountId: ACCOUNT,
+      clientName: "Claude",
+    });
+
+    const marks = await readAgentSends();
+    expect(marks).toHaveLength(MCP_AGENT_SEND_MAX);
+    expect(marks[0].operationId).toBe("send-1");
+    expect(marks.at(-1)?.operationId).toBe("send-over");
+  });
+
+  it("writes the file under 0600 in a 0700 directory", async () => {
+    await recordAgentSend({
+      operationId: "send-alpha",
+      accountId: ACCOUNT,
+      clientName: "Claude",
+    });
+    expect((await fs.stat(root)).mode & 0o777).toBe(0o700);
+    expect((await fs.stat(path.join(root, MCP_AGENT_SENDS_FILE))).mode & 0o777).toBe(0o600);
+  });
+
+  it("holds three ids and an app name, and nothing a message carried", async () => {
+    await recordAgentSend({
+      operationId: "send-alpha",
+      accountId: ACCOUNT,
+      clientName: "Claude",
+      // @ts-expect-error the mark shape is the redaction: there is no such field
+      subject: "the quarterly numbers",
+    });
+    const raw = await fs.readFile(path.join(root, MCP_AGENT_SENDS_FILE), "utf8");
+    expect(raw).not.toContain("quarterly");
+  });
+
+  it("answers nothing on a file a person edited badly", async () => {
+    await fs.mkdir(root, { recursive: true, mode: 0o700 });
+    await fs.writeFile(path.join(root, MCP_AGENT_SENDS_FILE), "{not json", { mode: 0o600 });
+    expect(await readAgentSends()).toEqual([]);
+  });
+});

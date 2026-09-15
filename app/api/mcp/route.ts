@@ -30,64 +30,112 @@ import {
   oauthIssuer,
 } from "@/lib/oauth/config";
 import { canonicalizeMcpPageMarkdown } from "@/lib/mcp-page-markdown";
-import { TASK_ID_RE } from "@/lib/tasks/model";
 import {
   exactBearerToken,
   mcpInsufficientScopeResponse,
   withMcpChallengeScopes,
 } from "@/lib/oauth/http";
 import { verifyMcpBearerToken } from "@/lib/oauth/server";
+import {
+  hasScope,
+  insufficientScope,
+  STORE_FAILED,
+  storeFailed,
+  text,
+  toolScopeOf,
+} from "./tool-kit";
+import { registerMailAttachmentTools } from "./mail-attachment-tools";
+import { registerMailTools } from "./mail-tools";
+import { registerMailSendTools } from "./mail-send-tools";
+import { registerTaskTools } from "./task-tools";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const text = (data: unknown) => ({
-  content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
-});
+/** EVERY PAGE TOOL'S STORE FAILURE, AS AN ANSWER.
+ *
+ *  The notes folder can fail on any of these, and the store's message for
+ *  that is a Node `fs` one carrying its absolute path. The SDK hands a thrown
+ *  error's message to the agent verbatim, so a rethrow published the path and
+ *  arrived as the transport error `docs/mcp-tools.md` calls a bug.
+ *
+ *  `NotFoundError` is passed through rather than folded in: an id that is not
+ *  a page is the caller's own mistake, it names no path, and the tool
+ *  reference documents what each tool does with one. */
+function pageTool<Args extends unknown[], Answer>(
+  work: (...args: Args) => Promise<Answer>,
+): (...args: Args) => Promise<Answer | ReturnType<typeof storeFailed>> {
+  return async (...args: Args) => {
+    try {
+      return await work(...args);
+    } catch (error) {
+      if (isNotFound(error)) throw error;
+      return storeFailed();
+    }
+  };
+}
 
-const TASK_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
+/** WHAT A NOTION_* RETHROW CARRIES, ONCE EVERY NAMED REFUSAL ABOVE HAS
+ *  ALREADY RETURNED.
+ *
+ *  The nine `notion_*` tools answer `{ error, code }` for the failures they
+ *  named and rethrow everything else, because the import driver reads a
+ *  throw as abort-and-retry and reads a return as a refusal to reason about.
+ *  What reaches this by the time control falls through is the store itself
+ *  failing, the same Node `fs` message that carries the absolute path of the
+ *  notes folder `pageTool` keeps from the other tools. The driver only cares
+ *  that the call threw, never what the message said, so the wording changes
+ *  here and the throw-vs-return protocol does not. */
+function notionStoreFailure(error: unknown): Error {
+  return Object.assign(new Error("Brain could not read the notes folder"), {
+    code: STORE_FAILED,
+    cause: error,
+  });
+}
 
-/** Real UTC offsets run from -12:00 to +14:00. */
-const MAX_OFFSET_MINUTES = 840;
-
-/** Inbox is the one list that is a property of the record alone: no `when`,
- *  no `deadline`, not done. Every day gives the same answer, so a caller who
- *  asked only for the Inbox is not made to supply one. */
-const ANY_DAY = "1970-01-01";
-
-const insufficientScope = (scope: "brain:write" | "brain:import") => ({
-  ...text({
-    error: "This connection does not have permission for this tool.",
-    code: "insufficient_scope",
-    requiredScope: scope,
-  }),
-  isError: true,
-});
-
-function hasScope(
-  extra: { authInfo?: { scopes: string[] } },
-  scope: "brain:write" | "brain:import",
-): boolean {
-  return Boolean(extra.authInfo?.scopes.includes(scope));
+/** GETSTORE(), FOR THE NINE NOTION TOOLS ALONE.
+ *
+ *  Every one of the nine calls `getStore()` before its own try block, so a
+ *  rejection from `getStore()` itself used to skip `notionStoreFailure`
+ *  entirely and reach the agent as the store's raw Node `fs` message, naming
+ *  the notes folder's absolute path. This wraps the acquisition in the same
+ *  sentence and code the try block's own catch already answers with, so the
+ *  nine tools stay uniform: whichever step fails, the throw carries Brain's
+ *  own wording, never the store's. */
+async function acquireStoreForImport() {
+  try {
+    return await getStore();
+  } catch (error) {
+    throw notionStoreFailure(error);
+  }
 }
 
 const handler = createMcpHandler(
   (server) => {
+    // The mail tools and the task tools live in their own modules because this
+    // file is already long enough. Their scope gate is `toolScopeOf` in
+    // `tool-kit.ts`, which runs off the tool name before this handler is
+    // reached.
+    registerMailTools(server);
+    registerMailAttachmentTools(server);
+    registerMailSendTools(server);
+    registerTaskTools(server);
+
     server.tool(
       "list_tree",
       "List the full page tree of the notebook (ids, titles, icons, nesting).",
       {},
-      async () => {
+      pageTool(async () => {
         const store = await getStore();
         return text(store.getTree());
-      },
+      }),
     );
 
     server.tool(
       "connection_check",
-      "Verify this MCP connection can authenticate and read Brain without changing any pages. Reports whether write and import access are authorized, but does not exercise those permissions.",
+      "Verify this MCP connection can authenticate and read Brain without changing any pages. Reports whether write, import, and mail access are authorized, but does not exercise those permissions.",
       {},
-      async (_input, extra) => {
+      pageTool(async (_input, extra) => {
         const store = await getStore();
         const tree = store.getTree();
         const scopes = extra.authInfo?.scopes ?? [];
@@ -105,22 +153,26 @@ const handler = createMcpHandler(
             import: scopes.includes("brain:import")
               ? "authorized"
               : "not_authorized",
+            mail: scopes.includes("brain:mail") ? "authorized" : "not_authorized",
+            mailSend: scopes.includes("brain:mail:send")
+              ? "authorized"
+              : "not_authorized",
           },
           rootPageCount: tree.length,
           scopes,
           changedPages: 0,
         });
-      },
+      }),
     );
 
     server.tool(
       "read_page",
       "Read a page's markdown by id. Returns meta, markdown, and rev (needed for write_page).",
       { id: z.string().describe("page id") },
-      async ({ id }) => {
+      pageTool(async ({ id }) => {
         const store = await getStore();
         return text(redactPage(await store.readPage(id)));
-      },
+      }),
     );
 
     server.tool(
@@ -131,7 +183,7 @@ const handler = createMcpHandler(
         markdown: z.string(),
         rev: z.string().optional().describe("rev from read_page; omit to overwrite"),
       },
-      async ({ id, markdown, rev }, extra) => {
+      pageTool(async ({ id, markdown, rev }, extra) => {
         if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
         const store = await getStore();
         try {
@@ -146,11 +198,21 @@ const handler = createMcpHandler(
             ),
           );
         } catch (e) {
+          // A refusal Brain decided on, in the shape every other one answers
+          // in. It used to answer with no `isError` and no `reason`, so an
+          // agent branching on either took a conflict for a write.
           if (isRevConflict(e))
-            return text({ error: "rev conflict — re-read the page", currentRev: e.currentRev });
+            return {
+              ...text({
+                error: "rev conflict — re-read the page",
+                reason: "rev_conflict",
+                currentRev: e.currentRev,
+              }),
+              isError: true as const,
+            };
           throw e;
         }
-      },
+      }),
     );
 
     server.tool(
@@ -162,7 +224,7 @@ const handler = createMcpHandler(
         id: z.string(),
         markdown: z.string().describe("markdown to add at the end of the page"),
       },
-      async ({ id, markdown }, extra) => {
+      pageTool(async ({ id, markdown }, extra) => {
         if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
         const store = await getStore();
         return text(
@@ -174,7 +236,7 @@ const handler = createMcpHandler(
             ),
           ),
         );
-      },
+      }),
     );
 
     server.tool(
@@ -187,7 +249,7 @@ const handler = createMcpHandler(
         icon: z.string().optional().describe("emoji; auto-picked from title if omitted"),
         status: z.string().optional().describe("kanban column, for cards on a board page"),
       },
-      async ({ title, parentId, markdown, icon, status }, extra) => {
+      pageTool(async ({ title, parentId, markdown, icon, status }, extra) => {
         if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
         const store = await getStore();
         try {
@@ -211,82 +273,7 @@ const handler = createMcpHandler(
             });
           throw e;
         }
-      },
-    );
-
-    server.tool(
-      "list_tasks",
-      "List the tasks of one list. Pass the caller's own local calendar date as `today`; the server has no timezone to fall back on. Every list but `logbook` answers `{tasks}`, one record each; `logbook` answers `{entries}`, one per completion, because a repeating task has many completions and one record, and each entry carries its own `key`.",
-      {
-        list: z.enum(["inbox", "today", "upcoming", "someday", "logbook"]),
-        today: z
-          .string()
-          .optional()
-          .describe("YYYY-MM-DD, required for every list but inbox"),
-        offsetMinutes: z
-          .number()
-          .int()
-          .min(-MAX_OFFSET_MINUTES)
-          .max(MAX_OFFSET_MINUTES)
-          .optional()
-          .describe(
-            "the caller's own UTC offset in minutes, east positive, required for the logbook",
-          ),
-        category: z.string().optional(),
-      },
-      async ({ list, today, offsetMinutes, category }) => {
-        if (list !== "inbox" && today === undefined) {
-          return text({
-            error:
-              "today is required for this list. Pass the caller's local calendar date as YYYY-MM-DD",
-          });
-        }
-        if (today !== undefined && !TASK_DAY_RE.test(today)) {
-          return text({ error: "bad_today" });
-        }
-        // `doneAt` is one UTC instant and the Logbook day it falls on is the
-        // caller's, so the logbook cannot be answered without their offset.
-        if (list === "logbook" && offsetMinutes === undefined) {
-          return text({ error: "bad_offset" });
-        }
-        const store = await getStore();
-        // THE LOGBOOK IS ENTRIES, NOT RECORDS. A repeating task finished on
-        // seven days is seven completions of ONE record, so a list of records
-        // answers with seven objects carrying the same `id`. Each entry is
-        // handed over with its own stable `key` instead.
-        if (list === "logbook") {
-          return text({
-            entries: store.listLogbook(today ?? ANY_DAY, {
-              offsetMinutes: offsetMinutes as number,
-              ...(category !== undefined ? { category } : {}),
-            }),
-          });
-        }
-        return text({
-          tasks: store.listTasks(today ?? ANY_DAY, {
-            list,
-            ...(offsetMinutes !== undefined ? { offsetMinutes } : {}),
-            ...(category !== undefined ? { category } : {}),
-          }),
-        });
-      },
-    );
-
-    server.tool(
-      "get_task",
-      "Read one task record, including whether its note line was removed and which page it is linked to.",
-      { id: z.string() },
-      async ({ id }) => {
-        if (!TASK_ID_RE.test(id)) return text({ error: "bad_id" });
-        const store = await getStore();
-        const task = store.getTask(id);
-        if (!task) return text({ error: "not_found" });
-        // A trashed page's tasks are hidden from every list, so reading one by
-        // id answers the same way rather than handing back a row the surface
-        // would never show.
-        if (store.taskPageTrashed(id)) return text({ error: "page_trashed" });
-        return text({ task });
-      },
+      }),
     );
 
     server.registerTool(
@@ -297,7 +284,7 @@ const handler = createMcpHandler(
       },
       async ({ notionId, reservationToken }, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text({
             page: await store.inspectNotionPage(notionId, reservationToken),
@@ -305,7 +292,7 @@ const handler = createMcpHandler(
         } catch (error) {
           if (isNotionImportConflict(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -318,7 +305,7 @@ const handler = createMcpHandler(
       },
       async ({ pageId }, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text({
             candidate: await store.inspectNotionCandidate(pageId),
@@ -327,7 +314,7 @@ const handler = createMcpHandler(
           if (isNotFound(error)) return text({ candidate: null });
           if (isNotionImportConflict(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -340,7 +327,7 @@ const handler = createMcpHandler(
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text(await store.adoptNotionImport(input));
         } catch (error) {
@@ -354,7 +341,7 @@ const handler = createMcpHandler(
             return text({ error: "Brain page not found", code: "not_found" });
           if (isNotionImportConflict(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -367,7 +354,7 @@ const handler = createMcpHandler(
       },
       async ({ notionId, sourceHash, parentId, beforeId, ...rest }, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text(
             await store.reserveNotionImport({
@@ -396,7 +383,7 @@ const handler = createMcpHandler(
           }
           if (isNotionImportConflict(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -417,7 +404,7 @@ const handler = createMcpHandler(
         dataBase64,
       }, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         const releaseUpload = acquireNotionUploadSlot();
         if (!releaseUpload) {
           return text({
@@ -444,7 +431,7 @@ const handler = createMcpHandler(
         } catch (error) {
           if (isNotionImportConflict(error) || isAttachmentValidation(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         } finally {
           releaseUpload();
         }
@@ -459,13 +446,13 @@ const handler = createMcpHandler(
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text(await store.verifyNotionAttachment(input));
         } catch (error) {
           if (isNotionImportConflict(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -478,7 +465,7 @@ const handler = createMcpHandler(
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text(await store.verifyFinalizedNotionAttachment(input));
         } catch (error) {
@@ -486,7 +473,7 @@ const handler = createMcpHandler(
             return text({ error: "notion page not found", code: "not_found" });
           if (isNotionImportConflict(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -499,7 +486,7 @@ const handler = createMcpHandler(
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text(await store.finalizeNotionImport(input));
         } catch (error) {
@@ -509,7 +496,7 @@ const handler = createMcpHandler(
             return text({ error: error.message, code: error.code });
           if (isAttachmentValidation(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -522,7 +509,7 @@ const handler = createMcpHandler(
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
-        const store = await getStore();
+        const store = await acquireStoreForImport();
         try {
           return text(await store.abortNotionImport(input));
         } catch (error) {
@@ -530,7 +517,7 @@ const handler = createMcpHandler(
             return text({ error: "notion page not reserved", code: "not_found" });
           if (isNotionImportConflict(error))
             return text({ error: error.message, code: error.code });
-          throw error;
+          throw notionStoreFailure(error);
         }
       },
     );
@@ -547,14 +534,14 @@ const handler = createMcpHandler(
         view: z.enum(["board", "doc"]).optional().describe("'board' or 'doc'"),
         public: z.boolean().optional(),
       },
-      async ({ id, view, public: pub, ...rest }, extra) => {
+      pageTool(async ({ id, view, public: pub, ...rest }, extra) => {
         if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
         if (pub === true) {
           return {
             ...text({
               error:
                 "public sharing must be enabled by the owner after scope disclosure",
-              code: "share_disclosure_required",
+              reason: "share_disclosure_required",
             }),
             isError: true,
           };
@@ -568,7 +555,7 @@ const handler = createMcpHandler(
             by: "claude",
           })),
         );
-      },
+      }),
     );
 
     server.tool(
@@ -589,7 +576,7 @@ const handler = createMcpHandler(
         newParentId: z.string().nullable().optional(),
         beforeId: z.string().nullable().optional(),
       },
-      async ({ id, newParentId, beforeId }, extra) => {
+      pageTool(async ({ id, newParentId, beforeId }, extra) => {
         if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
         const store = await getStore();
         const moved = await store.movePageWithBodyReport(
@@ -603,26 +590,26 @@ const handler = createMcpHandler(
           ...redactPageMeta(moved.meta),
           unlinkedFrom: moved.unlinkedFrom,
         });
-      },
+      }),
     );
 
     server.tool(
       "delete_page",
       "Delete a page and its whole subtree. Soft-delete — recoverable from Trash.",
       { id: z.string() },
-      async ({ id }, extra) => {
+      pageTool(async ({ id }, extra) => {
         if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
         const store = await getStore();
         await store.deletePage(id);
         return text({ ok: true });
-      },
+      }),
     );
 
     server.tool(
       "search",
       "Full-text search across all pages. Returns matching pages with snippets.",
       { query: z.string() },
-      async ({ query }) => text(await searchNotes(query)),
+      pageTool(async ({ query }) => text(await searchNotes(query))),
     );
   },
   {
@@ -637,10 +624,13 @@ const handler = createMcpHandler(
 
 const authenticatedHandler = withMcpAuth(
   async (request) => {
-    const requiredScope = await requiredToolScope(request);
+    const requiredScopes = await requiredToolScopes(request);
     const auth = (request as Request & { auth?: { scopes: string[] } }).auth;
-    if (requiredScope && !auth?.scopes.includes(requiredScope)) {
-      return mcpInsufficientScopeResponse(requiredScope);
+    const missingScope = requiredScopes.find(
+      (scope) => !auth?.scopes.includes(scope),
+    );
+    if (missingScope) {
+      return mcpInsufficientScopeResponse(missingScope);
     }
     return handler(request);
   },
@@ -660,16 +650,30 @@ async function routeHandler(request: Request): Promise<Response> {
   );
 }
 
-async function requiredToolScope(request: Request): Promise<McpScope | null> {
-  if (request.method !== "POST") return null;
+/** Every scope a batch's tool calls need, not only the last one named. A
+ *  request body is either one JSON-RPC message or an array of them, and a
+ *  grant must hold every scope any call in the batch needs before the batch
+ *  runs at all.
+ *
+ *  A set over all of them, with no early return. Import used to return as
+ *  soon as it was seen, on the reasoning that it is the widest scope in play,
+ *  which is true of the scopes it closes onto and false of the two mail ones:
+ *  a grant may hold import without holding either. So a batch mixing a
+ *  `notion_*` call with a mail call was pre-gated on `brain:import` alone,
+ *  and the mail call reached its own handler to refuse itself in body. No
+ *  access was given away, because every scoped tool carries its own
+ *  `hasScope`, but the property this gate exists for, refused before the
+ *  handler, was not held for that one shape. */
+async function requiredToolScopes(request: Request): Promise<McpScope[]> {
+  if (request.method !== "POST") return [];
   let payload: unknown;
   try {
     payload = await request.clone().json();
   } catch {
-    return null;
+    return [];
   }
   const messages = Array.isArray(payload) ? payload : [payload];
-  let required: McpScope | null = null;
+  const required: McpScope[] = [];
   for (const message of messages) {
     if (!message || typeof message !== "object") continue;
     const value = message as {
@@ -679,19 +683,10 @@ async function requiredToolScope(request: Request): Promise<McpScope | null> {
     if (value.method !== "tools/call" || typeof value.params?.name !== "string") {
       continue;
     }
-    if (value.params.name.startsWith("notion_")) return "brain:import";
-    if (WRITE_TOOLS.has(value.params.name)) required = "brain:write";
+    const scope = toolScopeOf(value.params.name);
+    if (scope && !required.includes(scope)) required.push(scope);
   }
   return required;
 }
-
-const WRITE_TOOLS = new Set([
-  "write_page",
-  "append_page",
-  "create_page",
-  "update_meta",
-  "move_page",
-  "delete_page",
-]);
 
 export { routeHandler as GET, routeHandler as POST, routeHandler as DELETE };

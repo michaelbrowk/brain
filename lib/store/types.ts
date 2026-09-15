@@ -168,6 +168,21 @@ export interface SavedAttachment {
   type: string;
 }
 
+/** What `Store.readAttachment` found. `missing` covers both a name the notes
+ *  folder cannot address and a name it does not hold, because a caller can
+ *  act on neither: the file is not there to send. `too_large` is the caller's
+ *  own budget, answered off the file's size before a buffer that size is
+ *  allocated. */
+export type ReadAttachmentResult =
+  | {
+      readonly kind: "file";
+      readonly name: string;
+      readonly mimeType: string;
+      readonly data: Uint8Array;
+    }
+  | { readonly kind: "missing" }
+  | { readonly kind: "too_large" };
+
 export interface NotionImportStatus {
   id: string;
   title: string;

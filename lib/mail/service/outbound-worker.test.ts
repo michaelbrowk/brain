@@ -468,7 +468,12 @@ function submission(
 }
 
 function sent(id: string): MailSendOperation {
-  return Object.freeze({ apiVersion: 1, operationId: id, status: "sent" });
+  return Object.freeze({
+    apiVersion: 1,
+    operationId: id,
+    status: "sent",
+    threadId: null,
+  });
 }
 
 function operationId(index: number): string {

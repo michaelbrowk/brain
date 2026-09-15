@@ -28,6 +28,7 @@ import {
 } from "./git";
 import { emitStore } from "./events";
 import {
+  attachmentMimeTypeForName,
   canonicalAttachmentMimeType,
   canonicalAttachmentExtension,
   localAttachmentName,
@@ -94,6 +95,7 @@ import {
   type Page,
   type PageMeta,
   type MetadataExpected,
+  type ReadAttachmentResult,
   type ReserveNotionImportInput,
   type ReserveNotionImportResult,
   type SavedAttachment,
@@ -4408,21 +4410,93 @@ export class Store {
     if (localAttachmentName(`/_attachments-v2/${name}`) !== name) {
       throw new Error("portable export attachment name is invalid");
     }
+    const read = await this.readAttachmentFile(name, MAX_ATTACHMENT_BYTES);
+    if (read.ok) return read.data;
+    if (read.why === "changed") {
+      throw new Error(`portable export attachment changed while reading: ${name}`);
+    }
+    throw new Error(`portable export attachment is missing or too large: ${name}`);
+  }
+
+  /** One attachment's bytes by its own name, for a caller that has already
+   *  decided the page naming it may hand the file over. A read, so it takes
+   *  no `mutate()`: the writer's queue is for writes.
+   *
+   *  The name is matched against the same pattern the media route uses, and
+   *  the joined path goes through `assertInRoot`, so a caller cannot hand in
+   *  a traversal and cannot reach outside the attachments directory. A name
+   *  this folder cannot address reads as missing rather than as an error,
+   *  because the caller can act on neither.
+   *
+   *  `maxBytes` is the caller's own remaining budget. A file above it is
+   *  answered off its size, before a buffer that size is allocated, so a
+   *  caller collecting several files never holds more than the total it
+   *  allows. */
+  async readAttachment(
+    name: string,
+    maxBytes: number,
+  ): Promise<ReadAttachmentResult> {
+    if (localAttachmentName(`/_attachments-v2/${name}`) !== name) {
+      return { kind: "missing" };
+    }
+    const budget =
+      Number.isSafeInteger(maxBytes) && maxBytes > 0
+        ? Math.min(maxBytes, MAX_ATTACHMENT_BYTES)
+        : 0;
+    const read = await this.readAttachmentFile(name, budget);
+    if (read.ok) {
+      return {
+        kind: "file",
+        name,
+        mimeType: attachmentMimeTypeForName(name),
+        data: read.data,
+      };
+    }
+    if (read.why === "changed") {
+      throw new Error(`attachment changed while reading: ${name}`);
+    }
+    return { kind: read.why };
+  }
+
+  /** The bytes of one file in the attachments directory: opened without
+   *  following its final component, read whole against a caller's ceiling,
+   *  and its identity rechecked afterwards so a path swap cannot smuggle
+   *  different bytes past the size that was measured. One copy of that dance
+   *  for the portable export and the read leaf above, which differ only in
+   *  how they word what went wrong. Both have matched the name first. */
+  private async readAttachmentFile(
+    name: string,
+    maxBytes: number,
+  ): Promise<
+    | { ok: true; data: Uint8Array }
+    | { ok: false; why: "missing" | "too_large" | "changed" }
+  > {
     const directory = assertInRoot(
       this.root,
       path.join(/* turbopackIgnore: true */ this.root, "_attachments"),
     );
     const file = assertInRoot(directory, path.join(directory, name));
-    const directoryIdentity = await assertRealDirectory(directory);
+    // A notes folder nothing has been uploaded into holds no attachments
+    // directory at all, which is one more way for the file not to be there.
+    const directoryIdentity = await assertRealDirectory(directory).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      },
+    );
+    if (directoryIdentity === null) return { ok: false, why: "missing" };
     const opened = await openRegularFileNoFollow(file);
     if (
       !opened ||
       !Number.isSafeInteger(opened.stat.size) ||
-      opened.stat.size < 0 ||
-      opened.stat.size > MAX_ATTACHMENT_BYTES
+      opened.stat.size < 0
     ) {
       await opened?.handle.close().catch(() => undefined);
-      throw new Error(`portable export attachment is missing or too large: ${name}`);
+      return { ok: false, why: "missing" };
+    }
+    if (opened.stat.size > maxBytes) {
+      await opened.handle.close().catch(() => undefined);
+      return { ok: false, why: "too_large" };
     }
     try {
       const bytes = Buffer.alloc(opened.stat.size);
@@ -4434,9 +4508,7 @@ export class Store {
           bytes.byteLength - offset,
           offset,
         );
-        if (bytesRead === 0) {
-          throw new Error(`portable export attachment changed while reading: ${name}`);
-        }
+        if (bytesRead === 0) return { ok: false, why: "changed" };
         offset += bytesRead;
       }
       const probe = Buffer.alloc(1);
@@ -4447,10 +4519,10 @@ export class Store {
         !sameFileVersion(opened.stat, final) ||
         !(await pathStillReferencesRegularFile(file, opened.stat))
       ) {
-        throw new Error(`portable export attachment changed while reading: ${name}`);
+        return { ok: false, why: "changed" };
       }
       await assertRealDirectory(directory, directoryIdentity);
-      return new Uint8Array(bytes);
+      return { ok: true, data: new Uint8Array(bytes) };
     } finally {
       await opened.handle.close();
     }

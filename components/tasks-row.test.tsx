@@ -1402,15 +1402,54 @@ describe("the fold on a press outside", () => {
   };
 
   it("folds on a pointer press that lands outside the row", async () => {
+    // A PRESS IS A POINTER THAT GOES DOWN AND COMES BACK UP IN THE SAME PLACE.
+    // The decision is taken on the way down, where a layer of the row's own is
+    // still standing to be seen, and it is spent on the lift.
     await renderRows([task("a", { when: TODAY })], { expanded: true });
     calls.expand.mockClear();
     const away = elsewhere();
 
     await act(async () => {
-      away.dispatchEvent(pointer("pointerdown"));
+      away.dispatchEvent(pointer("pointerdown", { clientX: 40, clientY: 400 }));
+      away.dispatchEvent(pointer("pointerup", { clientX: 40, clientY: 400 }));
     });
 
     expect(calls.expand).toHaveBeenCalledWith(null);
+    away.remove();
+  });
+
+  it("leaves the row standing when the press outside travels into a scroll", async () => {
+    // `pointerdown` IS THE FIRST EVENT OF A TOUCH SCROLL. Folding on it meant
+    // a finger dragged down the list took the row with it, on the one device
+    // where scrolling is how a reader gets anywhere.
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    calls.expand.mockClear();
+    const away = elsewhere();
+
+    await act(async () => {
+      away.dispatchEvent(pointer("pointerdown", { clientX: 40, clientY: 400 }));
+      away.dispatchEvent(pointer("pointermove", { clientX: 42, clientY: 340 }));
+      away.dispatchEvent(pointer("pointerup", { clientX: 42, clientY: 340 }));
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    away.remove();
+  });
+
+  it("leaves the row standing when the browser takes the gesture for its scroll", async () => {
+    // Chrome hands the finger to the compositor and tells the page so with
+    // `pointercancel`, which can arrive before the travel does.
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    calls.expand.mockClear();
+    const away = elsewhere();
+
+    await act(async () => {
+      away.dispatchEvent(pointer("pointerdown", { clientX: 40, clientY: 400 }));
+      away.dispatchEvent(pointer("pointercancel", { clientX: 40, clientY: 400 }));
+      away.dispatchEvent(pointer("pointerup", { clientX: 40, clientY: 400 }));
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
     away.remove();
   });
 
@@ -1425,6 +1464,22 @@ describe("the fold on a press outside", () => {
 
     expect(calls.expand).toHaveBeenCalledWith(null);
     away.remove();
+  });
+
+  it("reads a focus that falls to the body as nowhere, not as somewhere else", async () => {
+    // A LAYER CLOSING ON ESCAPE DROPS THE FOCUS ON THE BODY on its way back to
+    // the chip that opened it, and a row that folded there took the reader's
+    // row away on the key that was asked to close the panel. One dismissal per
+    // key, the way there is one per press: the panel goes, and the row is the
+    // next Escape.
+    await renderRows([task("a", { when: TODAY })], { expanded: true });
+    calls.expand.mockClear();
+
+    await act(async () => {
+      document.body.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
   });
 
   it("leaves a press inside the row to the row's own handler", async () => {
@@ -1455,6 +1510,7 @@ describe("the fold on a press outside", () => {
 
     await act(async () => {
       away.dispatchEvent(pointer("pointerdown"));
+      away.dispatchEvent(pointer("pointerup"));
     });
 
     expect(calls.expand).not.toHaveBeenCalled();
@@ -1468,6 +1524,7 @@ describe("the fold on a press outside", () => {
 
     await act(async () => {
       away.dispatchEvent(pointer("pointerdown"));
+      away.dispatchEvent(pointer("pointerup"));
       away.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
     });
 
@@ -1545,6 +1602,42 @@ describe("the quiet focus (D5)", () => {
     await renderRows([task("b", { when: TODAY })], { expanded: true, selected: true });
 
     expect(document.activeElement).toBe(chip);
+  });
+
+  it("takes the focus back when the fold pulls the chips out from under it", async () => {
+    // ESCAPE WITH THE FOCUS ON A CHIP. The row folds, the chips go, and the
+    // focus goes with them: the column stopped holding it, so the fill went
+    // out with nothing pressed, and under a mouse there is no ring either. The
+    // reader was left with neither, on a row the cursor is still standing on.
+    await renderRows([task("a", { when: TODAY })], { expanded: true, selected: true });
+    const chip = document.querySelector<HTMLElement>(".chip");
+    chip?.focus();
+    expect(document.activeElement).toBe(chip);
+
+    await renderRows([task("a", { when: TODAY })], { selected: true });
+
+    expect(document.activeElement).toBe(row());
+  });
+
+  it("leaves the focus where a press outside put it", async () => {
+    // The other half of the same rule: what a press takes away is the paint,
+    // and a row that grabbed the focus back would paint itself again over the
+    // gesture that was asked to end it.
+    await renderRows([task("a", { when: TODAY })], { expanded: true, selected: true });
+    const chip = document.querySelector<HTMLElement>(".chip");
+    chip?.focus();
+    const away = document.createElement("button");
+    document.body.append(away);
+
+    await act(async () => {
+      away.dispatchEvent(pointer("pointerdown", { clientX: 40, clientY: 400 }));
+      away.dispatchEvent(pointer("pointerup", { clientX: 40, clientY: 400 }));
+    });
+    expect(calls.expand).toHaveBeenCalledWith(null);
+    await renderRows([task("a", { when: TODAY })], { selected: true });
+
+    expect(document.activeElement).not.toBe(row());
+    away.remove();
   });
 
   it("wears one ring and not two, at the cursor's own inset offset", () => {

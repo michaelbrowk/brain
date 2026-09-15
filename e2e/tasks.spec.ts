@@ -624,4 +624,61 @@ test("@release the cursor's capsule is drawn only while the column holds the foc
   await page.waitForTimeout(400);
   expect(await tinted()).toBe(true);
   expect(await cursorHeld()).toBe(1);
+
+  // A FOLD THAT STARTS FROM A CHIP KEEPS THE PAINT. Escape out of the picker
+  // puts the focus back on the chip that opened it, and the Escape after it
+  // folds the row: the chips go, and the focus they were holding would fall to
+  // the body with nothing pressed, leaving the row with neither fill nor ring.
+  // It comes back to the row, which is a focus holder.
+  await row.getByText("Cursor capsule", { exact: true }).click();
+  await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(1);
+  await row.getByRole("button", { name: /^When:/ }).click();
+  await expect(page.getByRole("dialog", { name: /^When:/ })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog", { name: /^When:/ })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(0);
+  await page.waitForTimeout(400);
+  expect(await tinted()).toBe(true);
+  expect(
+    await row.evaluate(
+      (node) => node.querySelector(".brain-task-row") === document.activeElement,
+    ),
+  ).toBe(true);
+});
+
+test("@release @mobile a touch scroll over the list leaves the expanded row standing", async ({
+  page,
+}) => {
+  // `pointerdown` is the first event of a touch scroll, so a fold spent on the
+  // way down folded the row every time a finger dragged past it: on the one
+  // device where scrolling is how a reader gets anywhere. A press is a pointer
+  // that goes down and comes back up in the same place, and a drag is not one.
+  test.setTimeout(60_000);
+  await login(page);
+  const id = await createTask(page, "Reads while scrolling");
+  await page.goto("/tasks");
+  const row = page.locator(`[data-task-id="${id}"]`);
+  await expect(row).toBeVisible({ timeout: 20_000 });
+  await row.getByText("Reads while scrolling", { exact: true }).tap();
+  const capsule = row.locator(".brain-task-row[data-expanded]");
+  await expect(capsule).toHaveCount(1);
+  await page.waitForTimeout(500);
+
+  // A real finger, through the browser's own input pipeline: a dispatched
+  // event would prove nothing about the pointer events Chrome makes from it.
+  const touch = await page.context().newCDPSession(page);
+  const at = (y: number) => ({ touchPoints: [{ x: 195, y }] });
+  await touch.send("Input.dispatchTouchEvent", { type: "touchStart", ...at(700) });
+  for (const y of [690, 660, 620, 580, 540]) {
+    await touch.send("Input.dispatchTouchEvent", { type: "touchMove", ...at(y) });
+  }
+  await touch.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await page.waitForTimeout(400);
+
+  await expect(capsule).toHaveCount(1);
+
+  // And a tap that stays where it landed still folds it.
+  await page.touchscreen.tap(195, 700);
+  await expect(capsule).toHaveCount(0);
 });

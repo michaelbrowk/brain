@@ -106,6 +106,13 @@ const COMMIT_VELOCITY = 800;
 /** Past the column's own edge; the fold takes the height from there. */
 const EXIT_PX = 420;
 
+/** How far a press outside the row may travel and still be a press. A finger
+ *  scrolling the list starts with the same `pointerdown` a tap does, so a fold
+ *  spent on the way down folded the row every time the reader scrolled past
+ *  it. Eight is the travel a browser itself allows before it calls a touch a
+ *  drag. */
+const PRESS_SLOP_PX = 8;
+
 export type FoldDirection = "up" | "down";
 
 export interface TaskRowHandle {
@@ -403,8 +410,12 @@ export function TasksRow({
     task,
   });
 
-  useFoldOnOutside({ expanded, element: wrapRef, onExpand });
-  useCursorFocus({ selected, element: rowRef });
+  // A FOLD THE READER PRESSED FOR LEAVES THE FOCUS WHERE THE PRESS PUT IT, and
+  // every other fold hands it back to the row. The two hooks below are the two
+  // ends of that one sentence, so the fold says which kind it was.
+  const foldedAwayRef = useRef(false);
+  useFoldOnOutside({ expanded, element: wrapRef, onExpand, foldedAwayRef });
+  useCursorFocus({ selected, expanded, element: rowRef, foldedAwayRef });
 
   const swipeHandlers = useSwipe({
     x,
@@ -918,36 +929,99 @@ function WhenChip({
  *  the panel out from under that write. One dismissal per press, and the row is
  *  the next one.
  *
- *  `pointerdown` and not `click`, because the layer above reads the same event
- *  and a fold that waited for the click would land after the panel had already
- *  answered it. Capture, so a handler that stops propagation on its way up
- *  cannot take the row's own answer with it. */
+ *  THE QUESTION IS ASKED ON THE WAY DOWN AND ANSWERED ON THE LIFT. A press
+ *  that dismisses a layer belongs to that layer, and the layer reads
+ *  `pointerdown`: by the click the flag is already gone and the row would fold
+ *  on the gesture that closed the panel. So the row decides at `pointerdown`,
+ *  while the flag is still there to be read, and spends the decision at
+ *  `pointerup`.
+ *
+ *  It has to wait, because `pointerdown` IS THE FIRST EVENT OF A TOUCH SCROLL.
+ *  A finger dragged down the list to read what is under it folded the row on
+ *  the way past, on the one device where scrolling is how a reader gets
+ *  anywhere. A gesture that travels more than `PRESS_SLOP_PX`, or that the
+ *  browser takes for its own scroll (`pointercancel`), is not a press and ends
+ *  nothing. A wheel never reaches here at all: it fires no pointer event.
+ *
+ *  Capture, so a handler that stops propagation on its way up cannot take the
+ *  row's own answer with it. */
 function useFoldOnOutside({
   expanded,
   element,
   onExpand,
+  foldedAwayRef,
 }: {
   expanded: boolean;
   element: React.RefObject<HTMLLIElement | null>;
   onExpand: (id: string | null) => void;
+  /** Raised for the fold this hook asks for, and read by `useCursorFocus`: a
+   *  reader who pressed somewhere else has taken the focus with them. */
+  foldedAwayRef: React.RefObject<boolean>;
 }) {
   useEffect(() => {
     if (!expanded) return;
-    const away = (event: Event) => {
-      const row = element.current;
-      const target = event.target;
-      if (row === null || !(target instanceof Node)) return;
-      if (row.contains(target)) return;
-      if (row.querySelector("[data-state='open']") !== null) return;
+    // HOW THIS EXPANSION ENDS, for whoever asks after it has. A new expansion
+    // is a new fold to come, so the answer starts blank here rather than being
+    // consumed by the first reader of it.
+    foldedAwayRef.current = false;
+    const fold = () => {
+      foldedAwayRef.current = true;
       onExpand(null);
     };
-    document.addEventListener("pointerdown", away, true);
-    document.addEventListener("focusin", away, true);
-    return () => {
-      document.removeEventListener("pointerdown", away, true);
-      document.removeEventListener("focusin", away, true);
+    const outside = (target: EventTarget | null) => {
+      const row = element.current;
+      if (row === null || !(target instanceof Node)) return false;
+      if (row.contains(target)) return false;
+      return row.querySelector("[data-state='open']") === null;
     };
-  }, [element, expanded, onExpand]);
+
+    /** Where the pointer went down, while it is still a press. */
+    let press: { id: number; x: number; y: number } | null = null;
+    const travelled = (event: PointerEvent) =>
+      press === null ||
+      event.pointerId !== press.id ||
+      Math.hypot(event.clientX - press.x, event.clientY - press.y) > PRESS_SLOP_PX;
+
+    const down = (event: Event) => {
+      const pointer = event as PointerEvent;
+      press = outside(event.target)
+        ? { id: pointer.pointerId, x: pointer.clientX, y: pointer.clientY }
+        : null;
+    };
+    const move = (event: Event) => {
+      if (press !== null && travelled(event as PointerEvent)) press = null;
+    };
+    const up = (event: Event) => {
+      const held = press !== null && !travelled(event as PointerEvent);
+      press = null;
+      if (held) fold();
+    };
+    const cancel = () => {
+      press = null;
+    };
+    const leave = (event: Event) => {
+      // FOCUS ON THE BODY IS THE ABSENCE OF FOCUS, not a place the reader
+      // went. A layer closing on Escape drops it there on its way back to the
+      // chip that opened it, and a row that folded on that took the reader's
+      // row away with the key that was asked to close the panel.
+      const target = event.target;
+      if (target === document.body || target === document.documentElement) return;
+      if (outside(target)) fold();
+    };
+
+    document.addEventListener("pointerdown", down, true);
+    document.addEventListener("pointermove", move, true);
+    document.addEventListener("pointerup", up, true);
+    document.addEventListener("pointercancel", cancel, true);
+    document.addEventListener("focusin", leave, true);
+    return () => {
+      document.removeEventListener("pointerdown", down, true);
+      document.removeEventListener("pointermove", move, true);
+      document.removeEventListener("pointerup", up, true);
+      document.removeEventListener("pointercancel", cancel, true);
+      document.removeEventListener("focusin", leave, true);
+    };
+  }, [element, expanded, foldedAwayRef, onExpand]);
 }
 
 /** THE CURSOR HOLDS THE FOCUS IT STANDS ON.
@@ -965,15 +1039,31 @@ function useFoldOnOutside({
  *  menu open under it. The row is holding the focus either way, so there is
  *  nothing here to take.
  *
+ *  AND IT TAKES IT BACK WHEN THE FOLD PULLS THE CHIPS OUT FROM UNDER IT.
+ *  Escape with the focus on a chip folded the row, the chip went, and the
+ *  focus fell to the body: the column stopped holding it, so the cursor's fill
+ *  went out with nothing pressed, and under a mouse there is no ring to stand
+ *  in for it. The reader was left with neither, on a row the cursor had not
+ *  moved off. The row is a focus holder, so it holds it.
+ *
+ *  Not when the reader pressed somewhere else. That fold is the one gesture
+ *  whose whole point is that the paint goes, and a row that grabbed the focus
+ *  back would repaint itself over it. `foldedAwayRef` is what the press says so
+ *  with.
+ *
  *  `preventScroll`, because the column already scrolls the row it was ASKED to
  *  show (`useNamedTask` in `components/tasks-surface.tsx`) and the cursor moving
  *  under the arrows scrolled nothing before this. */
 function useCursorFocus({
   selected,
+  expanded,
   element,
+  foldedAwayRef,
 }: {
   selected: boolean;
+  expanded: boolean;
   element: React.RefObject<HTMLDivElement | null>;
+  foldedAwayRef: React.RefObject<boolean>;
 }) {
   useEffect(() => {
     if (!selected) return;
@@ -981,6 +1071,50 @@ function useCursorFocus({
     if (row === null || row.contains(document.activeElement)) return;
     row.focus({ preventScroll: true });
   }, [element, selected]);
+
+  // THE FOLD'S OWN MOMENT. The chips are still in the document while their exit
+  // plays, so the focus is either on one of them or already on the body it
+  // fell to. Anywhere else is a reader who has gone somewhere else, and that
+  // focus is theirs.
+  useEffect(() => {
+    if (expanded || !selected || foldedAwayRef.current) return;
+    const row = element.current;
+    if (row === null) return;
+    const holder = document.activeElement;
+    const lost = holder === null || holder === document.body || row.contains(holder);
+    if (!lost || holder === row) return;
+    row.focus({ preventScroll: true });
+  }, [element, expanded, foldedAwayRef, selected]);
+
+  // AND THE MOMENT A PANEL THAT OUTLIVED THE FOLD LETS GO. Escape with the
+  // calendar up closes the panel and folds the row on the one key, and the
+  // panel is portalled and keeps its node for the exit keyframe: the focus is
+  // still on a day cell when the fold commits and falls to nothing a moment
+  // later, which Chrome reports as a `focusout` with nowhere to go. A press
+  // outside never looks like this, since the press puts the focus on what it
+  // landed on. Read on the next frame, off the row's own attribute, so a
+  // second reader of the focus wins it and an open row keeps its panel.
+  useEffect(() => {
+    if (!selected) return;
+    let frame = 0;
+    const fell = (event: Event) => {
+      if ((event as FocusEvent).relatedTarget !== null) return;
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        const row = element.current;
+        if (row === null || !row.isConnected) return;
+        if (row.hasAttribute("data-expanded") || foldedAwayRef.current) return;
+        const holder = document.activeElement;
+        if (holder !== null && holder !== document.body) return;
+        row.focus({ preventScroll: true });
+      });
+    };
+    document.addEventListener("focusout", fell, true);
+    return () => {
+      document.removeEventListener("focusout", fell, true);
+      cancelAnimationFrame(frame);
+    };
+  }, [element, foldedAwayRef, selected]);
 }
 
 /** THE ROW'S KEYS ARE UNMODIFIED LETTERS, not browser chords.

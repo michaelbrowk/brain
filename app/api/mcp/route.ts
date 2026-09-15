@@ -37,13 +37,10 @@ import {
   withMcpChallengeScopes,
 } from "@/lib/oauth/http";
 import { verifyMcpBearerToken } from "@/lib/oauth/server";
+import { hasScope, insufficientScope, text, toolScopeOf } from "./tool-kit";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
-
-const text = (data: unknown) => ({
-  content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
-});
 
 const TASK_DAY_RE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -54,22 +51,6 @@ const MAX_OFFSET_MINUTES = 840;
  *  no `deadline`, not done. Every day gives the same answer, so a caller who
  *  asked only for the Inbox is not made to supply one. */
 const ANY_DAY = "1970-01-01";
-
-const insufficientScope = (scope: "brain:write" | "brain:import") => ({
-  ...text({
-    error: "This connection does not have permission for this tool.",
-    code: "insufficient_scope",
-    requiredScope: scope,
-  }),
-  isError: true,
-});
-
-function hasScope(
-  extra: { authInfo?: { scopes: string[] } },
-  scope: "brain:write" | "brain:import",
-): boolean {
-  return Boolean(extra.authInfo?.scopes.includes(scope));
-}
 
 const handler = createMcpHandler(
   (server) => {
@@ -679,19 +660,11 @@ async function requiredToolScope(request: Request): Promise<McpScope | null> {
     if (value.method !== "tools/call" || typeof value.params?.name !== "string") {
       continue;
     }
-    if (value.params.name.startsWith("notion_")) return "brain:import";
-    if (WRITE_TOOLS.has(value.params.name)) required = "brain:write";
+    const scope = toolScopeOf(value.params.name);
+    if (scope === "brain:import") return scope;
+    if (scope) required = scope;
   }
   return required;
 }
-
-const WRITE_TOOLS = new Set([
-  "write_page",
-  "append_page",
-  "create_page",
-  "update_meta",
-  "move_page",
-  "delete_page",
-]);
 
 export { routeHandler as GET, routeHandler as POST, routeHandler as DELETE };

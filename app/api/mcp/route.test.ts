@@ -231,7 +231,7 @@ describe("Notion MCP route validation", () => {
 
     expect(response.status).toBe(401);
     expect(response.headers.get("WWW-Authenticate")).toContain(
-      'scope="brain:read brain:write brain:import"',
+      'scope="brain:read brain:write brain:import brain:mail brain:mail:send"',
     );
     expect(mocks.getStore).not.toHaveBeenCalled();
   });

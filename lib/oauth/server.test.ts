@@ -203,7 +203,13 @@ describe("Brain MCP OAuth server", () => {
     await expect(verifyMcpBearerToken(oldToken.access_token)).resolves.toBeUndefined();
     await expect(verifyMcpBearerToken(upgradedToken.access_token)).resolves.toMatchObject({
       clientId: client.id,
-      scopes: ["brain:read", "brain:write", "brain:import"],
+      scopes: [
+        "brain:read",
+        "brain:write",
+        "brain:import",
+        "brain:mail",
+        "brain:mail:send",
+      ],
     });
   });
 
@@ -230,7 +236,13 @@ describe("Brain MCP OAuth server", () => {
     expect(token.scope).toBe("brain:read brain:write");
     await expect(verifyMcpBearerToken(token.access_token)).resolves.toMatchObject({
       clientId: client.id,
-      scopes: ["brain:read", "brain:write", "brain:import"],
+      scopes: [
+        "brain:read",
+        "brain:write",
+        "brain:import",
+        "brain:mail",
+        "brain:mail:send",
+      ],
     });
   });
 
@@ -451,7 +463,13 @@ describe("Brain MCP OAuth server", () => {
     await expect(verifyMcpBearerToken(token.access_token)).resolves.toBeUndefined();
     await expect(verifyMcpBearerToken("legacy-machine-token")).resolves.toMatchObject({
       clientId: "brain-legacy-bearer",
-      scopes: ["brain:read", "brain:write", "brain:import"],
+      scopes: [
+        "brain:read",
+        "brain:write",
+        "brain:import",
+        "brain:mail",
+        "brain:mail:send",
+      ],
     });
   });
 

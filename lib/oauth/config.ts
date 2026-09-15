@@ -1,19 +1,26 @@
 const DEFAULT_PUBLIC_ORIGIN = "https://brain.example.com";
 
+// Order is the output order of `normalizeScopes`, which filters this list, so
+// a name appended here appears last in every stored grant and every challenge.
 export const MCP_SCOPES = [
   "brain:read",
   "brain:write",
   "brain:import",
+  "brain:mail",
+  "brain:mail:send",
 ] as const;
 
 // Advertise every MCP capability during connection and reauthorization.
 // Import remains explicit on the consent screen because it can create many
 // pages/assets; omitting it here traps clients that restart OAuth after a
-// tool-specific insufficient-scope response in a read/write-only loop.
+// tool-specific insufficient-scope response in a read/write-only loop. The two
+// mail scopes are here for the same reason.
 export const MCP_CONNECTION_SCOPES = [
   "brain:read",
   "brain:write",
   "brain:import",
+  "brain:mail",
+  "brain:mail:send",
 ] as const;
 
 export type McpScope = (typeof MCP_SCOPES)[number];
@@ -22,6 +29,8 @@ export const MCP_SCOPE_LABELS: Record<McpScope, string> = {
   "brain:read": "Read page titles and note content",
   "brain:write": "Create, edit, move, and delete pages",
   "brain:import": "Run the guarded Notion import tools",
+  "brain:mail": "Read and sort your mail",
+  "brain:mail:send": "Send mail as you",
 };
 
 export function oauthIssuer(): string {
@@ -57,6 +66,12 @@ export function normalizeScopes(values: readonly string[]): McpScope[] {
       throw new OAuthRequestError("invalid_scope", "Unsupported scope");
     }
   }
+  // Mail is a second axis, not a step above writing. Send closes onto mail,
+  // and mail closes onto read because a mail reader has to name a page to save
+  // an attachment into. Neither reaches `brain:write`: a grant that sorts mail
+  // cannot edit notes.
+  if (requested.has("brain:mail:send")) requested.add("brain:mail");
+  if (requested.has("brain:mail")) requested.add("brain:read");
   if (requested.has("brain:import")) requested.add("brain:write");
   if (requested.has("brain:write")) requested.add("brain:read");
   if (requested.size === 0) requested.add("brain:read");

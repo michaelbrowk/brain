@@ -5,7 +5,7 @@ import path from "node:path";
 import { threadId } from "node:worker_threads";
 import { z } from "zod";
 import type { McpScope } from "./config";
-import { OAuthRequestError } from "./config";
+import { MCP_SCOPES, OAuthRequestError } from "./config";
 
 const MAX_CLIENTS = 128;
 const MAX_CODES = 256;
@@ -19,7 +19,10 @@ const OWNER_PREFIX = "process-owner-";
 const MAX_OWNER_CLAIMS = 32;
 const STATE_FILE = "state.json";
 
-const scopeSchema = z.enum(["brain:read", "brain:write", "brain:import"]);
+// Derived from the one scope list rather than spelled again. A second copy
+// here silently refuses every stored grant that carries a scope added to
+// `MCP_SCOPES`, which is a whole connection lost to a list nobody updated.
+const scopeSchema = z.enum(MCP_SCOPES);
 
 const clientSchema = z.object({
   id: z.string().min(16).max(128),

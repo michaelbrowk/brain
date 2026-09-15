@@ -65,10 +65,23 @@ const fields = taskRecordFields.shape;
  *  meant. That rescue exists for a person's own file. An agent sends JSON and
  *  has no such excuse, and `time: 905` comes back as 15:05 on purpose, so the
  *  tools take the written form and nothing else.
+ *
+ *  The rule is checked by the tool rather than by its input schema. A regex in
+ *  the schema made `25:99` a JSON-RPC `-32602` carrying zod's own words: an
+ *  error with no `reason` to branch on, from an endpoint whose whole contract
+ *  is that a refusal is an answer. Same rule, one step earlier.
  */
-const timeSchema = z
-  .string()
-  .regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'write it as "HH:MM"');
+const TIME_RE = /^([01]\d|2[0-3]):[0-5]\d$/;
+
+const timeSchema = z.string().describe('the clock, as "HH:MM", 24 hour');
+
+const BAD_TIME = "that time is not written as HH:MM";
+
+/** True for a written time this field cannot hold. `null` is a clear and
+ *  `undefined` is a field left alone, so neither is asked about. */
+function badTime(value: string | null | undefined): boolean {
+  return typeof value === "string" && !TIME_RE.test(value);
+}
 
 const daySchema = z.string().regex(TASK_DAY_RE, "write it as YYYY-MM-DD");
 
@@ -450,6 +463,7 @@ export function registerTaskTools(server: McpToolServer): void {
     },
     async ({ title, when, time, evening, deadline, category, repeat }, extra) =>
       taskWrite(extra, "create_task", async (marks) => {
+        if (badTime(time)) return no("bad_time", BAD_TIME, "bad_time");
         const store = await getStore();
         const input: CreateTaskInput = {
           title,
@@ -489,6 +503,7 @@ export function registerTaskTools(server: McpToolServer): void {
     },
     async ({ page, line, when, time, evening, deadline, category }, extra) =>
       taskWrite(extra, "promote_task_line", async (marks) => {
+        if (badTime(time)) return no("bad_time", BAD_TIME, "bad_time");
         if (!TASK_ID_RE.test(page)) {
           return no("bad_page", "that page id is not valid", "bad_page");
         }
@@ -583,6 +598,7 @@ export function registerTaskTools(server: McpToolServer): void {
       extra,
     ) =>
       taskWrite(extra, "update_task", async (marks) => {
+        if (badTime(time)) return no("bad_time", BAD_TIME, "bad_time");
         if (!TASK_ID_RE.test(id)) {
           return no("bad_id", "that task id is not valid", "bad_id");
         }
@@ -613,7 +629,7 @@ export function registerTaskTools(server: McpToolServer): void {
     "complete_task",
     {
       description:
-        "Tick one task. `today` is the caller's own local calendar date and is required: it files the completion under that day in the Logbook and the server has no timezone of the caller's to fall back on. A completion stays in the list it was in, struck through, until the day changes, which is what the answer's `list` says. `expectedWhen` is the `when` the caller was looking at, and only a repeating task's completion is refused against it.",
+        "Tick one task. `today` is the caller's own local calendar date and is required: the answer says which list the record is in for that day, and a repeating task's next occurrence is computed from it. The server has no timezone of the caller's to fall back on. A completion stays in the list it was in, struck through, until the day changes, which is what the answer's `list` says. `expectedWhen` is the `when` the caller was looking at, and only a repeating task's completion is refused against it.",
       inputSchema: z
         .object({
           id: z.string(),
@@ -632,9 +648,17 @@ export function registerTaskTools(server: McpToolServer): void {
         }
         marks.task = id;
         const store = await getStore();
+        // THE DAY GOES TO THE STORE ONLY WHERE THE STORE USES ONE.
+        //
+        // `assertTodayUsage` takes `today` on a repeating task's completion,
+        // which is the one write computing the next occurrence off it, and
+        // refuses it everywhere else as a caller mistake worth hearing about.
+        // Sending it always meant an ordinary task could not be completed
+        // through this surface at all. The answer's `list` still needs the
+        // caller's own day, which is why the argument stays.
         const task = await store.updateTask(id, {
           done: true,
-          today,
+          ...(store.getTask(id)?.repeat !== undefined ? { today } : {}),
           ...(expectedWhen !== undefined ? { expectedWhen } : {}),
           src: "claude",
         });
@@ -650,7 +674,7 @@ export function registerTaskTools(server: McpToolServer): void {
     "reopen_task",
     {
       description:
-        "Untick one task. `today` is the caller's own local calendar date and is required, for the same reason a completion needs one. Unticking a repeating task restores the instance its newest completion came from.",
+        "Untick one task. `today` is the caller's own local calendar date and is required: the answer says which list the record lands back in for that day. Unticking a repeating task restores the instance its newest completion came from.",
       inputSchema: z
         .object({
           id: z.string(),
@@ -668,9 +692,12 @@ export function registerTaskTools(server: McpToolServer): void {
         }
         marks.task = id;
         const store = await getStore();
+        // An untick completes nothing, so the store takes no day from it at
+        // all: with `done: false` there is no next occurrence to compute and
+        // `assertTodayUsage` refuses one. `today` is the answer's, for the
+        // list the record lands back in.
         const task = await store.updateTask(id, {
           done: false,
-          today,
           src: "claude",
         });
         // `listOf` does not read the offset once `done` is false, but the

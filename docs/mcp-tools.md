@@ -46,7 +46,8 @@ Five rules no single row states.
   characters from `A-Z`, `a-z`, `0-9`, `_` and `-`.** Reusing a key replays the
   same result. Reusing it with different content is refused.
 - **`complete_task` and `reopen_task` need `today` as your own local calendar
-  date.** A completion writes a day into the Logbook and the server has no
+  date.** The answer says which list the record is in for that day, and a
+  repeating task's next occurrence is computed from it. The server has no
   caller's time zone to fall back on. `list_tasks` and `get_task` are the
   lenient pair: they fall back to the owner's own zone.
 
@@ -81,8 +82,10 @@ logbook. So a list read that follows a completion carries `offsetMinutes` too.
 Without one the day is UTC's, and a completion near midnight moves lists under
 the agent that made it.
 
-`time` is `HH:MM`, 24 hour, in the owner's zone. `evening` is `true` or absent,
-never `false`. Both are statements about a day, so both need `when` to be a day
+`time` is `HH:MM`, 24 hour, in the owner's zone, and a written time that is not
+that shape is refused as `bad_time` in the same `{ error, reason }` every other
+refusal uses, rather than as a schema error with no reason to branch on. `null`
+clears it. `evening` is `true` or absent, never `false`. Both are statements about a day, so both need `when` to be a day
 rather than `someday`, and a later change that parks the task or sends it back
 to the Inbox clears them whether or not the call names them. `remindedAt` is
 not a field any tool can set: clearing `time` is how a reminder is stopped, and
@@ -95,11 +98,11 @@ record's id, the note's id for a promote, and the outcome. No title enters it.
 | --- | --- | --- | --- | --- |
 | `list_tasks` | | `list?` as `inbox`, `today`, `upcoming`, `someday` or `logbook`, `page?`, `today?`, `offsetMinutes?`, `category?` | `{ tasks }` for every list but the logbook, which answers `{ entries }`, one per completion, each with its own `key` | `bad_today` for a day that is not `YYYY-MM-DD`, `bad_offset` for a logbook read with no offset and no zone, the no-zone refusal for a derived list with neither a day nor a captured zone, and `missing_list` for a call naming neither a list nor a page. `store_failed` |
 | `get_task` | | `id` | `{ task }`, including whether its note line was removed and which page it is linked to | `bad_id`, `not_found`, `page_trashed`. `store_failed` |
-| `create_task` | `brain:write` | `title`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?` | `{ task }`, unlinked: it owns its own completion and belongs to no note | whatever the record refuses, as `that task change was refused` with the record's own reason, for instance `time needs a day to be a time on`. `store_failed` |
-| `promote_task_line` | `brain:write` | `page`, `line` as a zero-based markdown line number or the line's own text with runs of whitespace collapsed, `when?`, `time?`, `evening?`, `deadline?`, `category?` | `{ task }`, linked to that checkbox line, with the anchor the editor's own promote builds. The note's category is inherited unless one is named here | `that line is not a checkbox`, `that line appears more than once, pass its line number`, `that line is empty`, `that line already has a task` naming the record that has it, `bad_page`, and `not_found` for a note that is not there. `store_failed` |
-| `update_task` | `brain:write` | `id`, `title?`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?`. A field left out is left alone and `null` clears it | `{ task }` after the change | `bad_id`, `not_found`, whatever the record refuses. `expectedWhen` and `remindedAt` are refused as unknown arguments. `store_failed` |
-| `complete_task` | `brain:write` | `id`, `today`, `offsetMinutes?`, `expectedWhen?` | `{ task, list }`, where `list` is the list the record is in for that day, which is the list it was already in | `bad_id`, `not_found`, and `conflict` with `currentWhen` when a repeating task has moved since the caller last read it. `store_failed` |
-| `reopen_task` | `brain:write` | `id`, `today`, `offsetMinutes?` | `{ task, list }`. Unticking a repeating task restores the instance its newest completion came from | `bad_id`, `not_found`, `conflict`. `store_failed` |
+| `create_task` | `brain:write` | `title`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?` | `{ task }`, unlinked: it owns its own completion and belongs to no note | whatever the record refuses, as `that task change was refused` with the record's own reason, for instance `time needs a day to be a time on`. `bad_time` for a `time` that is not `HH:MM`. `store_failed` |
+| `promote_task_line` | `brain:write` | `page`, `line` as a zero-based markdown line number or the line's own text with runs of whitespace collapsed, `when?`, `time?`, `evening?`, `deadline?`, `category?` | `{ task }`, linked to that checkbox line, with the anchor the editor's own promote builds. The note's category is inherited unless one is named here | `that line is not a checkbox`, `that line appears more than once, pass its line number`, `that line is empty`, `that line already has a task` naming the record that has it, `bad_page`, and `not_found` for a note that is not there. `bad_time` for a `time` that is not `HH:MM`. `store_failed` |
+| `update_task` | `brain:write` | `id`, `title?`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?`. A field left out is left alone and `null` clears it | `{ task }` after the change | `bad_id`, `not_found`, whatever the record refuses. `expectedWhen` and `remindedAt` are refused as unknown arguments. `bad_time` for a `time` that is not `HH:MM`. `store_failed` |
+| `complete_task` | `brain:write` | `id`, `today`, `offsetMinutes?`, `expectedWhen?` | `{ task, list }`, where `list` is the list the record is in for that day, which is the list it was already in. An ordinary task's completion uses `today` for that answer alone; a repeating one's next occurrence is computed from it | `bad_id`, `not_found`, and `conflict` with `currentWhen` when a repeating task has moved since the caller last read it. `store_failed` |
+| `reopen_task` | `brain:write` | `id`, `today`, `offsetMinutes?` | `{ task, list }`, the list the record lands back in for that day. Unticking a repeating task restores the instance its newest completion came from | `bad_id`, `not_found`, `conflict`. `store_failed` |
 | `delete_task` | `brain:write` | `id` | `{ ok: true }`. A linked task's checkbox line stays in its note, and the record that pointed at it is what goes | `bad_id`, `not_found`. `store_failed` |
 
 Every code named in the task rows above is the `reason` on the refusal, with

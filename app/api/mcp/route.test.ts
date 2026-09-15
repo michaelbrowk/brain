@@ -1617,6 +1617,7 @@ describe("the task write tools", () => {
     expect(refused.isError).toBe(true);
 
     mocks.getStore.mockResolvedValue({
+      getTask: vi.fn().mockReturnValue(view({ repeat: { freq: "daily" } })),
       updateTask: vi
         .fn()
         .mockRejectedValue(
@@ -1650,45 +1651,139 @@ describe("the task write tools", () => {
     expect(missing.isError).toBe(true);
   });
 
-  it("completes with the caller's own day and refuses without one", async () => {
+  /** THE DAY IS THE ANSWER'S, AND THE STORE'S ONLY WHERE THE STORE USES ONE.
+   *
+   *  `assertTodayUsage` takes `today` only on a repeating task's completion,
+   *  because that is the one write computing the next occurrence off it, and
+   *  refuses it everywhere else as a caller mistake. Both tools forwarded it
+   *  always, so an ordinary task could not be completed through MCP at all and
+   *  `reopen_task`, which never completes anything, could never succeed. */
+  it("completes an ordinary task without handing the store a day it refuses", async () => {
     const updateTask = vi.fn().mockResolvedValue(view({ done: true }));
-    mocks.getStore.mockResolvedValue({ updateTask });
+    mocks.getStore.mockResolvedValue({
+      getTask: vi.fn().mockReturnValue(view()),
+      updateTask,
+    });
 
-    const { payload } = await toolPayload(
+    const { payload, isError } = await toolPayload(
       await callTool(
         "complete_task",
         { id: TASK_ID, today: TODAY, offsetMinutes: 240 },
         717,
       ),
     );
+    expect(isError).toBe(false);
     expect(updateTask).toHaveBeenCalledWith(TASK_ID, {
       done: true,
-      today: TODAY,
       src: "claude",
     });
     // A COMPLETION STAYS WHERE IT WAS until the day changes, so the answer
     // says which list the record is in rather than leaving an agent to assume
-    // it left one.
+    // it left one. That is what the caller's day is still taken for.
     expect(payload.list).toBe("logbook");
 
     const response = await callTool("complete_task", { id: TASK_ID }, 718);
     expect(await response.text()).toContain("Invalid arguments");
   });
 
-  it("reopens with the caller's own day", async () => {
-    const updateTask = vi.fn().mockResolvedValue(view({ when: TODAY }));
-    mocks.getStore.mockResolvedValue({ updateTask });
+  /** And the one write that does use it still gets it, with the `when` the
+   *  caller was looking at beside it. */
+  it("carries today and expectedWhen on a repeating task's completion", async () => {
+    const repeating = view({ when: TODAY, repeat: { freq: "daily" } });
+    const updateTask = vi.fn().mockResolvedValue(view({ when: "2026-09-15" }));
+    mocks.getStore.mockResolvedValue({
+      getTask: vi.fn().mockReturnValue(repeating),
+      updateTask,
+    });
 
-    const { payload } = await toolPayload(
+    const { isError } = await toolPayload(
+      await callTool(
+        "complete_task",
+        { id: TASK_ID, today: TODAY, expectedWhen: TODAY },
+        721,
+      ),
+    );
+
+    expect(isError).toBe(false);
+    expect(updateTask).toHaveBeenCalledWith(TASK_ID, {
+      done: true,
+      today: TODAY,
+      expectedWhen: TODAY,
+      src: "claude",
+    });
+  });
+
+  it("reopens a task, repeating or not, without forwarding the day", async () => {
+    const updateTask = vi.fn().mockResolvedValue(view({ when: TODAY }));
+    const getTask = vi.fn().mockReturnValue(view());
+    mocks.getStore.mockResolvedValue({ getTask, updateTask });
+
+    const { payload, isError } = await toolPayload(
       await callTool("reopen_task", { id: TASK_ID, today: TODAY }, 719),
     );
 
+    expect(isError).toBe(false);
     expect(updateTask).toHaveBeenCalledWith(TASK_ID, {
       done: false,
-      today: TODAY,
       src: "claude",
     });
     expect(payload.list).toBe("today");
+
+    // An untick never completes anything, so a repeating record makes no
+    // difference to what the store is handed.
+    getTask.mockReturnValue(view({ when: TODAY, repeat: { freq: "daily" } }));
+    await toolPayload(
+      await callTool("reopen_task", { id: TASK_ID, today: TODAY }, 722),
+    );
+    expect(updateTask).toHaveBeenLastCalledWith(TASK_ID, {
+      done: false,
+      src: "claude",
+    });
+  });
+
+  /** A TIME THAT IS NOT A TIME IS A REFUSAL, NOT A TRANSPORT ERROR.
+   *
+   *  The `HH:MM` rule used to live in the tool's own zod schema, so `25:99`
+   *  came back as JSON-RPC `-32602` with zod's words: an error with no
+   *  `reason` to branch on, from an endpoint whose whole contract is that a
+   *  refusal is an answer. The rule is the same rule, checked a step earlier. */
+  it("refuses a time that is not HH:MM in the shape every refusal uses", async () => {
+    const createTask = vi.fn();
+    const updateTask = vi.fn();
+    mocks.getStore.mockResolvedValue({
+      getTask: vi.fn().mockReturnValue(view()),
+      createTask,
+      updateTask,
+      readPage: vi.fn(),
+      pageTasks: vi.fn().mockReturnValue([]),
+    });
+
+    for (const [name, args, id] of [
+      ["create_task", { title: "Water the plants", when: TODAY, time: "25:99" }, 723],
+      ["update_task", { id: TASK_ID, time: "1:00" }, 724],
+      ["promote_task_line", { page: PAGE_ID, line: 0, time: "13:60" }, 725],
+    ] as const) {
+      const { payload, isError } = await toolPayload(await callTool(name, args, id));
+      expect(isError, name).toBe(true);
+      expect(payload, name).toEqual({
+        error: "that time is not written as HH:MM",
+        reason: "bad_time",
+      });
+    }
+    expect(createTask).not.toHaveBeenCalled();
+    expect(updateTask).not.toHaveBeenCalled();
+    await flushTaskActivityForTests();
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({ outcome: "bad_time" });
+
+    // Clearing a time is still `null`, and a real one still goes through.
+    await toolPayload(
+      await callTool("update_task", { id: TASK_ID, time: null }, 726),
+    );
+    expect(updateTask).toHaveBeenCalledWith(TASK_ID, {
+      time: null,
+      src: "claude",
+    });
   });
 
   it("deletes one task and answers ok", async () => {
@@ -1874,7 +1969,10 @@ describe("the task write tools", () => {
     const updateTask = vi.fn().mockResolvedValue(
       view({ when: TODAY, done: true, doneAt: "2026-09-13T21:30:00.000Z" }),
     );
-    mocks.getStore.mockResolvedValue({ updateTask });
+    mocks.getStore.mockResolvedValue({
+      getTask: vi.fn().mockReturnValue(view({ when: TODAY })),
+      updateTask,
+    });
 
     const { payload } = await toolPayload(
       await callTool("complete_task", { id: TASK_ID, today: TODAY }, 743),

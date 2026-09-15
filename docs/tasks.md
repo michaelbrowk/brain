@@ -11,6 +11,9 @@ three fields.
 
 ## The record
 
+A checkbox line in a note comes from the floating toolbar's Task button, the
+slash menu's Task item, or typing `- [ ] ` at a line start.
+
 | Field | Shape | Rule |
 | --- | --- | --- |
 | `id` | letters, digits, `_` and `-`, up to 128 characters | Matches the filename. A file whose frontmatter id is not its own name is skipped. |

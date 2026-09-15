@@ -25,6 +25,7 @@ import {
   FloatingToolbar,
   placeFloatingToolbar,
   selectionRectIntersectsViewport,
+  selectionIsInQuote,
   selectionIsInTable,
   selectionIsTask,
   selectionOwnsFloatingToolbar,
@@ -37,6 +38,7 @@ const schema = new Schema({
   nodes: {
     doc: { content: "block+" },
     paragraph: { content: "inline*", group: "block" },
+    blockquote: { content: "block+", group: "block" },
     bullet_list: { content: "list_item+", group: "block" },
     list_item: { content: "block+", attrs: { checked: { default: null } }, defining: true },
     table: { content: "table_row+", group: "block" },
@@ -46,9 +48,12 @@ const schema = new Schema({
   },
 });
 
-function documentFor(inTable: boolean, task: boolean) {
+function documentFor(inTable: boolean, task: boolean, quote: boolean) {
   const nodes = schema.nodes;
   const line = nodes.paragraph.create(null, schema.text("selected editor text"));
+  if (quote) {
+    return nodes.doc.create(null, nodes.blockquote.create(null, line));
+  }
   if (inTable) {
     return nodes.doc.create(
       null,
@@ -69,8 +74,9 @@ function editorState(
   selectionType: "text" | "node" | "all" = "text",
   empty = false,
   task = false,
+  quote = false,
 ): EditorState {
-  const doc = documentFor(inTable, task);
+  const doc = documentFor(inTable, task, quote);
   let line = 0;
   doc.descendants((node, pos) => {
     if (line === 0 && node.isTextblock) line = pos + 1;
@@ -360,6 +366,24 @@ describe("FloatingToolbar", () => {
     expect(taskButton().getAttribute("aria-pressed")).toBe("false");
   });
 
+  it("refuses the Task button inside a quote, and says why", async () => {
+    await renderWithSelection(false);
+    const taskButton = () =>
+      document.body.querySelector('[aria-label="Task"]') as HTMLButtonElement;
+    expect(taskButton().getAttribute("aria-disabled")).toBe("false");
+
+    view.state = editorState(false, "text", false, false, true);
+    await act(async () => document.dispatchEvent(new Event("selectionchange")));
+    await settle();
+
+    expect(taskButton().getAttribute("aria-disabled")).toBe("true");
+    expect(taskButton().getAttribute("title")).toBe("A task cannot live inside a quote");
+
+    editor.action.mockClear();
+    await click(taskButton());
+    expect(editor.action).not.toHaveBeenCalled();
+  });
+
   it("re-reads the pressed state from the editor's own transaction", async () => {
     await renderWithSelection(false);
     const taskButton = () =>
@@ -390,6 +414,11 @@ describe("floating toolbar geometry", () => {
   it("detects table ancestors at either selection edge", () => {
     expect(selectionIsInTable(editorState(true))).toBe(true);
     expect(selectionIsInTable(editorState(false))).toBe(false);
+  });
+
+  it("detects a quote ancestor at either selection edge", () => {
+    expect(selectionIsInQuote(editorState(false, "text", false, false, true))).toBe(true);
+    expect(selectionIsInQuote(editorState(false))).toBe(false);
   });
 
   it("detects a task-item ancestor at either selection edge", () => {

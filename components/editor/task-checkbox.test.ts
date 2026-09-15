@@ -16,7 +16,6 @@ import { parseTaskLines } from "@/lib/tasks/task-lines";
 
 import {
   ensureTaskCommand,
-  isTaskLine,
   selectionIsTask,
   taskCheckbox,
   toggleTaskCommand,
@@ -310,7 +309,7 @@ describe("the Task command", () => {
 
     press(view, ensureTaskCommand);
 
-    expect(serialize(view)).toBe("1. first\n\n* [ ] second\n\n1. third\n");
+    expect(serialize(view)).toBe("1. first\n\n* [ ] second\n\n2. third\n");
     expect(boxes(view)).toHaveLength(1);
     agreesWithTheStore(view);
   });
@@ -322,7 +321,7 @@ describe("the Task command", () => {
     press(view, ensureTaskCommand);
 
     expect(serialize(view)).toBe("* [ ] water the plants\n");
-    expect(isTaskLine(view.state.selection.$from)).toBe(true);
+    expect(selectionIsTask(view.state)).toBe(true);
     agreesWithTheStore(view);
   });
 
@@ -434,7 +433,6 @@ describe("the Task command", () => {
     const view = await mountEditor("- water the plants\n");
     caretInLine(view, 0);
     expect(selectionIsTask(view.state)).toBe(false);
-    expect(isTaskLine(view.state.selection.$from)).toBe(false);
   });
 
   it("removes the slash trigger and converts in one transaction", async () => {
@@ -445,7 +443,7 @@ describe("the Task command", () => {
     press(view, ensureTaskCommand, { from: 1, to: end });
 
     expect(serialize(view)).toBe("* [ ] <br />\n");
-    expect(isTaskLine(view.state.selection.$from)).toBe(true);
+    expect(selectionIsTask(view.state)).toBe(true);
     view.dispatch(view.state.tr.insertText("water the plants", view.state.selection.from));
     expect(serialize(view)).toBe("* [ ] water the plants\n");
 
@@ -454,6 +452,75 @@ describe("the Task command", () => {
     // One undo for the typing, one for the press: the trigger the reader
     // typed comes back with the line it became.
     expect(serialize(view)).toBe("/task\n");
+  });
+
+  it("keeps the count going in the tail of a split ordered list", async () => {
+    const view = await mountEditor("3. a\n4. b\n5. c\n");
+    caretInLine(view, 1);
+
+    press(view, ensureTaskCommand);
+
+    // Two numbered lines are left and they read as two, rather than the tail
+    // restarting at the number the head began with.
+    expect(serialize(view)).toBe("3. a\n\n* [ ] b\n\n4. c\n");
+    agreesWithTheStore(view);
+  });
+
+  it("leaves the siblings below a lifted task in the list they were in", async () => {
+    const view = await mountEditor("- [ ] p\n  - [ ] one\n  - [ ] two\n  - [ ] three\n");
+    caretInLine(view, 1);
+
+    press(view, toggleTaskCommand);
+
+    // `two` and `three` were never touched: they stay under `p`, at the depth
+    // the reader put them at. Only the pressed line leaves the list.
+    // The two-space indent is the nesting: both are still items of `p`'s own
+    // list. The blank lines are the serializer's, and section 5 of the review
+    // has them: a parsed list carries its `spread` as a string and comes back
+    // loose whatever it was.
+    expect(serialize(view)).toBe("* [ ] p\n  * [ ] two\n\n  * [ ] three\n\none\n");
+    expect(boxes(view)).toHaveLength(3);
+    agreesWithTheStore(view);
+  });
+
+  it("leaves a heading inside a selection a heading, and converts the lines around it", async () => {
+    const view = await mountEditor("a\n\n# H\n\nb\n");
+    selectLines(view, 0, 2);
+
+    press(view, ensureTaskCommand);
+
+    // A heading pressed on its own is left alone, so a heading caught in a
+    // longer selection is left alone too. It used to be swallowed as the
+    // second block of the task above it and stop being its own line.
+    expect(serialize(view)).toBe("* [ ] a\n\n# H\n\n* [ ] b\n");
+    expect(boxes(view)).toHaveLength(2);
+    agreesWithTheStore(view);
+  });
+
+  it("refuses a line inside a quote, either press", async () => {
+    const view = await mountEditor("> quoted\n");
+    caretInLine(view, 0);
+
+    press(view, ensureTaskCommand);
+    expect(serialize(view)).toBe("> quoted\n");
+
+    press(view, toggleTaskCommand);
+    // `> * [ ] quoted` draws a checkbox the store cannot read, and one of
+    // those on a page refuses + Task for the whole note.
+    expect(serialize(view)).toBe("> quoted\n");
+    expect(boxes(view)).toHaveLength(0);
+    agreesWithTheStore(view);
+  });
+
+  it("leaves the trigger a quote refuses where the reader typed it", async () => {
+    const view = await mountEditor("> /task\n");
+    const start = lineStarts(view)[0];
+    const end = start + "/task".length;
+    view.dispatch(view.state.tr.setSelection(TextSelection.create(view.state.doc, end)));
+
+    press(view, ensureTaskCommand, { from: start, to: end });
+
+    expect(serialize(view)).toBe("> /task\n");
   });
 
   it("comes back in one undo, whatever shape the line was", async () => {

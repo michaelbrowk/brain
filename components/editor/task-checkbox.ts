@@ -66,7 +66,7 @@ export const taskCheckboxView = $view(listItemSchema.node, () =>
     // the preset's markup here to drift. ProseMirror reads the absent spec
     // and takes the default path; the constructor's type says it always
     // returns a view, which is the one place this has to say otherwise.
-    if (initial.attrs.checked == null) return undefined as unknown as NodeView;
+    if (!isTaskItem(initial)) return undefined as unknown as NodeView;
 
     const dom = document.createElement("li");
     dom.className = "brain-task-item";
@@ -79,7 +79,7 @@ export const taskCheckboxView = $view(listItemSchema.node, () =>
       const pos = getPos();
       if (pos == null) return;
       const node = view.state.doc.nodeAt(pos);
-      if (!node || node.type.name !== "list_item" || node.attrs.checked == null) return;
+      if (!node || !isTaskItem(node)) return;
       view.dispatch(
         view.state.tr.setNodeMarkup(pos, undefined, {
           ...node.attrs,
@@ -118,7 +118,7 @@ export const taskCheckboxView = $view(listItemSchema.node, () =>
         // A bullet that becomes a task, or a task that becomes a bullet, is a
         // different control. Refusing the update has ProseMirror build the
         // right one from scratch.
-        if (node.type.name !== "list_item" || node.attrs.checked == null) return false;
+        if (!isTaskItem(node)) return false;
         render(node);
         return true;
       },
@@ -321,7 +321,7 @@ function taskItemsOf(doc: ProseNode): TaskItem[] {
     // one. Returning false keeps `descendants` from walking the inline
     // content, which is most of a note by count, so this walk is block level.
     if (node.isTextblock) return false;
-    if (node.type.name !== "list_item" || node.attrs.checked == null) return;
+    if (!isTaskItem(node)) return;
     const line = node.firstChild;
     if (!line || !line.isTextblock) return;
     found.push({
@@ -1310,21 +1310,36 @@ async function pageCategory(page: string): Promise<string | null> {
 
 /** A task item, and not a plain bullet: the gfm preset leaves `checked` null
  *  on a bullet and sets a boolean on a task. THE one reading of that
- *  attribute, so a press and the pressed state beside it cannot come to
- *  different answers about the same item. */
+ *  question, and every site in this file that asks it comes here: the
+ *  NodeView, the promote walk that counts the items, and the targets a press
+ *  collects. No two of them can answer differently about the same item.
+ *  Whether a task is DONE is a different question, and reads `=== true`. */
 function isTaskItem(node: ProseNode): boolean {
   return node.type.name === "list_item" && node.attrs.checked != null;
 }
 
-/** Whether a resolved position sits inside a task item. Walks the ancestor
- *  chain the way `isInTable` walks it for table context, so a caller can tell
- *  a task line from a plain one without re-deriving the schema knowledge. */
-export function isTaskLine($pos: ResolvedPos): boolean {
-  for (let depth = $pos.depth; depth >= 0; depth -= 1) {
-    const node = $pos.node(depth);
-    if (node.type.name === "list_item") return isTaskItem(node);
+/** Whether a resolved position sits inside a blockquote. Walks the ancestor
+ *  chain the way `isInTable` walks it for table context. */
+export function isInQuote($pos: ResolvedPos): boolean {
+  for (let depth = $pos.depth; depth > 0; depth -= 1) {
+    if ($pos.node(depth).type.name === "blockquote") return true;
   }
   return false;
+}
+
+/** A TASK LINE CANNOT LIVE INSIDE A QUOTE.
+ *
+ *  `> * [ ] x` is a checkbox to the editor and prose to `TASK_LINE_RE`, whose
+ *  `^\s*[-*+]` has no room for the `>`. One quoted task line on a page is
+ *  enough for `promoteLine`'s `lines.length !== items.length` guard to fire,
+ *  and every + Task on that page then answers "This note could not be read".
+ *
+ *  So both controls refuse it, the way they already refuse a table: the
+ *  toolbar's button is disabled and says why, and the slash menu has no Task
+ *  row inside a quote. The command refuses it again for anything that reaches
+ *  it another way. */
+export function selectionIsInQuote(state: Pick<EditorState, "selection">): boolean {
+  return isInQuote(state.selection.$from) || isInQuote(state.selection.$to);
 }
 
 /** The depth of the nearest `list_item` above a position, or -1 for a block
@@ -1378,6 +1393,12 @@ function taskTargets(doc: ProseNode, from: number, to: number): TaskTarget[] {
     if (!node.isTextblock) return true;
     const $block = doc.resolve(pos);
     if ($block.parent.type.name !== "list_item") {
+      // A heading, a code block, a math block: a line the press leaves where
+      // it is. A heading pressed on its own is already left alone, because a
+      // `list_item` wants a paragraph first and the wrap refuses, so one
+      // caught in a longer selection is left alone too rather than swallowed
+      // as the second block of the task above it.
+      if (node.type.name !== "paragraph") return false;
       targets.push({ kind: "block", pos, end: pos + node.nodeSize });
       return false;
     }
@@ -1470,13 +1491,60 @@ function convertOrderedItem(
   const base = tr.steps.length;
   // The later split first, so it does not move the earlier one.
   const end = pos + item.nodeSize;
-  if (index < list.childCount - 1 && canSplit(tr.doc, end, 1)) tr.split(end, 1);
+  const tailSplit = index < list.childCount - 1 && canSplit(tr.doc, end, 1);
+  if (tailSplit) tr.split(end, 1);
   if (index > 0 && canSplit(tr.doc, pos, 1)) tr.split(pos, 1);
   const itemPos = tr.mapping.slice(base).map(pos);
   const $now = tr.doc.resolve(itemPos);
   if ($now.parent.type.name !== "ordered_list") return itemPos;
+  if (tailSplit) keepTailCounting(tr, $now, list.attrs.order, index);
   tr.setNodeMarkup($now.before($now.depth), bulletListType, { spread: list.attrs.spread });
   return itemPos;
+}
+
+/** The piece of an ordered list below the press goes on counting.
+ *
+ *  `tr.split` copies the list's own attributes, `order` among them, so the
+ *  tail restarted at the number the head began with: `3. / 4. / 5.` with the
+ *  middle line pressed read `3.`, the task, `3.`. The line that left is not a
+ *  numbered line any more, so the count carries on over the lines that are:
+ *  `3.`, the task, `4.`. The preset's own `syncListOrderPlugin` reads `order`
+ *  back off the list and relabels the items under it. */
+function keepTailCounting(
+  tr: Transaction,
+  $item: ResolvedPos,
+  order: unknown,
+  index: number,
+) {
+  const tailPos = $item.after($item.depth);
+  const tail = tr.doc.nodeAt(tailPos);
+  if (!tail || tail.type.name !== "ordered_list") return;
+  tr.setNodeMarkup(tailPos, undefined, {
+    ...tail.attrs,
+    order: (typeof order === "number" ? order : 1) + index,
+  });
+}
+
+/** The siblings BELOW the pressed item stay in the list they were in.
+ *
+ *  `liftListItem` hands the items following the one it lifts to that item as
+ *  children, which is right for the one lift it performs. The next lift then
+ *  carried them out of the parent with it, so a press on one nested task took
+ *  the two below it up a level with it, and neither was ever selected.
+ *
+ *  Moving them above the pressed item first leaves the lift nothing borrowed
+ *  to carry. Only a nested list borrows: a list standing in no item splits
+ *  around the lifted line instead, and its siblings keep their depth and
+ *  their order both. */
+function hoistFollowingSiblings(tr: Transaction, $inside: ResolvedPos): void {
+  const depth = listItemDepth($inside);
+  if (depth < 2 || $inside.node(depth - 2).type.name !== "list_item") return;
+  const itemEnd = $inside.after(depth);
+  const listEnd = $inside.end(depth - 1);
+  if (itemEnd >= listEnd) return;
+  const tail = tr.doc.slice(itemEnd, listEnd).content;
+  tr.delete(itemEnd, listEnd);
+  tr.insert($inside.before(depth), tail);
 }
 
 /** A task item becomes a paragraph, however deep it sat, on ONE press.
@@ -1488,8 +1556,14 @@ function liftItemToParagraph(tr: Transaction, pos: number, listItemType: NodeTyp
   let blockPos = pos + 1;
   for (let lift = 0; lift < MAX_LIFTS; lift += 1) {
     if (blockPos + 1 > tr.doc.content.size) return;
-    const $inside = tr.doc.resolve(blockPos + 1);
+    let $inside = tr.doc.resolve(blockPos + 1);
     if (listItemDepth($inside) < 0) return;
+    const hoisted = tr.steps.length;
+    hoistFollowingSiblings(tr, $inside);
+    if (tr.steps.length !== hoisted) {
+      blockPos = tr.mapping.slice(hoisted).map(blockPos);
+      $inside = tr.doc.resolve(blockPos + 1);
+    }
     const base = tr.steps.length;
     // A bare state over the transaction's own document: `liftListItem` reads
     // a selection and writes steps, and the steps it writes are against this
@@ -1520,6 +1594,11 @@ function taskCommand(mode: "ensure" | "toggle", trigger: TaskTrigger | null): Co
     const bulletListType = state.schema.nodes.bullet_list;
     const listItemType = state.schema.nodes.list_item;
     if (!bulletListType || !listItemType) return false;
+
+    // Refused whole, and before the trigger is touched: the `/task` the
+    // reader typed stays on the line rather than being deleted for a
+    // conversion that cannot happen.
+    if (selectionIsInQuote(state)) return false;
 
     const tr = state.tr;
     if (trigger !== null && trigger.to > trigger.from && trigger.to <= tr.doc.content.size) {

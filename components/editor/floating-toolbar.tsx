@@ -29,7 +29,7 @@ import { Icon } from "../ui/icon";
 import { DUR, EASE_OUT } from "@/lib/motion";
 import { EDITOR_DOC_CHANGED_EVENT, notifyNestedTableBlocked } from "@/lib/editor-events";
 import { isInTable } from "./table-guard";
-import { selectionIsTask, toggleTaskCommand } from "./task-checkbox";
+import { selectionIsInQuote, selectionIsTask, toggleTaskCommand } from "./task-checkbox";
 
 const COLORS = [
   "red",
@@ -140,10 +140,11 @@ export function selectionIsInTable(state: Pick<EditorState, "selection">): boole
   return isInTable(state.selection.$from) || isInTable(state.selection.$to);
 }
 
-/** Whether every line the selection touches is already a task. It lives with
- *  the command that acts on those lines, so the pressed state this toolbar
- *  draws and the press behind it read the same blocks. */
-export { selectionIsTask };
+/** Whether every line the selection touches is already a task, and whether
+ *  the selection sits in a quote at all. Both live with the command that acts
+ *  on those lines, so the pressed state this toolbar draws, the button it
+ *  disables, and the press behind them read the same blocks. */
+export { selectionIsTask, selectionIsInQuote };
 
 /** The browser can keep a painted DOM range after the editor loses focus, and
  * ProseMirror keeps a NodeSelection after a block drag. Neither is an active
@@ -202,6 +203,7 @@ export function FloatingToolbar({
   const [aiLoading, setAiLoading] = useState<SelectionAiMode | null>(null);
   const [linkQuery, setLinkQuery] = useState("");
   const [inTable, setInTable] = useState(false);
+  const [inQuote, setInQuote] = useState(false);
   const [taskActive, setTaskActive] = useState(false);
   const [, getEditor] = useInstance();
   const [pos, setPos] = useState<Pos | null>(null);
@@ -249,6 +251,14 @@ export function FloatingToolbar({
     return next;
   }, [getEditor]);
 
+  const currentSelectionIsInQuote = useCallback(() => {
+    let next = false;
+    getEditor()?.action((ctx) => {
+      next = selectionIsInQuote(ctx.get(editorViewCtx).state);
+    });
+    return next;
+  }, [getEditor]);
+
   const editorOwnsLiveSelection = useCallback(() => {
     let ownsSelection = false;
     getEditor()?.action((ctx) => {
@@ -292,6 +302,7 @@ export function FloatingToolbar({
         savedRange.current = null;
         setPos(null);
         setInTable(false);
+        setInQuote(false);
         setTaskActive(false);
         return;
       }
@@ -301,6 +312,7 @@ export function FloatingToolbar({
       // the rect can be stale or gone while the pressed state is still owed
       // an answer.
       setInTable(currentSelectionIsInTable());
+      setInQuote(currentSelectionIsInQuote());
       setTaskActive(currentSelectionIsTask());
 
       const rect = firstVisibleSelectionRect(range);
@@ -329,6 +341,7 @@ export function FloatingToolbar({
     });
   }, [
     container,
+    currentSelectionIsInQuote,
     currentSelectionIsInTable,
     currentSelectionIsTask,
     editorOwnsLiveSelection,
@@ -678,9 +691,11 @@ export function FloatingToolbar({
                     label="Task"
                     // Two controls are named Task, and both are right: this
                     // one turns the line the caret is in into a checkbox, the
-                    // slash menu's inserts one. The tooltip says which.
-                    title="Task line"
+                    // slash menu's inserts one. The tooltip says which, and
+                    // says why instead when a quote refuses the line.
+                    title={inQuote ? "A task cannot live inside a quote" : "Task line"}
                     active={taskActive}
+                    disabled={inQuote}
                     pressed={taskActive}
                     onRun={() => run(toggleTaskCommand.key)}
                   >

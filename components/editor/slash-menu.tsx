@@ -22,7 +22,7 @@ import { insertCalloutCommand } from "./callout";
 import { notifyNestedTableBlocked } from "@/lib/editor-events";
 import { insertToggleCommand } from "./toggle";
 import { insertMathBlockCommand } from "./math";
-import { ensureTaskCommand } from "./task-checkbox";
+import { ensureTaskCommand, isInQuote } from "./task-checkbox";
 import {
   attachmentMarkdown,
   uploadAttachment,
@@ -118,6 +118,26 @@ export function slashMenuItems({ ai, upload, createPage }: SlashMenuCapabilities
   );
 }
 
+/** The rows a menu opened HERE offers, and what the reader typed after the
+ *  slash narrows them to.
+ *
+ *  A table refuses a nested table. A quote refuses a task: `> * [ ] x` draws
+ *  a checkbox `parseTaskLines` cannot see, and one of those on a page refuses
+ *  + Task for the whole note. The row is absent rather than present and
+ *  answering nothing. */
+export function visibleSlashItems(
+  items: ReturnType<typeof slashMenuItems>,
+  context: { query: string; inTable: boolean; inQuote: boolean },
+): ReturnType<typeof slashMenuItems> {
+  const query = context.query.toLowerCase();
+  return items.filter(
+    (item) =>
+      (!context.inTable || item.command !== insertTableCommand) &&
+      (!context.inQuote || item.command !== ensureTaskCommand) &&
+      (query ? item.keywords.includes(query) || item.label.toLowerCase().includes(query) : true),
+  );
+}
+
 async function askAi(mode: "continue", text: string): Promise<string> {
   try {
     const res = await apiFetch("/api/ai", {
@@ -141,6 +161,7 @@ interface State {
   query: string;
   from: number; // doc pos of the "/" so we can delete it
   inTable: boolean;
+  inQuote: boolean;
 }
 
 /** menu max height (max-h-[280px]) + breathing room */
@@ -196,10 +217,12 @@ export function SlashMenu({
       const ed = getEditor();
       let from = -1;
       let inTable = false;
+      let inQuote = false;
       ed?.action((ctx) => {
         const view = ctx.get(editorViewCtx);
         from = view.state.selection.$from.start();
         const $from = view.state.selection.$from;
+        inQuote = isInQuote($from);
         for (let depth = $from.depth; depth >= 0; depth -= 1) {
           const name = $from.node(depth).type.name;
           if (name === "table" || name === "table_cell" || name === "table_header") {
@@ -215,6 +238,7 @@ export function SlashMenu({
         query: m[1],
         from,
         inTable,
+        inQuote,
         ...(flip
           ? { bottom: r.bottom - rect.top + 6 }
           : { top: rect.bottom - r.top + 6 }),
@@ -232,17 +256,7 @@ export function SlashMenu({
   }, [update]);
 
   const results = useMemo(
-    () =>
-      state
-        ? slashMenuItems({ ai, upload, createPage }).filter(
-            (i) =>
-              (!state.inTable || i.command !== insertTableCommand) &&
-              (state.query
-                ? i.keywords.includes(state.query.toLowerCase()) ||
-                  i.label.toLowerCase().includes(state.query.toLowerCase())
-                : true),
-          )
-        : [],
+    () => (state ? visibleSlashItems(slashMenuItems({ ai, upload, createPage }), state) : []),
     [state, ai, upload, createPage],
   );
 

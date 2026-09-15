@@ -92,6 +92,9 @@ import {
 import { hashTaskText, parseTaskLines } from "@/lib/tasks/task-lines";
 import { toolScopeOf } from "./tool-kit";
 import { readMcpActivity } from "@/lib/mcp/activity-log";
+import { readAgentSends, recordAgentSend } from "@/lib/mcp/agent-sends";
+import { writeAgentSettings } from "@/lib/mcp/agent-settings";
+import type { MailSendInput } from "@/lib/mail/message-types";
 import { mailNotificationId } from "@/lib/notifications/ids";
 import {
   appendNotification,
@@ -2668,6 +2671,725 @@ describe("update_mail_thread", () => {
     expect(response.status).toBe(403);
     expect(response.headers.get("WWW-Authenticate")).toContain(
       'scope="brain:mail"',
+    );
+    expect(fake.calls).toEqual([]);
+    await expect(readMcpActivity(1)).resolves.toEqual([]);
+  });
+});
+
+describe("the mail send tools", () => {
+  const KEY = "mcp-key-alpha-0001";
+  let stateRoot: string;
+
+  beforeEach(async () => {
+    stateRoot = path.join(os.tmpdir(), "brain-mcp-send-state-test");
+    await fs.rm(stateRoot, { recursive: true, force: true });
+    mocks.getStore.mockReset();
+    mocks.createBrainMailClient.mockReset();
+    mocks.verifyMcpBearerToken.mockReset();
+    // The legacy bearer's own client id, so `clientNameOf` answers "Legacy
+    // token" without reaching the OAuth state store for a name no test wrote.
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "test-machine-token",
+      clientId: "brain-legacy-bearer",
+      scopes: ["brain:read", "brain:mail", "brain:mail:send"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+    vi.stubEnv("MCP_TOKEN", "test-machine-token");
+    vi.stubEnv("AUTH_SECRET", "test-auth-secret-with-at-least-32-bytes");
+    vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "https://brain.example.test");
+    vi.stubEnv("BRAIN_MCP_STATE_DIR", stateRoot);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(stateRoot, { recursive: true, force: true });
+  });
+
+  it("sends with origin mcp, no agent line, and no attachments yet", async () => {
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        400,
+      ),
+    );
+
+    expect(payload).toEqual({
+      operationId: "send-alpha",
+      created: true,
+      status: "queued",
+    });
+    expect(fake.calls[1]).toEqual({
+      method: "sendMessage",
+      args: [
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          idempotencyKey: KEY,
+          mode: "compose",
+          to: ["friend@example.net"],
+          cc: [],
+          bcc: [],
+          subject: "Hello",
+          text: "one line",
+          replyToMessageId: null,
+          attachments: [],
+          origin: "mcp",
+          agentLine: false,
+        },
+      ],
+    });
+  });
+
+  it("appends the recipient line only when the toggle is on", async () => {
+    await writeAgentSettings({ tellRecipients: true, allowSending: true });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        401,
+      ),
+    );
+
+    expect((fake.calls[1].args[0] as MailSendInput).agentLine).toBe(true);
+  });
+
+  it("refuses every send while agent sending is off, before the client is touched", async () => {
+    await writeAgentSettings({ tellRecipients: false, allowSending: false });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        402,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "agent sending is off",
+      reason: "turn it on in Settings, Connections",
+    });
+    expect(isError).toBe(true);
+    expect(fake.calls).toEqual([]);
+    const [entry] = await readMcpActivity(1);
+    expect(entry.outcome).toBe("agent_sending_off");
+  });
+
+  it("refuses a reply while agent sending is off, before the client is touched", async () => {
+    await writeAgentSettings({ tellRecipients: false, allowSending: false });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "reply_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          threadId: "thread-alpha",
+          messageId: "message-alpha",
+          text: "thanks",
+          idempotencyKey: KEY,
+        },
+        403,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "agent sending is off",
+      reason: "turn it on in Settings, Connections",
+    });
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("refuses an account that cannot send, naming the reason, without touching the service", async () => {
+    const fake = createMailClientFake({
+      listAccountCapabilities: async () => ({
+        apiVersion: 3,
+        accounts: [
+          fakeAccountV3(FAKE_ACCOUNT_ID, { capabilities: { send: false } }),
+        ],
+      }),
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        404,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "cannot send from this account",
+      reason: "smtp_relay_unavailable",
+    });
+    expect(isError).toBe(true);
+    expect(fake.calls.map((call) => call.method)).toEqual([
+      "listAccountCapabilities",
+    ]);
+    const [entry] = await readMcpActivity(1);
+    expect(entry.outcome).toBe("smtp_relay_unavailable");
+  });
+
+  it("refuses an account this host does not hold", async () => {
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID_TWO,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        405,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "account not found",
+      reason: FAKE_ACCOUNT_ID_TWO,
+    });
+    expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
+  });
+
+  it("refuses an empty to and a malformed address", async () => {
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const empty = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: [],
+          subject: "Hello",
+          text: "x",
+          idempotencyKey: KEY,
+        },
+        406,
+      ),
+    );
+    expect(empty.payload).toEqual({
+      error: "to is empty",
+      reason: "name at least one recipient",
+    });
+
+    const bad = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["not an address"],
+          subject: "Hello",
+          text: "x",
+          idempotencyKey: KEY,
+        },
+        407,
+      ),
+    );
+    expect(bad.payload).toEqual({
+      error: "that is not an address",
+      reason: "to[0]",
+    });
+
+    // The client's own rule wants a dotted domain, so a bare host is named
+    // here rather than coming back as an opaque request refusal.
+    const bareHost = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          cc: ["friend@localhost"],
+          subject: "Hello",
+          text: "x",
+          idempotencyKey: KEY,
+        },
+        408,
+      ),
+    );
+    expect(bareHost.payload).toEqual({
+      error: "that is not an address",
+      reason: "cc[0]",
+    });
+    expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
+  });
+
+  it("names a repeated recipient and a body over the text cap", async () => {
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const repeated = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          cc: ["Friend@Example.net"],
+          subject: "Hello",
+          text: "x",
+          idempotencyKey: KEY,
+        },
+        409,
+      ),
+    );
+    expect(repeated.payload).toEqual({
+      error: "that address is listed twice",
+      reason: "cc[0]",
+    });
+
+    const long = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "x".repeat(1024 * 1024 + 1),
+          idempotencyKey: KEY,
+        },
+        410,
+      ),
+    );
+    expect(long.payload).toEqual({
+      error: "that message is too long",
+      reason: "text is at most 1048576 bytes",
+    });
+    expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
+  });
+
+  it("replies to the derived recipients and takes no recipients from the agent", async () => {
+    const target = fakeMessage({
+      messageId: "message-alpha",
+      threadId: "thread-alpha",
+      from: { name: "Mary", address: "mary@example.net" },
+      replyTo: [{ name: null, address: "list@example.net" }],
+      to: [{ name: null, address: "me@example.test" }],
+      cc: [{ name: null, address: "team@example.org" }],
+      subject: "Quarterly",
+    });
+    const fake = createMailClientFake({
+      getThread: async () => ({
+        apiVersion: 1,
+        thread: fakeThread({ threadId: "thread-alpha" }),
+        messages: [target],
+      }),
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "reply_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          threadId: "thread-alpha",
+          messageId: "message-alpha",
+          text: "thanks",
+          idempotencyKey: KEY,
+        },
+        411,
+      ),
+    );
+
+    expect(payload).toEqual({
+      operationId: "send-alpha",
+      created: true,
+      status: "queued",
+    });
+    const sent = fake.calls.find((call) => call.method === "sendMessage")!
+      .args[0] as MailSendInput;
+    // Reply-To wins over From, and the account's own address is never copied
+    // back onto the message it is answering.
+    expect(sent.to).toEqual(["list@example.net"]);
+    expect(sent.cc).toEqual([]);
+    expect(sent.bcc).toEqual([]);
+    expect(sent.mode).toBe("reply");
+    expect(sent.replyToMessageId).toBe("message-alpha");
+    expect(sent.subject).toBe("Re: Quarterly");
+    expect(sent.origin).toBe("mcp");
+    expect(sent.attachments).toEqual([]);
+  });
+
+  it("keeps To and Cc roles on replyAll and still drops the account itself", async () => {
+    const target = fakeMessage({
+      messageId: "message-alpha",
+      threadId: "thread-alpha",
+      from: { name: "Mary", address: "mary@example.net" },
+      replyTo: [{ name: null, address: "list@example.net" }],
+      to: [{ name: null, address: "me@example.test" }],
+      cc: [{ name: null, address: "team@example.org" }],
+      subject: "Re: Quarterly",
+    });
+    const fake = createMailClientFake({
+      getThread: async () => ({
+        apiVersion: 1,
+        thread: fakeThread({ threadId: "thread-alpha" }),
+        messages: [target],
+      }),
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    await toolPayload(
+      await callTool(
+        "reply_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          threadId: "thread-alpha",
+          messageId: "message-alpha",
+          replyAll: true,
+          text: "thanks",
+          idempotencyKey: KEY,
+        },
+        412,
+      ),
+    );
+
+    const sent = fake.calls.find((call) => call.method === "sendMessage")!
+      .args[0] as MailSendInput;
+    expect(sent.to).toEqual(["list@example.net"]);
+    expect(sent.cc).toEqual(["team@example.org"]);
+    // A subject that already answers is not prefixed a second time.
+    expect(sent.subject).toBe("Re: Quarterly");
+  });
+
+  it("rejects a to on reply_mail as an unknown argument", async () => {
+    const response = await callTool(
+      "reply_mail",
+      {
+        accountId: FAKE_ACCOUNT_ID,
+        threadId: "thread-alpha",
+        messageId: "message-alpha",
+        to: ["someone@example.net"],
+        text: "x",
+        idempotencyKey: KEY,
+      },
+      413,
+    );
+
+    expect(await response.text()).toContain("Invalid arguments");
+  });
+
+  it("refuses a reply to a message that is not in that thread", async () => {
+    const fake = createMailClientFake({
+      getThread: async () => ({
+        apiVersion: 1,
+        thread: fakeThread({ threadId: "thread-alpha" }),
+        messages: [fakeMessage({ messageId: "message-beta" })],
+      }),
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "reply_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          threadId: "thread-alpha",
+          messageId: "message-alpha",
+          text: "thanks",
+          idempotencyKey: KEY,
+        },
+        414,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "that message is not in that thread",
+      reason: "message-alpha",
+    });
+    expect(isError).toBe(true);
+    expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
+  });
+
+  it("replays the same result for a repeated idempotency key", async () => {
+    const fake = createMailClientFake({
+      sendMessage: async () => ({
+        apiVersion: 1,
+        operationId: "send-alpha",
+        created: false,
+        status: "sent",
+      }),
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        415,
+      ),
+    );
+
+    expect(payload).toEqual({
+      operationId: "send-alpha",
+      created: false,
+      status: "sent",
+    });
+  });
+
+  it("names the key a different message already used, and the rate limit", async () => {
+    const conflicted = createMailClientFake({
+      sendMessage: async () => {
+        throw new BrainMailClientError(409, "mail_send_idempotency_conflict");
+      },
+    });
+    mocks.createBrainMailClient.mockReturnValue(conflicted.client);
+
+    const conflict = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        416,
+      ),
+    );
+    expect(conflict.payload).toEqual({
+      error: "that idempotency key was used for a different message",
+      reason: "mail_send_idempotency_conflict",
+    });
+    expect(conflict.isError).toBe(true);
+    const [conflictEntry] = await readMcpActivity(1);
+    expect(conflictEntry.outcome).toBe("mail_send_idempotency_conflict");
+
+    const limited = createMailClientFake({
+      sendMessage: async () => {
+        throw new BrainMailClientError(429, "mail_send_rate_limited");
+      },
+    });
+    mocks.createBrainMailClient.mockReturnValue(limited.client);
+
+    const rateLimited = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: "mcp-key-alpha-0002",
+        },
+        417,
+      ),
+    );
+    expect(rateLimited.payload).toEqual({
+      error: "the mail service is rate limiting sends",
+      reason: "mail_send_rate_limited",
+    });
+  });
+
+  it("says the mail service is unavailable without a word about the socket", async () => {
+    const fake = createMailClientFake({
+      listAccountCapabilities: async () => {
+        throw new BrainMailClientError(503, "mail_service_unavailable");
+      },
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        418,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "the mail service is unavailable",
+      reason: "mail_service_unavailable",
+    });
+    expect(isError).toBe(true);
+  });
+
+  it("records the send mark and one activity line, with no subject or address", async () => {
+    mocks.createBrainMailClient.mockReturnValue(createMailClientFake().client);
+
+    await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["mary@example.net"],
+          subject: "Quarterly invoice",
+          text: "x",
+          idempotencyKey: KEY,
+        },
+        419,
+      ),
+    );
+
+    expect(await readAgentSends()).toEqual([
+      {
+        operationId: "send-alpha",
+        accountId: FAKE_ACCOUNT_ID,
+        clientName: "Legacy token",
+        threadId: null,
+      },
+    ]);
+    const entries = await readMcpActivity(10);
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      tool: "send_mail",
+      operationId: "send-alpha",
+      accountId: FAKE_ACCOUNT_ID,
+      client: "Legacy token",
+      outcome: "ok",
+    });
+    const serialized = JSON.stringify(entries[0]);
+    expect(serialized).not.toContain("Quarterly");
+    expect(serialized).not.toContain("mary");
+  });
+
+  it("reports the send state machine and resolves the mark's thread", async () => {
+    await recordAgentSend({
+      operationId: "send-alpha",
+      accountId: FAKE_ACCOUNT_ID,
+      clientName: "Claude",
+    });
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        getSendOperation: async () => ({
+          apiVersion: 1,
+          operationId: "send-alpha",
+          status: "sent",
+          threadId: "thread-sent",
+        }),
+      }).client,
+    );
+
+    const { payload } = await toolPayload(
+      await callTool("get_mail_send_status", { operationId: "send-alpha" }, 420),
+    );
+
+    expect(payload).toEqual({
+      operationId: "send-alpha",
+      status: "sent",
+      threadId: "thread-sent",
+    });
+    expect((await readAgentSends())[0].threadId).toBe("thread-sent");
+    // A status read is a read: it changes no mail and writes no line.
+    await expect(readMcpActivity(1)).resolves.toEqual([]);
+  });
+
+  it("leaves the mark unresolved while the provider has no Sent copy yet", async () => {
+    await recordAgentSend({
+      operationId: "send-alpha",
+      accountId: FAKE_ACCOUNT_ID,
+      clientName: "Claude",
+    });
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        getSendOperation: async () => ({
+          apiVersion: 1,
+          operationId: "send-alpha",
+          status: "queued",
+          threadId: null,
+        }),
+      }).client,
+    );
+
+    const { payload } = await toolPayload(
+      await callTool("get_mail_send_status", { operationId: "send-alpha" }, 421),
+    );
+
+    expect(payload).toEqual({
+      operationId: "send-alpha",
+      status: "queued",
+      threadId: null,
+    });
+    expect((await readAgentSends())[0].threadId).toBeNull();
+  });
+
+  it.each([
+    [
+      "send_mail",
+      {
+        accountId: FAKE_ACCOUNT_ID,
+        to: ["friend@example.net"],
+        subject: "s",
+        text: "t",
+        idempotencyKey: "mcp-key-alpha-0001",
+      },
+    ],
+    [
+      "reply_mail",
+      {
+        accountId: FAKE_ACCOUNT_ID,
+        threadId: "thread-alpha",
+        messageId: "message-alpha",
+        text: "t",
+        idempotencyKey: "mcp-key-alpha-0001",
+      },
+    ],
+    ["get_mail_send_status", { operationId: "send-alpha" }],
+  ] as const)("refuses %s on a brain:mail grant", async (name, args) => {
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "test-machine-token",
+      clientId: "brain-legacy-bearer",
+      scopes: ["brain:read", "brain:mail"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const response = await callTool(name, args, 422);
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("WWW-Authenticate")).toContain(
+      'scope="brain:mail:send"',
     );
     expect(fake.calls).toEqual([]);
     await expect(readMcpActivity(1)).resolves.toEqual([]);

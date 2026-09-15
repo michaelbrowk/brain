@@ -38,6 +38,7 @@ import {
 import { verifyMcpBearerToken } from "@/lib/oauth/server";
 import { hasScope, insufficientScope, text, toolScopeOf } from "./tool-kit";
 import { registerMailTools } from "./mail-tools";
+import { registerMailSendTools } from "./mail-send-tools";
 import { registerTaskTools } from "./task-tools";
 
 export const dynamic = "force-dynamic";
@@ -50,6 +51,7 @@ const handler = createMcpHandler(
     // `tool-kit.ts`, which runs off the tool name before this handler is
     // reached.
     registerMailTools(server);
+    registerMailSendTools(server);
     registerTaskTools(server);
 
     server.tool(

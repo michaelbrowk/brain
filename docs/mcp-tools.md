@@ -161,6 +161,65 @@ so a bell that is one row stale is not reported as a triage that did not land.
 Every call writes one activity line with the account, the thread and the
 outcome. A refused call writes one too, so the owner sees what was attempted.
 
+## Mail, sending
+
+| Tool | Scope | Inputs | Answers | Refuses |
+| --- | --- | --- | --- | --- |
+| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent sending is off`; `invalid_account_id`; `to is empty`; `that is not an address` naming the field and index, and `that address is listed twice` the same way; `that message is too long` and `that subject is too long`, each naming its cap; `account not found`; `cannot send from this account` with the blocked reason; the service's own codes |
+| `reply_mail` | `brain:mail:send` | `accountId`, `threadId`, `messageId`, `replyAll?`, `text`, `idempotencyKey` | `{ operationId, created, status }`, the reply threaded by the service onto the message named | everything `send_mail` refuses, plus `invalid_thread_id`, `invalid_message_id`, `that message is not in that thread`, and `there is no one to reply to` when the message names this account and no one else. A `to`, `cc`, `bcc` or `subject` is an unknown argument and is refused by the schema |
+| `get_mail_send_status` | `brain:mail:send` | `operationId` | `{ operationId, status, threadId }`. `threadId` is the thread the Sent copy landed in, or `null` | `invalid_operation_id`, `no send with that id`, the service's own codes |
+
+The account is a parameter of every send and the agent picks it. There is no
+allowlist of accounts an agent may write from: the gate is the scope, the
+owner's toggle, and whether the account can send at all.
+
+`idempotencyKey` is required and is the agent's own: 16 to 128 characters of
+`A-Z`, `a-z`, `0-9`, `_` and `-`. A key outside that shape is an unknown
+argument rather than a refusal, so the agent learns it from the tool
+definition. Sending twice with one key replays the first result instead of
+sending twice, and reusing a key for a different message is refused with
+`mail_send_idempotency_conflict`.
+
+`status` is the send state machine as it stands: `queued`, `sending`, `sent`,
+`delivery_unknown` or `failed`. `threadId` on a status read stays `null` until
+the provider has a Sent copy, and on an account with no Sent folder it stays
+`null` for good.
+
+Brain checks what it can before the mail service is called: the owner's
+toggle, the account id's shape, an empty `to`, every address, a repeated
+address, and the two body caps (998 bytes of subject, 1 MiB of text). Each of
+those is a rule the mail client applies a moment later; checking twice is what
+lets the refusal name the field instead of arriving as a request the service
+could not read. The one round trip a refusal costs is the account list, which
+is why it is the last check.
+
+`reply_mail` derives its own recipients and the agent may not override them.
+The tool reads the thread, finds the message by id, puts `Reply-To` over
+`From`, drops this account's own addresses and the provider's equivalent forms
+of them, and never guesses a Bcc. `replyAll: true` keeps the To and Cc roles of
+the message being answered. The subject is the target's, prefixed `Re: ` unless
+it already answers. An agent that wants different recipients sends a new
+message.
+
+Every message an agent sends is marked as one. The send carries
+`origin: "mcp"`, which is what earns it the `X-Brain-Agent: mcp` header in the
+outbound MIME; one activity line is written with the account, the operation
+and the outcome; and one mark is kept in the state directory so the Sent row
+can say which app wrote it. The mark holds the operation id, the account, the
+app's name and the thread once it is known, and nothing about what was
+written. None of this is visible to the recipient.
+
+Two toggles in Settings, Connections govern the pair. "Let agents send mail" is
+on by default; with it off, `send_mail` and `reply_mail` answer
+`agent sending is off` with `turn it on in Settings, Connections` before the
+mail client is built, and reading mail is unaffected. "Tell recipients when an
+agent writes" is off by default; with it on, the outgoing message carries one
+plain last line saying an agent wrote it. `get_mail_send_status` is a read and
+neither toggle gates it: a send already made can always be asked about.
+
+Outgoing attachments are not part of these tools yet. They are named from a
+page's own files and land later on this branch.
+
 ## Notion import
 
 The nine `notion_*` tools are one guarded protocol, not nine independent
@@ -212,6 +271,6 @@ folder, in git or in a portable archive.
 
 ## Still to come in this release
 
-Mail sending and attachments, the task write tools and the Settings view of the
-activity log land later on this branch. Their rows are added here as each one
+Mail attachments, in and out, and the Settings view of the activity log land
+later on this branch. Their rows are added here as each one
 is registered, so this table and the server stay one description.

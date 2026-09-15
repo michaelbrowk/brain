@@ -35,15 +35,40 @@ write implies read, and mail never implies write.
 
 ## Tasks
 
-A task is a record, not a note. `list_tasks` needs the caller's own calendar
-date because the server has no timezone to fall back on, and the logbook needs
-the caller's UTC offset as well, because a completion is one instant and the
-day it falls on is the caller's.
+A task is a record, not a note. A derived list is read against a day, so
+`list_tasks` takes the caller's own calendar date as `today`. Leave it out and
+Brain uses the owner's own time zone, the one Settings, Account holds; with no
+zone captured and no `today`, the read is refused rather than answered in UTC.
+The logbook needs a UTC offset as well, because a completion is one instant and
+the day it falls on is the caller's.
+
+A COMPLETION DOES NOT LEAVE ITS LIST. A ticked task stays in the list it was
+in, struck through, until the day changes, and only then does it reach the
+logbook. So a list read that follows a completion carries `offsetMinutes` too:
+without one the day is UTC's, and a completion near midnight moves lists under
+the agent that made it.
+
+`time` is `HH:MM`, 24 hour, in the owner's zone. `evening` is `true` or absent,
+never `false`. Both are statements about a day, so both need `when` to be a day
+rather than `someday`, and a later change that parks the task or sends it back
+to the Inbox clears them whether or not the call names them. `remindedAt` is
+not a field any tool can set: clearing `time` is how a reminder is stopped, and
+the store clears the mark itself.
+
+Every task write records one line in the activity log, carrying the tool, the
+record's id, the note's id for a promote, and the outcome. No title enters it.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `list_tasks` | | `list`, `today?`, `offsetMinutes?`, `category?` | `{ tasks }` for every list but the logbook, which answers `{ entries }`, one per completion, each with its own `key` | a missing `today` on any list but the inbox, a `today` that is not `YYYY-MM-DD` (`bad_today`), a logbook read with no `offsetMinutes` (`bad_offset`) |
+| `list_tasks` | | `list?`, `page?`, `today?`, `offsetMinutes?`, `category?` | `{ tasks }` for every list but the logbook, which answers `{ entries }`, one per completion, each with its own `key`. With `page` it is every record on that note, complete | a `today` that is not `YYYY-MM-DD` (`bad_today`), a logbook read with no offset and no zone (`bad_offset`), a derived list with neither a day nor a captured zone, a call naming neither a list nor a page (`missing_list`) |
+| `list_tasks` with `page` | | `page` alone | `{ tasks }`: every record the note owns, linked and detached, done and open, whatever their age, because the editor draws a word on every task line whatever state its record is in | `list`, `today`, `offsetMinutes` or `category` beside it (`unexpected_list`, `unexpected_today`, `unexpected_offset`, `unexpected_category`), and `bad_page` |
 | `get_task` | | `id` | `{ task }`, including whether its note line was removed and which page it is linked to | `bad_id`, `not_found`, `page_trashed` |
+| `create_task` | `brain:write` | `title`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?` | `{ task }`, unlinked: it owns its own completion and belongs to no note | whatever the record refuses, as `that task change was refused` with the record's own reason, for instance `time needs a day to be a time on` |
+| `promote_task_line` | `brain:write` | `page`, `line` (a zero-based markdown line number, or the line's own text with runs of whitespace collapsed), `when?`, `time?`, `evening?`, `deadline?`, `category?` | `{ task }`, linked to that checkbox line, with the anchor the editor's own promote builds. The note's category is inherited unless one is named here | `that line is not a checkbox`, `that line appears more than once, pass its line number`, `that line is empty`, `that line already has a task` naming the record that has it, `bad_id`, `not_found` for a note that is not there |
+| `update_task` | `brain:write` | `id`, `title?`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?`. A field left out is left alone and `null` clears it | `{ task }` after the change | `bad_id`, `not_found`, whatever the record refuses. `expectedWhen` and `remindedAt` are refused as unknown arguments |
+| `complete_task` | `brain:write` | `id`, `today`, `offsetMinutes?`, `expectedWhen?` | `{ task, list }`, where `list` is the list the record is in for that day, which is the list it was already in | `bad_id`, `not_found`, and `conflict` with `currentWhen` when a repeating task has moved since the caller last read it |
+| `reopen_task` | `brain:write` | `id`, `today`, `offsetMinutes?` | `{ task, list }`. Unticking a repeating task restores the instance its newest completion came from | `bad_id`, `not_found`, `conflict` |
+| `delete_task` | `brain:write` | `id` | `{ ok: true }`. A linked task's checkbox line stays in its note; the record that pointed at it is what goes | `bad_id`, `not_found` |
 
 ## Mail, reading
 

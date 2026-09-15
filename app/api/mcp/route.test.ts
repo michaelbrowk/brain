@@ -2551,6 +2551,15 @@ describe("save_mail_attachment", () => {
     0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x34, 0x0a,
   ]);
 
+  /** The page the line is going on. The tool reads it before it asks the mail
+   *  service for a byte, so every store stand-in here answers one. */
+  const readsPageOne = () =>
+    vi.fn().mockResolvedValue({
+      meta: { id: "page-one" },
+      markdown: "a page",
+      rev: "rev-1",
+    });
+
   function streamOf(bytes: Uint8Array): ReadableStream<Uint8Array> {
     return new ReadableStream<Uint8Array>({
       start(controller) {
@@ -2616,7 +2625,11 @@ describe("save_mail_attachment", () => {
       type: "application/pdf",
     });
     const appendPage = vi.fn().mockResolvedValue({ meta: { id: "page-one" } });
-    mocks.getStore.mockResolvedValue({ saveAttachment, appendPage });
+    mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
+      saveAttachment,
+      appendPage,
+    });
     const fake = createMailClientFake({
       downloadAttachment: async () => ({
         contentType: "application/pdf",
@@ -2669,6 +2682,7 @@ describe("save_mail_attachment", () => {
   it("appends an image embed for an image", async () => {
     const appendPage = vi.fn().mockResolvedValue({ meta: { id: "page-one" } });
     mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
       saveAttachment: vi.fn().mockResolvedValue({
         url: "/_attachments-v2/bbbb.png",
         name: "shot.png",
@@ -2712,6 +2726,7 @@ describe("save_mail_attachment", () => {
   it("escapes a filename that would otherwise close the link early", async () => {
     const appendPage = vi.fn().mockResolvedValue({ meta: { id: "page-one" } });
     mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
       saveAttachment: vi.fn().mockResolvedValue({
         url: "/_attachments-v2/cccc.pdf",
         // The sender names the file, so the label is somebody else's prose.
@@ -2759,7 +2774,11 @@ describe("save_mail_attachment", () => {
       type: "application/pdf",
     });
     const appendPage = vi.fn();
-    mocks.getStore.mockResolvedValue({ saveAttachment, appendPage });
+    mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
+      saveAttachment,
+      appendPage,
+    });
     mocks.createBrainMailClient.mockReturnValue(
       createMailClientFake({
         downloadAttachment: async () => ({
@@ -2799,6 +2818,7 @@ describe("save_mail_attachment", () => {
     );
     const appendPage = vi.fn();
     mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
       saveAttachment: vi.fn().mockRejectedValue(blocked),
       appendPage,
     });
@@ -2837,7 +2857,11 @@ describe("save_mail_attachment", () => {
 
   it("refuses a declared size over the note cap without reading a byte", async () => {
     const saveAttachment = vi.fn();
-    mocks.getStore.mockResolvedValue({ saveAttachment, appendPage: vi.fn() });
+    mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
+      saveAttachment,
+      appendPage: vi.fn(),
+    });
     let cancelled = false;
     mocks.createBrainMailClient.mockReturnValue(
       createMailClientFake({
@@ -2845,14 +2869,22 @@ describe("save_mail_attachment", () => {
           contentType: "application/octet-stream",
           contentDisposition: 'attachment; filename="big.bin"',
           bytes: MAX_ATTACHMENT_BYTES + 1,
-          body: new ReadableStream<Uint8Array>({
-            pull(controller) {
-              controller.enqueue(new Uint8Array(64 * 1024));
+          // Nothing may read this one. The declared size is over the cap and
+          // the pre-check answers off that number alone, so a read is a
+          // failure: with `highWaterMark` 0 the stream pulls only when asked,
+          // and a pull that throws makes the drain answer the service's own
+          // outage code instead of this refusal.
+          body: new ReadableStream<Uint8Array>(
+            {
+              pull() {
+                throw new Error("the declared size should have refused this");
+              },
+              cancel() {
+                cancelled = true;
+              },
             },
-            cancel() {
-              cancelled = true;
-            },
-          }),
+            { highWaterMark: 0 },
+          ),
         }),
       }).client,
     );
@@ -2880,7 +2912,11 @@ describe("save_mail_attachment", () => {
 
   it("stops draining at the note cap when the stream outruns what it declared", async () => {
     const saveAttachment = vi.fn();
-    mocks.getStore.mockResolvedValue({ saveAttachment, appendPage: vi.fn() });
+    mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
+      saveAttachment,
+      appendPage: vi.fn(),
+    });
     const long = streamOfChunks(MAX_ATTACHMENT_BYTES * 2);
     mocks.createBrainMailClient.mockReturnValue(
       createMailClientFake({
@@ -2926,6 +2962,7 @@ describe("save_mail_attachment", () => {
       type: "application/pdf",
     });
     mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
       saveAttachment,
       appendPage: vi.fn().mockResolvedValue({ meta: { id: "page-one" } }),
     });
@@ -2986,6 +3023,7 @@ describe("save_mail_attachment", () => {
 
   it("logs one line naming the page and the attachment, and no filename", async () => {
     mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
       saveAttachment: vi.fn().mockResolvedValue({
         url: "/_attachments-v2/aaaa.pdf",
         name: "invoice.pdf",
@@ -3035,6 +3073,7 @@ describe("save_mail_attachment", () => {
       .fn()
       .mockRejectedValue(new NotFoundError("page-gone"));
     mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
       saveAttachment: vi.fn().mockResolvedValue({
         url: "/_attachments-v2/ffff.pdf",
         name: "invoice.pdf",
@@ -3077,7 +3116,11 @@ describe("save_mail_attachment", () => {
 
   it("hands back the service's own reason when the download fails", async () => {
     const saveAttachment = vi.fn();
-    mocks.getStore.mockResolvedValue({ saveAttachment, appendPage: vi.fn() });
+    mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
+      saveAttachment,
+      appendPage: vi.fn(),
+    });
     mocks.createBrainMailClient.mockReturnValue(
       createMailClientFake({
         downloadAttachment: async () => {
@@ -3108,9 +3151,135 @@ describe("save_mail_attachment", () => {
     expect(entry).toMatchObject({ outcome: "mail_service_unavailable" });
   });
 
+  it("refuses a page it cannot read before a byte is downloaded", async () => {
+    const readPage = vi.fn().mockRejectedValue(new NotFoundError("page-gone"));
+    const saveAttachment = vi.fn();
+    mocks.getStore.mockResolvedValue({
+      readPage,
+      saveAttachment,
+      appendPage: vi.fn(),
+    });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "save_mail_attachment",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          attachmentId: "attachment-alpha",
+          page: "page-gone",
+        },
+        516,
+      ),
+    );
+
+    // A mistyped page id is the common case and costs nothing to answer, so
+    // it must not cost a whole download and leave a file nothing links.
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "page not found",
+      reason: "page-gone",
+    });
+    expect(readPage).toHaveBeenCalledWith("page-gone");
+    expect(fake.calls).toEqual([]);
+    expect(saveAttachment).not.toHaveBeenCalled();
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({ page: "page-gone", outcome: "page_not_found" });
+  });
+
+  it("reads no page when the caller asks for no line", async () => {
+    const readPage = readsPageOne();
+    mocks.getStore.mockResolvedValue({
+      readPage,
+      saveAttachment: vi.fn().mockResolvedValue({
+        url: "/_attachments-v2/gggg.pdf",
+        name: "invoice.pdf",
+        size: 9,
+        type: "application/pdf",
+      }),
+      appendPage: vi.fn(),
+    });
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        downloadAttachment: async () => ({
+          contentType: "application/pdf",
+          contentDisposition: 'attachment; filename="invoice.pdf"',
+          bytes: PDF_BYTES.byteLength,
+          body: streamOf(PDF_BYTES),
+        }),
+      }).client,
+    );
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "save_mail_attachment",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          attachmentId: "attachment-alpha",
+          page: "page-one",
+          append: false,
+        },
+        517,
+      ),
+    );
+
+    // With no line to write, the page is not the tool's business and a page
+    // that is gone is not a reason to turn the save down.
+    expect(payload).toMatchObject({ url: "/_attachments-v2/gggg.pdf" });
+    expect(readPage).not.toHaveBeenCalled();
+  });
+
+  it("refuses an executable whatever type the message claims it is", async () => {
+    const saveAttachment = vi.fn();
+    mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
+      saveAttachment,
+      appendPage: vi.fn(),
+    });
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        downloadAttachment: async () => ({
+          contentType: "application/octet-stream",
+          contentDisposition: 'attachment; filename="setup.EXE"',
+          bytes: 4,
+          body: streamOf(new Uint8Array([0x4d, 0x5a, 0x90, 0x00])),
+        }),
+      }).client,
+    );
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "save_mail_attachment",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          attachmentId: "attachment-alpha",
+          page: "page-one",
+        },
+        518,
+      ),
+    );
+
+    // A person dragging a file into a note chose both the bytes and the name.
+    // Here a remote sender chose both and an agent decided to keep them, so
+    // the extension the store would mint is refused on its own.
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "that file cannot be saved into a note",
+      reason: "a message may not hand an agent a .exe",
+    });
+    expect(saveAttachment).not.toHaveBeenCalled();
+    const [entry] = await readMcpActivity(1);
+    expect(entry.outcome).toBe("blocked_extension");
+  });
+
   it("tells the agent to reconnect the account in the words every mail tool uses", async () => {
     const saveAttachment = vi.fn();
-    mocks.getStore.mockResolvedValue({ saveAttachment, appendPage: vi.fn() });
+    mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
+      saveAttachment,
+      appendPage: vi.fn(),
+    });
     mocks.createBrainMailClient.mockReturnValue(
       createMailClientFake({
         downloadAttachment: async () => {

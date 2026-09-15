@@ -282,11 +282,18 @@ without saying anything about what is in it.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type }`, the saved file as the note store named it | `that file is too large for a note`, naming the cap; whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`); `page not found`, which also says the file is saved and no line was added; `invalid_account_id`, `invalid_attachment_id`, `invalid_page_id`; plus the service's own codes |
+| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type }`, the saved file as the note store named it | `that account id is not valid`, `that attachment id is not valid` and `that page id is not valid`, each naming the shape it wanted; `page not found`, before anything is downloaded; `that file is too large for a note`, naming the cap; `that file cannot be saved into a note`, naming the executable extension; whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`); plus the service's own codes |
 
 It is the one mail tool that writes a note, so it asks for `brain:write`
 beside `brain:mail`. A grant that reads mail and cannot edit notes is refused
 before the mail client is built.
+
+The page is read before the download. A mistyped page id is the common case
+and costs one file read to answer, where answering it afterwards costs a whole
+file over the socket and leaves one nothing links. The append keeps its own
+not-found branch for the page deleted in between, and that one does say the
+file is saved and no line was added. With `append` false there is no line to
+write, so the page is not read at all.
 
 Two caps apply and the smaller one wins. The mail service hands out no more
 than 40 MiB from a mailbox, the notes folder takes no more than 25 MiB, and
@@ -296,9 +303,18 @@ down. The note store checks the rest, the same checks an upload from the
 browser meets: the blocked types, and the first bytes against the type the
 file claims.
 
+One check is this path's own, and the owner's own uploads do not meet it: a
+file whose stored name would end `.exe`, `.dll`, `.com`, `.scr`, `.bat`,
+`.cmd`, `.ps1`, `.msi`, `.jar`, `.sh`, `.app`, `.dmg` or `.pkg` is refused,
+whatever type the message claimed for it. A person dragging an installer into
+their own note chose both the bytes and the name. Here a remote sender chose
+both and an agent decided to keep them, and that is the difference the rule is
+about. The list lives in `lib/attachments.ts` beside the MIME lists.
+
 The file is named from the message's own `Content-Disposition`, the RFC 5987
-form first. The store keeps that as display metadata only and mints its own
-name for the file on disk.
+form first. The client refuses a malformed or oversized header before this
+tool sees it, and the name is bounded again here at 255 bytes. The store keeps
+it as display metadata only and mints its own name for the file on disk.
 
 With `append` true, the default, one Markdown line is added to the page: an
 image is shown, anything else is linked. The filename is escaped into the
@@ -307,6 +323,10 @@ would close the link early. The page's `updatedBy` becomes `claude`, as with
 every MCP write. With `append` false nothing is written to the page, and a
 file no page links is collected by the attachment sweep a day later, so an
 agent that passes it has to write its own line.
+
+There is no dedupe. Saving one attachment twice writes two files and two
+lines, the way a person uploading the same file twice would, so an agent
+retrying a call it already made has to check the page rather than call again.
 
 One activity line per call names the account, the attachment and the page,
 never the filename.

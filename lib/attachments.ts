@@ -138,6 +138,39 @@ export function attachmentMimeTypeForName(name: string): string {
   return ATTACHMENT_MIME_BY_EXTENSION[extension] ?? "application/octet-stream";
 }
 
+/** The extensions an agent may not save into a note out of a message.
+ *
+ *  `BLOCKED_ATTACHMENT_MIME` and `ACTIVE_ATTACHMENT_EXTENSIONS` above are
+ *  about a file a browser could run while rendering a note. This list is
+ *  about a file a person could run after opening one, and it exists for a
+ *  provenance the upload path does not have: a remote sender picks the bytes
+ *  and the name, and an agent, not a person, decides to keep them. An owner
+ *  dragging `setup.exe` into their own note chose it, and that path is
+ *  unchanged.
+ *
+ *  Named by the extension the store would mint for the file, so a sender who
+ *  declares `application/octet-stream` and calls it `setup.exe` is turned
+ *  down on the `.exe`, whatever the type claimed. */
+const EXECUTABLE_ATTACHMENT_EXTENSIONS: ReadonlySet<string> = new Set([
+  ".exe",
+  ".dll",
+  ".com",
+  ".scr",
+  ".bat",
+  ".cmd",
+  ".ps1",
+  ".msi",
+  ".jar",
+  ".sh",
+  ".app",
+  ".dmg",
+  ".pkg",
+]);
+
+export function isExecutableAttachmentExtension(extension: string): boolean {
+  return EXECUTABLE_ATTACHMENT_EXTENSIONS.has(extension.toLowerCase());
+}
+
 export function normalizeAttachmentDisplayName(originalName: string): string {
   return (
     originalName

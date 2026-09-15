@@ -1,5 +1,10 @@
 import type { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
+import {
+  canonicalAttachmentExtension,
+  isExecutableAttachmentExtension,
+  normalizeAttachmentDisplayName,
+} from "@/lib/attachments";
 import { createBrainMailClient } from "@/lib/mail/brain-mail-client";
 import { MAIL_RESOURCE_LIMITS } from "@/lib/mail/security";
 import {
@@ -91,23 +96,47 @@ async function drainBounded(
   return data;
 }
 
+/** A name is display metadata and a link label, so it is bounded here as
+ *  well. The header it comes out of is already bounded: the client refuses
+ *  any `Content-Disposition` that is not exactly
+ *  `attachment; filename="..."; filename*=UTF-8''...`, with no control
+ *  characters and at most 180 bytes, in `isSafeContentDisposition`
+ *  (`lib/mail/brain-mail-client.ts`). This cap is this module's own, so a
+ *  change to that guard cannot quietly put an unbounded string in a note. */
+const MAX_FILENAME_BYTES = 255;
+
+function boundedName(name: string): string {
+  if (Buffer.byteLength(name) <= MAX_FILENAME_BYTES) return name;
+  // One whole character at a time, so a cut never splits a letter into bytes
+  // that are not one, and never leaves half of a surrogate pair behind.
+  const characters = Array.from(name);
+  while (
+    characters.length > 0 &&
+    Buffer.byteLength(characters.join("")) > MAX_FILENAME_BYTES
+  ) {
+    characters.pop();
+  }
+  return characters.join("");
+}
+
 /** The name the message gave the file. The extended form comes first because
  *  the download path emits both and only the extended one carries a name
- *  outside ASCII. With neither, the name is the word `attachment`; the store
- *  re-reads it anyway, mints its own `<id>.<ext>` and keeps this as display
- *  metadata. */
+ *  outside ASCII, which is why the quoted branch is a fallback the real
+ *  client never reaches rather than a rule anything depends on. With neither,
+ *  the name is the word `attachment`; the store re-reads it anyway, mints its
+ *  own `<id>.<ext>` and keeps this as display metadata. */
 function filenameOf(disposition: string): string {
   const extended = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
   if (extended) {
     try {
       const decoded = decodeURIComponent(extended[1]).trim();
-      if (decoded) return decoded;
+      if (decoded) return boundedName(decoded);
     } catch {
       // A percent escape the sender mangled. The quoted form is the fallback.
     }
   }
   const quoted = /filename="([^"]*)"/i.exec(disposition);
-  if (quoted && quoted[1].trim()) return quoted[1].trim();
+  if (quoted && quoted[1].trim()) return boundedName(quoted[1].trim());
   return "attachment";
 }
 
@@ -133,7 +162,7 @@ function attachmentLine(saved: SavedAttachment): string {
 export function registerMailAttachmentTools(server: McpToolServer): void {
   server.tool(
     TOOL,
-    "Save one attachment from a message into a note's own files. The bytes stream from the mail service into the notes folder, where the note store checks them: nothing over 25 MiB, no active file type, and bytes that do not match the type they claim are turned down with the store's own reason. With append true, the default, one Markdown line is added to the page, an image shown and anything else linked. With append false nothing is written to the page, and a file no page links is swept a day later, so link it yourself.",
+    `Save one attachment from a message into a note's own files. The bytes stream from the mail service into the notes folder, where the note store checks them: ${SAVE_CAP_REASON}, no active file type, no executable whatever type the message claims, and bytes that do not match the type they claim are turned down with the store's own reason. With append true, the default, the page is read first and one Markdown line is added to it, an image shown and anything else linked. With append false nothing is written to the page, and a file no page links is swept a day later, so link it yourself.`,
     {
       accountId: z.string(),
       attachmentId: z
@@ -191,6 +220,24 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
         return insufficientScope("brain:write");
       }
 
+      const store = await getStore();
+      // The page before the bytes. A mistyped page id is the common case, it
+      // costs one `index.md` read to answer, and answering it after the
+      // download means a whole file over the socket and an orphan in the
+      // notes folder for the sweep to collect a day later. The append below
+      // keeps its own not-found branch for the page deleted in between.
+      // With `append: false` there is no line to write, so the page is not
+      // this call's business and is not read at all.
+      if (append !== false) {
+        try {
+          await store.readPage(page);
+        } catch (error) {
+          if (!isNotFound(error)) throw error;
+          await log("page_not_found");
+          return refusal("page not found", page);
+        }
+      }
+
       let data: Uint8Array;
       let originalName: string;
       let mimeType: string;
@@ -220,7 +267,22 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
         return mailRefusal(error);
       }
 
-      const store = await getStore();
+      // The name the file would land under, which is the store's own
+      // decision: the canonical extension for the type, or the sender's when
+      // the type has none. An executable is refused on that extension alone,
+      // whatever the message called the type.
+      const extension = canonicalAttachmentExtension(
+        normalizeAttachmentDisplayName(originalName),
+        mimeType,
+      );
+      if (isExecutableAttachmentExtension(extension)) {
+        await log("blocked_extension");
+        return refusal(
+          "that file cannot be saved into a note",
+          `a message may not hand an agent a ${extension}`,
+        );
+      }
+
       let saved: SavedAttachment;
       try {
         saved = await store.saveAttachment(

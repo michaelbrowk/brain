@@ -6,6 +6,7 @@ import {
   fingerprintMailSendInput,
   MailSendError,
   ProviderNeutralMailSendService,
+  runExclusiveOutboundBuild,
   validateMailSendInput,
   type MailReplyContextResolver,
   type MailSendAccountResolver,
@@ -545,6 +546,81 @@ describe("provider-neutral mail send service", () => {
         request(),
       ),
     ).rejects.toEqual(new MailSendError("mail_send_reply_target_not_found"));
+  });
+});
+
+describe("one outbound build at a time", () => {
+  it("starts a build only once the build before it has ended", async () => {
+    const steps: string[] = [];
+    let releaseFirst!: () => void;
+    const firstDone = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+
+    const first = runExclusiveOutboundBuild(async () => {
+      steps.push("first in");
+      await firstDone;
+      steps.push("first out");
+      return 1;
+    });
+    const second = runExclusiveOutboundBuild(() => {
+      steps.push("second in");
+      return 2;
+    });
+
+    await Promise.resolve();
+    expect(steps).toEqual(["first in"]);
+    releaseFirst();
+    await expect(first).resolves.toBe(1);
+    await expect(second).resolves.toBe(2);
+    expect(steps).toEqual(["first in", "first out", "second in"]);
+  });
+
+  it("keeps the queue moving after a build throws", async () => {
+    const failed = runExclusiveOutboundBuild(() => {
+      throw new Error("build failed");
+    });
+    await expect(failed).rejects.toThrow("build failed");
+    await expect(runExclusiveOutboundBuild(() => "next")).resolves.toBe("next");
+  });
+
+  it("holds a second send's build until the first send has finished its own", async () => {
+    const store = new MemoryMailSendStore();
+    const enqueued: string[] = [];
+    const record = store.enqueue.bind(store);
+    vi.spyOn(store, "enqueue").mockImplementation(async (submission) => {
+      enqueued.push(submission.idempotencyKey);
+      return record(submission);
+    });
+    const service = serviceFixture(store, acceptedProvider());
+
+    let release!: () => void;
+    const held = runExclusiveOutboundBuild(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+
+    const first = service.send(
+      { ...composeInput(), idempotencyKey: "queued-send-one" },
+      request(),
+    );
+    const second = service.send(
+      {
+        ...composeInput(),
+        idempotencyKey: "queued-send-two",
+        text: "Second body",
+      },
+      request(),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(enqueued).toEqual([]);
+
+    release();
+    await held;
+    await Promise.all([first, second]);
+    expect(enqueued).toEqual(["queued-send-one", "queued-send-two"]);
   });
 });
 

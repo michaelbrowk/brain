@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildMultipartBody,
   encodeAttachmentFilename,
+  encodeBase64Body,
   multipartBoundary,
 } from "./outbound-attachments";
 
@@ -66,6 +67,33 @@ describe("outgoing multipart writer", () => {
     ).toString("utf8");
     for (const line of body.split("\r\n")) {
       expect(line.length).toBeLessThanOrEqual(76);
+    }
+  });
+
+  it("truncates a long non-ASCII name to the bound the header limit needs", () => {
+    // 255 bytes of Cyrillic percent-encode to three bytes each, so the bound
+    // rather than the filename cap is what keeps the header under 998.
+    const name = `${"я".repeat(127)}.pdf`;
+    expect(Buffer.byteLength(name)).toBe(258);
+    const header = `Content-Disposition: attachment; ${encodeAttachmentFilename(name)}`;
+    expect(Buffer.byteLength(header)).toBeLessThan(998);
+    expect(header).toContain("%D1%8F");
+    expect(header).not.toContain(".pdf\"");
+  });
+
+  it("encodes a payload spanning chunks exactly as one wrapped encoding", () => {
+    // The writer encodes 57 source bytes per line and 512 lines per chunk.
+    // Both numbers have to hold or a receiver reads a different file.
+    for (const size of [0, 1, 56, 57, 58, 29_184, 29_185, 61_000]) {
+      const bytes = Buffer.alloc(size, 5);
+      const whole = bytes.toString("base64");
+      const wrapped: string[] = [];
+      for (let index = 0; index < whole.length; index += 76) {
+        wrapped.push(whole.slice(index, index + 76));
+      }
+      expect(encodeBase64Body(bytes).toString("ascii")).toBe(
+        wrapped.join("\r\n"),
+      );
     }
   });
 

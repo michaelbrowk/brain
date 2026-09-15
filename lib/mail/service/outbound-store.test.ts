@@ -1361,6 +1361,92 @@ describe("durable account-scoped mail drafts", () => {
     await fixture.store.close();
   });
 
+  // Step 7 of the plan, letting a draft carry attachments, was deferred: no
+  // path in the tree writes bytes into draft_attachments, so a draft that
+  // carried one would send without it. These two pin the refusals that hold
+  // the decision, because deleting either line leaves the suite green.
+  it("refuses to create a draft that already carries a file", async () => {
+    const fixture = await createStore();
+    const draft = storedDraftFixture({
+      attachments: Object.freeze([
+        draftAttachmentFixture(
+          "draft-attachment-00000000-0000-4000-8000-000000009001",
+        ),
+      ]),
+    });
+    await expect(
+      fixture.store.createDraft(
+        draft,
+        fingerprintMailDraftCreate(createInputFromFixture(draft)),
+      ),
+    ).rejects.toEqual(new MailDraftError("mail_draft_service_unavailable"));
+    await fixture.store.close();
+  });
+
+  it("refuses a draft send once the draft has grown a file the message cannot carry", async () => {
+    const fixture = await createStore();
+    const draft = storedDraftFixture({ to: "friend@example.com" });
+    await fixture.store.createDraft(
+      draft,
+      fingerprintMailDraftCreate(createInputFromFixture(draft)),
+    );
+    const database = openDatabase(fixture.cacheRoot);
+    try {
+      const attachment = draftAttachmentFixture(
+        "draft-attachment-00000000-0000-4000-8000-000000009002",
+      );
+      database
+        .prepare(
+          `INSERT INTO draft_attachments(
+             attachment_id, draft_id, account_id, filename, mime_type, bytes,
+             blob_sha256, blob_name, created_at
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          attachment.attachmentId,
+          draft.draftId,
+          FIRST_ACCOUNT,
+          attachment.filename,
+          attachment.mimeType,
+          attachment.bytes,
+          attachment.blobSha256,
+          attachment.blobName,
+          draft.updatedAt,
+        );
+    } finally {
+      database.close();
+    }
+    const submission = draftSubmissionFixture(draft, {
+      operationId: operationId(9_002),
+      idempotencyKey: "draft-attachment-send-1",
+      createdAt: draft.updatedAt + 1,
+      updatedAt: draft.updatedAt + 1,
+      nextAttemptAt: draft.updatedAt + 1,
+    });
+    const mutation = validateMailDraftMutationInput({
+      accountId: FIRST_ACCOUNT,
+      draftId: draft.draftId,
+      mutationId: draftMutationId(9_002),
+      expectedRevision: 0,
+      kind: "send",
+      sendIdempotencyKey: submission.idempotencyKey,
+      sendOperationId: submission.operationId,
+    });
+
+    await expect(
+      fixture.store.commitDraftSend(
+        mutation,
+        fingerprintMailDraftMutation(mutation),
+        submission,
+        submission.createdAt,
+      ),
+    ).rejects.toEqual(new MailDraftError("mail_draft_idempotency_conflict"));
+    await expect(
+      fixture.store.readByOperationId(submission.operationId),
+    ).resolves.toBeNull();
+    await fixture.store.close();
+  });
+
   it("atomically commits a draft send receipt with its durable outbox row", async () => {
     const fixture = await createStore();
     const draft = storedDraftFixture({ to: "friend@example.com" });
@@ -3077,6 +3163,21 @@ function submissionFixture(
     createdAt: Date.parse("2026-07-15T10:00:00.000Z"),
     updatedAt: Date.parse("2026-07-15T10:00:00.000Z"),
     ...override,
+  });
+}
+
+function draftAttachmentFixture(attachmentId: string) {
+  const digest = "c".repeat(64);
+  return Object.freeze({
+    accountId: FIRST_ACCOUNT,
+    draftId: draftId(1),
+    attachmentId,
+    filename: "invoice.pdf",
+    mimeType: "application/pdf",
+    bytes: 9,
+    blobSha256: digest,
+    blobName: `sha256-${digest}`,
+    createdAt: Date.parse("2026-07-20T01:00:00.000Z"),
   });
 }
 

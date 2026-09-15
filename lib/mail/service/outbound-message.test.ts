@@ -200,7 +200,7 @@ describe("outbound RFC 2822 builder", () => {
     expect(source.trimEnd().endsWith(`--${boundary}--`)).toBe(true);
   });
 
-  it("refuses a message that crosses the 26 MiB cap and wipes the buffer", () => {
+  it("refuses a message that crosses the 18 MiB cap and wipes the buffer", () => {
     expect(() =>
       buildOutboundRfc2822(
         base({
@@ -217,6 +217,23 @@ describe("outbound RFC 2822 builder", () => {
         }),
       ),
     ).toThrow("outbound message exceeds the configured byte limit");
+  });
+
+  it("writes the single-part message byte for byte", () => {
+    // Every Sent copy and every replay check compares these bytes, so the
+    // shape is pinned exactly rather than by what it happens to contain.
+    expect(buildOutboundRfc2822(base()).rawRfc2822.toString("utf8")).toBe(
+      "From: me@example.com\r\n" +
+        "To: friend@example.net\r\n" +
+        "Subject: =?UTF-8?B?UGxhaW4=?=\r\n" +
+        "Date: Wed, 15 Jul 2026 09:30:00 +0000\r\n" +
+        "Message-ID: <brain.1@example.com>\r\n" +
+        "MIME-Version: 1.0\r\n" +
+        'Content-Type: text/plain; charset="UTF-8"\r\n' +
+        "Content-Transfer-Encoding: base64\r\n" +
+        "\r\n" +
+        "b25lIGxpbmU=\r\n",
+    );
   });
 
   it("carries X-Brain-Agent only when the origin is mcp", () => {

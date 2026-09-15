@@ -257,7 +257,7 @@ export class ProviderNeutralMailSendService implements MailSendService {
     const operationId = validateMailSendOperationId(this.createOperationId());
     let proposal: StoredMailSendSubmission;
     try {
-      proposal = createMailSendSubmissionProposal({
+      proposal = await buildMailSendSubmissionProposal({
         account,
         input,
         reply,
@@ -814,25 +814,67 @@ export function fingerprintMailSendInput(input: MailSendInput): string {
     .digest("hex");
 }
 
-export function createMailSendSubmissionProposal(options: {
+export interface MailSendSubmissionProposalOptions {
   readonly account: MailSendAccount;
   readonly input: MailSendInput;
   readonly reply: MailReplyContext | null;
   readonly operationId: string;
   readonly createdAt: number;
-}): StoredMailSendSubmission {
+}
+
+/**
+ * One outbound MIME build at a time, for the whole process. A send at the
+ * attachment cap holds the decoded files and the finished message at once, and
+ * the service runs under `MemoryHigh=192M`, so two builds overlapping is the
+ * difference between a send and a killed process. Every build stands in this
+ * queue: a person's, an agent's, and a draft's.
+ */
+let outboundBuildQueue: Promise<unknown> = Promise.resolve();
+
+export function runExclusiveOutboundBuild<T>(
+  build: () => T | Promise<T>,
+): Promise<T> {
+  const result = outboundBuildQueue.then(build, build);
+  // A failed build releases the queue like any other, and the rejection
+  // belongs to its own caller rather than to the send that comes next.
+  outboundBuildQueue = result.then(
+    () => undefined,
+    () => undefined,
+  );
+  return result;
+}
+
+/** `createMailSendSubmissionProposal`, taking its turn in that queue. */
+export function buildMailSendSubmissionProposal(
+  options: MailSendSubmissionProposalOptions,
+): Promise<StoredMailSendSubmission> {
+  return runExclusiveOutboundBuild(() =>
+    createMailSendSubmissionProposal(options),
+  );
+}
+
+export function createMailSendSubmissionProposal(
+  options: MailSendSubmissionProposalOptions,
+): StoredMailSendSubmission {
   const messageId = createMessageId(options.account, options.input.idempotencyKey);
   const reply =
     options.reply === null ? null : validateReplyContext(options.reply);
   let rawRfc2822: Buffer | null = null;
-  // Decoded here, next to the wipe that follows, so somebody's invoice never
-  // outlives the one call that needed it.
-  const attachments = options.input.attachments.map((attachment) => ({
-    filename: attachment.filename,
-    mimeType: attachment.mimeType,
-    bytes: Buffer.from(attachment.dataBase64, "base64"),
-  }));
+  const attachments: {
+    readonly filename: string;
+    readonly mimeType: string;
+    readonly bytes: Buffer;
+  }[] = [];
   try {
+    // Decoded inside the try, so a throw part way down the list still leaves
+    // nothing decoded behind for the wipe below to miss.
+    for (const attachment of options.input.attachments) {
+      attachments.push({
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        bytes: Buffer.from(attachment.dataBase64, "base64"),
+      });
+    }
     const built = buildOutboundRfc2822({
       from: options.account.emailAddress,
       to: options.input.to,
@@ -876,6 +918,10 @@ export function createMailSendSubmissionProposal(options: {
       updatedAt: options.createdAt,
     });
   } finally {
+    // The buffers go, the strings cannot: `rawRfc2822Base64Url` on the record
+    // this returns is the same payload as an immutable string, and it lives
+    // until the queued submission is written and collected. The wipe bounds
+    // how long the decoded copy exists, it does not erase the message.
     rawRfc2822?.fill(0);
     for (const attachment of attachments) attachment.bytes.fill(0);
   }

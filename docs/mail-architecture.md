@@ -197,7 +197,7 @@ passes.
 | HTML | Sanitized, remote content blocked, sandboxed, strict CSP |
 | Attachments | Download by default. Only verified CID raster images may render inline |
 | Sender-icon egress | Deliberate, documented exception: the Brain app, never the mail service, may resolve DNS and open TLS to a sender's own domain to fetch its `/favicon.ico`, server-side and SSRF-guarded, cached on disk under an LRU cap. Sender domains are the only data that leaves; message content, addresses, and subjects never do |
-| Capacity | Separate receive, 26 MiB send, relay-frame, parser, connection, queue, cache, temp, WAL, and process limits sized for a handful of accounts on a small host shared with the rest of Brain |
+| Capacity | Separate receive, 18 MiB send, relay-frame, parser, connection, queue, cache, temp, WAL, and process limits sized for a handful of accounts on a small host shared with the rest of Brain |
 | PR0 dependencies | None added |
 
 ## 3. Build versus buy
@@ -618,6 +618,19 @@ keeps one deterministic order across replays. With the owner's toggle on,
 `agentLine` appends one last body line, `Sent by an agent through Brain.`, and
 only for an agent's message. A message a person typed carries neither.
 
+Both shapes are written as buffers end to end, and only one message is built at
+a time for the whole process. A send at the attachment cap holds the decoded
+files and the finished message together, so two overlapping builds would cross
+the `MemoryMax=256 MiB` contract. Every build stands in one in-process queue,
+a person's, an agent's and a draft's alike.
+
+`MailSendOperation.threadId` is the provider's own thread for the Sent copy. It
+fills only on an accepted provider delivery, which means Gmail. First-party
+SMTP acceptance issues no provider ids, so on an IMAP account the field is null
+for the life of the operation and not merely until the next poll. A reader that
+joins a Sent-row caption on it has to treat an IMAP operation as no caption
+ever, rather than retrying until one appears.
+
 The request fingerprint (`fingerprintMailSendInput`) is a SHA-256 over exactly
 the caller's own submission, in this order:
 
@@ -718,8 +731,8 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 | --- | ---: |
 | Accounts | 7 |
 | Incoming raw message | 40 MiB |
-| Outgoing raw message | 26 MiB |
-| Outgoing attachments | 25 MiB total, 10 files |
+| Outgoing raw message | 18 MiB |
+| Outgoing attachments | 10 MiB total, 10 files |
 | Relay frame | 16 KiB |
 | Relay client bytes | 2 MiB per tunnel, including SMTP/TLS overhead |
 | Relay server bytes | 128 KiB |
@@ -755,6 +768,8 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 | Process CPU/tasks | 35% CPU quota / 32 tasks contract |
 | Parser memory | `MemoryHigh=128 MiB`, `MemoryMax=192 MiB` contract |
 | Parser CPU/tasks/FDs | 20% CPU quota / 8 tasks / 64 file descriptors contract |
+
+The two outgoing rows are set by the process contract three rows above them, not by what a provider would accept. `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes` is the one number: 10 MiB of decoded attachments per message, measured on 2026-09-15 at 155 MiB peak RSS for one send through the whole wire path, against `MemoryHigh=192 MiB` and a 37.5 MiB bare-node baseline. Every other outgoing cap follows from it. Base64 at 76 columns multiplies a payload by 1.3684, so 10 MiB of files becomes 13.68 MiB of MIME parts, the 1 MiB text part expands the same way, and the headers take the finished message to the 18 MiB `outgoingRawMessageBytes` states. The JSON body that carries it is capped at 24 MiB, which is the base64 plus a text body escaped at its worst six bytes per source byte. The note store's own 25 MiB per-file cap is a different limit on a different path and does not move with these.
 
 One bound sits outside that file because it belongs to the browser rather than the service. `UNIFIED_FANOUT_LIMIT` in [`components/mail-surface.tsx`](../components/mail-surface.tsx) caps how many per-account requests the merged inbox has in flight at once, across its first load, its load-more, and its 60-second refresh. The merge itself is generic in the number of accounts, so the account cap can rise without it noticing, and the merged inbox is the one surface that asks every account at the same moment. The peak it makes stays at three however many accounts are connected, and the accounts waiting a turn read as pending rather than as empty or as failed.
 

@@ -7,6 +7,7 @@ import {
 } from "../send-attachment-codec";
 import {
   buildMultipartBody,
+  encodeBase64Body,
   multipartBoundary,
   type OutboundAttachmentPart,
 } from "./outbound-attachments";
@@ -90,7 +91,10 @@ export function buildOutboundRfc2822(
 
   const body =
     origin === "mcp" && agentLine ? `${text}\n\n${AGENT_BODY_LINE}` : text;
-  let encodedBody: string;
+  // Buffers end to end. A string of the finished body, and the template
+  // literal that would concatenate it with the headers, are two more
+  // full-size copies of somebody's attachment for no gain.
+  let encodedBody: Buffer;
   if (attachments.length === 0) {
     headers.push('Content-Type: text/plain; charset="UTF-8"');
     headers.push("Content-Transfer-Encoding: base64");
@@ -102,12 +106,14 @@ export function buildOutboundRfc2822(
       normalizeLineEndings(body),
       attachments,
       boundary,
-    ).toString("utf8");
+    );
   }
-  const rawRfc2822 = Buffer.from(
-    `${headers.join("\r\n")}\r\n\r\n${encodedBody}\r\n`,
-    "utf8",
-  );
+  const rawRfc2822 = Buffer.concat([
+    Buffer.from(headers.join("\r\n"), "utf8"),
+    HEADER_BODY_SEPARATOR,
+    encodedBody,
+    CRLF,
+  ]);
   try {
     admitOutgoingRawMessage(rawRfc2822.byteLength);
   } catch {
@@ -390,14 +396,9 @@ function normalizeLineEndings(value: string): string {
   return value.replace(/\r\n?/g, "\n").replace(/\n/g, "\r\n");
 }
 
-function wrapBase64(value: Buffer): string {
+function wrapBase64(value: Buffer): Buffer {
   try {
-    const encoded = value.toString("base64");
-    const lines: string[] = [];
-    for (let index = 0; index < encoded.length; index += 76) {
-      lines.push(encoded.slice(index, index + 76));
-    }
-    return lines.join("\r\n");
+    return encodeBase64Body(value);
   } finally {
     value.fill(0);
   }

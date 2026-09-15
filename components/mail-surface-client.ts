@@ -1363,7 +1363,11 @@ function readSendOperation(
 }
 
 function isNullableThreadId(value: unknown): value is string | null {
-  return value === null || typeof value === "string";
+  // The same rule `validateMailSendOperation` applies on the service side, so
+  // one field is not read under two definitions of a safe id.
+  return (
+    value === null || (typeof value === "string" && SAFE_RESOURCE_ID.test(value))
+  );
 }
 
 function readSyncResult(value: unknown): void {

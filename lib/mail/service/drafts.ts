@@ -36,7 +36,7 @@ import type {
 import { parseMailRecipientFields } from "../recipients";
 import { mailAccountCapabilities } from "./account-types";
 import {
-  createMailSendSubmissionProposal,
+  buildMailSendSubmissionProposal,
   mailSendSubmissionReplayProposal,
   MailSendError,
   type MailReplyContext,
@@ -305,7 +305,7 @@ export class ProviderNeutralMailDraftService implements MailDraftService {
       }
       committedAt = this.readNow();
       try {
-        proposal = createMailSendSubmissionProposal({
+        proposal = await buildMailSendSubmissionProposal({
           account,
           input: mailSendInputFromDraft(draft, mutation.sendIdempotencyKey),
           reply: replyContextFromDraft(draft),

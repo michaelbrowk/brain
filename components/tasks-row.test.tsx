@@ -896,6 +896,36 @@ describe("the When chip's picker", () => {
 
     expect(calls.expand).not.toHaveBeenCalled();
     expect(calls.patch).toHaveBeenCalledTimes(1);
+
+    // AND THE CATEGORY CHIP, WHICH IS THE ONE THAT DID NOT CARRY THE MARK.
+    // Its trigger is INSIDE the row, so containment passes it and the row read
+    // the press as a second press on itself: the row folded and the list never
+    // opened, which is the bug Michael wrote in about, one chip along.
+    calls.expand.mockClear();
+    calls.patch.mockClear();
+    const category = [...document.querySelectorAll<HTMLElement>(".chip")].find((node) =>
+      (node.textContent ?? "").includes("Category"),
+    )!;
+    await act(async () => {
+      category.dispatchEvent(pointer("pointerdown"));
+      category.click();
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    const suggestion = [
+      ...document.querySelectorAll<HTMLElement>(".brain-menu-item"),
+    ].find((node) => node.textContent === "Work");
+    expect(suggestion).toBeDefined();
+
+    await act(async () => {
+      suggestion?.click();
+    });
+
+    expect(calls.expand).not.toHaveBeenCalled();
+    expect(calls.patch).toHaveBeenCalledWith(expect.anything(), { category: "Work" });
   });
 
   /** I6. THE REPEAT MENU STATES ITS RULE, WHOLE.

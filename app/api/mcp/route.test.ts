@@ -701,6 +701,39 @@ describe("Notion MCP route validation", () => {
     expect(isError).toBe(true);
   });
 
+  /** THE PAGE TOOLS ANSWER A STORE FAILURE TOO.
+   *
+   *  `read_page` handed the agent the Node message verbatim, which names the
+   *  absolute path of the notes folder. A page id that is not a page still
+   *  surfaces the way `docs/mcp-tools.md` says it does. */
+  it("answers a store failure on the page tools with a code and no path", async () => {
+    const full = Object.assign(
+      new Error("EIO: i/o error, read '/notes/page-one.md'"),
+      { code: "EIO" },
+    );
+    mocks.getStore.mockResolvedValue({
+      readPage: vi.fn().mockRejectedValue(full),
+      appendPage: vi.fn().mockRejectedValue(full),
+      getTree: vi.fn(() => {
+        throw full;
+      }),
+    });
+
+    for (const [name, args, id] of [
+      ["read_page", { id: "page-one" }, 104],
+      ["append_page", { id: "page-one", markdown: "a line" }, 105],
+      ["list_tree", {}, 106],
+    ] as const) {
+      const { payload, isError } = await toolPayload(await callTool(name, args, id));
+      expect(isError, name).toBe(true);
+      expect(payload, name).toEqual({
+        error: "the notes folder could not answer",
+        reason: "store_failed",
+      });
+      expect(JSON.stringify(payload)).not.toContain("/notes/");
+    }
+  });
+
   it("canonicalizes exact same-origin page links at all normal MCP write boundaries", async () => {
     const writePage = vi.fn().mockResolvedValue({ id: "write-target" });
     const appendPage = vi.fn().mockResolvedValue({ id: "append-target" });
@@ -1772,6 +1805,36 @@ describe("the task write tools", () => {
     });
     expect(JSON.stringify(entries)).not.toContain("Water the plants");
     expect(JSON.stringify(entries)).not.toContain("water the plants");
+  });
+
+  /** A STORE FAILURE IS AN ANSWER, NOT A THROW.
+   *
+   *  A raw `fs` error left the tool as a transport error carrying its own
+   *  message, which is a Node one naming the absolute path of the notes
+   *  folder, and it escaped the catch that writes the line, so the owner's
+   *  Connections log showed that the call had never happened. */
+  it("answers a store failure with a code, no path, and one line", async () => {
+    const full = Object.assign(
+      new Error("ENOSPC: no space left on device, write '/notes/_tasks/task-alpha.md'"),
+      { code: "ENOSPC" },
+    );
+    mocks.getStore.mockResolvedValue({
+      createTask: vi.fn().mockRejectedValue(full),
+    });
+
+    const { payload, isError } = await toolPayload(
+      await callTool("create_task", { title: "Water the plants" }, 745),
+    );
+    await flushTaskActivityForTests();
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "the notes folder could not answer",
+      reason: "store_failed",
+    });
+    expect(JSON.stringify(payload)).not.toContain("/notes/");
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({ tool: "create_task", outcome: "store_failed" });
   });
 
   it("carries the changed fields on update_task's activity line, joined when several", async () => {
@@ -3026,6 +3089,103 @@ describe("save_mail_attachment", () => {
     expect(appendPage).not.toHaveBeenCalled();
     const [entry] = await readMcpActivity(1);
     expect(entry).toMatchObject({ outcome: "blocked_mime" });
+  });
+
+  /** The store's own refusals are answered in the store's words. Everything
+   *  else it can throw is a Node `fs` error carrying the absolute path of the
+   *  notes folder, and it used to leave as a transport error with that message
+   *  and no line behind it. */
+  it("answers a failed save with a code, no path, and one line", async () => {
+    const full = Object.assign(
+      new Error("ENOSPC: no space left on device, write '/notes/_attachments-v2/aaaa.pdf'"),
+      { code: "ENOSPC" },
+    );
+    mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
+      saveAttachment: vi.fn().mockRejectedValue(full),
+      appendPage: vi.fn(),
+    });
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        downloadAttachment: async () => ({
+          contentType: "application/pdf",
+          contentDisposition: 'attachment; filename="invoice.pdf"',
+          bytes: PDF_BYTES.byteLength,
+          body: streamOf(PDF_BYTES),
+        }),
+      }).client,
+    );
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "save_mail_attachment",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          attachmentId: "attachment-epsilon",
+          page: "page-one",
+        },
+        505,
+      ),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "that file could not be saved",
+      reason: "store_failed",
+    });
+    expect(JSON.stringify(payload)).not.toContain("/notes/");
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({ outcome: "store_failed" });
+  });
+
+  /** The same for the line: the file is already in the notes folder by then,
+   *  so the answer says that much and names no path. */
+  it("answers a failed append with a code, no path, and one line", async () => {
+    const full = Object.assign(
+      new Error("EIO: i/o error, write '/notes/page-one.md'"),
+      { code: "EIO" },
+    );
+    mocks.getStore.mockResolvedValue({
+      readPage: readsPageOne(),
+      saveAttachment: vi.fn().mockResolvedValue({
+        url: "/_attachments-v2/aaaa.pdf",
+        name: "invoice.pdf",
+        size: PDF_BYTES.byteLength,
+        type: "application/pdf",
+      }),
+      appendPage: vi.fn().mockRejectedValue(full),
+    });
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        downloadAttachment: async () => ({
+          contentType: "application/pdf",
+          contentDisposition: 'attachment; filename="invoice.pdf"',
+          bytes: PDF_BYTES.byteLength,
+          body: streamOf(PDF_BYTES),
+        }),
+      }).client,
+    );
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "save_mail_attachment",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          attachmentId: "attachment-zeta",
+          page: "page-one",
+        },
+        506,
+      ),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "that file was saved and no line could be added",
+      reason: "store_failed",
+    });
+    expect(JSON.stringify(payload)).not.toContain("/notes/");
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({ outcome: "store_failed" });
   });
 
   it("refuses a declared size over the note cap without reading a byte", async () => {

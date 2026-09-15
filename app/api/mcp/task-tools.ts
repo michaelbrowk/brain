@@ -18,6 +18,8 @@ import {
   hasScope,
   insufficientScope,
   refusal,
+  STORE_FAILED,
+  storeFailed,
   text,
 } from "./tool-kit";
 
@@ -98,11 +100,17 @@ const no = (outcome: string, error: string, reason: string): TaskAnswer => ({
   outcome,
 });
 
-/** The store's three error classes, as answers an agent can act on.
+/** The store's three error classes, as answers an agent can act on, and
+ *  anything else it can throw as one more.
  *
  *  `RecurrenceError` is deliberately absent: `advanceTaskUnlocked` turns it
  *  into a `TaskValidationError` before it leaves the store, so a branch for it
  *  here would be a branch nothing reaches.
+ *
+ *  The tail used to rethrow. That throw escaped `taskWrite`'s catch, so it
+ *  skipped the activity line as well as the shape: on a full disk the agent
+ *  read `ENOSPC … write '/Users/…/notes/…'` as a transport error and the
+ *  owner's Connections log showed nothing at all.
  */
 function taskRefusal(error: unknown): TaskAnswer {
   if (isTaskConflict(error)) {
@@ -125,7 +133,7 @@ function taskRefusal(error: unknown): TaskAnswer {
     return no("refused", "that task change was refused", error.message);
   }
   if (isNotFound(error)) return no("not_found", "no task with that id", "not_found");
-  throw error;
+  return { answer: storeFailed(), outcome: STORE_FAILED };
 }
 
 /** The ids one write touched. A tool fills them in as it learns them, so a
@@ -184,6 +192,22 @@ const pendingActivityWrites = new Set<Promise<void>>();
  *  fresh one. */
 export async function flushTaskActivityForTests(): Promise<void> {
   await Promise.all(pendingActivityWrites);
+}
+
+/** Every task read is registered through here, for the one reason a write has
+ *  its own wrapper: the notes folder can fail, and the store's message for
+ *  that names its absolute path. A read writes no activity line, because
+ *  Connections is the record of what an agent changed. */
+function taskRead<Args>(
+  work: (args: Args) => Promise<TaskAnswer["answer"]>,
+): (args: Args) => Promise<TaskAnswer["answer"]> {
+  return async (args: Args) => {
+    try {
+      return await work(args);
+    } catch {
+      return storeFailed();
+    }
+  };
 }
 
 /** Every task write runs through here: the scope check, the store's refusals
@@ -296,7 +320,7 @@ export function registerTaskTools(server: McpToolServer): void {
         ),
       category: z.string().optional(),
     },
-    async ({ list, page, today, offsetMinutes, category }) => {
+    taskRead(async ({ list, page, today, offsetMinutes, category }) => {
       // The page branch runs before every other check because it answers a
       // different question. `pageTasks` is a lookup and not a list: it takes no
       // day, drops nothing hidden and does not stop at the Logbook window,
@@ -383,14 +407,14 @@ export function registerTaskTools(server: McpToolServer): void {
           ...(category !== undefined ? { category } : {}),
         }),
       });
-    },
+    }),
   );
 
   server.tool(
     "get_task",
     "Read one task record, including whether its note line was removed and which page it is linked to.",
     { id: z.string() },
-    async ({ id }) => {
+    taskRead(async ({ id }) => {
       if (!TASK_ID_RE.test(id)) {
         return refusal("that task id is not valid", "bad_id");
       }
@@ -404,7 +428,7 @@ export function registerTaskTools(server: McpToolServer): void {
         return refusal("that task's page is in the trash", "page_trashed");
       }
       return text({ task });
-    },
+    }),
   );
 
   server.registerTool(

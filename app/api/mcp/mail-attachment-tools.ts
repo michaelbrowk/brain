@@ -15,7 +15,14 @@ import {
   type SavedAttachment,
 } from "@/lib/store";
 import { logMailActivity, mailOutcome, mailRefusal } from "./mail-tool-kit";
-import { hasScope, insufficientScope, refusal, text } from "./tool-kit";
+import {
+  hasScope,
+  insufficientScope,
+  refusal,
+  STORE_FAILED,
+  storeFailed,
+  text,
+} from "./tool-kit";
 
 /** ONE INCOMING ATTACHMENT, INTO A NOTE'S OWN FILES.
  *
@@ -301,7 +308,13 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
           await log(error.code);
           return refusal(error.message, error.code);
         }
-        throw error;
+        // Everything else the store can throw here is a Node `fs` error whose
+        // message carries the absolute path of the notes folder, and a rethrow
+        // handed that to the agent as a transport error with no line behind
+        // it. Brain's own sentence and one code, the way the page read above
+        // already answers.
+        await log(STORE_FAILED);
+        return storeFailed("that file could not be saved");
       }
 
       if (append === false) {
@@ -322,7 +335,10 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
             `the file is saved at ${saved.url} and no line was added`,
           );
         }
-        throw error;
+        // The file is in the notes folder by now and the line is not, which
+        // is what the sentence says. The path the store named stays here.
+        await log(STORE_FAILED);
+        return storeFailed("that file was saved and no line could be added");
       }
       await log("ok");
       return text(saved);

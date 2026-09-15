@@ -39,6 +39,26 @@ export function refusal(error: string, reason: string) {
   return { ...text({ error, reason }), isError: true as const };
 }
 
+/** The code every store failure answers under, whatever the tool. */
+export const STORE_FAILED = "store_failed";
+
+/** WHAT THE NOTES FOLDER FAILING LOOKS LIKE TO AN AGENT.
+ *
+ *  A store error that is none of the refusals the store decided on is a Node
+ *  `fs` one: a full disk, a read-only mount, a permission. Its message carries
+ *  the absolute path of the notes folder, and the SDK hands a thrown error's
+ *  message to the agent verbatim, so a rethrow published that path and arrived
+ *  as the transport error `docs/mcp-tools.md` calls a bug. One sentence of
+ *  Brain's own and one code instead, and the caller writes its line the way it
+ *  writes one for every other refusal.
+ *
+ *  The sentence is the tool's, because "could not be saved" and "could not
+ *  answer" are different things to an agent deciding whether to retry. The
+ *  code is the same everywhere, so `reason` stays the field to branch on. */
+export function storeFailed(error = "the notes folder could not answer") {
+  return refusal(error, STORE_FAILED);
+}
+
 /** The permission answer, in the same two fields every refusal uses, with the
  *  scope it wanted beside them. The `insufficient_scope` word itself is the
  *  OAuth one, and the 403 this endpoint answers at the HTTP level

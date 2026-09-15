@@ -22,7 +22,7 @@ write implies read, and mail never implies write.
 
 ## What an agent should know
 
-Four rules no single row states.
+Five rules no single row states.
 
 - **A refusal is an answer, not an error.** Read it and do not retry a
   permanent one. Every tool but the `notion_*` family answers the same two
@@ -33,6 +33,12 @@ Four rules no single row states.
   `write_page` conflict and `currentWhen` on a task one. The import tools keep
   the `{ error, code }` their own contract has, which `docs/notion-import.md`
   owns.
+- **`store_failed` is the notes folder failing.** A full disk, a read-only
+  mount, a permission. It is a refusal like any other, one sentence of Brain's
+  own and that code, and it carries neither the store's message nor a path.
+  The page tools, the task tools and `save_mail_attachment` all answer it, and
+  every write that meets it still writes its activity line. Retry it once the
+  disk is not what it was, not in a loop.
 - **`read_mail_message` may answer `state: "fetching"`.** Call it again. Each
   call re-records the demand that keeps the body in the service's cache, so an
   agent that stops asking loses the body it was waiting for.
@@ -48,16 +54,16 @@ Four rules no single row states.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `connection_check` | | none | `status`, per-check results, `access` with `read`, `write`, `import`, `mail` and `mailSend`, the root page count and the granted scopes | nothing |
-| `list_tree` | | none | the whole page tree: ids, titles, icons, nesting | nothing |
-| `read_page` | | `id` | the page's meta, its markdown and its `rev` | an id that is not a page surfaces as a transport error today rather than an `{ error }` answer |
+| `connection_check` | | none | `status`, per-check results, `access` with `read`, `write`, `import`, `mail` and `mailSend`, the root page count and the granted scopes | `store_failed` |
+| `list_tree` | | none | the whole page tree: ids, titles, icons, nesting | `store_failed` |
+| `read_page` | | `id` | the page's meta, its markdown and its `rev` | `store_failed`. An id that is not a page surfaces as a transport error today rather than an `{ error }` answer |
 | `search` | | `query` | matching pages with snippets | nothing |
-| `write_page` | `brain:write` | `id`, `markdown`, `rev?` | the written page's meta and new `rev` | `rev_conflict`, with `currentRev` to re-read from |
-| `append_page` | `brain:write` | `id`, `markdown` | the page's meta after the append | nothing of its own |
-| `create_page` | `brain:write` | `title`, `parentId?`, `markdown?`, `icon?`, `status?` | the new page's meta, including its id | `parent not found`, and it says the page was not created so the client does not retry at the root |
-| `update_meta` | `brain:write` | `id`, `title?`, `icon?`, `category?`, `status?`, `view?`, `public?` | the page's meta after the change | `public: true`, with `share_disclosure_required`: only the owner's own disclosure flow turns sharing on |
-| `move_page` | `brain:write` | `id`, `newParentId?`, `beforeId?` | the moved page's meta plus `unlinkedFrom`, the old parent whose body stopped listing it | nothing of its own |
-| `delete_page` | `brain:write` | `id` | `{ ok: true }`. The page and its subtree go to Trash and are recoverable | nothing of its own |
+| `write_page` | `brain:write` | `id`, `markdown`, `rev?` | the written page's meta and new `rev` | `rev_conflict`, with `currentRev` to re-read from. `store_failed` |
+| `append_page` | `brain:write` | `id`, `markdown` | the page's meta after the append | `store_failed` |
+| `create_page` | `brain:write` | `title`, `parentId?`, `markdown?`, `icon?`, `status?` | the new page's meta, including its id | `parent not found`, and it says the page was not created so the client does not retry at the root. `store_failed` |
+| `update_meta` | `brain:write` | `id`, `title?`, `icon?`, `category?`, `status?`, `view?`, `public?` | the page's meta after the change | `public: true`, with `share_disclosure_required`: only the owner's own disclosure flow turns sharing on. `store_failed` |
+| `move_page` | `brain:write` | `id`, `newParentId?`, `beforeId?` | the moved page's meta plus `unlinkedFrom`, the old parent whose body stopped listing it | `store_failed` |
+| `delete_page` | `brain:write` | `id` | `{ ok: true }`. The page and its subtree go to Trash and are recoverable | `store_failed` |
 
 ## Tasks
 
@@ -87,14 +93,14 @@ record's id, the note's id for a promote, and the outcome. No title enters it.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `list_tasks` | | `list?` as `inbox`, `today`, `upcoming`, `someday` or `logbook`, `page?`, `today?`, `offsetMinutes?`, `category?` | `{ tasks }` for every list but the logbook, which answers `{ entries }`, one per completion, each with its own `key` | `bad_today` for a day that is not `YYYY-MM-DD`, `bad_offset` for a logbook read with no offset and no zone, the no-zone refusal for a derived list with neither a day nor a captured zone, and `missing_list` for a call naming neither a list nor a page |
-| `get_task` | | `id` | `{ task }`, including whether its note line was removed and which page it is linked to | `bad_id`, `not_found`, `page_trashed` |
-| `create_task` | `brain:write` | `title`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?` | `{ task }`, unlinked: it owns its own completion and belongs to no note | whatever the record refuses, as `that task change was refused` with the record's own reason, for instance `time needs a day to be a time on` |
-| `promote_task_line` | `brain:write` | `page`, `line` as a zero-based markdown line number or the line's own text with runs of whitespace collapsed, `when?`, `time?`, `evening?`, `deadline?`, `category?` | `{ task }`, linked to that checkbox line, with the anchor the editor's own promote builds. The note's category is inherited unless one is named here | `that line is not a checkbox`, `that line appears more than once, pass its line number`, `that line is empty`, `that line already has a task` naming the record that has it, `bad_page`, and `not_found` for a note that is not there |
-| `update_task` | `brain:write` | `id`, `title?`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?`. A field left out is left alone and `null` clears it | `{ task }` after the change | `bad_id`, `not_found`, whatever the record refuses. `expectedWhen` and `remindedAt` are refused as unknown arguments |
-| `complete_task` | `brain:write` | `id`, `today`, `offsetMinutes?`, `expectedWhen?` | `{ task, list }`, where `list` is the list the record is in for that day, which is the list it was already in | `bad_id`, `not_found`, and `conflict` with `currentWhen` when a repeating task has moved since the caller last read it |
-| `reopen_task` | `brain:write` | `id`, `today`, `offsetMinutes?` | `{ task, list }`. Unticking a repeating task restores the instance its newest completion came from | `bad_id`, `not_found`, `conflict` |
-| `delete_task` | `brain:write` | `id` | `{ ok: true }`. A linked task's checkbox line stays in its note, and the record that pointed at it is what goes | `bad_id`, `not_found` |
+| `list_tasks` | | `list?` as `inbox`, `today`, `upcoming`, `someday` or `logbook`, `page?`, `today?`, `offsetMinutes?`, `category?` | `{ tasks }` for every list but the logbook, which answers `{ entries }`, one per completion, each with its own `key` | `bad_today` for a day that is not `YYYY-MM-DD`, `bad_offset` for a logbook read with no offset and no zone, the no-zone refusal for a derived list with neither a day nor a captured zone, and `missing_list` for a call naming neither a list nor a page. `store_failed` |
+| `get_task` | | `id` | `{ task }`, including whether its note line was removed and which page it is linked to | `bad_id`, `not_found`, `page_trashed`. `store_failed` |
+| `create_task` | `brain:write` | `title`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?` | `{ task }`, unlinked: it owns its own completion and belongs to no note | whatever the record refuses, as `that task change was refused` with the record's own reason, for instance `time needs a day to be a time on`. `store_failed` |
+| `promote_task_line` | `brain:write` | `page`, `line` as a zero-based markdown line number or the line's own text with runs of whitespace collapsed, `when?`, `time?`, `evening?`, `deadline?`, `category?` | `{ task }`, linked to that checkbox line, with the anchor the editor's own promote builds. The note's category is inherited unless one is named here | `that line is not a checkbox`, `that line appears more than once, pass its line number`, `that line is empty`, `that line already has a task` naming the record that has it, `bad_page`, and `not_found` for a note that is not there. `store_failed` |
+| `update_task` | `brain:write` | `id`, `title?`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?`. A field left out is left alone and `null` clears it | `{ task }` after the change | `bad_id`, `not_found`, whatever the record refuses. `expectedWhen` and `remindedAt` are refused as unknown arguments. `store_failed` |
+| `complete_task` | `brain:write` | `id`, `today`, `offsetMinutes?`, `expectedWhen?` | `{ task, list }`, where `list` is the list the record is in for that day, which is the list it was already in | `bad_id`, `not_found`, and `conflict` with `currentWhen` when a repeating task has moved since the caller last read it. `store_failed` |
+| `reopen_task` | `brain:write` | `id`, `today`, `offsetMinutes?` | `{ task, list }`. Unticking a repeating task restores the instance its newest completion came from | `bad_id`, `not_found`, `conflict`. `store_failed` |
+| `delete_task` | `brain:write` | `id` | `{ ok: true }`. A linked task's checkbox line stays in its note, and the record that pointed at it is what goes | `bad_id`, `not_found`. `store_failed` |
 
 Every code named in the task rows above is the `reason` on the refusal, with
 the sentence beside it in `error`.
@@ -366,7 +372,7 @@ three names before it is cut, and a cut is marked.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type }`, the saved file as the note store named it | `invalid_account_id`, `invalid_attachment_id` and `invalid_page_id`, the codes its sibling mail tools use. `page not found`, before anything is downloaded, and `page_read_failed` for a notes folder that could not answer, in Brain's own words rather than the store's. `that file is too large for a note`, naming the cap. `that file cannot be saved into a note`, naming the executable extension. Whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`). Plus the service's own codes |
+| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type }`, the saved file as the note store named it | `invalid_account_id`, `invalid_attachment_id` and `invalid_page_id`, the codes its sibling mail tools use. `page not found`, before anything is downloaded, and `page_read_failed` for a notes folder that could not answer, in Brain's own words rather than the store's. `that file is too large for a note`, naming the cap. `that file cannot be saved into a note`, naming the executable extension. Whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`). Plus the service's own codes. `store_failed` |
 
 It is the one mail tool that writes a note, so it asks for `brain:write`
 beside `brain:mail`. A grant that reads mail and cannot edit notes is refused

@@ -36,7 +36,13 @@ import {
   withMcpChallengeScopes,
 } from "@/lib/oauth/http";
 import { verifyMcpBearerToken } from "@/lib/oauth/server";
-import { hasScope, insufficientScope, text, toolScopeOf } from "./tool-kit";
+import {
+  hasScope,
+  insufficientScope,
+  storeFailed,
+  text,
+  toolScopeOf,
+} from "./tool-kit";
 import { registerMailAttachmentTools } from "./mail-attachment-tools";
 import { registerMailTools } from "./mail-tools";
 import { registerMailSendTools } from "./mail-send-tools";
@@ -44,6 +50,29 @@ import { registerTaskTools } from "./task-tools";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
+
+/** EVERY PAGE TOOL'S STORE FAILURE, AS AN ANSWER.
+ *
+ *  The notes folder can fail on any of these, and the store's message for
+ *  that is a Node `fs` one carrying its absolute path. The SDK hands a thrown
+ *  error's message to the agent verbatim, so a rethrow published the path and
+ *  arrived as the transport error `docs/mcp-tools.md` calls a bug.
+ *
+ *  `NotFoundError` is passed through rather than folded in: an id that is not
+ *  a page is the caller's own mistake, it names no path, and the tool
+ *  reference documents what each tool does with one. */
+function pageTool<Args extends unknown[], Answer>(
+  work: (...args: Args) => Promise<Answer>,
+): (...args: Args) => Promise<Answer | ReturnType<typeof storeFailed>> {
+  return async (...args: Args) => {
+    try {
+      return await work(...args);
+    } catch (error) {
+      if (isNotFound(error)) throw error;
+      return storeFailed();
+    }
+  };
+}
 
 const handler = createMcpHandler(
   (server) => {
@@ -60,17 +89,17 @@ const handler = createMcpHandler(
       "list_tree",
       "List the full page tree of the notebook (ids, titles, icons, nesting).",
       {},
-      async () => {
+      pageTool(async () => {
         const store = await getStore();
         return text(store.getTree());
-      },
+      }),
     );
 
     server.tool(
       "connection_check",
       "Verify this MCP connection can authenticate and read Brain without changing any pages. Reports whether write, import, and mail access are authorized, but does not exercise those permissions.",
       {},
-      async (_input, extra) => {
+      pageTool(async (_input, extra) => {
         const store = await getStore();
         const tree = store.getTree();
         const scopes = extra.authInfo?.scopes ?? [];
@@ -97,17 +126,17 @@ const handler = createMcpHandler(
           scopes,
           changedPages: 0,
         });
-      },
+      }),
     );
 
     server.tool(
       "read_page",
       "Read a page's markdown by id. Returns meta, markdown, and rev (needed for write_page).",
       { id: z.string().describe("page id") },
-      async ({ id }) => {
+      pageTool(async ({ id }) => {
         const store = await getStore();
         return text(redactPage(await store.readPage(id)));
-      },
+      }),
     );
 
     server.tool(
@@ -118,7 +147,7 @@ const handler = createMcpHandler(
         markdown: z.string(),
         rev: z.string().optional().describe("rev from read_page; omit to overwrite"),
       },
-      async ({ id, markdown, rev }, extra) => {
+      pageTool(async ({ id, markdown, rev }, extra) => {
         if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
         const store = await getStore();
         try {
@@ -147,7 +176,7 @@ const handler = createMcpHandler(
             };
           throw e;
         }
-      },
+      }),
     );
 
     server.tool(
@@ -159,7 +188,7 @@ const handler = createMcpHandler(
         id: z.string(),
         markdown: z.string().describe("markdown to add at the end of the page"),
       },
-      async ({ id, markdown }, extra) => {
+      pageTool(async ({ id, markdown }, extra) => {
         if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
         const store = await getStore();
         return text(
@@ -171,7 +200,7 @@ const handler = createMcpHandler(
             ),
           ),
         );
-      },
+      }),
     );
 
     server.tool(
@@ -184,7 +213,7 @@ const handler = createMcpHandler(
         icon: z.string().optional().describe("emoji; auto-picked from title if omitted"),
         status: z.string().optional().describe("kanban column, for cards on a board page"),
       },
-      async ({ title, parentId, markdown, icon, status }, extra) => {
+      pageTool(async ({ title, parentId, markdown, icon, status }, extra) => {
         if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
         const store = await getStore();
         try {
@@ -208,7 +237,7 @@ const handler = createMcpHandler(
             });
           throw e;
         }
-      },
+      }),
     );
 
     server.registerTool(
@@ -469,7 +498,7 @@ const handler = createMcpHandler(
         view: z.enum(["board", "doc"]).optional().describe("'board' or 'doc'"),
         public: z.boolean().optional(),
       },
-      async ({ id, view, public: pub, ...rest }, extra) => {
+      pageTool(async ({ id, view, public: pub, ...rest }, extra) => {
         if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
         if (pub === true) {
           return {
@@ -490,7 +519,7 @@ const handler = createMcpHandler(
             by: "claude",
           })),
         );
-      },
+      }),
     );
 
     server.tool(
@@ -511,7 +540,7 @@ const handler = createMcpHandler(
         newParentId: z.string().nullable().optional(),
         beforeId: z.string().nullable().optional(),
       },
-      async ({ id, newParentId, beforeId }, extra) => {
+      pageTool(async ({ id, newParentId, beforeId }, extra) => {
         if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
         const store = await getStore();
         const moved = await store.movePageWithBodyReport(
@@ -525,19 +554,19 @@ const handler = createMcpHandler(
           ...redactPageMeta(moved.meta),
           unlinkedFrom: moved.unlinkedFrom,
         });
-      },
+      }),
     );
 
     server.tool(
       "delete_page",
       "Delete a page and its whole subtree. Soft-delete — recoverable from Trash.",
       { id: z.string() },
-      async ({ id }, extra) => {
+      pageTool(async ({ id }, extra) => {
         if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
         const store = await getStore();
         await store.deletePage(id);
         return text({ ok: true });
-      },
+      }),
     );
 
     server.tool(

@@ -29,6 +29,7 @@ import { Icon } from "../ui/icon";
 import { DUR, EASE_OUT } from "@/lib/motion";
 import { notifyNestedTableBlocked } from "@/lib/editor-events";
 import { isInTable } from "./table-guard";
+import { isTaskLine, toggleTaskCommand } from "./task-checkbox";
 
 const COLORS = [
   "red",
@@ -139,6 +140,10 @@ export function selectionIsInTable(state: Pick<EditorState, "selection">): boole
   return isInTable(state.selection.$from) || isInTable(state.selection.$to);
 }
 
+export function selectionIsTask(state: Pick<EditorState, "selection">): boolean {
+  return isTaskLine(state.selection.$from) || isTaskLine(state.selection.$to);
+}
+
 /** The browser can keep a painted DOM range after the editor loses focus, and
  * ProseMirror keeps a NodeSelection after a block drag. Neither is an active
  * text selection: reacting to later scroll/resize events would resurrect the
@@ -196,6 +201,7 @@ export function FloatingToolbar({
   const [aiLoading, setAiLoading] = useState<SelectionAiMode | null>(null);
   const [linkQuery, setLinkQuery] = useState("");
   const [inTable, setInTable] = useState(false);
+  const [taskActive, setTaskActive] = useState(false);
   const [, getEditor] = useInstance();
   const [pos, setPos] = useState<Pos | null>(null);
   const raf = useRef<number>(0);
@@ -230,6 +236,14 @@ export function FloatingToolbar({
     let next = false;
     getEditor()?.action((ctx) => {
       next = selectionIsInTable(ctx.get(editorViewCtx).state);
+    });
+    return next;
+  }, [getEditor]);
+
+  const currentSelectionIsTask = useCallback(() => {
+    let next = false;
+    getEditor()?.action((ctx) => {
+      next = selectionIsTask(ctx.get(editorViewCtx).state);
     });
     return next;
   }, [getEditor]);
@@ -277,6 +291,7 @@ export function FloatingToolbar({
         savedRange.current = null;
         setPos(null);
         setInTable(false);
+        setTaskActive(false);
         return;
       }
 
@@ -292,6 +307,7 @@ export function FloatingToolbar({
       }
 
       setInTable(currentSelectionIsInTable());
+      setTaskActive(currentSelectionIsTask());
       // touch: don't chase the selection — dock at the bottom (rendered fixed)
       if (isMobile) {
         setPos({ mobile: true, top: 0, left: 0 });
@@ -308,6 +324,7 @@ export function FloatingToolbar({
   }, [
     container,
     currentSelectionIsInTable,
+    currentSelectionIsTask,
     editorOwnsLiveSelection,
     isMobile,
     submenuOpen,
@@ -647,6 +664,14 @@ export function FloatingToolbar({
                   <TB label="Numbered list" onRun={() => run(wrapInOrderedListCommand.key)}>
                     <Tt>1.</Tt>
                   </TB>
+                  <TB
+                    label="Task"
+                    active={taskActive}
+                    pressed={taskActive}
+                    onRun={() => run(toggleTaskCommand.key)}
+                  >
+                    <Icon name="checklist-linear" size={15} />
+                  </TB>
                   <TB label="Quote" onRun={() => run(wrapInBlockquoteCommand.key)}>
                     <Tt>“</Tt>
                   </TB>
@@ -691,16 +716,22 @@ function TB({
   children,
   active = false,
   disabled = false,
+  pressed,
 }: {
   label: string;
   onRun: () => void;
   children: React.ReactNode;
   active?: boolean;
   disabled?: boolean;
+  /** Renders `aria-pressed`, for a control that is a real toggle of document
+   *  state (unlike `active`, which only decides the highlight). Omitted, a
+   *  button stays out of the toggle role entirely. */
+  pressed?: boolean;
 }) {
   return (
     <button
       aria-label={label}
+      aria-pressed={pressed}
       aria-disabled={disabled}
       title={label}
       // preventDefault on mousedown keeps the text selection alive

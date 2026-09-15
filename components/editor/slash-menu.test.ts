@@ -31,4 +31,11 @@ describe("slashMenuItems", () => {
     expect(visitor).toEqual(expect.arrayContaining(["Text", "Heading 1", "Table", "Divider"]));
     expect(visitor).toHaveLength(labels(slashMenuItems(OWNER)).length - 4);
   });
+
+  it("offers a Task item, findable by its keywords, after Numbered list", () => {
+    const items = slashMenuItems({});
+    const task = items.find((item) => item.label === "Task");
+    expect(task?.keywords).toBe("task todo to-do checkbox check задача чекбокс");
+    expect(labels(items).indexOf("Task")).toBe(labels(items).indexOf("Numbered list") + 1);
+  });
 });

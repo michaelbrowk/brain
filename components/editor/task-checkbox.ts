@@ -1,8 +1,8 @@
 import { serializerCtx } from "@milkdown/kit/core";
 import { listItemSchema } from "@milkdown/kit/preset/commonmark";
 import { keymap } from "@milkdown/kit/prose/keymap";
-import type { Node as ProseNode } from "@milkdown/kit/prose/model";
-import { splitListItem } from "@milkdown/kit/prose/schema-list";
+import type { Node as ProseNode, ResolvedPos } from "@milkdown/kit/prose/model";
+import { liftListItem, splitListItem, wrapRangeInList } from "@milkdown/kit/prose/schema-list";
 import { Plugin, PluginKey } from "@milkdown/kit/prose/state";
 import type { Command, Transaction } from "@milkdown/kit/prose/state";
 import { Decoration, DecorationSet } from "@milkdown/kit/prose/view";
@@ -12,7 +12,7 @@ import type {
   NodeViewConstructor,
   ViewMutationRecord,
 } from "@milkdown/kit/prose/view";
-import { $prose, $view } from "@milkdown/kit/utils";
+import { $command, $prose, $view } from "@milkdown/kit/utils";
 
 import { localDay, onDayChange } from "@/components/tasks-client";
 import {
@@ -1305,4 +1305,72 @@ async function pageCategory(page: string): Promise<string | null> {
   }
 }
 
-export const taskCheckbox = [taskCheckboxView, taskSplitKeymap, taskPromote];
+/** Whether a resolved position sits inside a task item (`checked` set, not a
+ *  plain bullet). Walks the ancestor chain the way `isInTable` walks it for
+ *  table context, so the slash menu and the floating toolbar can tell a task
+ *  line from a plain one without re-deriving the schema knowledge. */
+export function isTaskLine($pos: ResolvedPos): boolean {
+  for (let depth = $pos.depth; depth >= 0; depth -= 1) {
+    const node = $pos.node(depth);
+    if (node.type.name === "list_item") return node.attrs.checked != null;
+  }
+  return false;
+}
+
+/** Sets `checked: false` on every fresh list item a wrap created inside
+ *  `[from, to)`. Attrs-only, so it never shifts a position already collected. */
+function markListItemsAsTask(tr: Transaction, from: number, to: number) {
+  const positions: number[] = [];
+  tr.doc.nodesBetween(from, to, (node, pos) => {
+    if (node.type.name === "list_item" && node.attrs.checked == null) positions.push(pos);
+  });
+  for (const pos of positions) {
+    const node = tr.doc.nodeAt(pos);
+    if (node) tr.setNodeMarkup(pos, undefined, { ...node.attrs, checked: false });
+  }
+}
+
+/** Wraps the block(s) the selection touches into unchecked task items. A
+ *  no-op on a selection already inside a task, so a line that is one stays
+ *  exactly the task it is. The slash menu's Task item never doubles a line
+ *  it is invoked on again. */
+const wrapAsTask: Command = (state, dispatch) => {
+  if (isTaskLine(state.selection.$from)) return true;
+  const { $from, $to } = state.selection;
+  const range = $from.blockRange($to);
+  const bulletListType = state.schema.nodes.bullet_list;
+  if (!range || !bulletListType) return false;
+  if (!dispatch) return wrapRangeInList(null, range, bulletListType);
+  const tr = state.tr;
+  if (!wrapRangeInList(tr, range, bulletListType)) return false;
+  markListItemsAsTask(tr, tr.mapping.map(range.start, -1), tr.mapping.map(range.end, 1));
+  dispatch(tr.scrollIntoView());
+  return true;
+};
+
+/** Toggles the block(s) the selection touches between an unchecked task item
+ *  and a plain paragraph. The move behind the floating toolbar's Task
+ *  button, pressed a second time. */
+const toggleTask: Command = (state, dispatch) => {
+  if (isTaskLine(state.selection.$from)) {
+    const listItemType = state.schema.nodes.list_item;
+    if (!listItemType) return false;
+    return liftListItem(listItemType)(state, dispatch);
+  }
+  return wrapAsTask(state, dispatch);
+};
+
+/** The slash menu's Task item: make the current line a task, or leave it if
+ *  it already is one. */
+export const ensureTaskCommand = $command("EnsureTask", () => () => wrapAsTask);
+/** The floating toolbar's Task button: task on the first press, paragraph on
+ *  the second. */
+export const toggleTaskCommand = $command("ToggleTask", () => () => toggleTask);
+
+export const taskCheckbox = [
+  taskCheckboxView,
+  taskSplitKeymap,
+  taskPromote,
+  ensureTaskCommand,
+  toggleTaskCommand,
+];

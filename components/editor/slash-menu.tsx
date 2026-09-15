@@ -22,6 +22,7 @@ import { insertCalloutCommand } from "./callout";
 import { notifyNestedTableBlocked } from "@/lib/editor-events";
 import { insertToggleCommand } from "./toggle";
 import { insertMathBlockCommand } from "./math";
+import { ensureTaskCommand } from "./task-checkbox";
 import {
   attachmentMarkdown,
   uploadAttachment,
@@ -83,6 +84,7 @@ const ITEMS: Item[] = [
   { label: "Heading 3", icon: "text-bold-linear", glyph: "H3", keywords: "h3 heading", command: wrapInHeadingCommand, payload: 3 },
   { label: "Bullet list", icon: "list-linear", keywords: "bullet list unordered", command: wrapInBulletListCommand },
   { label: "Numbered list", icon: "list-arrow-down-linear", keywords: "numbered ordered list", command: wrapInOrderedListCommand },
+  { label: "Task", icon: "checklist-linear", keywords: "task todo to-do checkbox check задача чекбокс", command: ensureTaskCommand },
   { label: "Quote", icon: "text-field-linear", keywords: "quote blockquote", command: wrapInBlockquoteCommand },
   { label: "Callout", icon: "sticker-smile-circle-2-linear", keywords: "callout note tip info", command: insertCalloutCommand },
   { label: "Toggle", icon: "alt-arrow-right-linear", keywords: "toggle collapsible details disclosure", command: insertToggleCommand },

@@ -23,13 +23,19 @@ import {
   placeFloatingToolbar,
   selectionRectIntersectsViewport,
   selectionIsInTable,
+  selectionIsTask,
   selectionOwnsFloatingToolbar,
 } from "./floating-toolbar";
 
-function resolvedPosition(names: string[]) {
+function resolvedPosition(names: string[], attrsByName?: Record<string, unknown>) {
   return {
     depth: names.length - 1,
-    node: (depth: number) => ({ type: { name: names[depth] } }),
+    node: (depth: number) => ({
+      type: { name: names[depth] },
+      ...(attrsByName?.[names[depth]] !== undefined
+        ? { attrs: attrsByName[names[depth]] }
+        : {}),
+    }),
   };
 }
 
@@ -37,11 +43,14 @@ function editorState(
   inTable: boolean,
   selectionType: "text" | "node" | "all" = "text",
   empty = false,
+  task = false,
 ): EditorState {
   const names = inTable
     ? ["doc", "table", "table_row", "table_cell", "paragraph"]
-    : ["doc", "paragraph"];
-  const $pos = resolvedPosition(names);
+    : task
+      ? ["doc", "bullet_list", "list_item", "paragraph"]
+      : ["doc", "paragraph"];
+  const $pos = resolvedPosition(names, task ? { list_item: { checked: false } } : undefined);
   const selection = {
     $from: $pos,
     $to: $pos,
@@ -315,6 +324,24 @@ describe("FloatingToolbar", () => {
     expect(document.body.querySelector('[role="toolbar"]')).not.toBeNull();
   });
 
+  it("presses the Task button only while the line is already a task, both ways", async () => {
+    await renderWithSelection(false);
+    const taskButton = () =>
+      document.body.querySelector('[aria-label="Task"]') as HTMLButtonElement;
+    expect(taskButton()).not.toBeNull();
+    expect(taskButton().getAttribute("aria-pressed")).toBe("false");
+
+    view.state = editorState(false, "text", false, true);
+    await act(async () => document.dispatchEvent(new Event("selectionchange")));
+    await settle();
+    expect(taskButton().getAttribute("aria-pressed")).toBe("true");
+
+    view.state = editorState(false);
+    await act(async () => document.dispatchEvent(new Event("selectionchange")));
+    await settle();
+    expect(taskButton().getAttribute("aria-pressed")).toBe("false");
+  });
+
   it("ignores the NodeSelection left behind by a block drag", async () => {
     await renderWithSelection(false);
     expect(document.body.querySelector('[role="toolbar"]')).not.toBeNull();
@@ -330,6 +357,11 @@ describe("floating toolbar geometry", () => {
   it("detects table ancestors at either selection edge", () => {
     expect(selectionIsInTable(editorState(true))).toBe(true);
     expect(selectionIsInTable(editorState(false))).toBe(false);
+  });
+
+  it("detects a task-item ancestor at either selection edge", () => {
+    expect(selectionIsTask(editorState(false, "text", false, true))).toBe(true);
+    expect(selectionIsTask(editorState(false))).toBe(false);
   });
 
   it("requires a focused, non-empty text selection", () => {

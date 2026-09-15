@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   MCP_AGENT_SETTINGS_FILE,
   readAgentSettings,
+  readAgentSettingsState,
   writeAgentSettings,
 } from "./agent-settings";
 
@@ -51,6 +52,23 @@ describe("the two agent toggles", () => {
       tellRecipients: false,
       allowSending: true,
     });
+  });
+
+  it("says a file nobody wrote yet is not a file it could not read", async () => {
+    expect(await readAgentSettingsState()).toEqual({
+      settings: { tellRecipients: false, allowSending: true },
+      unreadable: false,
+    });
+  });
+
+  it("says a file it could not parse is unreadable, so a caller can fail closed", async () => {
+    await fs.mkdir(root, { recursive: true, mode: 0o700 });
+    await fs.writeFile(path.join(root, MCP_AGENT_SETTINGS_FILE), "{not json", {
+      mode: 0o600,
+    });
+    const state = await readAgentSettingsState();
+    expect(state.unreadable).toBe(true);
+    expect(state.settings).toEqual({ tellRecipients: false, allowSending: true });
   });
 
   it("keeps the default for a field the file leaves out or spells wrong", async () => {

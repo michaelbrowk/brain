@@ -14,8 +14,15 @@ import {
   deriveReplyAllRecipients,
   deriveReplyRecipients,
 } from "@/lib/mail/reply-forward";
-import { recordAgentSend, resolveAgentSendThread } from "@/lib/mcp/agent-sends";
-import { readAgentSettings } from "@/lib/mcp/agent-settings";
+import {
+  recordAgentSend,
+  recordAgentSendIfAbsent,
+  resolveAgentSendThread,
+} from "@/lib/mcp/agent-sends";
+import {
+  readAgentSettingsState,
+  type McpAgentSettings,
+} from "@/lib/mcp/agent-settings";
 import {
   admitAttachmentRefs,
   attachmentActivityFields,
@@ -24,6 +31,7 @@ import {
   type OutgoingAttachmentRef,
 } from "./mail-send-attachments";
 import {
+  isAmbiguousSendFailure,
   logMailActivity,
   mailOutcome,
   mailRefusal,
@@ -92,6 +100,17 @@ const MAX_RECIPIENTS = 100;
 const MAX_SUBJECT_BYTES = 998;
 const MAX_TEXT_BYTES = 1024 * 1024;
 
+/** The characters a header line cannot carry. `validateSubject`
+ *  (`lib/mail/service/outbound-message.ts`) bans exactly these before the
+ *  MIME is built, and until now it was the only thing between an agent's
+ *  subject and `Subject: x` followed by a `Bcc:` line of the agent's own.
+ *  Brain holds its own lock on the one input where a miss would be
+ *  catastrophic, so the refusal names the field rather than arriving as an
+ *  opaque `mail_send_request_invalid` three layers down. `repliedSubject`
+ *  already strips these from a subject the provider wrote, which is why only
+ *  a composed message needs this. */
+const CONTROL_CHARACTERS = /[\x00-\x1f\x7f]/;
+
 /** The fields a send's own line names, out of everything a mail line may
  *  carry. One line per send attempt, whatever became of it, because the owner
  *  reading the log wants the attempt as much as the message. Ids only: never
@@ -102,6 +121,67 @@ type SendActivityTarget = Pick<
   McpActivityTarget,
   "accountId" | "threadId" | "operationId" | "attachmentId" | "change"
 >;
+
+/** The line an id refusal writes: the tool and the code, and no target at
+ *  all. A state directory that cannot be written must never turn a tool call
+ *  into a transport error, so this swallows its own failure like every other
+ *  call site here. */
+const logBadId = (
+  extra: { authInfo?: { clientId?: string } },
+  tool: string,
+  outcome: string,
+) => logMailActivity(extra, tool, {}, outcome).catch(() => undefined);
+
+type SendingGate =
+  | { readonly refused: ReturnType<typeof refusal>; readonly outcome: string }
+  | { readonly refused: null; readonly settings: McpAgentSettings };
+
+/** The owner's kill switch, and what to do when the file holding it cannot be
+ *  read. The switch exists to stop an agent, so a file this process cannot
+ *  parse refuses the send rather than falling back to the on-by-default: the
+ *  owner is pointed at the screen that rewrites the file. A file nobody has
+ *  written yet is the first run, and the defaults are the answer. */
+async function admitSending(): Promise<SendingGate> {
+  const state = await readAgentSettingsState();
+  if (state.unreadable) {
+    return {
+      refused: refusal(
+        "agent sending is off",
+        "the switch could not be read, set it again in Settings, Connections",
+      ),
+      outcome: "agent_settings_unreadable",
+    };
+  }
+  if (!state.settings.allowSending) {
+    return {
+      refused: refusal(
+        "agent sending is off",
+        "turn it on in Settings, Connections",
+      ),
+      outcome: "agent_sending_off",
+    };
+  }
+  return { refused: null, settings: state.settings };
+}
+
+/** Not a refusal: the message may be on its way. `/v1/send` enqueues durably
+ *  before it delivers, so a send whose answer never came back is as likely to
+ *  have gone out as not, and "the mail service refused this request" is the
+ *  one sentence an agent reads as "nothing happened, try again". The agent is
+ *  given the state, its own key back, and the one retry that cannot send a
+ *  second copy. `operationId` is null because the tool never learned one:
+ *  replaying the key is what answers it. */
+function unknownSend(idempotencyKey: string, error: unknown) {
+  return text({
+    state: "unknown",
+    idempotencyKey,
+    operationId: null,
+    retry: "same-key",
+    reason: mailOutcome(error),
+    detail:
+      "The mail service did not answer, and it holds the message already, so it may still go out. Ask again with this same idempotencyKey: that replays the first send instead of making a second one, and answers its operationId, which get_mail_send_status then reports on. A fresh key sends the message twice.",
+  });
+}
 
 interface Recipients {
   readonly to: readonly string[];
@@ -154,6 +234,12 @@ function admitBody(subject: string, body: string) {
     return refusal(
       "that message holds a null byte",
       "subject and text are plain text",
+    );
+  }
+  if (CONTROL_CHARACTERS.test(subject)) {
+    return refusal(
+      "that subject holds a control character",
+      "a subject is one line of plain text",
     );
   }
   if (Buffer.byteLength(subject) > MAX_SUBJECT_BYTES) {
@@ -286,20 +372,22 @@ export function registerMailSendTools(server: McpToolServer): void {
         );
       };
 
-      // The owner's kill switch, read before anything else, so a grant that
-      // can still read mail reaches no part of the send path.
-      const settings = await readAgentSettings();
-      if (!settings.allowSending) {
-        await log("agent_sending_off");
-        return refusal(
-          "agent sending is off",
-          "turn it on in Settings, Connections",
-        );
-      }
+      // The id's shape first, and its line names no target: an id Brain never
+      // issued names nothing, and no line this call writes may carry a string
+      // that was never checked.
       if (!SAFE_ACCOUNT_ID.test(accountId)) {
-        await log("invalid_account_id");
+        await logBadId(extra, SEND_TOOL, "invalid_account_id");
         return refusal("that account id is not valid", "invalid_account_id");
       }
+      // The owner's kill switch, read before anything that could put a
+      // message on the wire, so a grant that can still read mail reaches no
+      // part of the send path.
+      const gate = await admitSending();
+      if (gate.refused) {
+        await log(gate.outcome);
+        return gate.refused;
+      }
+      const settings = gate.settings;
       if (to.length === 0) {
         await log("empty_to");
         return refusal("to is empty", "name at least one recipient");
@@ -351,7 +439,17 @@ export function registerMailSendTools(server: McpToolServer): void {
           origin: "mcp",
           agentLine: settings.tellRecipients,
         };
-        const result = await client.sendMessage(input);
+        // Everything above either never reached the service or told it
+        // nothing to send. The wire starts here, and a failure from here on
+        // can mean the message went out anyway.
+        let result;
+        try {
+          result = await client.sendMessage(input);
+        } catch (error) {
+          if (!isAmbiguousSendFailure(error)) throw error;
+          await log("unknown");
+          return unknownSend(idempotencyKey, error);
+        }
         await recordSend(extra, accountId, result.operationId);
         await log("ok", result.operationId);
         return text({
@@ -420,26 +518,27 @@ export function registerMailSendTools(server: McpToolServer): void {
         );
       };
 
-      const settings = await readAgentSettings();
-      if (!settings.allowSending) {
-        await log("agent_sending_off");
-        return refusal(
-          "agent sending is off",
-          "turn it on in Settings, Connections",
-        );
-      }
+      // The three ids' shapes first, and their lines name no target: an id
+      // Brain never issued names nothing, and no line this call writes may
+      // carry a string that was never checked.
       if (!SAFE_ACCOUNT_ID.test(accountId)) {
-        await log("invalid_account_id");
+        await logBadId(extra, REPLY_TOOL, "invalid_account_id");
         return refusal("that account id is not valid", "invalid_account_id");
       }
       if (!SAFE_MAIL_RESOURCE_ID.test(threadId)) {
-        await log("invalid_thread_id");
+        await logBadId(extra, REPLY_TOOL, "invalid_thread_id");
         return refusal("that thread id is not valid", "invalid_thread_id");
       }
       if (!SAFE_MAIL_RESOURCE_ID.test(messageId)) {
-        await log("invalid_message_id");
+        await logBadId(extra, REPLY_TOOL, "invalid_message_id");
         return refusal("that message id is not valid", "invalid_message_id");
       }
+      const gate = await admitSending();
+      if (gate.refused) {
+        await log(gate.outcome);
+        return gate.refused;
+      }
+      const settings = gate.settings;
       const badBody = admitBody("", body);
       if (badBody) {
         await log("body_too_long");
@@ -520,7 +619,15 @@ export function registerMailSendTools(server: McpToolServer): void {
           origin: "mcp",
           agentLine: settings.tellRecipients,
         };
-        const result = await client.sendMessage(input);
+        // The wire starts here, the same way it does on a compose.
+        let result;
+        try {
+          result = await client.sendMessage(input);
+        } catch (error) {
+          if (!isAmbiguousSendFailure(error)) throw error;
+          await log("unknown");
+          return unknownSend(idempotencyKey, error);
+        }
         await recordSend(extra, accountId, result.operationId);
         await log("ok", result.operationId);
         return text({
@@ -539,10 +646,20 @@ export function registerMailSendTools(server: McpToolServer): void {
     STATUS_TOOL,
     {
       description:
-        "Report what became of one send: its status, and the thread its Sent copy landed in once the provider has one. A send whose account has no Sent folder keeps a null thread for good.",
-      inputSchema: z.object({ operationId: z.string() }).strict(),
+        "Report what became of one send: its status, and the thread its Sent copy landed in once the provider has one. A send whose account has no Sent folder keeps a null thread for good. Name the account as well after a send answered `state` unknown, so the owner's Sent row can still say which app wrote the message.",
+      inputSchema: z
+        .object({
+          operationId: z.string(),
+          accountId: z
+            .string()
+            .optional()
+            .describe(
+              "the account the send was made from, which lets Brain mark a send it never got an answer for",
+            ),
+        })
+        .strict(),
     },
-    async ({ operationId }, extra) => {
+    async ({ operationId, accountId }, extra) => {
       if (!hasScope(extra, "brain:mail:send")) {
         return insufficientScope("brain:mail:send");
       }
@@ -552,10 +669,25 @@ export function registerMailSendTools(server: McpToolServer): void {
           "invalid_operation_id",
         );
       }
+      if (accountId !== undefined && !SAFE_ACCOUNT_ID.test(accountId)) {
+        return refusal("that account id is not valid", "invalid_account_id");
+      }
       try {
         const operation = await createBrainMailClient().getSendOperation(
           operationId,
         );
+        // A send whose answer never arrived wrote no mark, because the tool
+        // never learned an operation id. This is where that id first exists,
+        // so the mark is filled in here, once the service says the send was
+        // accepted. A failed send never reached a Sent folder and earns no
+        // caption. A mark already there keeps what it holds.
+        if (accountId !== undefined && operation.status !== "failed") {
+          await recordAgentSendIfAbsent({
+            operationId,
+            accountId,
+            clientName: await clientNameOf(extra),
+          }).catch(() => undefined);
+        }
         // The Sent row is the provider's own row and carries no operation
         // id, so the caption Settings shows is a Brain-side join. This is
         // the one moment the thread is knowable, and filling the mark here

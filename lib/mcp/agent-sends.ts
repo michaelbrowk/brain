@@ -109,6 +109,29 @@ export async function recordAgentSend(
   });
 }
 
+/** The mark a send could not write for itself. A send whose answer never
+ *  arrived has no operation id to record, so the first caller that learns the
+ *  id writes the mark instead, and the Sent row still says which app wrote
+ *  the message. An operation already marked keeps the mark it has, thread and
+ *  all: this fills a gap, it does not overwrite a record. */
+export async function recordAgentSendIfAbsent(
+  send: Omit<McpAgentSend, "threadId">,
+): Promise<void> {
+  const mark: McpAgentSend = {
+    operationId: send.operationId,
+    accountId: send.accountId,
+    clientName: send.clientName,
+    threadId: null,
+  };
+  const dir = mcpStateDirectory();
+  await enqueue(async () => {
+    const marks = await readMarks(dir);
+    if (marks.some((held) => held.operationId === mark.operationId)) return;
+    marks.push(mark);
+    await writeMarks(dir, marks.slice(-MCP_AGENT_SEND_MAX));
+  });
+}
+
 /** Oldest first, the order they were sent in. */
 export async function readAgentSends(): Promise<McpAgentSend[]> {
   return readMarks(mcpStateDirectory());

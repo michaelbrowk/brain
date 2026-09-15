@@ -7,6 +7,7 @@ import {
   MCP_AGENT_SEND_MAX,
   readAgentSends,
   recordAgentSend,
+  recordAgentSendIfAbsent,
   resolveAgentSendThread,
 } from "./agent-sends";
 
@@ -79,6 +80,44 @@ describe("the agent send marks", () => {
       clientName: "Claude",
     });
     expect(await readAgentSends()).toHaveLength(1);
+  });
+
+  it("fills in a mark a send could not write for itself", async () => {
+    await recordAgentSendIfAbsent({
+      operationId: "send-alpha",
+      accountId: ACCOUNT,
+      clientName: "Claude",
+    });
+    expect(await readAgentSends()).toEqual([
+      {
+        operationId: "send-alpha",
+        accountId: ACCOUNT,
+        clientName: "Claude",
+        threadId: null,
+      },
+    ]);
+  });
+
+  it("leaves a mark that is already there, thread and all", async () => {
+    await recordAgentSend({
+      operationId: "send-alpha",
+      accountId: ACCOUNT,
+      clientName: "Claude",
+    });
+    await resolveAgentSendThread("send-alpha", "thread-alpha");
+    await recordAgentSendIfAbsent({
+      operationId: "send-alpha",
+      accountId: ACCOUNT,
+      clientName: "Another app",
+    });
+    expect(await readAgentSends()).toEqual([
+      {
+        operationId: "send-alpha",
+        accountId: ACCOUNT,
+        clientName: "Claude",
+        threadId: "thread-alpha",
+      },
+    ]);
   });
 
   it("drops the oldest mark at the cap", async () => {

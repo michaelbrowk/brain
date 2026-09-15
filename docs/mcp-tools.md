@@ -172,9 +172,9 @@ owner sees what was attempted.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent sending is off`; `invalid_account_id`; `to is empty`; `that is not an address` naming the field and index, and `that address is listed twice` the same way; `that message is too long` and `that subject is too long`, each naming its cap; `account not found`; `cannot send from this account` with the blocked reason; `too many attachments`, `that is not an attachment name`, `page not found`, `that page does not hold that file`, `that file is gone`, `those attachments are too large`, `that file cannot be sent`; the service's own codes |
+| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent sending is off`; `invalid_account_id`; `to is empty`; `that is not an address` naming the field and index, and `that address is listed twice` the same way; `that message is too long` and `that subject is too long`, each naming its cap; `that subject holds a control character`; `that message holds a null byte`; `account not found`; `cannot send from this account` with the blocked reason; `too many attachments`, `that is not an attachment name`, `page not found`, `that page does not hold that file`, `that file is gone`, `those attachments are too large`, `that file cannot be sent`; the service's own codes |
 | `reply_mail` | `brain:mail:send` | `accountId`, `threadId`, `messageId`, `replyAll?`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`, the reply threaded by the service onto the message named | everything `send_mail` refuses, plus `invalid_thread_id`, `invalid_message_id`, `that message is not in that thread`, and `there is no one to reply to` when the message names this account and no one else. A `to`, `cc`, `bcc` or `subject` is an unknown argument and is refused by the schema |
-| `get_mail_send_status` | `brain:mail:send` | `operationId` | `{ operationId, status, threadId }`. `threadId` is the thread the Sent copy landed in, or `null` | `invalid_operation_id`, `no send with that id`, the service's own codes |
+| `get_mail_send_status` | `brain:mail:send` | `operationId`, `accountId?` | `{ operationId, status, threadId }`. `threadId` is the thread the Sent copy landed in, or `null`. With `accountId` given, a send the tool never got an answer for gets its Sent-row mark written here | `invalid_operation_id`, `invalid_account_id`, `no send with that id`, the service's own codes |
 
 The account is a parameter of every send and the agent picks it. There is no
 allowlist of accounts an agent may write from: the gate is the scope, the
@@ -192,13 +192,39 @@ sending twice, and reusing a key for a different message is refused with
 the provider has a Sent copy, and on an account with no Sent folder it stays
 `null` for good.
 
-Brain checks what it can before the mail service is called: the owner's
-toggle, the account id's shape, an empty `to`, every address, a repeated
-address, and the two body caps (998 bytes of subject, 1 MiB of text). Each of
-those is a rule the mail client applies a moment later; checking twice is what
-lets the refusal name the field instead of arriving as a request the service
-could not read. The one round trip a refusal costs is the account list, which
-is why it is the last check.
+A send whose answer never comes back is not a refusal. The mail service
+enqueues the message durably before it delivers, so a request that timed out
+or was cancelled is as likely to have gone out as not, and `send_mail` and
+`reply_mail` answer
+
+```json
+{ "state": "unknown", "idempotencyKey": "...", "operationId": null, "retry": "same-key" }
+```
+
+with a sentence saying what to do. The one safe move is to ask again with the
+**same** `idempotencyKey`: the service replays the first send rather than
+making a second one, and answers its `operationId`, which
+`get_mail_send_status` then reports on. A fresh key sends the message twice.
+The activity line for that call reads `unknown`, so the owner's log
+distinguishes a send that did not happen from one nobody knows about. The
+answer carries no `error` and is not marked as one: only a failure the service
+named is a refusal.
+
+A send with no answer wrote no mark either, because the tool never learned an
+operation id, so the Sent row has nothing to caption. Passing `accountId` to
+`get_mail_send_status` beside the `operationId` closes that: the first status
+call that finds the send accepted writes the mark the send could not write for
+itself. A mark already there is left alone.
+
+Brain checks what it can before the mail service is called: the three id
+shapes, the owner's toggle, an empty `to`, every address, a repeated address,
+a control character in a subject, and the two body caps (998 bytes of subject,
+1 MiB of text). Each of those is a rule the mail client applies a moment
+later; checking twice is what lets the refusal name the field instead of
+arriving as a request the service could not read. The ids come first, so no
+activity line carries a string Brain never issued, and a line for a malformed
+id names no target at all. The one round trip a refusal costs is the account
+list, which is why it is the last check.
 
 `reply_mail` derives its own recipients and the agent may not override them.
 The tool reads the thread, finds the message by id, puts `Reply-To` over
@@ -223,6 +249,11 @@ mail client is built, and reading mail is unaffected. "Tell recipients when an
 agent writes" is off by default; with it on, the outgoing message carries one
 plain last line saying an agent wrote it. `get_mail_send_status` is a read and
 neither toggle gates it: a send already made can always be asked about.
+
+The kill switch fails closed. A settings file this process cannot read or make
+sense of refuses both write tools, naming Settings, Connections, where saving
+either toggle rewrites the file. A file nobody has written yet is the first
+run, not a fault, and the documented defaults are the answer.
 
 Outgoing attachments come from a page's own files and from nowhere else. Each
 is named by the page and by the file's own name in that page's Markdown, the

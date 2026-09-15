@@ -75,6 +75,18 @@ export function mailRefusalFields(error: unknown): {
     if (error.code === "mail_send_operation_not_found") {
       return { error: "no send with that id", reason: error.code };
     }
+    if (error.code === "mail_service_timeout") {
+      return {
+        error: "the mail service did not answer in time",
+        reason: error.code,
+      };
+    }
+    if (error.code === "mail_request_cancelled") {
+      return {
+        error: "that request was cancelled before the service answered",
+        reason: error.code,
+      };
+    }
     return {
       error: "the mail service refused this request",
       reason: error.code,
@@ -102,6 +114,30 @@ export function mailOutcome(error: unknown): string {
   return error instanceof BrainMailClientError
     ? error.code
     : "mail_service_unavailable";
+}
+
+/** The codes a message may have gone out under. `/v1/send` builds the
+ *  proposal, enqueues it durably and only then delivers
+ *  (`lib/mail/service/outbound.ts`), so a client that stopped waiting has no
+ *  idea which side of the enqueue it stopped on, and the outbox will deliver
+ *  what it holds. */
+const AMBIGUOUS_SEND_CODES: ReadonlySet<string> = new Set([
+  "mail_service_timeout",
+  "mail_request_cancelled",
+]);
+
+/** Whether a failure from the send call itself leaves the message's fate
+ *  unknown. Only a throw from `sendMessage` may be asked: a failure before it
+ *  told the service nothing to send.
+ *
+ *  Anything that is not the client's own error counts as unknown too. A
+ *  socket that died after the body was written throws that way, and for a
+ *  message in the owner's name the safe reading of a failure nobody has a
+ *  code for is "it may have gone out". */
+export function isAmbiguousSendFailure(error: unknown): boolean {
+  return error instanceof BrainMailClientError
+    ? AMBIGUOUS_SEND_CODES.has(error.code)
+    : true;
 }
 
 /** Every field a mail or task line may name. All of them are optional on

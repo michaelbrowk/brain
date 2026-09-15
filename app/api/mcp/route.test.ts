@@ -98,7 +98,10 @@ import { toolScopeOf } from "./tool-kit";
 import { dayInZone, flushTaskActivityForTests } from "./task-tools";
 import { readMcpActivity } from "@/lib/mcp/activity-log";
 import { readAgentSends, recordAgentSend } from "@/lib/mcp/agent-sends";
-import { writeAgentSettings } from "@/lib/mcp/agent-settings";
+import {
+  MCP_AGENT_SETTINGS_FILE,
+  writeAgentSettings,
+} from "@/lib/mcp/agent-settings";
 import type { MailSendInput } from "@/lib/mail/message-types";
 import { mailNotificationId } from "@/lib/notifications/ids";
 import {
@@ -4316,6 +4319,356 @@ describe("the mail send tools", () => {
     );
     expect(fake.calls).toEqual([]);
     await expect(readMcpActivity(1)).resolves.toEqual([]);
+  });
+
+  it("answers unknown, not refused, when the send itself times out", async () => {
+    const fake = createMailClientFake({
+      sendMessage: async () => {
+        throw new BrainMailClientError(504, "mail_service_timeout");
+      },
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        423,
+      ),
+    );
+
+    // The service enqueues the message durably before it delivers, so a
+    // client that gave up waiting cannot say nothing happened. "Refused" is
+    // the one word an agent reads as "send it again with a fresh key".
+    expect(isError).toBe(false);
+    expect(payload).toMatchObject({
+      state: "unknown",
+      idempotencyKey: KEY,
+      operationId: null,
+      retry: "same-key",
+      reason: "mail_service_timeout",
+    });
+    expect(JSON.stringify(payload)).not.toContain("refused");
+    expect(String(payload.detail)).toContain("idempotencyKey");
+    const [entry] = await readMcpActivity(1);
+    expect(entry.outcome).toBe("unknown");
+  });
+
+  it("writes the mark when a status resolves it, and replays on the same key", async () => {
+    const timedOut = createMailClientFake({
+      sendMessage: async () => {
+        throw new BrainMailClientError(504, "mail_service_timeout");
+      },
+    });
+    mocks.createBrainMailClient.mockReturnValue(timedOut.client);
+
+    await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        424,
+      ),
+    );
+    // Nothing to mark yet: the tool never learned an operation id.
+    expect(await readAgentSends()).toEqual([]);
+
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        getSendOperation: async () => ({
+          apiVersion: 1,
+          operationId: "send-alpha",
+          status: "sent",
+          threadId: "thread-sent",
+        }),
+      }).client,
+    );
+
+    await toolPayload(
+      await callTool(
+        "get_mail_send_status",
+        { operationId: "send-alpha", accountId: FAKE_ACCOUNT_ID },
+        425,
+      ),
+    );
+
+    expect(await readAgentSends()).toEqual([
+      {
+        operationId: "send-alpha",
+        accountId: FAKE_ACCOUNT_ID,
+        clientName: "Legacy token",
+        threadId: "thread-sent",
+      },
+    ]);
+
+    const replay = createMailClientFake({
+      sendMessage: async () => ({
+        apiVersion: 1,
+        operationId: "send-alpha",
+        created: false,
+        status: "sent",
+      }),
+    });
+    mocks.createBrainMailClient.mockReturnValue(replay.client);
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        426,
+      ),
+    );
+
+    // The same key answers the first operation rather than sending twice.
+    expect(payload).toEqual({
+      operationId: "send-alpha",
+      created: false,
+      status: "sent",
+    });
+    expect(await readAgentSends()).toHaveLength(1);
+  });
+
+  it("still refuses when the account list times out, because nothing was sent", async () => {
+    const fake = createMailClientFake({
+      listAccountCapabilities: async () => {
+        throw new BrainMailClientError(504, "mail_service_timeout");
+      },
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        427,
+      ),
+    );
+
+    // A read that timed out told the service nothing to send, so the honest
+    // answer is a refusal and the agent may use a fresh key next time.
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "the mail service did not answer in time",
+      reason: "mail_service_timeout",
+    });
+    expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
+  });
+
+  it("refuses a subject carrying a carriage return before the client is built", async () => {
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello\r\nBcc: attacker@example.net",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        428,
+      ),
+    );
+
+    // A header the agent writes is the one input where a miss is
+    // catastrophic, so Brain holds its own lock rather than leaving the
+    // builder three layers down as the only one.
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "that subject holds a control character",
+      reason: "a subject is one line of plain text",
+    });
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("names a malformed account id, an oversized subject and a null byte", async () => {
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const badAccount = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: "account-a" + "z".repeat(32),
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        429,
+      ),
+    );
+    expect(badAccount.payload).toEqual({
+      error: "that account id is not valid",
+      reason: "invalid_account_id",
+    });
+
+    const longSubject = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "s".repeat(999),
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        430,
+      ),
+    );
+    expect(longSubject.payload).toEqual({
+      error: "that subject is too long",
+      reason: "subject is at most 998 bytes",
+    });
+
+    const nullByte = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one\u0000line",
+          idempotencyKey: KEY,
+        },
+        431,
+      ),
+    );
+    expect(nullByte.payload).toEqual({
+      error: "that message holds a null byte",
+      reason: "subject and text are plain text",
+    });
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("refuses a reply to a message that names nobody but this account", async () => {
+    const target = fakeMessage({
+      messageId: "message-alpha",
+      threadId: "thread-alpha",
+      from: { name: "Me", address: "me@example.test" },
+      replyTo: [],
+      to: [{ name: null, address: "me@example.test" }],
+      cc: [],
+    });
+    const fake = createMailClientFake({
+      getThread: async () => ({
+        apiVersion: 1,
+        thread: fakeThread({ threadId: "thread-alpha" }),
+        messages: [target],
+      }),
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "reply_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          threadId: "thread-alpha",
+          messageId: "message-alpha",
+          text: "thanks",
+          idempotencyKey: KEY,
+        },
+        432,
+      ),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "there is no one to reply to",
+      reason: "that message names only this account",
+    });
+    expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
+  });
+
+  it("refuses to send at all when the kill switch cannot be read", async () => {
+    await fs.mkdir(stateRoot, { recursive: true, mode: 0o700 });
+    await fs.writeFile(
+      path.join(stateRoot, MCP_AGENT_SETTINGS_FILE),
+      "{not json",
+      { mode: 0o600 },
+    );
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        433,
+      ),
+    );
+
+    // A switch whose whole purpose is to stop an agent must not be one
+    // unreadable file away from being on again.
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "agent sending is off",
+      reason: "the switch could not be read, set it again in Settings, Connections",
+    });
+    expect(fake.calls).toEqual([]);
+    const [entry] = await readMcpActivity(1);
+    expect(entry.outcome).toBe("agent_settings_unreadable");
+  });
+
+  it("checks the account id before the kill switch, so no line carries a stray id", async () => {
+    await writeAgentSettings({ tellRecipients: false, allowSending: false });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: "a".repeat(200_000),
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        434,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "that account id is not valid",
+      reason: "invalid_account_id",
+    });
+    const entries = await readMcpActivity(10);
+    expect(entries).toHaveLength(1);
+    expect(entries[0].outcome).toBe("invalid_account_id");
+    expect(fake.calls).toEqual([]);
   });
 });
 

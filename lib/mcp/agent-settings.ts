@@ -33,14 +33,42 @@ function settingsFile(): string {
   return path.join(mcpStateDirectory(), MCP_AGENT_SETTINGS_FILE);
 }
 
-export async function readAgentSettings(): Promise<McpAgentSettings> {
+export interface McpAgentSettingsState {
+  readonly settings: McpAgentSettings;
+  /** True when the file is there and this process could not read it or make
+   *  sense of it. A missing file is the first run, not a fault. The send
+   *  tools refuse on this: a switch whose whole purpose is to stop an agent
+   *  must not be one unreadable file away from being on again. Everything
+   *  else keeps reading the defaults, so a bad edit costs no mail. */
+  readonly unreadable: boolean;
+}
+
+export async function readAgentSettingsState(): Promise<McpAgentSettingsState> {
+  let raw: string;
   try {
-    const parsed: unknown = JSON.parse(await fs.readFile(settingsFile(), "utf8"));
-    if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-      return MCP_AGENT_SETTINGS_DEFAULT;
-    }
-    const value = parsed as Record<string, unknown>;
+    raw = await fs.readFile(settingsFile(), "utf8");
+  } catch (cause) {
+    const code = (cause as NodeJS.ErrnoException).code;
     return {
+      settings: MCP_AGENT_SETTINGS_DEFAULT,
+      unreadable: code !== "ENOENT",
+    };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return { settings: MCP_AGENT_SETTINGS_DEFAULT, unreadable: true };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    return { settings: MCP_AGENT_SETTINGS_DEFAULT, unreadable: true };
+  }
+  const value = parsed as Record<string, unknown>;
+  // A field the file leaves out or spells wrong is not a file this process
+  // failed to read: the object parsed, and the documented default is the
+  // answer for that field alone.
+  return {
+    settings: {
       tellRecipients:
         typeof value.tellRecipients === "boolean"
           ? value.tellRecipients
@@ -49,13 +77,17 @@ export async function readAgentSettings(): Promise<McpAgentSettings> {
         typeof value.allowSending === "boolean"
           ? value.allowSending
           : MCP_AGENT_SETTINGS_DEFAULT.allowSending,
-    };
-  } catch {
-    // A missing file is the first run. A file this process cannot read or
-    // parse is one a person edited badly, and a bad edit must not stop mail:
-    // the answer is the documented default, not a throw.
-    return MCP_AGENT_SETTINGS_DEFAULT;
-  }
+    },
+    unreadable: false,
+  };
+}
+
+/** The settings as the owner's own screens read them. A file nobody can read
+ *  answers the documented defaults here, because a bad edit must not empty a
+ *  settings page. Anything deciding whether an agent may act asks
+ *  `readAgentSettingsState` and honours `unreadable`. */
+export async function readAgentSettings(): Promise<McpAgentSettings> {
+  return (await readAgentSettingsState()).settings;
 }
 
 export async function writeAgentSettings(

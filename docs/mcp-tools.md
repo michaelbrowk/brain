@@ -14,7 +14,9 @@ Scope is what the connection must already hold. `brain:read` is the floor every
 connection has, so a row with no scope named needs nothing beyond it. A tool
 called without its scope answers `insufficient_scope` and names the scope it
 wanted, and the gate runs on the tool name before the handler, so nothing is
-read or written on the way to that answer. Scope closure is in
+read or written on the way to that answer. A batch is gated on every scope
+every call in it needs, so a batch holding one call this connection cannot
+make is refused whole and none of the others run. Scope closure is in
 `docs/mcp-oauth.md`: send implies mail, mail implies read, import implies
 write implies read, and mail never implies write.
 

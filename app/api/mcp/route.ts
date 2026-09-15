@@ -588,10 +588,17 @@ async function routeHandler(request: Request): Promise<Response> {
 /** Every scope a batch's tool calls need, not only the last one named. A
  *  request body is either one JSON-RPC message or an array of them, and a
  *  grant must hold every scope any call in the batch needs before the batch
- *  runs at all. Import is still an early return: it is the widest scope in
- *  play, and a batch never mixes an import tool with a mail or write tool in
- *  practice, so returning as soon as one is seen keeps the common case cheap
- *  without changing what a well-formed batch is refused for. */
+ *  runs at all.
+ *
+ *  A set over all of them, with no early return. Import used to return as
+ *  soon as it was seen, on the reasoning that it is the widest scope in play,
+ *  which is true of the scopes it closes onto and false of the two mail ones:
+ *  a grant may hold import without holding either. So a batch mixing a
+ *  `notion_*` call with a mail call was pre-gated on `brain:import` alone,
+ *  and the mail call reached its own handler to refuse itself in body. No
+ *  access was given away, because every scoped tool carries its own
+ *  `hasScope`, but the property this gate exists for, refused before the
+ *  handler, was not held for that one shape. */
 async function requiredToolScopes(request: Request): Promise<McpScope[]> {
   if (request.method !== "POST") return [];
   let payload: unknown;
@@ -612,7 +619,6 @@ async function requiredToolScopes(request: Request): Promise<McpScope[]> {
       continue;
     }
     const scope = toolScopeOf(value.params.name);
-    if (scope === "brain:import") return [scope];
     if (scope && !required.includes(scope)) required.push(scope);
   }
   return required;

@@ -408,6 +408,54 @@ describe("Notion MCP route validation", () => {
     expect(mocks.createBrainMailClient).not.toHaveBeenCalled();
   });
 
+  // The one shape the pre-gate used to let through: an import tool returned
+  // early as the widest scope in play, so a batch mixing it with a mail call
+  // was pre-gated on brain:import alone and the mail call reached its handler
+  // to refuse itself in-body. The gate is a set over every tool in the batch
+  // with no early return, so a batch this grant cannot run is refused whole.
+  it("refuses a batch mixing an import tool with a mail tool on an import-only grant", async () => {
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "import-only-token",
+      clientId: "import-only-client",
+      scopes: ["brain:read", "brain:write", "brain:import"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+
+    const response = await POST(
+      new Request("https://brain.example.test/api/mcp", {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: "Bearer import-only-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify([
+          {
+            jsonrpc: "2.0",
+            id: 502,
+            method: "tools/call",
+            params: { name: "notion_find_page", arguments: {} },
+          },
+          {
+            jsonrpc: "2.0",
+            id: 503,
+            method: "tools/call",
+            params: {
+              name: "list_mail_threads",
+              arguments: { accountId: FAKE_ACCOUNT_ID },
+            },
+          },
+        ]),
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    expect(response.headers.get("WWW-Authenticate")).toContain(
+      'scope="brain:mail"',
+    );
+    expect(mocks.createBrainMailClient).not.toHaveBeenCalled();
+  });
+
   it("passes a single call from a grant holding only the scope that tool needs", async () => {
     mocks.verifyMcpBearerToken.mockResolvedValue({
       token: "mail-only-token",

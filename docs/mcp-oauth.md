@@ -140,6 +140,17 @@ real client has completed an OAuth connect/read/write check.
    that a mail tool returns HTTP `403` with exact `scope="brain:mail"`, and
    that `/var/lib/brain/mcp` is private to the `brain` service user with its
    files mode `0600`.
+9. Connect a test app with mail access and confirm the two axes stay apart. A
+   write tool must still be refused with exact `scope="brain:write"`, because
+   `brain:mail` does not include it. Then send one message to yourself with
+   `send_mail`, and check three things: the row in the Sent mailbox reads
+   "Sent by ‹client›" with the name from the consent screen, which is resolved
+   as that mailbox opens rather than polled, one line for that send appears under
+   Settings → Connections, and the received message carries an
+   `X-Brain-Agent: mcp` header and no extra body line. Turn "Let agents send
+   mail" off and confirm the next `send_mail` answers `agent sending is off`
+   while the mail reads keep working. A first-party SMTP account shows no
+   caption on its Sent row by design, so run this step on a Gmail account.
 
 Rollback is code-only, with one condition. Before any client has consented to
 `brain:mail` or `brain:mail:send`, switch to the prior immutable release and

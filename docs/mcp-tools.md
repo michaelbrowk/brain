@@ -18,11 +18,33 @@ read or written on the way to that answer. Scope closure is in
 `docs/mcp-oauth.md`: send implies mail, mail implies read, import implies
 write implies read, and mail never implies write.
 
+## What an agent should know
+
+Four rules no single row states.
+
+- **A refusal is an answer, not an error.** Read it and do not retry a
+  permanent one. The one field that is always a machine code is `reason` on a
+  refusal the mail service itself coined. Elsewhere the two fields split by
+  tool: a task refusal puts its code in `error` and often carries no `reason`
+  at all, while a mail refusal Brain decided on puts a sentence in `error` and
+  the field, the id or the measurement in `reason`. Branch on the whole
+  answer, not on one field of it.
+- **`read_mail_message` may answer `state: "fetching"`.** Call it again. Each
+  call re-records the demand that keeps the body in the service's cache, so an
+  agent that stops asking loses the body it was waiting for.
+- **`send_mail` and `reply_mail` need an `idempotencyKey` of 16 to 128
+  characters from `A-Z`, `a-z`, `0-9`, `_` and `-`.** Reusing a key replays the
+  same result. Reusing it with different content is refused.
+- **`complete_task` and `reopen_task` need `today` as your own local calendar
+  date.** A completion writes a day into the Logbook and the server has no
+  caller's time zone to fall back on. `list_tasks` and `get_task` are the
+  lenient pair: they fall back to the owner's own zone.
+
 ## Notes
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `connection_check` | | none | `status`, per-check results, which of write and import are authorized, the root page count, the granted scopes | nothing |
+| `connection_check` | | none | `status`, per-check results, `access` with `read`, `write`, `import`, `mail` and `mailSend`, the root page count and the granted scopes | nothing |
 | `list_tree` | | none | the whole page tree: ids, titles, icons, nesting | nothing |
 | `read_page` | | `id` | the page's meta, its markdown and its `rev` | an id that is not a page surfaces as a transport error today rather than an `{ error }` answer |
 | `search` | | `query` | matching pages with snippets | nothing |
@@ -37,15 +59,16 @@ write implies read, and mail never implies write.
 
 A task is a record, not a note. A derived list is read against a day, so
 `list_tasks` takes the caller's own calendar date as `today`. Leave it out and
-Brain uses the owner's own time zone, the one Settings, Account holds; with no
+Brain uses the owner's own time zone, the one Settings, Account holds. With no
 zone captured and no `today`, the read is refused rather than answered in UTC.
-The logbook needs a UTC offset as well, because a completion is one instant and
-the day it falls on is the caller's.
+The Inbox is the exception: it is a property of the record alone, so it needs
+neither a day nor a zone. The logbook needs a UTC offset as well, because a
+completion is one instant and the day it falls on is the caller's.
 
-A COMPLETION DOES NOT LEAVE ITS LIST. A ticked task stays in the list it was
+A completion does not leave its list. A ticked task stays in the list it was
 in, struck through, until the day changes, and only then does it reach the
-logbook. So a list read that follows a completion carries `offsetMinutes` too:
-without one the day is UTC's, and a completion near midnight moves lists under
+logbook. So a list read that follows a completion carries `offsetMinutes` too.
+Without one the day is UTC's, and a completion near midnight moves lists under
 the agent that made it.
 
 `time` is `HH:MM`, 24 hour, in the owner's zone. `evening` is `true` or absent,
@@ -60,15 +83,26 @@ record's id, the note's id for a promote, and the outcome. No title enters it.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `list_tasks` | | `list?`, `page?`, `today?`, `offsetMinutes?`, `category?` | `{ tasks }` for every list but the logbook, which answers `{ entries }`, one per completion, each with its own `key`. With `page` it is every record on that note, complete | a `today` that is not `YYYY-MM-DD` (`bad_today`), a logbook read with no offset and no zone (`bad_offset`), a derived list with neither a day nor a captured zone, a call naming neither a list nor a page (`missing_list`) |
-| `list_tasks` with `page` | | `page` alone | `{ tasks }`: every record the note owns, linked and detached, done and open, whatever their age, because the editor draws a word on every task line whatever state its record is in | `list`, `today`, `offsetMinutes` or `category` beside it (`unexpected_list`, `unexpected_today`, `unexpected_offset`, `unexpected_category`), and `bad_page` |
+| `list_tasks` | | `list?` as `inbox`, `today`, `upcoming`, `someday` or `logbook`, `page?`, `today?`, `offsetMinutes?`, `category?` | `{ tasks }` for every list but the logbook, which answers `{ entries }`, one per completion, each with its own `key` | `bad_today` for a day that is not `YYYY-MM-DD`, `bad_offset` for a logbook read with no offset and no zone, the no-zone refusal for a derived list with neither a day nor a captured zone, and `missing_list` for a call naming neither a list nor a page |
 | `get_task` | | `id` | `{ task }`, including whether its note line was removed and which page it is linked to | `bad_id`, `not_found`, `page_trashed` |
 | `create_task` | `brain:write` | `title`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?` | `{ task }`, unlinked: it owns its own completion and belongs to no note | whatever the record refuses, as `that task change was refused` with the record's own reason, for instance `time needs a day to be a time on` |
-| `promote_task_line` | `brain:write` | `page`, `line` (a zero-based markdown line number, or the line's own text with runs of whitespace collapsed), `when?`, `time?`, `evening?`, `deadline?`, `category?` | `{ task }`, linked to that checkbox line, with the anchor the editor's own promote builds. The note's category is inherited unless one is named here | `that line is not a checkbox`, `that line appears more than once, pass its line number`, `that line is empty`, `that line already has a task` naming the record that has it, `bad_page`, `not_found` for a note that is not there |
+| `promote_task_line` | `brain:write` | `page`, `line` as a zero-based markdown line number or the line's own text with runs of whitespace collapsed, `when?`, `time?`, `evening?`, `deadline?`, `category?` | `{ task }`, linked to that checkbox line, with the anchor the editor's own promote builds. The note's category is inherited unless one is named here | `that line is not a checkbox`, `that line appears more than once, pass its line number`, `that line is empty`, `that line already has a task` naming the record that has it, `bad_page`, and `not_found` for a note that is not there |
 | `update_task` | `brain:write` | `id`, `title?`, `when?`, `time?`, `evening?`, `deadline?`, `category?`, `repeat?`. A field left out is left alone and `null` clears it | `{ task }` after the change | `bad_id`, `not_found`, whatever the record refuses. `expectedWhen` and `remindedAt` are refused as unknown arguments |
 | `complete_task` | `brain:write` | `id`, `today`, `offsetMinutes?`, `expectedWhen?` | `{ task, list }`, where `list` is the list the record is in for that day, which is the list it was already in | `bad_id`, `not_found`, and `conflict` with `currentWhen` when a repeating task has moved since the caller last read it |
 | `reopen_task` | `brain:write` | `id`, `today`, `offsetMinutes?` | `{ task, list }`. Unticking a repeating task restores the instance its newest completion came from | `bad_id`, `not_found`, `conflict` |
-| `delete_task` | `brain:write` | `id` | `{ ok: true }`. A linked task's checkbox line stays in its note; the record that pointed at it is what goes | `bad_id`, `not_found` |
+| `delete_task` | `brain:write` | `id` | `{ ok: true }`. A linked task's checkbox line stays in its note, and the record that pointed at it is what goes | `bad_id`, `not_found` |
+
+`list_tasks` with `page` answers a different question, so it takes nothing
+else. It hands back `{ tasks }`: every record that note owns, linked and
+detached, done and open, whatever their age, because the editor draws a word on
+every task line whatever state its record is in. A `list`, a `today`, an
+`offsetMinutes` or a `category` beside it is refused as `unexpected_list`,
+`unexpected_today`, `unexpected_offset` or `unexpected_category`, and a page id
+that is not an id is `bad_page`.
+
+A linked task cannot repeat. The record refuses `repeat` and `page` together,
+because a repeating task advances its own `when` on completion and a checkbox
+has no second occurrence. That is why `promote_task_line` takes no `repeat`.
 
 ## Mail, reading
 
@@ -76,7 +110,9 @@ Every mail tool talks to the mail service in process over its Unix socket.
 None of them goes through `/api/mail/*`, which is same-origin gated for the
 browser. When the service is down the answer is one refusal,
 `the mail service is unavailable` with reason `mail_service_unavailable`, and
-nothing of the underlying failure is in it.
+nothing of the underlying failure is in it. Every other refusal the service
+coined keeps its own code in `reason`, so one code reads the same wherever an
+agent meets it.
 
 `mailbox` is one of the six system mailboxes (`inbox`, `all`, `sent`,
 `starred`, `spam`, `trash`) and defaults to `inbox`. There are no custom
@@ -96,10 +132,13 @@ field rather than arriving as a service refusal for a service that was never
 asked. `search_mail`'s `query` is checked the same way: empty or over the
 browser's own cap is `invalid_query`.
 
+Reading mail writes no activity line. The log is what an agent changed, and a
+log that recorded every read would bury the sends.
+
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
 | `list_mail_accounts` | `brain:mail` | none | `{ accounts }`, each `accountId`, `address`, `displayName`, `provider`, `canSend`, and `sendBlockedReason` only when it cannot send | nothing of its own |
-| `list_mail_threads` | `brain:mail` | `accountId`, `mailbox?`, `view?`, `cursor?`, `limit?` | `{ threads, nextCursor, availability }`, threads newest first with subject, participants, last message time, unread, starred, size, list flag and category; `availability` says whether the mailbox itself answered or why it did not | `invalid_account_id`, `account not found`, and any other code the service coined, as `the mail service refused this request` with that code as the reason |
+| `list_mail_threads` | `brain:mail` | `accountId`, `mailbox?`, `view?`, `cursor?`, `limit?` | `{ threads, nextCursor, availability }`, threads newest first with subject, participants, last message time, unread, starred, size, list flag and category. `availability` says whether the mailbox itself answered or why it did not | `invalid_account_id`, `account not found`, and any other code the service coined, as `the mail service refused this request` with that code as the reason |
 | `search_mail` | `brain:mail` | `query`, `accountId?`, `mailbox?`, `cursor?`, `limit?` | one account: `{ threads, nextCursor, availability, indexStatus, resultsTruncated }`. Every account: `{ threads, nextCursor, accounts }`, `accounts` holding each queried account's own `availability`, `indexStatus` and `resultsTruncated`, or `error` and `reason` for one that did not answer | `invalid_account_id`, `invalid_query`, `that cursor is not usable any more` (`stale_cursor`), plus the service's own codes |
 | `get_mail_thread` | `brain:mail` | `accountId`, `threadId` | `{ thread, messages }`, each message's `messageId`, `from`, `to`, `cc`, `subject`, `sentAt`, `unread`, `snippet`, `hasAttachments` and `bodyCached` | `invalid_account_id`, `invalid_thread_id`, `thread not found`, plus the service's own codes |
 | `read_mail_message` | `brain:mail` | `accountId`, `messageId`, `wait?` | `{ state, text?, attachments }`, each attachment's `attachmentId`, `filename`, `mimeType` and `bytes` | `invalid_account_id`, `invalid_message_id`, the service's own codes |
@@ -107,16 +146,18 @@ browser's own cap is `invalid_query`.
 `sendBlockedReason` is Brain's own read of a `canSend: false`, because the
 service reports sending as one boolean. `account_reauth_required` is the
 account waiting to be reconnected, `smtp_not_configured` is an IMAP account
-that was never given an SMTP endpoint, and `smtp_relay_unavailable` is an
-account that has one this host cannot reach.
+that was never given an SMTP endpoint, and `smtp_relay_unavailable` is
+everything else, which today means an account whose relay this host cannot
+reach. That last one is a fallback rather than a finding, so treat it as "the
+service will not send from this account" and not as a diagnosis.
 
 `availability`, on both `list_mail_threads` and `search_mail`, is what lets
 an agent tell an empty `threads` array apart from a mailbox that has not
-answered:
-`status: "available"` carries `windowTruncated`, `status: "unavailable"`
-carries a `reason` such as `mailbox_reauth_required`. `search_mail` adds
-`indexStatus` (`building` or `ready`) and `resultsTruncated`, the same two
-signals the browser shows as "Indexing" and "Retrying later".
+answered. `status: "available"` carries `windowTruncated`, and
+`status: "unavailable"` carries a `reason` such as `mailbox_reauth_required`.
+`search_mail` adds `indexStatus` (`building` or `ready`) and
+`resultsTruncated`, the same two signals the browser shows as "Indexing" and
+"Retrying later".
 
 `search_mail` with no `accountId` runs the search on every connected account,
 merges the results newest first with the thread id breaking a tie, and answers
@@ -132,7 +173,7 @@ signals, and the next call asks it again from the start.
 `read_mail_message` records the body demand with the service first, because the
 body cache drops a message outside the newest-Inbox cohort unless something is
 holding it, and then polls for up to `wait` milliseconds (0 to 20000, 8000 by
-default). It answers `state` rather than holding the call open: `not_requested`
+default). It answers `state` rather than holding the call open. `not_requested`
 and `fetching` both mean the body is not there yet and the caller should call
 again, `transient` means the fetch failed and may succeed later, `permanent`
 means it will not, and `ready` carries `text` and `attachments`.
@@ -141,14 +182,14 @@ means it will not, and `ready` carries `text` and `attachments`.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `update_mail_thread` | `brain:mail` | `accountId`, `threadId`, and exactly one of `read`, `starred`, `archive`, `trash`, `restore`, `spam` | `{ thread }`, the thread's row as it stands after the change | `invalid_account_id`, `invalid_thread_id`; `trash_is_true_only` and `restore_is_true_only`, `false` naming no second thing either word could mean; `one change per call`, naming either the fields that arrived together or the six to pick from; `mail_thread_mutation_unsupported` when the service withholds them for that account, the same code the wire uses for the folderless case; `thread not found`, plus the service's own codes |
+| `update_mail_thread` | `brain:mail` | `accountId`, `threadId`, and exactly one of `read`, `starred`, `archive`, `trash`, `restore`, `spam` | `{ thread }`, the thread's row as it stands after the change | `invalid_account_id` and `invalid_thread_id`. `trash_is_true_only` and `restore_is_true_only` for a `false` that names no second thing either word could mean. `one change per call`, naming either the fields that arrived together or the six to pick from. `mail_thread_mutation_unsupported` when the service withholds them for that account, the same code the wire uses for the folderless case. `thread not found`, plus the service's own codes |
 
 `trash` and `restore` take `true` and nothing else, because there is no second
 thing either word could mean. `false` on either is refused rather than
 accepted and ignored, naming the field and pointing at `restore: true` for the
 agent that reached for `trash: false` to mean "take it out of the trash". The
 other four take a boolean, so `read: false` puts a thread back to unread and
-`archive: false` brings it back to the Inbox. "Move" is one of these six:
+`archive: false` brings it back to the Inbox. "Move" is one of these six.
 Brain has no custom folders, and this release adds none.
 
 The one-change rule is Brain's own, checked before the mail service is called,
@@ -156,7 +197,7 @@ so the refusal names the fields the agent sent. It mirrors the PATCH the
 service accepts, which counts its keys and turns down a second action.
 
 `accountId` and `threadId` are checked against the same shapes the read tools
-check, before anything else runs: a malformed id is refused here, naming the
+check, before anything else runs. A malformed id is refused here, naming the
 field, rather than reaching the mail client or the activity log.
 
 A `read: true` also marks that thread's row read in the notification centre, on
@@ -172,7 +213,7 @@ owner sees what was attempted.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent sending is off`; `invalid_account_id`; `to is empty`; `that is not an address` naming the field and index, and `that address is listed twice` the same way; `that message is too long` and `that subject is too long`, each naming its cap; `that subject holds a control character`; `that message holds a null byte`; `account not found`; `cannot send from this account` with the blocked reason; `too many attachments`, `that is not an attachment name`, `page not found`, `that page does not hold that file`, `that file is gone`, `those attachments are too large`, `that file cannot be sent`, `page_changed`, `attachment_read_failed`; the service's own codes. A send that timed out is not refused: see the `state` unknown answer below |
+| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent sending is off`. `invalid_account_id`. `to is empty`. `that is too many recipients` over 100 across the three fields. `that is not an address` naming the field and index, and `that address is listed twice` the same way. `that message is too long` and `that subject is too long`, each naming its cap. `that subject holds a control character`. `that message holds a null byte`. `account not found`. `cannot send from this account` with the blocked reason. `too many attachments`, `that is not an attachment name`, `page not found`, `that page does not hold that file`, `that file is gone`, `those attachments are too large`, `that file cannot be sent`, `page_changed`, `attachment_read_failed`. Plus the service's own codes. A send that timed out is not refused: see the `state` unknown answer below |
 | `reply_mail` | `brain:mail:send` | `accountId`, `threadId`, `messageId`, `replyAll?`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`, the reply threaded by the service onto the message named | everything `send_mail` refuses, plus `invalid_thread_id`, `invalid_message_id`, `that message is not in that thread`, and `there is no one to reply to` when the message names this account and no one else. A `to`, `cc`, `bcc` or `subject` is an unknown argument and is refused by the schema |
 | `get_mail_send_status` | `brain:mail:send` | `operationId`, `accountId?` | `{ operationId, status, threadId }`. `threadId` is the thread the Sent copy landed in, or `null`. With `accountId` given, a send the tool never got an answer for gets its Sent-row mark written here | `invalid_operation_id`, `invalid_account_id`, `no send with that id`, the service's own codes |
 
@@ -218,13 +259,13 @@ itself. A mark already there is left alone.
 
 Brain checks what it can before the mail service is called: the three id
 shapes, the owner's toggle, an empty `to`, every address, a repeated address,
-a control character in a subject, and the two body caps (998 bytes of subject,
-1 MiB of text). Each of those is a rule the mail client applies a moment
-later; checking twice is what lets the refusal name the field instead of
-arriving as a request the service could not read. The ids come first, so no
-activity line carries a string Brain never issued, and a line for a malformed
-id names no target at all. The one round trip a refusal costs is the account
-list, which is why it is the last check.
+the recipient count, a control character in a subject, and the two body caps
+(998 bytes of subject, 1 MiB of text). Each of those is a rule the mail client
+applies a moment later, and checking twice is what lets the refusal name the
+field instead of arriving as a request the service could not read. The ids come
+first, so no activity line carries a string Brain never issued, and a line for
+a malformed id names no target at all. The one round trip a refusal costs is
+the account list, which is why it is the last check.
 
 `reply_mail` derives its own recipients and the agent may not override them.
 The tool reads the thread, finds the message by id, puts `Reply-To` over
@@ -236,19 +277,20 @@ message.
 
 Every message an agent sends is marked as one. The send carries
 `origin: "mcp"`, which is what earns it the `X-Brain-Agent: mcp` header in the
-outbound MIME; one activity line is written with the account, the operation
-and the outcome; and one mark is kept in the state directory so the Sent row
+outbound MIME. One activity line is written with the account, the operation
+and the outcome, and one mark is kept in the state directory so the Sent row
 can say which app wrote it. The mark holds the operation id, the account, the
 app's name and the thread once it is known, and nothing about what was
 written. None of this is visible to the recipient.
 
 Two toggles in Settings, Connections govern the pair. "Let agents send mail" is
-on by default; with it off, `send_mail` and `reply_mail` answer
+on by default. With it off, `send_mail` and `reply_mail` answer
 `agent sending is off` with `turn it on in Settings, Connections` before the
 mail client is built, and reading mail is unaffected. "Tell recipients when an
-agent writes" is off by default; with it on, the outgoing message carries one
-plain last line saying an agent wrote it. `get_mail_send_status` is a read and
-neither toggle gates it: a send already made can always be asked about.
+agent writes" is off by default. With it on, the outgoing message carries one
+plain last line, `Sent by an agent through Brain.`. `get_mail_send_status` is a
+read and neither toggle gates it: a send already made can always be asked
+about.
 
 The kill switch fails closed. A settings file this process cannot read or make
 sense of refuses both write tools, naming Settings, Connections, where saving
@@ -257,7 +299,7 @@ run, not a fault, and the documented defaults are the answer.
 
 Outgoing attachments come from a page's own files and from nowhere else. Each
 is named by the page and by the file's own name in that page's Markdown, the
-part after `/_attachments-v2/`, and never by a path: a name holding a slash, a
+part after `/_attachments-v2/`, and never by a path. A name holding a slash, a
 `..` or a space is refused as a name before anything is read. Brain then reads
 the page, and a file the body does not show is refused even when the file
 exists, because a page id the agent can read would otherwise be a key to every
@@ -297,7 +339,7 @@ three names before it is cut, and a cut is marked.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type }`, the saved file as the note store named it | `that account id is not valid`, `that attachment id is not valid` and `that page id is not valid`, each naming the shape it wanted; `page not found`, before anything is downloaded; `that file is too large for a note`, naming the cap; `that file cannot be saved into a note`, naming the executable extension; whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`); plus the service's own codes |
+| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type }`, the saved file as the note store named it | `that account id is not valid`, `that attachment id is not valid` and `that page id is not valid`, each naming the shape it wanted rather than a code. `page not found`, before anything is downloaded. `that file is too large for a note`, naming the cap. `that file cannot be saved into a note`, naming the executable extension. Whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`). Plus the service's own codes |
 
 It is the one mail tool that writes a note, so it asks for `brain:write`
 beside `brain:mail`. A grant that reads mail and cannot edit notes is refused
@@ -318,7 +360,7 @@ down. The note store checks the rest, the same checks an upload from the
 browser meets: the blocked types, and the first bytes against the type the
 file claims.
 
-One check is this path's own, and the owner's own uploads do not meet it: a
+One check is this path's own, and the owner's own uploads do not meet it. A
 file whose stored name would end `.exe`, `.dll`, `.com`, `.scr`, `.bat`,
 `.cmd`, `.ps1`, `.msi`, `.jar`, `.sh`, `.app`, `.dmg` or `.pkg` is refused,
 whatever type the message claimed for it. A person dragging an installer into
@@ -381,6 +423,9 @@ a gap.
 - **No HTML.** Text bodies only, in and out. HTML never crosses an MCP
   boundary in either direction.
 
+There are no draft tools either, and that one is a gap rather than a decision.
+See below.
+
 ## Activity
 
 Brain keeps an append-only log of what a connection did, capped at 2000 lines
@@ -398,8 +443,34 @@ The log lives in the MCP state directory (`BRAIN_MCP_STATE_DIR`,
 marks that caption a Sent row an agent wrote. None of it is in the notes
 folder, in git or in a portable archive.
 
-## Still to come in this release
+Settings, Connections shows the last fifty lines, newest first, with a Clear
+action beside the two toggles.
 
-The Settings view of the activity log lands later on this branch. Rows are
-added here as each tool is registered, so this table and the server stay one
-description.
+## Known gaps
+
+Five things this release ships without, each of them known.
+
+- **A write is logged and a read is not.** Every triage, send, attachment save
+  and task write leaves a line, refusals included. No read of any kind leaves
+  one, `get_mail_send_status` included. An owner scanning Connections sees what
+  an agent changed, never what it looked at.
+- **An agent's reply can make the bell name the correspondent.** The
+  notification centre announces a thread when something in it is unread, and a
+  reply an agent wrote into a thread that still holds an older unread message
+  passes that gate. The row then names the person the agent was answering. The
+  exact gate lives in the mail service, so this is a hole the agent path
+  widened rather than made.
+- **A Sent row from an IMAP account never gets its caption.**
+  `MailSendOperation.threadId` fills only on an accepted provider delivery,
+  which today means Gmail. First-party SMTP issues no provider ids, so the
+  mark has no thread to join on and the row reads as any other. The
+  `X-Brain-Agent: mcp` header and the activity line are still there.
+- **`sendBlockedReason` has three answers and the service has one boolean.**
+  Brain derives the reason from what it can see, so a fourth cause the service
+  knows about reads as `smtp_relay_unavailable`. A field on the wire is the
+  honest fix.
+- **A draft carries no attachments, so there are no draft tools.** The service
+  refuses a draft that holds one, in `createDraft` and again in
+  `draftMatchesSubmission`. MCP sends directly and never touches a draft, so
+  nothing here is blocked by it, and an agent that wanted to leave a message
+  for the owner to check cannot.

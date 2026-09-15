@@ -638,6 +638,35 @@ for the life of the operation and not merely until the next poll. A reader that
 joins a Sent-row caption on it has to treat an IMAP operation as no caption
 ever, rather than retrying until one appears.
 
+### The agent send path
+
+An MCP tool reaches the mail service the way the browser routes do, through
+`createBrainMailClient()` in process over the Unix socket. It never calls
+`/api/mail/*`. Those routes are same-origin gated for the browser and carry no
+bearer, so an agent reaching them would be refused by a check that was never
+about the agent. Nothing in `lib/mail/service/**` knows an MCP call from a
+browser one beyond the `origin` field above.
+
+The app's name never enters the service. `verifyMcpBearerToken` answers a
+client id and the name the owner approved lives in Brain's own OAuth state, so
+pushing it down the socket would put Brain-side prose into an artifact whose
+whole design is that it holds mail and nothing else. The service takes
+`origin: "mcp"` and no more. Brain keeps `{ operationId, accountId,
+clientName }` in `agent-sends.json` under `BRAIN_MCP_STATE_DIR`, capped at 200
+entries with the oldest dropped, and `GET /api/mail/agent-marks` resolves each
+unresolved mark once through `getSendOperation`, caching the `threadId` back.
+The Sent-row caption is that join, which is why the paragraph above about a
+null `threadId` decides whether a caption can ever appear.
+
+The 10 MiB outgoing attachment cap is this path's own limit and it is set by
+memory, not by a provider. `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes` is the
+one number every other outgoing cap derives from, and §11 records the
+measurement behind it. One MIME build at a time for the whole process is the
+other half of that contract: a send at the cap holds the decoded files and the
+finished message together, and two overlapping builds would cross
+`MemoryMax=256 MiB`. Brain takes the same turn on its own side before it reads
+a byte, so at most one encoded body exists above the socket as well.
+
 The request fingerprint (`fingerprintMailSendInput`) is a SHA-256 over exactly
 the caller's own submission, in this order:
 

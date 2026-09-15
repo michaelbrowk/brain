@@ -17,6 +17,15 @@ iPhone).
   import permission and lets the owner revoke it from Settings, once the
   trusted reverse proxy in `docs/mcp-oauth.md` is in front. Without one, a
   static `MCP_TOKEN` is the way in.
+- **Mail and tasks over the same MCP:** two more consent lines, "Read and sort
+  your mail" and "Send mail as you", let a connected app read and triage every
+  connected account, send and reply from whichever account it names, move an
+  attachment between a message and a note, and own tasks outright. Every
+  message an agent sends carries an `X-Brain-Agent: mcp` header, and every
+  change an agent makes lands in an activity log under Settings →
+  Connections, where two switches turn agent sending off and tell recipients
+  when an agent wrote. Mail is a second axis, not a step above writing: an app
+  that sorts your mail cannot edit your notes.
 - **AI:** inline writing assist, auto emoji, and smart-sort via OpenRouter.
   Inline assist sends only the selected text, capped at 12,000 characters.
   Sorting and emoji send page titles and immutable ids, never note bodies.

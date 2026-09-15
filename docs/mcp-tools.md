@@ -85,21 +85,38 @@ folders. `view` narrows a mailbox to `unread`, `attachments`, `lists` or
 passing its `nextCursor` as the next call's `cursor`.
 
 No tool answers HTML. A message that arrived as HTML alone is answered with
-the text the service extracted from it.
+its text: the service's own extraction when that already ran, and Brain's
+own reading of the sanitized HTML for the one shape the service's extraction
+misses.
+
+`accountId`, `threadId` and `messageId` are checked against the client's own
+id shapes before any of them reach it, so a malformed one is refused as
+`invalid_account_id`, `invalid_thread_id` or `invalid_message_id`, naming the
+field rather than arriving as a service refusal for a service that was never
+asked. `search_mail`'s `query` is checked the same way: empty or over the
+browser's own cap is `invalid_query`.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
 | `list_mail_accounts` | `brain:mail` | none | `{ accounts }`, each `accountId`, `address`, `displayName`, `provider`, `canSend`, and `sendBlockedReason` only when it cannot send | nothing of its own |
-| `list_mail_threads` | `brain:mail` | `accountId`, `mailbox?`, `view?`, `cursor?`, `limit?` | `{ threads, nextCursor }`, newest first, each thread's subject, participants, last message time, unread, starred, size, list flag and category | `account not found`, and any other code the service coined, as `the mail service refused this request` with that code as the reason |
-| `search_mail` | `brain:mail` | `query`, `accountId?`, `mailbox?`, `cursor?`, `limit?` | `{ threads, nextCursor }` over cached headers and previews only | `that cursor is not usable any more` (`stale_cursor`), plus the service's own codes |
-| `get_mail_thread` | `brain:mail` | `accountId`, `threadId` | `{ thread, messages }`, each message's `messageId`, `from`, `to`, `cc`, `subject`, `sentAt`, `unread`, `snippet`, `hasAttachments` and `bodyCached` | `thread not found`, plus the service's own codes |
-| `read_mail_message` | `brain:mail` | `accountId`, `messageId`, `wait?` | `{ state, text?, attachments }`, each attachment's `attachmentId`, `filename`, `mimeType` and `bytes` | the service's own codes |
+| `list_mail_threads` | `brain:mail` | `accountId`, `mailbox?`, `view?`, `cursor?`, `limit?` | `{ threads, nextCursor, availability }`, threads newest first with subject, participants, last message time, unread, starred, size, list flag and category; `availability` says whether the mailbox itself answered or why it did not | `invalid_account_id`, `account not found`, and any other code the service coined, as `the mail service refused this request` with that code as the reason |
+| `search_mail` | `brain:mail` | `query`, `accountId?`, `mailbox?`, `cursor?`, `limit?` | one account: `{ threads, nextCursor, availability, indexStatus, resultsTruncated }`. Every account: `{ threads, nextCursor, accounts }`, `accounts` holding each queried account's own `availability`, `indexStatus` and `resultsTruncated`, or `error` and `reason` for one that did not answer | `invalid_account_id`, `invalid_query`, `that cursor is not usable any more` (`stale_cursor`), plus the service's own codes |
+| `get_mail_thread` | `brain:mail` | `accountId`, `threadId` | `{ thread, messages }`, each message's `messageId`, `from`, `to`, `cc`, `subject`, `sentAt`, `unread`, `snippet`, `hasAttachments` and `bodyCached` | `invalid_account_id`, `invalid_thread_id`, `thread not found`, plus the service's own codes |
+| `read_mail_message` | `brain:mail` | `accountId`, `messageId`, `wait?` | `{ state, text?, attachments }`, each attachment's `attachmentId`, `filename`, `mimeType` and `bytes` | `invalid_account_id`, `invalid_message_id`, the service's own codes |
 
 `sendBlockedReason` is Brain's own read of a `canSend: false`, because the
 service reports sending as one boolean. `account_reauth_required` is the
 account waiting to be reconnected, `smtp_not_configured` is an IMAP account
 that was never given an SMTP endpoint, and `smtp_relay_unavailable` is an
 account that has one this host cannot reach.
+
+`availability`, on both `list_mail_threads` and `search_mail`, is what lets
+an agent tell an empty `threads` array apart from a mailbox that has not
+answered:
+`status: "available"` carries `windowTruncated`, `status: "unavailable"`
+carries a `reason` such as `mailbox_reauth_required`. `search_mail` adds
+`indexStatus` (`building` or `ready`) and `resultsTruncated`, the same two
+signals the browser shows as "Indexing" and "Retrying later".
 
 `search_mail` with no `accountId` runs the search on every connected account,
 merges the results newest first with the thread id breaking a tie, and answers
@@ -108,13 +125,17 @@ merged page can hold up to `limit` threads for each of them. An account the
 previous page ran to the end is not asked again. A cursor naming an account
 that is no longer connected is refused rather than silently narrowed, and a
 cursor from a merged search is not a cursor a single-account search accepts.
+One account failing does not fail the others: its page is skipped, its entry
+in `accounts` carries `error` and `reason` instead of the completeness
+signals, and the next call asks it again from the start.
 
 `read_mail_message` records the body demand with the service first, because the
 body cache drops a message outside the newest-Inbox cohort unless something is
 holding it, and then polls for up to `wait` milliseconds (0 to 20000, 8000 by
-default). It answers `state` rather than holding the call open: `fetching`
-means call again, `transient` means the fetch failed and may succeed later,
-`permanent` means it will not, and `ready` carries `text` and `attachments`.
+default). It answers `state` rather than holding the call open: `not_requested`
+and `fetching` both mean the body is not there yet and the caller should call
+again, `transient` means the fetch failed and may succeed later, `permanent`
+means it will not, and `ready` carries `text` and `attachments`.
 
 ## Mail, triage
 

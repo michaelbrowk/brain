@@ -113,8 +113,9 @@ export function canonicalAttachmentExtension(
  *  An extension outside this list answers `application/octet-stream`, and so
  *  does `.svg`: the media route has never served an SVG as an image and this
  *  list is that route's, so one answer decides what a file is called in a
- *  response header and in a MIME part. `app/api/media/[name]/route.ts` and
- *  `lib/portable/model.ts` each hold a copy of it and should read it here. */
+ *  response header, in a portable archive's manifest and in a MIME part an
+ *  agent attaches it to. `app/api/media/[name]/route.ts` and
+ *  `lib/portable/model.ts` read it here. */
 const ATTACHMENT_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
   png: "image/png",
   jpg: "image/jpeg",

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import {
+  attachmentMimeTypeForName,
   localAttachmentName,
   referencedAttachmentUrls,
 } from "@/lib/attachments";
@@ -163,26 +164,6 @@ function findNode(nodes: TreeNode[], id: string): TreeNode | null {
   return null;
 }
 
-function mimeTypeForAttachment(name: string): string {
-  const extension = name.split(".").at(-1)?.toLowerCase();
-  const known: Record<string, string> = {
-    png: "image/png",
-    jpg: "image/jpeg",
-    jpeg: "image/jpeg",
-    gif: "image/gif",
-    webp: "image/webp",
-    avif: "image/avif",
-    heic: "image/heic",
-    heif: "image/heif",
-    pdf: "application/pdf",
-    txt: "text/plain",
-    csv: "text/csv",
-    json: "application/json",
-    zip: "application/zip",
-  };
-  return (extension && known[extension]) || "application/octet-stream";
-}
-
 function replaceKnown(value: string, replacements: Map<string, string>): string {
   let result = value;
   for (const [source, target] of [...replacements].sort(
@@ -285,7 +266,10 @@ export async function buildPortableArchive(
     attachmentEntries.push({
       archivePath: `assets/${name}`,
       originalName: name,
-      mimeType: mimeTypeForAttachment(name),
+      // The one extension-to-MIME list, in `lib/attachments.ts`. It holds the
+      // same thirteen types this module used to keep its own copy of, so the
+      // manifest an export writes is unchanged.
+      mimeType: attachmentMimeTypeForName(name),
       data,
       sha256: createHash("sha256").update(data).digest("hex"),
     });

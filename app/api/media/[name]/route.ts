@@ -5,7 +5,10 @@ import type { FileHandle } from "node:fs/promises";
 import { Readable } from "node:stream";
 import path from "node:path";
 import { SESSION_COOKIE, verifySession } from "@/lib/auth";
-import { referencedAttachmentNames } from "@/lib/attachments";
+import {
+  attachmentMimeTypeForName,
+  referencedAttachmentNames,
+} from "@/lib/attachments";
 import { getStore, isNotFound, NOTES_ROOT } from "@/lib/store";
 import {
   attachmentGrantsRoot,
@@ -20,21 +23,6 @@ import {
 
 export const dynamic = "force-dynamic";
 
-const MIME: Record<string, string> = {
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  avif: "image/avif",
-  heic: "image/heic",
-  heif: "image/heif",
-  pdf: "application/pdf",
-  txt: "text/plain",
-  csv: "text/csv",
-  json: "application/json",
-  zip: "application/zip",
-};
 /** Which authorization served the request. The owner and a link visitor get
  *  the same bytes under different revocation rules, and the caching split
  *  below is the only place that difference shows. */
@@ -88,7 +76,10 @@ export async function GET(
     const stat = opened.stat;
     const ext = name.split(".").pop()!.toLowerCase();
     const headers: Record<string, string> = {
-      "Content-Type": MIME[ext] ?? "application/octet-stream",
+      // The one extension-to-MIME list, in `lib/attachments.ts`, so a file is
+      // called the same thing in this response header and in the MIME part an
+      // agent attaches it to.
+      "Content-Type": attachmentMimeTypeForName(name),
       "Cache-Control":
         access === "owner" ? OWNER_CACHE_CONTROL : SHARE_CACHE_CONTROL,
       "X-Content-Type-Options": "nosniff",

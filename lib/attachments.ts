@@ -104,6 +104,40 @@ export function canonicalAttachmentExtension(
   return ".bin";
 }
 
+/** The type a stored file is served and sent as, read off the name the store
+ *  minted for it. The extension is the only record of an attachment's type
+ *  once it is on disk: `canonicalAttachmentExtension` above chose it from the
+ *  type the file was accepted under, and nothing else about that type is
+ *  kept.
+ *
+ *  An extension outside this list answers `application/octet-stream`, and so
+ *  does `.svg`: the media route has never served an SVG as an image and this
+ *  list is that route's, so one answer decides what a file is called in a
+ *  response header and in a MIME part. `app/api/media/[name]/route.ts` and
+ *  `lib/portable/model.ts` each hold a copy of it and should read it here. */
+const ATTACHMENT_MIME_BY_EXTENSION: Readonly<Record<string, string>> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  avif: "image/avif",
+  heic: "image/heic",
+  heif: "image/heif",
+  pdf: "application/pdf",
+  txt: "text/plain",
+  csv: "text/csv",
+  json: "application/json",
+  zip: "application/zip",
+};
+
+export function attachmentMimeTypeForName(name: string): string {
+  const extension = name.includes(".")
+    ? (name.split(".").at(-1) ?? "").toLowerCase()
+    : "";
+  return ATTACHMENT_MIME_BY_EXTENSION[extension] ?? "application/octet-stream";
+}
+
 export function normalizeAttachmentDisplayName(originalName: string): string {
   return (
     originalName

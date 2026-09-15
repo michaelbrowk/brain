@@ -165,8 +165,8 @@ outcome. A refused call writes one too, so the owner sees what was attempted.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent sending is off`; `invalid_account_id`; `to is empty`; `that is not an address` naming the field and index, and `that address is listed twice` the same way; `that message is too long` and `that subject is too long`, each naming its cap; `account not found`; `cannot send from this account` with the blocked reason; the service's own codes |
-| `reply_mail` | `brain:mail:send` | `accountId`, `threadId`, `messageId`, `replyAll?`, `text`, `idempotencyKey` | `{ operationId, created, status }`, the reply threaded by the service onto the message named | everything `send_mail` refuses, plus `invalid_thread_id`, `invalid_message_id`, `that message is not in that thread`, and `there is no one to reply to` when the message names this account and no one else. A `to`, `cc`, `bcc` or `subject` is an unknown argument and is refused by the schema |
+| `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent sending is off`; `invalid_account_id`; `to is empty`; `that is not an address` naming the field and index, and `that address is listed twice` the same way; `that message is too long` and `that subject is too long`, each naming its cap; `account not found`; `cannot send from this account` with the blocked reason; `too many attachments`, `that is not an attachment name`, `page not found`, `that page does not hold that file`, `that file is gone`, `those attachments are too large`, `that file cannot be sent`; the service's own codes |
+| `reply_mail` | `brain:mail:send` | `accountId`, `threadId`, `messageId`, `replyAll?`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`, the reply threaded by the service onto the message named | everything `send_mail` refuses, plus `invalid_thread_id`, `invalid_message_id`, `that message is not in that thread`, and `there is no one to reply to` when the message names this account and no one else. A `to`, `cc`, `bcc` or `subject` is an unknown argument and is refused by the schema |
 | `get_mail_send_status` | `brain:mail:send` | `operationId` | `{ operationId, status, threadId }`. `threadId` is the thread the Sent copy landed in, or `null` | `invalid_operation_id`, `no send with that id`, the service's own codes |
 
 The account is a parameter of every send and the agent picks it. There is no
@@ -217,8 +217,28 @@ agent writes" is off by default; with it on, the outgoing message carries one
 plain last line saying an agent wrote it. `get_mail_send_status` is a read and
 neither toggle gates it: a send already made can always be asked about.
 
-Outgoing attachments are not part of these tools yet. They are named from a
-page's own files and land later on this branch.
+Outgoing attachments come from a page's own files and from nowhere else. Each
+is named by the page and by the file's own name in that page's Markdown, the
+part after `/_attachments-v2/`, and never by a path: a name holding a slash, a
+`..` or a space is refused as a name before anything is read. Brain then reads
+the page, and a file the body does not show is refused even when the file
+exists, because a page id the agent can read would otherwise be a key to every
+file in the notes folder. What an agent can send is what the note it named
+already shows, which is what a person could forward by opening that note.
+
+Ten files and 10 MiB of them are the limits for one message. Each file is read
+against what is left of that budget and the total is summed as it goes, so a
+set over the cap is turned down before a single byte is encoded and a file
+above the budget is turned down without being read at all. The bytes reach the
+message through the note store, the one module that touches the notes
+filesystem, and never through a temporary file. A file's type is the one its
+name records, and a type a MIME header cannot carry is refused with that as
+the reason.
+
+The activity line for a send with files names how many there were and the
+names the store minted for them. Those names are the store's own, not a
+filename a person chose, so the line says which file left the notes folder
+without saying anything about what is in it.
 
 ## Mail, an attachment into a note
 
@@ -304,6 +324,6 @@ folder, in git or in a portable archive.
 
 ## Still to come in this release
 
-Outgoing attachments and the Settings view of the activity log land later on
-this branch. Their rows are added here as each one is registered, so this
-table and the server stay one description.
+The Settings view of the activity log lands later on this branch. Rows are
+added here as each tool is registered, so this table and the server stay one
+description.

@@ -4204,3 +4204,446 @@ describe("the mail send tools", () => {
     await expect(readMcpActivity(1)).resolves.toEqual([]);
   });
 });
+
+describe("outgoing attachments", () => {
+  const KEY = "mcp-key-alpha-0001";
+  /** The shape the store mints for an ordinary upload: twelve characters and
+   *  the extension it chose itself. A Notion import is named by its own
+   *  sha256 instead, and the name-shape cases below carry one of those. */
+  const NAME = "file-alpha-1.pdf";
+  const SECOND = "file-alpha-2.pdf";
+  const TOTAL_CAP = 10 * 1024 * 1024;
+  let stateRoot: string;
+
+  function pageHolding(...names: string[]) {
+    return {
+      meta: { id: "page-one" },
+      markdown: names
+        .map((name) => `[a file](/_attachments-v2/${name})`)
+        .join("\n\n"),
+      rev: "rev-1",
+    };
+  }
+
+  function storeHolding(
+    page: ReturnType<typeof pageHolding>,
+    files: Record<string, { data: Uint8Array; mimeType: string }>,
+  ) {
+    const readPage = vi.fn().mockResolvedValue(page);
+    const readAttachment = vi.fn(async (name: string) => {
+      const file = files[name];
+      return file
+        ? { kind: "file", name, mimeType: file.mimeType, data: file.data }
+        : { kind: "missing" };
+    });
+    mocks.getStore.mockResolvedValue({ readPage, readAttachment });
+    return { readPage, readAttachment };
+  }
+
+  beforeEach(async () => {
+    stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-outgoing-"));
+    mocks.getStore.mockReset();
+    mocks.createBrainMailClient.mockReset();
+    mocks.verifyMcpBearerToken.mockReset();
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "test-machine-token",
+      clientId: "brain-legacy-bearer",
+      scopes: ["brain:read", "brain:mail", "brain:mail:send"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+    vi.stubEnv("MCP_TOKEN", "test-machine-token");
+    vi.stubEnv("AUTH_SECRET", "test-auth-secret-with-at-least-32-bytes");
+    vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "https://brain.example.test");
+    vi.stubEnv("BRAIN_MCP_STATE_DIR", stateRoot);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(stateRoot, { recursive: true, force: true });
+  });
+
+  it("resolves a page's own file and sends it as base64", async () => {
+    const { readAttachment } = storeHolding(pageHolding(NAME), {
+      [NAME]: { data: new Uint8Array([1, 2, 3]), mimeType: "application/pdf" },
+    });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Here it is",
+          text: "attached",
+          idempotencyKey: KEY,
+          attachments: [{ page: "page-one", name: NAME }],
+        },
+        600,
+      ),
+    );
+
+    expect(payload).toEqual({
+      operationId: "send-alpha",
+      created: true,
+      status: "queued",
+    });
+    const sent = fake.calls.find((call) => call.method === "sendMessage")!
+      .args[0] as MailSendInput;
+    expect(sent.attachments).toEqual([
+      { filename: NAME, mimeType: "application/pdf", dataBase64: "AQID" },
+    ]);
+    // The whole message cap is the budget the first file is read against, so
+    // a file above it never lands in this process at all.
+    expect(readAttachment).toHaveBeenCalledWith(NAME, TOTAL_CAP);
+  });
+
+  it("reads one page once for two of its files, and keeps their order", async () => {
+    const { readPage } = storeHolding(pageHolding(NAME, SECOND), {
+      [NAME]: { data: new Uint8Array([1, 2, 3]), mimeType: "application/pdf" },
+      [SECOND]: { data: new Uint8Array([4]), mimeType: "application/pdf" },
+    });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Here they are",
+          text: "attached",
+          idempotencyKey: KEY,
+          attachments: [
+            { page: "page-one", name: NAME },
+            { page: "page-one", name: SECOND },
+          ],
+        },
+        601,
+      ),
+    );
+
+    const sent = fake.calls.find((call) => call.method === "sendMessage")!
+      .args[0] as MailSendInput;
+    expect(sent.attachments.map((file) => file.filename)).toEqual([NAME, SECOND]);
+    expect(readPage).toHaveBeenCalledOnce();
+  });
+
+  it("refuses a file the page does not reference", async () => {
+    const { readAttachment } = storeHolding(
+      { meta: { id: "page-one" }, markdown: "no files here", rev: "rev-1" },
+      {},
+    );
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "s",
+          text: "t",
+          idempotencyKey: KEY,
+          attachments: [{ page: "page-one", name: NAME }],
+        },
+        602,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "that page does not hold that file",
+      reason: `page-one has no ${NAME}`,
+    });
+    expect(isError).toBe(true);
+    expect(readAttachment).not.toHaveBeenCalled();
+    expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
+  });
+
+  it.each([
+    ["../../etc/passwd"],
+    [`/_attachments-v2/${"a".repeat(64)}.pdf`],
+    ["a".repeat(64)],
+    ["file alpha.pdf"],
+  ])("refuses %s as a name, before the store or the service", async (name) => {
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "s",
+          text: "t",
+          idempotencyKey: KEY,
+          attachments: [{ page: "page-one", name }],
+        },
+        603,
+      ),
+    );
+
+    expect(payload.error).toBe("that is not an attachment name");
+    expect(isError).toBe(true);
+    expect(mocks.getStore).not.toHaveBeenCalled();
+    expect(mocks.createBrainMailClient).not.toHaveBeenCalled();
+  });
+
+  it("takes a sha256 name, which is what an imported file is called", async () => {
+    const imported = `${"a".repeat(64)}.pdf`;
+    storeHolding(pageHolding(imported), {
+      [imported]: {
+        data: new Uint8Array([1, 2, 3]),
+        mimeType: "application/pdf",
+      },
+    });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "s",
+          text: "t",
+          idempotencyKey: KEY,
+          attachments: [{ page: "page-one", name: imported }],
+        },
+        604,
+      ),
+    );
+
+    const sent = fake.calls.find((call) => call.method === "sendMessage")!
+      .args[0] as MailSendInput;
+    expect(sent.attachments.map((file) => file.filename)).toEqual([imported]);
+  });
+
+  it("refuses more than ten files", async () => {
+    const { payload } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "s",
+          text: "t",
+          idempotencyKey: KEY,
+          attachments: Array.from({ length: 11 }, () => ({
+            page: "page-one",
+            name: NAME,
+          })),
+        },
+        605,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "too many attachments",
+      reason: "10 files is the limit for one message",
+    });
+    expect(mocks.getStore).not.toHaveBeenCalled();
+  });
+
+  it("refuses when the total crosses 10 MiB, before the service sees anything", async () => {
+    const readPage = vi.fn().mockResolvedValue(pageHolding(NAME, SECOND));
+    // The store is the one that measures: it is handed what is left of the
+    // message's budget and answers `too_large` off the file's own size,
+    // before a buffer that size is ever allocated.
+    const readAttachment = vi.fn(async (name: string, maxBytes: number) =>
+      name === NAME
+        ? { kind: "file", name, mimeType: "application/pdf", data: new Uint8Array(4) }
+        : maxBytes < TOTAL_CAP
+          ? { kind: "too_large" }
+          : { kind: "file", name, mimeType: "application/pdf", data: new Uint8Array(4) },
+    );
+    mocks.getStore.mockResolvedValue({ readPage, readAttachment });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload, isError } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "s",
+          text: "t",
+          idempotencyKey: KEY,
+          attachments: [
+            { page: "page-one", name: NAME },
+            { page: "page-one", name: SECOND },
+          ],
+        },
+        606,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "those attachments are too large",
+      reason: "10 MiB is the limit for one message",
+    });
+    expect(isError).toBe(true);
+    expect(readAttachment).toHaveBeenLastCalledWith(SECOND, TOTAL_CAP - 4);
+    expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
+  });
+
+  it("refuses a page it cannot read and a file that is gone", async () => {
+    const readPage = vi.fn().mockRejectedValue(new NotFoundError("page-gone"));
+    mocks.getStore.mockResolvedValue({ readPage, readAttachment: vi.fn() });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const missingPage = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "s",
+          text: "t",
+          idempotencyKey: KEY,
+          attachments: [{ page: "page-gone", name: NAME }],
+        },
+        607,
+      ),
+    );
+    expect(missingPage.payload).toEqual({
+      error: "page not found",
+      reason: "page-gone",
+    });
+
+    storeHolding(pageHolding(NAME), {});
+    const missingFile = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "s",
+          text: "t",
+          idempotencyKey: KEY,
+          attachments: [{ page: "page-one", name: NAME }],
+        },
+        608,
+      ),
+    );
+    expect(missingFile.payload).toEqual({
+      error: "that file is gone",
+      reason: NAME,
+    });
+    expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
+  });
+
+  it("refuses a type that cannot travel in a MIME header", async () => {
+    storeHolding(pageHolding(NAME), {
+      [NAME]: {
+        data: new Uint8Array([1, 2, 3]),
+        mimeType: "application/pdf; charset=utf-8",
+      },
+    });
+    const fake = createMailClientFake();
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "s",
+          text: "t",
+          idempotencyKey: KEY,
+          attachments: [{ page: "page-one", name: NAME }],
+        },
+        609,
+      ),
+    );
+
+    expect(payload).toEqual({
+      error: "that file cannot be sent",
+      reason: "its type is not one a message can carry",
+    });
+    expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
+  });
+
+  it("carries attachments on a reply too, and logs the count and the names", async () => {
+    storeHolding(pageHolding(NAME), {
+      [NAME]: { data: new Uint8Array([1, 2, 3]), mimeType: "application/pdf" },
+    });
+    const target = fakeMessage({
+      messageId: "message-alpha",
+      threadId: "thread-alpha",
+      from: { name: "Mary", address: "mary@example.net" },
+      subject: "Quarterly",
+    });
+    const fake = createMailClientFake({
+      getThread: async () => ({
+        apiVersion: 1,
+        thread: fakeThread({ threadId: "thread-alpha" }),
+        messages: [target],
+      }),
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    await toolPayload(
+      await callTool(
+        "reply_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          threadId: "thread-alpha",
+          messageId: "message-alpha",
+          text: "thanks",
+          idempotencyKey: KEY,
+          attachments: [{ page: "page-one", name: NAME }],
+        },
+        610,
+      ),
+    );
+
+    const sent = fake.calls.find((call) => call.method === "sendMessage")!
+      .args[0] as MailSendInput;
+    expect(sent.attachments).toEqual([
+      { filename: NAME, mimeType: "application/pdf", dataBase64: "AQID" },
+    ]);
+    const [entry] = await readMcpActivity(1);
+    // The names are the store's own, minted for the file on disk, so naming
+    // them in the log tells the owner which file left without carrying a
+    // title, a subject or a word anybody wrote.
+    expect(entry).toMatchObject({
+      tool: "reply_mail",
+      outcome: "ok",
+      change: "attachments 1",
+      attachmentId: NAME,
+    });
+    expect(JSON.stringify(entry)).not.toContain("Quarterly");
+    expect(JSON.stringify(entry)).not.toContain("thanks");
+  });
+
+  it("logs the count on a refusal the names never got past", async () => {
+    await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "s",
+          text: "t",
+          idempotencyKey: KEY,
+          attachments: [{ page: "page-one", name: "../../etc/passwd" }],
+        },
+        611,
+      ),
+    );
+
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({
+      tool: "send_mail",
+      outcome: "invalid_attachment_name",
+      change: "attachments 1",
+    });
+    expect(entry.attachmentId).toBeUndefined();
+  });
+});

@@ -5,6 +5,8 @@ import path from "node:path";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import { MAIL_RESOURCE_LIMITS } from "../security";
+import { MAIL_SEND_ATTACHMENT_LIMITS } from "../send-attachment-codec";
 import type { MailSendProvider } from "./outbound";
 import {
   ProviderNeutralMailSendService,
@@ -120,7 +122,108 @@ describe("durable mail outbound worker integration", () => {
     await worker.stop();
     await reopened.close();
   });
+
+  /** THE WHOLE PATH AT THE CAP, ON A REAL DATABASE.
+   *
+   *  A send carrying `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes` of files, from
+   *  the request a client posts through `validateMailSendInput`, the MIME
+   *  build, the row, and back out of the row to the provider. Everything else
+   *  in this file and most of the store's own tests run on a 53-byte body,
+   *  which is how an attachment cap the store would not hold shipped once
+   *  already. What this pins is that the bytes the provider is handed are the
+   *  bytes the sender sent, after a round trip through a BLOB column. */
+  it("carries a send at the attachment cap from the request to the provider", async () => {
+    const now = Date.parse("2026-07-20T00:00:00.000Z");
+    const root = await mkdtemp(path.join(tmpdir(), "brain-mail-cap-"));
+    roots.push(root);
+    const cacheRoot = path.join(root, "cache");
+    await mkdir(cacheRoot, { mode: 0o700 });
+
+    const payload = Buffer.alloc(MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes, 7);
+    const store = new SqliteMailSendStore({ cacheRoot, now: () => now });
+    await store.initialize();
+    let delivered: Buffer | null = null;
+    const provider: MailSendProvider = {
+      providerKind: "gmail",
+      send: vi.fn(async (message, hooks) => {
+        delivered = message.rawRfc2822;
+        await hooks.beforeDelivery();
+        return {
+          kind: "accepted",
+          providerMessageId: "gmail-message-cap",
+          providerThreadId: "gmail-thread-cap",
+        } as const;
+      }),
+    };
+    const service = new ProviderNeutralMailSendService({
+      store,
+      accounts: {
+        readSendAccount: async () => ({
+          accountId: ACCOUNT_ID,
+          providerKind: "gmail",
+          emailAddress: "me@example.com",
+          status: "connected",
+        }),
+      },
+      replies: { resolveReplyContext: async () => null },
+      providers: [provider],
+      now: () => now,
+      createOperationId: () => operationId(9),
+    });
+
+    const sent = await service.send(
+      {
+        accountId: ACCOUNT_ID,
+        idempotencyKey: "send-at-the-cap",
+        mode: "compose",
+        to: ["friend@example.net"],
+        cc: [],
+        bcc: [],
+        subject: "At the cap",
+        text: "One line of body beside the file.\n",
+        replyToMessageId: null,
+        attachments: [
+          {
+            filename: "payload.bin",
+            mimeType: "application/octet-stream",
+            dataBase64: payload.toString("base64"),
+          },
+        ],
+        origin: "app",
+        agentLine: false,
+      },
+      requestContext(),
+    );
+    expect(sent).toMatchObject({ created: true, status: "sent" });
+
+    const message: Buffer | null = delivered;
+    expect(message).not.toBeNull();
+    expect(message!.byteLength).toBeGreaterThan(payload.byteLength);
+    expect(message!.byteLength).toBeLessThanOrEqual(
+      MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes,
+    );
+    // The file came back out of the row as the file that went in: the first
+    // wrapped line of its base64 is in the message the provider was handed.
+    expect(
+      message!.includes(
+        Buffer.from(payload.toString("base64").slice(0, 76), "ascii"),
+      ),
+    ).toBe(true);
+    const stored = await store.readByOperationId(sent.operationId);
+    expect(stored?.message.rawRfc2822.equals(message!)).toBe(true);
+    expect(createHash("sha256").update(message!).digest("hex")).toBe(
+      stored?.message.rawRfc2822Sha256,
+    );
+    await store.close();
+  });
 });
+
+function requestContext() {
+  return {
+    deadlineAt: Number.MAX_SAFE_INTEGER,
+    signal: new AbortController().signal,
+  };
+}
 
 function submission(
   index: number,

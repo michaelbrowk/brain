@@ -9,36 +9,43 @@ export const MAIL_SEND_ATTACHMENT_LIMITS = Object.freeze({
   maxCount: 10,
   maxFilenameBytes: 255,
   /**
-   * 5 MiB of decoded payload per message, the one number every other outgoing
+   * 8 MiB of decoded payload per message, the one number every other outgoing
    * cap is derived from. What sets it is the service's memory contract rather
    * than what a provider would accept: `MemoryHigh=192M` and `MemoryMax=256M`
    * in `ops/brain-mail.service`.
    *
-   * The figure was 10 MiB until 2026-09-15, on a measurement that stopped at
-   * the MIME build. Measured again through the whole path a send takes, the
-   * request body off the socket, `JSON.parse`, `validateMailSendInput`, the
-   * build, and `store.enqueue` into SQLite in the same request, five runs each
-   * against a 39 MiB bare-node baseline:
+   * The figure was 10 MiB on an enqueue nobody had measured, then 5 MiB once
+   * somebody did, and is 8 MiB now that the outbox row carries the message as a
+   * BLOB rather than inside its JSON (schema 3). Measured with
+   * `scripts/mail-outbox-memory-probe.mjs`, `process.resourceUsage().maxRSS`,
+   * one process per stage, three runs each, worst run shown, against a 35.8 MiB
+   * bare-node baseline:
    *
-   *   payload   build    built and enqueued
-   *    5 MiB    104.3 MiB   173.0 MiB
-   *    6 MiB    115.7 MiB   179.3 MiB
-   *    7 MiB    127.4 MiB   186.0 MiB (one run 201.3)
-   *   10 MiB    164.3 MiB   278.4 MiB
+   *   payload   build       enqueued     read back
+   *    5 MiB    101.4 MiB   119.6 MiB     56.4 MiB
+   *    7 MiB    124.0 MiB   147.9 MiB     61.8 MiB
+   *    8 MiB    136.1 MiB   162.2 MiB     64.7 MiB
+   *    9 MiB    148.0 MiB   177.1 MiB     67.5 MiB
+   *   10 MiB    159.1 MiB   190.7 MiB     70.0 MiB
    *
-   * The enqueue is what the build measurement missed: the row carries the
-   * whole finished message as base64url, and `JSON.stringify` makes a second
-   * copy of it beside the first. 5 MiB is the largest figure whose every run
-   * stayed under `MemoryHigh` with room for the service's own resident set,
-   * about 19 MiB of it, and 83 MiB under `MemoryMax`. The later turn that
-   * reads the row back to deliver it peaks at 80 MiB and never overlaps.
+   * The enqueue is the peak a send has to survive, and the bar is `MemoryHigh`
+   * less 15 MiB, which is the room the service's own resident set needs above a
+   * bare node. 8 MiB holds it with 29.8 MiB to spare. 9 MiB misses by 0.1 MiB
+   * and 10 MiB is 1.3 MiB under `MemoryHigh`, which is not a margin. The turn
+   * that reads the row back to deliver it peaks at 64.7 MiB and never overlaps
+   * a build.
+   *
+   * What the BLOB bought is the difference between 278 MiB and 190.7 MiB at
+   * 10 MiB of files: the message used to be materialised twice more after the
+   * build, once as a base64url string on the record and once by
+   * `JSON.stringify` copying that string into the row.
    *
    * `MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes` follows from this number:
-   * base64 at 76 columns multiplies a payload by 1.3684, so 5 MiB of files
-   * becomes 6.84 MiB of parts, and the 1 MiB text part and the headers take
-   * the finished message to the 10 MiB stated there.
+   * base64 at 76 columns multiplies a payload by 1.3684, so 8 MiB of files
+   * becomes 10.95 MiB of parts, and the 1 MiB text part and the headers take
+   * the finished message to the 14 MiB stated there.
    */
-  maxTotalBytes: 5_242_880,
+  maxTotalBytes: 8_388_608,
 });
 
 export interface MailSendAttachment {
@@ -121,7 +128,7 @@ export function validateMailSendAttachments(
 }
 
 /**
- * The decoded size read off the base64 length. Decoding 5 MiB to measure it
+ * The decoded size read off the base64 length. Decoding 8 MiB to measure it
  * is the allocation the cap exists to prevent. The group count is floored
  * because the function is exported for a tool to size a file, and a length
  * that is not a whole number of groups would otherwise answer a fraction.

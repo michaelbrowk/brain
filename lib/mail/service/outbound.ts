@@ -176,11 +176,12 @@ export interface StoredMailSendMessage {
    * The finished message as bytes, not as base64url.
    *
    * It used to be a string, and that string was the whole reason the outgoing
-   * attachment cap sat at 5 MiB: the record held the message base64url'd, the
-   * outbox row held `JSON.stringify` of that string, and the enqueue peaked at
-   * 278 MiB with 10 MiB of files against `MemoryHigh=192M`. The row carries a
-   * BLOB now (`raw_rfc2822`, schema 3) and the record carries the same bytes,
-   * so the message exists once per turn on either side of the store.
+   * attachment cap came down to 5 MiB: the record held the message base64url'd,
+   * the outbox row held `JSON.stringify` of that string, and the enqueue peaked
+   * at 278 MiB with 10 MiB of files against `MemoryHigh=192M`. The row carries
+   * a BLOB now (`raw_rfc2822`, schema 3) and the record carries the same bytes,
+   * so the message exists once per turn on either side of the store, and the
+   * same 10 MiB peaks at 190.7 MiB. The cap is 8 MiB.
    *
    * The two digests below stay beside it and are still what a read verifies:
    * they are what `smtp_submission_state` pins its identity on, and a BLOB can

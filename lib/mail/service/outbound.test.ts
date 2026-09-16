@@ -290,8 +290,8 @@ describe("provider-neutral mail send service", () => {
    *  decoded files and the finished message at once under `MemoryHigh=192M`.
    *  Releasing it at the end of the build bounded nothing: the built message
    *  is still in memory while the row is written, so two requests could hold
-   *  two 5 MiB messages across the enqueue. The turn now runs from the build
-   *  to the end of the enqueue. */
+   *  two messages at the attachment cap across the enqueue. The turn now runs
+   *  from the build to the end of the enqueue. */
   it("holds one turn across build and enqueue, so two sends never overlap", async () => {
     const kept = new MemoryMailSendStore();
     const order: string[] = [];

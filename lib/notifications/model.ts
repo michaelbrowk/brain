@@ -32,11 +32,26 @@ export const NOTIFICATION_ID_RE = /^[A-Za-z0-9:_.@+-]{1,400}$/;
 /** A path on this origin and nothing else. The service worker opens this
  *  value, so an absolute URL here would be an open redirect with a
  *  notification in front of it. A protocol-relative `//host` is a URL too. */
+const HREF_RE = /^\/(?!\/)[A-Za-z0-9/_?=&:.,%+-]*$/;
+const MAX_HREF = 300;
+
+/** The same rule, for a producer building a path out of an id it was handed.
+ *  It asks before it writes and falls back to the surface, so a row is never
+ *  written and announced only for the schema to drop it at the next read. */
+export function isNotificationHref(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    value.length > 0 &&
+    value.length <= MAX_HREF &&
+    HREF_RE.test(value)
+  );
+}
+
 const hrefField = z
   .string()
   .min(1)
-  .max(300)
-  .regex(/^\/(?!\/)[A-Za-z0-9/_?=&:.,%+-]*$/, "href must be a path on this origin");
+  .max(MAX_HREF)
+  .regex(HREF_RE, "href must be a path on this origin");
 
 const isLeapYear = (year: number): boolean =>
   year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);

@@ -862,7 +862,7 @@ export function registerMailSendTools(server: McpToolServer): void {
             .string()
             .optional()
             .describe(
-              "the account the send was made from, which lets Brain mark a send it never got an answer for",
+              "the account the send was made from. Naming an account that is not the operation's is refused, and the mark is always written against the operation's own account",
             ),
         })
         .strict(),
@@ -884,15 +884,25 @@ export function registerMailSendTools(server: McpToolServer): void {
         const operation = await createBrainMailClient().getSendOperation(
           operationId,
         );
+        // The mark names the account the operation lives in, never the one the
+        // caller typed. A caller naming another account is guessing, and a
+        // guess that wrote would caption a Sent row in the wrong mailbox, so
+        // it is refused before anything is written.
+        if (accountId !== undefined && accountId !== operation.accountId) {
+          return refusal(
+            "that send belongs to a different account",
+            "mail_operation_account_mismatch",
+          );
+        }
         // A send whose answer never arrived wrote no mark, because the tool
         // never learned an operation id. This is where that id first exists,
         // so the mark is filled in here, once the service says the send was
         // accepted. A failed send never reached a Sent folder and earns no
         // caption. A mark already there keeps what it holds.
-        if (accountId !== undefined && operation.status !== "failed") {
+        if (operation.status !== "failed") {
           await recordAgentSendIfAbsent({
             operationId,
-            accountId,
+            accountId: operation.accountId,
             clientName: await clientNameOf(extra),
           }).catch(() => undefined);
         }

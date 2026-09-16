@@ -183,6 +183,7 @@ describe("provider-neutral mail send service", () => {
     ).resolves.toEqual({
       apiVersion: 1,
       operationId: queued.operationId,
+      accountId,
       status: "queued",
       threadId: null,
     });
@@ -377,6 +378,7 @@ describe("provider-neutral mail send service", () => {
     await expect(service.status(first.operationId)).resolves.toEqual({
       apiVersion: 1,
       operationId: first.operationId,
+      accountId,
       status: "sent",
       threadId: "gmail-thread-1",
     });
@@ -618,6 +620,7 @@ describe("provider-neutral mail send service", () => {
     await expect(service.status(operationId)).resolves.toEqual({
       apiVersion: 1,
       operationId,
+      accountId,
       status: "failed",
       threadId: null,
     });

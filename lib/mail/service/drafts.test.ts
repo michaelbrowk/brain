@@ -190,6 +190,7 @@ describe("provider-neutral draft service", () => {
     const processor = vi.fn(async () => ({
       apiVersion: 1 as const,
       operationId: SEND_OPERATION_ID,
+      accountId: ACCOUNT_ID,
       status: "sent" as const,
       threadId: null,
     }));
@@ -212,6 +213,7 @@ describe("provider-neutral draft service", () => {
       Object.freeze({
         apiVersion: 1 as const,
         operationId,
+        accountId: ACCOUNT_ID,
         status: "queued" as const,
         threadId: null,
       }),
@@ -763,6 +765,7 @@ function createService(
       return Object.freeze({
         apiVersion: 1,
         operationId,
+        accountId: ACCOUNT_ID,
         status: "queued",
         threadId: null,
       });

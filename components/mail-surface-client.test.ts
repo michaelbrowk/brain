@@ -772,6 +772,7 @@ describe("defaultMailSurfaceClient drafts", () => {
       response({
         apiVersion: 1,
         operationId: SEND_OPERATION_ID,
+        accountId: ACCOUNT_ID,
         status: "failed",
         threadId: null,
       }),
@@ -783,6 +784,7 @@ describe("defaultMailSurfaceClient drafts", () => {
     ).resolves.toEqual({
       apiVersion: 1,
       operationId: SEND_OPERATION_ID,
+      accountId: ACCOUNT_ID,
       status: "failed",
       threadId: null,
     });

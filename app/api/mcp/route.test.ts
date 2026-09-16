@@ -5529,6 +5529,7 @@ describe("the mail send tools", () => {
         getSendOperation: async () => ({
           apiVersion: 1,
           operationId: "send-alpha",
+          accountId: FAKE_ACCOUNT_ID,
           status: "sent",
           threadId: "thread-sent",
         }),
@@ -5560,6 +5561,7 @@ describe("the mail send tools", () => {
         getSendOperation: async () => ({
           apiVersion: 1,
           operationId: "send-alpha",
+          accountId: FAKE_ACCOUNT_ID,
           status: "queued",
           threadId: null,
         }),
@@ -5576,6 +5578,73 @@ describe("the mail send tools", () => {
       threadId: null,
     });
     expect((await readAgentSends())[0].threadId).toBeNull();
+  });
+
+  /** WHICH ACCOUNT THE SENT MARK NAMES.
+   *
+   *  The mark is the join behind the Sent caption, so it has to name the
+   *  account the operation actually lives in. It used to name whatever the
+   *  caller typed, which put a caption on the wrong mailbox for an agent that
+   *  guessed. The operation's own account now decides, and a caller naming a
+   *  different one is refused before anything is written. */
+  it("refuses a status whose named account is not the operation's", async () => {
+    const other = `account-a${"0".repeat(30)}cd`;
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        getSendOperation: async () => ({
+          apiVersion: 1,
+          operationId: "send-alpha",
+          accountId: FAKE_ACCOUNT_ID,
+          status: "sent",
+          threadId: "thread-sent",
+        }),
+      }).client,
+    );
+
+    const response = await callTool(
+      "get_mail_send_status",
+      { operationId: "send-alpha", accountId: other },
+      426,
+    );
+    const { payload, isError } = await toolPayload(response);
+
+    expect(isError).toBe(true);
+    expect(payload.reason).toBe("mail_operation_account_mismatch");
+    expect(typeof payload.error).toBe("string");
+    // Refused before anything was written, under either account.
+    expect(await readAgentSends()).toEqual([]);
+  });
+
+  it("marks a status with no named account against the operation's account", async () => {
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        getSendOperation: async () => ({
+          apiVersion: 1,
+          operationId: "send-alpha",
+          accountId: FAKE_ACCOUNT_ID,
+          status: "sent",
+          threadId: "thread-sent",
+        }),
+      }).client,
+    );
+
+    const { payload } = await toolPayload(
+      await callTool("get_mail_send_status", { operationId: "send-alpha" }, 427),
+    );
+
+    expect(payload).toEqual({
+      operationId: "send-alpha",
+      status: "sent",
+      threadId: "thread-sent",
+    });
+    expect(await readAgentSends()).toEqual([
+      {
+        operationId: "send-alpha",
+        accountId: FAKE_ACCOUNT_ID,
+        clientName: "Legacy token",
+        threadId: "thread-sent",
+      },
+    ]);
   });
 
   it.each([
@@ -5688,6 +5757,7 @@ describe("the mail send tools", () => {
         getSendOperation: async () => ({
           apiVersion: 1,
           operationId: "send-alpha",
+          accountId: FAKE_ACCOUNT_ID,
           status: "sent",
           threadId: "thread-sent",
         }),

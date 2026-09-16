@@ -1087,6 +1087,9 @@ function toPublicOperation(value: StoredMailSendSubmission): MailSendOperation {
   return Object.freeze({
     apiVersion: 1,
     operationId: value.operationId,
+    // The account the row lives in, so a caller writing anything against this
+    // operation names the account the operation has rather than one it typed.
+    accountId: value.accountId,
     status: value.status,
     // The provider's own thread for the Sent copy. First-party SMTP acceptance
     // issues no ids, so an IMAP account answers null and a caller that wants

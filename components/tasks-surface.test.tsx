@@ -414,6 +414,17 @@ describe("the head of the column", () => {
     );
   });
 
+  /** THE COLUMN HAS TO BE THE THING THAT SCROLLS, or the head it floats and
+   *  the pill waiting in that head both leave with the rows. `min-height:
+   *  100%` never bound it: the wrapper it sits in has an indefinite height, so
+   *  the percentage resolved to nothing and the surface grew to its content
+   *  inside the shell's scroller. */
+  it("binds the column to the window, so its own scroller is the one that moves", () => {
+    const surface = ruleBodies(".brain-tasks").join("\n");
+    expect(surface).toMatch(/height:\s*100dvh/);
+    expect(surface).not.toMatch(/min-height:\s*100%/);
+  });
+
   it("names Today in the page-title register and dates it underneath", async () => {
     await mount([task("a", { when: TODAY })]);
     expect(title().textContent).toContain("Today");

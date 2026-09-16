@@ -5660,13 +5660,22 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
    the 8 between the box and the word. 52 at the desktop inset and 48 at the
    phone's, and the group headers ride it so a label starts on the same line
    its rows do. */
+/* THE COLUMN IS THE THING THAT SCROLLS, and it has to be told so. It asked
+   for `min-height: 100%` inside a wrapper whose own height is indefinite, so
+   the percentage resolved to nothing, the surface grew to its content and the
+   shell's scroller moved instead — which took the floating head, its scroll
+   edge and the pill waiting in it off the top of the screen the moment a list
+   ran past one window. The window's own height, the way Mail's frame takes
+   it, puts the scrolling back in `.brain-tasks-scroll`: `.brain-shell` is
+   `h-dvh` and the canvas scroller under it is that height exactly, so the two
+   agree on a phone with a shrinking URL bar as well. */
 .brain-tasks {
   --task-rule: calc(var(--inset) + 40px);
   --task-capsule: 36px;
   --task-chrome: 36px;
   position: relative;
   display: flex;
-  min-height: 100%;
+  height: 100dvh;
   width: 100%;
   flex-direction: column;
 }

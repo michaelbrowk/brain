@@ -45,6 +45,10 @@ const navigate = vi.fn();
 
 const MAIL_ID = "mail-new:account-adeadbeefdeadbeefdeadbeefdeadbeef:7468726561642d6f6e65";
 const AGENT_ID = "agent:2026-09-14T12:00:00.000Z:create_task:9f2c1b4a5e6d7c80";
+/** `agentMailHref` of the same account and thread the mail id above carries.
+ *  Written out rather than computed, so the test reads as a fixture. */
+const AGENT_MAIL_HREF =
+  "/mail?account=account-adeadbeefdeadbeefdeadbeefdeadbeef&thread=7468726561642d6f6e65";
 
 beforeEach(() => {
   (globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -447,6 +451,48 @@ describe("the bell", () => {
     await act(async () => item("Mark all read")!.click());
     expect(updateThread).not.toHaveBeenCalled();
     expect(navigate).not.toHaveBeenCalled();
+  });
+
+  /** An agent row about a thread carries the pair in its href, because its id
+   *  is a digest. The press asks Mail to open the thread and goes to the
+   *  surface, and it does NOT mark the thread read: this row is a record of
+   *  what an agent did, not a new letter. */
+  it("asks Mail to open the thread an agent row is about", async () => {
+    rows = [
+      {
+        id: AGENT_ID,
+        kind: "agent-action",
+        at: "2026-09-14T12:00:00.000Z",
+        title: "Claude replied to a message",
+        href: AGENT_MAIL_HREF,
+      },
+    ];
+    await render();
+    await open();
+    await act(async () => item("Claude replied to a message")!.click());
+    expect(requestOpenThread).toHaveBeenCalledWith(
+      "account-adeadbeefdeadbeefdeadbeefdeadbeef",
+      "thread-one",
+    );
+    expect(navigate).toHaveBeenCalledWith("/mail");
+    expect(updateThread).not.toHaveBeenCalled();
+  });
+
+  it("leaves an agent row that names no thread alone", async () => {
+    rows = [
+      {
+        id: AGENT_ID,
+        kind: "agent-action",
+        at: "2026-09-14T12:00:00.000Z",
+        title: "Claude sent a message",
+        href: "/mail",
+      },
+    ];
+    await render();
+    await open();
+    await act(async () => item("Claude sent a message")!.click());
+    expect(requestOpenThread).not.toHaveBeenCalled();
+    expect(navigate).toHaveBeenCalledWith("/mail");
   });
 
   it("draws one glyph per kind", async () => {

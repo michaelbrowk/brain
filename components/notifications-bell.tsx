@@ -18,6 +18,7 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { formatAgo } from "@/lib/format-ago";
 import { DUR } from "@/lib/motion";
 import {
+  decodeAgentMailHref,
   decodeMailNotificationId,
   decodeTaskNotificationId,
 } from "@/lib/notifications/ids";
@@ -55,6 +56,10 @@ const BADGE_CAP = 99;
  *  is a destination the producer chose, and is left alone. */
 const TASKS_COLUMN = "/tasks";
 
+/** Mail's own surface. It takes no thread in its route, which is why both the
+ *  kinds about a letter ask it to open one through a seam instead. */
+const MAIL_SURFACE = "/mail";
+
 /** The missed producer's own sentence, whole (`lib/reminders/scheduler.ts`).
  *  Anchored at both ends on purpose: the one other thing that could match is a
  *  mail subject, and a subject is a sentence somebody wrote. */
@@ -91,6 +96,11 @@ export function notificationBody(body: string): string {
  *  surface of its own would have been silently redirected here. The rewrite
  *  applies to the bare column and to nothing else. */
 export function notificationHref(row: NotificationRow): string {
+  // An agent row about a thread carries the pair in its query, because its id
+  // is a digest of the log line and reads back as nothing. The pair goes to
+  // Mail through the seam below; the address bar gets the surface, the way a
+  // `mail-new` row's does.
+  if (decodeAgentMailHref(row.href) !== null) return MAIL_SURFACE;
   if (row.href !== TASKS_COLUMN) return row.href;
   const taskId = decodeTaskNotificationId(row.id);
   return taskId === null ? row.href : `${TASKS_COLUMN}?task=${encodeURIComponent(taskId)}`;
@@ -128,6 +138,14 @@ export function openNotificationRow(
         .updateThread({ accountId: thread.accountId, threadId: thread.threadId, read: true })
         .catch(() => undefined);
     }
+  }
+  if (row.kind === "agent-action") {
+    // The same seam, and only that half of it. An agent row is a record of
+    // what an agent did, not a new letter, so the thread it names is opened
+    // and never marked read: the reader pressing "Claude replied to a message"
+    // is going to look at the thread, and what is unread in it is theirs.
+    const thread = decodeAgentMailHref(row.href);
+    if (thread) requestOpenThread(thread.accountId, thread.threadId);
   }
   onNavigate(notificationHref(row));
 }

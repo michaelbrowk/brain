@@ -26,6 +26,10 @@ const SEND_MUTATION_ID =
 const DELETE_MUTATION_ID =
   "draft-mutation-00000000-0000-4000-8000-000000000003";
 const SEND_OPERATION_ID = "send-00000000-0000-4000-8000-000000000001";
+const SECOND_DRAFT_ID = "draft-00000000-0000-4000-8000-000000000002";
+const SECOND_SEND_MUTATION_ID =
+  "draft-mutation-00000000-0000-4000-8000-000000000004";
+const SECOND_SEND_OPERATION_ID = "send-00000000-0000-4000-8000-000000000002";
 const roots: string[] = [];
 
 afterEach(async () => {
@@ -675,6 +679,80 @@ describe("draft recipient contract", () => {
     await expect(
       fixture.store.readByOperationId(SEND_OPERATION_ID),
     ).resolves.toBeNull();
+    await fixture.store.close();
+  });
+
+  /** ONE MESSAGE IN MEMORY AT A TIME, IN THIS LANE TOO.
+   *
+   *  The build gate bounds the memory a message takes while it is being
+   *  written, and the draft lane released it the moment the MIME message was
+   *  built — the message is still in memory while `commitDraftSend` writes the
+   *  row, so a draft send and a `/v1/send` at the attachment cap could hold two
+   *  messages at once. `/v1/send` holds one turn across build and enqueue; this
+   *  lane holds one across build and commit. */
+  it("holds one turn across build and commit, so two draft sends never overlap", async () => {
+    const fixture = await createFixture();
+    await fixture.service.create(
+      { ...createInput(), to: "friend@example.test" },
+      requestContext(),
+    );
+    await fixture.service.create(
+      { ...createInput(), draftId: SECOND_DRAFT_ID, to: "other@example.test" },
+      requestContext(),
+    );
+
+    const order: string[] = [];
+    let releaseFirst: () => void = () => {};
+    const parked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let held = false;
+    const recording = new Proxy(fixture.store, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target);
+        if (property === "commitDraftSend" && typeof value === "function") {
+          return async (...args: unknown[]) => {
+            const draftId = (args[0] as { readonly draftId: string }).draftId;
+            order.push(`enter:${draftId}`);
+            if (!held) {
+              held = true;
+              await parked;
+            }
+            const committed = await Reflect.apply(value, target, args);
+            order.push(`leave:${draftId}`);
+            return committed;
+          };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const service = createService(recording);
+
+    const first = service.send(sendMutation(), requestContext());
+    const second = service.send(
+      sendMutation({
+        draftId: SECOND_DRAFT_ID,
+        mutationId: SECOND_SEND_MUTATION_ID,
+        sendIdempotencyKey: "draft-send-key-0002",
+        sendOperationId: SECOND_SEND_OPERATION_ID,
+      }),
+      requestContext(),
+    );
+    // The first commit is parked. Give the second every turn it would need to
+    // build and reach the store if the gate ended at the build.
+    for (let turn = 0; turn < 20; turn += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(order).toEqual([`enter:${DRAFT_ID}`]);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(order).toEqual([
+      `enter:${DRAFT_ID}`,
+      `leave:${DRAFT_ID}`,
+      `enter:${SECOND_DRAFT_ID}`,
+      `leave:${SECOND_DRAFT_ID}`,
+    ]);
     await fixture.store.close();
   });
 });

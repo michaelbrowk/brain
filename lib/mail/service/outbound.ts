@@ -875,11 +875,16 @@ export interface MailSendSubmissionProposalOptions {
 }
 
 /**
- * One outbound MIME build at a time, for the whole process. A send at the
- * attachment cap holds the decoded files and the finished message at once, and
- * the service runs under `MemoryHigh=192M`, so two builds overlapping is the
- * difference between a send and a killed process. Every build stands in this
- * queue: a person's, an agent's, and a draft's.
+ * One outbound message in memory at a time, for the whole process. A send at
+ * the attachment cap holds the decoded files and the finished message at once,
+ * and the service runs under `MemoryHigh=192M`, so two of them overlapping is
+ * the difference between a send and a killed process.
+ *
+ * The turn runs from the build to the end of the write that makes the message
+ * durable, because the built message is in memory for all of it: `/v1/send`
+ * holds it across `store.enqueue`, and the draft lane across
+ * `commitDraftSend`. Every lane stands in this queue: a person's, an agent's,
+ * and a draft's.
  */
 let outboundBuildQueue: Promise<unknown> = Promise.resolve();
 
@@ -894,15 +899,6 @@ export function runExclusiveOutboundBuild<T>(
     () => undefined,
   );
   return result;
-}
-
-/** `createMailSendSubmissionProposal`, taking its turn in that queue. */
-export function buildMailSendSubmissionProposal(
-  options: MailSendSubmissionProposalOptions,
-): Promise<StoredMailSendSubmission> {
-  return runExclusiveOutboundBuild(() =>
-    createMailSendSubmissionProposal(options),
-  );
 }
 
 export function createMailSendSubmissionProposal(

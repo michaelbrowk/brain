@@ -32,6 +32,18 @@ describe("the notification model", () => {
     expect(notificationSchema.safeParse(value).success).toBe(true);
   });
 
+  it("accepts an agent row, which is what an agent did through MCP", () => {
+    const value = {
+      ...base,
+      id: "agent:2026-09-14T12:00:00.000Z:create_task:9f2c1b4a5e6d7c80",
+      kind: "agent-action",
+      title: "Claude created a task",
+      body: "Water the plants",
+      href: "/tasks?task=task-alpha",
+    };
+    expect(notificationSchema.safeParse(value).success).toBe(true);
+  });
+
   it("refuses a kind nothing produces", () => {
     expect(notificationSchema.safeParse({ ...base, kind: "agent-said" }).success).toBe(false);
   });
@@ -135,7 +147,7 @@ describe("what the schema accepts, field by field", () => {
     ["an id carrying a space", { id: "task-reminder:task alpha:2026-09-14T13:00" }, false],
     ["an id carrying a slash", { id: "task-reminder:task/alpha:2026-09-14T13:00" }, false],
 
-    ["a kind outside the three", { kind: "agent-said" }, false],
+    ["a kind outside the four", { kind: "agent-said" }, false],
     ["a key nothing declares", { taskId: "task-alpha" }, false],
   ];
 

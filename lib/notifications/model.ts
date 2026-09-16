@@ -2,14 +2,22 @@ import { z } from "zod";
 
 /** THE CENTRE'S MODEL, GENERIC ON PURPOSE.
  *
- *  Three kinds ship in this release. The shape carries nothing about a task
- *  or a letter, so an agent notice or a backup failure joins later without a
- *  second store and without a migration.
+ *  Four kinds. The shape carries nothing about a task, a letter or a tool
+ *  call, so a backup failure joins later without a second store and without a
+ *  migration: `agent-action` joined on exactly that promise and cost the enum
+ *  one word.
  *
  *  Nothing here reads the clock, the filesystem or a Store.
  */
 
-export const NOTIFICATION_KINDS = ["task-reminder", "task-missed", "mail-new"] as const;
+export const NOTIFICATION_KINDS = [
+  "task-reminder",
+  "task-missed",
+  "mail-new",
+  /** One mutation an agent made through MCP and the log line recorded as
+   *  `ok` (`lib/notifications/agent-producer.ts`). */
+  "agent-action",
+] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 
 /** Five hundred rows, oldest dropped first. The file is read whole on every

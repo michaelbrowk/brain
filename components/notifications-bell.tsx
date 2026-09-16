@@ -36,11 +36,15 @@ import { ScrollEdge } from "./ui/scroll-edge";
 
 /** One glyph per kind. A reminder that fired wears the alarm, one that was
  *  missed wears the clock, and new mail wears the letter Mail wears
- *  everywhere else. One table, read by every row the centre draws. */
+ *  everywhere else. What an agent did wears the plug Settings, Connections
+ *  wears (`components/settings/connections-section.tsx`), which is the screen
+ *  the row came from and the screen a reader goes to to take the grant away.
+ *  One table, read by every row the centre draws. */
 export const KIND_GLYPH: Record<NotificationRow["kind"], string> = {
   "task-reminder": "alarm-linear",
   "task-missed": "clock-circle-linear",
   "mail-new": "letter-linear",
+  "agent-action": "plug-circle-linear",
 };
 
 /** Past this the number is wider than the glyph it rides and says nothing a

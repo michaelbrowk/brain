@@ -38,7 +38,7 @@ import { mailNotificationId } from "@/lib/notifications/ids";
  */
 export interface NotificationRow {
   readonly id: string;
-  readonly kind: "task-reminder" | "task-missed" | "mail-new";
+  readonly kind: "task-reminder" | "task-missed" | "mail-new" | "agent-action";
   readonly at: string;
   readonly title: string;
   readonly body?: string;

@@ -5171,7 +5171,7 @@ test("share uses a viewport bottom sheet with 44px targets at 320px", async ({ p
   expect(Math.abs(bottomGeometry.bottom - 800)).toBeLessThanOrEqual(1);
 });
 
-test("default active share is a ledger on paper inside the regular glass", async ({ page }) => {
+test("default active share is a ledger on the regular glass", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await login(page);
 
@@ -5303,11 +5303,12 @@ test("default active share is a ledger on paper inside the regular glass", async
     animation: "materialize-in",
     border: "0px",
   });
-  // the glass is a 6px sleeve around an opaque paper plate (r8 inside r14),
-  // so nothing readable stands on a backdrop layer
+  // the glass is a 6px sleeve around an r8 content wrapper (r8 inside r14)
+  // that paints no fill of its own: the rows stand on the material itself,
+  // the way .brain-menu's rows do (0.11.1, the paper plate came out)
   for (const side of geometry.sleeve) expect(side).toBeCloseTo(6, 0);
   expect(geometry.plate.blur).toBe("none");
-  expect(geometry.plate.background).not.toBe("rgba(0, 0, 0, 0)");
+  expect(geometry.plate.background).toBe("rgba(0, 0, 0, 0)");
   expect(geometry.plate.radius).toBe("8px");
   // one head sentence in the Subheading register, then the rows in order,
   // the action last

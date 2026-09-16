@@ -285,6 +285,61 @@ describe("provider-neutral mail send service", () => {
     expect(failure.enqueued).toBe(true);
   });
 
+  /** ONE MESSAGE IN MEMORY AT A TIME, ENQUEUE INCLUDED.
+   *
+   *  The build gate exists because a send at the attachment cap holds the
+   *  decoded files and the finished message at once under `MemoryHigh=192M`.
+   *  Releasing it at the end of the build bounded nothing: the built message
+   *  is still in memory while the row is written, so two requests could hold
+   *  two 5 MiB messages across the enqueue. The turn now runs from the build
+   *  to the end of the enqueue. */
+  it("holds one turn across build and enqueue, so two sends never overlap", async () => {
+    const kept = new MemoryMailSendStore();
+    const order: string[] = [];
+    let releaseFirst: () => void = () => {};
+    const parked = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let held = false;
+    const store: MailSendStore = {
+      enqueue: async (submission) => {
+        order.push(`enter:${submission.idempotencyKey}`);
+        if (!held) {
+          held = true;
+          await parked;
+        }
+        const result = await kept.enqueue(submission);
+        order.push(`leave:${submission.idempotencyKey}`);
+        return result;
+      },
+      readByOperationId: (operationId) => kept.readByOperationId(operationId),
+      compareAndSwap: (operationId, expectedVersion, next) =>
+        kept.compareAndSwap(operationId, expectedVersion, next),
+    };
+    const service = serviceFixture(store, acceptedProvider());
+
+    const first = service.send(composeInput(), request());
+    const second = service.send(
+      { ...composeInput(), idempotencyKey: "compose-action-2" },
+      request(),
+    );
+    // The first enqueue is parked. Give the second every turn it would need
+    // to build and reach the store if the gate ended at the build.
+    for (let turn = 0; turn < 20; turn += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    expect(order).toEqual(["enter:compose-action-1"]);
+
+    releaseFirst();
+    await Promise.all([first, second]);
+    expect(order).toEqual([
+      "enter:compose-action-1",
+      "leave:compose-action-1",
+      "enter:compose-action-2",
+      "leave:compose-action-2",
+    ]);
+  });
+
   it("sends once, persists the result, and deduplicates the same request", async () => {
     const store = new MemoryMailSendStore();
     let rawReference: Buffer | null = null;

@@ -281,27 +281,36 @@ export class ProviderNeutralMailSendService implements MailSendService {
     this.assertRequestActive(request);
     const createdAt = this.now();
     const operationId = validateMailSendOperationId(this.createOperationId());
-    let proposal: StoredMailSendSubmission;
-    try {
-      proposal = await buildMailSendSubmissionProposal({
-        account,
-        input,
-        reply,
-        operationId,
-        createdAt,
-      });
-    } catch (error) {
-      if (error instanceof MailSendError) throw error;
-      throw new MailSendError("mail_send_request_invalid");
-    }
-
-    let enqueued: MailSendEnqueueResult;
-    try {
-      enqueued = await this.store.enqueue(proposal);
-    } catch (error) {
-      if (error instanceof MailSendError) throw error;
-      throw new MailSendError("mail_send_service_unavailable");
-    }
+    // Build and enqueue are one held turn. The built message stays in memory
+    // until the row is written, so releasing the gate at the end of the build
+    // let two requests hold two messages at the attachment cap at once — the
+    // exact overlap the gate exists to refuse.
+    const held = await runExclusiveOutboundBuild(async () => {
+      let built: StoredMailSendSubmission;
+      try {
+        built = createMailSendSubmissionProposal({
+          account,
+          input,
+          reply,
+          operationId,
+          createdAt,
+        });
+      } catch (error) {
+        if (error instanceof MailSendError) throw error;
+        throw new MailSendError("mail_send_request_invalid");
+      }
+      try {
+        return Object.freeze({
+          proposal: built,
+          enqueued: await this.store.enqueue(built),
+        });
+      } catch (error) {
+        if (error instanceof MailSendError) throw error;
+        throw new MailSendError("mail_send_service_unavailable");
+      }
+    });
+    const proposal: StoredMailSendSubmission = held.proposal;
+    const enqueued: MailSendEnqueueResult = held.enqueued;
     if (
       enqueued.submission.accountId !== input.accountId ||
       enqueued.submission.providerKind !== account.providerKind ||

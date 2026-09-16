@@ -154,8 +154,6 @@ function verbOf(entry: AgentActivityEntry): string | null {
  */
 function hrefOf(entry: AgentActivityEntry): string {
   const { accountId, threadId, page, task } = entry;
-  // A delete names no thing: the record or the note is gone, and a path to it
-  // is a 404 with a notification in front of it.
   const deleted = entry.tool === "delete_page" || entry.tool === "delete_task";
   switch (surfaceOf(entry.tool)) {
     case "page":

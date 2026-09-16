@@ -214,6 +214,16 @@ export function TasksSurface({
     [actions, onToast, today, view],
   );
 
+  /** WHICH ROW HAS A LAYER OPEN ABOVE IT, if any. A ref and not state: it is
+   *  read on a keydown and nothing on screen is drawn from it, so a render per
+   *  panel would be a render for nobody. Keyed by row, so the fold of one row
+   *  cannot take down the flag another row's panel raised. */
+  const layerRow = useRef<string | null>(null);
+  const noteLayer = useCallback((key: string, open: boolean) => {
+    if (open) layerRow.current = key;
+    else if (layerRow.current === key) layerRow.current = null;
+  }, []);
+
   const selectNext = useCallback(
     (afterId: string) => {
       const at = order.indexOf(afterId);
@@ -222,7 +232,8 @@ export function TasksSurface({
     [order],
   );
 
-  useArrowKeys({ order, selectedId, setSelectedId, setExpandedId });
+  useArrowKeys({ order, selectedId, setSelectedId });
+  useEscapeLayers({ layerRow, setExpandedId });
   useNamedTask({
     tasks: state.tasks,
     loading: state.loading,
@@ -323,6 +334,7 @@ export function TasksSurface({
                 onReschedule={actions.rescheduleTask}
                 onPatch={actions.patchField}
                 onFoldEnd={actions.releaseFold}
+                onLayer={noteLayer}
               />
             ))}
           </AnimatePresence>
@@ -493,6 +505,7 @@ function TaskGroup({
   onReschedule,
   onPatch,
   onFoldEnd,
+  onLayer,
 }: {
   section: TaskSection;
   index: number;
@@ -517,6 +530,8 @@ function TaskGroup({
   onReschedule: (task: TaskView, value: WhenValue, label: string) => Promise<void>;
   onPatch: (task: TaskView, patch: TaskFieldPatch) => void;
   onFoldEnd: (id: string) => void;
+  /** Whether one of this group's rows has a layer open above it. */
+  onLayer: (rowKey: string, open: boolean) => void;
 }) {
   const groupDelay = Math.min(index * GROUP_STEP, ENTRANCE_CEILING);
   // The count is what the LIST holds, so a row still folding is already out
@@ -639,6 +654,7 @@ function TaskGroup({
             onPatch={onPatch}
             onFoldEnd={onFoldEnd}
             onOpenPage={onOpenPage}
+            onLayer={onLayer}
           />
         ))}
       </ul>
@@ -774,19 +790,13 @@ function useArrowKeys({
   order,
   selectedId,
   setSelectedId,
-  setExpandedId,
 }: {
   order: readonly string[];
   selectedId: string | null;
   setSelectedId: (id: string | null) => void;
-  setExpandedId: (id: string | null) => void;
 }) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setExpandedId(null);
-        return;
-      }
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
       const target = event.target as HTMLElement | null;
       if (target?.closest?.("input, textarea, [contenteditable]")) return;
@@ -801,5 +811,48 @@ function useArrowKeys({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [order, selectedId, setExpandedId, setSelectedId]);
+  }, [order, selectedId, setSelectedId]);
+}
+
+/** ESCAPE PEELS ONE LAYER AT A TIME.
+ *
+ *  One key used to close the calendar AND fold the row under it: the picker
+ *  answered on its own element, this listener answered on the window, and a
+ *  reader who asked for the panel to go lost the row they were working in. A
+ *  press outside has never spent two dismissals at once — the panel takes the
+ *  press and the row is the next one — and the key says the same sentence.
+ *  Escape #1 closes the layer and leaves the row standing with the focus back
+ *  on the control that opened it, Escape #2 folds the row. Things behaves this
+ *  way.
+ *
+ *  THE ROW SAYS WHETHER IT HAS A LAYER, and this asks it rather than looking:
+ *  every panel a chip opens is portalled to the end of the document, and the
+ *  caret in a title is an `input` with no flag on anything.
+ *
+ *  AND THE ORDERING IS THE WHOLE OF IT. Radix dismisses its own layers from a
+ *  `keydown` listener on the DOCUMENT in the capture phase
+ *  (`@radix-ui/react-dismissable-layer`), so any listener further along the
+ *  path reads the row's signal with the layer already gone and folds the row
+ *  on the key that closed the panel. The window's capture phase is the FIRST
+ *  stop a key makes, before the document's, so the answer here is read while
+ *  the layer is still standing to be read. */
+function useEscapeLayers({
+  layerRow,
+  setExpandedId,
+}: {
+  /** The row with a layer open above it, or `null`. */
+  layerRow: React.RefObject<string | null>;
+  setExpandedId: (id: string | null) => void;
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      // The layer's key, and the layer's own listener is the one that answers
+      // it. The row is the next one.
+      if (layerRow.current !== null) return;
+      setExpandedId(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [layerRow, setExpandedId]);
 }

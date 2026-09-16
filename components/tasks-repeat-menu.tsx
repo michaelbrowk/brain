@@ -1,12 +1,13 @@
 "use client";
 
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
-import { Fragment } from "react";
+import { Fragment, useState } from "react";
 
 import type { TaskRepeat, TaskView, WeekDay } from "@/lib/tasks/model";
 
 import { weekdayOf } from "./tasks-lists";
 import { Icon } from "./ui/icon";
+import { useLayerSignal } from "./use-layer-signal";
 
 /** THE REPEAT CHIP, AND THE THREE RULES THERE ARE.
  *
@@ -118,11 +119,17 @@ export function TasksRepeatMenu({
   task,
   today,
   onSet,
+  onOpenChange,
 }: {
   task: TaskView;
   today: string;
   onSet: (repeat: TaskRepeat | null) => void;
+  /** THE MENU SAYS WHEN IT IS STANDING, so the row underneath it knows Escape
+   *  is this menu's before it is the row's. */
+  onOpenChange?: (open: boolean) => void;
 }) {
+  const [open, setOpen] = useState(false);
+  useLayerSignal(open, onOpenChange);
   const options = repeatOptions(task, today);
   const rules = options.filter((option) => option.kind !== "none");
   const stop = options.find((option) => option.kind === "none");
@@ -136,7 +143,7 @@ export function TasksRepeatMenu({
     : "Repeat";
 
   return (
-    <Dropdown.Root>
+    <Dropdown.Root open={open} onOpenChange={setOpen}>
       <Dropdown.Trigger asChild>
         <button
           type="button"

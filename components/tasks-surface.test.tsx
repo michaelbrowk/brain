@@ -1474,10 +1474,17 @@ describe("Escape peels one layer at a time", () => {
   /** A REAL PRESS FOCUSES THE BUTTON IT LANDS ON and jsdom's `click()` does
    *  not. Radix remembers what held the focus as the layer opened and hands it
    *  back there, so a chip that was never focused would hand it to the body
-   *  and the assertion would be about jsdom rather than about the row. */
+   *  and the assertion would be about jsdom rather than about the row.
+   *
+   *  And the press goes DOWN before it clicks: a popover opens on the click
+   *  and a dropdown menu on the `pointerdown`, so a press that is only half a
+   *  press opens one of the two. */
   const openLayer = async (chip: HTMLElement) => {
+    const down = new MouseEvent("pointerdown", { bubbles: true, button: 0 });
+    Object.defineProperty(down, "pointerId", { value: 1 });
     await act(async () => {
       chip.focus();
+      chip.dispatchEvent(down);
       chip.click();
     });
     await settle();
@@ -1562,21 +1569,25 @@ describe("Escape peels one layer at a time", () => {
   it("does the same for the title editor", async () => {
     await mount([task("a", { when: TODAY })]);
     await expand("a");
+    // Held, because the words are what `rowFor` reads the row back by and the
+    // caret takes them out of the document.
+    const item = rowFor("a");
+    const capsule = item.querySelector(".brain-task-row") as HTMLElement;
     // The caret goes in on a SECOND press of the words, not on the expansion.
     await act(async () => {
-      (rowFor("a").querySelector(".brain-task-title") as HTMLElement).click();
+      (item.querySelector(".brain-task-title") as HTMLElement).click();
     });
-    expect(rowFor("a").querySelector(".brain-task-input")).not.toBeNull();
+    expect(item.querySelector(".brain-task-input")).not.toBeNull();
 
     await escape();
 
-    expect(rowFor("a").querySelector(".brain-task-input")).toBeNull();
-    expect(capsuleOf("a").hasAttribute("data-expanded")).toBe(true);
-    expect(document.activeElement).toBe(capsuleOf("a"));
+    expect(item.querySelector(".brain-task-input")).toBeNull();
+    expect(capsule.hasAttribute("data-expanded")).toBe(true);
+    expect(document.activeElement).toBe(capsule);
 
     await escape();
 
-    expect(capsuleOf("a").hasAttribute("data-expanded")).toBe(false);
+    expect(capsule.hasAttribute("data-expanded")).toBe(false);
   });
 
   it("folds a row that has no layer open, the way it always did", async () => {

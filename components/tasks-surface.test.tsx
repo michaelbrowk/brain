@@ -185,6 +185,14 @@ const css = readFileSync(
 );
 const tasksBlock = () => css;
 
+/** Every declaration block whose selector list carries this exact selector.
+ *  The waiting pill and the column's own top padding are rules the surface
+ *  computes for itself, and jsdom loads no stylesheet. */
+const ruleBodies = (selector: string): string[] =>
+  [...css.replace(/\/\*[\s\S]*?\*\//g, "").matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    .filter(([, list]) => list.split(",").some((one) => one.trim() === selector))
+    .map(([, , body]) => body);
+
 const rowTitles = () =>
   [...document.querySelectorAll(".brain-task-title")].map((node) => node.textContent);
 
@@ -222,6 +230,17 @@ const animations: { element: Element; frames: Keyframe[] }[] = [];
 const foldOf = (row: HTMLElement) =>
   animations.find((entry) => entry.element === row);
 
+/** EVERY INTERSECTION OBSERVER, WITH WHAT IT WATCHES.
+ *
+ *  jsdom has none, and the real hook hands an engine without one the flag set
+ *  (the pill a reader has always had), so a title that stopped being observed
+ *  would look exactly like a title that had scrolled away. The stub lets a
+ *  case cross the line in both directions. */
+const observers: {
+  cb: (entries: { isIntersecting: boolean }[]) => void;
+  targets: Element[];
+}[] = [];
+
 beforeEach(() => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
@@ -233,8 +252,26 @@ beforeEach(() => {
   records.length = 0;
   localStorage.clear();
   animations.length = 0;
+  observers.length = 0;
   resetTasksStore();
   apiFetchMock.mockReset();
+  vi.stubGlobal(
+    "IntersectionObserver",
+    class {
+      private readonly entry: (typeof observers)[number];
+      constructor(cb: (entries: { isIntersecting: boolean }[]) => void) {
+        this.entry = { cb, targets: [] };
+        observers.push(this.entry);
+      }
+      observe(target: Element) {
+        this.entry.targets.push(target);
+      }
+      unobserve() {}
+      disconnect() {
+        this.entry.targets.length = 0;
+      }
+    },
+  );
   Object.defineProperty(Element.prototype, "animate", {
     configurable: true,
     writable: true,
@@ -333,6 +370,207 @@ describe("a task named in the URL", () => {
     // long after the reader followed the link.
     expect(toasts).toEqual([]);
     expect(window.location.search).toBe("");
+  });
+});
+
+/** THE COLUMN GETS THE HEAD A NOTE HAS. The list's name on paper in the
+ *  page-title register, the one caption Today has under it, and the band's
+ *  pill waiting above for the title to leave — the lone breadcrumb's rule,
+ *  on the surface that had no title at all. */
+describe("the head of the column", () => {
+  const title = (): HTMLButtonElement => {
+    const node = document.querySelector<HTMLButtonElement>(".brain-tasks-title");
+    if (!node) throw new Error("the column has no title");
+    return node;
+  };
+
+  const caption = () =>
+    document.querySelector(".brain-tasks-title-block .brain-page-meta");
+
+  /** The title crosses the scroller's top edge, in either direction. */
+  async function crossLine(inView: boolean) {
+    const watched = title();
+    const observer = observers.find((entry) => entry.targets.includes(watched));
+    if (!observer) throw new Error("the title is not observed");
+    await act(async () => observer.cb([{ isIntersecting: inView }]));
+  }
+
+  /** Radix opens a dropdown on `pointerdown`, not on a click. */
+  async function openMenu(trigger: HTMLElement) {
+    await act(async () => {
+      trigger.dispatchEvent(
+        new PointerEvent("pointerdown", {
+          bubbles: true,
+          cancelable: true,
+          button: 0,
+        }),
+      );
+    });
+  }
+
+  const menuRows = () => [
+    ...document.body.querySelectorAll<HTMLElement>('[role="menuitemradio"]'),
+  ];
+
+  it("starts the column where a note's own column starts", async () => {
+    expect(ruleBodies(".brain-tasks-scrollpad").join("\n")).toContain(
+      "padding-top: var(--canvas-top)",
+    );
+  });
+
+  /** THE COLUMN HAS TO BE THE THING THAT SCROLLS, or the head it floats and
+   *  the pill waiting in that head both leave with the rows. `min-height:
+   *  100%` never bound it: the wrapper it sits in has an indefinite height, so
+   *  the percentage resolved to nothing and the surface grew to its content
+   *  inside the shell's scroller. */
+  it("binds the column to the window, so its own scroller is the one that moves", () => {
+    const surface = ruleBodies(".brain-tasks").join("\n");
+    expect(surface).toMatch(/height:\s*100dvh/);
+    expect(surface).not.toMatch(/min-height:\s*100%/);
+  });
+
+  /** A WHEEL OVER THE PILL HAS TO MOVE THE COLUMN. The head used to be a
+   *  sibling of the scroller, so once the column became the thing that
+   *  scrolls the chain from the pill ran through four boxes that scroll
+   *  nothing and the ~90x36 it covers at the top of the column went dead —
+   *  reachable exactly while the reader is scrolling. It stands inside the
+   *  scroller now, on the scroll edge's own construction: sticky at the
+   *  inset, its height cancelled by its own negative margin, so it floats
+   *  where it always did and contributes no box to the flow.
+   *
+   *  jsdom scrolls nothing, so what a case here can hold is the containment
+   *  the browser's own chain follows, and the rule that keeps it floating.
+   *  The wheel itself is measured in a browser (`pr5-report.md`). */
+  it("stands the head inside the scroller, so a wheel over the pill moves the column", async () => {
+    await mount([task("a", { when: TODAY })]);
+    const scroller = document.querySelector(".brain-tasks-scroll") as HTMLElement;
+    const head = document.querySelector(".brain-tasks-head") as HTMLElement;
+    expect(scroller.contains(head)).toBe(true);
+    // the top edge and its sentinel still open the scroller: BlurEdge reads
+    // its own parentElement for the scroller it observes
+    expect(scroller.firstElementChild?.nextElementSibling?.className).toContain("edge");
+
+    const rules = ruleBodies(".brain-tasks-head");
+    expect(rules.length).toBeGreaterThan(0);
+    const head_css = rules.join("\n");
+    expect(head_css).toMatch(/position:\s*sticky/);
+    expect(head_css).toMatch(/margin-bottom:\s*calc\(-1 \* var\(--task-chrome\)\)/);
+  });
+
+  /** §7's own reserve, the one `.brain-page-scroll` keeps: the band a floating
+   *  head covers, plus 16. The column owns a floating head and became its own
+   *  scroller in the same branch, so it has to keep the band itself — nothing
+   *  the browser scrolls into view may land under the pill. */
+  it("reserves the head's own band for anything scrolled into view", () => {
+    expect(ruleBodies(".brain-tasks-scroll").join("\n")).toMatch(
+      /scroll-padding-top:\s*calc\(var\(--inset\) \+ var\(--task-chrome\) \+ 16px\)/,
+    );
+  });
+
+  /** §8: reduced motion drops the scale and keeps the fill. The title's press
+   *  is the product's `scale(.97)`, and that includes the drop. */
+  it("drops the title's press scale under reduced motion", () => {
+    const bodies = ruleBodies(".brain-tasks-title:active");
+    expect(bodies.length).toBe(2);
+    expect(bodies.join("\n")).toMatch(/transform:\s*scale\(0\.97\)/);
+    expect(bodies.join("\n")).toMatch(/transform:\s*none/);
+  });
+
+  /** `.btn:hover` spells its durations out so the press keeps its 100ms; a
+   *  bare `transition-duration` on a multi-property list takes the press with
+   *  it. The title's list is two properties, not the button's three. */
+  it("keeps the press at 100ms while the hover shortens the fill", () => {
+    expect(ruleBodies(".brain-tasks-title:hover").join("\n")).toMatch(
+      /transition-duration:\s*80ms,\s*100ms/,
+    );
+  });
+
+  it("names Today in the page-title register and dates it underneath", async () => {
+    await mount([task("a", { when: TODAY })]);
+    expect(title().textContent).toContain("Today");
+    expect(title().className).toContain("text-title");
+    // it stands on open paper with the whole canvas around it, so the ring is
+    // the global one at +2; `focus-inset` is for a ring inside a capsule and
+    // drew itself through the word's own descenders
+    expect(title().className).not.toContain("focus-inset");
+    // the pill carries one, so the title carries one: a long category clips
+    // in both and only one of them answered a hover
+    expect(title().getAttribute("title")).toBe("Today");
+    // NOON is 13 September 2026, a Sunday
+    expect(caption()?.textContent).toBe("Sunday, 13 September");
+    expect(caption()?.className).toContain("text-caption");
+  });
+
+  it("writes the caption as the weekday and the full month", async () => {
+    vi.setSystemTime(new Date("2025-09-16T12:00:00.000Z"));
+    await mount([]);
+    expect(caption()?.textContent).toBe("Tuesday, 16 September");
+  });
+
+  it("gives every other list its word and no caption line at all", async () => {
+    await mount([task("b", { when: dayFrom(3) })], { list: "upcoming" });
+    expect(title().textContent).toContain("Upcoming");
+    expect(caption()).toBeNull();
+
+    await mount([task("c", { when: "someday" })], { list: "someday" });
+    expect(title().textContent).toContain("Someday");
+    expect(caption()).toBeNull();
+  });
+
+  it("titles a category view by the word, and an empty category No category", async () => {
+    await mount([task("call mum", { category: "Family" })], {
+      list: { category: "Family" },
+    });
+    expect(title().textContent).toContain("Family");
+    expect(caption()).toBeNull();
+
+    await mount([task("loose", {})], { list: { category: "" } });
+    expect(title().textContent).toContain("No category");
+  });
+
+  it("opens the list menu from the title and reports the row that was picked", async () => {
+    const onSelectList = vi.fn();
+    await mount([task("a", { when: TODAY }), task("b", { category: "Family" })], {
+      onSelectList,
+    });
+    await openMenu(title());
+    const rows = menuRows();
+    expect(rows.map((row) => row.textContent?.trim())).toContain("Upcoming");
+
+    const upcoming = rows.find((row) => row.textContent?.trim() === "Upcoming");
+    await act(async () => upcoming?.click());
+    expect(onSelectList).toHaveBeenLastCalledWith("upcoming");
+  });
+
+  it("keeps the band's pill waiting until the title has left the scroller", async () => {
+    await mount([task("a", { when: TODAY })]);
+    const surface = document.querySelector(".brain-tasks") as HTMLElement;
+    expect(surface.hasAttribute("data-title-out")).toBe(false);
+
+    await crossLine(false);
+    expect(surface.hasAttribute("data-title-out")).toBe(true);
+
+    await crossLine(true);
+    expect(surface.hasAttribute("data-title-out")).toBe(false);
+  });
+
+  it("hides the waiting pill the way the lone breadcrumb is hidden", async () => {
+    // one rule, shared by selector, so the two cannot drift apart
+    const rest = ruleBodies(".brain-tasks-head > .toolbar-pill").join("\n");
+    expect(rest).toMatch(/visibility:\s*hidden/);
+    const out = ruleBodies(
+      ".brain-tasks[data-title-out] .brain-tasks-head > .toolbar-pill",
+    ).join("\n");
+    expect(out).toMatch(/visibility:\s*visible/);
+  });
+
+  it("puts the ghost row after the title, so Tab reaches the switcher first", async () => {
+    await mount([task("a", { when: TODAY })]);
+    const pad = document.querySelector(".brain-tasks-scrollpad") as HTMLElement;
+    const ghost = pad.querySelector('input[aria-label="New task"]') as HTMLElement;
+    expect(
+      title().compareDocumentPosition(ghost) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 });
 

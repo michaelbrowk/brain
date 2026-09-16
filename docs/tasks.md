@@ -80,6 +80,17 @@ is nothing to resolve.
 
 ## The lists
 
+**The column has a head, the one a note has.** The list you are in is named at
+the top of the column in the page-title register, and that word is the
+switcher: pressing it opens the same menu the pill in the band above opens,
+the five lists in one block and your categories in another. Under it, Today
+alone carries a line saying which day it is — "Tuesday, 16 September". The
+other four lists and every category mean the same thing on every day of the
+year, so they carry no line there, and no counts either, because the group
+headers below already say "Today · 2". The pill above the title stays out of
+sight while the title is on screen and comes up once you have scrolled past
+it, so the column's name is never in two places at once.
+
 A task is in exactly one list. Read these top to bottom and the first that
 matches wins.
 

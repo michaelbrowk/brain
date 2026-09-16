@@ -2627,6 +2627,7 @@ a.brain-share-url:active {
   .chip[data-active],
   .crumb-seg:active,
   .crumb-seg[data-active],
+  .brain-tasks-title:active,
   .brain-share-eye:active {
     transform: none;
   }
@@ -2900,7 +2901,14 @@ a.brain-share-url:active {
    is out of the accessibility tree and out of the tab order, and it still
    holds its box, so the pills at the right of the layer never move and no
    gap opens under the scroll. */
-.brain-crumb-lone {
+/* THE TASKS COLUMN'S LIST PILL WAITS ON THIS SAME RULE, shared by selector
+   rather than copied so the two cannot drift apart. That head pill says the
+   word the title on paper says a few centimetres below it, which is the lone
+   crumb's argument on a second surface. Its flag is `data-title-out` on
+   `.brain-tasks`, off an observer on the title button itself
+   (tasks-surface.tsx → useTitleReveal, the hook the page head shares). */
+.brain-crumb-lone,
+.brain-tasks-head > .toolbar-pill {
   visibility: hidden;
   opacity: 0;
   transform: scale(0.96);
@@ -2910,7 +2918,8 @@ a.brain-share-url:active {
     transform 120ms ease-in,
     visibility 0s linear 120ms;
 }
-.brain-main[data-title-out] .brain-crumb-lone {
+.brain-main[data-title-out] .brain-crumb-lone,
+.brain-tasks[data-title-out] .brain-tasks-head > .toolbar-pill {
   visibility: visible;
   opacity: 1;
   transform: scale(1);
@@ -2922,13 +2931,15 @@ a.brain-share-url:active {
 /* §6: a crossfade of 160ms or under, no scale. The reveal itself stays — it
    is what the pill means here, not decoration. */
 @media (prefers-reduced-motion: reduce) {
-  .brain-crumb-lone {
+  .brain-crumb-lone,
+  .brain-tasks-head > .toolbar-pill {
     transform: none;
     transition:
       opacity 120ms ease-in,
       visibility 0s linear 120ms;
   }
-  .brain-main[data-title-out] .brain-crumb-lone {
+  .brain-main[data-title-out] .brain-crumb-lone,
+  .brain-tasks[data-title-out] .brain-tasks-head > .toolbar-pill {
     transform: none;
     transition:
       opacity 160ms var(--ease-out),
@@ -5650,25 +5661,40 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
    the 8 between the box and the word. 52 at the desktop inset and 48 at the
    phone's, and the group headers ride it so a label starts on the same line
    its rows do. */
+/* THE COLUMN IS THE THING THAT SCROLLS, and it has to be told so. It asked
+   for `min-height: 100%` inside a wrapper whose own height is indefinite, so
+   the percentage resolved to nothing, the surface grew to its content and the
+   shell's scroller moved instead — which took the floating head, its scroll
+   edge and the pill waiting in it off the top of the screen the moment a list
+   ran past one window. The window's own height, the way Mail's frame takes
+   it, puts the scrolling back in `.brain-tasks-scroll`: `.brain-shell` is
+   `h-dvh` and the canvas scroller under it is that height exactly, so the two
+   agree on a phone with a shrinking URL bar as well. */
 .brain-tasks {
   --task-rule: calc(var(--inset) + 40px);
   --task-capsule: 36px;
   --task-chrome: 36px;
   position: relative;
   display: flex;
-  min-height: 100%;
+  height: 100dvh;
   width: 100%;
   flex-direction: column;
 }
 /* The head floats: a glass object on the canvas with the rows running under
    it, never a plate across the column. It lets everything through except its
-   own pill, so the space beside it is a place a reader clicks a task. */
+   own pill, so the space beside it is a place a reader clicks a task.
+   IT FLOATS FROM INSIDE THE SCROLLER, on the scroll edge's own construction
+   (`.edge` above): sticky at the inset, with a negative margin cancelling its
+   own height, so it stands still while the rows pass under it and takes no
+   box in the flow. Absolute, as a SIBLING of the scroller, it was a hole in
+   the wheel's scroll chain — the pill is a hit target from the moment it is
+   up, and from it the chain reached nothing that scrolls. */
 .brain-tasks-head {
-  position: absolute;
+  position: sticky;
   z-index: var(--z-toolbar);
   top: var(--inset);
-  right: 0;
-  left: 0;
+  height: var(--task-chrome);
+  margin-bottom: calc(-1 * var(--task-chrome));
   /* the inset lives INSIDE the 700 box, so the pill's left edge lands on the
      row capsule's, not half an inset off it */
   padding-inline: var(--inset);
@@ -5684,6 +5710,11 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
   min-height: 0;
   flex: 1;
   overflow-y: auto;
+  /* B6 on this column: nothing the browser scrolls into view lands under the
+     floating head. The band plus 16, which is what `.brain-page-scroll`
+     reserves from `--chrome-top` — the same figure, off this surface's own
+     head, which stands at the inset and takes no safe area of its own. */
+  scroll-padding-top: calc(var(--inset) + var(--task-chrome) + 16px);
 }
 /* THE COLUMN IS A MEASURE, not the window. A task is one line of text with a
    date at its end, and across 1100px of canvas the two stop being one row:
@@ -5696,10 +5727,61 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
   max-width: 700px;
   margin-inline: auto;
 }
-/* The rows start below the floating head: inset, the head, and the 8 of air
-   that separates chrome from content everywhere else. */
+/* THE COLUMN STARTS WHERE A NOTE'S COLUMN STARTS. `--canvas-top` — the pill
+   band plus 28, 76 on desktop and 72 on a phone — is the line a page title
+   sits on, and the Tasks column has a title of its own now, so it takes the
+   same one rather than the inset + head + 8 it used while the first thing on
+   it was a row. Twenty pixels lower, and the list reads at a page's rhythm
+   instead of hanging off the top of the screen. */
 .brain-tasks-scrollpad {
-  padding-top: calc(var(--inset) + var(--task-chrome) + 8px);
+  padding-top: var(--canvas-top);
+}
+/* The head a note has, in the note's registers. The block keeps the inset the
+   rows keep, so the title's word starts on the row capsule's own left edge;
+   the button's fill bleeds out past it by its padding, the way the page
+   head's icon button does. */
+.brain-tasks-title-block {
+  padding-inline: var(--inset);
+}
+/* The title IS the list switcher, so it is a button — quiet at rest, the ink
+   tint under the pointer, the product's press. The negative margins cancel
+   its own padding, so the box it occupies is the text's box and the head
+   measures what a note's head measures. */
+.brain-tasks-title {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  margin: -2px -8px 14px;
+  padding: 2px 8px;
+  border-radius: var(--r-md);
+  color: var(--ink);
+  text-align: left;
+  transition:
+    background-color 160ms var(--ease-out),
+    transform 100ms ease-out;
+}
+/* Spelled out, the way `.btn:hover` spells its three: a bare
+   `transition-duration` on a list of two takes the press down to 80 with the
+   fill, and the press is 100 everywhere in the product. Two here and not
+   three, because the title's ink does not move on hover and a transition for
+   a colour that never changes is a declaration that does nothing. */
+@media (hover: hover) {
+  .brain-tasks-title:hover {
+    background-color: var(--fill-hover);
+    transition-duration: 80ms, 100ms;
+  }
+}
+/* Press is the scale (§8), dropped under reduced motion with every other
+   press in the product — the list at the top of this file. */
+.brain-tasks-title:active {
+  transform: scale(0.97);
+}
+/* The breadcrumb's own marker weight: ink-4, and small beside a 30px word. */
+.brain-tasks-title-chevron {
+  flex-shrink: 0;
+  color: var(--ink-4);
 }
 /* Below md the mobile tab bar floats over the column's foot, so the rows
    reserve its height at their end: a list whose last row you cannot reach has

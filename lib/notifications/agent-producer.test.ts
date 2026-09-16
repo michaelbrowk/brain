@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { McpActivityEntry } from "@/lib/mcp/activity-log";
-import { agentActionNotification, type AgentActivityEntry } from "./agent-producer";
+import {
+  AGENT_FOLD_WINDOW_MS,
+  agentActionFold,
+  agentActionFoldKey,
+  agentActionNotification,
+  type AgentActivityEntry,
+  type AgentFold,
+} from "./agent-producer";
 import { decodeAgentMailHref } from "./ids";
 import { notificationSchema } from "./model";
 
@@ -204,5 +211,137 @@ describe("what an agent did, as a row", () => {
     const row = agentActionNotification(line({ tool: "write_page", page: "a b#c" }));
     expect(row!.href).toBe("/");
     expect(notificationSchema.safeParse(row).success).toBe(true);
+  });
+});
+
+/** BURSTS COALESCE (Michael's ruling). An agent archiving a mailbox left one
+ *  row per thread, and the centre's five hundred are shared with the reminders
+ *  it was pushing out. Rows of the same shape inside five minutes are one row
+ *  with a count. */
+describe("what a burst of the same thing folds into", () => {
+  const held = (patch: Partial<AgentFold> = {}): AgentFold => ({
+    id: "agent:2026-09-14T12:00:00.000Z:update_mail_thread:1111111111111111",
+    at: "2026-09-14T12:00:00.000Z",
+    count: 1,
+    href: "/mail?account=account-a1&thread=7468726561642d31",
+    ...patch,
+  });
+
+  const archive = (at: string, thread: string) =>
+    line({ at, tool: "update_mail_thread", accountId: "account-a1", threadId: thread, change: "archive" });
+
+  it("counts the rows and keeps the first one's id", () => {
+    const entry = archive("2026-09-14T12:01:00.000Z", "thread-2");
+    const folded = agentActionFold(entry, agentActionNotification(entry)!, held());
+    expect(folded).not.toBeNull();
+    expect(folded!.row.id).toBe(held().id);
+    expect(folded!.row.title).toBe("Claude archived 2 threads");
+    // The newest line's instant, so the row rises to the head of the centre.
+    expect(folded!.row.at).toBe("2026-09-14T12:01:00.000Z");
+    expect(folded!.fold.count).toBe(2);
+    expect(notificationSchema.safeParse(folded!.row).success).toBe(true);
+  });
+
+  it("drops the body, which named one of the things and not the rest", () => {
+    const entry = line({ at: "2026-09-14T12:01:00.000Z", task: "task-beta" });
+    const folded = agentActionFold(
+      entry,
+      agentActionNotification(entry, "Call the bank")!,
+      held({
+        id: "agent:2026-09-14T12:00:00.000Z:create_task:2222222222222222",
+        href: "/tasks?task=task-alpha",
+        body: "Water the plants",
+      }),
+    );
+    expect(folded!.row.title).toBe("Claude created 2 tasks");
+    expect(folded!.row.body).toBeUndefined();
+    expect(folded!.fold.body).toBeUndefined();
+  });
+
+  it("falls back to the surface once the rows name different things", () => {
+    const entry = archive("2026-09-14T12:01:00.000Z", "thread-2");
+    const folded = agentActionFold(entry, agentActionNotification(entry)!, held());
+    expect(folded!.row.href).toBe("/mail");
+  });
+
+  it("keeps the destination while every row names the same thing", () => {
+    // The same task ticked and unticked and ticked again is still that task.
+    const entry = line({ at: "2026-09-14T12:01:00.000Z", task: "task-alpha" });
+    const folded = agentActionFold(
+      entry,
+      agentActionNotification(entry)!,
+      held({
+        id: "agent:2026-09-14T12:00:00.000Z:create_task:3333333333333333",
+        href: "/tasks?task=task-alpha",
+      }),
+    );
+    expect(folded!.row.href).toBe("/tasks?task=task-alpha");
+  });
+
+  it("starts a new row once the window has passed", () => {
+    const entry = archive("2026-09-14T12:06:00.000Z", "thread-2");
+    expect(agentActionFold(entry, agentActionNotification(entry)!, held())).toBeNull();
+    expect(AGENT_FOLD_WINDOW_MS).toBe(5 * 60 * 1000);
+  });
+
+  it("folds a line stamped a little before the row it joins", () => {
+    // Two clocks inside one window. The row keeps the later instant rather
+    // than walking backwards down the centre.
+    const entry = archive("2026-09-14T11:59:30.000Z", "thread-2");
+    const folded = agentActionFold(entry, agentActionNotification(entry)!, held());
+    expect(folded!.row.at).toBe("2026-09-14T12:00:00.000Z");
+  });
+
+  it("keys the fold on the client, the tool and the change, and nothing else", () => {
+    const base = archive("2026-09-14T12:00:00.000Z", "thread-1");
+    expect(agentActionFoldKey(base)).toBe(
+      agentActionFoldKey(archive("2026-09-14T12:04:00.000Z", "thread-9")),
+    );
+    expect(agentActionFoldKey({ ...base, client: "Other" })).not.toBe(
+      agentActionFoldKey(base),
+    );
+    expect(agentActionFoldKey({ ...base, change: "trash" })).not.toBe(
+      agentActionFoldKey(base),
+    );
+    expect(agentActionFoldKey({ ...base, tool: "create_task" })).not.toBe(
+      agentActionFoldKey(base),
+    );
+  });
+
+  /** Every verb has a plural, because a count reads as a sentence or it reads
+   *  as a bug: "Claude archived 12 threads", never "Claude archived a thread
+   *  12". */
+  const plurals: Array<[Partial<AgentActivityEntry>, string]> = [
+    [{ tool: "send_mail", accountId: "account-a1" }, "Claude sent 4 messages"],
+    [{ tool: "reply_mail", accountId: "account-a1", threadId: "t" }, "Claude replied to 4 messages"],
+    [{ tool: "save_mail_attachment", page: "notes" }, "Claude saved 4 attachments"],
+    [{ tool: "create_task", task: "t" }, "Claude created 4 tasks"],
+    [{ tool: "promote_task_line", task: "t" }, "Claude made 4 tasks from lines"],
+    [{ tool: "update_task", task: "t" }, "Claude changed 4 tasks"],
+    [{ tool: "complete_task", task: "t" }, "Claude completed 4 tasks"],
+    [{ tool: "reopen_task", task: "t" }, "Claude reopened 4 tasks"],
+    [{ tool: "delete_task", task: "t" }, "Claude deleted 4 tasks"],
+    [{ tool: "write_page", page: "p" }, "Claude wrote 4 pages"],
+    [{ tool: "append_page", page: "p" }, "Claude added to 4 pages"],
+    [{ tool: "create_page", page: "p" }, "Claude created 4 pages"],
+    [{ tool: "update_meta", page: "p" }, "Claude changed 4 pages"],
+    [{ tool: "move_page", page: "p" }, "Claude moved 4 pages"],
+    [{ tool: "delete_page", page: "p" }, "Claude deleted 4 pages"],
+    [{ tool: "update_mail_thread", change: "archive" }, "Claude archived 4 threads"],
+    [{ tool: "update_mail_thread", change: "trash" }, "Claude moved 4 threads to the trash"],
+    [{ tool: "update_mail_thread", change: "restore" }, "Claude took 4 threads out of the trash"],
+    [{ tool: "update_mail_thread", change: "spam" }, "Claude marked 4 threads as spam"],
+    [{ tool: "update_mail_thread", change: "starred" }, "Claude changed the star on 4 threads"],
+    [{ tool: "update_mail_thread" }, "Claude sorted 4 threads"],
+  ];
+
+  it.each(plurals)("%o", (patch, title) => {
+    const entry = line({ at: "2026-09-14T12:01:00.000Z", ...patch });
+    const folded = agentActionFold(
+      entry,
+      agentActionNotification(entry)!,
+      held({ id: `agent:2026-09-14T12:00:00.000Z:${patch.tool ?? "create_task"}:4444444444444444`, count: 3 }),
+    );
+    expect(folded!.row.title).toBe(title);
   });
 });

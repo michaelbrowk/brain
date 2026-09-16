@@ -55,23 +55,39 @@ export interface AgentActivityEntry {
  *  rather than by a second list that could disagree with this one. The phrases
  *  are the row's whole title after the client's name, and they are written to
  *  read as a sentence a person says: "Claude completed a task".
+ *
+ *  TWO FORMS EACH, because a burst of the same thing folds into one row with a
+ *  count (`agentActionFold`), and a count reads as a sentence or it reads as a
+ *  bug: "Claude archived 12 threads", never "Claude archived a thread 12".
+ *  `%n` is where the number goes.
  */
-const VERB: Readonly<Record<string, string>> = {
-  send_mail: "sent a message",
-  reply_mail: "replied to a message",
-  save_mail_attachment: "saved an attachment",
-  create_task: "created a task",
-  promote_task_line: "made a task from a line",
-  update_task: "changed a task",
-  complete_task: "completed a task",
-  reopen_task: "reopened a task",
-  delete_task: "deleted a task",
-  write_page: "wrote a page",
-  append_page: "added to a page",
-  create_page: "created a page",
-  update_meta: "changed a page",
-  move_page: "moved a page",
-  delete_page: "deleted a page",
+interface Verb {
+  readonly one: string;
+  readonly many: string;
+}
+
+const VERB: Readonly<Record<string, Verb>> = {
+  send_mail: { one: "sent a message", many: "sent %n messages" },
+  reply_mail: { one: "replied to a message", many: "replied to %n messages" },
+  save_mail_attachment: {
+    one: "saved an attachment",
+    many: "saved %n attachments",
+  },
+  create_task: { one: "created a task", many: "created %n tasks" },
+  promote_task_line: {
+    one: "made a task from a line",
+    many: "made %n tasks from lines",
+  },
+  update_task: { one: "changed a task", many: "changed %n tasks" },
+  complete_task: { one: "completed a task", many: "completed %n tasks" },
+  reopen_task: { one: "reopened a task", many: "reopened %n tasks" },
+  delete_task: { one: "deleted a task", many: "deleted %n tasks" },
+  write_page: { one: "wrote a page", many: "wrote %n pages" },
+  append_page: { one: "added to a page", many: "added to %n pages" },
+  create_page: { one: "created a page", many: "created %n pages" },
+  update_meta: { one: "changed a page", many: "changed %n pages" },
+  move_page: { one: "moved a page", many: "moved %n pages" },
+  delete_page: { one: "deleted a page", many: "deleted %n pages" },
 };
 
 const TRIAGE_TOOL = "update_mail_thread";
@@ -80,12 +96,21 @@ const TRIAGE_TOOL = "update_mail_thread";
  *  (`app/api/mcp/mail-tools.ts`). `starred` can go either way and the line does
  *  not say which, so the row does not either: a "starred a thread" over an
  *  unstar is worse than a plainer word. */
-const TRIAGE_VERB: Readonly<Record<string, string>> = {
-  archive: "archived a thread",
-  trash: "moved a thread to the trash",
-  restore: "took a thread out of the trash",
-  spam: "marked a thread as spam",
-  starred: "changed a thread's star",
+const TRIAGE_VERB: Readonly<Record<string, Verb>> = {
+  archive: { one: "archived a thread", many: "archived %n threads" },
+  trash: {
+    one: "moved a thread to the trash",
+    many: "moved %n threads to the trash",
+  },
+  restore: {
+    one: "took a thread out of the trash",
+    many: "took %n threads out of the trash",
+  },
+  spam: { one: "marked a thread as spam", many: "marked %n threads as spam" },
+  starred: {
+    one: "changed a thread's star",
+    many: "changed the star on %n threads",
+  },
 };
 
 /** THE ONE MUTATION THAT SAYS NOTHING.
@@ -100,7 +125,10 @@ const SILENT_CHANGE = "read";
 
 /** What a triage line that named no change says. Reachable only for a line
  *  written before the change token existed, or by a caller that skipped it. */
-const TRIAGE_FALLBACK = "sorted a thread";
+const TRIAGE_FALLBACK: Verb = {
+  one: "sorted a thread",
+  many: "sorted %n threads",
+};
 
 /** The import family has its own ledger and its own batch, and the handshake
  *  changes nothing at all. Both are excluded by name rather than by leaving
@@ -123,6 +151,14 @@ const DIGEST_FIELDS = [
   "change",
 ] as const;
 
+/** The separator inside a fold key. A NUL, because a client name or a change
+ *  token can hold anything else and two fields must not be able to run into
+ *  one another. */
+const FOLD_KEY_SEPARATOR = "\u0000";
+
+/** Where the count goes in a plural verb. */
+const COUNT_MARK = "%n";
+
 /** Half a sha256, hex. Sixteen characters is short enough to read in a file
  *  and far past what a collision inside one instant's worth of tool calls
  *  would need. */
@@ -143,7 +179,7 @@ function clientName(value: string): string {
   return tidy.length > 0 ? tidy : CLIENT_FALLBACK;
 }
 
-function verbOf(entry: AgentActivityEntry): string | null {
+function verbOf(entry: AgentActivityEntry): Verb | null {
   if (entry.tool === TRIAGE_TOOL) {
     if (entry.change === SILENT_CHANGE) return null;
     if (entry.change === undefined) return TRIAGE_FALLBACK;
@@ -226,10 +262,79 @@ export function agentActionNotification(
     id: agentActionNotificationId(entry),
     kind: "agent-action",
     at: entry.at,
-    title: `${clientName(entry.client)} ${verb}`.slice(0, MAX_TITLE),
+    title: `${clientName(entry.client)} ${verb.one}`.slice(0, MAX_TITLE),
     ...(body !== undefined && body.length > 0 ? { body } : {}),
     // An id the store minted is a path already; an id from anywhere else is
     // checked before it becomes one, and the surface is the fallback.
     href: isNotificationHref(href) ? href : SURFACE_HREF[surfaceOf(entry.tool)],
+  };
+}
+
+/** HOW LONG A BURST IS.
+ *
+ *  Five minutes (Michael's ruling). Long enough that an agent working through a
+ *  mailbox or a list is one row, short enough that two sittings are two rows,
+ *  which is what a reader coming back to the bell wants to be able to tell
+ *  apart. */
+export const AGENT_FOLD_WINDOW_MS = 5 * 60 * 1000;
+
+/** WHAT THE CENTRE ALREADY HOLDS FOR ONE SHAPE OF ACTION.
+ *
+ *  Kept by the choke point, not by this module: the fold has to be decided
+ *  before the write, and this file reads no clock and no file. `id` is the
+ *  FIRST line's, which is the row's id for its whole life; `at` is the newest
+ *  line's, which is where the centre sorts it. */
+export interface AgentFold {
+  readonly id: string;
+  readonly at: string;
+  readonly count: number;
+  readonly href: string;
+  readonly body?: string;
+}
+
+/** THE SHAPE A BURST IS COUNTED BY: who did it, with which tool, and which
+ *  change of that tool's. Never the thing it was done to, which is the whole
+ *  point: twelve threads archived by Claude is one row, and a thread archived
+ *  by Claude beside one archived by a second grant is two. */
+export function agentActionFoldKey(entry: AgentActivityEntry): string {
+  return [entry.client, entry.tool, entry.change ?? ""].join(FOLD_KEY_SEPARATOR);
+}
+
+/** The row `held` becomes when this line joins it, or `null` when it does not:
+ *  the window has passed, or the line is one that earns no row at all.
+ *
+ *  `next` is what this line produced on its own, which the caller has in hand
+ *  already and which carries the checked href and the bounded title.
+ */
+export function agentActionFold(
+  entry: AgentActivityEntry,
+  next: BrainNotification,
+  held: AgentFold,
+): { row: BrainNotification; fold: AgentFold } | null {
+  const verb = verbOf(entry);
+  if (verb === null) return null;
+  const apart = Date.parse(next.at) - Date.parse(held.at);
+  if (!Number.isFinite(apart) || Math.abs(apart) > AGENT_FOLD_WINDOW_MS) return null;
+  const count = held.count + 1;
+  // The later of the two instants. Two clocks inside one window would
+  // otherwise walk the row backwards down a centre that sorts on this string.
+  const at = next.at > held.at ? next.at : held.at;
+  // The destination survives only while every line named the same thing. A
+  // burst over a dozen threads goes to Mail, not to the twelfth thread.
+  const href = held.href === next.href ? held.href : SURFACE_HREF[surfaceOf(entry.tool)];
+  return {
+    row: {
+      id: held.id,
+      kind: "agent-action",
+      at,
+      title: `${clientName(entry.client)} ${verb.many.replace(COUNT_MARK, String(count))}`.slice(
+        0,
+        MAX_TITLE,
+      ),
+      // No body past the first: it named one of the things and says nothing
+      // about the rest, and a count with one name beside it reads as a lie.
+      href,
+    },
+    fold: { id: held.id, at, count, href },
   };
 }

@@ -138,6 +138,14 @@ archived a thread".
   tasks at the moment of the call. The activity line holds ids and no prose by
   design, and the centre is downstream of it: no subject, no address, no body,
   no recipient.
+- **A burst is one row.** The same app doing the same thing inside five
+  minutes is counted, not repeated: "Claude archived 12 threads". The row keeps
+  the first action's place in the file and takes the newest one's time, so it
+  rises to the top as the burst goes on, and reading it reads the whole burst.
+  The body drops away once there is more than one thing in it, and the row
+  opens the surface rather than the twelfth thread. Five minutes after the last
+  one, the next action starts a new row. A restart starts a new row too: the
+  count is what this server has watched happen, not a claim about the file.
 - **A press opens what the row is about.** The task, selected in Tasks. The
   note the file landed in. The thread, opened in Mail without being marked
   read, because the row is a record of what an agent did and not a new letter.

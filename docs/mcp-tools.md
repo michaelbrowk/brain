@@ -508,8 +508,12 @@ produces none, and the `notion_*` family and `connection_check` are excluded by
 name. The row's body is a task or note title read out of the owner's own store
 where the call already had one; nothing an agent wrote reaches it, because the
 line it comes from has no field prose can enter through. Pressing the row opens
-the task, the note or the thread. There is no push for these: push stays the
-phone's signal for reminders. `docs/notifications.md` has the rest.
+the task, the note or the thread. A burst of the same thing inside five minutes is
+one row with a count rather than one row each, so an agent working through a
+mailbox does not push a day of reminders out of the centre. There is no push
+for any of it: push stays the phone's signal for reminders. The log itself
+never folds, so Connections still shows one line per call.
+`docs/notifications.md` has the rest.
 
 ## Known gaps
 

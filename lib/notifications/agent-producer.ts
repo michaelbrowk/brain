@@ -77,17 +77,26 @@ const VERB: Readonly<Record<string, string>> = {
 const TRIAGE_TOOL = "update_mail_thread";
 
 /** One tool, six changes, and the line names which one it ran
- *  (`app/api/mcp/mail-tools.ts`). `read` and `starred` are the two that can go
- *  either way, and the line does not say which, so the row does not either: a
- *  "marked a thread read" over an unread is worse than a plainer word. */
+ *  (`app/api/mcp/mail-tools.ts`). `starred` can go either way and the line does
+ *  not say which, so the row does not either: a "starred a thread" over an
+ *  unstar is worse than a plainer word. */
 const TRIAGE_VERB: Readonly<Record<string, string>> = {
   archive: "archived a thread",
   trash: "moved a thread to the trash",
   restore: "took a thread out of the trash",
   spam: "marked a thread as spam",
   starred: "changed a thread's star",
-  read: "changed a thread's read mark",
 };
+
+/** THE ONE MUTATION THAT SAYS NOTHING.
+ *
+ *  A read mark is triage, and the same call marks the centre's own `mail-new`
+ *  row for that thread read (`markCentreRead` in `app/api/mcp/mail-tools.ts`).
+ *  A row about the marking would put the badge back to one for a letter the
+ *  owner has just had dealt with, which is the opposite of what the centre is
+ *  for. Michael's ruling. The line is still written, so Settings, Connections
+ *  shows it like every other mutation. */
+const SILENT_CHANGE = "read";
 
 /** What a triage line that named no change says. Reachable only for a line
  *  written before the change token existed, or by a caller that skipped it. */
@@ -136,6 +145,7 @@ function clientName(value: string): string {
 
 function verbOf(entry: AgentActivityEntry): string | null {
   if (entry.tool === TRIAGE_TOOL) {
+    if (entry.change === SILENT_CHANGE) return null;
     if (entry.change === undefined) return TRIAGE_FALLBACK;
     return TRIAGE_VERB[entry.change] ?? TRIAGE_FALLBACK;
   }

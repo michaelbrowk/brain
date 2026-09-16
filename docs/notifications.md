@@ -127,7 +127,10 @@ archived a thread".
 
 - **Successful mutations, and nothing else.** A refusal leaves no row, a read
   of any kind leaves none, and the `notion_*` import family and
-  `connection_check` are out by name. The row comes off the one activity line
+  `connection_check` are out by name. So is one mutation: marking a thread
+  read. The same call marks that thread's own `mail-new` row read, so a row
+  about the marking would put the badge back to one for a letter you have just
+  had dealt with. Settings → Connections still logs it. The row comes off the one activity line
   the mutation already writes (`lib/mcp/activity-log.ts`), so a tool that logs
   cannot forget to announce, and a tool that does not log stays silent: page
   writes leave no line today, so they leave no row either.

@@ -81,7 +81,6 @@ describe("what an agent did, as a row", () => {
     ["restore", "Claude took a thread out of the trash"],
     ["spam", "Claude marked a thread as spam"],
     ["starred", "Claude changed a thread's star"],
-    ["read", "Claude changed a thread's read mark"],
   ];
 
   it.each(triage)("update_mail_thread, %s", (change, title) => {
@@ -90,6 +89,18 @@ describe("what an agent did, as a row", () => {
     );
     expect(row!.title).toBe(title);
     expect(notificationSchema.safeParse(row).success).toBe(true);
+  });
+
+  /** A READ MARK IS NOT NEWS. The mail row for that thread is being marked
+   *  read in the same breath (`markCentreRead`), and a row about the marking
+   *  would leave the badge at one for a letter the owner has just had dealt
+   *  with. Michael's ruling, and the one triage change that says nothing. */
+  it("says nothing about a thread's read mark", () => {
+    expect(
+      agentActionNotification(
+        line({ tool: "update_mail_thread", accountId: ACCOUNT, threadId: "thread-one", change: "read" }),
+      ),
+    ).toBeNull();
   });
 
   it("falls back to one word for a triage line that named no change", () => {

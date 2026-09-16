@@ -83,7 +83,8 @@ const WANT = [
   "bell-linear",
   // The notification centre draws one glyph per kind: a reminder that fired
   // takes the alarm, one that was missed takes the clock already listed
-  // above, and new mail takes the letter that is already in PAIRS.
+  // above, new mail takes the letter that is already in PAIRS, and what an
+  // agent did takes the plug Settings, Connections wears, listed above too.
   "alarm-linear",
   "align-left-linear",
   "align-horizontal-center-linear",

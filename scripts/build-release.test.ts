@@ -328,7 +328,11 @@ describe("the mail runtime's module lists", () => {
       "utf8",
     );
     // The build must reach for the shared list rather than repeat it, which is
-    // the whole point of there being one.
+    // the whole point of there being one. A grep, not a behavioural check —
+    // the behaviour is guarded above it: `verifyStage` compares the staged
+    // tree to `MAIL_RUNTIME_LISTING` exactly, extras included, so a module
+    // dropped from this list and therefore left in the tree fails the release
+    // build. This catches the list being copied back instead of read.
     expect(source).toContain("MAIL_RUNTIME_BUNDLED_AWAY");
   });
 });

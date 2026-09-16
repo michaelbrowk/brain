@@ -44,9 +44,9 @@ week of downtime fills the centre in stages rather than in one flood.
 ## The centre
 
 A row is `{ id, kind, at, title, body?, href, readAt? }`, and the kind is one of
-`task-reminder`, `task-missed` and `mail-new` (`lib/notifications/model.ts`).
-Nothing in the shape is about a task or a letter, so another kind can join later
-without a second store.
+`task-reminder`, `task-missed`, `mail-new` and `agent-action`
+(`lib/notifications/model.ts`). Nothing in the shape is about a task, a letter
+or a tool call, so another kind can join later without a second store.
 
 - **Five hundred rows.** The oldest goes when the five hundred and first
   arrives. The file is read whole on every request, and the cap is what keeps
@@ -116,6 +116,35 @@ One case still rings when it should not. A reply you write into a thread that
 still holds an older unread message passes the unread gate. The exact answer
 needs a "the newest message is the owner's" fact from the mail service, which
 is a change over there.
+
+## What an agent did
+
+A mutation an agent makes through MCP produces an `agent-action` row. The
+title is the app's own name and a verb, "Claude completed a task", and the
+body after it is the thing's own name where the call already knew one, "Water
+the plants". A row whose call knew no name is the title alone, "Claude
+archived a thread".
+
+- **Successful mutations, and nothing else.** A refusal leaves no row, a read
+  of any kind leaves none, and the `notion_*` import family and
+  `connection_check` are out by name. The row comes off the one activity line
+  the mutation already writes (`lib/mcp/activity-log.ts`), so a tool that logs
+  cannot forget to announce, and a tool that does not log stays silent: page
+  writes leave no line today, so they leave no row either.
+- **Nothing the agent wrote reaches a row.** The title is Brain's own words
+  after the app's name, and the body is a title read out of your own notes or
+  tasks at the moment of the call. The activity line holds ids and no prose by
+  design, and the centre is downstream of it: no subject, no address, no body,
+  no recipient.
+- **A press opens what the row is about.** The task, selected in Tasks. The
+  note the file landed in. The thread, opened in Mail without being marked
+  read, because the row is a record of what an agent did and not a new letter.
+  A row about something deleted opens the surface it was on.
+- **No push.** Push stays the phone's signal for reminders. An agent working
+  through a list at two in the morning is not a reason to buzz a pocket.
+
+Settings → Connections still holds the full log, refusals and reads included,
+and is unchanged by any of this.
 
 ## Push
 

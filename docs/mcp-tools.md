@@ -493,6 +493,17 @@ folder, in git or in a portable archive.
 Settings, Connections shows the last fifty lines, newest first, with a Clear
 action beside the two toggles.
 
+**A successful mutation also rings the owner's bell.** The same call that
+writes the line produces one `agent-action` row in the notification centre,
+titled with the app's name and a verb: "Claude sent a message", "Claude
+completed a task", "Claude archived a thread". A refusal produces none, a read
+produces none, and the `notion_*` family and `connection_check` are excluded by
+name. The row's body is a task or note title read out of the owner's own store
+where the call already had one; nothing an agent wrote reaches it, because the
+line it comes from has no field prose can enter through. Pressing the row opens
+the task, the note or the thread. There is no push for these: push stays the
+phone's signal for reminders. `docs/notifications.md` has the rest.
+
 ## Known gaps
 
 Five things this release ships without, each of them known.

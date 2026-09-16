@@ -67,6 +67,7 @@ import {
 import { EASE_OUT_CSS } from "./tasks-checkbox";
 import { ScrollEdge } from "./ui/scroll-edge";
 import { SOLAR } from "./ui/solar-icons.generated";
+import { useLayerSignal } from "./use-layer-signal";
 import { useSheetGesture } from "./use-sheet-gesture";
 
 export interface WhenValue {
@@ -826,6 +827,7 @@ export function TasksWhenPicker({
   today,
   mode = "when",
   onPick,
+  onOpenChange,
   trigger,
   ariaLabel,
 }: {
@@ -833,10 +835,15 @@ export function TasksWhenPicker({
   today: string;
   mode?: "when" | "deadline";
   onPick: (value: WhenValue) => void;
+  /** THE PANEL SAYS WHEN IT IS STANDING. Escape peels one layer at a time, so
+   *  the row this chip sits on has to know the key is the picker's before it
+   *  is the row's. */
+  onOpenChange?: (open: boolean) => void;
   trigger: ReactNode;
   ariaLabel: string;
 }) {
   const [open, setOpen] = useState(false);
+  useLayerSignal(open, onOpenChange);
   const reduce = useReducedMotion() ?? false;
   const sheet = useSheetGesture();
   const dragControls = useDragControls();

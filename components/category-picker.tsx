@@ -4,18 +4,24 @@ import * as Popover from "@radix-ui/react-popover";
 import { useState } from "react";
 import { Field } from "./ui/field";
 import { ScrollEdge } from "./ui/scroll-edge";
+import { useLayerSignal } from "./use-layer-signal";
 
 /** Category chip + picker: free text with suggestions from existing categories. */
 export function CategoryPicker({
   value,
   suggestions,
   onSet,
+  onOpenChange,
   revealClass = "",
   chip = false,
 }: {
   value?: string;
   suggestions: string[];
   onSet: (category: string) => void;
+  /** THE PANEL SAYS WHEN IT IS STANDING. A host that draws this inside
+   *  something dismissable of its own has to know, because Escape peels one
+   *  layer at a time and this one is the layer on top. */
+  onOpenChange?: (open: boolean) => void;
   /** hides the empty "+ Category" affordance until the header is hovered; a set
    *  category pill stays visible */
   revealClass?: string;
@@ -28,6 +34,7 @@ export function CategoryPicker({
 }) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState("");
+  useLayerSignal(open, onOpenChange);
 
   const commit = (v: string) => {
     onSet(v.trim());

@@ -76,6 +76,11 @@ const GROUP_STEP = 0.05;
 const RULE_STEP = 0.06;
 const ROW_STEP = 0.03;
 
+/** The capture row's own name in the layer register. Every other name there is
+ *  a row's key, which is a record id (nanoid) or an id and a day: neither can
+ *  carry a space, so this one cannot be mistaken for a row. */
+const CAPTURE_ROW_LAYER = "the capture row";
+
 export function TasksSurface({
   list = null,
   onSelectList,
@@ -217,7 +222,8 @@ export function TasksSurface({
   /** WHICH ROW HAS A LAYER OPEN ABOVE IT, if any. A ref and not state: it is
    *  read on a keydown and nothing on screen is drawn from it, so a render per
    *  panel would be a render for nobody. Keyed by row, so the fold of one row
-   *  cannot take down the flag another row's panel raised. */
+   *  cannot take down the flag another row's panel raised, and the capture row
+   *  answers under a name of its own. */
   const layerRow = useRef<string | null>(null);
   const noteLayer = useCallback((key: string, open: boolean) => {
     if (open) layerRow.current = key;
@@ -289,6 +295,7 @@ export function TasksSurface({
                 captureRequest={captureRequest}
                 today={today}
                 onCreate={capture}
+                onLayer={(open) => noteLayer(CAPTURE_ROW_LAYER, open)}
               />
             </ul>
           )}

@@ -1476,15 +1476,22 @@ describe("Escape peels one layer at a time", () => {
    *  back there, so a chip that was never focused would hand it to the body
    *  and the assertion would be about jsdom rather than about the row.
    *
-   *  And the press goes DOWN before it clicks: a popover opens on the click
-   *  and a dropdown menu on the `pointerdown`, so a press that is only half a
-   *  press opens one of the two. */
+   *  And it is a WHOLE press: down, up, click. A popover opens on the click
+   *  and a dropdown menu on the `pointerdown`, so half a press opens one of the
+   *  two — and the fold on a press outside is decided on the way down and spent
+   *  on the lift, so half a press would never ask the question a chip in
+   *  another row has to answer. */
+  const press = (node: HTMLElement, type: string) => {
+    const event = new MouseEvent(type, { bubbles: true, button: 0 });
+    Object.defineProperty(event, "pointerId", { value: 1 });
+    node.dispatchEvent(event);
+  };
+
   const openLayer = async (chip: HTMLElement) => {
-    const down = new MouseEvent("pointerdown", { bubbles: true, button: 0 });
-    Object.defineProperty(down, "pointerId", { value: 1 });
     await act(async () => {
       chip.focus();
-      chip.dispatchEvent(down);
+      press(chip, "pointerdown");
+      press(chip, "pointerup");
       chip.click();
     });
     await settle();
@@ -1624,5 +1631,35 @@ describe("Escape peels one layer at a time", () => {
 
     expect(writes()).toHaveLength(1);
     expect(JSON.parse(String(writes()[0]?.[1]?.body))).toEqual({ when: TODAY });
+  });
+
+  /** THE CAPTURE ROW'S PICKER IS A LAYER TOO, and it is the one layer that does
+   *  not belong to the row it stands over: the reader writing a line at the top
+   *  of the column reaches for its When chip with a task row open below, and
+   *  the key that closes that panel was spending the row as well. One dismissal
+   *  per key, wherever on this surface the panel was opened from. */
+  it("closes the capture row's picker and leaves an expanded row standing", async () => {
+    await mount([task("a", { when: TODAY })]);
+    await expand("a");
+    const capsule = capsuleOf("a");
+    const ghost = document.querySelector<HTMLElement>(
+      ".brain-task-row_ghost .chip",
+    ) as HTMLElement;
+    await openLayer(ghost);
+    expect(document.querySelector(".brain-when-picker")).not.toBeNull();
+    // THE PRESS THAT OPENED IT BELONGS TO THAT PANEL, which is the rule the
+    // row's own fold-on-outside already keeps: one dismissal per press, and
+    // this press spent its one opening the picker.
+    expect(capsule.hasAttribute("data-expanded")).toBe(true);
+
+    await escape();
+
+    expect(document.querySelector(".brain-when-picker")).toBeNull();
+    expect(capsule.hasAttribute("data-expanded")).toBe(true);
+    expect(document.activeElement).toBe(ghost);
+
+    await escape();
+
+    expect(capsule.hasAttribute("data-expanded")).toBe(false);
   });
 });

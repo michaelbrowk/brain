@@ -1037,6 +1037,26 @@ function useFoldOnOutside({
       const row = element.current;
       if (row === null || !(target instanceof Node)) return false;
       if (row.contains(target)) return false;
+      // A LAYER SOMEWHERE ELSE ON THIS SURFACE IS STILL A LAYER. The rule
+      // below asks whether a panel of THIS row's is standing, which is the
+      // whole question while the only panels here are the row's own. The
+      // capture row has one too: a reader giving the line they are writing a
+      // day reaches for its When chip over an open row, and the press that
+      // opened that panel, and the focus that went into it, were folding the
+      // row underneath. One dismissal per press, wherever the panel was opened
+      // from, and the key is the column's own to spend (`useEscapeLayers`).
+      //
+      // Two marks, because the two moments are different. `data-task-control`
+      // is on the control and is there before the press; Radix's
+      // `data-state="open"` arrives with the panel and is what the focus lands
+      // inside of. Neither can be read off this row, since the panel is
+      // portalled to the end of the document.
+      if (
+        target instanceof Element &&
+        target.closest("[data-task-control], [data-state='open']") !== null
+      ) {
+        return false;
+      }
       return row.querySelector("[data-state='open']") === null;
     };
 

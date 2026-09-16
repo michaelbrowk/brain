@@ -42,12 +42,18 @@ export function TasksGhostRow({
   captureRequest = 0,
   today,
   onCreate,
+  onLayer,
 }: {
   placeholder?: string;
   /** Bumped by "New task" from the palette: the caret comes here. */
   captureRequest?: number;
   today: string;
   onCreate: (title: string, value: WhenValue) => void;
+  /** WHETHER THIS ROW'S PICKER IS STANDING. It is the one layer on this
+   *  surface that is not opened by the row it is drawn over, and Escape peels
+   *  one layer at a time: the key belongs to this panel, and the expanded task
+   *  row below is the next key's. */
+  onLayer?: (open: boolean) => void;
 }) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const [draft, setDraft] = useState("");
@@ -121,9 +127,15 @@ export function TasksGhostRow({
                 value={when}
                 today={today}
                 onPick={setWhen}
+                onOpenChange={onLayer}
                 ariaLabel={`When: ${chipLabel}${when.time ? ` at ${when.time}` : ""}`}
                 trigger={
-                  <button type="button" className="chip">
+                  /* THE MARK, so a task row expanded below this one does not
+                     read the press that opens this panel as the press that
+                     ends it. One dismissal per press: this one was spent
+                     opening the picker. `useFoldOnOutside` in `tasks-row.tsx`
+                     is what reads it. */
+                  <button type="button" className="chip" data-task-control>
                     <span className="chip-glyph">
                       <Icon name="calendar" size={14} />
                     </span>

@@ -150,9 +150,15 @@ export function TasksListTitle({
           ref={titleRef}
           type="button"
           /* The name, the way the pill says it: a reader hears the list and
-             not the category of thing the control is. */
+             not the category of thing the control is, and a long category
+             word truncates here as it does there, so the same `title` answers
+             a hover on both. No `focus-inset`: that is for a ring inside a
+             capsule, and this word stands on open paper with the whole canvas
+             around it — drawn at −3 the ring ran through its own descenders,
+             so it takes the global one at +2. */
           aria-label={label}
-          className="brain-tasks-title text-title focus-inset"
+          title={label}
+          className="brain-tasks-title text-title"
         >
           <span className="min-w-0 truncate">{label}</span>
           {/* the breadcrumb's own weight — a marker in ink-4, not a pill, and

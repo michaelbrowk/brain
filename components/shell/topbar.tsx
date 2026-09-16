@@ -332,8 +332,9 @@ function Breadcrumb({
   // title again — the pill repeats what the icon and the title say just
   // below it. So it hides while the title is on screen and materialises once
   // the title has scrolled away (`.brain-crumb-lone` in globals.css, driven
-  // by `useTitleReveal` in shell/page-head.tsx). A crumb that carries
-  // ancestors never duplicates the title and stays visible throughout.
+  // by `useTitleReveal` in shell/use-title-reveal.ts, which the Tasks column's
+  // own head pill waits on too). A crumb that carries ancestors never
+  // duplicates the title and stays visible throughout.
   return (
     <BreadcrumbPill
       items={items}

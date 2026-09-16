@@ -282,19 +282,30 @@ export function TasksSurface({
 
   return (
     <section aria-label="Tasks" data-testid="tasks-surface" className="brain-tasks">
-      <header className="brain-tasks-head">
-        <TasksListMenu
-          view={view}
-          today={today}
-          categories={categories}
-          onSelect={(next) => onSelectList?.(next)}
-        />
-      </header>
-
       <div className="brain-tasks-scroll">
         {/* the head floats over the rows at every width, so the edge is
             unconditional and its height follows --mail-chrome in CSS (§7) */}
         <ScrollEdge variant="blur" steps={1} />
+
+        {/* THE HEAD IS INSIDE THE THING IT FLOATS OVER. As a sibling of the
+            scroller it was a hole in the wheel's scroll chain: the pill is a
+            hit target from the moment it is up, which is the moment the
+            reader is scrolling, and the chain from it ran head → surface →
+            wrapper → the shell's scroller, not one of which scrolls anything
+            once the column binds to the window. It floats on the scroll
+            edge's own construction instead — sticky at the inset, its height
+            cancelled by its own negative margin — so it stands where it
+            always stood, takes no box in the flow, and a wheel over it
+            reaches the column it is standing on. */}
+        <header className="brain-tasks-head">
+          <TasksListMenu
+            view={view}
+            today={today}
+            categories={categories}
+            onSelect={(next) => onSelectList?.(next)}
+          />
+        </header>
+
         <div className="brain-tasks-scrollfoot brain-tasks-scrollpad">
           {/* The head a note has, in the note's own registers: the list's name
               on paper where a page title stands, and the one caption Today

@@ -425,10 +425,73 @@ describe("the head of the column", () => {
     expect(surface).not.toMatch(/min-height:\s*100%/);
   });
 
+  /** A WHEEL OVER THE PILL HAS TO MOVE THE COLUMN. The head used to be a
+   *  sibling of the scroller, so once the column became the thing that
+   *  scrolls the chain from the pill ran through four boxes that scroll
+   *  nothing and the ~90x36 it covers at the top of the column went dead —
+   *  reachable exactly while the reader is scrolling. It stands inside the
+   *  scroller now, on the scroll edge's own construction: sticky at the
+   *  inset, its height cancelled by its own negative margin, so it floats
+   *  where it always did and contributes no box to the flow.
+   *
+   *  jsdom scrolls nothing, so what a case here can hold is the containment
+   *  the browser's own chain follows, and the rule that keeps it floating.
+   *  The wheel itself is measured in a browser (`pr5-report.md`). */
+  it("stands the head inside the scroller, so a wheel over the pill moves the column", async () => {
+    await mount([task("a", { when: TODAY })]);
+    const scroller = document.querySelector(".brain-tasks-scroll") as HTMLElement;
+    const head = document.querySelector(".brain-tasks-head") as HTMLElement;
+    expect(scroller.contains(head)).toBe(true);
+    // the top edge and its sentinel still open the scroller: BlurEdge reads
+    // its own parentElement for the scroller it observes
+    expect(scroller.firstElementChild?.nextElementSibling?.className).toContain("edge");
+
+    const rules = ruleBodies(".brain-tasks-head");
+    expect(rules.length).toBeGreaterThan(0);
+    const head_css = rules.join("\n");
+    expect(head_css).toMatch(/position:\s*sticky/);
+    expect(head_css).toMatch(/margin-bottom:\s*calc\(-1 \* var\(--task-chrome\)\)/);
+  });
+
+  /** §7's own reserve, the one `.brain-page-scroll` keeps: the band a floating
+   *  head covers, plus 16. The column owns a floating head and became its own
+   *  scroller in the same branch, so it has to keep the band itself — nothing
+   *  the browser scrolls into view may land under the pill. */
+  it("reserves the head's own band for anything scrolled into view", () => {
+    expect(ruleBodies(".brain-tasks-scroll").join("\n")).toMatch(
+      /scroll-padding-top:\s*calc\(var\(--inset\) \+ var\(--task-chrome\) \+ 16px\)/,
+    );
+  });
+
+  /** §8: reduced motion drops the scale and keeps the fill. The title's press
+   *  is the product's `scale(.97)`, and that includes the drop. */
+  it("drops the title's press scale under reduced motion", () => {
+    const bodies = ruleBodies(".brain-tasks-title:active");
+    expect(bodies.length).toBe(2);
+    expect(bodies.join("\n")).toMatch(/transform:\s*scale\(0\.97\)/);
+    expect(bodies.join("\n")).toMatch(/transform:\s*none/);
+  });
+
+  /** `.btn:hover` spells its durations out so the press keeps its 100ms; a
+   *  bare `transition-duration` on a multi-property list takes the press with
+   *  it. The title's list is two properties, not the button's three. */
+  it("keeps the press at 100ms while the hover shortens the fill", () => {
+    expect(ruleBodies(".brain-tasks-title:hover").join("\n")).toMatch(
+      /transition-duration:\s*80ms,\s*100ms/,
+    );
+  });
+
   it("names Today in the page-title register and dates it underneath", async () => {
     await mount([task("a", { when: TODAY })]);
     expect(title().textContent).toContain("Today");
     expect(title().className).toContain("text-title");
+    // it stands on open paper with the whole canvas around it, so the ring is
+    // the global one at +2; `focus-inset` is for a ring inside a capsule and
+    // drew itself through the word's own descenders
+    expect(title().className).not.toContain("focus-inset");
+    // the pill carries one, so the title carries one: a long category clips
+    // in both and only one of them answered a hover
+    expect(title().getAttribute("title")).toBe("Today");
     // NOON is 13 September 2026, a Sunday
     expect(caption()?.textContent).toBe("Sunday, 13 September");
     expect(caption()?.className).toContain("text-caption");

@@ -6,7 +6,7 @@
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -39,6 +39,10 @@ const { TasksSurface } = await import("./tasks-surface");
 const { dayLabel, openTodayCount } = await import("./tasks-lists");
 const { WRITE_AT_MS } = await import("./tasks-row");
 const { emitTaskCommand } = await import("./tasks-commands");
+/** The shell's own modal, for the one case that needs a layer this column
+ *  never hears about. It is the palette a reader reaches with ⌘K over an open
+ *  row, not a stand-in for one. */
+const { CommandPalette } = await import("./command-palette");
 
 const apiFetchMock = vi.mocked(apiFetch);
 
@@ -1497,6 +1501,58 @@ describe("Escape peels one layer at a time", () => {
     await settle();
   };
 
+  /** THE PALETTE, IN ITS OWN ROOT, the way the shell draws it: a sibling of
+   *  the column rather than something inside it. Radix owns its Escape, so
+   *  `open` is state here and the dialog answers the key on its own. */
+  let paletteHost: HTMLDivElement | null = null;
+  let paletteRoot: Root | null = null;
+
+  const paletteNode = () =>
+    document.body.querySelector<HTMLElement>('[data-testid="desktop-command-palette"]');
+
+  function Palette() {
+    const [open, setOpen] = useState(true);
+    return (
+      <CommandPalette
+        open={open}
+        onOpenChange={setOpen}
+        tree={[]}
+        onSelect={() => {}}
+        hasCurrent={false}
+        onNewPage={() => {}}
+      />
+    );
+  }
+
+  const openPalette = async () => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        unobserve() {}
+        disconnect() {}
+      },
+    );
+    Object.defineProperty(Element.prototype, "scrollIntoView", {
+      configurable: true,
+      writable: true,
+      value() {},
+    });
+    paletteHost = document.createElement("div");
+    document.body.appendChild(paletteHost);
+    paletteRoot = createRoot(paletteHost);
+    await act(async () => paletteRoot?.render(<Palette />));
+    await settle();
+  };
+
+  afterEach(async () => {
+    if (paletteRoot) await act(async () => paletteRoot?.unmount());
+    paletteHost?.remove();
+    paletteRoot = null;
+    paletteHost = null;
+    Reflect.deleteProperty(Element.prototype, "scrollIntoView");
+  });
+
   /** The key, from wherever the reader's focus actually is. */
   const escape = async () => {
     await act(async () => {
@@ -1608,30 +1664,15 @@ describe("Escape peels one layer at a time", () => {
     expect(document.activeElement).toBe(capsuleOf("a"));
   });
 
-  /** A PRESS THAT ALREADY ANSWERED IS NOT UNDONE BY THE KEY THAT FOLLOWS IT.
-   *  Today is a quick row: one tap, one write, and the panel is gone. The key
-   *  a reader reaches for on the way out asked for one write, not for none. */
-  it("leaves the quick row's write alone when Escape follows it", async () => {
-    const parked = task("a", { when: "someday" });
-    await mount([parked], { list: "someday" });
-    apiFetchMock.mockImplementation(async (input) => {
-      const url = String(input);
-      if (url.startsWith("/api/tasks?")) return response({ tasks: [parked] });
-      return response({ task: { ...parked, when: TODAY } });
-    });
-    await expand("a");
-    await openLayer(chipOn("a", "When:"));
-
-    await act(async () => {
-      document.querySelector<HTMLElement>("[data-when-today]")?.click();
-    });
-    await settle();
-    await escape();
-    await settle();
-
-    expect(writes()).toHaveLength(1);
-    expect(JSON.parse(String(writes()[0]?.[1]?.body))).toEqual({ when: TODAY });
-  });
+  /* A PRESS THAT ALREADY ANSWERED IS NOT UNDONE BY THE KEY THAT FOLLOWS IT is
+     the picker's own rule, and it is pinned where the picker is:
+     `tasks-when-picker.test.tsx:690`, which holds the panel open for its exit
+     and presses the key inside that window. A case here could not: by the time
+     this surface can deliver the key, the quick row's write has folded the row
+     and taken the panel with it, so the key lands on nothing and the write
+     count is one for reasons that have nothing to do with the rule. It was
+     written, measured, and taken out rather than left standing as a case that
+     cannot go red. */
 
   /** THE CAPTURE ROW'S PICKER IS A LAYER TOO, and it is the one layer that does
    *  not belong to the row it stands over: the reader writing a line at the top
@@ -1657,6 +1698,69 @@ describe("Escape peels one layer at a time", () => {
     expect(document.querySelector(".brain-when-picker")).toBeNull();
     expect(capsule.hasAttribute("data-expanded")).toBe(true);
     expect(document.activeElement).toBe(ghost);
+
+    await escape();
+
+    expect(capsule.hasAttribute("data-expanded")).toBe(false);
+  });
+
+  /** A LAYER NOBODY REGISTERED IS STILL A LAYER.
+   *
+   *  The register holds what this column draws: its rows' panels and the
+   *  capture row's. ⌘K over an open row draws a layer the column never hears
+   *  about, and the key that dismisses it was folding the row underneath —
+   *  the same double dismissal this block exists to remove, one level up. So
+   *  the column reads the document as well, in the capture phase, where the
+   *  panel is still there to be seen. */
+  it("leaves the row standing for a layer nobody registered", async () => {
+    await mount([task("a", { when: TODAY })]);
+    await expand("a");
+    const capsule = capsuleOf("a");
+    await openPalette();
+    expect(paletteNode()).not.toBeNull();
+
+    await escape();
+
+    expect(paletteNode()).toBeNull();
+    expect(capsule.hasAttribute("data-expanded")).toBe(true);
+
+    await escape();
+
+    expect(capsule.hasAttribute("data-expanded")).toBe(false);
+  });
+
+  /** AND THE COLUMN HAS TO BE FIRST ON THE PATH TO SEE IT.
+   *
+   *  A panel that is not React's takes itself out of the document inside the
+   *  keydown that dismissed it — the shape the note's own promote popover has
+   *  (`components/editor/task-checkbox.ts`), and the shape Radix decides in,
+   *  from a `keydown` listener on the DOCUMENT in capture. A column that read
+   *  the document any later than the window's own capture phase would find
+   *  the panel already gone and fold the row on the key that closed it. This
+   *  is the case that goes red if the `true` comes off that listener. */
+  it("reads the document before the layer's own listener can empty it", async () => {
+    await mount([task("a", { when: TODAY })]);
+    await expand("a");
+    const capsule = capsuleOf("a");
+
+    const panel = document.createElement("div");
+    panel.setAttribute("role", "dialog");
+    panel.dataset.state = "open";
+    document.body.append(panel);
+    const dismiss = (event: Event) => {
+      if ((event as KeyboardEvent).key === "Escape") panel.remove();
+    };
+    document.addEventListener("keydown", dismiss, true);
+
+    try {
+      await escape();
+
+      expect(panel.isConnected).toBe(false);
+      expect(capsule.hasAttribute("data-expanded")).toBe(true);
+    } finally {
+      document.removeEventListener("keydown", dismiss, true);
+      panel.remove();
+    }
 
     await escape();
 

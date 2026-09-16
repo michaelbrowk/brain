@@ -9,15 +9,22 @@ import { DELETE, GET, SHOWN } from "./route";
 const ACCOUNT = "account-a00000000000000000000000000000000";
 
 let root: string;
+/** The centre, which every `ok` mutation line here also lands a row in. Given
+ *  its own directory for the same reason the log is: a suite must not write
+ *  into the bell a developer's own `pnpm dev` reads. */
+let centre: string;
 
 beforeEach(async () => {
   root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-activity-route-"));
+  centre = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-activity-centre-"));
   vi.stubEnv("BRAIN_MCP_STATE_DIR", root);
+  vi.stubEnv("BRAIN_NOTIFICATIONS_STATE_DIR", centre);
 });
 
 afterEach(async () => {
   vi.unstubAllEnvs();
   await fs.rm(root, { recursive: true, force: true });
+  await fs.rm(centre, { recursive: true, force: true });
 });
 
 async function write(index: number): Promise<void> {

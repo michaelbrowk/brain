@@ -772,6 +772,7 @@ describe("defaultMailSurfaceClient drafts", () => {
       response({
         apiVersion: 1,
         operationId: SEND_OPERATION_ID,
+        accountId: ACCOUNT_ID,
         status: "failed",
         threadId: null,
       }),
@@ -783,6 +784,7 @@ describe("defaultMailSurfaceClient drafts", () => {
     ).resolves.toEqual({
       apiVersion: 1,
       operationId: SEND_OPERATION_ID,
+      accountId: ACCOUNT_ID,
       status: "failed",
       threadId: null,
     });
@@ -800,6 +802,32 @@ describe("defaultMailSurfaceClient drafts", () => {
           apiVersion: 1,
           operationId: "send-99999999-9999-4999-8999-999999999999",
           status: "sent",
+        }),
+      ),
+    );
+
+    await expect(
+      defaultMailSurfaceClient.getSendOperation(SEND_OPERATION_ID),
+    ).rejects.toThrow("invalid mail send operation");
+  });
+
+  /** The account on the answer is what the Sent mark is written against, so
+   *  the browser reads it under the same rule as every other account id it
+   *  accepts rather than trusting whatever shape arrives. */
+  it.each([
+    ["an account id that is not one", "account-not-a-real-id"],
+    ["an account id of the wrong type", 7],
+    ["no account id at all", undefined],
+  ])("rejects a send operation carrying %s", async (_name, accountId) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        response({
+          apiVersion: 1,
+          operationId: SEND_OPERATION_ID,
+          ...(accountId === undefined ? {} : { accountId }),
+          status: "sent",
+          threadId: null,
         }),
       ),
     );

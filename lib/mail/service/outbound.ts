@@ -281,27 +281,36 @@ export class ProviderNeutralMailSendService implements MailSendService {
     this.assertRequestActive(request);
     const createdAt = this.now();
     const operationId = validateMailSendOperationId(this.createOperationId());
-    let proposal: StoredMailSendSubmission;
-    try {
-      proposal = await buildMailSendSubmissionProposal({
-        account,
-        input,
-        reply,
-        operationId,
-        createdAt,
-      });
-    } catch (error) {
-      if (error instanceof MailSendError) throw error;
-      throw new MailSendError("mail_send_request_invalid");
-    }
-
-    let enqueued: MailSendEnqueueResult;
-    try {
-      enqueued = await this.store.enqueue(proposal);
-    } catch (error) {
-      if (error instanceof MailSendError) throw error;
-      throw new MailSendError("mail_send_service_unavailable");
-    }
+    // Build and enqueue are one held turn. The built message stays in memory
+    // until the row is written, so releasing the gate at the end of the build
+    // let two requests hold two messages at the attachment cap at once — the
+    // exact overlap the gate exists to refuse.
+    const held = await runExclusiveOutboundBuild(async () => {
+      let built: StoredMailSendSubmission;
+      try {
+        built = createMailSendSubmissionProposal({
+          account,
+          input,
+          reply,
+          operationId,
+          createdAt,
+        });
+      } catch (error) {
+        if (error instanceof MailSendError) throw error;
+        throw new MailSendError("mail_send_request_invalid");
+      }
+      try {
+        return Object.freeze({
+          proposal: built,
+          enqueued: await this.store.enqueue(built),
+        });
+      } catch (error) {
+        if (error instanceof MailSendError) throw error;
+        throw new MailSendError("mail_send_service_unavailable");
+      }
+    });
+    const proposal: StoredMailSendSubmission = held.proposal;
+    const enqueued: MailSendEnqueueResult = held.enqueued;
     if (
       enqueued.submission.accountId !== input.accountId ||
       enqueued.submission.providerKind !== account.providerKind ||
@@ -866,11 +875,16 @@ export interface MailSendSubmissionProposalOptions {
 }
 
 /**
- * One outbound MIME build at a time, for the whole process. A send at the
- * attachment cap holds the decoded files and the finished message at once, and
- * the service runs under `MemoryHigh=192M`, so two builds overlapping is the
- * difference between a send and a killed process. Every build stands in this
- * queue: a person's, an agent's, and a draft's.
+ * One outbound message in memory at a time, for the whole process. A send at
+ * the attachment cap holds the decoded files and the finished message at once,
+ * and the service runs under `MemoryHigh=192M`, so two of them overlapping is
+ * the difference between a send and a killed process.
+ *
+ * The turn runs from the build to the end of the write that makes the message
+ * durable, because the built message is in memory for all of it: `/v1/send`
+ * holds it across `store.enqueue`, and the draft lane across
+ * `commitDraftSend`. Every lane stands in this queue: a person's, an agent's,
+ * and a draft's.
  */
 let outboundBuildQueue: Promise<unknown> = Promise.resolve();
 
@@ -885,15 +899,6 @@ export function runExclusiveOutboundBuild<T>(
     () => undefined,
   );
   return result;
-}
-
-/** `createMailSendSubmissionProposal`, taking its turn in that queue. */
-export function buildMailSendSubmissionProposal(
-  options: MailSendSubmissionProposalOptions,
-): Promise<StoredMailSendSubmission> {
-  return runExclusiveOutboundBuild(() =>
-    createMailSendSubmissionProposal(options),
-  );
 }
 
 export function createMailSendSubmissionProposal(
@@ -1078,6 +1083,9 @@ function toPublicOperation(value: StoredMailSendSubmission): MailSendOperation {
   return Object.freeze({
     apiVersion: 1,
     operationId: value.operationId,
+    // The account the row lives in, so a caller writing anything against this
+    // operation names the account the operation has rather than one it typed.
+    accountId: value.accountId,
     status: value.status,
     // The provider's own thread for the Sent copy. First-party SMTP acceptance
     // issues no ids, so an IMAP account answers null and a caller that wants

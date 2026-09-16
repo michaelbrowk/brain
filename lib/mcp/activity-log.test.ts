@@ -10,6 +10,7 @@ import {
   MCP_ACTIVITY_MAX_LINES,
   appendMcpActivity,
   clearMcpActivity,
+  mcpActivityCacheState,
   mcpStateDirectory,
   readMcpActivity,
 } from "./activity-log";
@@ -87,6 +88,42 @@ describe("the MCP activity log", () => {
 
   it("answers nothing before anything has been written", async () => {
     expect(await readMcpActivity(50)).toEqual([]);
+  });
+
+  /** A crash mid-append leaves a line with no closing newline, and the next
+   *  process counts the file back. The count added a newline to every line it
+   *  saw and dropped the bytes of the lines it could not parse, so the cached
+   *  total and the file on disk disagreed and the byte cap tripped at the
+   *  wrong moment. The count is the file's own size. */
+  it("counts a torn tail as the bytes the file actually holds", async () => {
+    const file = path.join(root, MCP_ACTIVITY_FILE);
+    const whole = (at: string) =>
+      JSON.stringify({ at, client: "Claude", tool: "search", outcome: "ok" });
+    await fs.writeFile(
+      file,
+      `${whole("2026-09-14T09:00:00.000Z")}\n` +
+        `${whole("2026-09-14T09:00:01.000Z")}\n` +
+        `{"at":"2026-09-14T09:00:02.0`,
+      "utf8",
+    );
+
+    // The first append is the one that counts the file back.
+    await appendMcpActivity({
+      at: "2026-09-14T09:00:03.000Z",
+      client: "Claude",
+      tool: "search",
+      outcome: "ok",
+    });
+    expect(mcpActivityCacheState(root)?.bytes).toBe((await fs.stat(file)).size);
+
+    // The second runs on the cached count alone, which has to stay true.
+    await appendMcpActivity({
+      at: "2026-09-14T09:00:04.000Z",
+      client: "Claude",
+      tool: "search",
+      outcome: "ok",
+    });
+    expect(mcpActivityCacheState(root)?.bytes).toBe((await fs.stat(file)).size);
   });
 
   it(

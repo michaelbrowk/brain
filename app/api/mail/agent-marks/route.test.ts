@@ -43,7 +43,7 @@ function operation(
   status: MailSendStatus,
   threadId: string | null,
 ): MailSendOperation {
-  return { apiVersion: 1, operationId, status, threadId };
+  return { apiVersion: 1, operationId, accountId: ACCOUNT, status, threadId };
 }
 
 async function get(): Promise<{

@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   MAIL_OPS_FILES,
+  MAIL_RUNTIME_BUNDLED_AWAY,
   MAIL_RUNTIME_LISTING,
   RELEASE_OPS_EXCLUDED,
   RELEASE_OPS_FILES,
@@ -268,5 +269,70 @@ describe("native modules in the release stage", () => {
     const releaseJson = { schema: 1, version: "0.9.0", commit, buildTime: builtAt, minUpgradeFrom: "0.9.0" };
     await writeFile(path.join(stage, "release.json"), `${JSON.stringify(releaseJson, null, 2)}\n`);
     await expect(verifyStage(stage, { layout: "release" })).rejects.toThrow("release stage carries native modules");
+  });
+});
+
+/** FOUR LISTS NAMING THE MAIL RUNTIME'S MODULES.
+ *
+ *  `MAIL_RUNTIME_LISTING` is what the release stage verifies it staged,
+ *  `REQUIRED_FILES` in `ops/project_mail_runtime.py` is what actually reaches
+ *  `/run` and runs, and `MAIL_RUNTIME_BUNDLED_AWAY` is what the SMTP bundle
+ *  inlines and the mail-service build then deletes. A module in one list and
+ *  not the others either ships as dead weight nobody projects or is missing
+ *  where the service needs it, and until this test nothing said so:
+ *  `cloudflare-egress-client.js` sat in the staged listing alone for a
+ *  release, inlined into `service/smtp-runtime.js` and never projected. */
+describe("the mail runtime's module lists", () => {
+  function stagedRuntimeModules(): string[] {
+    const files: string[] = [];
+    for (const [relative, entries] of Object.entries(MAIL_RUNTIME_LISTING)) {
+      for (const entry of entries) {
+        const [name, kind] = entry.split("|");
+        if (kind !== "f" || !name.endsWith(".js")) continue;
+        files.push(relative === "." ? name : `${relative}/${name}`);
+      }
+    }
+    return files.sort();
+  }
+
+  async function projectedRuntimeModules(): Promise<string[]> {
+    const source = await readFile(
+      path.join(process.cwd(), "ops", "project_mail_runtime.py"),
+      "utf8",
+    );
+    const block = /^REQUIRED_FILES = \(\n([\s\S]*?)^\)$/m.exec(source);
+    if (!block) throw new Error("ops/project_mail_runtime.py has no REQUIRED_FILES tuple");
+    return [...block[1].matchAll(/Path\("([^"]+)"\)/g)]
+      .map((match) => match[1])
+      .filter((name) => name.endsWith(".js"))
+      .sort();
+  }
+
+  it("stages exactly the modules the projector carries into /run", async () => {
+    expect(stagedRuntimeModules()).toEqual(await projectedRuntimeModules());
+  });
+
+  it("ships none of the modules the SMTP bundle inlines", async () => {
+    const staged = new Set(stagedRuntimeModules());
+    const projected = new Set(await projectedRuntimeModules());
+    expect(MAIL_RUNTIME_BUNDLED_AWAY.length).toBeGreaterThan(0);
+    for (const relative of MAIL_RUNTIME_BUNDLED_AWAY) {
+      expect(staged.has(relative)).toBe(false);
+      expect(projected.has(relative)).toBe(false);
+    }
+  });
+
+  it("deletes every module it bundles away from the built runtime", async () => {
+    const source = await readFile(
+      path.join(process.cwd(), "scripts", "build-mail-service.mjs"),
+      "utf8",
+    );
+    // The build must reach for the shared list rather than repeat it, which is
+    // the whole point of there being one. A grep, not a behavioural check —
+    // the behaviour is guarded above it: `verifyStage` compares the staged
+    // tree to `MAIL_RUNTIME_LISTING` exactly, extras included, so a module
+    // dropped from this list and therefore left in the tree fails the release
+    // build. This catches the list being copied back instead of read.
+    expect(source).toContain("MAIL_RUNTIME_BUNDLED_AWAY");
   });
 });

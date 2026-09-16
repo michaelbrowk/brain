@@ -79,9 +79,13 @@ const CASES = [
     boxes: 2,
   },
   {
+    // `TASK_LINE_RE` reads `- [ ]` and nothing else, so a numbered task line
+    // is a checkbox the editor draws and the store cannot see. The editor
+    // re-bullets one on the way in rather than writing a line back that
+    // makes every + Task on the page answer "This note could not be read".
     name: "ordered task",
     md: out("1. [ ] ordered one", "2. [x] ordered two"),
-    want: out("1. [ ] ordered one", "2. [x] ordered two"),
+    want: out("* [ ] ordered one", "", "* [x] ordered two"),
     boxes: 2,
   },
   {

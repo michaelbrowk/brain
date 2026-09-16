@@ -517,12 +517,14 @@ export function validateMailSendResult(value: unknown): MailSendResult {
 export function validateMailSendOperation(value: unknown): MailSendOperation {
   if (
     !isRecordWithExactFields(value, [
+      "accountId",
       "apiVersion",
       "operationId",
       "status",
       "threadId",
     ]) ||
     value.apiVersion !== 1 ||
+    !SAFE_ACCOUNT_ID.test(typeof value.accountId === "string" ? value.accountId : "") ||
     (value.threadId !== null &&
       (typeof value.threadId !== "string" || !SAFE_RESOURCE_ID.test(value.threadId)))
   ) {
@@ -531,6 +533,7 @@ export function validateMailSendOperation(value: unknown): MailSendOperation {
   return Object.freeze({
     apiVersion: 1,
     operationId: validateResponseOperationId(value.operationId),
+    accountId: value.accountId as string,
     status: validateSendStatus(value.status),
     threadId: value.threadId,
   });

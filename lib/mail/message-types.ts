@@ -217,6 +217,10 @@ export interface MailSendResult {
 export interface MailSendOperation {
   readonly apiVersion: 1;
   readonly operationId: string;
+  /** The account the operation lives in, which is the only account a caller
+   *  may write a Sent mark against for it. A caller naming another one is
+   *  guessing, and the answer says so rather than letting the guess win. */
+  readonly accountId: string;
   readonly status: MailSendStatus;
   /** The Sent copy's thread once a provider has one, so a caller can find it. */
   readonly threadId: string | null;

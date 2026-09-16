@@ -1346,9 +1346,16 @@ function readSendOperation(
   expectedOperationId: string,
 ): MailSendOperation {
   if (
-    !isExactRecord(value, ["apiVersion", "operationId", "status", "threadId"]) ||
+    !isExactRecord(value, [
+      "accountId",
+      "apiVersion",
+      "operationId",
+      "status",
+      "threadId",
+    ]) ||
     value.apiVersion !== 1 ||
     value.operationId !== expectedOperationId ||
+    !isAccountId(value.accountId) ||
     !isDraftSendStatus(value.status) ||
     !isNullableThreadId(value.threadId)
   ) {
@@ -1357,6 +1364,7 @@ function readSendOperation(
   return {
     apiVersion: 1,
     operationId: expectedOperationId,
+    accountId: value.accountId,
     status: value.status,
     threadId: value.threadId,
   };

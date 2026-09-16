@@ -5,6 +5,8 @@ import { promisify } from "node:util";
 
 import { build } from "esbuild";
 
+import { MAIL_RUNTIME_BUNDLED_AWAY } from "./build-release.mjs";
+
 const execFileAsync = promisify(execFile);
 const root = process.cwd();
 const output = path.join(root, ".next", "standalone", "mail-service");
@@ -80,16 +82,12 @@ const smtpRuntimeBundle = await build({
   logLevel: "info",
   metafile: true,
 });
+// Every module the bundle above inlined. The compiled copies tsc left behind
+// are dead once the bundle exists, and a module in the tarball that the
+// projector never carries into /run is weight nothing checks.
 await Promise.all(
-  [
-    "account-access.js",
-    "imap-sent-copy.js",
-    "smtp-runtime-config.js",
-    "smtp-transport.js",
-    "smtp-wire.js",
-    "smtp-worker.js",
-  ].map((name) =>
-    rm(path.join(output, "service", name), { force: true }),
+  MAIL_RUNTIME_BUNDLED_AWAY.map((relative) =>
+    rm(path.join(output, relative), { force: true }),
   ),
 );
 

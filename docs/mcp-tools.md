@@ -231,7 +231,7 @@ owner sees what was attempted.
 | --- | --- | --- | --- | --- |
 | `send_mail` | `brain:mail:send` | `accountId`, `to`, `cc?`, `bcc?`, `subject`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`. `created: false` means this key had already been sent and the first result is being replayed | `agent_sending_off` and `agent_settings_unreadable`, both naming Settings, Connections in the sentence. `invalid_account_id`. `to is empty`. `that is too many recipients` over 100 across the three fields. `that is not an address` naming the field and index, and `that address is listed twice` the same way. `that message is too long` and `that subject is too long`, each naming its cap. `that subject holds a control character`. `that message holds a null byte`. `possible_duplicate`, for a fresh key on a message an unknown send may already have sent. `account not found`. `cannot send from this account` with the blocked reason. `too many attachments`, `that is not an attachment name`, `page not found`, `that page does not hold that file`, `that file is gone`, `those attachments are too large`, `those attachments are too large for this account` for an IMAP account over its relay's own figure, `that file cannot be sent`, `page_read_failed`, `attachment_read_failed`. Plus the service's own codes. A send that timed out is not refused: see the `state` unknown answer below |
 | `reply_mail` | `brain:mail:send` | `accountId`, `threadId`, `messageId`, `replyAll?`, `text`, `idempotencyKey`, `attachments?` as `[{ page, name }]` | `{ operationId, created, status }`, the reply threaded by the service onto the message named | everything `send_mail` refuses, plus `invalid_thread_id`, `invalid_message_id`, `that message is not in that thread`, and `there is no one to reply to` when the message names this account and no one else. A `to`, `cc`, `bcc` or `subject` is an unknown argument and is refused by the schema |
-| `get_mail_send_status` | `brain:mail:send` | `operationId`, `accountId?` | `{ operationId, status, threadId }`. `threadId` is the thread the Sent copy landed in, or `null`. With `accountId` given, a send the tool never got an answer for gets its Sent-row mark written here | `invalid_operation_id`, `invalid_account_id`, `no send with that id`, the service's own codes |
+| `get_mail_send_status` | `brain:mail:send` | `operationId`, `accountId?` | `{ operationId, status, threadId }`. `threadId` is the thread the Sent copy landed in, or `null`. A send the tool never got an answer for gets its Sent-row mark written here, against the account the operation itself names | `invalid_operation_id`, `invalid_account_id`, `mail_operation_account_mismatch`, `no send with that id`, the service's own codes |
 
 The account is a parameter of every send and the agent picks it. There is no
 allowlist of accounts an agent may write from: the gate is the scope, the
@@ -284,10 +284,16 @@ for, and a send that answers clears the memory. It is a guard rail on one
 conversation's mistake rather than a durable record: a restart forgets it.
 
 A send with no answer wrote no mark either, because the tool never learned an
-operation id, so the Sent row has nothing to caption. Passing `accountId` to
-`get_mail_send_status` beside the `operationId` closes that: the first status
-call that finds the send accepted writes the mark the send could not write for
-itself. A mark already there is left alone.
+operation id, so the Sent row has nothing to caption. `get_mail_send_status`
+closes that: the first status call that finds the send accepted writes the mark
+the send could not write for itself. A mark already there is left alone.
+
+The account on that mark comes from the operation, not from the call. The
+service's status answer carries the account the operation lives in, and that is
+the one the mark names, so a caption never lands on a mailbox the send was not
+made from. `accountId` stays an optional argument and is now a check rather
+than the source: naming an account that is not the operation's is refused with
+`mail_operation_account_mismatch` before anything is written.
 
 Brain checks what it can before the mail service is called: the three id
 shapes, the owner's toggle, an empty `to`, every address, a repeated address,

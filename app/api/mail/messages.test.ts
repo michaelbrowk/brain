@@ -90,6 +90,7 @@ describe("Brain Mail message API routes", () => {
           writeJson(response, 200, {
             apiVersion: 1,
             operationId: OPERATION_ID,
+            accountId: ACCOUNT_ID,
             status: "sent",
             threadId: null,
           });

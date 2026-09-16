@@ -95,11 +95,29 @@ export const RELEASE_OPS_EXCLUDED = Object.freeze([
   "ops/docker/",                    // image-only
 ]);
 
+/** Modules `service/smtp-runtime.js` inlines, deleted from the built runtime
+ *  by `build-mail-service.mjs` once that bundle is written.
+ *
+ *  `tsc` compiles each of them because the bundle's entry point imports them,
+ *  and the compiled copies are dead the moment the bundle exists: nothing
+ *  loads them, and the projector's `REQUIRED_FILES` does not carry them into
+ *  `/run`. One list, read by the build that deletes them and by the test that
+ *  holds the staged listing and the projector's against each other. */
+export const MAIL_RUNTIME_BUNDLED_AWAY = Object.freeze([
+  "cloudflare-egress-client.js",
+  "service/account-access.js",
+  "service/imap-sent-copy.js",
+  "service/smtp-runtime-config.js",
+  "service/smtp-transport.js",
+  "service/smtp-wire.js",
+  "service/smtp-worker.js",
+]);
+
 /** Exact listings (`name|f` / `name|d`) of the packaged Mail runtime. */
 export const MAIL_RUNTIME_LISTING = Object.freeze({
   ".": [
     "THIRD_PARTY_NOTICES.txt|f", "address-identity.js|f", "build.json|f",
-    "cloudflare-egress-client.js|f", "content-codec.js|f", "content-types.js|f",
+    "content-codec.js|f", "content-types.js|f",
     "draft-codec.js|f", "draft-types.js|f", "message-codec.js|f", "search-query.js|f",
     "message-types.js|f", "ports.js|f", "reader-content.js|f", "providers|d",
     "raster-metadata.js|f", "recipients.js|f", "security.js|f",

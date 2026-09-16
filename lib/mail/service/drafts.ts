@@ -36,9 +36,10 @@ import type {
 import { parseMailRecipientFields } from "../recipients";
 import { mailAccountCapabilities } from "./account-types";
 import {
-  buildMailSendSubmissionProposal,
+  createMailSendSubmissionProposal,
   mailSendSubmissionReplayProposal,
   MailSendError,
+  runExclusiveOutboundBuild,
   type MailReplyContext,
   type MailReplyContextResolver,
   type MailSendAccount,
@@ -290,6 +291,7 @@ export class ProviderNeutralMailDraftService implements MailDraftService {
       this.store.readByOperationId(mutation.sendOperationId),
     );
     let committedAt: number;
+    let build: (() => StoredMailSendSubmission) | null = null;
     if (proposal === null) {
       if (account.status === "reauth_required") {
         throw new MailDraftError("mail_draft_account_reauth_required");
@@ -304,23 +306,17 @@ export class ProviderNeutralMailDraftService implements MailDraftService {
         throw new MailDraftError("mail_draft_state_invalid");
       }
       committedAt = this.readNow();
-      try {
-        proposal = await buildMailSendSubmissionProposal({
+      const createdAt = committedAt;
+      // Deferred into the held turn below, so the built message and the row
+      // that carries it are one turn rather than two.
+      build = () =>
+        createMailSendSubmissionProposal({
           account,
           input: mailSendInputFromDraft(draft, mutation.sendIdempotencyKey),
           reply: replyContextFromDraft(draft),
           operationId: mutation.sendOperationId,
-          createdAt: committedAt,
+          createdAt,
         });
-      } catch (error) {
-        if (
-          !(error instanceof MailDraftError) &&
-          !(error instanceof MailSendError)
-        ) {
-          throw new MailDraftError("mail_draft_request_invalid");
-        }
-        throw mapSendError(error);
-      }
     } else {
       if (
         proposal.accountId !== mutation.accountId ||
@@ -334,15 +330,39 @@ export class ProviderNeutralMailDraftService implements MailDraftService {
     }
 
     this.assertRequestActive(request);
-    const committed = await this.storeCall(() =>
-      this.store.commitDraftSend(
-        mutation,
-        fingerprintMailDraftMutation(mutation),
-        proposal!,
-        committedAt,
-        request,
-      ),
-    );
+    // ONE MESSAGE IN MEMORY AT A TIME, IN THIS LANE TOO.
+    //
+    // The gate bounds the memory a message takes while it is being written,
+    // and the built message is still in memory until `commitDraftSend` has
+    // written the row. Releasing it at the end of the build let a draft send
+    // and a `/v1/send` at the attachment cap hold two messages at once under
+    // `MemoryHigh=192M`. `/v1/send` holds one turn across build and enqueue;
+    // this holds one across build and commit. A replay builds nothing and
+    // takes the turn for the commit alone.
+    const committed = await runExclusiveOutboundBuild(async () => {
+      if (build !== null) {
+        try {
+          proposal = build();
+        } catch (error) {
+          if (
+            !(error instanceof MailDraftError) &&
+            !(error instanceof MailSendError)
+          ) {
+            throw new MailDraftError("mail_draft_request_invalid");
+          }
+          throw mapSendError(error);
+        }
+      }
+      return this.storeCall(() =>
+        this.store.commitDraftSend(
+          mutation,
+          fingerprintMailDraftMutation(mutation),
+          proposal!,
+          committedAt,
+          request,
+        ),
+      );
+    });
     if (
       committed.operationId !== mutation.sendOperationId ||
       committed.submission.operationId !== mutation.sendOperationId ||

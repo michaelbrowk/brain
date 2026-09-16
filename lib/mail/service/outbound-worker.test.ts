@@ -471,6 +471,7 @@ function sent(id: string): MailSendOperation {
   return Object.freeze({
     apiVersion: 1,
     operationId: id,
+    accountId: ACCOUNT_A,
     status: "sent",
     threadId: null,
   });

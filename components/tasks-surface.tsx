@@ -48,6 +48,7 @@ import { Icon } from "./ui/icon";
 import { Empty } from "./ui/empty";
 import type { ToastOptions } from "./ui/primitives";
 import { ScrollEdge } from "./ui/scroll-edge";
+import { LAYER_IN_DOCUMENT } from "./use-layer-signal";
 
 export interface TasksSurfaceProps {
   /** The open list, or a category view. Navigation state, so Back and
@@ -75,6 +76,11 @@ const ENTRANCE_CEILING = 0.42;
 const GROUP_STEP = 0.05;
 const RULE_STEP = 0.06;
 const ROW_STEP = 0.03;
+
+/** The capture row's own name in the layer register. Every other name there is
+ *  a row's key, which is a record id (nanoid) or an id and a day: neither can
+ *  carry a space, so this one cannot be mistaken for a row. */
+const CAPTURE_ROW_LAYER = "the capture row";
 
 export function TasksSurface({
   list = null,
@@ -214,6 +220,22 @@ export function TasksSurface({
     [actions, onToast, today, view],
   );
 
+  /** WHICH LAYERS ARE STANDING OVER THIS COLUMN, under the name of whatever
+   *  raised each one: a row's key, or the capture row's. A ref and not state,
+   *  because it is read on a keydown and nothing on screen is drawn from it,
+   *  so a render per panel would be a render for nobody.
+   *
+   *  A SET AND NOT ONE SLOT. Two names can stand at once — a chip pressed while
+   *  another panel is up raises the second before Radix takes the first down —
+   *  and one slot would let the older close empty a register the newer panel is
+   *  still standing in. The order the panels actually arrive in makes that
+   *  unreachable today; a set makes it unreachable without the argument. */
+  const layers = useRef(new Set<string>());
+  const noteLayer = useCallback((key: string, open: boolean) => {
+    if (open) layers.current.add(key);
+    else layers.current.delete(key);
+  }, []);
+
   const selectNext = useCallback(
     (afterId: string) => {
       const at = order.indexOf(afterId);
@@ -222,7 +244,8 @@ export function TasksSurface({
     [order],
   );
 
-  useArrowKeys({ order, selectedId, setSelectedId, setExpandedId });
+  useArrowKeys({ order, selectedId, setSelectedId });
+  useEscapeLayers({ layers, setExpandedId });
   useNamedTask({
     tasks: state.tasks,
     loading: state.loading,
@@ -278,6 +301,7 @@ export function TasksSurface({
                 captureRequest={captureRequest}
                 today={today}
                 onCreate={capture}
+                onLayer={(open) => noteLayer(CAPTURE_ROW_LAYER, open)}
               />
             </ul>
           )}
@@ -323,6 +347,7 @@ export function TasksSurface({
                 onReschedule={actions.rescheduleTask}
                 onPatch={actions.patchField}
                 onFoldEnd={actions.releaseFold}
+                onLayer={noteLayer}
               />
             ))}
           </AnimatePresence>
@@ -493,6 +518,7 @@ function TaskGroup({
   onReschedule,
   onPatch,
   onFoldEnd,
+  onLayer,
 }: {
   section: TaskSection;
   index: number;
@@ -517,6 +543,8 @@ function TaskGroup({
   onReschedule: (task: TaskView, value: WhenValue, label: string) => Promise<void>;
   onPatch: (task: TaskView, patch: TaskFieldPatch) => void;
   onFoldEnd: (id: string) => void;
+  /** Whether one of this group's rows has a layer open above it. */
+  onLayer: (rowKey: string, open: boolean) => void;
 }) {
   const groupDelay = Math.min(index * GROUP_STEP, ENTRANCE_CEILING);
   // The count is what the LIST holds, so a row still folding is already out
@@ -639,6 +667,7 @@ function TaskGroup({
             onPatch={onPatch}
             onFoldEnd={onFoldEnd}
             onOpenPage={onOpenPage}
+            onLayer={onLayer}
           />
         ))}
       </ul>
@@ -774,19 +803,13 @@ function useArrowKeys({
   order,
   selectedId,
   setSelectedId,
-  setExpandedId,
 }: {
   order: readonly string[];
   selectedId: string | null;
   setSelectedId: (id: string | null) => void;
-  setExpandedId: (id: string | null) => void;
 }) {
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setExpandedId(null);
-        return;
-      }
       if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
       const target = event.target as HTMLElement | null;
       if (target?.closest?.("input, textarea, [contenteditable]")) return;
@@ -801,5 +824,57 @@ function useArrowKeys({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [order, selectedId, setExpandedId, setSelectedId]);
+  }, [order, selectedId, setSelectedId]);
+}
+
+/** ESCAPE PEELS ONE LAYER AT A TIME.
+ *
+ *  One key used to close the calendar AND fold the row under it: the picker
+ *  answered on its own element, this listener answered on the window, and a
+ *  reader who asked for the panel to go lost the row they were working in. A
+ *  press outside has never spent two dismissals at once — the panel takes the
+ *  press and the row is the next one — and the key says the same sentence.
+ *  Escape #1 closes the layer and leaves the row standing with the focus back
+ *  on the control that opened it, Escape #2 folds the row. Things behaves this
+ *  way.
+ *
+ *  THE ROW SAYS WHETHER IT HAS A LAYER, and this asks it rather than looking:
+ *  every panel a chip opens is portalled to the end of the document, and the
+ *  caret in a title is an `input` with no flag on anything.
+ *
+ *  AND A LAYER NOBODY REPORTED IS STILL A LAYER. The register holds what this
+ *  column draws; ⌘K over an open row draws a modal it never hears about, and
+ *  the key that dismissed it was folding the row underneath — the same double
+ *  dismissal this hook exists to remove, one level up. So the document is read
+ *  too, for the shapes a portalled layer has and for nothing that stands
+ *  permanently (`LAYER_IN_DOCUMENT` keeps that reasoning).
+ *
+ *  AND THE PHASE IS WHAT MAKES EITHER ANSWER READABLE. Radix dismisses its own
+ *  layers from a `keydown` listener on the DOCUMENT in the capture phase
+ *  (`@radix-ui/react-dismissable-layer`), and a panel that is not React's
+ *  takes itself out of the document inside that same key. The window's capture
+ *  phase is the FIRST stop a key makes, before the document's, so both the
+ *  register and the document are read while the layer is still there to be
+ *  read. Take the `true` off the listener below and the row folds on the key
+ *  that closed the panel. */
+function useEscapeLayers({
+  layers,
+  setExpandedId,
+}: {
+  /** The names of the layers standing over the column. Empty means none. */
+  layers: React.RefObject<Set<string>>;
+  setExpandedId: (id: string | null) => void;
+}) {
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      // The layer's key, and the layer's own listener is the one that answers
+      // it. The row is the next one.
+      if (layers.current.size > 0) return;
+      if (document.querySelector(LAYER_IN_DOCUMENT) !== null) return;
+      setExpandedId(null);
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, [layers, setExpandedId]);
 }

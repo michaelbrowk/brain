@@ -44,6 +44,7 @@ import {
 import { TasksRepeatMenu } from "./tasks-repeat-menu";
 import { TasksWhenPicker, type WhenValue } from "./tasks-when-picker";
 import { Icon } from "./ui/icon";
+import { LAYER_IN_DOCUMENT, useLayerSignal } from "./use-layer-signal";
 
 /** THE ROW, AND THE ONE DIRECTION IT CAN LEAVE IN.
  *
@@ -210,6 +211,14 @@ export interface TasksRowProps {
   ) => void;
   onFoldEnd: (id: string) => void;
   onOpenPage?: (pageId: string) => void;
+  /** WHETHER THIS ROW HAS A LAYER OPEN ABOVE ITSELF: the When picker, the
+   *  category picker, the repeat menu, the deadline picker, the caret in the
+   *  title. The column reads it on Escape, which peels one layer at a time —
+   *  the key closes the layer and the row is the next key's. Reported by the
+   *  row because the row is the only thing that can know: every panel here is
+   *  portalled out of it, and the title editor is a bare `input` with no flag
+   *  on anything. */
+  onLayer?: (rowKey: string, open: boolean) => void;
 }
 
 export function TasksRow({
@@ -234,6 +243,7 @@ export function TasksRow({
   onPatch,
   onFoldEnd,
   onOpenPage,
+  onLayer,
 }: TasksRowProps) {
   const key = rowKey ?? task.id;
   const wrapRef = useRef<HTMLLIElement | null>(null);
@@ -262,6 +272,44 @@ export function TasksRow({
   const [sinking, setSinking] = useState(false);
   const sinkRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const x = useMotionValue(0);
+
+  /** THE LAYERS THIS ROW HAS OPEN ABOVE ITSELF, by name.
+   *
+   *  A set and not a flag, because two of them can overlap for a frame: a chip
+   *  pressed while another panel is standing opens its own and Radix takes the
+   *  first one down afterwards, and a flag would go out on that close with a
+   *  panel still on screen. The column is told only whether there is anything
+   *  left, since one key takes one layer and which one it was is the layer's
+   *  own business. */
+  const layers = useRef(new Set<string>());
+  const layerRef = useRef(onLayer);
+  useEffect(() => {
+    layerRef.current = onLayer;
+  });
+  const setLayer = useCallback(
+    (name: string, open: boolean) => {
+      if (open) layers.current.add(name);
+      else layers.current.delete(name);
+      layerRef.current?.(key, layers.current.size > 0);
+    },
+    [key],
+  );
+  // A row taken off the list with a layer still up leaves nothing behind: the
+  // column would go on believing a panel is standing and never fold again.
+  //
+  // THIS IS THE SECOND BELT, not the one holding the trousers. Every panel
+  // here is React-owned by this row even though it is portalled, so an unmount
+  // of the row unmounts the panel and `useLayerSignal`'s own cleanup has
+  // already said so — which is the guarantee the tests kill. This covers a
+  // layer that is not a component at all, the way the title editor is not.
+  useEffect(
+    () => () => {
+      if (layers.current.size === 0) return;
+      layers.current.clear();
+      layerRef.current?.(key, false);
+    },
+    [key],
+  );
 
   const linked = task.page !== undefined && task.detachedAt === undefined;
   const detached = task.detachedAt !== undefined;
@@ -396,6 +444,13 @@ export function TasksRow({
       onFoldEnd(task.id);
     },
     [offsetMinutes, onFoldEnd, onReschedule, reduce, task, today],
+  );
+
+  /** The caret in the title is a layer like any panel: Escape takes it off and
+   *  leaves the row standing. */
+  useLayerSignal(
+    editing,
+    useCallback((open: boolean) => setLayer("title", open), [setLayer]),
   );
 
   useRowShortcuts({
@@ -600,7 +655,16 @@ export function TasksRow({
                   onBlur={commitTitle}
                   onKeyDown={(event) => {
                     if (event.key === "Enter") commitTitle();
-                    if (event.key === "Escape") setEditing(false);
+                    // ESCAPE TAKES THE CARET OFF AND LEAVES THE ROW STANDING,
+                    // and hands the focus back to the row it came from. The
+                    // column paints its cursor only while it holds the focus,
+                    // so an input that unmounted with it would drop the focus
+                    // on the body and take the row's tint with it, on a row
+                    // still open in front of the reader.
+                    if (event.key === "Escape") {
+                      setEditing(false);
+                      rowRef.current?.focus({ preventScroll: true });
+                    }
                   }}
                 />
               ) : (
@@ -753,12 +817,14 @@ export function TasksRow({
                     task={task}
                     today={today}
                     onPick={(value) => void leaveDown(value, movedLabel(value, today))}
+                    onOpenChange={(open) => setLayer("when", open)}
                   />
                   <CategoryPicker
                     chip
                     value={task.category}
                     suggestions={[...categories]}
                     onSet={(category) => onPatch(task, { category: category || null })}
+                    onOpenChange={(open) => setLayer("category", open)}
                   />
                   {/* A rule can be added to an OPEN task that is not a note
                       line's, and to no other (decision 14): a linked task's
@@ -774,6 +840,7 @@ export function TasksRow({
                       task={task}
                       today={today}
                       onSet={(repeat) => onPatch(task, { repeat })}
+                      onOpenChange={(open) => setLayer("repeat", open)}
                     />
                   )}
                   {/* A someday task is explicitly undated, and a deadline
@@ -787,6 +854,7 @@ export function TasksRow({
                       /* `mode="deadline"` draws no Someday row, so the value
                          is a day or nothing and the record takes it whole. */
                       onPick={(value) => onPatch(task, { deadline: value.when })}
+                      onOpenChange={(open) => setLayer("deadline", open)}
                       ariaLabel={deadlineSpoken}
                       trigger={
                         <button
@@ -864,10 +932,12 @@ function WhenChip({
   task,
   today,
   onPick,
+  onOpenChange,
 }: {
   task: TaskView;
   today: string;
   onPick: (value: WhenValue) => void;
+  onOpenChange: (open: boolean) => void;
 }) {
   const label =
     task.when === "someday"
@@ -896,6 +966,7 @@ function WhenChip({
       }}
       today={today}
       onPick={onPick}
+      onOpenChange={onOpenChange}
       ariaLabel={spoken}
       trigger={
         <button type="button" className="chip" data-task-control aria-label={spoken}>
@@ -972,6 +1043,34 @@ function useFoldOnOutside({
       const row = element.current;
       if (row === null || !(target instanceof Node)) return false;
       if (row.contains(target)) return false;
+      // A LAYER SOMEWHERE ELSE ON THIS SURFACE IS STILL A LAYER. The rule
+      // below asks whether a panel of THIS row's is standing, which is the
+      // whole question while the only panels here are the row's own. The
+      // capture row has one too: a reader giving the line they are writing a
+      // day reaches for its When chip over an open row, and the press that
+      // opened that panel, and the focus that went into it, were folding the
+      // row underneath. One dismissal per press, wherever the panel was opened
+      // from, and the key is the column's own to spend (`useEscapeLayers`).
+      //
+      // Two marks, because the two moments are different. `data-task-control`
+      // is on the control and is there before the press; the panel's own shape
+      // arrives with the panel and is what the focus lands inside of.
+      // `LAYER_IN_DOCUMENT` names the three shapes a PORTALLED layer has and
+      // nothing that stands permanently, which is the invariant the whole
+      // clause rests on: a bare `[data-state='open']` here would let one
+      // `Collapsible` in the sidebar make an expanded row unfoldable by
+      // pressing anywhere inside it. `components/use-layer-signal.ts` keeps
+      // the reasoning with the selector.
+      if (
+        target instanceof Element &&
+        target.closest(`[data-task-control], ${LAYER_IN_DOCUMENT}`) !== null
+      ) {
+        return false;
+      }
+      // And the row's OWN panels, which are answered from inside the row: the
+      // chip that opened one carries Radix's flag and lives here, so this
+      // reads a trigger rather than a portalled panel and is not the selector
+      // above.
       return row.querySelector("[data-state='open']") === null;
     };
 

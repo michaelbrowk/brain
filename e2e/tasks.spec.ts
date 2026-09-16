@@ -636,6 +636,10 @@ test("@release the cursor's capsule is drawn only while the column holds the foc
   await expect(page.getByRole("dialog", { name: /^When:/ })).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog", { name: /^When:/ })).toHaveCount(0);
+  // ONE DISMISSAL PER KEY, said in a real browser. Without this line the case
+  // reads the same on the old behaviour, where the first key took the panel
+  // and the row together and the second had nothing left to fold.
+  await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(1);
   await page.keyboard.press("Escape");
   await expect(row.locator(".brain-task-row[data-expanded]")).toHaveCount(0);
   await page.waitForTimeout(400);

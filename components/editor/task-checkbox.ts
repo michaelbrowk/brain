@@ -1731,12 +1731,33 @@ function rebulletOrderedTasks(state: EditorState): Transaction | null {
 const orderedTaskRebullet = $prose(
   () =>
     new Plugin({
+      // THE LOAD-TIME PASS WRITES THE NOTE, SO A FROZEN PAGE WAITS.
+      //
+      // `brainImmediateDirty` in `milkdown-editor.tsx` counts any `docChanged`
+      // transaction as a document change, so opening a note that holds
+      // `1. [ ] b` saves it. That is the point of the fix: the store only ever
+      // reads what is on disk. But a mount that refuses the reader's own edits
+      // must not write either. `editorViewOptionsCtx`'s `editable` is the one
+      // reading of that question — `mutationsFrozen`, a page-ref restore still
+      // pending — and `view.editable` is what it answers, so the pass asks the
+      // view rather than repeating the condition. It runs once, the first time
+      // the view says yes, whether that is at mount or when the freeze lifts.
+      //
+      // `appendTransaction` below is not gated: it only ever fires behind a
+      // transaction that already changed the document, so by then there is
+      // nothing left to protect.
       view: (editorView) => {
-        const tr = rebulletOrderedTasks(editorView.state);
-        // Not an edit the reader made, so undo does not put the shape the
-        // store cannot read back.
-        if (tr) editorView.dispatch(tr.setMeta("addToHistory", false));
-        return {};
+        let done = false;
+        const pass = (view: EditorView) => {
+          if (done || !view.editable) return;
+          done = true;
+          const tr = rebulletOrderedTasks(view.state);
+          // Not an edit the reader made, so undo does not put the shape the
+          // store cannot read back.
+          if (tr) view.dispatch(tr.setMeta("addToHistory", false));
+        };
+        pass(editorView);
+        return { update: pass };
       },
       appendTransaction: (transactions, _old, state) =>
         transactions.some((tr) => tr.docChanged)

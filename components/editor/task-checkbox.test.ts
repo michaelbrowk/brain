@@ -314,6 +314,50 @@ describe("the Task command", () => {
     agreesWithTheStore(view);
   });
 
+  /** A TASK ITEM UNDER AN ORDERED LIST, WITHOUT A PRESS.
+   *
+   *  The Task press moves an ordered item to a bullet one, but nobody presses
+   *  anything when a note is opened, pasted into, or imported from Notion.
+   *  `1. [ ] b` draws a checkbox the editor understands and `TASK_LINE_RE`
+   *  does not, and one such line made every + Task on the page answer "This
+   *  note could not be read". The editor re-bullets it on the way in. */
+  it("re-bullets an ordered task item a loaded note arrived with", async () => {
+    const view = await mountEditor("1. a\n2. [ ] b\n3. c\n");
+
+    expect(serialize(view)).toBe("1. a\n\n* [ ] b\n\n2. c\n");
+    expect(boxes(view)).toHaveLength(1);
+    expect(parseTaskLines(serialize(view))).toHaveLength(1);
+    agreesWithTheStore(view);
+  });
+
+  it("keeps a re-bulleted ordered task done if that is how it arrived", async () => {
+    const view = await mountEditor("1. [x] b\n");
+
+    expect(serialize(view)).toBe("* [x] b\n");
+    expect(box(view).getAttribute("aria-checked")).toBe("true");
+    agreesWithTheStore(view);
+  });
+
+  it("re-bullets an ordered task item that arrives by paste", async () => {
+    const view = await mountEditor("intro\n");
+    const pasted = view.state.schema.nodeFromJSON({
+      type: "ordered_list",
+      attrs: { order: 1, spread: false },
+      content: [
+        {
+          type: "list_item",
+          attrs: { checked: false, label: "1.", listType: "ordered", spread: false },
+          content: [{ type: "paragraph", content: [{ type: "text", text: "b" }] }],
+        },
+      ],
+    });
+    view.dispatch(view.state.tr.replaceWith(view.state.doc.content.size, view.state.doc.content.size, pasted));
+
+    expect(serialize(view)).toBe("intro\n\n* [ ] b\n");
+    expect(boxes(view)).toHaveLength(1);
+    agreesWithTheStore(view);
+  });
+
   it("turns a paragraph into a task line and puts the caret in it", async () => {
     const view = await mountEditor("water the plants\n");
     caretInLine(view, 0);

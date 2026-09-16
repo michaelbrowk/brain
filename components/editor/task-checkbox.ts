@@ -1652,6 +1652,74 @@ function taskCommand(mode: "ensure" | "toggle", trigger: TaskTrigger | null): Co
   };
 }
 
+/** NO TASK ITEM EVER STANDS UNDER AN ORDERED LIST.
+ *
+ *  The Task press moves an ordered item to a bullet one, and nobody presses
+ *  anything when a note is opened, pasted into, or imported from Notion.
+ *  `TASK_LINE_RE` in `lib/tasks/task-lines.ts` reads `- [ ]` and nothing
+ *  else, so `1. [ ] b` draws a checkbox the editor understands and the store
+ *  cannot see, and one such line makes every + Task on the page answer "This
+ *  note could not be read".
+ *
+ *  Every way in lands here: the document the editor opened with, through the
+ *  plugin's view, and every transaction after it, through
+ *  `appendTransaction`. The store's regex is left alone — the editor holds
+ *  the shape the store already reads.
+ */
+function orderedTaskItems(doc: ProseNode): number[] {
+  const positions: number[] = [];
+  doc.descendants((node, pos, parent) => {
+    if (parent?.type.name === "ordered_list" && isTaskItem(node)) positions.push(pos);
+  });
+  return positions;
+}
+
+/** The item keeps whatever `checked` it arrived with: an imported `1. [x]` is
+ *  a task that is done, and re-bulleting it is not un-ticking it. */
+function rebulletItem(tr: Transaction, pos: number) {
+  const node = tr.doc.nodeAt(pos);
+  if (!node || node.type.name !== "list_item") return;
+  tr.setNodeMarkup(pos, undefined, { ...node.attrs, ...BULLET_ITEM_ATTRS });
+}
+
+function rebulletOrderedTasks(state: EditorState): Transaction | null {
+  const bulletListType = state.schema.nodes.bullet_list;
+  if (!bulletListType) return null;
+  // One at a time, re-read from the transaction's own doc each turn:
+  // converting an item splits the list it stood in, which moves every
+  // position after it. Bounded by the count the document arrived with, so a
+  // conversion that cannot happen costs a turn rather than spinning.
+  const budget = orderedTaskItems(state.doc).length;
+  if (budget === 0) return null;
+  const tr = state.tr;
+  for (let turn = 0; turn < budget; turn += 1) {
+    const [pos] = orderedTaskItems(tr.doc);
+    if (pos === undefined) break;
+    const steps = tr.steps.length;
+    const moved = convertOrderedItem(tr, pos, bulletListType);
+    if (moved !== null) rebulletItem(tr, moved);
+    if (tr.steps.length === steps) break;
+  }
+  return tr.steps.length === 0 ? null : tr;
+}
+
+const orderedTaskRebullet = $prose(
+  () =>
+    new Plugin({
+      view: (editorView) => {
+        const tr = rebulletOrderedTasks(editorView.state);
+        // Not an edit the reader made, so undo does not put the shape the
+        // store cannot read back.
+        if (tr) editorView.dispatch(tr.setMeta("addToHistory", false));
+        return {};
+      },
+      appendTransaction: (transactions, _old, state) =>
+        transactions.some((tr) => tr.docChanged)
+          ? rebulletOrderedTasks(state)
+          : null,
+    }),
+);
+
 /** A transaction landed in the editor.
  *
  *  A press changes the document without moving the browser's own selection,
@@ -1685,6 +1753,7 @@ export const taskCheckbox = [
   taskCheckboxView,
   taskSplitKeymap,
   taskPromote,
+  orderedTaskRebullet,
   taskDocNotifier,
   ensureTaskCommand,
   toggleTaskCommand,

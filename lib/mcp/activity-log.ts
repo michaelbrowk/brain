@@ -278,6 +278,17 @@ type DirectoryState = DirectoryCounts & FileStamp;
  *  check neither process would ever see the cap. */
 const directoryState = new Map<string, DirectoryState>();
 
+/** What this process currently believes about one state directory, or `null`
+ *  before it has looked. The byte cap is checked against `bytes` and trims the
+ *  file when it trips, so a count that drifts from the file's real size trims
+ *  at the wrong moment; this is what lets a test hold the two against each
+ *  other. */
+export function mcpActivityCacheState(
+  dir: string,
+): Readonly<DirectoryState> | null {
+  return directoryState.get(dir) ?? null;
+}
+
 function countsFromLines(lines: readonly string[]): DirectoryCounts {
   let bytes = 0;
   for (const raw of lines) bytes += Buffer.byteLength(raw, "utf8") + 1;
@@ -318,7 +329,12 @@ export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> 
       state.mtimeMs !== stamp.mtimeMs
     ) {
       validLines = (await readLines(dir)).filter((raw) => parseLine(raw) !== null);
-      state = { ...countsFromLines(validLines), ...stamp };
+      // The byte total is the file's own size, not the sum of the lines that
+      // parsed back. A crash leaves a last line with no closing newline, and
+      // a line nobody can parse is still bytes on disk: counting a newline per
+      // line and skipping the rest put the cached total either side of what
+      // the file holds, and the byte cap trims against that total.
+      state = { lines: validLines.length, bytes: stamp.size, ...stamp };
       directoryState.set(dir, state);
     }
 

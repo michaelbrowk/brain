@@ -235,13 +235,57 @@ const MONTHS = [
 
 const WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
+/** The same seven and the same twelve, said in full. Two surfaces need the
+ *  short form and one needs the long one, and a word abbreviated in a caption
+ *  under a 30px title reads as a table cell. */
+const WEEKDAYS_LONG = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+];
+
+const MONTHS_LONG = [
+  "January",
+  "February",
+  "March",
+  "April",
+  "May",
+  "June",
+  "July",
+  "August",
+  "September",
+  "October",
+  "November",
+  "December",
+];
+
 /** `13 Sep`: the pill's tail and a deadline, one shape. */
 export function dayLabel(day: string): string {
   return `${Number(day.slice(8, 10))} ${MONTHS[Number(day.slice(5, 7)) - 1]}`;
 }
 
+/** Which of the seven, as an index, so the short word and the long one come
+ *  off one derive rather than two that could disagree about a Sunday. */
+function weekdayIndex(day: string): number {
+  return new Date(dayNumber(day) * 86_400_000).getUTCDay();
+}
+
 export function weekdayOf(day: string): string {
-  return WEEKDAYS[new Date(dayNumber(day) * 86_400_000).getUTCDay()] as string;
+  return WEEKDAYS[weekdayIndex(day)] as string;
+}
+
+/** `Tuesday, 16 September`: the caption under the Tasks column's title, and
+ *  the only place a day is said in full. The pill above it keeps `dayLabel`
+ *  — the same date twice in one register would read as a repeat, and the two
+ *  are never on screen together anyway. */
+export function longDayLabel(day: string): string {
+  return `${WEEKDAYS_LONG[weekdayIndex(day)]}, ${Number(day.slice(8, 10))} ${
+    MONTHS_LONG[Number(day.slice(5, 7)) - 1]
+  }`;
 }
 
 /** THE WORD A FIELD IS NAMED BY.

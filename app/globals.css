@@ -2900,7 +2900,14 @@ a.brain-share-url:active {
    is out of the accessibility tree and out of the tab order, and it still
    holds its box, so the pills at the right of the layer never move and no
    gap opens under the scroll. */
-.brain-crumb-lone {
+/* THE TASKS COLUMN'S LIST PILL WAITS ON THIS SAME RULE, shared by selector
+   rather than copied so the two cannot drift apart. That head pill says the
+   word the title on paper says a few centimetres below it, which is the lone
+   crumb's argument on a second surface. Its flag is `data-title-out` on
+   `.brain-tasks`, off an observer on the title button itself
+   (tasks-surface.tsx → useTitleReveal, the hook the page head shares). */
+.brain-crumb-lone,
+.brain-tasks-head > .toolbar-pill {
   visibility: hidden;
   opacity: 0;
   transform: scale(0.96);
@@ -2910,7 +2917,8 @@ a.brain-share-url:active {
     transform 120ms ease-in,
     visibility 0s linear 120ms;
 }
-.brain-main[data-title-out] .brain-crumb-lone {
+.brain-main[data-title-out] .brain-crumb-lone,
+.brain-tasks[data-title-out] .brain-tasks-head > .toolbar-pill {
   visibility: visible;
   opacity: 1;
   transform: scale(1);
@@ -2922,13 +2930,15 @@ a.brain-share-url:active {
 /* §6: a crossfade of 160ms or under, no scale. The reveal itself stays — it
    is what the pill means here, not decoration. */
 @media (prefers-reduced-motion: reduce) {
-  .brain-crumb-lone {
+  .brain-crumb-lone,
+  .brain-tasks-head > .toolbar-pill {
     transform: none;
     transition:
       opacity 120ms ease-in,
       visibility 0s linear 120ms;
   }
-  .brain-main[data-title-out] .brain-crumb-lone {
+  .brain-main[data-title-out] .brain-crumb-lone,
+  .brain-tasks[data-title-out] .brain-tasks-head > .toolbar-pill {
     transform: none;
     transition:
       opacity 160ms var(--ease-out),
@@ -5696,10 +5706,54 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
   max-width: 700px;
   margin-inline: auto;
 }
-/* The rows start below the floating head: inset, the head, and the 8 of air
-   that separates chrome from content everywhere else. */
+/* THE COLUMN STARTS WHERE A NOTE'S COLUMN STARTS. `--canvas-top` — the pill
+   band plus 28, 76 on desktop and 72 on a phone — is the line a page title
+   sits on, and the Tasks column has a title of its own now, so it takes the
+   same one rather than the inset + head + 8 it used while the first thing on
+   it was a row. Twenty pixels lower, and the list reads at a page's rhythm
+   instead of hanging off the top of the screen. */
 .brain-tasks-scrollpad {
-  padding-top: calc(var(--inset) + var(--task-chrome) + 8px);
+  padding-top: var(--canvas-top);
+}
+/* The head a note has, in the note's registers. The block keeps the inset the
+   rows keep, so the title's word starts on the row capsule's own left edge;
+   the button's fill bleeds out past it by its padding, the way the page
+   head's icon button does. */
+.brain-tasks-title-block {
+  padding-inline: var(--inset);
+}
+/* The title IS the list switcher, so it is a button — quiet at rest, the ink
+   tint under the pointer, the product's press. The negative margins cancel
+   its own padding, so the box it occupies is the text's box and the head
+   measures what a note's head measures. */
+.brain-tasks-title {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  margin: -2px -8px 14px;
+  padding: 2px 8px;
+  border-radius: var(--r-md);
+  color: var(--ink);
+  text-align: left;
+  transition:
+    background-color 160ms var(--ease-out),
+    transform 100ms ease-out;
+}
+@media (hover: hover) {
+  .brain-tasks-title:hover {
+    background-color: var(--fill-hover);
+    transition-duration: 80ms;
+  }
+}
+.brain-tasks-title:active {
+  transform: scale(0.97);
+}
+/* The breadcrumb's own marker weight: ink-4, and small beside a 30px word. */
+.brain-tasks-title-chevron {
+  flex-shrink: 0;
+  color: var(--ink-4);
 }
 /* Below md the mobile tab bar floats over the column's foot, so the rows
    reserve its height at their end: a list whose last row you cannot reach has

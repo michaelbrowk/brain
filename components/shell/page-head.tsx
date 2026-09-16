@@ -27,7 +27,15 @@ import { CollectionRowProperties } from "../collection-view";
 import { StickersInline, newSticker } from "../stickers";
 import { formatAgo } from "@/lib/format-ago";
 import { SaveIndicator } from "./save-indicator";
+import { useTitleReveal } from "./use-title-reveal";
 import { COVER_GRADIENTS, type LoadedPage, type SaveState } from "./helpers";
+
+/** The note's own pair: the flag goes on the shell, and the line is the
+ *  document scroller's top edge. The Tasks column passes its own two. */
+const PAGE_TITLE_REVEAL = {
+  scroller: ".brain-page-scroll",
+  host: ".brain-main",
+} as const;
 
 // value #1 — chrome disappears while writing. The meta-row affordances (add
 // cover, board, smart sort, sticker, empty +Category/+Tag) fade out at rest and
@@ -422,69 +430,6 @@ function CoverPicker({
   );
 }
 
-/** Value #1 — chrome that repeats what the page already says gets out of the
- *  way. A breadcrumb with one segment IS the title, a few centimetres above
- *  it, so it waits: while the title is on screen the shell carries nothing
- *  and the lone crumb stays hidden; when the title leaves the shell takes
- *  `data-title-out` and the crumb materialises (globals.css →
- *  `.brain-crumb-lone`). A crumb carrying an ancestor says something the
- *  title does not, and is gated by none of this.
- *
- *  The line is the scroller's own top, not the bottom of the pill band. The
- *  pills cover a strip at the left of the canvas, not the whole width — the
- *  document column runs to the right of them — so a title level with the
- *  pills is still on screen and still naming the page, and handing over
- *  there would put the same word in two places at once. Leaving at the top
- *  edge makes the handover exact: the crumb takes the name in the frame the
- *  title gives it up.
- *
- *  An IntersectionObserver on the title, the scroll-edge atom's pattern
- *  (DESIGN.md v2 → §7): off the scroll event path, and the flag lands on the
- *  DOM rather than in state, so crossing the line never re-renders the
- *  shell. Hidden is the rest state, so the crumb cannot flash before the
- *  first callback — an engine without the observer is handed the crumb it
- *  has always had. */
-function useTitleReveal(ref: React.RefObject<HTMLTextAreaElement | null>) {
-  useEffect(() => {
-    const title = ref.current;
-    const scroller = title?.closest<HTMLElement>(".brain-page-scroll");
-    const shell = title?.closest<HTMLElement>(".brain-main");
-    if (!title || !scroller || !shell) return;
-    // The flag lives on the shell, which outlives any one title: during a
-    // canvas change two TitleInputs are mounted at once, so the leaving one
-    // must not clear a flag the arriving one has just set. Each observer
-    // clears only what it set itself. Harmless today — navigation always
-    // opens a page at the top — and not harmless the day scroll restoration
-    // lands.
-    let owns = false;
-    const set = () => {
-      owns = true;
-      shell.dataset.titleOut = "";
-    };
-    const clear = () => {
-      if (!owns) return;
-      owns = false;
-      delete shell.dataset.titleOut;
-    };
-    if (typeof IntersectionObserver === "undefined") {
-      set();
-      return clear;
-    }
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (entry.isIntersecting) clear();
-        else set();
-      },
-      { root: scroller, threshold: 0 },
-    );
-    observer.observe(title);
-    return () => {
-      observer.disconnect();
-      clear();
-    };
-  }, [ref]);
-}
-
 function TitleInput({
   pageId,
   value,
@@ -500,7 +445,7 @@ function TitleInput({
 }) {
   const [draft, setDraft] = useState(value);
   const ref = useRef<HTMLTextAreaElement>(null);
-  useTitleReveal(ref);
+  useTitleReveal(ref, PAGE_TITLE_REVEAL);
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
       const recovered = recoverTitleDraft(localStorage, pageId, value);

@@ -18,6 +18,7 @@ import { DUR, EASE_OUT, SPRING_MATERIALIZE, materializeFade } from "@/lib/motion
 import type { TaskView } from "@/lib/tasks/model";
 
 import { type TasksListState } from "./shell/helpers";
+import { useTitleReveal } from "./shell/use-title-reveal";
 import { useTaskActions, type TaskFieldPatch } from "./tasks-actions";
 import {
   TaskRequestError,
@@ -28,7 +29,7 @@ import {
 } from "./tasks-client";
 import { onTaskCommand, type TaskCommand } from "./tasks-commands";
 import { TasksGhostRow } from "./tasks-ghost-row";
-import { TasksListMenu } from "./tasks-list-menu";
+import { TasksListMenu, TasksListTitle } from "./tasks-list-menu";
 import {
   EVENING_GROUP_KEY,
   belongs,
@@ -36,6 +37,7 @@ import {
   countsFor,
   headerLabel,
   listOf,
+  longDayLabel,
   sectionsFor,
   type TaskCounts,
   type TaskSection,
@@ -67,6 +69,14 @@ export interface TasksSurfaceProps {
   pageTitleOf?: (pageId: string) => string | undefined;
   onOpenPage?: (pageId: string) => void;
 }
+
+/** The column's own pair for the reveal the lone breadcrumb uses: the line is
+ *  this scroller's top edge, and the flag goes on the surface, where the head
+ *  pill waiting above can see it. */
+const TASKS_TITLE_REVEAL = {
+  scroller: ".brain-tasks-scroll",
+  host: ".brain-tasks",
+} as const;
 
 /** The morning entrance, once per calendar day. */
 const ENTRANCE_KEY = "brain.tasks.entrance";
@@ -256,6 +266,20 @@ export function TasksSurface({
   const empty =
     today !== "" && sections.length === 0 && !state.loading && state.error === null;
 
+  /* THE CAPTION IS ONLY TODAY'S. "Today" is the one word on this surface whose
+     meaning is a date, so the line under it says which one, in full, the way a
+     note's meta line says when it was edited. Upcoming, Someday, the Inbox,
+     the Logbook and every category mean the same thing on every day of the
+     year, and a line under them would be reserved space with nothing to put in
+     it — the counts the reader might want are already on the group headers. */
+  const caption =
+    view.kind === "list" && view.list === "today" && today !== ""
+      ? longDayLabel(today)
+      : null;
+
+  const titleRef = useRef<HTMLButtonElement>(null);
+  useTitleReveal(titleRef, TASKS_TITLE_REVEAL);
+
   return (
     <section aria-label="Tasks" data-testid="tasks-surface" className="brain-tasks">
       <header className="brain-tasks-head">
@@ -272,6 +296,23 @@ export function TasksSurface({
             unconditional and its height follows --mail-chrome in CSS (§7) */}
         <ScrollEdge variant="blur" steps={1} />
         <div className="brain-tasks-scrollfoot brain-tasks-scrollpad">
+          {/* The head a note has, in the note's own registers: the list's name
+              on paper where a page title stands, and the one caption Today
+              carries under it on the meta line's spacing. It comes FIRST, so
+              Tab reaches the switcher before the capture field and a reader
+              reads the column's name before its rows. */}
+          <div className="brain-tasks-title-block">
+            <TasksListTitle
+              view={view}
+              categories={categories}
+              titleRef={titleRef}
+              onSelect={(next) => onSelectList?.(next)}
+            />
+            {caption !== null && (
+              <div className="brain-page-meta text-caption">{caption}</div>
+            )}
+          </div>
+
           {capturable && (
             <ul className="brain-tasks-rows" aria-label="New task">
               <TasksGhostRow

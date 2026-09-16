@@ -77,10 +77,8 @@ describe("outgoing attachments and the agent mark on a proposal", () => {
     });
   }
 
-  function rawOf(submission: { readonly message: { readonly rawRfc2822Base64Url: string } }) {
-    return Buffer.from(submission.message.rawRfc2822Base64Url, "base64url").toString(
-      "utf8",
-    );
+  function rawOf(submission: { readonly message: { readonly rawRfc2822: Buffer } }) {
+    return submission.message.rawRfc2822.toString("utf8");
   }
 
   it("carries a page's file into the multipart body the provider submits", () => {
@@ -374,7 +372,14 @@ describe("provider-neutral mail send service", () => {
     expect(repeated).toEqual({ ...first, created: false });
     expect(provider.send).toHaveBeenCalledTimes(1);
     expect(rawReference).not.toBeNull();
-    expect((rawReference as unknown as Buffer).every((byte: number) => byte === 0)).toBe(true);
+    // The buffer the provider was handed is the record's own message, and
+    // nothing wipes it: zeroing it would hand the compare-and-swap after the
+    // send a message that no longer matches the row it is swapping. It was
+    // zeroed here while the record carried the message as its own base64url
+    // string, which the row no longer holds.
+    expect((rawReference as unknown as Buffer).toString("utf8")).toContain(
+      "To: friend@example.net\r\n",
+    );
     await expect(service.status(first.operationId)).resolves.toEqual({
       apiVersion: 1,
       operationId: first.operationId,
@@ -885,6 +890,16 @@ class MemoryMailSendStore implements MailSendStore {
   }
 }
 
-function clone<T>(value: T): T {
-  return structuredClone(value);
+/** A store round trip, including the part SQLite does for the real one: the
+ *  message goes to its own column and comes back as bytes. `structuredClone`
+ *  turns a Buffer into a plain Uint8Array, so the message is put back the way
+ *  the store puts it back. */
+function clone<T extends { readonly message: { readonly rawRfc2822: Buffer } }>(
+  value: T,
+): T {
+  const copy = structuredClone(value);
+  return {
+    ...copy,
+    message: { ...copy.message, rawRfc2822: Buffer.from(value.message.rawRfc2822) },
+  };
 }

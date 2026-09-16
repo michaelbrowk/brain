@@ -55,13 +55,18 @@ export class MailSendError extends Error {
    *  enqueue, which is the safe reading of a failure nobody marked. */
   readonly enqueued: boolean;
 
+  /** What the code alone cannot say, for the log and for the thrown error.
+   *  A size refusal names the size; the wire still carries only the code. */
+  readonly detail: string | null;
+
   constructor(
     readonly code: MailSendErrorCode,
-    options: { readonly enqueued?: boolean } = {},
+    options: { readonly enqueued?: boolean; readonly detail?: string } = {},
   ) {
-    super(code);
+    super(options.detail === undefined ? code : `${code}: ${options.detail}`);
     this.name = "MailSendError";
     this.enqueued = options.enqueued === true;
+    this.detail = options.detail ?? null;
   }
 }
 
@@ -167,7 +172,21 @@ export interface StoredMailSendMessage {
   readonly messageId: string;
   readonly envelope: MailEnvelope;
   readonly providerThreadId: string | null;
-  readonly rawRfc2822Base64Url: string;
+  /**
+   * The finished message as bytes, not as base64url.
+   *
+   * It used to be a string, and that string was the whole reason the outgoing
+   * attachment cap sat at 5 MiB: the record held the message base64url'd, the
+   * outbox row held `JSON.stringify` of that string, and the enqueue peaked at
+   * 278 MiB with 10 MiB of files against `MemoryHigh=192M`. The row carries a
+   * BLOB now (`raw_rfc2822`, schema 3) and the record carries the same bytes,
+   * so the message exists once per turn on either side of the store.
+   *
+   * The two digests below stay beside it and are still what a read verifies:
+   * they are what `smtp_submission_state` pins its identity on, and a BLOB can
+   * be corrupted as easily as a string could.
+   */
+  readonly rawRfc2822: Buffer;
   readonly rawRfc2822Bytes: number;
   readonly rawRfc2822Sha256: string;
 }
@@ -469,10 +488,13 @@ export class ProviderNeutralMailSendService implements MailSendService {
     }
     current = claimed;
 
-    let raw: Buffer | null = null;
     let riskMarked = false;
     try {
-      raw = decodeStoredRaw(current.message);
+      // The record's own bytes, verified against its digests. Nothing wipes
+      // them on the way out: the record every transition below carries points
+      // at this same buffer, and zeroing it would hand the compare-and-swap a
+      // message that no longer matches the row it is swapping.
+      const raw = verifyStoredRaw(current.message);
       const outcome = await provider.send(
         {
           operationId: current.operationId,
@@ -582,8 +604,6 @@ export class ProviderNeutralMailSendService implements MailSendService {
         return await this.readRequired(current.operationId);
       }
       return safe;
-    } finally {
-      raw?.fill(0);
     }
   }
 
@@ -907,7 +927,6 @@ export function createMailSendSubmissionProposal(
   const messageId = createMessageId(options.account, options.input.idempotencyKey);
   const reply =
     options.reply === null ? null : validateReplyContext(options.reply);
-  let rawRfc2822: Buffer | null = null;
   const attachments: {
     readonly filename: string;
     readonly mimeType: string;
@@ -937,7 +956,6 @@ export function createMailSendSubmissionProposal(
       origin: options.input.origin,
       agentLine: options.input.agentLine,
     });
-    rawRfc2822 = built.rawRfc2822;
     return freezeSubmission({
       version: 0,
       operationId: options.operationId,
@@ -952,10 +970,10 @@ export function createMailSendSubmissionProposal(
         messageId,
         envelope: built.envelope,
         providerThreadId: reply?.providerThreadId ?? null,
-        rawRfc2822Base64Url: rawRfc2822.toString("base64url"),
-        rawRfc2822Bytes: rawRfc2822.byteLength,
+        rawRfc2822: built.rawRfc2822,
+        rawRfc2822Bytes: built.rawRfc2822.byteLength,
         rawRfc2822Sha256: createHash("sha256")
-          .update(rawRfc2822)
+          .update(built.rawRfc2822)
           .digest("hex"),
       },
       providerMessageId: null,
@@ -966,11 +984,11 @@ export function createMailSendSubmissionProposal(
       updatedAt: options.createdAt,
     });
   } finally {
-    // The buffers go, the strings cannot: `rawRfc2822Base64Url` on the record
-    // this returns is the same payload as an immutable string, and it lives
-    // until the queued submission is written and collected. The wipe bounds
-    // how long the decoded copy exists, it does not erase the message.
-    rawRfc2822?.fill(0);
+    // The attachments were decoded here and nothing else holds them, so they
+    // go. The finished message stays: it is the record's own `rawRfc2822`, the
+    // bytes the outbox row is written from and the transport sends. It lives
+    // until the queued submission is written and collected, which is one turn,
+    // the same lifetime the base64url string had before it.
     for (const attachment of attachments) attachment.bytes.fill(0);
   }
 }
@@ -993,22 +1011,27 @@ export function mailSendSubmissionReplayProposal(
   });
 }
 
-function decodeStoredRaw(message: StoredMailSendMessage): Buffer {
+/**
+ * The stored message, checked against the digests stored beside it.
+ *
+ * No decode any more: the store read the BLOB and the record carries those
+ * bytes, so this verifies rather than converts, and what it returns is the
+ * record's own buffer rather than a second copy of the message.
+ */
+function verifyStoredRaw(message: StoredMailSendMessage): Buffer {
   if (
-    !/^[A-Za-z0-9_-]+$/.test(message.rawRfc2822Base64Url) ||
+    !Buffer.isBuffer(message.rawRfc2822) ||
     !Number.isSafeInteger(message.rawRfc2822Bytes) ||
     message.rawRfc2822Bytes < 1 ||
     !/^[a-f0-9]{64}$/.test(message.rawRfc2822Sha256)
   ) {
     throw new MailSendError("mail_send_service_unavailable");
   }
-  const raw = Buffer.from(message.rawRfc2822Base64Url, "base64url");
+  const raw = message.rawRfc2822;
   if (
     raw.byteLength !== message.rawRfc2822Bytes ||
-    raw.toString("base64url") !== message.rawRfc2822Base64Url ||
     createHash("sha256").update(raw).digest("hex") !== message.rawRfc2822Sha256
   ) {
-    raw.fill(0);
     throw new MailSendError("mail_send_service_unavailable");
   }
   return raw;

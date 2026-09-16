@@ -149,7 +149,7 @@ function submission(
         bcc: Object.freeze([]),
       }),
       providerThreadId: null,
-      rawRfc2822Base64Url: raw.toString("base64url"),
+      rawRfc2822: raw,
       rawRfc2822Bytes: raw.byteLength,
       rawRfc2822Sha256: createHash("sha256").update(raw).digest("hex"),
     }),

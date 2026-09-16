@@ -48,6 +48,7 @@ import { Icon } from "./ui/icon";
 import { Empty } from "./ui/empty";
 import type { ToastOptions } from "./ui/primitives";
 import { ScrollEdge } from "./ui/scroll-edge";
+import { LAYER_IN_DOCUMENT } from "./use-layer-signal";
 
 export interface TasksSurfaceProps {
   /** The open list, or a category view. Navigation state, so Back and
@@ -219,15 +220,20 @@ export function TasksSurface({
     [actions, onToast, today, view],
   );
 
-  /** WHICH ROW HAS A LAYER OPEN ABOVE IT, if any. A ref and not state: it is
-   *  read on a keydown and nothing on screen is drawn from it, so a render per
-   *  panel would be a render for nobody. Keyed by row, so the fold of one row
-   *  cannot take down the flag another row's panel raised, and the capture row
-   *  answers under a name of its own. */
-  const layerRow = useRef<string | null>(null);
+  /** WHICH LAYERS ARE STANDING OVER THIS COLUMN, under the name of whatever
+   *  raised each one: a row's key, or the capture row's. A ref and not state,
+   *  because it is read on a keydown and nothing on screen is drawn from it,
+   *  so a render per panel would be a render for nobody.
+   *
+   *  A SET AND NOT ONE SLOT. Two names can stand at once — a chip pressed while
+   *  another panel is up raises the second before Radix takes the first down —
+   *  and one slot would let the older close empty a register the newer panel is
+   *  still standing in. The order the panels actually arrive in makes that
+   *  unreachable today; a set makes it unreachable without the argument. */
+  const layers = useRef(new Set<string>());
   const noteLayer = useCallback((key: string, open: boolean) => {
-    if (open) layerRow.current = key;
-    else if (layerRow.current === key) layerRow.current = null;
+    if (open) layers.current.add(key);
+    else layers.current.delete(key);
   }, []);
 
   const selectNext = useCallback(
@@ -239,7 +245,7 @@ export function TasksSurface({
   );
 
   useArrowKeys({ order, selectedId, setSelectedId });
-  useEscapeLayers({ layerRow, setExpandedId });
+  useEscapeLayers({ layers, setExpandedId });
   useNamedTask({
     tasks: state.tasks,
     loading: state.loading,
@@ -836,19 +842,27 @@ function useArrowKeys({
  *  every panel a chip opens is portalled to the end of the document, and the
  *  caret in a title is an `input` with no flag on anything.
  *
- *  AND THE ORDERING IS THE WHOLE OF IT. Radix dismisses its own layers from a
- *  `keydown` listener on the DOCUMENT in the capture phase
- *  (`@radix-ui/react-dismissable-layer`), so any listener further along the
- *  path reads the row's signal with the layer already gone and folds the row
- *  on the key that closed the panel. The window's capture phase is the FIRST
- *  stop a key makes, before the document's, so the answer here is read while
- *  the layer is still standing to be read. */
+ *  AND A LAYER NOBODY REPORTED IS STILL A LAYER. The register holds what this
+ *  column draws; ⌘K over an open row draws a modal it never hears about, and
+ *  the key that dismissed it was folding the row underneath — the same double
+ *  dismissal this hook exists to remove, one level up. So the document is read
+ *  too, for the shapes a portalled layer has and for nothing that stands
+ *  permanently (`LAYER_IN_DOCUMENT` keeps that reasoning).
+ *
+ *  AND THE PHASE IS WHAT MAKES EITHER ANSWER READABLE. Radix dismisses its own
+ *  layers from a `keydown` listener on the DOCUMENT in the capture phase
+ *  (`@radix-ui/react-dismissable-layer`), and a panel that is not React's
+ *  takes itself out of the document inside that same key. The window's capture
+ *  phase is the FIRST stop a key makes, before the document's, so both the
+ *  register and the document are read while the layer is still there to be
+ *  read. Take the `true` off the listener below and the row folds on the key
+ *  that closed the panel. */
 function useEscapeLayers({
-  layerRow,
+  layers,
   setExpandedId,
 }: {
-  /** The row with a layer open above it, or `null`. */
-  layerRow: React.RefObject<string | null>;
+  /** The names of the layers standing over the column. Empty means none. */
+  layers: React.RefObject<Set<string>>;
   setExpandedId: (id: string | null) => void;
 }) {
   useEffect(() => {
@@ -856,10 +870,11 @@ function useEscapeLayers({
       if (event.key !== "Escape") return;
       // The layer's key, and the layer's own listener is the one that answers
       // it. The row is the next one.
-      if (layerRow.current !== null) return;
+      if (layers.current.size > 0) return;
+      if (document.querySelector(LAYER_IN_DOCUMENT) !== null) return;
       setExpandedId(null);
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [layerRow, setExpandedId]);
+  }, [layers, setExpandedId]);
 }

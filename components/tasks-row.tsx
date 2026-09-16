@@ -44,7 +44,7 @@ import {
 import { TasksRepeatMenu } from "./tasks-repeat-menu";
 import { TasksWhenPicker, type WhenValue } from "./tasks-when-picker";
 import { Icon } from "./ui/icon";
-import { useLayerSignal } from "./use-layer-signal";
+import { LAYER_IN_DOCUMENT, useLayerSignal } from "./use-layer-signal";
 
 /** THE ROW, AND THE ONE DIRECTION IT CAN LEAVE IN.
  *
@@ -296,6 +296,12 @@ export function TasksRow({
   );
   // A row taken off the list with a layer still up leaves nothing behind: the
   // column would go on believing a panel is standing and never fold again.
+  //
+  // THIS IS THE SECOND BELT, not the one holding the trousers. Every panel
+  // here is React-owned by this row even though it is portalled, so an unmount
+  // of the row unmounts the panel and `useLayerSignal`'s own cleanup has
+  // already said so — which is the guarantee the tests kill. This covers a
+  // layer that is not a component at all, the way the title editor is not.
   useEffect(
     () => () => {
       if (layers.current.size === 0) return;
@@ -1047,16 +1053,24 @@ function useFoldOnOutside({
       // from, and the key is the column's own to spend (`useEscapeLayers`).
       //
       // Two marks, because the two moments are different. `data-task-control`
-      // is on the control and is there before the press; Radix's
-      // `data-state="open"` arrives with the panel and is what the focus lands
-      // inside of. Neither can be read off this row, since the panel is
-      // portalled to the end of the document.
+      // is on the control and is there before the press; the panel's own shape
+      // arrives with the panel and is what the focus lands inside of.
+      // `LAYER_IN_DOCUMENT` names the three shapes a PORTALLED layer has and
+      // nothing that stands permanently, which is the invariant the whole
+      // clause rests on: a bare `[data-state='open']` here would let one
+      // `Collapsible` in the sidebar make an expanded row unfoldable by
+      // pressing anywhere inside it. `components/use-layer-signal.ts` keeps
+      // the reasoning with the selector.
       if (
         target instanceof Element &&
-        target.closest("[data-task-control], [data-state='open']") !== null
+        target.closest(`[data-task-control], ${LAYER_IN_DOCUMENT}`) !== null
       ) {
         return false;
       }
+      // And the row's OWN panels, which are answered from inside the row: the
+      // chip that opened one carries Radix's flag and lives here, so this
+      // reads a trigger rather than a portalled panel and is not the selector
+      // above.
       return row.querySelector("[data-state='open']") === null;
     };
 

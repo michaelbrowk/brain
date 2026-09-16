@@ -114,7 +114,7 @@ import {
   writeAgentSettings,
 } from "@/lib/mcp/agent-settings";
 import type { MailSendInput } from "@/lib/mail/message-types";
-import { mailNotificationId } from "@/lib/notifications/ids";
+import { decodeAgentMailHref, mailNotificationId } from "@/lib/notifications/ids";
 import {
   appendNotification,
   listNotifications,
@@ -1459,6 +1459,10 @@ describe("the task write tools", () => {
   // one: a fixed path collides across concurrent vitest processes, which is
   // what made `lib/mcp/activity-log.test.ts` flaky under parallel load.
   let stateRoot: string;
+  // The centre, which a write now lands a row in as well. Redirected for the
+  // same reason the log is: a write here must not reach the bell a developer's
+  // own `pnpm dev` is reading.
+  let centreRoot: string;
 
   const view = (overrides: Record<string, unknown> = {}) => ({
     id: TASK_ID,
@@ -1481,6 +1485,9 @@ describe("the task write tools", () => {
     stateRoot = await fs.mkdtemp(
       path.join(os.tmpdir(), "brain-mcp-task-tools-"),
     );
+    centreRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "brain-mcp-task-centre-"),
+    );
     mocks.getStore.mockReset();
     mocks.readTimeZone.mockReset();
     mocks.readTimeZone.mockResolvedValue(null);
@@ -1495,6 +1502,7 @@ describe("the task write tools", () => {
     vi.stubEnv("AUTH_SECRET", "test-auth-secret-with-at-least-32-bytes");
     vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "https://brain.example.test");
     vi.stubEnv("BRAIN_MCP_STATE_DIR", stateRoot);
+    vi.stubEnv("BRAIN_NOTIFICATIONS_STATE_DIR", centreRoot);
     vi.stubEnv("BRAIN_OAUTH_STATE_DIR", path.join(stateRoot, "oauth"));
   });
 
@@ -1502,10 +1510,12 @@ describe("the task write tools", () => {
     // The activity line is fire and forget, so a write a test triggered can
     // still be in flight when the next test's beforeEach points the state
     // directory somewhere else. Wait for it to land in this test's own
-    // directory before that directory goes away.
+    // directory before that directory goes away. The centre's row is written
+    // inside that same turn, so this waits for both.
     await flushTaskActivityForTests();
     vi.unstubAllEnvs();
     await fs.rm(stateRoot, { recursive: true, force: true });
+    await fs.rm(centreRoot, { recursive: true, force: true });
   });
 
   it("creates an unlinked task and never a linked one", async () => {
@@ -1900,6 +1910,10 @@ describe("the task write tools", () => {
     expect(moved.isError).toBe(true);
 
     mocks.getStore.mockResolvedValue({
+      // `delete_task` reads the record's title before it goes, for the row the
+      // notification centre draws; a record the store does not hold answers
+      // undefined and the delete refuses on its own.
+      getTask: vi.fn().mockReturnValue(undefined),
       deleteTask: vi.fn().mockRejectedValue(new NotFoundError("task-missing")),
     });
     const missing = await toolPayload(
@@ -2049,7 +2063,10 @@ describe("the task write tools", () => {
 
   it("deletes one task and answers ok", async () => {
     const deleteTask = vi.fn().mockResolvedValue(undefined);
-    mocks.getStore.mockResolvedValue({ deleteTask });
+    mocks.getStore.mockResolvedValue({
+      getTask: vi.fn().mockReturnValue(view()),
+      deleteTask,
+    });
 
     const { payload } = await toolPayload(
       await callTool("delete_task", { id: TASK_ID }, 720),
@@ -2133,6 +2150,7 @@ describe("the task write tools", () => {
       }),
       pageTasks: vi.fn().mockReturnValue([]),
       createTask,
+      getTask: vi.fn().mockReturnValue(undefined),
       deleteTask: vi.fn().mockRejectedValue(new NotFoundError("task-missing")),
     });
 
@@ -2191,6 +2209,86 @@ describe("the task write tools", () => {
     expect(JSON.stringify(payload)).not.toContain("/notes/");
     const [entry] = await readMcpActivity(1);
     expect(entry).toMatchObject({ tool: "create_task", outcome: "store_failed" });
+  });
+
+  /** THE OWNER HEARS ABOUT IT, not only the log. One row per write that
+   *  worked, naming the task it wrote, and nothing for a write that did not.
+   *  The client name is "Unknown app" because this suite's grant is an id no
+   *  OAuth state store here holds a name for. */
+  it("puts one row in the centre naming the task it wrote", async () => {
+    const createTask = vi.fn().mockResolvedValue(view());
+    mocks.getStore.mockResolvedValue({ createTask });
+
+    await toolPayload(
+      await callTool("create_task", { title: "Water the plants" }, 746),
+    );
+    await flushTaskActivityForTests();
+
+    const rows = await listNotifications(centreRoot);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: "agent-action",
+      title: "Unknown app created a task",
+      body: "Water the plants",
+      href: `/tasks?task=${TASK_ID}`,
+    });
+    expect(rows[0].readAt).toBeUndefined();
+  });
+
+  it("names the task a completion ticked, and opens it", async () => {
+    mocks.getStore.mockResolvedValue({
+      getTask: vi.fn().mockReturnValue(view()),
+      updateTask: vi.fn().mockResolvedValue(view({ done: true })),
+    });
+
+    await toolPayload(
+      await callTool("complete_task", { id: TASK_ID, today: TODAY }, 747),
+    );
+    await flushTaskActivityForTests();
+
+    expect(await listNotifications(centreRoot)).toMatchObject([
+      {
+        kind: "agent-action",
+        title: "Unknown app completed a task",
+        body: "Water the plants",
+        href: `/tasks?task=${TASK_ID}`,
+      },
+    ]);
+  });
+
+  it("names the task a delete took away, and opens the column", async () => {
+    // The title is read before the record goes, out of the store's own
+    // in-memory view, so the row says which task without a file read.
+    mocks.getStore.mockResolvedValue({
+      getTask: vi.fn().mockReturnValue(view()),
+      deleteTask: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await toolPayload(await callTool("delete_task", { id: TASK_ID }, 748));
+    await flushTaskActivityForTests();
+
+    expect(await listNotifications(centreRoot)).toMatchObject([
+      {
+        title: "Unknown app deleted a task",
+        body: "Water the plants",
+        href: "/tasks",
+      },
+    ]);
+  });
+
+  it("puts no row in the centre for a write that was refused", async () => {
+    mocks.getStore.mockResolvedValue({
+      updateTask: vi.fn().mockRejectedValue(new NotFoundError(TASK_ID)),
+    });
+
+    await toolPayload(
+      await callTool("update_task", { id: TASK_ID, title: "Water them" }, 749),
+    );
+    await flushTaskActivityForTests();
+
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({ tool: "update_task", outcome: "not_found" });
+    expect(await listNotifications(centreRoot)).toEqual([]);
   });
 
   it("carries the changed fields on update_task's activity line, joined when several", async () => {
@@ -3138,6 +3236,7 @@ describe("the mail read tools", () => {
 
 describe("save_mail_attachment", () => {
   let stateRoot: string;
+  let centreRoot: string;
 
   /** Nine bytes a PDF reader would accept, because the note store checks the
    *  first bytes against the type they claim and a fixture of letters would
@@ -3188,6 +3287,9 @@ describe("save_mail_attachment", () => {
     stateRoot = await fs.mkdtemp(
       path.join(os.tmpdir(), "brain-mcp-attachment-"),
     );
+    centreRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), "brain-mcp-attachment-centre-"),
+    );
     mocks.getStore.mockReset();
     mocks.createBrainMailClient.mockReset();
     mocks.verifyMcpBearerToken.mockReset();
@@ -3205,11 +3307,13 @@ describe("save_mail_attachment", () => {
     vi.stubEnv("AUTH_SECRET", "test-auth-secret-with-at-least-32-bytes");
     vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "https://brain.example.test");
     vi.stubEnv("BRAIN_MCP_STATE_DIR", stateRoot);
+    vi.stubEnv("BRAIN_NOTIFICATIONS_STATE_DIR", centreRoot);
   });
 
   afterEach(async () => {
     vi.unstubAllEnvs();
     await fs.rm(stateRoot, { recursive: true, force: true });
+    await fs.rm(centreRoot, { recursive: true, force: true });
   });
 
   it("streams the attachment into the store and appends a link for a document", async () => {
@@ -3448,6 +3552,57 @@ describe("save_mail_attachment", () => {
     expect(appendPage).not.toHaveBeenCalled();
     const [entry] = await readMcpActivity(1);
     expect(entry).toMatchObject({ outcome: "blocked_mime" });
+  });
+
+  /** The note the file landed in is what the reader wants, so the row names
+   *  it and opens it. The title comes off the page the tool already read to
+   *  check it exists: no second read, and nothing the sender wrote. */
+  it("puts one row in the centre naming the note the file landed in", async () => {
+    mocks.getStore.mockResolvedValue({
+      readPage: vi.fn().mockResolvedValue({
+        meta: { id: "page-one", title: "Meeting notes" },
+        markdown: "a page",
+        rev: "rev-1",
+      }),
+      saveAttachment: vi.fn().mockResolvedValue({
+        url: "/_attachments-v2/aaaa.pdf",
+        name: "invoice.pdf",
+        size: 9,
+        type: "application/pdf",
+      }),
+      appendPage: vi.fn().mockResolvedValue({ meta: { id: "page-one" } }),
+    });
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        downloadAttachment: async () => ({
+          contentType: "application/pdf",
+          contentDisposition: 'attachment; filename="invoice.pdf"',
+          bytes: PDF_BYTES.byteLength,
+          body: streamOf(PDF_BYTES),
+        }),
+      }).client,
+    );
+
+    await toolPayload(
+      await callTool(
+        "save_mail_attachment",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          attachmentId: "attachment-alpha",
+          page: "page-one",
+        },
+        507,
+      ),
+    );
+
+    expect(await listNotifications(centreRoot)).toMatchObject([
+      {
+        kind: "agent-action",
+        title: "Legacy token saved an attachment",
+        body: "Meeting notes",
+        href: "/p/page-one",
+      },
+    ]);
   });
 
   /** `getStore()` ITSELF CAN FAIL, BEFORE ANY PAGE OR ATTACHMENT WORK STARTS.
@@ -4402,6 +4557,42 @@ describe("update_mail_thread", () => {
     expect(JSON.stringify(entry)).not.toContain("Quarterly");
   });
 
+  /** The row says which way the thread went and carries the thread itself in
+   *  the href, because Mail has no per-thread route and an `agent-action` id
+   *  is a digest with nothing to read back out of it. No subject: the log
+   *  never held one, so the centre cannot either. */
+  it("puts one row in the centre naming the change and the thread", async () => {
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        updateThread: async () => ({
+          apiVersion: 1,
+          thread: fakeThread({ subject: "Quarterly invoice" }),
+        }),
+      }).client,
+    );
+
+    await toolPayload(
+      await callTool(
+        "update_mail_thread",
+        { accountId: FAKE_ACCOUNT_ID, threadId: "thread-alpha", archive: true },
+        305,
+      ),
+    );
+
+    const rows = await listNotifications(centreRoot);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: "agent-action",
+      title: "Legacy token archived a thread",
+    });
+    expect(rows[0].body).toBeUndefined();
+    expect(decodeAgentMailHref(rows[0].href)).toEqual({
+      accountId: FAKE_ACCOUNT_ID,
+      threadId: "thread-alpha",
+    });
+    expect(JSON.stringify(rows)).not.toContain("Quarterly");
+  });
+
   it("logs the refusal reason when the service refuses", async () => {
     mocks.createBrainMailClient.mockReturnValue(
       createMailClientFake({
@@ -4488,7 +4679,11 @@ describe("update_mail_thread", () => {
     );
 
     await vi.waitFor(async () => {
-      const [row] = await listNotifications();
+      // BY ID, NOT BY POSITION. The triage call leaves an `agent-action` row
+      // of its own, stamped now, and the centre is newest first, so the head
+      // of the list is that row and not the letter this test seeded.
+      const rows = await listNotifications();
+      const row = rows.find((held) => held.kind === "mail-new");
       expect(row?.readAt).toBeDefined();
     });
   });
@@ -4522,8 +4717,8 @@ describe("update_mail_thread", () => {
       ),
     );
 
-    const [row] = await listNotifications();
-    expect(row?.readAt).toBeUndefined();
+    const rows = await listNotifications();
+    expect(rows.find((held) => held.kind === "mail-new")?.readAt).toBeUndefined();
   });
 
   it("refuses a brain:read grant before the client or the log is touched", async () => {
@@ -4628,9 +4823,11 @@ describe("update_mail_thread", () => {
 describe("the mail send tools", () => {
   const KEY = "mcp-key-alpha-0001";
   let stateRoot: string;
+  let centreRoot: string;
 
   beforeEach(async () => {
     stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-send-state-"));
+    centreRoot = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-send-centre-"));
     mocks.getStore.mockReset();
     mocks.createBrainMailClient.mockReset();
     mocks.verifyMcpBearerToken.mockReset();
@@ -4646,11 +4843,44 @@ describe("the mail send tools", () => {
     vi.stubEnv("AUTH_SECRET", "test-auth-secret-with-at-least-32-bytes");
     vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "https://brain.example.test");
     vi.stubEnv("BRAIN_MCP_STATE_DIR", stateRoot);
+    vi.stubEnv("BRAIN_NOTIFICATIONS_STATE_DIR", centreRoot);
   });
 
   afterEach(async () => {
     vi.unstubAllEnvs();
     await fs.rm(stateRoot, { recursive: true, force: true });
+    await fs.rm(centreRoot, { recursive: true, force: true });
+  });
+
+  /** A MESSAGE LEFT IN THE OWNER'S NAME, so the bell says so. The row carries
+   *  no recipient and no subject: the log line holds ids only, by design, and
+   *  the centre is downstream of it. */
+  it("puts one row in the centre for a message that went out", async () => {
+    mocks.createBrainMailClient.mockReturnValue(createMailClientFake().client);
+
+    await toolPayload(
+      await callTool(
+        "send_mail",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          to: ["friend@example.net"],
+          subject: "Hello",
+          text: "one line",
+          idempotencyKey: KEY,
+        },
+        890,
+      ),
+    );
+
+    const rows = await listNotifications(centreRoot);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      kind: "agent-action",
+      title: "Legacy token sent a message",
+      href: "/mail",
+    });
+    expect(JSON.stringify(rows)).not.toContain("friend@example.net");
+    expect(JSON.stringify(rows)).not.toContain("Hello");
   });
 
   it("sends with origin mcp, no agent line, and no attachments yet", async () => {
@@ -6065,6 +6295,7 @@ describe("outgoing attachments", () => {
   const TOTAL_CAP = 5 * 1024 * 1024;
   const RELAY_CAP = 1024 * 1024;
   let stateRoot: string;
+  let centreRoot: string;
 
   function pageHolding(...names: string[]) {
     return {
@@ -6093,6 +6324,7 @@ describe("outgoing attachments", () => {
 
   beforeEach(async () => {
     stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-outgoing-"));
+    centreRoot = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-outgoing-centre-"));
     mocks.getStore.mockReset();
     mocks.createBrainMailClient.mockReset();
     mocks.verifyMcpBearerToken.mockReset();
@@ -6106,11 +6338,13 @@ describe("outgoing attachments", () => {
     vi.stubEnv("AUTH_SECRET", "test-auth-secret-with-at-least-32-bytes");
     vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "https://brain.example.test");
     vi.stubEnv("BRAIN_MCP_STATE_DIR", stateRoot);
+    vi.stubEnv("BRAIN_NOTIFICATIONS_STATE_DIR", centreRoot);
   });
 
   afterEach(async () => {
     vi.unstubAllEnvs();
     await fs.rm(stateRoot, { recursive: true, force: true });
+    await fs.rm(centreRoot, { recursive: true, force: true });
   });
 
   it("resolves a page's own file and sends it as base64", async () => {

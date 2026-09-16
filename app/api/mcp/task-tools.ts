@@ -161,6 +161,14 @@ interface TaskMarks {
   task?: string;
   page?: string;
   change?: string;
+  /** THE RECORD'S OWN TITLE, FOR THE BELL AND NOT FOR THE LOG.
+   *
+   *  Every write here gets the record back from the store, so the title is
+   *  already in hand and the row in the notification centre can say which
+   *  task without a second read. It is passed beside the entry rather than
+   *  inside it: the log line's shape is the redaction, and a title has no
+   *  field to enter it through. */
+  label?: string;
 }
 
 async function logTaskWrite(
@@ -178,15 +186,18 @@ async function logTaskWrite(
     client = "Unknown app";
   }
   try {
-    await appendMcpActivity({
-      at: new Date().toISOString(),
-      client,
-      tool,
-      ...(marks.task !== undefined ? { task: marks.task } : {}),
-      ...(marks.page !== undefined ? { page: marks.page } : {}),
-      ...(marks.change !== undefined ? { change: marks.change } : {}),
-      outcome,
-    });
+    await appendMcpActivity(
+      {
+        at: new Date().toISOString(),
+        client,
+        tool,
+        ...(marks.task !== undefined ? { task: marks.task } : {}),
+        ...(marks.page !== undefined ? { page: marks.page } : {}),
+        ...(marks.change !== undefined ? { change: marks.change } : {}),
+        outcome,
+      },
+      marks.label === undefined ? undefined : { label: marks.label },
+    );
   } catch (cause) {
     // The write already landed. A log line that cannot be appended must not
     // turn a task that exists into a transport error, because the agent would
@@ -481,6 +492,7 @@ export function registerTaskTools(server: McpToolServer): void {
         };
         const task = await store.createTask(input);
         marks.task = task.id;
+        marks.label = task.title;
         return ok({ task });
       }),
   );
@@ -582,6 +594,7 @@ export function registerTaskTools(server: McpToolServer): void {
           src: "claude",
         });
         marks.task = task.id;
+        marks.label = task.title;
         return ok({ task });
       }),
   );
@@ -632,7 +645,9 @@ export function registerTaskTools(server: McpToolServer): void {
         marks.change = Object.keys(patch)
           .filter((key) => key !== "src")
           .join("+");
-        return ok({ task: await store.updateTask(id, patch) });
+        const task = await store.updateTask(id, patch);
+        marks.label = task.title;
+        return ok({ task });
       }),
   );
 
@@ -677,6 +692,7 @@ export function registerTaskTools(server: McpToolServer): void {
         // through the same fallback list_tasks uses, never a bare UTC 0: a
         // completion near local midnight would read the wrong day under it.
         const day = await callerDay(today, offsetMinutes);
+        marks.label = task.title;
         return ok({ task, list: listOf(task, today, day.offsetMinutes) });
       }),
   );
@@ -715,6 +731,7 @@ export function registerTaskTools(server: McpToolServer): void {
         // same fallback as complete_task keeps the two answers derived one
         // way rather than two.
         const day = await callerDay(today, offsetMinutes);
+        marks.label = task.title;
         return ok({ task, list: listOf(task, today, day.offsetMinutes) });
       }),
   );
@@ -733,6 +750,10 @@ export function registerTaskTools(server: McpToolServer): void {
         }
         marks.task = id;
         const store = await getStore();
+        // The title before the record goes, out of the store's own in-memory
+        // view: the row in the centre says which task was deleted, and a read
+        // after the delete would have nothing to name.
+        marks.label = store.getTask(id)?.title;
         await store.deleteTask(id, "claude");
         return ok({ ok: true });
       }),

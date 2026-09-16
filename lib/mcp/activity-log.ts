@@ -1,5 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import { agentActionNotification } from "@/lib/notifications/agent-producer";
+import { appendNotification } from "@/lib/notifications/store";
 import { atomicWrite } from "@/lib/store/atomic";
 import { mcpStateDirectory } from "./state-dir";
 
@@ -13,6 +15,12 @@ import { mcpStateDirectory } from "./state-dir";
  *  address, a body or a title could enter through, and `appendMcpActivity`
  *  writes the named fields one by one, so a caller that hands it an extra key
  *  does not put that key on disk.
+ *
+ *  IT IS ALSO WHERE THE BELL HEARS ABOUT IT. Every mutation an agent makes
+ *  already passes through this one call, so the notification centre's
+ *  `agent-action` row is produced here rather than at a dozen call sites, and
+ *  a tool that logs cannot forget to tell the owner. See `noteInCentre` at the
+ *  foot of the file for what that costs and what it can never cost.
  */
 
 export type { McpEnv } from "./state-dir";
@@ -87,6 +95,18 @@ export interface McpActivityEntry {
   readonly operationId?: string;
   readonly change?: string; // which mutation or field, never free text
   readonly outcome: string; // "ok", or a refusal code
+}
+
+/** WHAT THE BELL MAY SAY THAT THE LOG MAY NOT.
+ *
+ *  The entry above is the redaction and stays it: nothing here is written to
+ *  disk beside the line. `label` is a title the call site already had in hand
+ *  out of the owner's own store, the task it just wrote or the note the file
+ *  landed in, and it becomes the row's body so a reader knows which task.
+ *  Never a string the agent handed in.
+ */
+export interface McpActivityNotice {
+  readonly label?: string;
 }
 
 const OPTIONAL_FIELDS = [
@@ -309,7 +329,10 @@ async function stampOf(dir: string): Promise<FileStamp> {
   }
 }
 
-export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> {
+export async function appendMcpActivity(
+  entry: McpActivityEntry,
+  notice?: McpActivityNotice,
+): Promise<void> {
   const dir = mcpStateDirectory();
   const line = JSON.stringify(closedEntry(entry));
   const lineBytes = Buffer.byteLength(line, "utf8") + 1;
@@ -392,6 +415,41 @@ export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> 
       mtimeMs: (await stampOf(dir)).mtimeMs,
     });
   });
+  await noteInCentre(entry, notice);
+}
+
+/** THE ROW THE BELL SHOWS, OFF THE SAME CALL AS THE LINE.
+ *
+ *  After the line, not beside it: a log this process could not append throws
+ *  out of the call above, and the row is the line's echo rather than a second
+ *  opinion about whether the mutation happened.
+ *
+ *  IT CAN NEVER FAIL THE TOOL. Everything here is swallowed, because by the
+ *  time it runs the task is written or the message is gone, and an agent that
+ *  saw a transport error would do it again. Dropped rows are warned about on
+ *  the server's own console, which is where a dropped log line is warned about
+ *  too.
+ *
+ *  AWAITED RATHER THAN FIRED AND FORGOTTEN. It is one small atomic write, the
+ *  same cost the log line just paid, and waiting for it is what makes it
+ *  land in the state directory this turn is pointed at rather than in whatever
+ *  the next one swaps in. `app/api/mcp/task-tools.ts` had to grow a flush
+ *  helper for exactly that, for exactly this reason.
+ *
+ *  `agentActionNotification` decides what earns a row: mutations only,
+ *  successes only, no import family and no read.
+ */
+async function noteInCentre(
+  entry: McpActivityEntry,
+  notice: McpActivityNotice | undefined,
+): Promise<void> {
+  try {
+    const row = agentActionNotification(entry, notice?.label);
+    if (row !== null) await appendNotification(row);
+  } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    console.warn(`[brain/mcp] agent notification dropped: ${reason}`);
+  }
 }
 
 /** Newest first, because that is the order the Settings list shows and the

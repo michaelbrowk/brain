@@ -14,10 +14,15 @@ import {
   mcpStateDirectory,
   readMcpActivity,
 } from "./activity-log";
+import { listNotifications } from "@/lib/notifications/store";
 
 const ACCOUNT = "account-a00000000000000000000000000000000";
 
 let root: string;
+/** The centre's own directory. A mutation writes two files now, and a test
+ *  that redirected only the first would leave its rows in the bell a
+ *  developer's own `pnpm dev` reads. */
+let centre: string;
 
 beforeEach(async () => {
   // A fixed path collides across concurrent vitest processes (another
@@ -26,12 +31,15 @@ beforeEach(async () => {
   // by this path, a reused literal would also carry a stale count from the
   // previous test in this same file into the next one.
   root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-activity-test-"));
+  centre = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-centre-test-"));
   vi.stubEnv("BRAIN_MCP_STATE_DIR", root);
+  vi.stubEnv("BRAIN_NOTIFICATIONS_STATE_DIR", centre);
 });
 
 afterEach(async () => {
   vi.unstubAllEnvs();
   await fs.rm(root, { recursive: true, force: true });
+  await fs.rm(centre, { recursive: true, force: true });
 });
 
 describe("the MCP activity log", () => {
@@ -487,4 +495,98 @@ describe("the MCP activity log", () => {
     },
     15_000,
   );
+});
+
+/** THE SECOND RECORD ONE MUTATION LEAVES.
+ *
+ *  Settings, Connections reads the log; the bell reads the centre. Both come
+ *  off this one call, so a tool that already logs cannot forget to tell the
+ *  owner, and a tool that logs a read or a refusal cannot accidentally start.
+ */
+describe("the row a mutation leaves in the centre", () => {
+  const rows = () => listNotifications(centre);
+
+  it("writes one row beside the log line", async () => {
+    await appendMcpActivity(
+      {
+        at: "2026-09-14T09:00:00.000Z",
+        client: "Claude",
+        tool: "create_task",
+        task: "task-alpha",
+        outcome: "ok",
+      },
+      { label: "Water the plants" },
+    );
+    expect(await readMcpActivity(50)).toHaveLength(1);
+    const centreRows = await rows();
+    expect(centreRows).toHaveLength(1);
+    expect(centreRows[0].kind).toBe("agent-action");
+    expect(centreRows[0].title).toBe("Claude created a task");
+    expect(centreRows[0].body).toBe("Water the plants");
+    expect(centreRows[0].readAt).toBeUndefined();
+  });
+
+  it("keeps the label out of the log line", async () => {
+    await appendMcpActivity(
+      {
+        at: "2026-09-14T09:00:00.000Z",
+        client: "Claude",
+        tool: "create_task",
+        task: "task-alpha",
+        outcome: "ok",
+      },
+      { label: "Water the plants" },
+    );
+    const raw = await fs.readFile(path.join(root, MCP_ACTIVITY_FILE), "utf8");
+    expect(raw).not.toContain("Water the plants");
+  });
+
+  it("writes no row for a refusal, a read or an import", async () => {
+    for (const entry of [
+      { tool: "create_task", task: "task-alpha", outcome: "not_found" },
+      { tool: "get_task", task: "task-alpha", outcome: "ok" },
+      { tool: "notion_finalize_page", page: "notes", outcome: "ok" },
+      { tool: "connection_check", outcome: "ok" },
+    ]) {
+      await appendMcpActivity({
+        at: "2026-09-14T09:00:00.000Z",
+        client: "Claude",
+        ...entry,
+      });
+    }
+    expect(await readMcpActivity(50)).toHaveLength(4);
+    expect(await rows()).toHaveLength(0);
+  });
+
+  it("writes one row for the same line twice, so a replay never doubles", async () => {
+    const entry = {
+      at: "2026-09-14T09:00:00.000Z",
+      client: "Claude",
+      tool: "complete_task",
+      task: "task-alpha",
+      outcome: "ok",
+    };
+    await appendMcpActivity(entry);
+    await appendMcpActivity(entry);
+    expect(await readMcpActivity(50)).toHaveLength(2);
+    expect(await rows()).toHaveLength(1);
+  });
+
+  it("still writes the log line when the centre cannot be written", async () => {
+    // A file where the centre's directory should be: `mkdir` fails, and with
+    // it every write behind it. The tool must not hear about it.
+    const blocked = path.join(centre, "blocked");
+    await fs.writeFile(blocked, "not a directory");
+    vi.stubEnv("BRAIN_NOTIFICATIONS_STATE_DIR", blocked);
+    await expect(
+      appendMcpActivity({
+        at: "2026-09-14T09:00:00.000Z",
+        client: "Claude",
+        tool: "create_task",
+        task: "task-alpha",
+        outcome: "ok",
+      }),
+    ).resolves.toBeUndefined();
+    expect(await readMcpActivity(50)).toHaveLength(1);
+  });
 });

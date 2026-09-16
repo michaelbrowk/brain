@@ -132,8 +132,7 @@ archived a thread".
   about the marking would put the badge back to one for a letter you have just
   had dealt with. Settings → Connections still logs it. The row comes off the one activity line
   the mutation already writes (`lib/mcp/activity-log.ts`), so a tool that logs
-  cannot forget to announce, and a tool that does not log stays silent: page
-  writes leave no line today, so they leave no row either.
+  cannot forget to announce.
 - **Nothing the agent wrote reaches a row.** The title is Brain's own words
   after the app's name, and the body is a title read out of your own notes or
   tasks at the moment of the call. The activity line holds ids and no prose by

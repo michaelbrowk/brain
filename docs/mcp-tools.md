@@ -493,6 +493,13 @@ folder, in git or in a portable archive.
 Settings, Connections shows the last fifty lines, newest first, with a Clear
 action beside the two toggles.
 
+**The six page writes are in the log too**, with the page's id, the tool's own
+mutation token as `change` (`markdown`, `append`, `create`, `move`, `delete`,
+and for `update_meta` the field names its patch carried) and the same outcome
+codes. A rewritten note is the change an owner most wants to see a record of.
+The `notion_*` import family is still out: it keeps its own ledger, and one
+import would fill the list it is meant to be read from.
+
 **A successful mutation also rings the owner's bell.** The same call that
 writes the line produces one `agent-action` row in the notification centre,
 titled with the app's name and a verb: "Claude sent a message", "Claude
@@ -508,10 +515,10 @@ phone's signal for reminders. `docs/notifications.md` has the rest.
 
 Five things this release ships without, each of them known.
 
-- **A write is logged and a read is not.** Every triage, send, attachment save
-  and task write leaves a line, refusals included. No read of any kind leaves
-  one, `get_mail_send_status` included. An owner scanning Connections sees what
-  an agent changed, never what it looked at.
+- **A write is logged and a read is not.** Every triage, send, attachment save,
+  task write and page write leaves a line, refusals included. No read of any
+  kind leaves one, `get_mail_send_status` included. An owner scanning
+  Connections sees what an agent changed, never what it looked at.
 - **An agent's reply can make the bell name the correspondent.** The
   notification centre announces a thread when something in it is unread, and a
   reply an agent wrote into a thread that still holds an older unread message

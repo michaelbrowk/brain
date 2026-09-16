@@ -100,6 +100,7 @@ import { BrainMailClientError } from "@/lib/mail/brain-mail-client";
 import {
   MAX_ATTACHMENT_BYTES,
   NotFoundError,
+  RevConflictError,
   TaskConflictError,
   TaskValidationError,
 } from "@/lib/store";
@@ -189,7 +190,17 @@ function toolsListRequest(id: number) {
 }
 
 describe("Notion MCP route validation", () => {
-  beforeEach(() => {
+  // Both state directories, because a page write now leaves a line in one and
+  // a row in the other, and a suite must write into neither of the machine's
+  // own.
+  let stateRoot: string;
+  let centreRoot: string;
+
+  beforeEach(async () => {
+    stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-route-state-"));
+    centreRoot = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-route-centre-"));
+    vi.stubEnv("BRAIN_MCP_STATE_DIR", stateRoot);
+    vi.stubEnv("BRAIN_NOTIFICATIONS_STATE_DIR", centreRoot);
     mocks.getStore.mockReset();
     mocks.createBrainMailClient.mockReset();
     mocks.verifyMcpBearerToken.mockReset();
@@ -217,7 +228,11 @@ describe("Notion MCP route validation", () => {
     vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "https://brain.example.test");
   });
 
-  afterEach(() => vi.unstubAllEnvs());
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(stateRoot, { recursive: true, force: true });
+    await fs.rm(centreRoot, { recursive: true, force: true });
+  });
 
   it("blocks write tools for a read-only OAuth connection before Store access", async () => {
     const response = await POST(
@@ -7077,5 +7092,234 @@ describe("outgoing attachments", () => {
     expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
     const [entry] = await readMcpActivity(1);
     expect(entry.outcome).toBe("attachment_read_failed");
+  });
+});
+
+/** WHAT AN AGENT WRITES INTO THE NOTES, IN THE OWNER'S OWN LOG AND BELL.
+ *
+ *  The six page writes were the one family of mutations that recorded nothing:
+ *  an agent could rewrite every note in the folder and Settings, Connections
+ *  showed an empty list. Each writes one line now, and one row beside it.
+ */
+describe("the page write tools", () => {
+  let stateRoot: string;
+  let centreRoot: string;
+
+  beforeEach(async () => {
+    stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-page-state-"));
+    centreRoot = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-page-centre-"));
+    mocks.getStore.mockReset();
+    mocks.verifyMcpBearerToken.mockReset();
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "test-machine-token",
+      clientId: "brain-legacy-bearer",
+      scopes: ["brain:read", "brain:write"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+    vi.stubEnv("MCP_TOKEN", "test-machine-token");
+    vi.stubEnv("AUTH_SECRET", "test-auth-secret-with-at-least-32-bytes");
+    vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "https://brain.example.test");
+    vi.stubEnv("BRAIN_MCP_STATE_DIR", stateRoot);
+    vi.stubEnv("BRAIN_NOTIFICATIONS_STATE_DIR", centreRoot);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    await fs.rm(stateRoot, { recursive: true, force: true });
+    await fs.rm(centreRoot, { recursive: true, force: true });
+  });
+
+  const page = (overrides: Record<string, unknown> = {}) => ({
+    meta: { id: "page-one", title: "Meeting notes", ...overrides },
+    markdown: "# one",
+    rev: "rev-2",
+  });
+
+  /** One case per tool: what the store answers, what the line says it did, and
+   *  what the bell says. The change token is the tool's own mutation word, the
+   *  way a triage line names which field moved. */
+  const writes: Array<{
+    tool: string;
+    args: Record<string, unknown>;
+    store: Record<string, unknown>;
+    change: string;
+    title: string;
+    href: string;
+  }> = [
+    {
+      tool: "write_page",
+      args: { id: "page-one", markdown: "# one", rev: "rev-1" },
+      store: { writePage: vi.fn().mockResolvedValue(page()) },
+      change: "markdown",
+      title: "Legacy token wrote a page",
+      href: "/p/page-one",
+    },
+    {
+      tool: "append_page",
+      args: { id: "page-one", markdown: "one more line" },
+      store: { appendPage: vi.fn().mockResolvedValue(page()) },
+      change: "append",
+      title: "Legacy token added to a page",
+      href: "/p/page-one",
+    },
+    {
+      tool: "create_page",
+      args: { title: "Meeting notes", parentId: null, icon: "📝" },
+      store: {
+        createPage: vi.fn().mockResolvedValue({ id: "page-one", title: "Meeting notes" }),
+      },
+      change: "create",
+      title: "Legacy token created a page",
+      href: "/p/page-one",
+    },
+    {
+      tool: "update_meta",
+      args: { id: "page-one", title: "Meeting notes", icon: "📝" },
+      store: {
+        updateMeta: vi.fn().mockResolvedValue({ id: "page-one", title: "Meeting notes" }),
+      },
+      change: "title+icon",
+      title: "Legacy token changed a page",
+      href: "/p/page-one",
+    },
+    {
+      tool: "move_page",
+      args: { id: "page-one", newParentId: "page-two", beforeId: null },
+      store: {
+        movePageWithBodyReport: vi.fn().mockResolvedValue({
+          meta: { id: "page-one", title: "Meeting notes" },
+          unlinkedFrom: null,
+        }),
+      },
+      change: "move",
+      title: "Legacy token moved a page",
+      href: "/p/page-one",
+    },
+    {
+      tool: "delete_page",
+      args: { id: "page-one" },
+      store: {
+        readPage: vi.fn().mockResolvedValue(page()),
+        deletePage: vi.fn().mockResolvedValue(undefined),
+      },
+      change: "delete",
+      title: "Legacy token deleted a page",
+      // The note is gone, so the row opens the surface it was on.
+      href: "/",
+    },
+  ];
+
+  let id = 900;
+  it.each(writes)("$tool writes one line and one row", async (write) => {
+    mocks.getStore.mockResolvedValue(write.store);
+
+    const { isError } = await toolPayload(
+      await callTool(write.tool, write.args, (id += 1)),
+    );
+    expect(isError).toBe(false);
+
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({
+      client: "Legacy token",
+      tool: write.tool,
+      page: "page-one",
+      change: write.change,
+      outcome: "ok",
+    });
+    // The line is ids and tokens. A title is the owner's own words and belongs
+    // to the bell, never to the log.
+    expect(JSON.stringify(entry)).not.toContain("Meeting notes");
+
+    expect(await listNotifications(centreRoot)).toMatchObject([
+      {
+        kind: "agent-action",
+        title: write.title,
+        body: "Meeting notes",
+        href: write.href,
+      },
+    ]);
+  });
+
+  it("writes a line and no row when the write was refused", async () => {
+    mocks.getStore.mockResolvedValue({
+      writePage: vi.fn().mockRejectedValue(new RevConflictError("rev-2", "rev-1")),
+    });
+
+    const { isError } = await toolPayload(
+      await callTool(
+        "write_page",
+        { id: "page-one", markdown: "# one", rev: "rev-1" },
+        960,
+      ),
+    );
+
+    expect(isError).toBe(true);
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({ tool: "write_page", outcome: "rev_conflict" });
+    expect(await listNotifications(centreRoot)).toEqual([]);
+  });
+
+  it("writes a line for a page that is not there, and answers as it always did", async () => {
+    mocks.getStore.mockResolvedValue({
+      readPage: vi.fn().mockRejectedValue(new NotFoundError("page-missing")),
+      deletePage: vi.fn().mockRejectedValue(new NotFoundError("page-missing")),
+    });
+
+    // The body is read, not only the response: this endpoint answers over a
+    // stream, so a test that stops at the Response leaves the tool's own turn
+    // running into the next one's state directory. A rethrow is not the
+    // `text()` JSON the other tools answer, so it is read raw.
+    const { isError } = await rawToolText(
+      await callTool("delete_page", { id: "page-missing" }, 961),
+    );
+    expect(isError).toBe(true);
+
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({
+      tool: "delete_page",
+      page: "page-missing",
+      outcome: "not_found",
+    });
+    expect(await listNotifications(centreRoot)).toEqual([]);
+  });
+
+  it("writes a line for a store that could not answer, and no path with it", async () => {
+    mocks.getStore.mockRejectedValue(
+      Object.assign(new Error("EIO: i/o error, read '/notes/page-one.md'"), {
+        code: "EIO",
+      }),
+    );
+
+    const { payload } = await toolPayload(
+      await callTool("append_page", { id: "page-one", markdown: "x" }, 962),
+    );
+
+    expect(payload).toEqual({
+      error: "the notes folder could not answer",
+      reason: "store_failed",
+    });
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({ tool: "append_page", outcome: "store_failed" });
+    expect(JSON.stringify(entry)).not.toContain("/notes/");
+    expect(await listNotifications(centreRoot)).toEqual([]);
+  });
+
+  it("leaves the import family out of both", async () => {
+    // `notion_*` has its own ledger and its own batch. It writes no line here
+    // and no row, whatever it does to a page.
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "test-machine-token",
+      clientId: "brain-legacy-bearer",
+      scopes: ["brain:read", "brain:write", "brain:import"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+    mocks.getStore.mockResolvedValue({
+      inspectNotionPage: vi.fn().mockResolvedValue({ page: null }),
+    });
+
+    await callTool("notion_find_page", { notionId: "a".repeat(32) }, 963);
+
+    expect(await readMcpActivity(5)).toEqual([]);
+    expect(await listNotifications(centreRoot)).toEqual([]);
   });
 });

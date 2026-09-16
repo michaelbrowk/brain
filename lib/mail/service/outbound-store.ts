@@ -1727,7 +1727,11 @@ export class SqliteMailSendStore
     return this.runAccount(submission.accountId, async () => {
       const database = await this.openAccountDatabase(submission.accountId, true);
       if (!database) throw unavailable();
-      let committed = false;
+      // An answer has been earned: from here the caller is owed the result this
+      // transaction reached, and a failure past that point may not be told as
+      // one that happened instead of it. Not "COMMIT returned" — the raced-read
+      // branch in `insertNewSubmission` earns an answer without one.
+      let answered = false;
       try {
         database.exec("BEGIN IMMEDIATE");
         try {
@@ -1735,7 +1739,7 @@ export class SqliteMailSendStore
           pruneTerminalRows(database, prunedAt);
           const existing = this.readExistingSubmission(database, submission);
           database.exec("COMMIT");
-          committed = true;
+          answered = true;
           afterCommit(submission.accountId, () => {
             this.markRetentionSweep(submission.accountId, prunedAt);
           });
@@ -1750,7 +1754,7 @@ export class SqliteMailSendStore
         try {
           await closeDatabase(database, this.databasePath(submission.accountId));
         } catch (error) {
-          if (!committed) throw error;
+          if (!answered) throw error;
           logAfterCommit(submission.accountId, error);
         }
       }
@@ -1764,7 +1768,9 @@ export class SqliteMailSendStore
     return this.runAccount(submission.accountId, async () => {
       const database = await this.openAccountDatabase(submission.accountId, true);
       if (!database) throw unavailable();
-      let committed = false;
+      // See `pruneAndReadExisting`: an answer has been earned, which the raced
+      // read below reaches without a COMMIT of its own.
+      let answered = false;
       try {
         database.exec("BEGIN IMMEDIATE");
         try {
@@ -1773,7 +1779,7 @@ export class SqliteMailSendStore
           const existing = this.readExistingSubmission(database, submission);
           if (existing !== null) {
             database.exec("COMMIT");
-            committed = true;
+            answered = true;
             afterCommit(submission.accountId, () => {
               this.markRetentionSweep(submission.accountId, prunedAt);
             });
@@ -1785,7 +1791,7 @@ export class SqliteMailSendStore
             pruneTerminalRows(database, prunedAt);
           }
           database.exec("COMMIT");
-          committed = true;
+          answered = true;
           afterCommit(submission.accountId, () => {
             this.markRetentionSweep(submission.accountId, prunedAt);
           });
@@ -1801,13 +1807,17 @@ export class SqliteMailSendStore
           if (raced.requestFingerprint !== submission.requestFingerprint) {
             throw new MailSendError("mail_send_idempotency_conflict");
           }
+          // Another writer committed this row, so the message is durable and
+          // this call has an answer for it. A close that fails after this is
+          // the same "nothing happened" lie as one after a COMMIT of our own.
+          answered = true;
           return Object.freeze({ created: false, submission: raced });
         }
       } finally {
         try {
           await closeDatabase(database, this.databasePath(submission.accountId));
         } catch (error) {
-          if (!committed) throw error;
+          if (!answered) throw error;
           logAfterCommit(submission.accountId, error);
         }
       }

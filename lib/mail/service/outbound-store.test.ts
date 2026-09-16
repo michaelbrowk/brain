@@ -145,6 +145,100 @@ describe("private durable mail outbox", () => {
     await fixture.store.close();
   });
 
+  // The other half of the same rule, and the half the injected sweep never
+  // reached: the `finally`'s own `closeDatabase`. It checkpoints the WAL before
+  // it closes the handle, so a throw from that pragma is a close that failed
+  // with the row already on disk.
+  it("keeps an enqueue whose database close fails after the insert", async () => {
+    const fixture = await createStore();
+    const queued = submissionFixture();
+    const close = breakNextDatabaseClose();
+    const sweep = armOnRetentionSweep(fixture.store, 2, close.arm);
+
+    try {
+      await expect(fixture.store.enqueue(queued)).resolves.toEqual({
+        created: true,
+        submission: queued,
+      });
+    } finally {
+      sweep.mockRestore();
+      close.restore();
+    }
+    await expect(
+      fixture.store.readByOperationId(queued.operationId),
+    ).resolves.toEqual(queued);
+    await fixture.store.close();
+  });
+
+  // And the sibling transaction, whose COMMIT prunes terminal rows before the
+  // insert ever runs. Its close failing must not fail the enqueue either.
+  it("keeps an enqueue whose first transaction's close fails", async () => {
+    const fixture = await createStore();
+    const queued = submissionFixture();
+    const close = breakNextDatabaseClose();
+    const sweep = armOnRetentionSweep(fixture.store, 1, close.arm);
+
+    try {
+      await expect(fixture.store.enqueue(queued)).resolves.toEqual({
+        created: true,
+        submission: queued,
+      });
+    } finally {
+      sweep.mockRestore();
+      close.restore();
+    }
+    await expect(
+      fixture.store.readByOperationId(queued.operationId),
+    ).resolves.toEqual(queued);
+    await fixture.store.close();
+  });
+
+  /** THE RACED READ IS AN ANSWER TOO.
+   *
+   *  Another writer's row lands between this call's read and its insert: the
+   *  read answers nothing, the INSERT hits `UNIQUE(account_id,
+   *  idempotency_key)`, and the catch reads the row back and returns it. That
+   *  is a success over a message that is on disk, so a close failing after it
+   *  must not turn into "nothing happened, send it again" either. */
+  it("keeps a raced-read answer whose database close fails", async () => {
+    const fixture = await createStore();
+    const queued = submissionFixture();
+    await expect(fixture.store.enqueue(queued)).resolves.toEqual({
+      created: true,
+      submission: queued,
+    });
+
+    const close = breakNextDatabaseClose();
+    const prototype = Object.getPrototypeOf(fixture.store) as Record<
+      string,
+      unknown
+    >;
+    let reads = 0;
+    const read = vi
+      .spyOn(
+        prototype as { readExistingSubmission: () => unknown },
+        "readExistingSubmission",
+      )
+      .mockImplementation(() => {
+        reads += 1;
+        // The second read of an enqueue is the insert's own, so the next close
+        // is the `finally` that follows the raced answer.
+        if (reads === 2) close.arm();
+        return null;
+      });
+
+    try {
+      await expect(fixture.store.enqueue(queued)).resolves.toEqual({
+        created: false,
+        submission: queued,
+      });
+    } finally {
+      read.mockRestore();
+      close.restore();
+    }
+    await fixture.store.close();
+  });
+
   // The gap between the MIME writer and the outbox. Everything else in this
   // file runs on a 53-byte body, so a row big enough to meet the serialized
   // submission cap had never been written, and the branch shipped an
@@ -2935,6 +3029,59 @@ describe("durable account-scoped mail drafts", () => {
     await reopened.close();
   });
 });
+
+/** Break the next `closeDatabase`, and only that one.
+ *
+ *  `closeDatabase` checkpoints the WAL before it closes the handle, so a throw
+ *  from that one pragma is a close that failed with the handle still tidied up
+ *  in its own `finally`. One-shot, because every read path inside an enqueue
+ *  closes a database too and breaking all of them would fail the call long
+ *  before it reached the insert. */
+function breakNextDatabaseClose(): {
+  readonly arm: () => void;
+  readonly restore: () => void;
+} {
+  const original = DatabaseSync.prototype.exec;
+  let armed = false;
+  const spy = vi
+    .spyOn(DatabaseSync.prototype, "exec")
+    .mockImplementation(function (this: DatabaseSync, sql: string) {
+      if (armed && sql.startsWith("PRAGMA wal_checkpoint")) {
+        armed = false;
+        throw new Error("wal checkpoint failed");
+      }
+      original.call(this, sql);
+    });
+  return {
+    arm: () => {
+      armed = true;
+    },
+    restore: () => spy.mockRestore(),
+  };
+}
+
+/** Run `arm` when the store takes its nth retention mark. An enqueue takes two:
+ *  the prune-and-read transaction's, then the insert's, each one the first
+ *  thing past its own COMMIT. So the nth mark names which `finally` the armed
+ *  close belongs to. */
+function armOnRetentionSweep(
+  store: SqliteMailSendStore,
+  nth: number,
+  arm: () => void,
+) {
+  const prototype = Object.getPrototypeOf(store) as {
+    markRetentionSweep: (accountId: string, now: number) => void;
+  };
+  const original = prototype.markRetentionSweep;
+  let sweeps = 0;
+  return vi
+    .spyOn(prototype, "markRetentionSweep")
+    .mockImplementation(function (this: unknown, accountId: string, now: number) {
+      sweeps += 1;
+      if (sweeps === nth) arm();
+      original.call(this, accountId, now);
+    });
+}
 
 async function createStore(
   options: {

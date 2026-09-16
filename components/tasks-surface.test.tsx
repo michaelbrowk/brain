@@ -1433,3 +1433,185 @@ describe("a repeating task", () => {
     expect(older.querySelector("[data-selected]")).toBeNull();
   });
 });
+
+/** ESCAPE PEELS ONE LAYER AT A TIME.
+ *
+ *  One Escape with the calendar up closed the calendar AND folded the row
+ *  under it: the picker answered on its own element, the column's listener
+ *  answered on the window, and the reader who asked for the panel to go lost
+ *  the row they were working in. A press outside has never spent two
+ *  dismissals at once — the panel takes the press and the row is the next one
+ *  — and the key is the same sentence.
+ *
+ *  So Escape #1 closes the layer and leaves the row standing with the focus
+ *  back on the chip that opened it, and Escape #2 folds the row. Things
+ *  behaves this way.
+ *
+ *  THE ORDERING IS THE WHOLE OF IT. Radix dismisses its layers from a
+ *  `keydown` listener on the DOCUMENT in the capture phase, so by any listener
+ *  further along the path the layer is already gone and the column would fold
+ *  on the key that closed it. The column's own listener is on the WINDOW in
+ *  capture, which is the first stop on the path a key takes, and it reads the
+ *  row's signal while the layer is still standing to be read. */
+describe("Escape peels one layer at a time", () => {
+  const capsuleOf = (title: string) =>
+    rowFor(title).querySelector(".brain-task-row") as HTMLElement;
+
+  const expand = async (title: string) => {
+    await act(async () => {
+      (rowFor(title).querySelector(".brain-task-title") as HTMLElement).click();
+    });
+  };
+
+  const chipOn = (title: string, named: string): HTMLElement => {
+    const chip = [...rowFor(title).querySelectorAll<HTMLElement>(".chip")].find((node) =>
+      (node.getAttribute("aria-label") ?? node.textContent ?? "").startsWith(named),
+    );
+    if (!chip) throw new Error(`no ${named} chip on the expanded row`);
+    return chip;
+  };
+
+  /** A REAL PRESS FOCUSES THE BUTTON IT LANDS ON and jsdom's `click()` does
+   *  not. Radix remembers what held the focus as the layer opened and hands it
+   *  back there, so a chip that was never focused would hand it to the body
+   *  and the assertion would be about jsdom rather than about the row. */
+  const openLayer = async (chip: HTMLElement) => {
+    await act(async () => {
+      chip.focus();
+      chip.click();
+    });
+    await settle();
+  };
+
+  /** The key, from wherever the reader's focus actually is. */
+  const escape = async () => {
+    await act(async () => {
+      (document.activeElement ?? document.body).dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+      );
+    });
+    // Radix hands the focus back to the trigger in a macrotask.
+    await act(async () => {
+      vi.advanceTimersByTime(1);
+    });
+  };
+
+  it("closes the When picker and leaves the row standing, and folds on the next key", async () => {
+    await mount([task("a", { when: TODAY })]);
+    await expand("a");
+    const when = chipOn("a", "When:");
+    await openLayer(when);
+    expect(document.querySelector(".brain-when-picker")).not.toBeNull();
+
+    await escape();
+
+    expect(document.querySelector(".brain-when-picker")).toBeNull();
+    expect(capsuleOf("a").hasAttribute("data-expanded")).toBe(true);
+    expect(document.activeElement).toBe(when);
+    // ESCAPE THROWS THE VALUE AWAY, which is the picker's own rule and is not
+    // touched here: nothing was picked, so nothing was written either.
+    expect(writes()).toHaveLength(0);
+
+    await escape();
+
+    expect(capsuleOf("a").hasAttribute("data-expanded")).toBe(false);
+    expect(document.activeElement).toBe(capsuleOf("a"));
+    expect(writes()).toHaveLength(0);
+  });
+
+  it("does the same for the category picker", async () => {
+    await mount([task("a", { when: TODAY })]);
+    await expand("a");
+    const category = chipOn("a", "+ Category");
+    await openLayer(category);
+    expect(document.querySelector('input[aria-label="Category name"]')).not.toBeNull();
+
+    await escape();
+
+    expect(document.querySelector('input[aria-label="Category name"]')).toBeNull();
+    expect(capsuleOf("a").hasAttribute("data-expanded")).toBe(true);
+    expect(document.activeElement).toBe(category);
+
+    await escape();
+
+    expect(capsuleOf("a").hasAttribute("data-expanded")).toBe(false);
+  });
+
+  it("does the same for the repeat menu", async () => {
+    await mount([task("a", { when: TODAY })]);
+    await expand("a");
+    const repeat = chipOn("a", "Repeat");
+    await openLayer(repeat);
+    expect(document.querySelector("[role='menuitemradio']")).not.toBeNull();
+
+    await escape();
+
+    expect(document.querySelector("[role='menuitemradio']")).toBeNull();
+    expect(capsuleOf("a").hasAttribute("data-expanded")).toBe(true);
+    expect(document.activeElement).toBe(repeat);
+
+    await escape();
+
+    expect(capsuleOf("a").hasAttribute("data-expanded")).toBe(false);
+  });
+
+  /** THE TITLE EDITOR IS A LAYER TOO, and the one no flag in the DOM answers
+   *  for: it is an `input` the row swapped its own words for, with no Radix
+   *  `data-state` on anything. The row says so itself, which is why the signal
+   *  the column reads is the row's own and not a query for an open panel. */
+  it("does the same for the title editor", async () => {
+    await mount([task("a", { when: TODAY })]);
+    await expand("a");
+    // The caret goes in on a SECOND press of the words, not on the expansion.
+    await act(async () => {
+      (rowFor("a").querySelector(".brain-task-title") as HTMLElement).click();
+    });
+    expect(rowFor("a").querySelector(".brain-task-input")).not.toBeNull();
+
+    await escape();
+
+    expect(rowFor("a").querySelector(".brain-task-input")).toBeNull();
+    expect(capsuleOf("a").hasAttribute("data-expanded")).toBe(true);
+    expect(document.activeElement).toBe(capsuleOf("a"));
+
+    await escape();
+
+    expect(capsuleOf("a").hasAttribute("data-expanded")).toBe(false);
+  });
+
+  it("folds a row that has no layer open, the way it always did", async () => {
+    await mount([task("a", { when: TODAY })]);
+    await expand("a");
+    expect(capsuleOf("a").hasAttribute("data-expanded")).toBe(true);
+
+    await escape();
+
+    expect(capsuleOf("a").hasAttribute("data-expanded")).toBe(false);
+    expect(document.activeElement).toBe(capsuleOf("a"));
+  });
+
+  /** A PRESS THAT ALREADY ANSWERED IS NOT UNDONE BY THE KEY THAT FOLLOWS IT.
+   *  Today is a quick row: one tap, one write, and the panel is gone. The key
+   *  a reader reaches for on the way out asked for one write, not for none. */
+  it("leaves the quick row's write alone when Escape follows it", async () => {
+    const parked = task("a", { when: "someday" });
+    await mount([parked], { list: "someday" });
+    apiFetchMock.mockImplementation(async (input) => {
+      const url = String(input);
+      if (url.startsWith("/api/tasks?")) return response({ tasks: [parked] });
+      return response({ task: { ...parked, when: TODAY } });
+    });
+    await expand("a");
+    await openLayer(chipOn("a", "When:"));
+
+    await act(async () => {
+      document.querySelector<HTMLElement>("[data-when-today]")?.click();
+    });
+    await settle();
+    await escape();
+    await settle();
+
+    expect(writes()).toHaveLength(1);
+    expect(JSON.parse(String(writes()[0]?.[1]?.body))).toEqual({ when: TODAY });
+  });
+});

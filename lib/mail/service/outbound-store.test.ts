@@ -10,7 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MAIL_RESOURCE_LIMITS } from "../security";
 import { MAIL_SEND_ATTACHMENT_LIMITS } from "../send-attachment-codec";
@@ -99,6 +99,50 @@ describe("private durable mail outbox", () => {
     expect(metadata.mode & 0o077).toBe(0);
     await expect(readFile(databasePath)).resolves.toBeInstanceOf(Buffer);
     await reopened.close();
+  });
+
+  // Once COMMIT has returned the row is durable. The bookkeeping that follows
+  // it — the retention mark, the database close — used to be inside the same
+  // try, so a throw there was caught, turned into `mail_send_service_unavailable`
+  // and handed to the agent as "nothing happened, send it again" while the
+  // message sat in the outbox waiting to go out.
+  it("keeps an enqueue whose bookkeeping throws after COMMIT", async () => {
+    const fixture = await createStore();
+    const queued = submissionFixture();
+    const prototype = Object.getPrototypeOf(fixture.store) as {
+      markRetentionSweep: (accountId: string, now: number) => void;
+    };
+    const sweep = vi
+      .spyOn(prototype, "markRetentionSweep")
+      .mockImplementation(() => {
+        throw new Error("torn after commit");
+      });
+
+    let result: unknown;
+    let thrown: unknown;
+    let sweeps = 0;
+    try {
+      result = await fixture.store.enqueue(queued);
+    } catch (error) {
+      thrown = error;
+    } finally {
+      sweeps = sweep.mock.calls.length;
+      sweep.mockRestore();
+    }
+
+    if (thrown === undefined) {
+      expect(result).toEqual({ created: true, submission: queued });
+    } else {
+      // The other half of the ruling: a failure past COMMIT may still be told,
+      // but only in the shape the tool reads as "enqueued, state unknown".
+      expect(thrown).toBeInstanceOf(MailSendError);
+      expect((thrown as MailSendError).enqueued).toBe(true);
+    }
+    expect(sweeps).toBeGreaterThan(0);
+    await expect(
+      fixture.store.readByOperationId(queued.operationId),
+    ).resolves.toEqual(queued);
+    await fixture.store.close();
   });
 
   // The gap between the MIME writer and the outbox. Everything else in this

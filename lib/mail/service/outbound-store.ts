@@ -37,7 +37,7 @@ import {
   type SubmissionPhase,
   type SubmissionRecord,
 } from "../send-state";
-import { MAIL_RESOURCE_LIMITS } from "../security";
+import { MAIL_RESOURCE_LIMITS, writeMailLogRecord } from "../security";
 import {
   mailSendInputFromDraft,
   type MailDraftCreateResult,
@@ -585,7 +585,10 @@ export class SqliteMailSendStore
           if (prunedAt !== null) pruneTerminalRows(database, prunedAt);
           database.exec("COMMIT");
           if (prunedAt !== null) {
-            this.markRetentionSweep(next.accountId, prunedAt);
+            const sweptAt = prunedAt;
+            afterCommit(next.accountId, () => {
+              this.markRetentionSweep(next.accountId, sweptAt);
+            });
           }
           return true;
         } catch (error) {
@@ -800,7 +803,12 @@ export class SqliteMailSendStore
             }
           }
           database.exec("COMMIT");
-          if (prunedAt !== null) this.markRetentionSweep(accountId, prunedAt);
+          if (prunedAt !== null) {
+            const sweptAt = prunedAt;
+            afterCommit(accountId, () => {
+              this.markRetentionSweep(accountId, sweptAt);
+            });
+          }
           return true;
         } catch (error) {
           if (database.isTransaction) database.exec("ROLLBACK");
@@ -1719,6 +1727,7 @@ export class SqliteMailSendStore
     return this.runAccount(submission.accountId, async () => {
       const database = await this.openAccountDatabase(submission.accountId, true);
       if (!database) throw unavailable();
+      let committed = false;
       try {
         database.exec("BEGIN IMMEDIATE");
         try {
@@ -1726,7 +1735,10 @@ export class SqliteMailSendStore
           pruneTerminalRows(database, prunedAt);
           const existing = this.readExistingSubmission(database, submission);
           database.exec("COMMIT");
-          this.markRetentionSweep(submission.accountId, prunedAt);
+          committed = true;
+          afterCommit(submission.accountId, () => {
+            this.markRetentionSweep(submission.accountId, prunedAt);
+          });
           return existing === null
             ? null
             : Object.freeze({ created: false, submission: existing });
@@ -1735,7 +1747,12 @@ export class SqliteMailSendStore
           throw error;
         }
       } finally {
-        await closeDatabase(database, this.databasePath(submission.accountId));
+        try {
+          await closeDatabase(database, this.databasePath(submission.accountId));
+        } catch (error) {
+          if (!committed) throw error;
+          logAfterCommit(submission.accountId, error);
+        }
       }
     });
   }
@@ -1747,6 +1764,7 @@ export class SqliteMailSendStore
     return this.runAccount(submission.accountId, async () => {
       const database = await this.openAccountDatabase(submission.accountId, true);
       if (!database) throw unavailable();
+      let committed = false;
       try {
         database.exec("BEGIN IMMEDIATE");
         try {
@@ -1755,7 +1773,10 @@ export class SqliteMailSendStore
           const existing = this.readExistingSubmission(database, submission);
           if (existing !== null) {
             database.exec("COMMIT");
-            this.markRetentionSweep(submission.accountId, prunedAt);
+            committed = true;
+            afterCommit(submission.accountId, () => {
+              this.markRetentionSweep(submission.accountId, prunedAt);
+            });
             return Object.freeze({ created: false, submission: existing });
           }
           insertSubmissionRow(database, submission, serialized);
@@ -1764,7 +1785,10 @@ export class SqliteMailSendStore
             pruneTerminalRows(database, prunedAt);
           }
           database.exec("COMMIT");
-          this.markRetentionSweep(submission.accountId, prunedAt);
+          committed = true;
+          afterCommit(submission.accountId, () => {
+            this.markRetentionSweep(submission.accountId, prunedAt);
+          });
           return Object.freeze({ created: true, submission });
         } catch (error) {
           if (database.isTransaction) database.exec("ROLLBACK");
@@ -1780,7 +1804,12 @@ export class SqliteMailSendStore
           return Object.freeze({ created: false, submission: raced });
         }
       } finally {
-        await closeDatabase(database, this.databasePath(submission.accountId));
+        try {
+          await closeDatabase(database, this.databasePath(submission.accountId));
+        } catch (error) {
+          if (!committed) throw error;
+          logAfterCommit(submission.accountId, error);
+        }
       }
     });
   }
@@ -1835,7 +1864,9 @@ export class SqliteMailSendStore
           if (database.isTransaction) database.exec("ROLLBACK");
           throw error;
         }
-        this.markRetentionSweep(accountId, now);
+        afterCommit(accountId, () => {
+          this.markRetentionSweep(accountId, now);
+        });
       } finally {
         await closeDatabase(database, this.databasePath(accountId));
       }
@@ -4083,6 +4114,32 @@ function isExactRecord(
 
 function storeError(error: unknown): MailSendError {
   return error instanceof MailSendError ? error : unavailable();
+}
+
+/**
+ * Runs one step that sits past a COMMIT and drops whatever it throws.
+ *
+ * The retention mark and the database close are bookkeeping: by the time they
+ * run the row is on disk, and a caller told `mail_send_service_unavailable`
+ * reads it as "nothing happened, send it again" and sends a second copy. The
+ * failure is logged under the account it happened on and the call returns the
+ * result the transaction earned.
+ */
+function afterCommit(accountId: string, step: () => void): void {
+  try {
+    step();
+  } catch (error) {
+    logAfterCommit(accountId, error);
+  }
+}
+
+function logAfterCommit(accountId: string, error: unknown): void {
+  writeMailLogRecord({
+    event: "mail_outbox_after_commit_failed",
+    accountId,
+    errorCode:
+      error instanceof MailSendError ? error.code : "mail_send_service_unavailable",
+  });
 }
 
 function draftStoreError(error: unknown): MailDraftError {

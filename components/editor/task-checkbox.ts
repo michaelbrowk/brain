@@ -1682,6 +1682,14 @@ function rebulletItem(tr: Transaction, pos: number) {
   tr.setNodeMarkup(pos, undefined, { ...node.attrs, ...BULLET_ITEM_ATTRS });
 }
 
+function everyChildIsTask(list: ProseNode): boolean {
+  let every = list.childCount > 0;
+  list.forEach((child) => {
+    if (!isTaskItem(child)) every = false;
+  });
+  return every;
+}
+
 function rebulletOrderedTasks(state: EditorState): Transaction | null {
   const bulletListType = state.schema.nodes.bullet_list;
   if (!bulletListType) return null;
@@ -1696,8 +1704,25 @@ function rebulletOrderedTasks(state: EditorState): Transaction | null {
     const [pos] = orderedTaskItems(tr.doc);
     if (pos === undefined) break;
     const steps = tr.steps.length;
-    const moved = convertOrderedItem(tr, pos, bulletListType);
-    if (moved !== null) rebulletItem(tr, moved);
+    const $item = tr.doc.resolve(pos);
+    const list = $item.parent;
+    if (everyChildIsTask(list)) {
+      // A list that is nothing but tasks becomes one bullet list. Splitting
+      // it item by item would leave a list per line, which the reader wrote
+      // as one and the editor would then draw apart.
+      const start = $item.start($item.depth);
+      tr.setNodeMarkup($item.before($item.depth), bulletListType, {
+        spread: list.attrs.spread,
+      });
+      let offset = 0;
+      list.forEach((child) => {
+        rebulletItem(tr, start + offset);
+        offset += child.nodeSize;
+      });
+    } else {
+      const moved = convertOrderedItem(tr, pos, bulletListType);
+      if (moved !== null) rebulletItem(tr, moved);
+    }
     if (tr.steps.length === steps) break;
   }
   return tr.steps.length === 0 ? null : tr;

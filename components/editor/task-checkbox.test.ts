@@ -330,6 +330,15 @@ describe("the Task command", () => {
     agreesWithTheStore(view);
   });
 
+  it("re-bullets an all-task ordered list as one list, not one per line", async () => {
+    const view = await mountEditor("1. [ ] one\n2. [x] two\n");
+
+    expect(serialize(view)).toBe("* [ ] one\n\n* [x] two\n");
+    expect(view.dom.querySelectorAll("ul")).toHaveLength(1);
+    expect(view.dom.querySelector("ol")).toBeNull();
+    agreesWithTheStore(view);
+  });
+
   it("keeps a re-bulleted ordered task done if that is how it arrived", async () => {
     const view = await mountEditor("1. [x] b\n");
 

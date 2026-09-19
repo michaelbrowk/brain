@@ -63,14 +63,18 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
   concurrentMimeParsers: 2,
   concurrentSmtpSubmissions: 1,
   /* Derived from `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes`, which is the one
-   * outgoing number: 5 MiB of attachments is 6.84 MiB once base64 wraps it
+   * outgoing number: 8 MiB of attachments is 10.95 MiB once base64 wraps it
    * at 76 columns, the 1 MiB text part expands the same way, and the headers
-   * take the rest, so 10 MiB carries the whole band under the attachment cap
-   * with room to spare. The tunnel ceiling below is deliberately not raised
-   * with it: a message this size reaches a Gmail account and is refused at the
-   * relay for an IMAP one, which is what `egressTunnelAttachmentBytes` exists
-   * to say before the message is built rather than after. */
-  outgoingRawMessageBytes: 10 * 1024 * 1024,
+   * take the rest, so 14 MiB carries the whole band under the attachment cap
+   * with room to spare. The room matters: a ceiling a message at the cap can
+   * reach is a refusal after the build, which is the defect the cap round of
+   * 2026-09-15 exists to have fixed. The outbox checks a message against this
+   * figure by name before it writes a row. The tunnel ceiling below is
+   * deliberately not raised with it: a message this size reaches a Gmail
+   * account and is refused at the relay for an IMAP one, which is what
+   * `egressTunnelAttachmentBytes` exists to say before the message is built
+   * rather than after. */
+  outgoingRawMessageBytes: 14 * 1024 * 1024,
   egressTunnelFrameBytes: 16 * 1024,
   egressTunnelClientBytes: 2 * 1024 * 1024,
   /* What one message may carry in files when it leaves through the relay

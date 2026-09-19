@@ -706,7 +706,15 @@ describe("draft recipient contract", () => {
     const parked = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
-    let held = false;
+    // WHICH SEND ARRIVES FIRST IS NOT PART OF THE CONTRACT.
+    //
+    // Both sends read the account, the operation and the draft before they
+    // reach the gate, and those reads are real file work the store serialises
+    // per account, so either send can finish them first. The gate is in order
+    // from the moment each one arrives at it, not from the moment it was
+    // started. This case is about exclusion, so it records whichever send
+    // arrives first and holds every later assertion to that one.
+    let heldDraftId: string | null = null;
     const recording = new Proxy(fixture.store, {
       get(target, property) {
         const value = Reflect.get(target, property, target);
@@ -714,8 +722,8 @@ describe("draft recipient contract", () => {
           return async (...args: unknown[]) => {
             const draftId = (args[0] as { readonly draftId: string }).draftId;
             order.push(`enter:${draftId}`);
-            if (!held) {
-              held = true;
+            if (heldDraftId === null) {
+              heldDraftId = draftId;
               await parked;
             }
             const committed = await Reflect.apply(value, target, args);
@@ -743,15 +751,18 @@ describe("draft recipient contract", () => {
     for (let turn = 0; turn < 20; turn += 1) {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
-    expect(order).toEqual([`enter:${DRAFT_ID}`]);
+    expect(heldDraftId).not.toBeNull();
+    expect(order).toEqual([`enter:${heldDraftId}`]);
 
     releaseFirst();
     await Promise.all([first, second]);
+    const waiting =
+      heldDraftId === DRAFT_ID ? SECOND_DRAFT_ID : DRAFT_ID;
     expect(order).toEqual([
-      `enter:${DRAFT_ID}`,
-      `leave:${DRAFT_ID}`,
-      `enter:${SECOND_DRAFT_ID}`,
-      `leave:${SECOND_DRAFT_ID}`,
+      `enter:${heldDraftId}`,
+      `leave:${heldDraftId}`,
+      `enter:${waiting}`,
+      `leave:${waiting}`,
     ]);
     await fixture.store.close();
   });

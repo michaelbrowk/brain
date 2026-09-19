@@ -1010,6 +1010,54 @@ describe("brain-mail message HTTP surface", () => {
       body: { apiVersion: 1, error: { code: "mail_send_service_unavailable" } },
     });
   });
+
+  /** A refusal that has a figure says it. `mail_send_request_invalid` on its own
+   *  cannot tell a caller whether a smaller file would go through, which is the
+   *  whole question after a message is turned down for its size. The code is
+   *  still what the wire is keyed on; the line rides beside it. */
+  it("names the figures of a size refusal on the wire", async () => {
+    const detail =
+      "finished message of 15000000 bytes exceeds the 14680064 byte ceiling";
+    const send = sendServiceFixture();
+    (send.send as ReturnType<typeof vi.fn>).mockRejectedValue(
+      new MailSendError("mail_send_request_invalid", { detail }),
+    );
+    const socketPath = await startServer(messageServiceFixture(), send);
+    const logged: string[] = [];
+    const stderr = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: unknown) => {
+        logged.push(String(chunk));
+        return true;
+      });
+
+    try {
+      await expect(
+        requestJson(socketPath, "POST", "/v1/send", JSON.stringify(sendInput())),
+      ).resolves.toEqual({
+        status: 400,
+        body: {
+          apiVersion: 1,
+          error: { code: "mail_send_request_invalid", detail },
+        },
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+
+    // The answer carries the figures; the log record stays the stable code,
+    // the route family and the account, as section 13 says it must.
+    const failures = logged.filter((line) =>
+      line.includes("mail_request_failed"),
+    );
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).not.toContain("15000000");
+    expect(JSON.parse(failures[0]!) as Record<string, unknown>).toEqual({
+      event: "mail_request_failed",
+      errorCode: "mail_send_request_invalid",
+      phase: "send_post",
+    });
+  });
 });
 
 function messageServiceFixture(): MailMessageService & Record<string, ReturnType<typeof vi.fn>> {

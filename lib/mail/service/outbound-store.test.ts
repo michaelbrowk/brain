@@ -101,6 +101,64 @@ describe("private durable mail outbox", () => {
     await reopened.close();
   });
 
+  // THE MESSAGE IS PART OF WHAT A SWAP MAY NOT CHANGE.
+  //
+  // `assertImmutableIdentity` compares the message's digests rather than its
+  // bytes, because a swap reads the digests out of the row's JSON and never the
+  // BLOB. That is sound — each side's bytes were checked against its own digests
+  // before either reached the comparison, so agreeing on the digests is agreeing
+  // on the message — but nothing exercised it: the whole suite stayed green with
+  // the comparison replaced by `return true`.
+  it("refuses a swap that changes the message under an operation", async () => {
+    const fixture = await createStore();
+    const queued = submissionFixture();
+    await fixture.store.enqueue(queued);
+    const other = otherMessageFixture();
+    expect(other.rawRfc2822Sha256).not.toBe(queued.message.rawRfc2822Sha256);
+
+    for (const changed of [
+      other,
+      // One field at a time, so a comparison that forgot any of them is caught
+      // by the field it forgot.
+      Object.freeze({ ...queued.message, messageId: "<other@example.com>" }),
+      Object.freeze({ ...queued.message, providerThreadId: "thread-2" }),
+      Object.freeze({
+        ...queued.message,
+        envelope: Object.freeze({
+          ...queued.message.envelope,
+          to: Object.freeze(["stranger@example.net"]),
+        }),
+      }),
+    ]) {
+      await expect(
+        fixture.store.compareAndSwap(
+          queued.operationId,
+          0,
+          Object.freeze({
+            ...queued,
+            version: 1,
+            status: "sending" as const,
+            attemptCount: 1,
+            lease: Object.freeze({
+              attemptId: "attempt-00000000-0000-4000-8000-000000000009",
+              expiresAt: queued.updatedAt + 60_000,
+              deliveryRisk: false,
+            }),
+            nextAttemptAt: null,
+            updatedAt: queued.updatedAt + 1,
+            message: changed,
+          }),
+        ),
+      ).rejects.toEqual(new MailSendError("mail_send_service_unavailable"));
+    }
+    // The row is untouched by every one of them.
+    expectSameSubmission(
+      await fixture.store.readByOperationId(queued.operationId),
+      queued,
+    );
+    await fixture.store.close();
+  });
+
   // Once COMMIT has returned the row is durable. The bookkeeping that follows
   // it — the retention mark, the database close — used to be inside the same
   // try, so a throw there was caught, turned into `mail_send_service_unavailable`
@@ -243,8 +301,8 @@ describe("private durable mail outbox", () => {
   // file runs on a 53-byte body, so a row big enough to meet the serialized
   // submission cap had never been written, and the branch shipped an
   // attachment cap the store would not hold. A message at the cap has to
-  // reach the row and come back off it whole, or `rawRfc2822Base64Url` is
-  // not what the sender puts on the wire.
+  // reach the row and come back off it whole, or `raw_rfc2822` is not what
+  // the sender puts on the wire.
   it("holds a message at the attachment cap and reads it back whole", async () => {
     const fixture = await createStore();
     const queued = cappedSubmissionFixture();
@@ -255,20 +313,14 @@ describe("private durable mail outbox", () => {
       MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes,
     );
 
-    await expect(fixture.store.enqueue(queued)).resolves.toEqual({
-      created: true,
-      submission: queued,
-    });
+    const enqueued = await fixture.store.enqueue(queued);
+    expect(enqueued.created).toBe(true);
+    expectSameSubmission(enqueued.submission, queued);
     const readBack = await fixture.store.readByOperationId(queued.operationId);
-    expect(readBack).toEqual(queued);
-    expect(readBack?.message.rawRfc2822Base64Url).toBe(
-      queued.message.rawRfc2822Base64Url,
-    );
+    expectSameSubmission(readBack, queued);
     expect(
       createHash("sha256")
-        .update(
-          Buffer.from(readBack?.message.rawRfc2822Base64Url ?? "", "base64url"),
-        )
+        .update(readBack?.message.rawRfc2822 ?? Buffer.alloc(0))
         .digest("hex"),
     ).toBe(queued.message.rawRfc2822Sha256);
     await fixture.store.close();
@@ -282,18 +334,26 @@ describe("private durable mail outbox", () => {
 
     const database = openDatabase(fixture.cacheRoot);
     try {
-      expect(
-        database
-          .prepare("SELECT submission_json FROM outbox WHERE operation_id = ?")
-          .get(gmail.operationId)?.submission_json,
-      ).toBe(JSON.stringify(gmail));
+      const row = database
+        .prepare(
+          "SELECT submission_json, raw_rfc2822 FROM outbox WHERE operation_id = ?",
+        )
+        .get(gmail.operationId);
+      expect(row?.submission_json).toBe(
+        JSON.stringify(withoutMessageBytes(gmail)),
+      );
+      // The message is the column, and the JSON beside it says nothing of it
+      // beyond its two digests.
+      expect(Buffer.from(row?.raw_rfc2822 as Uint8Array)).toEqual(
+        gmail.message.rawRfc2822,
+      );
       // The ownership schema exists, but a Gmail row never becomes SMTP-owned.
       expect(
         database
           .prepare("SELECT COUNT(*) AS count FROM smtp_submission_state")
           .get()?.count,
       ).toBe(0);
-      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(2);
+      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
     } finally {
       database.close();
     }
@@ -358,7 +418,7 @@ describe("private durable mail outbox", () => {
 
     const database = openDatabase(fixture.cacheRoot);
     try {
-      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(2);
+      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
       expect(
         database
           .prepare(
@@ -628,13 +688,13 @@ describe("private durable mail outbox", () => {
     const reopened = new SqliteMailSendStore({ cacheRoot: fixture.cacheRoot });
     await reopened.initialize();
     await expect(reopened.listRunnable(now, 2)).resolves.toEqual([
-      queued,
-      expiredSafe,
+      identityOf(queued),
+      identityOf(expiredSafe),
     ]);
     await expect(reopened.listRunnable(now, 10)).resolves.toEqual([
-      queued,
-      expiredSafe,
-      expiredRisk,
+      identityOf(queued),
+      identityOf(expiredSafe),
+      identityOf(expiredRisk),
     ]);
     await expect(reopened.nextRunnableAt()).resolves.toBe(now - 3_000);
     await expect(reopened.countActive()).resolves.toBe(4);
@@ -654,12 +714,12 @@ describe("private durable mail outbox", () => {
     await reopened.initialize();
     await expect(
       reopened.listRunnable(queued.updatedAt, 1),
-    ).resolves.toEqual([queued]);
+    ).resolves.toEqual([identityOf(queued)]);
     await reopened.close();
 
     const database = openDatabase(fixture.cacheRoot);
     try {
-      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(2);
+      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
       const columns = database
         .prepare("PRAGMA table_info(outbox)")
         .all()
@@ -688,36 +748,549 @@ describe("private durable mail outbox", () => {
     }
   });
 
-  it("rolls back a v1 migration when legacy JSON is corrupt", async () => {
+  // A v1 row whose JSON is unreadable used to roll the migration back and leave
+  // the file at version 1, which meant every later open repeated the failure and
+  // the account stayed shut. It is carried across as a failed row instead, on the
+  // same reasoning as the v2 walk: one message is the casualty, not the account.
+  it("carries a v1 row with unreadable JSON across as a failed one", async () => {
     const fixture = await createStore();
     await fixture.store.close();
-    await createLegacyDatabase(
-      fixture.cacheRoot,
-      submissionFixture({ operationId: operationId(11) }),
-      "{not-json",
-    );
+    const legacy = submissionFixture({ operationId: operationId(11) });
+    await createLegacyDatabase(fixture.cacheRoot, legacy, "{not-json");
 
-    const reopened = new SqliteMailSendStore({ cacheRoot: fixture.cacheRoot });
+    const reopened = new SqliteMailSendStore({
+      cacheRoot: fixture.cacheRoot,
+      now: () => legacy.updatedAt + 1_000,
+    });
     await reopened.initialize();
-    await expect(reopened.countActive()).rejects.toEqual(
-      new MailSendError("mail_send_service_unavailable"),
-    );
+    await expect(reopened.countActive()).resolves.toBe(0);
+    await expect(
+      reopened.readByOperationId(legacy.operationId),
+    ).rejects.toEqual(new MailSendError("mail_send_service_unavailable"));
     await reopened.close();
 
     const database = openDatabase(fixture.cacheRoot);
     try {
-      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(1);
-      const columns = database
-        .prepare("PRAGMA table_info(outbox)")
-        .all()
-        .map((row) => row.name);
-      expect(columns).not.toContain("runnable_at");
+      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
       expect(
-        database.prepare("SELECT COUNT(*) AS count FROM outbox").get()?.count,
-      ).toBe(1);
+        database
+          .prepare(
+            `SELECT status, runnable_at, submission_json,
+                    length(raw_rfc2822) AS raw_bytes FROM outbox`,
+          )
+          .all(),
+      ).toEqual([
+        {
+          status: "failed",
+          runnable_at: null,
+          submission_json: "{not-json",
+          raw_bytes: 0,
+        },
+      ]);
     } finally {
       database.close();
     }
+  });
+
+  // Schema 2 to 3. The file this runs on is a real one: a draft's committed
+  // send, a message at the attachment cap and an IMAP row with its SMTP state,
+  // written by the store and then put back into the shape schema 2 wrote. Both
+  // hazards of a rebuild live in that file — the state row's foreign key into
+  // the outbox, and the two drafts triggers that fire on an outbox insert.
+  it("moves a schema 2 outbox into the message column, message for message", async () => {
+    const fixture = await createStore();
+    const draft = storedDraftFixture({
+      draftId: draftId(3_001),
+      to: "friend@example.com",
+    });
+    await fixture.store.createDraft(
+      draft,
+      fingerprintMailDraftCreate(createInputFromFixture(draft)),
+    );
+    const fromDraft = draftSubmissionFixture(draft, {
+      operationId: operationId(3_001),
+      idempotencyKey: "schema-3-draft-send",
+      createdAt: draft.updatedAt + 1,
+      updatedAt: draft.updatedAt + 1,
+      nextAttemptAt: draft.updatedAt + 1,
+    });
+    const mutation = validateMailDraftMutationInput({
+      accountId: FIRST_ACCOUNT,
+      draftId: draft.draftId,
+      mutationId: draftMutationId(3_001),
+      expectedRevision: 0,
+      kind: "send",
+      sendIdempotencyKey: fromDraft.idempotencyKey,
+      sendOperationId: fromDraft.operationId,
+    });
+    await fixture.store.commitDraftSend(
+      mutation,
+      fingerprintMailDraftMutation(mutation),
+      fromDraft,
+      fromDraft.createdAt,
+    );
+    const capped = cappedSubmissionFixture();
+    await fixture.store.enqueue(capped);
+    const imap = submissionFixture({
+      providerKind: "imap",
+      operationId: operationId(3_003),
+      idempotencyKey: "schema-3-imap",
+    });
+    await fixture.store.enqueue(imap);
+    await fixture.store.initializeSmtpSubmissionState(
+      imap.accountId,
+      imap.operationId,
+    );
+    const draftBefore = await fixture.store.readDraft(
+      FIRST_ACCOUNT,
+      draft.draftId,
+    );
+    await fixture.store.close();
+
+    const rows = [fromDraft, capped, imap];
+    downgradeToSchemaV2(fixture.cacheRoot, rows);
+
+    const reopened = new SqliteMailSendStore({ cacheRoot: fixture.cacheRoot });
+    await reopened.initialize();
+    for (const row of rows) {
+      expectSameSubmission(
+        await reopened.readByOperationId(row.operationId),
+        row,
+      );
+    }
+    // The state row holds the foreign key a rebuild would have cascaded away.
+    await expect(
+      reopened.readSmtpSubmissionState(imap.accountId, imap.operationId),
+    ).resolves.not.toBeNull();
+    await expect(
+      reopened.readSmtpSubmissionRaw(imap.accountId, imap.operationId),
+    ).resolves.toEqual(imap.message.rawRfc2822);
+    // The drafts triggers never fired: no row was inserted, only rewritten.
+    await expect(
+      reopened.readDraft(FIRST_ACCOUNT, draft.draftId),
+    ).resolves.toEqual(draftBefore);
+    await reopened.close();
+
+    const database = openDatabase(fixture.cacheRoot);
+    try {
+      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
+      expect(database.prepare("PRAGMA foreign_key_check").all()).toEqual([]);
+      const row = database
+        .prepare(
+          `SELECT submission_json, length(raw_rfc2822) AS raw_bytes
+             FROM outbox WHERE operation_id = ?`,
+        )
+        .get(capped.operationId);
+      expect(row?.submission_json).not.toContain("rawRfc2822Base64Url");
+      expect(row?.raw_bytes).toBe(capped.message.rawRfc2822Bytes);
+    } finally {
+      database.close();
+    }
+  });
+
+  // ONE MESSAGE IS THE CASUALTY, NOT THE ACCOUNT.
+  //
+  // A legacy row whose base64url does not decode, or whose digests do not match
+  // what it decodes to, used to throw out of the migration and out of the open:
+  // `user_version` stayed at 2, the next open repeated the failure, and the
+  // account could not send, read a status or drain what was already queued.
+  // Under schema 2 the same corruption cost exactly the row that carried it.
+  // So the bad row is marked failed with an empty message, the migration
+  // finishes, version 3 is claimed, and the one message is the one thing lost.
+  it("marks a legacy row it cannot read failed and migrates the rest", async () => {
+    const fixture = await createStore();
+    const healthy = submissionFixture({
+      operationId: operationId(4_001),
+      idempotencyKey: "healthy-row",
+    });
+    const undecodable = submissionFixture({
+      operationId: operationId(4_002),
+      idempotencyKey: "undecodable-row",
+    });
+    const mismatched = submissionFixture({
+      operationId: operationId(4_003),
+      idempotencyKey: "mismatched-row",
+    });
+    for (const row of [healthy, undecodable, mismatched]) {
+      await fixture.store.enqueue(row);
+    }
+    await fixture.store.close();
+
+    downgradeToSchemaV2(
+      fixture.cacheRoot,
+      [healthy, undecodable, mismatched],
+      new Map<
+        string,
+        (value: Record<string, unknown>) => Record<string, unknown>
+      >([
+        [
+          undecodable.operationId,
+          (value) => ({
+            ...value,
+            message: {
+              ...(value.message as Record<string, unknown>),
+              rawRfc2822Base64Url: "not base64url at all",
+            },
+          }),
+        ],
+        [
+          mismatched.operationId,
+          (value) => ({
+            ...value,
+            message: {
+              ...(value.message as Record<string, unknown>),
+              rawRfc2822Sha256: "f".repeat(64),
+            },
+          }),
+        ],
+      ]),
+    );
+
+    const logged: string[] = [];
+    const stderr = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: unknown) => {
+        logged.push(String(chunk));
+        return true;
+      });
+    const reopened = new SqliteMailSendStore({
+      cacheRoot: fixture.cacheRoot,
+      // A clock inside the retention window, so the two failed rows are still
+      // there to be asserted on rather than swept as terminal history.
+      now: () => healthy.updatedAt + 1_000,
+    });
+    await reopened.initialize();
+    try {
+      expectSameSubmission(
+        await reopened.readByOperationId(healthy.operationId),
+        healthy,
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+    for (const row of [undecodable, mismatched]) {
+      await expect(reopened.readByOperationId(row.operationId)).rejects.toEqual(
+        new MailSendError("mail_send_service_unavailable"),
+      );
+    }
+    // Neither of them is runnable any more, so the worker never picks one up.
+    await expect(reopened.countActive()).resolves.toBe(1);
+    await expect(
+      reopened.listRunnable(healthy.updatedAt, 10),
+    ).resolves.toEqual([identityOf(healthy)]);
+    await reopened.close();
+
+    expect(
+      logged
+        .filter((line) => line.includes("mail_outbox_row_unreadable"))
+        .map((line) => JSON.parse(line) as Record<string, unknown>),
+    ).toEqual([
+      {
+        event: "mail_outbox_row_unreadable",
+        accountId: FIRST_ACCOUNT,
+        operationId: undecodable.operationId,
+      },
+      {
+        event: "mail_outbox_row_unreadable",
+        accountId: FIRST_ACCOUNT,
+        operationId: mismatched.operationId,
+      },
+    ]);
+
+    const database = openDatabase(fixture.cacheRoot);
+    try {
+      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
+      expect(
+        database
+          .prepare(
+            `SELECT operation_id, status, runnable_at, updated_at,
+                    length(raw_rfc2822) AS raw_bytes
+               FROM outbox ORDER BY operation_id`,
+          )
+          .all(),
+      ).toEqual([
+        {
+          operation_id: healthy.operationId,
+          status: "queued",
+          runnable_at: healthy.nextAttemptAt,
+          updated_at: healthy.updatedAt,
+          raw_bytes: healthy.message.rawRfc2822Bytes,
+        },
+        // Stamped with the migration's own clock, not left at the send's. A row
+        // queued longer ago than the terminal retention window would otherwise
+        // be marked failed and swept by the first `listRunnable` after the open,
+        // taking the JSON this migration keeps as the only evidence with it.
+        {
+          operation_id: undecodable.operationId,
+          status: "failed",
+          runnable_at: null,
+          updated_at: healthy.updatedAt + 1_000,
+          raw_bytes: 0,
+        },
+        {
+          operation_id: mismatched.operationId,
+          status: "failed",
+          runnable_at: null,
+          updated_at: healthy.updatedAt + 1_000,
+          raw_bytes: 0,
+        },
+      ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  // THE WALK ADVANCES PAST A ROW IT CANNOT MOVE AT ALL.
+  //
+  // `after` is assigned before the attempt and outside every branch, so the next
+  // page starts past this row whatever became of it. Moving that assignment into
+  // the success branch makes the walk read the same page for ever — and the
+  // marking is not the only thing that can fail on a row: a database that
+  // refuses that write leaves the row exactly as it was. The walk still has to
+  // finish and claim version 3, because the alternative is an account that never
+  // opens again.
+  it("finishes the migration when a row cannot even be marked", async () => {
+    const fixture = await createStore();
+    const healthy = submissionFixture({
+      operationId: operationId(4_101),
+      idempotencyKey: "healthy-beside-stuck",
+    });
+    const stuck = submissionFixture({
+      operationId: operationId(4_102),
+      idempotencyKey: "stuck-row",
+    });
+    for (const row of [healthy, stuck]) await fixture.store.enqueue(row);
+    await fixture.store.close();
+    downgradeToSchemaV2(
+      fixture.cacheRoot,
+      [healthy, stuck],
+      new Map<
+        string,
+        (value: Record<string, unknown>) => Record<string, unknown>
+      >([
+        [
+          stuck.operationId,
+          (value) => ({
+            ...value,
+            message: {
+              ...(value.message as Record<string, unknown>),
+              rawRfc2822Base64Url: "not base64url at all",
+            },
+          }),
+        ],
+      ]),
+    );
+
+    // Every attempt to mark a row failed is refused: the one inside the row's
+    // own transaction and the one taken on its own afterwards.
+    const prepare = DatabaseSync.prototype.prepare;
+    const spy = vi
+      .spyOn(DatabaseSync.prototype, "prepare")
+      .mockImplementation(function (this: DatabaseSync, sql: string) {
+        const statement = prepare.call(this, sql);
+        if (!sql.includes("status = 'failed'")) return statement;
+        return new Proxy(statement, {
+          get(target, property, receiver) {
+            if (property === "run") {
+              return () => {
+                throw new Error("the marking write is refused");
+              };
+            }
+            const value = Reflect.get(target, property, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      });
+    const logged: string[] = [];
+    const stderr = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: unknown) => {
+        logged.push(String(chunk));
+        return true;
+      });
+    const reopened = new SqliteMailSendStore({
+      cacheRoot: fixture.cacheRoot,
+      now: () => healthy.updatedAt + 1_000,
+    });
+    try {
+      await reopened.initialize();
+      // The row before it in id order moved, and the walk came back at all.
+      expectSameSubmission(
+        await reopened.readByOperationId(healthy.operationId),
+        healthy,
+      );
+    } finally {
+      spy.mockRestore();
+      stderr.mockRestore();
+    }
+    await expect(reopened.readByOperationId(stuck.operationId)).rejects.toEqual(
+      new MailSendError("mail_send_service_unavailable"),
+    );
+    await reopened.close();
+
+    expect(
+      logged.filter((line) => line.includes("mail_outbox_row_unreadable")),
+    ).toHaveLength(1);
+    const database = openDatabase(fixture.cacheRoot);
+    try {
+      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
+      // Unmarked, because the write that marks it was refused, and still empty,
+      // which is what makes every read of it refuse.
+      expect(
+        database
+          .prepare(
+            `SELECT status, length(raw_rfc2822) AS raw_bytes
+               FROM outbox WHERE operation_id = ?`,
+          )
+          .get(stuck.operationId),
+      ).toEqual({ status: "queued", raw_bytes: 0 });
+    } finally {
+      database.close();
+    }
+  });
+
+  // More rows than one page of the migration, so the walk has to advance rather
+  // than read the same page for ever. The old bound refused to migrate at all
+  // above ten thousand rows, which was a second way to make a file unopenable.
+  it("migrates a backlog larger than one migration page", async () => {
+    const fixture = await createStore();
+    const seed = submissionFixture({
+      operationId: operationId(5_000),
+      idempotencyKey: "page-seed",
+    });
+    await fixture.store.enqueue(seed);
+    await fixture.store.close();
+
+    const rows = [seed];
+    const database = openDatabase(fixture.cacheRoot);
+    try {
+      database.exec("BEGIN IMMEDIATE");
+      for (let index = 1; index <= 501; index += 1) {
+        const row = submissionFixture({
+          operationId: operationId(5_000 + index),
+          idempotencyKey: `page-row-${index}`,
+        });
+        insertSubmissionRowDirectly(database, row);
+        rows.push(row);
+      }
+      database.exec("COMMIT");
+    } finally {
+      database.close();
+    }
+    downgradeToSchemaV2(fixture.cacheRoot, rows);
+
+    const reopened = new SqliteMailSendStore({ cacheRoot: fixture.cacheRoot });
+    await reopened.initialize();
+    await expect(reopened.countActive()).resolves.toBe(rows.length);
+    expectSameSubmission(
+      await reopened.readByOperationId(rows[rows.length - 1]!.operationId),
+      rows[rows.length - 1]!,
+    );
+    await reopened.close();
+
+    const verified = openDatabase(fixture.cacheRoot);
+    try {
+      expect(verified.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
+      expect(
+        verified
+          .prepare(
+            "SELECT COUNT(*) AS count FROM outbox WHERE length(raw_rfc2822) = 0",
+          )
+          .get()?.count,
+      ).toBe(0);
+    } finally {
+      verified.close();
+    }
+  });
+
+  // A version this service does not write, and no path down from it: the
+  // account is refused rather than read. What the case shows is the branch, on
+  // a version from the future, because a schema 2 service cannot be run from a
+  // schema 3 test — the other direction of the one-way migration takes this
+  // same branch (`version !== SCHEMA_VERSION`, no downgrade) and was verified
+  // by reading `8b3971a`'s `initializeSchema`, where `SCHEMA_VERSION` is 2.
+  it("refuses an outbox whose schema version it does not write", async () => {
+    const fixture = await createStore();
+    const queued = submissionFixture();
+    await fixture.store.enqueue(queued);
+    await fixture.store.close();
+    const database = openDatabase(fixture.cacheRoot);
+    try {
+      database.exec("PRAGMA user_version = 4");
+    } finally {
+      database.close();
+    }
+
+    const reopened = new SqliteMailSendStore({ cacheRoot: fixture.cacheRoot });
+    await reopened.initialize();
+    await expect(reopened.readByOperationId(queued.operationId)).rejects.toEqual(
+      new MailSendError("mail_send_service_unavailable"),
+    );
+    await reopened.close();
+  });
+
+  // What the 2 MiB literal used to do at the end of a build: refuse, name no
+  // size, and call itself a service outage. The ceiling is the outgoing one
+  // now, the refusal names both figures, and nothing is written.
+  it("refuses a message over the outgoing ceiling, naming its size", async () => {
+    const fixture = await createStore();
+    const raw = Buffer.alloc(
+      MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes + 1,
+      0x41,
+    );
+    const oversized = submissionFixture({
+      idempotencyKey: "over-the-ceiling",
+      message: Object.freeze({
+        ...submissionFixture().message,
+        rawRfc2822: raw,
+        rawRfc2822Bytes: raw.byteLength,
+        rawRfc2822Sha256: createHash("sha256").update(raw).digest("hex"),
+      }),
+    });
+
+    const error = await fixture.store
+      .enqueue(oversized)
+      .then(() => null, (thrown: unknown) => thrown);
+    expect(error).toBeInstanceOf(MailSendError);
+    expect((error as MailSendError).code).toBe("mail_send_request_invalid");
+    expect((error as MailSendError).message).toContain(String(raw.byteLength));
+    expect((error as MailSendError).message).toContain(
+      String(MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes),
+    );
+    await expect(
+      fixture.store.readByOperationId(oversized.operationId),
+    ).resolves.toBeNull();
+    await expect(fixture.store.countActive()).resolves.toBe(0);
+    // Refused before the first database call, so this enqueue never even made
+    // the account's directory, let alone a row inside it.
+    await expect(
+      stat(path.join(fixture.cacheRoot, FIRST_ACCOUNT)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+    await fixture.store.close();
+  });
+
+  it("refuses a message its row's digests no longer match", async () => {
+    const fixture = await createStore();
+    const queued = submissionFixture();
+    await fixture.store.enqueue(queued);
+    await fixture.store.close();
+    const corrupted = Buffer.from(queued.message.rawRfc2822);
+    corrupted[0] = corrupted[0]! ^ 0xff;
+    const database = openDatabase(fixture.cacheRoot);
+    try {
+      database
+        .prepare("UPDATE outbox SET raw_rfc2822 = ? WHERE operation_id = ?")
+        .run(corrupted, queued.operationId);
+    } finally {
+      database.close();
+    }
+
+    const reopened = new SqliteMailSendStore({ cacheRoot: fixture.cacheRoot });
+    await reopened.initialize();
+    await expect(reopened.readByOperationId(queued.operationId)).rejects.toEqual(
+      new MailSendError("mail_send_service_unavailable"),
+    );
+    await reopened.close();
   });
 
   it("enforces one global active quota across concurrent account enqueues", async () => {
@@ -827,8 +1400,8 @@ describe("private durable mail outbox", () => {
     const database = openDatabase(fixture.cacheRoot);
     try {
       database.exec("BEGIN IMMEDIATE");
-      insertV2Submission(database, old);
-      for (const submission of recent) insertV2Submission(database, submission);
+      insertSubmissionRowDirectly(database, old);
+      for (const submission of recent) insertSubmissionRowDirectly(database, submission);
       database.exec("COMMIT");
     } finally {
       database.close();
@@ -889,7 +1462,7 @@ describe("private durable mail outbox", () => {
     );
     const database = openDatabase(fixture.cacheRoot);
     try {
-      insertV2Submission(database, old);
+      insertSubmissionRowDirectly(database, old);
     } finally {
       database.close();
     }
@@ -941,7 +1514,12 @@ describe("private durable mail outbox", () => {
     await fixture.store.close();
   });
 
-  it("uses metadata aggregates and decodes JSON only for the selected batch", async () => {
+  // A corrupt row is one failed operation, not a batch that cannot be listed.
+  // The listing reads metadata columns only, so a row whose JSON or whose
+  // message cannot be read is listed like any other and refused on the read
+  // that would deliver it — which is the worker's own failure path, one
+  // operation wide.
+  it("lists a corrupt row like any other and refuses it on the read that delivers it", async () => {
     const fixture = await createStore();
     const now = Date.now();
     const valid = submissionFixture({
@@ -956,14 +1534,14 @@ describe("private durable mail outbox", () => {
 
     const database = openDatabase(fixture.cacheRoot);
     try {
-      insertCorruptV2Row(database, {
+      insertCorruptRowDirectly(database, {
         operationId: operationId(3_001),
         idempotencyKey: "corrupt-terminal",
         status: "sent",
         runnableAt: null,
         createdAt: now,
       });
-      insertCorruptV2Row(database, {
+      insertCorruptRowDirectly(database, {
         operationId: operationId(3_002),
         idempotencyKey: "corrupt-runnable",
         status: "queued",
@@ -978,10 +1556,20 @@ describe("private durable mail outbox", () => {
     await reopened.initialize();
     await expect(reopened.nextRunnableAt()).resolves.toBe(now);
     await expect(reopened.countActive()).resolves.toBe(2);
-    await expect(reopened.listRunnable(now + 1, 1)).resolves.toEqual([valid]);
-    await expect(reopened.listRunnable(now + 1, 2)).rejects.toEqual(
-      new MailSendError("mail_send_service_unavailable"),
-    );
+    await expect(reopened.listRunnable(now + 1, 1)).resolves.toEqual([
+      identityOf(valid),
+    ]);
+    await expect(reopened.listRunnable(now + 1, 2)).resolves.toEqual([
+      identityOf(valid),
+      { accountId: FIRST_ACCOUNT, operationId: operationId(3_002) },
+    ]);
+    // The message behind the corrupt row is what refuses, on its own read.
+    await expect(
+      reopened.readByOperationId(operationId(3_002)),
+    ).rejects.toEqual(new MailSendError("mail_send_service_unavailable"));
+    await expect(
+      reopened.readByOperationId(valid.operationId),
+    ).resolves.toEqual(valid);
     await reopened.close();
   });
 
@@ -1064,7 +1652,9 @@ describe("SMTP ownership handoff and outbox mirror", () => {
     await fixture.store.enqueue(gmail);
     await fixture.store.enqueue(imap);
 
-    await expect(fixture.store.listRunnable(now, 10)).resolves.toEqual([gmail]);
+    await expect(fixture.store.listRunnable(now, 10)).resolves.toEqual([
+      identityOf(gmail),
+    ]);
     await expect(fixture.store.nextRunnableAt()).resolves.toBe(
       gmail.nextAttemptAt,
     );
@@ -1079,9 +1669,7 @@ describe("SMTP ownership handoff and outbox mirror", () => {
     );
     await expect(
       fixture.store.readSmtpSubmissionRaw(imap.accountId, imap.operationId),
-    ).resolves.toEqual(
-      Buffer.from(imap.message.rawRfc2822Base64Url, "base64url"),
-    );
+    ).resolves.toEqual(imap.message.rawRfc2822);
     await expect(
       fixture.store.readSmtpSubmissionRaw(gmail.accountId, gmail.operationId),
     ).resolves.toBeNull();
@@ -1367,14 +1955,14 @@ async function casThrough(
 }
 
 describe("durable account-scoped mail drafts", () => {
-  it("adds dormant draft tables without changing schema v2 or the send path", async () => {
+  it("adds dormant draft tables without changing schema v3 or the send path", async () => {
     const fixture = await createStore();
     await fixture.store.enqueue(submissionFixture());
     await fixture.store.close();
 
     const database = openDatabase(fixture.cacheRoot);
     try {
-      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(2);
+      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
       const tables = database
         .prepare(
           `SELECT name FROM sqlite_master
@@ -1953,14 +2541,14 @@ describe("durable account-scoped mail drafts", () => {
       ),
     ).rejects.toEqual(new MailDraftError("mail_draft_idempotency_conflict"));
     const wrongRaw = Buffer.concat([
-      Buffer.from(matching.message.rawRfc2822Base64Url, "base64url"),
+      matching.message.rawRfc2822,
       Buffer.from("X", "ascii"),
     ]);
     const wrongMime = Object.freeze({
       ...matching,
       message: Object.freeze({
         ...matching.message,
-        rawRfc2822Base64Url: wrongRaw.toString("base64url"),
+        rawRfc2822: wrongRaw,
         rawRfc2822Bytes: wrongRaw.byteLength,
         rawRfc2822Sha256: createHash("sha256").update(wrongRaw).digest("hex"),
       }),
@@ -2250,7 +2838,7 @@ describe("durable account-scoped mail drafts", () => {
     try {
       database.exec("BEGIN IMMEDIATE");
       for (let index = 0; index < 501; index += 1) {
-        insertV2Submission(
+        insertSubmissionRowDirectly(
           database,
           terminalSubmission(20_000 + index, now + index),
         );
@@ -2340,7 +2928,7 @@ describe("durable account-scoped mail drafts", () => {
     try {
       database.exec("BEGIN IMMEDIATE");
       for (let index = 0; index < 501; index += 1) {
-        insertV2Submission(
+        insertSubmissionRowDirectly(
           database,
           terminalSubmission(22_000 + index, now + index),
         );
@@ -3131,7 +3719,7 @@ async function createLegacyDatabase(
     database
       .prepare("INSERT INTO metadata(singleton, account_id) VALUES (1, ?)")
       .run(submission.accountId);
-    const legacy: Record<string, unknown> = { ...submission };
+    const legacy: Record<string, unknown> = { ...legacySubmissionJson(submission) };
     delete legacy.nextAttemptAt;
     database
       .prepare(
@@ -3160,7 +3748,9 @@ function openDatabase(
   return new DatabaseSync(path.join(cacheRoot, accountId, "outbox.sqlite3"));
 }
 
-function insertV2Submission(
+/** A row written straight into the live table, past the store, to set up a
+ *  state the store's own API will not produce. */
+function insertSubmissionRowDirectly(
   database: DatabaseSync,
   submission: StoredMailSendSubmission,
 ): void {
@@ -3168,8 +3758,9 @@ function insertV2Submission(
     .prepare(
       `INSERT INTO outbox(
          operation_id, account_id, idempotency_key, request_fingerprint,
-         version, status, runnable_at, created_at, updated_at, submission_json
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         version, status, runnable_at, created_at, updated_at, submission_json,
+         raw_rfc2822
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       submission.operationId,
@@ -3181,11 +3772,12 @@ function insertV2Submission(
       submission.nextAttemptAt ?? submission.lease?.expiresAt ?? null,
       submission.createdAt,
       submission.updatedAt,
-      JSON.stringify(submission),
+      JSON.stringify(withoutMessageBytes(submission)),
+      submission.message.rawRfc2822,
     );
 }
 
-function insertCorruptV2Row(
+function insertCorruptRowDirectly(
   database: DatabaseSync,
   input: {
     readonly operationId: string;
@@ -3199,8 +3791,9 @@ function insertCorruptV2Row(
     .prepare(
       `INSERT INTO outbox(
          operation_id, account_id, idempotency_key, request_fingerprint,
-         version, status, runnable_at, created_at, updated_at, submission_json
-       ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
+         version, status, runnable_at, created_at, updated_at, submission_json,
+         raw_rfc2822
+       ) VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.operationId,
@@ -3212,6 +3805,7 @@ function insertCorruptV2Row(
       input.createdAt,
       input.createdAt,
       "{not-json",
+      Buffer.from("From: me@example.com\r\n\r\nBody\r\n", "utf8"),
     );
 }
 
@@ -3353,6 +3947,105 @@ function terminalSubmission(
   });
 }
 
+/**
+ * Two records are the same record.
+ *
+ * `toEqual` on the whole thing walks a multi-megabyte message byte by byte —
+ * twenty-five seconds for one comparison at the cap — so the message is
+ * compared with `Buffer.equals`, which is one memcmp, and the rest of the
+ * record the ordinary way.
+ */
+function expectSameSubmission(
+  actual: StoredMailSendSubmission | null,
+  expected: StoredMailSendSubmission,
+): void {
+  expect(actual).not.toBeNull();
+  expect(actual?.message.rawRfc2822.equals(expected.message.rawRfc2822)).toBe(
+    true,
+  );
+  expect(withoutMessageBytes(actual!)).toEqual(withoutMessageBytes(expected));
+}
+
+/** A different message, digests and all: another operation's, near enough to
+ *  the fixture's that only the message tells them apart. */
+function otherMessageFixture(): StoredMailSendSubmission["message"] {
+  const raw = Buffer.from(
+    "From: me@example.com\r\nTo: friend@example.net\r\n\r\nAnother body\r\n",
+    "utf8",
+  );
+  return Object.freeze({
+    ...submissionFixture().message,
+    rawRfc2822: raw,
+    rawRfc2822Bytes: raw.byteLength,
+    rawRfc2822Sha256: createHash("sha256").update(raw).digest("hex"),
+  });
+}
+
+/** What a queue listing carries. */
+function identityOf(value: StoredMailSendSubmission) {
+  return { accountId: value.accountId, operationId: value.operationId };
+}
+
+function withoutMessageBytes(value: StoredMailSendSubmission): unknown {
+  const message = { ...value.message } as Record<string, unknown>;
+  delete message.rawRfc2822;
+  return { ...value, message };
+}
+
+/**
+ * A schema 3 outbox put back into the shape schema 2 wrote.
+ *
+ * `DROP COLUMN` and a rewrite of each row's JSON, so everything else in the
+ * file — the drafts tables, their two triggers, the SMTP state row and its
+ * foreign key — is left exactly as the store built it, which is what makes the
+ * forward migration's run over this file worth anything.
+ */
+function downgradeToSchemaV2(
+  cacheRoot: string,
+  rows: readonly StoredMailSendSubmission[],
+  corrupt: ReadonlyMap<
+    string,
+    (value: Record<string, unknown>) => Record<string, unknown>
+  > = new Map(),
+): void {
+  const database = openDatabase(cacheRoot);
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    const update = database.prepare(
+      "UPDATE outbox SET submission_json = ? WHERE operation_id = ?",
+    );
+    for (const row of rows) {
+      const legacy = legacySubmissionJson(row);
+      const damage = corrupt.get(row.operationId);
+      const changed = update.run(
+        JSON.stringify(damage ? damage(legacy) : legacy),
+        row.operationId,
+      );
+      expect(changed.changes).toBe(1);
+    }
+    database.exec("ALTER TABLE outbox DROP COLUMN raw_rfc2822");
+    database.exec("PRAGMA user_version = 2");
+    database.exec("COMMIT");
+  } finally {
+    database.close();
+  }
+}
+
+/** The record as schema 1 and 2 wrote it: the message inside the JSON, as a
+ *  base64url string, with no column of its own. */
+function legacySubmissionJson(
+  value: StoredMailSendSubmission,
+): Record<string, unknown> {
+  const { rawRfc2822, ...message } = value.message;
+  return {
+    ...value,
+    message: {
+      ...message,
+      rawRfc2822Base64Url: rawRfc2822.toString("base64url"),
+    },
+  };
+}
+
 function submissionFixture(
   override: Partial<StoredMailSendSubmission> = {},
 ): StoredMailSendSubmission {
@@ -3379,7 +4072,7 @@ function submissionFixture(
         bcc: Object.freeze([]),
       }),
       providerThreadId: null,
-      rawRfc2822Base64Url: raw.toString("base64url"),
+      rawRfc2822: raw,
       rawRfc2822Bytes: raw.byteLength,
       rawRfc2822Sha256: createHash("sha256").update(raw).digest("hex"),
     }),
@@ -3424,7 +4117,7 @@ function cappedSubmissionFixture(): StoredMailSendSubmission {
       messageId: built.messageId,
       envelope: built.envelope,
       providerThreadId: null,
-      rawRfc2822Base64Url: built.rawRfc2822.toString("base64url"),
+      rawRfc2822: built.rawRfc2822,
       rawRfc2822Bytes: built.rawRfc2822.byteLength,
       rawRfc2822Sha256: createHash("sha256")
         .update(built.rawRfc2822)
@@ -3493,24 +4186,20 @@ function draftSubmissionFixture(
     origin: "app",
     agentLine: false,
   });
-  try {
-    return Object.freeze({
-      ...seed,
-      requestFingerprint: fingerprintMailSendInput(input),
-      message: Object.freeze({
-        messageId: built.messageId,
-        envelope: built.envelope,
-        providerThreadId: threading?.providerThreadId ?? null,
-        rawRfc2822Base64Url: built.rawRfc2822.toString("base64url"),
-        rawRfc2822Bytes: built.rawRfc2822.byteLength,
-        rawRfc2822Sha256: createHash("sha256")
-          .update(built.rawRfc2822)
-          .digest("hex"),
-      }),
-    });
-  } finally {
-    built.rawRfc2822.fill(0);
-  }
+  return Object.freeze({
+    ...seed,
+    requestFingerprint: fingerprintMailSendInput(input),
+    message: Object.freeze({
+      messageId: built.messageId,
+      envelope: built.envelope,
+      providerThreadId: threading?.providerThreadId ?? null,
+      rawRfc2822: built.rawRfc2822,
+      rawRfc2822Bytes: built.rawRfc2822.byteLength,
+      rawRfc2822Sha256: createHash("sha256")
+        .update(built.rawRfc2822)
+        .digest("hex"),
+    }),
+  });
 }
 
 function fixtureRecipients(value: string): readonly string[] {

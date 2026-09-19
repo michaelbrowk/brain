@@ -6307,7 +6307,7 @@ describe("outgoing attachments", () => {
    *  sha256 instead, and the name-shape cases below carry one of those. */
   const NAME = "file-alpha-1.pdf";
   const SECOND = "file-alpha-2.pdf";
-  const TOTAL_CAP = 5 * 1024 * 1024;
+  const TOTAL_CAP = 8 * 1024 * 1024;
   const RELAY_CAP = 1024 * 1024;
   let stateRoot: string;
   let centreRoot: string;
@@ -6547,7 +6547,7 @@ describe("outgoing attachments", () => {
     expect(mocks.getStore).not.toHaveBeenCalled();
   });
 
-  it("refuses when the total crosses 5 MiB, before the service sees anything", async () => {
+  it("refuses when the total crosses 8 MiB, before the service sees anything", async () => {
     const readPage = vi.fn().mockResolvedValue(pageHolding(NAME, SECOND));
     // The store is the one that measures: it is handed what is left of the
     // message's budget and answers `too_large` off the file's own size,
@@ -6583,7 +6583,7 @@ describe("outgoing attachments", () => {
 
     expect(payload).toEqual({
       error: "those attachments are too large",
-      reason: "5 MiB is the limit for one message",
+      reason: "8 MiB is the limit for one message",
     });
     expect(isError).toBe(true);
     expect(readAttachment).toHaveBeenLastCalledWith(SECOND, TOTAL_CAP - 4);
@@ -6684,7 +6684,7 @@ describe("outgoing attachments", () => {
     expect(payload).toEqual({
       error: "those attachments are too large for this account",
       reason:
-        "1 MiB is the limit for one message from an IMAP account, whose relay carries 2 MiB of finished message, against 5 MiB from a Gmail account",
+        "1 MiB is the limit for one message from an IMAP account, whose relay carries 2 MiB of finished message, against 8 MiB from a Gmail account",
     });
     expect(isError).toBe(true);
     expect(fake.calls.some((call) => call.method === "sendMessage")).toBe(false);
@@ -7004,9 +7004,9 @@ describe("outgoing attachments", () => {
     const second = toolPayload(await call(SECOND, "mcp-key-alpha-0002", 621));
 
     await vi.waitFor(() => expect(events).toContain("send 1"));
-    // A 5 MiB attachment costs about 30 MiB resident while it is on its way,
-    // and the service builds one message at a time, so a second caller that
-    // read its bytes now would hold them for the whole of the first send.
+    // An attachment costs about six times its own size resident while it is on
+    // its way, and the service builds one message at a time, so a second caller
+    // that read its bytes now would hold them for the whole of the first send.
     expect(events).toEqual([`read ${NAME}`, "send 1"]);
 
     releaseFirst();

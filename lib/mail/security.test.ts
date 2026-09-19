@@ -52,7 +52,7 @@ describe("mail security and resource contracts", () => {
       concurrentFetchStreams: 2,
       concurrentMimeParsers: 2,
       concurrentSmtpSubmissions: 1,
-      outgoingRawMessageBytes: 10 * 1024 * 1024,
+      outgoingRawMessageBytes: 14 * 1024 * 1024,
       egressTunnelFrameBytes: 16 * 1024,
       egressTunnelClientBytes: 2 * 1024 * 1024,
       egressTunnelAttachmentBytes: 1024 * 1024,

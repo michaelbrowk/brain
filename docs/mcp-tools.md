@@ -344,7 +344,7 @@ exists, because a page id the agent can read would otherwise be a key to every
 file in the notes folder. What an agent can send is what the note it named
 already shows, which is what a person could forward by opening that note.
 
-Ten files and 5 MiB of them are the limits for one message from a Gmail
+Ten files and 8 MiB of them are the limits for one message from a Gmail
 account. An IMAP account's limit is 1 MiB, because its SMTP session leaves
 through a relay whose tunnel carries 2 MiB of finished message and base64
 turns a megabyte of files into 1.37 MiB of it. `list_mail_accounts` reports
@@ -361,10 +361,11 @@ filesystem, and never through a temporary file. A file's type is the one its
 name records, and a type a MIME header cannot carry is refused with that as
 the reason.
 
-One message with files goes out at a time. A 5 MiB attachment costs about
-30 MiB of memory while it is on its way, counting the file, its base64, the
-JSON of the whole request and the buffer of that, and the mail service builds
-one message at a time anyway. So a second call carrying files waits for the
+One message with files goes out at a time. An attachment costs about six
+times its own size in memory while it is on its way, counting the file, its
+base64, the JSON of the whole request and the buffer of that, and the mail
+service builds one message at a time anyway. So a second call carrying files
+waits for the
 first to answer before it reads a byte, rather than holding its own encoded
 copy for the length of somebody else's send. It waits, it is never refused,
 and a message with no files is not held up at all.

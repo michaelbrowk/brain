@@ -454,7 +454,7 @@ function submission(
         bcc: Object.freeze([]),
       }),
       providerThreadId: null,
-      rawRfc2822Base64Url: "",
+      rawRfc2822: Buffer.alloc(0),
       rawRfc2822Bytes: 0,
       rawRfc2822Sha256: "b".repeat(64),
     }),

@@ -200,7 +200,7 @@ describe("outbound RFC 2822 builder", () => {
     expect(source.trimEnd().endsWith(`--${boundary}--`)).toBe(true);
   });
 
-  it("refuses a message that crosses the 10 MiB cap and wipes the buffer", () => {
+  it("refuses a message that crosses the outgoing ceiling and wipes the buffer", () => {
     expect(() =>
       buildOutboundRfc2822(
         base({

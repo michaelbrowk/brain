@@ -2,7 +2,7 @@ import type { MailSendOperation } from "../message-types";
 import type {
   MailSendQueueStore,
   MailSendRequestContext,
-  StoredMailSendSubmission,
+  MailSendSubmissionIdentity,
 } from "./outbound";
 
 const DEFAULT_INITIAL_DELAY_MS = 0;
@@ -229,18 +229,18 @@ export class MailOutboundWorker {
     const seen = new Set<string>();
     let failures = 0;
     let skippedInvalidated = 0;
-    for (const submission of listed) {
+    for (const identity of listed) {
       if (signal.aborted) break;
-      if (!isRunnableIdentity(submission) || seen.has(submission.operationId)) {
+      if (!isRunnableIdentity(identity) || seen.has(identity.operationId)) {
         failures += 1;
         continue;
       }
-      seen.add(submission.operationId);
-      if (this.invalidatedAccounts.has(submission.accountId)) {
+      seen.add(identity.operationId);
+      if (this.invalidatedAccounts.has(identity.accountId)) {
         skippedInvalidated += 1;
         continue;
       }
-      const outcome = await this.processOne(submission, signal);
+      const outcome = await this.processOne(identity, signal);
       if (outcome === "failed") failures += 1;
       if (outcome === "skipped_invalidated") skippedInvalidated += 1;
     }
@@ -252,7 +252,7 @@ export class MailOutboundWorker {
   }
 
   private async processOne(
-    submission: StoredMailSendSubmission,
+    submission: MailSendSubmissionIdentity,
     passSignal: AbortSignal,
   ): Promise<"completed" | "failed" | "skipped_invalidated"> {
     const controller = new AbortController();
@@ -406,8 +406,8 @@ export class MailOutboundWorker {
 }
 
 function isRunnableIdentity(
-  value: StoredMailSendSubmission,
-): value is StoredMailSendSubmission {
+  value: MailSendSubmissionIdentity,
+): value is MailSendSubmissionIdentity {
   return (
     typeof value === "object" &&
     value !== null &&

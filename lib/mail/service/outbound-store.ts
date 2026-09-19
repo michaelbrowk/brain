@@ -53,6 +53,7 @@ import {
   type MailSendErrorCode,
   type MailSendRequestContext,
   type MailSendStore,
+  type MailSendSubmissionIdentity,
   type StoredMailSendMessage,
   type StoredMailSendSubmission,
 } from "./outbound";
@@ -63,7 +64,11 @@ import {
   type MailSmtpSubmissionWorkStore,
 } from "./smtp-state-store";
 
-const SCHEMA_VERSION = 2;
+/* 3: the finished message moved out of `submission_json` and into the
+ * `raw_rfc2822` BLOB beside it. One way — a database at 3 is refused by a
+ * service that knows 2, because its reader would find no message in the row
+ * and answer a send with an outage. */
+const SCHEMA_VERSION = 3;
 const SQLITE_BUSY_TIMEOUT_MS = 5_000;
 const DATABASE_FILE = "outbox.sqlite3";
 const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
@@ -75,23 +80,28 @@ const SAFE_MESSAGE_ID = /^<[^<>\s\u0000-\u001f\u007f]+>$/u;
 const SAFE_ATTEMPT_ID = /^attempt-[0-9a-f-]{36}$/;
 const SAFE_DRAFT_FINGERPRINT = /^[a-f0-9]{64}$/;
 const MAX_ACCOUNT_CACHE_ENTRIES = 64;
-/* The row carries the whole finished message, so this budget follows
- * `MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes`, which follows in turn from
- * the one outgoing number, `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes`.
- * `rawRfc2822Base64Url` is four characters per three bytes and its alphabet
- * needs no JSON escaping, so a message at that ceiling is exactly 4/3 of it as
- * a string, and the megabyte on top holds the rest of the record: the
- * envelope's addresses, the message id, the two digests and the ids.
+/* What `submission_json` holds now that the message is not in it: the ids, the
+ * envelope, the two digests. The envelope is the largest part of that and it is
+ * bounded, `MAIL_RESOURCE_LIMITS.addressesPerMessage` of at most 254 bytes each,
+ * about 51 KiB before JSON escaping and about 102 KiB after it at worst, so a
+ * megabyte is the whole record several times over.
  *
- * Arithmetic rather than a figure, because a figure is what made the outgoing
- * attachment cap unreachable. This constant stayed at 2 MiB while the outgoing
- * caps moved around it, so every send carrying more than about 1.09 MiB of
- * files was refused here, after the message had been built, as a service
- * outage that named no size. */
-const MAX_SERIALIZED_SUBMISSION_BYTES =
-  Math.ceil(MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes / 3) * 4 + 1024 * 1024;
+ * It no longer follows the outgoing message ceiling, because the message is a
+ * BLOB in its own column and `MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes` is
+ * checked against those bytes directly, before the insert. What made the
+ * outgoing cap unreachable once was this budget being spent on the message: a
+ * 2 MiB literal here left about 1.09 MiB for files and refused everything above
+ * it as a service outage that named no size. Nothing of the message is spent
+ * here any more. */
+const MAX_SERIALIZED_SUBMISSION_BYTES = 1024 * 1024;
+/** Every read that rebuilds a submission takes both halves of the row: the
+ *  record without its message, and the message. */
+const SUBMISSION_COLUMNS = "submission_json, raw_rfc2822";
 const MAX_SERIALIZED_SMTP_STATE_BYTES = 128 * 1024;
 const MAX_LEGACY_ROWS_PER_ACCOUNT = 10_000;
+/** How many rows the schema 2 migration lists at a time. Not a bound on the
+ *  account: the walk pages by key until nothing is left. */
+const MIGRATION_PAGE_ROWS = 500;
 const TERMINAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_TERMINAL_ROWS_PER_ACCOUNT = 500;
 const RETENTION_SWEEP_INTERVAL_MS = 60 * 60 * 1_000;
@@ -347,7 +357,14 @@ const DRAFT_OUTBOX_UPDATE_TRIGGER_SQL = `CREATE TRIGGER IF NOT EXISTS drafts_out
      );
   END`;
 
-const OUTBOX_V2_SQL = `
+/* The `raw_rfc2822` default is empty on purpose and is never inserted: it is
+ * what lets `migrateSchemaV2` add the column to a table that already holds
+ * rows, with `ALTER TABLE ... ADD COLUMN`, so a migrated outbox and a freshly
+ * created one are the same table down to the text of this definition. A row
+ * left empty by a migration that stopped part way is refused on read like any
+ * other corrupt message, and the migration only claims version 3 once no row
+ * is empty. */
+const OUTBOX_V3_SQL = `
   CREATE TABLE outbox (
     operation_id TEXT PRIMARY KEY,
     account_id TEXT NOT NULL,
@@ -361,6 +378,7 @@ const OUTBOX_V2_SQL = `
     created_at INTEGER NOT NULL CHECK(created_at >= 0),
     updated_at INTEGER NOT NULL CHECK(updated_at >= created_at),
     submission_json TEXT NOT NULL,
+    raw_rfc2822 BLOB NOT NULL DEFAULT x'',
     UNIQUE(account_id, idempotency_key),
     CHECK(
       (status IN ('queued', 'sending') AND runnable_at IS NOT NULL) OR
@@ -385,7 +403,7 @@ const SCHEMA_SQL = `
     account_id TEXT NOT NULL
   ) STRICT;
 
-  ${OUTBOX_V2_SQL}
+  ${OUTBOX_V3_SQL}
 `;
 
 interface RunnableMetadata {
@@ -394,6 +412,12 @@ interface RunnableMetadata {
   readonly runnableAt: number;
   readonly createdAt: number;
 }
+
+/** A submission as `submission_json` holds it: the record with the message's
+ *  two digests where the message would be. */
+type SubmissionWithoutMessage = Omit<StoredMailSendSubmission, "message"> & {
+  readonly message: Omit<StoredMailSendMessage, "rawRfc2822">;
+};
 
 /**
  * Durable provider-neutral outbox. Every account gets its own private SQLite
@@ -453,6 +477,9 @@ export class SqliteMailSendStore
     input: StoredMailSendSubmission,
   ): Promise<MailSendEnqueueResult> {
     const submission = validateSubmission(input);
+    // Before the first database call, so a message over the ceiling is refused
+    // with its size named and no row, no lock and no open file behind it.
+    assertRawWithinCeiling(submission.message.rawRfc2822);
     const serialized = serializeSubmission(submission);
     return this.runGlobalMutation(async () => {
       const globalExisting = await this.readGlobalOperation(
@@ -502,7 +529,9 @@ export class SqliteMailSendStore
         if (!database) return null;
         try {
           const row = database
-            .prepare("SELECT submission_json FROM outbox WHERE operation_id = ?")
+            .prepare(
+              `SELECT ${SUBMISSION_COLUMNS} FROM outbox WHERE operation_id = ?`,
+            )
             .get(operationId);
           return row === undefined ? null : submissionFromRow(row);
         } finally {
@@ -536,14 +565,20 @@ export class SqliteMailSendStore
       try {
         database.exec("BEGIN IMMEDIATE");
         try {
+          // The JSON alone: what this decides is the version, the ownership and
+          // the identity, and the message's identity is its two digests, which
+          // are in the JSON. Reading the BLOB here would put a second copy of
+          // the message beside the caller's on every transition of a send.
           const row = database
-            .prepare("SELECT submission_json FROM outbox WHERE operation_id = ?")
+            .prepare(
+              "SELECT submission_json FROM outbox WHERE operation_id = ?",
+            )
             .get(operationId);
           if (row === undefined) {
             database.exec("ROLLBACK");
             return false;
           }
-          const current = submissionFromRow(row);
+          const current = submissionJsonFromRow(row);
           if (current.version !== expectedVersion) {
             database.exec("ROLLBACK");
             return false;
@@ -624,7 +659,7 @@ export class SqliteMailSendStore
             )
             .get(accountId, operationId);
           if (outboxRow === undefined) throw unavailable();
-          const outbox = submissionFromRow(outboxRow);
+          const outbox = submissionJsonFromRow(outboxRow);
           assertSmtpOutboxIdentity(accountId, operationId, outbox);
 
           const existingRow = database
@@ -746,7 +781,7 @@ export class SqliteMailSendStore
           ) {
             throw unavailable();
           }
-          const outbox = submissionFromRow({
+          const outbox = submissionJsonFromRow({
             submission_json: row.outbox_json,
           });
           const current = smtpStateFromJoinedRow(row, accountId, operationId);
@@ -912,34 +947,19 @@ export class SqliteMailSendStore
       try {
         const row = database
           .prepare(
-            `SELECT outbox.submission_json
+            `SELECT outbox.submission_json, outbox.raw_rfc2822
                FROM smtp_submission_state AS state
                JOIN outbox ON outbox.operation_id = state.operation_id
               WHERE outbox.account_id = ? AND state.operation_id = ?`,
           )
           .get(accountId, operationId);
         if (row === undefined) return null;
-        if (
-          !isExactRecord(row, ["submission_json"]) ||
-          typeof row.submission_json !== "string"
-        ) {
-          throw unavailable();
-        }
+        // The BLOB reaches the transport as the bytes SQLite handed back, with
+        // no base64 turn either way. `submissionFromRow` has already checked
+        // them against the digests the row carries beside them.
         const outbox = submissionFromRow(row);
         assertSmtpOutboxIdentity(accountId, operationId, outbox);
-        const raw = Buffer.from(
-          outbox.message.rawRfc2822Base64Url,
-          "base64url",
-        );
-        if (
-          raw.byteLength !== outbox.message.rawRfc2822Bytes ||
-          createHash("sha256").update(raw).digest("hex") !==
-            outbox.message.rawRfc2822Sha256
-        ) {
-          raw.fill(0);
-          throw unavailable();
-        }
-        return raw;
+        return outbox.message.rawRfc2822;
       } catch (error) {
         throw storeError(error);
       } finally {
@@ -979,10 +999,25 @@ export class SqliteMailSendStore
     });
   }
 
+  /**
+   * What is runnable, as identities, never as messages.
+   *
+   * The worker takes a batch — twenty by default — and delivers them one at a
+   * time, so a batch that carried its messages would hold all twenty for the
+   * length of the pass: 219 MiB of message at the attachment cap, against
+   * `MemoryMax=256M`, on exactly the backlog a provider outage produces. It
+   * returns the two ids the worker uses and nothing else, and the message is
+   * read at the moment it is delivered, so the pass holds one message however
+   * deep the queue is.
+   *
+   * A row whose message is unreadable is listed here like any other and refused
+   * on the read that delivers it, which is one failed operation rather than a
+   * whole batch that cannot be listed.
+   */
   async listRunnable(
     now: number,
     limit: number,
-  ): Promise<readonly StoredMailSendSubmission[]> {
+  ): Promise<readonly MailSendSubmissionIdentity[]> {
     if (
       !Number.isSafeInteger(now) ||
       now < 0 ||
@@ -1017,25 +1052,15 @@ export class SqliteMailSendStore
       }
       if (!advanced) break;
     }
-    const submissions = new Map<string, StoredMailSendSubmission>();
-    for (const accountId of accountIds) {
-      const accountSelection = selected.filter(
-        (value) => value.accountId === accountId,
-      );
-      if (accountSelection.length === 0) continue;
-      for (const submission of await this.readSelectedSubmissions(
-        accountId,
-        accountSelection,
-      )) {
-        if (submissions.has(submission.operationId)) throw unavailable();
-        submissions.set(submission.operationId, submission);
-      }
-    }
+    const seen = new Set<string>();
     return Object.freeze(
       selected.map((metadata) => {
-        const submission = submissions.get(metadata.operationId);
-        if (!submission) throw unavailable();
-        return submission;
+        if (seen.has(metadata.operationId)) throw unavailable();
+        seen.add(metadata.operationId);
+        return Object.freeze({
+          accountId: metadata.accountId,
+          operationId: metadata.operationId,
+        });
       }),
     );
   }
@@ -1333,6 +1358,7 @@ export class SqliteMailSendStore
     let serialized: string;
     try {
       submission = validateSubmission(inputSubmission);
+      assertRawWithinCeiling(submission.message.rawRfc2822);
       serialized = serializeSubmission(submission);
     } catch {
       throw draftUnavailable();
@@ -1829,7 +1855,7 @@ export class SqliteMailSendStore
     submission: StoredMailSendSubmission,
   ): StoredMailSendSubmission | null {
     const existingOperation = database
-      .prepare("SELECT submission_json FROM outbox WHERE operation_id = ?")
+      .prepare(`SELECT ${SUBMISSION_COLUMNS} FROM outbox WHERE operation_id = ?`)
       .get(submission.operationId);
     if (existingOperation !== undefined) {
       const existing = submissionFromRow(existingOperation);
@@ -1914,35 +1940,6 @@ export class SqliteMailSendStore
           .all(now, limit);
         return Object.freeze(
           rows.map((row) => runnableMetadataFromRow(accountId, row)),
-        );
-      } finally {
-        await closeDatabase(database, this.databasePath(accountId));
-      }
-    });
-  }
-
-  private async readSelectedSubmissions(
-    accountId: string,
-    selected: readonly RunnableMetadata[],
-  ): Promise<readonly StoredMailSendSubmission[]> {
-    return this.runAccount(accountId, async () => {
-      const database = await this.openAccountDatabase(accountId, false);
-      if (!database) throw unavailable();
-      try {
-        const placeholders = selected.map(() => "?").join(", ");
-        const rows = database
-          .prepare(
-            `SELECT operation_id, runnable_at, created_at, submission_json
-               FROM outbox
-              WHERE operation_id IN (${placeholders})`,
-          )
-          .all(...selected.map((value) => value.operationId));
-        if (rows.length !== selected.length) throw unavailable();
-        const expected = new Map(
-          selected.map((value) => [value.operationId, value]),
-        );
-        return Object.freeze(
-          rows.map((row) => selectedSubmissionFromRow(accountId, expected, row)),
         );
       } finally {
         await closeDatabase(database, this.databasePath(accountId));
@@ -2079,7 +2076,7 @@ export class SqliteMailSendStore
   ): StoredMailSendSubmission | null {
     const row = database
       .prepare(
-        `SELECT submission_json FROM outbox
+        `SELECT ${SUBMISSION_COLUMNS} FROM outbox
           WHERE account_id = ? AND idempotency_key = ?`,
       )
       .get(accountId, idempotencyKey);
@@ -2125,7 +2122,7 @@ function initializeSchema(
       if (database.isTransaction) database.exec("ROLLBACK");
       throw error;
     }
-  } else if (version === 1) {
+  } else if (version === 1 || version === 2) {
     assertDatabaseIdentity(
       database,
       accountId,
@@ -2133,7 +2130,12 @@ function initializeSchema(
       options.onIntegrityCheck,
     );
     integrityVerified = true;
-    migrateSchemaV1(database, options.now);
+    // A version 1 file predates both the drafts tables and the SMTP state
+    // table, so its outbox can be rebuilt whole; version 2 has both, and one
+    // of them holds a foreign key into the outbox. The two migrations stay
+    // apart for that reason and a file at 1 walks through both.
+    if (version === 1) migrateSchemaV1(database, options.now, accountId);
+    migrateSchemaV2(database, accountId, options.now);
   } else if (version !== SCHEMA_VERSION) {
     throw unavailable();
   }
@@ -2167,7 +2169,246 @@ function assertDatabaseIdentity(
   }
 }
 
-function migrateSchemaV1(database: DatabaseSync, now: number): void {
+/**
+ * Schema 2 to 3: the message leaves `submission_json` for the `raw_rfc2822`
+ * BLOB beside it.
+ *
+ * The column is added rather than the table rebuilt. A rebuild would mean
+ * renaming and dropping `outbox`, and at version 2 two other objects point at
+ * it: `smtp_submission_state` holds a foreign key with ON DELETE CASCADE, so
+ * dropping the table would delete every SMTP submission's state, and the two
+ * drafts triggers fire on insert, so copying rows through them would bump draft
+ * revisions and delete a sent draft's attachments. `ALTER TABLE ... ADD COLUMN`
+ * touches neither.
+ *
+ * One transaction per row, so the largest thing in memory at any moment is one
+ * message rather than the account's whole outbox, and a row's decode, its BLOB
+ * and its shortened JSON commit together or not at all. A file that loses power
+ * part way is left at version 2 with some rows already moved, which is why the
+ * work is driven off the rows that are still empty and why version 3 is claimed
+ * only when none are. One way: a service that knows schema 2 reads the shortened
+ * JSON, finds no message in it, and refuses the file.
+ *
+ * One row's message being unreadable — base64url that does not decode, digests
+ * that do not match what it decodes to, a message above the outgoing ceiling —
+ * costs that row and nothing else. It is marked failed with an empty message and
+ * the walk carries on, because the alternative was throwing out of the open: the
+ * version stayed at 2, every later open repeated the failure, and an account
+ * could not send, read a status or drain what was already queued. Under schema 2
+ * the same corruption cost exactly the row that carried it, and it should cost
+ * the same here. A read of such a row is refused the way any corrupt message is.
+ *
+ * The walk is by key rather than by offset, so it advances past the rows it
+ * marks, and it has no row bound: the bound it had refused to migrate an account
+ * with more than ten thousand rows still to move, which was a second way to
+ * leave a file unopenable for good.
+ */
+function migrateSchemaV2(
+  database: DatabaseSync,
+  accountId: string,
+  now: number,
+): void {
+  if (!outboxHasRawColumn(database)) {
+    database.exec(
+      "ALTER TABLE outbox ADD COLUMN raw_rfc2822 BLOB NOT NULL DEFAULT x''",
+    );
+  }
+  const page = database.prepare(
+    `SELECT operation_id FROM outbox
+      WHERE length(raw_rfc2822) = 0 AND operation_id > ?
+      ORDER BY operation_id
+      LIMIT ?`,
+  );
+  let unreadable = 0;
+  let after = "";
+  for (;;) {
+    const rows = page.all(after, MIGRATION_PAGE_ROWS);
+    if (rows.length === 0) break;
+    const startedAt = after;
+    for (const row of rows) {
+      if (
+        !isExactRecord(row, ["operation_id"]) ||
+        typeof row.operation_id !== "string"
+      ) {
+        throw unavailable();
+      }
+      // Assigned before the attempt, and outside every branch below: the walk
+      // has to advance past this row whatever becomes of it, or a row it cannot
+      // move is a page it reads for ever.
+      after = row.operation_id;
+      if (migrateRow(database, row.operation_id, now)) continue;
+      unreadable += 1;
+      writeMailLogRecord({
+        event: "mail_outbox_row_unreadable",
+        accountId,
+        operationId: row.operation_id,
+      });
+    }
+    // Unreachable while `after` is assigned for every row: each page is
+    // `operation_id > after` in ascending order, so the cursor is strictly
+    // monotone and the walk ends in at most one page per five hundred rows.
+    // It is here because the failure it guards against is an open that never
+    // returns, which is worse than an open that refuses.
+    if (after === startedAt) throw unavailable();
+  }
+  // Every empty row was visited, and each was either filled or marked, so what
+  // is left empty is exactly what was marked.
+  if (
+    aggregateCount(
+      database
+        .prepare(
+          `SELECT COUNT(*) AS row_count FROM outbox
+            WHERE length(raw_rfc2822) = 0`,
+        )
+        .get(),
+      "row_count",
+    ) !== unreadable
+  ) {
+    throw unavailable();
+  }
+  database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+}
+
+/**
+ * Whether the row's message moved.
+ *
+ * False means the walk could not move it — it could not be read, or the write
+ * that marks it failed could not be made either. Marking it is the better
+ * outcome and is tried twice, once inside the row's own transaction and once
+ * on its own afterwards, but a database that refuses both is not a reason to
+ * abandon the migration and leave the account at version 2: the row keeps
+ * whatever it had, its message stays empty, and every read of it is refused.
+ * What that costs is one operation a worker retries and never completes, which
+ * is the same trade as the rest of this walk — one message, not the account.
+ */
+function migrateRow(
+  database: DatabaseSync,
+  operationId: string,
+  now: number,
+): boolean {
+  try {
+    return migrateSubmissionRowToBlob(database, operationId, now);
+  } catch {
+    try {
+      markOutboxRowFailed(database, operationId, now);
+    } catch {
+      // Nothing left to try on this row.
+    }
+    return false;
+  }
+}
+
+function migrateSubmissionRowToBlob(
+  database: DatabaseSync,
+  operationId: string,
+  now: number,
+): boolean {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    const row = database
+      .prepare(
+        `SELECT submission_json FROM outbox
+          WHERE operation_id = ? AND length(raw_rfc2822) = 0`,
+      )
+      .get(operationId);
+    // Another writer got there first, which is an answer and not a failure.
+    if (row === undefined) {
+      database.exec("COMMIT");
+      return true;
+    }
+    let submission: StoredMailSendSubmission | null = null;
+    try {
+      submission = submissionFromLegacyJson(row);
+      // A message the service could not put on the wire either way. Marked here
+      // rather than carried forward, so the row says what happened to it instead
+      // of failing at the transport with an untyped error every retry.
+      if (
+        submission.message.rawRfc2822Bytes >
+        MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes
+      ) {
+        submission = null;
+      }
+    } catch {
+      submission = null;
+    }
+    if (submission === null) {
+      // The JSON is left as it stands. It still holds whatever the row had, which
+      // is the only evidence of the message left, and a read refuses the row
+      // anyway: an empty BLOB cannot match the digests beside it.
+      markOutboxRowFailed(database, operationId, now);
+      database.exec("COMMIT");
+      return false;
+    }
+    const changed = database
+      .prepare(
+        `UPDATE outbox SET submission_json = ?, raw_rfc2822 = ?
+          WHERE operation_id = ? AND length(raw_rfc2822) = 0`,
+      )
+      .run(
+        serializeSubmission(submission),
+        submission.message.rawRfc2822,
+        operationId,
+      );
+    if (changed.changes !== 1) throw unavailable();
+    database.exec("COMMIT");
+    return true;
+  } catch (error) {
+    if (database.isTransaction) database.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+/**
+ * Terminal, and not runnable: whatever the worker would have done with this
+ * row, it cannot send a message it cannot read.
+ *
+ * The migration's own clock goes on `updated_at` for the same reason the
+ * version 1 path uses it. Terminal rows are swept thirty days after that
+ * stamp, and a row that had been queued longer than that would otherwise be
+ * marked and then deleted by the first `listRunnable` after the open, taking
+ * with it the JSON this migration deliberately keeps as the only evidence of
+ * the message. `MAX` rather than a bare assignment because the table requires
+ * `updated_at >= created_at` and a row's own stamp may sit ahead of the clock.
+ */
+function markOutboxRowFailed(
+  database: DatabaseSync,
+  operationId: string,
+  now: number,
+): void {
+  database
+    .prepare(
+      `UPDATE outbox SET status = 'failed', runnable_at = NULL,
+              updated_at = MAX(created_at, ?)
+        WHERE operation_id = ?`,
+    )
+    .run(now, operationId);
+}
+
+function outboxHasRawColumn(database: DatabaseSync): boolean {
+  return database
+    .prepare("SELECT name FROM pragma_table_info('outbox')")
+    .all()
+    .some((row) => row.name === "raw_rfc2822");
+}
+
+/**
+ * Schema 1 to 3, by rebuilding the table.
+ *
+ * Safe here and not at version 2: a version 1 file predates both the drafts
+ * tables and the SMTP state table, so nothing holds a foreign key into
+ * `outbox` and no trigger fires on an insert into it.
+ *
+ * A row whose message cannot be read, or whose message is above today's
+ * outgoing ceiling, is carried across as failed with an empty message rather
+ * than failing the open — the same trade `migrateSchemaV2` makes, for the same
+ * reason. The row bound stays: a version 1 file is old enough that a backlog
+ * above ten thousand rows is a corrupt file rather than a busy account.
+ */
+function migrateSchemaV1(
+  database: DatabaseSync,
+  now: number,
+  accountId: string,
+): void {
   const count = aggregateCount(
     database.prepare("SELECT COUNT(*) AS row_count FROM outbox").get(),
     "row_count",
@@ -2177,7 +2418,7 @@ function migrateSchemaV1(database: DatabaseSync, now: number): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     database.exec("ALTER TABLE outbox RENAME TO outbox_v1");
-    database.exec(OUTBOX_V2_SQL);
+    database.exec(OUTBOX_V3_SQL);
     let migrated = 0;
     const rows = database
       .prepare(
@@ -2190,7 +2431,28 @@ function migrateSchemaV1(database: DatabaseSync, now: number): void {
     for (const row of rows) {
       migrated += 1;
       if (migrated > MAX_LEGACY_ROWS_PER_ACCOUNT) throw unavailable();
-      const submission = legacySubmissionFromRow(row);
+      let submission: StoredMailSendSubmission | null = null;
+      try {
+        submission = legacySubmissionFromRow(row);
+        if (
+          submission.message.rawRfc2822Bytes >
+          MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes
+        ) {
+          submission = null;
+        }
+      } catch {
+        submission = null;
+      }
+      if (submission === null) {
+        insertUnreadableLegacyRow(database, row, now);
+        writeMailLogRecord({
+          event: "mail_outbox_row_unreadable",
+          accountId,
+          operationId:
+            typeof row.operation_id === "string" ? row.operation_id : "unknown",
+        });
+        continue;
+      }
       insertSubmissionRow(
         database,
         submission,
@@ -2206,6 +2468,56 @@ function migrateSchemaV1(database: DatabaseSync, now: number): void {
     if (database.isTransaction) database.exec("ROLLBACK");
     throw error;
   }
+}
+
+/**
+ * A version 1 row whose message could not be read, carried into version 3 as a
+ * failed one.
+ *
+ * Only the five columns version 1 had are trusted here, because the JSON is what
+ * could not be read: no timestamps come out of it, so the migration's own clock
+ * stands in for both, which also means the row lives out the ordinary terminal
+ * retention window instead of being swept by the prune at the end of the same
+ * migration. The JSON is kept as it stands — it is the only evidence of the
+ * message left — and the empty message is what makes a read of the row refuse it.
+ */
+function insertUnreadableLegacyRow(
+  database: DatabaseSync,
+  row: Record<string, unknown>,
+  now: number,
+): void {
+  if (
+    typeof row.operation_id !== "string" ||
+    !SAFE_OPERATION_ID.test(row.operation_id) ||
+    typeof row.account_id !== "string" ||
+    !SAFE_ACCOUNT_ID.test(row.account_id) ||
+    typeof row.idempotency_key !== "string" ||
+    !SAFE_IDEMPOTENCY_KEY.test(row.idempotency_key) ||
+    typeof row.request_fingerprint !== "string" ||
+    !SAFE_FINGERPRINT.test(row.request_fingerprint) ||
+    !Number.isSafeInteger(row.version) ||
+    (row.version as number) < 0 ||
+    typeof row.submission_json !== "string"
+  ) {
+    throw unavailable();
+  }
+  database
+    .prepare(
+      `INSERT INTO outbox(
+         operation_id, account_id, idempotency_key, request_fingerprint,
+         version, status, runnable_at, created_at, updated_at, submission_json
+       ) VALUES (?, ?, ?, ?, ?, 'failed', NULL, ?, ?, ?)`,
+    )
+    .run(
+      row.operation_id,
+      row.account_id,
+      row.idempotency_key,
+      row.request_fingerprint,
+      row.version as number,
+      now,
+      now,
+      row.submission_json,
+    );
 }
 
 function initializeDraftSchema(
@@ -2831,11 +3143,13 @@ function draftMatchesSubmission(
       agentLine: input.agentLine,
     });
     expectedRaw = built.rawRfc2822;
+    // The bytes are compared to the bytes, in constant time neither before nor
+    // now: what this decides is whether a replay rebuilt the same message, and
+    // both sides are this service's own.
     return (
       equalEnvelope(built.envelope, submission.message.envelope) &&
       expectedRaw.byteLength === submission.message.rawRfc2822Bytes &&
-      expectedRaw.toString("base64url") ===
-        submission.message.rawRfc2822Base64Url &&
+      expectedRaw.equals(submission.message.rawRfc2822) &&
       createHash("sha256").update(expectedRaw).digest("hex") ===
         submission.message.rawRfc2822Sha256
     );
@@ -3168,11 +3482,19 @@ function draftIdValue(value: string): string {
   }
 }
 
-function submissionFromRow(
+/**
+ * The record the row's JSON holds: everything except the message bytes.
+ *
+ * Most of what the store does with a row needs this and not the message — a
+ * compare-and-swap compares the digests, the SMTP state row pins its identity
+ * on them, the queue listing needs neither. The BLOB is read only where the
+ * bytes themselves are going somewhere: a delivery, or a replay handed back to
+ * the caller that asked for the send.
+ */
+function submissionJsonFromRow(
   row: Record<string, unknown>,
-): StoredMailSendSubmission {
+): SubmissionWithoutMessage {
   if (
-    !isExactRecord(row, ["submission_json"]) ||
     typeof row.submission_json !== "string" ||
     Buffer.byteLength(row.submission_json) > MAX_SERIALIZED_SUBMISSION_BYTES
   ) {
@@ -3184,7 +3506,58 @@ function submissionFromRow(
   } catch {
     throw unavailable();
   }
-  return validateSubmission(parsed);
+  return validateSubmissionWithoutMessage(parsed);
+}
+
+/**
+ * The whole record, from the row's two halves.
+ *
+ * The digests in the JSON are checked against the BLOB on every read, the way
+ * they were checked against the base64url string before, and the bytes are
+ * wrapped rather than copied.
+ */
+function submissionFromRow(
+  row: Record<string, unknown>,
+): StoredMailSendSubmission {
+  if (
+    !isExactRecord(row, ["raw_rfc2822", "submission_json"]) ||
+    !isBinaryRow(row.raw_rfc2822)
+  ) {
+    throw unavailable();
+  }
+  return withMessageBytes(
+    submissionJsonFromRow(row),
+    bufferOf(row.raw_rfc2822),
+  );
+}
+
+/** The record and its message, once the digests have agreed on both. */
+function withMessageBytes(
+  record: SubmissionWithoutMessage,
+  raw: Buffer,
+): StoredMailSendSubmission {
+  if (
+    raw.byteLength !== record.message.rawRfc2822Bytes ||
+    createHash("sha256").update(raw).digest("hex") !==
+      record.message.rawRfc2822Sha256
+  ) {
+    throw unavailable();
+  }
+  return Object.freeze({
+    ...record,
+    message: Object.freeze({ ...record.message, rawRfc2822: raw }),
+  });
+}
+
+/** A BLOB as SQLite hands it back, wrapped rather than copied. */
+function bufferOf(value: Uint8Array): Buffer {
+  return Buffer.isBuffer(value)
+    ? value
+    : Buffer.from(value.buffer, value.byteOffset, value.byteLength);
+}
+
+function isBinaryRow(value: unknown): value is Uint8Array {
+  return value instanceof Uint8Array;
 }
 
 function smtpStateFromJoinedRow(
@@ -3206,7 +3579,9 @@ function smtpStateFromJoinedRow(
   ) {
     throw unavailable();
   }
-  const outbox = submissionFromRow({ submission_json: row.outbox_json });
+  const outbox = submissionJsonFromRow({
+    submission_json: row.outbox_json,
+  });
   assertSmtpOutboxIdentity(accountId, operationId, outbox);
   return smtpStateFromRow(
     {
@@ -3222,7 +3597,7 @@ function smtpStateFromJoinedRow(
 
 function smtpStateFromRow(
   row: Record<string, unknown>,
-  outbox: StoredMailSendSubmission,
+  outbox: SubmissionWithoutMessage,
 ): SubmissionRecord {
   if (
     !isExactRecord(row, [
@@ -3261,7 +3636,7 @@ function smtpStateFromRow(
 }
 
 function createInitialSmtpState(
-  outbox: StoredMailSendSubmission,
+  outbox: SubmissionWithoutMessage,
 ): SubmissionRecord {
   if (
     outbox.providerKind !== "imap" ||
@@ -3321,7 +3696,7 @@ function insertSmtpStateRow(
 function assertSmtpOutboxIdentity(
   accountId: string,
   operationId: string,
-  outbox: StoredMailSendSubmission,
+  outbox: SubmissionWithoutMessage,
 ): void {
   if (
     outbox.accountId !== accountId ||
@@ -3334,7 +3709,7 @@ function assertSmtpOutboxIdentity(
 
 function assertSmtpStateMatchesOutbox(
   state: SubmissionRecord,
-  outbox: StoredMailSendSubmission,
+  outbox: SubmissionWithoutMessage,
 ): void {
   const identity = state.submission;
   if (
@@ -3423,17 +3798,17 @@ function smtpLegacyErrorCode(code: string | null): MailSendErrorCode {
  * delivery_unknown may later still resolve to sent.
  */
 function smtpOutboxMirror(
-  outbox: StoredMailSendSubmission,
+  outbox: SubmissionWithoutMessage,
   state: SubmissionRecord,
   now: number,
-): StoredMailSendSubmission | null {
+): SubmissionWithoutMessage | null {
   const status = smtpOutboxStatusForState(state);
   if (status === null || outbox.status === status) return null;
   const allowed =
     outbox.status === "queued" ||
     (outbox.status === "delivery_unknown" && status === "sent");
   if (!allowed) throw unavailable();
-  return validateSubmission({
+  return validateSubmissionWithoutMessage({
     ...outbox,
     version: outbox.version + 1,
     status,
@@ -3472,12 +3847,52 @@ function mergeAccountIdentities(
   return Object.freeze(selected);
 }
 
-function serializeSubmission(value: StoredMailSendSubmission): string {
-  const serialized = JSON.stringify(value);
+/**
+ * The record without its message.
+ *
+ * `JSON.stringify` of the whole record would make a second copy of the message
+ * beside the one the record already holds, which is what the row shape exists
+ * to stop, and a Buffer would come out of it as an array of numbers. The
+ * message goes to its own column; the digests stay here and are what a read
+ * checks the column against.
+ */
+function serializeSubmission(value: SubmissionWithoutMessage): string {
+  const serialized = JSON.stringify({
+    ...value,
+    // Written field by field, so the one place that decides what a row's JSON
+    // holds says it plainly rather than by subtraction.
+    message: {
+      messageId: value.message.messageId,
+      envelope: value.message.envelope,
+      providerThreadId: value.message.providerThreadId,
+      rawRfc2822Bytes: value.message.rawRfc2822Bytes,
+      rawRfc2822Sha256: value.message.rawRfc2822Sha256,
+    },
+  });
   if (Buffer.byteLength(serialized) > MAX_SERIALIZED_SUBMISSION_BYTES) {
     throw unavailable();
   }
   return serialized;
+}
+
+/**
+ * The bytes the row will hold, refused here rather than by the column.
+ *
+ * `MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes` is the ceiling on a finished
+ * outgoing message, and this is the last place it can be enforced before the
+ * insert. The refusal names both figures: a caller told only
+ * `mail_send_request_invalid` at the end of a build cannot tell whether a
+ * smaller file would go through, which is the failure the 2 MiB literal used
+ * to produce.
+ */
+function assertRawWithinCeiling(raw: Buffer): void {
+  if (raw.byteLength > MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes) {
+    throw new MailSendError("mail_send_request_invalid", {
+      detail:
+        `finished message of ${raw.byteLength} bytes exceeds the ` +
+        `${MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes} byte outgoing ceiling`,
+    });
+  }
 }
 
 function insertSubmissionRow(
@@ -3485,12 +3900,14 @@ function insertSubmissionRow(
   submission: StoredMailSendSubmission,
   serialized: string,
 ): void {
+  assertRawWithinCeiling(submission.message.rawRfc2822);
   database
     .prepare(
       `INSERT INTO outbox(
          operation_id, account_id, idempotency_key, request_fingerprint,
-         version, status, runnable_at, created_at, updated_at, submission_json
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         version, status, runnable_at, created_at, updated_at, submission_json,
+         raw_rfc2822
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       submission.operationId,
@@ -3503,6 +3920,7 @@ function insertSubmissionRow(
       submission.createdAt,
       submission.updatedAt,
       serialized,
+      submission.message.rawRfc2822,
     );
 }
 
@@ -3582,9 +4000,7 @@ function legacySubmissionFromRow(
   ) {
     throw unavailable();
   }
-  const submission = submissionFromRow({
-    submission_json: row.submission_json,
-  });
+  const submission = submissionFromLegacyJson(row);
   if (
     row.operation_id !== submission.operationId ||
     row.account_id !== submission.accountId ||
@@ -3595,6 +4011,60 @@ function legacySubmissionFromRow(
     throw unavailable();
   }
   return submission;
+}
+
+/**
+ * A record out of a row whose JSON still carries the message.
+ *
+ * This is the only reader of `rawRfc2822Base64Url` left, and it exists for the
+ * two migrations: the base64url string in the stored JSON becomes the Buffer
+ * the record now carries, once, and the digests beside it are checked against
+ * those bytes by `validateSubmission` exactly as before. The size bound is the
+ * one the old rows were written under, four characters per three bytes of the
+ * outgoing ceiling plus a megabyte for the rest of the record.
+ */
+function submissionFromLegacyJson(
+  row: Record<string, unknown>,
+): StoredMailSendSubmission {
+  if (
+    typeof row.submission_json !== "string" ||
+    Buffer.byteLength(row.submission_json) >
+      Math.ceil(MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes / 3) * 4 +
+        1024 * 1024
+  ) {
+    throw unavailable();
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(row.submission_json);
+  } catch {
+    throw unavailable();
+  }
+  if (
+    !isExactRecord((parsed as { message?: unknown })?.message, [
+      "envelope",
+      "messageId",
+      "providerThreadId",
+      "rawRfc2822Base64Url",
+      "rawRfc2822Bytes",
+      "rawRfc2822Sha256",
+    ])
+  ) {
+    throw unavailable();
+  }
+  const stored = parsed as { message: Record<string, unknown> };
+  const encoded = stored.message.rawRfc2822Base64Url;
+  if (typeof encoded !== "string" || !/^[A-Za-z0-9_-]+$/.test(encoded)) {
+    throw unavailable();
+  }
+  const message = { ...stored.message };
+  delete message.rawRfc2822Base64Url;
+  const raw = Buffer.from(encoded, "base64url");
+  if (raw.toString("base64url") !== encoded) throw unavailable();
+  return validateSubmission({
+    ...stored,
+    message: { ...message, rawRfc2822: raw },
+  });
 }
 
 function runnableMetadataFromRow(
@@ -3616,45 +4086,6 @@ function runnableMetadataFromRow(
     runnableAt: row.runnable_at,
     createdAt: row.created_at,
   });
-}
-
-function selectedSubmissionFromRow(
-  accountId: string,
-  expected: ReadonlyMap<string, RunnableMetadata>,
-  row: Record<string, unknown>,
-): StoredMailSendSubmission {
-  if (
-    !isExactRecord(row, [
-      "created_at",
-      "operation_id",
-      "runnable_at",
-      "submission_json",
-    ])
-  ) {
-    throw unavailable();
-  }
-  const metadata = runnableMetadataFromRow(accountId, {
-    created_at: row.created_at,
-    operation_id: row.operation_id,
-    runnable_at: row.runnable_at,
-  });
-  const selected = expected.get(metadata.operationId);
-  const submission = submissionFromRow({
-    submission_json: row.submission_json,
-  });
-  if (
-    !selected ||
-    selected.accountId !== accountId ||
-    selected.runnableAt !== metadata.runnableAt ||
-    selected.createdAt !== metadata.createdAt ||
-    submission.accountId !== accountId ||
-    submission.operationId !== metadata.operationId ||
-    submissionRunnableAt(submission) !== metadata.runnableAt ||
-    submission.createdAt !== metadata.createdAt
-  ) {
-    throw unavailable();
-  }
-  return submission;
 }
 
 function aggregateTimestamp(
@@ -3684,7 +4115,18 @@ function safeFutureTimestamp(now: number, delayMs: number): number {
   return Math.min(Number.MAX_SAFE_INTEGER, now + delayMs);
 }
 
-function validateSubmission(value: unknown): StoredMailSendSubmission {
+/**
+ * The record the row's JSON holds, validated: everything but the message bytes.
+ *
+ * `validateSubmission` is this plus the bytes. Split because most of what the
+ * store does with a row — a compare-and-swap, the SMTP state row's identity,
+ * the mirror it writes back — needs the digests and not the message, and
+ * reading a BLOB to compare two strings is the second resident copy of a
+ * message that the delivery turn cannot afford.
+ */
+function validateSubmissionWithoutMessage(
+  value: unknown,
+): SubmissionWithoutMessage {
   if (
     isExactRecord(value, [
       "accountId",
@@ -3758,7 +4200,7 @@ function validateSubmission(value: unknown): StoredMailSendSubmission {
     throw unavailable();
   }
   const lease = validateLease(value.lease);
-  const message = validateMessage(value.message);
+  const message = validateMessageWithoutBytes(value.message);
   const status = value.status as StoredMailSendSubmission["status"];
   const attemptCount = value.attemptCount as number;
   if (
@@ -3803,13 +4245,14 @@ function validateSubmission(value: unknown): StoredMailSendSubmission {
   });
 }
 
-function validateMessage(value: unknown): StoredMailSendMessage {
+function validateMessageWithoutBytes(
+  value: unknown,
+): SubmissionWithoutMessage["message"] {
   if (
     !isExactRecord(value, [
       "envelope",
       "messageId",
       "providerThreadId",
-      "rawRfc2822Base64Url",
       "rawRfc2822Bytes",
       "rawRfc2822Sha256",
     ]) ||
@@ -3817,39 +4260,56 @@ function validateMessage(value: unknown): StoredMailSendMessage {
     Buffer.byteLength(value.messageId) > 998 ||
     !SAFE_MESSAGE_ID.test(value.messageId) ||
     !isOptionalProviderId(value.providerThreadId) ||
-    typeof value.rawRfc2822Base64Url !== "string" ||
-    !/^[A-Za-z0-9_-]+$/.test(value.rawRfc2822Base64Url) ||
     !Number.isSafeInteger(value.rawRfc2822Bytes) ||
     (value.rawRfc2822Bytes as number) < 1 ||
-    (value.rawRfc2822Bytes as number) >
-      MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes ||
+    // The structural bound, not the outgoing one. What a send may write is
+    // `outgoingRawMessageBytes` and `assertRawWithinCeiling` refuses it by
+    // name before the insert; a row already on disk is read back whatever that
+    // ceiling says today. That narrows the window a lowered cap opens rather
+    // than closing it: the message stays readable and visible here, and the
+    // three delivery-side calls to `admitOutgoingRawMessage` — the Gmail
+    // adapter, the SMTP wire, the send state — are where it is refused instead.
+    (value.rawRfc2822Bytes as number) > MAIL_RESOURCE_LIMITS.rawMessageBytes ||
     typeof value.rawRfc2822Sha256 !== "string" ||
     !SAFE_FINGERPRINT.test(value.rawRfc2822Sha256)
   ) {
     throw unavailable();
   }
   const envelope = validateEnvelope(value.envelope);
-  const raw = Buffer.from(value.rawRfc2822Base64Url, "base64url");
-  try {
-    if (
-      raw.byteLength !== value.rawRfc2822Bytes ||
-      raw.toString("base64url") !== value.rawRfc2822Base64Url ||
-      createHash("sha256").update(raw).digest("hex") !==
-        value.rawRfc2822Sha256
-    ) {
-      throw unavailable();
-    }
-  } finally {
-    raw.fill(0);
-  }
   return Object.freeze({
     messageId: value.messageId,
     envelope,
     providerThreadId: value.providerThreadId,
-    rawRfc2822Base64Url: value.rawRfc2822Base64Url,
     rawRfc2822Bytes: value.rawRfc2822Bytes as number,
     rawRfc2822Sha256: value.rawRfc2822Sha256,
   });
+}
+
+/**
+ * The whole record, bytes included.
+ *
+ * The bytes are pulled off before the rest is validated, so one validator
+ * decides the record's shape whether it came off a row or out of a build, and
+ * `withMessageBytes` is the one place that decides a message matches its
+ * digests. SQLite hands a BLOB back as a Uint8Array and the record says Buffer:
+ * wrapped rather than copied, so naming the type costs nothing at the cap.
+ */
+function validateSubmission(value: unknown): StoredMailSendSubmission {
+  const message = (value as { readonly message?: unknown })?.message;
+  if (typeof message !== "object" || message === null || Array.isArray(message)) {
+    throw unavailable();
+  }
+  const raw = (message as { readonly rawRfc2822?: unknown }).rawRfc2822;
+  if (!isBinaryRow(raw)) throw unavailable();
+  const withoutBytes = { ...(message as Record<string, unknown>) };
+  delete withoutBytes.rawRfc2822;
+  return withMessageBytes(
+    validateSubmissionWithoutMessage({
+      ...(value as Record<string, unknown>),
+      message: withoutBytes,
+    }),
+    bufferOf(raw),
+  );
 }
 
 function validateEnvelope(value: unknown): StoredMailSendMessage["envelope"] {
@@ -3913,8 +4373,8 @@ function validateLease(
 }
 
 function assertImmutableIdentity(
-  current: StoredMailSendSubmission,
-  next: StoredMailSendSubmission,
+  current: SubmissionWithoutMessage,
+  next: SubmissionWithoutMessage,
 ): void {
   if (
     current.operationId !== next.operationId ||
@@ -3923,10 +4383,32 @@ function assertImmutableIdentity(
     current.idempotencyKey !== next.idempotencyKey ||
     current.requestFingerprint !== next.requestFingerprint ||
     current.createdAt !== next.createdAt ||
-    JSON.stringify(current.message) !== JSON.stringify(next.message)
+    !equalMessageIdentity(current.message, next.message)
   ) {
     throw unavailable();
   }
+}
+
+/**
+ * Whether two records carry the same message.
+ *
+ * Field by field rather than `JSON.stringify` of both, which is what this was:
+ * the message is a Buffer now, and stringifying it would build an array of
+ * every byte twice on every state transition. The digests are the message's
+ * identity, and `validateMessage` has already checked each side's bytes
+ * against its own digests.
+ */
+function equalMessageIdentity(
+  current: SubmissionWithoutMessage["message"],
+  next: SubmissionWithoutMessage["message"],
+): boolean {
+  return (
+    current.messageId === next.messageId &&
+    current.providerThreadId === next.providerThreadId &&
+    current.rawRfc2822Bytes === next.rawRfc2822Bytes &&
+    current.rawRfc2822Sha256 === next.rawRfc2822Sha256 &&
+    equalEnvelope(current.envelope, next.envelope)
+  );
 }
 
 async function closeDatabase(
@@ -4086,7 +4568,7 @@ function isOptionalTimestamp(value: unknown): value is number | null {
   return value === null || isTimestamp(value);
 }
 
-function submissionRunnableAt(value: StoredMailSendSubmission): number | null {
+function submissionRunnableAt(value: SubmissionWithoutMessage): number | null {
   if (value.status === "queued") return value.nextAttemptAt;
   if (value.status === "sending") return value.lease?.expiresAt ?? null;
   return null;

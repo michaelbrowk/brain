@@ -215,12 +215,7 @@ export class GmailSendAdapter implements MailSendProvider {
       return retryable("mail_send_service_unavailable", null);
     }
 
-    const raw = message.rawRfc2822.toString("base64url");
-    const body = JSON.stringify(
-      message.providerThreadId === null
-        ? { raw }
-        : { raw, threadId: message.providerThreadId },
-    );
+    const body = sendRequestBody(message);
 
     let deliveryStarted = false;
     let safeToRetry = true;
@@ -354,6 +349,61 @@ export class GmailSendAdapter implements MailSendProvider {
     }
     return token;
   }
+}
+
+/** Base64 groups three bytes into four characters, so a chunk that is a
+ *  multiple of three encodes without padding and the pieces concatenate. */
+const BASE64_CHUNK_BYTES = 3 * 1024 * 1024;
+
+/**
+ * The send request's body, as bytes.
+ *
+ * Gmail's API takes the message base64url'd inside a JSON object, and the
+ * obvious way to build that — `JSON.stringify({ raw })` over the whole encoded
+ * message — holds three full-size copies at once at the attachment cap: the
+ * encoded string, the JSON string of it, and the bytes `fetch` makes of that.
+ * A drain of a backlog pays it per message, which is what took a twenty-deep
+ * pass to 206 MiB against `MemoryHigh=192M`.
+ *
+ * So the body is written straight into one buffer, and the message is encoded
+ * a chunk at a time into it: what exists beyond the body itself is one chunk's
+ * worth of string. No escaping is needed and none is done — base64url's
+ * alphabet is `A-Za-z0-9_-` and a thread id is checked against
+ * `SAFE_RESOURCE_ID` before this runs, so neither can carry a quote, a
+ * backslash or a control character.
+ */
+function sendRequestBody(
+  message: MailSendProviderMessage,
+): Uint8Array<ArrayBuffer> {
+  const raw = message.rawRfc2822;
+  const encodedLength = Math.ceil(raw.byteLength / 3) * 4 - (raw.byteLength % 3 === 0 ? 0 : 3 - (raw.byteLength % 3));
+  const prefix = Buffer.from('{"raw":"', "ascii");
+  const suffix = Buffer.from(
+    message.providerThreadId === null
+      ? '"}'
+      : `","threadId":"${message.providerThreadId}"}`,
+    "ascii",
+  );
+  // Allocated as a Uint8Array and written through a Buffer view of it: one
+  // allocation, and what `fetch` is handed is a `BufferSource` the DOM types
+  // accept rather than a Buffer they do not.
+  const bytes = new Uint8Array(
+    prefix.byteLength + encodedLength + suffix.byteLength,
+  );
+  const body = Buffer.from(bytes.buffer, 0, bytes.byteLength);
+  prefix.copy(body, 0);
+  let offset = prefix.byteLength;
+  for (let start = 0; start < raw.byteLength; start += BASE64_CHUNK_BYTES) {
+    const chunk = raw
+      .subarray(start, Math.min(start + BASE64_CHUNK_BYTES, raw.byteLength))
+      .toString("base64url");
+    offset += body.write(chunk, offset, "ascii");
+  }
+  if (offset !== prefix.byteLength + encodedLength) {
+    throw new Error("gmail send body length is inconsistent");
+  }
+  suffix.copy(body, offset);
+  return bytes;
 }
 
 function validateMessage(message: MailSendProviderMessage): void {

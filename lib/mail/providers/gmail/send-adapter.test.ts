@@ -31,7 +31,9 @@ describe("Gmail send adapter", () => {
       expect(new Headers(init?.headers).get("Authorization")).toBe(
         "Bearer cached-access-token",
       );
-      const body = JSON.parse(String(init?.body)) as {
+      const body = JSON.parse(
+        Buffer.from(init?.body as Uint8Array).toString("utf8"),
+      ) as {
         raw: string;
         threadId: string;
       };
@@ -61,6 +63,50 @@ describe("Gmail send adapter", () => {
     expect(events).toEqual(["token:false", "barrier", "request"]);
     expect(tokens.every((token) => token.every((byte) => byte === 0))).toBe(true);
   });
+
+  /** THE BODY IS BUILT, NOT STRINGIFIED.
+   *
+   *  `JSON.stringify({ raw })` over an encoded message holds three full-size
+   *  copies at the attachment cap — the encoded string, the JSON of it, and
+   *  what `fetch` makes of that — and a drain of a backlog pays it per message.
+   *  The body is written into one buffer a chunk at a time instead. What it has
+   *  to stay is byte-identical to the JSON it replaced, across a message longer
+   *  than one chunk and at every remainder of three, because base64 groups three
+   *  bytes into four characters and a mis-aligned chunk would quietly corrupt
+   *  every message after the first. */
+  it.each([1, 2, 3, 4 * 1024 * 1024, 4 * 1024 * 1024 + 1, 4 * 1024 * 1024 + 2])(
+    "builds the request body of a %i-byte message exactly as JSON would",
+    async (bytes) => {
+      const raw = Buffer.alloc(bytes, 0x61);
+      raw[0] = 0xff;
+      raw[bytes - 1] = 0x00;
+      const bodies: string[] = [];
+      const request = vi.fn<typeof fetch>(async (_input, init) => {
+        bodies.push(Buffer.from(init?.body as Uint8Array).toString("utf8"));
+        return jsonResponse({
+          id: "gmail-message-1",
+          threadId: "gmail-thread-1",
+        });
+      });
+      const adapter = new GmailSendAdapter({
+        tokenPort: tokenPort([], []),
+        request,
+      });
+
+      await adapter.send(
+        message({ rawRfc2822: raw, providerThreadId: "gmail-thread-1" }),
+        hooks([]),
+        context(),
+      );
+
+      expect(bodies).toEqual([
+        JSON.stringify({
+          raw: raw.toString("base64url"),
+          threadId: "gmail-thread-1",
+        }),
+      ]);
+    },
+  );
 
   it("refreshes exactly once after 401 and wipes both access tokens", async () => {
     const events: string[] = [];

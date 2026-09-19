@@ -123,6 +123,11 @@ const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
  * commit that adds it — `proxies every stable service error code` in
  * `service/http-messages.test.ts` fails when one does not.
  */
+/** A refusal's extra line: printable ASCII, one line, short enough to read.
+ *  It reaches an agent's answer, so it is admitted as words and figures and
+ *  nothing that could carry a control character into a log or a terminal. */
+const SAFE_SERVICE_ERROR_DETAIL = /^[ -~]{1,200}$/;
+
 export const SAFE_SERVICE_ERROR_CODES = new Set([
   "account_request_invalid",
   "account_not_found",
@@ -306,11 +311,20 @@ export class BrainMailClientError extends Error {
    *  one a refusal carries, so this is read off the error body's own field and
    *  never guessed. False for every failure the service did not mark. */
   readonly enqueued: boolean;
+  /** What the code alone cannot say, when the service had a figure worth
+   *  passing on — a message's size and the ceiling it crossed. Present only
+   *  when the service sent one, and carried no further than the words a tool
+   *  refuses in. */
+  readonly detail: string | null;
 
   constructor(
     status: number,
     code: string,
-    options: { readonly requestSent?: boolean; readonly enqueued?: boolean } = {},
+    options: {
+      readonly requestSent?: boolean;
+      readonly enqueued?: boolean;
+      readonly detail?: string | null;
+    } = {},
   ) {
     super(code);
     this.name = "BrainMailClientError";
@@ -318,6 +332,7 @@ export class BrainMailClientError extends Error {
     this.code = code;
     this.requestSent = options.requestSent === true;
     this.enqueued = options.enqueued === true;
+    this.detail = options.detail ?? null;
   }
 }
 
@@ -1339,7 +1354,7 @@ async function requestMailService<T>(
                     ? 504
                     : safeServiceStatus(status),
                   refusal.code,
-                  { enqueued: refusal.enqueued },
+                  { enqueued: refusal.enqueued, detail: refusal.detail },
                 ),
               );
             } catch {
@@ -1481,7 +1496,7 @@ async function requestMailAttachment(
                     ? 504
                     : safeServiceStatus(status),
                   refusal.code,
-                  { enqueued: refusal.enqueued },
+                  { enqueued: refusal.enqueued, detail: refusal.detail },
                 );
               }
               const contentType = response.headers["content-type"];
@@ -2177,32 +2192,45 @@ function validateCapabilities(
   }
 }
 
-/** The service's error body: the code always, and on a send that failed after
- *  the message was durable, `enqueued: true` beside it. The shape is still
- *  exact, so `enqueued` is admitted as that one value and nothing else: a body
- *  carrying anything different is one this client does not understand. */
+/** The service's error body: the code always, `enqueued: true` beside it on a
+ *  send that failed after the message was durable, and `detail` when the service
+ *  had a figure to name. The shape stays exact — `enqueued` is admitted as that
+ *  one value and nothing else, a detail only as a short line of printable ASCII
+ *  — so a body carrying anything different is one this client does not
+ *  understand. */
 function validateServiceError(value: unknown): {
   code: string;
   enqueued: boolean;
+  detail: string | null;
 } {
   if (
     !isExactRecord(value, ["apiVersion", "error"]) ||
     value.apiVersion !== 1 ||
-    !(
-      isExactRecord(value.error, ["code"]) ||
-      (isExactRecord(value.error, ["code", "enqueued"]) &&
-        value.error.enqueued === true)
-    ) ||
+    !isPlainRecord(value.error) ||
     typeof value.error.code !== "string"
   ) {
     throw invalidResponse();
   }
+  const fields = Reflect.ownKeys(value.error);
+  if (
+    fields.some(
+      (field) => field !== "code" && field !== "enqueued" && field !== "detail",
+    ) ||
+    (fields.includes("enqueued") && value.error.enqueued !== true) ||
+    (fields.includes("detail") &&
+      (typeof value.error.detail !== "string" ||
+        !SAFE_SERVICE_ERROR_DETAIL.test(value.error.detail)))
+  ) {
+    throw invalidResponse();
+  }
   const enqueued = value.error.enqueued === true;
+  const detail =
+    typeof value.error.detail === "string" ? value.error.detail : null;
   if (value.error.code === "request_deadline_exceeded") {
-    return { code: "mail_service_timeout", enqueued };
+    return { code: "mail_service_timeout", enqueued, detail };
   }
   if (!SAFE_SERVICE_ERROR_CODES.has(value.error.code)) throw invalidResponse();
-  return { code: value.error.code, enqueued };
+  return { code: value.error.code, enqueued, detail };
 }
 
 function validateSocketPath(value: string): string {

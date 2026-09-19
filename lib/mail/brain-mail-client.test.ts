@@ -1171,6 +1171,49 @@ describe("Brain Mail Unix-socket client", () => {
       code: "mail_service_invalid_response",
     });
   });
+
+  /** The figures a refusal names are the whole point of naming them: an agent
+   *  told only `mail_send_request_invalid` cannot tell whether a smaller file
+   *  would go through. The line is admitted as one short run of printable
+   *  ASCII, so a service that sent a control character or a page of prose is
+   *  one this client does not understand. */
+  it("carries a refusal's detail onto the error, within limits", async () => {
+    const named =
+      "finished message of 15000000 bytes exceeds the 14680064 byte ceiling";
+    const bodies: unknown[] = [
+      {
+        apiVersion: 1,
+        error: { code: "mail_send_request_invalid", detail: named },
+      },
+      { apiVersion: 1, error: { code: "mail_send_request_invalid" } },
+      {
+        apiVersion: 1,
+        error: { code: "mail_send_request_invalid", detail: "a\nb" },
+      },
+      {
+        apiVersion: 1,
+        error: { code: "mail_send_request_invalid", detail: "x".repeat(201) },
+      },
+    ];
+    const { socketPath } = await startServer((_request, response) => {
+      writeJson(response, 400, bodies.shift());
+    });
+    const client = createBrainMailClient({ socketPath });
+
+    await expect(client.sendMessage(sendInput())).rejects.toMatchObject({
+      code: "mail_send_request_invalid",
+      detail: named,
+    });
+    await expect(client.sendMessage(sendInput())).rejects.toMatchObject({
+      code: "mail_send_request_invalid",
+      detail: null,
+    });
+    for (let index = 0; index < 2; index += 1) {
+      await expect(client.sendMessage(sendInput())).rejects.toMatchObject({
+        code: "mail_service_invalid_response",
+      });
+    }
+  });
 });
 
 function sendInput(): MailSendInput {

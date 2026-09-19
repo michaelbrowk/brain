@@ -225,18 +225,24 @@ class MailHttpError extends Error {
    *  the request was answered, the code is the same one an outage carries,
    *  and only the outbox knows it is holding the message. */
   readonly enqueued: boolean;
+  /** What the code alone cannot say, when the service has a figure the caller
+   *  needs to act on — a size, and the ceiling it crossed. It reaches the
+   *  answer's body; the log record stays the stable code and nothing else. */
+  readonly detail: string | null;
 
   constructor(
     status: number,
     code: MailServiceErrorCode,
     closeConnection = false,
     enqueued = false,
+    detail: string | null = null,
   ) {
-    super(code);
+    super(detail === null ? code : `${code}: ${detail}`);
     this.name = "MailHttpError";
     this.status = status;
     this.code = code;
     this.closeConnection = closeConnection;
+    this.detail = detail;
     this.enqueued = enqueued;
   }
 }
@@ -1026,6 +1032,7 @@ async function handleRequest(
       error: {
         code: httpError.code,
         ...(httpError.enqueued ? { enqueued: true } : {}),
+        ...(httpError.detail === null ? {} : { detail: httpError.detail }),
       },
     });
     logRequestFailure(httpError, requestPhase, requestAccountId);
@@ -1501,7 +1508,13 @@ function toHttpError(error: unknown): MailHttpError {
     // `enqueued` travels with every status this error can take: a 409 or a
     // 429 raised after the enqueue is as durable as the 503 below it.
     if (error.code === "mail_send_request_invalid") {
-      return new MailHttpError(400, error.code, false, error.enqueued);
+      return new MailHttpError(
+        400,
+        error.code,
+        false,
+        error.enqueued,
+        error.detail,
+      );
     }
     if (
       error.code === "mail_send_account_not_found" ||

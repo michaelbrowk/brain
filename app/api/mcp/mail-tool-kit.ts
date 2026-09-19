@@ -51,6 +51,18 @@ export function mailRefusalFields(error: unknown): {
         reason: error.code,
       };
     }
+    if (error.code === "mail_send_request_invalid") {
+      // The service names its figures when it has them — what the finished
+      // message weighed and the ceiling it crossed — and that is the difference
+      // between an agent trying again with a smaller file and an agent retrying
+      // the same one for ever. A refusal with no figures still reads as a
+      // refusal of this request rather than as an outage.
+      return {
+        error: "the mail service refused this message",
+        reason:
+          error.detail === null ? error.code : `${error.code}: ${error.detail}`,
+      };
+    }
     if (error.code === "mail_send_idempotency_conflict") {
       return {
         error: "that idempotency key was used for a different message",

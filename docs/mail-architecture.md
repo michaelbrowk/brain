@@ -629,7 +629,7 @@ takes it off an agent's.
 Both shapes are written as buffers end to end, and only one message is built at
 a time for the whole process. A send at the attachment cap holds the decoded
 files and the finished message together, so two overlapping builds would cross
-the `MemoryMax=256 MiB` contract. Every build stands in one in-process queue,
+the `MemoryMax=296 MiB` contract. Every build stands in one in-process queue,
 a person's, an agent's and a draft's alike.
 
 `MailSendOperation.threadId` is the provider's own thread for the Sent copy. It
@@ -665,7 +665,7 @@ one number every other outgoing cap derives from, and §11 records the
 measurement behind it. One MIME build at a time for the whole process is the
 other half of that contract: a send at the cap holds the decoded files and the
 finished message together, and two overlapping builds would cross
-`MemoryMax=256 MiB`. Brain takes the same turn on its own side before it reads
+`MemoryMax=296 MiB`. Brain takes the same turn on its own side before it reads
 a byte, so at most one encoded body exists above the socket as well.
 
 The request fingerprint (`fingerprintMailSendInput`) is a SHA-256 over exactly
@@ -801,7 +801,7 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 | Inline raster | 8 MiB encoded per part / 12,000,000 cumulative decoded pixels / 100 cumulative frames per message |
 | IDLE restart | 25 minutes |
 | Worker lease | 5 minutes maximum |
-| Process memory | `MemoryHigh=192 MiB`, `MemoryMax=256 MiB` contract |
+| Process memory | `MemoryHigh=232 MiB`, `MemoryMax=296 MiB` contract |
 | Process CPU/tasks | 35% CPU quota / 32 tasks contract |
 | Parser memory | `MemoryHigh=128 MiB`, `MemoryMax=192 MiB` contract |
 | Parser CPU/tasks/FDs | 20% CPU quota / 8 tasks / 64 file descriptors contract |
@@ -846,7 +846,7 @@ One bound sits outside that file because it belongs to the browser rather than t
 
 [`MailSystemAdmissionPort`](../lib/mail/ports.ts) atomically reserves aggregate capacity before each connection, fetch, parse, SMTP submission, queue, temp blob, or WAL-growing operation. Its exact delta validator rejects unknown, negative, fractional, non-finite, accessor-backed, or individually oversized counters before arithmetic. [`admitMailSystemUsage`](../lib/mail/security.ts) rejects a snapshot above any quota, including the explicit fetch/parser/SMTP concurrency fields. Per-account limits cannot substitute for these global limits.
 
-Later service units must enforce the executable process contract below the host's physical capacity: 192 MiB soft memory pressure, 256 MiB hard memory, 35% CPU, 32 tasks, and 256 file descriptors. The parser worker has its own smaller 128/192 MiB, 20% CPU, 8-task, and 64-file-descriptor contract. A parser failure, out-of-memory kill, or process restart must leave only a resumable atomic sync page or an expired lease. It must not publish half a mailbox generation or retry an ambiguous send.
+Later service units must enforce the executable process contract below the host's physical capacity: 232 MiB soft memory pressure, 296 MiB hard memory, 35% CPU, 32 tasks, and 256 file descriptors. The parser worker has its own smaller 128/192 MiB, 20% CPU, 8-task, and 64-file-descriptor contract. A parser failure, out-of-memory kill, or process restart must leave only a resumable atomic sync page or an expired lease. It must not publish half a mailbox generation or retry an ambiguous send.
 
 Disk admission is checked before a fetch, local compose attachment, or MIME queue write. When free space crosses the warning floor, pause cache growth and evict unpinned cache blobs. When it crosses the hard floor, reject new local writes with a durable error and keep existing mail readable. Exact floors depend on a measured production baseline and are deferred.
 

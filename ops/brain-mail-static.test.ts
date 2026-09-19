@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import { describe, expect, it } from "vitest";
+import { MAIL_PROCESS_LIMITS } from "@/lib/mail/security";
 
 const root = process.cwd();
 const read = (name: string) => readFileSync(path.join(root, "ops", name), "utf8");
@@ -55,8 +56,8 @@ describe("brain-mail systemd contracts", () => {
     for (const line of [
       "User=brain-mail",
       "Group=brain-mail",
-      "MemoryHigh=192M",
-      "MemoryMax=256M",
+      "MemoryHigh=232M",
+      "MemoryMax=296M",
       "CPUQuota=35%",
       "TasksMax=32",
       "LimitNOFILE=256",
@@ -72,6 +73,18 @@ describe("brain-mail systemd contracts", () => {
     ]) {
       expect(service).toContain(`${line}\n`);
     }
+    // The unit is what the memory probe measures against: the probe reads
+    // `MAIL_PROCESS_LIMITS` and prints `MemoryHigh` as the bar every figure in
+    // §11 of `docs/mail-architecture.md` is judged by, and the outgoing
+    // attachment cap rests on those figures. A unit that drifts from the
+    // constant would leave the cap measured against a limit the service on the
+    // droplet never had.
+    expect(service).toContain(
+      `MemoryHigh=${MAIL_PROCESS_LIMITS.memoryHighBytes / (1024 * 1024)}M\n`,
+    );
+    expect(service).toContain(
+      `MemoryMax=${MAIL_PROCESS_LIMITS.memoryMaxBytes / (1024 * 1024)}M\n`,
+    );
     expect(service).not.toMatch(/PORT=|HOST(?:NAME)?=/);
     // One environment file, and it is the mail service's own — never
     // /etc/brain/brain.env, which holds the web process's secrets.

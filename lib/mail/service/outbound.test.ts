@@ -287,7 +287,7 @@ describe("provider-neutral mail send service", () => {
   /** ONE MESSAGE IN MEMORY AT A TIME, ENQUEUE INCLUDED.
    *
    *  The build gate exists because a send at the attachment cap holds the
-   *  decoded files and the finished message at once under `MemoryHigh=192M`.
+   *  decoded files and the finished message at once under `MemoryHigh=232M`.
    *  Releasing it at the end of the build bounded nothing: the built message
    *  is still in memory while the row is written, so two requests could hold
    *  two messages at the attachment cap across the enqueue. The turn now runs

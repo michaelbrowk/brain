@@ -363,7 +363,7 @@ const BASE64_CHUNK_BYTES = 3 * 1024 * 1024;
  * message — holds three full-size copies at once at the attachment cap: the
  * encoded string, the JSON string of it, and the bytes `fetch` makes of that.
  * A drain of a backlog pays it per message, which is what took a twenty-deep
- * pass to 206 MiB against `MemoryHigh=192M`.
+ * pass to 206 MiB against the `MemoryHigh` of the day, 192M then and 232M now.
  *
  * So the body is written straight into one buffer, and the message is encoded
  * a chunk at a time into it: what exists beyond the body itself is one chunk's

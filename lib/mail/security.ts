@@ -127,8 +127,8 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
 });
 
 export const MAIL_PROCESS_LIMITS = Object.freeze({
-  memoryHighBytes: 192 * 1024 * 1024,
-  memoryMaxBytes: 256 * 1024 * 1024,
+  memoryHighBytes: 232 * 1024 * 1024,
+  memoryMaxBytes: 296 * 1024 * 1024,
   cpuQuotaPercent: 35,
   tasksMax: 32,
   openFilesMax: MAIL_RESOURCE_LIMITS.maxOpenFileDescriptors,

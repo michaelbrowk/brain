@@ -336,7 +336,7 @@ export class ProviderNeutralMailDraftService implements MailDraftService {
     // and the built message is still in memory until `commitDraftSend` has
     // written the row. Releasing it at the end of the build let a draft send
     // and a `/v1/send` at the attachment cap hold two messages at once under
-    // `MemoryHigh=192M`. `/v1/send` holds one turn across build and enqueue;
+    // `MemoryHigh=232M`. `/v1/send` holds one turn across build and enqueue;
     // this holds one across build and commit. A replay builds nothing and
     // takes the turn for the commit alone.
     const committed = await runExclusiveOutboundBuild(async () => {

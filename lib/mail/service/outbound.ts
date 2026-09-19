@@ -912,7 +912,7 @@ export interface MailSendSubmissionProposalOptions {
 /**
  * One outbound message in memory at a time, for the whole process. A send at
  * the attachment cap holds the decoded files and the finished message at once,
- * and the service runs under `MemoryHigh=192M`, so two of them overlapping is
+ * and the service runs under `MemoryHigh=232M`, so two of them overlapping is
  * the difference between a send and a killed process.
  *
  * The turn runs from the build to the end of the write that makes the message

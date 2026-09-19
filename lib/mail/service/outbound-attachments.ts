@@ -61,7 +61,7 @@ export function encodeAttachmentFilename(filename: string): string {
  * Every byte is measured before anything is allocated, so an 8 MiB set of
  * files produces one buffer of the finished size rather than a string of it
  * and a buffer of it. A send at the cap is the peak this service has to
- * survive inside `MemoryHigh=192M`.
+ * survive inside `MemoryHigh=232M`.
  */
 export function buildMultipartBody(
   text: string,

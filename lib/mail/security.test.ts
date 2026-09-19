@@ -52,7 +52,7 @@ describe("mail security and resource contracts", () => {
       concurrentFetchStreams: 2,
       concurrentMimeParsers: 2,
       concurrentSmtpSubmissions: 1,
-      outgoingRawMessageBytes: 14 * 1024 * 1024,
+      outgoingRawMessageBytes: 17 * 1024 * 1024,
       egressTunnelFrameBytes: 16 * 1024,
       egressTunnelClientBytes: 2 * 1024 * 1024,
       egressTunnelAttachmentBytes: 1024 * 1024,
@@ -95,8 +95,8 @@ describe("mail security and resource contracts", () => {
       }),
     ).toThrow(/headers/i);
     expect(MAIL_PROCESS_LIMITS).toMatchObject({
-      memoryHighBytes: 192 * 1024 * 1024,
-      memoryMaxBytes: 256 * 1024 * 1024,
+      memoryHighBytes: 232 * 1024 * 1024,
+      memoryMaxBytes: 296 * 1024 * 1024,
       cpuQuotaPercent: 35,
       tasksMax: 32,
       openFilesMax: 256,

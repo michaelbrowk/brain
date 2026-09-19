@@ -344,7 +344,7 @@ exists, because a page id the agent can read would otherwise be a key to every
 file in the notes folder. What an agent can send is what the note it named
 already shows, which is what a person could forward by opening that note.
 
-Ten files and 8 MiB of them are the limits for one message from a Gmail
+Ten files and 10 MiB of them are the limits for one message from a Gmail
 account. An IMAP account's limit is 1 MiB, because its SMTP session leaves
 through a relay whose tunnel carries 2 MiB of finished message and base64
 turns a megabyte of files into 1.37 MiB of it. `list_mail_accounts` reports

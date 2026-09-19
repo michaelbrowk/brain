@@ -63,18 +63,24 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
   concurrentMimeParsers: 2,
   concurrentSmtpSubmissions: 1,
   /* Derived from `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes`, which is the one
-   * outgoing number: 8 MiB of attachments is 10.95 MiB once base64 wraps it
-   * at 76 columns, the 1 MiB text part expands the same way, and the headers
-   * take the rest, so 14 MiB carries the whole band under the attachment cap
-   * with room to spare. The room matters: a ceiling a message at the cap can
+   * outgoing number: 10 MiB of attachments is 13.68 MiB once base64 wraps it
+   * at 76 columns. The text part can cost more than its own limit, which is
+   * the term the arithmetic used to miss — `normalizeLineEndings` turns every
+   * line break into CRLF, so a 1 MiB body of line breaks is 2 MiB before
+   * base64 and 2.74 MiB after it. Headers cannot reach their own 256 KiB:
+   * a hundred addresses of 254 bytes, a 998-byte subject and the rest come to
+   * about 33 KiB. The whole worst shape measures 16.45 MiB, so 17 MiB
+   * carries it with 0.55 MiB to spare, and
+   * `outbound-worker-integration.test.ts` builds exactly that message and
+   * asserts it fits. The room matters: a ceiling a message at the cap can
    * reach is a refusal after the build, which is the defect the cap round of
-   * 2026-09-15 exists to have fixed. The outbox checks a message against this
-   * figure by name before it writes a row. The tunnel ceiling below is
-   * deliberately not raised with it: a message this size reaches a Gmail
-   * account and is refused at the relay for an IMAP one, which is what
-   * `egressTunnelAttachmentBytes` exists to say before the message is built
-   * rather than after. */
-  outgoingRawMessageBytes: 14 * 1024 * 1024,
+   * 2026-09-15 exists to have fixed. The outbox checks
+   * a message against this figure by name before it writes a row. The tunnel
+   * ceiling below is deliberately not raised with it: a message this size
+   * reaches a Gmail account and is refused at the relay for an IMAP one, which
+   * is what `egressTunnelAttachmentBytes` exists to say before the message is
+   * built rather than after. */
+  outgoingRawMessageBytes: 17 * 1024 * 1024,
   egressTunnelFrameBytes: 16 * 1024,
   egressTunnelClientBytes: 2 * 1024 * 1024,
   /* What one message may carry in files when it leaves through the relay
@@ -127,8 +133,8 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
 });
 
 export const MAIL_PROCESS_LIMITS = Object.freeze({
-  memoryHighBytes: 192 * 1024 * 1024,
-  memoryMaxBytes: 256 * 1024 * 1024,
+  memoryHighBytes: 232 * 1024 * 1024,
+  memoryMaxBytes: 296 * 1024 * 1024,
   cpuQuotaPercent: 35,
   tasksMax: 32,
   openFilesMax: MAIL_RESOURCE_LIMITS.maxOpenFileDescriptors,

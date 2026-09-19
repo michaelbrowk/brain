@@ -418,12 +418,14 @@ file before a bulk import. The application admits one body stream at a time and
 returns `429` with `Retry-After` to parallel upload attempts.
 
 `POST /api/mail/send` has its own body cap, `MAX_SEND_REQUEST_BYTES` at
-20 MiB, and it only applies to a request the edge let through: it sits under
+24 MiB, and it only applies to a request the edge let through: it sits under
 the server-level `client_max_body_size`, 101m in the reference vhost and 30m
-as measured on the droplet. Lowering either below 20 MiB turns an agent's
+as measured on the droplet. Lowering either below 24 MiB turns an agent's
 attachment send into a `413` the application never sees and cannot explain.
-The figure moved up from 16 MiB with the outgoing attachment cap, which is
-8 MiB of files since the outbox row started carrying the message as a BLOB.
+The figure moved up from 16 MiB to 20 MiB and now to 24 MiB with the outgoing
+attachment cap, which is 10 MiB of files since the mail service's own memory
+went to `MemoryHigh=232M` and `MemoryMax=296M`. The droplet's 30m clears it
+with 6 MiB to spare, so nothing at the edge moves with this.
 
 ### What a move writes
 

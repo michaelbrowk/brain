@@ -87,7 +87,7 @@ describe("reference nginx vhost", () => {
     expect(serverCap).toBeGreaterThan(mib(MAX_ATTACHMENT_BYTES));
     // A send at the outgoing attachment cap is the third body the app accepts
     // and the edge has to let through. It was the one nothing checked: the
-    // 30m measured on the droplet clears today's 20 MiB, and nothing would
+    // 30m measured on the droplet clears today's 24 MiB, and nothing would
     // have said so if the cap moved past it.
     expect(serverCap).toBeGreaterThan(
       mib(MAIL_SERVICE_HTTP_LIMITS.maxSendBodyBytes),

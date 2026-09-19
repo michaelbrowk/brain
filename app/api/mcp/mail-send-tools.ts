@@ -178,8 +178,8 @@ async function admitSending(): Promise<SendingGate> {
  *
  *  An attachment costs about six times its own size in resident memory while
  *  it is on its way: the file itself, its base64, the JSON string of the whole
- *  send input and the Buffer of that string, so about 48 MiB at the 8 MiB cap.
- *  Four at once measured +144 MiB when the cap was 10 MiB, against the unit's
+ *  send input and the Buffer of that string, so about 60 MiB at the 10 MiB cap.
+ *  Four at once measured +144 MiB at that same 10 MiB cap, against the unit's
  *  `MemoryHigh=512M`, and the mail
  *  service builds one MIME message at a time, so a second caller that had
  *  already read its bytes

@@ -28,8 +28,8 @@ TimeoutStopSec=15
 KillSignal=SIGTERM
 UMask=0077
 
-MemoryHigh=192M
-MemoryMax=256M
+MemoryHigh=232M
+MemoryMax=296M
 CPUQuota=35%
 TasksMax=32
 LimitNOFILE=256

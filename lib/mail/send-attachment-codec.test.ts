@@ -166,7 +166,7 @@ describe("outgoing attachment codec", () => {
     expect(MAIL_SEND_ATTACHMENT_LIMITS).toEqual({
       maxCount: 10,
       maxFilenameBytes: 255,
-      maxTotalBytes: 8_388_608,
+      maxTotalBytes: 10_485_760,
     });
   });
 });

@@ -206,7 +206,7 @@ export async function resolveOutgoingAttachments(
       // Which ceiling was hit is the whole point of the answer: a message the
       // outgoing cap would have carried, refused because this account sends
       // through the relay, has to say so and name both figures, or the agent
-      // reads an 8 MiB limit in the tool reference and cannot tell why 2 MiB
+      // reads a 10 MiB limit in the tool reference and cannot tell why 2 MiB
       // of files was turned down.
       return budget < MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes
         ? refuse(

@@ -2,7 +2,9 @@
 /**
  * The memory probe, from a working tree.
  *
- *   node scripts/mail-outbox-memory-probe.mjs --size 8
+ *   node scripts/mail-outbox-memory-probe.mjs
+ *
+ * With no `--size` it measures the outgoing attachment cap that ships.
  *
  * Bundles `scripts/lib/mail-outbox-memory-probe.ts` — the probe itself, with
  * the service's own modules inside it rather than a copy of them — and runs it.

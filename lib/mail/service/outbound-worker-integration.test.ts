@@ -223,7 +223,7 @@ describe("durable mail outbound worker integration", () => {
    *
    *  The worker takes a batch of twenty by default and delivers them one at a
    *  time, so the batch read is where a backlog becomes memory: twenty messages
-   *  at the attachment cap is 219 MiB of message, against `MemoryMax=256M`. The
+   *  at the attachment cap is 274 MiB of message, against `MemoryMax=296M`. The
    *  listing carries identities and nothing else, and the message is read at the
    *  moment it is delivered, so what the pass holds is one message however deep
    *  the queue is. Measured separately by

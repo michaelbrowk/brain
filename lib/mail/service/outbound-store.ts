@@ -1004,8 +1004,8 @@ export class SqliteMailSendStore
    *
    * The worker takes a batch — twenty by default — and delivers them one at a
    * time, so a batch that carried its messages would hold all twenty for the
-   * length of the pass: 219 MiB of message at the attachment cap, against
-   * `MemoryMax=256M`, on exactly the backlog a provider outage produces. It
+   * length of the pass: 274 MiB of message at the attachment cap, against
+   * `MemoryMax=296M`, on exactly the backlog a provider outage produces. It
    * returns the two ids the worker uses and nothing else, and the message is
    * read at the moment it is delivered, so the pass holds one message however
    * deep the queue is.

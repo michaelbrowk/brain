@@ -181,10 +181,11 @@ export interface StoredMailSendMessage {
    * It used to be a string, and that string was the whole reason the outgoing
    * attachment cap came down to 5 MiB: the record held the message base64url'd,
    * the outbox row held `JSON.stringify` of that string, and the enqueue peaked
-   * at 278 MiB with 10 MiB of files against `MemoryHigh=192M`. The row carries
-   * a BLOB now (`raw_rfc2822`, schema 3) and the record carries the same bytes,
-   * so the message exists once per turn on either side of the store, and the
-   * same 10 MiB peaks at 190.7 MiB. The cap is 8 MiB.
+   * at 278 MiB with 10 MiB of files against a `MemoryHigh` of 192M. The row
+   * carries a BLOB now (`raw_rfc2822`, schema 3) and the record carries the
+   * same bytes, so the message exists once per turn on either side of the
+   * store, and the same 10 MiB peaks at 191.8 MiB. That, and the service's own
+   * memory going to 232M, is why the cap is 10 MiB again.
    *
    * The two digests below stay beside it and are still what a read verifies:
    * they are what `smtp_submission_state` pins its identity on, and a BLOB can
@@ -246,7 +247,8 @@ export interface MailSendStore {
  *  What a queue listing carries, and all it carries. A listing that returned
  *  whole submissions would hold every message in the batch for the length of
  *  the pass, while the worker delivers them one at a time — twenty at the
- *  attachment cap is 219 MiB of message against `MemoryMax=256M`. */
+ *  attachment cap is 274 MiB of message against `MemoryMax=296M`, which leaves
+ *  the process less than a bare node takes. */
 export interface MailSendSubmissionIdentity {
   readonly accountId: string;
   readonly operationId: string;

@@ -1,7 +1,10 @@
 /**
  * What a send at a given attachment size costs the mail service in memory.
  *
- *   node <this, bundled> --size 8 [--runs 3] [--batch 20]
+ *   node <this, bundled> [--size <MiB>] [--runs 3] [--batch 20]
+ *
+ * With no `--size` it measures the outgoing attachment cap that ships, which
+ * is the figure the cap rests on.
  *
  * Prints one peak per stage, per run, in MiB, against `MemoryHigh` from
  * `MAIL_PROCESS_LIMITS`. The figure is `process.resourceUsage().maxRSS`, a
@@ -44,6 +47,7 @@ import process from "node:process";
 
 import { sendRequestBody } from "../../lib/mail/providers/gmail/send-adapter";
 import { MAIL_PROCESS_LIMITS } from "../../lib/mail/security";
+import { MAIL_SEND_ATTACHMENT_LIMITS } from "../../lib/mail/send-attachment-codec";
 import {
   createMailSendSubmissionProposal,
   ProviderNeutralMailSendService,
@@ -63,6 +67,11 @@ const ACCOUNT: MailSendAccount = Object.freeze({
 });
 const CREATED_AT = 1_800_000_000_000;
 const STAGES = ["build", "enqueue", "read", "drain"] as const;
+/** The size a run with no `--size` measures. Read off the cap rather than
+ *  written down, because the cap is what the figure is taken to justify and a
+ *  default left behind measures the previous one while still printing a
+ *  table. */
+const DEFAULT_SIZE_MIB = MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes / (1024 * 1024);
 
 type Stage = (typeof STAGES)[number];
 
@@ -291,12 +300,12 @@ function parseArguments(argv: readonly string[]): Options {
       index += 1;
     } else {
       throw new Error(
-        "usage: mail-outbox-memory-probe --size 8 [--runs 3] [--batch 20] " +
-          "[--provider gmail|bytes]",
+        `usage: mail-outbox-memory-probe [--size ${DEFAULT_SIZE_MIB}] ` +
+          "[--runs 3] [--batch 20] [--provider gmail|bytes]",
       );
     }
   }
-  if (options.sizes.length === 0) options.sizes.push(8);
+  if (options.sizes.length === 0) options.sizes.push(DEFAULT_SIZE_MIB);
   return options;
 }
 

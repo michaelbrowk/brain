@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { DatabaseSync } from "node:sqlite";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { MAIL_RESOURCE_LIMITS } from "../security";
@@ -214,6 +216,151 @@ describe("durable mail outbound worker integration", () => {
     expect(createHash("sha256").update(message!).digest("hex")).toBe(
       stored?.message.rawRfc2822Sha256,
     );
+    await store.close();
+  });
+
+  /** ONE MESSAGE RESIDENT, WHATEVER THE BACKLOG.
+   *
+   *  The worker takes a batch of twenty by default and delivers them one at a
+   *  time, so the batch read is where a backlog becomes memory: twenty messages
+   *  at the attachment cap is 219 MiB of message, against `MemoryMax=256M`. The
+   *  listing carries identities and nothing else, and the message is read at the
+   *  moment it is delivered, so what the pass holds is one message however deep
+   *  the queue is. Measured separately by
+   *  `scripts/mail-outbox-memory-probe.mjs --drain`; what this pins is the shape
+   *  that makes the measurement true. */
+  it("drains a backlog one message at a time, never a batch of them", async () => {
+    const now = Date.parse("2026-07-20T00:00:00.000Z");
+    const root = await mkdtemp(path.join(tmpdir(), "brain-mail-drain-"));
+    roots.push(root);
+    const cacheRoot = path.join(root, "cache");
+    await mkdir(cacheRoot, { mode: 0o700 });
+
+    const store = new SqliteMailSendStore({ cacheRoot, now: () => now });
+    await store.initialize();
+    const queued = [11, 12, 13, 14].map((index) =>
+      submission(index, {
+        nextAttemptAt: now - 1_000,
+        createdAt: now - 1_000,
+        updatedAt: now - 1_000,
+      }),
+    );
+    for (const value of queued) await store.enqueue(value);
+
+    const events: string[] = [];
+    const provider: MailSendProvider = {
+      providerKind: "gmail",
+      send: vi.fn(async (message, hooks) => {
+        events.push(`send ${message.operationId.slice(-2)}`);
+        await hooks.beforeDelivery();
+        return {
+          kind: "accepted",
+          providerMessageId: `gmail-message-${message.operationId.slice(-2)}`,
+          providerThreadId: `gmail-thread-${message.operationId.slice(-2)}`,
+        } as const;
+      }),
+    };
+    // The store as the worker sees it, recording what it is handed: a listing
+    // that carries a message would be a batch of them.
+    const recording = new Proxy(store, {
+      get(target, property) {
+        const value = Reflect.get(target, property, target);
+        if (property === "listRunnable" && typeof value === "function") {
+          return async (...args: [number, number]) => {
+            const listed = await target.listRunnable(...args);
+            for (const entry of listed) {
+              expect(Object.keys(entry).sort()).toEqual([
+                "accountId",
+                "operationId",
+              ]);
+            }
+            return listed;
+          };
+        }
+        if (property === "readByOperationId" && typeof value === "function") {
+          return async (operationId: string) => {
+            const read = await target.readByOperationId(operationId);
+            if (read !== null) events.push(`read ${operationId.slice(-2)}`);
+            return read;
+          };
+        }
+        return typeof value === "function" ? value.bind(target) : value;
+      },
+    });
+    const service = new ProviderNeutralMailSendService({
+      store: recording,
+      accounts: {
+        readSendAccount: async () => ({
+          accountId: ACCOUNT_ID,
+          providerKind: "gmail",
+          emailAddress: "me@example.com",
+          status: "connected",
+        }),
+      },
+      replies: { resolveReplyContext: async () => null },
+      providers: [provider],
+      now: () => now,
+    });
+    const worker = new MailOutboundWorker({
+      store: recording,
+      processor: service,
+      now: () => now,
+      batchSize: 20,
+    });
+
+    await worker.runNow();
+
+    // Read, send, read, send: each message is read for its own delivery and
+    // none of them before the pass needs it.
+    expect(events).toEqual([
+      "read 11",
+      "send 11",
+      "read 12",
+      "send 12",
+      "read 13",
+      "send 13",
+      "read 14",
+      "send 14",
+    ]);
+    await worker.stop();
+    await store.close();
+  });
+
+  /** The same property one layer down: the statement the listing prepares does
+   *  not name the message column at all. */
+  it("prepares no statement that reads a message while it lists work", async () => {
+    const now = Date.parse("2026-07-20T00:00:00.000Z");
+    const root = await mkdtemp(path.join(tmpdir(), "brain-mail-listing-"));
+    roots.push(root);
+    const cacheRoot = path.join(root, "cache");
+    await mkdir(cacheRoot, { mode: 0o700 });
+
+    const store = new SqliteMailSendStore({ cacheRoot, now: () => now });
+    await store.initialize();
+    await store.enqueue(
+      submission(21, {
+        nextAttemptAt: now - 1_000,
+        createdAt: now - 1_000,
+        updatedAt: now - 1_000,
+      }),
+    );
+
+    const prepared: string[] = [];
+    const prepare = DatabaseSync.prototype.prepare;
+    const spy = vi
+      .spyOn(DatabaseSync.prototype, "prepare")
+      .mockImplementation(function (this: DatabaseSync, sql: string) {
+        prepared.push(sql);
+        return prepare.call(this, sql);
+      });
+    try {
+      await store.listRunnable(now, 20);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(prepared.length).toBeGreaterThan(0);
+    expect(prepared.filter((sql) => sql.includes("raw_rfc2822"))).toEqual([]);
     await store.close();
   });
 });

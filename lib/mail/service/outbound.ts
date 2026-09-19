@@ -238,11 +238,22 @@ export interface MailSendStore {
   ): Promise<boolean>;
 }
 
+/** Which operation, in which account.
+ *
+ *  What a queue listing carries, and all it carries. A listing that returned
+ *  whole submissions would hold every message in the batch for the length of
+ *  the pass, while the worker delivers them one at a time — twenty at the
+ *  attachment cap is 219 MiB of message against `MemoryMax=256M`. */
+export interface MailSendSubmissionIdentity {
+  readonly accountId: string;
+  readonly operationId: string;
+}
+
 export interface MailSendQueueStore {
   listRunnable(
     now: number,
     limit: number,
-  ): Promise<readonly StoredMailSendSubmission[]>;
+  ): Promise<readonly MailSendSubmissionIdentity[]>;
   nextRunnableAt(): Promise<number | null>;
   countActive(): Promise<number>;
 }

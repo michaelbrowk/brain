@@ -630,13 +630,13 @@ describe("private durable mail outbox", () => {
     const reopened = new SqliteMailSendStore({ cacheRoot: fixture.cacheRoot });
     await reopened.initialize();
     await expect(reopened.listRunnable(now, 2)).resolves.toEqual([
-      queued,
-      expiredSafe,
+      identityOf(queued),
+      identityOf(expiredSafe),
     ]);
     await expect(reopened.listRunnable(now, 10)).resolves.toEqual([
-      queued,
-      expiredSafe,
-      expiredRisk,
+      identityOf(queued),
+      identityOf(expiredSafe),
+      identityOf(expiredRisk),
     ]);
     await expect(reopened.nextRunnableAt()).resolves.toBe(now - 3_000);
     await expect(reopened.countActive()).resolves.toBe(4);
@@ -656,7 +656,7 @@ describe("private durable mail outbox", () => {
     await reopened.initialize();
     await expect(
       reopened.listRunnable(queued.updatedAt, 1),
-    ).resolves.toEqual([queued]);
+    ).resolves.toEqual([identityOf(queued)]);
     await reopened.close();
 
     const database = openDatabase(fixture.cacheRoot);
@@ -1127,7 +1127,12 @@ describe("private durable mail outbox", () => {
     await fixture.store.close();
   });
 
-  it("uses metadata aggregates and decodes JSON only for the selected batch", async () => {
+  // A corrupt row is one failed operation, not a batch that cannot be listed.
+  // The listing reads metadata columns only, so a row whose JSON or whose
+  // message cannot be read is listed like any other and refused on the read
+  // that would deliver it — which is the worker's own failure path, one
+  // operation wide.
+  it("lists a corrupt row like any other and refuses it on the read that delivers it", async () => {
     const fixture = await createStore();
     const now = Date.now();
     const valid = submissionFixture({
@@ -1164,10 +1169,20 @@ describe("private durable mail outbox", () => {
     await reopened.initialize();
     await expect(reopened.nextRunnableAt()).resolves.toBe(now);
     await expect(reopened.countActive()).resolves.toBe(2);
-    await expect(reopened.listRunnable(now + 1, 1)).resolves.toEqual([valid]);
-    await expect(reopened.listRunnable(now + 1, 2)).rejects.toEqual(
-      new MailSendError("mail_send_service_unavailable"),
-    );
+    await expect(reopened.listRunnable(now + 1, 1)).resolves.toEqual([
+      identityOf(valid),
+    ]);
+    await expect(reopened.listRunnable(now + 1, 2)).resolves.toEqual([
+      identityOf(valid),
+      { accountId: FIRST_ACCOUNT, operationId: operationId(3_002) },
+    ]);
+    // The message behind the corrupt row is what refuses, on its own read.
+    await expect(
+      reopened.readByOperationId(operationId(3_002)),
+    ).rejects.toEqual(new MailSendError("mail_send_service_unavailable"));
+    await expect(
+      reopened.readByOperationId(valid.operationId),
+    ).resolves.toEqual(valid);
     await reopened.close();
   });
 
@@ -1250,7 +1265,9 @@ describe("SMTP ownership handoff and outbox mirror", () => {
     await fixture.store.enqueue(gmail);
     await fixture.store.enqueue(imap);
 
-    await expect(fixture.store.listRunnable(now, 10)).resolves.toEqual([gmail]);
+    await expect(fixture.store.listRunnable(now, 10)).resolves.toEqual([
+      identityOf(gmail),
+    ]);
     await expect(fixture.store.nextRunnableAt()).resolves.toBe(
       gmail.nextAttemptAt,
     );
@@ -3560,6 +3577,11 @@ function expectSameSubmission(
     true,
   );
   expect(withoutMessageBytes(actual!)).toEqual(withoutMessageBytes(expected));
+}
+
+/** What a queue listing carries. */
+function identityOf(value: StoredMailSendSubmission) {
+  return { accountId: value.accountId, operationId: value.operationId };
 }
 
 function withoutMessageBytes(value: StoredMailSendSubmission): unknown {

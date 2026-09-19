@@ -99,6 +99,9 @@ const MAX_SERIALIZED_SUBMISSION_BYTES = 1024 * 1024;
 const SUBMISSION_COLUMNS = "submission_json, raw_rfc2822";
 const MAX_SERIALIZED_SMTP_STATE_BYTES = 128 * 1024;
 const MAX_LEGACY_ROWS_PER_ACCOUNT = 10_000;
+/** How many rows the schema 2 migration lists at a time. Not a bound on the
+ *  account: the walk pages by key until nothing is left. */
+const MIGRATION_PAGE_ROWS = 500;
 const TERMINAL_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const MAX_TERMINAL_ROWS_PER_ACCOUNT = 500;
 const RETENTION_SWEEP_INTERVAL_MS = 60 * 60 * 1_000;
@@ -2131,8 +2134,8 @@ function initializeSchema(
     // table, so its outbox can be rebuilt whole; version 2 has both, and one
     // of them holds a foreign key into the outbox. The two migrations stay
     // apart for that reason and a file at 1 walks through both.
-    if (version === 1) migrateSchemaV1(database, options.now);
-    migrateSchemaV2(database);
+    if (version === 1) migrateSchemaV1(database, options.now, accountId);
+    migrateSchemaV2(database, accountId);
   } else if (version !== SCHEMA_VERSION) {
     throw unavailable();
   }
@@ -2185,29 +2188,57 @@ function assertDatabaseIdentity(
  * work is driven off the rows that are still empty and why version 3 is claimed
  * only when none are. One way: a service that knows schema 2 reads the shortened
  * JSON, finds no message in it, and refuses the file.
+ *
+ * One row's message being unreadable — base64url that does not decode, digests
+ * that do not match what it decodes to, a message above the outgoing ceiling —
+ * costs that row and nothing else. It is marked failed with an empty message and
+ * the walk carries on, because the alternative was throwing out of the open: the
+ * version stayed at 2, every later open repeated the failure, and an account
+ * could not send, read a status or drain what was already queued. Under schema 2
+ * the same corruption cost exactly the row that carried it, and it should cost
+ * the same here. A read of such a row is refused the way any corrupt message is.
+ *
+ * The walk is by key rather than by offset, so it advances past the rows it
+ * marks, and it has no row bound: the bound it had refused to migrate an account
+ * with more than ten thousand rows still to move, which was a second way to
+ * leave a file unopenable for good.
  */
-function migrateSchemaV2(database: DatabaseSync): void {
+function migrateSchemaV2(database: DatabaseSync, accountId: string): void {
   if (!outboxHasRawColumn(database)) {
     database.exec(
       "ALTER TABLE outbox ADD COLUMN raw_rfc2822 BLOB NOT NULL DEFAULT x''",
     );
   }
-  const pending = database
-    .prepare(
-      `SELECT operation_id FROM outbox
-        WHERE length(raw_rfc2822) = 0
-        ORDER BY operation_id
-        LIMIT ?`,
-    )
-    .all(MAX_LEGACY_ROWS_PER_ACCOUNT + 1);
-  if (pending.length > MAX_LEGACY_ROWS_PER_ACCOUNT) throw unavailable();
-  for (const row of pending) {
-    if (!isExactRecord(row, ["operation_id"]) ||
-        typeof row.operation_id !== "string") {
-      throw unavailable();
+  const page = database.prepare(
+    `SELECT operation_id FROM outbox
+      WHERE length(raw_rfc2822) = 0 AND operation_id > ?
+      ORDER BY operation_id
+      LIMIT ?`,
+  );
+  let unreadable = 0;
+  let after = "";
+  for (;;) {
+    const rows = page.all(after, MIGRATION_PAGE_ROWS);
+    if (rows.length === 0) break;
+    for (const row of rows) {
+      if (
+        !isExactRecord(row, ["operation_id"]) ||
+        typeof row.operation_id !== "string"
+      ) {
+        throw unavailable();
+      }
+      after = row.operation_id;
+      if (migrateSubmissionRowToBlob(database, row.operation_id)) continue;
+      unreadable += 1;
+      writeMailLogRecord({
+        event: "mail_outbox_row_unreadable",
+        accountId,
+        operationId: row.operation_id,
+      });
     }
-    migrateSubmissionRowToBlob(database, row.operation_id);
   }
+  // Every empty row was visited, and each was either filled or marked, so what
+  // is left empty is exactly what was marked.
   if (
     aggregateCount(
       database
@@ -2217,17 +2248,19 @@ function migrateSchemaV2(database: DatabaseSync): void {
         )
         .get(),
       "row_count",
-    ) !== 0
+    ) !== unreadable
   ) {
     throw unavailable();
   }
   database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 
+/** Whether the row's message moved. False means it could not be read and the
+ *  row was marked failed instead, which the caller logs. */
 function migrateSubmissionRowToBlob(
   database: DatabaseSync,
   operationId: string,
-): void {
+): boolean {
   database.exec("BEGIN IMMEDIATE");
   try {
     const row = database
@@ -2239,9 +2272,31 @@ function migrateSubmissionRowToBlob(
     // Another writer got there first, which is an answer and not a failure.
     if (row === undefined) {
       database.exec("COMMIT");
-      return;
+      return true;
     }
-    const submission = submissionFromLegacyJson(row);
+    let submission: StoredMailSendSubmission | null = null;
+    try {
+      submission = submissionFromLegacyJson(row);
+      // A message the service could not put on the wire either way. Marked here
+      // rather than carried forward, so the row says what happened to it instead
+      // of failing at the transport with an untyped error every retry.
+      if (
+        submission.message.rawRfc2822Bytes >
+        MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes
+      ) {
+        submission = null;
+      }
+    } catch {
+      submission = null;
+    }
+    if (submission === null) {
+      // The JSON is left as it stands. It still holds whatever the row had, which
+      // is the only evidence of the message left, and a read refuses the row
+      // anyway: an empty BLOB cannot match the digests beside it.
+      markOutboxRowFailed(database, operationId);
+      database.exec("COMMIT");
+      return false;
+    }
     const changed = database
       .prepare(
         `UPDATE outbox SET submission_json = ?, raw_rfc2822 = ?
@@ -2254,10 +2309,25 @@ function migrateSubmissionRowToBlob(
       );
     if (changed.changes !== 1) throw unavailable();
     database.exec("COMMIT");
+    return true;
   } catch (error) {
     if (database.isTransaction) database.exec("ROLLBACK");
     throw error;
   }
+}
+
+/** Terminal, and not runnable: whatever the worker would have done with this
+ *  row, it cannot send a message it cannot read. */
+function markOutboxRowFailed(
+  database: DatabaseSync,
+  operationId: string,
+): void {
+  database
+    .prepare(
+      `UPDATE outbox SET status = 'failed', runnable_at = NULL
+        WHERE operation_id = ?`,
+    )
+    .run(operationId);
 }
 
 function outboxHasRawColumn(database: DatabaseSync): boolean {
@@ -2267,7 +2337,24 @@ function outboxHasRawColumn(database: DatabaseSync): boolean {
     .some((row) => row.name === "raw_rfc2822");
 }
 
-function migrateSchemaV1(database: DatabaseSync, now: number): void {
+/**
+ * Schema 1 to 3, by rebuilding the table.
+ *
+ * Safe here and not at version 2: a version 1 file predates both the drafts
+ * tables and the SMTP state table, so nothing holds a foreign key into
+ * `outbox` and no trigger fires on an insert into it.
+ *
+ * A row whose message cannot be read, or whose message is above today's
+ * outgoing ceiling, is carried across as failed with an empty message rather
+ * than failing the open — the same trade `migrateSchemaV2` makes, for the same
+ * reason. The row bound stays: a version 1 file is old enough that a backlog
+ * above ten thousand rows is a corrupt file rather than a busy account.
+ */
+function migrateSchemaV1(
+  database: DatabaseSync,
+  now: number,
+  accountId: string,
+): void {
   const count = aggregateCount(
     database.prepare("SELECT COUNT(*) AS row_count FROM outbox").get(),
     "row_count",
@@ -2290,7 +2377,28 @@ function migrateSchemaV1(database: DatabaseSync, now: number): void {
     for (const row of rows) {
       migrated += 1;
       if (migrated > MAX_LEGACY_ROWS_PER_ACCOUNT) throw unavailable();
-      const submission = legacySubmissionFromRow(row);
+      let submission: StoredMailSendSubmission | null = null;
+      try {
+        submission = legacySubmissionFromRow(row);
+        if (
+          submission.message.rawRfc2822Bytes >
+          MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes
+        ) {
+          submission = null;
+        }
+      } catch {
+        submission = null;
+      }
+      if (submission === null) {
+        insertUnreadableLegacyRow(database, row, now);
+        writeMailLogRecord({
+          event: "mail_outbox_row_unreadable",
+          accountId,
+          operationId:
+            typeof row.operation_id === "string" ? row.operation_id : "unknown",
+        });
+        continue;
+      }
       insertSubmissionRow(
         database,
         submission,
@@ -2306,6 +2414,56 @@ function migrateSchemaV1(database: DatabaseSync, now: number): void {
     if (database.isTransaction) database.exec("ROLLBACK");
     throw error;
   }
+}
+
+/**
+ * A version 1 row whose message could not be read, carried into version 3 as a
+ * failed one.
+ *
+ * Only the five columns version 1 had are trusted here, because the JSON is what
+ * could not be read: no timestamps come out of it, so the migration's own clock
+ * stands in for both, which also means the row lives out the ordinary terminal
+ * retention window instead of being swept by the prune at the end of the same
+ * migration. The JSON is kept as it stands — it is the only evidence of the
+ * message left — and the empty message is what makes a read of the row refuse it.
+ */
+function insertUnreadableLegacyRow(
+  database: DatabaseSync,
+  row: Record<string, unknown>,
+  now: number,
+): void {
+  if (
+    typeof row.operation_id !== "string" ||
+    !SAFE_OPERATION_ID.test(row.operation_id) ||
+    typeof row.account_id !== "string" ||
+    !SAFE_ACCOUNT_ID.test(row.account_id) ||
+    typeof row.idempotency_key !== "string" ||
+    !SAFE_IDEMPOTENCY_KEY.test(row.idempotency_key) ||
+    typeof row.request_fingerprint !== "string" ||
+    !SAFE_FINGERPRINT.test(row.request_fingerprint) ||
+    !Number.isSafeInteger(row.version) ||
+    (row.version as number) < 0 ||
+    typeof row.submission_json !== "string"
+  ) {
+    throw unavailable();
+  }
+  database
+    .prepare(
+      `INSERT INTO outbox(
+         operation_id, account_id, idempotency_key, request_fingerprint,
+         version, status, runnable_at, created_at, updated_at, submission_json
+       ) VALUES (?, ?, ?, ?, ?, 'failed', NULL, ?, ?, ?)`,
+    )
+    .run(
+      row.operation_id,
+      row.account_id,
+      row.idempotency_key,
+      row.request_fingerprint,
+      row.version as number,
+      now,
+      now,
+      row.submission_json,
+    );
 }
 
 function initializeDraftSchema(

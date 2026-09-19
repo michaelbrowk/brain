@@ -370,9 +370,14 @@ const BASE64_CHUNK_BYTES = 3 * 1024 * 1024;
  * worth of string. No escaping is needed and none is done — base64url's
  * alphabet is `A-Za-z0-9_-` and a thread id is checked against
  * `SAFE_RESOURCE_ID` before this runs, so neither can carry a quote, a
- * backslash or a control character.
+ * backslash or a control character. It does not validate for itself: its one
+ * caller does, two lines above the call.
+ *
+ * Exported for the memory probe, which measures what a delivery costs and has
+ * to measure this rather than a copy of it — a copy would keep reporting the
+ * old figure after this changed, and the outgoing cap rests on that figure.
  */
-function sendRequestBody(
+export function sendRequestBody(
   message: MailSendProviderMessage,
 ): Uint8Array<ArrayBuffer> {
   const raw = message.rawRfc2822;

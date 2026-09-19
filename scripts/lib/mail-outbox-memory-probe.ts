@@ -42,6 +42,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import process from "node:process";
 
+import { sendRequestBody } from "../../lib/mail/providers/gmail/send-adapter";
 import { MAIL_PROCESS_LIMITS } from "../../lib/mail/security";
 import {
   createMailSendSubmissionProposal,
@@ -130,50 +131,22 @@ async function openStore(cacheRoot: string): Promise<SqliteMailSendStore> {
 /**
  * What the transport costs on top of the store.
  *
- * `gmail` is what `send-adapter.ts` does: the message base64url'd, and that
- * string inside a JSON request body, so two more full-size copies per delivery.
- * `bytes` is what the SMTP path does — one Buffer copy with the Bcc header
- * stripped — and it is also the shape that isolates the store's own share of a
- * drain. Both are real; the difference between them belongs to the provider
- * rather than to the outbox.
+ * `gmail` calls the Gmail adapter's own `sendRequestBody`: one buffer with the
+ * message encoded into it a chunk at a time, which is what a delivery to a Gmail
+ * account allocates. Imported rather than reproduced, because the outgoing cap
+ * rests on this figure and a copy would keep reporting the old one after the
+ * adapter changed. `bytes` is what the SMTP path does — one Buffer copy with
+ * the Bcc header stripped — and it is also the shape that isolates the store's
+ * own share of a drain. Both are real; the difference between them belongs to
+ * the provider rather than to the outbox.
  */
-const BASE64_CHUNK_BYTES = 3 * 1024 * 1024;
-
-/** The Gmail adapter's own body construction, copied here rather than imported
- *  so the probe measures the shape of the cost without reaching into a module
- *  that does not export it. */
-function gmailRequestBody(raw: Buffer): Buffer {
-  const remainder = raw.byteLength % 3;
-  const encodedLength =
-    Math.ceil(raw.byteLength / 3) * 4 - (remainder === 0 ? 0 : 3 - remainder);
-  const prefix = Buffer.from('{"raw":"', "ascii");
-  const suffix = Buffer.from('"}', "ascii");
-  const body = Buffer.allocUnsafe(
-    prefix.byteLength + encodedLength + suffix.byteLength,
-  );
-  prefix.copy(body, 0);
-  let offset = prefix.byteLength;
-  for (let start = 0; start < raw.byteLength; start += BASE64_CHUNK_BYTES) {
-    offset += body.write(
-      raw
-        .subarray(start, Math.min(start + BASE64_CHUNK_BYTES, raw.byteLength))
-        .toString("base64url"),
-      offset,
-      "ascii",
-    );
-  }
-  suffix.copy(body, offset);
-  return body;
-}
-
 function costingProvider(shape: "gmail" | "bytes"): MailSendProvider {
   return {
     providerKind: "gmail",
     send: async (message, hooks) => {
       await hooks.beforeDelivery();
       if (shape === "gmail") {
-        // What `send-adapter.ts` builds, built the way it builds it.
-        const body = gmailRequestBody(message.rawRfc2822);
+        const body = sendRequestBody(message);
         if (body.byteLength < 1) throw new Error("empty body");
       } else if (message.rawRfc2822.byteLength < 1) {
         throw new Error("empty message");

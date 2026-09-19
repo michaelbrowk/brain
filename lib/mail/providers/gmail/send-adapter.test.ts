@@ -74,9 +74,20 @@ describe("Gmail send adapter", () => {
    *  than one chunk and at every remainder of three, because base64 groups three
    *  bytes into four characters and a mis-aligned chunk would quietly corrupt
    *  every message after the first. */
-  it.each([1, 2, 3, 4 * 1024 * 1024, 4 * 1024 * 1024 + 1, 4 * 1024 * 1024 + 2])(
-    "builds the request body of a %i-byte message exactly as JSON would",
-    async (bytes) => {
+  it.each([
+    [1, "gmail-thread-1"],
+    [2, "gmail-thread-1"],
+    [3, "gmail-thread-1"],
+    [4 * 1024 * 1024, "gmail-thread-1"],
+    [4 * 1024 * 1024 + 1, "gmail-thread-1"],
+    [4 * 1024 * 1024 + 2, "gmail-thread-1"],
+    // The other shape of the suffix: a compose rather than a reply, where the
+    // body closes straight after the message.
+    [3, null],
+    [4 * 1024 * 1024 + 1, null],
+  ] as const)(
+    "builds the request body of a %i-byte message for thread %s exactly as JSON would",
+    async (bytes, providerThreadId) => {
       const raw = Buffer.alloc(bytes, 0x61);
       raw[0] = 0xff;
       raw[bytes - 1] = 0x00;
@@ -94,16 +105,17 @@ describe("Gmail send adapter", () => {
       });
 
       await adapter.send(
-        message({ rawRfc2822: raw, providerThreadId: "gmail-thread-1" }),
+        message({ rawRfc2822: raw, providerThreadId }),
         hooks([]),
         context(),
       );
 
       expect(bodies).toEqual([
-        JSON.stringify({
-          raw: raw.toString("base64url"),
-          threadId: "gmail-thread-1",
-        }),
+        JSON.stringify(
+          providerThreadId === null
+            ? { raw: raw.toString("base64url") }
+            : { raw: raw.toString("base64url"), threadId: providerThreadId },
+        ),
       ]);
     },
   );

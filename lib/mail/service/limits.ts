@@ -2,7 +2,7 @@ export const MAIL_SERVICE_HTTP_LIMITS = Object.freeze({
   maxHeaderBytes: 8 * 1024,
   maxHeaders: 32,
   maxBodyBytes: 16 * 1024,
-  // A send at the 8 MiB attachment cap carries 10.67 MiB of base64 inside a
+  // A send at the 8 MiB attachment cap carries 10.95 MiB of base64 inside a
   // JSON body, and a 1 MiB text body can expand to six JSON bytes per source
   // byte, so 20 MiB admits the whole band and nothing beyond it. readJsonBody
   // refuses any maxBodyBytes above maxDraftBodyBytes, so the two move together

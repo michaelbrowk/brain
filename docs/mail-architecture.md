@@ -455,8 +455,9 @@ intent, subject, send status, and timestamps. Recipient text, body text, and
 attachment metadata require the single-draft route, so the valid 128 MiB
 account quota can never become one oversized list response or one equivalent
 in-memory projection. The list wire envelope is capped at 2 MiB. A full draft
-request or response may use up to 8 MiB of JSON transport space because a valid
-1 MiB text body can expand substantially when JSON escapes control bytes.
+request or response may use up to the 20 MiB `maxDraftBodyBytes` admits, because
+a valid 1 MiB text body can expand substantially when JSON escapes control bytes
+and an attachment send carries 10.95 MiB of base64 beside it.
 
 Every mutating HTTP route carries its disconnect signal and absolute deadline
 through the service into the SQLite store. The store checks that admission
@@ -469,7 +470,7 @@ second synchronous delivery attempt.
 
 SQLite must run with foreign keys enabled, a busy timeout, bounded transactions, and WAL mode. Backup uses the SQLite backup API or a checkpointed snapshot, not a copy of live database files. The [SQLite WAL documentation](https://sqlite.org/wal.html) is the operating reference.
 
-Schema numbers migrate forward, never refuse: the account store keeps a forward-only ladder keyed by `user_version`, the outbox migrates v1 to v2 to v3, and both caches stay additive at v1 with a rebuild as their migration path. Forward only means exactly that — an outbox at v3 is refused by a service that writes v2, because its reader would find no message in the row. The oldest supported fixture set under `test/data-versions/` must open in CI.
+Schema numbers migrate forward, never refuse: the account store keeps a forward-only ladder keyed by `user_version`, the outbox migrates v1 to v2 to v3, and both caches stay additive at v1 with a rebuild as their migration path. Forward only means exactly that — an outbox at v3 is refused by a service that writes v2, because its reader would find no message in the row — so the way back from a release that migrates is a snapshot taken before it: `ops/brain-mail-state-rollback.py snapshot`, restored with the same script's `restore`, documented in [`mail-account-connect-operations.md`](./mail-account-connect-operations.md). The oldest supported fixture set under `test/data-versions/` must open in CI.
 
 ## 6. Provider-neutral ports
 
@@ -809,7 +810,7 @@ The two outgoing rows are set by the process contract three rows above them, not
 
 The figure has moved twice. It was 10 MiB on a measurement that stopped at the MIME build, then 5 MiB on 2026-09-15 when the whole path was measured and the enqueue turned out to be the peak: the row held the finished message as JSON text, so a send materialised it twice more after the build, once as `rawRfc2822Base64Url` on the submission record and once as `JSON.stringify`'s copy of that string. Schema 3 moved the message into the `raw_rfc2822` BLOB beside the JSON and neither copy exists any more, which is what this 8 MiB is measured against.
 
-[`scripts/mail-outbox-memory-probe.mjs`](../scripts/mail-outbox-memory-probe.mjs) is that measurement, kept so it can be rerun anywhere, including on the droplet: `node scripts/mail-outbox-memory-probe.mjs --size 8`. It reports `process.resourceUsage().maxRSS`, one process per stage, because the mark is a high-water mark over a whole process and stages that never coexist would otherwise add up into a peak that never happens. The request body is written by a separate step, so the client's own copies never land on the service's mark, and the payload is low-entropy on purpose. Three runs each, worst run shown, Node 22 on darwin against a 35.8 MiB bare-node baseline:
+[`scripts/lib/mail-outbox-memory-probe.ts`](../scripts/lib/mail-outbox-memory-probe.ts) is that measurement. From a working tree it runs as `node scripts/mail-outbox-memory-probe.mjs --size 8`, which bundles it and runs the bundle; `pnpm build:probe` writes the same bundle into the release as `bin/mail-outbox-memory-probe.mjs`, so the droplet takes the reading with plain node against the contract that actually applies to it. It reports `process.resourceUsage().maxRSS`, one process per stage, because the mark is a high-water mark over a whole process and stages that never coexist would otherwise add up into a peak that never happens. The request body is written by a separate step, so the client's own copies never land on the service's mark, and the payload is low-entropy on purpose. Three runs each, worst run shown, Node 22 on darwin against a 35.8 MiB bare-node baseline:
 
 | Attachment payload | Through the build | Built and enqueued | Read back to deliver |
 | ---: | ---: | ---: | ---: |
@@ -819,11 +820,27 @@ The figure has moved twice. It was 10 MiB on a measurement that stopped at the M
 | 9 MiB | 148.0 MiB | 177.1 MiB | 67.5 MiB |
 | 10 MiB | 159.1 MiB | 190.7 MiB | 70.0 MiB |
 
+The read-back column stops where the provider starts. A drain — the worker's own pass over a backlog, through the body the Gmail adapter builds — is the figure that includes it, and it is flat in the depth of the queue:
+
+| Backlog at 8 MiB | One pass |
+| ---: | ---: |
+| 1 | 132.1 MiB |
+| 20 (the default batch) | **154.4 MiB** |
+| 100 (`maxQueuedSubmissions`) | 154.2 MiB |
+
+That it is flat is the point: the listing carries identities and the worker reads one message at a time. Before that, twenty rows at this cap held 219 MiB of message and measured 274 MiB resident, past `MemoryMax`. The level came down with the Gmail body: built into one buffer a chunk at a time rather than `JSON.stringify`'d, which took the same twenty-deep pass from 206 MiB to 154 MiB.
+
 The middle column is the one the contract has to hold: `MemoryHigh=192M` and `MemoryMax=256M` in `ops/brain-mail.service`, and the bar is `MemoryHigh` less 15 MiB, which is the room the service's own resident set needs above a bare node. 8 MiB holds it in every run with 29.8 MiB to spare. 9 MiB misses it by 0.1 MiB. 10 MiB sits 1.3 MiB under `MemoryHigh`, which is not a margin, so the BLOB did not quite buy the original figure back — it bought 3 MiB of attachment and took the 10 MiB peak from 278.4 MiB to 190.7 MiB. The deliver read-back is a later turn in the same process and never overlaps the build, so its own peak is not additive.
 
 Every other outgoing cap follows from that number. Base64 at 76 columns multiplies a payload by 1.3684, so 8 MiB of files becomes 10.95 MiB of MIME parts, the 1 MiB text part expands the same way, and the headers take the finished message to the 14 MiB `outgoingRawMessageBytes` states — with room above the band on purpose, because a ceiling a message at the cap can reach is a refusal after the build. The outbox checks a message against that figure by name, with both sizes in the refusal, before it writes a row. `MAX_SERIALIZED_SUBMISSION_BYTES` in `outbound-store.ts` is 1 MiB and no longer follows it at all: the row's JSON holds the ids, the envelope and the two digests, and 200 addresses of 254 bytes is about 51 KiB of that, about 102 KiB escaped at its worst. The JSON body that carries the request is capped at 20 MiB, which is the base64 plus a text body escaped at its worst six bytes per source byte. The note store's own 25 MiB per-file cap is a different limit on a different path and does not move with these.
 
-The outbox row itself: `submission_json TEXT` for the record and `raw_rfc2822 BLOB` for the message, at `user_version` 3. The migration from 2 adds the column and fills it one transaction per row, so one message is in memory at a time and a file that loses power part way resumes from the rows still empty. It does not rebuild the table, because at version 2 `smtp_submission_state` holds a foreign key into `outbox` with ON DELETE CASCADE and the two drafts triggers fire on an outbox insert, so a drop-and-copy would delete every SMTP submission's state and bump draft revisions on the way through. The migration is one way: a service that knows schema 2 finds no message in the shortened JSON and refuses the file.
+The outbox row itself: `submission_json TEXT` for the record and `raw_rfc2822 BLOB` for the message, at `user_version` 3. The migration from 2 adds the column and fills it one transaction per row, so one message is in memory at a time and a file that loses power part way resumes from the rows still empty. It walks by key, five hundred at a time, with no bound on the account. It does not rebuild the table, because at version 2 `smtp_submission_state` holds a foreign key into `outbox` with ON DELETE CASCADE and the two drafts triggers fire on an outbox insert, so a drop-and-copy would delete every SMTP submission's state and bump draft revisions on the way through. The migration is one way: a service that knows schema 2 finds no message in the shortened JSON and refuses the file, so take `ops/brain-mail-state-rollback.py snapshot` before the release that migrates.
+
+A row whose message cannot be read — base64url that does not decode, digests that do not match it, or a message above the outgoing ceiling — is marked failed with `runnable_at` NULL and an empty message, and the migration carries on. One message is the casualty rather than the account: throwing there left `user_version` at 2, so every later open repeated the failure and the account could not send, read a status or drain what was already queued, while under schema 2 the same corruption cost exactly the row that carried it. The operation id goes to the log as `mail_outbox_row_unreadable`. The same marking is what a version 1 row gets, and what a message above today's ceiling gets in both migrations, so a cap that comes down never fails an open.
+
+That ceiling is also where a lowered cap now bites. A queued message above it is read back by the store — the store's own bound is the structural 40 MiB — and refused at the transport instead, by `admitOutgoingRawMessage` in the Gmail adapter, the SMTP wire and the send state. So lowering the cap narrows the window from the store to the transport rather than closing it: the message stays readable and visible, and it stops at the provider rather than at the row.
+
+The queue listing carries identities, never messages. `listRunnable` returns the account and the operation for each runnable row and the worker reads each message at the moment it delivers it, because the worker takes twenty rows by default and delivers them one at a time — twenty messages at the cap is 219 MiB, measured at 274 MiB resident, past `MemoryMax`. One message is resident whatever the backlog, which the drain rows below measure. A compare-and-swap reads the JSON alone for the same reason: the message's identity is its two digests and both are in the JSON, so a transition never allocates the message to compare it.
 
 One bound sits outside that file because it belongs to the browser rather than the service. `UNIFIED_FANOUT_LIMIT` in [`components/mail-surface.tsx`](../components/mail-surface.tsx) caps how many per-account requests the merged inbox has in flight at once, across its first load, its load-more, and its 60-second refresh. The merge itself is generic in the number of accounts, so the account cap can rise without it noticing, and the merged inbox is the one surface that asks every account at the same moment. The peak it makes stays at three however many accounts are connected, and the accounts waiting a turn read as pending rather than as empty or as failed.
 

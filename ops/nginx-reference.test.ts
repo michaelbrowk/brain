@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { MAIL_SERVICE_HTTP_LIMITS } from "@/lib/mail/service/limits";
 import { MAX_PORTABLE_ARCHIVE_BYTES } from "@/lib/portable/archive";
 import { MAX_ATTACHMENT_BYTES } from "@/lib/store/store";
 
@@ -84,6 +85,13 @@ describe("reference nginx vhost", () => {
     const serverCap = Number(cap?.[1]);
     expect(serverCap).toBeGreaterThan(mib(MAX_PORTABLE_ARCHIVE_BYTES));
     expect(serverCap).toBeGreaterThan(mib(MAX_ATTACHMENT_BYTES));
+    // A send at the outgoing attachment cap is the third body the app accepts
+    // and the edge has to let through. It was the one nothing checked: the
+    // 30m measured on the droplet clears today's 20 MiB, and nothing would
+    // have said so if the cap moved past it.
+    expect(serverCap).toBeGreaterThan(
+      mib(MAIL_SERVICE_HTTP_LIMITS.maxSendBodyBytes),
+    );
   });
   it("streams SSE unbuffered and admits 25 MiB Notion uploads unbuffered", () => {
     expect(block("= /api/events")).toContain("proxy_buffering off;");

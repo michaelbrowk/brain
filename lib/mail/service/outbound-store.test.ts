@@ -101,6 +101,64 @@ describe("private durable mail outbox", () => {
     await reopened.close();
   });
 
+  // THE MESSAGE IS PART OF WHAT A SWAP MAY NOT CHANGE.
+  //
+  // `assertImmutableIdentity` compares the message's digests rather than its
+  // bytes, because a swap reads the digests out of the row's JSON and never the
+  // BLOB. That is sound — each side's bytes were checked against its own digests
+  // before either reached the comparison, so agreeing on the digests is agreeing
+  // on the message — but nothing exercised it: the whole suite stayed green with
+  // the comparison replaced by `return true`.
+  it("refuses a swap that changes the message under an operation", async () => {
+    const fixture = await createStore();
+    const queued = submissionFixture();
+    await fixture.store.enqueue(queued);
+    const other = otherMessageFixture();
+    expect(other.rawRfc2822Sha256).not.toBe(queued.message.rawRfc2822Sha256);
+
+    for (const changed of [
+      other,
+      // One field at a time, so a comparison that forgot any of them is caught
+      // by the field it forgot.
+      Object.freeze({ ...queued.message, messageId: "<other@example.com>" }),
+      Object.freeze({ ...queued.message, providerThreadId: "thread-2" }),
+      Object.freeze({
+        ...queued.message,
+        envelope: Object.freeze({
+          ...queued.message.envelope,
+          to: Object.freeze(["stranger@example.net"]),
+        }),
+      }),
+    ]) {
+      await expect(
+        fixture.store.compareAndSwap(
+          queued.operationId,
+          0,
+          Object.freeze({
+            ...queued,
+            version: 1,
+            status: "sending" as const,
+            attemptCount: 1,
+            lease: Object.freeze({
+              attemptId: "attempt-00000000-0000-4000-8000-000000000009",
+              expiresAt: queued.updatedAt + 60_000,
+              deliveryRisk: false,
+            }),
+            nextAttemptAt: null,
+            updatedAt: queued.updatedAt + 1,
+            message: changed,
+          }),
+        ),
+      ).rejects.toEqual(new MailSendError("mail_send_service_unavailable"));
+    }
+    // The row is untouched by every one of them.
+    expectSameSubmission(
+      await fixture.store.readByOperationId(queued.operationId),
+      queued,
+    );
+    await fixture.store.close();
+  });
+
   // Once COMMIT has returned the row is durable. The bookkeeping that follows
   // it — the retention mark, the database close — used to be inside the same
   // try, so a throw there was caught, turned into `mail_send_service_unavailable`
@@ -1029,10 +1087,12 @@ describe("private durable mail outbox", () => {
     }
   });
 
-  // The other direction of the one-way migration. A service that knows schema
-  // 2 takes this branch on a schema 3 file: the version is not the one it
-  // writes and there is no path down, so it refuses the account rather than
-  // reading a row whose message it would not find.
+  // A version this service does not write, and no path down from it: the
+  // account is refused rather than read. What the case shows is the branch, on
+  // a version from the future, because a schema 2 service cannot be run from a
+  // schema 3 test — the other direction of the one-way migration takes this
+  // same branch (`version !== SCHEMA_VERSION`, no downgrade) and was verified
+  // by reading `8b3971a`'s `initializeSchema`, where `SCHEMA_VERSION` is 2.
   it("refuses an outbox whose schema version it does not write", async () => {
     const fixture = await createStore();
     const queued = submissionFixture();
@@ -3788,6 +3848,21 @@ function expectSameSubmission(
     true,
   );
   expect(withoutMessageBytes(actual!)).toEqual(withoutMessageBytes(expected));
+}
+
+/** A different message, digests and all: another operation's, near enough to
+ *  the fixture's that only the message tells them apart. */
+function otherMessageFixture(): StoredMailSendSubmission["message"] {
+  const raw = Buffer.from(
+    "From: me@example.com\r\nTo: friend@example.net\r\n\r\nAnother body\r\n",
+    "utf8",
+  );
+  return Object.freeze({
+    ...submissionFixture().message,
+    rawRfc2822: raw,
+    rawRfc2822Bytes: raw.byteLength,
+    rawRfc2822Sha256: createHash("sha256").update(raw).digest("hex"),
+  });
 }
 
 /** What a queue listing carries. */

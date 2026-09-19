@@ -38,9 +38,10 @@ export const MAIL_SEND_ATTACHMENT_LIMITS = Object.freeze({
    *
    * `MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes` follows from this number:
    * base64 at 76 columns multiplies a payload by 1.3684, so 10 MiB of files
-   * becomes 13.68 MiB of parts, the 1 MiB text part expands the same way, and
-   * the 256 KiB of headers take the band to 15.30 MiB, under the 17 MiB stated
-   * there.
+   * becomes 13.68 MiB of parts. The text part costs more than its own limit,
+   * because every line break becomes CRLF before it is encoded, so the worst
+   * 1 MiB body is 2.74 MiB of part. The whole worst shape the composer can
+   * build measures 16.45 MiB, under the 17 MiB stated there.
    */
   maxTotalBytes: 10_485_760,
 });

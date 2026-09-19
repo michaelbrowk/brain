@@ -219,6 +219,158 @@ describe("durable mail outbound worker integration", () => {
     await store.close();
   });
 
+  /** THE WORST MESSAGE THE COMPOSER CAN BUILD, AGAINST THE CEILING.
+   *
+   *  The case above sends the attachment cap beside a 35-byte body, so it
+   *  builds about 13.7 MiB and clears the 17 MiB ceiling whatever that ceiling
+   *  says down to 14 — the ceiling is not load-bearing in it. What
+   *  `outgoingRawMessageBytes` has to carry is the whole band: the cap in
+   *  files, the text body at its own limit, the headers at theirs.
+   *
+   *  So this one asks the composer for every byte it can be made to produce.
+   *  Ten files (`maxCount`) summing to `maxTotalBytes`, each with a filename
+   *  that forces both the ASCII and the RFC 5987 parameter. A text body at
+   *  `MAX_TEXT_BYTES` made entirely of line breaks, which is the shape that
+   *  costs the most: `normalizeLineEndings` turns every one into CRLF, so the
+   *  part that reaches base64 is twice the body that was admitted. `origin:
+   *  "mcp"` with `agentLine`, which appends a line after that. A subject at
+   *  `MAX_SUBJECT_BYTES`, which travels as base64 encoded words. A hundred
+   *  recipients (`MAX_RECIPIENTS`) at `MAX_ADDRESS_BYTES` each.
+   *
+   *  There is no HTML part to add: the outbound composer writes text/plain and
+   *  the attachments, and nothing else.
+   *
+   *  The assertion is the whole point — the message is over 15 MiB and still
+   *  inside `outgoingRawMessageBytes`, so lowering that constant below what
+   *  this shape costs reddens the case instead of passing silently. */
+  it("carries the composer's worst shape, files and text at their limits, under the ceiling", async () => {
+    const now = Date.parse("2026-07-20T00:00:00.000Z");
+    const root = await mkdtemp(path.join(tmpdir(), "brain-mail-band-"));
+    roots.push(root);
+    const cacheRoot = path.join(root, "cache");
+    await mkdir(cacheRoot, { mode: 0o700 });
+
+    const perFile =
+      MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes /
+      MAIL_SEND_ATTACHMENT_LIMITS.maxCount;
+    expect(Number.isInteger(perFile)).toBe(true);
+    const payloads = Array.from(
+      { length: MAIL_SEND_ATTACHMENT_LIMITS.maxCount },
+      (_, index) => Buffer.alloc(perFile, index + 1),
+    );
+    // A space in the name is what makes `encodeAttachmentFilename` write the
+    // RFC 5987 form beside the ASCII one, which is the longer of the two
+    // Content-Disposition shapes it can produce.
+    const attachments = payloads.map((bytes, index) => ({
+      filename: `f${index} ${"n".repeat(247)}.bin`,
+      mimeType: "application/octet-stream",
+      dataBase64: bytes.toString("base64"),
+    }));
+    // A hundred addresses of 254 bytes, all distinct, split across the three
+    // recipient fields. Bcc is in the message a provider API is handed.
+    const address = (index: number) =>
+      `r${String(index).padStart(3, "0")}${"a".repeat(238)}@example.net`;
+    const everyone = Array.from({ length: 100 }, (_, index) => address(index));
+    expect(new Set(everyone).size).toBe(100);
+    expect(everyone.every((one) => Buffer.byteLength(one) === 254)).toBe(true);
+    const text = "\n".repeat(1024 * 1024);
+    const subject = "S".repeat(998);
+
+    const store = new SqliteMailSendStore({ cacheRoot, now: () => now });
+    await store.initialize();
+    let delivered: Buffer | null = null;
+    const provider: MailSendProvider = {
+      providerKind: "gmail",
+      send: vi.fn(async (message, hooks) => {
+        delivered = message.rawRfc2822;
+        await hooks.beforeDelivery();
+        return {
+          kind: "accepted",
+          providerMessageId: "gmail-message-band",
+          providerThreadId: "gmail-thread-band",
+        } as const;
+      }),
+    };
+    const service = new ProviderNeutralMailSendService({
+      store,
+      accounts: {
+        readSendAccount: async () => ({
+          accountId: ACCOUNT_ID,
+          providerKind: "gmail",
+          emailAddress: "me@example.com",
+          status: "connected",
+        }),
+      },
+      replies: { resolveReplyContext: async () => null },
+      providers: [provider],
+      now: () => now,
+      createOperationId: () => operationId(10),
+    });
+
+    const request = {
+      accountId: ACCOUNT_ID,
+      idempotencyKey: "send-the-whole-band",
+      mode: "compose" as const,
+      to: everyone.slice(0, 1),
+      cc: everyone.slice(1, 50),
+      bcc: everyone.slice(50),
+      subject,
+      text,
+      replyToMessageId: null,
+      attachments,
+      origin: "mcp" as const,
+      agentLine: true,
+    };
+    const sent = await service.send(request, requestContext());
+    expect(sent).toMatchObject({ created: true, status: "sent" });
+
+    const message: Buffer | null = delivered;
+    expect(message).not.toBeNull();
+    // Over 15 MiB is what makes the ceiling load-bearing: the case above is
+    // not, and a ceiling nothing reaches is a number nobody can check.
+    expect(message!.byteLength).toBeGreaterThan(15 * 1024 * 1024);
+    expect(message!.byteLength).toBeLessThanOrEqual(
+      MAIL_RESOURCE_LIMITS.outgoingRawMessageBytes,
+    );
+    // The body doubled on its way to the wire: the first wrapped line of the
+    // CRLF-normalized text is in the message, not the first line of the text
+    // as it was admitted.
+    const normalized = Buffer.from("\r\n".repeat(1024 * 1024), "utf8");
+    expect(
+      message!.includes(
+        Buffer.from(normalized.toString("base64").slice(0, 76), "ascii"),
+      ),
+    ).toBe(true);
+    expect(
+      message!.includes(
+        Buffer.from(payloads[9]!.toString("base64").slice(0, 76), "ascii"),
+      ),
+    ).toBe(true);
+    expect(message!.includes(Buffer.from("Bcc: ", "ascii"))).toBe(true);
+    expect(message!.includes(Buffer.from("X-Brain-Agent: mcp", "ascii"))).toBe(
+      true,
+    );
+
+    const stored = await store.readByOperationId(sent.operationId);
+    expect(stored?.message.rawRfc2822.equals(message!)).toBe(true);
+    expect(createHash("sha256").update(message!).digest("hex")).toBe(
+      stored?.message.rawRfc2822Sha256,
+    );
+
+    // The 1 MiB above is a mirror of `MAX_TEXT_BYTES`, which the service keeps
+    // to itself. One byte more is refused, so the mirror cannot drift without
+    // this case saying so — a text limit that had quietly risen would make the
+    // band measured here an understatement.
+    await expect(
+      service.send(
+        { ...request, idempotencyKey: "one-byte-over", text: `${text}\n` },
+        requestContext(),
+      ),
+    ).rejects.toMatchObject({ code: "mail_send_request_invalid" });
+
+    await store.close();
+  });
+
   /** ONE MESSAGE RESIDENT, WHATEVER THE BACKLOG.
    *
    *  The worker takes a batch of twenty by default and delivers them one at a

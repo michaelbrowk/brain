@@ -64,11 +64,17 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
   concurrentSmtpSubmissions: 1,
   /* Derived from `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes`, which is the one
    * outgoing number: 10 MiB of attachments is 13.68 MiB once base64 wraps it
-   * at 76 columns, the 1 MiB text part expands the same way to 1.37 MiB, and
-   * the 256 KiB of `headerBytes` take the band to 15.30 MiB, so 17 MiB carries
-   * the whole of it with 1.70 MiB to spare. The room matters: a ceiling a
-   * message at the cap can reach is a refusal after the build, which is the
-   * defect the cap round of 2026-09-15 exists to have fixed. The outbox checks
+   * at 76 columns. The text part can cost more than its own limit, which is
+   * the term the arithmetic used to miss — `normalizeLineEndings` turns every
+   * line break into CRLF, so a 1 MiB body of line breaks is 2 MiB before
+   * base64 and 2.74 MiB after it. Headers cannot reach their own 256 KiB:
+   * a hundred addresses of 254 bytes, a 998-byte subject and the rest come to
+   * about 33 KiB. The whole worst shape measures 16.45 MiB, so 17 MiB
+   * carries it with 0.55 MiB to spare, and
+   * `outbound-worker-integration.test.ts` builds exactly that message and
+   * asserts it fits. The room matters: a ceiling a message at the cap can
+   * reach is a refusal after the build, which is the defect the cap round of
+   * 2026-09-15 exists to have fixed. The outbox checks
    * a message against this figure by name before it writes a row. The tunnel
    * ceiling below is deliberately not raised with it: a message this size
    * reaches a Gmail account and is refused at the relay for an IMAP one, which

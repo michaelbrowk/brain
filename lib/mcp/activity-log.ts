@@ -1,5 +1,16 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import {
+  AGENT_FOLD_WINDOW_MS,
+  agentActionFold,
+  agentActionFoldKey,
+  agentActionNotification,
+  type AgentFold,
+} from "@/lib/notifications/agent-producer";
+import {
+  appendOrFoldNotification,
+  notificationStateDirectory,
+} from "@/lib/notifications/store";
 import { atomicWrite } from "@/lib/store/atomic";
 import { mcpStateDirectory } from "./state-dir";
 
@@ -13,6 +24,12 @@ import { mcpStateDirectory } from "./state-dir";
  *  address, a body or a title could enter through, and `appendMcpActivity`
  *  writes the named fields one by one, so a caller that hands it an extra key
  *  does not put that key on disk.
+ *
+ *  IT IS ALSO WHERE THE BELL HEARS ABOUT IT. Every mutation an agent makes
+ *  already passes through this one call, so the notification centre's
+ *  `agent-action` row is produced here rather than at a dozen call sites, and
+ *  a tool that logs cannot forget to tell the owner. See `noteInCentre` at the
+ *  foot of the file for what that costs and what it can never cost.
  */
 
 export type { McpEnv } from "./state-dir";
@@ -87,6 +104,18 @@ export interface McpActivityEntry {
   readonly operationId?: string;
   readonly change?: string; // which mutation or field, never free text
   readonly outcome: string; // "ok", or a refusal code
+}
+
+/** WHAT THE BELL MAY SAY THAT THE LOG MAY NOT.
+ *
+ *  The entry above is the redaction and stays it: nothing here is written to
+ *  disk beside the line. `label` is a title the call site already had in hand
+ *  out of the owner's own store, the task it just wrote or the note the file
+ *  landed in, and it becomes the row's body so a reader knows which task.
+ *  Never a string the agent handed in.
+ */
+export interface McpActivityNotice {
+  readonly label?: string;
 }
 
 const OPTIONAL_FIELDS = [
@@ -309,7 +338,10 @@ async function stampOf(dir: string): Promise<FileStamp> {
   }
 }
 
-export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> {
+export async function appendMcpActivity(
+  entry: McpActivityEntry,
+  notice?: McpActivityNotice,
+): Promise<void> {
   const dir = mcpStateDirectory();
   const line = JSON.stringify(closedEntry(entry));
   const lineBytes = Buffer.byteLength(line, "utf8") + 1;
@@ -392,6 +424,124 @@ export async function appendMcpActivity(entry: McpActivityEntry): Promise<void> 
       mtimeMs: (await stampOf(dir)).mtimeMs,
     });
   });
+  await noteInCentre(entry, notice);
+}
+
+/** THIS PROCESS'S BELIEF ABOUT THE BURST IN PROGRESS, one entry per shape of
+ *  action (`agentActionFoldKey`: the client, the tool and the change).
+ *
+ *  It is a memo, not a source of truth. The file decides: a fold it proposes
+ *  for a row the centre no longer holds, or has had read, is answered with a
+ *  plain append and the memo starts again from that row. A restart, or a
+ *  second process on the same state directory, simply starts a new row, which
+ *  is the honest thing for a count this process cannot vouch for.
+ *
+ *  Keyed by the centre's directory as well, the way `directoryState` above is.
+ *  A row id is derived from the line, so the same line written into two
+ *  different centres has one id, and a memo that ignored the directory would
+ *  answer a question about one file with what it knows about another.
+ *
+ *  `lines` is the ids a fold has already swallowed. Those rows are not in the
+ *  file under their own ids any more, so the centre's own duplicate check
+ *  cannot see them, and a replay of the log would otherwise count one action
+ *  twice.
+ */
+interface FoldMemo {
+  fold: AgentFold;
+  lines: Set<string>;
+}
+
+const agentFolds = new Map<string, FoldMemo>();
+
+/** The separator between the directory and the shape in a memo key, the same
+ *  NUL `agentActionFoldKey` joins its own fields with. */
+const FOLD_KEY_SEPARATOR = "\u0000";
+
+/** The ids one memo remembers. A burst of thousands is bounded here rather
+ *  than left to grow: past this the dedupe degrades to the file's own check,
+ *  which is the pre-fold behaviour and not a leak. */
+const MAX_REMEMBERED_LINES = 500;
+
+function remember(lines: Set<string> | undefined, id: string): Set<string> {
+  const next = lines ?? new Set<string>();
+  if (next.size < MAX_REMEMBERED_LINES) next.add(id);
+  return next;
+}
+
+/** Entries older than one window can never be folded into again, and a process
+ *  that runs for months would otherwise hold one per client, tool and change it
+ *  has ever seen. Swept on every write, because the map is a handful of keys
+ *  and a timer for it would be a timer to shut down. */
+function pruneFolds(now: string): void {
+  const floor = Date.parse(now) - AGENT_FOLD_WINDOW_MS;
+  if (!Number.isFinite(floor)) return;
+  for (const [key, memo] of agentFolds) {
+    // On the row's first line, which is what the window is measured against:
+    // a memo whose box has closed can never be folded into again.
+    if (Date.parse(memo.fold.first) < floor) agentFolds.delete(key);
+  }
+}
+
+/** THE ROW THE BELL SHOWS, OFF THE SAME CALL AS THE LINE.
+ *
+ *  After the line, not beside it: a log this process could not append throws
+ *  out of the call above, and the row is the line's echo rather than a second
+ *  opinion about whether the mutation happened.
+ *
+ *  IT CAN NEVER FAIL THE TOOL. Everything here is swallowed, because by the
+ *  time it runs the task is written or the message is gone, and an agent that
+ *  saw a transport error would do it again. Dropped rows are warned about on
+ *  the server's own console, which is where a dropped log line is warned about
+ *  too.
+ *
+ *  AWAITED RATHER THAN FIRED AND FORGOTTEN. It is one small atomic write, the
+ *  same cost the log line just paid, and waiting for it is what makes it
+ *  land in the state directory this turn is pointed at rather than in whatever
+ *  the next one swaps in. `app/api/mcp/task-tools.ts` had to grow a flush
+ *  helper for exactly that, for exactly this reason.
+ *
+ *  `agentActionNotification` decides what earns a row: mutations only,
+ *  successes only, no import family and no read.
+ */
+async function noteInCentre(
+  entry: McpActivityEntry,
+  notice: McpActivityNotice | undefined,
+): Promise<void> {
+  try {
+    const row = agentActionNotification(entry, notice?.label);
+    if (row === null) return;
+    // Read once and passed on, rather than read here and again inside the
+    // store's default argument: the memo and the file have to be talking about
+    // the same centre even if the environment moves between two lines.
+    const centre = notificationStateDirectory();
+    const key = `${centre}${FOLD_KEY_SEPARATOR}${agentActionFoldKey(entry)}`;
+    const held = agentFolds.get(key);
+    // A line this fold has already swallowed is not counted again. It is no
+    // longer in the file under its own id, so the centre's own duplicate check
+    // cannot see it, and a replay of the log would otherwise inflate the count.
+    if (held?.lines.has(row.id)) return;
+    const folded = held === undefined ? null : agentActionFold(entry, row, held.fold);
+    const done = await appendOrFoldNotification(row, folded?.row ?? null, centre);
+    if (done === "folded" && folded !== null) {
+      agentFolds.set(key, { fold: folded.fold, lines: remember(held?.lines, row.id) });
+    } else if (done === "appended") {
+      agentFolds.set(key, {
+        fold: {
+          id: row.id,
+          first: row.at,
+          at: row.at,
+          count: 1,
+          href: row.href,
+          ...(row.body !== undefined ? { body: row.body } : {}),
+        },
+        lines: new Set([row.id]),
+      });
+    }
+    pruneFolds(row.at);
+  } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    console.warn(`[brain/mcp] agent notification dropped: ${reason}`);
+  }
 }
 
 /** Newest first, because that is the order the Settings list shows and the

@@ -181,14 +181,22 @@ export async function logMailActivity(
   tool: string,
   target: McpActivityTarget,
   outcome: string,
+  /** A title the caller already had out of the owner's own store, for the row
+   *  the notification centre draws off this same call and for nothing on
+   *  disk. The entry is the redaction and stays it: a title rides beside the
+   *  line, never in it. */
+  label?: string,
 ): Promise<void> {
-  await appendMcpActivity({
-    at: new Date().toISOString(),
-    client: await clientNameOf(extra),
-    tool,
-    ...target,
-    outcome,
-  });
+  await appendMcpActivity(
+    {
+      at: new Date().toISOString(),
+      client: await clientNameOf(extra),
+      tool,
+      ...target,
+      outcome,
+    },
+    label === undefined ? undefined : { label },
+  );
 }
 
 /** The service reports sending as one boolean, so the reason it is false is

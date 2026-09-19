@@ -30,6 +30,7 @@ import {
   oauthIssuer,
 } from "@/lib/oauth/config";
 import { canonicalizeMcpPageMarkdown } from "@/lib/mcp-page-markdown";
+import { appendMcpActivity } from "@/lib/mcp/activity-log";
 import {
   exactBearerToken,
   mcpInsufficientScopeResponse,
@@ -37,6 +38,7 @@ import {
 } from "@/lib/oauth/http";
 import { verifyMcpBearerToken } from "@/lib/oauth/server";
 import {
+  clientNameOf,
   hasScope,
   insufficientScope,
   STORE_FAILED,
@@ -73,6 +75,126 @@ function pageTool<Args extends unknown[], Answer>(
       return storeFailed();
     }
   };
+}
+
+/** WHAT A PAGE WRITE LEAVES BEHIND, BESIDE THE PAGE.
+ *
+ *  The six writes here were the one family of mutations that recorded nothing:
+ *  an agent could rewrite every note in the folder and the owner's Connections
+ *  list stayed empty. They write one line each now, through the same
+ *  `appendMcpActivity` the mail and task tools use, which is also what puts a
+ *  row in the notification centre.
+ *
+ *  `change` is the tool's own mutation token, the way a triage line names which
+ *  field moved: `markdown`, `append`, `create`, `move`, `delete`, and for
+ *  `update_meta` the field names its patch carried. `label` is the page's own
+ *  title, for the bell's body and never for the line.
+ *
+ *  `notion_*` stays out. It has its own ledger, its own batch and its own
+ *  scope, and one import would otherwise fill the list it is meant to be read
+ *  from.
+ */
+interface PageMarks {
+  page?: string;
+  change?: string;
+  label?: string;
+}
+
+/** A tool's answer and the one word the log records beside it, the shape
+ *  `task-tools.ts` already answers in. */
+interface PageAnswer<Answer> {
+  answer: Answer;
+  outcome: string;
+}
+
+type PageToolExtra = { authInfo?: { scopes?: string[]; clientId?: string } };
+
+async function logPageWrite(
+  extra: PageToolExtra,
+  tool: string,
+  marks: PageMarks,
+  outcome: string,
+): Promise<void> {
+  // The grant's name is a nicety and the line is the record, so a state store
+  // that cannot be read costs the name rather than the line. The whole append
+  // is swallowed for the same reason: a write that has already landed must not
+  // reach the agent as a failure, or it will do it again.
+  let client = "Unknown app";
+  try {
+    client = await clientNameOf(extra);
+  } catch {
+    client = "Unknown app";
+  }
+  try {
+    await appendMcpActivity(
+      {
+        at: new Date().toISOString(),
+        client,
+        tool,
+        ...(marks.page !== undefined ? { page: marks.page } : {}),
+        ...(marks.change !== undefined ? { change: marks.change } : {}),
+        outcome,
+      },
+      marks.label === undefined ? undefined : { label: marks.label },
+    );
+  } catch (cause) {
+    const reason = cause instanceof Error ? cause.message : String(cause);
+    console.warn(`[brain/mcp] page activity line dropped: ${reason}`);
+  }
+}
+
+/** Every page write runs through here instead of `pageTool`: the same store
+ *  failure answered in Brain's own words, and one line whatever the outcome,
+ *  the refusals included. Awaited rather than fired and forgotten, the way the
+ *  mail tools' line is: it is one bounded append, and a line that outlived its
+ *  own turn is what made the task tools grow a flush helper for their tests.
+ *
+ *  The `insufficient_scope` each of the six answers is the second lock, not
+ *  the first: all six are in `WRITE_TOOLS`, so the route's own gate refuses a
+ *  grant without `brain:write` before any handler runs. There is no test for
+ *  that branch because there is no request that reaches it; it is here so a
+ *  scope check removed one layer up cannot quietly let a mail grant write a
+ *  note. */
+async function pageWrite<Answer>(
+  extra: PageToolExtra,
+  tool: string,
+  work: (marks: PageMarks) => Promise<PageAnswer<Answer>>,
+): Promise<Answer | ReturnType<typeof storeFailed>> {
+  const marks: PageMarks = {};
+  try {
+    const { answer, outcome } = await work(marks);
+    await logPageWrite(extra, tool, marks, outcome);
+    return answer;
+  } catch (error) {
+    if (isNotFound(error)) {
+      await logPageWrite(extra, tool, marks, "not_found");
+      throw error;
+    }
+    await logPageWrite(extra, tool, marks, STORE_FAILED);
+    return storeFailed();
+  }
+}
+
+/** A page's own title out of whatever the store just answered with, for the
+ *  bell's body. Typed for the shape rather than the class so a value that has
+ *  no meta is `undefined` and never a throw. */
+function titleIn(value: { meta?: { title?: string } }): string | undefined {
+  return value.meta?.title;
+}
+
+/** The title of a page about to go, for the bell's body. Swallowed on purpose:
+ *  a row's body is a nicety and the delete is the record, so a note whose
+ *  `index.md` cannot be read is still deleted and still announced, without its
+ *  name. */
+async function pageTitleFor(
+  store: Awaited<ReturnType<typeof getStore>>,
+  id: string,
+): Promise<string | undefined> {
+  try {
+    return (await store.readPage(id)).meta.title;
+  } catch {
+    return undefined;
+  }
 }
 
 /** WHAT A NOTION_* RETHROW CARRIES, ONCE EVERY NAMED REFUSAL ABOVE HAS
@@ -183,36 +305,45 @@ const handler = createMcpHandler(
         markdown: z.string(),
         rev: z.string().optional().describe("rev from read_page; omit to overwrite"),
       },
-      pageTool(async ({ id, markdown, rev }, extra) => {
-        if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
-        const store = await getStore();
-        try {
-          return text(
-            redactPage(
-              await store.writePage(
-                id,
-                canonicalizeMcpPageMarkdown(markdown, oauthIssuer()),
-                rev,
-                "claude",
-              ),
-            ),
-          );
-        } catch (e) {
-          // A refusal Brain decided on, in the shape every other one answers
-          // in. It used to answer with no `isError` and no `reason`, so an
-          // agent branching on either took a conflict for a write.
-          if (isRevConflict(e))
+      async ({ id, markdown, rev }, extra) =>
+        pageWrite(extra, "write_page", async (marks) => {
+          if (!hasScope(extra, "brain:write")) {
             return {
-              ...text({
-                error: "rev conflict — re-read the page",
-                reason: "rev_conflict",
-                currentRev: e.currentRev,
-              }),
-              isError: true as const,
+              answer: insufficientScope("brain:write"),
+              outcome: "insufficient_scope",
             };
-          throw e;
-        }
-      }),
+          }
+          marks.page = id;
+          marks.change = "markdown";
+          const store = await getStore();
+          try {
+            const written = await store.writePage(
+              id,
+              canonicalizeMcpPageMarkdown(markdown, oauthIssuer()),
+              rev,
+              "claude",
+            );
+            marks.label = titleIn(written);
+            return { answer: text(redactPage(written)), outcome: "ok" };
+          } catch (e) {
+            // A refusal Brain decided on, in the shape every other one answers
+            // in. It used to answer with no `isError` and no `reason`, so an
+            // agent branching on either took a conflict for a write.
+            if (isRevConflict(e))
+              return {
+                answer: {
+                  ...text({
+                    error: "rev conflict — re-read the page",
+                    reason: "rev_conflict",
+                    currentRev: e.currentRev,
+                  }),
+                  isError: true as const,
+                },
+                outcome: "rev_conflict",
+              };
+            throw e;
+          }
+        }),
     );
 
     server.tool(
@@ -224,19 +355,25 @@ const handler = createMcpHandler(
         id: z.string(),
         markdown: z.string().describe("markdown to add at the end of the page"),
       },
-      pageTool(async ({ id, markdown }, extra) => {
-        if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
-        const store = await getStore();
-        return text(
-          redactPage(
-            await store.appendPage(
-              id,
-              canonicalizeMcpPageMarkdown(markdown, oauthIssuer()),
-              "claude",
-            ),
-          ),
-        );
-      }),
+      async ({ id, markdown }, extra) =>
+        pageWrite(extra, "append_page", async (marks) => {
+          if (!hasScope(extra, "brain:write")) {
+            return {
+              answer: insufficientScope("brain:write"),
+              outcome: "insufficient_scope",
+            };
+          }
+          marks.page = id;
+          marks.change = "append";
+          const store = await getStore();
+          const appended = await store.appendPage(
+            id,
+            canonicalizeMcpPageMarkdown(markdown, oauthIssuer()),
+            "claude",
+          );
+          marks.label = titleIn(appended);
+          return { answer: text(redactPage(appended)), outcome: "ok" };
+        }),
     );
 
     server.tool(
@@ -249,31 +386,45 @@ const handler = createMcpHandler(
         icon: z.string().optional().describe("emoji; auto-picked from title if omitted"),
         status: z.string().optional().describe("kanban column, for cards on a board page"),
       },
-      pageTool(async ({ title, parentId, markdown, icon, status }, extra) => {
-        if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
-        const store = await getStore();
-        try {
-          const meta = await store.createPage(parentId ?? null, title, {
-            markdown:
-              markdown === undefined
-                ? undefined
-                : canonicalizeMcpPageMarkdown(markdown, oauthIssuer()),
-            icon: icon || (await smartEmoji(title)),
-            status,
-            by: "claude",
-          });
-          return text(redactPageMeta(meta));
-        } catch (e) {
-          // Return a structured error instead of a raw throw: a transport-level
-          // 500 reads as id=null to the client, which then re-creates at root.
-          if (isNotFound(e))
-            return text({
-              error: `parent not found: ${parentId} — page NOT created, do not retry at root`,
-              parentId,
+      async ({ title, parentId, markdown, icon, status }, extra) =>
+        pageWrite(extra, "create_page", async (marks) => {
+          if (!hasScope(extra, "brain:write")) {
+            return {
+              answer: insufficientScope("brain:write"),
+              outcome: "insufficient_scope",
+            };
+          }
+          marks.change = "create";
+          const store = await getStore();
+          try {
+            const meta = await store.createPage(parentId ?? null, title, {
+              markdown:
+                markdown === undefined
+                  ? undefined
+                  : canonicalizeMcpPageMarkdown(markdown, oauthIssuer()),
+              icon: icon || (await smartEmoji(title)),
+              status,
+              by: "claude",
             });
-          throw e;
-        }
-      }),
+            // The id is the store's, not the caller's: this is the one write
+            // whose page did not exist when the call came in.
+            marks.page = meta.id;
+            marks.label = meta.title;
+            return { answer: text(redactPageMeta(meta)), outcome: "ok" };
+          } catch (e) {
+            // Return a structured error instead of a raw throw: a transport-level
+            // 500 reads as id=null to the client, which then re-creates at root.
+            if (isNotFound(e))
+              return {
+                answer: text({
+                  error: `parent not found: ${parentId} — page NOT created, do not retry at root`,
+                  parentId,
+                }),
+                outcome: "parent_not_found",
+              };
+            throw e;
+          }
+        }),
     );
 
     server.registerTool(
@@ -534,28 +685,44 @@ const handler = createMcpHandler(
         view: z.enum(["board", "doc"]).optional().describe("'board' or 'doc'"),
         public: z.boolean().optional(),
       },
-      pageTool(async ({ id, view, public: pub, ...rest }, extra) => {
-        if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
-        if (pub === true) {
-          return {
-            ...text({
-              error:
-                "public sharing must be enabled by the owner after scope disclosure",
-              reason: "share_disclosure_required",
-            }),
-            isError: true,
-          };
-        }
-        const store = await getStore();
-        return text(
-          redactPageMeta(await store.updateMeta(id, {
+      async ({ id, view, public: pub, ...rest }, extra) =>
+        pageWrite(extra, "update_meta", async (marks) => {
+          if (!hasScope(extra, "brain:write")) {
+            return {
+              answer: insufficientScope("brain:write"),
+              outcome: "insufficient_scope",
+            };
+          }
+          marks.page = id;
+          if (pub === true) {
+            return {
+              answer: {
+                ...text({
+                  error:
+                    "public sharing must be enabled by the owner after scope disclosure",
+                  reason: "share_disclosure_required",
+                }),
+                isError: true,
+              },
+              outcome: "share_disclosure_required",
+            };
+          }
+          const patch = {
             ...rest,
-            ...(view !== undefined ? { view: view === "board" ? "board" : null } : {}),
+            ...(view !== undefined
+              ? { view: view === "board" ? ("board" as const) : null }
+              : {}),
             ...(pub !== undefined ? { public: pub } : {}),
-            by: "claude",
-          })),
-        );
-      }),
+          };
+          // The field names the patch carried, in the schema's own order, the
+          // way `update_task`'s line names its own. A person scanning the log
+          // can tell a retitle from a filing without opening the note.
+          marks.change = Object.keys(patch).join("+") || "meta";
+          const store = await getStore();
+          const meta = await store.updateMeta(id, { ...patch, by: "claude" });
+          marks.label = meta.title;
+          return { answer: text(redactPageMeta(meta)), outcome: "ok" };
+        }),
     );
 
     server.tool(
@@ -576,33 +743,57 @@ const handler = createMcpHandler(
         newParentId: z.string().nullable().optional(),
         beforeId: z.string().nullable().optional(),
       },
-      pageTool(async ({ id, newParentId, beforeId }, extra) => {
-        if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
-        const store = await getStore();
-        const moved = await store.movePageWithBodyReport(
-          id,
-          newParentId ?? null,
-          beforeId ?? null,
-          undefined,
-          "claude",
-        );
-        return text({
-          ...redactPageMeta(moved.meta),
-          unlinkedFrom: moved.unlinkedFrom,
-        });
-      }),
+      async ({ id, newParentId, beforeId }, extra) =>
+        pageWrite(extra, "move_page", async (marks) => {
+          if (!hasScope(extra, "brain:write")) {
+            return {
+              answer: insufficientScope("brain:write"),
+              outcome: "insufficient_scope",
+            };
+          }
+          marks.page = id;
+          marks.change = "move";
+          const store = await getStore();
+          const moved = await store.movePageWithBodyReport(
+            id,
+            newParentId ?? null,
+            beforeId ?? null,
+            undefined,
+            "claude",
+          );
+          marks.label = titleIn(moved);
+          return {
+            answer: text({
+              ...redactPageMeta(moved.meta),
+              unlinkedFrom: moved.unlinkedFrom,
+            }),
+            outcome: "ok",
+          };
+        }),
     );
 
     server.tool(
       "delete_page",
       "Delete a page and its whole subtree. Soft-delete — recoverable from Trash.",
       { id: z.string() },
-      pageTool(async ({ id }, extra) => {
-        if (!hasScope(extra, "brain:write")) return insufficientScope("brain:write");
-        const store = await getStore();
-        await store.deletePage(id);
-        return text({ ok: true });
-      }),
+      async ({ id }, extra) =>
+        pageWrite(extra, "delete_page", async (marks) => {
+          if (!hasScope(extra, "brain:write")) {
+            return {
+              answer: insufficientScope("brain:write"),
+              outcome: "insufficient_scope",
+            };
+          }
+          marks.page = id;
+          marks.change = "delete";
+          const store = await getStore();
+          // The title before the subtree goes. One `index.md` read against a
+          // call that is about to rewrite a whole subtree, and it is swallowed:
+          // see `pageTitleFor`.
+          marks.label = await pageTitleFor(store, id);
+          await store.deletePage(id);
+          return { answer: text({ ok: true }), outcome: "ok" };
+        }),
     );
 
     server.tool(

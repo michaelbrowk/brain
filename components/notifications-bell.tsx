@@ -18,6 +18,7 @@ import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { formatAgo } from "@/lib/format-ago";
 import { DUR } from "@/lib/motion";
 import {
+  decodeAgentMailHref,
   decodeMailNotificationId,
   decodeTaskNotificationId,
 } from "@/lib/notifications/ids";
@@ -36,11 +37,15 @@ import { ScrollEdge } from "./ui/scroll-edge";
 
 /** One glyph per kind. A reminder that fired wears the alarm, one that was
  *  missed wears the clock, and new mail wears the letter Mail wears
- *  everywhere else. One table, read by every row the centre draws. */
+ *  everywhere else. What an agent did wears the plug Settings, Connections
+ *  wears (`components/settings/connections-section.tsx`), which is the screen
+ *  the row came from and the screen a reader goes to to take the grant away.
+ *  One table, read by every row the centre draws. */
 export const KIND_GLYPH: Record<NotificationRow["kind"], string> = {
   "task-reminder": "alarm-linear",
   "task-missed": "clock-circle-linear",
   "mail-new": "letter-linear",
+  "agent-action": "plug-circle-linear",
 };
 
 /** Past this the number is wider than the glyph it rides and says nothing a
@@ -50,6 +55,10 @@ const BADGE_CAP = 99;
 /** The one destination this rewrites. Everything else a row was stored with
  *  is a destination the producer chose, and is left alone. */
 const TASKS_COLUMN = "/tasks";
+
+/** Mail's own surface. It takes no thread in its route, which is why both the
+ *  kinds about a letter ask it to open one through a seam instead. */
+const MAIL_SURFACE = "/mail";
 
 /** The missed producer's own sentence, whole (`lib/reminders/scheduler.ts`).
  *  Anchored at both ends on purpose: the one other thing that could match is a
@@ -87,6 +96,11 @@ export function notificationBody(body: string): string {
  *  surface of its own would have been silently redirected here. The rewrite
  *  applies to the bare column and to nothing else. */
 export function notificationHref(row: NotificationRow): string {
+  // An agent row about a thread carries the pair in its query, because its id
+  // is a digest of the log line and reads back as nothing. The pair goes to
+  // Mail through the seam below; the address bar gets the surface, the way a
+  // `mail-new` row's does.
+  if (decodeAgentMailHref(row.href) !== null) return MAIL_SURFACE;
   if (row.href !== TASKS_COLUMN) return row.href;
   const taskId = decodeTaskNotificationId(row.id);
   return taskId === null ? row.href : `${TASKS_COLUMN}?task=${encodeURIComponent(taskId)}`;
@@ -124,6 +138,14 @@ export function openNotificationRow(
         .updateThread({ accountId: thread.accountId, threadId: thread.threadId, read: true })
         .catch(() => undefined);
     }
+  }
+  if (row.kind === "agent-action") {
+    // The same seam, and only that half of it. An agent row is a record of
+    // what an agent did, not a new letter, so the thread it names is opened
+    // and never marked read: the reader pressing "Claude replied to a message"
+    // is going to look at the thread, and what is unread in it is theirs.
+    const thread = decodeAgentMailHref(row.href);
+    if (thread) requestOpenThread(thread.accountId, thread.threadId);
   }
   onNavigate(notificationHref(row));
 }

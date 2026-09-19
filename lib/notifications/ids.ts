@@ -32,9 +32,60 @@ export function mailNotificationId(accountId: string, threadId: string): string 
   if (bytes.length > MAX_THREAD_ID_BYTES) {
     throw new Error(`thread id is too long for a notification id: ${bytes.length} bytes`);
   }
+  return `mail-new:${accountId}:${hexOf(bytes)}`;
+}
+
+function hexOf(bytes: Uint8Array): string {
   let hex = "";
   for (const byte of bytes) hex += byte.toString(16).padStart(2, "0");
-  return `mail-new:${accountId}:${hex}`;
+  return hex;
+}
+
+function bytesOf(hex: string): Uint8Array | null {
+  if (hex.length === 0 || hex.length % 2 !== 0) return null;
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let index = 0; index < bytes.length; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+/** THE THREAD AN AGENT ROW IS ABOUT, IN THE HREF RATHER THAN IN THE ID.
+ *
+ *  A `mail-new` row carries its pair in its own id, and the bell reads it back
+ *  to ask Mail to open that thread. An `agent-action` id is a digest of the
+ *  line it came from (`agent:<at>:<tool>:<sha>`), so there is nothing to read
+ *  back out of it, and the row's shape has no field for a pair either. The
+ *  href is what is left, and it is the honest carrier: the row's destination
+ *  IS that thread.
+ *
+ *  Same hex-of-the-UTF-8-bytes encoding the id uses, for the same reason: no
+ *  Buffer and no btoa, so the browser reads what the server wrote.
+ */
+const AGENT_MAIL_HREF = /^\/mail\?account=([A-Za-z0-9_-]+)&thread=([0-9a-f]+)$/;
+
+/** The centre's own bound on an href (`hrefField` in `model.ts`). Mirrored
+ *  rather than imported because this module stays zod-free for the browser. */
+const MAX_HREF_CHARS = 300;
+
+/** The Mail surface, with the thread named when it can be. A pair this
+ *  cannot carry falls back to the surface alone, which is where the row was
+ *  going anyway: a thread the bell cannot ask for costs the selection, never
+ *  the row. */
+export function agentMailHref(accountId: string, threadId: string): string {
+  if (!ACCOUNT_ID_RE.test(accountId)) return "/mail";
+  const href = `/mail?account=${accountId}&thread=${hexOf(new TextEncoder().encode(threadId))}`;
+  return href.length > MAX_HREF_CHARS ? "/mail" : href;
+}
+
+export function decodeAgentMailHref(
+  href: string,
+): { accountId: string; threadId: string } | null {
+  const match = AGENT_MAIL_HREF.exec(href);
+  if (!match) return null;
+  const bytes = bytesOf(match[2]);
+  if (bytes === null) return null;
+  return { accountId: match[1], threadId: new TextDecoder().decode(bytes) };
 }
 
 /** A task id, `TASK_ID_RE` in `lib/tasks/model.ts`. Written out rather than
@@ -61,11 +112,7 @@ export function decodeMailNotificationId(
 ): { accountId: string; threadId: string } | null {
   const match = /^mail-new:([A-Za-z0-9_-]+):([0-9a-f]*)$/.exec(id);
   if (!match) return null;
-  const hex = match[2];
-  if (hex.length === 0 || hex.length % 2 !== 0) return null;
-  const bytes = new Uint8Array(hex.length / 2);
-  for (let index = 0; index < bytes.length; index += 1) {
-    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
-  }
+  const bytes = bytesOf(match[2]);
+  if (bytes === null) return null;
   return { accountId: match[1], threadId: new TextDecoder().decode(bytes) };
 }

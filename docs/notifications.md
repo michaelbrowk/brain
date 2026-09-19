@@ -44,9 +44,9 @@ week of downtime fills the centre in stages rather than in one flood.
 ## The centre
 
 A row is `{ id, kind, at, title, body?, href, readAt? }`, and the kind is one of
-`task-reminder`, `task-missed` and `mail-new` (`lib/notifications/model.ts`).
-Nothing in the shape is about a task or a letter, so another kind can join later
-without a second store.
+`task-reminder`, `task-missed`, `mail-new` and `agent-action`
+(`lib/notifications/model.ts`). Nothing in the shape is about a task, a letter
+or a tool call, so another kind can join later without a second store.
 
 - **Five hundred rows.** The oldest goes when the five hundred and first
   arrives. The file is read whole on every request, and the cap is what keeps
@@ -116,6 +116,53 @@ One case still rings when it should not. A reply you write into a thread that
 still holds an older unread message passes the unread gate. The exact answer
 needs a "the newest message is the owner's" fact from the mail service, which
 is a change over there.
+
+## What an agent did
+
+A mutation an agent makes through MCP produces an `agent-action` row. The
+title is the app's own name and a verb, "Claude completed a task", and the
+body after it is the thing's own name where the call already knew one, "Water
+the plants". A row whose call knew no name is the title alone, "Claude
+archived a thread".
+
+- **Successful mutations, and nothing else.** A refusal leaves no row, a read
+  of any kind leaves none, and the `notion_*` import family and
+  `connection_check` are out by name. So is one mutation: marking a thread
+  read. The same call marks that thread's own `mail-new` row read, so a row
+  about the marking would put the badge back to one for a letter you have just
+  had dealt with; Settings → Connections still logs it. Every row comes off the
+  one activity line the mutation already writes
+  (`lib/mcp/activity-log.ts`), so a tool that logs cannot forget to announce.
+- **No letter reaches a row.** The title is Brain's own words after the app's
+  name, one of twenty-one fixed phrases. The body is the thing's own name, read
+  out of your notes or your tasks at the moment of the call, so a row about a
+  note an agent has just made shows the title the agent gave it: that is your
+  note's name now, and the same string is already in your sidebar. What cannot
+  reach a row at all is a subject, an address, a recipient or a message body,
+  because the activity line the row comes from has no field any of them could
+  enter through.
+- **A burst is one row.** The same app doing the same thing inside five
+  minutes is counted, not repeated: "Claude archived 12 threads". The row keeps
+  the first action's id and takes the newest one's time, so it rises to the top
+  as the burst goes on, and reading it reads the whole burst. The body drops
+  away once there is more than one thing in it, and the row opens the surface
+  rather than the twelfth thread.
+
+  **The five minutes run from the row's first action**, not from its newest, so
+  the row closes five minutes after it opened whatever has joined it since, and
+  an afternoon of work is several rows of five minutes each rather than one row
+  that grows all day. A restart starts a new row too: the count is what this
+  server watched happen, not a claim about the file.
+- **A press opens what the row is about.** The task, selected in Tasks. The
+  note the file landed in. The thread, opened in Mail without being marked
+  read, because the row is a record of what an agent did and not a new letter.
+  A row about something deleted opens the surface it was on.
+- **No push.** Push stays the phone's signal for reminders. An agent working
+  through a list at two in the morning is not a reason to buzz a pocket.
+
+Settings → Connections still holds the full log, refusals included, and is
+unchanged by any of this. It has never logged a read, and neither does the
+bell.
 
 ## Push
 

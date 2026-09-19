@@ -141,6 +141,57 @@ export async function appendNotification(
   return taken;
 }
 
+/** WHAT AN APPEND DID, when the caller has a second row it would rather write.
+ *
+ *  `folded` is `row` merged into one the centre may already hold: the same
+ *  action a moment later, counted rather than repeated. Both are decided before
+ *  this call and only one is written, because whether there is still a row to
+ *  fold into is a fact about the file, and the file may only be read and
+ *  written under one lock.
+ *
+ *  The fold is taken only when the centre holds `folded.id` AND has not had it
+ *  read. A row the reader has already seen is not rewritten under them: folding
+ *  into it would either hide the new action behind a read row or drag a row
+ *  they have dealt with back to unread, and a new row says the true thing.
+ */
+export async function appendOrFoldNotification(
+  row: BrainNotification,
+  folded: BrainNotification | null,
+  dir = notificationStateDirectory(),
+): Promise<"appended" | "folded" | "refused"> {
+  const done = await serialise(async () => {
+    const items = await readAll(dir);
+    if (folded !== null) {
+      const parsed = notificationSchema.safeParse(folded);
+      const held = items.find((candidate) => candidate.id === folded.id);
+      if (parsed.success && held !== undefined && held.readAt === undefined) {
+        // The cap is re-applied on this branch too, though a fold is
+        // count-preserving and cannot push the file past it on its own: a file
+        // that already holds more than the cap, from an older writer or a hand
+        // edit, is then trimmed by either branch rather than by one of them.
+        const next = sorted([
+          ...items.filter((candidate) => candidate.id !== folded.id),
+          parsed.data,
+        ]).slice(0, NOTIFICATION_CAP);
+        await writeAll(dir, next);
+        return "folded" as const;
+      }
+    }
+    const parsed = notificationSchema.safeParse(row);
+    if (!parsed.success) return "refused" as const;
+    if (items.some((held) => held.id === parsed.data.id)) return "refused" as const;
+    const next = sorted([...items, parsed.data]).slice(0, NOTIFICATION_CAP);
+    if (!next.some((held) => held.id === parsed.data.id)) return "refused" as const;
+    await writeAll(dir, next);
+    return "appended" as const;
+  });
+  // A fold moves a row the bell is already drawing, so it is announced like an
+  // append: an open tab has to redraw the count and the title it is showing.
+  if (done === "folded") emitStore({ type: "notification", id: folded!.id });
+  if (done === "appended") emitStore({ type: "notification", id: row.id });
+  return done;
+}
+
 /** A read is not announced. The tab that pressed the row already knows, and a
  *  second tab showing one stale unread until its next fetch is cheaper than a
  *  broadcast on every press.

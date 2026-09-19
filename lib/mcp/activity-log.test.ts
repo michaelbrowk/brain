@@ -14,10 +14,18 @@ import {
   mcpStateDirectory,
   readMcpActivity,
 } from "./activity-log";
+import {
+  listNotifications,
+  markNotificationsRead,
+} from "@/lib/notifications/store";
 
 const ACCOUNT = "account-a00000000000000000000000000000000";
 
 let root: string;
+/** The centre's own directory. A mutation writes two files now, and a test
+ *  that redirected only the first would leave its rows in the bell a
+ *  developer's own `pnpm dev` reads. */
+let centre: string;
 
 beforeEach(async () => {
   // A fixed path collides across concurrent vitest processes (another
@@ -26,12 +34,15 @@ beforeEach(async () => {
   // by this path, a reused literal would also carry a stale count from the
   // previous test in this same file into the next one.
   root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-activity-test-"));
+  centre = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-centre-test-"));
   vi.stubEnv("BRAIN_MCP_STATE_DIR", root);
+  vi.stubEnv("BRAIN_NOTIFICATIONS_STATE_DIR", centre);
 });
 
 afterEach(async () => {
   vi.unstubAllEnvs();
   await fs.rm(root, { recursive: true, force: true });
+  await fs.rm(centre, { recursive: true, force: true });
 });
 
 describe("the MCP activity log", () => {
@@ -487,4 +498,252 @@ describe("the MCP activity log", () => {
     },
     15_000,
   );
+});
+
+/** THE SECOND RECORD ONE MUTATION LEAVES.
+ *
+ *  Settings, Connections reads the log; the bell reads the centre. Both come
+ *  off this one call, so a tool that already logs cannot forget to tell the
+ *  owner, and a tool that logs a read or a refusal cannot accidentally start.
+ */
+describe("the row a mutation leaves in the centre", () => {
+  const rows = () => listNotifications(centre);
+
+  it("writes one row beside the log line", async () => {
+    await appendMcpActivity(
+      {
+        at: "2026-09-14T09:00:00.000Z",
+        client: "Claude",
+        tool: "create_task",
+        task: "task-alpha",
+        outcome: "ok",
+      },
+      { label: "Water the plants" },
+    );
+    expect(await readMcpActivity(50)).toHaveLength(1);
+    const centreRows = await rows();
+    expect(centreRows).toHaveLength(1);
+    expect(centreRows[0].kind).toBe("agent-action");
+    expect(centreRows[0].title).toBe("Claude created a task");
+    expect(centreRows[0].body).toBe("Water the plants");
+    expect(centreRows[0].readAt).toBeUndefined();
+  });
+
+  it("keeps the label out of the log line", async () => {
+    await appendMcpActivity(
+      {
+        at: "2026-09-14T09:00:00.000Z",
+        client: "Claude",
+        tool: "create_task",
+        task: "task-alpha",
+        outcome: "ok",
+      },
+      { label: "Water the plants" },
+    );
+    const raw = await fs.readFile(path.join(root, MCP_ACTIVITY_FILE), "utf8");
+    expect(raw).not.toContain("Water the plants");
+  });
+
+  it("writes no row for a refusal, a read or an import", async () => {
+    for (const entry of [
+      { tool: "create_task", task: "task-alpha", outcome: "not_found" },
+      { tool: "get_task", task: "task-alpha", outcome: "ok" },
+      { tool: "notion_finalize_page", page: "notes", outcome: "ok" },
+      { tool: "connection_check", outcome: "ok" },
+    ]) {
+      await appendMcpActivity({
+        at: "2026-09-14T09:00:00.000Z",
+        client: "Claude",
+        ...entry,
+      });
+    }
+    expect(await readMcpActivity(50)).toHaveLength(4);
+    expect(await rows()).toHaveLength(0);
+  });
+
+  it("writes one row for the same line twice, so a replay never doubles", async () => {
+    const entry = {
+      at: "2026-09-14T09:00:00.000Z",
+      client: "Claude",
+      tool: "complete_task",
+      task: "task-alpha",
+      outcome: "ok",
+    };
+    await appendMcpActivity(entry);
+    await appendMcpActivity(entry);
+    expect(await readMcpActivity(50)).toHaveLength(2);
+    expect(await rows()).toHaveLength(1);
+  });
+
+  it("still writes the log line when the centre cannot be written", async () => {
+    // A file where the centre's directory should be: `mkdir` fails, and with
+    // it every write behind it. The tool must not hear about it.
+    const blocked = path.join(centre, "blocked");
+    await fs.writeFile(blocked, "not a directory");
+    vi.stubEnv("BRAIN_NOTIFICATIONS_STATE_DIR", blocked);
+    await expect(
+      appendMcpActivity({
+        at: "2026-09-14T09:00:00.000Z",
+        client: "Claude",
+        tool: "create_task",
+        task: "task-alpha",
+        outcome: "ok",
+      }),
+    ).resolves.toBeUndefined();
+    expect(await readMcpActivity(50)).toHaveLength(1);
+  });
+});
+
+/** A BURST IS ONE ROW (Michael's ruling).
+ *
+ *  An agent working through a mailbox left one row per thread, and the centre's
+ *  five hundred are shared with the reminders that burst was pushing out. The
+ *  same client, tool and change inside five minutes is one row with a count.
+ */
+describe("what a burst of the same action leaves in the centre", () => {
+  const archive = (at: string, thread: string, client = "Claude") =>
+    appendMcpActivity({
+      at,
+      client,
+      tool: "update_mail_thread",
+      accountId: ACCOUNT,
+      threadId: thread,
+      change: "archive",
+      outcome: "ok",
+    });
+
+  it("counts three inside the window and starts again after it", async () => {
+    await archive("2026-09-14T09:00:00.000Z", "thread-1");
+    await archive("2026-09-14T09:01:00.000Z", "thread-2");
+    await archive("2026-09-14T09:02:00.000Z", "thread-3");
+
+    const folded = await listNotifications(centre);
+    expect(folded).toHaveLength(1);
+    expect(folded[0]).toMatchObject({
+      title: "Claude archived 3 threads",
+      at: "2026-09-14T09:02:00.000Z",
+      // The destination stops naming one thread the moment the row stops being
+      // about one thread.
+      href: "/mail",
+    });
+
+    // Six minutes after the third, which is past the window.
+    await archive("2026-09-14T09:08:00.000Z", "thread-4");
+    const rows = await listNotifications(centre);
+    expect(rows).toHaveLength(2);
+    expect(rows.map((row) => row.title)).toEqual([
+      "Claude archived a thread",
+      "Claude archived 3 threads",
+    ]);
+    // Every line is still its own line. The fold is the bell's, not the log's.
+    expect(await readMcpActivity(10)).toHaveLength(4);
+  });
+
+  /** THE WINDOW IS FIXED, NOT SLIDING (Michael's ruling): a row lives five
+   *  minutes from its FIRST line, whatever has landed in it since. The two
+   *  cases below are the ones that tell the two readings apart. */
+  it("ends the row five minutes after its first line, not after its newest", async () => {
+    await archive("2026-09-14T12:00:00.000Z", "thread-1");
+    await archive("2026-09-14T12:03:00.000Z", "thread-2");
+    // Four minutes after the newest line and seven after the first. A sliding
+    // window folds this; a fixed one starts a row.
+    await archive("2026-09-14T12:07:00.000Z", "thread-3");
+
+    const rows = await listNotifications(centre);
+    expect(rows.map((row) => row.title)).toEqual([
+      "Claude archived a thread",
+      "Claude archived 2 threads",
+    ]);
+  });
+
+  it("folds everything that lands inside the five minutes", async () => {
+    await archive("2026-09-14T12:00:00.000Z", "thread-1");
+    await archive("2026-09-14T12:04:00.000Z", "thread-2");
+    await archive("2026-09-14T12:04:30.000Z", "thread-3");
+
+    const rows = await listNotifications(centre);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      title: "Claude archived 3 threads",
+      at: "2026-09-14T12:04:30.000Z",
+    });
+  });
+
+  it("keeps one grant's burst apart from another's", async () => {
+    await archive("2026-09-14T09:00:00.000Z", "thread-1", "Claude");
+    await archive("2026-09-14T09:00:30.000Z", "thread-2", "Another app");
+    const rows = await listNotifications(centre);
+    expect(rows.map((row) => row.title).sort()).toEqual([
+      "Another app archived a thread",
+      "Claude archived a thread",
+    ]);
+  });
+
+  it("keeps one change apart from another of the same tool", async () => {
+    await archive("2026-09-14T09:00:00.000Z", "thread-1");
+    await appendMcpActivity({
+      at: "2026-09-14T09:00:30.000Z",
+      client: "Claude",
+      tool: "update_mail_thread",
+      accountId: ACCOUNT,
+      threadId: "thread-2",
+      change: "spam",
+      outcome: "ok",
+    });
+    expect(await listNotifications(centre)).toHaveLength(2);
+  });
+
+  it("does not count the same line twice when it is written twice", async () => {
+    // A replay of the log is one row, and it is one row of one. The ids a fold
+    // has already swallowed are remembered, because they are no longer in the
+    // file for the centre's own duplicate check to find.
+    await archive("2026-09-14T09:00:00.000Z", "thread-1");
+    await archive("2026-09-14T09:01:00.000Z", "thread-2");
+    await archive("2026-09-14T09:01:00.000Z", "thread-2");
+    const rows = await listNotifications(centre);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].title).toBe("Claude archived 2 threads");
+  });
+
+  it("starts a new row rather than rewriting one the reader has seen", async () => {
+    await archive("2026-09-14T09:00:00.000Z", "thread-1");
+    const [row] = await listNotifications(centre);
+    await markNotificationsRead([row.id], "2026-09-14T09:00:30.000Z", centre);
+
+    await archive("2026-09-14T09:01:00.000Z", "thread-2");
+    const rows = await listNotifications(centre);
+    expect(rows).toHaveLength(2);
+    expect(rows[0].title).toBe("Claude archived a thread");
+    expect(rows[0].readAt).toBeUndefined();
+  });
+
+  it("folds a burst of task writes into one row without a body", async () => {
+    await appendMcpActivity(
+      {
+        at: "2026-09-14T09:00:00.000Z",
+        client: "Claude",
+        tool: "create_task",
+        task: "task-alpha",
+        outcome: "ok",
+      },
+      { label: "Water the plants" },
+    );
+    await appendMcpActivity(
+      {
+        at: "2026-09-14T09:00:10.000Z",
+        client: "Claude",
+        tool: "create_task",
+        task: "task-beta",
+        outcome: "ok",
+      },
+      { label: "Call the bank" },
+    );
+    const rows = await listNotifications(centre);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      title: "Claude created 2 tasks",
+      href: "/tasks",
+    });
+    expect(rows[0].body).toBeUndefined();
+  });
 });

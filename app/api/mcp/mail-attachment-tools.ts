@@ -203,12 +203,19 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
       // because the owner reading the log wants the attempt as much as the
       // save. It names the account, the attachment and the page, and never
       // the filename: that is the sender's own prose.
+      //
+      // The page's own title rides beside the line, never in it: the row the
+      // notification centre draws says which note the file landed in, and the
+      // log's shape has no field a title could enter through. It is filled in
+      // below, off the page this call already reads.
+      let pageTitle: string | undefined;
       const log = (outcome: string) =>
         logMailActivity(
           extra,
           TOOL,
           { accountId, attachmentId, page },
           outcome,
+          pageTitle,
         ).catch(() => undefined);
 
       // The route's gate already refused a grant without `brain:mail`. This
@@ -242,7 +249,7 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
       // this call's business and is not read at all.
       if (append !== false) {
         try {
-          await store.readPage(page);
+          pageTitle = (await store.readPage(page)).meta.title;
         } catch (error) {
           if (isNotFound(error)) {
             await log("page_not_found");

@@ -130,22 +130,29 @@ archived a thread".
   `connection_check` are out by name. So is one mutation: marking a thread
   read. The same call marks that thread's own `mail-new` row read, so a row
   about the marking would put the badge back to one for a letter you have just
-  had dealt with. Settings → Connections still logs it. The row comes off the one activity line
-  the mutation already writes (`lib/mcp/activity-log.ts`), so a tool that logs
-  cannot forget to announce.
-- **Nothing the agent wrote reaches a row.** The title is Brain's own words
-  after the app's name, and the body is a title read out of your own notes or
-  tasks at the moment of the call. The activity line holds ids and no prose by
-  design, and the centre is downstream of it: no subject, no address, no body,
-  no recipient.
+  had dealt with; Settings → Connections still logs it. Every row comes off the
+  one activity line the mutation already writes
+  (`lib/mcp/activity-log.ts`), so a tool that logs cannot forget to announce.
+- **No letter reaches a row.** The title is Brain's own words after the app's
+  name, one of twenty-one fixed phrases. The body is the thing's own name, read
+  out of your notes or your tasks at the moment of the call, so a row about a
+  note an agent has just made shows the title the agent gave it: that is your
+  note's name now, and the same string is already in your sidebar. What cannot
+  reach a row at all is a subject, an address, a recipient or a message body,
+  because the activity line the row comes from has no field any of them could
+  enter through.
 - **A burst is one row.** The same app doing the same thing inside five
   minutes is counted, not repeated: "Claude archived 12 threads". The row keeps
-  the first action's place in the file and takes the newest one's time, so it
-  rises to the top as the burst goes on, and reading it reads the whole burst.
-  The body drops away once there is more than one thing in it, and the row
-  opens the surface rather than the twelfth thread. Five minutes after the last
-  one, the next action starts a new row. A restart starts a new row too: the
-  count is what this server has watched happen, not a claim about the file.
+  the first action's id and takes the newest one's time, so it rises to the top
+  as the burst goes on, and reading it reads the whole burst. The body drops
+  away once there is more than one thing in it, and the row opens the surface
+  rather than the twelfth thread.
+
+  **The five minutes run from the row's first action**, not from its newest, so
+  the row closes five minutes after it opened whatever has joined it since, and
+  an afternoon of work is several rows of five minutes each rather than one row
+  that grows all day. A restart starts a new row too: the count is what this
+  server watched happen, not a claim about the file.
 - **A press opens what the row is about.** The task, selected in Tasks. The
   note the file landed in. The thread, opened in Mail without being marked
   read, because the row is a record of what an agent did and not a new letter.
@@ -153,8 +160,9 @@ archived a thread".
 - **No push.** Push stays the phone's signal for reminders. An agent working
   through a list at two in the morning is not a reason to buzz a pocket.
 
-Settings → Connections still holds the full log, refusals and reads included,
-and is unchanged by any of this.
+Settings → Connections still holds the full log, refusals included, and is
+unchanged by any of this. It has never logged a read, and neither does the
+bell.
 
 ## Push
 

@@ -330,6 +330,26 @@ describe("appending, or folding into what is already there", () => {
     expect(await listNotifications(dir)).toHaveLength(1);
   });
 
+  it("trims to the cap on the fold branch as well as on the append", async () => {
+    // A fold is count-preserving, so it cannot push the file past the cap on
+    // its own. A file that already holds more than the cap can: from an older
+    // writer, or a hand edit. Both branches trim, so which one ran is not a
+    // thing a reader has to know.
+    const target = agent("agent-1", "2026-09-14T12:00:00.000Z", "Claude archived a thread");
+    await seed(dir, [...fullCentre(), target]);
+
+    const outcome = await appendOrFoldNotification(
+      agent("agent-2", "2026-09-14T12:01:00.000Z", "Claude archived a thread"),
+      agent("agent-1", "2026-09-14T12:01:00.000Z", "Claude archived 2 threads"),
+      dir,
+    );
+
+    expect(outcome).toBe("folded");
+    const rows = await listNotifications(dir);
+    expect(rows).toHaveLength(NOTIFICATION_CAP);
+    expect(rows[0]).toMatchObject({ id: "agent-1", title: "Claude archived 2 threads" });
+  });
+
   it("announces a fold, so an open bell counts it", async () => {
     await appendNotification(agent("agent-1", "2026-09-14T12:00:00.000Z", "Claude archived a thread"), dir);
     const seen: SequencedStoreEvent[] = [];

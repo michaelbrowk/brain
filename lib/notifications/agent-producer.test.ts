@@ -221,6 +221,7 @@ describe("what an agent did, as a row", () => {
 describe("what a burst of the same thing folds into", () => {
   const held = (patch: Partial<AgentFold> = {}): AgentFold => ({
     id: "agent:2026-09-14T12:00:00.000Z:update_mail_thread:1111111111111111",
+    first: "2026-09-14T12:00:00.000Z",
     at: "2026-09-14T12:00:00.000Z",
     count: 1,
     href: "/mail?account=account-a1&thread=7468726561642d31",
@@ -282,6 +283,31 @@ describe("what a burst of the same thing folds into", () => {
     const entry = archive("2026-09-14T12:06:00.000Z", "thread-2");
     expect(agentActionFold(entry, agentActionNotification(entry)!, held())).toBeNull();
     expect(AGENT_FOLD_WINDOW_MS).toBe(5 * 60 * 1000);
+  });
+
+  /** THE WINDOW IS A BOX, NOT A GAP (Michael's ruling). Five minutes from the
+   *  row's FIRST line, whatever has landed in it since. Measured from the
+   *  newest instead, an agent doing one thing every four minutes would fold
+   *  into one row forever, and that row would sit at the head of the bell for
+   *  as long as it kept working. */
+  it("measures the window from the first line and not from the newest", () => {
+    const late = archive("2026-09-14T12:07:00.000Z", "thread-3");
+    expect(
+      agentActionFold(late, agentActionNotification(late)!, held({
+        // A row opened at 12:00 whose newest line landed at 12:03: four
+        // minutes of gap, seven minutes of life.
+        first: "2026-09-14T12:00:00.000Z",
+        at: "2026-09-14T12:03:00.000Z",
+        count: 2,
+      })),
+    ).toBeNull();
+  });
+
+  it("keeps the first line's instant as the row fills up", () => {
+    const entry = archive("2026-09-14T12:04:00.000Z", "thread-2");
+    const folded = agentActionFold(entry, agentActionNotification(entry)!, held());
+    expect(folded!.fold.first).toBe("2026-09-14T12:00:00.000Z");
+    expect(folded!.fold.at).toBe("2026-09-14T12:04:00.000Z");
   });
 
   it("folds a line stamped a little before the row it joins", () => {

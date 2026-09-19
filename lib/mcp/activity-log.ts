@@ -476,7 +476,9 @@ function pruneFolds(now: string): void {
   const floor = Date.parse(now) - AGENT_FOLD_WINDOW_MS;
   if (!Number.isFinite(floor)) return;
   for (const [key, memo] of agentFolds) {
-    if (Date.parse(memo.fold.at) < floor) agentFolds.delete(key);
+    // On the row's first line, which is what the window is measured against:
+    // a memo whose box has closed can never be folded into again.
+    if (Date.parse(memo.fold.first) < floor) agentFolds.delete(key);
   }
 }
 
@@ -508,19 +510,30 @@ async function noteInCentre(
   try {
     const row = agentActionNotification(entry, notice?.label);
     if (row === null) return;
-    const key = `${notificationStateDirectory()}${FOLD_KEY_SEPARATOR}${agentActionFoldKey(entry)}`;
+    // Read once and passed on, rather than read here and again inside the
+    // store's default argument: the memo and the file have to be talking about
+    // the same centre even if the environment moves between two lines.
+    const centre = notificationStateDirectory();
+    const key = `${centre}${FOLD_KEY_SEPARATOR}${agentActionFoldKey(entry)}`;
     const held = agentFolds.get(key);
     // A line this fold has already swallowed is not counted again. It is no
     // longer in the file under its own id, so the centre's own duplicate check
     // cannot see it, and a replay of the log would otherwise inflate the count.
     if (held?.lines.has(row.id)) return;
     const folded = held === undefined ? null : agentActionFold(entry, row, held.fold);
-    const done = await appendOrFoldNotification(row, folded?.row ?? null);
+    const done = await appendOrFoldNotification(row, folded?.row ?? null, centre);
     if (done === "folded" && folded !== null) {
       agentFolds.set(key, { fold: folded.fold, lines: remember(held?.lines, row.id) });
     } else if (done === "appended") {
       agentFolds.set(key, {
-        fold: { id: row.id, at: row.at, count: 1, href: row.href, ...(row.body !== undefined ? { body: row.body } : {}) },
+        fold: {
+          id: row.id,
+          first: row.at,
+          at: row.at,
+          count: 1,
+          href: row.href,
+          ...(row.body !== undefined ? { body: row.body } : {}),
+        },
         lines: new Set([row.id]),
       });
     }

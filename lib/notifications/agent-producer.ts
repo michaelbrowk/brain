@@ -275,17 +275,29 @@ export function agentActionNotification(
  *  Five minutes (Michael's ruling). Long enough that an agent working through a
  *  mailbox or a list is one row, short enough that two sittings are two rows,
  *  which is what a reader coming back to the bell wants to be able to tell
- *  apart. */
+ *  apart.
+ *
+ *  A BOX, NOT A GAP. The five minutes run from the row's FIRST line, whatever
+ *  has landed in it since. Measured from the newest line instead, an agent
+ *  doing one thing every four minutes folds into one row forever: the count
+ *  grows without a bound and the row is pushed back to the head of the bell on
+ *  every fold, so it can never age down the list while the agent is working.
+ *  A box says the true thing about a long session: several rows, each one five
+ *  minutes of it. */
 export const AGENT_FOLD_WINDOW_MS = 5 * 60 * 1000;
 
 /** WHAT THE CENTRE ALREADY HOLDS FOR ONE SHAPE OF ACTION.
  *
  *  Kept by the choke point, not by this module: the fold has to be decided
- *  before the write, and this file reads no clock and no file. `id` is the
- *  FIRST line's, which is the row's id for its whole life; `at` is the newest
- *  line's, which is where the centre sorts it. */
+ *  before the write, and this file reads no clock and no file.
+ *
+ *  Three instants' worth of state in two fields. `id` is the first line's,
+ *  which is the row's id for its whole life. `first` is when the row opened,
+ *  which is what the window is measured against. `at` is the newest line's,
+ *  which is where the centre sorts it. */
 export interface AgentFold {
   readonly id: string;
+  readonly first: string;
   readonly at: string;
   readonly count: number;
   readonly href: string;
@@ -313,12 +325,18 @@ export function agentActionFold(
 ): { row: BrainNotification; fold: AgentFold } | null {
   const verb = verbOf(entry);
   if (verb === null) return null;
-  const apart = Date.parse(next.at) - Date.parse(held.at);
+  // Against the row's first line, never against its newest: the window is the
+  // row's whole life, not the gap since the last thing that joined it.
+  const apart = Date.parse(next.at) - Date.parse(held.first);
   if (!Number.isFinite(apart) || Math.abs(apart) > AGENT_FOLD_WINDOW_MS) return null;
   const count = held.count + 1;
   // The later of the two instants. Two clocks inside one window would
   // otherwise walk the row backwards down a centre that sorts on this string.
   const at = next.at > held.at ? next.at : held.at;
+  // And the earlier of the two opens it, for the same reason read the other
+  // way: a line stamped before the row it joins makes the row that old, and
+  // the box closes five minutes after the earliest thing in it.
+  const first = next.at < held.first ? next.at : held.first;
   // The destination survives only while every line named the same thing. A
   // burst over a dozen threads goes to Mail, not to the twelfth thread.
   const href = held.href === next.href ? held.href : SURFACE_HREF[surfaceOf(entry.tool)];
@@ -335,6 +353,6 @@ export function agentActionFold(
       // about the rest, and a count with one name beside it reads as a lie.
       href,
     },
-    fold: { id: held.id, at, count, href },
+    fold: { id: held.id, first, at, count, href },
   };
 }

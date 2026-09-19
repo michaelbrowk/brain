@@ -147,7 +147,14 @@ async function logPageWrite(
  *  failure answered in Brain's own words, and one line whatever the outcome,
  *  the refusals included. Awaited rather than fired and forgotten, the way the
  *  mail tools' line is: it is one bounded append, and a line that outlived its
- *  own turn is what made the task tools grow a flush helper for their tests. */
+ *  own turn is what made the task tools grow a flush helper for their tests.
+ *
+ *  The `insufficient_scope` each of the six answers is the second lock, not
+ *  the first: all six are in `WRITE_TOOLS`, so the route's own gate refuses a
+ *  grant without `brain:write` before any handler runs. There is no test for
+ *  that branch because there is no request that reaches it; it is here so a
+ *  scope check removed one layer up cannot quietly let a mail grant write a
+ *  note. */
 async function pageWrite<Answer>(
   extra: PageToolExtra,
   tool: string,

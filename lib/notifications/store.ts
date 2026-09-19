@@ -165,10 +165,14 @@ export async function appendOrFoldNotification(
       const parsed = notificationSchema.safeParse(folded);
       const held = items.find((candidate) => candidate.id === folded.id);
       if (parsed.success && held !== undefined && held.readAt === undefined) {
+        // The cap is re-applied on this branch too, though a fold is
+        // count-preserving and cannot push the file past it on its own: a file
+        // that already holds more than the cap, from an older writer or a hand
+        // edit, is then trimmed by either branch rather than by one of them.
         const next = sorted([
           ...items.filter((candidate) => candidate.id !== folded.id),
           parsed.data,
-        ]);
+        ]).slice(0, NOTIFICATION_CAP);
         await writeAll(dir, next);
         return "folded" as const;
       }

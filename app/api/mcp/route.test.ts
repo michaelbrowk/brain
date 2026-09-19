@@ -7259,6 +7259,54 @@ describe("the page write tools", () => {
     expect(await listNotifications(centreRoot)).toEqual([]);
   });
 
+  /** The one reachable outcome whose line carries a page and no change: the
+   *  share refusal happens before the patch is read, so there is no mutation
+   *  token to name. */
+  it("writes a line naming the page when the share refusal fires", async () => {
+    mocks.getStore.mockResolvedValue({ updateMeta: vi.fn() });
+
+    const { payload, isError } = await toolPayload(
+      await callTool("update_meta", { id: "page-one", public: true }, 964),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toMatchObject({ reason: "share_disclosure_required" });
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({
+      tool: "update_meta",
+      page: "page-one",
+      outcome: "share_disclosure_required",
+    });
+    expect(entry.change).toBeUndefined();
+    expect(await listNotifications(centreRoot)).toEqual([]);
+  });
+
+  it("names no page when the parent was not there to create under", async () => {
+    // Nothing was created, so the line names nothing: an id the caller sent
+    // for a parent is not a page this call touched.
+    mocks.getStore.mockResolvedValue({
+      createPage: vi.fn().mockRejectedValue(new NotFoundError("page-parent")),
+    });
+
+    const { payload } = await toolPayload(
+      await callTool(
+        "create_page",
+        { title: "Meeting notes", parentId: "page-parent" },
+        965,
+      ),
+    );
+
+    expect(payload).toMatchObject({ parentId: "page-parent" });
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({
+      tool: "create_page",
+      change: "create",
+      outcome: "parent_not_found",
+    });
+    expect(entry.page).toBeUndefined();
+    expect(await listNotifications(centreRoot)).toEqual([]);
+  });
+
   it("writes a line for a page that is not there, and answers as it always did", async () => {
     mocks.getStore.mockResolvedValue({
       readPage: vi.fn().mockRejectedValue(new NotFoundError("page-missing")),

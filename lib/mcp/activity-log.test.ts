@@ -639,6 +639,36 @@ describe("what a burst of the same action leaves in the centre", () => {
     expect(await readMcpActivity(10)).toHaveLength(4);
   });
 
+  /** THE WINDOW IS FIXED, NOT SLIDING (Michael's ruling): a row lives five
+   *  minutes from its FIRST line, whatever has landed in it since. The two
+   *  cases below are the ones that tell the two readings apart. */
+  it("ends the row five minutes after its first line, not after its newest", async () => {
+    await archive("2026-09-14T12:00:00.000Z", "thread-1");
+    await archive("2026-09-14T12:03:00.000Z", "thread-2");
+    // Four minutes after the newest line and seven after the first. A sliding
+    // window folds this; a fixed one starts a row.
+    await archive("2026-09-14T12:07:00.000Z", "thread-3");
+
+    const rows = await listNotifications(centre);
+    expect(rows.map((row) => row.title)).toEqual([
+      "Claude archived a thread",
+      "Claude archived 2 threads",
+    ]);
+  });
+
+  it("folds everything that lands inside the five minutes", async () => {
+    await archive("2026-09-14T12:00:00.000Z", "thread-1");
+    await archive("2026-09-14T12:04:00.000Z", "thread-2");
+    await archive("2026-09-14T12:04:30.000Z", "thread-3");
+
+    const rows = await listNotifications(centre);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      title: "Claude archived 3 threads",
+      at: "2026-09-14T12:04:30.000Z",
+    });
+  });
+
   it("keeps one grant's burst apart from another's", async () => {
     await archive("2026-09-14T09:00:00.000Z", "thread-1", "Claude");
     await archive("2026-09-14T09:00:30.000Z", "thread-2", "Another app");

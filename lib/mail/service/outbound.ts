@@ -55,8 +55,11 @@ export class MailSendError extends Error {
    *  enqueue, which is the safe reading of a failure nobody marked. */
   readonly enqueued: boolean;
 
-  /** What the code alone cannot say, for the log and for the thrown error.
-   *  A size refusal names the size; the wire still carries only the code. */
+  /** What the code alone cannot say, on the answer and on the thrown error.
+   *  A size refusal names the size it refused and the ceiling it crossed, which
+   *  is what tells a caller whether a smaller file would go through. It reaches
+   *  the error body and the agent's own refusal; the log record stays the
+   *  stable code, the route family and the account. */
   readonly detail: string | null;
 
   constructor(

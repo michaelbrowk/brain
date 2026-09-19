@@ -1003,7 +1003,7 @@ describe("private durable mail outbox", () => {
       expect(
         database
           .prepare(
-            `SELECT operation_id, status, runnable_at,
+            `SELECT operation_id, status, runnable_at, updated_at,
                     length(raw_rfc2822) AS raw_bytes
                FROM outbox ORDER BY operation_id`,
           )
@@ -1013,21 +1013,137 @@ describe("private durable mail outbox", () => {
           operation_id: healthy.operationId,
           status: "queued",
           runnable_at: healthy.nextAttemptAt,
+          updated_at: healthy.updatedAt,
           raw_bytes: healthy.message.rawRfc2822Bytes,
         },
+        // Stamped with the migration's own clock, not left at the send's. A row
+        // queued longer ago than the terminal retention window would otherwise
+        // be marked failed and swept by the first `listRunnable` after the open,
+        // taking the JSON this migration keeps as the only evidence with it.
         {
           operation_id: undecodable.operationId,
           status: "failed",
           runnable_at: null,
+          updated_at: healthy.updatedAt + 1_000,
           raw_bytes: 0,
         },
         {
           operation_id: mismatched.operationId,
           status: "failed",
           runnable_at: null,
+          updated_at: healthy.updatedAt + 1_000,
           raw_bytes: 0,
         },
       ]);
+    } finally {
+      database.close();
+    }
+  });
+
+  // THE WALK ADVANCES PAST A ROW IT CANNOT MOVE AT ALL.
+  //
+  // `after` is assigned before the attempt and outside every branch, so the next
+  // page starts past this row whatever became of it. Moving that assignment into
+  // the success branch makes the walk read the same page for ever — and the
+  // marking is not the only thing that can fail on a row: a database that
+  // refuses that write leaves the row exactly as it was. The walk still has to
+  // finish and claim version 3, because the alternative is an account that never
+  // opens again.
+  it("finishes the migration when a row cannot even be marked", async () => {
+    const fixture = await createStore();
+    const healthy = submissionFixture({
+      operationId: operationId(4_101),
+      idempotencyKey: "healthy-beside-stuck",
+    });
+    const stuck = submissionFixture({
+      operationId: operationId(4_102),
+      idempotencyKey: "stuck-row",
+    });
+    for (const row of [healthy, stuck]) await fixture.store.enqueue(row);
+    await fixture.store.close();
+    downgradeToSchemaV2(
+      fixture.cacheRoot,
+      [healthy, stuck],
+      new Map<
+        string,
+        (value: Record<string, unknown>) => Record<string, unknown>
+      >([
+        [
+          stuck.operationId,
+          (value) => ({
+            ...value,
+            message: {
+              ...(value.message as Record<string, unknown>),
+              rawRfc2822Base64Url: "not base64url at all",
+            },
+          }),
+        ],
+      ]),
+    );
+
+    // Every attempt to mark a row failed is refused: the one inside the row's
+    // own transaction and the one taken on its own afterwards.
+    const prepare = DatabaseSync.prototype.prepare;
+    const spy = vi
+      .spyOn(DatabaseSync.prototype, "prepare")
+      .mockImplementation(function (this: DatabaseSync, sql: string) {
+        const statement = prepare.call(this, sql);
+        if (!sql.includes("status = 'failed'")) return statement;
+        return new Proxy(statement, {
+          get(target, property, receiver) {
+            if (property === "run") {
+              return () => {
+                throw new Error("the marking write is refused");
+              };
+            }
+            const value = Reflect.get(target, property, receiver);
+            return typeof value === "function" ? value.bind(target) : value;
+          },
+        });
+      });
+    const logged: string[] = [];
+    const stderr = vi
+      .spyOn(process.stderr, "write")
+      .mockImplementation((chunk: unknown) => {
+        logged.push(String(chunk));
+        return true;
+      });
+    const reopened = new SqliteMailSendStore({
+      cacheRoot: fixture.cacheRoot,
+      now: () => healthy.updatedAt + 1_000,
+    });
+    try {
+      await reopened.initialize();
+      // The row before it in id order moved, and the walk came back at all.
+      expectSameSubmission(
+        await reopened.readByOperationId(healthy.operationId),
+        healthy,
+      );
+    } finally {
+      spy.mockRestore();
+      stderr.mockRestore();
+    }
+    await expect(reopened.readByOperationId(stuck.operationId)).rejects.toEqual(
+      new MailSendError("mail_send_service_unavailable"),
+    );
+    await reopened.close();
+
+    expect(
+      logged.filter((line) => line.includes("mail_outbox_row_unreadable")),
+    ).toHaveLength(1);
+    const database = openDatabase(fixture.cacheRoot);
+    try {
+      expect(database.prepare("PRAGMA user_version").get()?.user_version).toBe(3);
+      // Unmarked, because the write that marks it was refused, and still empty,
+      // which is what makes every read of it refuse.
+      expect(
+        database
+          .prepare(
+            `SELECT status, length(raw_rfc2822) AS raw_bytes
+               FROM outbox WHERE operation_id = ?`,
+          )
+          .get(stuck.operationId),
+      ).toEqual({ status: "queued", raw_bytes: 0 });
     } finally {
       database.close();
     }

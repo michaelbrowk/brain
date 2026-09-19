@@ -2135,7 +2135,7 @@ function initializeSchema(
     // of them holds a foreign key into the outbox. The two migrations stay
     // apart for that reason and a file at 1 walks through both.
     if (version === 1) migrateSchemaV1(database, options.now, accountId);
-    migrateSchemaV2(database, accountId);
+    migrateSchemaV2(database, accountId, options.now);
   } else if (version !== SCHEMA_VERSION) {
     throw unavailable();
   }
@@ -2203,7 +2203,11 @@ function assertDatabaseIdentity(
  * with more than ten thousand rows still to move, which was a second way to
  * leave a file unopenable for good.
  */
-function migrateSchemaV2(database: DatabaseSync, accountId: string): void {
+function migrateSchemaV2(
+  database: DatabaseSync,
+  accountId: string,
+  now: number,
+): void {
   if (!outboxHasRawColumn(database)) {
     database.exec(
       "ALTER TABLE outbox ADD COLUMN raw_rfc2822 BLOB NOT NULL DEFAULT x''",
@@ -2220,6 +2224,7 @@ function migrateSchemaV2(database: DatabaseSync, accountId: string): void {
   for (;;) {
     const rows = page.all(after, MIGRATION_PAGE_ROWS);
     if (rows.length === 0) break;
+    const startedAt = after;
     for (const row of rows) {
       if (
         !isExactRecord(row, ["operation_id"]) ||
@@ -2227,8 +2232,11 @@ function migrateSchemaV2(database: DatabaseSync, accountId: string): void {
       ) {
         throw unavailable();
       }
+      // Assigned before the attempt, and outside every branch below: the walk
+      // has to advance past this row whatever becomes of it, or a row it cannot
+      // move is a page it reads for ever.
       after = row.operation_id;
-      if (migrateSubmissionRowToBlob(database, row.operation_id)) continue;
+      if (migrateRow(database, row.operation_id, now)) continue;
       unreadable += 1;
       writeMailLogRecord({
         event: "mail_outbox_row_unreadable",
@@ -2236,6 +2244,12 @@ function migrateSchemaV2(database: DatabaseSync, accountId: string): void {
         operationId: row.operation_id,
       });
     }
+    // Unreachable while `after` is assigned for every row: each page is
+    // `operation_id > after` in ascending order, so the cursor is strictly
+    // monotone and the walk ends in at most one page per five hundred rows.
+    // It is here because the failure it guards against is an open that never
+    // returns, which is worse than an open that refuses.
+    if (after === startedAt) throw unavailable();
   }
   // Every empty row was visited, and each was either filled or marked, so what
   // is left empty is exactly what was marked.
@@ -2255,11 +2269,39 @@ function migrateSchemaV2(database: DatabaseSync, accountId: string): void {
   database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
 }
 
-/** Whether the row's message moved. False means it could not be read and the
- *  row was marked failed instead, which the caller logs. */
+/**
+ * Whether the row's message moved.
+ *
+ * False means the walk could not move it — it could not be read, or the write
+ * that marks it failed could not be made either. Marking it is the better
+ * outcome and is tried twice, once inside the row's own transaction and once
+ * on its own afterwards, but a database that refuses both is not a reason to
+ * abandon the migration and leave the account at version 2: the row keeps
+ * whatever it had, its message stays empty, and every read of it is refused.
+ * What that costs is one operation a worker retries and never completes, which
+ * is the same trade as the rest of this walk — one message, not the account.
+ */
+function migrateRow(
+  database: DatabaseSync,
+  operationId: string,
+  now: number,
+): boolean {
+  try {
+    return migrateSubmissionRowToBlob(database, operationId, now);
+  } catch {
+    try {
+      markOutboxRowFailed(database, operationId, now);
+    } catch {
+      // Nothing left to try on this row.
+    }
+    return false;
+  }
+}
+
 function migrateSubmissionRowToBlob(
   database: DatabaseSync,
   operationId: string,
+  now: number,
 ): boolean {
   database.exec("BEGIN IMMEDIATE");
   try {
@@ -2293,7 +2335,7 @@ function migrateSubmissionRowToBlob(
       // The JSON is left as it stands. It still holds whatever the row had, which
       // is the only evidence of the message left, and a read refuses the row
       // anyway: an empty BLOB cannot match the digests beside it.
-      markOutboxRowFailed(database, operationId);
+      markOutboxRowFailed(database, operationId, now);
       database.exec("COMMIT");
       return false;
     }
@@ -2316,18 +2358,30 @@ function migrateSubmissionRowToBlob(
   }
 }
 
-/** Terminal, and not runnable: whatever the worker would have done with this
- *  row, it cannot send a message it cannot read. */
+/**
+ * Terminal, and not runnable: whatever the worker would have done with this
+ * row, it cannot send a message it cannot read.
+ *
+ * The migration's own clock goes on `updated_at` for the same reason the
+ * version 1 path uses it. Terminal rows are swept thirty days after that
+ * stamp, and a row that had been queued longer than that would otherwise be
+ * marked and then deleted by the first `listRunnable` after the open, taking
+ * with it the JSON this migration deliberately keeps as the only evidence of
+ * the message. `MAX` rather than a bare assignment because the table requires
+ * `updated_at >= created_at` and a row's own stamp may sit ahead of the clock.
+ */
 function markOutboxRowFailed(
   database: DatabaseSync,
   operationId: string,
+  now: number,
 ): void {
   database
     .prepare(
-      `UPDATE outbox SET status = 'failed', runnable_at = NULL
+      `UPDATE outbox SET status = 'failed', runnable_at = NULL,
+              updated_at = MAX(created_at, ?)
         WHERE operation_id = ?`,
     )
-    .run(operationId);
+    .run(now, operationId);
 }
 
 function outboxHasRawColumn(database: DatabaseSync): boolean {
@@ -4211,8 +4265,10 @@ function validateMessageWithoutBytes(
     // The structural bound, not the outgoing one. What a send may write is
     // `outgoingRawMessageBytes` and `assertRawWithinCeiling` refuses it by
     // name before the insert; a row already on disk is read back whatever that
-    // ceiling says today, so lowering the cap never strands a queued message
-    // the service still owes the recipient.
+    // ceiling says today. That narrows the window a lowered cap opens rather
+    // than closing it: the message stays readable and visible here, and the
+    // three delivery-side calls to `admitOutgoingRawMessage` — the Gmail
+    // adapter, the SMTP wire, the send state — are where it is refused instead.
     (value.rawRfc2822Bytes as number) > MAIL_RESOURCE_LIMITS.rawMessageBytes ||
     typeof value.rawRfc2822Sha256 !== "string" ||
     !SAFE_FINGERPRINT.test(value.rawRfc2822Sha256)

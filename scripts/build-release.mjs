@@ -10,6 +10,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import { PROBE_BUNDLE_NAME } from "./build-probe.mjs";
 import { listFixtureVersions } from "./data-versions.mjs";
 import { parseSemver, resolveMinUpgradeFrom } from "./release-version.mjs";
 
@@ -194,13 +195,23 @@ export async function stageStandalone({ root, stage }) {
   } catch {
     await rename(path.join(stage, "server.js"), path.join(stage, "brain-next-server.js"));
   }
+  // The memory probe is one bundled file carrying the service's own modules
+  // (`pnpm build:probe`), and it belongs beside the other scripts an operator
+  // runs rather than at the root of the app. It is what lets the outgoing
+  // attachment cap be measured against the memory contract on the machine that
+  // contract applies to, rather than only on a laptop.
+  await mkdir(path.join(stage, "bin"), { recursive: true });
+  await rename(
+    path.join(stage, PROBE_BUNDLE_NAME),
+    path.join(stage, "bin", PROBE_BUNDLE_NAME),
+  );
   await cp(path.join(root, "ops", "brain-server.cjs"), path.join(stage, "server.js"));
   await cp(path.join(root, "ops", "brain-shutdown-preload.mjs"), path.join(stage, "brain-shutdown-preload.mjs"));
   await stageFileSet({ root, destination: path.join(stage, "brain-mail-ops"), files: MAIL_OPS_FILES });
 }
 
 export async function verifyStage(stage, { layout = "legacy" } = {}) {
-  for (const required of ["server.js", "brain-next-server.js", "brain-shutdown-preload.mjs", "brain-mail-ops/project_mail_runtime.py"]) {
+  for (const required of ["server.js", "brain-next-server.js", "brain-shutdown-preload.mjs", "brain-mail-ops/project_mail_runtime.py", `bin/${PROBE_BUNDLE_NAME}`]) {
     if (!(await stat(path.join(stage, required))).isFile()) throw new Error(`${required} is not a regular file`);
   }
   for (const [relative, expected] of Object.entries(MAIL_RUNTIME_LISTING)) {

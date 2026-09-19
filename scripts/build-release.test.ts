@@ -44,6 +44,11 @@ async function syntheticRoot(): Promise<string> {
   await mkdir(path.join(standalone, "node_modules", "pkg"), { recursive: true });
   await writeFile(path.join(standalone, "server.js"), "next server\n");
   await writeFile(path.join(standalone, "package.json"), "{}\n");
+  // `pnpm build:probe` writes this beside the server; the stage moves it to bin/.
+  await writeFile(
+    path.join(standalone, "mail-outbox-memory-probe.mjs"),
+    "probe bundle\n",
+  );
   await symlink("pkg", path.join(standalone, "node_modules", "alias"));
   for (const [relative, entries] of Object.entries(MAIL_RUNTIME_LISTING)) {
     const directory = path.join(standalone, "mail-service", relative);
@@ -86,6 +91,9 @@ describe("release packaging", () => {
     expect(await readFile(path.join(stage, "public", "icon.svg"), "utf8")).toBe("<svg/>\n");
     const { stdout } = await execFileAsync("readlink", [path.join(stage, "node_modules", "alias")]);
     expect(stdout.trim()).toBe("pkg");
+    expect(
+      await readFile(path.join(stage, "bin", "mail-outbox-memory-probe.mjs"), "utf8"),
+    ).toBe("probe bundle\n");
     const manifest = await readFile(path.join(stage, "brain-mail-ops", "MANIFEST.sha256"), "utf8");
     expect(manifest.trimEnd().split("\n")).toHaveLength(MAIL_OPS_FILES.length);
     expect(manifest).toMatch(/^[0-9a-f]{64}  brain-mail\.service$/m);

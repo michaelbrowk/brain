@@ -203,15 +203,15 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
       // `keeps`: nothing the page already had is replaced or removed, only
       // added to.
       //
-      // `idempotent` is the file's story, not the line's. The saved file is
-      // content-addressed, so the same attachment saved twice is one file. The
-      // Markdown line is not: the append below runs unconditionally, so a
-      // second call with `append` left at its default puts a second identical
-      // line on the page. The hint is declared `idempotent` because that is
-      // the contract this endpoint publishes; the honest fix is for the append
-      // to skip a line the page already carries, which is a behaviour change
-      // and not this one's to make.
-      annotations: hints("write keeps idempotent outside"),
+      // `repeats`: the same attachment saved twice is a second file, because
+      // `store.saveAttachment` names a file `nanoid(12)` plus its extension
+      // rather than by its content. The line guard below is not idempotency
+      // and is not claimed as any: it stops a second copy of a line the page
+      // already carries, and two saves do not produce the same line to begin
+      // with. Naming the general save by content hash, the way
+      // `stageNotionAttachment` already does, is what would turn this word
+      // over, and it is a store-wide change filed as its own follow-up.
+      annotations: hints("write keeps repeats outside"),
     },
     async ({ accountId, attachmentId, page, append }, extra) => {
       // The ids first, and a malformed one writes no line: an id Brain never

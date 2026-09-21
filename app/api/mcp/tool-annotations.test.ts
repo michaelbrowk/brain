@@ -99,7 +99,11 @@ const TRUTH_TABLE: Record<string, string> = {
   read_mail_message: "read keeps idempotent outside",
   get_mail_send_status: "read keeps idempotent outside",
   update_mail_thread: "write destroys idempotent outside",
-  save_mail_attachment: "write keeps idempotent outside",
+  // `repeats`, not `idempotent`: the same attachment saved twice is a second
+  // file, because the general save names a file `nanoid(12)` rather than by
+  // its content. Not adding a second copy of a line the page already carries
+  // is a different property, and it is the only one this tool has.
+  save_mail_attachment: "write keeps repeats outside",
   send_mail: "write destroys idempotent outside",
   reply_mail: "write destroys idempotent outside",
   // Notion import

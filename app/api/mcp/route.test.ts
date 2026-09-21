@@ -3408,15 +3408,16 @@ describe("save_mail_attachment", () => {
    *  two happened, because an agent that cannot tell them apart goes looking
    *  for a line it thinks it wrote.
    *
-   *  WHAT THIS DOES NOT PROVE. The store here answers one url for both saves.
-   *  The real `saveAttachment` does not: `saveAttachmentUnlocked` names the
-   *  file `nanoid(12)` plus the extension, so saving one mail attachment twice
-   *  writes two files with two urls and therefore two different lines, and
-   *  this guard never fires. Only the Notion staging path is content-addressed
-   *  (`stageNotionAttachment`, sha256 of the bytes). The guard is right and it
-   *  becomes effective the day the general save is named by content; until
-   *  then `save_mail_attachment` is still not idempotent about the line, which
-   *  is what `docs/mcp-tools.md` says under the hints.
+   *  WHAT THIS DOES NOT PROVE, and does not claim to. The store here answers
+   *  one url for both saves. The real `saveAttachment` does not:
+   *  `saveAttachmentUnlocked` names the file `nanoid(12)` plus the extension,
+   *  so saving one mail attachment twice writes two files with two urls and
+   *  therefore two different lines, which this guard never matches. Only the
+   *  Notion staging path is content-addressed (`stageNotionAttachment`, sha256
+   *  of the bytes). That is why the tool is declared `repeats` and not
+   *  `idempotent` in `tool-annotations.test.ts`: this is a guard against a
+   *  duplicated line, not a dedupe. The guard becomes effective the day the
+   *  general save is named by content, which is its own follow-up.
    *
    *  A store that holds its own body rather than a `readPage` answering a
    *  constant: the point is what the first call left behind for the second to

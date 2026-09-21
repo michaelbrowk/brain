@@ -103,7 +103,7 @@ per hint, in the order the tables below use them:
 | `read_mail_message` | read keeps idempotent outside |
 | `get_mail_send_status` | read keeps idempotent outside |
 | `update_mail_thread` | write **destroys** idempotent outside |
-| `save_mail_attachment` | write keeps idempotent outside |
+| `save_mail_attachment` | write keeps **repeats** outside |
 | `send_mail` | write **destroys** idempotent outside |
 | `reply_mail` | write **destroys** idempotent outside |
 | `notion_find_page` | read keeps idempotent outside |
@@ -116,7 +116,7 @@ per hint, in the order the tables below use them:
 | `notion_finalize_page` | write keeps idempotent outside |
 | `notion_abort_page` | write **destroys** idempotent outside |
 
-Three rows carry a caveat the four words cannot.
+Three rows carry a note the four words cannot.
 
 - **`update_mail_thread` is one tool covering six changes**, and two of them,
   trash and spam, take a thread out of the mailbox the owner reads. It is
@@ -128,14 +128,9 @@ Three rows carry a caveat the four words cannot.
   caption's own mark, because the moment a status is read is the one moment
   the operation id and its thread are both known. Both writes are write-once
   and neither is reachable by the caller.
-- **`save_mail_attachment` is not idempotent yet, and is declared as though it
-  were.** The tool no longer appends a line the page already carries, and says
-  which call added one in `lineAdded`. The file naming is the half that is
-  missing: `saveAttachment` names a file `nanoid(12)` plus its extension, so
-  the same attachment saved twice is two files with two urls and two different
-  lines, which the guard cannot match. Naming the general save by content hash,
-  the way `stageNotionAttachment` already does, is what would make the hint
-  true.
+- **`save_mail_attachment` is `repeats` because a second save writes a second
+  file**, and naming the general save by content hash is the follow-up that
+  would make it idempotent.
 
 `app/api/mcp/tool-annotations.test.ts` asserts this table against the server's
 own `tools/list`, in these same words. A tool registered without a title or
@@ -525,14 +520,15 @@ agent that passes it has to write its own line.
 body is read again immediately before the append, and a line already there is
 not added a second time.
 
-That guard does not add up to a dedupe yet, because the file naming is the
-other half and it is unchanged. `saveAttachment` names a file `nanoid(12)`
-plus its extension, so saving one attachment twice writes two files with two
-urls and therefore two different lines, and the guard never matches. Only the
-Notion staging path is content-addressed. Until the general save is named by
-content, an agent retrying a call it already made still has to check the page
-rather than call again, and `save_mail_attachment`'s `idempotentHint` is a
-declaration rather than a fact — see "What the hints say".
+That guard is not a dedupe, and the tool does not claim to be one: its
+`idempotentHint` is false. The file naming is the other half and it is
+unchanged. `saveAttachment` names a file `nanoid(12)` plus its extension, so
+saving one attachment twice writes two files with two urls and therefore two
+different lines, which the guard never matches. Only the Notion staging path
+is content-addressed. So an agent retrying a call it already made still has to
+check the page rather than call again. Naming the general save by content hash
+would change that, and it is a store-wide change filed as its own follow-up
+rather than done here.
 
 One activity line per call names the account, the attachment and the page,
 never the filename.

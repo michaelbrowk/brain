@@ -301,3 +301,125 @@ test("@release a stranger with the link edits a page, and a revoke ends it mid-s
     await visitor.close();
   }
 });
+
+/** The other half of the share model in the browser: a link that survives its
+ *  own page stopping being a root.
+ *
+ *  Part of the same compact release gate. What it proves is the promise the
+ *  card makes when it offers to share the parent instead — that the link
+ *  already in a stranger's hand goes on opening the page it named. Nothing
+ *  under it can prove that: the fold, the hop and the render are three
+ *  different files, and only the browser walks all three. */
+test("@release sharing a parent folds the nested link into it and the old address still opens", async ({
+  page,
+  browser,
+}) => {
+  test.setTimeout(120_000);
+
+  await login(page);
+  const parent = (
+    await browserJson(page, "/api/page", {
+      method: "POST",
+      body: { title: "Apartment", markdown: "Everything in the flat" },
+    })
+  ).body as { id: string };
+  const child = (
+    await browserJson(page, "/api/page", {
+      method: "POST",
+      body: {
+        parentId: parent.id,
+        title: "Furniture",
+        markdown: "The sofa and the lamp",
+      },
+    })
+  ).body as { id: string };
+
+  // owner: the child is shared on its own, through the API — the card's own
+  // path is covered above, and this test is about what happens next
+  const disclosed = (await browserJson(page, `/api/page/${child.id}/share`))
+    .body as { scopeToken: string };
+  const enabled = await browserJson(page, `/api/page/${child.id}/share`, {
+    method: "POST",
+    body: {
+      enabled: true,
+      expectedScopeToken: disclosed.scopeToken,
+      canEdit: false,
+    },
+  });
+  expect(
+    enabled.ok,
+    `share failed with ${enabled.status}: ${JSON.stringify(enabled.body)}`,
+  ).toBeTruthy();
+
+  // visitor: the address they are given, before anything moves
+  const visitor = await browser.newContext();
+  const shared = await visitor.newPage();
+  try {
+    await shared.goto(`/share/${child.id}`);
+    await expect(shared.locator("article h1")).toHaveText("Furniture");
+
+    // owner: Share on the parent states the overlap and offers one way out
+    await page.goto(`/p/${parent.id}`);
+    await expect(page.getByRole("textbox", { name: "Page title" })).toHaveValue(
+      "Apartment",
+      { timeout: 20_000 },
+    );
+    await page.getByRole("button", { name: "Share", exact: true }).click();
+    const card = page.getByRole("dialog", { name: "Share settings" });
+    await expect(card.locator("[data-share-overlap-blocker]")).toContainText(
+      "Furniture · shared nested page",
+      { timeout: 20_000 },
+    );
+    await expect(card.locator("[data-share-overlap-blocker]")).toContainText(
+      "Furniture's link will open inside this one; anyone who has it keeps it.",
+    );
+    await page.getByRole("button", { name: "Share Apartment instead" }).click();
+
+    // owner: the ledger turns into the ordinary shared state on the parent
+    await expect(card.locator(".brain-share-head")).toHaveText(
+      "Anyone with the link can read 2 pages.",
+      { timeout: 20_000 },
+    );
+    const link = await card
+      .locator('[data-share-row="link"] a')
+      .getAttribute("href");
+    expect(link).toContain(`/share/${parent.id}`);
+    await page.keyboard.press("Escape");
+
+    // the child is no longer a link of its own
+    await expect
+      .poll(
+        async () =>
+          (
+            (await browserJson(page, `/api/page/${child.id}/share`)).body as {
+              public: boolean;
+            }
+          ).public,
+        { timeout: 20_000 },
+      )
+      .toBe(false);
+
+    // visitor: the address they were given still opens the page they were
+    // given, inside the parent's link
+    await shared.goto(`/share/${child.id}`);
+    await expect(shared.locator("article h1")).toHaveText("Furniture");
+    await expect(shared).toHaveURL(
+      new RegExp(`/share/${parent.id}\\?page=${child.id}$`),
+    );
+    await expect(shared.locator("article")).toContainText("The sofa and the lamp");
+    // and the way up is the parent it now hangs from
+    await expect(shared.locator("[data-share-root-link]")).toContainText(
+      "Apartment",
+    );
+
+    // owner: revoking the parent ends the folded link with it
+    await browserJson(page, `/api/page/${parent.id}/share`, {
+      method: "POST",
+      body: { enabled: false },
+    });
+    const gone = await shared.goto(`/share/${child.id}`);
+    expect(gone?.status()).toBe(404);
+  } finally {
+    await visitor.close();
+  }
+});

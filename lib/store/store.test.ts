@@ -608,6 +608,25 @@ describe("Store", () => {
     expect(children.every(Object.isFrozen)).toBe(true);
   });
 
+  it("reads one page's live label, and nothing for an id the tree does not have", async () => {
+    const { s, root } = await tmpStore();
+    const parent = await s.createPage(null, "Parent");
+    const child = await s.createPage(parent.id, "Untitled");
+    await s.updateMeta(child.id, { title: "Pantry", icon: "🥫", by: "me" });
+
+    const reloaded = new Store(root);
+    await reloaded.init();
+
+    const label = reloaded.readPageLabel(child.id);
+    expect(label).toEqual({ id: child.id, title: "Pantry", icon: "🥫" });
+    expect(Object.isFrozen(label)).toBe(true);
+    expect(reloaded.readPageLabel(parent.id)).toEqual({
+      id: parent.id,
+      title: "Parent",
+    });
+    expect(reloaded.readPageLabel("no-such-page")).toBeNull();
+  });
+
   it("returns an existing deterministic page id instead of creating a duplicate", async () => {
     const { s, root } = await tmpStore();
     const id = "Ky7fPq2vR8sT4wX1zB6nD";

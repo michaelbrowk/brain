@@ -18,10 +18,7 @@ export function renderReadOnly(
     attachmentAccess?:
       | { pageId: string; shareVersion: number }
       | { rootId: string; targetId: string; shareVersion: number };
-    shareNavigation?: {
-      rootId: string;
-      isAllowedPage: (pageId: string) => boolean;
-    };
+    shareNavigation?: ShareNavigation;
   } = {},
 ): string {
   const cleaned = stripEditorDirectiveFences(markdown);
@@ -59,16 +56,20 @@ export function renderReadOnly(
   );
 }
 
+interface ShareNavigation {
+  rootId: string;
+  isAllowedPage: (pageId: string) => boolean;
+  /** The title and icon that page carries now, for a page the share reaches.
+   *  Null keeps the label the body was written with, which is the answer for
+   *  every page outside the share. */
+  pageLabel?: (pageId: string) => { title: string; icon?: string } | null;
+}
+
 /** Flatten private app links at render time, after Markdown was tokenized.
  * Rewriting their labels in the source can create new fences/headings and make
  * attachment authorization disagree with what the shared page displays. */
 class ReadOnlyRenderer extends Renderer {
-  constructor(
-    private readonly shareNavigation?: {
-      rootId: string;
-      isAllowedPage: (pageId: string) => boolean;
-    },
-  ) {
+  constructor(private readonly shareNavigation?: ShareNavigation) {
     super();
   }
 
@@ -84,10 +85,29 @@ class ReadOnlyRenderer extends Renderer {
           pageRef[1] === this.shareNavigation.rootId
             ? rootHref
             : `${rootHref}?page=${encodeURIComponent(pageRef[1])}`;
-        return `<a class="brain-page-ref" href="${href}">${this.parser.parseInline(token.tokens)}</a>`;
+        // The live title, the way the editor's page-ref node draws it for the
+        // owner. A rename does not rewrite the label in this body — Markdown
+        // is the source of truth — so the written one is only the fallback,
+        // for a page this share cannot see.
+        const live = this.shareNavigation.pageLabel?.(pageRef[1]) ?? null;
+        const label = live
+          ? `<span class="brain-page-ref-icon">${escapeText(live.icon || "📄")}</span> ${escapeText(live.title)}`
+          : this.parser.parseInline(token.tokens);
+        return `<a class="brain-page-ref" href="${href}">${label}</a>`;
       }
       return this.parser.parseInline(token.tokens);
     }
     return super.link(token);
   }
+}
+
+/** A title is text, not Markdown and not HTML. It goes through DOMPurify
+ *  after this either way, so this is about `A & B` reading as it was typed
+ *  rather than about safety. */
+function escapeText(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }

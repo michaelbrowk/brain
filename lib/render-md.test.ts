@@ -90,6 +90,52 @@ describe("read-only attachment rendering", () => {
     expect(html).toContain("<p>Fragment</p>");
   });
 
+  it("draws a page ref inside the share with the target's live title and icon", () => {
+    const html = renderReadOnly(
+      ["[📄 Untitled](/p/child)", "[Stale](/p/plain)", "[Stale](/p/outside)"].join(
+        "\n\n",
+      ),
+      {
+        shareNavigation: {
+          rootId: "root",
+          isAllowedPage: (id) => id !== "outside",
+          pageLabel: (id) =>
+            id === "child"
+              ? { title: "Pantry", icon: "🥫" }
+              : id === "plain"
+                ? { title: "Plain & <live>" }
+                : null,
+        },
+      },
+    );
+
+    expect(html).toContain(
+      '<a class="brain-page-ref" href="/share/root?page=child"><span class="brain-page-ref-icon">🥫</span> Pantry</a>',
+    );
+    expect(html).not.toContain("Untitled");
+    // No icon of its own reads as a page, the way the derived tail draws one.
+    expect(html).toContain(
+      '<a class="brain-page-ref" href="/share/root?page=plain"><span class="brain-page-ref-icon">📄</span> Plain &amp; &lt;live&gt;</a>',
+    );
+    // A page the share does not reach keeps the label the body carries, and
+    // the visitor learns nothing else about it.
+    expect(html).toContain("<p>Stale</p>");
+  });
+
+  it("keeps the written label when the share has no live title for the target", () => {
+    const html = renderReadOnly("[Written label](/p/child)", {
+      shareNavigation: {
+        rootId: "root",
+        isAllowedPage: () => true,
+        pageLabel: () => null,
+      },
+    });
+
+    expect(html).toContain(
+      '<a class="brain-page-ref" href="/share/root?page=child">Written label</a>',
+    );
+  });
+
   it("keeps ordinary external links out of the page-reference treatment", () => {
     const html = renderReadOnly("[External](https://example.com)");
 

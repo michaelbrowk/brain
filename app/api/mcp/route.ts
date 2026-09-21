@@ -373,7 +373,7 @@ const handler = createMcpHandler(
         title: "Append to a page",
         description:
           "Append markdown to the end of a page in one atomic call (read + append + " +
-          "write server-side) — add to a page without overwriting it, no read_page / " +
+          "write server-side): add to a page without overwriting it, no read_page / " +
           "rev dance needed. Great for logging into a pre-filled agenda or journal. " +
           "Calling it twice adds the text twice, and each save is committed to the " +
           "notes folder's own git history.",
@@ -838,7 +838,7 @@ const handler = createMcpHandler(
       {
         title: "Move a page to Trash",
         description:
-          "Delete a page and its whole subtree. Soft-delete — the pages go to Trash and are recoverable from there. Nothing is purged: only the owner empties the Trash.",
+          "Delete a page and its whole subtree. A soft delete: the pages go to Trash and are recoverable from there. Nothing is purged, only the owner empties the Trash.",
         inputSchema: { id: z.string() },
         annotations: hints("write destroys idempotent local"),
       },

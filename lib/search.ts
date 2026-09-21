@@ -118,8 +118,9 @@ async function doSearch(q: string): Promise<SearchHit[]> {
   const dirToId = new Map<string, SearchPage>();
   const candidates = new Map<
     string,
-    SearchPage & { lines: string[]; matchedTerms: Set<string> }
+    SearchPage & { lines: string[]; matchedTerms: Set<string>; phrase: boolean }
   >();
+  const normalizedQuery = q.toLocaleLowerCase();
   const walk = (nodes: ReturnType<typeof store.getTree>) => {
     for (const n of nodes) {
       const page = {
@@ -132,15 +133,31 @@ async function doSearch(q: string): Promise<SearchHit[]> {
       const title = n.title.toLocaleLowerCase();
       const matchedTerms = new Set(terms.filter((term) => title.includes(term)));
       if (matchedTerms.size > 0) {
-        candidates.set(n.id, { ...page, lines: [], matchedTerms });
+        candidates.set(n.id, {
+          ...page,
+          lines: [],
+          matchedTerms,
+          phrase: title.includes(normalizedQuery),
+        });
       }
       walk(n.children);
     }
   };
   walk(store.getTree());
 
-  const lines = await rgJson(terms);
-  for (const line of lines) {
+  // THE PHRASE RUN FIRST, AND ITS HITS FIRST.
+  //
+  // A note holding "Урок 15 сентября" as written is what somebody typing that
+  // wanted, above a note holding урок in one place and сентября in another.
+  // The whole query in the title counts too: a page called by its name is the
+  // same kind of hit, and sorting a body phrase above it would be a worse
+  // answer than the one this had before.
+  const { phrase: phraseLines, words: wordLines } = await rgJson(q);
+  const scanned = [
+    ...phraseLines.map((line) => ({ line, fromPhrase: true })),
+    ...wordLines.map((line) => ({ line, fromPhrase: false })),
+  ];
+  for (const { line, fromPhrase } of scanned) {
     let obj: {
       type?: string;
       data?: {
@@ -173,7 +190,9 @@ async function doSearch(q: string): Promise<SearchHit[]> {
       ...page,
       lines: [],
       matchedTerms: new Set<string>(),
+      phrase: page.title.toLocaleLowerCase().includes(normalizedQuery),
     };
+    if (fromPhrase) candidate.phrase = true;
     for (const term of terms) {
       if (normalizedLine.includes(term)) candidate.matchedTerms.add(term);
     }
@@ -196,6 +215,7 @@ async function doSearch(q: string): Promise<SearchHit[]> {
         icon: candidate.icon,
         updated: candidate.updated,
         rank: rankSearchCandidate(candidate.title, candidate.lines, q),
+        phrase: candidate.phrase,
         source: bestLine ? ("body" as const) : ("title" as const),
         bestLine,
         snippet,
@@ -203,6 +223,7 @@ async function doSearch(q: string): Promise<SearchHit[]> {
     })
     .sort(
       (a, b) =>
+        Number(b.phrase) - Number(a.phrase) ||
         a.rank - b.rank ||
         searchTimestamp(b.updated) - searchTimestamp(a.updated) ||
         a.title.localeCompare(b.title),
@@ -476,30 +497,88 @@ function makeSnippet(line: string, q: string, terms: string[]) {
   return { before, match, after };
 }
 
-async function rgJson(terms: string[]): Promise<string[]> {
-  const lines: string[] = [];
-  // Search each word separately. A single multi-pattern rg command applies
-  // max-count to their combined output, so a common first word can otherwise
-  // hide a rarer second word later in the same note.
+/** THE WORD THAT IS IN EVERY NOTE.
+ *
+ *  A run is one ripgrep invocation. The phrase comes first and the words
+ *  follow, each on its own: a single multi-pattern command applies max-count
+ *  to their combined output, so a common first word hides a rarer second word
+ *  later in the same note.
+ *
+ *  WHY A WORD CAN BE LEFT OUT OF THE WORD RUNS. "Урок 15 сентября" failed on
+ *  Michael's notebook because "15" is in three lines of nearly every note he
+ *  keeps, and its run alone was thousands of matches of nothing. A word under
+ *  three characters, or one that is only digits, says too little on its own to
+ *  spend a run on — the phrase run is where a date is found, on the line that
+ *  holds the whole query. A word that is the entire query is searched
+ *  whatever its shape: there is nothing else to go on, and "15" typed by
+ *  itself means the notes with 15 in them. */
+export interface SearchRun {
+  readonly pattern: string;
+  /** The whole trimmed query, as one fixed string. Its hits rank first. */
+  readonly phrase: boolean;
+}
+
+const MIN_WORD_CHARS = 3;
+
+export function searchRunPlan(query: string): SearchRun[] {
+  const phrase = query.trim();
+  const terms = tokenizeSearchQuery(query);
+  if (!phrase || terms.length === 0) return [];
+  const runs: SearchRun[] = [{ pattern: phrase, phrase: true }];
+  // A one-word query is its own phrase. Running it twice would be the same
+  // search for the same lines against the same cap.
+  const planned = new Set([phrase.toLocaleLowerCase()]);
   for (const term of terms) {
-    lines.push(
-      ...(await runRipgrep([
-        "--fixed-strings",
-        "--ignore-case",
-        "--max-count",
-        "3",
-        "-e",
-        term,
-      ])),
-    );
+    if (planned.has(term)) continue;
+    if (terms.length > 1 && !worthOwnRun(term)) continue;
+    planned.add(term);
+    runs.push({ pattern: term, phrase: false });
   }
-  return lines;
+  return runs;
+}
+
+function worthOwnRun(term: string): boolean {
+  return [...term].length >= MIN_WORD_CHARS && !/^\p{N}+$/u.test(term);
+}
+
+async function rgJson(query: string): Promise<{ phrase: string[]; words: string[] }> {
+  const phrase: string[] = [];
+  const words: string[] = [];
+  for (const run of searchRunPlan(query)) {
+    const lines = await runRipgrep([
+      "--fixed-strings",
+      "--ignore-case",
+      "--max-count",
+      "3",
+      "-e",
+      run.pattern,
+    ]);
+    (run.phrase ? phrase : words).push(...lines);
+  }
+  return { phrase, words };
 }
 
 /** Case-sensitive fixed-string match (ids are case-sensitive). */
 function rgLines(pattern: string, maxCount: number): Promise<string[]> {
   return runRipgrep(["--fixed-strings", "--max-count", String(maxCount), "-e", pattern]);
 }
+
+/** How many `match` lines one run answers before ripgrep is stopped.
+ *
+ *  A BROAD TERM DEGRADES, IT DOES NOT FAIL. The old guard counted bytes over
+ *  the whole run and refused everything at 512 KB, so a word in most of the
+ *  notes — "15", in the query that reported this — turned the search into
+ *  `search_backend` rather than into the first matches it had already read.
+ *  Three hundred is well past `MAX_HITS` even when every line lands on a
+ *  different page, so the answer a reader sees is the same answer for
+ *  anything narrower than the cap. */
+export const MAX_MATCH_LINES = 300;
+
+/** The one thing bytes are still counted for: a single line past this cannot
+ *  be answered out of half of itself, and nothing downstream will parse it. */
+const MAX_LINE_BYTES = 512 * 1024;
+
+const MATCH_LINE = /"type"\s*:\s*"match"/;
 
 export function runRipgrep(
   args: string[],
@@ -511,7 +590,9 @@ export function runRipgrep(
       ["--json", ...args, "-g", "index.md", "."],
       { cwd, stdio: ["ignore", "pipe", "pipe"] },
     );
-    let out = "";
+    const lines: string[] = [];
+    let pending = "";
+    let matches = 0;
     let stderr = "";
     let settled = false;
     let exceededOutputLimit = false;
@@ -520,15 +601,35 @@ export function runRipgrep(
       settled = true;
       clearTimeout(timer);
       if (error) reject(error);
-      else resolve(out.split("\n").filter(Boolean));
+      else resolve(lines);
     };
     const timer = setTimeout(() => {
       rg.kill("SIGKILL");
       finish(new SearchBackendError("ripgrep search timed out"));
     }, TIMEOUT_MS);
-    rg.stdout.on("data", (d) => {
-      out += d;
-      if (out.length > 512 * 1024) {
+    // Decoded here rather than by concatenating buffers: a multi-byte
+    // character split across two chunks is one character again.
+    rg.stdout.setEncoding("utf8");
+    rg.stdout.on("data", (chunk: string) => {
+      pending += chunk;
+      let newline = pending.indexOf("\n");
+      while (newline !== -1) {
+        const line = pending.slice(0, newline);
+        pending = pending.slice(newline + 1);
+        if (line) {
+          lines.push(line);
+          if (MATCH_LINE.test(line)) matches += 1;
+        }
+        if (matches >= MAX_MATCH_LINES) {
+          // Answered, not refused: these are the first matches, and ripgrep
+          // has no more work to do for a caller that keeps twenty of them.
+          rg.kill("SIGKILL");
+          finish();
+          return;
+        }
+        newline = pending.indexOf("\n");
+      }
+      if (pending.length > MAX_LINE_BYTES) {
         exceededOutputLimit = true;
         rg.kill("SIGKILL");
       }
@@ -543,6 +644,9 @@ export function runRipgrep(
       }
       // ripgrep uses exit 1 for a successful search with no matches.
       if (code === 0 || code === 1) {
+        // A last line with no newline after it. ripgrep terminates every JSON
+        // line, so this is the shape of a run that was cut off elsewhere.
+        if (pending) lines.push(pending);
         finish();
         return;
       }

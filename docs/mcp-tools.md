@@ -42,13 +42,15 @@ Five rules no single row states.
 - **`search_backend` is the search engine failing, which is not the notes
   folder failing.** Only `search` answers it. Brain searches through ripgrep,
   and the four things that stop it are the `rg` binary missing from the
-  release or off `PATH`, a search that ran past its three seconds, a query
-  whose output went over 512 KB, and a bad exit. The sentence is Brain's own
-  and names nothing of the machine — ripgrep's own stderr stays in the
-  server's log, so a bad exit says only which code it was. A narrower query is
-  worth one retry for the middle two — the other two need somebody to fix the
-  release, so do not loop, and do not read it as a folder you should stop
-  writing to.
+  release or off `PATH`, a search that ran past its three seconds, a single
+  output line over 512 KB, and a bad exit. A broad query is no longer one of
+  them: matches past the first 300 are dropped and the search answers what it
+  read, so a common word costs you the rest of its matches rather than the
+  whole answer. The sentence is Brain's own and names nothing of the machine —
+  ripgrep's own stderr stays in the server's log, so a bad exit says only which
+  code it was. A narrower query is worth one retry for the timeout — the others
+  need somebody to fix the release or the note, so do not loop, and do not read
+  it as a folder you should stop writing to.
 - **`read_mail_message` may answer `state: "fetching"`.** Call it again. Each
   call re-records the demand that keeps the body in the service's cache, so an
   agent that stops asking loses the body it was waiting for.
@@ -153,7 +155,7 @@ without all four hints fails there.
 | `connection_check` | | none | `status`, per-check results, `access` with `read`, `write`, `import`, `mail` and `mailSend`, the root page count and the granted scopes | `store_failed` |
 | `list_tree` | | none | the whole page tree: ids, titles, icons, nesting | `store_failed` |
 | `read_page` | | `id` | the page's meta, its markdown and its `rev` | `store_failed`. An id that is not a page surfaces as a transport error today rather than an `{ error }` answer |
-| `search` | | `query` | matching pages with snippets | `search_backend`, in ripgrep's own sentence: the binary missing, a timeout, the 512 KB output cap, a bad exit. `store_failed` |
+| `search` | | `query` | matching pages with snippets, the whole-query matches first | `search_backend`, in ripgrep's own sentence: the binary missing, a timeout, one line over 512 KB, a bad exit. A broad word is capped, not refused. `store_failed` |
 | `write_page` | `brain:write` | `id`, `markdown`, `rev?` | the written page's meta and new `rev` | `rev_conflict`, with `currentRev` to re-read from. `store_failed` |
 | `append_page` | `brain:write` | `id`, `markdown` | the page's meta after the append | `store_failed` |
 | `create_page` | `brain:write` | `title`, `parentId?`, `markdown?`, `icon?`, `status?` | the new page's meta, including its id | `parent not found`, and it says the page was not created so the client does not retry at the root. `store_failed` |

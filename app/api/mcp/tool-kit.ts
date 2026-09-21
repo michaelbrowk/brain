@@ -59,6 +59,24 @@ export function storeFailed(error = "the notes folder could not answer") {
   return refusal(error, STORE_FAILED);
 }
 
+/** The code the full-text engine failing answers under, which is not the
+ *  notes folder failing. */
+export const SEARCH_BACKEND = "search_backend";
+
+/** WHAT RIPGREP FAILING LOOKS LIKE TO AN AGENT.
+ *
+ *  `search` reads the store like every other page tool, so it is wrapped in
+ *  the same catch-all, and that swallowed the one failure it has of its own:
+ *  `rg` missing from the release or off `PATH`, a timeout, an output cap, a
+ *  bad exit. All four arrived as `store_failed`, and an agent cannot tell a
+ *  notes folder it should stop writing to from a search binary somebody has
+ *  to install. Its own code, and the engine's own sentence — `rg` is spawned
+ *  with the notes folder as its cwd and searches `.`, so everything it says
+ *  is relative and no path of the machine's travels with it. */
+export function searchBackendFailed(error: string) {
+  return refusal(error, SEARCH_BACKEND);
+}
+
 /** The permission answer, in the same two fields every refusal uses, with the
  *  scope it wanted beside them. The `insufficient_scope` word itself is the
  *  OAuth one, and the 403 this endpoint answers at the HTTP level

@@ -31,6 +31,17 @@ export class SearchBackendError extends Error {
   }
 }
 
+/** THE SEARCH ENGINE FAILING, TOLD FROM THE NOTES FOLDER FAILING.
+ *
+ *  A caller that catches everything alike cannot tell "ripgrep is not
+ *  installed" from "the notes folder is unwritable", and those two call for
+ *  opposite responses. Read off the name rather than the class, the way
+ *  `lib/store`'s own predicates are, so a module that mocks this one still
+ *  answers for the errors it throws. */
+export function isSearchBackendError(error: unknown): boolean {
+  return error instanceof Error && error.name === "SearchBackendError";
+}
+
 /** Production readiness must fail loudly when the external full-text engine is
  *  absent. Interactive requests also fail explicitly instead of pretending an
  *  unavailable backend returned zero matches. */

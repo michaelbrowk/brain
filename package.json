@@ -1,6 +1,6 @@
 {
   "name": "brain",
-  "version": "0.12.2",
+  "version": "0.12.3",
   "description": "Self-hosted notes and mail on a folder of Markdown files.",
   "license": "MIT",
   "repository": {

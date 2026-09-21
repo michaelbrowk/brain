@@ -8,7 +8,7 @@ import { act, useEffect, useReducer } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { apiFetch } from "@/lib/client";
-import { resetTasksStore } from "./tasks-client";
+import { localDay, mutateTasks, resetTasksStore } from "./tasks-client";
 import { resetMailComposeAvailable } from "./mail-compose-available";
 import { resetTaskCaptureFocus } from "./tasks-ghost-row";
 import { Shell } from "./shell";
@@ -260,6 +260,41 @@ describe("tasks surface navigation (desktop)", () => {
     // the event bumps the token, and the token is part of the load's key
     expect(callsFor("/api/tasks?")).toBe(tasksBefore + 1);
     expect(callsFor("/api/tree")).toBe(treeBefore);
+  });
+
+  it("counts a task promoted in a note on the sidebar row, asking nothing", async () => {
+    // THE BADGE IS THE SAME SET, FROM A THIRD SCREEN. A task promoted on a
+    // note is written into `components/tasks-client` by the editor, and the
+    // count the shell derives is off that set, so the number moves on a note
+    // the reader never left. Nothing is asked again: the tab drops the SSE
+    // echo of its own write, so no token moves and no load runs.
+    window.history.replaceState({}, "", "/");
+
+    await act(async () => root.render(<Shell tree={[]} initialSelectedId={null} />));
+    await settle();
+    expect(navRow("Tasks")?.querySelector(".tree-row-count")).toBeNull();
+    const reads = () =>
+      apiFetchMock.mock.calls.filter(([input]) =>
+        String(input).startsWith("/api/tasks?"),
+      ).length;
+    const before = reads();
+
+    await act(async () => {
+      mutateTasks(() => [
+        {
+          id: "task-1",
+          title: "water the plants",
+          when: localDay().today,
+          done: false,
+          created: "2026-09-01T09:00:00.000Z",
+          updated: "2026-09-01T09:00:00.000Z",
+        },
+      ]);
+    });
+    await settle();
+
+    expect(navRow("Tasks")?.querySelector(".tree-row-count")?.textContent).toBe("1");
+    expect(reads()).toBe(before);
   });
 
   it("re-enters on a forward popstate to /tasks", async () => {

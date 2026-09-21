@@ -34,7 +34,7 @@ vi.mock("framer-motion", async () => {
   });
 });
 
-const { localDay, resetTasksStore, useTasks } = await import("./tasks-client");
+const { localDay, mutateTasks, resetTasksStore, useTasks } = await import("./tasks-client");
 const { TasksSurface } = await import("./tasks-surface");
 const { dayLabel, openTodayCount } = await import("./tasks-lists");
 const { WRITE_AT_MS } = await import("./tasks-row");
@@ -116,8 +116,9 @@ const storeNow = (): readonly TaskView[] => records.at(-1) ?? [];
 async function mount(
   tasks: TaskView[],
   props: Partial<React.ComponentProps<typeof TasksSurface>> = {},
+  { fresh = true }: { fresh?: boolean } = {},
 ) {
-  token += 1;
+  if (fresh) token += 1;
   apiFetchMock.mockImplementation(async (input) => {
     const url = String(input);
     if (url.startsWith("/api/tasks?")) return response({ tasks });
@@ -138,18 +139,31 @@ async function mount(
   await settle();
 }
 
-/** A whole new mount of the surface, the way walking to Mail and back is. */
+/** A whole new mount of the surface, the way walking to Mail and back is.
+ *
+ *  WARM, because that walk is warm. `components/tasks-client` is a module the
+ *  shell keeps subscribed for the sidebar count, so it outlives the column,
+ *  and a tab that wrote a task itself never bumps the token (the shell drops
+ *  the SSE echo of its own write). This helper used to call
+ *  `resetTasksStore()` and take a new token on every remount, which is a
+ *  colder start than production ever has: it re-fetched the fixture each
+ *  time, and so it could not see a record the store is missing. That is the
+ *  class of bug the case below pins.
+ *
+ *  `cold` is for a case that needs the module to know nothing — it says so at
+ *  the call site. */
 async function remount(
   tasks: TaskView[],
   props: Partial<React.ComponentProps<typeof TasksSurface>> = {},
+  { cold = false }: { cold?: boolean } = {},
 ) {
   await act(async () => root.unmount());
-  resetTasksStore();
+  if (cold) resetTasksStore();
   host.remove();
   host = document.createElement("div");
   document.body.appendChild(host);
   root = createRoot(host);
-  await mount(tasks, props);
+  await mount(tasks, props, { fresh: cold });
 }
 
 /** The framer props each row MOUNTED with. First render wins: the entrance
@@ -1288,6 +1302,34 @@ describe("the morning, and the day that turns under an open tab", () => {
     expect(reads()).toBeGreaterThan(before);
     // the flag is already down for this tab: a date change does not replay it
     expect(localStorage.getItem("brain.tasks.entrance")).toBe(TODAY);
+  });
+});
+
+describe("a task this tab wrote away from the column", () => {
+  it("stands on the walk back to Tasks, with nothing asked again", async () => {
+    // THE PROMOTE IN A NOTE, FROM THE COLUMN'S SIDE OF IT. The editor writes
+    // the task, the route answers the record, and the writer puts it in the
+    // shared set — `components/editor/task-checkbox.ts` does this now, and
+    // `components/editor/task-promote.test.ts` pins that it does. What this
+    // case owns is the other half: the column reads that set and nothing
+    // else, so walking away and back shows the task with no request at all.
+    // The tab cannot ask: it dedupes on (day, token), and the token only
+    // moves on a task event this tab did NOT write.
+    await mount([task("old A", { when: dayFrom(3) })], { list: "upcoming" });
+    expect(rowTitles()).toEqual(["old A"]);
+    const reads = () =>
+      apiFetchMock.mock.calls.filter(([input]) =>
+        String(input).startsWith("/api/tasks?"),
+      ).length;
+    const before = reads();
+
+    await act(async () => {
+      mutateTasks((tasks) => [task("from the note", { when: dayFrom(1) }), ...tasks]);
+    });
+    await remount([task("old A", { when: dayFrom(3) })], { list: "upcoming" });
+
+    expect(rowTitles()).toEqual(["from the note", "old A"]);
+    expect(reads()).toBe(before);
   });
 });
 

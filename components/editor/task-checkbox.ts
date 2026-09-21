@@ -15,7 +15,7 @@ import type {
 } from "@milkdown/kit/prose/view";
 import { $command, $prose, $view } from "@milkdown/kit/utils";
 
-import { localDay, onDayChange } from "@/components/tasks-client";
+import { localDay, mutateTasks, onDayChange } from "@/components/tasks-client";
 import {
   prefersReducedMotion,
   renderTaskCheckbox,
@@ -1243,6 +1243,16 @@ async function promoteLine(
     if (!response.ok) return refused(await refusalOf(response));
     const answer = (await response.json()) as { task: TaskView };
     publishTasks(view, [...(promoteKey.getState(view.state)?.tasks ?? []), answer.task]);
+    // AND THE SET EVERY OTHER TASKS SCREEN READS. `publishTasks` is a
+    // ProseMirror meta: it draws this line's word and reaches nothing else.
+    // Tasks, Home's Today block and the sidebar count all read
+    // `components/tasks-client`, which dedupes on (day, token), and the token
+    // only moves on a task event THIS TAB DID NOT WRITE — the shell drops its
+    // own echo (`components/shell.tsx`), and that guard is load-bearing. So
+    // nothing would ever have told them, and the three screens showed the
+    // list they last fetched until a reload or midnight. The writer reports,
+    // the way the capture row and Home's quick capture already do.
+    mutateTasks((tasks) => [answer.task, ...tasks]);
     return { taskId: answer.task.id, reason: null };
   } catch {
     return refused("The task could not be saved");
@@ -1268,6 +1278,17 @@ async function reschedule(
       (promoteKey.getState(view.state)?.tasks ?? []).map((task) =>
         task.id === taskId ? answer.task : task,
       ),
+    );
+    // AN UPSERT AND NOT A MAP, which the promote's insert above is the other
+    // half of. This line's record came with the page, and the shared set is
+    // the reader's own lists: a task filed on a day outside the open one is a
+    // record that set has never loaded, so replacing what is already there
+    // would write this answer nowhere. Adding one the first `load()` will
+    // replace wholesale is safe — `mutateTasks` does not touch `loadedKey`.
+    mutateTasks((tasks) =>
+      tasks.some((task) => task.id === taskId)
+        ? tasks.map((task) => (task.id === taskId ? answer.task : task))
+        : [answer.task, ...tasks],
     );
     return null;
   } catch {

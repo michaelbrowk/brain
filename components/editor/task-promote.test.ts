@@ -8,7 +8,7 @@ import type { EditorView } from "@milkdown/kit/prose/view";
 import { callCommand, getMarkdown } from "@milkdown/kit/utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { resetTasksStore } from "@/components/tasks-client";
+import { liveTask, resetTasksStore } from "@/components/tasks-client";
 import { hashTaskText, normalizeTaskText } from "@/lib/tasks/task-lines";
 
 import {
@@ -1303,5 +1303,75 @@ describe("the + Task gesture", () => {
 
     expect(menu()).toBeNull();
     expect(calls.filter((call) => call.method === "POST")).toHaveLength(0);
+  });
+
+  /** THE WRITE HAS TO REACH THE SET EVERY OTHER TASKS SCREEN READS.
+   *
+   *  `publishTasks` is a ProseMirror meta: it reaches this note's own line
+   *  decorations and nothing else, which is why the word on the line was
+   *  right while Tasks, Home's Today block and the sidebar count went on
+   *  showing the list they last fetched. Nothing else could tell them —
+   *  `components/tasks-client` dedupes on (day, token), and the shell drops
+   *  the SSE echo of a write this tab made itself
+   *  (`components/shell.tsx`, load-bearing). So the writer reports, the way
+   *  the capture row and Home's quick capture already do.
+   */
+  describe("the record set Tasks, Home and the badge read", () => {
+    it("holds the promoted task, with the day the chip set", async () => {
+      const view = await mountEditor("- [ ] water the plants\n");
+      hover(view, 0);
+      marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+
+      await pickDay(TOMORROW);
+
+      expect(liveTask("task-1")).toMatchObject({
+        id: "task-1",
+        title: normalizeTaskText("water the plants"),
+        when: TOMORROW,
+      });
+    });
+
+    it("holds the new day when a promoted line is rescheduled", async () => {
+      const view = await mountEditor("- [ ] water the plants\n");
+      hover(view, 0);
+      marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await pick("Today");
+
+      marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await pickDay(TOMORROW);
+
+      expect(liveTask("task-1")).toMatchObject({ id: "task-1", when: TOMORROW });
+    });
+
+    it("takes in a record the set never loaded, rather than dropping it", async () => {
+      // AN UPSERT AND NOT A MAP. This line's record came with the page, and
+      // the shared set is the reader's own lists: a task filed on a day
+      // outside the open one is a record the set has never seen, and a
+      // reschedule that only replaced what was already there would write it
+      // nowhere.
+      const text = normalizeTaskText("water the plants");
+      tasks = [
+        {
+          id: "task-known",
+          title: text,
+          page: PAGE,
+          when: TODAY,
+          done: false,
+          created: NOW.toISOString(),
+          updated: NOW.toISOString(),
+          anchor: { text, hash: hashTaskText(text), ordinal: 0, line: 0 },
+        },
+      ];
+      const view = await mountEditor("- [ ] water the plants\n");
+      expect(liveTask("task-known")).toBeUndefined();
+
+      marks(view)[0].dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      await pickDay(TOMORROW);
+
+      expect(liveTask("task-known")).toMatchObject({
+        id: "task-known",
+        when: TOMORROW,
+      });
+    });
   });
 });

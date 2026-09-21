@@ -17,6 +17,7 @@ import {
 import { logMailActivity, mailOutcome, mailRefusal } from "./mail-tool-kit";
 import {
   hasScope,
+  hints,
   insufficientScope,
   refusal,
   STORE_FAILED,
@@ -171,19 +172,34 @@ function attachmentLine(saved: SavedAttachment): string {
 }
 
 export function registerMailAttachmentTools(server: McpToolServer): void {
-  server.tool(
+  server.registerTool(
     TOOL,
-    `Save one attachment from a message into a note's own files. The bytes stream from the mail service into the notes folder, where the note store checks them: ${SAVE_CAP_REASON}, no active file type, no executable whatever type the message claims, and bytes that do not match the type they claim are turned down with the store's own reason. With append true, the default, the page is read first and one Markdown line is added to it, an image shown and anything else linked. With append false nothing is written to the page, and a file no page links is swept a day later, so link it yourself.`,
     {
-      accountId: z.string(),
-      attachmentId: z
-        .string()
-        .describe("from the attachment list on a message"),
-      page: z.string().describe("the page the file is saved into"),
-      append: z
-        .boolean()
-        .optional()
-        .describe("add a line linking the file, true by default"),
+      title: "Save a mail attachment into a note",
+      description: `Save one attachment from a message into a note's own files. The bytes stream from the mail service into the notes folder, where the note store checks them: ${SAVE_CAP_REASON}, no active file type, no executable whatever type the message claims, and bytes that do not match the type they claim are turned down with the store's own reason. With append true, the default, the page is read first and one Markdown line is added to it, an image shown and anything else linked. With append false nothing is written to the page, and a file no page links is swept a day later, so link it yourself.`,
+      inputSchema: {
+        accountId: z.string(),
+        attachmentId: z
+          .string()
+          .describe("from the attachment list on a message"),
+        page: z.string().describe("the page the file is saved into"),
+        append: z
+          .boolean()
+          .optional()
+          .describe("add a line linking the file, true by default"),
+      },
+      // `keeps`: nothing the page already had is replaced or removed, only
+      // added to.
+      //
+      // `idempotent` is the file's story, not the line's. The saved file is
+      // content-addressed, so the same attachment saved twice is one file. The
+      // Markdown line is not: the append below runs unconditionally, so a
+      // second call with `append` left at its default puts a second identical
+      // line on the page. The hint is declared `idempotent` because that is
+      // the contract this endpoint publishes; the honest fix is for the append
+      // to skip a line the page already carries, which is a behaviour change
+      // and not this one's to make.
+      annotations: hints("write keeps idempotent outside"),
     },
     async ({ accountId, attachmentId, page, append }, extra) => {
       // The ids first, and a malformed one writes no line: an id Brain never

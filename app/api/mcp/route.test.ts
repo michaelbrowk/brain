@@ -1163,10 +1163,16 @@ describe("Notion MCP route validation", () => {
    *  exercise. */
   it("calls getStore() only through acquireStoreForImport() inside the nine notion_* handlers", async () => {
     const source = await fs.readFile(new URL("./route.ts", import.meta.url), "utf8");
-    const notionHandlers = source.slice(
-      source.indexOf('server.registerTool(\n      "notion_find_page"'),
-      source.indexOf('server.tool(\n      "update_meta"'),
-    );
+    // Both anchors are asserted found before the slice. An `indexOf` that
+    // missed used to return -1 silently, and `slice(start, -1)` then ran to
+    // the end of the file and swept in the page writes below — which is what
+    // happened when every registration moved to `registerTool` and the end
+    // anchor still said `server.tool`.
+    const first = source.indexOf('server.registerTool(\n      "notion_find_page"');
+    const after = source.indexOf('server.registerTool(\n      "update_meta"');
+    expect(first).toBeGreaterThan(-1);
+    expect(after).toBeGreaterThan(first);
+    const notionHandlers = source.slice(first, after);
     expect(notionHandlers).toContain("notion_abort_page");
     const bareGetStoreCalls = notionHandlers.match(/\bgetStore\(\)/g) ?? [];
     expect(bareGetStoreCalls).toEqual([]);

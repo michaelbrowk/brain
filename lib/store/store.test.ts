@@ -608,11 +608,20 @@ describe("Store", () => {
     expect(children.every(Object.isFrozen)).toBe(true);
   });
 
-  it("reads one page's live label, and nothing for an id the tree does not have", async () => {
+  it("reads one page's live label, and nothing for a row or an id the tree does not have", async () => {
     const { s, root } = await tmpStore();
     const parent = await s.createPage(null, "Parent");
     const child = await s.createPage(parent.id, "Untitled");
     await s.updateMeta(child.id, { title: "Pantry", icon: "🥫", by: "me" });
+    const collectionRow = await s.createPage(parent.id, "Collection row");
+    await writeRawPageMeta(s, collectionRow.id, {
+      collectionRow: {
+        source: "notion",
+        version: 1,
+        databaseId: "synthetic-database",
+        values: {},
+      },
+    });
 
     const reloaded = new Store(root);
     await reloaded.init();
@@ -624,6 +633,9 @@ describe("Store", () => {
       id: parent.id,
       title: "Parent",
     });
+    // A row of a collection is not a page a shared body may draw as one,
+    // which is the rule `readDirectChildren` keeps for the derived tail.
+    expect(reloaded.readPageLabel(collectionRow.id)).toBeNull();
     expect(reloaded.readPageLabel("no-such-page")).toBeNull();
   });
 

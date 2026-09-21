@@ -101,9 +101,14 @@ class ReadOnlyRenderer extends Renderer {
   }
 }
 
-/** A title is text, not Markdown and not HTML. It goes through DOMPurify
- *  after this either way, so this is about `A & B` reading as it was typed
- *  rather than about safety. */
+/** Load-bearing. A page title is text, and this is the one place a title is
+ *  concatenated into raw HTML — the derived tail is JSX, where React escapes
+ *  it for free. Without this, a title of `<img src=x onerror=…>` becomes live
+ *  markup on a public page: DOMPurify drops the handler but keeps the `<img>`
+ *  (a remote beacon fired on every anonymous load) and any `<b>` around it.
+ *  On an editable share the title need not even be the owner's — a visitor
+ *  names the subpage they create, and every later visitor is served it.
+ *  DOMPurify is the second line here, not the first. */
 function escapeText(value: string): string {
   return value
     .replace(/&/g, "&amp;")

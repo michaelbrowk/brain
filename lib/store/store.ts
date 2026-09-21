@@ -1861,16 +1861,18 @@ export class Store {
   }
 
   /** The live title and icon of one page, for a surface that has already
-   *  decided it may show them. Same projection as `readDirectChildren`, one
-   *  page at a time, so a shared page can draw a link to a grandchild with
-   *  the name it carries now. An id the tree does not have answers null
-   *  rather than throwing: a public caller learns nothing from the
-   *  difference between a page that moved away and one that never existed. */
+   *  decided it may show them — the gate is the caller's, never this method's.
+   *  Same projection as `readDirectChildren`, one page at a time, so a shared
+   *  page can draw a link to a grandchild with the name it carries now, and a
+   *  collection row is as little a page here as it is there. An id the tree
+   *  does not have answers null rather than throwing: a public caller learns
+   *  nothing from the difference between a page that moved away and one that
+   *  never existed. */
   readPageLabel(
     id: string,
   ): Readonly<{ id: string; title: string; icon?: string }> | null {
     const entry = this.index.get(id);
-    if (!entry) return null;
+    if (!entry || entry.meta.collectionRow) return null;
     return Object.freeze({
       id: entry.meta.id,
       title: entry.meta.title,

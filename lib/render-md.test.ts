@@ -122,6 +122,30 @@ describe("read-only attachment rendering", () => {
     expect(html).toContain("<p>Stale</p>");
   });
 
+  it("draws a live title carrying markup as text, not as markup", () => {
+    // The title is not always the owner's: on an editable share a visitor
+    // names the subpage they create, and every later visitor is served that
+    // name. Unescaped, DOMPurify would drop the handler and keep the <img>,
+    // which is a remote beacon on every anonymous load.
+    const html = renderReadOnly("[Written label](/p/child)", {
+      shareNavigation: {
+        rootId: "root",
+        isAllowedPage: () => true,
+        pageLabel: () => ({
+          title: "<img src=x onerror=alert(1)> <b>bold</b>",
+          icon: "<i>🥫</i>",
+        }),
+      },
+    });
+
+    expect(html).not.toContain("<img");
+    expect(html).not.toContain("<b>");
+    expect(html).not.toContain("<i>");
+    expect(html).toContain(
+      "&lt;img src=x onerror=alert(1)&gt; &lt;b&gt;bold&lt;/b&gt;",
+    );
+  });
+
   it("keeps the written label when the share has no live title for the target", () => {
     const html = renderReadOnly("[Written label](/p/child)", {
       shareNavigation: {

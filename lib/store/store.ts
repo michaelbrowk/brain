@@ -55,7 +55,10 @@ import {
   standalonePageRefOccurrences,
 } from "../page-ref-nesting";
 import { referencedPageIds } from "../derived-page-refs";
-import { ShareAccessNotFoundError } from "../share-access";
+import {
+  ShareAccessNotFoundError,
+  type ShareFoldNode,
+} from "../share-access";
 import { isShareExpired } from "../sharing";
 import {
   MAX_SHARE_SUBTREE_PAGES,
@@ -1926,6 +1929,21 @@ export class Store {
     return false;
   }
 
+  /** The three share facts a folded link is resolved from, off the index and
+   *  without touching the disk: whether this page is a root of its own, when
+   *  that grant ends, and which ancestor absorbed the grant it used to have.
+   *  A missing id is null, the same fail-closed answer the ancestry check
+   *  gives a public caller. */
+  readShareNode(id: string): ShareFoldNode | null {
+    const entry = this.index.get(id);
+    if (!entry) return null;
+    return Object.freeze({
+      public: entry.meta.public === true,
+      shareExpiresAt: entry.meta.shareExpiresAt ?? null,
+      sharedUnder: entry.meta.sharedUnder ?? null,
+    });
+  }
+
   private shareScopeSnapshot(id: string): ShareScopeSnapshot {
     const root = this.get(id);
     if (this.isDeleted(id)) throw new NotFoundError(id);
@@ -1956,6 +1974,7 @@ export class Store {
           typeof entry.meta.shareExpiresAt === "string"
             ? entry.meta.shareExpiresAt
             : null,
+        shareLocked: !!entry.meta.sharePass,
       }))
       .sort((a, b) => {
         if (a.relation !== b.relation) {
@@ -4975,9 +4994,109 @@ export class Store {
       entry.meta.updatedBy = "me";
       entry.meta.updated = now();
       await this.persist(entry);
+      // A revoke ends every link this root answers for, the folded ones
+      // included: a page whose own grant was absorbed here goes back to being
+      // private, and its old address stops resolving with the rest.
+      if (!input.enabled) await this.releaseFoldedGrantsUnlocked(id, input.src);
       scheduleCommit(this.root);
       emitStore({ type: "meta", id, src: input.src });
     });
+  }
+
+  /** Share the parent instead: one grant for the whole subtree, made out of
+   *  the nested ones already inside it. The owner reached a dead end here —
+   *  every nested grant had to be revoked by hand first, and each revoke broke
+   *  a link somebody was holding. So this takes them all in one mutation: the
+   *  parent becomes the root, each nested page stops being one, and the pages
+   *  whose links are still alive record which root absorbed them, so those
+   *  links go on opening inside the new one.
+   *
+   *  What it will not do: answer for an ancestor's grant (that root is already
+   *  the authority and the page is already inside its link), or drop a nested
+   *  password by folding it under a parent that asks for none. Both come back
+   *  as the scope conflict the enable path uses, with the fresh disclosure, so
+   *  a caller shows the truth rather than an error of its own.
+   *
+   *  `shareEdit` is the one setting inherited, and it is inherited the safe way
+   *  round for the reader who already holds a link: on if any absorbed grant
+   *  had it. An expired nested grant grants nothing — it is cleared like the
+   *  rest, so one authority is left, but it records no pointer and its dead
+   *  link stays dead. */
+  async absorbNestedShares(
+    id: string,
+    input: { expectedScopeToken: string; src?: string },
+  ): Promise<void> {
+    return this.mutate(async () => {
+      const before = this.shareScopeSnapshot(id);
+      if (input.expectedScopeToken !== before.scopeToken) {
+        throw new ShareScopeConflictError(before);
+      }
+      const entry = this.get(id);
+      const nested = before.overlappingRoots.filter(
+        (overlap) => overlap.relation === "descendant",
+      );
+      if (
+        entry.meta.public ||
+        nested.length === 0 ||
+        nested.length !== before.overlappingRoots.length
+      ) {
+        throw new ShareScopeConflictError(before);
+      }
+      const live = nested.filter(
+        (overlap) => !isShareExpired(overlap.shareExpiresAt ?? undefined),
+      );
+      if (!entry.meta.sharePass && live.some((overlap) => overlap.shareLocked)) {
+        throw new ShareScopeConflictError(before);
+      }
+      const canEdit = live.some(
+        (overlap) => this.get(overlap.rootId).meta.shareEdit === true,
+      );
+      if (canEdit && !this.publicOrigin) throw new ShareEditOriginError();
+      // Before the flag lands, for the same reason configureShare takes it
+      // there: the baseline is what the subtree showed while nobody could
+      // hold the parent's link. Every absorbed root is inside this one, so a
+      // scoped one among them is exactly the case this walk is for.
+      await this.scopeNewShareRootUnlocked(id);
+      const stamp = now();
+      const folded = new Set(live.map((overlap) => overlap.rootId));
+      for (const overlap of nested) {
+        const child = this.get(overlap.rootId);
+        child.meta.public = undefined;
+        child.meta.sharePass = undefined;
+        child.meta.shareExpiresAt = undefined;
+        child.meta.shareEdit = undefined;
+        child.meta.shareVersion = (child.meta.shareVersion ?? 0) + 1;
+        child.meta.sharedUnder = folded.has(overlap.rootId) ? id : undefined;
+        child.meta.updatedBy = "me";
+        child.meta.updated = stamp;
+        await this.persist(child);
+      }
+      entry.meta.public = true;
+      entry.meta.shareEdit = canEdit || undefined;
+      entry.meta.shareVersion = (entry.meta.shareVersion ?? 0) + 1;
+      entry.meta.updatedBy = "me";
+      entry.meta.updated = stamp;
+      await this.persist(entry);
+      scheduleCommit(this.root);
+      for (const overlap of nested) {
+        emitStore({ type: "meta", id: overlap.rootId, src: input.src });
+      }
+      emitStore({ type: "meta", id, src: input.src });
+    });
+  }
+
+  /** The pointers this root absorbed, given back. Caller owns mutate(). */
+  private async releaseFoldedGrantsUnlocked(
+    id: string,
+    src?: string,
+  ): Promise<void> {
+    for (const entry of this.index.values()) {
+      if (entry.meta.sharedUnder !== id) continue;
+      entry.meta.sharedUnder = undefined;
+      entry.meta.updated = now();
+      await this.persist(entry);
+      emitStore({ type: "meta", id: entry.meta.id, src });
+    }
   }
 
   /** Import-only collection metadata restore. Ordinary UI/MCP mutations keep

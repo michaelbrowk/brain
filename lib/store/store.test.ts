@@ -54,6 +54,7 @@ import {
   resolveShareAccess,
   ShareAccessNotFoundError,
 } from "../share-access";
+import { resolveInheritedShareGrants } from "../share-grants";
 import {
   MAX_SHARE_SUBTREE_PAGES,
   SHARE_ROOT_UPLOAD_BYTES,
@@ -1338,12 +1339,14 @@ describe("Store", () => {
         title: "Descendant A",
         relation: "descendant" as const,
         shareExpiresAt: null,
+        shareLocked: false,
       },
       {
         rootId: descendantB.id,
         title: "Descendant B",
         relation: "descendant" as const,
         shareExpiresAt: "not-an-iso-date",
+        shareLocked: false,
       },
     ].sort((a, b) => (a.rootId < b.rootId ? -1 : 1));
     expect(snapshot.overlappingRoots).toEqual([
@@ -1352,6 +1355,7 @@ describe("Store", () => {
         title: "Ancestor",
         relation: "ancestor",
         shareExpiresAt: "2020-01-01T00:00:00.000Z",
+        shareLocked: false,
       },
       ...descendants,
     ]);
@@ -8900,6 +8904,193 @@ describe("editable share authority", () => {
         canEdit: true,
       }),
     ).rejects.toThrow("editable sharing needs BRAIN_PUBLIC_ORIGIN");
+  });
+});
+
+describe("folding a nested share into its parent", () => {
+  /** Furniture is shared; the owner opens Share on Apartment. */
+  async function nestedShare(options: { canEdit?: boolean } = {}) {
+    const { s, root } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const parent = await s.createPage(null, "Apartment");
+    const child = await s.createPage(parent.id, "Furniture");
+    const grandchild = await s.createPage(child.id, "Sofa");
+    const disclosed = await s.readShareScope(child.id);
+    await s.configureShare(child.id, {
+      enabled: true,
+      expectedScopeToken: disclosed.scopeToken,
+      canEdit: options.canEdit ?? true,
+    });
+    return { s, root, parent, child, grandchild };
+  }
+
+  /** The one authority the tree resolves for a page under the fold. */
+  function inheritedRoot(s: Store, childId: string) {
+    const tree = s.getTree();
+    const path: TreeNode[] = [];
+    const walk = (nodes: TreeNode[]): boolean =>
+      nodes.some((node) => {
+        path.push(node);
+        if (node.id === childId || walk(node.children)) return true;
+        path.pop();
+        return false;
+      });
+    walk(tree);
+    return resolveInheritedShareGrants(path).active;
+  }
+
+  it("makes the parent the one authority and keeps the nested link alive", async () => {
+    const { s, parent, child, grandchild } = await nestedShare();
+    const disclosed = await s.readShareScope(parent.id);
+    expect(disclosed.overlappingRoots).toEqual([
+      expect.objectContaining({
+        rootId: child.id,
+        relation: "descendant",
+        shareLocked: false,
+      }),
+    ]);
+
+    await s.absorbNestedShares(parent.id, {
+      expectedScopeToken: disclosed.scopeToken,
+    });
+
+    const absorbed = await s.readShareScope(parent.id);
+    expect(absorbed).toMatchObject({
+      public: true,
+      shareEdit: true,
+      shareVersion: 1,
+      overlappingRoots: [],
+    });
+    const folded = (await s.readPage(child.id)).meta;
+    expect(folded.public).toBeUndefined();
+    expect(folded.shareEdit).toBeUndefined();
+    expect(folded.sharedUnder).toBe(parent.id);
+    expect(folded.shareVersion).toBe(2);
+    expect(inheritedRoot(s, grandchild.id)?.id).toBe(parent.id);
+    expect(inheritedRoot(s, child.id)?.id).toBe(parent.id);
+  });
+
+  it("turns edit on when any absorbed grant carried it", async () => {
+    const { s, parent, child } = await nestedShare({ canEdit: false });
+    const second = await s.createPage(parent.id, "Rugs");
+    const secondScope = await s.readShareScope(second.id);
+    await s.configureShare(second.id, {
+      enabled: true,
+      expectedScopeToken: secondScope.scopeToken,
+      canEdit: true,
+    });
+
+    const disclosed = await s.readShareScope(parent.id);
+    await s.absorbNestedShares(parent.id, {
+      expectedScopeToken: disclosed.scopeToken,
+    });
+
+    expect((await s.readShareScope(parent.id)).shareEdit).toBe(true);
+    expect((await s.readPage(child.id)).meta.sharedUnder).toBe(parent.id);
+    expect((await s.readPage(second.id)).meta.sharedUnder).toBe(parent.id);
+  });
+
+  it("leaves an expired nested link dead rather than reviving it", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const parent = await s.createPage(null, "Apartment");
+    const child = await s.createPage(parent.id, "Furniture");
+    await s.updateMeta(child.id, {
+      public: true,
+      shareExpiresAt: "2020-01-01T00:00:00.000Z",
+    });
+
+    const disclosed = await s.readShareScope(parent.id);
+    await s.absorbNestedShares(parent.id, {
+      expectedScopeToken: disclosed.scopeToken,
+    });
+
+    const folded = (await s.readPage(child.id)).meta;
+    expect(folded.public).toBeUndefined();
+    expect(folded.sharedUnder).toBeUndefined();
+    expect((await s.readShareScope(parent.id)).public).toBe(true);
+  });
+
+  it("refuses a fold that would drop a password or answer an ancestor grant", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const parent = await s.createPage(null, "Apartment");
+    const child = await s.createPage(parent.id, "Furniture");
+    await s.updateMeta(child.id, { public: true, sharePass: "child-hash" });
+    const locked = await s.readShareScope(parent.id);
+    expect(locked.overlappingRoots[0]).toMatchObject({ shareLocked: true });
+    await expect(
+      s.absorbNestedShares(parent.id, {
+        expectedScopeToken: locked.scopeToken,
+      }),
+    ).rejects.toMatchObject({ name: "ShareScopeConflictError" });
+    expect((await s.readPage(parent.id)).meta.public).toBeUndefined();
+
+    const ancestor = await s.createPage(null, "Building");
+    const middle = await s.createPage(ancestor.id, "Floor");
+    await s.updateMeta(ancestor.id, { public: true });
+    const inherited = await s.readShareScope(middle.id);
+    await expect(
+      s.absorbNestedShares(middle.id, {
+        expectedScopeToken: inherited.scopeToken,
+      }),
+    ).rejects.toMatchObject({ name: "ShareScopeConflictError" });
+    expect((await s.readPage(middle.id)).meta.public).toBeUndefined();
+  });
+
+  it("refuses a stale disclosure and a page with nothing nested to absorb", async () => {
+    const { s, parent } = await nestedShare();
+    await expect(
+      s.absorbNestedShares(parent.id, {
+        expectedScopeToken: "b".repeat(64),
+      }),
+    ).rejects.toMatchObject({ name: "ShareScopeConflictError" });
+
+    const alone = await s.createPage(null, "Garage");
+    const disclosed = await s.readShareScope(alone.id);
+    await expect(
+      s.absorbNestedShares(alone.id, {
+        expectedScopeToken: disclosed.scopeToken,
+      }),
+    ).rejects.toMatchObject({ name: "ShareScopeConflictError" });
+  });
+
+  it("clears the fold when the parent's own share is revoked", async () => {
+    const { s, parent, child } = await nestedShare();
+    const disclosed = await s.readShareScope(parent.id);
+    await s.absorbNestedShares(parent.id, {
+      expectedScopeToken: disclosed.scopeToken,
+    });
+
+    await s.configureShare(parent.id, { enabled: false });
+
+    expect((await s.readPage(child.id)).meta.sharedUnder).toBeUndefined();
+    expect(s.readShareNode(child.id)).toMatchObject({
+      public: false,
+      sharedUnder: null,
+    });
+    await expect(
+      resolveShareAccess(s, { rootId: child.id }),
+    ).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+  });
+
+  it("keeps the fold through a reload and reads it back from the file", async () => {
+    const { s, root, parent, child } = await nestedShare();
+    const disclosed = await s.readShareScope(parent.id);
+    await s.absorbNestedShares(parent.id, {
+      expectedScopeToken: disclosed.scopeToken,
+    });
+
+    const reloaded = new Store(root);
+    await reloaded.init();
+    expect(reloaded.readShareNode(child.id)).toEqual({
+      public: false,
+      shareExpiresAt: null,
+      sharedUnder: parent.id,
+    });
+    expect(reloaded.readShareNode("missing")).toBeNull();
+    const raw = await fs.readFile(
+      path.join(s.resolve(child.id), "index.md"),
+      "utf8",
+    );
+    expect(raw).toContain(`sharedUnder: ${parent.id}`);
   });
 });
 

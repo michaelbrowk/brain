@@ -501,6 +501,7 @@ describe("SharePopover redesign", () => {
               title: "Already shared child",
               relation: "descendant",
               shareExpiresAt: null,
+              shareLocked: false,
             },
           ],
         }),
@@ -868,12 +869,14 @@ describe("SharePopover redesign", () => {
         title: "Public parent",
         relation: "ancestor",
         shareExpiresAt: null,
+        shareLocked: false,
       },
       {
         rootId: "child",
         title: "Public child",
         relation: "descendant",
         shareExpiresAt: null,
+        shareLocked: false,
       },
     ];
     await renderAndOpen(true, {
@@ -904,6 +907,7 @@ describe("SharePopover redesign", () => {
               title: "Expired child",
               relation: "descendant",
               shareExpiresAt: "2000-01-01T00:00:00.000Z",
+              shareLocked: false,
             },
           ],
         }),

@@ -38,6 +38,15 @@ export type ShareDirectChild = Readonly<{
   icon?: string;
 }>;
 
+/** What the index knows about one page's share standing: whether it is a root
+ *  of its own, when that grant ends, and which ancestor absorbed the grant it
+ *  used to carry. */
+export type ShareFoldNode = Readonly<{
+  public: boolean;
+  shareExpiresAt: string | null;
+  sharedUnder: string | null;
+}>;
+
 type GrantedShareAccess = {
   kind: "granted";
   root: Page;

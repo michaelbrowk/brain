@@ -98,10 +98,9 @@ describe("what an agent did, as a row", () => {
     expect(notificationSchema.safeParse(row).success).toBe(true);
   });
 
-  /** A READ MARK IS NOT NEWS. The mail row for that thread is being marked
-   *  read in the same breath (`markCentreRead`), and a row about the marking
-   *  would leave the badge at one for a letter the owner has just had dealt
-   *  with. Michael's ruling, and the one triage change that says nothing. */
+  /** A READ MARK IS NOT NEWS. It is triage, and a row about the marking would
+   *  leave the badge at one for a letter the owner has just had dealt with.
+   *  Michael's ruling, and the one triage change that says nothing. */
   it("says nothing about a thread's read mark", () => {
     expect(
       agentActionNotification(

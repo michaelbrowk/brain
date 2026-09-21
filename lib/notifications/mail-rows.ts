@@ -96,8 +96,11 @@ function isLegacyMailRow(row: BrainNotification): boolean {
 export function foldLegacyMailRows(
   rows: readonly BrainNotification[],
 ): readonly BrainNotification[] {
+  // The common path answers here and allocates nothing. This runs on every
+  // read of the file — every request to the centre, every append, every read
+  // mark — and after the first fold there is at most one mail row to test.
+  if (!rows.some(isLegacyMailRow)) return rows;
   const old = rows.filter(isLegacyMailRow);
-  if (old.length === 0) return rows;
   const rest = rows.filter((row) => !isLegacyMailRow(row));
   if (old.every((row) => row.readAt !== undefined)) return rest;
 

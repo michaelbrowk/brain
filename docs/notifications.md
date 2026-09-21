@@ -36,8 +36,9 @@ time zone is set, so no reminder will fire. Set one in Account."
 the page is in the trash. Restore the page inside the day and the reminder
 still fires.
 
-One scan appends at most fifty rows and leaves the rest for the next one, so a
-week of downtime fills the centre in stages rather than in one flood.
+One reminder scan appends at most fifty rows and leaves the rest for the next
+one, so a week of downtime fills the centre in stages rather than in one flood.
+The mail poll beside it writes one row however many letters it found.
 
 `BRAIN_REMINDERS=0` stops the scan, reminders and new mail together.
 
@@ -60,6 +61,9 @@ or a tool call, so another kind can join later without a second store.
   Brain already runs, as `type: "notification"`, and the shell forwards it the
   way it forwards a task event. A tab that slept through its own events reloads
   the centre when it comes back.
+- **The badge counts rows, not letters.** It is how many things want you, and
+  new mail is one of them however many letters are behind it: the row itself
+  says how many.
 
 **On a desktop the bell is in the sidebar head**, inboard of the accent circle,
 and it is drawn on Settings too. It carries a count while something is unread
@@ -76,15 +80,21 @@ for one release, which put the centre's list where the page's opening line
 belongs.
 
 **Opening a row marks it read and goes where it points.** A task row opens
-Tasks with that task selected. A mail row opens Mail with that thread selected,
-and marks the thread read. "Mark all read" clears the centre alone and moves no
-mailbox: one press would otherwise fire an unbounded number of thread writes at
-a service that can stop answering halfway, with no undo.
+Tasks with that task selected. The mail row opens Mail on its main screen and
+names no thread. "Mark all read" clears the centre alone and moves no mailbox:
+a row there is a thing that wants you, not a letter, and pressing one word
+should not write to a mail service that can stop answering halfway.
 
 ## New mail
 
-A new thread in an account's Inbox, from a person, produces a `mail-new` row:
-the sender's name as the title, the subject as the body
+**One row, and it counts.** New mail is a single `mail-new` row that says "10
+new messages" — no sender, no subject, no account — and it opens Mail
+(`lib/notifications/mail-rows.ts`). It held one row per thread until 0.12.2,
+which made a morning's mail thirty rows to press one at a time: the bell had
+become a second inbox. What a letter looks like is the phone's push and Mail
+itself.
+
+A new thread in an account's Inbox, from a person, is a letter the row counts
 (`lib/notifications/mail-producer.ts`). Three things have to be true.
 
 - **The mail classifier calls it people, and not a list message.** A
@@ -101,18 +111,41 @@ the sender's name as the title, the subject as the body
 
 **The first pass after an upgrade says nothing.** With no mark to compare
 against, every unread thread in the inbox would be new, and the bell would open
-on fifty rows about mail you have already seen. The first poll writes the mark
-and stays quiet.
+counting mail you have already seen. The first poll writes the mark and stays
+quiet.
 
 The poll asks each account for one page of twenty five threads on every second
 tick, so once a minute. The mail service runs its own sync once a minute, and
 asking twice as often would ask the same question twice for one answer.
 
-**Read state runs both ways.** Marking the thread read in Mail marks the row
-read, batched so that emptying an inbox is one request rather than one per
-letter. Opening the row in the centre marks the thread read.
+**The count grows while the row is unread.** Every account's letters go into
+one count — the row is not about a mailbox — and each poll that finds more adds
+to the open row and moves it to the head of the bell under the newest letter's
+time. The row's id is the instant it opened, so it is one row for its whole
+life.
 
-One case still rings when it should not. A reply you write into a thread that
+**Reading it resets.** The row is read when you press it, when Mail is opened
+any other way, and by "Mark all read". A read row is never counted into again:
+the next letters open a new row with a fresh count. Nothing else clears it —
+not reading one letter in Mail, and not an agent marking a thread read through
+MCP.
+
+**While Mail is open it stays read.** A poll that lands during an hour in Mail
+opens a row about letters already in the list in front of you, so the surface
+holds the seam for as long as it stands and every answer the centre gives reads
+the mail row. It ends when you leave Mail: a row that opens after that is
+yours to see, including one that opens while a failed first load is being
+retried.
+
+**A centre from before 0.12.2** holds one row per thread. They are folded into
+one counted row the first time the file is read, dated by the newest of them
+and unread if any of them was, and dropped if all of them were read.
+
+**The push is unchanged**: one per letter, with the sender and the subject on
+it, tagged with the account and thread so two letters are two notifications.
+The phone's signal is push; the centre is the tally.
+
+One case still counts when it should not. A reply you write into a thread that
 still holds an older unread message passes the unread gate. The exact answer
 needs a "the newest message is the owner's" fact from the mail service, which
 is a change over there.
@@ -128,10 +161,9 @@ archived a thread".
 - **Successful mutations, and nothing else.** A refusal leaves no row, a read
   of any kind leaves none, and the `notion_*` import family and
   `connection_check` are out by name. So is one mutation: marking a thread
-  read. The same call marks that thread's own `mail-new` row read, so a row
-  about the marking would put the badge back to one for a letter you have just
-  had dealt with; Settings → Connections still logs it. Every row comes off the
-  one activity line the mutation already writes
+  read. It is triage, and a row about it would put the badge back to one for a
+  letter you have just had dealt with; Settings → Connections still logs it.
+  Every row comes off the one activity line the mutation already writes
   (`lib/mcp/activity-log.ts`), so a tool that logs cannot forget to announce.
 - **No letter reaches a row.** The title is Brain's own words after the app's
   name, one of twenty-one fixed phrases. The body is the thing's own name, read

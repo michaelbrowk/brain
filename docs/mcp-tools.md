@@ -216,10 +216,11 @@ service accepts, which counts its keys and turns down a second action.
 check, before anything else runs. A malformed id is refused here, naming the
 field, rather than reaching the mail client or the activity log.
 
-A `read: true` also marks that thread's row read in the notification centre, on
-the same condition the Mail surface uses: a letter read is a letter read,
-whichever window read it. That mark never blocks the tool and never fails it,
-so a bell that is one row stale is not reported as a triage that did not land.
+A `read: true` leaves the notification centre alone. It used to mark that
+thread's own row read, from when the centre held one row per thread. The centre
+holds one counted row now — "10 new messages", the owner's tally of what is
+waiting for them — and an agent reading one thread inside it is not the owner
+reading their mail. That row is answered by opening Mail, and by nothing else.
 
 Every call writes one activity line with the account, the thread, which of the
 six fields changed and the outcome. A refused call writes one too, so the
@@ -524,12 +525,13 @@ Five things this release ships without, each of them known.
   task write and page write leaves a line, refusals included. No read of any
   kind leaves one, `get_mail_send_status` included. An owner scanning
   Connections sees what an agent changed, never what it looked at.
-- **An agent's reply can make the bell name the correspondent.** The
-  notification centre announces a thread when something in it is unread, and a
-  reply an agent wrote into a thread that still holds an older unread message
-  passes that gate. The row then names the person the agent was answering. The
-  exact gate lives in the mail service, so this is a hole the agent path
-  widened rather than made.
+- **An agent's reply can make the bell count a letter twice.** The mail poll
+  counts a thread when something in it is unread, and a reply an agent wrote
+  into a thread that still holds an older unread message passes that gate. The
+  count then includes a letter the owner has in a sense already had. It names
+  nobody — the row is "10 new messages" — so what the hole costs now is one on
+  a number rather than a stranger's name in the bell. The exact gate lives in
+  the mail service, so this is a hole the agent path widened rather than made.
 - **A Sent row from an IMAP account never gets its caption.**
   `MailSendOperation.threadId` fills only on an accepted provider delivery,
   which today means Gmail. First-party SMTP issues no provider ids, so the

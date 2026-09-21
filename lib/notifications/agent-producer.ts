@@ -115,12 +115,10 @@ const TRIAGE_VERB: Readonly<Record<string, Verb>> = {
 
 /** THE ONE MUTATION THAT SAYS NOTHING.
  *
- *  A read mark is triage, and the same call marks the centre's own `mail-new`
- *  row for that thread read (`markCentreRead` in `app/api/mcp/mail-tools.ts`).
- *  A row about the marking would put the badge back to one for a letter the
- *  owner has just had dealt with, which is the opposite of what the centre is
- *  for. Michael's ruling. The line is still written, so Settings, Connections
- *  shows it like every other mutation. */
+ *  A read mark is triage. A row about the marking would put the badge back to
+ *  one for a letter the owner has just had dealt with, which is the opposite
+ *  of what the centre is for. Michael's ruling. The line is still written, so
+ *  Settings, Connections shows it like every other mutation. */
 const SILENT_CHANGE = "read";
 
 /** What a triage line that named no change says. Reachable only for a line

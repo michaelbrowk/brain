@@ -17,13 +17,9 @@ import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { formatAgo } from "@/lib/format-ago";
 import { DUR } from "@/lib/motion";
-import {
-  decodeAgentMailHref,
-  decodeMailNotificationId,
-  decodeTaskNotificationId,
-} from "@/lib/notifications/ids";
+import { decodeAgentMailHref, decodeTaskNotificationId } from "@/lib/notifications/ids";
 import { monthName } from "@/lib/tasks/calendar";
-import { defaultMailSurfaceClient, requestOpenThread } from "./mail-surface-client";
+import { requestOpenThread } from "./mail-surface-client";
 import {
   markAllRead,
   markRead,
@@ -56,13 +52,13 @@ const BADGE_CAP = 99;
  *  is a destination the producer chose, and is left alone. */
 const TASKS_COLUMN = "/tasks";
 
-/** Mail's own surface. It takes no thread in its route, which is why both the
- *  kinds about a letter ask it to open one through a seam instead. */
+/** Mail's own surface. It takes no thread in its route, which is why an agent
+ *  row about one asks Mail to open it through a seam instead. */
 const MAIL_SURFACE = "/mail";
 
 /** The missed producer's own sentence, whole (`lib/reminders/scheduler.ts`).
  *  Anchored at both ends on purpose: the one other thing that could match is a
- *  mail subject, and a subject is a sentence somebody wrote. */
+ *  body somebody else wrote, and rewriting one is not this row's business. */
 const MISSED_BODY = /^Missed (\d{4}-\d{2}-\d{2}) at (\d{2}:\d{2})$/;
 
 /** THE STORED BODY IS LOCALE-FREE, AND THE ROW IS NOT.
@@ -98,52 +94,30 @@ export function notificationBody(body: string): string {
 export function notificationHref(row: NotificationRow): string {
   // An agent row about a thread carries the pair in its query, because its id
   // is a digest of the log line and reads back as nothing. The pair goes to
-  // Mail through the seam below; the address bar gets the surface, the way a
-  // `mail-new` row's does.
+  // Mail through the seam below; the address bar gets the surface, which is
+  // where a mail row goes too.
   if (decodeAgentMailHref(row.href) !== null) return MAIL_SURFACE;
   if (row.href !== TASKS_COLUMN) return row.href;
   const taskId = decodeTaskNotificationId(row.id);
   return taskId === null ? row.href : `${TASKS_COLUMN}?task=${encodeURIComponent(taskId)}`;
 }
 
-/** WHAT A ROW DOES WHEN IT IS PRESSED. It is marked read, its thread is read
- *  if it is a mail row, and the reader is taken where it points. It sits here
- *  rather than inside the menu's own JSX because a press does three things and
- *  a row is not the place to read them. */
+/** WHAT A ROW DOES WHEN IT IS PRESSED. It is marked read, and the reader is
+ *  taken where it points. It sits here rather than inside the menu's own JSX
+ *  because an agent row about a thread does a third thing on the way.
+ *
+ *  A MAIL ROW DOES ONLY THE TWO. It is the count of what is waiting, not a
+ *  letter, so there is no thread to ask Mail for and none to mark read: the
+ *  press clears the tally and opens Mail on its main screen. */
 export function openNotificationRow(
   row: NotificationRow,
   onNavigate: (href: string) => void,
 ): void {
-  // THE ROW IS MARKED READ FIRST, and that is what keeps one press from
-  // posting twice. `defaultMailSurfaceClient.updateThread` already calls the
-  // centre's mail seam on its way through, and the seam skips an id the centre
-  // holds no unread row for, so this commit has already taken the id out of
-  // the unread set by the time the seam's window closes, and the second POST
-  // never happens.
   void markRead([row.id]);
-  if (row.kind === "mail-new") {
-    // A mail row's thread is read the moment its notification is (spec §7,
-    // D6). It is not awaited: the mail service is another process with its own
-    // latency, and a bell that waited on it would feel like a broken menu.
-    const thread = decodeMailNotificationId(row.id);
-    if (thread) {
-      // The href says "/mail", which is the surface and not the letter. The
-      // pair goes to Mail's own client, where the surface finds it on the
-      // mount the navigation below causes, opens the account it belongs to and
-      // selects the thread. Left before the navigation on purpose: a request
-      // written after Mail mounted would be read on its next list commit
-      // instead of on this one.
-      requestOpenThread(thread.accountId, thread.threadId);
-      void defaultMailSurfaceClient
-        .updateThread({ accountId: thread.accountId, threadId: thread.threadId, read: true })
-        .catch(() => undefined);
-    }
-  }
   if (row.kind === "agent-action") {
-    // The same seam, and only that half of it. An agent row is a record of
-    // what an agent did, not a new letter, so the thread it names is opened
-    // and never marked read: the reader pressing "Claude replied to a message"
-    // is going to look at the thread, and what is unread in it is theirs.
+    // The thread it names is opened and never marked read: the reader pressing
+    // "Claude replied to a message" is going to look at the thread, and what
+    // is unread in it is theirs.
     const thread = decodeAgentMailHref(row.href);
     if (thread) requestOpenThread(thread.accountId, thread.threadId);
   }

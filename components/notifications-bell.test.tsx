@@ -2,8 +2,8 @@
 
 // The bell, the badge and the centre under it. Two of these are easy to get
 // wrong and are pinned on purpose: the badge crossfades at `DUR.fast` and
-// collapses under reduced motion, and opening a `mail-new` row marks its
-// thread read without waiting for the mail service to answer.
+// collapses under reduced motion, and the `mail-new` row is one counted line
+// that opens Mail and names no thread at all.
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
@@ -28,13 +28,8 @@ vi.mock("framer-motion", async () => {
   });
 });
 
-const updateThread = vi.fn(async () => undefined);
 const requestOpenThread = vi.fn();
 vi.mock("./mail-surface-client", () => ({
-  defaultMailSurfaceClient: {
-    updateThread: (...args: unknown[]) =>
-      (updateThread as unknown as (...a: unknown[]) => Promise<undefined>)(...args),
-  },
   requestOpenThread: (...args: unknown[]) => requestOpenThread(...args),
 }));
 
@@ -43,7 +38,7 @@ let host: HTMLDivElement;
 let root: Root;
 const navigate = vi.fn();
 
-const MAIL_ID = "mail-new:account-adeadbeefdeadbeefdeadbeefdeadbeef:7468726561642d6f6e65";
+const MAIL_ID = "mail-new:2026-09-14T12:00:00.000Z";
 const AGENT_ID = "agent:2026-09-14T12:00:00.000Z:create_task:9f2c1b4a5e6d7c80";
 /** `agentMailHref` of the same account and thread the mail id above carries.
  *  Written out rather than computed, so the test reads as a fixture. */
@@ -57,8 +52,6 @@ beforeEach(() => {
   harness.spans.length = 0;
   navigate.mockReset();
   requestOpenThread.mockReset();
-  updateThread.mockReset();
-  updateThread.mockResolvedValue(undefined);
   rows = [];
   vi.stubGlobal(
     "fetch",
@@ -276,7 +269,6 @@ describe("the bell", () => {
     await open();
     await act(async () => item("Water the plants")!.click());
     expect(navigate).toHaveBeenCalledWith("/tasks");
-    expect(updateThread).not.toHaveBeenCalled();
   });
 
   it("names the task in the path it opens", async () => {
@@ -380,76 +372,73 @@ describe("the bell", () => {
     ).toBe("07:45");
   });
 
-  it("does not touch a mail subject, which is the sender's own words", async () => {
+  it("does not touch a body that is somebody's own words", async () => {
     rows = [
       {
-        id: MAIL_ID,
-        kind: "mail-new",
+        id: AGENT_ID,
+        kind: "agent-action",
         at: "2026-09-14T12:00:00.000Z",
-        title: "Vera Almeida",
+        title: "Claude wrote a page",
         body: "Re: the 2026-09-13 at 18:00 slot",
-        href: "/mail",
+        href: "/",
       },
     ];
     await render();
     await open();
-    // The producer's shape is a body that STARTS with it. A subject that
-    // happens to carry a date is a sentence somebody wrote, and rewriting it
-    // would be this row editing its own mail.
+    // The missed producer's shape is a body that STARTS with "Missed". A body
+    // that happens to carry a date is a sentence somebody wrote, and rewriting
+    // it would be this row editing somebody else's words.
     expect(
       document.querySelector('[role="menuitem"] [data-notification-body]')!.textContent,
     ).toBe("Re: the 2026-09-13 at 18:00 slot");
   });
 
-  it("marks a mail row's thread read before it opens Mail", async () => {
+  /** ONE LINE, A COUNT, AND NO LETTER IN IT. The centre drew one row per
+   *  thread until 0.12.2, with a sender and a subject on each, which made the
+   *  bell a second inbox. */
+  it("draws the mail row as a count with no body", async () => {
     rows = [
-      { id: MAIL_ID, kind: "mail-new", at: "2026-09-14T12:00:00.000Z", title: "Ana Silva", body: "Lunch on Friday", href: "/mail" },
+      { id: MAIL_ID, kind: "mail-new", at: "2026-09-14T12:00:00.000Z", title: "10 new messages", href: "/mail" },
     ];
     await render();
     await open();
-    await act(async () => item("Ana Silva")!.click());
-    expect(updateThread).toHaveBeenCalledWith({
-      accountId: "account-adeadbeefdeadbeefdeadbeefdeadbeef",
-      threadId: "thread-one",
-      read: true,
+    expect(item("10 new messages")).not.toBeNull();
+    expect(document.querySelector('[role="menuitem"] [data-notification-body]')).toBeNull();
+  });
+
+  it("says one message in the singular", async () => {
+    rows = [
+      { id: MAIL_ID, kind: "mail-new", at: "2026-09-14T12:00:00.000Z", title: "1 new message", href: "/mail" },
+    ];
+    await render();
+    await open();
+    expect(item("1 new message")).not.toBeNull();
+  });
+
+  it("marks the mail row read and opens Mail, naming no thread", async () => {
+    rows = [
+      { id: MAIL_ID, kind: "mail-new", at: "2026-09-14T12:00:00.000Z", title: "10 new messages", href: "/mail" },
+    ];
+    await render();
+    await open();
+    await act(async () => item("10 new messages")!.click());
+    const calls = (globalThis.fetch as unknown as { mock: { calls: unknown[][] } }).mock.calls;
+    const read = calls.find((call) => String(call[0]) === "/api/notifications/read");
+    expect(JSON.parse(String((read?.[1] as { body?: unknown })?.body))).toEqual({
+      ids: [MAIL_ID],
     });
+    expect(requestOpenThread).not.toHaveBeenCalled();
     expect(navigate).toHaveBeenCalledWith("/mail");
   });
 
-  it("asks Mail to open the thread the row is about", async () => {
-    // The href is "/mail", which is the surface and not the letter. The pair
-    // goes to Mail's own client, and the surface opens it when it mounts.
+  it("clears the centre with Mark all read and opens nothing", async () => {
     rows = [
-      { id: MAIL_ID, kind: "mail-new", at: "2026-09-14T12:00:00.000Z", title: "Ana Silva", href: "/mail" },
-    ];
-    await render();
-    await open();
-    await act(async () => item("Ana Silva")!.click());
-    expect(requestOpenThread).toHaveBeenCalledWith(
-      "account-adeadbeefdeadbeefdeadbeefdeadbeef",
-      "thread-one",
-    );
-  });
-
-  it("still opens Mail when the thread mutation fails", async () => {
-    updateThread.mockRejectedValue(new Error("mail_service_unavailable"));
-    rows = [
-      { id: MAIL_ID, kind: "mail-new", at: "2026-09-14T12:00:00.000Z", title: "Ana Silva", href: "/mail" },
-    ];
-    await render();
-    await open();
-    await act(async () => item("Ana Silva")!.click());
-    expect(navigate).toHaveBeenCalledWith("/mail");
-  });
-
-  it("clears the centre with Mark all read and touches no mailbox", async () => {
-    rows = [
-      { id: MAIL_ID, kind: "mail-new", at: "2026-09-14T12:00:00.000Z", title: "Ana Silva", href: "/mail" },
+      { id: MAIL_ID, kind: "mail-new", at: "2026-09-14T12:00:00.000Z", title: "10 new messages", href: "/mail" },
     ];
     await render();
     await open();
     await act(async () => item("Mark all read")!.click());
-    expect(updateThread).not.toHaveBeenCalled();
+    expect(requestOpenThread).not.toHaveBeenCalled();
     expect(navigate).not.toHaveBeenCalled();
   });
 
@@ -475,7 +464,6 @@ describe("the bell", () => {
       "thread-one",
     );
     expect(navigate).toHaveBeenCalledWith("/mail");
-    expect(updateThread).not.toHaveBeenCalled();
   });
 
   it("leaves an agent row that names no thread alone", async () => {
@@ -534,7 +522,6 @@ describe("the bell", () => {
     );
     await act(async () => item("Claude created a task")!.click());
     expect(navigate).toHaveBeenCalledWith("/tasks?task=task-1");
-    expect(updateThread).not.toHaveBeenCalled();
   });
 
   it("marks a read row apart from an unread one", async () => {

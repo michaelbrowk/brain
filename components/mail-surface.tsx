@@ -56,6 +56,7 @@ import {
   type PublicMailAccount,
 } from "./mail-surface-client";
 import { MailNav } from "./mail-nav";
+import { markMailCentreRead } from "./notifications-read";
 import {
   MailThreadList,
   mailSmartViewItems,
@@ -2312,10 +2313,23 @@ export function MailSurface({
     }
   }, [clearStickyOpen, refreshThreadsSilently]);
 
+  /** OPENING MAIL ANSWERS THE BELL'S MAIL ROW (spec §7, D6).
+   *
+   *  The centre holds one row for new mail and it says how many letters are
+   *  waiting. Mail being open is the answer to that question, whichever way it
+   *  was opened — the row itself, the sidebar, a link, the phone's tab bar —
+   *  so the mark is here, on the mount, and not on the press.
+   *
+   *  REGISTERED FOR AS LONG AS MAIL STANDS, rather than called once: a scan
+   *  that lands during an hour in Mail opens a row about letters already in
+   *  the list on screen, and the seam reads it on the answer that carries it.
+   *  The cleanup ends that, so nothing is marked once Mail is gone. */
+  useEffect(() => markMailCentreRead(), []);
+
   /** THE THREAD SOMETHING OUTSIDE MAIL ASKED FOR (spec §7, D6).
    *
-   *  A `mail-new` row in the notification centre is pressed on whatever surface
-   *  the reader is on, so it leaves an account and a thread in
+   *  An `agent-action` row about a thread is pressed on whatever surface the
+   *  reader is on, so it leaves an account and a thread in
    *  `mail-surface-client` and the shell opens Mail. This is the other end. The
    *  request is read on mount and again on every list commit, because the list
    *  it has to be found in usually arrives after it.
@@ -2423,8 +2437,8 @@ export function MailSurface({
       return;
     }
 
-    // The mailbox on screen is the one a `mail-new` row is about, whichever
-    // account the request names. Checked before the switch below rather than
+    // The mailbox on screen is the one an incoming request is about, whichever
+    // account it names. Checked before the switch below rather than
     // after it: switching resets to Inbox and clears the query on its way,
     // so a cross-account request would otherwise answer where a same-account
     // one is dropped, for the same reader standing on the same other folder.

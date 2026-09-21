@@ -512,11 +512,10 @@ describe("mobile navigation surfaces", () => {
         href: "/tasks",
       },
       {
-        id: "mail-new:account-adeadbeefdeadbeefdeadbeefdeadbeef:7468726561642d6f6e65",
+        id: "mail-new:2026-09-15T11:00:00.000Z",
         kind: "mail-new",
         at: "2026-09-15T11:00:00.000Z",
-        title: "Ana Silva",
-        body: "Lunch on Friday",
+        title: "3 new messages",
         href: "/mail",
       },
     ];

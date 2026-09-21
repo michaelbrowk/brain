@@ -101,7 +101,8 @@ test("@release the bell opens the centre and says when nothing is waiting", asyn
   // ships. That same fact is what makes the empty state below deterministic.
   // The produced-row path is covered by
   // components/notifications-bell.test.tsx: the glyph per kind, the unread
-  // mark, the open handler and the mail thread it marks read.
+  // mark, the open handler, and the counted mail row that opens Mail and
+  // names no thread.
   // Read from the page's own session rather than through `page.request`: the
   // centre is behind the human-session gate and the API context does not carry
   // that cookie.

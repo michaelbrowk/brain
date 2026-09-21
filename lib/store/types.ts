@@ -66,6 +66,11 @@ export interface PageMeta {
   shareVersion?: number; // invalidates already-issued share cookies on rotation
   shareExpiresAt?: string; // optional ISO deadline; elapsed/malformed fails closed
   shareEdit?: boolean; // root-only: the link may be written through as well as read
+  /** This page's own grant was folded into an ancestor's, so the link people
+   *  already hold opens inside that one. Not hierarchy: the folder tree stays
+   *  the only source of containment (invariant 3), and this pointer is
+   *  honoured only while the page it names is a live, public ancestor. */
+  sharedUnder?: string;
   category?: string; // free-text label, suggested from existing ones
   pinned?: boolean; // shown in the sidebar's Pinned section
   updatedBy?: "me" | "claude" | "visitor"; // who wrote last (hub feed); absent on old pages
@@ -427,6 +432,9 @@ export interface ShareScopeSnapshot {
     title: string;
     relation: "ancestor" | "descendant";
     shareExpiresAt: string | null;
+    /** A nested grant that asks for a password cannot be folded into a parent
+     *  that does not, so the owner's surface has to know before it offers. */
+    shareLocked: boolean;
   }>;
   scopeToken: string;
   public: boolean;

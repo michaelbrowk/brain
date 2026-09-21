@@ -52,6 +52,47 @@ export async function POST(req: NextRequest, { params }: Ctx) {
     }
   }
 
+  // Share the parent instead. The settings come off the grants being absorbed
+  // rather than off the request, so this branch takes the owner's disclosure
+  // token and nothing else.
+  if (body.absorbNested === true) {
+    if (
+      typeof body.expectedScopeToken !== "string" ||
+      !SCOPE_TOKEN_RE.test(body.expectedScopeToken)
+    ) {
+      return NextResponse.json(
+        { error: "invalid share configuration" },
+        { status: 400 },
+      );
+    }
+    const expectedScopeToken = body.expectedScopeToken;
+    try {
+      const store = await getStore();
+      await store.absorbNestedShares(id, {
+        expectedScopeToken,
+        src: src(req),
+      });
+      return NextResponse.json(await store.readShareScope(id));
+    } catch (error) {
+      if (isShareScopeConflict(error)) {
+        return NextResponse.json(
+          { error: "scope changed", snapshot: error.snapshot },
+          { status: 409 },
+        );
+      }
+      if (isShareEditOrigin(error)) {
+        return NextResponse.json(
+          { error: "editable sharing needs a public origin" },
+          { status: 400 },
+        );
+      }
+      if (isNotFound(error)) {
+        return NextResponse.json({ error: "not found" }, { status: 404 });
+      }
+      throw error;
+    }
+  }
+
   if (
     typeof body.expectedScopeToken !== "string" ||
     !SCOPE_TOKEN_RE.test(body.expectedScopeToken) ||

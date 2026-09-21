@@ -171,6 +171,7 @@ describe("SharePopover redesign", () => {
       <SharePopover
         isPublic={isPublic}
         pageId="page-a"
+        pageTitle={options.pageTitle ?? "Apartment"}
         hasPassword={!!options.hasPassword}
         hasEdit={!!options.hasEdit}
         expiresAt={options.expiresAt}
@@ -192,6 +193,19 @@ describe("SharePopover redesign", () => {
             Promise.resolve({
               status: "enabled",
               snapshot: { ...fallback, rootId: "page-a", public: true },
+            }))
+        }
+        onAbsorbNestedShares={
+          options.onAbsorbNestedShares ??
+          (() =>
+            Promise.resolve({
+              status: "enabled",
+              snapshot: {
+                ...fallback,
+                rootId: "page-a",
+                public: true,
+                overlappingRoots: [],
+              },
             }))
         }
         onDisableShare={
@@ -488,8 +502,9 @@ describe("SharePopover redesign", () => {
     });
   });
 
-  it("blocks a new overlapping nested grant using the authoritative scope read", async () => {
+  it("blocks a new grant under a shared parent using the authoritative scope read", async () => {
     const onEnableShare = vi.fn();
+    const onAbsorbNestedShares = vi.fn();
     const onOpenShareSettings = vi.fn();
     await renderAndOpen(false, {
       onPrepareShare: vi.fn().mockResolvedValue(
@@ -497,26 +512,291 @@ describe("SharePopover redesign", () => {
           descendantCount: 2,
           overlappingRoots: [
             {
-              rootId: "nested",
-              title: "Already shared child",
-              relation: "descendant",
+              rootId: "above",
+              title: "Already shared parent",
+              relation: "ancestor",
               shareExpiresAt: null,
+              shareLocked: false,
             },
           ],
         }),
       ),
       onEnableShare,
+      onAbsorbNestedShares,
       onOpenShareSettings,
     });
 
     expect(document.body.textContent).toContain("This scope already overlaps another shared page.");
-    expect(document.body.textContent).toContain("Already shared child · shared nested page");
+    expect(document.body.textContent).toContain("Already shared parent · shared parent");
     expect(document.body.textContent).toContain("Resolve the existing grant");
     expect(document.body.querySelector('[aria-label="Password protection"]')).toBeNull();
     expect(shareButton()).toBeUndefined();
+    // nothing to fold: that root is the authority and this page is already
+    // inside its link
+    expect(button("Share Apartment instead")).toBeUndefined();
     await click(button("Review shared links"));
     expect(onOpenShareSettings).toHaveBeenCalledTimes(1);
     expect(onEnableShare).not.toHaveBeenCalled();
+    expect(onAbsorbNestedShares).not.toHaveBeenCalled();
+  });
+
+  it("offers one action for a nested overlap and folds it into this page", async () => {
+    const onEnableShare = vi.fn();
+    const onOpenShareSettings = vi.fn();
+    const onAbsorbNestedShares = vi.fn().mockResolvedValue({
+      status: "enabled",
+      snapshot: snapshot({
+        public: true,
+        shareEdit: true,
+        shareVersion: 1,
+      }),
+    });
+    await renderAndOpen(false, {
+      onPrepareShare: vi
+        .fn()
+        .mockResolvedValueOnce(
+          snapshot({
+            descendantCount: 2,
+            overlappingRoots: [
+              {
+                rootId: "nested",
+                title: "Furniture",
+                relation: "descendant",
+                shareExpiresAt: null,
+                shareLocked: false,
+              },
+            ],
+          }),
+        )
+        .mockResolvedValue(
+          snapshot({ descendantCount: 2, public: true, shareEdit: true }),
+        ),
+      onEnableShare,
+      onAbsorbNestedShares,
+      onOpenShareSettings,
+    });
+
+    expect(document.body.textContent).toContain("Furniture · shared nested page");
+    expect(document.body.textContent).toContain(
+      "Furniture's link will open inside this one and show everything Apartment shares; anyone who has it keeps it.",
+    );
+    expect(document.body.textContent).not.toContain("Resolve the existing grant");
+    expect(shareButton()).toBeUndefined();
+
+    await click(button("Share Apartment instead"));
+
+    expect(onAbsorbNestedShares).toHaveBeenCalledWith({
+      expectedScopeToken: "a".repeat(64),
+    });
+    expect(onEnableShare).not.toHaveBeenCalled();
+    // the blocker turns into the ordinary shared state
+    expect(
+      document.body.querySelector('[data-share-state="manage"]'),
+    ).not.toBeNull();
+    expect(document.body.querySelector("[data-share-overlap-blocker]")).toBeNull();
+    expect(head()).toBe(
+      `Anyone with the link can read and edit 3${NB}pages.`,
+    );
+  });
+
+  it("names several nested links at once and leaves an expired one out of the promise", async () => {
+    await renderAndOpen(false, {
+      onPrepareShare: vi.fn().mockResolvedValue(
+        snapshot({
+          descendantCount: 4,
+          overlappingRoots: [
+            {
+              rootId: "nested-a",
+              title: "Furniture",
+              relation: "descendant",
+              shareExpiresAt: null,
+              shareLocked: false,
+            },
+            {
+              rootId: "nested-b",
+              title: "Rugs",
+              relation: "descendant",
+              shareExpiresAt: null,
+              shareLocked: false,
+            },
+            {
+              rootId: "nested-c",
+              title: "Lamps",
+              relation: "descendant",
+              shareExpiresAt: "2000-01-01T00:00:00.000Z",
+              shareLocked: false,
+            },
+          ],
+        }),
+      ),
+    });
+    // three overlaps listed, two links promised: the dead one is named on the
+    // list as expired and left out of what the sentence undertakes
+    expect(document.body.textContent).toContain("Lamps · shared nested page · expired");
+    expect(document.body.textContent).toContain(
+      "Those links will open inside this one and show everything Apartment shares; anyone who has them keeps them.",
+    );
+    expect(button("Share Apartment instead")).toBeDefined();
+  });
+
+  it("promises nothing where every nested link has already expired", async () => {
+    await renderAndOpen(false, {
+      onPrepareShare: vi.fn().mockResolvedValue(
+        snapshot({
+          descendantCount: 2,
+          overlappingRoots: [
+            {
+              rootId: "nested",
+              title: "Furniture",
+              relation: "descendant",
+              shareExpiresAt: "2000-01-01T00:00:00.000Z",
+              shareLocked: false,
+            },
+          ],
+        }),
+      ),
+    });
+    expect(document.body.textContent).toContain(
+      "Those links have expired and stay off. This one will be new.",
+    );
+    expect(button("Share Apartment instead")).toBeDefined();
+  });
+
+  it("keeps the dead end where a live nested link carries a deadline", async () => {
+    // a fixed clock, so the row's date is the same sentence every year
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-22T12:00:00.000Z"));
+    const onAbsorbNestedShares = vi.fn();
+    await renderAndOpen(false, {
+      onPrepareShare: vi.fn().mockResolvedValue(
+        snapshot({
+          descendantCount: 2,
+          overlappingRoots: [
+            {
+              rootId: "nested",
+              title: "Furniture",
+              relation: "descendant",
+              shareExpiresAt: "2026-09-29T12:00:00.000Z",
+              shareLocked: false,
+            },
+          ],
+        }),
+      ),
+      onAbsorbNestedShares,
+      onOpenShareSettings: vi.fn(),
+    });
+
+    expect(document.body.textContent).toContain("Resolve the existing grant");
+    // the deadline is the reason, said the way a date is said everywhere else
+    expect(document.body.textContent).toContain(
+      "Furniture · shared nested page · expires 29 Sep",
+    );
+    expect(button("Share Apartment instead")).toBeUndefined();
+    expect(onAbsorbNestedShares).not.toHaveBeenCalled();
+  });
+
+  it("cuts a title too long for the action's capsule at 24", async () => {
+    const overlappingRoots: ShareScopeSnapshot["overlappingRoots"] = [
+      {
+        rootId: "nested",
+        title: "Furniture",
+        relation: "descendant",
+        shareExpiresAt: null,
+        shareLocked: false,
+      },
+    ];
+    await renderAndOpen(false, {
+      pageTitle: "Apartment on the seventh floor",
+      onPrepareShare: vi
+        .fn()
+        .mockResolvedValue(snapshot({ descendantCount: 2, overlappingRoots })),
+    });
+    expect(button("Share Apartment on the sevent… instead")).toBeDefined();
+
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    await renderAndOpen(false, {
+      // 24 exactly stays whole, and the cut counts code points rather than
+      // code units, so a surrogate pair is never halved
+      pageTitle: "Apartment on the 17th 🏠🏠",
+      onPrepareShare: vi
+        .fn()
+        .mockResolvedValue(snapshot({ descendantCount: 2, overlappingRoots })),
+    });
+    expect(button("Share Apartment on the 17th 🏠🏠 instead")).toBeDefined();
+  });
+
+  it("keeps the dead end where a nested link asks for a password, and names it", async () => {
+    const onAbsorbNestedShares = vi.fn();
+    await renderAndOpen(false, {
+      onPrepareShare: vi.fn().mockResolvedValue(
+        snapshot({
+          descendantCount: 2,
+          overlappingRoots: [
+            {
+              rootId: "nested",
+              title: "Furniture",
+              relation: "descendant",
+              shareExpiresAt: null,
+              shareLocked: true,
+            },
+          ],
+        }),
+      ),
+      onAbsorbNestedShares,
+      onOpenShareSettings: vi.fn(),
+    });
+
+    expect(document.body.textContent).toContain("Resolve the existing grant");
+    // the row says which gate is in the way, or the refusal names no reason
+    expect(document.body.textContent).toContain(
+      "Furniture · shared nested page · password",
+    );
+    expect(button("Share Apartment instead")).toBeUndefined();
+    expect(onAbsorbNestedShares).not.toHaveBeenCalled();
+  });
+
+  it("says the scope changed when a fold is refused, and keeps the blocker", async () => {
+    const refused = snapshot({
+      descendantCount: 3,
+      scopeToken: "c".repeat(64),
+      overlappingRoots: [
+        {
+          rootId: "nested",
+          title: "Furniture",
+          relation: "descendant",
+          shareExpiresAt: null,
+          shareLocked: false,
+        },
+      ],
+    });
+    const onAbsorbNestedShares = vi
+      .fn()
+      .mockResolvedValue({ status: "conflict", snapshot: refused });
+    await renderAndOpen(false, {
+      onPrepareShare: vi.fn().mockResolvedValue(
+        snapshot({
+          descendantCount: 2,
+          overlappingRoots: [
+            {
+              rootId: "nested",
+              title: "Furniture",
+              relation: "descendant",
+              shareExpiresAt: null,
+              shareLocked: false,
+            },
+          ],
+        }),
+      ),
+      onAbsorbNestedShares,
+    });
+
+    await click(button("Share Apartment instead"));
+
+    expect(document.body.textContent).toContain(
+      "The shared scope changed. Review what is inside this page and confirm again.",
+    );
+    expect(document.body.querySelector("[data-share-overlap-blocker]")).not.toBeNull();
   });
 
   it("shows a status-first loading state while exact scope is pending", async () => {
@@ -868,12 +1148,14 @@ describe("SharePopover redesign", () => {
         title: "Public parent",
         relation: "ancestor",
         shareExpiresAt: null,
+        shareLocked: false,
       },
       {
         rootId: "child",
         title: "Public child",
         relation: "descendant",
         shareExpiresAt: null,
+        shareLocked: false,
       },
     ];
     await renderAndOpen(true, {
@@ -904,6 +1186,7 @@ describe("SharePopover redesign", () => {
               title: "Expired child",
               relation: "descendant",
               shareExpiresAt: "2000-01-01T00:00:00.000Z",
+              shareLocked: false,
             },
           ],
         }),

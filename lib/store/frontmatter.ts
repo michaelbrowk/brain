@@ -50,6 +50,7 @@ const MANAGED_PAGE_META_KEYS = new Set([
   "shareVersion",
   "shareExpiresAt",
   "shareEdit",
+  "sharedUnder",
   "category",
   "pinned",
   "quickCaptureFingerprint",
@@ -120,6 +121,7 @@ export function serializePage(meta: PageMeta, markdown: string): string {
   if (meta.shareVersion !== undefined) ordered.shareVersion = meta.shareVersion;
   if (meta.shareExpiresAt) ordered.shareExpiresAt = meta.shareExpiresAt;
   if (meta.shareEdit) ordered.shareEdit = true;
+  if (meta.sharedUnder) ordered.sharedUnder = meta.sharedUnder;
   if (meta.category) ordered.category = meta.category;
   if (meta.pinned) ordered.pinned = true;
   if (meta.quickCaptureFingerprint)

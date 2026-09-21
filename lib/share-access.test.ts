@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import {
+  resolveFoldedShareRoot,
   resolveShareAccess,
   resolveShareLabels,
   ShareAccessNotFoundError,
@@ -648,3 +649,150 @@ describe("live labels inside a shared subtree", () => {
 type FixtureResult = ReturnType<typeof fixture>;
 type FixtureRoot = FixtureResult["root"];
 type FixtureTarget = FixtureResult["target"];
+
+describe("a folded share's old address", () => {
+  type Node = {
+    public?: boolean;
+    shareExpiresAt?: string | null;
+    sharedUnder?: string | null;
+    parentId?: string | null;
+    deleted?: boolean;
+  };
+
+  function tree(nodes: Record<string, Node>) {
+    return {
+      readShareNode: (id: string) =>
+        nodes[id]
+          ? {
+              public: nodes[id].public === true,
+              shareExpiresAt: nodes[id].shareExpiresAt ?? null,
+              sharedUnder: nodes[id].sharedUnder ?? null,
+            }
+          : null,
+      isDeleted: (id: string) => nodes[id]?.deleted === true,
+      isWithinSubtree: (rootId: string, targetId: string) => {
+        let current: string | null | undefined = targetId;
+        const seen = new Set<string>();
+        while (current && !seen.has(current)) {
+          if (current === rootId) return true;
+          seen.add(current);
+          current = nodes[current]?.parentId ?? null;
+        }
+        return false;
+      },
+    };
+  }
+
+  const apartment = {
+    apartment: { public: true },
+    furniture: { parentId: "apartment", sharedUnder: "apartment" },
+  };
+
+  it("resolves to the root that absorbed the grant", () => {
+    expect(resolveFoldedShareRoot(tree(apartment), "furniture")).toBe(
+      "apartment",
+    );
+  });
+
+  it("leaves a page that is still a live root of its own to its own grant", () => {
+    // Only a hand-edited file can hold both, and the pointer must not outrank
+    // the page's own authority: answering the ancestor here would walk past
+    // this page's password and widen the link to the ancestor's whole subtree.
+    const stale = {
+      apartment: { public: true },
+      furniture: {
+        parentId: "apartment",
+        sharedUnder: "apartment",
+        public: true,
+      },
+    };
+    expect(resolveFoldedShareRoot(tree(stale), "furniture")).toBeNull();
+    // an expired grant of its own is no grant, so the fold still answers
+    expect(
+      resolveFoldedShareRoot(
+        tree({
+          ...stale,
+          furniture: {
+            ...stale.furniture,
+            shareExpiresAt: "2020-01-01T00:00:00.000Z",
+          },
+        }),
+        "furniture",
+      ),
+    ).toBe("apartment");
+  });
+
+  it("answers nothing for a page that was never folded", () => {
+    expect(
+      resolveFoldedShareRoot(tree({ apartment: { public: true } }), "apartment"),
+    ).toBeNull();
+    expect(resolveFoldedShareRoot(tree(apartment), "missing")).toBeNull();
+  });
+
+  it("refuses the address once the absorbing root is not a live grant", () => {
+    for (const apartmentNode of [
+      {},
+      { public: true, shareExpiresAt: "2020-01-01T00:00:00.000Z" },
+      { public: true, deleted: true },
+    ]) {
+      expect(
+        resolveFoldedShareRoot(
+          tree({
+            apartment: apartmentNode,
+            furniture: { parentId: "apartment", sharedUnder: "apartment" },
+          }),
+          "furniture",
+        ),
+      ).toBeNull();
+    }
+  });
+
+  it("reads the pointer through the live tree, never as hierarchy", () => {
+    // the page was moved out from under the root that absorbed it
+    expect(
+      resolveFoldedShareRoot(
+        tree({
+          apartment: { public: true },
+          furniture: { parentId: null, sharedUnder: "apartment" },
+        }),
+        "furniture",
+      ),
+    ).toBeNull();
+    // and a deleted page has no address at all
+    expect(
+      resolveFoldedShareRoot(
+        tree({
+          apartment: { public: true },
+          furniture: {
+            parentId: "apartment",
+            sharedUnder: "apartment",
+            deleted: true,
+          },
+        }),
+        "furniture",
+      ),
+    ).toBeNull();
+  });
+
+  it("follows a fold that was itself folded, and never a cycle", () => {
+    expect(
+      resolveFoldedShareRoot(
+        tree({
+          building: { public: true },
+          apartment: { parentId: "building", sharedUnder: "building" },
+          furniture: { parentId: "apartment", sharedUnder: "apartment" },
+        }),
+        "furniture",
+      ),
+    ).toBe("building");
+    expect(
+      resolveFoldedShareRoot(
+        tree({
+          a: { parentId: "b", sharedUnder: "b" },
+          b: { parentId: "a", sharedUnder: "a" },
+        }),
+        "a",
+      ),
+    ).toBeNull();
+  });
+});

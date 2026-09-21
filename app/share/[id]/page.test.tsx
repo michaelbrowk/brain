@@ -45,6 +45,8 @@ async function loadPage(
     editing?: { vid: string; name: string } | null;
     origin?: string | null;
     withinSubtree?: (rootId: string, pageId: string) => boolean;
+    /** The root that absorbed this link's page, as the resolver answers. */
+    foldedInto?: string | null;
     /** The live title and icon the share may show for a page id. An id that
      *  is not here is one the share does not reach. */
     labels?: Record<string, { title: string; icon?: string }>;
@@ -64,6 +66,7 @@ async function loadPage(
   const store = {
     isWithinSubtree: vi.fn(options.withinSubtree ?? (() => true)),
     isDeleted: vi.fn().mockReturnValue(false),
+    readShareNode: vi.fn().mockReturnValue(null),
   };
   const resolveShareLabels = vi.fn(
     (_store: unknown, _rootId: string, ids: Iterable<string>) => {
@@ -84,8 +87,12 @@ async function loadPage(
     configuredPublicOrigin: () =>
       options.origin === undefined ? "https://brain.example.com" : options.origin,
   }));
+  const resolveFoldedShareRoot = vi
+    .fn()
+    .mockReturnValue(options.foldedInto ?? null);
   vi.doMock("@/lib/share-access", () => ({
     resolveShareAccess,
+    resolveFoldedShareRoot,
     resolveShareLabels,
     ShareAccessNotFoundError,
     ShareAccessBusyError,
@@ -112,11 +119,15 @@ async function loadPage(
     notFound: () => {
       throw new Error("not found");
     },
+    permanentRedirect: (url: string) => {
+      throw Object.assign(new Error("redirect"), { url });
+    },
   }));
   const pageModule = await import("./page");
   return {
     ...pageModule,
     resolveShareAccess,
+    resolveFoldedShareRoot,
     resolveShareLabels,
     renderReadOnly,
     store,
@@ -535,6 +546,52 @@ describe("shared subtree page", () => {
     expect(markup).not.toContain("data-share-name-dialog");
     expect(markup).not.toContain("data-share-fallback");
     expect(markup).toContain("<p>rendered</p>");
+  });
+
+  it("sends a folded page's old address to the root that absorbed it", async () => {
+    const {
+      default: SharePage,
+      resolveShareAccess,
+      resolveFoldedShareRoot,
+      store,
+    } = await loadPage(
+      { kind: "granted", root, target: child, shareVersion: 7 },
+      { foldedInto: "apartment" },
+    );
+
+    await expect(
+      SharePage({
+        params: Promise.resolve({ id: "furniture" }),
+        searchParams: Promise.resolve({}),
+      }),
+    ).rejects.toMatchObject({ url: "/share/apartment?page=furniture" });
+    // the subpage form of the old address keeps its page
+    await expect(
+      SharePage({
+        params: Promise.resolve({ id: "furniture" }),
+        searchParams: Promise.resolve({ page: "sofa" }),
+      }),
+    ).rejects.toMatchObject({ url: "/share/apartment?page=sofa" });
+    expect(resolveFoldedShareRoot).toHaveBeenCalledWith(store, "furniture");
+    // the hop happens before any grant is read, so the refused root never
+    // reaches the access check
+    expect(resolveShareAccess).not.toHaveBeenCalled();
+  });
+
+  it("leaves an unfolded address where it is", async () => {
+    const { default: SharePage, resolveShareAccess } = await loadPage({
+      kind: "granted",
+      root,
+      target: child,
+      shareVersion: 7,
+    });
+
+    await SharePage({
+      params: Promise.resolve({ id: "root" }),
+      searchParams: Promise.resolve({}),
+    });
+
+    expect(resolveShareAccess).toHaveBeenCalledTimes(1);
   });
 });
 

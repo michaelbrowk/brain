@@ -38,6 +38,71 @@ export type ShareDirectChild = Readonly<{
   icon?: string;
 }>;
 
+/** What the index knows about one page's share standing: whether it is a root
+ *  of its own, when that grant ends, and which ancestor absorbed the grant it
+ *  used to carry. */
+export type ShareFoldNode = Readonly<{
+  public: boolean;
+  shareExpiresAt: string | null;
+  sharedUnder: string | null;
+}>;
+
+export interface ShareFoldStore {
+  readShareNode(id: string): ShareFoldNode | null;
+  isDeleted(id: string): boolean;
+  isWithinSubtree(rootId: string, targetId: string): boolean;
+}
+
+/** A page whose own grant was absorbed by an ancestor's keeps the address the
+ *  reader already has: this is the root that now answers for it, or null when
+ *  nothing does and the old address is a 404 like any revoked share.
+ *
+ *  The pointer is a record of what the owner did, never a second source of
+ *  hierarchy, and never authority of its own. A page that is a live grant is
+ *  answered by that grant whatever a leftover pointer says: the fold clears
+ *  `public` on the pages it absorbs, so the two can only be true together in a
+ *  file somebody edited by hand, and sending that page to an ancestor would
+ *  walk past its own password and widen the link to the ancestor's subtree.
+ *
+ *  Every hop is checked against the live tree — the named page has to exist,
+ *  to still contain this one, to be undeleted and to be an active public root
+ *  — so a page moved out from under the root that absorbed it, or a root whose
+ *  share has since ended, resolves to nothing. A fold that was itself folded
+ *  is followed up the chain, and a cycle in a hand-edited file runs out of
+ *  hops rather than out of stack. */
+export function resolveFoldedShareRoot(
+  store: ShareFoldStore,
+  id: string,
+  now = Date.now(),
+): string | null {
+  if (store.isDeleted(id)) return null;
+  const seen = new Set<string>([id]);
+  let current = store.readShareNode(id);
+  if (isLiveGrant(current, now)) return null;
+  while (current?.sharedUnder) {
+    const rootId: string = current.sharedUnder;
+    if (seen.has(rootId)) return null;
+    seen.add(rootId);
+    const root = store.readShareNode(rootId);
+    if (
+      !root ||
+      store.isDeleted(rootId) ||
+      !store.isWithinSubtree(rootId, id)
+    ) {
+      return null;
+    }
+    if (isLiveGrant(root, now)) return rootId;
+    current = root;
+  }
+  return null;
+}
+
+function isLiveGrant(node: ShareFoldNode | null, now: number): boolean {
+  return (
+    !!node?.public && !isShareExpired(node.shareExpiresAt ?? undefined, now)
+  );
+}
+
 /** What a shared page may draw for a page it links: the name and icon that
  *  page carries now, rather than the label the body was written with. */
 export type SharePageLabel = Readonly<{ title: string; icon?: string }>;

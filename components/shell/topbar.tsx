@@ -57,6 +57,7 @@ export interface ShellTopbarProps {
   onSelect: (id: string) => void;
   onPrepareShare: SharePopoverProps["onPrepareShare"];
   onEnableShare: SharePopoverProps["onEnableShare"];
+  onAbsorbNestedShares: SharePopoverProps["onAbsorbNestedShares"];
   onDisableShare: SharePopoverProps["onDisableShare"];
   onCopyShareLink: SharePopoverProps["onCopyLink"];
   onSetShareProtection: SharePopoverProps["onSetProtection"];
@@ -99,6 +100,7 @@ export function ShellTopbar({
   onSelect,
   onPrepareShare,
   onEnableShare,
+  onAbsorbNestedShares,
   onDisableShare,
   onCopyShareLink,
   onSetShareProtection,
@@ -143,6 +145,7 @@ export function ShellTopbar({
       key={currentNode.id}
       isPublic={!!currentNode.public}
       pageId={currentNode.id}
+      pageTitle={currentNode.title}
       hasPassword={!!activeShareRoot?.shareLocked}
       // The active root, the same answer the password and the deadline give.
       // The head sentence states what the active link does, and where a page
@@ -172,6 +175,7 @@ export function ShellTopbar({
       scopeRevision={shareScopeRevision}
       onPrepareShare={onPrepareShare}
       onEnableShare={onEnableShare}
+      onAbsorbNestedShares={onAbsorbNestedShares}
       onDisableShare={onDisableShare}
       onCopyLink={onCopyShareLink}
       onOpenShareSettings={

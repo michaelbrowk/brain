@@ -92,6 +92,50 @@ export function resolveFoldedShareRoot(
   return null;
 }
 
+/** What a shared page may draw for a page it links: the name and icon that
+ *  page carries now, rather than the label the body was written with. */
+export type SharePageLabel = Readonly<{ title: string; icon?: string }>;
+
+export interface ShareLabelStore {
+  isWithinSubtree(rootId: string, targetId: string): boolean;
+  isDeleted(id: string): boolean;
+  readPageLabel(id: string): ShareDirectChild | null;
+}
+
+/** Live titles for the pages a shared body links.
+ *
+ *  Markdown is the source of truth and a rename must not rewrite another
+ *  file, so the label in a parent's `[📄 Untitled](/p/<id>)` stays whatever
+ *  the child was called that day. The owner never sees it — the editor's
+ *  page-ref node draws the live title and icon from the tree — and this is
+ *  the same answer for a visitor.
+ *
+ *  Authorization is the rule the shared page already applies to those links:
+ *  inside the root's subtree and not deleted, which is what decides whether a
+ *  ref may link at all. A page outside the share is never read, so nothing
+ *  about one reaches the visitor. The work is bounded by the links the body
+ *  carries, and each id is asked once however many times it appears. */
+export function resolveShareLabels(
+  store: ShareLabelStore,
+  rootId: string,
+  ids: Iterable<string>,
+): ReadonlyMap<string, SharePageLabel> {
+  const labels = new Map<string, SharePageLabel>();
+  for (const id of new Set(ids)) {
+    if (!store.isWithinSubtree(rootId, id) || store.isDeleted(id)) continue;
+    const label = store.readPageLabel(id);
+    if (!label) continue;
+    labels.set(
+      id,
+      Object.freeze({
+        title: label.title,
+        ...(label.icon === undefined ? {} : { icon: label.icon }),
+      }),
+    );
+  }
+  return labels;
+}
+
 type GrantedShareAccess = {
   kind: "granted";
   root: Page;

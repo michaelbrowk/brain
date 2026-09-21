@@ -139,6 +139,11 @@ interface EditorProps {
   onSerialized?: () => void;
   registerFlush?: (flush: () => void) => () => void;
   pages?: PageRef[];
+  /** Live titles and icons for the page refs in this body, for a surface
+   *  that has a directory but offers no page list. `pages` is both at once —
+   *  the owner's shell passes it, and the link and wikilink menus read it —
+   *  while the visitor's island has only the first half. */
+  pageDirectory?: readonly PageRef[];
   onNavigate?: (id: string) => void;
   onReparentPageRef?: ReparentPageRef;
   onRequestRemovePageRef?: RequestRemovePageRef;
@@ -366,6 +371,7 @@ function Inner({
   onSerialized,
   registerFlush,
   pages,
+  pageDirectory,
   onNavigate,
   onReparentPageRef,
   onRequestRemovePageRef,
@@ -378,6 +384,9 @@ function Inner({
   caretOnMount,
   capabilities = {},
 }: EditorProps) {
+  // One directory for the page-ref blocks and the serializer, whichever half
+  // the surface has.
+  const refDirectory = pages ?? pageDirectory;
   const lastEmitted = useRef(value);
   const [editorSession] = useState(
     () => new EditorSerializationSession(pageRefNestingPending),
@@ -510,7 +519,7 @@ function Inner({
         });
         // Seed the single live page directory used by the serializer and
         // mounted NodeViews.
-        syncLivePageInfo(pages);
+        syncLivePageInfo(refDirectory);
       })
       .use(commonmarkWithoutHeadingIdSync)
       .use(gfm)
@@ -787,8 +796,8 @@ function Inner({
   // Keep the page directory current so mounted blocks update immediately after
   // rename, icon changes, or a previously missing id becoming available.
   useEffect(() => {
-    syncLivePageInfo(pages);
-  }, [pages]);
+    syncLivePageInfo(refDirectory);
+  }, [refDirectory]);
 
   const pickCalloutEmoji = (emoji: string) => {
     const anchor = calloutEmoji;

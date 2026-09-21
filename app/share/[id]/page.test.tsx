@@ -47,6 +47,9 @@ async function loadPage(
     withinSubtree?: (rootId: string, pageId: string) => boolean;
     /** The root that absorbed this link's page, as the resolver answers. */
     foldedInto?: string | null;
+    /** The live title and icon the share may show for a page id. An id that
+     *  is not here is one the share does not reach. */
+    labels?: Record<string, { title: string; icon?: string }>;
   } = {},
 ) {
   const resolveShareAccess = vi.fn();
@@ -65,6 +68,16 @@ async function loadPage(
     isDeleted: vi.fn().mockReturnValue(false),
     readShareNode: vi.fn().mockReturnValue(null),
   };
+  const resolveShareLabels = vi.fn(
+    (_store: unknown, _rootId: string, ids: Iterable<string>) => {
+      const labels = new Map<string, { title: string; icon?: string }>();
+      for (const id of ids) {
+        const label = options.labels?.[id];
+        if (label) labels.set(id, label);
+      }
+      return labels;
+    },
+  );
   const verifyShareEditToken = vi.fn().mockResolvedValue(options.editing ?? null);
   const mount = vi.fn((props: Record<string, unknown>) => (
     <div data-share-editor-mount={JSON.stringify(props)} />
@@ -80,6 +93,7 @@ async function loadPage(
   vi.doMock("@/lib/share-access", () => ({
     resolveShareAccess,
     resolveFoldedShareRoot,
+    resolveShareLabels,
     ShareAccessNotFoundError,
     ShareAccessBusyError,
   }));
@@ -114,6 +128,7 @@ async function loadPage(
     ...pageModule,
     resolveShareAccess,
     resolveFoldedShareRoot,
+    resolveShareLabels,
     renderReadOnly,
     store,
     verifyShareEditToken,
@@ -201,6 +216,45 @@ describe("shared subtree page", () => {
         },
       }),
     );
+  });
+
+  it("gives the read-only render the live title of every ref the share reaches", async () => {
+    const {
+      default: SharePage,
+      renderReadOnly,
+      resolveShareLabels,
+    } = await loadPage(
+      {
+        kind: "granted",
+        root: { ...root, markdown: "[📄 Untitled](/p/child)" },
+        target: root as unknown as typeof child,
+        shareVersion: 7,
+      },
+      { labels: { child: { title: "Pantry", icon: "🥫" } } },
+    );
+
+    await SharePage({
+      params: Promise.resolve({ id: "root" }),
+      searchParams: Promise.resolve({}),
+    });
+
+    expect(resolveShareLabels).toHaveBeenCalledWith(
+      expect.anything(),
+      "root",
+      ["child"],
+    );
+    const { shareNavigation } = renderReadOnly.mock.calls[0]![1] as {
+      shareNavigation: {
+        pageLabel: (id: string) => { title: string; icon?: string } | null;
+      };
+    };
+    expect(shareNavigation.pageLabel("child")).toEqual({
+      title: "Pantry",
+      icon: "🥫",
+    });
+    // A page the share does not reach has no live label, so its written
+    // label stands and the visitor learns nothing about it.
+    expect(shareNavigation.pageLabel("elsewhere")).toBeNull();
   });
 
   it("renders unreferenced direct children inside the authorized share", async () => {
@@ -406,6 +460,7 @@ describe("shared subtree page", () => {
         {
           editing: { vid: "vid-1", name: "Ann" },
           withinSubtree: (_rootId, pageId) => pageId !== "elsewhere",
+          labels: { child: { title: "Pantry", icon: "🥫" } },
         },
       );
 
@@ -427,10 +482,11 @@ describe("shared subtree page", () => {
         visitorName: "Ann",
         initialMarkdown: editableRoot.markdown,
         initialRev: "root-rev",
-        // Only the linked pages the share reaches: the island renders a ref
-        // to any other page as unavailable, the way the read-only page
-        // flattens it.
-        linkablePageIds: ["child"],
+        // Only the linked pages the share reaches, each with the title and
+        // icon it carries now rather than the one the body was written with:
+        // the island renders a ref to any other page as unavailable, the way
+        // the read-only page flattens it.
+        linkablePages: [{ id: "child", title: "Pantry", icon: "🥫" }],
       });
       expect(markup).toContain("data-share-editor-mount");
       // The read-only render stays underneath: a script-blocked browser and

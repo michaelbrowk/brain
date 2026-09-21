@@ -9,6 +9,7 @@ import {
 import {
   resolveFoldedShareRoot,
   resolveShareAccess,
+  resolveShareLabels,
   ShareAccessBusyError,
   ShareAccessNotFoundError,
 } from "@/lib/share-access";
@@ -106,6 +107,14 @@ export default async function SharePage({
 
   const isAllowedPage = (pageId: string) =>
     store.isWithinSubtree(id, pageId) && !store.isDeleted(pageId);
+  const origin = configuredPublicOrigin();
+  // The name each linked page carries now, for every page in this body the
+  // share reaches. A rename never rewrites the label in another file, so the
+  // body still says what the child was called the day it was linked; the
+  // owner's editor draws the live one, and so does this.
+  const liveLabels = resolveShareLabels(store, id, [
+    ...referencedPageIds(page.markdown, origin),
+  ]);
   const html = renderReadOnly(page.markdown, {
     attachmentAccess: {
       ...(targetId === id
@@ -113,20 +122,24 @@ export default async function SharePage({
         : { rootId: id, targetId }),
       shareVersion: access.shareVersion,
     },
-    shareNavigation: { rootId: id, isAllowedPage },
+    shareNavigation: {
+      rootId: id,
+      isAllowedPage,
+      pageLabel: (pageId) => liveLabels.get(pageId) ?? null,
+    },
   });
-  const origin = configuredPublicOrigin();
   const directChildren = unreferencedDirectChildren(
     access.directChildren,
     page.markdown,
     origin,
   );
-  // What the island may link: the pages this body links today that the share
-  // reaches, by the rule the read-only render applies to the same links. The
-  // island cannot ask the store, so a ref pasted later stays unavailable until
-  // the next load, which is the side the guard errs on too.
-  const linkablePageIds = editing
-    ? [...referencedPageIds(page.markdown, origin)].filter(isAllowedPage)
+  // What the island may link, and what it may call each one: the pages this
+  // body links today that the share reaches, by the rule the read-only render
+  // applies to the same links. The island cannot ask the store, so a ref
+  // pasted later stays unavailable until the next load, which is the side the
+  // guard errs on too.
+  const linkablePages = editing
+    ? [...liveLabels].map(([pageId, label]) => ({ id: pageId, ...label }))
     : [];
   const shareRootHref = sharePageHref(id, id);
 
@@ -178,7 +191,7 @@ export default async function SharePage({
               visitorName={editing.name}
               initialMarkdown={page.markdown}
               initialRev={page.rev}
-              linkablePageIds={linkablePageIds}
+              linkablePages={linkablePages}
             />
           )}
           {/* Always drawn: the no-JS fallback a crawler and a script-blocked

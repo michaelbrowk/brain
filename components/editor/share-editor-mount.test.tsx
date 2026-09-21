@@ -42,7 +42,7 @@ const props = {
   visitorName: "Ada",
   initialMarkdown: "# Hello",
   initialRev: "abcdefabcdef",
-  linkablePageIds: ["page-3"],
+  linkablePages: [{ id: "page-3", title: "Pantry", icon: "🥫" }],
 };
 
 describe("the visitor editor mount", () => {

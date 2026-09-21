@@ -458,6 +458,7 @@ function readOpening(keys: SlotKeys, initialMarkdown: string, initialRev: string
 }
 
 const NO_PAGES: readonly string[] = [];
+const NO_PAGE_REFS: readonly PageRef[] = [];
 const assignLocation = (href: string) => location.assign(href);
 
 const refusedSubpage = (
@@ -498,10 +499,11 @@ export interface ShareEditorProps {
   initialMarkdown: string;
   initialRev: string;
   /** The pages this body links that the share reaches, decided by the server
-   *  at render. A ref to any of them is a link into the share; a ref to any
-   *  other page is unavailable, which is what the read-only page does with
-   *  the same links. */
-  linkablePageIds?: readonly string[];
+   *  at render, each with the title and icon it carries now. A ref to any of
+   *  them is a link into the share, drawn with that live name; a ref to any
+   *  other page is unavailable and keeps its written label, which is what the
+   *  read-only page does with the same links. */
+  linkablePages?: readonly PageRef[];
   onReload?: () => void;
   /** Where a page ref inside the share takes the visitor. */
   onNavigate?: (href: string) => void;
@@ -527,7 +529,7 @@ function ShareEditorForPage({
   visitorName,
   initialMarkdown,
   initialRev,
-  linkablePageIds = NO_PAGES,
+  linkablePages = NO_PAGE_REFS,
   onReload = () => location.reload(),
   onNavigate = assignLocation,
 }: ShareEditorProps) {
@@ -614,11 +616,10 @@ function ShareEditorForPage({
 
   // The same statement for page refs: a ref the share reaches links into the
   // share, every other ref is unavailable, and the owner's /p/ address never
-  // shows through. The editor gets no page directory, so a ref keeps the
-  // label the owner baked into it, as on the read-only page.
+  // shows through.
   const linkable = useMemo(
-    () => new Set([...linkablePageIds, ...madeHere]),
-    [linkablePageIds, madeHere],
+    () => new Set([...linkablePages.map((page) => page.id), ...madeHere]),
+    [linkablePages, madeHere],
   );
   const hrefFor = useCallback(
     (id: string): string | null => {
@@ -1149,6 +1150,14 @@ function ShareEditorForPage({
         registerFlush={registerFlush}
         onCreatePageAtCursor={nameThenCreate}
         capabilities={capabilities}
+        // The directory the page-ref blocks draw from: the pages this share
+        // reaches, with the titles they carry now, so a ref written before a
+        // rename reads as it does for the owner. A page outside the share
+        // keeps the label baked into the body. This is not `pages`: the
+        // visitor is offered no page list in the link or wikilink menus. A
+        // page made this visit is not here either — its ref was placed with
+        // the title the visitor had just typed.
+        pageDirectory={linkablePages}
       />
       {naming && (
         <ShareSubpageDialog

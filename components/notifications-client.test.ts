@@ -12,7 +12,7 @@ import type { BrainNotification } from "@/lib/notifications/model";
 import {
   hasUnreadRow,
   markAllRead,
-  markMailNotificationRead,
+  markMailCentreRead,
   markRead,
   resetNotificationsStore,
   useNotifications,
@@ -41,25 +41,7 @@ vi.mock("@/lib/client", () => ({
 let calls: { url: string; body: unknown }[];
 let rows: unknown[];
 
-const MAIL_ID = "mail-new:account-adeadbeefdeadbeefdeadbeefdeadbeef:7468726561642d6f6e65";
-
-/** What the mail route answers a thread mutation with. The client validates
- *  it, so a bare `{ ok: true }` would fail before the seam is reached. */
-const THREAD_MUTATION = {
-  apiVersion: 1,
-  thread: {
-    accountId: "account-adeadbeefdeadbeefdeadbeefdeadbeef",
-    threadId: "thread-one",
-    subject: "Lunch on Friday",
-    participants: [{ name: "Ana Silva", address: "ana@example.test" }],
-    snippet: "Cached safely",
-    lastMessageAt: 1_700_000_000_000,
-    messageCount: 1,
-    unread: false,
-    starred: false,
-    hasAttachments: false,
-  },
-};
+const MAIL_ID = "mail-new:2026-09-14T12:00:00.000Z";
 
 function response(body: unknown): Response {
   return { ok: true, status: 200, json: async () => body } as Response;
@@ -168,11 +150,11 @@ describe("the notifications client", () => {
     await act(async () => root.unmount());
   });
 
-  it("says nothing to the server for a thread with no unread row in the centre", async () => {
+  it("says nothing to the server when the centre holds no mail row", async () => {
     const { root } = mount();
     await settle();
     calls.length = 0;
-    markMailNotificationRead("account-adeadbeefdeadbeefdeadbeefdeadbeef", "thread-one");
+    markMailCentreRead();
     await act(async () => {
       await Promise.resolve();
     });
@@ -180,91 +162,84 @@ describe("the notifications client", () => {
     await act(async () => root.unmount());
   });
 
-  it("still says nothing once the seam's own window has closed", async () => {
-    // The test above passes on the batching window alone, which would hold
-    // even if the skip were not there. This one waits the window out, which
-    // is where a read with no row would actually go to the server.
-    vi.useFakeTimers();
-    try {
-      const { root } = mount();
-      await settle();
-      calls.length = 0;
-      markMailNotificationRead("account-adeadbeefdeadbeefdeadbeefdeadbeef", "thread-one");
-      await vi.advanceTimersByTimeAsync(400);
-      expect(calls).toEqual([]);
-      await act(async () => root.unmount());
-    } finally {
-      vi.useRealTimers();
-    }
+  it("marks the mail row read when Mail opens", async () => {
+    rows = [{ ...row("a"), id: MAIL_ID, kind: "mail-new", title: "3 new messages", href: "/mail" }];
+    const { root } = mount();
+    await settle();
+    expect(hasUnreadRow(MAIL_ID)).toBe(true);
+    calls.length = 0;
+    await act(async () => {
+      markMailCentreRead();
+      await Promise.resolve();
+    });
+    expect(calls).toEqual([{ url: "/api/notifications/read", body: { ids: [MAIL_ID] } }]);
+    await act(async () => root.unmount());
   });
 
-  it("posts a thread read that the centre does hold, so the skip is not a blanket", async () => {
-    const mailId = "mail-new:account-adeadbeefdeadbeefdeadbeefdeadbeef:7468726561642d6f6e65";
-    rows = [{ ...row("a"), id: mailId, kind: "mail-new", href: "/mail" }];
-    vi.useFakeTimers();
-    try {
-      const { root } = mount();
-      await settle();
-      expect(hasUnreadRow(mailId)).toBe(true);
-      calls.length = 0;
-      markMailNotificationRead("account-adeadbeefdeadbeefdeadbeefdeadbeef", "thread-one");
-      await vi.advanceTimersByTimeAsync(400);
-      expect(calls).toEqual([{ url: "/api/notifications/read", body: { ids: [mailId] } }]);
-      await act(async () => root.unmount());
-    } finally {
-      vi.useRealTimers();
-    }
+  it("marks no reminder, whatever else the centre is holding", async () => {
+    rows = [row("a"), { ...row("m"), id: MAIL_ID, kind: "mail-new", href: "/mail" }];
+    const { root } = mount();
+    await settle();
+    calls.length = 0;
+    await act(async () => {
+      markMailCentreRead();
+      await Promise.resolve();
+    });
+    expect(calls).toEqual([{ url: "/api/notifications/read", body: { ids: [MAIL_ID] } }]);
+    await act(async () => root.unmount());
   });
 
-  it("opens a mail row with one read POST and the thread PATCH after it", async () => {
-    // THE ORDERING IS THIS TASK'S OWN DECISION, and this is the one case that
-    // runs the REAL seam: `./mail-surface-client` is not doubled here, so
-    // `updateThread` calls `markMailNotificationRead` on its way out the way it
-    // does in a browser. `openNotificationRow` marks the row read first, which
-    // takes the id out of the live unread set before the seam's window closes,
-    // so the seam's own flush owes nothing and one press is one POST. Move
-    // `markRead` after `updateThread` and the two lines below swap.
+  it("waits for the centre's first answer when Mail mounted before it", async () => {
+    // Mail and the bell mount together, and Mail is usually the faster of the
+    // two: there is no row to name yet, so the wish is kept and taken on the
+    // commit the bell's own fetch causes.
+    rows = [{ ...row("a"), id: MAIL_ID, kind: "mail-new", title: "3 new messages", href: "/mail" }];
+    markMailCentreRead();
+    expect(calls).toEqual([]);
+    const { root } = mount();
+    await settle();
+    await settle();
+    expect(calls.map((c) => c.url)).toEqual([
+      "/api/notifications",
+      "/api/notifications/read",
+    ]);
+    await act(async () => root.unmount());
+  });
+
+  it("opens the mail row with one read POST and no mail request at all", async () => {
+    // The row is the count of what is waiting, not a letter, so a press marks
+    // it read and opens Mail. `./mail-surface-client` is not doubled here, so
+    // a PATCH would be a real one.
     const mailRow = {
       id: MAIL_ID,
       kind: "mail-new" as const,
       at: "2026-09-14T12:00:00.000Z",
-      title: "Ana Silva",
+      title: "3 new messages",
       href: "/mail",
     };
     rows = [mailRow];
     const wire: string[] = [];
-    vi.useFakeTimers();
-    try {
-      vi.stubGlobal(
-        "fetch",
-        vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
-          const url = String(input);
-          wire.push(`${init?.method ?? "GET"} ${url}`);
-          if (url === "/api/notifications") {
-            return response({ notifications: rows, unread: 1 });
-          }
-          if (url === "/api/notifications/read") return response({ read: 1 });
-          // The mail client validates what a mutation answers, and a body it
-          // refuses would leave the seam behind it unreached.
-          return response(THREAD_MUTATION);
-        }),
-      );
-      const { root } = mount();
-      await settle();
-      const { openNotificationRow } = await import("./notifications-bell");
-      wire.length = 0;
-      await act(async () => {
-        openNotificationRow(mailRow, () => undefined);
-        await vi.advanceTimersByTimeAsync(400);
-      });
-      expect(wire).toEqual([
-        "POST /api/notifications/read",
-        "PATCH /api/mail/threads/thread-one",
-      ]);
-      await act(async () => root.unmount());
-    } finally {
-      vi.useRealTimers();
-    }
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        wire.push(`${init?.method ?? "GET"} ${url}`);
+        if (url === "/api/notifications") {
+          return response({ notifications: rows, unread: 1 });
+        }
+        return response({ read: 1 });
+      }),
+    );
+    const { root } = mount();
+    await settle();
+    const { openNotificationRow } = await import("./notifications-bell");
+    wire.length = 0;
+    await act(async () => {
+      openNotificationRow(mailRow, () => undefined);
+      await Promise.resolve();
+    });
+    expect(wire).toEqual(["POST /api/notifications/read"]);
+    await act(async () => root.unmount());
   });
 
   it("re-reads rather than guessing when the read the server was told about fails", async () => {

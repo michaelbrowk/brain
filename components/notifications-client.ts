@@ -2,7 +2,6 @@
 
 import { useEffect, useSyncExternalStore } from "react";
 import { apiFetch } from "@/lib/client";
-import { mailNotificationId } from "@/lib/notifications/ids";
 
 /** ONE FETCH OF THE CENTRE, READ BY EVERYTHING THAT DRAWS IT.
  *
@@ -103,6 +102,9 @@ function commit(rows: readonly NotificationRow[]): void {
   for (const item of rows) if (item.readAt === undefined) next.add(item.id);
   unreadIds = next;
   set({ notifications: rows, unread: next.size, loading: false, error: null });
+  // Mail mounted before the centre had answered, so the row it is about is
+  // only nameable now. See `markMailCentreRead`.
+  if (mailReadWanted && loaded) markMailCentreRead();
 }
 
 function subscribe(listener: () => void): () => void {
@@ -209,16 +211,15 @@ export function useNotifications(refreshToken = 0): NotificationsState {
   return snapshot;
 }
 
-/** Whether this tab holds an unread row under that id. The mail seam's skip
- *  reads it, and so does anything else that wants to know before it asks. */
+/** Whether this tab holds an unread row under that id. Anything that wants to
+ *  know before it asks the server reads it. */
 export function hasUnreadRow(id: string): boolean {
   return unreadIds.has(id);
 }
 
 /** Whether a read under this id is worth a request at all. Before the centre
  *  has answered there is no set to consult and every read must reach the
- *  server; after it, only an id it holds unread. The seam asks this before the
- *  id joins a batch, and `sendable` asks it again for whatever did. */
+ *  server; after it, only an id it holds unread. */
 function worthAsking(id: string): boolean {
   return !loaded || hasUnreadRow(id);
 }
@@ -273,83 +274,43 @@ export async function markAllRead(): Promise<void> {
   }
 }
 
-/** ONE POST PER RUN, NOT ONE PER LETTER.
+/** THE SEAM FOR "MAIL IS OPEN" (spec §7, D6).
  *
- *  Bulk Done marks every unread thread it archives, one at a time, and each
- *  POST reads and re-parses the whole centre file through the store's
- *  serialised queue. Forty threads was forty of those, for rows that in the
- *  common case do not exist at all. The ids collect instead and go out in one
- *  body a quarter second after the last one lands, so a run of forty is one
- *  request on a bell the reader is not looking at.
+ *  The centre holds one mail row, and it says how many letters are waiting.
+ *  Opening Mail is what answers it, whichever way Mail was opened: the row
+ *  pressed in the bell, the sidebar, a link, the phone's tab bar. So the Mail
+ *  surface calls this once on mount and the row is read, the way every
+ *  per-thread row used to be read through `updateThread`.
+ *
+ *  Mail marks NO OTHER ROW. A reminder is not answered by reading mail.
+ *
+ *  BEFORE THE CENTRE HAS ANSWERED there is no row to name, so the wish is
+ *  remembered and taken on the next commit — which is the fetch the bell
+ *  beside it already started. It lives no longer than that one commit: a
+ *  reader who opened Mail and moved on is not marking a row that arrives ten
+ *  minutes later.
+ *
+ *  It never throws at its caller. A surface that mounted must not fail
+ *  because the bell could not be updated.
  */
-const FLUSH_MS = 250;
+let mailReadWanted = false;
 
-/** A reader holding the down arrow auto-reads a thread per keypress, and a
- *  window that restarts on every mark would never close while they held it.
- *  The route takes up to `NOTIFICATION_CAP` ids, so this is far inside it. */
-const MAX_BATCH = 100;
-
-const pending = new Set<string>();
-let flushTimer: ReturnType<typeof setTimeout> | null = null;
-
-function send(ids: readonly string[]): void {
+export function markMailCentreRead(): void {
+  if (!loaded) {
+    mailReadWanted = true;
+    return;
+  }
+  mailReadWanted = false;
+  const ids = state.notifications
+    .filter((row) => row.kind === "mail-new" && row.readAt === undefined)
+    .map((row) => row.id);
+  if (ids.length === 0) return;
   try {
     void markRead(ids).catch(() => undefined);
   } catch {
     // A `fetch` that throws synchronously rather than rejecting, which a test
-    // double or a locked-down runtime can do. The mail mutation already
-    // landed; the bell is not worth failing it for.
+    // double or a locked-down runtime can do.
   }
-}
-
-/** Everything collected so far, now. Exported for a caller that knows its run
- *  is over and does not want to wait out the window. */
-export function flushMailNotificationReads(): void {
-  if (flushTimer !== null) {
-    clearTimeout(flushTimer);
-    flushTimer = null;
-  }
-  if (pending.size === 0) return;
-  const ids = [...pending];
-  pending.clear();
-  send(ids);
-}
-
-/** THE SEAM FOR "THIS THREAD IS READ" (spec §7, D6).
- *
- *  Every read in Mail reaches the service through one method,
- *  `MailSurfaceClient.updateThread`, so the centre's half of it hangs there
- *  rather than being threaded to four call sites inside a five-thousand line
- *  component. The id is derived from the account and the thread, so there is
- *  no lookup, and a thread the centre holds no unread row for is dropped by
- *  `sendable` before a request is made.
- *
- *  It never throws at its caller. A mail mutation that worked must not be
- *  reported as failed because the bell could not be updated.
- */
-export function markMailNotificationRead(accountId: string, threadId: string): void {
-  let id: string;
-  try {
-    id = mailNotificationId(accountId, threadId);
-  } catch {
-    return;
-  }
-  // THE CENTRE IS ASKED BEFORE THE ID JOINS THE BATCH. `hasUnreadRow` is the
-  // public form of that question and this is its caller: a mailbox read in a
-  // tab whose bell holds no row for the thread is the common case, and it now
-  // costs neither a batch entry nor a timer. `sendable` asks the same thing of
-  // whatever did join, because the centre can answer between the two.
-  if (!worthAsking(id)) return;
-  // A Set, so a thread marked twice inside one window costs one id and not
-  // two. The centre answers `{ read: 0 }` for the second anyway, but the
-  // cheapest request is the one nobody sent.
-  pending.add(id);
-  if (pending.size >= MAX_BATCH) {
-    flushMailNotificationReads();
-    return;
-  }
-  if (flushTimer !== null) clearTimeout(flushTimer);
-  flushTimer = setTimeout(flushMailNotificationReads, FLUSH_MS);
 }
 
 /** The tests own this. Module state outlives a test file's cases, and a bell
@@ -357,9 +318,7 @@ export function markMailNotificationRead(accountId: string, threadId: string): v
 export function resetNotificationsStore(): void {
   inFlight?.abort();
   inFlight = null;
-  if (flushTimer !== null) clearTimeout(flushTimer);
-  flushTimer = null;
-  pending.clear();
+  mailReadWanted = false;
   watchers = 0;
   loaded = false;
   loadedKey = null;

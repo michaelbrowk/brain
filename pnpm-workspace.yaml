@@ -8,18 +8,42 @@ allowBuilds:
   unrs-resolver: true
   workerd: true
 
-# Security floors (audit 2026-08-19): parents of these transitive deps pin
-# vulnerable ranges. Selectors are version-scoped so future majors are never
-# hijacked. postcss stays an exact pin (was 8.5.16 since the July reliability
-# rollout), bumped along the same 8.5.x line.
+# Security floors (audits 2026-08-19, 2026-09-21): parents of these transitive
+# deps pin vulnerable ranges. Selectors are version-scoped so future majors are
+# never hijacked. postcss stays an exact pin (was 8.5.16 since the July
+# reliability rollout), bumped along the same 8.5.x line.
+#
+# The 2026-09-21 additions, and why each is a floor rather than a parent bump:
+# nodemailer is pinned to 9.0.3 by both imapflow@1.4.7 and mailparser@3.9.14,
+# and those two versions are frozen by patches/ and by the pinned-package
+# assertions in scripts/build-mail-service.mjs, so the parents cannot move
+# without porting the MIME hardening patches. fast-uri reaches us through ajv
+# inside @modelcontextprotocol/sdk@1.26.0, which mcp-handler@1.1.0 pins exactly.
+# browserslist arrives via styled-jsx > @babel/core inside next. deepmerge-ts
+# comes from html-to-text@10.0.0 under mailparser; html-to-text@10.0.1 pairs
+# itself with deepmerge-ts ^8.0.1, so 8.x is the combination upstream ships.
+#
+# The last three close the moderate findings from the same audit. Each sits
+# inside a range its parent already declares, so the floor only lifts a
+# resolution the lockfile had frozen low. hono is the one that matters most:
+# it is the HTTP layer of @modelcontextprotocol/sdk, and /api/mcp is a route
+# this app serves, so GHSA-crvj-82cr-hjcx (a query-parser cache-key and proxy
+# interpretation differential) is reachable rather than theoretical.
 overrides:
   postcss: 8.5.26
-  "js-yaml@>=3.0.0 <3.15.1": 3.15.1
+  "js-yaml@>=3.0.0 <3.15.2": 3.15.2
   "js-yaml@>=4.0.0 <4.3.1": 4.3.1
   "undici@>=7.0.0 <7.29.0": 7.29.0
   "nanoid@>=3.0.0 <3.3.18": 3.3.18
   "brace-expansion@>=1.0.0 <1.1.18": 1.1.18
   "brace-expansion@>=5.0.0 <5.0.9": 5.0.9
+  "nodemailer@>=6.0.0 <9.1.1": 9.1.1
+  "fast-uri@>=3.0.0 <3.1.6": 3.1.6
+  "browserslist@>=4.0.0 <4.28.7": 4.28.7
+  "deepmerge-ts@>=7.0.0 <8.0.0": 8.0.2
+  "baseline-browser-mapping@>=2.0.0 <2.11.0": 2.11.0
+  "hono@>=4.0.0 <4.13.5": 4.13.5
+  "qs@>=6.0.0 <6.16.0": 6.16.0
 patchedDependencies:
   '@zone-eu/mailsplit@5.4.14': patches/@zone-eu__mailsplit@5.4.14.patch
   mailparser@3.9.14: patches/mailparser@3.9.14.patch

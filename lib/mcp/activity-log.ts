@@ -93,7 +93,7 @@ const LINE_BACKSTOP_FIELD_BYTES = 64;
 
 export interface McpActivityEntry {
   readonly at: string; // ISO instant
-  readonly client: string; // the grant's client name, or "Legacy token"
+  readonly client: string; // the grant's client name, or the static token's
   readonly tool: string;
   readonly accountId?: string;
   readonly threadId?: string;

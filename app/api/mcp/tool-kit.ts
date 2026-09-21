@@ -1,3 +1,4 @@
+import { staticClientName } from "@/lib/oauth/config";
 import { getOAuthStateStore } from "@/lib/oauth/state";
 
 /** THE SHARED SHAPES EVERY MCP TOOL ANSWERS IN, AND THE ONE SCOPE TABLE.
@@ -152,13 +153,18 @@ export function hasScope(
  *  batch is the only case where one request makes more than one of these
  *  calls. Caching here would mean inventing that context first, for a read
  *  that costs one already-open state file. Revisit if a request-scoped
- *  object appears for another reason. */
+ *  object appears for another reason.
+ *
+ *  The static bearer has no registered name to read, so the owner supplies one
+ *  in `MCP_TOKEN_NAME` and `staticClientName` is the only place it is read.
+ *  Lines already written keep the word they were written with: the log is
+ *  history, not a view. */
 export async function clientNameOf(extra: {
   authInfo?: { clientId?: string };
 }): Promise<string> {
   const clientId = extra.authInfo?.clientId;
   if (!clientId) return "Unknown app";
-  if (clientId === "brain-legacy-bearer") return "Legacy token";
+  if (clientId === "brain-legacy-bearer") return staticClientName();
   return (await getOAuthStateStore().getClient(clientId))?.name ?? "Unknown app";
 }
 

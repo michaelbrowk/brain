@@ -3730,7 +3730,7 @@ describe("save_mail_attachment", () => {
     expect(await listNotifications(centreRoot)).toMatchObject([
       {
         kind: "agent-action",
-        title: "Legacy token saved an attachment",
+        title: "API token saved an attachment",
         body: "Meeting notes",
         href: "/p/page-one",
       },
@@ -4073,7 +4073,7 @@ describe("save_mail_attachment", () => {
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({
       tool: "save_mail_attachment",
-      client: "Legacy token",
+      client: "API token",
       accountId: FAKE_ACCOUNT_ID,
       attachmentId: "attachment-alpha",
       page: "page-one",
@@ -4679,7 +4679,7 @@ describe("update_mail_thread", () => {
 
     const [entry] = await readMcpActivity(1);
     expect(entry).toMatchObject({
-      client: "Legacy token",
+      client: "API token",
       tool: "update_mail_thread",
       accountId: FAKE_ACCOUNT_ID,
       threadId: "thread-alpha",
@@ -4715,7 +4715,7 @@ describe("update_mail_thread", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       kind: "agent-action",
-      title: "Legacy token archived a thread",
+      title: "API token archived a thread",
     });
     expect(rows[0].body).toBeUndefined();
     expect(decodeAgentMailHref(rows[0].href)).toEqual({
@@ -4932,7 +4932,7 @@ describe("the mail send tools", () => {
     mocks.getStore.mockReset();
     mocks.createBrainMailClient.mockReset();
     mocks.verifyMcpBearerToken.mockReset();
-    // The legacy bearer's own client id, so `clientNameOf` answers "Legacy
+    // The static bearer's own client id, so `clientNameOf` answers "API
     // token" without reaching the OAuth state store for a name no test wrote.
     mocks.verifyMcpBearerToken.mockResolvedValue({
       token: "test-machine-token",
@@ -4977,7 +4977,7 @@ describe("the mail send tools", () => {
     expect(rows).toHaveLength(1);
     expect(rows[0]).toMatchObject({
       kind: "agent-action",
-      title: "Legacy token sent a message",
+      title: "API token sent a message",
       href: "/mail",
     });
     expect(JSON.stringify(rows)).not.toContain("friend@example.net");
@@ -5831,7 +5831,7 @@ describe("the mail send tools", () => {
       {
         operationId: "send-alpha",
         accountId: FAKE_ACCOUNT_ID,
-        clientName: "Legacy token",
+        clientName: "API token",
         threadId: null,
       },
     ]);
@@ -5841,7 +5841,7 @@ describe("the mail send tools", () => {
       tool: "send_mail",
       operationId: "send-alpha",
       accountId: FAKE_ACCOUNT_ID,
-      client: "Legacy token",
+      client: "API token",
       outcome: "ok",
     });
     const serialized = JSON.stringify(entries[0]);
@@ -5972,7 +5972,7 @@ describe("the mail send tools", () => {
       {
         operationId: "send-alpha",
         accountId: FAKE_ACCOUNT_ID,
-        clientName: "Legacy token",
+        clientName: "API token",
         threadId: "thread-sent",
       },
     ]);
@@ -6107,7 +6107,7 @@ describe("the mail send tools", () => {
       {
         operationId: "send-alpha",
         accountId: FAKE_ACCOUNT_ID,
-        clientName: "Legacy token",
+        clientName: "API token",
         threadId: "thread-sent",
       },
     ]);
@@ -6148,7 +6148,7 @@ describe("the mail send tools", () => {
       {
         operationId: "send-alpha",
         accountId: FAKE_ACCOUNT_ID,
-        clientName: "Legacy token",
+        clientName: "API token",
         threadId: "thread-sent",
       },
     ]);
@@ -7237,7 +7237,7 @@ describe("the page write tools", () => {
       args: { id: "page-one", markdown: "# one", rev: "rev-1" },
       store: { writePage: vi.fn().mockResolvedValue(page()) },
       change: "markdown",
-      title: "Legacy token wrote a page",
+      title: "API token wrote a page",
       href: "/p/page-one",
     },
     {
@@ -7245,7 +7245,7 @@ describe("the page write tools", () => {
       args: { id: "page-one", markdown: "one more line" },
       store: { appendPage: vi.fn().mockResolvedValue(page()) },
       change: "append",
-      title: "Legacy token added to a page",
+      title: "API token added to a page",
       href: "/p/page-one",
     },
     {
@@ -7255,7 +7255,7 @@ describe("the page write tools", () => {
         createPage: vi.fn().mockResolvedValue({ id: "page-one", title: "Meeting notes" }),
       },
       change: "create",
-      title: "Legacy token created a page",
+      title: "API token created a page",
       href: "/p/page-one",
     },
     {
@@ -7265,7 +7265,7 @@ describe("the page write tools", () => {
         updateMeta: vi.fn().mockResolvedValue({ id: "page-one", title: "Meeting notes" }),
       },
       change: "title+icon",
-      title: "Legacy token changed a page",
+      title: "API token changed a page",
       href: "/p/page-one",
     },
     {
@@ -7278,7 +7278,7 @@ describe("the page write tools", () => {
         }),
       },
       change: "move",
-      title: "Legacy token moved a page",
+      title: "API token moved a page",
       href: "/p/page-one",
     },
     {
@@ -7289,7 +7289,7 @@ describe("the page write tools", () => {
         deletePage: vi.fn().mockResolvedValue(undefined),
       },
       change: "delete",
-      title: "Legacy token deleted a page",
+      title: "API token deleted a page",
       // The note is gone, so the row opens the surface it was on.
       href: "/",
     },
@@ -7306,7 +7306,7 @@ describe("the page write tools", () => {
 
     const [entry] = await readMcpActivity(1);
     expect(entry).toMatchObject({
-      client: "Legacy token",
+      client: "API token",
       tool: write.tool,
       page: "page-one",
       change: write.change,
@@ -7323,6 +7323,47 @@ describe("the page write tools", () => {
         body: "Meeting notes",
         href: write.href,
       },
+    ]);
+  });
+
+  /** MICHAEL'S OWN CLAUDE IS ON THE STATIC TOKEN, SO THE ROWS SAY SO.
+   *
+   *  The name travels through one function (`staticClientName`) into the
+   *  line's `client` at write time, and the bell reads the line. One case for
+   *  both, because a test that pinned them apart could pass with two
+   *  different words in the two places. */
+  it("calls the static token what MCP_TOKEN_NAME calls it, in the line and the row", async () => {
+    vi.stubEnv("MCP_TOKEN_NAME", "Claude");
+    mocks.getStore.mockResolvedValue({
+      createPage: vi.fn().mockResolvedValue({ id: "page-one", title: "Meeting notes" }),
+    });
+
+    const { isError } = await toolPayload(
+      await callTool("create_page", { title: "Meeting notes", parentId: null }, 968),
+    );
+
+    expect(isError).toBe(false);
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({ client: "Claude", tool: "create_page" });
+    expect(await listNotifications(centreRoot)).toMatchObject([
+      { kind: "agent-action", title: "Claude created a page" },
+    ]);
+  });
+
+  it("falls back to API token when the name is not one a row can draw", async () => {
+    vi.stubEnv("MCP_TOKEN_NAME", "C".repeat(60));
+    mocks.getStore.mockResolvedValue({
+      createPage: vi.fn().mockResolvedValue({ id: "page-one", title: "Meeting notes" }),
+    });
+
+    await toolPayload(
+      await callTool("create_page", { title: "Meeting notes", parentId: null }, 969),
+    );
+
+    const [entry] = await readMcpActivity(1);
+    expect(entry).toMatchObject({ client: "API token" });
+    expect(await listNotifications(centreRoot)).toMatchObject([
+      { title: "API token created a page" },
     ]);
   });
 

@@ -39,6 +39,45 @@ export const LEGACY_BEARER_SCOPES = [
   "brain:import",
 ] as const;
 
+// WHAT THE STATIC `MCP_TOKEN` BEARER IS CALLED.
+//
+// The other credential the owner never named on a screen. An OAuth client
+// registers its own name and the consent screen shows it, so a bell row and a
+// Connections row say "Claude" because Claude said so. The static token has
+// nowhere to say anything, and "Legacy token" was this file's guess: it reads
+// as something left behind, and Michael's own Claude is on that token, so
+// every row it earns said the wrong word about the agent he uses most.
+//
+// `MCP_TOKEN_NAME` is where the owner says it instead, beside the token in the
+// same env file. The default names what the thing is rather than how old it
+// is.
+export const DEFAULT_STATIC_CLIENT_NAME = "API token";
+
+// Forty is a row's worth. Past it the name is not a name, and the bell and the
+// Connections list would carry a paragraph where a word goes.
+const MAX_STATIC_CLIENT_NAME = 40;
+
+// Anything a row cannot draw: controls, separators, the formatting codepoints
+// that reorder what follows them. `\p{C}` covers all three, and a value
+// carrying one is refused whole rather than stripped — a half-obeyed name is
+// worse to read than the default.
+const UNDRAWABLE = /[\p{C}\p{Zl}\p{Zp}]/u;
+
+/** The display name of the static-token client: the activity line's `client`
+ *  at write time, and through it the bell row and the Connections ring.
+ *
+ *  One reader, called per use rather than read once at import: the module is
+ *  loaded long before the server's env is what it will be under systemd, and
+ *  this costs a property read. A value that is not a name falls back to the
+ *  default whole. */
+export function staticClientName(): string {
+  const value = (process.env.MCP_TOKEN_NAME ?? "").trim();
+  if (!value) return DEFAULT_STATIC_CLIENT_NAME;
+  if ([...value].length > MAX_STATIC_CLIENT_NAME) return DEFAULT_STATIC_CLIENT_NAME;
+  if (UNDRAWABLE.test(value)) return DEFAULT_STATIC_CLIENT_NAME;
+  return value;
+}
+
 export type McpScope = (typeof MCP_SCOPES)[number];
 
 export const MCP_SCOPE_LABELS: Record<McpScope, string> = {

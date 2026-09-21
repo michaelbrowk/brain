@@ -1,19 +1,22 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MAIL_SEND_TOOLS,
   MAIL_TOOLS,
   WRITE_TOOLS,
+  clientNameOf,
   insufficientScope,
   refusal,
   text,
   toolScopeOf,
 } from "./tool-kit";
 import {
+  DEFAULT_STATIC_CLIENT_NAME,
   MCP_SCOPES,
   MCP_CONNECTION_SCOPES,
   MCP_SCOPE_LABELS,
   normalizeScopes,
   ownerEffectiveScopes,
+  staticClientName,
 } from "@/lib/oauth/config";
 
 describe("the tool scope table", () => {
@@ -120,5 +123,47 @@ describe("the answer shapes", () => {
       reason: "insufficient_scope",
       requiredScope: "brain:mail:send",
     });
+  });
+});
+
+describe("the static token's name", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("calls the static bearer whatever MCP_TOKEN_NAME says, trimmed", async () => {
+    vi.stubEnv("MCP_TOKEN_NAME", "  Claude  ");
+    expect(staticClientName()).toBe("Claude");
+    await expect(
+      clientNameOf({ authInfo: { clientId: "brain-legacy-bearer" } }),
+    ).resolves.toBe("Claude");
+  });
+
+  it("calls it API token when nothing names it", async () => {
+    vi.stubEnv("MCP_TOKEN_NAME", "");
+    expect(DEFAULT_STATIC_CLIENT_NAME).toBe("API token");
+    expect(staticClientName()).toBe("API token");
+    await expect(
+      clientNameOf({ authInfo: { clientId: "brain-legacy-bearer" } }),
+    ).resolves.toBe("API token");
+  });
+
+  // A name is drawn in a bell row and in a settings list, so a value that
+  // would not draw is not half-used: it falls back whole.
+  it.each([
+    ["a name past forty characters", "N".repeat(60)],
+    ["a name carrying a control character", "Claude"],
+    ["a name carrying a newline", "Claude\nand more"],
+    ["a name that is only whitespace", "   "],
+  ])("falls back to the default for %s", (_case, value) => {
+    vi.stubEnv("MCP_TOKEN_NAME", value);
+    expect(staticClientName()).toBe("API token");
+  });
+
+  it("keeps a forty-character name, and a name of letters outside ASCII", () => {
+    vi.stubEnv("MCP_TOKEN_NAME", "N".repeat(40));
+    expect(staticClientName()).toBe("N".repeat(40));
+    vi.stubEnv("MCP_TOKEN_NAME", "Мишин токен");
+    expect(staticClientName()).toBe("Мишин токен");
   });
 });

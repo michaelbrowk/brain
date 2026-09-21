@@ -1,6 +1,6 @@
 "use client";
 
-// Connections: the MCP endpoint, OAuth connect, the legacy bearer token,
+// Connections: the MCP endpoint, OAuth connect, the static token,
 // connected apps, what agents may do, what they did, and the AI-requests
 // note. Session controls live in Account.
 //
@@ -98,7 +98,7 @@ function activityTarget(entry: McpActivityEntry): string | undefined {
 
 /** The second line of a log row: which mutation, which account, which
  *  record, how it ended. The account and the record are shown by their
- *  head, the way the legacy bearer token above is, because the whole string
+ *  head, the way the static token above is, because the whole string
  *  names nothing a person reads. */
 function activityDetail(entry: McpActivityEntry): string {
   const parts: string[] = [];
@@ -355,12 +355,12 @@ export function ConnectionsSection({
         </SettingsRow>
         {mcp?.token && (
           <SettingsRow
-            label="Legacy bearer token"
+            label="Static token"
             hint="Full access. Keep it only for clients that do not support OAuth yet"
             stack
           >
             <CopyRow
-              label="Copy legacy bearer token"
+              label="Copy static token"
               value={mcp.token.slice(0, 12) + "…"}
               onCopy={() => copy(mcp.token, "Token copied")}
             />

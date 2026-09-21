@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { resolveShareAccess, ShareAccessNotFoundError } from "./share-access";
+import {
+  resolveShareAccess,
+  resolveShareLabels,
+  ShareAccessNotFoundError,
+} from "./share-access";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -579,6 +583,65 @@ describe("shared subtree access", () => {
     } finally {
       clock.mockRestore();
     }
+  });
+});
+
+describe("live labels inside a shared subtree", () => {
+  function labelFixture(options: { within?: string[]; deleted?: string[] } = {}) {
+    const titles: Record<string, { id: string; title: string; icon?: string }> = {
+      pantry: { id: "pantry", title: "Pantry", icon: "🥫" },
+      deep: { id: "deep", title: "Deep page" },
+      gone: { id: "gone", title: "Deleted page" },
+      outside: { id: "outside", title: "Private page", icon: "🔒" },
+    };
+    const isWithinSubtree = vi.fn(
+      (rootId: string, id: string) =>
+        rootId === "root" &&
+        (options.within ?? ["pantry", "deep", "gone"]).includes(id),
+    );
+    const isDeleted = vi.fn((id: string) =>
+      (options.deleted ?? ["gone"]).includes(id),
+    );
+    const readPageLabel = vi.fn((id: string) => titles[id] ?? null);
+    return { store: { isWithinSubtree, isDeleted, readPageLabel }, readPageLabel };
+  }
+
+  it("answers with the live title and icon of every page the share reaches", () => {
+    const { store } = labelFixture();
+
+    const labels = resolveShareLabels(store, "root", ["pantry", "deep"]);
+
+    expect(labels.get("pantry")).toEqual({ title: "Pantry", icon: "🥫" });
+    expect(labels.get("deep")).toEqual({ title: "Deep page" });
+  });
+
+  it("says nothing about a page outside the subtree, a deleted one, or one the tree lost", () => {
+    const { store, readPageLabel } = labelFixture();
+
+    const labels = resolveShareLabels(store, "root", [
+      "outside",
+      "gone",
+      "vanished",
+      "pantry",
+    ]);
+
+    expect([...labels.keys()]).toEqual(["pantry"]);
+    // A page outside the share is never read, so nothing about it can leak
+    // through timing either.
+    expect(readPageLabel).not.toHaveBeenCalledWith("outside");
+  });
+
+  it("asks for each id once, however many links point at it", () => {
+    const { store, readPageLabel } = labelFixture();
+
+    const labels = resolveShareLabels(store, "root", [
+      "pantry",
+      "pantry",
+      "pantry",
+    ]);
+
+    expect(labels.size).toBe(1);
+    expect(readPageLabel).toHaveBeenCalledTimes(1);
   });
 });
 

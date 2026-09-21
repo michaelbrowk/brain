@@ -20,6 +20,7 @@ type StubProps = {
     insertPageRef: (page: { id: string; title: string; icon?: string }) => boolean,
   ) => Promise<void>;
   pages?: unknown;
+  pageDirectory?: unknown;
   capabilities?: {
     upload?: {
       endpoint: string;
@@ -168,7 +169,7 @@ async function mount(
   page: {
     pageId?: string;
     initialRev?: string;
-    linkablePageIds?: readonly string[];
+    linkablePages?: readonly { id: string; title: string; icon?: string }[];
     onNavigate?: (href: string) => void;
   } = {},
 ) {
@@ -183,7 +184,7 @@ async function mount(
         initialMarkdown={initialMarkdown}
         initialRev={page.initialRev ?? REV}
         onReload={onReload}
-        linkablePageIds={page.linkablePageIds}
+        linkablePages={page.linkablePages}
         onNavigate={page.onNavigate}
       />,
     );
@@ -365,11 +366,21 @@ describe("the visitor editor", () => {
   it("points a page ref at the share for a page inside it, and nowhere for one outside", async () => {
     const moved: string[] = [];
     await mount("", undefined, {
-      linkablePageIds: ["page-3", "root-1"],
+      linkablePages: [
+        { id: "page-3", title: "Pantry", icon: "🥫" },
+        { id: "root-1", title: "Furniture" },
+      ],
       onNavigate: (href) => moved.push(href),
     });
-    // The editor gets no page directory: titles come from the baked labels.
+    // The pages the share reaches, with the title each carries now: a ref
+    // written when one of them was called something else draws the live name,
+    // the way it does for the owner. Nothing is offered to the link or
+    // wikilink menus, which is what `pages` would do.
     expect(editorProps.current!.pages).toBeUndefined();
+    expect(editorProps.current!.pageDirectory).toEqual([
+      { id: "page-3", title: "Pantry", icon: "🥫" },
+      { id: "root-1", title: "Furniture" },
+    ]);
     expect(pageRefHref("page-3")).toBe("/share/root-1?page=page-3");
     expect(pageRefHref("root-1")).toBe("/share/root-1");
     expect(pageRefHref("elsewhere")).toBeNull();

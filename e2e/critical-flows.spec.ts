@@ -5633,6 +5633,15 @@ test("public share renders authorized structural children without changing Markd
     },
   });
   expect(seeded.ok).toBeTruthy();
+  // The child is renamed after the body was written, which is the ordinary
+  // way a label goes stale: the parent's Markdown keeps the name of the day
+  // it was linked, and nothing rewrites it.
+  const renamedTitle = "Pantry";
+  const renamed = await browserJson(page, `/api/page/${authored.id}`, {
+    method: "PATCH",
+    body: { title: renamedTitle, icon: "🥫" },
+  });
+  expect(renamed.ok).toBeTruthy();
   const disclosure = await browserJson(page, `/api/page/${root.id}/share`);
   expect(disclosure.ok).toBeTruthy();
   const shared = await browserJson(page, `/api/page/${root.id}/share`, {
@@ -5658,6 +5667,11 @@ test("public share renders authorized structural children without changing Markd
     `a.brain-page-ref[data-page-ref="${derived.id}"]`,
   );
   await expect(authoredLink).toHaveCount(1);
+  // The visitor reads the page as it is today, the way the owner's editor
+  // draws the same ref, not the label the body was written with.
+  await expect(authoredLink).toHaveText(`🥫 ${renamedTitle}`);
+  await expect(authoredLink.locator("span.brain-page-ref-icon")).toHaveText("🥫");
+  await expect(article).not.toContainText("Authored child");
   await expect(derivedLink).toHaveCount(1);
   await expect(derivedLink).toHaveText(`📄 ${derivedTitle}`);
   await expect(derivedLink).toHaveAttribute(

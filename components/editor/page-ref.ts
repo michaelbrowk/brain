@@ -57,7 +57,7 @@ export function hasPageRefHrefResolver(): boolean {
  * This deliberately does not dispatch a ProseMirror transaction: a rename,
  * icon update, or newly resolved page is live display state, not a note edit. */
 export function syncLivePageInfo(
-  pages?: { id: string; title: string; icon?: string }[],
+  pages?: readonly { id: string; title: string; icon?: string }[],
 ) {
   livePageInfo.clear();
   for (const page of pages ?? []) {

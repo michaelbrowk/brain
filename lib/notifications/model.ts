@@ -24,9 +24,9 @@ export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
  *  request, so the cap is what keeps it a few hundred kilobytes. */
 export const NOTIFICATION_CAP = 500;
 
-/** An id is derived, never minted: the same reminder computed by two scans,
- *  or the same thread seen by two polls, has to be one row. The charset is
- *  what `mailNotificationId` can produce plus the two literal separators. */
+/** An id is derived, never minted: the same reminder computed by two scans
+ *  has to be one row, and the mail row carries the instant it opened. The
+ *  charset is what those producers write plus the literal separators. */
 export const NOTIFICATION_ID_RE = /^[A-Za-z0-9:_.@+-]{1,400}$/;
 
 /** A path on this origin and nothing else. The service worker opens this
@@ -109,11 +109,7 @@ export function taskMissedNotificationId(taskId: string, when: string, time: str
   return `task-missed:${taskId}:${when}T${time}`;
 }
 
-/** The mail id pair lives in its own zod-free module so the Mail client can
- *  import it without pulling this file's schemas into the browser bundle. It
- *  is re-exported here so a server caller still has one import. */
-export {
-  mailNotificationId,
-  decodeMailNotificationId,
-  decodeTaskNotificationId,
-} from "./ids";
+/** The id readers live in their own zod-free module so the browser can import
+ *  them without pulling this file's schemas into a route bundle. Re-exported
+ *  here so a server caller still has one import. */
+export { decodeTaskNotificationId } from "./ids";

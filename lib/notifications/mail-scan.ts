@@ -1,8 +1,9 @@
 import type { MailThreadListItem } from "@/lib/mail/message-types";
-import { MAIL_SCAN_PAGE, newMailNotifications } from "./mail-producer";
+import { MAIL_SCAN_PAGE, newMailLetters, type NewMailLetter } from "./mail-producer";
+import { countedMailRow, mailRow, openMailRow, type OpenMailRow } from "./mail-rows";
 import type { BrainNotification } from "./model";
 import { notificationStateDirectory } from "./state-dir";
-import { appendNotification } from "./store";
+import { appendOrFoldNotification, listNotifications } from "./store";
 import { readMailWatermarks, writeMailWatermark } from "./watermarks";
 
 /** THE NEW-MAIL POLL.
@@ -18,67 +19,61 @@ import { readMailWatermarks, writeMailWatermark } from "./watermarks";
  *  a reader can act on it.
  */
 
-/** HOW MANY ROWS ONE SCAN MAY APPEND, the same number and the same reason as
- *  the reminder scan's cap: every append takes a slot in the 256-entry SSE
- *  replay journal, and a scan that emptied it would leave every reconnecting
- *  tab with nothing to replay. One page is 25, so the cap can only bite from
- *  the third busy account onwards. */
-export const MAX_MAIL_APPENDS_PER_SCAN = 50;
-
-/** ONE PAGE MUST FIT INSIDE ONE SCAN'S BUDGET, AND `tsc` SAYS SO.
- *
- *  The whole-account rule below carries an account whose page does not fit the
- *  remaining budget, so a page larger than the cap would be carried on every
- *  tick for ever and that account's bell would never speak again. Prose next
- *  to two numbers is not a guard: this is, and it costs nothing at runtime.
- */
-type Slots<N extends number, T extends 0[] = []> = T["length"] extends N ? T : Slots<N, [...T, 0]>;
-type Under<A extends number, B extends number> =
-  Slots<B> extends [...Slots<A>, 0, ...0[]] ? true : false;
-type Assert<T extends true> = T;
-export type MailScanPageFitsInOneScan = Assert<
-  Under<typeof MAIL_SCAN_PAGE, typeof MAX_MAIL_APPENDS_PER_SCAN>
->;
+/** ONE WRITE PER SCAN, WHATEVER THE MORNING BROUGHT. The centre took one row
+ *  per thread until 0.12.2 and one scan's appends were capped at fifty, because
+ *  every append takes a slot in the 256-entry SSE replay journal. A scan writes
+ *  one row now — it opens one or counts into the open one — so there is nothing
+ *  left to cap and nothing to carry to the next tick. What a busy account costs
+ *  is its pushes, which are one per letter and bounded by the page. */
 
 export interface MailScanPort {
   dir: string;
   accounts(): Promise<readonly { readonly accountId: string }[]>;
   inbox(accountId: string): Promise<readonly MailThreadListItem[]>;
-  /** `false` when the centre did not keep the row: it already held the id, it
-   *  refused the shape, or a full centre evicted it. */
-  notify(notification: BrainNotification): Promise<boolean>;
+  /** The row this scan counts into, or `null` when the next letter opens one.
+   *  Read before the write and re-checked under the store's own lock, so a row
+   *  read in between is not written back under the reader. */
+  openMailRow(): Promise<OpenMailRow | null>;
+  notify(
+    row: BrainNotification,
+    folded: BrainNotification | null,
+  ): Promise<"appended" | "folded" | "refused">;
   push(payload: { title: string; body?: string; href: string; tag?: string }): Promise<void>;
 }
 
-const PORT_MEMBERS = ["dir", "accounts", "inbox", "notify", "push"] as const;
+const PORT_MEMBERS = ["dir", "accounts", "inbox", "openMailRow", "notify", "push"] as const;
 
-async function defaultPort(): Promise<MailScanPort> {
-  const [{ createBrainMailClient }, { sendPush }] = await Promise.all([
+function defaultPort(dir: string): Promise<MailScanPort> {
+  return Promise.all([
     import("@/lib/mail/brain-mail-client"),
     import("@/lib/push/send"),
-  ]);
-  const client = createBrainMailClient();
-  return {
-    dir: notificationStateDirectory(),
-    accounts: async () => (await client.listAccounts()).accounts,
-    inbox: async (accountId) =>
-      (await client.listMailboxThreads(accountId, "inbox", { limit: MAIL_SCAN_PAGE })).items,
-    notify: (notification) => appendNotification(notification),
-    push: async (payload) => {
-      await sendPush("mail-new", payload);
-    },
-  };
+  ]).then(([{ createBrainMailClient }, { sendPush }]) => {
+    const client = createBrainMailClient();
+    return {
+      dir,
+      accounts: async () => (await client.listAccounts()).accounts,
+      inbox: async (accountId) =>
+        (await client.listMailboxThreads(accountId, "inbox", { limit: MAIL_SCAN_PAGE })).items,
+      openMailRow: async () => openMailRow(await listNotifications(dir)),
+      notify: (row, folded) => appendOrFoldNotification(row, folded, dir),
+      push: async (payload) => {
+        await sendPush("mail-new", payload);
+      },
+    };
+  });
 }
 
 /** The real port is built only for the members the caller did not bring, the
- *  way the reminder scan resolves its own. A test that supplies all five gets
- *  exactly those five, and neither the mail socket nor the push keys is
- *  reached to run an arithmetic test. */
+ *  way the reminder scan resolves its own. A test that supplies all six gets
+ *  exactly those six, and neither the mail socket nor the push keys is
+ *  reached to run an arithmetic test. A test that brings only `dir` gets the
+ *  real centre at that directory, which is where the fold is decided. */
 async function resolvePort(overrides: Partial<MailScanPort>): Promise<MailScanPort> {
   if (PORT_MEMBERS.every((member) => overrides[member] !== undefined)) {
     return overrides as MailScanPort;
   }
-  return { ...(await defaultPort()), ...overrides };
+  const dir = overrides.dir ?? notificationStateDirectory();
+  return { ...(await defaultPort(dir)), ...overrides };
 }
 
 /** SAID ONCE, NOT EVERY MINUTE. A mail service that is down stays down for
@@ -114,53 +109,22 @@ export async function runMailScan(
 
   const watermarks = await readMailWatermarks(port.dir);
   const at = new Date().toISOString();
-  let produced = 0;
-  let budget = MAX_MAIL_APPENDS_PER_SCAN;
-  let refused = 0;
-  let carried = 0;
+  const letters: NewMailLetter[] = [];
 
   for (const account of accounts) {
     try {
       const items = await port.inbox(account.accountId);
       unreachable.delete(account.accountId);
-      const result = newMailNotifications(items, watermarks[account.accountId] ?? null, at);
-
-      // AN ACCOUNT IS REPORTED WHOLE OR NOT AT ALL. Reporting half a page and
-      // moving the mark past the rest would lose the letters that did not fit,
-      // because the mark is the only record of what was said. Leaving the mark
-      // where it is costs one more tick and nothing else.
-      if (result.notifications.length > budget) {
-        carried += result.notifications.length;
-        continue;
-      }
-      budget -= result.notifications.length;
-
-      for (const notification of result.notifications) {
-        const appended = await port.notify(notification);
-        if (!appended) {
-          refused += 1;
-          continue;
-        }
-        produced += 1;
-        await port
-          .push({
-            title: notification.title,
-            ...(notification.body !== undefined ? { body: notification.body } : {}),
-            href: notification.href,
-            // The row's own id. Every mail row carries href "/mail", so a tag
-            // built from the destination let the second letter of a poll
-            // replace the first on the device.
-            tag: notification.id,
-          })
-          .catch((cause: unknown) => {
-            console.warn(`[brain/notifications] mail push failed: ${reason(cause)}`);
-          });
-      }
+      const result = newMailLetters(items, watermarks[account.accountId] ?? null, at);
+      // EVERY ACCOUNT INTO ONE COUNT. The row is not about an account and the
+      // reader does not sort their morning by mailbox: three letters in two
+      // inboxes is "3 new messages".
+      letters.push(...result.letters);
 
       // THE MARK GOES ON WHATEVER THE CENTRE ANSWERED. A row the centre would
       // not keep is a row it will not keep on the next tick either, and an
-      // unmoved mark would offer it again every minute for as long as the
-      // inbox held it.
+      // unmoved mark would offer the same letters again every minute for as
+      // long as the inbox held them.
       if (result.watermark !== null) {
         await writeMailWatermark(account.accountId, result.watermark, port.dir);
       }
@@ -176,13 +140,43 @@ export async function runMailScan(
     }
   }
 
-  if (refused > 0) {
-    console.warn(`[brain/notifications] the centre did not store ${refused} new-mail rows`);
+  if (letters.length === 0) return { produced: 0 };
+
+  // The newest letter dates the row, so the bell rises to the head on the
+  // letter that arrived rather than on the poll that found it.
+  let newest = letters[0].at;
+  for (const letter of letters) if (letter.at > newest) newest = letter.at;
+
+  // A row already open takes the count; a row the reader has read does not,
+  // and the letters open a new one under the newest instant. The store decides
+  // which under its own lock: `held` may have been read in the meantime.
+  const held = await port.openMailRow();
+  const done = await port.notify(
+    mailRow(newest, letters.length, newest),
+    held === null
+      ? null
+      : countedMailRow(held.id, held.count + letters.length, held.at > newest ? held.at : newest),
+  );
+  if (done === "refused") {
+    console.warn(`[brain/notifications] the centre did not count ${letters.length} new letters`);
   }
-  if (carried > 0) {
-    console.warn(
-      `[brain/notifications] ${carried} new letters did not fit this scan; the next one takes them`,
-    );
+
+  // THE PUSH GOES WHATEVER THE CENTRE DID. It is one per letter, it carries
+  // the sender and the subject, and it is the phone's whole signal: a tally
+  // the store could not write is not a reason to leave a person unaware that
+  // their mail arrived.
+  for (const letter of letters) {
+    await port
+      .push({
+        title: letter.title,
+        body: letter.body,
+        href: "/mail",
+        ...(letter.tag !== undefined ? { tag: letter.tag } : {}),
+      })
+      .catch((cause: unknown) => {
+        console.warn(`[brain/notifications] mail push failed: ${reason(cause)}`);
+      });
   }
-  return { produced };
+
+  return { produced: done === "refused" ? 0 : letters.length };
 }

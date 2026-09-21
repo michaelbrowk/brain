@@ -1,4 +1,4 @@
-/** THE MAIL NOTIFICATION ID, ON BOTH SIDES OF THE WIRE.
+/** THE IDS A ROW CARRIES, AND WHAT CAN BE READ BACK OUT OF THEM.
  *
  *  Its own module because the Mail client imports it. `model.ts` builds
  *  `notificationSchema` at module scope, so a value import of it from a
@@ -6,32 +6,37 @@
  *  declares no `sideEffects` for the bundler to prune it with. Everything here
  *  is string work: no zod, no node, no clock.
  *
- *  `model.ts` re-exports both functions, so a server caller still has one
- *  import and nothing moved for a reader following the old path.
+ *  `model.ts` re-exports what a server caller wants, so nothing moved for a
+ *  reader following the old path.
  */
 
-/** A provider's thread id may hold anything, and the id has to stay inside
- *  NOTIFICATION_ID_RE so Mail can compute it on the client and mark the row
- *  read without a lookup. Hex of the UTF-8 bytes is the one encoding that
- *  needs neither Buffer nor btoa, so the same function runs on both sides. */
+/** A provider's thread id may hold anything, and the tag has to stay inside
+ *  `MAX_PUSH_TAG`. Hex of the UTF-8 bytes is the one encoding that needs
+ *  neither Buffer nor btoa, so the same function runs on both sides. */
 const MAX_THREAD_ID_BYTES = 150;
 
-/** What `decodeMailNotificationId` can read back, and so what the encoder
- *  accepts. Wider than today's `account-a<32 hex>` and narrower than the id
- *  charset, which has to hold the two separators as well. */
+/** What `decodeAgentMailHref` can read back, and so what the encoders accept.
+ *  Wider than today's `account-a<32 hex>` and narrower than the id charset,
+ *  which has to hold the two separators as well. */
 const ACCOUNT_ID_RE = /^[A-Za-z0-9_-]+$/;
 
-export function mailNotificationId(accountId: string, threadId: string): string {
-  // The decoder reads the account back out of the id, so an account id it
-  // cannot parse must never be encoded into one. Every mail module already
-  // gates on `account-a<32 hex>`; this is the same gate at the other end.
-  if (!ACCOUNT_ID_RE.test(accountId)) {
-    throw new Error(`account id is not one a notification id can carry: ${accountId}`);
-  }
+/** THE TAG ON ONE LETTER'S PUSH, and the last thing left of the per-thread
+ *  mail notification id the centre kept until 0.12.2.
+ *
+ *  A push is still one per letter (`lib/notifications/mail-scan.ts`), and the
+ *  service worker tags each notification so two letters in one poll are two
+ *  notifications rather than one replacing the other: every mail push carries
+ *  the same href "/mail", so a tag built from the destination collapsed them.
+ *  The pair is the one thing about a letter that is already an id rather than
+ *  content, which is why the tag is made of it and of nothing else.
+ *
+ *  `null` for a pair this cannot carry. The letter is still counted and still
+ *  pushed; it is its tag that is lost, and an untagged notification stands on
+ *  its own, which is the behaviour a tag is there to buy. */
+export function mailPushTag(accountId: string, threadId: string): string | null {
+  if (!ACCOUNT_ID_RE.test(accountId)) return null;
   const bytes = new TextEncoder().encode(threadId);
-  if (bytes.length > MAX_THREAD_ID_BYTES) {
-    throw new Error(`thread id is too long for a notification id: ${bytes.length} bytes`);
-  }
+  if (bytes.length > MAX_THREAD_ID_BYTES) return null;
   return `mail-new:${accountId}:${hexOf(bytes)}`;
 }
 
@@ -52,15 +57,15 @@ function bytesOf(hex: string): Uint8Array | null {
 
 /** THE THREAD AN AGENT ROW IS ABOUT, IN THE HREF RATHER THAN IN THE ID.
  *
- *  A `mail-new` row carries its pair in its own id, and the bell reads it back
- *  to ask Mail to open that thread. An `agent-action` id is a digest of the
- *  line it came from (`agent:<at>:<tool>:<sha>`), so there is nothing to read
- *  back out of it, and the row's shape has no field for a pair either. The
- *  href is what is left, and it is the honest carrier: the row's destination
- *  IS that thread.
+ *  An `agent-action` id is a digest of the line it came from
+ *  (`agent:<at>:<tool>:<sha>`), so there is nothing to read back out of it,
+ *  and the row's shape has no field for a pair either. The href is what is
+ *  left, and it is the honest carrier: the row's destination IS that thread.
+ *  It is the one kind that still opens a letter from the bell — a `mail-new`
+ *  row is a count now and names no thread at all.
  *
- *  Same hex-of-the-UTF-8-bytes encoding the id uses, for the same reason: no
- *  Buffer and no btoa, so the browser reads what the server wrote.
+ *  Same hex-of-the-UTF-8-bytes encoding the push tag uses, for the same
+ *  reason: no Buffer and no btoa, so the browser reads what the server wrote.
  */
 const AGENT_MAIL_HREF = /^\/mail\?account=([A-Za-z0-9_-]+)&thread=([0-9a-f]+)$/;
 
@@ -105,14 +110,4 @@ const TASK_ID = /^task-(?:reminder|missed):([A-Za-z0-9_-]{1,128}):/;
  *  answer that leaves the href as it stands. */
 export function decodeTaskNotificationId(id: string): string | null {
   return TASK_ID.exec(id)?.[1] ?? null;
-}
-
-export function decodeMailNotificationId(
-  id: string,
-): { accountId: string; threadId: string } | null {
-  const match = /^mail-new:([A-Za-z0-9_-]+):([0-9a-f]*)$/.exec(id);
-  if (!match) return null;
-  const bytes = bytesOf(match[2]);
-  if (bytes === null) return null;
-  return { accountId: match[1], threadId: new TextDecoder().decode(bytes) };
 }

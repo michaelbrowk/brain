@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { atomicWrite } from "@/lib/store/atomic";
 import { emitStore } from "@/lib/store/events";
+import { foldLegacyMailRows } from "./mail-rows";
 import {
   NOTIFICATION_CAP,
   isNotificationInstant,
@@ -75,7 +76,11 @@ async function readAll(dir: string): Promise<BrainNotification[]> {
     const row = notificationSchema.safeParse(item);
     if (row.success) rows.push(row.data);
   }
-  return rows;
+  // The one shape this file reads differently from the way it was written: a
+  // centre from before 0.12.2 holds one mail row per thread, and they are
+  // folded into the single counted row on the way out. Every write below
+  // starts from this answer, so the first one persists the fold.
+  return [...foldLegacyMailRows(rows)];
 }
 
 async function writeAll(dir: string, items: BrainNotification[]): Promise<void> {

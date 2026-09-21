@@ -15,7 +15,8 @@ import {
 } from "@/lib/autosave";
 import { canonicalPageMarkdown } from "@/lib/page-markdown";
 import { openTodayCount } from "./tasks-lists";
-import { useTasks } from "./tasks-client";
+import { reloadTasks, useTasks } from "./tasks-client";
+import { parseTaskLines } from "@/lib/tasks/task-lines";
 import { sectionPageIds } from "@/lib/dated-sections";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { Kbd, Skeleton, useShortcutTitle, type ToastOptions } from "./ui/primitives";
@@ -212,6 +213,13 @@ const SMART_UNDO_RISE_MS = 400;
  *  them, and it is the affordance whose absence used to force a Back row into
  *  each header. */
 type MobileOverlay = "pages" | "search";
+
+/** Whether a note's markdown holds a checkbox line at all. The store's own
+ *  reader, so "a task line" means here exactly what the reconcile means by it
+ *  — a `[x]` counts, and a bracket pair inside a fence does not. */
+function hasTaskLine(markdown: string): boolean {
+  return parseTaskLines(markdown).length > 0;
+}
 
 function currentOverlayEntry(): MobileOverlay | null {
   const state = window.history.state as { brainMobileOverlay?: unknown } | null;
@@ -2106,6 +2114,11 @@ export function Shell({
         // edit visible when the action was invoked. If that edit fails, the
         // rewrite is skipped; edits typed later are already queued after it.
         if (prerequisite && !(await prerequisite)) return false;
+        // What the store held for this note before this save, for the task
+        // check below. Read here because `saveMarkdown` moves the base
+        // markdown on and `cachePut` moves the cache on.
+        const markdownBefore =
+          pageCache.current.get(id)?.markdown ?? baseMarkdownRef.current.get(id) ?? "";
         try {
           const revision = await saveMarkdown({
             fetcher: apiFetch,
@@ -2128,6 +2141,19 @@ export function Shell({
           // below, rather than markdown equality, decides draft cleanup.
           const prev = pageCache.current.get(id);
           if (prev) cachePut({ ...prev, markdown: md, rev: revision });
+          // A TICK AND A DELETED LINE ARE TASK WRITES TOO, AND THIS IS THE
+          // ONLY PLACE THEY SETTLE.
+          //
+          // The note's checkbox and its lines are markdown, so both gestures
+          // reach the store as this PUT, which runs `reconcilePageTasks` and
+          // emits the same `type: "task"` event a promote does — carrying this
+          // tab's own `src`, which the forwarder above drops. Unlike the
+          // promote there is no record to hand over: the page answer carries a
+          // rev and nothing about the tasks the reconcile decided. So the set
+          // is re-asked once, and Tasks, Home's Today block and the sidebar
+          // count move with the note. Only for a note that has a task line or
+          // had one, which is what makes typing prose cost nothing.
+          if (hasTaskLine(md) || hasTaskLine(markdownBefore)) reloadTasks();
           const newerPending =
             pendingRef.current?.id === id ? pendingRef.current : null;
           if (newerPending && newerPending.operationId !== operationId) {

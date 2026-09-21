@@ -8,7 +8,8 @@ import type { EditorView } from "@milkdown/kit/prose/view";
 import { callCommand, getMarkdown } from "@milkdown/kit/utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { liveTask, resetTasksStore } from "@/components/tasks-client";
+import { liveTask, mutateTasks, resetTasksStore } from "@/components/tasks-client";
+import type { TaskView } from "@/lib/tasks/model";
 import { hashTaskText, normalizeTaskText } from "@/lib/tasks/task-lines";
 
 import {
@@ -235,6 +236,18 @@ async function pickDay(day: string) {
     ?.querySelector<HTMLElement>("[data-when-done]")
     ?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
   await settle();
+}
+
+/** THE WHOLE SHARED SET, not the first record that answers to an id.
+ *  `mutateTasks` with an identity update is the only reader of the array
+ *  itself the module exports, and it changes nothing. */
+function storeTasks(): readonly TaskView[] {
+  let tasks: readonly TaskView[] = [];
+  mutateTasks((current) => {
+    tasks = current;
+    return current;
+  });
+  return tasks;
 }
 
 function postBody(): Record<string, unknown> {
@@ -1341,6 +1354,12 @@ describe("the + Task gesture", () => {
       await pickDay(TOMORROW);
 
       expect(liveTask("task-1")).toMatchObject({ id: "task-1", when: TOMORROW });
+      // AND EXACTLY ONE OF IT. `liveTask` returns the first match, so it
+      // cannot see an upsert that has quietly become an insert — and that
+      // regression is not cosmetic: `rowsFor` keys a row on `task.id`, so a
+      // duplicate is two rows sharing a React key and a badge counting the
+      // task twice. Read the whole set through an identity mutation.
+      expect(storeTasks().filter((task) => task.id === "task-1")).toHaveLength(1);
     });
 
     it("takes in a record the set never loaded, rather than dropping it", async () => {

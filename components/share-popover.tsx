@@ -278,8 +278,10 @@ export function SharePopover({
       setDirectOverride({ value: true, basePublic: isPublic });
       setConfirmation(null);
     } catch {
+      // Not "the links inside are unchanged": the fold may have landed and the
+      // read-back after it thrown, and this is the one path that cannot tell.
       setShareError(
-        "Couldn't share this page instead. The links inside it are unchanged; check the current state before retrying.",
+        "Couldn't confirm sharing this page instead. Check the current state before retrying.",
       );
     } finally {
       setBusy(false);
@@ -569,15 +571,17 @@ function PrivateReview({
   const blocked = overlaps.length > 0;
   // Every overlap nested inside this page can be folded into one link here.
   // A parent's grant cannot: that root is already the authority and this page
-  // is already inside its link. Nor can a nested link that asks for a password
-  // this page does not, which the fold would quietly drop.
+  // is already inside its link. Nor can a live nested link that carries a gate
+  // this page does not — a password, or a deadline — which the fold would take
+  // away from the readers holding it. The owner lifts that gate where it
+  // stands, which is the dead end's own advice and the one case it is right.
   const live = overlaps.filter(
     (overlap) => !isExpired(overlap.shareExpiresAt ?? undefined),
   );
   const foldable =
     blocked &&
     overlaps.every((overlap) => overlap.relation === "descendant") &&
-    !live.some((overlap) => overlap.shareLocked);
+    !live.some((overlap) => overlap.shareLocked || overlap.shareExpiresAt);
   return (
     <div data-share-state="review">
       <h2 className={HEAD}>
@@ -605,7 +609,7 @@ function PrivateReview({
           </ul>
           <span className={NOTE}>
             {foldable
-              ? foldNote(live)
+              ? foldNote(live, pageTitle)
               : "Resolve the existing grant before creating this link."}
           </span>
         </div>
@@ -1633,24 +1637,29 @@ function isExpired(value?: string): boolean {
   return !Number.isFinite(deadline) || deadline <= Date.now();
 }
 
-/** What pressing the one action does, in one sentence. The links listed
- *  above go on working, which is the whole reason the action is offered; an
- *  expired one is not revived by it and says so. */
-function foldNote(live: Overlap[]): string {
+/** What pressing the one action does, in one sentence. The links listed above
+ *  go on working, which is the whole reason the action is offered — and what
+ *  they reach afterwards is this page's whole share, not the one page they
+ *  named, which is the half a sentence of pure reassurance would leave out.
+ *  An expired link is not revived by any of it and says so. */
+function foldNote(live: Overlap[], pageTitle: string): string {
   if (live.length === 0) {
     return "Those links have expired and stay off. This one will be new.";
   }
   if (live.length === 1) {
-    return `${live[0].title}'s link will open inside this one; anyone who has it keeps it.`;
+    return `${live[0].title}'s link will open inside this one and show everything ${pageTitle} shares; anyone who has it keeps it.`;
   }
-  return "Those links will open inside this one; anyone who has them keeps them.";
+  return `Those links will open inside this one and show everything ${pageTitle} shares; anyone who has them keeps them.`;
 }
 
-/** A title long enough to break the action's capsule is cut on a character
- *  rather than a code unit, so an emoji never splits in half. */
+/** A title long enough to break the action's capsule is cut at 24 code points
+ *  rather than 24 code units, which keeps a surrogate pair whole. A sequence
+ *  built out of several code points — a flag, a family — can still be cut
+ *  through the middle; the capsule is what this is for, and `Intl.Segmenter`
+ *  is a larger promise than a button label needs. */
 function shortTitle(title: string): string {
-  const glyphs = [...title];
-  return glyphs.length > 24 ? `${glyphs.slice(0, 23).join("").trimEnd()}…` : title;
+  const points = [...title];
+  return points.length > 24 ? `${points.slice(0, 23).join("").trimEnd()}…` : title;
 }
 
 function relationLabel(overlap: Overlap): string {

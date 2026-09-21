@@ -578,7 +578,7 @@ describe("SharePopover redesign", () => {
 
     expect(document.body.textContent).toContain("Furniture · shared nested page");
     expect(document.body.textContent).toContain(
-      "Furniture's link will open inside this one; anyone who has it keeps it.",
+      "Furniture's link will open inside this one and show everything Apartment shares; anyone who has it keeps it.",
     );
     expect(document.body.textContent).not.toContain("Resolve the existing grant");
     expect(shareButton()).toBeUndefined();
@@ -619,14 +619,104 @@ describe("SharePopover redesign", () => {
               shareExpiresAt: null,
               shareLocked: false,
             },
+            {
+              rootId: "nested-c",
+              title: "Lamps",
+              relation: "descendant",
+              shareExpiresAt: "2000-01-01T00:00:00.000Z",
+              shareLocked: false,
+            },
+          ],
+        }),
+      ),
+    });
+    // three overlaps listed, two links promised: the dead one is named on the
+    // list as expired and left out of what the sentence undertakes
+    expect(document.body.textContent).toContain("Lamps · shared nested page · expired");
+    expect(document.body.textContent).toContain(
+      "Those links will open inside this one and show everything Apartment shares; anyone who has them keeps them.",
+    );
+    expect(button("Share Apartment instead")).toBeDefined();
+  });
+
+  it("promises nothing where every nested link has already expired", async () => {
+    await renderAndOpen(false, {
+      onPrepareShare: vi.fn().mockResolvedValue(
+        snapshot({
+          descendantCount: 2,
+          overlappingRoots: [
+            {
+              rootId: "nested",
+              title: "Furniture",
+              relation: "descendant",
+              shareExpiresAt: "2000-01-01T00:00:00.000Z",
+              shareLocked: false,
+            },
           ],
         }),
       ),
     });
     expect(document.body.textContent).toContain(
-      "Those links will open inside this one; anyone who has them keeps them.",
+      "Those links have expired and stay off. This one will be new.",
     );
     expect(button("Share Apartment instead")).toBeDefined();
+  });
+
+  it("keeps the dead end where a live nested link carries a deadline", async () => {
+    const onAbsorbNestedShares = vi.fn();
+    await renderAndOpen(false, {
+      onPrepareShare: vi.fn().mockResolvedValue(
+        snapshot({
+          descendantCount: 2,
+          overlappingRoots: [
+            {
+              rootId: "nested",
+              title: "Furniture",
+              relation: "descendant",
+              shareExpiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+              shareLocked: false,
+            },
+          ],
+        }),
+      ),
+      onAbsorbNestedShares,
+      onOpenShareSettings: vi.fn(),
+    });
+
+    expect(document.body.textContent).toContain("Resolve the existing grant");
+    expect(button("Share Apartment instead")).toBeUndefined();
+    expect(onAbsorbNestedShares).not.toHaveBeenCalled();
+  });
+
+  it("cuts a title too long for the action's capsule at 24", async () => {
+    const overlappingRoots: ShareScopeSnapshot["overlappingRoots"] = [
+      {
+        rootId: "nested",
+        title: "Furniture",
+        relation: "descendant",
+        shareExpiresAt: null,
+        shareLocked: false,
+      },
+    ];
+    await renderAndOpen(false, {
+      pageTitle: "Apartment on the seventh floor",
+      onPrepareShare: vi
+        .fn()
+        .mockResolvedValue(snapshot({ descendantCount: 2, overlappingRoots })),
+    });
+    expect(button("Share Apartment on the sevent… instead")).toBeDefined();
+
+    await act(async () => root.unmount());
+    root = createRoot(host);
+    await renderAndOpen(false, {
+      // 24 exactly stays whole, and the cut counts code points rather than
+      // code units, so a surrogate pair is never halved
+      pageTitle: "Apartment on the 17th 🏠🏠",
+      onPrepareShare: vi
+        .fn()
+        .mockResolvedValue(snapshot({ descendantCount: 2, overlappingRoots })),
+    });
+    expect(button("Share Apartment on the 17th 🏠🏠 instead")).toBeDefined();
   });
 
   it("keeps the dead end where a nested link asks for a password", async () => {

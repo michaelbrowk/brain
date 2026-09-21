@@ -5014,8 +5014,18 @@ export function Shell({
         throw new Error(`Share fold returned ${response.status}`);
       }
 
+      // The fold's whole promise is that the links inside go on working, so
+      // the read-back asks whether the root they now hang from is a link that
+      // works: public, nothing left overlapping it, and neither locked nor
+      // expired — the two gates it clears and the two the enable path reads
+      // back the same way. A toast may not say the links work until this has.
       const readBack = await readShareScope(rootId);
-      if (!readBack.public || readBack.overlappingRoots.length > 0) {
+      if (
+        !readBack.public ||
+        readBack.overlappingRoots.length > 0 ||
+        readBack.shareLocked ||
+        isShareGrantExpired(readBack.shareExpiresAt)
+      ) {
         throw new Error("Share fold read-back mismatch");
       }
       await refreshTree().catch(() => {});

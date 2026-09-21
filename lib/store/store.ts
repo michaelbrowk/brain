@@ -5032,16 +5032,26 @@ export class Store {
    *  links go on opening inside the new one.
    *
    *  What it will not do: answer for an ancestor's grant (that root is already
-   *  the authority and the page is already inside its link), or drop a nested
-   *  password by folding it under a parent that asks for none. Both come back
-   *  as the scope conflict the enable path uses, with the fresh disclosure, so
-   *  a caller shows the truth rather than an error of its own.
+   *  the authority and the page is already inside its link), or take away a
+   *  gate a live nested link carries — a password, or a deadline — by folding
+   *  it under a parent that has none. The owner lifts that gate where it
+   *  stands, on the link that carries it. Both come back as the scope conflict
+   *  the enable path uses, with the fresh disclosure, so a caller shows the
+   *  truth rather than an error of its own.
    *
-   *  `shareEdit` is the one setting inherited, and it is inherited the safe way
-   *  round for the reader who already holds a link: on if any absorbed grant
-   *  had it. An expired nested grant grants nothing — it is cleared like the
-   *  rest, so one authority is left, but it records no pointer and its dead
-   *  link stays dead. */
+   *  The new root's settings come off the grants being absorbed and from
+   *  nowhere else. `shareEdit` is inherited the safe way round for the reader
+   *  who already holds a link: on if any absorbed grant had it. The password
+   *  and the deadline are CLEARED rather than preserved, unlike every other
+   *  field a revoke leaves on a page: `configureShare`'s preservation exists
+   *  for an owner re-enabling their own link, and it is the popover's explicit
+   *  values that answer for it there. Here it would turn a credential revoked
+   *  long ago back on under links that have never seen it, which is the one
+   *  way this action can destroy what it promises to keep.
+   *
+   *  An expired nested grant grants nothing — it is cleared like the rest, so
+   *  one authority is left, but it records no pointer and its dead link stays
+   *  dead. */
   async absorbNestedShares(
     id: string,
     input: { expectedScopeToken: string; src?: string },
@@ -5065,7 +5075,15 @@ export class Store {
       const live = nested.filter(
         (overlap) => !isShareExpired(overlap.shareExpiresAt ?? undefined),
       );
-      if (!entry.meta.sharePass && live.some((overlap) => overlap.shareLocked)) {
+      // A live grant's deadline is a gate like its password: `live` holds only
+      // the unexpired ones, so a deadline on one of them is a date still to
+      // come, and folding it away would make a link the owner set to die next
+      // week live for good.
+      if (
+        live.some(
+          (overlap) => overlap.shareLocked || overlap.shareExpiresAt !== null,
+        )
+      ) {
         throw new ShareScopeConflictError(before);
       }
       const canEdit = live.some(
@@ -5092,6 +5110,8 @@ export class Store {
         await this.persist(child);
       }
       entry.meta.public = true;
+      entry.meta.sharePass = undefined;
+      entry.meta.shareExpiresAt = undefined;
       entry.meta.shareEdit = canEdit || undefined;
       entry.meta.shareVersion = (entry.meta.shareVersion ?? 0) + 1;
       entry.meta.updatedBy = "me";

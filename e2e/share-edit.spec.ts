@@ -371,7 +371,7 @@ test("@release sharing a parent folds the nested link into it and the old addres
       { timeout: 20_000 },
     );
     await expect(card.locator("[data-share-overlap-blocker]")).toContainText(
-      "Furniture's link will open inside this one; anyone who has it keeps it.",
+      "Furniture's link will open inside this one and show everything Apartment shares; anyone who has it keeps it.",
     );
     await page.getByRole("button", { name: "Share Apartment instead" }).click();
 

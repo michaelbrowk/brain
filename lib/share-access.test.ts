@@ -694,6 +694,34 @@ describe("a folded share's old address", () => {
     );
   });
 
+  it("leaves a page that is still a live root of its own to its own grant", () => {
+    // Only a hand-edited file can hold both, and the pointer must not outrank
+    // the page's own authority: answering the ancestor here would walk past
+    // this page's password and widen the link to the ancestor's whole subtree.
+    const stale = {
+      apartment: { public: true },
+      furniture: {
+        parentId: "apartment",
+        sharedUnder: "apartment",
+        public: true,
+      },
+    };
+    expect(resolveFoldedShareRoot(tree(stale), "furniture")).toBeNull();
+    // an expired grant of its own is no grant, so the fold still answers
+    expect(
+      resolveFoldedShareRoot(
+        tree({
+          ...stale,
+          furniture: {
+            ...stale.furniture,
+            shareExpiresAt: "2020-01-01T00:00:00.000Z",
+          },
+        }),
+        "furniture",
+      ),
+    ).toBe("apartment");
+  });
+
   it("answers nothing for a page that was never folded", () => {
     expect(
       resolveFoldedShareRoot(tree({ apartment: { public: true } }), "apartment"),

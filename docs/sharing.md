@@ -29,15 +29,27 @@ on working: `/share/<formerRoot>` is answered with a 308 to
 the edit cookie and the subpages the page then asks for are all addressed to the
 root that actually holds the grant.
 
-`shareEdit` is the one setting inherited, and the safe way round for a reader
-who already holds a link: on if any absorbed grant had it. An expired nested
-grant is cleared like the rest, so one authority is left, but it records no
-pointer and its dead link stays dead. Two folds are refused, because both would
-give a reader something the grant they hold never promised: one that would
-answer for an **ancestor's** grant (that root is already the authority, and the
-page is already inside its link), and one that would drop a nested **password**
-under a parent that asks for none. Both come back as the enable path's scope
-conflict, carrying the fresh disclosure.
+**The new root's settings come off the grants being absorbed and from nowhere
+else.** `shareEdit` is inherited the safe way round for a reader who already
+holds a link: on if any absorbed grant had it. The password and the deadline are
+cleared, not preserved — `configureShare` keeps both on a revoked page so an
+owner can re-enable their own link, and the popover passes explicit values there,
+but the fold passes none, so preserving them would turn a credential revoked long
+ago back on under links that have never seen it, or publish a grant born expired
+while the card says the links inside still work. An expired nested grant is
+cleared like the rest, so one authority is left, but it records no pointer and
+its dead link stays dead.
+
+Three folds are refused, because each would give a reader something the grant
+they hold never promised, or leave two grants over the same pages: one that
+would answer for an **ancestor's** grant (that root is already the authority,
+and the page is already inside its link — the same refusal covers a page that
+overlaps a parent's grant *and* a nested one), and one that would take a gate
+away from a live nested link — its **password**, or its **deadline**, both of
+which the fold would otherwise clear, so a link set to die next Friday would
+live for good. The owner lifts that gate where it stands, on the link that
+carries it. All of them come back as the enable path's scope conflict, carrying
+the fresh disclosure.
 
 Revoking the parent's share gives every pointer back, so the folded links stop
 resolving with the one that absorbed them. There is no other undo: revoking the
@@ -48,6 +60,13 @@ source of containment, and the pointer is read only through the live tree: the
 page it names has to exist, to still contain this page, to be undeleted and to
 be an active public root, or the old address is a 404 like any revoked share.
 A fold that was itself folded is followed up the chain.
+
+`mutate()` is a queue and not a transaction, and nothing here rolls back. A
+failed write inside the fold leaves some nested roots cleared and the parent not
+yet public — which fails closed, since the children go private before the parent
+goes public and no window has two roots over one subtree — but it does not heal
+itself, and the attachment baseline it took first makes a later share of that
+parent skip taking a fresh one. `configureShare` has the same shape.
 
 ## Attachments
 

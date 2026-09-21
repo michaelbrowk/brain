@@ -51,6 +51,7 @@ import {
 } from "../tasks/task-lines";
 import type { TaskView } from "../tasks/model";
 import {
+  resolveFoldedShareRoot,
   resolveShareAccess,
   ShareAccessNotFoundError,
 } from "../share-access";
@@ -9040,6 +9041,102 @@ describe("folding a nested share into its parent", () => {
     expect((await s.readShareScope(parent.id)).public).toBe(true);
   });
 
+  it("refuses a fold that would take a live nested link's deadline away", async () => {
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const parent = await s.createPage(null, "Apartment");
+    const child = await s.createPage(parent.id, "Furniture");
+    const friday = new Date(Date.now() + 7 * 86_400_000).toISOString();
+    await s.updateMeta(child.id, { public: true, shareExpiresAt: friday });
+
+    const disclosed = await s.readShareScope(parent.id);
+    await expect(
+      s.absorbNestedShares(parent.id, {
+        expectedScopeToken: disclosed.scopeToken,
+      }),
+    ).rejects.toMatchObject({ name: "ShareScopeConflictError" });
+    // the gate is still where the owner put it, on the link that carries it
+    expect((await s.readPage(parent.id)).meta.public).toBeUndefined();
+    expect((await s.readPage(child.id)).meta.shareExpiresAt).toBe(friday);
+  });
+
+  it("refuses a page that overlaps a parent's grant as well as a nested one", async () => {
+    // The mixed case. Each half on its own is caught by another clause, and
+    // folding here would leave the building's grant and this one stacked over
+    // the same pages, which is the one thing the model forbids.
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const building = await s.createPage(null, "Building");
+    const middle = await s.createPage(building.id, "Floor");
+    const deep = await s.createPage(middle.id, "Apartment");
+    const deepScope = await s.readShareScope(deep.id);
+    await s.configureShare(deep.id, {
+      enabled: true,
+      expectedScopeToken: deepScope.scopeToken,
+      canEdit: false,
+    });
+    // the legacy enable, which is how an overlap this shape comes about at all
+    await s.updateMeta(building.id, { public: true });
+
+    const disclosed = await s.readShareScope(middle.id);
+    expect(disclosed.overlappingRoots.map((overlap) => overlap.relation)).toEqual([
+      "ancestor",
+      "descendant",
+    ]);
+    await expect(
+      s.absorbNestedShares(middle.id, {
+        expectedScopeToken: disclosed.scopeToken,
+      }),
+    ).rejects.toMatchObject({ name: "ShareScopeConflictError" });
+    expect((await s.readPage(middle.id)).meta.public).toBeUndefined();
+    expect((await s.readPage(deep.id)).meta.sharedUnder).toBeUndefined();
+  });
+
+  it("takes the new root's password and deadline off the grants it absorbs, not off its own revoked link", async () => {
+    // A parent shared once and revoked keeps its credential and its deadline
+    // in the file: configureShare preserves both for an owner re-enabling
+    // their own link. The fold is the one caller that never passes explicit
+    // values, so preserving them here would turn a credential nobody holds
+    // back on — or, with a deadline five years past, publish a grant that is
+    // born dead while the card says the links inside still work.
+    const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const parent = await s.createPage(null, "Apartment");
+    const child = await s.createPage(parent.id, "Furniture");
+    const parentScope = await s.readShareScope(parent.id);
+    await s.configureShare(parent.id, {
+      enabled: true,
+      expectedScopeToken: parentScope.scopeToken,
+      canEdit: false,
+      sharePass: "old-parent-hash",
+      shareExpiresAt: "2020-01-01T00:00:00.000Z",
+    });
+    await s.configureShare(parent.id, { enabled: false });
+    expect((await s.readPage(parent.id)).meta.sharePass).toBe("old-parent-hash");
+    const childScope = await s.readShareScope(child.id);
+    await s.configureShare(child.id, {
+      enabled: true,
+      expectedScopeToken: childScope.scopeToken,
+      canEdit: false,
+    });
+
+    const disclosed = await s.readShareScope(parent.id);
+    await s.absorbNestedShares(parent.id, {
+      expectedScopeToken: disclosed.scopeToken,
+    });
+
+    const absorbed = await s.readShareScope(parent.id);
+    expect(absorbed).toMatchObject({
+      public: true,
+      shareLocked: false,
+      shareExpiresAt: null,
+    });
+    expect((await s.readPage(parent.id)).meta.sharePass).toBeUndefined();
+    // and the promise the card makes holds: the old address resolves, and the
+    // grant it lands in is a grant that answers
+    expect(resolveFoldedShareRoot(s, child.id)).toBe(parent.id);
+    await expect(
+      resolveShareAccess(s, { rootId: parent.id }),
+    ).resolves.toMatchObject({ kind: "granted" });
+  });
+
   it("refuses a fold that would drop a password or answer an ancestor grant", async () => {
     const { s } = await tmpStore({ publicOrigin: "https://brain.test" });
     const parent = await s.createPage(null, "Apartment");
@@ -10793,6 +10890,48 @@ describe("share-aware Store leaves", () => {
     expect((await readAttachmentScope(root)).roots).toEqual([inner.id]);
 
     await s.updateMeta(outer.id, { public: true, by: "me" });
+
+    const scope = await readAttachmentScope(root);
+    expect([...scope.roots].sort()).toEqual([inner.id, outer.id].sort());
+    expect(
+      attachmentGrantsRoot(scope, attachmentName(image.url), outer.id),
+    ).toBe(true);
+  });
+
+  it("takes a baseline when the page becomes public by absorbing the scoped root inside it", async () => {
+    // The same overlap arriving by the other route. The fold makes the outer
+    // page the one authority for a subtree that already holds visitor
+    // Markdown, so it owes the same walk the enable path above owes — without
+    // it the new root grants no picture the inner link was showing.
+    const { s, root } = await tmpStore({ publicOrigin: "https://brain.test" });
+    const outer = await s.createPage(null, "Outer");
+    const inner = await s.createPage(outer.id, "Inner");
+    const child = await s.createPage(inner.id, "Child");
+    const image = await s.saveAttachment({
+      ...shot(),
+      originalName: "folded.png",
+    });
+    await s.writePage(child.id, `![](${image.url})`, undefined, "me");
+    const before = await s.readShareScope(inner.id);
+    await s.configureShare(inner.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+    });
+    const version = (await s.readShareScope(inner.id)).shareVersion;
+    await s.writeSharedPage({
+      rootId: inner.id,
+      targetId: child.id,
+      shareVersion: version,
+      markdown: `![](${image.url})\n\na visitor was here`,
+      visitorName: "Ada",
+    });
+    expect((await readAttachmentScope(root)).roots).toEqual([inner.id]);
+
+    const disclosed = await s.readShareScope(outer.id);
+    await s.absorbNestedShares(outer.id, {
+      expectedScopeToken: disclosed.scopeToken,
+    });
 
     const scope = await readAttachmentScope(root);
     expect([...scope.roots].sort()).toEqual([inner.id, outer.id].sort());

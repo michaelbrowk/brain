@@ -61,6 +61,91 @@ Five rules no single row states.
   caller's time zone to fall back on. `list_tasks` and `get_task` are the
   lenient pair: they fall back to the owner's own zone.
 
+## What the hints say
+
+Every tool carries all four of MCP's tool annotations, and none of them is
+left to a default. `tools/list` returns them under `annotations`, beside a
+human `title`. They are hints: they describe what a tool does, they are not
+the permission system. Scope is the permission system, and it is the column
+in every table below.
+
+A host reads them to decide what to confirm before it calls. Four words, one
+per hint, in the order the tables below use them:
+
+- **`read` / `write`** — `readOnlyHint`. Whether the tool changes anything.
+- **`keeps` / `destroys`** — `destructiveHint`. Whether the change can be
+  taken back. Every note and task write is `keeps`: the notes folder is a git
+  repository and each save is a commit, so the version a write replaced is
+  still there. `destroys` is for the six that cannot be undone from inside
+  Brain — the two deletes, a triage move to trash or spam, the two sends, and
+  the import abort.
+- **`idempotent` / `repeats`** — `idempotentHint`. Whether the same call made
+  twice leaves what one call left, or a second thing.
+- **`local` / `outside`** — `openWorldHint`. Whether the tool stays inside the
+  notes folder, or reaches a service Brain does not own. Every mail tool is
+  `outside` because it talks to the mail service. Every `notion_*` tool is
+  `outside` because it is one step of an import whose other end is Notion.
+
+| Tool | Hints |
+| --- | --- |
+| `connection_check` | read keeps idempotent local |
+| `list_tree` | read keeps idempotent local |
+| `read_page` | read keeps idempotent local |
+| `search` | read keeps idempotent local |
+| `create_page` | write keeps repeats local |
+| `write_page` | write keeps idempotent local |
+| `append_page` | write keeps repeats local |
+| `update_meta` | write keeps idempotent local |
+| `move_page` | write keeps idempotent local |
+| `delete_page` | write **destroys** idempotent local |
+| `list_tasks` | read keeps idempotent local |
+| `get_task` | read keeps idempotent local |
+| `create_task` | write keeps repeats local |
+| `promote_task_line` | write keeps repeats local |
+| `update_task` | write keeps idempotent local |
+| `complete_task` | write keeps idempotent local |
+| `reopen_task` | write keeps idempotent local |
+| `delete_task` | write **destroys** idempotent local |
+| `list_mail_accounts` | read keeps idempotent outside |
+| `list_mail_threads` | read keeps idempotent outside |
+| `search_mail` | read keeps idempotent outside |
+| `get_mail_thread` | read keeps idempotent outside |
+| `read_mail_message` | read keeps idempotent outside |
+| `get_mail_send_status` | read keeps idempotent outside |
+| `update_mail_thread` | write **destroys** idempotent outside |
+| `save_mail_attachment` | write keeps **repeats** outside |
+| `send_mail` | write **destroys** idempotent outside |
+| `reply_mail` | write **destroys** idempotent outside |
+| `notion_find_page` | read keeps idempotent outside |
+| `notion_inspect_candidate` | read keeps idempotent outside |
+| `notion_verify_attachment` | read keeps idempotent outside |
+| `notion_verify_finalized_attachment` | read keeps idempotent outside |
+| `notion_adopt_page` | write keeps idempotent outside |
+| `notion_reserve_page` | write keeps idempotent outside |
+| `notion_upload_attachment` | write keeps idempotent outside |
+| `notion_finalize_page` | write keeps idempotent outside |
+| `notion_abort_page` | write **destroys** idempotent outside |
+
+Three rows carry a note the four words cannot.
+
+- **`update_mail_thread` is one tool covering six changes**, and two of them,
+  trash and spam, take a thread out of the mailbox the owner reads. It is
+  marked `destroys` for the worst of the six, so a host confirming it is
+  confirming the right one. Marking a thread read is not destructive and is
+  confirmed all the same.
+- **`get_mail_send_status` is `read` in the sense the hint asks about**: no
+  mail moves and the answer is the same every time. It does fill in the Sent
+  caption's own mark, because the moment a status is read is the one moment
+  the operation id and its thread are both known. Both writes are write-once
+  and neither is reachable by the caller.
+- **`save_mail_attachment` is `repeats` because a second save writes a second
+  file**, and naming the general save by content hash is the follow-up that
+  would make it idempotent.
+
+`app/api/mcp/tool-annotations.test.ts` asserts this table against the server's
+own `tools/list`, in these same words. A tool registered without a title or
+without all four hints fails there.
+
 ## Notes
 
 | Tool | Scope | Inputs | Answers | Refuses |
@@ -398,7 +483,7 @@ three names before it is cut, and a cut is marked.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type }`, the saved file as the note store named it | `invalid_account_id`, `invalid_attachment_id` and `invalid_page_id`, the codes its sibling mail tools use. `page not found`, before anything is downloaded, and `page_read_failed` for a notes folder that could not answer, in Brain's own words rather than the store's. `that file is too large for a note`, naming the cap. `that file cannot be saved into a note`, naming the executable extension. Whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`). Plus the service's own codes. `store_failed` |
+| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type, lineAdded }`, the saved file as the note store named it, and whether this call put a line on the page | `invalid_account_id`, `invalid_attachment_id` and `invalid_page_id`, the codes its sibling mail tools use. `page not found`, before anything is downloaded, and `page_read_failed` for a notes folder that could not answer, in Brain's own words rather than the store's. `that file is too large for a note`, naming the cap. `that file cannot be saved into a note`, naming the executable extension. Whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`). Plus the service's own codes. `store_failed` |
 
 It is the one mail tool that writes a note, so it asks for `brain:write`
 beside `brain:mail`. A grant that reads mail and cannot edit notes is refused
@@ -440,9 +525,20 @@ every MCP write. With `append` false nothing is written to the page, and a
 file no page links is collected by the attachment sweep a day later, so an
 agent that passes it has to write its own line.
 
-There is no dedupe. Saving one attachment twice writes two files and two
-lines, the way a person uploading the same file twice would, so an agent
-retrying a call it already made has to check the page rather than call again.
+`lineAdded` says whether this call put a line on the page. It is `false` with
+`append` false, and `false` when the page already carried the exact line: the
+body is read again immediately before the append, and a line already there is
+not added a second time.
+
+That guard is not a dedupe, and the tool does not claim to be one: its
+`idempotentHint` is false. The file naming is the other half and it is
+unchanged. `saveAttachment` names a file `nanoid(12)` plus its extension, so
+saving one attachment twice writes two files with two urls and therefore two
+different lines, which the guard never matches. Only the Notion staging path
+is content-addressed. So an agent retrying a call it already made still has to
+check the page rather than call again. Naming the general save by content hash
+would change that, and it is a store-wide change filed as its own follow-up
+rather than done here.
 
 One activity line per call names the account, the attachment and the page,
 never the filename.

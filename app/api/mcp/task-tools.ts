@@ -16,6 +16,7 @@ import { normalizeTaskText, parseTaskLines } from "@/lib/tasks/task-lines";
 import {
   clientNameOf,
   hasScope,
+  hints,
   insufficientScope,
   refusal,
   STORE_FAILED,
@@ -326,27 +327,32 @@ function categoryOf(meta: unknown): string | undefined {
 }
 
 export function registerTaskTools(server: McpToolServer): void {
-  server.tool(
+  server.registerTool(
     "list_tasks",
-    "List the tasks of one list, or every record on one note. Pass the caller's own local calendar date as `today`; leave it out and Brain uses the owner's own time zone. Every list but `logbook` answers `{tasks}`, one record each; `logbook` answers `{entries}`, one per completion, because a repeating task has many completions and one record, and each entry carries its own `key`. A completion stays in the list it was in until the day changes, so pass `offsetMinutes` to read the day the way the owner does.",
     {
-      list: z
-        .enum(["inbox", "today", "upcoming", "someday", "logbook"])
-        .optional(),
-      page: z
-        .string()
-        .optional()
-        .describe("one note's records, complete, instead of a list"),
-      today: z
-        .string()
-        .optional()
-        .describe("YYYY-MM-DD; the owner's own zone is used when it is left out"),
-      offsetMinutes: offsetSchema
-        .optional()
-        .describe(
-          "the caller's own UTC offset in minutes, east positive, required for the logbook",
-        ),
-      category: z.string().optional(),
+      title: "List tasks",
+      description:
+        "List the tasks of one list, or every record on one note. Pass the caller's own local calendar date as `today`; leave it out and Brain uses the owner's own time zone. Every list but `logbook` answers `{tasks}`, one record each; `logbook` answers `{entries}`, one per completion, because a repeating task has many completions and one record, and each entry carries its own `key`. A completion stays in the list it was in until the day changes, so pass `offsetMinutes` to read the day the way the owner does.",
+      inputSchema: {
+        list: z
+          .enum(["inbox", "today", "upcoming", "someday", "logbook"])
+          .optional(),
+        page: z
+          .string()
+          .optional()
+          .describe("one note's records, complete, instead of a list"),
+        today: z
+          .string()
+          .optional()
+          .describe("YYYY-MM-DD; the owner's own zone is used when it is left out"),
+        offsetMinutes: offsetSchema
+          .optional()
+          .describe(
+            "the caller's own UTC offset in minutes, east positive, required for the logbook",
+          ),
+        category: z.string().optional(),
+      },
+      annotations: hints("read keeps idempotent local"),
     },
     taskRead(async ({ list, page, today, offsetMinutes, category }) => {
       // The page branch runs before every other check because it answers a
@@ -438,10 +444,15 @@ export function registerTaskTools(server: McpToolServer): void {
     }),
   );
 
-  server.tool(
+  server.registerTool(
     "get_task",
-    "Read one task record, including whether its note line was removed and which page it is linked to.",
-    { id: z.string() },
+    {
+      title: "Read a task",
+      description:
+        "Read one task record, including whether its note line was removed and which page it is linked to.",
+      inputSchema: { id: z.string() },
+      annotations: hints("read keeps idempotent local"),
+    },
     taskRead(async ({ id }) => {
       if (!TASK_ID_RE.test(id)) {
         return refusal("that task id is not valid", "bad_id");
@@ -462,8 +473,12 @@ export function registerTaskTools(server: McpToolServer): void {
   server.registerTool(
     "create_task",
     {
+      title: "Create a task",
+      // `repeats`: there is no key on a task, so the same title sent twice is
+      // two records.
+      annotations: hints("write keeps repeats local"),
       description:
-        "Make a task. It is unlinked: it owns its own completion and belongs to no note. To turn a checkbox line of a note into a task, use promote_task_line. `time` and `evening` are statements about a day, so both need `when` to be a day rather than `someday`.",
+        "Make a task. It is unlinked: it owns its own completion and belongs to no note. To turn a checkbox line of a note into a task, use promote_task_line. `time` and `evening` are statements about a day, so both need `when` to be a day rather than `someday`. Calling it twice makes two tasks.",
       inputSchema: z
         .object({
           title: fields.title,
@@ -500,6 +515,10 @@ export function registerTaskTools(server: McpToolServer): void {
   server.registerTool(
     "promote_task_line",
     {
+      title: "Promote a note line into a task",
+      // `repeats`: a second promote of the same line makes a second record
+      // against it, the way the editor's own gesture does.
+      annotations: hints("write keeps repeats local"),
       description:
         "Turn one checkbox line of a note into a task linked to that line. `line` is a zero-based markdown line number, or the line's own text with runs of whitespace collapsed. The note's category is inherited unless one is named here. The line keeps owning the task's title and its completion. Takes no `rev`: the anchor is built from the note as read a moment before the record is made, the same window the editor's own promote gesture has, and a later edit to the line is repaired on the next reconcile.",
       inputSchema: z
@@ -602,6 +621,8 @@ export function registerTaskTools(server: McpToolServer): void {
   server.registerTool(
     "update_task",
     {
+      title: "Update a task",
+      annotations: hints("write keeps idempotent local"),
       description:
         "Change one task. A field left out is left alone and `null` clears it. `when` takes a day, the word `someday`, or null for the Inbox. `time` and `evening` are statements about a day, so a change that parks the task or sends it back to the Inbox clears both whether or not they are named here. Clearing `time` is also how a reminder is stopped.",
       inputSchema: z
@@ -654,6 +675,17 @@ export function registerTaskTools(server: McpToolServer): void {
   server.registerTool(
     "complete_task",
     {
+      title: "Complete a task",
+      // `keeps`: a tick is a state `reopen_task` takes back, and the record
+      // stays either way.
+      //
+      // `idempotent` holds for an ordinary task outright, and for a repeating
+      // one through `expectedWhen`: a repeat's completion appends a logbook
+      // entry and moves `when` a period on, so a second call carrying the same
+      // `expectedWhen` meets a record that has moved and is refused rather
+      // than counted twice. A caller that omits `expectedWhen` gives that up,
+      // which is why the field is in the description.
+      annotations: hints("write keeps idempotent local"),
       description:
         "Tick one task. `today` is the caller's own local calendar date and is required: the answer says which list the record is in for that day, and a repeating task's next occurrence is computed from it. The server has no timezone of the caller's to fall back on. A completion stays in the list it was in, struck through, until the day changes, which is what the answer's `list` says. `expectedWhen` is the `when` the caller was looking at, and only a repeating task's completion is refused against it.",
       inputSchema: z
@@ -700,6 +732,8 @@ export function registerTaskTools(server: McpToolServer): void {
   server.registerTool(
     "reopen_task",
     {
+      title: "Reopen a task",
+      annotations: hints("write keeps idempotent local"),
       description:
         "Untick one task. `today` is the caller's own local calendar date and is required: the answer says which list the record lands back in for that day. Unticking a repeating task restores the instance its newest completion came from.",
       inputSchema: z
@@ -739,8 +773,13 @@ export function registerTaskTools(server: McpToolServer): void {
   server.registerTool(
     "delete_task",
     {
+      title: "Delete a task",
+      // The one task tool with no Trash behind it: unlike `delete_page`, the
+      // record is gone and nothing restores it. The note line survives,
+      // which is what the description says, and it is not the record.
+      annotations: hints("write destroys idempotent local"),
       description:
-        "Delete one task record. A linked task's checkbox line stays in its note; the record that pointed at it is what goes.",
+        "Delete one task record. A linked task's checkbox line stays in its note; the record that pointed at it is what goes. There is no Trash for a task: the record is gone for good.",
       inputSchema: z.object({ id: z.string() }).strict(),
     },
     async ({ id }, extra) =>

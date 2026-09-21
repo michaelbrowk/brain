@@ -18,6 +18,51 @@ export const text = (data: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }],
 });
 
+/** THE FOUR HINTS A HOST READS BEFORE IT DECIDES WHETHER TO CONFIRM A CALL.
+ *
+ *  MCP's tool annotations are how a host such as Claude tells `read_page`
+ *  from `delete_page` without calling either. Brain declared none of them, so
+ *  every tool arrived looking equally safe and a host had nothing to put a
+ *  confirmation behind.
+ *
+ *  Four words, in a fixed order, instead of four named booleans spelled out
+ *  at every registration site. The argument's type is the sixteen legal
+ *  sentences, so a misspelling or a swapped pair is a typecheck failure
+ *  rather than a hint that quietly reads as its opposite.
+ *  `tool-annotations.test.ts` pins the same table in the same words, and
+ *  `docs/mcp-tools.md` publishes it.
+ *
+ *  - `read` / `write` — whether the tool changes anything at all.
+ *  - `keeps` / `destroys` — whether the change can be taken back. A note
+ *    write is `keeps` because every save is a git commit. A delete, a send
+ *    and a triage move to trash or spam are not.
+ *  - `idempotent` / `repeats` — whether calling it twice with the same input
+ *    leaves the same result, or a second thing.
+ *  - `local` / `outside` — whether it stays inside the notes folder, or
+ *    reaches a service Brain does not own.
+ *
+ *  All four are set on every tool and none is left to the SDK's default: a
+ *  default is indistinguishable from a tool nobody thought about, which is
+ *  the state this replaced. */
+export type ToolHints = `${"read" | "write"} ${"keeps" | "destroys"} ${
+  | "idempotent"
+  | "repeats"} ${"local" | "outside"}`;
+
+export function hints(row: ToolHints): {
+  readOnlyHint: boolean;
+  destructiveHint: boolean;
+  idempotentHint: boolean;
+  openWorldHint: boolean;
+} {
+  const [access, loss, repeat, reach] = row.split(" ");
+  return {
+    readOnlyHint: access === "read",
+    destructiveHint: loss === "destroys",
+    idempotentHint: repeat === "idempotent",
+    openWorldHint: reach === "outside",
+  };
+}
+
 /** THE ONE SHAPE EVERY REFUSAL ON THIS ENDPOINT ANSWERS IN.
  *
  *  `{ error, reason }` with `isError` set, never a thrown JSON-RPC error: a

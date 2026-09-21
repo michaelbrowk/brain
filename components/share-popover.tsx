@@ -640,20 +640,22 @@ function PrivateReview({
       )}
 
       {blocked
-        ? (foldable || onOpenShareSettings) && (
-            <ActionRow>
-              <div className="brain-share-row-actions">
-                {onOpenShareSettings && (
-                  <Button
-                    variant="quiet"
-                    disabled={busy}
-                    onClick={onOpenShareSettings}
-                    className="max-sm:min-h-11"
-                  >
-                    Review shared links
-                  </Button>
-                )}
-                {foldable && (
+        ? foldable
+          ? (
+              // the pair rides the confirmation's own group, so the quiet one
+              // keeps its distance from the fill rather than the row's rule
+              <ActionRow>
+                <div className="brain-share-row-actions">
+                  {onOpenShareSettings && (
+                    <Button
+                      variant="quiet"
+                      disabled={busy}
+                      onClick={onOpenShareSettings}
+                      className="max-sm:min-h-11"
+                    >
+                      Review shared links
+                    </Button>
+                  )}
                   <Button
                     variant="ink"
                     disabled={busy}
@@ -662,10 +664,20 @@ function PrivateReview({
                   >
                     {busy ? "Sharing…" : `Share ${shortTitle(pageTitle)} instead`}
                   </Button>
-                )}
-              </div>
-            </ActionRow>
-          )
+                </div>
+              </ActionRow>
+            )
+          : onOpenShareSettings && (
+              <ActionRow>
+                <Button
+                  variant="quiet"
+                  onClick={onOpenShareSettings}
+                  className="max-sm:min-h-11"
+                >
+                  Review shared links
+                </Button>
+              </ActionRow>
+            )
         : (
             <ActionRow>
               <Button

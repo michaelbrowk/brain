@@ -41,6 +41,7 @@ const EXPIRY_OPTIONS: Array<{ value: ExpiryChoice; label: string }> = [
 export function SharePopover({
   isPublic,
   pageId,
+  pageTitle,
   hasPassword,
   hasEdit,
   expiresAt,
@@ -49,6 +50,7 @@ export function SharePopover({
   scopeRevision,
   onPrepareShare,
   onEnableShare,
+  onAbsorbNestedShares,
   onDisableShare,
   onCopyLink,
   onOpenShareSettings,
@@ -58,6 +60,8 @@ export function SharePopover({
 }: {
   isPublic: boolean;
   pageId: string;
+  /** This page's own title, for the one action that names it. */
+  pageTitle: string;
   hasPassword: boolean;
   /** The page's own grant, off the tree, for the window before the exact
    *  scope is read and for every state the active snapshot is not this
@@ -73,6 +77,11 @@ export function SharePopover({
     canEdit: boolean;
     password?: string | null;
     expiresAt?: string | null;
+  }) => Promise<ShareEnableResult>;
+  /** Share this page instead, folding the grants already inside it into it.
+   *  It takes no settings: they come off the grants being absorbed. */
+  onAbsorbNestedShares: (input: {
+    expectedScopeToken: string;
   }) => Promise<ShareEnableResult>;
   onDisableShare: () => Promise<ShareScopeSnapshot>;
   onCopyLink: (rootId: string) => void | Promise<void>;
@@ -245,6 +254,38 @@ export function SharePopover({
     }
   };
 
+  /** Share this page instead of resolving the grants inside it by hand. One
+   *  call: the nested roots are folded into this one and the links people
+   *  already hold go on working, so the panel comes back as the ordinary
+   *  shared state rather than as the blocker it was. */
+  const absorbNested = async () => {
+    if (!confirmation || busy) return;
+    setBusy(true);
+    setShareError(null);
+    try {
+      const result = await onAbsorbNestedShares({
+        expectedScopeToken: confirmation.scopeToken,
+      });
+      setVerified(result.snapshot);
+      if (result.status === "conflict") {
+        setConfirmation(result.snapshot);
+        setShareError(
+          "The shared scope changed. Review what is inside this page and confirm again.",
+        );
+        return;
+      }
+      if (!result.snapshot.public) throw new Error("share fold was not confirmed");
+      setDirectOverride({ value: true, basePublic: isPublic });
+      setConfirmation(null);
+    } catch {
+      setShareError(
+        "Couldn't share this page instead. The links inside it are unchanged; check the current state before retrying.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const stopSharing = async () => {
     if (busy || !effectiveDirectPublic) return;
     setBusy(true);
@@ -351,6 +392,7 @@ export function SharePopover({
     confirmation && !effectiveDirectPublic ? (
       <PrivateReview
         snapshot={confirmation}
+        pageTitle={pageTitle}
         busy={busy}
         editOn={enableEditOn}
         passwordOn={enablePasswordOn}
@@ -370,6 +412,7 @@ export function SharePopover({
         onPasswordVisibleChange={setEnablePasswordVisible}
         onExpiryChange={setEnableExpiry}
         onShare={() => void enableShare()}
+        onAbsorb={() => void absorbNested()}
         onOpenShareSettings={onOpenShareSettings}
       />
     ) : checkingScope && !effectiveDirectPublic && !inheritedFrom && !expiredInheritedFrom ? (
@@ -486,6 +529,7 @@ function LoadingView() {
 
 function PrivateReview({
   snapshot,
+  pageTitle,
   busy,
   editOn,
   passwordOn,
@@ -499,9 +543,11 @@ function PrivateReview({
   onPasswordVisibleChange,
   onExpiryChange,
   onShare,
+  onAbsorb,
   onOpenShareSettings,
 }: {
   snapshot: ShareScopeSnapshot;
+  pageTitle: string;
   busy: boolean;
   editOn: boolean;
   passwordOn: boolean;
@@ -515,11 +561,23 @@ function PrivateReview({
   onPasswordVisibleChange: (visible: boolean) => void;
   onExpiryChange: (value: ExpiryChoice) => void;
   onShare: () => void;
+  onAbsorb: () => void;
   onOpenShareSettings?: () => void;
 }) {
   const total = snapshot.descendantCount + 1;
   const overlaps = snapshot.overlappingRoots;
   const blocked = overlaps.length > 0;
+  // Every overlap nested inside this page can be folded into one link here.
+  // A parent's grant cannot: that root is already the authority and this page
+  // is already inside its link. Nor can a nested link that asks for a password
+  // this page does not, which the fold would quietly drop.
+  const live = overlaps.filter(
+    (overlap) => !isExpired(overlap.shareExpiresAt ?? undefined),
+  );
+  const foldable =
+    blocked &&
+    overlaps.every((overlap) => overlap.relation === "descendant") &&
+    !live.some((overlap) => overlap.shareLocked);
   return (
     <div data-share-state="review">
       <h2 className={HEAD}>
@@ -546,7 +604,9 @@ function PrivateReview({
             ))}
           </ul>
           <span className={NOTE}>
-            Resolve the existing grant before creating this link.
+            {foldable
+              ? foldNote(live)
+              : "Resolve the existing grant before creating this link."}
           </span>
         </div>
       ) : (
@@ -580,15 +640,30 @@ function PrivateReview({
       )}
 
       {blocked
-        ? onOpenShareSettings && (
+        ? (foldable || onOpenShareSettings) && (
             <ActionRow>
-              <Button
-                variant="quiet"
-                onClick={onOpenShareSettings}
-                className="max-sm:min-h-11"
-              >
-                Review shared links
-              </Button>
+              <div className="brain-share-row-actions">
+                {onOpenShareSettings && (
+                  <Button
+                    variant="quiet"
+                    disabled={busy}
+                    onClick={onOpenShareSettings}
+                    className="max-sm:min-h-11"
+                  >
+                    Review shared links
+                  </Button>
+                )}
+                {foldable && (
+                  <Button
+                    variant="ink"
+                    disabled={busy}
+                    onClick={onAbsorb}
+                    className="max-sm:min-h-11"
+                  >
+                    {busy ? "Sharing…" : `Share ${shortTitle(pageTitle)} instead`}
+                  </Button>
+                )}
+              </div>
             </ActionRow>
           )
         : (
@@ -1544,6 +1619,26 @@ function isExpired(value?: string): boolean {
   if (!value) return false;
   const deadline = Date.parse(value);
   return !Number.isFinite(deadline) || deadline <= Date.now();
+}
+
+/** What pressing the one action does, in one sentence. The links listed
+ *  above go on working, which is the whole reason the action is offered; an
+ *  expired one is not revived by it and says so. */
+function foldNote(live: Overlap[]): string {
+  if (live.length === 0) {
+    return "Those links have expired and stay off. This one will be new.";
+  }
+  if (live.length === 1) {
+    return `${live[0].title}'s link will open inside this one; anyone who has it keeps it.`;
+  }
+  return "Those links will open inside this one; anyone who has them keeps them.";
+}
+
+/** A title long enough to break the action's capsule is cut on a character
+ *  rather than a code unit, so an emoji never splits in half. */
+function shortTitle(title: string): string {
+  const glyphs = [...title];
+  return glyphs.length > 24 ? `${glyphs.slice(0, 23).join("").trimEnd()}…` : title;
 }
 
 function relationLabel(overlap: Overlap): string {

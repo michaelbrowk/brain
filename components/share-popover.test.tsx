@@ -171,6 +171,7 @@ describe("SharePopover redesign", () => {
       <SharePopover
         isPublic={isPublic}
         pageId="page-a"
+        pageTitle={options.pageTitle ?? "Apartment"}
         hasPassword={!!options.hasPassword}
         hasEdit={!!options.hasEdit}
         expiresAt={options.expiresAt}
@@ -192,6 +193,19 @@ describe("SharePopover redesign", () => {
             Promise.resolve({
               status: "enabled",
               snapshot: { ...fallback, rootId: "page-a", public: true },
+            }))
+        }
+        onAbsorbNestedShares={
+          options.onAbsorbNestedShares ??
+          (() =>
+            Promise.resolve({
+              status: "enabled",
+              snapshot: {
+                ...fallback,
+                rootId: "page-a",
+                public: true,
+                overlappingRoots: [],
+              },
             }))
         }
         onDisableShare={
@@ -488,8 +502,9 @@ describe("SharePopover redesign", () => {
     });
   });
 
-  it("blocks a new overlapping nested grant using the authoritative scope read", async () => {
+  it("blocks a new grant under a shared parent using the authoritative scope read", async () => {
     const onEnableShare = vi.fn();
+    const onAbsorbNestedShares = vi.fn();
     const onOpenShareSettings = vi.fn();
     await renderAndOpen(false, {
       onPrepareShare: vi.fn().mockResolvedValue(
@@ -497,9 +512,9 @@ describe("SharePopover redesign", () => {
           descendantCount: 2,
           overlappingRoots: [
             {
-              rootId: "nested",
-              title: "Already shared child",
-              relation: "descendant",
+              rootId: "above",
+              title: "Already shared parent",
+              relation: "ancestor",
               shareExpiresAt: null,
               shareLocked: false,
             },
@@ -507,17 +522,180 @@ describe("SharePopover redesign", () => {
         }),
       ),
       onEnableShare,
+      onAbsorbNestedShares,
       onOpenShareSettings,
     });
 
     expect(document.body.textContent).toContain("This scope already overlaps another shared page.");
-    expect(document.body.textContent).toContain("Already shared child · shared nested page");
+    expect(document.body.textContent).toContain("Already shared parent · shared parent");
     expect(document.body.textContent).toContain("Resolve the existing grant");
     expect(document.body.querySelector('[aria-label="Password protection"]')).toBeNull();
     expect(shareButton()).toBeUndefined();
+    // nothing to fold: that root is the authority and this page is already
+    // inside its link
+    expect(button("Share Apartment instead")).toBeUndefined();
     await click(button("Review shared links"));
     expect(onOpenShareSettings).toHaveBeenCalledTimes(1);
     expect(onEnableShare).not.toHaveBeenCalled();
+    expect(onAbsorbNestedShares).not.toHaveBeenCalled();
+  });
+
+  it("offers one action for a nested overlap and folds it into this page", async () => {
+    const onEnableShare = vi.fn();
+    const onOpenShareSettings = vi.fn();
+    const onAbsorbNestedShares = vi.fn().mockResolvedValue({
+      status: "enabled",
+      snapshot: snapshot({
+        public: true,
+        shareEdit: true,
+        shareVersion: 1,
+      }),
+    });
+    await renderAndOpen(false, {
+      onPrepareShare: vi
+        .fn()
+        .mockResolvedValueOnce(
+          snapshot({
+            descendantCount: 2,
+            overlappingRoots: [
+              {
+                rootId: "nested",
+                title: "Furniture",
+                relation: "descendant",
+                shareExpiresAt: null,
+                shareLocked: false,
+              },
+            ],
+          }),
+        )
+        .mockResolvedValue(
+          snapshot({ descendantCount: 2, public: true, shareEdit: true }),
+        ),
+      onEnableShare,
+      onAbsorbNestedShares,
+      onOpenShareSettings,
+    });
+
+    expect(document.body.textContent).toContain("Furniture · shared nested page");
+    expect(document.body.textContent).toContain(
+      "Furniture's link will open inside this one; anyone who has it keeps it.",
+    );
+    expect(document.body.textContent).not.toContain("Resolve the existing grant");
+    expect(shareButton()).toBeUndefined();
+
+    await click(button("Share Apartment instead"));
+
+    expect(onAbsorbNestedShares).toHaveBeenCalledWith({
+      expectedScopeToken: "a".repeat(64),
+    });
+    expect(onEnableShare).not.toHaveBeenCalled();
+    // the blocker turns into the ordinary shared state
+    expect(
+      document.body.querySelector('[data-share-state="manage"]'),
+    ).not.toBeNull();
+    expect(document.body.querySelector("[data-share-overlap-blocker]")).toBeNull();
+    expect(head()).toBe(
+      `Anyone with the link can read and edit 3${NB}pages.`,
+    );
+  });
+
+  it("names several nested links at once and leaves an expired one out of the promise", async () => {
+    await renderAndOpen(false, {
+      onPrepareShare: vi.fn().mockResolvedValue(
+        snapshot({
+          descendantCount: 4,
+          overlappingRoots: [
+            {
+              rootId: "nested-a",
+              title: "Furniture",
+              relation: "descendant",
+              shareExpiresAt: null,
+              shareLocked: false,
+            },
+            {
+              rootId: "nested-b",
+              title: "Rugs",
+              relation: "descendant",
+              shareExpiresAt: null,
+              shareLocked: false,
+            },
+          ],
+        }),
+      ),
+    });
+    expect(document.body.textContent).toContain(
+      "Those links will open inside this one; anyone who has them keeps them.",
+    );
+    expect(button("Share Apartment instead")).toBeDefined();
+  });
+
+  it("keeps the dead end where a nested link asks for a password", async () => {
+    const onAbsorbNestedShares = vi.fn();
+    await renderAndOpen(false, {
+      onPrepareShare: vi.fn().mockResolvedValue(
+        snapshot({
+          descendantCount: 2,
+          overlappingRoots: [
+            {
+              rootId: "nested",
+              title: "Furniture",
+              relation: "descendant",
+              shareExpiresAt: null,
+              shareLocked: true,
+            },
+          ],
+        }),
+      ),
+      onAbsorbNestedShares,
+      onOpenShareSettings: vi.fn(),
+    });
+
+    expect(document.body.textContent).toContain("Resolve the existing grant");
+    expect(button("Share Apartment instead")).toBeUndefined();
+    expect(onAbsorbNestedShares).not.toHaveBeenCalled();
+  });
+
+  it("says the scope changed when a fold is refused, and keeps the blocker", async () => {
+    const refused = snapshot({
+      descendantCount: 3,
+      scopeToken: "c".repeat(64),
+      overlappingRoots: [
+        {
+          rootId: "nested",
+          title: "Furniture",
+          relation: "descendant",
+          shareExpiresAt: null,
+          shareLocked: false,
+        },
+      ],
+    });
+    const onAbsorbNestedShares = vi
+      .fn()
+      .mockResolvedValue({ status: "conflict", snapshot: refused });
+    await renderAndOpen(false, {
+      onPrepareShare: vi.fn().mockResolvedValue(
+        snapshot({
+          descendantCount: 2,
+          overlappingRoots: [
+            {
+              rootId: "nested",
+              title: "Furniture",
+              relation: "descendant",
+              shareExpiresAt: null,
+              shareLocked: false,
+            },
+          ],
+        }),
+      ),
+      onAbsorbNestedShares,
+    });
+
+    await click(button("Share Apartment instead"));
+
+    expect(document.body.textContent).toContain(
+      "The shared scope changed. Review what is inside this page and confirm again.",
+    );
+    expect(document.body.querySelector("[data-share-overlap-blocker]")).not.toBeNull();
   });
 
   it("shows a status-first loading state while exact scope is pending", async () => {

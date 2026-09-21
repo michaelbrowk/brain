@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   getStore: vi.fn(),
   configureShare: vi.fn(),
+  absorbNestedShares: vi.fn(),
   readShareScope: vi.fn(),
   hash: vi.fn(),
 }));
@@ -59,8 +60,10 @@ describe("atomic subtree sharing route", () => {
     mocks.configureShare.mockReset().mockResolvedValue(undefined);
     mocks.readShareScope.mockReset().mockResolvedValue(disclosed);
     mocks.hash.mockReset().mockResolvedValue("bcrypt-hash");
+    mocks.absorbNestedShares.mockReset().mockResolvedValue(undefined);
     mocks.getStore.mockReset().mockResolvedValue({
       configureShare: mocks.configureShare,
+      absorbNestedShares: mocks.absorbNestedShares,
       readShareScope: mocks.readShareScope,
     });
   });
@@ -161,6 +164,70 @@ describe("atomic subtree sharing route", () => {
       snapshot: refreshed,
     });
     expect(mocks.readShareScope).not.toHaveBeenCalled();
+  });
+
+  it("folds the nested grants inside the page and reads the new root back", async () => {
+    mocks.readShareScope.mockResolvedValueOnce({ ...enabled, shareEdit: true });
+
+    const response = await POST(
+      request("POST", {
+        enabled: true,
+        absorbNested: true,
+        expectedScopeToken: TOKEN,
+      }),
+      { params: Promise.resolve({ id: PAGE_ID }) },
+    );
+
+    expect(response.status).toBe(200);
+    expect(mocks.absorbNestedShares).toHaveBeenCalledWith(PAGE_ID, {
+      expectedScopeToken: TOKEN,
+      src: "client-a",
+    });
+    // the fold takes its settings off the grants it absorbs, so the request
+    // carries no canEdit and no credential of its own
+    expect(mocks.configureShare).not.toHaveBeenCalled();
+    expect(mocks.hash).not.toHaveBeenCalled();
+    await expect(response.json()).resolves.toMatchObject({
+      public: true,
+      shareEdit: true,
+    });
+  });
+
+  it("returns the refreshed scope when a fold is refused", async () => {
+    const refreshed = { ...disclosed, scopeToken: "d".repeat(64) };
+    mocks.absorbNestedShares.mockRejectedValueOnce(
+      Object.assign(new Error("share scope conflict"), {
+        name: "ShareScopeConflictError",
+        snapshot: refreshed,
+      }),
+    );
+
+    const response = await POST(
+      request("POST", {
+        enabled: true,
+        absorbNested: true,
+        expectedScopeToken: TOKEN,
+      }),
+      { params: Promise.resolve({ id: PAGE_ID }) },
+    );
+
+    expect(response.status).toBe(409);
+    await expect(response.json()).resolves.toEqual({
+      error: "scope changed",
+      snapshot: refreshed,
+    });
+    expect(mocks.readShareScope).not.toHaveBeenCalled();
+  });
+
+  it("refuses a fold with no disclosure to bind it to", async () => {
+    const response = await POST(
+      request("POST", { enabled: true, absorbNested: true }),
+      { params: Promise.resolve({ id: PAGE_ID }) },
+    );
+
+    expect(response.status).toBe(400);
+    expect(mocks.getStore).not.toHaveBeenCalled();
+    expect(mocks.absorbNestedShares).not.toHaveBeenCalled();
   });
 
   it("revokes without a stale scope token and returns a read-back", async () => {

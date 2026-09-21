@@ -4971,6 +4971,67 @@ export function Shell({
     [currentNode, readShareScope, refreshTree, showToast],
   );
 
+  /** Share this page instead of the grants already inside it. The request
+   *  carries the disclosure token and nothing else — the fold takes its
+   *  settings off the grants it absorbs — and success is still the separate
+   *  durable read-back every other share write waits for. */
+  const onAbsorbNestedShares = useCallback(
+    async ({
+      expectedScopeToken,
+    }: {
+      expectedScopeToken: string;
+    }): Promise<ShareEnableResult> => {
+      if (!currentNode) throw new Error("no page selected");
+      const rootId = currentNode.id;
+      const response = await apiFetch(`/api/page/${rootId}/share`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: true,
+          absorbNested: true,
+          expectedScopeToken,
+        }),
+      });
+      const payload: unknown = await response.json().catch(() => null);
+      if (response.status === 409) {
+        const snapshot =
+          payload &&
+          typeof payload === "object" &&
+          !Array.isArray(payload) &&
+          "snapshot" in payload
+            ? (payload as { snapshot: unknown }).snapshot
+            : null;
+        if (!isShareScopeSnapshot(snapshot) || snapshot.rootId !== rootId) {
+          throw new Error("Invalid refreshed share scope");
+        }
+        return { status: "conflict", snapshot };
+      }
+      if (
+        !response.ok ||
+        !isShareScopeSnapshot(payload) ||
+        payload.rootId !== rootId
+      ) {
+        throw new Error(`Share fold returned ${response.status}`);
+      }
+
+      const readBack = await readShareScope(rootId);
+      if (!readBack.public || readBack.overlappingRoots.length > 0) {
+        throw new Error("Share fold read-back mismatch");
+      }
+      await refreshTree().catch(() => {});
+      try {
+        await navigator.clipboard.writeText(
+          `${location.origin}/share/${rootId}`,
+        );
+        showToast("Public link copied. The links inside it still work.");
+      } catch {
+        showToast("Shared — copy the link manually. The links inside it still work.");
+      }
+      return { status: "enabled", snapshot: readBack };
+    },
+    [currentNode, readShareScope, refreshTree, showToast],
+  );
+
   const revokeShare = useCallback(async (rootId: string) => {
     const response = await apiFetch(`/api/page/${rootId}/share`, {
       method: "POST",
@@ -5431,6 +5492,7 @@ export function Shell({
     onSelect: select,
     onPrepareShare,
     onEnableShare,
+    onAbsorbNestedShares,
     onDisableShare,
     onCopyShareLink,
     onSetShareProtection,

@@ -145,6 +145,7 @@ const pageMetaSchema = z
     public: z.boolean().optional(),
     shareVersion: z.number().int().nonnegative().optional(),
     shareEdit: z.boolean().optional(),
+    sharedUnder: brainIdSchema.optional(),
     category: z.string().optional(),
     pinned: z.boolean().optional(),
     updatedBy: z.enum(["me", "claude", "visitor"]).optional(),

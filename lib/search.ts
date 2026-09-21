@@ -31,6 +31,17 @@ export class SearchBackendError extends Error {
   }
 }
 
+/** THE SEARCH ENGINE FAILING, TOLD FROM THE NOTES FOLDER FAILING.
+ *
+ *  A caller that catches everything alike cannot tell "ripgrep is not
+ *  installed" from "the notes folder is unwritable", and those two call for
+ *  opposite responses. Read off the name rather than the class, the way
+ *  `lib/store`'s own predicates are, so a module that mocks this one still
+ *  answers for the errors it throws. */
+export function isSearchBackendError(error: unknown): boolean {
+  return error instanceof Error && error.name === "SearchBackendError";
+}
+
 /** Production readiness must fail loudly when the external full-text engine is
  *  absent. Interactive requests also fail explicitly instead of pretending an
  *  unavailable backend returned zero matches. */
@@ -535,12 +546,21 @@ export function runRipgrep(
         finish();
         return;
       }
-      finish(
-        new SearchBackendError(
-          `ripgrep search failed (${code ?? "signal"})` +
-            (stderr.trim() ? `: ${stderr.trim().slice(0, 500)}` : ""),
-        ),
-      );
+      // THE MESSAGE LEAVES THE PROCESS, SO THE STDERR STAYS IN IT.
+      //
+      // This sentence now reaches an MCP agent verbatim (`search_backend`),
+      // and the other three throwers say nothing of the machine because they
+      // are fixed strings. This one interpolated a third-party binary's error
+      // text, so what it names is ripgrep's business and not something this
+      // code can promise — an `RIPGREP_CONFIG_PATH` that will not parse, for
+      // one, is reported with its absolute path. The operator still needs it,
+      // so it goes to the server's own log and the exit code travels alone.
+      if (stderr.trim()) {
+        console.error(
+          `ripgrep search failed (${code ?? "signal"}): ${stderr.trim().slice(0, 500)}`,
+        );
+      }
+      finish(new SearchBackendError(`ripgrep search failed (${code ?? "signal"})`));
     });
     rg.on("error", (error) => {
       finish(new SearchBackendError(`ripgrep search unavailable: ${error.message}`));

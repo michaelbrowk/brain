@@ -27,7 +27,7 @@ vi.mock("framer-motion", async () => {
   return createFramerMotionMock({ reducedMotion: () => harness.reduce });
 });
 
-const { localDay, resetTasksStore } = await import("./tasks-client");
+const { localDay, mutateTasks, resetTasksStore } = await import("./tasks-client");
 const { HubToday } = await import("./hub-today");
 const { WRITE_AT_MS } = await import("./tasks-row");
 
@@ -394,6 +394,25 @@ describe("the Today block on Home", () => {
 
     expect(host.querySelector("[data-hub-today]")).not.toBeNull();
     expect(host.textContent).toContain("Nothing planned today");
+  });
+
+  it("takes in a task promoted in a note, with nothing asked again", async () => {
+    // THE BLOCK READS THE COLUMN'S SET AND NOTHING ELSE. A task promoted on a
+    // note is written by `components/editor/task-checkbox.ts` straight into
+    // that set, and that is the whole of what puts it here: the tab never
+    // asks again for a write it made itself, because the shell drops the SSE
+    // echo of its own event.
+    await mount([task("call the bank")]);
+    expect(titles()).toEqual(["call the bank"]);
+    const before = apiFetchMock.mock.calls.length;
+
+    await act(async () => {
+      mutateTasks((tasks) => [task("water the plants"), ...tasks]);
+    });
+
+    expect(titles()).toContain("water the plants");
+    expect(header()).toContain("2");
+    expect(apiFetchMock.mock.calls).toHaveLength(before);
   });
 
   it("says nothing at all before the browser's clock has been read", async () => {

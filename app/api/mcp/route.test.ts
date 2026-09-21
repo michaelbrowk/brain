@@ -73,7 +73,20 @@ vi.mock("@/lib/store", () => ({
 // state directory so a test says what zone is captured in its own body, and so
 // a machine with a zone already captured cannot change what a test means.
 vi.mock("@/lib/owner-settings", () => ({ readTimeZone: mocks.readTimeZone }));
-vi.mock("@/lib/search", () => ({ searchNotes: vi.fn() }));
+// The predicate reads the error's own name, the way the real one does and the
+// way the store's four above do. A stand-in that always answered false would
+// fold ripgrep's own failure back into the catch-all this pins it out of.
+vi.mock("@/lib/search", () => ({
+  searchNotes: vi.fn(),
+  isSearchBackendError: (e: unknown) =>
+    e instanceof Error && e.name === "SearchBackendError",
+  SearchBackendError: class SearchBackendError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = "SearchBackendError";
+    }
+  },
+}));
 vi.mock("@/lib/emoji-llm", () => ({ smartEmoji: vi.fn() }));
 vi.mock("@/lib/oauth/server", () => ({
   verifyMcpBearerToken: mocks.verifyMcpBearerToken,
@@ -121,7 +134,7 @@ import {
   appendNotification,
   listNotifications,
 } from "@/lib/notifications/store";
-import { searchNotes } from "@/lib/search";
+import { SearchBackendError, searchNotes } from "@/lib/search";
 
 const notionId = "a".repeat(32);
 const sourceHash = "b".repeat(64);
@@ -787,6 +800,28 @@ describe("Notion MCP route validation", () => {
       reason: "store_failed",
     });
     expect(JSON.stringify(payload)).not.toContain("/notes/");
+  });
+
+  /** AND THE ENGINE'S OWN FAILURE IS NOT THE FOLDER'S.
+   *
+   *  `store_failed` told an agent to stop writing to a notes folder that was
+   *  fine, over a `rg` binary that was not installed. Four throws share this
+   *  class — the binary missing, a timeout, the 512 KB output cap, a bad exit
+   *  — and all four are the search engine, not the disk. */
+  it("names ripgrep's own failure on search rather than the notes folder", async () => {
+    vi.mocked(searchNotes).mockRejectedValue(
+      new SearchBackendError("ripgrep search unavailable: spawn rg ENOENT"),
+    );
+
+    const { payload, isError } = await toolPayload(
+      await callTool("search", { query: "anything" }, 108),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "ripgrep search unavailable: spawn rg ENOENT",
+      reason: "search_backend",
+    });
   });
 
   /** THE NOTION_* CARVE-OUT KEEPS THE THROW, NOT THE PATH.

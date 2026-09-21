@@ -9,7 +9,7 @@ import {
   redactPage,
   redactPageMeta,
 } from "@/lib/store";
-import { searchNotes } from "@/lib/search";
+import { isSearchBackendError, searchNotes } from "@/lib/search";
 import { smartEmoji } from "@/lib/emoji-llm";
 import {
   decodeNotionAttachmentBase64,
@@ -42,6 +42,7 @@ import {
   hasScope,
   hints,
   insufficientScope,
+  searchBackendFailed,
   STORE_FAILED,
   storeFailed,
   text,
@@ -871,7 +872,22 @@ const handler = createMcpHandler(
         inputSchema: { query: z.string() },
         annotations: hints("read keeps idempotent local"),
       },
-      pageTool(async ({ query }) => text(await searchNotes(query))),
+      // THE ENGINE'S OWN FAILURE, BEFORE THE CATCH-ALL SEES IT. `pageTool`
+      // answers `store_failed` for everything that is not a `NotFoundError`,
+      // which is right for the notes folder and wrong for `rg`: a binary that
+      // is not installed, a timed-out search and a query over the output cap
+      // all read as an unwritable disk. Named here, so the folder's code
+      // still means the folder.
+      pageTool(async ({ query }) => {
+        try {
+          return text(await searchNotes(query));
+        } catch (error) {
+          if (isSearchBackendError(error)) {
+            return searchBackendFailed((error as Error).message);
+          }
+          throw error;
+        }
+      }),
     );
   },
   {

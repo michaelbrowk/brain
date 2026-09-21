@@ -367,3 +367,69 @@ describe("appending, or folding into what is already there", () => {
     expect(seen).toMatchObject([{ type: "notification", id: "agent-1" }]);
   });
 });
+
+/** THE ROWS AN OLDER BUILD WROTE, on the first read after the upgrade.
+ *
+ *  One row per thread is what the centre held until 0.12.2. They are folded on
+ *  the way out of the file rather than by a migration pass, so a file that has
+ *  none costs one filter and no version bump. `mail-rows.test.ts` owns the
+ *  arithmetic; this is the seam. */
+describe("a centre written by an older build", () => {
+  function old(id: string, at: string, readAt?: string): BrainNotification {
+    return {
+      id: `mail-new:account-adeadbeefdeadbeefdeadbeefdeadbeef:${id}`,
+      kind: "mail-new",
+      at,
+      title: "Ana Silva",
+      body: "Lunch on Friday",
+      href: "/mail",
+      ...(readAt !== undefined ? { readAt } : {}),
+    };
+  }
+
+  it("answers one counted row where it held one per thread", async () => {
+    await seed(dir, [
+      old("6f6e65", "2026-09-14T11:00:00.000Z"),
+      old("74776f", "2026-09-14T12:00:00.000Z"),
+      row("task-1", "2026-09-14T10:00:00.000Z"),
+    ]);
+    expect(await listNotifications(dir)).toEqual([
+      {
+        id: "mail-new:2026-09-14T12:00:00.000Z",
+        kind: "mail-new",
+        at: "2026-09-14T12:00:00.000Z",
+        title: "2 new messages",
+        href: "/mail",
+      },
+      row("task-1", "2026-09-14T10:00:00.000Z"),
+    ]);
+    expect(await unreadNotificationCount(dir)).toBe(2);
+  });
+
+  it("drops rows that were all read, and counts the fold as one unread row", async () => {
+    await seed(dir, [
+      old("6f6e65", "2026-09-14T11:00:00.000Z", "2026-09-14T11:30:00.000Z"),
+      old("74776f", "2026-09-14T12:00:00.000Z", "2026-09-14T12:30:00.000Z"),
+    ]);
+    expect(await listNotifications(dir)).toEqual([]);
+    expect(await unreadNotificationCount(dir)).toBe(0);
+  });
+
+  it("persists the fold on the next write of the file", async () => {
+    await seed(dir, [old("6f6e65", "2026-09-14T11:00:00.000Z")]);
+    await markAllNotificationsRead("2026-09-14T13:00:00.000Z", dir);
+    const raw = JSON.parse(await readFile(path.join(dir, NOTIFICATIONS_FILE), "utf8")) as {
+      items: BrainNotification[];
+    };
+    expect(raw.items).toEqual([
+      {
+        id: "mail-new:2026-09-14T11:00:00.000Z",
+        kind: "mail-new",
+        at: "2026-09-14T11:00:00.000Z",
+        title: "1 new message",
+        href: "/mail",
+        readAt: "2026-09-14T13:00:00.000Z",
+      },
+    ]);
+  });
+});

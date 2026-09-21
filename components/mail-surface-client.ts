@@ -24,7 +24,6 @@ import {
   MAIL_THREAD_STATE_CONTRACT_VALUE,
 } from "@/lib/mail/thread-contract";
 import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
-import { markMailNotificationRead } from "./notifications-read";
 
 /**
  * Mirror of `MAIL_RESOURCE_LIMITS.maxAccounts`. That module reaches node:crypto
@@ -504,14 +503,6 @@ export const defaultMailSurfaceClient: MailSurfaceClient = {
       MAIL_MUTATION_TIMEOUT_MS,
     );
     readThreadMutationResult(payload);
-    // Reading a letter in Mail clears its row in the notification centre, and
-    // opening that row in the centre marks the letter read: the two are one
-    // state seen from two places (spec §7, D6). Fire and forget, because the
-    // mail mutation has already landed and a bell that is one row stale is
-    // not a reason to report a failure.
-    if ("read" in input && input.read === true) {
-      markMailNotificationRead(input.accountId, threadId);
-    }
   },
 
   async send(input, signal) {

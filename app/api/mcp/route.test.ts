@@ -115,7 +115,8 @@ import {
   writeAgentSettings,
 } from "@/lib/mcp/agent-settings";
 import type { MailSendInput } from "@/lib/mail/message-types";
-import { decodeAgentMailHref, mailNotificationId } from "@/lib/notifications/ids";
+import { decodeAgentMailHref } from "@/lib/notifications/ids";
+import { mailRowId } from "@/lib/notifications/mail-rows";
 import {
   appendNotification,
   listNotifications,
@@ -4674,12 +4675,16 @@ describe("update_mail_thread", () => {
     expect(entry.change).toBe("archive");
   });
 
-  it("marks the centre's mail row read when the agent marks the thread read", async () => {
+  /** THE OWNER'S TALLY IS THE OWNER'S. The centre held one row per thread
+   *  until 0.12.2 and this call marked that thread's row read; it holds one
+   *  counted row now, and an agent reading one thread inside it is not the
+   *  owner reading their mail. */
+  it("leaves the owner's mail row alone when an agent marks a thread read", async () => {
     await appendNotification({
-      id: mailNotificationId(FAKE_ACCOUNT_ID, "thread-alpha"),
+      id: mailRowId("2026-09-14T09:00:00.000Z"),
       kind: "mail-new",
       at: "2026-09-14T09:00:00.000Z",
-      title: "One new letter",
+      title: "3 new messages",
       href: "/mail",
     });
     mocks.createBrainMailClient.mockReturnValue(
@@ -4699,47 +4704,12 @@ describe("update_mail_thread", () => {
       ),
     );
 
-    await vi.waitFor(async () => {
-      // BY ID, NOT BY POSITION. The triage call leaves an `agent-action` row
-      // of its own, stamped now, and the centre is newest first, so the head
-      // of the list is that row and not the letter this test seeded.
-      const rows = await listNotifications();
-      const row = rows.find((held) => held.kind === "mail-new");
-      expect(row?.readAt).toBeDefined();
-    });
-  });
-
-  it("leaves the centre's row alone when the change is not a read", async () => {
-    await appendNotification({
-      id: mailNotificationId(FAKE_ACCOUNT_ID, "thread-alpha"),
-      kind: "mail-new",
-      at: "2026-09-14T09:00:00.000Z",
-      title: "One new letter",
-      href: "/mail",
-    });
-    mocks.createBrainMailClient.mockReturnValue(
-      createMailClientFake({
-        updateThread: async () => ({
-          apiVersion: 1,
-          thread: fakeThread({ starred: true }),
-        }),
-      }).client,
-    );
-
-    await toolPayload(
-      await callTool(
-        "update_mail_thread",
-        {
-          accountId: FAKE_ACCOUNT_ID,
-          threadId: "thread-alpha",
-          starred: true,
-        },
-        308,
-      ),
-    );
-
+    // The triage call leaves an `agent-action` row of its own, so the mail row
+    // is found by kind rather than by position.
     const rows = await listNotifications();
-    expect(rows.find((held) => held.kind === "mail-new")?.readAt).toBeUndefined();
+    const row = rows.find((held) => held.kind === "mail-new");
+    expect(row?.title).toBe("3 new messages");
+    expect(row?.readAt).toBeUndefined();
   });
 
   it("refuses a brain:read grant before the client or the log is touched", async () => {

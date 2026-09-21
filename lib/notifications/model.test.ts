@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { mailPushTag } from "./ids";
+import { mailRowId } from "./mail-rows";
 import {
   NOTIFICATION_CAP,
-  decodeMailNotificationId,
   decodeTaskNotificationId,
-  mailNotificationId,
   notificationSchema,
   taskMissedNotificationId,
   taskReminderNotificationId,
@@ -73,22 +73,9 @@ describe("the notification model", () => {
     );
   });
 
-  it("round-trips a mail id through an id the schema accepts", () => {
-    const accountId = "account-adeadbeefdeadbeefdeadbeefdeadbeef";
-    const threadId = "thread/one+two=three";
-    const id = mailNotificationId(accountId, threadId);
+  it("accepts the mail row's own id, which is the instant it opened", () => {
+    const id = mailRowId("2026-09-14T12:00:00.000Z");
     expect(notificationSchema.safeParse({ ...base, kind: "mail-new", id }).success).toBe(true);
-    expect(decodeMailNotificationId(id)).toEqual({ accountId, threadId });
-  });
-
-  it("returns null for an id that is not a mail id", () => {
-    expect(decodeMailNotificationId("task-reminder:task-alpha:2026-09-14T13:00")).toBeNull();
-    expect(decodeMailNotificationId("mail-new:account-a:zz")).toBeNull();
-  });
-
-  it("refuses a thread id too long to fit the bounded id", () => {
-    const accountId = "account-adeadbeefdeadbeefdeadbeefdeadbeef";
-    expect(() => mailNotificationId(accountId, "t".repeat(200))).toThrow(/too long/);
   });
 
   it("reads a task's own id back out of both task ids", () => {
@@ -103,8 +90,7 @@ describe("the notification model", () => {
   });
 
   it("returns null for an id that names no task", () => {
-    const mailId = mailNotificationId("account-adeadbeefdeadbeefdeadbeefdeadbeef", "thread-one");
-    expect(decodeTaskNotificationId(mailId)).toBeNull();
+    expect(decodeTaskNotificationId(mailRowId("2026-09-14T12:00:00.000Z"))).toBeNull();
     expect(decodeTaskNotificationId("task-reminder:")).toBeNull();
     // A task id is `[A-Za-z0-9_-]`, so a segment holding anything else is not
     // one and the row opens the surface without naming a row.
@@ -156,19 +142,23 @@ describe("what the schema accepts, field by field", () => {
   });
 });
 
-describe("the mail id's two ends agree", () => {
+/** The tag on one letter's push, which is all that is left of the per-thread
+ *  mail id. It never reaches the centre now, so what it has to stay inside is
+ *  `MAX_PUSH_TAG` and not the row's charset. */
+describe("the mail push tag", () => {
   // The shape every mail module already gates on, SAFE_ACCOUNT_ID.
   const accountId = `account-a${"deadbeef".repeat(4)}`;
 
-  it("round-trips the account id shape the mail store mints", () => {
-    const threadId = "th:read/one+two=three 🔔";
-    const id = mailNotificationId(accountId, threadId);
-    expect(notificationSchema.safeParse({ ...base, kind: "mail-new", id }).success).toBe(true);
-    expect(decodeMailNotificationId(id)).toEqual({ accountId, threadId });
+  it("is one tag per pair, whatever the provider's thread id holds", () => {
+    const tag = mailPushTag(accountId, "th:read/one+two=three 🔔");
+    expect(tag).toBe(`mail-new:${accountId}:74683a726561642f6f6e652b74776f3d746872656520f09f9494`);
+    expect(tag!.length).toBeLessThanOrEqual(400);
+    expect(mailPushTag(accountId, "thread-one")).not.toBe(tag);
   });
 
-  it("refuses to encode an account id the decoder could not read back", () => {
-    expect(() => mailNotificationId("account.one", "a")).toThrow(/account id/);
-    expect(() => mailNotificationId("account:one", "a")).toThrow(/account id/);
+  it("answers null rather than a tag it cannot make, and the letter still goes", () => {
+    expect(mailPushTag("account.one", "a")).toBeNull();
+    expect(mailPushTag("account:one", "a")).toBeNull();
+    expect(mailPushTag(accountId, "t".repeat(200))).toBeNull();
   });
 });

@@ -56,7 +56,7 @@ vi.mock("next/dynamic", () => ({
 }));
 
 const TASK_ID = "task-reminder:task-1:2026-09-14T13:00";
-const MAIL_ID = "mail-new:account-adeadbeefdeadbeefdeadbeefdeadbeef:7468726561642d6f6e65";
+const MAIL_ID = "mail-new:2026-09-14T12:00:00.000Z";
 
 let rows: unknown[];
 
@@ -302,12 +302,11 @@ describe("a notification row's destination", () => {
         id: MAIL_ID,
         kind: "mail-new",
         at: "2026-09-14T12:00:00.000Z",
-        title: "Ana Silva",
-        body: "Lunch on Friday",
+        title: "3 new messages",
         href: "/mail",
       },
     ];
-    await pressTheRow("Ana Silva");
+    await pressTheRow("3 new messages");
 
     await findLazy(mailSurface, "mail surface after the row press");
     expect(window.location.pathname).toBe("/mail");

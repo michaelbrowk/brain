@@ -15,6 +15,16 @@ vi.mock("framer-motion", async () => {
   const { createFramerMotionMock } = await import("@/test/framer-motion-mock");
   return createFramerMotionMock({ reducedMotion: false });
 });
+
+/** The centre's seam, doubled: what it decides is `notifications-client`'s
+ *  business and pinned there. What belongs here is that Mail registers with it
+ *  once on the mount, whichever way Mail was opened, and unregisters when it
+ *  goes. */
+const closeMailCentreRead = vi.fn();
+const markMailCentreRead = vi.fn(() => closeMailCentreRead);
+vi.mock("./notifications-read", () => ({
+  markMailCentreRead: () => markMailCentreRead(),
+}));
 import {
   clearOpenThreadRequest,
   defaultMailSurfaceClient,
@@ -7613,15 +7623,50 @@ describe("MailSurface", () => {
       expect(archiveButton()).not.toBeUndefined();
     });
   });
+  /** OPENING MAIL ANSWERS THE BELL'S MAIL ROW. The centre holds one row for
+   *  new mail, "10 new messages", and Mail being open is what reads it —
+   *  whichever way Mail was opened, which is why the call is on the mount and
+   *  not on the press. */
+  describe("the bell's mail row", () => {
+    beforeEach(() => {
+      markMailCentreRead.mockClear();
+      closeMailCentreRead.mockClear();
+    });
+
+    it("is registered once when Mail mounts, and released when it goes", async () => {
+      const client = makeClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      expect(markMailCentreRead).toHaveBeenCalledTimes(1);
+      expect(closeMailCentreRead).not.toHaveBeenCalled();
+
+      // A re-render is not a second opening of Mail.
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      expect(markMailCentreRead).toHaveBeenCalledTimes(1);
+      expect(closeMailCentreRead).not.toHaveBeenCalled();
+
+      // And leaving Mail ends it, so a row that opens afterwards stays unread.
+      await act(async () => root.render(<></>));
+      await settle();
+      expect(closeMailCentreRead).toHaveBeenCalledTimes(1);
+    });
+  });
+
   /** A THREAD ASKED FOR FROM OUTSIDE MAIL.
    *
    *  The notification centre is a menu in the sidebar, on whatever surface the
-   *  reader is on, and it opens a letter. It cannot hand this component a list
-   *  item, because Mail has not mounted when the row is pressed and the row
-   *  holds an id pair. It leaves the pair in `mail-surface-client` and the
-   *  surface
-   *  answers it here: in the account the letter belongs to, with the thread
-   *  selected, and the request taken back off.
+   *  reader is on, and an `agent-action` row in it opens a letter. It cannot
+   *  hand this component a list item, because Mail has not mounted when the row
+   *  is pressed and the row holds an id pair. It leaves the pair in
+   *  `mail-surface-client` and the surface answers it here: in the account the
+   *  letter belongs to, with the thread selected, and the request taken back
+   *  off.
    */
   describe("a thread asked for from outside Mail", () => {
     const other: MailThreadListItem = {

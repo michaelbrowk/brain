@@ -12,8 +12,6 @@ import type {
 } from "@/lib/mail/message-types";
 import { sanitizeSnippet } from "@/lib/mail/reader-content";
 import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
-import { mailNotificationId } from "@/lib/notifications/ids";
-import { markNotificationsRead } from "@/lib/notifications/store";
 import {
   logMailActivity,
   mailOutcome,
@@ -221,39 +219,16 @@ function triageMutation(
   return null;
 }
 
-/** Reading a letter in Mail clears its row in the notification centre, and
- *  opening that row in the centre marks the letter read: the two are one state
- *  seen from two places (`components/mail-surface-client.ts`). The browser
- *  moves it on a `read: true` PATCH, and an agent that did not would leave the
- *  bell showing rows for letters it has already read and acted on.
+/** AN AGENT'S READ MARK TOUCHES THE CENTRE NO LONGER.
  *
- *  Fire and forget, on the same condition, for the reason the browser gives:
- *  the mail has already changed, and a bell that is one row stale is not a
- *  reason to tell the agent its triage failed. */
-async function markCentreRead(
-  accountId: string,
-  threadId: string,
-): Promise<void> {
-  try {
-    await markNotificationsRead(
-      [mailNotificationId(accountId, threadId)],
-      new Date().toISOString(),
-    );
-  } catch (cause) {
-    // `mailNotificationId` throws on an id it cannot encode, and the store can
-    // fail on a state directory it cannot write. Neither is the agent's
-    // problem, and neither is a reason to lose the triage that landed. The
-    // process log gets a code, not the thrown message: an fs failure's own
-    // `code` when there is one, and a fixed fallback otherwise, so this line
-    // never carries an id or a path into a log a person other than the
-    // operator might read.
-    const reason =
-      cause instanceof Error && typeof (cause as NodeJS.ErrnoException).code === "string"
-        ? (cause as NodeJS.ErrnoException).code
-        : "centre_mark_failed";
-    console.warn(`[brain/mcp] notification row left unread: ${reason}`);
-  }
-}
+ *  It used to: the centre held one row per thread, so a thread an agent read
+ *  left a row about a letter already dealt with, and this file marked it read
+ *  on the same PATCH. The centre holds one counted row now ("10 new
+ *  messages"), which is the owner's tally of what is waiting for THEM. An
+ *  agent reading one thread inside it is not the owner reading their mail, and
+ *  a mark here would empty the tally on their behalf. The row is cleared by
+ *  opening Mail or by pressing it, and by nothing else.
+ */
 
 export function registerMailTools(server: McpToolServer): void {
   server.registerTool(
@@ -665,9 +640,6 @@ export function registerMailTools(server: McpToolServer): void {
           );
         }
         const result = await client.updateThread(threadId, mutation);
-        if ("read" in mutation && mutation.read === true) {
-          void markCentreRead(accountId, threadId);
-        }
         await log("ok", change);
         return text({ thread: result.thread });
       } catch (error) {

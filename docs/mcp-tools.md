@@ -128,11 +128,14 @@ Three rows carry a caveat the four words cannot.
   caption's own mark, because the moment a status is read is the one moment
   the operation id and its thread are both known. Both writes are write-once
   and neither is reachable by the caller.
-- **`save_mail_attachment` is `idempotent` about the file, not the line.** The
-  saved file is content-addressed, so the same attachment saved twice is one
-  file. The Markdown line the tool appends is added every call, so a second
-  save with `append` left at its default puts a second identical line on the
-  page.
+- **`save_mail_attachment` is not idempotent yet, and is declared as though it
+  were.** The tool no longer appends a line the page already carries, and says
+  which call added one in `lineAdded`. The file naming is the half that is
+  missing: `saveAttachment` names a file `nanoid(12)` plus its extension, so
+  the same attachment saved twice is two files with two urls and two different
+  lines, which the guard cannot match. Naming the general save by content hash,
+  the way `stageNotionAttachment` already does, is what would make the hint
+  true.
 
 `app/api/mcp/tool-annotations.test.ts` asserts this table against the server's
 own `tools/list`, in these same words. A tool registered without a title or
@@ -475,7 +478,7 @@ three names before it is cut, and a cut is marked.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type }`, the saved file as the note store named it | `invalid_account_id`, `invalid_attachment_id` and `invalid_page_id`, the codes its sibling mail tools use. `page not found`, before anything is downloaded, and `page_read_failed` for a notes folder that could not answer, in Brain's own words rather than the store's. `that file is too large for a note`, naming the cap. `that file cannot be saved into a note`, naming the executable extension. Whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`). Plus the service's own codes. `store_failed` |
+| `save_mail_attachment` | `brain:mail` and `brain:write` | `accountId`, `attachmentId`, `page`, `append?` | `{ url, name, size, type, lineAdded }`, the saved file as the note store named it, and whether this call put a line on the page | `invalid_account_id`, `invalid_attachment_id` and `invalid_page_id`, the codes its sibling mail tools use. `page not found`, before anything is downloaded, and `page_read_failed` for a notes folder that could not answer, in Brain's own words rather than the store's. `that file is too large for a note`, naming the cap. `that file cannot be saved into a note`, naming the executable extension. Whatever the note store refuses the file for, in its own words with its own code (`blocked_mime`, `mime_mismatch`, `too_large`). Plus the service's own codes. `store_failed` |
 
 It is the one mail tool that writes a note, so it asks for `brain:write`
 beside `brain:mail`. A grant that reads mail and cannot edit notes is refused
@@ -517,9 +520,19 @@ every MCP write. With `append` false nothing is written to the page, and a
 file no page links is collected by the attachment sweep a day later, so an
 agent that passes it has to write its own line.
 
-There is no dedupe. Saving one attachment twice writes two files and two
-lines, the way a person uploading the same file twice would, so an agent
-retrying a call it already made has to check the page rather than call again.
+`lineAdded` says whether this call put a line on the page. It is `false` with
+`append` false, and `false` when the page already carried the exact line: the
+body is read again immediately before the append, and a line already there is
+not added a second time.
+
+That guard does not add up to a dedupe yet, because the file naming is the
+other half and it is unchanged. `saveAttachment` names a file `nanoid(12)`
+plus its extension, so saving one attachment twice writes two files with two
+urls and therefore two different lines, and the guard never matches. Only the
+Notion staging path is content-addressed. Until the general save is named by
+content, an agent retrying a call it already made still has to check the page
+rather than call again, and `save_mail_attachment`'s `idempotentHint` is a
+declaration rather than a fact — see "What the hints say".
 
 One activity line per call names the account, the attachment and the page,
 never the filename.

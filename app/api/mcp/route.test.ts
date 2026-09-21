@@ -3378,6 +3378,7 @@ describe("save_mail_attachment", () => {
       name: "invoice.pdf",
       size: 9,
       type: "application/pdf",
+      lineAdded: true,
     });
     expect(fake.calls).toEqual([
       {
@@ -3398,6 +3399,79 @@ describe("save_mail_attachment", () => {
       "[invoice.pdf](/_attachments-v2/aaaa.pdf)",
       "claude",
     );
+  });
+
+  /** A LINE THE PAGE ALREADY CARRIES IS NOT ADDED TWICE.
+   *
+   *  The page is read again immediately before the append, and a body that
+   *  already holds the exact line is left alone. `lineAdded` says which of the
+   *  two happened, because an agent that cannot tell them apart goes looking
+   *  for a line it thinks it wrote.
+   *
+   *  WHAT THIS DOES NOT PROVE. The store here answers one url for both saves.
+   *  The real `saveAttachment` does not: `saveAttachmentUnlocked` names the
+   *  file `nanoid(12)` plus the extension, so saving one mail attachment twice
+   *  writes two files with two urls and therefore two different lines, and
+   *  this guard never fires. Only the Notion staging path is content-addressed
+   *  (`stageNotionAttachment`, sha256 of the bytes). The guard is right and it
+   *  becomes effective the day the general save is named by content; until
+   *  then `save_mail_attachment` is still not idempotent about the line, which
+   *  is what `docs/mcp-tools.md` says under the hints.
+   *
+   *  A store that holds its own body rather than a `readPage` answering a
+   *  constant: the point is what the first call left behind for the second to
+   *  find, which a fixed answer cannot show. */
+  it("does not add a second copy of a line the page already carries, and says so", async () => {
+    const saved = {
+      url: "/_attachments-v2/aaaa.pdf",
+      name: "invoice.pdf",
+      size: 9,
+      type: "application/pdf",
+    };
+    let body = "a page";
+    const appendPage = vi.fn(async (_id: string, markdown: string) => {
+      body = `${body}\n\n${markdown}`;
+      return { meta: { id: "page-one" } };
+    });
+    mocks.getStore.mockResolvedValue({
+      readPage: vi.fn(async () => ({
+        meta: { id: "page-one" },
+        markdown: body,
+        rev: "rev-1",
+      })),
+      saveAttachment: vi.fn().mockResolvedValue(saved),
+      appendPage,
+    });
+    mocks.createBrainMailClient.mockReturnValue(
+      createMailClientFake({
+        downloadAttachment: async () => ({
+          contentType: "application/pdf",
+          contentDisposition: 'attachment; filename="invoice.pdf"',
+          bytes: PDF_BYTES.byteLength,
+          body: streamOf(PDF_BYTES),
+        }),
+      }).client,
+    );
+
+    const save = (id: number) =>
+      callTool(
+        "save_mail_attachment",
+        {
+          accountId: FAKE_ACCOUNT_ID,
+          attachmentId: "attachment-alpha",
+          page: "page-one",
+        },
+        id,
+      );
+
+    const first = await toolPayload(await save(560));
+    const second = await toolPayload(await save(561));
+
+    expect(first.payload).toEqual({ ...saved, lineAdded: true });
+    expect(second.payload).toEqual({ ...saved, lineAdded: false });
+    expect(appendPage).toHaveBeenCalledTimes(1);
+    // One link on the page, not two.
+    expect(body.match(/\[invoice\.pdf\]/g)).toHaveLength(1);
   });
 
   it("appends an image embed for an image", async () => {

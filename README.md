@@ -295,6 +295,7 @@ unusual-looking pin is worth much less than a knowingly vulnerable parser.
 | `AUTH_PASSWORD_HASH` | bcrypt hash of the login password                               |
 | `BRAIN_PUBLIC_ORIGIN` | Exact origin the browser shows — `http://localhost:3020` for a local trial, `https://` before MCP and Gmail work |
 | `MCP_TOKEN`          | Legacy full-access MCP token kept during the OAuth migration     |
+| `MCP_TOKEN_NAME`     | What the client on that token is called in the bell and under Connections (default `API token`) |
 | `BRAIN_EDGE_RATE_SECRET` | 256-bit edge proof shared only by nginx and Brain           |
 | `BRAIN_OAUTH_STATE_DIR` | Optional OAuth state directory (default `/var/lib/brain/oauth`) |
 | `BRAIN_READINESS_TOKEN` | 256-bit internal token for the deep deploy health probe      |

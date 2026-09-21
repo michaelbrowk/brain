@@ -127,6 +127,17 @@ connect it over OAuth and approve "Read and sort your mail", or "Send mail as
 you" as well. `MCP_TOKEN` is not returned by OAuth and should be retired only
 after every real client has completed an OAuth connect/read/write check.
 
+`MCP_TOKEN_NAME` is what that client is called wherever Brain names it: the
+activity line each mutation writes, the bell row that line earns, and the
+Connections ring underneath. An OAuth client registers its own name and the
+consent screen shows it, so those rows say "Claude" because Claude said so; the
+static token has nowhere to say anything, so the owner says it here. Set it to
+the agent that holds the token — with `MCP_TOKEN_NAME=Claude` the bell reads
+"Claude created a page". The value is trimmed and has to be at most 40 drawable
+characters; unset, longer, or carrying a control character, the name is
+`API token`. Lines already in the log keep the word they were written with: the
+log is history, and a rename is not a correction to what happened.
+
 ## Rollout check
 
 1. Confirm `BRAIN_PUBLIC_ORIGIN` is the exact public HTTPS origin,

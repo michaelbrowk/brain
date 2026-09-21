@@ -1,5 +1,5 @@
 import { cookies } from "next/headers";
-import { notFound } from "next/navigation";
+import { notFound, permanentRedirect } from "next/navigation";
 import { configuredPublicOrigin, getStore } from "@/lib/store";
 import { renderReadOnly } from "@/lib/render-md";
 import {
@@ -7,6 +7,7 @@ import {
   unreferencedDirectChildren,
 } from "@/lib/derived-page-refs";
 import {
+  resolveFoldedShareRoot,
   resolveShareAccess,
   ShareAccessBusyError,
   ShareAccessNotFoundError,
@@ -61,6 +62,13 @@ export default async function SharePage({
   if (Array.isArray(query.page)) notFound();
   const targetId = query.page ?? id;
   const store = await getStore();
+  // This link's page was shared on its own once and its grant has since been
+  // folded into an ancestor's. The address in the reader's hand still names
+  // this page, so it is answered where the page now lives: one hop, and every
+  // surface the page then asks for — its media, its edit cookie, its
+  // subpages — is addressed to the root that actually holds the grant.
+  const foldedInto = resolveFoldedShareRoot(store, id);
+  if (foldedInto) permanentRedirect(sharePageHref(foldedInto, targetId));
   const jar = await cookies();
   let access;
   try {

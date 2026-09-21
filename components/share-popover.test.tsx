@@ -663,6 +663,9 @@ describe("SharePopover redesign", () => {
   });
 
   it("keeps the dead end where a live nested link carries a deadline", async () => {
+    // a fixed clock, so the row's date is the same sentence every year
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-22T12:00:00.000Z"));
     const onAbsorbNestedShares = vi.fn();
     await renderAndOpen(false, {
       onPrepareShare: vi.fn().mockResolvedValue(
@@ -673,7 +676,7 @@ describe("SharePopover redesign", () => {
               rootId: "nested",
               title: "Furniture",
               relation: "descendant",
-              shareExpiresAt: new Date(Date.now() + 7 * 86_400_000).toISOString(),
+              shareExpiresAt: "2026-09-29T12:00:00.000Z",
               shareLocked: false,
             },
           ],
@@ -684,6 +687,10 @@ describe("SharePopover redesign", () => {
     });
 
     expect(document.body.textContent).toContain("Resolve the existing grant");
+    // the deadline is the reason, said the way a date is said everywhere else
+    expect(document.body.textContent).toContain(
+      "Furniture · shared nested page · expires 29 Sep",
+    );
     expect(button("Share Apartment instead")).toBeUndefined();
     expect(onAbsorbNestedShares).not.toHaveBeenCalled();
   });
@@ -719,7 +726,7 @@ describe("SharePopover redesign", () => {
     expect(button("Share Apartment on the 17th 🏠🏠 instead")).toBeDefined();
   });
 
-  it("keeps the dead end where a nested link asks for a password", async () => {
+  it("keeps the dead end where a nested link asks for a password, and names it", async () => {
     const onAbsorbNestedShares = vi.fn();
     await renderAndOpen(false, {
       onPrepareShare: vi.fn().mockResolvedValue(
@@ -741,6 +748,10 @@ describe("SharePopover redesign", () => {
     });
 
     expect(document.body.textContent).toContain("Resolve the existing grant");
+    // the row says which gate is in the way, or the refusal names no reason
+    expect(document.body.textContent).toContain(
+      "Furniture · shared nested page · password",
+    );
     expect(button("Share Apartment instead")).toBeUndefined();
     expect(onAbsorbNestedShares).not.toHaveBeenCalled();
   });

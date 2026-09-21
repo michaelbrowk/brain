@@ -5,6 +5,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import type { ShareScopeSnapshot } from "@/lib/store/types";
 import { Segmented } from "./settings/shared";
+import { dayLabel } from "./tasks-lists";
 import { Button } from "./ui/button";
 import { Field } from "./ui/field";
 import { Icon } from "./ui/icon";
@@ -581,7 +582,9 @@ function PrivateReview({
   const foldable =
     blocked &&
     overlaps.every((overlap) => overlap.relation === "descendant") &&
-    !live.some((overlap) => overlap.shareLocked || overlap.shareExpiresAt);
+    !live.some(
+      (overlap) => overlap.shareLocked || overlap.shareExpiresAt !== null,
+    );
   return (
     <div data-share-state="review">
       <h2 className={HEAD}>
@@ -602,8 +605,7 @@ function PrivateReview({
           <ul className="brain-share-row-list">
             {overlaps.map((overlap) => (
               <li key={overlap.rootId} className={NOTE}>
-                {overlap.title} · {relationLabel(overlap)}
-                {isExpired(overlap.shareExpiresAt ?? undefined) ? " · expired" : ""}
+                {`${overlap.title} · ${overlapMarks(overlap).join(" · ")}`}
               </li>
             ))}
           </ul>
@@ -1660,6 +1662,22 @@ function foldNote(live: Overlap[], pageTitle: string): string {
 function shortTitle(title: string): string {
   const points = [...title];
   return points.length > 24 ? `${points.slice(0, 23).join("").trimEnd()}…` : title;
+}
+
+/** What one row of the overlap list says after the title: where the grant
+ *  stands, and then every gate it carries. The gates are the reason the fold
+ *  is withheld, so the row is where they have to be named — the refusal
+ *  sentence says to resolve "the existing grant" and the owner is the one who
+ *  has to see which part of it stands in the way, and that lifting it is what
+ *  gives the action back. A deadline is said the way a Tasks chip says one. */
+function overlapMarks(overlap: Overlap): string[] {
+  const marks = [relationLabel(overlap)];
+  if (overlap.shareLocked) marks.push("password");
+  if (isExpired(overlap.shareExpiresAt ?? undefined)) marks.push("expired");
+  else if (overlap.shareExpiresAt) {
+    marks.push(`expires ${dayLabel(overlap.shareExpiresAt.slice(0, 10))}`);
+  }
+  return marks;
 }
 
 function relationLabel(overlap: Overlap): string {

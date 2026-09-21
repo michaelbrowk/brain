@@ -9199,6 +9199,30 @@ describe("folding a nested share into its parent", () => {
     ).rejects.toBeInstanceOf(ShareAccessNotFoundError);
   });
 
+  it("clears the fold through the legacy revoke as well, so a re-share revives nothing", async () => {
+    const { s, parent, child } = await nestedShare();
+    const disclosed = await s.readShareScope(parent.id);
+    await s.absorbNestedShares(parent.id, {
+      expectedScopeToken: disclosed.scopeToken,
+    });
+
+    // not the card's revoke: the plain metadata patch, which ends the same
+    // links and must let go of the same addresses
+    await s.updateMeta(parent.id, { public: false });
+    expect((await s.readPage(child.id)).meta.sharedUnder).toBeUndefined();
+
+    const again = await s.readShareScope(parent.id);
+    await s.configureShare(parent.id, {
+      enabled: true,
+      expectedScopeToken: again.scopeToken,
+      canEdit: false,
+    });
+    expect(resolveFoldedShareRoot(s, child.id)).toBeNull();
+    await expect(
+      resolveShareAccess(s, { rootId: child.id }),
+    ).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+  });
+
   it("keeps the fold through a reload and reads it back from the file", async () => {
     const { s, root, parent, child } = await nestedShare();
     const disclosed = await s.readShareScope(parent.id);

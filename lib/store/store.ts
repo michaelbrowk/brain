@@ -4926,6 +4926,13 @@ export class Store {
       if (patch.by) e.meta.updatedBy = patch.by;
       e.meta.updated = now();
       await this.persist(e);
+      // The legacy revoke ends the same links configureShare's does, the
+      // folded ones included. Leaving their pointers on this root would mean a
+      // later share of it silently answering addresses the owner has already
+      // turned off once.
+      if (patch.public === false) {
+        await this.releaseFoldedGrantsUnlocked(id, patch.src);
+      }
       scheduleCommit(this.root);
       emitStore({ type: "meta", id, src: patch.src });
       return e.meta;

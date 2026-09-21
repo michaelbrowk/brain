@@ -40,20 +40,23 @@ while the card says the links inside still work. An expired nested grant is
 cleared like the rest, so one authority is left, but it records no pointer and
 its dead link stays dead.
 
-Three folds are refused, because each would give a reader something the grant
-they hold never promised, or leave two grants over the same pages: one that
-would answer for an **ancestor's** grant (that root is already the authority,
-and the page is already inside its link — the same refusal covers a page that
-overlaps a parent's grant *and* a nested one), and one that would take a gate
-away from a live nested link — its **password**, or its **deadline**, both of
-which the fold would otherwise clear, so a link set to die next Friday would
-live for good. The owner lifts that gate where it stands, on the link that
-carries it. All of them come back as the enable path's scope conflict, carrying
-the fresh disclosure.
+Two folds are refused, because each would give a reader something the grant they
+hold never promised, or leave two grants over the same pages. One would answer
+for an **ancestor's** grant — that root is already the authority, and the page
+is already inside its link; the same refusal covers a page that overlaps a
+parent's grant *and* a nested one. The other would take a gate away from a live
+nested link: its **password** or its **deadline**, both of which the fold
+otherwise clears, so a link the owner set to die next Friday would live for
+good. The owner lifts that gate where it stands, on the link that carries it,
+and the card's overlap list names which gate that is. Both refusals come back as
+the enable path's scope conflict, carrying the fresh disclosure.
 
 Revoking the parent's share gives every pointer back, so the folded links stop
-resolving with the one that absorbed them. There is no other undo: revoking the
-parent does not resurrect the grants it took.
+resolving with the one that absorbed them — through the card's own revoke and
+through the legacy `PATCH /api/page/<id> {"public": false}` alike, so no later
+re-share of that page can revive an address the owner has already turned off.
+There is no other undo: revoking the parent does not resurrect the grants it
+took.
 
 `sharedUnder` is not hierarchy (invariant 3). The folder tree stays the only
 source of containment, and the pointer is read only through the live tree: the

@@ -125,10 +125,17 @@ time. The row's id is the instant it opened, so it is one row for its whole
 life.
 
 **Reading it resets.** The row is read when you press it, when Mail is opened
-any other way (the surface marks it on mount), and by "Mark all read". A read
-row is never counted into again: the next letters open a new row with a fresh
-count. Nothing else clears it — not reading one letter in Mail, and not an
-agent marking a thread read through MCP.
+any other way, and by "Mark all read". A read row is never counted into again:
+the next letters open a new row with a fresh count. Nothing else clears it —
+not reading one letter in Mail, and not an agent marking a thread read through
+MCP.
+
+**While Mail is open it stays read.** A poll that lands during an hour in Mail
+opens a row about letters already in the list in front of you, so the surface
+holds the seam for as long as it stands and every answer the centre gives reads
+the mail row. It ends when you leave Mail: a row that opens after that is
+yours to see, including one that opens while a failed first load is being
+retried.
 
 **A centre from before 0.12.2** holds one row per thread. They are folded into
 one counted row the first time the file is read, dated by the newest of them

@@ -102,9 +102,10 @@ function commit(rows: readonly NotificationRow[]): void {
   for (const item of rows) if (item.readAt === undefined) next.add(item.id);
   unreadIds = next;
   set({ notifications: rows, unread: next.size, loading: false, error: null });
-  // Mail mounted before the centre had answered, so the row it is about is
-  // only nameable now. See `markMailCentreRead`.
-  if (mailReadWanted && loaded) markMailCentreRead();
+  // EVERY ANSWER, WHILE MAIL IS ON SCREEN. The mount that arrived before the
+  // centre ever answered is read here, and so is a row a scan opened while the
+  // reader sat in Mail. See `markMailCentreRead`.
+  readOpenMailRows();
 }
 
 function subscribe(listener: () => void): () => void {
@@ -279,28 +280,41 @@ export async function markAllRead(): Promise<void> {
  *  The centre holds one mail row, and it says how many letters are waiting.
  *  Opening Mail is what answers it, whichever way Mail was opened: the row
  *  pressed in the bell, the sidebar, a link, the phone's tab bar. So the Mail
- *  surface calls this once on mount and the row is read, the way every
- *  per-thread row used to be read through `updateThread`.
+ *  surface calls this on mount and calls the returned function on unmount,
+ *  the way every per-thread row used to be read through `updateThread`.
  *
  *  Mail marks NO OTHER ROW. A reminder is not answered by reading mail.
  *
- *  BEFORE THE CENTRE HAS ANSWERED there is no row to name, so the wish is
- *  remembered and taken on the next commit — which is the fetch the bell
- *  beside it already started. It lives no longer than that one commit: a
- *  reader who opened Mail and moved on is not marking a row that arrives ten
- *  minutes later.
+ *  IT IS A REGISTRATION AND NOT A ONE-SHOT, and that is the whole of both
+ *  halves. WHILE MAIL IS ON SCREEN every answer the centre gives reads its
+ *  mail row, because a scan that lands during an hour in Mail opens a row
+ *  about letters already in the list in front of the reader, and a bell
+ *  saying "4 new messages" about those is the second inbox again. AFTER MAIL
+ *  IS GONE nothing marks: a mount that happened before the centre had ever
+ *  answered leaves no wish behind it, so a first fetch that failed and a
+ *  reload that succeeds minutes later cannot read a row the person never saw.
+ *
+ *  Nothing is remembered between the two, which is why there is no stale
+ *  wish to expire: the mark is decided at each commit from what is registered
+ *  and what the centre holds at that instant.
  *
  *  It never throws at its caller. A surface that mounted must not fail
  *  because the bell could not be updated.
  */
-let mailReadWanted = false;
+let mailOpen = 0;
 
-export function markMailCentreRead(): void {
-  if (!loaded) {
-    mailReadWanted = true;
-    return;
-  }
-  mailReadWanted = false;
+export function markMailCentreRead(): () => void {
+  mailOpen += 1;
+  readOpenMailRows();
+  return () => {
+    mailOpen = Math.max(0, mailOpen - 1);
+  };
+}
+
+function readOpenMailRows(): void {
+  // Before the centre has answered there is no row to name. The next commit
+  // calls this again, and it is the registration above that makes it so.
+  if (!loaded || mailOpen === 0) return;
   const ids = state.notifications
     .filter((row) => row.kind === "mail-new" && row.readAt === undefined)
     .map((row) => row.id);
@@ -318,7 +332,7 @@ export function markMailCentreRead(): void {
 export function resetNotificationsStore(): void {
   inFlight?.abort();
   inFlight = null;
-  mailReadWanted = false;
+  mailOpen = 0;
   watchers = 0;
   loaded = false;
   loadedKey = null;

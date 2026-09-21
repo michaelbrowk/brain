@@ -17,9 +17,11 @@ vi.mock("framer-motion", async () => {
 });
 
 /** The centre's seam, doubled: what it decides is `notifications-client`'s
- *  business and pinned there. What belongs here is that Mail calls it once,
- *  on the mount, whichever way Mail was opened. */
-const markMailCentreRead = vi.fn();
+ *  business and pinned there. What belongs here is that Mail registers with it
+ *  once on the mount, whichever way Mail was opened, and unregisters when it
+ *  goes. */
+const closeMailCentreRead = vi.fn();
+const markMailCentreRead = vi.fn(() => closeMailCentreRead);
 vi.mock("./notifications-read", () => ({
   markMailCentreRead: () => markMailCentreRead(),
 }));
@@ -7628,9 +7630,10 @@ describe("MailSurface", () => {
   describe("the bell's mail row", () => {
     beforeEach(() => {
       markMailCentreRead.mockClear();
+      closeMailCentreRead.mockClear();
     });
 
-    it("is marked read once when Mail mounts", async () => {
+    it("is registered once when Mail mounts, and released when it goes", async () => {
       const client = makeClient();
       await act(async () =>
         root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
@@ -7638,6 +7641,7 @@ describe("MailSurface", () => {
       await settle();
       await enterSingleAccount();
       expect(markMailCentreRead).toHaveBeenCalledTimes(1);
+      expect(closeMailCentreRead).not.toHaveBeenCalled();
 
       // A re-render is not a second opening of Mail.
       await act(async () =>
@@ -7645,6 +7649,12 @@ describe("MailSurface", () => {
       );
       await settle();
       expect(markMailCentreRead).toHaveBeenCalledTimes(1);
+      expect(closeMailCentreRead).not.toHaveBeenCalled();
+
+      // And leaving Mail ends it, so a row that opens afterwards stays unread.
+      await act(async () => root.render(<></>));
+      await settle();
+      expect(closeMailCentreRead).toHaveBeenCalledTimes(1);
     });
   });
 

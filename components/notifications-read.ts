@@ -5,7 +5,9 @@
  *  The row to mark and the POST live in `components/notifications-client.ts`,
  *  beside the rows the bell draws, because the row Mail answers is the one the
  *  centre is holding unread at this instant: a set kept in a second module
- *  would be a copy that goes stale.
+ *  would be a copy that goes stale. Mail registers on mount and calls what it
+ *  gets back on unmount, so every answer the centre gives in between reads the
+ *  mail row, and nothing does once Mail has gone.
  *
  *  The path stays because `components/mail-surface.tsx` imports it, and a
  *  reader following that import lands on this sentence rather than on a

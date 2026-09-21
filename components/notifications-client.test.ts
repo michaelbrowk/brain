@@ -14,6 +14,7 @@ import {
   markAllRead,
   markMailCentreRead,
   markRead,
+  reloadNotifications,
   resetNotificationsStore,
   useNotifications,
   type NotificationRow,
@@ -154,11 +155,12 @@ describe("the notifications client", () => {
     const { root } = mount();
     await settle();
     calls.length = 0;
-    markMailCentreRead();
+    const closed = markMailCentreRead();
     await act(async () => {
       await Promise.resolve();
     });
     expect(calls).toEqual([]);
+    closed();
     await act(async () => root.unmount());
   });
 
@@ -168,11 +170,13 @@ describe("the notifications client", () => {
     await settle();
     expect(hasUnreadRow(MAIL_ID)).toBe(true);
     calls.length = 0;
+    let closed = () => {};
     await act(async () => {
-      markMailCentreRead();
+      closed = markMailCentreRead();
       await Promise.resolve();
     });
     expect(calls).toEqual([{ url: "/api/notifications/read", body: { ids: [MAIL_ID] } }]);
+    closed();
     await act(async () => root.unmount());
   });
 
@@ -181,20 +185,22 @@ describe("the notifications client", () => {
     const { root } = mount();
     await settle();
     calls.length = 0;
+    let closed = () => {};
     await act(async () => {
-      markMailCentreRead();
+      closed = markMailCentreRead();
       await Promise.resolve();
     });
     expect(calls).toEqual([{ url: "/api/notifications/read", body: { ids: [MAIL_ID] } }]);
+    closed();
     await act(async () => root.unmount());
   });
 
   it("waits for the centre's first answer when Mail mounted before it", async () => {
     // Mail and the bell mount together, and Mail is usually the faster of the
-    // two: there is no row to name yet, so the wish is kept and taken on the
-    // commit the bell's own fetch causes.
+    // two: there is no row to name yet, so the answer that follows is what
+    // reads it.
     rows = [{ ...row("a"), id: MAIL_ID, kind: "mail-new", title: "3 new messages", href: "/mail" }];
-    markMailCentreRead();
+    const closed = markMailCentreRead();
     expect(calls).toEqual([]);
     const { root } = mount();
     await settle();
@@ -203,6 +209,86 @@ describe("the notifications client", () => {
       "/api/notifications",
       "/api/notifications/read",
     ]);
+    closed();
+    await act(async () => root.unmount());
+  });
+
+  /** THE WISH DIES WITH THE SURFACE THAT MADE IT.
+   *
+   *  Mail mounts before the centre has answered, that first answer never
+   *  comes, and the person leaves Mail. A later reload — the
+   *  `visibilitychange` one, minutes on — carries a row a scan opened after
+   *  Mail was closed. Nothing may mark it: the count they never saw is the
+   *  count Michael asked to keep. */
+  it("marks nothing after Mail has gone, when the first answer never came", async () => {
+    rows = [{ ...row("a"), id: MAIL_ID, kind: "mail-new", title: "3 new messages", href: "/mail" }];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null });
+        if (url === "/api/notifications") throw new Error("offline");
+        return response({ read: 1 });
+      }),
+    );
+    const closed = markMailCentreRead();
+    const { root } = mount();
+    await settle();
+    await settle();
+    // The fetch failed, so nothing was read and nothing was marked.
+    expect(calls.map((c) => c.url)).toEqual(["/api/notifications"]);
+
+    closed();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        calls.push({ url, body: init?.body ? JSON.parse(String(init.body)) : null });
+        if (url === "/api/notifications") {
+          return response({ notifications: rows, unread: 1 });
+        }
+        return response({ read: 1 });
+      }),
+    );
+    calls.length = 0;
+    await act(async () => {
+      reloadNotifications();
+      await settle();
+    });
+    expect(calls.map((c) => c.url)).toEqual(["/api/notifications"]);
+    expect(hasUnreadRow(MAIL_ID)).toBe(true);
+    await act(async () => root.unmount());
+  });
+
+  /** AN HOUR INSIDE MAIL IS NOT A BELL FULL OF MAIL. A scan that lands while
+   *  Mail is on screen opens a row about letters already in the list, so the
+   *  answer that carries it reads it. */
+  it("marks a row that opens while Mail is on screen, and stops once it leaves", async () => {
+    const { root } = mount();
+    await settle();
+    const closed = markMailCentreRead();
+    calls.length = 0;
+
+    rows = [{ ...row("a"), id: MAIL_ID, kind: "mail-new", title: "4 new messages", href: "/mail" }];
+    await act(async () => {
+      reloadNotifications();
+      await settle();
+    });
+    expect(calls.map((c) => c.url)).toEqual([
+      "/api/notifications",
+      "/api/notifications/read",
+    ]);
+
+    closed();
+    const later = "mail-new:2026-09-14T13:00:00.000Z";
+    rows = [{ ...row("a"), id: later, kind: "mail-new", title: "2 new messages", href: "/mail" }];
+    calls.length = 0;
+    await act(async () => {
+      reloadNotifications();
+      await settle();
+    });
+    expect(calls.map((c) => c.url)).toEqual(["/api/notifications"]);
+    expect(hasUnreadRow(later)).toBe(true);
     await act(async () => root.unmount());
   });
 

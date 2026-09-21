@@ -2318,12 +2318,13 @@ export function MailSurface({
    *  The centre holds one row for new mail and it says how many letters are
    *  waiting. Mail being open is the answer to that question, whichever way it
    *  was opened — the row itself, the sidebar, a link, the phone's tab bar —
-   *  so the mark is here, on the mount, and not on the press. One call: the
-   *  seam decides whether there is a row to mark and whether it is worth a
-   *  request. */
-  useEffect(() => {
-    markMailCentreRead();
-  }, []);
+   *  so the mark is here, on the mount, and not on the press.
+   *
+   *  REGISTERED FOR AS LONG AS MAIL STANDS, rather than called once: a scan
+   *  that lands during an hour in Mail opens a row about letters already in
+   *  the list on screen, and the seam reads it on the answer that carries it.
+   *  The cleanup ends that, so nothing is marked once Mail is gone. */
+  useEffect(() => markMailCentreRead(), []);
 
   /** THE THREAD SOMETHING OUTSIDE MAIL ASKED FOR (spec §7, D6).
    *

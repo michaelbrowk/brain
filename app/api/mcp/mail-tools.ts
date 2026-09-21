@@ -19,7 +19,7 @@ import {
   mailRefusalFields,
   sendBlockedReasonOf,
 } from "./mail-tool-kit";
-import { hasScope, insufficientScope, refusal, text } from "./tool-kit";
+import { hasScope, hints, insufficientScope, refusal, text } from "./tool-kit";
 
 /** THE MAIL READS: ACCOUNTS, THREADS, SEARCH, ONE THREAD, ONE BODY.
  *
@@ -231,10 +231,15 @@ function triageMutation(
  */
 
 export function registerMailTools(server: McpToolServer): void {
-  server.tool(
+  server.registerTool(
     "list_mail_accounts",
-    "List the connected mail accounts, each with whether this host can send from it and why not when it cannot.",
-    {},
+    {
+      title: "List mail accounts",
+      description:
+        "List the connected mail accounts, each with whether this host can send from it and why not when it cannot.",
+      inputSchema: {},
+      annotations: hints("read keeps idempotent outside"),
+    },
     async (_input, extra) => {
       if (!hasScope(extra, "brain:mail")) return insufficientScope("brain:mail");
       try {
@@ -246,17 +251,22 @@ export function registerMailTools(server: McpToolServer): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "list_mail_threads",
-    "List one account's threads in one system mailbox, newest first. Pass `nextCursor` back as `cursor` for the next page.",
     {
-      accountId: z.string(),
-      mailbox: mailboxSchema
-        .optional()
-        .describe("one of the six system mailboxes, inbox by default"),
-      view: viewSchema.optional().describe("narrow the mailbox to one view"),
-      cursor: z.string().optional().describe("the previous page's nextCursor"),
-      limit: limitSchema.optional().describe("1 to 50, 25 by default"),
+      title: "List mail threads",
+      description:
+        "List one account's threads in one system mailbox, newest first. Pass `nextCursor` back as `cursor` for the next page.",
+      inputSchema: {
+        accountId: z.string(),
+        mailbox: mailboxSchema
+          .optional()
+          .describe("one of the six system mailboxes, inbox by default"),
+        view: viewSchema.optional().describe("narrow the mailbox to one view"),
+        cursor: z.string().optional().describe("the previous page's nextCursor"),
+        limit: limitSchema.optional().describe("1 to 50, 25 by default"),
+      },
+      annotations: hints("read keeps idempotent outside"),
     },
     async ({ accountId, mailbox, view, cursor, limit }, extra) => {
       if (!hasScope(extra, "brain:mail")) return insufficientScope("brain:mail");
@@ -284,20 +294,25 @@ export function registerMailTools(server: McpToolServer): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "search_mail",
-    "Search cached thread headers and previews. Message bodies are never searched. With no `accountId` every account is searched and the results merge newest first behind one cursor.",
     {
-      query: z.string(),
-      accountId: z
-        .string()
-        .optional()
-        .describe("one account, or every account when left out"),
-      mailbox: mailboxSchema.optional(),
-      cursor: z.string().optional().describe("the previous page's nextCursor"),
-      limit: limitSchema
-        .optional()
-        .describe("1 to 50 per account, 25 by default"),
+      title: "Search mail",
+      description:
+        "Search cached thread headers and previews. Message bodies are never searched. With no `accountId` every account is searched and the results merge newest first behind one cursor.",
+      inputSchema: {
+        query: z.string(),
+        accountId: z
+          .string()
+          .optional()
+          .describe("one account, or every account when left out"),
+        mailbox: mailboxSchema.optional(),
+        cursor: z.string().optional().describe("the previous page's nextCursor"),
+        limit: limitSchema
+          .optional()
+          .describe("1 to 50 per account, 25 by default"),
+      },
+      annotations: hints("read keeps idempotent outside"),
     },
     async ({ query, accountId, mailbox, cursor, limit }, extra) => {
       if (!hasScope(extra, "brain:mail")) return insufficientScope("brain:mail");
@@ -389,10 +404,15 @@ export function registerMailTools(server: McpToolServer): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "get_mail_thread",
-    "Read one thread: its row and every message's headers, preview and whether a body is already cached. Bodies come from read_mail_message.",
-    { accountId: z.string(), threadId: z.string() },
+    {
+      title: "Read a mail thread",
+      description:
+        "Read one thread: its row and every message's headers, preview and whether a body is already cached. Bodies come from read_mail_message.",
+      inputSchema: { accountId: z.string(), threadId: z.string() },
+      annotations: hints("read keeps idempotent outside"),
+    },
     async ({ accountId, threadId }, extra) => {
       if (!hasScope(extra, "brain:mail")) return insufficientScope("brain:mail");
       if (!SAFE_ACCOUNT_ID.test(accountId)) {
@@ -427,19 +447,24 @@ export function registerMailTools(server: McpToolServer): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
     "read_mail_message",
-    "Read one message's plain-text body and its attachment list. Answers `state` fetching when the body is still on its way, and the caller asks again.",
     {
-      accountId: z.string(),
-      messageId: z.string(),
-      wait: z
-        .number()
-        .int()
-        .min(0)
-        .max(MAX_WAIT_MS)
-        .optional()
-        .describe("milliseconds to wait for the body, 8000 by default"),
+      title: "Read a mail message",
+      description:
+        "Read one message's plain-text body and its attachment list. Answers `state` fetching when the body is still on its way, and the caller asks again.",
+      inputSchema: {
+        accountId: z.string(),
+        messageId: z.string(),
+        wait: z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_WAIT_MS)
+          .optional()
+          .describe("milliseconds to wait for the body, 8000 by default"),
+      },
+      annotations: hints("read keeps idempotent outside"),
     },
     async ({ accountId, messageId, wait }, extra) => {
       if (!hasScope(extra, "brain:mail")) return insufficientScope("brain:mail");
@@ -493,24 +518,33 @@ export function registerMailTools(server: McpToolServer): void {
     },
   );
 
-  server.tool(
+  server.registerTool(
     TRIAGE_TOOL,
-    "Sort one thread: mark it read or unread, star it, archive it, move it to trash or spam, or restore it from either. Exactly one of the six per call, which is the shape the service's own PATCH takes. There is no purge: a thread in the trash stays there until the person empties it.",
     {
-      accountId: z.string(),
-      threadId: z.string(),
-      read: z.boolean().optional(),
-      starred: z.boolean().optional(),
-      archive: z.boolean().optional(),
-      trash: z
-        .boolean()
-        .optional()
-        .describe("true moves it to the trash; false is refused, pass restore: true instead"),
-      restore: z
-        .boolean()
-        .optional()
-        .describe("true takes it back out of the trash or the spam folder; false is refused"),
-      spam: z.boolean().optional(),
+      title: "Sort a mail thread",
+      description:
+        "Sort one thread: mark it read or unread, star it, archive it, move it to trash or spam, or restore it from either. Exactly one of the six per call, which is the shape the service's own PATCH takes. There is no purge: a thread in the trash stays there until the person empties it.",
+      inputSchema: {
+        accountId: z.string(),
+        threadId: z.string(),
+        read: z.boolean().optional(),
+        starred: z.boolean().optional(),
+        archive: z.boolean().optional(),
+        trash: z
+          .boolean()
+          .optional()
+          .describe("true moves it to the trash; false is refused, pass restore: true instead"),
+        restore: z
+          .boolean()
+          .optional()
+          .describe("true takes it back out of the trash or the spam folder; false is refused"),
+        spam: z.boolean().optional(),
+      },
+      // One tool covering six changes, and two of them — trash and spam — take
+      // a thread out of the mailbox the owner reads. A host confirming this
+      // call is confirming the worst of the six, which is the right default for
+      // a tool whose argument decides which it is.
+      annotations: hints("write destroys idempotent outside"),
     },
     async (input, extra) => {
       if (!hasScope(extra, "brain:mail")) return insufficientScope("brain:mail");

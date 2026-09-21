@@ -40,6 +40,7 @@ import { verifyMcpBearerToken } from "@/lib/oauth/server";
 import {
   clientNameOf,
   hasScope,
+  hints,
   insufficientScope,
   STORE_FAILED,
   storeFailed,
@@ -243,20 +244,30 @@ const handler = createMcpHandler(
     registerMailSendTools(server);
     registerTaskTools(server);
 
-    server.tool(
+    server.registerTool(
       "list_tree",
-      "List the full page tree of the notebook (ids, titles, icons, nesting).",
-      {},
+      {
+        title: "List the page tree",
+        description:
+          "List the full page tree of the notebook (ids, titles, icons, nesting).",
+        inputSchema: {},
+        annotations: hints("read keeps idempotent local"),
+      },
       pageTool(async () => {
         const store = await getStore();
         return text(store.getTree());
       }),
     );
 
-    server.tool(
+    server.registerTool(
       "connection_check",
-      "Verify this MCP connection can authenticate and read Brain without changing any pages. Reports whether write, import, and mail access are authorized, but does not exercise those permissions.",
-      {},
+      {
+        title: "Check this connection",
+        description:
+          "Verify this MCP connection can authenticate and read Brain without changing any pages. Reports whether write, import, and mail access are authorized, but does not exercise those permissions.",
+        inputSchema: {},
+        annotations: hints("read keeps idempotent local"),
+      },
       pageTool(async (_input, extra) => {
         const store = await getStore();
         const tree = store.getTree();
@@ -287,23 +298,33 @@ const handler = createMcpHandler(
       }),
     );
 
-    server.tool(
+    server.registerTool(
       "read_page",
-      "Read a page's markdown by id. Returns meta, markdown, and rev (needed for write_page).",
-      { id: z.string().describe("page id") },
+      {
+        title: "Read a page",
+        description:
+          "Read a page's markdown by id. Returns meta, markdown, and rev (needed for write_page).",
+        inputSchema: { id: z.string().describe("page id") },
+        annotations: hints("read keeps idempotent local"),
+      },
       pageTool(async ({ id }) => {
         const store = await getStore();
         return text(redactPage(await store.readPage(id)));
       }),
     );
 
-    server.tool(
+    server.registerTool(
       "write_page",
-      "Replace a page's markdown. Pass the rev from read_page for conflict safety; omit to force.",
       {
-        id: z.string(),
-        markdown: z.string(),
-        rev: z.string().optional().describe("rev from read_page; omit to overwrite"),
+        title: "Replace a page's markdown",
+        description:
+          "Replace a page's markdown. Pass the rev from read_page for conflict safety; omit to force. The version it replaces is kept: every save is committed to the notes folder's own git history.",
+        inputSchema: {
+          id: z.string(),
+          markdown: z.string(),
+          rev: z.string().optional().describe("rev from read_page; omit to overwrite"),
+        },
+        annotations: hints("write keeps idempotent local"),
       },
       async ({ id, markdown, rev }, extra) =>
         pageWrite(extra, "write_page", async (marks) => {
@@ -346,14 +367,21 @@ const handler = createMcpHandler(
         }),
     );
 
-    server.tool(
+    server.registerTool(
       "append_page",
-      "Append markdown to the end of a page in one atomic call (read + append + " +
-        "write server-side) — add to a page without overwriting it, no read_page / " +
-        "rev dance needed. Great for logging into a pre-filled agenda or journal.",
       {
-        id: z.string(),
-        markdown: z.string().describe("markdown to add at the end of the page"),
+        title: "Append to a page",
+        description:
+          "Append markdown to the end of a page in one atomic call (read + append + " +
+          "write server-side): add to a page without overwriting it, no read_page / " +
+          "rev dance needed. Great for logging into a pre-filled agenda or journal. " +
+          "Calling it twice adds the text twice, and each save is committed to the " +
+          "notes folder's own git history.",
+        inputSchema: {
+          id: z.string(),
+          markdown: z.string().describe("markdown to add at the end of the page"),
+        },
+        annotations: hints("write keeps repeats local"),
       },
       async ({ id, markdown }, extra) =>
         pageWrite(extra, "append_page", async (marks) => {
@@ -376,15 +404,20 @@ const handler = createMcpHandler(
         }),
     );
 
-    server.tool(
+    server.registerTool(
       "create_page",
-      "Create a page. parentId null/omitted = top level. Returns the new page's meta (id).",
       {
-        title: z.string(),
-        parentId: z.string().nullable().optional(),
-        markdown: z.string().optional().describe("initial content"),
-        icon: z.string().optional().describe("emoji; auto-picked from title if omitted"),
-        status: z.string().optional().describe("kanban column, for cards on a board page"),
+        title: "Create a page",
+        description:
+          "Create a page. parentId null/omitted = top level. Returns the new page's meta (id). Calling it twice makes two pages, and each save is committed to the notes folder's own git history.",
+        inputSchema: {
+          title: z.string(),
+          parentId: z.string().nullable().optional(),
+          markdown: z.string().optional().describe("initial content"),
+          icon: z.string().optional().describe("emoji; auto-picked from title if omitted"),
+          status: z.string().optional().describe("kanban column, for cards on a board page"),
+        },
+        annotations: hints("write keeps repeats local"),
       },
       async ({ title, parentId, markdown, icon, status }, extra) =>
         pageWrite(extra, "create_page", async (marks) => {
@@ -430,8 +463,10 @@ const handler = createMcpHandler(
     server.registerTool(
       "notion_find_page",
       {
+        title: "Find the Brain page for a Notion id",
         description: "Find the Brain page for one Notion id and report server-computed import baseline, lease, and optional candidate-token ownership integrity without returning the token.",
         inputSchema: notionFindPageInputSchema,
+        annotations: hints("read keeps idempotent outside"),
       },
       async ({ notionId, reservationToken }, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
@@ -451,8 +486,10 @@ const handler = createMcpHandler(
     server.registerTool(
       "notion_inspect_candidate",
       {
+        title: "Inspect an import candidate",
         description: "Inspect one explicitly selected Brain page for preserve/adopt using only rev, placement, and redacted Notion binding state.",
         inputSchema: notionInspectCandidateInputSchema,
+        annotations: hints("read keeps idempotent outside"),
       },
       async ({ pageId }, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
@@ -473,8 +510,10 @@ const handler = createMcpHandler(
     server.registerTool(
       "notion_adopt_page",
       {
+        title: "Adopt a page into an import",
         description: "Bind a verified existing Brain page to one Notion source without changing its content or hierarchy. Read the page immediately before adoption and pass its rev plus the conversion hash for that exact target.",
         inputSchema: notionAdoptPageInputSchema,
+        annotations: hints("write keeps idempotent outside"),
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
@@ -500,8 +539,10 @@ const handler = createMcpHandler(
     server.registerTool(
       "notion_reserve_page",
       {
+        title: "Reserve a page for an import",
         description: "Atomically find-or-reserve a Notion page before converting content. Pass one maps ids; pass two supplies conversionHash and desired beforeId after every sibling id is known. Never retries at root.",
         inputSchema: notionReservePageInputSchema,
+        annotations: hints("write keeps idempotent outside"),
       },
       async ({ notionId, sourceHash, parentId, beforeId, ...rest }, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
@@ -542,8 +583,10 @@ const handler = createMcpHandler(
     server.registerTool(
       "notion_upload_attachment",
       {
+        title: "Upload an imported attachment",
         description: "Upload one converted Notion attachment under an active page reservation.",
         inputSchema: notionUploadAttachmentInputSchema,
+        annotations: hints("write keeps idempotent outside"),
       },
       async ({
         notionId,
@@ -592,8 +635,10 @@ const handler = createMcpHandler(
     server.registerTool(
       "notion_verify_attachment",
       {
+        title: "Verify a staged attachment",
         description: "Read and hash one staged attachment under the matching active Notion reservation.",
         inputSchema: notionVerifyAttachmentInputSchema,
+        annotations: hints("read keeps idempotent outside"),
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
@@ -611,8 +656,10 @@ const handler = createMcpHandler(
     server.registerTool(
       "notion_verify_finalized_attachment",
       {
+        title: "Verify a finalized attachment",
         description: "Read and hash one permanent attachment owned by an intact finalized Notion target.",
         inputSchema: notionVerifyFinalizedAttachmentInputSchema,
+        annotations: hints("read keeps idempotent outside"),
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
@@ -632,8 +679,10 @@ const handler = createMcpHandler(
     server.registerTool(
       "notion_finalize_page",
       {
+        title: "Finalize an imported page",
         description: "Finalize a reserved Notion page. Refuses stale tokens and concurrent edits. Finalize parents before children and each sibling group from last to first (the next beforeId target must already be stable).",
         inputSchema: notionFinalizePageInputSchema,
+        annotations: hints("write keeps idempotent outside"),
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
@@ -655,8 +704,10 @@ const handler = createMcpHandler(
     server.registerTool(
       "notion_abort_page",
       {
-        description: "Release a token-owned Notion reservation without overwriting the current page body.",
+        title: "Abort an import reservation",
+        description: "Release a token-owned Notion reservation without overwriting the current page body. The conversion work done under that reservation is discarded, and a placeholder the import created is detached rather than hard-deleted.",
         inputSchema: notionAbortPageInputSchema,
+        annotations: hints("write destroys idempotent outside"),
       },
       async (input, extra) => {
         if (!hasScope(extra, "brain:import")) return insufficientScope("brain:import");
@@ -673,17 +724,22 @@ const handler = createMcpHandler(
       },
     );
 
-    server.tool(
+    server.registerTool(
       "update_meta",
-      "Update page metadata: title, icon, category, kanban status, view ('board' turns a page with children into a kanban board). public:false may revoke sharing; only the owner disclosure flow can enable it.",
       {
-        id: z.string(),
-        title: z.string().optional(),
-        icon: z.string().optional(),
-        category: z.string().optional(),
-        status: z.string().optional(),
-        view: z.enum(["board", "doc"]).optional().describe("'board' or 'doc'"),
-        public: z.boolean().optional(),
+        title: "Update a page's details",
+        description:
+          "Update page metadata: title, icon, category, kanban status, view ('board' turns a page with children into a kanban board). public:false may revoke sharing; only the owner disclosure flow can enable it. The previous metadata is kept: every save is committed to the notes folder's own git history.",
+        inputSchema: {
+          id: z.string(),
+          title: z.string().optional(),
+          icon: z.string().optional(),
+          category: z.string().optional(),
+          status: z.string().optional(),
+          view: z.enum(["board", "doc"]).optional().describe("'board' or 'doc'"),
+          public: z.boolean().optional(),
+        },
+        annotations: hints("write keeps idempotent local"),
       },
       async ({ id, view, public: pub, ...rest }, extra) =>
         pageWrite(extra, "update_meta", async (marks) => {
@@ -725,23 +781,28 @@ const handler = createMcpHandler(
         }),
     );
 
-    server.tool(
+    server.registerTool(
       "move_page",
-      [
-        "Move a page under a new parent (null = top level), optionally before a sibling.",
-        "A move between parents edits two documents, not only the tree: every",
-        "standalone `[label](/p/<id>)` paragraph for the page is removed from",
-        "the old parent's body, and one is appended to the new parent's body",
-        "unless that body already links the page. A reorder among siblings",
-        "edits no body. Both rewritten pages record updatedBy: claude. The",
-        "result is the moved page's metadata plus `unlinkedFrom`: the old",
-        "parent whose body stopped listing the page, or null when no body",
-        "changed.",
-      ].join(" "),
       {
-        id: z.string(),
-        newParentId: z.string().nullable().optional(),
-        beforeId: z.string().nullable().optional(),
+        title: "Move a page",
+        description: [
+          "Move a page under a new parent (null = top level), optionally before a sibling.",
+          "A move between parents edits two documents, not only the tree: every",
+          "standalone `[label](/p/<id>)` paragraph for the page is removed from",
+          "the old parent's body, and one is appended to the new parent's body",
+          "unless that body already links the page. A reorder among siblings",
+          "edits no body. Both rewritten pages record updatedBy: claude. The",
+          "result is the moved page's metadata plus `unlinkedFrom`: the old",
+          "parent whose body stopped listing the page, or null when no body",
+          "changed. Both rewrites are committed to the notes folder's own git",
+          "history, so the bodies as they were are kept.",
+        ].join(" "),
+        inputSchema: {
+          id: z.string(),
+          newParentId: z.string().nullable().optional(),
+          beforeId: z.string().nullable().optional(),
+        },
+        annotations: hints("write keeps idempotent local"),
       },
       async ({ id, newParentId, beforeId }, extra) =>
         pageWrite(extra, "move_page", async (marks) => {
@@ -772,10 +833,15 @@ const handler = createMcpHandler(
         }),
     );
 
-    server.tool(
+    server.registerTool(
       "delete_page",
-      "Delete a page and its whole subtree. Soft-delete — recoverable from Trash.",
-      { id: z.string() },
+      {
+        title: "Move a page to Trash",
+        description:
+          "Delete a page and its whole subtree. A soft delete: the pages go to Trash and are recoverable from there. Nothing is purged, only the owner empties the Trash.",
+        inputSchema: { id: z.string() },
+        annotations: hints("write destroys idempotent local"),
+      },
       async ({ id }, extra) =>
         pageWrite(extra, "delete_page", async (marks) => {
           if (!hasScope(extra, "brain:write")) {
@@ -796,10 +862,15 @@ const handler = createMcpHandler(
         }),
     );
 
-    server.tool(
+    server.registerTool(
       "search",
-      "Full-text search across all pages. Returns matching pages with snippets.",
-      { query: z.string() },
+      {
+        title: "Search the notes",
+        description:
+          "Full-text search across all pages. Returns matching pages with snippets.",
+        inputSchema: { query: z.string() },
+        annotations: hints("read keeps idempotent local"),
+      },
       pageTool(async ({ query }) => text(await searchNotes(query))),
     );
   },

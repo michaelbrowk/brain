@@ -44,6 +44,7 @@ import {
 import {
   clientNameOf,
   hasScope,
+  hints,
   insufficientScope,
   refusal,
   text,
@@ -502,8 +503,15 @@ export function registerMailSendTools(server: McpToolServer): void {
   server.registerTool(
     SEND_TOOL,
     {
+      title: "Send a message",
+      // `destroys`: a message that has left cannot be recalled. Nothing in
+      // Brain is lost, and that is not what the hint is asking — it asks
+      // whether the effect can be undone, and this one cannot.
+      // `idempotent`: the idempotency key every send carries. Reusing it
+      // replays the same result rather than sending a second message.
+      annotations: hints("write destroys idempotent outside"),
       description:
-        "Send a new message from one connected account. The account is yours to name and every send needs an idempotency key. Text only, no HTML. The message is marked as an agent's inside Brain: the owner sees it in Settings, Connections.",
+        "Send a new message from one connected account. The account is yours to name and every send needs an idempotency key. Text only, no HTML. The message is marked as an agent's inside Brain: the owner sees it in Settings, Connections. A sent message cannot be recalled.",
       inputSchema: z
         .object({
           accountId: z.string(),
@@ -665,8 +673,11 @@ export function registerMailSendTools(server: McpToolServer): void {
   server.registerTool(
     REPLY_TOOL,
     {
+      title: "Reply to a message",
+      // The same two as `send_mail`, for the same two reasons.
+      annotations: hints("write destroys idempotent outside"),
       description:
-        "Reply to one message in a thread. The recipients are derived from the message being answered, Reply-To over From, with this account's own addresses dropped; there is no `to` here. To write to someone else, send a new message. Text only, no HTML.",
+        "Reply to one message in a thread. The recipients are derived from the message being answered, Reply-To over From, with this account's own addresses dropped; there is no `to` here. To write to someone else, send a new message. Text only, no HTML. A sent reply cannot be recalled.",
       inputSchema: z
         .object({
           accountId: z.string(),
@@ -854,6 +865,17 @@ export function registerMailSendTools(server: McpToolServer): void {
   server.registerTool(
     STATUS_TOOL,
     {
+      title: "Check what became of a send",
+      // `read` in the sense the hint is asked for: no mail moves, nothing the
+      // owner can see changes, and calling it twice shows the same thing. It
+      // is not literally side-effect free — the handler fills in the Sent
+      // caption's mark and resolves its thread, because this call is the one
+      // moment the operation id and the thread are both known. Both writes
+      // are write-once, both are swallowed on failure, and neither is
+      // reachable by the caller. Declaring this a write would put a
+      // confirmation in front of a status poll, which is the opposite of what
+      // the hint is for.
+      annotations: hints("read keeps idempotent outside"),
       description:
         "Report what became of one send: its status, and the thread its Sent copy landed in once the provider has one. A send whose account has no Sent folder keeps a null thread for good. Name the account as well after a send answered `state` unknown, so the owner's Sent row can still say which app wrote the message.",
       inputSchema: z

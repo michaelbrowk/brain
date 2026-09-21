@@ -17,6 +17,7 @@ import {
 import { logMailActivity, mailOutcome, mailRefusal } from "./mail-tool-kit";
 import {
   hasScope,
+  hints,
   insufficientScope,
   refusal,
   STORE_FAILED,
@@ -170,20 +171,47 @@ function attachmentLine(saved: SavedAttachment): string {
   return saved.type.startsWith("image/") ? `!${link}` : link;
 }
 
+/** Whether this page's body already carries that exact line.
+ *
+ *  A whole line, trimmed, and never a substring: `appendPage` puts the line in
+ *  as its own paragraph, so a line is what to look for. A substring match
+ *  would find the url inside a sentence somebody wrote about the file and
+ *  call the work done, and it would find `shot.png` inside `old-shot.png`.
+ *  The trim is because a hand-edited note may have trailing spaces the store
+ *  never put there. */
+function pageCarries(page: { markdown: string }, line: string): boolean {
+  return page.markdown.split("\n").some((row) => row.trim() === line);
+}
+
 export function registerMailAttachmentTools(server: McpToolServer): void {
-  server.tool(
+  server.registerTool(
     TOOL,
-    `Save one attachment from a message into a note's own files. The bytes stream from the mail service into the notes folder, where the note store checks them: ${SAVE_CAP_REASON}, no active file type, no executable whatever type the message claims, and bytes that do not match the type they claim are turned down with the store's own reason. With append true, the default, the page is read first and one Markdown line is added to it, an image shown and anything else linked. With append false nothing is written to the page, and a file no page links is swept a day later, so link it yourself.`,
     {
-      accountId: z.string(),
-      attachmentId: z
-        .string()
-        .describe("from the attachment list on a message"),
-      page: z.string().describe("the page the file is saved into"),
-      append: z
-        .boolean()
-        .optional()
-        .describe("add a line linking the file, true by default"),
+      title: "Save a mail attachment into a note",
+      description: `Save one attachment from a message into a note's own files. The bytes stream from the mail service into the notes folder, where the note store checks them: ${SAVE_CAP_REASON}, no active file type, no executable whatever type the message claims, and bytes that do not match the type they claim are turned down with the store's own reason. With append true, the default, the page is read first and one Markdown line is added to it, an image shown and anything else linked. With append false nothing is written to the page, and a file no page links is swept a day later, so link it yourself.`,
+      inputSchema: {
+        accountId: z.string(),
+        attachmentId: z
+          .string()
+          .describe("from the attachment list on a message"),
+        page: z.string().describe("the page the file is saved into"),
+        append: z
+          .boolean()
+          .optional()
+          .describe("add a line linking the file, true by default"),
+      },
+      // `keeps`: nothing the page already had is replaced or removed, only
+      // added to.
+      //
+      // `repeats`: the same attachment saved twice is a second file, because
+      // `store.saveAttachment` names a file `nanoid(12)` plus its extension
+      // rather than by its content. The line guard below is not idempotency
+      // and is not claimed as any: it stops a second copy of a line the page
+      // already carries, and two saves do not produce the same line to begin
+      // with. Naming the general save by content hash, the way
+      // `stageNotionAttachment` already does, is what would turn this word
+      // over, and it is a store-wide change filed as its own follow-up.
+      annotations: hints("write keeps repeats outside"),
     },
     async ({ accountId, attachmentId, page, append }, extra) => {
       // The ids first, and a malformed one writes no line: an id Brain never
@@ -336,14 +364,40 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
 
       if (append === false) {
         await log("ok");
-        return text(saved);
+        // `lineAdded` is on every answer, not only the appending one, so an
+        // agent reads one field rather than inferring from its own argument.
+        return text({ ...saved, lineAdded: false });
       }
 
-      // A second `mutate()`, deliberately: `mutate` is not reentrant, and a
-      // crash between the two leaves an unreferenced file the attachment
-      // sweep collects a day later.
+      // A LINE THE PAGE ALREADY CARRIES IS NOT ADDED TWICE.
+      //
+      // The append used to run every call. The body is read again here,
+      // immediately before the append rather than reusing the one read before
+      // the download, because the download is where the time goes and the page
+      // may have gained the line meanwhile.
+      //
+      // TWO THINGS THIS DOES NOT CLOSE, both of them worth knowing before
+      // trusting `save_mail_attachment`'s `idempotentHint`.
+      //
+      // The first is the naming. `store.saveAttachment` names the file
+      // `nanoid(12)` plus the extension, so saving one mail attachment twice
+      // writes two files with two urls and two different lines, and this guard
+      // never matches. Only the Notion staging path is content-addressed
+      // (`stageNotionAttachment`, sha256 of the bytes). This guard is what the
+      // general save being named by content would need, and it is inert until
+      // then.
+      //
+      // The second is the window. The read and the append are two `mutate()`
+      // calls — `mutate` is not reentrant — so two saves racing inside it can
+      // both see a body without the line. Closing that needs an
+      // append-if-absent on the store.
+      const line = attachmentLine(saved);
       try {
-        await store.appendPage(page, attachmentLine(saved), "claude");
+        if (pageCarries(await store.readPage(page), line)) {
+          await log("ok");
+          return text({ ...saved, lineAdded: false });
+        }
+        await store.appendPage(page, line, "claude");
       } catch (error) {
         if (isNotFound(error)) {
           await log("not_found");
@@ -360,7 +414,7 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
         return storeFailed("that file was saved and no line could be added");
       }
       await log("ok");
-      return text(saved);
+      return text({ ...saved, lineAdded: true });
     },
   );
 }

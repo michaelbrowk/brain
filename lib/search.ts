@@ -504,41 +504,51 @@ function makeSnippet(line: string, q: string, terms: string[]) {
  *  to their combined output, so a common first word hides a rarer second word
  *  later in the same note.
  *
- *  WHY A WORD CAN BE LEFT OUT OF THE WORD RUNS. "Урок 15 сентября" failed on
- *  Michael's notebook because "15" is in three lines of nearly every note he
- *  keeps, and its run alone was thousands of matches of nothing. A word under
- *  three characters, or one that is only digits, says too little on its own to
- *  spend a run on — the phrase run is where a date is found, on the line that
- *  holds the whole query. A word that is the entire query is searched
- *  whatever its shape: there is nothing else to go on, and "15" typed by
- *  itself means the notes with 15 in them. */
+ *  EVERY WORD KEEPS ITS RUN, AND THE BROAD ONES GO LAST. "Урок 15 сентября"
+ *  failed on Michael's notebook because "15" is in three lines of nearly every
+ *  note he keeps and the whole search was refused over its output. A first cut
+ *  of this dropped that run: a word under three characters, or one that is
+ *  only digits, is nearly free of meaning on its own. It also cost real
+ *  recall — a note holding урок, 15 and сентября on three separate lines was a
+ *  hit before and stopped being one — and the cap below made the run cheap
+ *  again, so the exclusion was buying nothing. It is an ordering now.
+ *
+ *  ORDER IS NOT COSMETIC HERE. A candidate keeps the first twelve lines that
+ *  land on it (`doSearch`), and that is what the snippet and the same-line
+ *  ranking are read out of, so the run that says least about the query must
+ *  not be the one that fills those twelve. The broad word goes last for that
+ *  reason, and because a run capped at 300 answers whichever lines ripgrep
+ *  walked first — luck, and different on every machine. */
 export interface SearchRun {
   readonly pattern: string;
   /** The whole trimmed query, as one fixed string. Its hits rank first. */
   readonly phrase: boolean;
 }
 
-const MIN_WORD_CHARS = 3;
+const SHORT_WORD_CHARS = 3;
 
 export function searchRunPlan(query: string): SearchRun[] {
   const phrase = query.trim();
   const terms = tokenizeSearchQuery(query);
   if (!phrase || terms.length === 0) return [];
-  const runs: SearchRun[] = [{ pattern: phrase, phrase: true }];
   // A one-word query is its own phrase. Running it twice would be the same
   // search for the same lines against the same cap.
-  const planned = new Set([phrase.toLocaleLowerCase()]);
-  for (const term of terms) {
-    if (planned.has(term)) continue;
-    if (terms.length > 1 && !worthOwnRun(term)) continue;
-    planned.add(term);
-    runs.push({ pattern: term, phrase: false });
-  }
-  return runs;
+  const words = terms.filter((term) => term !== phrase.toLocaleLowerCase());
+  const ordered = [
+    ...words.filter((term) => !saysLittleAlone(term)),
+    ...words.filter(saysLittleAlone),
+  ];
+  return [
+    { pattern: phrase, phrase: true },
+    ...ordered.map((term) => ({ pattern: term, phrase: false })),
+  ];
 }
 
-function worthOwnRun(term: string): boolean {
-  return [...term].length >= MIN_WORD_CHARS && !/^\p{N}+$/u.test(term);
+/** A word that carries nearly no intent by itself: under three characters, or
+ *  only digits. It is still searched — it is still one of the words the
+ *  reader typed — but after the words that say something. */
+function saysLittleAlone(term: string): boolean {
+  return [...term].length < SHORT_WORD_CHARS || /^\p{N}+$/u.test(term);
 }
 
 async function rgJson(query: string): Promise<{ phrase: string[]; words: string[] }> {
@@ -575,7 +585,10 @@ function rgLines(pattern: string, maxCount: number): Promise<string[]> {
 export const MAX_MATCH_LINES = 300;
 
 /** The one thing bytes are still counted for: a single line past this cannot
- *  be answered out of half of itself, and nothing downstream will parse it. */
+ *  be answered out of half of itself, and nothing downstream will parse it.
+ *  Measured in bytes with `Buffer.byteLength`, not in `String.length`, which
+ *  is UTF-16 units — a line of Cyrillic is two bytes a character and would
+ *  otherwise reach a megabyte before this fired. */
 const MAX_LINE_BYTES = 512 * 1024;
 
 const MATCH_LINE = /"type"\s*:\s*"match"/;
@@ -611,6 +624,9 @@ export function runRipgrep(
     // character split across two chunks is one character again.
     rg.stdout.setEncoding("utf8");
     rg.stdout.on("data", (chunk: string) => {
+      // Nothing after the answer or after the guard: a kill is not instant,
+      // and a chunk already in flight must not reopen a run that is over.
+      if (settled || exceededOutputLimit) return;
       pending += chunk;
       let newline = pending.indexOf("\n");
       while (newline !== -1) {
@@ -629,7 +645,7 @@ export function runRipgrep(
         }
         newline = pending.indexOf("\n");
       }
-      if (pending.length > MAX_LINE_BYTES) {
+      if (Buffer.byteLength(pending) > MAX_LINE_BYTES) {
         exceededOutputLimit = true;
         rg.kill("SIGKILL");
       }
@@ -642,6 +658,12 @@ export function runRipgrep(
         finish(new SearchBackendError("ripgrep search exceeded output limit"));
         return;
       }
+      // THE RUN THIS SIDE ENDED IS NOT A RUN THAT FAILED. A cap and a timeout
+      // both close on a SIGKILL, and close then arrives with a null code and
+      // whatever ripgrep had written to stderr — an unreadable file, a
+      // warning. Logging that as a failure puts failure lines in the server's
+      // log for searches that answered.
+      if (settled) return;
       // ripgrep uses exit 1 for a successful search with no matches.
       if (code === 0 || code === 1) {
         // A last line with no newline after it. ripgrep terminates every JSON

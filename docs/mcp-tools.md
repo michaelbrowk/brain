@@ -44,9 +44,12 @@ Five rules no single row states.
   and the four things that stop it are the `rg` binary missing from the
   release or off `PATH`, a search that ran past its three seconds, a single
   output line over 512 KB, and a bad exit. A broad query is no longer one of
-  them: matches past the first 300 are dropped and the search answers what it
-  read, so a common word costs you the rest of its matches rather than the
-  whole answer. The sentence is Brain's own and names nothing of the machine —
+  them: `search` runs the whole query as a phrase and then each of its words,
+  and each of those runs stops after 300 matches and answers what it read. So a
+  word that is in most of the notes costs you the rest of its own matches —
+  a page whose only tie to that word sits past the first 300 can be missed —
+  rather than costing you the answer. The sentence is Brain's own and names
+  nothing of the machine —
   ripgrep's own stderr stays in the server's log, so a bad exit says only which
   code it was. A narrower query is worth one retry for the timeout — the others
   need somebody to fix the release or the note, so do not loop, and do not read

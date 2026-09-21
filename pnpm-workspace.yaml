@@ -22,6 +22,13 @@ allowBuilds:
 # browserslist arrives via styled-jsx > @babel/core inside next. deepmerge-ts
 # comes from html-to-text@10.0.0 under mailparser; html-to-text@10.0.1 pairs
 # itself with deepmerge-ts ^8.0.1, so 8.x is the combination upstream ships.
+#
+# The last three close the moderate findings from the same audit. Each sits
+# inside a range its parent already declares, so the floor only lifts a
+# resolution the lockfile had frozen low. hono is the one that matters most:
+# it is the HTTP layer of @modelcontextprotocol/sdk, and /api/mcp is a route
+# this app serves, so GHSA-crvj-82cr-hjcx (a query-parser cache-key and proxy
+# interpretation differential) is reachable rather than theoretical.
 overrides:
   postcss: 8.5.26
   "js-yaml@>=3.0.0 <3.15.2": 3.15.2
@@ -34,6 +41,9 @@ overrides:
   "fast-uri@>=3.0.0 <3.1.6": 3.1.6
   "browserslist@>=4.0.0 <4.28.7": 4.28.7
   "deepmerge-ts@>=7.0.0 <8.0.0": 8.0.2
+  "baseline-browser-mapping@>=2.0.0 <2.11.0": 2.11.0
+  "hono@>=4.0.0 <4.13.5": 4.13.5
+  "qs@>=6.0.0 <6.16.0": 6.16.0
 patchedDependencies:
   '@zone-eu/mailsplit@5.4.14': patches/@zone-eu__mailsplit@5.4.14.patch
   mailparser@3.9.14: patches/mailparser@3.9.14.patch

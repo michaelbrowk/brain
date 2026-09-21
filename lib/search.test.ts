@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   assertSearchReady,
   buildSearchTextTarget,
@@ -175,15 +175,32 @@ describe("search readiness", () => {
     });
   });
 
-  it("rejects an interactive search when ripgrep fails", async () => {
-    await withFakeRipgrep('echo "backend failed" >&2\nexit 2', async (cwd) => {
-      await expect(runRipgrep(["needle"], cwd)).rejects.toEqual(
-        expect.objectContaining<SearchBackendError>({
-          name: "SearchBackendError",
-          message: expect.stringContaining("backend failed"),
-        }),
-      );
-    });
+  it("rejects an interactive search when ripgrep fails, keeping its stderr here", async () => {
+    // THE MESSAGE LEAVES THE PROCESS. `app/api/mcp/route.ts` hands a
+    // `SearchBackendError` to an agent with this sentence verbatim, under
+    // `search_backend`, so what ripgrep chose to print is the operator's and
+    // not the agent's — an `RIPGREP_CONFIG_PATH` that will not parse is
+    // reported with its absolute path. The exit code travels, the stderr
+    // stays in the log.
+    const logged: string[] = [];
+    const error = vi
+      .spyOn(console, "error")
+      .mockImplementation((...parts: unknown[]) => {
+        logged.push(parts.map(String).join(" "));
+      });
+    try {
+      await withFakeRipgrep('echo "backend failed" >&2\nexit 2', async (cwd) => {
+        await expect(runRipgrep(["needle"], cwd)).rejects.toEqual(
+          expect.objectContaining<SearchBackendError>({
+            name: "SearchBackendError",
+            message: "ripgrep search failed (2)",
+          }),
+        );
+      });
+    } finally {
+      error.mockRestore();
+    }
+    expect(logged.join("\n")).toContain("backend failed");
   });
 });
 

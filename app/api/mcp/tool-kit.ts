@@ -70,9 +70,11 @@ export const SEARCH_BACKEND = "search_backend";
  *  `rg` missing from the release or off `PATH`, a timeout, an output cap, a
  *  bad exit. All four arrived as `store_failed`, and an agent cannot tell a
  *  notes folder it should stop writing to from a search binary somebody has
- *  to install. Its own code, and the engine's own sentence — `rg` is spawned
- *  with the notes folder as its cwd and searches `.`, so everything it says
- *  is relative and no path of the machine's travels with it. */
+ *  to install. Its own code, and Brain's own sentence for it: all four
+ *  messages `lib/search.ts` throws are written there and none interpolates
+ *  anything of the machine's. The bad-exit one used to carry ripgrep's stderr
+ *  and no longer does — that text is a third-party binary's to choose, so it
+ *  goes to the server's log and the exit code travels alone. */
 export function searchBackendFailed(error: string) {
   return refusal(error, SEARCH_BACKEND);
 }

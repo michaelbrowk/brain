@@ -43,10 +43,12 @@ Five rules no single row states.
   folder failing.** Only `search` answers it. Brain searches through ripgrep,
   and the four things that stop it are the `rg` binary missing from the
   release or off `PATH`, a search that ran past its three seconds, a query
-  whose output went over 512 KB, and a bad exit. The sentence is the engine's
-  own and names nothing of the machine. A narrower query is worth one retry
-  for the middle two — the other two need somebody to fix the release, so do
-  not loop, and do not read it as a folder you should stop writing to.
+  whose output went over 512 KB, and a bad exit. The sentence is Brain's own
+  and names nothing of the machine — ripgrep's own stderr stays in the
+  server's log, so a bad exit says only which code it was. A narrower query is
+  worth one retry for the middle two — the other two need somebody to fix the
+  release, so do not loop, and do not read it as a folder you should stop
+  writing to.
 - **`read_mail_message` may answer `state: "fetching"`.** Call it again. Each
   call re-records the demand that keeps the body in the service's cache, so an
   agent that stops asking loses the body it was waiting for.

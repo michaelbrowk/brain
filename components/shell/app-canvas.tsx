@@ -1,13 +1,14 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import { apiFetch } from "@/lib/client";
 import type { TreeNode } from "@/lib/store/types";
 import { APP_FRAME_SANDBOX } from "@/lib/apps/csp";
 import { readAppTokens } from "@/lib/apps/tokens";
 import { createAppBridge } from "./app-bridge";
-import { AppBridgeError, createAppReads } from "./app-reads";
+import { createAppReads } from "./app-reads";
+import { createAppHandler, createAppWrites } from "./app-writes";
 import { Empty } from "../ui/empty";
 import { Icon } from "../ui/icon";
 
@@ -35,7 +36,19 @@ export interface AppCanvasProps {
  *  for the same four facts to come from. */
 export function AppCanvas({ node, liveTree, onOpenPage, onToast }: AppCanvasProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
-  const reads = useMemo(() => createAppReads(liveTree), [liveTree]);
+  /** THE PAGES THIS APP HAS JUST MADE.
+   *
+   *  The shell's tree is the read guard, and it hears about a new page over
+   *  SSE a moment after the create route has answered. Without this set an
+   *  app that creates a page and reads it in its next request is told its own
+   *  page is not there. A ref rather than state: nothing draws from it, and
+   *  the bridge is rebuilt on a rename, which must not empty it. It is
+   *  replaced when a different app opens, and bounded by the create route's
+   *  own `APP_MAX_OWNED` cap. */
+  const createdRef = useRef<{ appId: string; ids: Set<string> }>({
+    appId: node.id,
+    ids: new Set(),
+  });
   const { resolvedTheme } = useTheme();
   const theme = resolvedTheme === "dark" ? "dark" : "light";
   const bridgeRef = useRef<ReturnType<typeof createAppBridge> | null>(null);
@@ -79,19 +92,22 @@ export function AppCanvas({ node, liveTree, onOpenPage, onToast }: AppCanvasProp
   useEffect(() => {
     const frame = frameRef.current;
     if (!frame || files !== "present") return;
+    if (createdRef.current.appId !== node.id) {
+      createdRef.current = { appId: node.id, ids: new Set() };
+    }
+    const created = createdRef.current.ids;
     const bridge = createAppBridge({
       frame,
       page: { id: node.id, title: node.title },
       theme: () => (document.documentElement.classList.contains("dark") ? "dark" : "light"),
       tokens: () => readAppTokens(document.documentElement),
-      // The reads answer what they own and hand back `undefined` for the
-      // rest, so the write side layers over this with one more `??` rather
-      // than a second switch that could disagree with the first.
-      handle: async (request) => {
-        const answer = await reads(request);
-        if (answer !== undefined) return answer;
-        throw new AppBridgeError("that request is not available yet", "bad_request");
-      },
+      // Reads, then writes, then the refusal. The order and the sentinel that
+      // separates "no answer" from an answer of `null` live in
+      // `createAppHandler`, which has a test of its own.
+      handle: createAppHandler(
+        createAppReads(liveTree, created),
+        createAppWrites(node.id, (id) => created.add(id)),
+      ),
       onOpenPage,
       onToast,
     });
@@ -100,7 +116,7 @@ export function AppCanvas({ node, liveTree, onOpenPage, onToast }: AppCanvasProp
       bridge.dispose();
       bridgeRef.current = null;
     };
-  }, [files, node.id, node.title, reads, onOpenPage, onToast]);
+  }, [files, node.id, node.title, liveTree, onOpenPage, onToast]);
 
   useEffect(() => {
     bridgeRef.current?.sendTheme(theme);

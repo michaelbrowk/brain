@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 const apiFetch = vi.fn();
 vi.mock("@/lib/client", () => ({ apiFetch, CLIENT_ID: "test-client" }));
 
-const { createAppReads } = await import("./app-reads");
+const { createAppReads, UNHANDLED } = await import("./app-reads");
 
 function json(body: unknown, status = 200) {
   return {
@@ -116,7 +116,7 @@ describe("the app's read side", () => {
   it("leaves a request that is not a read to the next layer", async () => {
     expect(
       await createAppReads(() => TREE as never)({ ...envelope, type: "state.get" }),
-    ).toBeUndefined();
+    ).toBe(UNHANDLED);
     expect(apiFetch).not.toHaveBeenCalled();
   });
 

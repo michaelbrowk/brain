@@ -12,6 +12,9 @@ import { createAppHandler, createAppWrites } from "./app-writes";
 import { Empty } from "../ui/empty";
 import { Icon } from "../ui/icon";
 
+/** How long "Copied." stands before the line goes back to the invitation. */
+const COPIED_FOR_MS = 2_000;
+
 export interface AppCanvasProps {
   node: TreeNode;
   /** The shell's own tree, read on every request rather than snapshotted:
@@ -52,37 +55,51 @@ export function AppCanvas({ node, liveTree, onOpenPage, onToast }: AppCanvasProp
   const { resolvedTheme } = useTheme();
   const theme = resolvedTheme === "dark" ? "dark" : "light";
   const bridgeRef = useRef<ReturnType<typeof createAppBridge> | null>(null);
-  const [copied, setCopied] = useState(false);
+  /** What the line beside Rebuild is saying. "copied" is a confirmation and
+   *  goes back to the invitation on its own, the way every other momentary
+   *  confirmation in the shell does. "failed" stays, because the owner still
+   *  has the prompt to deal with. */
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 
-  /** ASK BEFORE MOUNTING.
+  /** ASK FOR THE ADDRESS BEFORE MOUNTING.
    *
-   *  A `kind: app` page whose files are not there — hand-written frontmatter,
-   *  a restore that has not finished, a rebuild that failed part way — would
-   *  otherwise mount a frame onto a 404 and paint the browser's own error
-   *  document inside the canvas, which says nothing the owner can act on. One
-   *  HEAD, and then either the frame or a sentence with the Rebuild control
-   *  already beside it.
+   *  The frame's authority is in its path, so the canvas cannot know where to
+   *  mount it. It asks, and the server answers with a signed address or with
+   *  404, which makes one call do two jobs. A `kind: app` page whose files are
+   *  not there — hand-written frontmatter, a restore that has not finished, a
+   *  rebuild that failed part way — would otherwise mount a frame onto a 404
+   *  and paint the browser's own error document inside the canvas, which says
+   *  nothing the owner can act on. Here it is an answer with no address in it,
+   *  and the canvas draws the sentence with the Rebuild control beside it.
    *
    *  `undefined` while the question is open: neither branch draws, so the
    *  canvas does not flash a frame it is about to replace. The answer is held
    *  WITH the id it was asked about, so opening a second app reads as an open
    *  question again without a `setState` in the effect body. */
-  const [probe, setProbe] = useState<{
-    id: string;
-    files: "present" | "missing";
-  } | null>(null);
-  const files = probe?.id === node.id ? probe.files : undefined;
+  const [probe, setProbe] = useState<{ id: string; src: string | null } | null>(
+    null,
+  );
+  const src = probe?.id === node.id ? probe.src : undefined;
   useEffect(() => {
     let live = true;
-    void apiFetch(`/api/app/${encodeURIComponent(node.id)}/index.html`, { method: "HEAD" })
-      .then((response) => {
-        if (live) setProbe({ id: node.id, files: response.ok ? "present" : "missing" });
+    void apiFetch(`/api/app/${encodeURIComponent(node.id)}/frame`, { method: "POST" })
+      .then(async (response) => {
+        if (!live) return;
+        if (!response.ok) {
+          setProbe({ id: node.id, src: null });
+          return;
+        }
+        const body = (await response.json()) as { src?: unknown };
+        setProbe({
+          id: node.id,
+          src: typeof body.src === "string" ? body.src : null,
+        });
       })
       .catch(() => {
-        // A network failure is not a missing file. The frame is mounted and
-        // the browser retries the request itself, which is the better of two
-        // wrong answers: an app that is there still runs.
-        if (live) setProbe({ id: node.id, files: "present" });
+        // A network failure is not a missing file, but with no address there
+        // is nothing to mount either. The owner gets the sentence and the
+        // Rebuild control, and reopening the page asks again.
+        if (live) setProbe({ id: node.id, src: null });
       });
     return () => {
       live = false;
@@ -91,7 +108,7 @@ export function AppCanvas({ node, liveTree, onOpenPage, onToast }: AppCanvasProp
 
   useEffect(() => {
     const frame = frameRef.current;
-    if (!frame || files !== "present") return;
+    if (!frame || !src) return;
     if (createdRef.current.appId !== node.id) {
       createdRef.current = { appId: node.id, ids: new Set() };
     }
@@ -116,7 +133,7 @@ export function AppCanvas({ node, liveTree, onOpenPage, onToast }: AppCanvasProp
       bridge.dispose();
       bridgeRef.current = null;
     };
-  }, [files, node.id, node.title, liveTree, onOpenPage, onToast]);
+  }, [src, node.id, node.title, liveTree, onOpenPage, onToast]);
 
   useEffect(() => {
     bridgeRef.current?.sendTheme(theme);
@@ -140,9 +157,25 @@ export function AppCanvas({ node, liveTree, onOpenPage, onToast }: AppCanvasProp
 
   const prompt = `rebuild the page ${node.title} (id ${node.id})`;
   const copy = async () => {
-    await navigator.clipboard.writeText(prompt);
-    setCopied(true);
+    try {
+      await navigator.clipboard.writeText(prompt);
+    } catch {
+      // A denied permission, or a page served over plain http, where there is
+      // no clipboard to write to at all. Unhandled this is a rejected promise
+      // inside an onClick and an owner who pressed a button that did nothing,
+      // so the prompt goes on the page instead, where it can be selected.
+      setCopyState("failed");
+      onToast("Could not copy. The prompt is beside the button, select it there.");
+      return;
+    }
+    setCopyState("copied");
   };
+
+  useEffect(() => {
+    if (copyState !== "copied") return;
+    const settle = setTimeout(() => setCopyState("idle"), COPIED_FOR_MS);
+    return () => clearTimeout(settle);
+  }, [copyState]);
 
   return (
     <div data-app-canvas className="brain-app-canvas brain-page-top">
@@ -169,12 +202,20 @@ export function AppCanvas({ node, liveTree, onOpenPage, onToast }: AppCanvasProp
             <Icon name="refresh-linear" size={13} className="text-ink-3" />
             Rebuild
           </button>
-          <span className="text-caption text-ink-3">
-            {copied ? "Copied. Paste it to your agent." : "Copy a prompt for your agent"}
-          </span>
+          {copyState === "failed" ? (
+            <span data-app-prompt className="text-caption text-ink-2 select-all">
+              {prompt}
+            </span>
+          ) : (
+            <span className="text-caption text-ink-3">
+              {copyState === "copied"
+                ? "Copied. Paste it to your agent."
+                : "Copy a prompt for your agent"}
+            </span>
+          )}
         </div>
       </div>
-      {files === "missing" ? (
+      {src === null ? (
         <div className="mx-auto w-full max-w-[720px] px-5 md:px-6">
           <Empty
             icon="file-corrupted-linear"
@@ -182,12 +223,12 @@ export function AppCanvas({ node, liveTree, onOpenPage, onToast }: AppCanvasProp
             hint="The page is here and its description is above. What it runs is not."
           />
         </div>
-      ) : files === "present" ? (
+      ) : src !== undefined ? (
         <iframe
           ref={frameRef}
           title={node.title}
           sandbox={APP_FRAME_SANDBOX}
-          src={`/api/app/${encodeURIComponent(node.id)}/index.html`}
+          src={src}
           className="brain-app-frame"
         />
       ) : null}

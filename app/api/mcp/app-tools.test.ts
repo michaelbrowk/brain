@@ -257,6 +257,37 @@ describe("create_app_page", () => {
     expect(answer.body).toMatchObject({ reason: "bad_type" });
   });
 
+  it("refuses a blank owned title before the store has to", async () => {
+    // `createAppPage` asks the same question before its first write and
+    // throws a bare Error for it, which would reach the agent as
+    // `store_failed`: the notes folder is broken, stop writing. The fix is
+    // one field of the agent's own call, so it is asked here too.
+    const answer = await call("create_app_page", {
+      parentId: null,
+      title: "T",
+      description: "d",
+      entryHtml: ENTRY,
+      owns: [{ title: "Words" }, { title: "  " }],
+      reason: "r",
+    });
+    expect(answer.isError).toBe(true);
+    expect(answer.body.reason).toBe("bad_request");
+    expect(createAppPage).not.toHaveBeenCalled();
+  });
+
+  it("answers not_found when the store says the page is not an app", async () => {
+    const { NotAnAppError } = await import("@/lib/store/types");
+    createAppPage.mockRejectedValue(new NotAnAppError());
+    const answer = await call("create_app_page", {
+      parentId: null,
+      title: "T",
+      description: "d",
+      entryHtml: ENTRY,
+      reason: "r",
+    });
+    expect(answer.body).toMatchObject({ reason: "not_found" });
+  });
+
   describe("an asset that is not base64", () => {
     // `Buffer.from(s, "base64")` never throws. It drops what it cannot read
     // and answers whatever is left, so the likeliest agent mistake of all,

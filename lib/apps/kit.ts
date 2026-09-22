@@ -89,9 +89,10 @@ body {
  *
  *  A theme event carries the tokens with it, so the ordinary repaint costs
  *  the event and nothing else. The `hello` in that branch is the fallback for
- *  a host that sent the theme alone: the token VALUES are what change across
- *  a flip, and an app that kept the old ones would paint a light palette on a
- *  dark ground.
+ *  a host that sent the theme alone, or sent an empty set because it could
+ *  not resolve the properties off its own document: the token VALUES are what
+ *  change across a flip, and an app that kept the old ones would paint a
+ *  light palette on a dark ground under the new `data-theme`.
  *
  *  IT ANSWERS ONLY ITS OWN PARENT. The frame's origin is opaque, so
  *  `event.origin` is the useless string "null" on both sides of this bridge
@@ -155,8 +156,11 @@ export const APP_KIT_JS = `
     if (!message || message.v !== ${BRIDGE_VERSION}) return;
     if (message.event === "theme") {
       applyTheme(message.theme);
-      if (message.tokens) applyTokens(message.tokens);
-      else ask("hello").then(applyHello, function () {});
+      if (message.tokens && Object.keys(message.tokens).length > 0) {
+        applyTokens(message.tokens);
+      } else {
+        ask("hello").then(applyHello, function () {});
+      }
       window.dispatchEvent(new CustomEvent("brain:theme", { detail: message.theme }));
       return;
     }

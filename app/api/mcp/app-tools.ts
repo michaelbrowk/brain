@@ -4,6 +4,7 @@ import {
   getStore,
   isAppSize,
   isAttachmentValidation,
+  isNotApp,
   isNotFound,
   isRevConflict,
   type AppAssetInput,
@@ -132,7 +133,11 @@ function appRefusal(error: unknown): AppAnswer {
       outcome: "rev_conflict",
     };
   }
-  if (isNotFound(error)) {
+  // A page that is not an app and a page that is not there are one answer to
+  // an agent: go and find the right id. The store tells them apart because
+  // `NotAnAppError` is also what stops `writeAppFiles` renaming a child
+  // page's folder out of the tree, which is a different job from this one.
+  if (isNotFound(error) || isNotApp(error)) {
     return no("not_found", "there is no app page with that id", "not_found");
   }
   return { answer: storeFailed("that app could not be saved"), outcome: STORE_FAILED };
@@ -343,6 +348,13 @@ export function registerAppTools(server: McpToolServer): void {
         if (finding !== null) return lintRefused(finding.rule, finding.line);
         const decoded = decodeAssets(assets);
         if (!decoded.ok) return badBase64(decoded.name);
+        // `createAppPage` asks this too, before its first write, and throws a
+        // bare Error for it. That arrives here as `store_failed`, which tells
+        // an agent the notes folder is broken when the fix is one field of
+        // its own call. Asked here as well, in the word an agent branches on.
+        if ((owns ?? []).some((child) => child.title.trim().length === 0)) {
+          return no("bad_request", "every owned page needs a title", "bad_request");
+        }
 
         const store = await getStore();
         const { meta, owned } = await store.createAppPage(parentId ?? null, title, {

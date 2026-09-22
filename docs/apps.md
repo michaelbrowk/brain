@@ -71,11 +71,18 @@ content policy is:
 
 ```
 default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline';
-img-src blob: data: <origin>/api/app/<id>/assets/;
-font-src data: <origin>/api/app/<id>/assets/;
-media-src data: <origin>/api/app/<id>/assets/;
+img-src blob: data: <origin>/api/app/<id>/t/;
+font-src data: <origin>/api/app/<id>/t/;
+media-src data: <origin>/api/app/<id>/t/;
 connect-src 'none'; frame-ancestors <origin>; base-uri 'none'; form-action 'none'
 ```
+
+The entry is served under a per-session token, at
+`/api/app/<id>/t/<token>/index.html`, and its assets sit beside it at
+`/api/app/<id>/t/<token>/assets/…`. The token changes every time the frame is
+mounted, so no path an app could write down stays valid and the policy names
+`/t/` rather than any one grant. **This is why an asset is addressed
+relatively and can be addressed no other way.**
 
 Three things follow, and each of them is a way an app breaks silently if you
 forget it.
@@ -88,10 +95,11 @@ forget it.
   is why `script-src` and `style-src` allow inline: the entry is an inline
   script and an inline stylesheet. There is no second file to load.
 - **An asset is addressed relatively.** Write `assets/card.png`, never
-  `/api/app/<id>/assets/card.png` and never an absolute URL. The `img-src`
-  source list names the app's own asset folder as a host-source, and a request
-  the policy blocks inside an opaque-origin frame reaches no console the owner
-  will ever open: the app simply paints nothing.
+  `/api/app/<id>/assets/card.png` and never an absolute URL. The path the
+  frame is actually served from carries a token the app cannot know, so a
+  written-out path is wrong on the next mount even when it is right on this
+  one, and a request the policy blocks inside an opaque-origin frame reaches
+  no console the owner will ever open: the app simply paints nothing.
 
 A `data:` URI works everywhere an asset does, so a handful of small icons can
 live in the entry with no asset at all.

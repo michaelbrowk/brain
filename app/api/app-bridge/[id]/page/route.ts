@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, verifySession } from "@/lib/auth";
-import { getStore, isNotFound } from "@/lib/store";
+import { getStore, isAppOwnsFull, isNotFound } from "@/lib/store";
 import { appWriteClient } from "@/lib/apps/write-authority";
-import { APP_MAX_OWNED, appMetaSchema } from "@/lib/apps/model";
+import { APP_ENTRY_MAX_BYTES } from "@/lib/apps/model";
 import { logAppBridgeWrite } from "../../activity";
 
 export const dynamic = "force-dynamic";
@@ -34,8 +34,7 @@ export async function POST(
   }
 
   const store = await getStore();
-  const app = store.readAppMeta(id);
-  if (app === null) {
+  if (store.readAppMeta(id) === null) {
     return NextResponse.json(
       { error: "that page is not an app", reason: "not_found" },
       { status: 404 },
@@ -65,40 +64,49 @@ export async function POST(
     );
   }
 
-  // Checked before the create, so a refused app never leaves a page it cannot
-  // then write. `APP_MAX_OWNED` is the schema's own cap, imported rather than
-  // restated: a number in the file that enforces the shape and a second one in
-  // the route that enforces the request is two numbers to keep in step.
-  if (app.owns.length >= APP_MAX_OWNED) {
+  // The same ceiling the write route takes, for the same reason: a page an app
+  // creates is a page, and a two-megabyte one is a runaway loop rather than a
+  // note. The bridge schema refuses it in the frame as well, which is the
+  // convenience; this is the authority.
+  const markdown = typeof body?.markdown === "string" ? body.markdown : "";
+  if (Buffer.byteLength(markdown, "utf8") > APP_ENTRY_MAX_BYTES) {
     await line("too_large");
     return NextResponse.json(
-      { error: "that app already owns as many pages as it may", reason: "too_large" },
+      { error: "that page is too large to write", reason: "too_large" },
       { status: 413 },
     );
   }
 
   try {
-    const created = await store.createPage(id, title, {
-      icon:
-        typeof body?.icon === "string" && body.icon.length <= MAX_ICON_CHARS
-          ? body.icon
-          : undefined,
-      markdown: typeof body?.markdown === "string" ? body.markdown : "",
-      by: "claude",
-    });
-    /** OWNERSHIP IS RECORDED BEFORE THE ID IS HANDED BACK.
+    /** THE PAGE AND THE OWNERSHIP ARE ONE WRITE, AND THE STORE OWNS BOTH.
      *
      *  A page the app cannot then write is worse than no page: the app would
-     *  create it again on the next run, and again. So the `owns` append is
-     *  part of this request rather than something the app has to ask for. */
-    await store.setAppMeta(
+     *  create it again on the next run, and again. `createOwnedPage` makes
+     *  the child and appends to `owns` inside one mutation, re-reading the
+     *  `app` map in there, so nothing this route read a moment ago is written
+     *  back over a state write or a second create that has landed since. The
+     *  cap is its decision too, for the same reason. */
+    const { page } = await store.createOwnedPage(
       id,
-      appMetaSchema.parse({ ...app, owns: [...app.owns, created.id] }),
+      {
+        title,
+        ...(typeof body?.icon === "string" && body.icon.length <= MAX_ICON_CHARS
+          ? { icon: body.icon }
+          : {}),
+        markdown,
+      },
       "claude",
     );
-    await line("ok", created.id, created.title);
-    return NextResponse.json({ id: created.id });
+    await line("ok", page.id, page.title);
+    return NextResponse.json({ id: page.id });
   } catch (error) {
+    if (isAppOwnsFull(error)) {
+      await line("too_large");
+      return NextResponse.json(
+        { error: "that app already owns as many pages as it may", reason: "too_large" },
+        { status: 413 },
+      );
+    }
     if (isNotFound(error)) {
       await line("not_found");
       return NextResponse.json(

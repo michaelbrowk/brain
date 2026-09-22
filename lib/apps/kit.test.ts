@@ -368,6 +368,23 @@ describe("the kit, evaluated the way a frame evaluates it", () => {
     expect(document.documentElement.style.getPropertyValue("--paper")).toBe("#101010");
   });
 
+  it("treats an empty token set as none, because that is a host that could not read them", async () => {
+    // The host builds the set by resolving the properties off its own
+    // document, so `{}` is a failure to read rather than a theme with no
+    // values. Repainting from it would leave the app on the old palette
+    // under the new `data-theme`, which is the one state this path exists
+    // to avoid.
+    vi.useFakeTimers();
+    const kit = mountKit();
+    answer(kit, kit.lastRid(), { theme: "light", kit: { tokens: { "--paper": "#ffffff" } } });
+    await kit.brain.ready;
+    const before = kit.posted.length;
+
+    kit.send({ v: 1, event: "theme", theme: "dark", tokens: {} });
+    expect(kit.posted).toHaveLength(before + 1);
+    expect(kit.posted[before]).toMatchObject({ type: "hello" });
+  });
+
   it("hands both events to brain.on", () => {
     const kit = mountKit();
     const themes: unknown[] = [];

@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, verifySession } from "@/lib/auth";
 import { getStore } from "@/lib/store";
-import { APP_STATE_MAX_BYTES, appMetaSchema } from "@/lib/apps/model";
+import { APP_STATE_MAX_BYTES } from "@/lib/apps/model";
 
 export const dynamic = "force-dynamic";
 
@@ -22,7 +22,7 @@ async function open(
   req: NextRequest,
   id: string,
 ): Promise<
-  | { ok: true; store: Awaited<ReturnType<typeof getStore>>; state: boolean }
+  | { ok: true; store: Awaited<ReturnType<typeof getStore>> }
   | { ok: false; response: NextResponse }
 > {
   if (!(await verifySession(req.cookies.get(SESSION_COOKIE)?.value))) {
@@ -35,8 +35,7 @@ async function open(
     };
   }
   const store = await getStore();
-  const app = store.readAppMeta(id);
-  if (app === null) {
+  if (store.readAppMeta(id) === null) {
     return {
       ok: false,
       response: NextResponse.json(
@@ -45,7 +44,7 @@ async function open(
       ),
     };
   }
-  return { ok: true, store, state: app.state };
+  return { ok: true, store };
 }
 
 export async function GET(
@@ -86,7 +85,18 @@ export async function PUT(
     );
   }
 
-  const encoded = JSON.stringify(body.json);
+  // Inside a try of its own: `req.json()` will parse a payload nested deeper
+  // than `JSON.stringify` can walk, and the `RangeError` out of it would reach
+  // Next as a bare 500 with no reason the app could branch on.
+  let encoded: string | undefined;
+  try {
+    encoded = JSON.stringify(body.json);
+  } catch {
+    return NextResponse.json(
+      { error: "that state is not something Brain can keep", reason: "bad_request" },
+      { status: 400 },
+    );
+  }
   if (encoded === undefined || Buffer.byteLength(encoded, "utf8") > APP_STATE_MAX_BYTES) {
     return NextResponse.json(
       { error: "that state is too large to keep", reason: "too_large" },
@@ -95,16 +105,11 @@ export async function PUT(
   }
 
   try {
+    // The flag rides with the file, inside the store's own mutation. A route
+    // that wrote the file and then patched the frontmatter left a window where
+    // a crash between the two puts a `state.json` on disk that `readAppState`
+    // will not read.
     await opened.store.writeAppState(id, body.json);
-    // The flag says the file exists, so a reader of `index.md` alone knows.
-    // Written once, on the first state an app keeps: a frontmatter rewrite per
-    // card answered would be a git commit per card answered.
-    if (!opened.state) {
-      const app = opened.store.readAppMeta(id);
-      if (app !== null) {
-        await opened.store.setAppMeta(id, appMetaSchema.parse({ ...app, state: true }), "claude");
-      }
-    }
     return NextResponse.json({ ok: true });
   } catch {
     return NextResponse.json(

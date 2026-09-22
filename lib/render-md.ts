@@ -92,12 +92,15 @@ class ReadOnlyRenderer extends Renderer {
         // is the source of truth — so the written one is only the fallback,
         // for a page this share cannot see.
         const live = this.shareNavigation.pageLabel?.(pageRef[1]) ?? null;
-        // Static markup, byte for byte what `AiChip` renders, so the one CSS
-        // rule serves the owner's editor and the public page alike. Nothing
-        // here comes from the page, so there is nothing to escape.
+        // Static markup, byte for byte what `AiChip` renders, `aria-label`
+        // included: without one a screen reader on a public page is read the
+        // two letters "AI" and nothing else, which names no origin and is
+        // the whole of what the chip is for. One CSS rule then serves the
+        // owner's editor and the public page alike. Nothing here comes from
+        // the page, so there is nothing to escape.
         const chip =
           live?.kind === "app"
-            ? `<span class="ai-chip" title="Built by an agent">AI</span>`
+            ? `<span class="ai-chip" title="Built by an agent" aria-label="Built by an agent">AI</span>`
             : "";
         const label = live
           ? `<span class="brain-page-ref-icon">${escapeText(live.icon || "📄")}</span> ${escapeText(live.title)}${chip}`

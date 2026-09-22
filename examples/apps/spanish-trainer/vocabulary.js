@@ -260,7 +260,9 @@ export async function readVocabulary(nodes, readPage, options) {
         used = 1;
         try {
           page = await readPage(node.id);
-        } catch (again) {
+        } catch {
+          // Refused twice. The page is counted below rather than retried
+          // again: a loop against a limiter is how an app never finishes.
           page = null;
         }
       }

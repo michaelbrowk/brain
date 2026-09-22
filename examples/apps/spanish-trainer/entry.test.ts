@@ -42,8 +42,13 @@ describe("the trainer's entry", () => {
 
   it("writes only its own Words page", () => {
     expect(entry).toContain("writePage");
-    // one write call site, and it is the Words page's id
+    // One write call site, and the id it names is the Words page's. Counting
+    // the call sites is not enough: a trainer rewritten to write its own app
+    // page, or any other id it is holding, still has exactly one of them, and
+    // `owns` on the server would be the only thing left refusing it. The
+    // target is the assertion.
     expect(entry.match(/brain\.writePage\(/g)).toHaveLength(1);
+    expect(entry).toContain("brain.writePage(settings.wordsPageId,");
     expect(entry).not.toContain("brain.createPage(");
   });
 

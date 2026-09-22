@@ -756,6 +756,11 @@ async function handleRequest(
       /^\/v1\/drafts\/(draft-[0-9a-f-]{36})\/send$/.exec(url.pathname);
     if (draftSendMatch) {
       if (method !== "POST") throw new MailHttpError(405, "method_not_allowed");
+      // The second send door, refused on the same terms as the first. A draft
+      // send reserves capacity and writes an outbox row, so letting it through
+      // while the owner has Mail off would leave the two doors disagreeing
+      // about one switch.
+      if (syncPause?.isPaused()) throw new MailHttpError(409, "sync_paused");
       const service = requireDraftService(drafts);
       const draftId = validateMailDraftId(draftSendMatch[1]);
       const mutation = validateMailDraftMutationInput(

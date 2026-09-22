@@ -1453,7 +1453,13 @@ export class SqliteMailAccountStore
   /** Whether the owner has paused this service. A `meta` row and not a new
    *  table: `initializeSchema` asserts the table set is exactly accounts,
    *  credentials and meta, and a fourth one fails the service's own startup
-   *  with `account_state_invalid`. */
+   *  with `account_state_invalid`.
+   *
+   *  A missing row, and any value this file did not write, read as running.
+   *  The fail-open is deliberate, and Brain's startup `PATCH /v1/sync` is what
+   *  repairs it: a wrong `false` costs a few seconds of syncing before Brain
+   *  says the setting again, while a wrong `true` is a mail client stuck off
+   *  with nothing in the interface to explain it. */
   readSyncPaused(): boolean {
     const row = this.requireDatabase()
       .prepare("SELECT value FROM meta WHERE key = ?")

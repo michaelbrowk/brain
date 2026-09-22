@@ -1095,9 +1095,11 @@ describe("PATCH /v1/sync", () => {
   });
 
   it("refuses a sync trigger and a send while paused, and nothing else", async () => {
+    const messages = messageServiceFixture();
+    const sendService = sendServiceFixture();
     const socketPath = await startServer(
-      messageServiceFixture(),
-      sendServiceFixture(),
+      messages,
+      sendService,
       undefined,
       pauseFixture(true),
     );
@@ -1110,6 +1112,7 @@ describe("PATCH /v1/sync", () => {
     );
     expect(sync.status).toBe(409);
     expect(sync.body).toMatchObject({ error: { code: "sync_paused" } });
+    expect(messages.sync).not.toHaveBeenCalled();
 
     const send = await requestJson(
       socketPath,
@@ -1119,6 +1122,17 @@ describe("PATCH /v1/sync", () => {
     );
     expect(send.status).toBe(409);
     expect(send.body).toMatchObject({ error: { code: "sync_paused" } });
+    // Nothing is admitted and nothing is enqueued: the send service, which is
+    // what reserves capacity and writes the outbox row, is never reached.
+    expect(sendService.send).not.toHaveBeenCalled();
+
+    // And the refusal is ahead of the body, which is the ordering the comment
+    // beside it promises. A guard moved down to the mutation callback would
+    // answer 415 here, because a request carrying no Content-Type would
+    // already have been through `readJsonBody`.
+    const bodyless = await requestJson(socketPath, "POST", "/v1/send");
+    expect(bodyless.status).toBe(409);
+    expect(bodyless.body).toMatchObject({ error: { code: "sync_paused" } });
 
     // Reads are not the pause's business: a cached thread still opens, and
     // asking what became of a letter already on the wire is a read.

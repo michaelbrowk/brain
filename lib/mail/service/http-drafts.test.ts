@@ -204,6 +204,52 @@ describe("private mail draft HTTP contract", () => {
       body: { apiVersion: 1, error: { code: "mail_draft_service_unavailable" } },
     });
   });
+
+  /** THE SECOND SEND DOOR.
+   *
+   *  A draft send is a send, and `commitDraftSend` writes an outbox row, so
+   *  the pause has to stand in front of this route exactly as it stands in
+   *  front of `/v1/send`. Two send doors answering differently to the same
+   *  switch is the shape a caller works around by accident. */
+  it("refuses a draft send while the owner has Mail paused", async () => {
+    const service = draftServiceFixture();
+    const socketPath = await startServer(service, {
+      isPaused: () => true,
+      setPaused: async () => {},
+    });
+
+    await expect(
+      requestJson(
+        socketPath,
+        "POST",
+        `/v1/drafts/${DRAFT_ID}/send`,
+        JSON.stringify(sendInput()),
+      ),
+    ).resolves.toEqual({
+      status: 409,
+      body: { apiVersion: 1, error: { code: "sync_paused" } },
+    });
+    expect(service.send).not.toHaveBeenCalled();
+
+    // Before the body is read, which is what makes "before admission" true:
+    // a refusal that came after this would answer 415 for a request carrying
+    // no Content-Type at all, and the outbox row would already exist.
+    await expect(
+      requestJson(socketPath, "POST", `/v1/drafts/${DRAFT_ID}/send`),
+    ).resolves.toMatchObject({
+      status: 409,
+      body: { error: { code: "sync_paused" } },
+    });
+
+    // Reading and editing a draft is not sending it.
+    await expect(
+      requestJson(
+        socketPath,
+        "GET",
+        `/v1/drafts/${DRAFT_ID}?accountId=${ACCOUNT_ID}`,
+      ),
+    ).resolves.toMatchObject({ status: 200 });
+  });
 });
 
 function draftServiceFixture(): MailDraftService {
@@ -295,12 +341,16 @@ function draftDto() {
   };
 }
 
-async function startServer(drafts: MailDraftService): Promise<string> {
+async function startServer(
+  drafts: MailDraftService,
+  syncPause?: Parameters<typeof createMailServiceHttpServer>[0]["syncPause"],
+): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "brain-mail-http-drafts-"));
   const socketPath = path.join(root, "mail.sock");
   const server = createMailServiceHttpServer({
     build: { commit: "dev", builtAt: "dev" },
     drafts,
+    syncPause,
   });
   running.push({ server, root });
   await new Promise<void>((resolve, reject) => {

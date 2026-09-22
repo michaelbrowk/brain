@@ -20,8 +20,18 @@ beforeEach(() => {
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
   fetchMock.mockReset();
-  fetchMock.mockResolvedValue({ ok: true, status: 200 } as Response);
+  fetchMock.mockResolvedValue(minted());
 });
+
+/** What `POST /api/app/<id>/frame` answers: a signed address to mount. The
+ *  token is opaque to the canvas, which is the point of the shape. */
+const FRAME_SRC = "/api/app/app1/t/head.body.signature/index.html";
+const minted = (src: string | null = FRAME_SRC) =>
+  ({
+    ok: true,
+    status: 200,
+    json: async () => (src === null ? {} : { src }),
+  }) as Response;
 
 const settle = () =>
   act(async () => {
@@ -65,7 +75,7 @@ afterEach(() => {
   host = null;
 });
 
-function render() {
+function render(onToast: (text: string) => void = () => {}) {
   host = document.createElement("div");
   document.body.append(host);
   act(() => {
@@ -74,7 +84,7 @@ function render() {
         node={node as never}
         liveTree={() => LIVE_TREE as never}
         onOpenPage={() => {}}
-        onToast={() => {}}
+        onToast={onToast}
       />,
     );
   });
@@ -83,20 +93,26 @@ function render() {
 
 /** Mounts and drains the preflight, so a case reads the canvas in the state
  *  it settles into rather than the one frame before it. */
-async function renderReady() {
-  const mounted = render();
+async function renderReady(onToast?: (text: string) => void) {
+  const mounted = render(onToast);
   await settle();
   return mounted;
 }
 
+const rebuildButton = (mounted: HTMLElement) =>
+  mounted.querySelector("[data-app-rebuild]") as HTMLButtonElement;
+
 describe("the app canvas", () => {
-  it("asks whether the files are there before it mounts a frame", async () => {
+  it("asks for an address before it mounts a frame", async () => {
+    // The frame's authority is in its path, so the canvas does not know where
+    // to mount it until the server says. One POST, and the answer is both the
+    // address and whether there is anything to show.
     render();
     await settle();
-    expect(fetchMock).toHaveBeenCalledWith("/api/app/app1/index.html", { method: "HEAD" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/app/app1/frame", { method: "POST" });
   });
 
-  it("says so, and offers Rebuild, when the entry is missing", async () => {
+  it("says so, and offers Rebuild, when there is no address to mount", async () => {
     fetchMock.mockResolvedValue({ ok: false, status: 404 } as Response);
     const host = render();
     await settle();
@@ -105,9 +121,20 @@ describe("the app canvas", () => {
     expect(host.querySelector("[data-app-rebuild]")).not.toBeNull();
   });
 
-  it("mounts the frame at the app's own address, sandboxed", async () => {
+  it("says the same when the answer carries no address at all", async () => {
+    fetchMock.mockResolvedValue(minted(null));
+    const host = render();
+    await settle();
+    expect(host.querySelector("iframe")).toBeNull();
+    expect(host.textContent).toContain("App files are missing. Ask your agent to rebuild the page.");
+  });
+
+  it("mounts the frame at the address it was given, sandboxed", async () => {
     const frame = (await renderReady()).querySelector("iframe") as HTMLIFrameElement;
-    expect(frame.getAttribute("src")).toBe("/api/app/app1/index.html");
+    expect(frame.getAttribute("src")).toBe(FRAME_SRC);
+    // The token is a path segment, which is what lets a relative
+    // `assets/x.png` inside the frame carry it without the document knowing.
+    expect(frame.getAttribute("src")).toContain("/t/");
     expect(frame.getAttribute("sandbox")).toBe(APP_FRAME_SANDBOX);
     expect(frame.getAttribute("sandbox")).not.toContain("allow-same-origin");
     expect(frame.getAttribute("title")).toBe("Trainer");
@@ -136,6 +163,48 @@ describe("the app canvas", () => {
 
   it("says what to do with what it copied, beside the button", async () => {
     expect((await renderReady()).textContent).toContain("Copy a prompt for your agent");
+  });
+
+  it("stops saying Copied after a couple of seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      Object.assign(navigator, { clipboard: { writeText: vi.fn(async () => {}) } });
+      const mounted = await renderReady();
+      await act(async () => {
+        rebuildButton(mounted).click();
+      });
+      expect(mounted.textContent).toContain("Copied. Paste it to your agent.");
+      await act(async () => {
+        vi.advanceTimersByTime(2_500);
+      });
+      expect(mounted.textContent).not.toContain("Copied.");
+      expect(mounted.textContent).toContain("Copy a prompt for your agent");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says so when the clipboard refuses, and puts the prompt where it can be read", async () => {
+    // A denied permission or a page that is not a secure context rejects the
+    // write. Unhandled, the owner clicks Rebuild and nothing at all happens.
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: vi.fn(async () => {
+          throw new Error("denied");
+        }),
+      },
+    });
+    const toasts: string[] = [];
+    const mounted = await renderReady((text) => toasts.push(text));
+    await act(async () => {
+      rebuildButton(mounted).click();
+    });
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]).toContain("Could not copy");
+    expect(mounted.textContent).not.toContain("Copied.");
+    expect(
+      (mounted.querySelector("[data-app-prompt]") as HTMLElement | null)?.textContent,
+    ).toBe("rebuild the page Trainer (id app1)");
   });
 
   it("keeps the phone's tab bar reserve under the frame", async () => {
@@ -172,6 +241,37 @@ describe("the app canvas", () => {
         data: { tree: [{ id: "p1", parentId: null, title: "Words" }] },
       },
     ]);
+  });
+
+  it("draws a page whose app map the tree withheld, without inventing one", async () => {
+    // `getTree` hands out `app` only when it validates, so a page carrying
+    // `kind: app` and a map this release cannot read arrives here as a node
+    // with no `app` at all. The route refuses it for the same reason, so the
+    // two ends agree: the head says the little it knows and the canvas draws
+    // the missing-files state rather than a frame onto a 404.
+    fetchMock.mockResolvedValue({ ok: false, status: 404 } as Response);
+    host = document.createElement("div");
+    document.body.append(host);
+    const withheld = { id: "app1", title: "Trainer", icon: "🃏", kind: "app" as const };
+    act(() => {
+      createRoot(host as HTMLDivElement).render(
+        <AppCanvas
+          node={withheld as never}
+          liveTree={() => []}
+          onOpenPage={() => {}}
+          onToast={() => {}}
+        />,
+      );
+    });
+    await settle();
+    expect(host.textContent).toContain("Built by an agent");
+    // No timestamp, so no separator left standing on its own beside it.
+    expect(host.querySelector("[data-app-built]")).toBeNull();
+    expect(host.textContent).toContain(
+      "App files are missing. Ask your agent to rebuild the page.",
+    );
+    expect(host.querySelector("iframe")).toBeNull();
+    expect(host.querySelector("[data-app-rebuild]")).not.toBeNull();
   });
 
   it("carries no em-dash in anything a reader sees", async () => {

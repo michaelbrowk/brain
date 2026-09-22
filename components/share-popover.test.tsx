@@ -639,6 +639,43 @@ describe("SharePopover redesign", () => {
     expect(button("Share Apartment instead")).toBeDefined();
   });
 
+  it("marks an app page on the overlap list and leaves an ordinary one unmarked", async () => {
+    // The list names pages, so it carries the same mark every other surface
+    // that names one carries. Read off `kind`, never off the title.
+    await renderAndOpen(false, {
+      onPrepareShare: vi.fn().mockResolvedValue(
+        snapshot({
+          descendantCount: 3,
+          overlappingRoots: [
+            {
+              rootId: "nested-app",
+              title: "Trainer",
+              kind: "app",
+              relation: "descendant",
+              shareExpiresAt: null,
+              shareLocked: false,
+            },
+            {
+              rootId: "nested-plain",
+              title: "AI notes",
+              relation: "descendant",
+              shareExpiresAt: null,
+              shareLocked: false,
+            },
+          ],
+        }),
+      ),
+    });
+    const rows = [
+      ...document.body.querySelectorAll<HTMLElement>(".brain-share-row-list li"),
+    ];
+    const app = rows.find((row) => row.textContent?.includes("Trainer"));
+    const plain = rows.find((row) => row.textContent?.includes("AI notes"));
+    expect(app?.querySelector(".ai-chip")?.textContent).toBe("AI");
+    expect(plain).toBeDefined();
+    expect(plain?.querySelector(".ai-chip")).toBeNull();
+  });
+
   it("promises nothing where every nested link has already expired", async () => {
     await renderAndOpen(false, {
       onPrepareShare: vi.fn().mockResolvedValue(

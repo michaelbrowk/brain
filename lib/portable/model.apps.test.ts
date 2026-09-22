@@ -138,6 +138,63 @@ describe("an app page in a portable archive", () => {
     }
   });
 
+  it("round-trips an app page whose own child is called App", async () => {
+    // `slugify("App")` is `app`, the name of the app's own file set. In the
+    // exporting notebook the child was pushed to `app-2` because the app's
+    // folder was already there. A restore creates the pages first, into a
+    // notebook where nothing holds `app/` yet, so the child took it and the
+    // metadata write that followed refused the WHOLE archive: a notebook that
+    // cannot be restored from its own backup. The app page says what it is
+    // before its children exist, so the child lands beside `app/` here too.
+    const { meta, owned } = await store.createAppPage(null, "Trainer", {
+      icon: "🃏",
+      description: "Trainer for the words under Spanish.",
+      entryHtml: ENTRY,
+      assets: [{ name: "cards/front.png", data: CARD }],
+      owns: [{ title: "App", markdown: "| word |" }],
+      state: { seen: 3 },
+      builtBy: "Claude",
+    });
+    expect(path.basename(store.resolve(owned[0].id))).not.toBe("app");
+    const { bytes } = await buildPortableArchive(store);
+
+    const otherRoot = await mkdtemp(path.join(tmpdir(), "brain-portable-apps-in-"));
+    const other = new Store(otherRoot);
+    await other.init();
+    try {
+      const { bundle } = validatePortableArchive(bytes);
+      const { rootIds } = await applyPortableBundle(other, bundle);
+      const restored = rootIds[0];
+
+      // The child survived, as a page, with a folder of its own.
+      const child = other.getTree()[0].children[0];
+      expect(other.getTree()[0].children).toHaveLength(1);
+      expect(child.title).toBe("App");
+      expect(path.basename(other.resolve(child.id))).not.toBe("app");
+
+      // And the app runs: its files are there and its map validates.
+      expect(other.readAppMeta(restored)?.builtBy).toBe("Claude");
+      expect(other.readAppMeta(restored)?.owns).toEqual([child.id]);
+      const entry = await other.readAppFile(restored, APP_ENTRY_PATH);
+      expect(entry.kind === "file" && Buffer.from(entry.data).toString("utf8")).toBe(
+        ENTRY,
+      );
+      expect(
+        (await other.readAppFile(restored, "app/assets/cards/front.png")).kind,
+      ).toBe("file");
+      expect(await other.readAppState(restored)).toEqual({ seen: 3 });
+      expect(meta.id).not.toBe(restored);
+
+      // A reopen reads the same tree back off disk.
+      const again = new Store(otherRoot);
+      await again.init();
+      expect(again.getTree()[0].children.map((node) => node.title)).toEqual(["App"]);
+      expect(again.readAppMeta(restored)).not.toBeNull();
+    } finally {
+      await rm(otherRoot, { recursive: true, force: true });
+    }
+  });
+
   it("still reads a version 2 archive, which has no app key at all", async () => {
     await store.createPage(null, "Spanish", { markdown: "hola" });
     const { bytes, manifest } = await buildPortableArchive(store);
@@ -159,5 +216,60 @@ describe("an app page in a portable archive", () => {
     await seedApp();
     const { bytes } = await buildPortableArchive(store);
     expect(() => validatePortableArchive(downgradeManifest(bytes))).toThrow();
+  });
+
+  it("refuses a state file that is not JSON, before anything is created", async () => {
+    // The refusal belongs to validation, where every other malformed archive
+    // is caught and named. Left to the restore it arrived as a bare
+    // SyntaxError out of `applyPortableBundle`, after the import had begun,
+    // and the owner read a parser's words about a file they never saw.
+    await seedApp();
+    const { bytes } = await buildPortableArchive(store);
+    const entries = readPortableArchive(bytes);
+    const statePath = [...entries.keys()].find((key) => key.endsWith("/state.json"))!;
+    const broken = createPortableArchive(
+      [...entries].map(([entryPath, data]) => ({
+        path: entryPath,
+        data: entryPath === statePath ? new TextEncoder().encode("not json{") : data,
+      })),
+    );
+
+    expect(() => validatePortableArchive(broken)).toThrow(/state/i);
+  });
+
+  it("refuses one app page that claims another app page's asset", async () => {
+    // The case the same-folder check exists for, and the only one that
+    // reaches it. A traversal in a path is refused by the schema's regex
+    // first, so a path that is perfectly well formed but names a DIFFERENT
+    // page's folder is what shows the check doing work of its own: page A
+    // claiming page B's asset would restore B's file under A.
+    await seedApp();
+    await store.createAppPage(null, "Second", {
+      description: "d",
+      entryHtml: ENTRY,
+      assets: [{ name: "b.png", data: CARD }],
+      builtBy: "Claude",
+    });
+    const { bytes } = await buildPortableArchive(store);
+
+    const crossClaimed = rewriteManifest(bytes, (manifest) => {
+      const pages = manifest.pages as {
+        app?: {
+          entryPath: string;
+          assets: { name: string; archivePath: string }[];
+        };
+      }[];
+      const apps = pages.filter((page) => page.app !== undefined);
+      expect(apps).toHaveLength(2);
+      const [first, second] = apps;
+      // Well formed, matches the schema, and names the other page's folder.
+      first.app!.assets = [
+        { name: "stolen.png", archivePath: second.app!.assets[0].archivePath },
+      ];
+    });
+
+    expect(() => validatePortableArchive(crossClaimed)).toThrow(
+      /outside its own folder/,
+    );
   });
 });

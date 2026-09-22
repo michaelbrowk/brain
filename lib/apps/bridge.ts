@@ -117,14 +117,31 @@ export function appRefusal(
 }
 
 export type AppEvent =
-  | { readonly v: typeof BRIDGE_VERSION; readonly event: "theme"; readonly theme: AppTheme }
+  | {
+      readonly v: typeof BRIDGE_VERSION;
+      readonly event: "theme";
+      readonly theme: AppTheme;
+      /** The values, not only the name. Spec §6 hands the frame Brain's
+       *  tokens at `hello` and again here, because the values are what
+       *  changed: an app told only "dark" would repaint with the light
+       *  palette it cached at `hello`. */
+      readonly tokens: Readonly<Record<string, string>>;
+    }
   | { readonly v: typeof BRIDGE_VERSION; readonly event: "visibility"; readonly visible: boolean };
 
 /** Nothing asked for an event, so it carries no request id. */
-export function appEvent(event: "theme", theme: AppTheme): AppEvent;
+export function appEvent(
+  event: "theme",
+  theme: AppTheme,
+  tokens: Readonly<Record<string, string>>,
+): AppEvent;
 export function appEvent(event: "visibility", visible: boolean): AppEvent;
-export function appEvent(event: "theme" | "visibility", value: AppTheme | boolean): AppEvent {
+export function appEvent(
+  event: "theme" | "visibility",
+  value: AppTheme | boolean,
+  tokens?: Readonly<Record<string, string>>,
+): AppEvent {
   return event === "theme"
-    ? { v: BRIDGE_VERSION, event, theme: value as AppTheme }
+    ? { v: BRIDGE_VERSION, event, theme: value as AppTheme, tokens: tokens ?? {} }
     : { v: BRIDGE_VERSION, event, visible: value as boolean };
 }

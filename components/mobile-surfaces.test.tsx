@@ -598,18 +598,22 @@ describe("mobile navigation surfaces", () => {
     expect(group.every((el) => el.tabIndex === 0)).toBe(true);
   });
 
-  it("sizes the bar by five 56px slots and leaves the plus its inset", () => {
+  it("sizes the bar by 56px slots, as many as the modules ask for", () => {
     const css = readFileSync(
       path.join(process.cwd(), "app", "globals.css"),
       "utf8",
     );
     const slot = /--tabbar-slot:\s*(\d+)px/.exec(css);
+    const defaultSlots = /--tabbar-slots:\s*(\d+)/.exec(css);
     const tracks =
-      /grid-template-columns:\s*repeat\((\d+), minmax\(44px, var\(--tabbar-slot\)\)\)/.exec(
+      /grid-template-columns:\s*repeat\(var\(--tabbar-slots\), minmax\(44px, var\(--tabbar-slot\)\)\)/.test(
         css,
       );
     expect(slot?.[1]).toBe("56");
-    expect(tracks?.[1]).toBe("5");
+    // Five is the default the rule carries; the component overrides it per
+    // render, and e2e/modules.spec.ts reads the computed value at 390.
+    expect(defaultSlots?.[1]).toBe("5");
+    expect(tracks).toBe(true);
     // Five of those plus the row's own 4px ends is the 288 the DOM renders,
     // read at every width by e2e/mail-shots.spec.ts. jsdom lays nothing out,
     // so this case pins the figures the two objects are built from and the

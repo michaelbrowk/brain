@@ -413,6 +413,15 @@ export interface StoreOptions {
    *  the same on both sides of an API call, or "row n" of a request names a
    *  different row on the disk. Null means only `/p/<id>` is a page link. */
   publicOrigin?: string | null;
+  /** Whether the Tasks module is on. Read at reconcile time rather than
+   *  captured, because the Store is a process-wide singleton on globalThis
+   *  (`lib/store/index.ts`) with no invalidation: a boolean taken at
+   *  construction would outlive every switch flip until a restart.
+   *  Synchronous by signature, so the guard cannot quietly become a file read
+   *  on the page-save path; `lib/store/index.ts` gives it the memoised peek.
+   *  Absent means on, which is what every existing caller and every test that
+   *  has no opinion gets. */
+  tasksEnabled?: () => boolean;
 }
 
 /** Fractional-index keys MUST be compared by code point (ASCII), never
@@ -528,6 +537,7 @@ function rethrowSharedAttachmentFailure(error: unknown): never {
 export class Store {
   readonly root: string;
   private readonly publicOrigin: string | null;
+  private readonly tasksEnabled: () => boolean;
   private readonly notionStagingRoot: string;
   private readonly notionStagingLimits: NotionStagingLimits;
   private index = new Map<string, Entry>();
@@ -613,6 +623,7 @@ export class Store {
   constructor(root: string, options: StoreOptions = {}) {
     this.root = path.resolve(/* turbopackIgnore: true */ root);
     this.publicOrigin = options.publicOrigin ?? null;
+    this.tasksEnabled = options.tasksEnabled ?? (() => true);
     const rootKey = createHash("sha256").update(this.root).digest("hex").slice(0, 20);
     this.notionStagingRoot = path.join(
       os.tmpdir(),
@@ -7827,6 +7838,18 @@ export class Store {
     markdown: string,
     src?: string,
   ): Promise<void> {
+    // TASKS OFF: THE NOTE IS THE ONLY THING A TICK WRITES.
+    //
+    // Every page save runs this, from all eight call sites. Without the
+    // guard a `- [x]` typed while the module is off would rewrite the record
+    // under `_tasks/` and emit a `task` event for a surface nobody can see,
+    // and a line whose checkbox the writer deleted would detach its record.
+    // Skipped whole: nothing is written, nothing is detached, nothing is
+    // emitted, and the task files are exactly what the switch found. The next
+    // save of this note after the module comes back reconciles it, and the
+    // existing checkbox-aware merge takes the note's state as the truth for
+    // the tick, which is the whole of "nothing is lost and nothing conflicts".
+    if (!this.tasksEnabled()) return;
     const records = this.taskIndex.byPage(pageId);
     if (records.length === 0) return;
     const at = now();

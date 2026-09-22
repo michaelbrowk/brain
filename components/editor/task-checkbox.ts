@@ -1816,12 +1816,35 @@ export const ensureTaskCommand = $command(
  *  the second, whatever list the line was standing in. */
 export const toggleTaskCommand = $command("ToggleTask", () => () => taskCommand("toggle", null));
 
-export const taskCheckbox = [
+/** WHAT A CHECKBOX LINE NEEDS TO BE A CHECKBOX, AND NOTHING MORE.
+ *
+ *  `taskCheckboxView` is the node view that draws the box and takes the
+ *  click, `taskSplitKeymap` is Enter on a task line, and
+ *  `orderedTaskRebullet` keeps a checkbox inside an ordered list drawn as
+ *  one. None of the three knows a record exists. This half is applied
+ *  whatever the Tasks module says, because a `- [ ]` line is ordinary
+ *  Markdown and must render and tick with Tasks off: dropping it turned
+ *  every checkbox in every note into a dead bullet. */
+export const taskCheckboxMarkdown = [
   taskCheckboxView,
   taskSplitKeymap,
-  taskPromote,
   orderedTaskRebullet,
+];
+
+/** THE RECORD HALF, applied only while Tasks are on.
+ *
+ *  `taskPromote` is the "+ Task" hover word, the mark decorations and the
+ *  popover on a promoted line; `taskDocNotifier` tells the surfaces a task
+ *  line moved; the two commands are what the floating toolbar's Task button
+ *  and the slash menu's Task item run. With Tasks off none of the four has a
+ *  surface to reach, and the two commands are unregistered, which is why the
+ *  toolbar item and the slash item are hidden in the same commit rather than
+ *  left to call a command that is not there. */
+export const taskCheckboxRecords = [
+  taskPromote,
   taskDocNotifier,
   ensureTaskCommand,
   toggleTaskCommand,
 ];
+
+export const taskCheckbox = [...taskCheckboxMarkdown, ...taskCheckboxRecords];

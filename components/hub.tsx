@@ -233,6 +233,7 @@ export function Hub({
   taskRefreshToken = 0,
   onOpenTasks,
   onOpenMail,
+  taskCaptureEnabled = true,
   onToast,
   pageTitleOf,
 }: {
@@ -244,6 +245,9 @@ export function Hub({
   taskRefreshToken?: number;
   onOpenTasks?: () => void;
   onOpenMail?: () => void;
+  /** The Tasks module, for the capture field's second destination. Off and
+   *  the field makes pages only: no Task control and no ⌘⏎. */
+  taskCaptureEnabled?: boolean;
   onToast?: (title: string, options?: ToastOptions) => void;
   /** A note's title by id. A detached task's row names the note its line left,
    *  and Home reads it from the same lookup the Tasks column does. */
@@ -483,8 +487,6 @@ export function Hub({
       : { duration: DUR.base, ease: EASE_OUT, delay: 0.03 * i },
   });
 
-  const openTasks = () => onOpenTasks?.();
-
   return (
     <div className="brain-page-top mx-auto max-w-[720px] px-5 pb-40 md:px-6">
       {/* NOTHING STANDS ABOVE THE CAPTURE FIELD, at any width. Home opened
@@ -508,25 +510,27 @@ export function Hub({
           onKeyDown={(e) => {
             if (e.key !== "Enter" || !draft.trim()) return;
             e.preventDefault();
-            // ⌘⏎ is the keyboard form of the control beside the field, and
-            // plain Enter still makes a page. Two gestures, two destinations,
-            // and neither one has to be guessed at.
-            if (e.metaKey || e.ctrlKey) submitTask();
+            // ⌘⏎ is the keyboard form of the control beside the field. With
+            // Tasks off the field makes pages only, so both gestures land in
+            // the same place rather than one of them doing nothing.
+            if (taskCaptureEnabled && (e.metaKey || e.ctrlKey)) submitTask();
             else void submitCapture();
           }}
           placeholder="New thought…"
           aria-label="New thought"
           trailing={
-            <button
-              type="button"
-              data-hub-capture-task
-              disabled={!draft.trim() || capturePending}
-              title={newTaskTitle}
-              onClick={submitTask}
-              className="rounded-xs px-1.5 py-0.5 text-[12px] text-ink-2 transition-colors hover:bg-fill-hover disabled:pointer-events-none disabled:text-ink-3"
-            >
-              Task
-            </button>
+            taskCaptureEnabled ? (
+              <button
+                type="button"
+                data-hub-capture-task
+                disabled={!draft.trim() || capturePending}
+                title={newTaskTitle}
+                onClick={submitTask}
+                className="rounded-xs px-1.5 py-0.5 text-[12px] text-ink-2 transition-colors hover:bg-fill-hover disabled:pointer-events-none disabled:text-ink-3"
+              >
+                Task
+              </button>
+            ) : undefined
           }
         />
         {flight !== null && !flight.landed && (
@@ -575,15 +579,17 @@ export function Hub({
           browser's clock has been read, the mail block where no account is
           connected. So neither can put a heading over a question it has not
           asked yet. */}
-      <HubToday
-        refreshToken={taskRefreshToken}
-        onOpenTasks={openTasks}
-        onToast={onToast}
-        flight={flight?.landed ? flight.text : null}
-        capturedId={capturedId}
-        pageTitleOf={pageTitleOf}
-        notebookEmpty={pages.length === 0}
-      />
+      {onOpenTasks && (
+        <HubToday
+          refreshToken={taskRefreshToken}
+          onOpenTasks={onOpenTasks}
+          onToast={onToast}
+          flight={flight?.landed ? flight.text : null}
+          capturedId={capturedId}
+          pageTitleOf={pageTitleOf}
+          notebookEmpty={pages.length === 0}
+        />
+      )}
       {onOpenMail && <HubMail onOpenMail={onOpenMail} />}
 
       {/* a brand-new notebook teaches the interface instead of claiming a

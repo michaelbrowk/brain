@@ -192,12 +192,16 @@ export function FloatingToolbar({
   container,
   pages = [],
   ai = false,
+  tasks = true,
 }: {
   container: React.RefObject<HTMLDivElement | null>;
   pages?: PageRef[];
   /** Renders the AI control. Without it the /api/ai call has no way in:
    *  the button that opens the panel is not in the DOM. */
   ai?: boolean;
+  /** The Tasks module. Off and the Task button is absent, because the
+   *  command it runs is not registered with the editor at all. */
+  tasks?: boolean;
 }) {
   const [linkOpen, setLinkOpen] = useState(false);
   const [colorOpen, setColorOpen] = useState(false);
@@ -689,20 +693,22 @@ export function FloatingToolbar({
                   <TB label="Numbered list" onRun={() => run(wrapInOrderedListCommand.key)}>
                     <Tt>1.</Tt>
                   </TB>
-                  <TB
-                    label="Task"
-                    // Two controls are named Task, and both are right: this
-                    // one turns the line the caret is in into a checkbox, the
-                    // slash menu's inserts one. The tooltip says which, and
-                    // says why instead when a quote refuses the line.
-                    title={inQuote ? "A task cannot live inside a quote" : "Task line"}
-                    active={taskActive}
-                    disabled={inQuote}
-                    pressed={taskActive}
-                    onRun={() => run(toggleTaskCommand.key)}
-                  >
-                    <Icon name="checklist-linear" size={15} />
-                  </TB>
+                  {tasks && (
+                    <TB
+                      label="Task"
+                      // Two controls are named Task, and both are right: this
+                      // one turns the line the caret is in into a checkbox, the
+                      // slash menu's inserts one. The tooltip says which, and
+                      // says why instead when a quote refuses the line.
+                      title={inQuote ? "A task cannot live inside a quote" : "Task line"}
+                      active={taskActive}
+                      disabled={inQuote}
+                      pressed={taskActive}
+                      onRun={() => run(toggleTaskCommand.key)}
+                    >
+                      <Icon name="checklist-linear" size={15} />
+                    </TB>
+                  )}
                   <TB label="Quote" onRun={() => run(wrapInBlockquoteCommand.key)}>
                     <Tt>“</Tt>
                   </TB>

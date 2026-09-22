@@ -192,6 +192,13 @@ button. To run without it, delete the `mail` service and web's
 `depends_on: [mail]` line from the compose file — Compose refuses a
 `depends_on` that names a service the file no longer has.
 
+**Settings → Modules** turns Mail or Tasks off for this installation. Off means
+hidden and stopped, never deleted: Mail keeps its accounts, its tokens and its
+cache and stops syncing and sending, Tasks keeps every record and every
+checkbox line in every note and stops drawing a surface, firing a reminder or
+answering a tool. A checkbox in a note is ordinary Markdown either way and
+keeps working. Turning a module back on restores everything as it was.
+
 Would rather run Brain under systemd than in containers? `docs/operations.md`
 is that path start to finish, and it says which of its steps a new host skips.
 

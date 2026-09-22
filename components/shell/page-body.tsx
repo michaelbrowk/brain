@@ -91,6 +91,10 @@ export interface PageBodyProps {
   onCreatePageAtCursor: NonNullable<EditorProps["onCreatePageAtCursor"]>;
   /** Children listed under the editor (collection rows excluded). */
   subpages: readonly TreeNode[];
+  /** The Tasks module. Off and the editor keeps the Markdown half of the
+   *  checkbox (a `- [ ]` line still draws and still ticks) and drops the
+   *  record half, so nothing offers to promote a line to a task. */
+  tasksEnabled: boolean;
 }
 
 export function PageBody({
@@ -122,6 +126,7 @@ export function PageBody({
   onRequestRemovePageRef,
   onCreatePageAtCursor,
   subpages,
+  tasksEnabled,
 }: PageBodyProps) {
   if (isCollection && currentNode) {
     return (
@@ -180,6 +185,7 @@ export function PageBody({
           }
           onCreatePageAtCursor={onCreatePageAtCursor}
           capabilities={OWNER_CAPABILITIES}
+          tasksEnabled={tasksEnabled}
         />
         <Subpages
           pages={subpages}

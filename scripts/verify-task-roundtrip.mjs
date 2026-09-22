@@ -146,7 +146,7 @@ function diff(label, want, got) {
 async function main() {
   const dom = await installDomGlobals();
   const loader = await createBundledEditorSourceLoader(repoRoot, "brain-task-roundtrip-");
-  const { taskCheckbox } = await loader.load(
+  const { taskCheckbox, taskCheckboxMarkdown } = await loader.load(
     "components/editor/task-checkbox.ts",
     "task-checkbox.mjs",
   );
@@ -161,7 +161,10 @@ async function main() {
 
   // One editor per run, torn down after. `press` ticks the nth control before
   // serializing, which is the only way the transaction path gets tested.
-  const run = async (md, press) => {
+  // `bundle` is which half of the checkbox goes in: the whole thing, or the
+  // Markdown half alone, which is what an installation with the Tasks module
+  // off loads (components/editor/milkdown-editor.tsx).
+  const run = async (md, press, bundle = taskCheckbox) => {
     const root = document.createElement("div");
     document.body.append(root);
     let editor = null;
@@ -173,14 +176,18 @@ async function main() {
         })
         .use(commonmark)
         .use(gfm)
-        .use(taskCheckbox)
+        .use(bundle)
         .create();
       const controls = root.querySelectorAll("button[role='checkbox']");
       if (press !== undefined) {
         if (!controls[press]) throw new Error(`no control at index ${press}`);
         controls[press].click();
       }
-      return { md: editor.action(getMarkdown()), boxes: controls.length };
+      return {
+        md: editor.action(getMarkdown()),
+        boxes: controls.length,
+        marks: root.querySelectorAll(".brain-task-mark").length,
+      };
     } finally {
       if (editor) await editor.destroy();
       root.remove();
@@ -188,7 +195,7 @@ async function main() {
   };
 
   let failures = 0;
-  const total = CASES.length + TOGGLES.length;
+  const total = CASES.length + TOGGLES.length * 2;
   try {
     for (const c of CASES) {
       try {
@@ -238,6 +245,47 @@ async function main() {
       } catch (e) {
         failures += 1;
         console.log(`ERR  ${t.name}: ${e.message?.slice(0, 200)}`);
+      }
+    }
+
+    // A CHECKBOX IS ORDINARY MARKDOWN, AND THE TASKS MODULE DOES NOT OWN IT.
+    //
+    // With the module off the editor loads `taskCheckboxMarkdown` alone, so
+    // every toggle above has to behave identically: the box draws, the press
+    // moves one bracket, the serializer is still a fixed point. What is gone
+    // is the record half, and the proof of that is the promote mark: it is
+    // `taskPromote`'s decoration, and with the Markdown half alone there is
+    // nothing to draw it. Dropping the whole bundle once turned every
+    // checkbox line in every note into a dead bullet, which is the bug this
+    // leg exists to keep out.
+    for (const t of TOGGLES) {
+      const name = `${t.name} (Tasks off)`;
+      try {
+        const pressed = await run(t.md, t.press, taskCheckboxMarkdown);
+        if (pressed.md !== t.want) {
+          failures += 1;
+          console.log(`DIFF ${name}`);
+          diff("toggle", t.want, pressed.md);
+          continue;
+        }
+        if (pressed.marks !== 0) {
+          failures += 1;
+          console.log(
+            `DIFF ${name}: the record half is absent, so no promote mark may be drawn (found ${pressed.marks})`,
+          );
+          continue;
+        }
+        const again = await run(pressed.md, undefined, taskCheckboxMarkdown);
+        if (again.md !== pressed.md) {
+          failures += 1;
+          console.log(`DRIFT ${name} (serializer is not a fixed point)`);
+          diff("idempotency", pressed.md, again.md);
+          continue;
+        }
+        console.log(`OK   ${name}`);
+      } catch (e) {
+        failures += 1;
+        console.log(`ERR  ${name}: ${e.message?.slice(0, 200)}`);
       }
     }
   } finally {

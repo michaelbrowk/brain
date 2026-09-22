@@ -1,7 +1,11 @@
 import { NextRequest } from "next/server";
 import { unstable_doesMiddlewareMatch } from "next/experimental/testing/server";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createSession, createShareToken } from "@/lib/auth";
+import { resetOwnerSettingsCache, setModules } from "@/lib/owner-settings";
 import { config, proxy } from "./proxy";
 
 describe("proxy authentication boundaries", () => {
@@ -238,5 +242,69 @@ describe("the /api/share-edit prefix", () => {
       );
       expect(res.status, `${method} ${path}`).toBe(401);
     }
+  });
+});
+
+describe("the module gate", () => {
+  let dir: string;
+
+  beforeEach(async () => {
+    vi.stubEnv("AUTH_SECRET", "middleware-test-secret");
+    dir = await fs.mkdtemp(path.join(os.tmpdir(), "brain-proxy-modules-"));
+    process.env.BRAIN_SETTINGS_STATE_DIR = dir;
+    resetOwnerSettingsCache(dir);
+  });
+
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    delete process.env.BRAIN_SETTINGS_STATE_DIR;
+    resetOwnerSettingsCache(dir);
+    await fs.rm(dir, { recursive: true, force: true });
+  });
+
+  async function ask(pathname: string) {
+    const session = await createSession();
+    return proxy(
+      new NextRequest(`https://brain.test${pathname}`, {
+        headers: { cookie: `brain_session=${session}` },
+      }),
+    );
+  }
+
+  it("lets a task route through while Tasks are on", async () => {
+    expect((await ask("/api/tasks?today=2026-09-22")).status).toBe(200);
+  });
+
+  it("refuses every task route with a 409 that names the module", async () => {
+    await setModules({ tasks: false }, dir);
+    for (const pathname of ["/api/tasks", "/api/tasks/task-1"]) {
+      const response = await ask(pathname);
+      expect(response.status, pathname).toBe(409);
+      expect(await response.json()).toEqual({ error: "module_off", module: "tasks" });
+    }
+  });
+
+  // The wall comes first: an off module must not tell a stranger anything an
+  // on one would not.
+  it("answers 401 before 409 for a request with no session", async () => {
+    await setModules({ tasks: false }, dir);
+    const response = await proxy(new NextRequest("https://brain.test/api/tasks"));
+    expect(response.status).toBe(401);
+  });
+
+  it("leaves every other route alone", async () => {
+    await setModules({ tasks: false }, dir);
+    expect((await ask("/api/settings/modules")).status).toBe(200);
+    expect((await ask("/api/tree")).status).toBe(200);
+  });
+
+  // The MCP endpoint answers in a tool's own shape, not in HTTP, so it is
+  // past this gate by the time the module matters.
+  it("does not touch the MCP endpoint", async () => {
+    await setModules({ tasks: false }, dir);
+    const response = await proxy(
+      new NextRequest("https://brain.test/api/mcp", { method: "POST" }),
+    );
+    expect(response.status).not.toBe(409);
   });
 });

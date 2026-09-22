@@ -39,15 +39,23 @@ import {
 import { TEMPLATES, requestTemplateCaret, type Template } from "@/lib/templates";
 
 import { useMailComposeAvailable } from "./mail-compose-available";
+import { defaultMailSurfaceClient } from "./mail-surface-client";
 import { useSheetGesture } from "./use-sheet-gesture";
 import { useDeferredMenuAction } from "./ui/deferred-menu-action";
 import { Icon } from "./ui/icon";
+
+/** A client that answers "no accounts" without a request, for a menu whose
+ *  Mail module is off. The hook is still called, in the same order, every
+ *  render: what changes is what it asks. */
+const NO_MAIL_ACCOUNTS = { loadAccounts: async () => [] };
 
 export function NewMenu({
   children,
   onPickTemplate,
   onNewTask,
   onNewMessage,
+  taskEnabled = true,
+  mailEnabled = true,
 }: {
   children: React.ReactNode;
   /** May resolve to the created page id; a template page then opens with the
@@ -55,11 +63,20 @@ export function NewMenu({
   onPickTemplate: (t: Template) => void | Promise<string | null>;
   onNewTask: () => void;
   onNewMessage: () => void;
+  /** The module switches, defaulting to on so a caller that has no opinion
+   *  (a test, the share island) is unchanged. `mailEnabled` is a second lock
+   *  and not a replacement for `canSend` below: with Mail off the accounts
+   *  request answers 409 and `canSend` would come back false anyway, but a
+   *  row hidden because a request failed is hidden for the wrong reason. */
+  taskEnabled?: boolean;
+  mailEnabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const reduce = useReducedMotion() ?? false;
   const sheet = useSheetGesture();
-  const canSend = useMailComposeAvailable();
+  const canSend = useMailComposeAvailable(
+    mailEnabled ? defaultMailSurfaceClient : NO_MAIL_ACCOUNTS,
+  );
   const dragControls = useDragControls();
   const sheetY = useMotionValue(0);
   const sheetRef = useRef<HTMLDivElement | null>(null);
@@ -89,14 +106,16 @@ export function NewMenu({
       <p className="brain-menu-label">New</p>
       {/* The glyph each surface already wears: the tab bar's Tasks slot and
           the sidebar's Mail row. One surface, one drawing. */}
-      <Dropdown.Item
-        className="brain-menu-item"
-        onSelect={() => focusAction.defer(onNewTask)}
-      >
-        <Icon name="checklist-linear" size={16} className="brain-menu-icon" />
-        Task
-      </Dropdown.Item>
-      {canSend && (
+      {taskEnabled && (
+        <Dropdown.Item
+          className="brain-menu-item"
+          onSelect={() => focusAction.defer(onNewTask)}
+        >
+          <Icon name="checklist-linear" size={16} className="brain-menu-icon" />
+          Task
+        </Dropdown.Item>
+      )}
+      {mailEnabled && canSend && (
         <Dropdown.Item
           className="brain-menu-item"
           onSelect={() => focusAction.defer(onNewMessage)}

@@ -11,8 +11,24 @@ export interface StoreEvent {
    *  live stream to an open tab (app/api/events/route.ts) and a second one
    *  would be a second reconnect, a second replay cursor and a second
    *  heartbeat for one bell. A client has to skip it the way it skips `task`,
-   *  or the bell refetches the page tree. */
-  type: "write" | "create" | "move" | "delete" | "meta" | "task" | "notification";
+   *  or the bell refetches the page tree.
+   *
+   *  `modules` carries the owner's module switches after a change. It reaches
+   *  the same emitter the task and notification events do, for the same
+   *  reason: there is one live stream to an open tab
+   *  (app/api/events/route.ts), and a second one would be a second reconnect,
+   *  a second replay cursor and a second heartbeat for one pair of booleans.
+   *  A client reads the booleans off the event rather than asking, and
+   *  returns without refreshing the tree, which nothing here touched. */
+  type:
+    | "write"
+    | "create"
+    | "move"
+    | "delete"
+    | "meta"
+    | "task"
+    | "notification"
+    | "modules";
   id: string;
   /** rev of the content after a write — lets clients skip a GET when they
    *  already hold this rev */
@@ -20,6 +36,10 @@ export interface StoreEvent {
   /** originating client's id (x-brain-client header). A client ignores its own
    *  echo instead of round-tripping a reload + rev-conflict toast at itself. */
   src?: string;
+  /** Only on a `modules` event: what stands after the change. It is emitted
+   *  with no `src`, so the shell's own-echo guard passes it to every tab, the
+   *  one that flipped the switch included. */
+  modules?: { mail: boolean; tasks: boolean };
 }
 
 export interface SequencedStoreEvent extends StoreEvent {

@@ -71,9 +71,15 @@ function Sentence({ children }: { children: React.ReactNode }) {
 }
 
 export function NotificationsSection({
+  modules,
   onToast,
   onOpenSection,
 }: {
+  /** A kind whose module is off has no row: the switch that would turn its
+   *  push on cannot produce one, and a control that can only do nothing is
+   *  worse than no control. The preference itself is untouched, so turning
+   *  the module back on restores the row exactly as it was. */
+  modules: { mail: boolean; tasks: boolean };
   onToast: (title: string) => void;
   /** The surface's own section change, handed down by `settings-surface`. The
    *  zone row quotes a setting Account owns, and reaching it used to be
@@ -376,12 +382,16 @@ export function NotificationsSection({
 
       <div>
         <SettingsGroup title="What gets pushed">
-          <SettingsRow label="Task reminders" hint="A reminder you set on a task">
-            {segment("task-reminder", "Task reminders")}
-          </SettingsRow>
-          <SettingsRow label="New mail" hint="Mail from a person, not from a list">
-            {segment("mail-new", "New mail")}
-          </SettingsRow>
+          {modules.tasks && (
+            <SettingsRow label="Task reminders" hint="A reminder you set on a task">
+              {segment("task-reminder", "Task reminders")}
+            </SettingsRow>
+          )}
+          {modules.mail && (
+            <SettingsRow label="New mail" hint="Mail from a person, not from a list">
+              {segment("mail-new", "New mail")}
+            </SettingsRow>
+          )}
           {kindProblem && (
             <SettingsRow stack>
               <p role="alert" className="max-w-[56ch] text-caption leading-relaxed text-ink-2">

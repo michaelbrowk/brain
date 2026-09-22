@@ -51,6 +51,9 @@ interface Item {
   imageUpload?: boolean;
   /** Creates a child page and replaces the slash trigger with its page-ref. */
   newPage?: boolean;
+  /** Runs a command the records half of the checkbox bundle registers, so it
+   *  is absent while the Tasks module is off. */
+  task?: boolean;
 }
 
 const COLUMNS_MARKDOWN = [
@@ -84,7 +87,7 @@ const ITEMS: Item[] = [
   { label: "Heading 3", icon: "text-bold-linear", glyph: "H3", keywords: "h3 heading", command: wrapInHeadingCommand, payload: 3 },
   { label: "Bullet list", icon: "list-linear", keywords: "bullet list unordered", command: wrapInBulletListCommand },
   { label: "Numbered list", icon: "list-arrow-down-linear", keywords: "numbered ordered list", command: wrapInOrderedListCommand },
-  { label: "Task", icon: "checklist-linear", keywords: "task todo to-do checkbox check задача чекбокс", command: ensureTaskCommand },
+  { label: "Task", icon: "checklist-linear", keywords: "task todo to-do checkbox check задача чекбокс", command: ensureTaskCommand, task: true },
   { label: "Quote", icon: "text-field-linear", keywords: "quote blockquote", command: wrapInBlockquoteCommand },
   { label: "Callout", icon: "sticker-smile-circle-2-linear", keywords: "callout note tip info", command: insertCalloutCommand },
   { label: "Toggle", icon: "alt-arrow-right-linear", keywords: "toggle collapsible details disclosure", command: insertToggleCommand },
@@ -105,15 +108,24 @@ export interface SlashMenuCapabilities {
   /** The "New page" entry. The handler that creates it is a separate prop;
    *  without both the row is absent rather than a click that does nothing. */
   createPage?: boolean;
+  /** The Tasks module, defaulting to on. Off and the "Task" entry is absent,
+   *  because the command it runs is not registered with the editor at all. */
+  tasks?: boolean;
 }
 
 /** Absent capability, absent entry. A visitor's menu is the owner's menu
  *  with the AI and upload rows missing, not the same rows refusing. */
-export function slashMenuItems({ ai, upload, createPage }: SlashMenuCapabilities) {
+export function slashMenuItems({
+  ai,
+  upload,
+  createPage,
+  tasks = true,
+}: SlashMenuCapabilities) {
   return ITEMS.filter(
     (item) =>
       (item.newPage ? !!createPage : true) &&
       (item.aiMode ? !!ai : true) &&
+      (item.task ? tasks : true) &&
       (item.fileAttachment || item.imageUpload ? !!upload : true),
   );
 }
@@ -175,6 +187,7 @@ export function SlashMenu({
   ai,
   upload,
   createPage,
+  tasks = true,
 }: SlashMenuCapabilities & {
   container: React.RefObject<HTMLDivElement | null>;
   onCreatePageAtCursor?: (
@@ -256,8 +269,11 @@ export function SlashMenu({
   }, [update]);
 
   const results = useMemo(
-    () => (state ? visibleSlashItems(slashMenuItems({ ai, upload, createPage }), state) : []),
-    [state, ai, upload, createPage],
+    () =>
+      state
+        ? visibleSlashItems(slashMenuItems({ ai, upload, createPage, tasks }), state)
+        : [],
+    [state, ai, upload, createPage, tasks],
   );
 
   const run = useCallback(

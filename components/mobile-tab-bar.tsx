@@ -6,6 +6,9 @@ import { NewMenu } from "./new-menu";
 import { Icon } from "./ui/icon";
 
 interface MobileTabBarProps {
+  /** Which modules this installation draws. The bar is five slots with both
+   *  on, four with one off, three with both. */
+  modules: { mail: boolean; tasks: boolean };
   homeActive: boolean;
   searchActive: boolean;
   tasksActive: boolean;
@@ -42,10 +45,15 @@ const items = [
   { key: "mail", label: "Mail", icon: "letter" },
 ] as const;
 
+/** What `--tabbar-slots` already is in `app/globals.css`. A bar of this many
+ *  writes no style of its own. */
+const DEFAULT_SLOTS = 5;
+
 /** Mobile-first primary navigation: TWO objects on one line at the bottom
- *  inset, both 54 tall. The bar stands on the left inset, sized by its five
- *  slots rather than by the window (DESIGN.md v2 → Geometry: what floats is
- *  sized by its content); New stands on the right one as an ink circle,
+ *  inset, both 54 tall. The bar stands on the left inset, sized by its slots
+ *  rather than by the window (DESIGN.md v2 → Geometry: what floats is sized
+ *  by its content), and how many slots there are is what the module switches
+ *  change; New stands on the right one as an ink circle,
  *  the surface's one ink-filled control (§2 → Primary), wearing the bare plus
  *  the desktop circle wears for the same act and opening the same menu it
  *  opens: a task, a message or a page. New was a slot in the middle of
@@ -62,9 +70,10 @@ const items = [
  *  The canvas passes under both and the material blurs on its own, with no
  *  hairline and no edge band. Search and Pages render their own copy inside
  *  their focus scope, with the same positions and the same material, so the
- *  line looks and sits identically whichever of the five tabs is up; desktop
+ *  line looks and sits identically whichever tab is up; desktop
  *  keeps its sidebar. */
 export function MobileTabBar({
+  modules,
   homeActive,
   searchActive,
   tasksActive,
@@ -82,16 +91,34 @@ export function MobileTabBar({
   onPages,
   onMail,
 }: MobileTabBarProps) {
+  // The order is the array's; a module that is off takes its slot out rather
+  // than dimming it, the way the Message row in the menu below already does.
+  const shown = items.filter(
+    (item) =>
+      (item.key !== "tasks" || modules.tasks) &&
+      (item.key !== "mail" || modules.mail),
+  );
   return (
     <>
       <nav
         aria-label="Primary"
         aria-hidden={hidden || undefined}
         data-hidden={hidden ? "" : undefined}
+        // The grid's track count is a variable and not a literal, so one bar
+        // of three and one of five are the same rule at two values. Written
+        // only when it is not the five the rule already defaults to, the way
+        // `ui/scroll-edge.tsx` writes `--edge-size`: an installation with
+        // both modules on renders the markup it rendered before the switches
+        // existed, which is what the seven shell DOM baselines hold.
+        style={
+          shown.length === DEFAULT_SLOTS
+            ? undefined
+            : ({ "--tabbar-slots": shown.length } as React.CSSProperties)
+        }
         className="brain-mobile-tabbar mat-thick"
       >
         <div className="brain-mobile-tabbar-items">
-          {items.map((item) => {
+          {shown.map((item) => {
             const active =
               (item.key === "home" && homeActive) ||
               (item.key === "search" && searchActive) ||
@@ -155,6 +182,8 @@ export function MobileTabBar({
         onPickTemplate={onNew}
         onNewTask={onNewTask}
         onNewMessage={onNewMessage}
+        taskEnabled={modules.tasks}
+        mailEnabled={modules.mail}
       >
         <button
           type="button"

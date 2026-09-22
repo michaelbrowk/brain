@@ -31,6 +31,7 @@ describe("the settings registry", () => {
   it("puts Notifications between Connections and Sharing", () => {
     expect(SETTINGS_SECTION_ORDER).toEqual([
       "appearance",
+      "modules",
       "mail",
       "connections",
       "notifications",
@@ -109,8 +110,10 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-async function render() {
-  await act(async () => root.render(<NotificationsSection onToast={() => {}} />));
+async function render(modules = { mail: true, tasks: true }) {
+  await act(async () =>
+    root.render(<NotificationsSection modules={modules} onToast={() => {}} />),
+  );
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
@@ -331,7 +334,13 @@ describe("Settings → Notifications", () => {
   it("offers the Account section without leaving the surface", async () => {
     const openSection = vi.fn();
     await act(async () =>
-      root.render(<NotificationsSection onToast={() => {}} onOpenSection={openSection} />),
+      root.render(
+        <NotificationsSection
+          modules={{ mail: true, tasks: true }}
+          onToast={() => {}}
+          onOpenSection={openSection}
+        />,
+      ),
     );
     await act(async () => {
       await Promise.resolve();
@@ -361,5 +370,27 @@ describe("Settings → Notifications", () => {
       (node) => (node.textContent ?? "").trim() === "On",
     )!;
     expect(on.getAttribute("aria-checked")).toBe("true");
+  });
+});
+
+describe("the kind rows follow the module switches", () => {
+  it("shows both rows with both modules on", async () => {
+    await render({ mail: true, tasks: true });
+    expect(text()).toContain("Task reminders");
+    expect(text()).toContain("New mail");
+  });
+
+  // The preference itself is untouched, so turning the module back on
+  // restores the row exactly as it was.
+  it("drops the new-mail row when Mail is off", async () => {
+    await render({ mail: false, tasks: true });
+    expect(text()).toContain("Task reminders");
+    expect(text()).not.toContain("New mail");
+  });
+
+  it("drops the task-reminder row when Tasks are off", async () => {
+    await render({ mail: true, tasks: false });
+    expect(text()).not.toContain("Task reminders");
+    expect(text()).toContain("New mail");
   });
 });

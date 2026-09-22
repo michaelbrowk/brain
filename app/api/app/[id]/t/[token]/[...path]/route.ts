@@ -159,9 +159,18 @@ async function serve(
 function missing() {
   return NextResponse.json(
     { error: "not found" },
-    { status: 404, headers: { "Cache-Control": "private, no-store" } },
+    { status: 404, headers: REFUSAL_HEADERS },
   );
 }
+
+/** A refusal is typed the way an answer is. Everything this route serves is
+ *  asked for by a frame, so a refusal reaches an `<img>` or a `<script>` as
+ *  readily as the bytes would, and a route where only the happy path says
+ *  `nosniff` is the one somebody copies the unhappy path out of. */
+const REFUSAL_HEADERS = {
+  "Cache-Control": "private, no-store",
+  "X-Content-Type-Options": "nosniff",
+} as const;
 
 /** Said once per process, not once per request: a log line on every asset of
  *  every app open would be the noise that hides it. */
@@ -191,9 +200,6 @@ function appOrigin(req: NextRequest): string {
 function busy() {
   return NextResponse.json(
     { error: "temporarily unavailable" },
-    {
-      status: 503,
-      headers: { "Cache-Control": "private, no-store", "Retry-After": "1" },
-    },
+    { status: 503, headers: { ...REFUSAL_HEADERS, "Retry-After": "1" } },
   );
 }

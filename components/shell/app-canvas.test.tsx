@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 
 import { act } from "react";
-import { createRoot } from "react-dom/client";
+import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { APP_FRAME_SANDBOX } from "@/lib/apps/csp";
 import { apiFetch } from "@/lib/client";
@@ -33,14 +33,18 @@ beforeEach(() => {
   writesMock.mockClear();
 });
 
-/** What `POST /api/app/<id>/frame` answers: a signed address to mount. The
- *  token is opaque to the canvas, which is the point of the shape. */
+/** What `POST /api/app/<id>/frame` answers: a signed address to mount and the
+ *  second it stops working. The token is opaque to the canvas, which is the
+ *  point of the shape; the expiry is not, because the canvas is what has to
+ *  ask again before it arrives. */
 const FRAME_SRC = "/api/app/app1/t/head.body.signature/index.html";
-const minted = (src: string | null = FRAME_SRC) =>
+const TWELVE_HOURS = 12 * 60 * 60;
+const minted = (src: string | null = FRAME_SRC, inSeconds = TWELVE_HOURS) =>
   ({
     ok: true,
     status: 200,
-    json: async () => (src === null ? {} : { src }),
+    json: async () =>
+      src === null ? {} : { src, exp: Math.floor(Date.now() / 1000) + inSeconds },
   }) as Response;
 
 const settle = () =>
@@ -79,8 +83,14 @@ const LIVE_TREE = [
 ];
 
 let host: HTMLDivElement | null = null;
+let root: Root | null = null;
 
+/** The root is unmounted, not just detached. The canvas listens on `document`
+ *  for `visibilitychange`, so a root left mounted goes on answering events a
+ *  later case dispatches, with the expiry the earlier case gave it. */
 afterEach(() => {
+  if (root) act(() => root!.unmount());
+  root = null;
   host?.remove();
   host = null;
 });
@@ -88,8 +98,9 @@ afterEach(() => {
 function render(onToast: (text: string) => void = () => {}) {
   host = document.createElement("div");
   document.body.append(host);
+  root = createRoot(host);
   act(() => {
-    createRoot(host as HTMLDivElement).render(
+    root!.render(
       <AppCanvas
         node={node as never}
         liveTree={() => LIVE_TREE as never}
@@ -262,9 +273,10 @@ describe("the app canvas", () => {
     fetchMock.mockResolvedValue({ ok: false, status: 404 } as Response);
     host = document.createElement("div");
     document.body.append(host);
+    root = createRoot(host);
     const withheld = { id: "app1", title: "Trainer", icon: "🃏", kind: "app" as const };
     act(() => {
-      createRoot(host as HTMLDivElement).render(
+      root!.render(
         <AppCanvas
           node={withheld as never}
           liveTree={() => []}
@@ -282,6 +294,70 @@ describe("the app canvas", () => {
     );
     expect(host.querySelector("iframe")).toBeNull();
     expect(host.querySelector("[data-app-rebuild]")).not.toBeNull();
+  });
+
+  it("asks for a new address before the one it holds expires", async () => {
+    // The token behind the address lasts twelve hours. An app left open
+    // longer than that would go on running and then silently fail the first
+    // subresource it had not already fetched: inside an opaque-origin frame
+    // that reports nothing anywhere, which is the failure mode this whole
+    // shape exists to remove.
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockResolvedValue(minted(FRAME_SRC, 600));
+      const mounted = render();
+      await settle();
+      expect(mounted.querySelector("iframe")?.getAttribute("src")).toBe(FRAME_SRC);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const next = "/api/app/app1/t/second.token.here/index.html";
+      fetchMock.mockResolvedValue(minted(next, 600));
+      // Five minutes before it dies, not after.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync((600 - 300) * 1000);
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(fetchMock).toHaveBeenLastCalledWith("/api/app/app1/frame", {
+        method: "POST",
+      });
+      expect(mounted.querySelector("iframe")?.getAttribute("src")).toBe(next);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("asks again when the canvas comes back with little time left", async () => {
+    // A backgrounded tab's timers are throttled and can be an hour late, so
+    // returning to the page is its own moment to check.
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockResolvedValue(minted(FRAME_SRC, 120));
+      render();
+      await settle();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("leaves the address alone while there is plenty of time on it", async () => {
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockResolvedValue(minted(FRAME_SRC, TWELVE_HOURS));
+      render();
+      await settle();
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("carries no em-dash in anything a reader sees", async () => {

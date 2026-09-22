@@ -362,6 +362,30 @@ describe("an app's files", () => {
     expect(res.headers.get("Content-Length")).toBe("3");
   });
 
+  it("types its refusals the way it types its answers", async () => {
+    // A JSON 404 reaching an `<img>` is harmless on its own. The asymmetry is
+    // not: a route where only the happy path is typed is the one somebody
+    // copies the unhappy path out of.
+    const refused = await GET(
+      request("/api/app/app1/t/not-a-token/index.html"),
+      params("not-a-token", ["index.html"]),
+    );
+    expect(refused.status).toBe(404);
+    expect(refused.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(refused.headers.get("Cache-Control")).toBe("private, no-store");
+
+    const { ShareAccessBusyError } = await import("@/lib/share-access");
+    resolveShareAccess.mockRejectedValue(new ShareAccessBusyError());
+    const token = await shareToken();
+    const busy = await GET(
+      request(`/api/app/app1/t/${token}/index.html`),
+      params(token, ["index.html"]),
+    );
+    expect(busy.status).toBe(503);
+    expect(busy.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(busy.headers.get("Retry-After")).toBe("1");
+  });
+
   it("answers HEAD with the same decision and none of the work", async () => {
     const token = await ownerToken();
     const res = await HEAD(

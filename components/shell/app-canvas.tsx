@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import { apiFetch } from "@/lib/client";
 import type { TreeNode } from "@/lib/store/types";
@@ -14,6 +14,11 @@ import { Icon } from "../ui/icon";
 
 /** How long "Copied." stands before the line goes back to the invitation. */
 const COPIED_FOR_MS = 2_000;
+
+/** How long before a frame token dies the canvas asks for the next one. Wide
+ *  enough that a slow answer still lands in time, narrow enough that an app
+ *  open all day is re-addressed once rather than repeatedly. */
+const REMINT_BEFORE_MS = 5 * 60 * 1000;
 
 export interface AppCanvasProps {
   node: TreeNode;
@@ -76,35 +81,80 @@ export function AppCanvas({ node, liveTree, onOpenPage, onToast }: AppCanvasProp
    *  canvas does not flash a frame it is about to replace. The answer is held
    *  WITH the id it was asked about, so opening a second app reads as an open
    *  question again without a `setState` in the effect body. */
-  const [probe, setProbe] = useState<{ id: string; src: string | null } | null>(
-    null,
-  );
+  const [probe, setProbe] = useState<{
+    id: string;
+    src: string | null;
+    /** When the token in that address stops working, in seconds since the
+     *  epoch, as the route minted it. */
+    exp: number;
+  } | null>(null);
   const src = probe?.id === node.id ? probe.src : undefined;
+  const exp = probe?.id === node.id ? probe.exp : undefined;
+
+  const askForAddress = useCallback(async (id: string) => {
+    try {
+      const response = await apiFetch(`/api/app/${encodeURIComponent(id)}/frame`, {
+        method: "POST",
+      });
+      if (!response.ok) return { id, src: null, exp: 0 };
+      const body = (await response.json()) as { src?: unknown; exp?: unknown };
+      return {
+        id,
+        src: typeof body.src === "string" ? body.src : null,
+        exp: typeof body.exp === "number" ? body.exp : 0,
+      };
+    } catch {
+      // A network failure is not a missing file, but with no address there is
+      // nothing to mount either. The owner gets the sentence and the Rebuild
+      // control, and reopening the page asks again.
+      return { id, src: null, exp: 0 };
+    }
+  }, []);
+
   useEffect(() => {
     let live = true;
-    void apiFetch(`/api/app/${encodeURIComponent(node.id)}/frame`, { method: "POST" })
-      .then(async (response) => {
-        if (!live) return;
-        if (!response.ok) {
-          setProbe({ id: node.id, src: null });
-          return;
-        }
-        const body = (await response.json()) as { src?: unknown };
-        setProbe({
-          id: node.id,
-          src: typeof body.src === "string" ? body.src : null,
-        });
-      })
-      .catch(() => {
-        // A network failure is not a missing file, but with no address there
-        // is nothing to mount either. The owner gets the sentence and the
-        // Rebuild control, and reopening the page asks again.
-        if (live) setProbe({ id: node.id, src: null });
-      });
+    void askForAddress(node.id).then((answer) => {
+      if (live) setProbe(answer);
+    });
     return () => {
       live = false;
     };
-  }, [node.id]);
+  }, [node.id, askForAddress]);
+
+  /** ASK AGAIN BEFORE THE ADDRESS DIES.
+   *
+   *  The token in it lasts twelve hours. An app left open longer than that
+   *  goes on running and then fails the first file it had not already
+   *  fetched, and inside an opaque-origin frame that failure reaches no
+   *  console: the picture simply stops appearing. So the canvas asks for a
+   *  new address five minutes before the old one expires.
+   *
+   *  A new address is a new token, so the frame's `src` changes and the frame
+   *  reloads. AN APP LOSES WHATEVER IT WAS HOLDING IN MEMORY WHEN THAT
+   *  HAPPENS, at most once every twelve hours. That is the trade: an app that
+   *  forgets a half-typed answer twice a day beats one that quietly stops
+   *  loading its own pictures. An app with anything worth keeping keeps it in
+   *  its state, which is the bridge's and survives the reload.
+   *
+   *  A timer alone is not enough. A backgrounded tab's timers are throttled
+   *  hard and can fire an hour late, so coming back to the page is its own
+   *  moment to check. */
+  useEffect(() => {
+    if (!exp || src === null) return;
+    const remaining = () => exp * 1000 - Date.now();
+    const renew = () => {
+      void askForAddress(node.id).then(setProbe);
+    };
+    const timer = setTimeout(renew, Math.max(0, remaining() - REMINT_BEFORE_MS));
+    const onVisible = () => {
+      if (!document.hidden && remaining() <= REMINT_BEFORE_MS) renew();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [exp, src, node.id, askForAddress]);
 
   useEffect(() => {
     const frame = frameRef.current;

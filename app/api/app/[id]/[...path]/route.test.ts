@@ -26,7 +26,7 @@ vi.mock("@/lib/share-access", async () => ({
   ShareAccessNotFoundError: class extends Error {},
 }));
 
-const { GET } = await import("./route");
+const { GET, HEAD } = await import("./route");
 const { appFrameCsp } = await import("@/lib/apps/csp");
 
 const ENTRY = '<!doctype html><meta name="color-scheme" content="light dark">';
@@ -97,7 +97,12 @@ describe("an app's files", () => {
     expect(res.headers.get("Content-Security-Policy")).toBe(
       appFrameCsp("https://brain.public.example", "app1"),
     );
-    expect(res.headers.get("Content-Security-Policy")).not.toContain("127.0.0.1");
+    // Named against the request's own origin as NextURL resolved it, rather
+    // than against the string this test wrote: an assertion on a host the
+    // request does not have could never fail.
+    expect(res.headers.get("Content-Security-Policy")).not.toContain(
+      proxied.nextUrl.origin,
+    );
     configuredPublicOrigin.mockReturnValue(null);
   });
 
@@ -131,6 +136,10 @@ describe("an app's files", () => {
     });
     expect(res.status).toBe(404);
     expect(readAppFile).not.toHaveBeenCalled();
+    // Nor is the index consulted. Both answers are the same 404, so nothing
+    // was disclosed either way, but a caller who has shown nothing gets to
+    // touch nothing.
+    expect(readAppMeta).not.toHaveBeenCalled();
   });
 
   it("serves a visitor whose grant reaches the app", async () => {
@@ -250,6 +259,86 @@ describe("an app's files", () => {
       });
       expect(res.status).toBe(404);
       expect(readAppFile).not.toHaveBeenCalled();
+    }
+  });
+
+  it("answers HEAD with the same decision and none of the work", async () => {
+    // The canvas asks HEAD before it mounts anything, so this runs on every
+    // app open. Next would otherwise auto-implement it by running GET whole,
+    // which decodes the entry and splices the kit into it for a body nobody
+    // reads.
+    const res = await HEAD(request("/api/app/app1/index.html"), {
+      params: Promise.resolve({ id: "app1", path: ["index.html"] }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("");
+    expect(res.headers.get("Content-Type")).toBe("text/html; charset=utf-8");
+    expect(res.headers.get("Cache-Control")).toBe("private, no-store");
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(res.headers.get("Content-Security-Policy")).toBe(
+      appFrameCsp("https://brain.example", "app1"),
+    );
+    // The one header it will not answer: the length is the length AFTER the
+    // kit is spliced in, and finding it out is the work this verb exists to
+    // skip.
+    expect(res.headers.get("Content-Length")).toBeNull();
+  });
+
+  it("refuses a HEAD everywhere it refuses a GET", async () => {
+    verifySession.mockResolvedValue(false);
+    const stranger = await HEAD(request("/api/app/app1/index.html"), {
+      params: Promise.resolve({ id: "app1", path: ["index.html"] }),
+    });
+    expect(stranger.status).toBe(404);
+
+    verifySession.mockResolvedValue(true);
+    const wrongPath = await HEAD(request("/api/app/app1/x"), {
+      params: Promise.resolve({ id: "app1", path: ["state.json"] }),
+    });
+    expect(wrongPath.status).toBe(404);
+
+    readAppFile.mockResolvedValue({ kind: "missing" });
+    const gone = await HEAD(request("/api/app/app1/index.html"), {
+      params: Promise.resolve({ id: "app1", path: ["index.html"] }),
+    });
+    expect(gone.status).toBe(404);
+  });
+
+  it("says once when a proxy is in front and no public origin is configured", async () => {
+    // The silent failure N6 names: behind nginx with BRAIN_PUBLIC_ORIGIN
+    // unset, the policy names the bind host, frame-ancestors does not match
+    // the address the browser is on, and the frame is refused with no console
+    // anybody reads. One line in the server log is the whole diagnosis.
+    vi.resetModules();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const fresh = await import("./route");
+      const proxied = new NextRequest(
+        new URL("/api/app/app1/index.html", "http://127.0.0.1:3000"),
+        { headers: { "x-forwarded-host": "brain.example" } },
+      );
+      const params = () => Promise.resolve({ id: "app1", path: ["index.html"] });
+
+      configuredPublicOrigin.mockReturnValue("https://brain.public.example");
+      await fresh.GET(proxied, { params: params() });
+      expect(warn).not.toHaveBeenCalled();
+
+      configuredPublicOrigin.mockReturnValue(null);
+      const first = await fresh.GET(proxied, { params: params() });
+      await fresh.GET(proxied, { params: params() });
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0]![0])).toContain("BRAIN_PUBLIC_ORIGIN");
+      // And the header is still not used for anything: the policy names the
+      // request's own origin, not the one the proxy claimed.
+      expect(first.headers.get("Content-Security-Policy")).toBe(
+        appFrameCsp(proxied.nextUrl.origin, "app1"),
+      );
+      expect(first.headers.get("Content-Security-Policy")).not.toContain(
+        "brain.example",
+      );
+    } finally {
+      warn.mockRestore();
+      configuredPublicOrigin.mockReturnValue(null);
     }
   });
 

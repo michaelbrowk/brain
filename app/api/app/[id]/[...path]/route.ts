@@ -31,21 +31,38 @@ function storePathOf(segments: readonly string[]): string | null {
   return `${APP_ASSETS_DIR}/${name}`;
 }
 
+/** The canvas asks this before it mounts anything, so it runs on every app
+ *  open. Next auto-implements HEAD by running GET whole and dropping the
+ *  body, which here means decoding the entry and splicing the kit into it for
+ *  a body nobody reads. This is the same decision with none of that work.
+ *
+ *  It answers no `Content-Length`, because the length is the length after the
+ *  kit is spliced in and finding it out is the work the verb exists to skip.
+ *  A HEAD may omit it; a wrong one would be worse than none. */
+export async function HEAD(
+  req: NextRequest,
+  ctx: { params: Promise<{ id: string; path: string[] }> },
+) {
+  return serve(req, ctx, "HEAD");
+}
+
 export async function GET(
   req: NextRequest,
+  ctx: { params: Promise<{ id: string; path: string[] }> },
+) {
+  return serve(req, ctx, "GET");
+}
+
+async function serve(
+  req: NextRequest,
   { params }: { params: Promise<{ id: string; path: string[] }> },
+  method: "GET" | "HEAD",
 ) {
   const { id, path } = await params;
   const relative = storePathOf(path ?? []);
   if (relative === null) return missing();
 
   const store = await getStore();
-  // A page is an app only when its own `app` map parses. A hand-written
-  // `kind: app`, or a restore that has not reached the frontmatter yet,
-  // leaves a page that claims to be an app and is not one; `readAppMeta`
-  // answers null for it and nothing of it is served. The canvas draws the
-  // missing-files state off the same 404.
-  if (store.readAppMeta(id) === null) return missing();
   if (!(await verifySession(req.cookies.get(SESSION_COOKIE)?.value))) {
     // A link visitor reaches an app the same way they reach its media: the
     // root they came through and the share version they were served, checked
@@ -68,8 +85,35 @@ export async function GET(
     }
   }
 
+  // A page is an app only when its own `app` map parses. A hand-written
+  // `kind: app`, or a restore that has not reached the frontmatter yet,
+  // leaves a page that claims to be an app and is not one; `readAppMeta`
+  // answers null for it and nothing of it is served. The canvas draws the
+  // missing-files state off the same 404. Asked after the session, so a
+  // caller who has shown nothing touches nothing, index included.
+  if (store.readAppMeta(id) === null) return missing();
+
   const file = await store.readAppFile(id, relative);
   if (file.kind !== "file") return missing();
+
+  const headers: Record<string, string> = {
+    "Content-Type": file.mimeType,
+    // The policy is built here rather than in `next.config.ts` because it
+    // names the public origin and this app's id, and a config block can
+    // only carry a static string. The origin is the configured one
+    // (`BRAIN_PUBLIC_ORIGIN`, what share links are built from); behind
+    // nginx `req.nextUrl.origin` is the bind host, not the address the
+    // browser will fetch assets from, so it is only the fallback for an
+    // install with no public origin configured. `Host` and
+    // `X-Forwarded-Host` are the client's to set and are not read.
+    "Content-Security-Policy": appFrameCsp(appOrigin(req), id),
+    // An app's files are mutable: a rebuild replaces them at the same
+    // address. Nothing here may be cached, or a rebuild would be invisible.
+    "Cache-Control": "private, no-store",
+    "X-Content-Type-Options": "nosniff",
+  };
+
+  if (method === "HEAD") return new NextResponse(null, { status: 200, headers });
 
   // The kit is injected at serve time when the entry asks for it, because the
   // policy above forbids the frame fetching a stylesheet of its own. An entry
@@ -81,23 +125,7 @@ export async function GET(
 
   return new NextResponse(body as BodyInit, {
     status: 200,
-    headers: {
-      "Content-Type": file.mimeType,
-      "Content-Length": String(body.byteLength),
-      // The policy is built here rather than in `next.config.ts` because it
-      // names the public origin and this app's id, and a config block can
-      // only carry a static string. The origin is the configured one
-      // (`BRAIN_PUBLIC_ORIGIN`, what share links are built from); behind
-      // nginx `req.nextUrl.origin` is the bind host, not the address the
-      // browser will fetch assets from, so it is only the fallback for an
-      // install with no public origin configured. `Host` and
-      // `X-Forwarded-Host` are the client's to set and are not read.
-      "Content-Security-Policy": appFrameCsp(appOrigin(req), id),
-      // An app's files are mutable: a rebuild replaces them at the same
-      // address. Nothing here may be cached, or a rebuild would be invisible.
-      "Cache-Control": "private, no-store",
-      "X-Content-Type-Options": "nosniff",
-    },
+    headers: { ...headers, "Content-Length": String(body.byteLength) },
   });
 }
 
@@ -108,9 +136,29 @@ function missing() {
   );
 }
 
+/** Said once per process, not once per request: a log line on every asset of
+ *  every app open would be the noise that hides it. */
+let warnedAboutProxy = false;
+
 // The origin the frame's policy names. See the comment at the header.
 function appOrigin(req: NextRequest): string {
-  return configuredPublicOrigin() ?? req.nextUrl.origin;
+  const configured = configuredPublicOrigin();
+  if (configured) return configured;
+  // Behind a proxy with nothing configured, the origin below is the bind
+  // host, the frame's `frame-ancestors` does not match the address the
+  // browser is actually on, and the browser refuses the frame with no console
+  // anybody will open. The forwarded header is NOT used to fix it, because a
+  // policy built from a header is a policy the client wrote. It is read for
+  // this one sentence and for nothing else.
+  if (!warnedAboutProxy && req.headers.get("x-forwarded-host")) {
+    warnedAboutProxy = true;
+    console.warn(
+      "An app frame is being served behind a proxy with no BRAIN_PUBLIC_ORIGIN set. " +
+        "Its policy will name this server's own address, and the browser will refuse " +
+        "to render the app. Set BRAIN_PUBLIC_ORIGIN to the address people open Brain on.",
+    );
+  }
+  return req.nextUrl.origin;
 }
 
 function busy() {

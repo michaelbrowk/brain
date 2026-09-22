@@ -167,6 +167,121 @@ describe("the chip in the command palette", () => {
     expect(plain).toBeDefined();
     expect(plain?.querySelector(".ai-chip")).toBeNull();
   });
+
+  it("names an app page in the Recent group and no ordinary one", async () => {
+    // Recent is its own list with its own row markup, and on an empty query
+    // it REPLACES the page list below it: the palette a reader opens on a
+    // notebook they have used is this list and no other.
+    await act(async () => {
+      host = document.createElement("div");
+      document.body.append(host);
+      createRoot(host).render(
+        <CommandPalette
+          open
+          onOpenChange={() => {}}
+          tree={[
+            node({ id: "app1", title: "Trainer", kind: "app" }),
+            node({ id: "page1", title: "Spanish" }),
+          ]}
+          recentIds={["app1", "page1"]}
+          onSelect={() => {}}
+          hasCurrent={false}
+        />,
+      );
+    });
+    const items = [
+      ...document.body.querySelectorAll<HTMLElement>("[cmdk-item]"),
+    ];
+    const app = items.find((item) => item.textContent?.includes("Trainer"));
+    const plain = items.find((item) => item.textContent?.includes("Spanish"));
+    expect(app?.querySelector(".ai-chip")?.textContent).toBe("AI");
+    expect(plain).toBeDefined();
+    expect(plain?.querySelector(".ai-chip")).toBeNull();
+  });
+});
+
+describe("the chip on a search hit in the command palette", () => {
+  // The "In text" group is the third row shape in the palette and the only
+  // one fed by the search route rather than by the tree, so `kind` has to
+  // survive all three hops of `lib/search.ts` to arrive here.
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          hits: [
+            {
+              id: "app1",
+              title: "Trainer",
+              kind: "app",
+              source: "body",
+              snippet: { before: "a ", match: "needle", after: " b" },
+            },
+            {
+              id: "page1",
+              title: "Spanish",
+              source: "body",
+              snippet: { before: "a ", match: "needle", after: " b" },
+            },
+          ],
+        }),
+      } as Response),
+    );
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("names an app page in the text results and no ordinary one", async () => {
+    await act(async () => {
+      host = document.createElement("div");
+      document.body.append(host);
+      createRoot(host).render(
+        <CommandPalette
+          open
+          onOpenChange={() => {}}
+          tree={[
+            node({ id: "app1", title: "Trainer", kind: "app" }),
+            node({ id: "page1", title: "Spanish" }),
+          ]}
+          onSelect={() => {}}
+          hasCurrent={false}
+        />,
+      );
+    });
+    const input = document.body.querySelector(
+      'input[aria-label="Search pages and text"]',
+    ) as HTMLInputElement;
+    await act(async () => {
+      const setter = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )?.set;
+      // Neither title matches, so the only rows below are the text hits.
+      setter?.call(input, "needle");
+      input.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(200);
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    const items = [
+      ...document.body.querySelectorAll<HTMLElement>("[cmdk-item]"),
+    ];
+    const app = items.find((item) => item.textContent?.includes("Trainer"));
+    const plain = items.find((item) => item.textContent?.includes("Spanish"));
+    expect(app?.querySelector(".ai-chip")?.textContent).toBe("AI");
+    expect(plain).toBeDefined();
+    expect(plain?.querySelector(".ai-chip")).toBeNull();
+  });
 });
 
 describe("the chip on Home", () => {

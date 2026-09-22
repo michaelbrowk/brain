@@ -234,16 +234,52 @@ describe("page references", () => {
     }
   });
 
-  it("keeps the chip out of the label a pasted ref bakes", () => {
+  it("keeps the chip out of the label a pasted ref bakes", async () => {
+    // THROUGH `parseDOM`, not only through the helper. `label` is the string
+    // a ref falls back to once the page it names is gone, so two letters of
+    // chrome baked in here become part of somebody's title for good. Calling
+    // the helper proves the helper; what has to hold is the rule that calls
+    // it. The anchor carries no `href`, which is how `toDOM` writes a ref to
+    // a page the live directory has lost, and that is exactly the ref whose
+    // label ever gets read.
+    setPageRefOrigin(ORIGIN);
     syncLivePageInfo([{ id: "app1", title: "Trainer", icon: "🃏", kind: "app" }]);
-    const anchor = document.createElement("a");
-    anchor.setAttribute("data-page-ref", "app1");
-    anchor.append(document.createTextNode("🃏 Trainer"));
-    const chip = document.createElement("span");
-    chip.className = "ai-chip";
-    chip.textContent = "AI";
-    anchor.append(chip);
-    expect(pageRefLabelFromDom(anchor)).toBe("🃏 Trainer");
+    const root = document.createElement("div");
+    document.body.append(root);
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, "");
+      })
+      .use(commonmark)
+      .use(gfm)
+      .use(pageRef)
+      .create();
+
+    try {
+      const anchor = document.createElement("a");
+      anchor.setAttribute("data-page-ref", "app1");
+      anchor.append(document.createTextNode("🃏 Trainer"));
+      const chip = document.createElement("span");
+      chip.className = "ai-chip";
+      chip.textContent = "AI";
+      anchor.append(chip);
+      const holder = document.createElement("div");
+      holder.append(anchor);
+
+      const view = editor.action((ctx) => ctx.get(editorViewCtx));
+      const parsed = DOMParser.fromSchema(view.state.schema).parse(holder);
+      const labels: string[] = [];
+      parsed.descendants((node) => {
+        if (node.type.name === "page_ref") labels.push(String(node.attrs.label));
+      });
+      expect(labels).toEqual(["🃏 Trainer"]);
+
+      // And the helper the rule leans on, on its own.
+      expect(pageRefLabelFromDom(anchor)).toBe("🃏 Trainer");
+    } finally {
+      await editor.destroy();
+    }
   });
 
   it("carries no chip through a copy and a paste of a ref to an app page", async () => {

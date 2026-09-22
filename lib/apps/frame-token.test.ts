@@ -1,4 +1,6 @@
+import { SignJWT } from "jose";
 import { beforeAll, describe, expect, it } from "vitest";
+import { createSession, verifySession } from "@/lib/auth";
 import {
   APP_FRAME_TOKEN_MAX_AGE_SECONDS,
   mintAppFrameToken,
@@ -112,6 +114,43 @@ describe("the token in an app frame's address", () => {
 
   it("names twelve hours as the owner's window", () => {
     expect(APP_FRAME_TOKEN_MAX_AGE_SECONDS).toBe(12 * 60 * 60);
+  });
+
+  it("refuses this installation's other tokens, whatever they claim to be", async () => {
+    const session = await createSession();
+    await expect(verifyAppFrameToken(session, "app1")).resolves.toBeNull();
+
+    const frame = await mintAppFrameToken({
+      pageId: "app1",
+      grant: { kind: "owner" },
+      exp: soon(),
+    });
+    await expect(verifySession(frame)).resolves.toBe(false);
+  });
+
+  it("is signed in a domain of its own, which is a third lock and not a spare", async () => {
+    // The case above passes on `aud` and `sub` alone, so it cannot say
+    // anything about the key: swap `secret("app-frame")` for
+    // `secret("session")` and it stays green. This one forges a token whose
+    // claims are all correct and signs it in the SESSION domain, so the key
+    // is the only thing left that can refuse it.
+    //
+    // The derivation is mirrored from `secret()` in `lib/auth.ts`. That is
+    // deliberate duplication: it is what lets this test notice the day the
+    // two domains stop being two.
+    const sessionDomainKey = new TextEncoder().encode(
+      `${process.env.AUTH_SECRET}\0brain:session:v1`,
+    );
+    const forged = await new SignJWT({ kind: "app-frame", grant: { kind: "owner" } })
+      .setProtectedHeader({ alg: "HS256", typ: "JWT" })
+      .setIssuer("brain")
+      .setAudience("brain:app-frame")
+      .setSubject("app:app1")
+      .setIssuedAt()
+      .setExpirationTime(soon())
+      .sign(sessionDomainKey);
+
+    await expect(verifyAppFrameToken(forged, "app1")).resolves.toBeNull();
   });
 
   it("refuses to mint for something that is not a page id", async () => {

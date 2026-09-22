@@ -4316,6 +4316,12 @@ export class Store {
     const app = this.readAppMeta(appId);
     if (!app || appId === targetId) return false;
     if (!app.owns.includes(targetId)) return false;
+    // An app page's body is the agent's description of it, which the canvas
+    // draws and the owner reads under the title. `appId === targetId` above
+    // keeps an app off its own, and a second app page underneath it is the
+    // same page by another name. `owns` cannot settle this: it is a list an
+    // agent wrote, and this is the check that does not take its word.
+    if (this.index.get(targetId)?.meta.kind === "app") return false;
     return this.isWithinSubtree(appId, targetId) && !this.isDeleted(targetId);
   }
 

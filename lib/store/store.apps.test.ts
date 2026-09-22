@@ -113,6 +113,27 @@ describe("app pages in the store", () => {
     expect(store.appMayWrite(meta.id, meta.id)).toBe(false);
   });
 
+  it("refuses an owned page that is itself an app", async () => {
+    // A page's own body is the agent's description of it, which an app has no
+    // business replacing: `appMayWrite` already refuses the app's own page,
+    // and a second app underneath it is the same page by another name. The
+    // `owns` entry is not enough, because `owns` is written by an agent.
+    const { meta } = await store.createAppPage(null, "Trainer", {
+      description: "d",
+      entryHtml: ENTRY,
+      builtBy: "Claude",
+    });
+    const inner = await store.createAppPage(meta.id, "Inner", {
+      description: "d",
+      entryHtml: ENTRY,
+      builtBy: "Claude",
+    });
+    await store.setAppMeta(meta.id, { ...meta.app!, owns: [inner.meta.id] });
+
+    expect(store.readAppMeta(meta.id)?.owns).toEqual([inner.meta.id]);
+    expect(store.appMayWrite(meta.id, inner.meta.id)).toBe(false);
+  });
+
   it("bumps the version and keeps owns and state across a rewrite", async () => {
     const { meta, owned } = await store.createAppPage(null, "Trainer", {
       description: "d",

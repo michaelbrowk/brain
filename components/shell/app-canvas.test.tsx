@@ -59,12 +59,17 @@ afterEach(() => {
   host = null;
 });
 
-function render() {
+function render(onToast: (text: string) => void = () => {}) {
   host = document.createElement("div");
   document.body.append(host);
   act(() => {
     createRoot(host as HTMLDivElement).render(
-      <AppCanvas node={node as never} liveTree={() => []} onOpenPage={() => {}} onToast={() => {}} />,
+      <AppCanvas
+        node={node as never}
+        liveTree={() => []}
+        onOpenPage={() => {}}
+        onToast={onToast}
+      />,
     );
   });
   return host;
@@ -72,11 +77,14 @@ function render() {
 
 /** Mounts and drains the preflight, so a case reads the canvas in the state
  *  it settles into rather than the one frame before it. */
-async function renderReady() {
-  const mounted = render();
+async function renderReady(onToast?: (text: string) => void) {
+  const mounted = render(onToast);
   await settle();
   return mounted;
 }
+
+const rebuildButton = (mounted: HTMLElement) =>
+  mounted.querySelector("[data-app-rebuild]") as HTMLButtonElement;
 
 describe("the app canvas", () => {
   it("asks whether the files are there before it mounts a frame", async () => {
@@ -125,6 +133,48 @@ describe("the app canvas", () => {
 
   it("says what to do with what it copied, beside the button", async () => {
     expect((await renderReady()).textContent).toContain("Copy a prompt for your agent");
+  });
+
+  it("stops saying Copied after a couple of seconds", async () => {
+    vi.useFakeTimers();
+    try {
+      Object.assign(navigator, { clipboard: { writeText: vi.fn(async () => {}) } });
+      const mounted = await renderReady();
+      await act(async () => {
+        rebuildButton(mounted).click();
+      });
+      expect(mounted.textContent).toContain("Copied. Paste it to your agent.");
+      await act(async () => {
+        vi.advanceTimersByTime(2_500);
+      });
+      expect(mounted.textContent).not.toContain("Copied.");
+      expect(mounted.textContent).toContain("Copy a prompt for your agent");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says so when the clipboard refuses, and puts the prompt where it can be read", async () => {
+    // A denied permission or a page that is not a secure context rejects the
+    // write. Unhandled, the owner clicks Rebuild and nothing at all happens.
+    Object.assign(navigator, {
+      clipboard: {
+        writeText: vi.fn(async () => {
+          throw new Error("denied");
+        }),
+      },
+    });
+    const toasts: string[] = [];
+    const mounted = await renderReady((text) => toasts.push(text));
+    await act(async () => {
+      rebuildButton(mounted).click();
+    });
+    expect(toasts).toHaveLength(1);
+    expect(toasts[0]).toContain("Could not copy");
+    expect(mounted.textContent).not.toContain("Copied.");
+    expect(
+      (mounted.querySelector("[data-app-prompt]") as HTMLElement | null)?.textContent,
+    ).toBe("rebuild the page Trainer (id app1)");
   });
 
   it("keeps the phone's tab bar reserve under the frame", async () => {

@@ -10,6 +10,9 @@ import { createAppBridge } from "./app-bridge";
 import { Empty } from "../ui/empty";
 import { Icon } from "../ui/icon";
 
+/** How long "Copied." stands before the line goes back to the invitation. */
+const COPIED_FOR_MS = 2_000;
+
 export interface AppCanvasProps {
   node: TreeNode;
   /** The shell's own tree, read on every request rather than snapshotted:
@@ -38,7 +41,11 @@ export function AppCanvas({ node, onOpenPage, onToast }: AppCanvasProps) {
   const { resolvedTheme } = useTheme();
   const theme = resolvedTheme === "dark" ? "dark" : "light";
   const bridgeRef = useRef<ReturnType<typeof createAppBridge> | null>(null);
-  const [copied, setCopied] = useState(false);
+  /** What the line beside Rebuild is saying. "copied" is a confirmation and
+   *  goes back to the invitation on its own, the way every other momentary
+   *  confirmation in the shell does. "failed" stays, because the owner still
+   *  has the prompt to deal with. */
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 
   /** ASK BEFORE MOUNTING.
    *
@@ -123,9 +130,25 @@ export function AppCanvas({ node, onOpenPage, onToast }: AppCanvasProps) {
 
   const prompt = `rebuild the page ${node.title} (id ${node.id})`;
   const copy = async () => {
-    await navigator.clipboard.writeText(prompt);
-    setCopied(true);
+    try {
+      await navigator.clipboard.writeText(prompt);
+    } catch {
+      // A denied permission, or a page served over plain http, where there is
+      // no clipboard to write to at all. Unhandled this is a rejected promise
+      // inside an onClick and an owner who pressed a button that did nothing,
+      // so the prompt goes on the page instead, where it can be selected.
+      setCopyState("failed");
+      onToast("Could not copy. The prompt is beside the button, select it there.");
+      return;
+    }
+    setCopyState("copied");
   };
+
+  useEffect(() => {
+    if (copyState !== "copied") return;
+    const settle = setTimeout(() => setCopyState("idle"), COPIED_FOR_MS);
+    return () => clearTimeout(settle);
+  }, [copyState]);
 
   return (
     <div data-app-canvas className="brain-app-canvas brain-page-top">
@@ -152,9 +175,17 @@ export function AppCanvas({ node, onOpenPage, onToast }: AppCanvasProps) {
             <Icon name="refresh-linear" size={13} className="text-ink-3" />
             Rebuild
           </button>
-          <span className="text-caption text-ink-3">
-            {copied ? "Copied. Paste it to your agent." : "Copy a prompt for your agent"}
-          </span>
+          {copyState === "failed" ? (
+            <span data-app-prompt className="text-caption text-ink-2 select-all">
+              {prompt}
+            </span>
+          ) : (
+            <span className="text-caption text-ink-3">
+              {copyState === "copied"
+                ? "Copied. Paste it to your agent."
+                : "Copy a prompt for your agent"}
+            </span>
+          )}
         </div>
       </div>
       {files === "missing" ? (

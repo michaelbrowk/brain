@@ -14,6 +14,7 @@ import {
   APP_ASSETS_MAX_BYTES,
   APP_ENTRY_MAX_BYTES,
   APP_ENTRY_PATH,
+  APP_MAX_OWNED,
   APP_STAGING_DIR,
   APP_STATE_MAX_BYTES,
   APP_STATE_PATH,
@@ -3989,9 +3990,33 @@ export class Store {
     title: string,
     input: CreateAppPageInput,
   ): Promise<{ meta: PageMeta; owned: readonly PageMeta[] }> {
+    // EVERY QUESTION BEFORE THE FIRST WRITE.
+    //
+    // The page, each owned child, the files and the metadata are four
+    // separate writes, and this composite has no rollback of its own. A
+    // question asked late therefore costs the owner an orphan: a page in
+    // their tree with no `kind`, no files and children they never asked for.
+    // The sizes were always checked here; the reason, the asset names and the
+    // owned titles were checked inside the writes that follow, which is too
+    // late. They are all asked here now, and the code below may assume the
+    // answers.
     assertAppEntrySize(input.entryHtml);
     assertAppAssetsSize(input.assets);
     assertAppStateSize(input.state);
+    assertAppAssetNames(input.assets);
+    // Through the schema's own transform, so what is validated here is the
+    // string `setAppMeta` will later store, not the one the caller passed.
+    if (input.reason !== undefined) {
+      appMetaSchema.shape.reason.parse(input.reason);
+    }
+    if ((input.owns?.length ?? 0) > APP_MAX_OWNED) {
+      throw new Error(`an app may own at most ${APP_MAX_OWNED} pages`);
+    }
+    for (const child of input.owns ?? []) {
+      if (typeof child.title !== "string" || child.title.trim().length === 0) {
+        throw new Error("an owned page needs a title");
+      }
+    }
     const meta = await this.createPage(parentId, title, {
       icon: input.icon,
       markdown: input.description,
@@ -4065,13 +4090,7 @@ export class Store {
     assertAppEntrySize(files.entryHtml);
     assertAppAssetsSize(files.assets);
     assertAppStateSize(files.state);
-    // Every asset's name is checked before the first byte is written, so a
-    // set holding one bad name costs nothing and changes nothing.
-    for (const asset of files.assets ?? []) {
-      if (appAssetPath(asset.name) === null || appAssetMimeType(asset.name) === null) {
-        throw new AttachmentValidationError("bad_type", `app asset refused: ${asset.name}`);
-      }
-    }
+    assertAppAssetNames(files.assets);
     return this.mutate(async () => {
       const e = this.get(id);
       // WHOSE FOLDER `app/` IS, decided before the first rename.
@@ -8563,6 +8582,24 @@ async function assertAppFolderIsNotAPage(dir: string): Promise<void> {
   const legacyIndex = await readOptionalFile(path.join(dir, "app", "index.md"));
   if (legacyIndex !== null) {
     throw new NotAnAppError("this page already has a child page whose folder is app");
+  }
+}
+
+/** Every asset's name, before the first byte of the set is written, so a set
+ *  holding one refused name costs nothing and changes nothing. Both the
+ *  create and the rewrite ask this, and they ask the same function: a create
+ *  that left the check to the write it delegates to has already minted the
+ *  page by the time the answer comes back. */
+function assertAppAssetNames(
+  assets: readonly AppAssetInput[] | undefined,
+): void {
+  for (const asset of assets ?? []) {
+    if (appAssetPath(asset.name) === null || appAssetMimeType(asset.name) === null) {
+      throw new AttachmentValidationError(
+        "bad_type",
+        `app asset refused: ${asset.name}`,
+      );
+    }
   }
 }
 

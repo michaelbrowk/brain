@@ -160,4 +160,40 @@ describe("an app page in a portable archive", () => {
     const { bytes } = await buildPortableArchive(store);
     expect(() => validatePortableArchive(downgradeManifest(bytes))).toThrow();
   });
+
+  it("refuses one app page that claims another app page's asset", async () => {
+    // The case the same-folder check exists for, and the only one that
+    // reaches it. A traversal in a path is refused by the schema's regex
+    // first, so a path that is perfectly well formed but names a DIFFERENT
+    // page's folder is what shows the check doing work of its own: page A
+    // claiming page B's asset would restore B's file under A.
+    await seedApp();
+    await store.createAppPage(null, "Second", {
+      description: "d",
+      entryHtml: ENTRY,
+      assets: [{ name: "b.png", data: CARD }],
+      builtBy: "Claude",
+    });
+    const { bytes } = await buildPortableArchive(store);
+
+    const crossClaimed = rewriteManifest(bytes, (manifest) => {
+      const pages = manifest.pages as {
+        app?: {
+          entryPath: string;
+          assets: { name: string; archivePath: string }[];
+        };
+      }[];
+      const apps = pages.filter((page) => page.app !== undefined);
+      expect(apps).toHaveLength(2);
+      const [first, second] = apps;
+      // Well formed, matches the schema, and names the other page's folder.
+      first.app!.assets = [
+        { name: "stolen.png", archivePath: second.app!.assets[0].archivePath },
+      ];
+    });
+
+    expect(() => validatePortableArchive(crossClaimed)).toThrow(
+      /outside its own folder/,
+    );
+  });
 });

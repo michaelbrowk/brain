@@ -7,6 +7,7 @@ import {
   rootCtx,
 } from "@milkdown/kit/core";
 import { commonmark } from "@milkdown/kit/preset/commonmark";
+import { DOMParser, DOMSerializer } from "@milkdown/kit/prose/model";
 import { gfm } from "@milkdown/kit/preset/gfm";
 import { getMarkdown } from "@milkdown/kit/utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -243,6 +244,53 @@ describe("page references", () => {
     chip.textContent = "AI";
     anchor.append(chip);
     expect(pageRefLabelFromDom(anchor)).toBe("🃏 Trainer");
+  });
+
+  it("carries no chip through a copy and a paste of a ref to an app page", async () => {
+    // THE WHOLE CLIPBOARD ROUND TRIP, because the chip is chrome and chrome
+    // must not become text. Copying runs the schema's `toDOM`; pasting parses
+    // that markup back. Commonmark's link-mark rule outranks this node's own
+    // `parseDOM`, so the ref returns as an ordinary link and what survives is
+    // its TEXT: a chip inside `toDOM` lands in the document as "🃏 TrainerAI"
+    // and the serializer then writes those two letters to disk as the label.
+    // Guarding `getAttrs` does not reach this, because `getAttrs` is not the
+    // rule that matched.
+    setPageRefOrigin(ORIGIN);
+    syncLivePageInfo([{ id: "app1", title: "Trainer", icon: "🃏", kind: "app" }]);
+    const root = document.createElement("div");
+    document.body.append(root);
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, "[🃏 Trainer](/p/app1)");
+      })
+      .use(commonmark)
+      .use(gfm)
+      .use(pageRef)
+      .create();
+
+    try {
+      const view = editor.action((ctx) => ctx.get(editorViewCtx));
+      // What the editor draws still wears the chip: that is the NodeView.
+      expect(
+        root.querySelector('[data-page-ref="app1"]')?.querySelector(".ai-chip"),
+      ).not.toBeNull();
+
+      // What the clipboard carries does not.
+      const copied = DOMSerializer.fromSchema(view.state.schema).serializeFragment(
+        view.state.doc.content,
+      );
+      const holder = document.createElement("div");
+      holder.append(copied);
+      expect(holder.querySelector(".ai-chip")).toBeNull();
+      expect(holder.textContent).not.toContain("AI");
+
+      // And pasting it back yields a document with no "AI" in its text.
+      const parsed = DOMParser.fromSchema(view.state.schema).parse(holder);
+      expect(parsed.textContent).toBe("🃏 Trainer");
+    } finally {
+      await editor.destroy();
+    }
   });
 
   it("says whether a host is placing page ids, which the click handler asks", () => {

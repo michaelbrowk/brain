@@ -479,6 +479,7 @@ function Row({
       {...dragHandlers}
       title={node.title}
       emoji={node.icon || undefined}
+      ai={node.kind === "app"}
       depth={depth}
       selected={active}
       hasChildren={!!node.hasChildren}

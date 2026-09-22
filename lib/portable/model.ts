@@ -6,6 +6,11 @@ import {
   referencedAttachmentUrls,
 } from "@/lib/attachments";
 import {
+  APP_ENTRY_PATH,
+  appAssetPath,
+  appMetaSchema,
+} from "@/lib/apps/model";
+import {
   collectionDefinitionSchema,
   collectionRowSchema,
 } from "@/lib/collections/model";
@@ -14,12 +19,15 @@ import { type TaskRecord, taskRecordSchema } from "@/lib/tasks/model";
 import { createPortableArchive, readPortableArchive } from "./archive";
 
 export const PORTABLE_FORMAT = "brain-portable" as const;
-/** Version 2 is the first to carry tasks. */
-export const PORTABLE_VERSION = 2 as const;
-/** Both versions are read. A version 1 archive has no `tasks` key and imports
- *  exactly as it did before the bump, because refusing the exports people
- *  already hold would cost them their data and buy nothing. */
-const portableVersionSchema = z.union([z.literal(1), z.literal(2)]);
+/** Version 2 is the first to carry tasks; version 3 the first to carry an app
+ *  page's own files. Every version is read. A 1 or a 2 imports exactly as it
+ *  did before its bump, because refusing the exports people already hold
+ *  would cost them their data and buy nothing. The other direction does not
+ *  hold and cannot: both schemas here are strict, so a Brain older than this
+ *  release refuses a version 3 archive rather than dropping the key it does
+ *  not know. That is the trade 0.10.0 made for tasks, in the same words. */
+export const PORTABLE_VERSION = 3 as const;
+const portableVersionSchema = z.union([z.literal(1), z.literal(2), z.literal(3)]);
 const MAX_PORTABLE_PAGES = 5_000;
 const MAX_PAGE_MARKDOWN_BYTES = 10 * 1024 * 1024;
 
@@ -65,12 +73,45 @@ const portableMetaSchema = z
   })
   .strict();
 
+/** AN APP PAGE'S FILES, BY THE PATHS THEY TAKE IN THE ZIP.
+ *
+ *  Under `app/<page index>/`, keyed by the same index the markdown path uses,
+ *  so one page's files are one folder a person can open. Not under `assets/`,
+ *  which is the attachment namespace: every entry there is handed to
+ *  `store.saveAttachment` on import and would land as a loose file nothing
+ *  references.
+ *
+ *  `meta` is the `app` map itself, carried as `unknown` and parsed through
+ *  `appMetaSchema` on import, the way `collection` already is. `owns` inside
+ *  it names ids from the EXPORTING notebook, which the import remaps, so it
+ *  is never written through unchanged. */
+const portableAppSchema = z
+  .object({
+    meta: z.unknown(),
+    entryPath: z.string().regex(/^app\/p\d{6}\/index\.html$/),
+    assets: z
+      .array(
+        z
+          .object({
+            name: z.string().max(512),
+            archivePath: z
+              .string()
+              .regex(/^app\/p\d{6}\/assets\/[A-Za-z0-9_./-]{1,512}$/),
+          })
+          .strict(),
+      )
+      .max(256),
+    statePath: z.string().regex(/^app\/p\d{6}\/state\.json$/).optional(),
+  })
+  .strict();
+
 const portablePageSchema = z
   .object({
     sourceId: safeText(128, 1),
     parentSourceId: safeText(128, 1).nullable(),
     markdownPath: z.string().regex(/^pages\/p\d{6}\.md$/),
     meta: portableMetaSchema,
+    app: portableAppSchema.optional(),
   })
   .strict();
 
@@ -131,6 +172,15 @@ export interface PortableBundle {
   attachments: Map<string, Uint8Array>;
   /** The body each `bodyPath` names, decoded and untrimmed. */
   taskBodies: Map<string, string>;
+  /** Every entry under `app/`, by its archive path. Filled the way
+   *  `attachments` is, so the restore looks each file up by the name the
+   *  manifest gave it rather than by walking the archive again. */
+  appFiles: Map<string, Uint8Array>;
+  /** Each app's state, already parsed, by the same archive path. Parsed
+   *  during validation rather than during the restore, so a state file that
+   *  is not JSON is one refusal among the archive's others and not a bare
+   *  SyntaxError half way through an import. */
+  appState: Map<string, unknown>;
 }
 
 export interface PortableImportSummary {
@@ -216,7 +266,13 @@ async function exportedTasks(
 export async function buildPortableArchive(
   store: Store,
   options: { rootId?: string; now?: Date } = {},
-): Promise<{ bytes: Uint8Array; manifest: PortableManifest }> {
+): Promise<{
+  bytes: Uint8Array;
+  manifest: PortableManifest;
+  /** The ids of pages that say `kind: app` whose files this archive does not
+   *  carry. Empty on every ordinary notebook. */
+  skippedApps: string[];
+}> {
   const tree = store.getTree();
   const selected = options.rootId
     ? (() => {
@@ -286,6 +342,53 @@ export async function buildPortableArchive(
     pageReplacements.set(`/p/${node.id}`, `./${pagePaths.get(node.id)!.slice("pages/".length)}`);
   }
 
+  // One folder per app page, named by the same index its markdown takes.
+  const appEntries: Array<{ path: string; data: Uint8Array }> = [];
+  const appManifests = new Map<string, NonNullable<PortablePage["app"]>>();
+  // A page that says `kind: app` whose files this export could not carry,
+  // because the map does not validate or the entry is gone. It travels as an
+  // ordinary page and the caller is handed the list, rather than left to find
+  // out on the next import.
+  const skippedApps: string[] = [];
+  for (const node of nodes) {
+    const app = store.readAppMeta(node.id);
+    if (app === null) {
+      if (node.kind === "app") skippedApps.push(node.id);
+      continue;
+    }
+    const prefix = `app/p${pagePaths
+      .get(node.id)!
+      .slice("pages/p".length, -".md".length)}`;
+    const entry = await store.readAppFile(node.id, APP_ENTRY_PATH);
+    // An app page whose entry has gone is exported as an ordinary page. The
+    // archive is a copy of what is there, not a repair of what is not.
+    if (entry.kind !== "file") {
+      skippedApps.push(node.id);
+      continue;
+    }
+    appEntries.push({ path: `${prefix}/index.html`, data: entry.data });
+    const assets: { name: string; archivePath: string }[] = [];
+    for (const name of await store.listAppAssets(node.id)) {
+      const asset = await store.readAppFile(node.id, appAssetPath(name)!);
+      if (asset.kind !== "file") continue;
+      assets.push({ name, archivePath: `${prefix}/assets/${name}` });
+      appEntries.push({ path: `${prefix}/assets/${name}`, data: asset.data });
+    }
+    const state = app.state ? await store.readAppState(node.id) : null;
+    if (state !== null) {
+      appEntries.push({
+        path: `${prefix}/state.json`,
+        data: new TextEncoder().encode(JSON.stringify(state)),
+      });
+    }
+    appManifests.set(node.id, {
+      meta: app,
+      entryPath: `${prefix}/index.html`,
+      assets,
+      ...(state !== null ? { statePath: `${prefix}/state.json` } : {}),
+    });
+  }
+
   const manifestPages: PortableManifest["pages"] = pages.map((page) => {
     const node = nodes.find((candidate) => candidate.id === page.meta.id)!;
     const coverName = page.meta.cover
@@ -315,6 +418,9 @@ export async function buildPortableArchive(
           ? { collectionRow: page.meta.collectionRow }
           : {}),
       },
+      ...(appManifests.has(page.meta.id)
+        ? { app: appManifests.get(page.meta.id) }
+        : {}),
     };
   });
   const exportedAt = options.now ?? new Date();
@@ -355,6 +461,7 @@ export async function buildPortableArchive(
       path: entry.archivePath,
       data: entry.data,
     })),
+    ...appEntries,
     // Only the tasks that have one. The body is written raw, with no trim,
     // because the promise the store's own writer makes about it is byte for
     // byte and an export is not the place to start editing somebody's file.
@@ -369,7 +476,7 @@ export async function buildPortableArchive(
         : [],
     ),
   ];
-  return { bytes: createPortableArchive(entries), manifest };
+  return { bytes: createPortableArchive(entries), manifest, skippedApps };
 }
 
 function orderedPages(pages: PortablePage[]): PortablePage[] {
@@ -416,6 +523,9 @@ export function validatePortableArchive(
   }
   if (manifest.version === 1 && manifest.tasks) {
     throw new Error("portable manifest is version 1 and cannot carry tasks");
+  }
+  if (manifest.version < 3 && manifest.pages.some((page) => page.app)) {
+    throw new Error("portable manifest is older than version 3 and cannot carry app files");
   }
   orderedPages(manifest.pages);
   const expectedEntries = new Set(["manifest.json"]);
@@ -473,6 +583,56 @@ export function validatePortableArchive(
     attachments.set(attachment.archivePath, data);
     attachmentBytes += data.byteLength;
   }
+  // An app's files get the presence check the markdown and the attachments
+  // already get: every path the manifest names is an entry the archive holds,
+  // and the unlisted-file sweep below then makes the converse true, so no
+  // file rides under `app/` that no page claims.
+  const appFiles = new Map<string, Uint8Array>();
+  const appState = new Map<string, unknown>();
+  for (const page of manifest.pages) {
+    if (!page.app) continue;
+    const prefix = page.app.entryPath.slice(0, -"/index.html".length);
+    const paths = [
+      page.app.entryPath,
+      ...page.app.assets.map((asset) => asset.archivePath),
+      ...(page.app.statePath ? [page.app.statePath] : []),
+    ];
+    for (const appPath of paths) {
+      // Every one of the three keys carries its own page index in its regex,
+      // and they have to be the SAME index: a page naming another page's
+      // folder would restore one app's assets under a second app.
+      if (!appPath.startsWith(`${prefix}/`)) {
+        throw new Error(`portable app file is outside its own folder: ${appPath}`);
+      }
+      if (appFiles.has(appPath)) {
+        throw new Error(`portable manifest has duplicate app files: ${appPath}`);
+      }
+      expectedEntries.add(appPath);
+      const data = entries.get(appPath);
+      if (!data) throw new Error(`portable app file is missing: ${appPath}`);
+      appFiles.set(appPath, data);
+    }
+    // The state file is the one app entry with a shape, and the restore hands
+    // it straight to `JSON.parse`. Read here, where every other malformed
+    // archive is caught and named, it is one refusal among its peers; left to
+    // the restore it arrives as a bare SyntaxError after the import has
+    // begun, and the owner reads a parser's words about a file they never
+    // saw.
+    if (page.app.statePath) {
+      try {
+        appState.set(
+          page.app.statePath,
+          JSON.parse(
+            new TextDecoder("utf-8", { fatal: true }).decode(
+              appFiles.get(page.app.statePath)!,
+            ),
+          ),
+        );
+      } catch {
+        throw new Error(`portable app state is not JSON: ${page.app.statePath}`);
+      }
+    }
+  }
   const taskBodies = new Map<string, string>();
   for (const task of manifest.tasks ?? []) {
     if (!task.bodyPath) continue;
@@ -518,7 +678,7 @@ export function validatePortableArchive(
     }
   }
   return {
-    bundle: { manifest, markdown, attachments, taskBodies },
+    bundle: { manifest, markdown, attachments, taskBodies, appFiles, appState },
     summary: {
       title: manifest.title,
       pages: manifest.pages.length,
@@ -572,6 +732,29 @@ export async function applyPortableBundle(
       });
       created.set(page.sourceId, meta.id);
       if (page.parentSourceId === null) rootIds.push(meta.id);
+      // AN APP PAGE SAYS SO BEFORE ITS CHILDREN EXIST.
+      //
+      // `ordered` puts a parent before its children, and `slugify("App")` is
+      // `app`, the folder name an app's own file set uses. In the exporting
+      // notebook such a child was pushed aside because the app's folder was
+      // already on disk; here nothing holds it yet, so the child took it and
+      // the metadata write below refused the WHOLE archive. A notebook that
+      // cannot be restored from its own backup is worse than either.
+      //
+      // `owns` waits for the loop that remaps it: the ids this import mints
+      // are not known until every page is created.
+      if (page.app) {
+        await store.setAppMeta(
+          meta.id,
+          appMetaSchema.parse({
+            ...appMetaSchema.parse(page.app.meta),
+            owns: [],
+            state: page.app.statePath !== undefined,
+          }),
+          "me",
+          options.src,
+        );
+      }
     }
     const pageLinks = new Map<string, string>();
     for (const page of ordered) {
@@ -620,6 +803,44 @@ export async function applyPortableBundle(
         page.meta.collectionRow,
         options.src,
       );
+    }
+    for (const page of ordered.filter((item) => item.app !== undefined)) {
+      const id = created.get(page.sourceId)!;
+      const app = page.app!;
+      // The map again, this time with `owns`. It names ids from the exporting
+      // notebook, so it is remapped onto the ids this import minted, and an
+      // id the archive did not carry is dropped: an app that may write a page
+      // it cannot see is a refusal waiting to confuse somebody. The rest of
+      // the map is what the create loop already wrote, so a restore that dies
+      // here leaves an app that runs and owns nothing rather than a page with
+      // no `kind`.
+      //
+      // Still before the files: `writeAppFiles` refuses a page that is not an
+      // app, which is what stops its rename pair carrying a child page whose
+      // folder is `app/` out of the tree.
+      const source = appMetaSchema.parse(app.meta);
+      await store.setAppMeta(
+        id,
+        appMetaSchema.parse({
+          ...source,
+          owns: source.owns
+            .map((owned) => created.get(owned))
+            .filter((owned): owned is string => owned !== undefined),
+          state: app.statePath !== undefined,
+        }),
+        "me",
+        options.src,
+      );
+      await store.writeAppFiles(id, {
+        entryHtml: new TextDecoder().decode(bundle.appFiles.get(app.entryPath)!),
+        assets: app.assets.map((asset) => ({
+          name: asset.name,
+          data: bundle.appFiles.get(asset.archivePath)!,
+        })),
+        ...(app.statePath === undefined
+          ? {}
+          : { state: bundle.appState.get(app.statePath) }),
+      });
     }
     // Every task goes in through the store's own leaf, so the task index is
     // right the moment this returns and the note edits and the task writes

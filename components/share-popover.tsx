@@ -6,6 +6,7 @@ import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react"
 import type { ShareScopeSnapshot } from "@/lib/store/types";
 import { Segmented } from "./settings/shared";
 import { dayLabel } from "./tasks-lists";
+import { AiChip } from "./ui/ai-chip";
 import { Button } from "./ui/button";
 import { Field } from "./ui/field";
 import { Icon } from "./ui/icon";
@@ -605,7 +606,9 @@ function PrivateReview({
           <ul className="brain-share-row-list">
             {overlaps.map((overlap) => (
               <li key={overlap.rootId} className={NOTE}>
-                {`${overlap.title} · ${overlapMarks(overlap).join(" · ")}`}
+                {overlap.title}
+                {overlap.kind === "app" && <AiChip />}
+                {` · ${overlapMarks(overlap).join(" · ")}`}
               </li>
             ))}
           </ul>

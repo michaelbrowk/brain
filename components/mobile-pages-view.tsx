@@ -13,6 +13,7 @@ import {
 import { DEFAULT_PAGE_ICON } from "@/lib/constants";
 import type { TreeNode } from "@/lib/store/types";
 import { pageFade, pageTransition } from "@/lib/motion";
+import { AiChip } from "./ui/ai-chip";
 import { Icon } from "./ui/icon";
 import { IconButton } from "./ui/button";
 import { ScrollEdge } from "./ui/scroll-edge";
@@ -333,6 +334,7 @@ function MobilePagesSurface({
                       <span className="text-caption ml-2 text-ink-2">{path}</span>
                     )}
                   </span>
+                  {node.kind === "app" && <AiChip />}
                 </button>
               </div>
             ))}
@@ -423,6 +425,7 @@ function MobilePageRow({
             {node.icon ?? DEFAULT_PAGE_ICON}
           </span>
           <span className="tree-row-title">{node.title}</span>
+          {node.kind === "app" && <AiChip />}
         </button>
       </div>
       {hasChildren && isOpen &&

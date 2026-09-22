@@ -30,6 +30,7 @@ import {
   type DragEvent,
   type MouseEvent,
 } from "react";
+import { AiChip } from "./ui/ai-chip";
 import { Icon } from "./ui/icon";
 
 const subscribeToOrigin = () => () => {};
@@ -352,6 +353,7 @@ export function Subpages({
               >
                 <span className="brain-page-ref-icon">{child.icon || "📄"}</span>
                 {` ${child.title}`}
+                {child.kind === "app" && <AiChip />}
               </a>
               <FileInPage
                 child={child}

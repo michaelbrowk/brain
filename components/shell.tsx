@@ -4201,12 +4201,12 @@ export function Shell({
   // one walk of the tree, memoized — recomputed only when the tree changes, not
   // on every keystroke (setPage used to trigger four full walks of it each)
   const { allPages, pinnedPages, allCategories } = useMemo(() => {
-    const all: { id: string; title: string; icon?: string }[] = [];
-    const pinned: { id: string; title: string; icon?: string }[] = [];
+    const all: { id: string; title: string; icon?: string; kind?: "app" }[] = [];
+    const pinned: { id: string; title: string; icon?: string; kind?: "app" }[] = [];
     const cats = new Set<string>();
     const walk = (nodes: TreeNode[]) => {
       for (const n of nodes) {
-        const lite = { id: n.id, title: n.title, icon: n.icon };
+        const lite = { id: n.id, title: n.title, icon: n.icon, kind: n.kind };
         all.push(lite);
         if (n.pinned) pinned.push(lite);
         if (n.category) cats.add(n.category);

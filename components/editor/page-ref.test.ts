@@ -7,6 +7,7 @@ import {
   rootCtx,
 } from "@milkdown/kit/core";
 import { commonmark } from "@milkdown/kit/preset/commonmark";
+import { DOMParser, DOMSerializer } from "@milkdown/kit/prose/model";
 import { gfm } from "@milkdown/kit/preset/gfm";
 import { getMarkdown } from "@milkdown/kit/utils";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +15,7 @@ import {
   hasPageRefHrefResolver,
   pageRef,
   pageRefHref,
+  pageRefLabelFromDom,
   setPageRefHrefResolver,
   setPageRefOrigin,
   syncLivePageInfo,
@@ -194,6 +196,134 @@ describe("page references", () => {
       const serialized = editor.action(getMarkdown());
       expect(serialized).toContain("[🪄 After rename](/p/known)");
       expect(serialized).toContain("[🌱 Now resolved](/p/missing)");
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("draws the chip on a ref to an app page and not on an ordinary one", async () => {
+    setPageRefOrigin(ORIGIN);
+    syncLivePageInfo([
+      { id: "app1", title: "Trainer", icon: "🃏", kind: "app" },
+      { id: "page1", title: "Spanish", icon: "📄" },
+    ]);
+    const root = document.createElement("div");
+    document.body.append(root);
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, "[🃏 Trainer](/p/app1)\n\n[📄 Spanish](/p/page1)");
+      })
+      .use(commonmark)
+      .use(gfm)
+      .use(pageRef)
+      .create();
+
+    try {
+      const appRef = root.querySelector<HTMLAnchorElement>('[data-page-ref="app1"]')!;
+      const plain = root.querySelector<HTMLAnchorElement>('[data-page-ref="page1"]')!;
+      expect(appRef.querySelector(".ai-chip")?.textContent).toBe("AI");
+      expect(plain.querySelector(".ai-chip")).toBeNull();
+
+      // The chip is chrome, not content: it must not enter the text the
+      // serializer writes or the label a paste bakes back into the node.
+      expect(appRef.title).toBe("🃏 Trainer");
+      expect(editor.action(getMarkdown())).toContain("[🃏 Trainer](/p/app1)");
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("keeps the chip out of the label a pasted ref bakes", async () => {
+    // THROUGH `parseDOM`, not only through the helper. `label` is the string
+    // a ref falls back to once the page it names is gone, so two letters of
+    // chrome baked in here become part of somebody's title for good. Calling
+    // the helper proves the helper; what has to hold is the rule that calls
+    // it. The anchor carries no `href`, which is how `toDOM` writes a ref to
+    // a page the live directory has lost, and that is exactly the ref whose
+    // label ever gets read.
+    setPageRefOrigin(ORIGIN);
+    syncLivePageInfo([{ id: "app1", title: "Trainer", icon: "🃏", kind: "app" }]);
+    const root = document.createElement("div");
+    document.body.append(root);
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, "");
+      })
+      .use(commonmark)
+      .use(gfm)
+      .use(pageRef)
+      .create();
+
+    try {
+      const anchor = document.createElement("a");
+      anchor.setAttribute("data-page-ref", "app1");
+      anchor.append(document.createTextNode("🃏 Trainer"));
+      const chip = document.createElement("span");
+      chip.className = "ai-chip";
+      chip.textContent = "AI";
+      anchor.append(chip);
+      const holder = document.createElement("div");
+      holder.append(anchor);
+
+      const view = editor.action((ctx) => ctx.get(editorViewCtx));
+      const parsed = DOMParser.fromSchema(view.state.schema).parse(holder);
+      const labels: string[] = [];
+      parsed.descendants((node) => {
+        if (node.type.name === "page_ref") labels.push(String(node.attrs.label));
+      });
+      expect(labels).toEqual(["🃏 Trainer"]);
+
+      // And the helper the rule leans on, on its own.
+      expect(pageRefLabelFromDom(anchor)).toBe("🃏 Trainer");
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("carries no chip through a copy and a paste of a ref to an app page", async () => {
+    // THE WHOLE CLIPBOARD ROUND TRIP, because the chip is chrome and chrome
+    // must not become text. Copying runs the schema's `toDOM`; pasting parses
+    // that markup back. Commonmark's link-mark rule outranks this node's own
+    // `parseDOM`, so the ref returns as an ordinary link and what survives is
+    // its TEXT: a chip inside `toDOM` lands in the document as "🃏 TrainerAI"
+    // and the serializer then writes those two letters to disk as the label.
+    // Guarding `getAttrs` does not reach this, because `getAttrs` is not the
+    // rule that matched.
+    setPageRefOrigin(ORIGIN);
+    syncLivePageInfo([{ id: "app1", title: "Trainer", icon: "🃏", kind: "app" }]);
+    const root = document.createElement("div");
+    document.body.append(root);
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, "[🃏 Trainer](/p/app1)");
+      })
+      .use(commonmark)
+      .use(gfm)
+      .use(pageRef)
+      .create();
+
+    try {
+      const view = editor.action((ctx) => ctx.get(editorViewCtx));
+      // What the editor draws still wears the chip: that is the NodeView.
+      expect(
+        root.querySelector('[data-page-ref="app1"]')?.querySelector(".ai-chip"),
+      ).not.toBeNull();
+
+      // What the clipboard carries does not.
+      const copied = DOMSerializer.fromSchema(view.state.schema).serializeFragment(
+        view.state.doc.content,
+      );
+      const holder = document.createElement("div");
+      holder.append(copied);
+      expect(holder.querySelector(".ai-chip")).toBeNull();
+      expect(holder.textContent).not.toContain("AI");
+
+      // And pasting it back yields a document with no "AI" in its text.
+      const parsed = DOMParser.fromSchema(view.state.schema).parse(holder);
+      expect(parsed.textContent).toBe("🃏 Trainer");
     } finally {
       await editor.destroy();
     }

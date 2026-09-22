@@ -1,3 +1,4 @@
+import type { AppMeta } from "../apps/model";
 import type {
   CollectionDefinition,
   CollectionRow,
@@ -58,6 +59,12 @@ export interface PageMeta {
   title: string; // display, mutable
   icon?: string;
   cover?: string;
+  /** An app page: its body is an HTML application under `app/`, not Markdown
+   *  the editor may open. The Markdown body stays the agent's one-paragraph
+   *  description, which is what search indexes and what a client that cannot
+   *  run the app sees. */
+  kind?: "app";
+  app?: AppMeta;
   order: string; // fractional-index key among siblings
   created: string; // ISO
   updated: string; // ISO
@@ -396,6 +403,10 @@ export interface TreeNode {
   title: string;
   icon?: string;
   cover?: string;
+  /** Drawn as the AI chip wherever this page is named, and read by the shell
+   *  to pick the app canvas instead of the editor. */
+  kind?: "app";
+  app?: AppMeta;
   order: string;
   public?: boolean;
   shareLocked?: boolean; // sharePass is set (the hash itself never leaves the server)
@@ -430,6 +441,9 @@ export interface ShareScopeSnapshot {
   overlappingRoots: Array<{
     rootId: string;
     title: string;
+    /** An app page, so the overlap list names it the way every other surface
+     *  that names a page does. */
+    kind?: "app";
     relation: "ancestor" | "descendant";
     shareExpiresAt: string | null;
     /** A nested grant that asks for a password cannot be folded into a parent
@@ -608,13 +622,83 @@ export class AttachmentValidationError extends Error {
       | "blocked_mime"
       | "mime_mismatch"
       | "hash_mismatch"
-      | "quota_exceeded",
+      | "quota_exceeded"
+      // An app asset whose name is not one an app may hold. The routes that
+      // read this code already answer anything but `too_large` as an unsafe
+      // type, which is what a refused name is.
+      | "bad_type",
     message: string,
   ) {
     super(message);
     this.name = "AttachmentValidationError";
   }
 }
+
+/** A write whose bytes are over one of the three caps in `lib/apps/model.ts`.
+ *  Nothing was written: the size is answered before the file is opened, the
+ *  same way an attachment's is, so a caller collecting several files never
+ *  holds more than the total it allows. */
+export class AppSizeError extends Error {
+  constructor(readonly what: "entry" | "assets" | "state") {
+    super(`app ${what} is too large`);
+    this.name = "AppSizeError";
+  }
+}
+
+export function isAppSize(e: unknown): e is AppSizeError {
+  return e instanceof Error && e.name === "AppSizeError";
+}
+
+/** A write aimed at a page that is not an app, or at one whose `app/` folder
+ *  is a child page's rather than an app's file set.
+ *
+ *  The second half is the one that matters. `slugify("App")` is `app`, so
+ *  `<parent>/app/` is an ordinary page's own folder in some notebooks, and
+ *  the rename pair in `writeAppFiles` would carry that page and everything
+ *  under it out of the tree and then delete it. `kind` on the page's own
+ *  index, and the absence of an `index.md` under `app/`, are what tell the
+ *  two apart, and both are read before the first rename rather than after. */
+export class NotAnAppError extends Error {
+  readonly code = "not_app";
+  constructor(message = "page is not an app") {
+    super(message);
+    this.name = "NotAnAppError";
+  }
+}
+
+export function isNotApp(e: unknown): e is NotAnAppError {
+  return e instanceof Error && e.name === "NotAnAppError";
+}
+
+export interface AppAssetInput {
+  readonly name: string;
+  readonly data: Uint8Array;
+}
+
+export interface AppFilesInput {
+  readonly entryHtml?: string;
+  /** Replaces the asset folder whole. A rebuild that names no assets keeps
+   *  the ones already there; one that names an empty array clears them. */
+  readonly assets?: readonly AppAssetInput[];
+  readonly state?: unknown;
+}
+
+export interface CreateAppPageInput {
+  readonly icon?: string;
+  readonly description: string;
+  readonly entryHtml: string;
+  readonly assets?: readonly AppAssetInput[];
+  readonly owns?: readonly { title: string; icon?: string; markdown?: string }[];
+  readonly state?: unknown;
+  /** The client name out of the grant. */
+  readonly builtBy: string;
+  readonly reason?: string;
+  readonly src?: string;
+}
+
+export type AppFileRead =
+  | { readonly kind: "file"; readonly mimeType: string; readonly data: Uint8Array }
+  | { readonly kind: "missing" };
 
 /** Match store errors by NAME, never `instanceof`. Next bundles route handlers
  *  and RSC pages into separate module layers, each with its own copy of these

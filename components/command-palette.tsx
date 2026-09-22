@@ -4,6 +4,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { Command } from "cmdk";
 import { motion, useReducedMotion } from "framer-motion";
 import { pageFade, pageTransition } from "@/lib/motion";
+import { AiChip } from "./ui/ai-chip";
 import { IconButton } from "./ui/button";
 import { Icon } from "./ui/icon";
 import { Kbd } from "./ui/primitives";
@@ -24,6 +25,7 @@ interface FlatPage {
   id: string;
   title: string;
   icon?: string;
+  kind?: "app";
   path: string;
   category?: string;
   tags?: string[];
@@ -46,6 +48,7 @@ function flattenPages(tree: TreeNode[]): FlatPage[] {
         id: n.id,
         title: n.title,
         icon: n.icon,
+        kind: n.kind,
         path: trail.join(" / "),
         category: n.category,
         tags: n.tags,
@@ -747,6 +750,7 @@ export function CommandPalette({
                 )}
               </span>
               <span className="min-w-0 flex-1 truncate">{p.title}</span>
+              {p.kind === "app" && <AiChip />}
               {p.path && (
                 <span className="max-w-[45%] shrink-0 truncate text-[12px] text-ink-2">
                   {p.path}
@@ -778,6 +782,7 @@ export function CommandPalette({
                 <span className="min-w-0 flex-1 truncate">
                   {highlightText(p.title, q, true)}
                 </span>
+                {p.kind === "app" && <AiChip />}
                 {p.path && (
                   <span className="max-w-[45%] shrink-0 truncate text-[12px] text-ink-2">
                     {p.path}
@@ -810,6 +815,7 @@ export function CommandPalette({
                 <span className="min-w-0 flex-1 truncate">
                   {highlightText(h.title, q, true)}
                 </span>
+                {h.kind === "app" && <AiChip />}
               </span>
               <span className="truncate pl-[30px] text-[12px] text-ink-2">
                 {highlightText(h.snippet.before, q)}

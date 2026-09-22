@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, type ReactNode } from "react";
+import { AiChip } from "./ai-chip";
 
 export interface Crumb {
   label: ReactNode;
@@ -11,6 +12,9 @@ export interface Crumb {
   onClick?: () => void;
   /** Tooltip for a folded segment ("…" → the grandparent's title). */
   title?: string;
+  /** The page this crumb names is an app. Drawn from `kind`, never from the
+   *  label, so a folded "…" segment never grows one. */
+  ai?: boolean;
   /** Static states for the stand and screenshots. */
   hover?: boolean;
   pressed?: boolean;
@@ -42,6 +46,7 @@ export function BreadcrumbPill({
               </span>
             )}
             <span className="crumb-label truncate">{item.label}</span>
+            {item.ai && <AiChip />}
           </>
         );
         const state = {

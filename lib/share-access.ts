@@ -36,6 +36,9 @@ export type ShareDirectChild = Readonly<{
   id: string;
   title: string;
   icon?: string;
+  /** An app page. A visitor sees the same mark the owner does, because the
+   *  question it answers, who built this, is the visitor's question too. */
+  kind?: "app";
 }>;
 
 /** What the index knows about one page's share standing: whether it is a root
@@ -105,7 +108,11 @@ function isLiveGrant(node: ShareFoldNode | null, now: number): boolean {
 
 /** What a shared page may draw for a page it links: the name and icon that
  *  page carries now, rather than the label the body was written with. */
-export type SharePageLabel = Readonly<{ title: string; icon?: string }>;
+export type SharePageLabel = Readonly<{
+  title: string;
+  icon?: string;
+  kind?: "app";
+}>;
 
 export interface ShareLabelStore {
   isWithinSubtree(rootId: string, targetId: string): boolean;
@@ -141,6 +148,7 @@ export function resolveShareLabels(
       Object.freeze({
         title: label.title,
         ...(label.icon === undefined ? {} : { icon: label.icon }),
+        ...(label.kind === undefined ? {} : { kind: label.kind }),
       }),
     );
   }

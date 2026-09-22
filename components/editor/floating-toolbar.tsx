@@ -184,6 +184,8 @@ export interface PageRef {
   id: string;
   title: string;
   icon?: string;
+  /** An app page, so every surface that names it can draw the AI chip. */
+  kind?: "app";
 }
 
 export function FloatingToolbar({

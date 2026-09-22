@@ -3,6 +3,7 @@
 import { motion, useReducedMotion } from "framer-motion";
 import { forwardRef, type HTMLAttributes, type ReactNode } from "react";
 import { SPRING_SELECT } from "@/lib/motion";
+import { AiChip } from "./ai-chip";
 import { Icon } from "./icon";
 
 /** Tree row on glass — 28px capsule r14 (DESIGN.md v2 → Hover, Motion).
@@ -38,6 +39,7 @@ export const TreeRow = forwardRef<HTMLDivElement, TreeRowProps>(function TreeRow
     dropEdge,
     dropDepth = 0,
     hover,
+    ai = false,
     layoutId = "tree-selected",
     className = "",
     style,
@@ -89,6 +91,7 @@ export const TreeRow = forwardRef<HTMLDivElement, TreeRowProps>(function TreeRow
         {emoji ?? <Icon name={icon} size={16} variant={selected ? "bold" : "linear"} />}
       </span>
       <span className="tree-row-title">{title}</span>
+      {ai && <AiChip />}
       {menu && <span className="tree-row-more">{menu}</span>}
     </div>
   );
@@ -117,6 +120,8 @@ export type TreeRowProps = Omit<HTMLAttributes<HTMLDivElement>, "title" | "class
   dropDepth?: number;
   /** Static hover for the stand and screenshots. */
   hover?: boolean;
+  /** The page is an app. Drawn from `kind`, never from the title. */
+  ai?: boolean;
   /** Shared between the rows of one tree so the capsule flows between them. */
   layoutId?: string;
   className?: string;

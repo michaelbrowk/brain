@@ -35,6 +35,11 @@ const child = spawn(
       BRAIN_UPDATE_CHECK: "off",
       BRAIN_NOTIFICATIONS_STATE_DIR: path.join(stateRoot, "notifications"),
       BRAIN_MCP_STATE_DIR: path.join(stateRoot, "mcp"),
+      // The owner settings too, for the same reason and one more: the module
+      // switches live here, `e2e/modules.spec.ts` turns them off and on, and a
+      // run killed between the two would leave the machine's own `pnpm dev`
+      // with Mail or Tasks missing and nothing on screen to explain it.
+      BRAIN_SETTINGS_STATE_DIR: path.join(stateRoot, "settings"),
       // A timer writing task files under a temp notes root mid-run is a flake
       // nobody would diagnose twice. NODE_ENV is development here, so the
       // scan's own test guard does not cover this process.

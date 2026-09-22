@@ -77,3 +77,48 @@ describe("the Words page", () => {
     expect(parseWordsTable(table)[0].status).toBe("new");
   });
 });
+
+/** THE ROW THAT USED TO DISAPPEAR EVERY TIME IT WAS WRITTEN.
+ *
+ *  A pipe is the table's own separator, so a word or a translation carrying
+ *  one wrote a six-cell row that `parseWordsTable` then dropped. The word was
+ *  re-extracted from the source page as new, drilled again, written again and
+ *  dropped again, and the owner's `Words` page rendered as a broken table in
+ *  the editor. Markdown's own answer is a backslash, and it is what a person
+ *  hand-editing the page would write. */
+describe("a cell that carries the table's own separator", () => {
+  const awkward = [
+    { word: "o|u", translation: "or", status: "learning" as const, seen: 2, next: "2026-10-01" },
+    { word: "coma", translation: "comma, the mark", status: "new" as const, seen: 0, next: "" },
+    { word: "barra", translation: "a slash | a bar", status: "known" as const, seen: 5, next: "2026-12-01" },
+  ];
+
+  it("round-trips a word and a translation that hold one", () => {
+    expect(parseWordsTable(renderWordsTable(awkward))).toEqual(awkward);
+  });
+
+  it("writes it escaped, so the owner's page is still a table", () => {
+    const table = renderWordsTable([awkward[0]]);
+    expect(table.split("\n")[2]).toBe("| o\\|u | or | learning | 2 | 2026-10-01 |");
+  });
+
+  it("reads an escaped separator out of a source page too", () => {
+    const md = ["| Spanish | English |", "| --- | --- |", "| o\\|u | or |"].join("\n");
+    expect(extractVocabulary(md)).toEqual([{ word: "o|u", translation: "or" }]);
+  });
+
+  it("keeps a cell on one line, whatever it was given", () => {
+    const table = renderWordsTable([
+      { word: "dos\nlineas", translation: "two lines", status: "new" as const, seen: 0, next: "" },
+    ]);
+    expect(table.split("\n")).toHaveLength(3);
+    expect(parseWordsTable(table)[0].word).toBe("dos lineas");
+  });
+
+  it("survives a backslash of the owner's own", () => {
+    const rows = [
+      { word: "contra\\barra", translation: "backslash", status: "new" as const, seen: 0, next: "" },
+    ];
+    expect(parseWordsTable(renderWordsTable(rows))).toEqual(rows);
+  });
+});

@@ -64,6 +64,55 @@
 
 const SEPARATOR = /\s+[—–-]\s+/;
 
+/** A CELL MAY NOT CONTAIN THE THING THAT SEPARATES CELLS.
+ *
+ *  A word spelled `o|u` written raw into a pipe-delimited row makes a
+ *  six-cell line, and the reader below wants five. The row is dropped on the
+ *  next read, the word is found again on its source page as if it were new,
+ *  drilled again, written again and dropped again, and meanwhile the owner's
+ *  `Words` page is a broken table in their editor. Markdown's own answer is a
+ *  backslash, and it is what a person hand-editing that page would write, so
+ *  it is what is written and what is read.
+ *
+ *  The backslash is escaped first, or escaping the pipe afterwards would
+ *  escape the escape. A newline cannot be escaped inside a table at all, so
+ *  it becomes a space and the cell stays one cell. */
+function escapeCell(value) {
+  return String(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/\|/g, "\\|")
+    .replace(/\s*\r?\n\s*/g, " ")
+    .trim();
+}
+
+/** The cells of one row, split on the pipes that are not escaped, and each
+ *  one unescaped. `split("|")` has no idea what `\|` is, and a lookbehind
+ *  still misreads `\\|`, which is a real backslash followed by a real
+ *  separator. Walk it.
+ *
+ *  A row opens and closes with a separator, so the first and last pieces are
+ *  whatever sits outside the table, which is nothing. */
+function splitRow(line) {
+  const cells = [];
+  let current = "";
+  for (let index = 0; index < line.length; index += 1) {
+    const character = line[index];
+    if (character === "\\" && index + 1 < line.length) {
+      current += line[index + 1];
+      index += 1;
+      continue;
+    }
+    if (character === "|") {
+      cells.push(current);
+      current = "";
+      continue;
+    }
+    current += character;
+  }
+  cells.push(current);
+  return cells.slice(1, -1).map((cell) => cell.trim());
+}
+
 /** A line that ends the way a sentence ends is a sentence. It is the one
  *  signal that separates `I am learning - slowly.` from `adios - goodbye`
  *  without guessing at length: both sides of the first are short enough to
@@ -82,7 +131,7 @@ function extractVocabulary(markdown) {
     if (inFence || line.length === 0 || line.startsWith("#")) continue;
 
     if (line.startsWith("|") && line.endsWith("|")) {
-      const cells = line.slice(1, -1).split("|").map((cell) => cell.trim());
+      const cells = splitRow(line);
       // A separator row, and a header row whose cells name the columns rather
       // than being a pair of words.
       if (cells.every((cell) => /^:?-{3,}:?$/.test(cell))) continue;
@@ -121,7 +170,10 @@ function renderWordsTable(rows) {
     const key = row.word.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    lines.push(`| ${row.word} | ${row.translation} | ${row.status} | ${row.seen} | ${row.next} |`);
+    lines.push(
+      `| ${escapeCell(row.word)} | ${escapeCell(row.translation)} | ` +
+        `${escapeCell(row.status)} | ${escapeCell(row.seen)} | ${escapeCell(row.next)} |`,
+    );
   }
   return lines.join("\n");
 }
@@ -135,7 +187,7 @@ function parseWordsTable(markdown) {
   for (const raw of String(markdown).split("\n")) {
     const line = raw.trim();
     if (!line.startsWith("|") || !line.endsWith("|")) continue;
-    const cells = line.slice(1, -1).split("|").map((cell) => cell.trim());
+    const cells = splitRow(line);
     if (cells.length !== 5) continue;
     if (cells[0] === "word" || /^:?-{3,}:?$/.test(cells[0])) continue;
     const seen = Number.parseInt(cells[3], 10);

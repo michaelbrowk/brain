@@ -40,6 +40,12 @@ export async function GET(
   if (relative === null) return missing();
 
   const store = await getStore();
+  // A page is an app only when its own `app` map parses. A hand-written
+  // `kind: app`, or a restore that has not reached the frontmatter yet,
+  // leaves a page that claims to be an app and is not one; `readAppMeta`
+  // answers null for it and nothing of it is served. The canvas draws the
+  // missing-files state off the same 404.
+  if (store.readAppMeta(id) === null) return missing();
   if (!(await verifySession(req.cookies.get(SESSION_COOKIE)?.value))) {
     // A link visitor reaches an app the same way they reach its media: the
     // root they came through and the share version they were served, checked

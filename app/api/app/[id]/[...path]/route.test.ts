@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { NextRequest } from "next/server";
 
 const readAppFile = vi.fn();
+const readAppMeta = vi.fn();
 const verifySession = vi.fn();
 const resolveShareAccess = vi.fn();
 // Null by default: the request URL's own origin is the policy's, as on an
@@ -11,6 +12,7 @@ const configuredPublicOrigin = vi.fn<() => string | null>(() => null);
 vi.mock("@/lib/store", () => ({
   getStore: async () => ({
     readAppFile,
+    readAppMeta,
     isWithinSubtree: () => true,
     isDeleted: () => false,
   }),
@@ -36,6 +38,14 @@ function request(url: string) {
 beforeEach(() => {
   vi.clearAllMocks();
   verifySession.mockResolvedValue(true);
+  readAppMeta.mockReturnValue({
+    entry: "app/index.html",
+    version: 1,
+    builtBy: "Claude",
+    builtAt: "2026-09-22T10:00:00.000Z",
+    owns: [],
+    state: false,
+  });
   readAppFile.mockResolvedValue({
     kind: "file",
     mimeType: "text/html; charset=utf-8",
@@ -135,6 +145,18 @@ describe("an app's files", () => {
       expect.anything(),
       expect.objectContaining({ rootId: "root1", targetId: "app1", requestedVersion: "3" }),
     );
+  });
+
+  it("answers 404 for a page whose app map does not parse, before it reads a file", async () => {
+    // `readAppMeta` validates the frontmatter map and answers null for a
+    // hand-written or half-restored one. A page whose map does not parse is
+    // not an app, whatever its `kind` says, so nothing of it is served.
+    readAppMeta.mockReturnValue(null);
+    const res = await GET(request("/api/app/app1/index.html"), {
+      params: Promise.resolve({ id: "app1", path: ["index.html"] }),
+    });
+    expect(res.status).toBe(404);
+    expect(readAppFile).not.toHaveBeenCalled();
   });
 
   it("answers 404 for a page that is not an app", async () => {

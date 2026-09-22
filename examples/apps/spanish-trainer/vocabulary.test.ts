@@ -9,6 +9,7 @@ import {
   mergeWordRows,
   nextInterval,
   parseWordsTable,
+  readVocabulary,
   renderWordsTable,
 } from "./vocabulary.js";
 
@@ -355,5 +356,98 @@ describe("merging the owner's page with the app's session", () => {
     const before = JSON.stringify([app, owner]);
     mergeWordRows(app, owner, ["hola"]);
     expect(JSON.stringify([app, owner])).toBe(before);
+  });
+});
+
+/** READING A HUNDRED PAGES THROUGH A BRIDGE THAT ALLOWS THIRTY A SECOND.
+ *
+ *  `components/shell/app-bridge.ts` refuses the thirty-first request in a
+ *  second with `too_many`. The trainer reads every page under the chosen
+ *  parent, so a deck of more than thirty source pages used to spend the
+ *  budget, have the rest refused, and drop every refused page in a bare
+ *  `catch { continue; }` — the owner saw a smaller word count and no reason
+ *  for it. The reads are paced under the limit, a refusal is waited out once,
+ *  and whatever still could not be read is counted so the app can say so. */
+describe("reading the pages a deck is built from", () => {
+  const pages = (count: number) =>
+    Array.from({ length: count }, (_value, index) => ({ id: `p${index}`, title: `Page ${index}` }));
+
+  function clock() {
+    const waits: number[] = [];
+    return { waits, wait: async (ms: number) => void waits.push(ms), now: () => 0 };
+  }
+
+  it("reads every page and keeps the words in the order it found them", async () => {
+    const answers: Record<string, string> = { p0: "hola — hello", p1: "adios — goodbye" };
+    const answered = await readVocabulary(
+      pages(2),
+      async (id: string) => ({ markdown: answers[id] }),
+      clock(),
+    );
+    expect(answered.failed).toBe(0);
+    expect(answered.rows).toEqual([
+      { word: "hola", translation: "hello" },
+      { word: "adios", translation: "goodbye" },
+    ]);
+  });
+
+  it("waits out a too_many refusal once and then has the page", async () => {
+    const timing = clock();
+    let refused = false;
+    const answered = await readVocabulary(
+      pages(1),
+      async () => {
+        if (!refused) {
+          refused = true;
+          throw Object.assign(new Error("that app is asking too often"), { reason: "too_many" });
+        }
+        return { markdown: "hola — hello" };
+      },
+      timing,
+    );
+    expect(answered.failed).toBe(0);
+    expect(answered.rows).toEqual([{ word: "hola", translation: "hello" }]);
+    expect(timing.waits).toEqual([1000]);
+  });
+
+  it("counts a page it could not read, and reads the rest anyway", async () => {
+    const answered = await readVocabulary(
+      pages(3),
+      async (id: string) => {
+        if (id === "p1") throw Object.assign(new Error("gone"), { reason: "not_found" });
+        return { markdown: "hola — hello" };
+      },
+      clock(),
+    );
+    expect(answered.failed).toBe(1);
+    expect(answered.rows).toHaveLength(2);
+  });
+
+  it("counts a page that is refused twice rather than looping on it", async () => {
+    const timing = clock();
+    let asked = 0;
+    const answered = await readVocabulary(
+      pages(1),
+      async () => {
+        asked += 1;
+        throw Object.assign(new Error("too often"), { reason: "too_many" });
+      },
+      timing,
+    );
+    expect(asked).toBe(2);
+    expect(answered.failed).toBe(1);
+    expect(answered.rows).toEqual([]);
+  });
+
+  it("holds itself under the bridge's own limit rather than being refused by it", async () => {
+    const timing = clock();
+    const answered = await readVocabulary(
+      pages(45),
+      async () => ({ markdown: "hola — hello" }),
+      { ...timing, perSecond: 20 },
+    );
+    expect(answered.failed).toBe(0);
+    // Forty-five pages, twenty a second: it paused twice, for a second each.
+    expect(timing.waits).toEqual([1000, 1000]);
   });
 });

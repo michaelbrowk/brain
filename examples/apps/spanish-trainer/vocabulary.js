@@ -215,6 +215,65 @@ export function applyAnswer(row, kind, today) {
   };
 }
 
+/** THIRTY REQUESTS A SECOND IS THE WHOLE BUDGET, AND A DECK CAN BE BIGGER.
+ *
+ *  The host's bridge refuses the thirty-first request in a second with
+ *  `too_many` (`components/shell/app-bridge.ts`). A trainer reading every
+ *  page under a parent will pass that on any real notebook, and a refusal
+ *  swallowed in a bare catch is a page silently missing from the deck: the
+ *  owner sees a smaller count and no reason for it.
+ *
+ *  So the reads are paced under the limit rather than up against it, a
+ *  refusal is waited out once, and whatever still could not be read is
+ *  COUNTED and handed back for the app to say out loud. The clock and the
+ *  waiting are arguments, so this has a test that takes no time to run. */
+const READS_PER_SECOND = 20;
+
+export async function readVocabulary(nodes, readPage, options) {
+  const settings = options || {};
+  const perSecond = settings.perSecond || READS_PER_SECOND;
+  const wait = settings.wait || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+  const now = settings.now || (() => Date.now());
+
+  const rows = [];
+  let failed = 0;
+  let windowStart = now();
+  let used = 0;
+
+  for (const node of nodes) {
+    if (used >= perSecond) {
+      const elapsed = now() - windowStart;
+      if (elapsed < 1000) await wait(1000 - elapsed);
+      windowStart = now();
+      used = 0;
+    }
+    used += 1;
+    let page = null;
+    try {
+      page = await readPage(node.id);
+    } catch (error) {
+      if (error && error.reason === "too_many") {
+        // The budget is spent. A second is the window, so a second is the
+        // wait, and the window starts again with this page in it.
+        await wait(1000);
+        windowStart = now();
+        used = 1;
+        try {
+          page = await readPage(node.id);
+        } catch (again) {
+          page = null;
+        }
+      }
+    }
+    if (page === null) {
+      failed += 1;
+      continue;
+    }
+    for (const row of extractVocabulary(page.markdown)) rows.push(row);
+  }
+  return { rows, failed };
+}
+
 /** THE PAGE AND THE SESSION, WHEN BOTH MOVED.
  *
  *  A `rev_conflict` means somebody wrote the `Words` page between the app's

@@ -10,6 +10,14 @@ export interface PortableArchiveEntry {
   data: Uint8Array;
 }
 
+/** One app page's own files, under the same six digit counter its markdown
+ *  takes. An asset may sit in a folder, so the tail is one or more segments,
+ *  each of which has to open with a letter, a digit or an underscore. That
+ *  leading class is what makes `..` unspellable here, so no path an app
+ *  contributes can climb out of the folder its page index named. */
+const APP_ARCHIVE_PATH =
+  /^app\/p\d{6}\/(?:index\.html|state\.json|assets\/[A-Za-z0-9_][A-Za-z0-9._-]{0,63}(?:\/[A-Za-z0-9_][A-Za-z0-9._-]{0,63})*)$/;
+
 /** The closed allowlist of paths an archive may carry, applied to both the
  *  writer and the reader. It is the boundary a crafted archive meets first,
  *  so every alternative names an exact shape and nothing looser. A task file
@@ -21,6 +29,7 @@ function safeArchivePath(value: string): boolean {
     value === "manifest.json" ||
     /^pages\/p\d{6}\.md$/.test(value) ||
     /^tasks\/t\d{6}\.md$/.test(value) ||
+    APP_ARCHIVE_PATH.test(value) ||
     /^assets\/[A-Za-z0-9_-]{6,}(?:\.[A-Za-z0-9][A-Za-z0-9_-]{0,31})?$/.test(
       value,
     )

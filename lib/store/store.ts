@@ -4163,6 +4163,26 @@ export class Store {
     }
   }
 
+  /** The asset names one app holds, relative to its assets folder, depth
+   *  first and sorted, so an export writes the same archive twice running. */
+  async listAppAssets(id: string): Promise<string[]> {
+    const entry = this.index.get(id);
+    if (!entry || entry.meta.kind !== "app") return [];
+    const base = assertInRoot(this.root, path.join(entry.dir, APP_ASSETS_DIR));
+    const walkAssets = async (dir: string, prefix: string): Promise<string[]> => {
+      const found = await fs.readdir(dir, { withFileTypes: true }).catch(() => null);
+      if (found === null) return [];
+      const names: string[] = [];
+      for (const item of [...found].sort((a, b) => a.name.localeCompare(b.name))) {
+        const name = prefix ? `${prefix}/${item.name}` : item.name;
+        if (item.isDirectory()) names.push(...(await walkAssets(path.join(dir, item.name), name)));
+        else if (appAssetPath(name) !== null) names.push(name);
+      }
+      return names;
+    };
+    return walkAssets(base, "");
+  }
+
   async readAppState(id: string): Promise<unknown> {
     const entry = this.index.get(id);
     if (!entry || entry.meta.app?.state !== true) return null;

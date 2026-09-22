@@ -92,7 +92,7 @@ describe("the trainer's entry", () => {
     }
   });
 
-  it("carries no em-dash in a string the user reads", () => {
+  it("carries no em-dash in the markup a reader sees", () => {
     // Task 22's module matches `word — translation` as a separator, and that
     // regex is inlined into this file inside a <script>. A scan over ">…<"
     // would read the whole script body as visible text and fail on it, so the
@@ -104,5 +104,30 @@ describe("the trainer's entry", () => {
     expect(visible).not.toContain("—");
     // and the guard is worth something: the script it skipped does carry one
     expect(entry).toContain("—");
+  });
+
+  it("carries no em-dash in a string the script puts on the screen", () => {
+    // THE HALF THE SCAN ABOVE CANNOT SEE, AND IT IS THE BIGGER HALF.
+    //
+    // Every sentence this app actually shows a person — the status line, the
+    // summary, the count of words, the refusals — is a string literal inside
+    // that <script>, which the markup scan strips whole. So the script is
+    // scanned separately: comments out first (they are the house idiom and
+    // keep their em-dashes, and an apostrophe in one would otherwise open a
+    // literal that runs past the next quote), then every remaining string
+    // literal, which is every string that can reach the screen.
+    const script = [...entry.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)]
+      .map((match) => match[1])
+      .join("\n")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/(^|[^:"'\\])\/\/[^\n]*/g, "$1");
+    const literals = [
+      ...script.matchAll(/"((?:[^"\\\n]|\\.)*)"|'((?:[^'\\\n]|\\.)*)'/g),
+    ].map((match) => match[1] ?? match[2]);
+
+    expect(literals.length).toBeGreaterThan(20);
+    for (const literal of literals) {
+      expect(literal, `an em-dash in ${JSON.stringify(literal)}`).not.toContain("—");
+    }
   });
 });

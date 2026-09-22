@@ -49,6 +49,26 @@ describe("reading vocabulary out of a page", () => {
     expect(extractVocabulary(md)).toEqual([]);
   });
 
+  it("takes a pair somebody put a full stop after", () => {
+    // The sentence guard is there for `I am learning - slowly.`, and it used
+    // to cost this line too. A full stop is what a person writes at the end
+    // of a list item; it is not what makes the line prose. Length is.
+    expect(extractVocabulary("adios — goodbye.")).toEqual([
+      { word: "adios", translation: "goodbye" },
+    ]);
+    expect(extractVocabulary("- gracias — thanks!")).toEqual([
+      { word: "gracias", translation: "thanks" },
+    ]);
+    expect(extractVocabulary("buenos dias — good morning.")).toEqual([
+      { word: "buenos dias", translation: "good morning" },
+    ]);
+  });
+
+  it("still takes nothing from a sentence that happens to hold a dash", () => {
+    expect(extractVocabulary("I am learning - slowly.")).toEqual([]);
+    expect(extractVocabulary("The trainer reads them - all three of them.")).toEqual([]);
+  });
+
   it("does not take the table's own header row", () => {
     const md = ["| word | translation |", "| --- | --- |", "| hola | hello |"].join("\n");
     expect(extractVocabulary(md)).toEqual([{ word: "hola", translation: "hello" }]);

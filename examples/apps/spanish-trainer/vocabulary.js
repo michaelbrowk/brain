@@ -60,11 +60,22 @@ function splitRow(line) {
   return cells.slice(1, -1).map((cell) => cell.trim());
 }
 
-/** A line that ends the way a sentence ends is a sentence. It is the one
- *  signal that separates `I am learning - slowly.` from `adios - goodbye`
- *  without guessing at length: both sides of the first are short enough to
- *  pass for a phrase, and only one of them is punctuated. */
-const SENTENCE_END = /[.!?]$/;
+/** WHAT SEPARATES `I am learning - slowly.` FROM `adios — goodbye.`
+ *
+ *  Not the full stop on its own: a person writing a list puts one after the
+ *  last item, and refusing every punctuated line cost a legitimate pair. What
+ *  separates them is length. A pair is a word or a short phrase either side;
+ *  a sentence with a dash in it is longer than that, and the full stop is the
+ *  signal to hold it to the shorter limit rather than to reject it outright.
+ *
+ *  The stop itself is then not part of the translation, so it comes off. */
+const SENTENCE_END = /[.!?]+$/;
+const MAX_PHRASE_WORDS = 4;
+const MAX_SENTENCE_WORDS = 2;
+
+function countWords(value) {
+  return value.split(/\s+/).length;
+}
 
 export function extractVocabulary(markdown) {
   const rows = [];
@@ -90,17 +101,20 @@ export function extractVocabulary(markdown) {
       continue;
     }
 
-    if (SENTENCE_END.test(line)) continue;
     const bare = line.replace(/^[-*+]\s+/, "");
     // A bullet that was stripped is a list item; a line that was not must
     // still have exactly one separator, or it is a sentence with a dash in it.
     const parts = bare.split(SEPARATOR);
     if (parts.length !== 2) continue;
-    const [word, translation] = parts.map((part) => part.trim());
-    if (word.length === 0 || translation.length === 0) continue;
+    const [word, rest] = parts.map((part) => part.trim());
+    if (word.length === 0 || rest.length === 0) continue;
     // A sentence is longer than a word. Four words either side is generous
-    // for a phrase and short of anything anybody would call prose.
-    if (word.split(/\s+/).length > 4 || translation.split(/\s+/).length > 4) continue;
+    // for a phrase and short of anything anybody would call prose; a line
+    // that ends like a sentence is held to two, which a pair still passes.
+    const limit = SENTENCE_END.test(bare) ? MAX_SENTENCE_WORDS : MAX_PHRASE_WORDS;
+    if (countWords(word) > limit || countWords(rest) > limit) continue;
+    const translation = rest.replace(SENTENCE_END, "").trim();
+    if (translation.length === 0) continue;
     rows.push({ word, translation });
   }
   return rows;

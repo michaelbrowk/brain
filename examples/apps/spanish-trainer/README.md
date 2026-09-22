@@ -37,15 +37,33 @@ node examples/apps/spanish-trainer/build.mjs
   are Again, Good and Easy. Again puts the word back in this session, Good
   pushes it out by `2 ** seen` days, Easy marks it known and takes it out of
   the rotation. A known word is never drawn again.
-- Every answer writes `Words` through `write.page`, reading the rev back first.
-  One conflict is retried once, because the owner may have the page open.
+- Every answer writes `Words` through `write.page`, reading the page back
+  first and merging it rather than replacing it: the owner owns the words,
+  the app owns the schedule of what it answered in this session. One conflict
+  is retried once, because the owner may have the page open in the editor.
+- Source pages are read paced under the bridge's thirty requests a second, and
+  whatever still could not be read is counted and said out loud, because a page
+  silently missing from a deck is a word the owner thinks they have finished.
+- A line ending in a full stop is held to a shorter length before it counts as
+  a pair, so `adios — goodbye.` is a word and `I am learning - slowly.` is not.
+  A long phrase with a full stop after it is the case this gets wrong.
 
 ## How the e2e seeds it
 
-`e2e/apps.spec.ts` reads `index.html` off disk and sends it to
-`create_app_page` over MCP, with `owns: [{ title: "Words" }]`, the way an agent
-would. Nothing about the trainer is special to the test, which is the point:
-the case fails if the tool, the frame, the kit or the bridge is wrong.
+`e2e/apps.spec.ts` reads `index.html` off disk and seeds it through
+`POST /api/portable/import`, with the `Words` page as a child the app owns.
+
+It does **not** go through `create_app_page`, and the reason is worth knowing
+before this file is copied as a template. `/api/mcp` waits for a real `https://`
+origin, which `.env.example` states as product behaviour, and the browser
+harness serves `http://127.0.0.1:<port>` — the same value its share links and
+the frame's own policy are built from. MCP is therefore off in that harness by
+design, and the portable import is the other surface reaching the same store
+writers. The three tools themselves are covered by
+`app/api/mcp/app-tools.test.ts`.
+
+Nothing about the trainer is special to the test, which is the point: the case
+fails if the frame, the kit or the bridge is wrong.
 
 A shared copy of the trainer runs the same entry with the writes absent. It
 reads inside the shared subtree, refuses every write with `read_only`, and the

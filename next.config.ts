@@ -9,9 +9,19 @@ const nextConfig: NextConfig = {
   // Do not let unrelated lockfiles above this checkout move the standalone
   // root. A stable root makes local smoke artifacts match CI/release layout.
   turbopack: { root: process.cwd() },
-  // Runtime note paths are deliberately dynamic and live outside the release.
-  // Turbopack can otherwise copy repository source, tests, and .git into the
-  // standalone artifact while following those filesystem calls.
+  // Runtime note paths are deliberately dynamic and live outside the release,
+  // and a tracer following those filesystem calls copies repository source,
+  // tests and .git into the standalone artifact. This list names what it must
+  // not take.
+  //
+  // MEASURED, AND IT IS NOT HONOURED TODAY. The 0.13.0 build carries `app/`,
+  // `docs/`, `.git` and every other directory named below into
+  // `.next/standalone` regardless, which is this Turbopack rather than this
+  // list: the entries are correct and inert. They stay, because the day the
+  // tracer reads them is not a day anybody will think to write them, and
+  // because the jsdom exclude two entries down IS read and is load-bearing
+  // (see its own comment). Do not read a green build as evidence that a new
+  // entry here works; measure the artifact.
   outputFileTracingExcludes: {
     "/*": [
       "./.git/**/*",

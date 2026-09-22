@@ -9242,7 +9242,9 @@ describe("folding a nested share into its parent", () => {
       path.join(s.resolve(child.id), "index.md"),
       "utf8",
     );
-    expect(raw).toContain(`sharedUnder: ${parent.id}`);
+    // The serializer quotes an id that starts with `-`, which one nanoid in
+    // sixty-four does, so the file is matched with or without the quotes.
+    expect(raw).toMatch(new RegExp(`^sharedUnder: '?${parent.id}'?$`, "m"));
   });
 });
 

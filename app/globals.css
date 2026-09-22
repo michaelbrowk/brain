@@ -1671,6 +1671,29 @@ html[data-kbd] [contenteditable]:focus-visible {
   color: var(--ink);
 }
 
+/* AI chip — the mark on a page an agent built (spec §5). Label register on
+   the layered ink tint, never its own hue: it names an origin, and an origin
+   is not a state. It never shrinks on a phone, because that is where it does
+   the most work. */
+.ai-chip {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  height: 16px;
+  margin-left: 6px;
+  padding: 0 4px;
+  border-radius: 4px;
+  background-color: var(--fill-glass-hover);
+  font-family: var(--font-sf);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: 0.06px;
+  color: var(--ink-3);
+  cursor: inherit;
+  user-select: none;
+}
+
 /* Smart sort's heap, and the band that reads it. One layer for the whole
    pile rather than sixty-one animations: the pages are being read in the
    order they are stacked, and a single 96px gradient sweeping down says that

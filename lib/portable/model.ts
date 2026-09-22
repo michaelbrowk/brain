@@ -176,6 +176,11 @@ export interface PortableBundle {
    *  `attachments` is, so the restore looks each file up by the name the
    *  manifest gave it rather than by walking the archive again. */
   appFiles: Map<string, Uint8Array>;
+  /** Each app's state, already parsed, by the same archive path. Parsed
+   *  during validation rather than during the restore, so a state file that
+   *  is not JSON is one refusal among the archive's others and not a bare
+   *  SyntaxError half way through an import. */
+  appState: Map<string, unknown>;
 }
 
 export interface PortableImportSummary {
@@ -583,6 +588,7 @@ export function validatePortableArchive(
   // and the unlisted-file sweep below then makes the converse true, so no
   // file rides under `app/` that no page claims.
   const appFiles = new Map<string, Uint8Array>();
+  const appState = new Map<string, unknown>();
   for (const page of manifest.pages) {
     if (!page.app) continue;
     const prefix = page.app.entryPath.slice(0, -"/index.html".length);
@@ -605,6 +611,26 @@ export function validatePortableArchive(
       const data = entries.get(appPath);
       if (!data) throw new Error(`portable app file is missing: ${appPath}`);
       appFiles.set(appPath, data);
+    }
+    // The state file is the one app entry with a shape, and the restore hands
+    // it straight to `JSON.parse`. Read here, where every other malformed
+    // archive is caught and named, it is one refusal among its peers; left to
+    // the restore it arrives as a bare SyntaxError after the import has
+    // begun, and the owner reads a parser's words about a file they never
+    // saw.
+    if (page.app.statePath) {
+      try {
+        appState.set(
+          page.app.statePath,
+          JSON.parse(
+            new TextDecoder("utf-8", { fatal: true }).decode(
+              appFiles.get(page.app.statePath)!,
+            ),
+          ),
+        );
+      } catch {
+        throw new Error(`portable app state is not JSON: ${page.app.statePath}`);
+      }
     }
   }
   const taskBodies = new Map<string, string>();
@@ -652,7 +678,7 @@ export function validatePortableArchive(
     }
   }
   return {
-    bundle: { manifest, markdown, attachments, taskBodies, appFiles },
+    bundle: { manifest, markdown, attachments, taskBodies, appFiles, appState },
     summary: {
       title: manifest.title,
       pages: manifest.pages.length,
@@ -789,11 +815,7 @@ export async function applyPortableBundle(
         })),
         ...(app.statePath === undefined
           ? {}
-          : {
-              state: JSON.parse(
-                new TextDecoder().decode(bundle.appFiles.get(app.statePath)!),
-              ),
-            }),
+          : { state: bundle.appState.get(app.statePath) }),
       });
     }
     // Every task goes in through the store's own leaf, so the task index is

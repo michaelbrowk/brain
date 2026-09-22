@@ -7,6 +7,7 @@ import { BreadcrumbPill } from "./ui/breadcrumb-pill";
 import { CommandPalette } from "./command-palette";
 import { Hub } from "./hub";
 import { MobilePagesView } from "./mobile-pages-view";
+import { PinnedChip } from "./shell/sidebar";
 import { Subpages } from "./subpages";
 import { resetTasksStore } from "./tasks-client";
 import { TreeRow } from "./ui/tree-row";
@@ -212,6 +213,37 @@ describe("the chip on Home", () => {
     const rows = [...(host?.querySelectorAll<HTMLElement>("button") ?? [])];
     const app = rows.find((row) => row.textContent?.includes("Trainer"));
     const plain = rows.find((row) => row.textContent?.includes("Spanish"));
+    expect(app?.querySelector(".ai-chip")?.textContent).toBe("AI");
+    expect(plain).toBeDefined();
+    expect(plain?.querySelector(".ai-chip")).toBeNull();
+  });
+});
+
+describe("the chip on a pinned chip in the sidebar", () => {
+  it("draws on an app page and not on an ordinary one", () => {
+    const pinned = mount(
+      <>
+        <PinnedChip
+          page={{ id: "app1", title: "Trainer", kind: "app" }}
+          tree={[]}
+          pageRefSourcePageId={null}
+          selected={false}
+          onSelect={() => {}}
+          onReparentPageRef={() => null}
+        />
+        <PinnedChip
+          page={{ id: "page1", title: "AI notes" }}
+          tree={[]}
+          pageRefSourcePageId={null}
+          selected={false}
+          onSelect={() => {}}
+          onReparentPageRef={() => null}
+        />
+      </>,
+    );
+    const chips = [...pinned.querySelectorAll<HTMLElement>(".chip")];
+    const app = chips.find((chip) => chip.textContent?.includes("Trainer"));
+    const plain = chips.find((chip) => chip.textContent?.includes("AI notes"));
     expect(app?.querySelector(".ai-chip")?.textContent).toBe("AI");
     expect(plain).toBeDefined();
     expect(plain?.querySelector(".ai-chip")).toBeNull();

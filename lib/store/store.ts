@@ -6934,7 +6934,13 @@ export class Store {
 
   /** Roots of trashed subtrees (a deleted page under a deleted parent isn't
    *  listed separately). Most-recently-deleted first. */
-  trashList(): { id: string; title: string; icon?: string; deleted: string }[] {
+  trashList(): {
+    id: string;
+    title: string;
+    icon?: string;
+    kind?: "app";
+    deleted: string;
+  }[] {
     // Root detection walks the whole ancestor chain, not just the immediate
     // parent: a flagged page inside another trashed subtree is not separately
     // restorable, so listing it implied an operation that could not work.
@@ -6949,6 +6955,7 @@ export class Store {
         id: e.meta.id,
         title: e.meta.title,
         icon: e.meta.icon,
+        ...(e.meta.kind === undefined ? {} : { kind: e.meta.kind }),
         deleted: e.meta.deleted!,
       }));
   }

@@ -161,6 +161,25 @@ describe("an app page in a portable archive", () => {
     expect(() => validatePortableArchive(downgradeManifest(bytes))).toThrow();
   });
 
+  it("refuses a state file that is not JSON, before anything is created", async () => {
+    // The refusal belongs to validation, where every other malformed archive
+    // is caught and named. Left to the restore it arrived as a bare
+    // SyntaxError out of `applyPortableBundle`, after the import had begun,
+    // and the owner read a parser's words about a file they never saw.
+    await seedApp();
+    const { bytes } = await buildPortableArchive(store);
+    const entries = readPortableArchive(bytes);
+    const statePath = [...entries.keys()].find((key) => key.endsWith("/state.json"))!;
+    const broken = createPortableArchive(
+      [...entries].map(([entryPath, data]) => ({
+        path: entryPath,
+        data: entryPath === statePath ? new TextEncoder().encode("not json{") : data,
+      })),
+    );
+
+    expect(() => validatePortableArchive(broken)).toThrow(/state/i);
+  });
+
   it("refuses one app page that claims another app page's asset", async () => {
     // The case the same-folder check exists for, and the only one that
     // reaches it. A traversal in a path is refused by the schema's regex

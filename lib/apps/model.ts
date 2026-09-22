@@ -61,6 +61,27 @@ const ASSET_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/;
  *  `.txt`, which the walk has never read. */
 const MARKDOWN_NAME = /\.md$/i;
 
+/** A NAME WINDOWS WOULD NOT STORE AS WRITTEN.
+ *
+ *  A notes folder syncs, and a name one host accepts and another rewrites
+ *  makes two notebooks that disagree about what is on disk: the asset an app
+ *  asks for stops being the file that is there. Windows strips a trailing dot
+ *  or space silently, and reserves the old device names whatever extension
+ *  follows them, so `CON.png` is not a file it will keep.
+ *
+ *  Refused here rather than repaired, because an agent that meant `card.png`
+ *  can be told to write `card.png`, while a rename behind its back leaves it
+ *  addressing a name that no longer exists. */
+const WINDOWS_RESERVED_BASENAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i;
+
+function windowsWouldRewrite(segment: string): boolean {
+  return (
+    segment.endsWith(".") ||
+    segment.endsWith(" ") ||
+    WINDOWS_RESERVED_BASENAME.test(segment)
+  );
+}
+
 export const appMetaSchema = z.object({
   entry: z.literal(APP_ENTRY_PATH),
   /** The app's own version, the agent's to set. Brain reads it only to show
@@ -116,6 +137,7 @@ export function appAssetPath(name: string): string | null {
   if (MARKDOWN_NAME.test(name)) return null;
   const segments = name.split("/");
   if (!segments.every((segment) => ASSET_SEGMENT.test(segment))) return null;
+  if (segments.some(windowsWouldRewrite)) return null;
   return `${APP_ASSETS_DIR}/${segments.join("/")}`;
 }
 

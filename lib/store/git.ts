@@ -199,11 +199,26 @@ export async function scheduleDirtyCommit(root: string): Promise<boolean> {
   return true;
 }
 
+/** WORKING FILES THE NOTES HISTORY DOES NOT WANT.
+ *
+ *  This commit is debounced and runs outside the store's lock, so it can fire
+ *  in the middle of an app's file rewrite, when `.app-next/` holds a set that
+ *  is half written and `.app-next-old/` holds the one being replaced.
+ *  Committing either puts a duplicate of somebody's app in their history for
+ *  a commit or two and then deletes it again: noise they cannot read and did
+ *  not ask for. The folders are transient by construction, so there is
+ *  nothing to keep.
+ *
+ *  Pathspecs rather than a `.gitignore`, because the notes folder is the
+ *  owner's and Brain does not write files into it that the owner did not
+ *  make. */
+const COMMIT_EXCLUDES = [":(exclude,glob)**/.app-next", ":(exclude,glob)**/.app-next/**", ":(exclude,glob)**/.app-next-old", ":(exclude,glob)**/.app-next-old/**"];
+
 async function commit(root: string): Promise<void> {
   if (!fs.existsSync(path.join(root, ".git"))) {
     await runGit(root, ["init", "-q"]);
   }
-  await runGit(root, ["add", "-A"]);
+  await runGit(root, ["add", "-A", "--", ".", ...COMMIT_EXCLUDES]);
   const staged = await runGit(root, ["diff", "--cached", "--quiet"], [0, 1]);
   if (staged.code === 1) {
     await runGit(root, [

@@ -81,6 +81,26 @@ describe("app metadata", () => {
     expect(appAssetMimeType("a.md")).toBeNull();
   });
 
+  it("refuses a name a Windows filesystem would not store as written", () => {
+    // Notes folders sync. A name a POSIX host accepts and Windows rewrites or
+    // refuses turns one notebook into two that disagree about what is on
+    // disk, and the asset an app asks for stops being the file that is there.
+    // Trailing dots and spaces are stripped silently there, and the device
+    // names are reserved whatever extension follows them.
+    expect(appAssetPath("a.png.")).toBeNull();
+    expect(appAssetPath("a.png ")).toBeNull();
+    expect(appAssetPath("cards/front.png.")).toBeNull();
+    for (const reserved of ["CON", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9"]) {
+      expect(appAssetPath(`${reserved}.png`)).toBeNull();
+      expect(appAssetPath(`${reserved.toLowerCase()}.png`)).toBeNull();
+      expect(appAssetPath(`cards/${reserved}.png`)).toBeNull();
+    }
+    // A name that merely opens with one is an ordinary name.
+    expect(appAssetPath("console.png")).toBe("app/assets/console.png");
+    expect(appAssetPath("com10.png")).toBe("app/assets/com10.png");
+    expect(appAssetPath("nullable.png")).toBe("app/assets/nullable.png");
+  });
+
   it("serves only the types the spec allows and refuses an executable", () => {
     expect(appAssetMimeType("a.png")).toBe("image/png");
     expect(appAssetMimeType("a.woff2")).toBe("font/woff2");

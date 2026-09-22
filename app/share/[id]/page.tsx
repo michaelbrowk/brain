@@ -218,7 +218,11 @@ export default async function SharePage({
                   <span className="brain-page-ref-icon">{child.icon || "📄"}</span>
                   {` ${child.title}`}
                   {child.kind === "app" && (
-                    <span className="ai-chip" title="Built by an agent">
+                    <span
+                      className="ai-chip"
+                      title="Built by an agent"
+                      aria-label="Built by an agent"
+                    >
                       AI
                     </span>
                   )}

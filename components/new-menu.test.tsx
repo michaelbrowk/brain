@@ -200,6 +200,19 @@ const released = async () => {
   });
 };
 
+/** Shut the menu again, so one case can open it twice around a prop change.
+ *  Escape is the way out Radix owns; the content unmounts with it. */
+const escape = async () => {
+  await act(async () => {
+    document.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
+    );
+  });
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+};
+
 const menu = () => document.querySelector<HTMLElement>(".brain-menu")!;
 const rows = () =>
   [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map((node) =>
@@ -256,6 +269,79 @@ describe("the New menu", () => {
     expect(row("Message")!.querySelector("svg")).not.toBeNull();
     expect(row("Task")!.querySelector(".brain-menu-icon")).not.toBeNull();
     expect(row("Message")!.querySelector(".brain-menu-icon")).not.toBeNull();
+  });
+
+  // THE TWO ROWS A MODULE SWITCH TAKES AWAY.
+  //
+  // Radix renders a dropdown's content only while it is open, so no shell DOM
+  // baseline can see either row: the menu is shut in every one of them. These
+  // open it.
+  it("draws both rows with both modules on", async () => {
+    await render({ taskEnabled: true, mailEnabled: true });
+    await open();
+
+    expect(row("Task")).not.toBeUndefined();
+    expect(row("Message")).not.toBeUndefined();
+  });
+
+  it("leaves the Task row out with Tasks off, and keeps Message", async () => {
+    await render({ taskEnabled: false });
+    await open();
+
+    expect(row("Task")).toBeUndefined();
+    expect(row("Message")).not.toBeUndefined();
+    // Absent, not dimmed, the way the Message row already goes.
+    expect(menu().querySelector("[data-disabled]")).toBeNull();
+    expect(rows()[0]).toBe("Message");
+  });
+
+  it("leaves the Message row out with Mail off, and keeps Task", async () => {
+    await render({ mailEnabled: false });
+    await open();
+
+    expect(row("Message")).toBeUndefined();
+    expect(row("Task")).not.toBeUndefined();
+    expect(menu().querySelector("[data-disabled]")).toBeNull();
+    expect(rows()[0]).toBe("Task");
+  });
+
+  it("leaves the whole New group out with both modules off", async () => {
+    await render({ taskEnabled: false, mailEnabled: false });
+    await open();
+
+    expect(row("Task")).toBeUndefined();
+    expect(row("Message")).toBeUndefined();
+    expect(rows()).toEqual(TEMPLATES.map((template) => `${template.emoji}${template.name}`));
+  });
+
+  // TURNING MAIL BACK ON, WITH NO RELOAD.
+  //
+  // An owner whose Mail is off boots every tab with `mailEnabled: false`, and
+  // that is the only state such a tab ever mounts in. The shared answer is
+  // therefore asked of a client that says "no accounts", and memoising it once
+  // per process left the Message row missing after the switch came back on
+  // until somebody pressed F5. Spec §1: turning a module back on restores
+  // everything as it was.
+  it("finds the account to send from when Mail is turned back on", async () => {
+    await render({ mailEnabled: false });
+    await open();
+    expect(row("Message")).toBeUndefined();
+    await escape();
+
+    await render({ mailEnabled: true });
+    await open();
+    expect(row("Message")).not.toBeUndefined();
+  });
+
+  it("stops offering Message the moment Mail goes off, without asking again", async () => {
+    await render({ mailEnabled: true });
+    await open();
+    expect(row("Message")).not.toBeUndefined();
+    await escape();
+
+    await render({ mailEnabled: false });
+    await open();
+    expect(row("Message")).toBeUndefined();
   });
 
   it("runs the three creates from their own rows", async () => {

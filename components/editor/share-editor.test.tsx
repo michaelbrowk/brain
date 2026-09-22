@@ -21,6 +21,8 @@ type StubProps = {
   ) => Promise<void>;
   pages?: unknown;
   pageDirectory?: unknown;
+  /** The Tasks module, which a share visitor never has. */
+  tasksEnabled?: boolean;
   capabilities?: {
     upload?: {
       endpoint: string;
@@ -347,6 +349,19 @@ describe("the visitor editor", () => {
     // drawn only where both are, so neither can arrive without the other.
     expect(typeof editorProps.current!.onCreatePageAtCursor).toBe("function");
     expect(typeof capabilities.upload!.onUploaded).toBe("function");
+  });
+
+  // A VISITOR NEVER PROMOTES A LINE TO A TASK.
+  //
+  // Tasks are the owner's, reached from a surface this link does not open and
+  // written through routes it cannot call, so the record half of the checkbox
+  // bundle has nothing here to reach: the `+ Task` hover word and the popover
+  // would offer an act that ends in a refusal. The Markdown half stays, so a
+  // `- [ ]` line in a shared note still draws a checkbox and still ticks,
+  // which is the same promise the owner's own Tasks-off state makes.
+  it("loads the editor without the task-record half", async () => {
+    await mount("");
+    expect(editorProps.current!.tasksEnabled).toBe(false);
   });
 
   it("renders a bare attachment path with the access triple, and clears the resolver on unmount", async () => {

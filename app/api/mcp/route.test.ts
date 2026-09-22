@@ -8,6 +8,10 @@ const mocks = vi.hoisted(() => ({
   verifyMcpBearerToken: vi.fn(),
   createBrainMailClient: vi.fn(),
   readTimeZone: vi.fn(),
+  /** What `moduleGated` reads before every mail and task handler. Mutable, so
+   *  one case can drive a real tool through the real registration with a
+   *  module off; every other case leaves it at both on. */
+  modules: { mail: true, tasks: true },
 }));
 
 vi.mock("@/lib/store", () => ({
@@ -73,12 +77,14 @@ vi.mock("@/lib/store", () => ({
 // state directory so a test says what zone is captured in its own body, and so
 // a machine with a zone already captured cannot change what a test means.
 // `readModules` is what `moduleGated` asks before every mail or task handler.
-// Both modules on is what this file is about: the tools' own answers, with the
-// module gate out of the way. `app/api/mcp/module-gate.test.ts` is where the
-// gate itself is pinned.
+// Both modules on is what most of this file is about: the tools' own answers,
+// with the module gate out of the way. "the module gate, where it is wired"
+// below is the one place that moves it, and it is the only case that proves
+// `route.ts` actually wraps the registrars — `module-gate.test.ts` pins the
+// wrapper against a fake server and cannot see the wiring at all.
 vi.mock("@/lib/owner-settings", () => ({
   readTimeZone: mocks.readTimeZone,
-  readModules: async () => ({ mail: true, tasks: true }),
+  readModules: async () => mocks.modules,
 }));
 // The predicate reads the error's own name, the way the real one does and the
 // way the store's four above do. A stand-in that always answered false would
@@ -7503,5 +7509,125 @@ describe("the page write tools", () => {
 
     expect(await readMcpActivity(5)).toEqual([]);
     expect(await listNotifications(centreRoot)).toEqual([]);
+  });
+});
+
+// THE GATE WHERE IT IS WIRED, not where it is defined.
+//
+// `app/api/mcp/module-gate.ts` is pinned against a fake tool server in its own
+// suite, which proves the wrapper refuses and leaves registration alone. What
+// no suite could see is whether `route.ts` actually passes the four registrars
+// through it: replacing `registerTaskTools(moduleGated(server, "tasks"))` with
+// `registerTaskTools(server)` left every MCP suite green. These drive a real
+// tool through the real registration with a module off.
+describe("the module gate, where it is wired", () => {
+  let stateRoot: string;
+  let centreRoot: string;
+
+  beforeEach(async () => {
+    stateRoot = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-wired-gate-"));
+    centreRoot = await fs.mkdtemp(path.join(os.tmpdir(), "brain-mcp-wired-centre-"));
+    mocks.getStore.mockReset();
+    mocks.createBrainMailClient.mockReset();
+    mocks.readTimeZone.mockReset();
+    mocks.readTimeZone.mockResolvedValue("Europe/Lisbon");
+    mocks.verifyMcpBearerToken.mockReset();
+    mocks.verifyMcpBearerToken.mockResolvedValue({
+      token: "test-machine-token",
+      clientId: "legacy-client",
+      scopes: ["brain:read", "brain:write", "brain:mail", "brain:mail:send"],
+      resource: new URL("https://brain.example.test/api/mcp"),
+    });
+    mocks.modules = { mail: true, tasks: true };
+    vi.stubEnv("MCP_TOKEN", "test-machine-token");
+    vi.stubEnv("AUTH_SECRET", "test-auth-secret-with-at-least-32-bytes");
+    vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "https://brain.example.test");
+    vi.stubEnv("BRAIN_MCP_STATE_DIR", stateRoot);
+    vi.stubEnv("BRAIN_NOTIFICATIONS_STATE_DIR", centreRoot);
+    vi.stubEnv("BRAIN_OAUTH_STATE_DIR", path.join(stateRoot, "oauth"));
+  });
+
+  afterEach(async () => {
+    await flushTaskActivityForTests();
+    mocks.modules = { mail: true, tasks: true };
+    vi.unstubAllEnvs();
+    await fs.rm(stateRoot, { recursive: true, force: true });
+    await fs.rm(centreRoot, { recursive: true, force: true });
+  });
+
+  it("refuses a task tool with Tasks off, without reaching the store", async () => {
+    mocks.modules = { mail: true, tasks: false };
+    // Never called: the gate answers ahead of the handler, so the notes
+    // folder is not opened for a module that is off.
+    mocks.getStore.mockRejectedValue(new Error("the store must not be reached"));
+
+    const { payload, isError } = await toolPayload(
+      await callTool("list_tasks", { list: "inbox" }, 970),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "Tasks are turned off in Settings › Modules",
+      reason: "module_off",
+    });
+    expect(mocks.getStore).not.toHaveBeenCalled();
+  });
+
+  it("refuses a mail tool with Mail off, without building a mail client", async () => {
+    mocks.modules = { mail: false, tasks: true };
+    mocks.createBrainMailClient.mockImplementation(() => {
+      throw new Error("the mail client must not be built");
+    });
+
+    const { payload, isError } = await toolPayload(
+      await callTool("list_mail_accounts", {}, 971),
+    );
+
+    expect(isError).toBe(true);
+    expect(payload).toEqual({
+      error: "Mail is turned off in Settings › Modules",
+      reason: "module_off",
+    });
+    expect(mocks.createBrainMailClient).not.toHaveBeenCalled();
+  });
+
+  // The gate is per module, and the wrapper is applied per registrar. A task
+  // tool answering while Mail is off is what proves the two are not one.
+  it("leaves the other module's tools alone", async () => {
+    mocks.modules = { mail: false, tasks: true };
+    const listTasks = vi.fn().mockReturnValue([]);
+    mocks.getStore.mockResolvedValue({ listTasks });
+
+    const { isError } = await toolPayload(
+      await callTool("list_tasks", { list: "inbox" }, 972),
+    );
+
+    expect(isError).toBe(false);
+    expect(listTasks).toHaveBeenCalled();
+  });
+
+  // Registration is untouched: a tool out of a module that is off is listed
+  // and refused, never missing, so the consent screen and the scopes hold.
+  it("still lists every tool while both modules are off", async () => {
+    mocks.modules = { mail: false, tasks: false };
+    const response = await POST(
+      new Request("https://brain.example.test/api/mcp", {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: "Bearer test-machine-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 973, method: "tools/list" }),
+      }),
+    );
+    const body = await response.text();
+    const dataLine = body.split("\n").find((line) => line.startsWith("data: "));
+    const envelope = JSON.parse(dataLine?.slice(6) ?? body) as {
+      result?: { tools?: Array<{ name: string }> };
+    };
+    const names = (envelope.result?.tools ?? []).map((tool) => tool.name);
+    expect(names).toContain("list_tasks");
+    expect(names).toContain("list_mail_accounts");
   });
 });

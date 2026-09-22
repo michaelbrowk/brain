@@ -48,6 +48,29 @@ export function ModulesSection({
   const [pending, setPending] = useState<keyof ModuleSwitches | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
 
+  // AND THIS IS THE DROPPING, which is the half that was missing.
+  //
+  // The override outlives its request on purpose: the `modules` prop is a
+  // beat behind, because the shell only learns the new pair when the SSE
+  // event lands. But once the server has spoken through the prop, the
+  // override has nothing left to add, and leaving it makes this screen the
+  // one place a later flip cannot reach: tab A turns Tasks off, tab B turns
+  // it back on, and tab A's sidebar redraws the Tasks row from the event
+  // while this row still reads Off. A screen contradicting the shell around
+  // it is the one state it must not hold.
+  //
+  // Adjusted during render, the way React's own "adjusting state when a prop
+  // changes" is written, rather than cleared from an effect: the React
+  // compiler's rules forbid a setState in an effect body, and a stale pair
+  // must not survive even the single commit an effect would take to clear it.
+  // Compared by value and not by identity, so an unrelated re-render carrying
+  // a fresh object cannot discard a flip that is still in flight.
+  const [serverPair, setServerPair] = useState(modules);
+  if (serverPair.mail !== modules.mail || serverPair.tasks !== modules.tasks) {
+    setServerPair(modules);
+    setShownOverride(null);
+  }
+
   const shown = shownOverride ?? modules;
 
   const flip = async (key: keyof ModuleSwitches, on: boolean) => {
@@ -100,7 +123,10 @@ export function ModulesSection({
             <Segmented
               label={row.label}
               value={shown[row.key] ? "on" : "off"}
-              disabled={pending === row.key}
+              // BOTH rows, not just the one in flight. `flip` refuses a
+              // second call while one is outstanding, so a switch that still
+              // looked live would do nothing and say nothing about it.
+              disabled={pending !== null}
               options={[
                 { value: "off", label: "Off" },
                 { value: "on", label: "On" },

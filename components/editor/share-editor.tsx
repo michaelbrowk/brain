@@ -1150,6 +1150,13 @@ function ShareEditorForPage({
         registerFlush={registerFlush}
         onCreatePageAtCursor={nameThenCreate}
         capabilities={capabilities}
+        // A visitor never promotes a line to a task: the Tasks surface is not
+        // in this link, and every task route refuses a share token. So the
+        // record half of the checkbox bundle stays out, and with it the
+        // `+ Task` hover word and the popover that would offer an act ending
+        // in a refusal. The Markdown half is still applied, so a `- [ ]` line
+        // in a shared note draws a checkbox and ticks like any other.
+        tasksEnabled={false}
         // The directory the page-ref blocks draw from: the pages this share
         // reaches, with the titles they carry now, so a ref written before a
         // rename reads as it does for the owner. A page outside the share

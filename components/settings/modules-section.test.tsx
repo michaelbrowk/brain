@@ -42,6 +42,14 @@ describe("the Modules section", () => {
     );
   }
 
+  /** The two microtask hops a flip takes: the fetch, then its body. */
+  const settled = async () => {
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+  };
+
   function radio(label: string, option: "On" | "Off"): HTMLButtonElement {
     const group = host.querySelector<HTMLElement>(
       `[role="radiogroup"][aria-label="${label}"]`,
@@ -83,10 +91,12 @@ describe("the Modules section", () => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ mail: false }),
     });
-    // Optimistic, and the row is not pressable again until the answer lands.
+    // Optimistic, and neither row is pressable again until the answer lands:
+    // `flip` refuses a second call while one is in flight, so a switch that
+    // still looked live would do nothing and say nothing.
     expect(radio("Mail", "Off").getAttribute("aria-checked")).toBe("true");
     expect(radio("Mail", "Off").disabled).toBe(true);
-    expect(radio("Tasks", "On").disabled).toBe(false);
+    expect(radio("Tasks", "On").disabled).toBe(true);
 
     await act(async () => {
       settle({ ok: true, json: async () => ({ mail: false, tasks: true }) } as Response);
@@ -134,6 +144,63 @@ describe("the Modules section", () => {
     expect(host.querySelector('[role="alert"]')?.textContent).toBe(
       "that is not a switch",
     );
+  });
+
+  // THE OVERRIDE IS A STOPGAP, NOT A SECOND SOURCE OF TRUTH.
+  //
+  // The rows show the answer's own body until the `modules` prop catches up
+  // over SSE, and then they have to let go of it. Nothing dropped it, so after
+  // any successful flip this screen showed its own last answer for good: tab A
+  // turns Tasks off, tab B turns it back on, and tab A's sidebar redraws the
+  // Tasks row from the event while this row still reads Off. The screen
+  // contradicting the shell around it is the one state it must not reach.
+  it("lets go of its own answer once the prop agrees with it", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ mail: true, tasks: false }),
+      })) as unknown as typeof fetch,
+    );
+    await render();
+    await act(async () => radio("Tasks", "Off").click());
+    await settled();
+    expect(radio("Tasks", "Off").getAttribute("aria-checked")).toBe("true");
+
+    // The event this tab's own PUT produced, arriving over SSE.
+    await render({ mail: true, tasks: false });
+    expect(radio("Tasks", "Off").getAttribute("aria-checked")).toBe("true");
+
+    // Another tab turns it back on. The prop moves and the row has to follow.
+    await render({ mail: true, tasks: true });
+    expect(radio("Tasks", "On").getAttribute("aria-checked")).toBe("true");
+  });
+
+  // A control that can only do nothing is worse than no control: the other
+  // row's switch stands down until the one in flight has an answer.
+  it("stands the idle row down while the other is in flight", async () => {
+    let settle: (value: Response) => void = () => {};
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            settle = resolve;
+          }),
+      ),
+    );
+    await render();
+
+    await act(async () => radio("Mail", "Off").click());
+    expect(radio("Mail", "Off").disabled).toBe(true);
+    expect(radio("Tasks", "On").disabled).toBe(true);
+
+    await act(async () => {
+      settle({ ok: true, json: async () => ({ mail: false, tasks: true }) } as Response);
+      await Promise.resolve();
+    });
+    expect(radio("Mail", "Off").disabled).toBe(false);
+    expect(radio("Tasks", "On").disabled).toBe(false);
   });
 
   it("says something act-on-able when the request never lands", async () => {

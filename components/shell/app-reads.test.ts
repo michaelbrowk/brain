@@ -119,4 +119,58 @@ describe("the app's read side", () => {
     ).toBeUndefined();
     expect(apiFetch).not.toHaveBeenCalled();
   });
+
+  const node = (id: string, children: unknown[] = []) => ({
+    id,
+    parentId: null,
+    title: id,
+    hasChildren: children.length > 0,
+    children,
+  });
+
+  it("refuses a page the live tree does not hold, without fetching its body", async () => {
+    const reads = createAppReads(() => [node("a")] as never);
+    await expect(reads({ ...envelope, type: "read.page", id: "trashed" })).rejects.toMatchObject({
+      reason: "not_found",
+    });
+    expect(apiFetch).not.toHaveBeenCalled();
+  });
+
+  it("reads a page the live tree holds", async () => {
+    apiFetch.mockResolvedValue(json({ meta: { id: "a", title: "Spanish" }, markdown: "x", rev: "r" }));
+    const answer = (await createAppReads(() => [node("a")] as never)({
+      ...envelope,
+      type: "read.page",
+      id: "a",
+    })) as { rev: string };
+    expect(apiFetch).toHaveBeenCalledWith("/api/page/a");
+    expect(answer.rev).toBe("r");
+  });
+
+  it("follows the tree as it changes, in both directions", async () => {
+    // The whole of M15 in one case. A set cached at the first read.tree would
+    // answer both of these the way the notebook looked an hour ago.
+    let tree = [node("a")];
+    const reads = createAppReads(() => tree as never);
+    await reads({ ...envelope, type: "read.tree" });
+
+    // a page deleted after the app read the tree
+    tree = [];
+    await expect(reads({ ...envelope, type: "read.page", id: "a" })).rejects.toMatchObject({
+      reason: "not_found",
+    });
+
+    // and a page created after it
+    apiFetch.mockResolvedValue(json({ meta: { id: "b", title: "New" }, markdown: "x", rev: "r" }));
+    tree = [node("b")];
+    await expect(reads({ ...envelope, type: "read.page", id: "b" })).resolves.toBeTruthy();
+  });
+
+  it("finds a page at any depth of the tree", async () => {
+    apiFetch.mockResolvedValue(json({ meta: { id: "c", title: "Deep" }, markdown: "x", rev: "r" }));
+    const deep = () => [node("a", [node("b", [node("c")])])] as never;
+    await expect(
+      createAppReads(deep)({ ...envelope, type: "read.page", id: "c" }),
+    ).resolves.toBeTruthy();
+  });
 });

@@ -67,17 +67,33 @@ async function read(path: string): Promise<unknown> {
  *  `undefined` for everything else, so the write side layers over it with a
  *  `??` rather than a second switch that could disagree with this one.
  *
- *  `liveTree` is the shell's own tree, read through on every request rather
- *  than fetched: the shell already holds that answer and keeps it current over
- *  SSE, so an app sees the notebook as the sidebar does and a second fetch
- *  would only risk showing it something staler. Task 12 is where the same
- *  getter starts deciding which pages may be read at all. */
+ *  THE LIVE TREE IS ALSO THE GUEST LIST.
+ *
+ *  Spec §4 lets an app read any page and refuses a deleted one. The store's
+ *  `readPage` answers a soft-deleted page, because the owner's own trash
+ *  dialog reads it, so the tree — which never holds one — is the check.
+ *
+ *  It is the SHELL'S tree, read through a getter on every request, not a set
+ *  this module caches. The shell's copy is the one the sidebar draws and the
+ *  one the SSE stream keeps current, so a page deleted while an app is open
+ *  is refused on the next read and a page created while it is open becomes
+ *  readable at once. A set cached at the first `read.tree` would answer both
+ *  of those with the notebook as it looked when the app started. */
 export function createAppReads(
   liveTree: () => readonly TreeNode[],
 ): (request: AppRequest) => Promise<unknown> {
+  const has = (id: string): boolean => {
+    const walk = (nodes: readonly TreeNode[]): boolean =>
+      nodes.some((node) => node.id === id || walk(node.children));
+    return walk(liveTree());
+  };
+
   return async (request) => {
     if (request.type === "read.tree") return { tree: flatten(liveTree(), []) };
     if (request.type === "read.page") {
+      if (!has(request.id)) {
+        throw new AppBridgeError("that page is not there", "not_found");
+      }
       const body = (await read(`/api/page/${encodeURIComponent(request.id)}`)) as {
         meta: Record<string, unknown>;
         markdown: string;

@@ -25,7 +25,7 @@ import {
   visibleSettingsSections,
   type SettingsSection,
 } from "../settings/sections";
-import type { ModuleSwitches } from "@/lib/owner-settings";
+import type { ModuleSwitches } from "@/lib/modules";
 import { useUpdateStatus } from "../settings/use-update-status";
 import { AiChip } from "../ui/ai-chip";
 import { Icon } from "../ui/icon";

@@ -8,7 +8,7 @@
 // Presentational — navigation (pushState / replaceState / back) lives in
 // <Shell>, which hands it down as callbacks.
 
-import type { ModuleSwitches } from "@/lib/owner-settings";
+import type { ModuleSwitches } from "@/lib/modules";
 import type { TreeNode } from "@/lib/store/types";
 import { Icon } from "../ui/icon";
 import {

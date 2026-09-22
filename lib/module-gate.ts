@@ -1,4 +1,4 @@
-import type { ModuleSwitches } from "./owner-settings";
+import type { ModuleSwitches } from "./modules";
 
 /** THE ONE READING OF "IS THIS REQUEST A MODULE'S REQUEST".
  *

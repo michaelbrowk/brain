@@ -53,7 +53,10 @@ import {
   settingsPath,
   type SettingsSection,
 } from "./settings/sections";
-import { ALL_MODULES_ON, type ModuleSwitches } from "@/lib/owner-settings";
+// `@/lib/modules` and not `@/lib/owner-settings`: this is a client component,
+// and the settings file's reader imports `node:fs/promises`, which Turbopack
+// refuses to put in a browser chunk.
+import { ALL_MODULES_ON, type ModuleSwitches } from "@/lib/modules";
 // code-split the mail client out of the notes bundle the same way as the
 // editor — opening a note must not download ~9k lines of mail UI
 const MailSurface = dynamic(

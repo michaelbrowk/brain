@@ -12,7 +12,7 @@
 // one reader this screen exists for.
 
 import { useState } from "react";
-import type { ModuleSwitches } from "@/lib/owner-settings";
+import type { ModuleSwitches } from "@/lib/modules";
 import { SettingsGroup, SettingsRow, Segmented } from "./shared";
 
 const SAVE_FAILED = "Couldn't save that. Try again.";

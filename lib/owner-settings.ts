@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { ALL_MODULES_ON, type ModuleSwitches } from "./modules";
 import { atomicWrite } from "./store/atomic";
 
 /** THE ONE DURABLE OWNER SETTING, AND WHY IT IS NOT IN THE NOTES TREE.
@@ -25,19 +26,13 @@ import { atomicWrite } from "./store/atomic";
 /** Which modules this installation draws, serves and runs background work
  *  for. A property of the instance, like the zone above it: it is not in a
  *  portable archive and not in anybody's git history, because turning Mail
- *  off on the laptop must not turn it off on the server a restore lands on. */
-export interface ModuleSwitches {
-  mail: boolean;
-  tasks: boolean;
-}
-
-/** The reading of an absent, half-written or unreadable answer. Silence is
- *  "nothing is off": an installation that upgrades into 0.14.0 keeps every
- *  surface it had the day before. */
-export const ALL_MODULES_ON: ModuleSwitches = Object.freeze({
-  mail: true,
-  tasks: true,
-});
+ *  off on the laptop must not turn it off on the server a restore lands on.
+ *
+ *  The shape and its default live in `lib/modules.ts`, which imports nothing:
+ *  the shell is a client component and holds the pair, and reaching them
+ *  through this file put `node:fs/promises` in a browser chunk. Re-exported
+ *  here so a server caller reads them where it reads the zone. */
+export { ALL_MODULES_ON, type ModuleSwitches } from "./modules";
 
 export interface OwnerSettings {
   schema: 2;

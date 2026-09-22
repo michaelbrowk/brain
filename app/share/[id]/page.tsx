@@ -18,6 +18,7 @@ import { ShareGate } from "@/components/share-gate";
 import { ShareBusyRetry } from "@/components/share-busy-retry";
 import { ShareNameDialog } from "@/components/share-name-dialog";
 import { ShareEditorMount } from "@/components/editor/share-editor-mount";
+import { ShareAppFrame } from "@/components/apps/share-app-frame";
 import { Icon } from "@/components/ui/icon";
 import "@/components/editor/milkdown.css";
 
@@ -93,9 +94,16 @@ export default async function SharePage({
   if (access.kind === "password-required") return <ShareGate id={id} />;
   const page = access.target;
 
+  // An app page is run, not read and not written. The editor is never mounted
+  // over one: an editable share is a licence to write Markdown, and an app's
+  // body is the agent's description of it rather than anything a visitor came
+  // here to type. Rebuilding an app is the owner's business and it is not a
+  // thing a link can do at all.
+  const isApp = page.meta.kind === "app";
+
   // The edit cookie is root-scoped and bound to the share version, so it
   // answers for every page of the share and dies with every rotation.
-  const editable = access.root.meta.shareEdit === true;
+  const editable = !isApp && access.root.meta.shareEdit === true;
   const editing = editable
     ? await verifyShareEditToken(
         jar.get(shareEditCookieName(id))?.value,
@@ -194,12 +202,22 @@ export default async function SharePage({
               linkablePages={linkablePages}
             />
           )}
+          {isApp && (
+            <ShareAppFrame
+              appId={page.meta.id}
+              rootId={id}
+              shareVersion={access.shareVersion}
+              title={page.meta.title}
+            />
+          )}
           {/* Always drawn: the no-JS fallback a crawler and a script-blocked
               browser read, and the page as it stands until the island's chunk
-              arrives, which hides it the moment it mounts. */}
+              arrives, which hides it the moment it mounts. For an app that
+              body is the agent's description of what the app does, which is
+              what spec §2 asks a client that cannot run one to be shown. */}
           <div
             className="ProseMirror brain-read-only"
-            data-share-fallback={editing ? "true" : undefined}
+            data-share-fallback={editing || isApp ? "true" : undefined}
             dangerouslySetInnerHTML={{ __html: html }}
           />
         </div>

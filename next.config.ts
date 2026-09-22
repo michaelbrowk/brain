@@ -236,6 +236,14 @@ const nextConfig: NextConfig = {
       // Nothing a visitor writes survives the sanitizer as script, so what is
       // still open is defence in depth for the app's own bundle rather than a
       // channel a visitor can reach.
+      //
+      // frame-src is 'self' rather than 'none' because a shared page
+      // can BE an app: `kind: app` renders the same sandboxed frame
+      // the owner sees, served from this origin. The directive reads
+      // the frame's URL, which is same-origin; the opaque origin the
+      // sandbox gives the document inside it is not what is measured
+      // here. No other source is allowed, so a visitor's Markdown
+      // still cannot frame anything at all.
       {
         source: "/share/:path*",
         headers: [
@@ -249,7 +257,7 @@ const nextConfig: NextConfig = {
           {
             key: "Content-Security-Policy",
             value:
-              "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; connect-src 'self'; form-action 'none'; frame-src 'none'; img-src 'self' data:; media-src 'self'",
+              "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; connect-src 'self'; form-action 'none'; frame-src 'self'; img-src 'self' data:; media-src 'self'",
           },
           { key: "X-Robots-Tag", value: "noindex, nofollow" },
           { key: "Cache-Control", value: "private, no-store" },

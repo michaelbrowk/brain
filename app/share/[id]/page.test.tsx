@@ -82,6 +82,9 @@ async function loadPage(
   const mount = vi.fn((props: Record<string, unknown>) => (
     <div data-share-editor-mount={JSON.stringify(props)} />
   ));
+  const appFrame = vi.fn((props: Record<string, unknown>) => (
+    <div data-share-app-frame={JSON.stringify(props)} />
+  ));
   vi.doMock("@/lib/store", () => ({
     getStore: async () => store,
     configuredPublicOrigin: () =>
@@ -104,6 +107,9 @@ async function loadPage(
   }));
   vi.doMock("@/components/editor/share-editor-mount", () => ({
     ShareEditorMount: mount,
+  }));
+  vi.doMock("@/components/apps/share-app-frame", () => ({
+    ShareAppFrame: appFrame,
   }));
   vi.doMock("next/headers", () => ({
     cookies: async () => ({
@@ -133,6 +139,7 @@ async function loadPage(
     store,
     verifyShareEditToken,
     mount,
+    appFrame,
   };
 }
 
@@ -143,6 +150,7 @@ describe("shared subtree page", () => {
     vi.doUnmock("@/lib/render-md");
     vi.doUnmock("@/lib/auth");
     vi.doUnmock("@/components/editor/share-editor-mount");
+    vi.doUnmock("@/components/apps/share-app-frame");
     vi.doUnmock("next/headers");
     vi.doUnmock("next/navigation");
     vi.restoreAllMocks();
@@ -520,6 +528,79 @@ describe("shared subtree page", () => {
       });
       expect(findDialog(result)?.props).toEqual({ id: "root" });
       expect(renderToStaticMarkup(result)).not.toContain("Password");
+    });
+  });
+
+  describe("an app page behind a link", () => {
+    const trainer = {
+      meta: { id: "app1", title: "Trainer", icon: "🃏", kind: "app" as const },
+      markdown: "A trainer for the Spanish words on these pages.",
+      rev: "app-rev",
+    };
+
+    it("runs the app in place of the body it would have drawn", async () => {
+      const { default: SharePage, appFrame } = await loadPage({
+        kind: "granted",
+        root,
+        target: trainer as unknown as typeof child,
+        shareVersion: 7,
+      });
+
+      const result = await SharePage({
+        params: Promise.resolve({ id: "root" }),
+        searchParams: Promise.resolve({ page: "app1" }),
+      });
+      const markup = renderToStaticMarkup(result);
+
+      expect(appFrame).toHaveBeenCalledTimes(1);
+      expect(appFrame.mock.calls[0]![0]).toEqual({
+        appId: "app1",
+        rootId: "root",
+        shareVersion: 7,
+        title: "Trainer",
+      });
+      // The title block and the back link are the page's, not the app's, and
+      // they stay exactly where a shared page draws them.
+      expect(markup).toContain("Trainer");
+      expect(markup).toContain("/share/root");
+      // Spec §2: a client that cannot run the app reads the agent's own
+      // description of it. The server always draws it, and the island is the
+      // sibling that hides it.
+      expect(markup).toContain('data-share-fallback="true"');
+      expect(markup).toContain("<p>rendered</p>");
+    });
+
+    it("does not make an app editable because the share is", async () => {
+      // An editable share is a licence to write Markdown, and an app's body
+      // is not what a visitor would be writing. The editor island is never
+      // mounted over one, and the name dialog that precedes it is not asked
+      // for either.
+      const editableRoot = {
+        ...root,
+        meta: { ...root.meta, shareEdit: true },
+      };
+      const { default: SharePage, appFrame, mount, verifyShareEditToken } =
+        await loadPage(
+          {
+            kind: "granted",
+            root: editableRoot,
+            target: trainer as unknown as typeof child,
+            shareVersion: 7,
+          },
+          { editing: { vid: "vid-1", name: "Ann" } },
+        );
+
+      const result = await SharePage({
+        params: Promise.resolve({ id: "root" }),
+        searchParams: Promise.resolve({ page: "app1" }),
+      });
+      const markup = renderToStaticMarkup(result);
+
+      expect(appFrame).toHaveBeenCalledTimes(1);
+      expect(mount).not.toHaveBeenCalled();
+      expect(verifyShareEditToken).not.toHaveBeenCalled();
+      expect(markup).not.toContain("data-share-editor-mount");
+      expect(markup).not.toContain("data-share-name-dialog");
     });
   });
 

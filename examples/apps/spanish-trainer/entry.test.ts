@@ -41,21 +41,44 @@ describe("the trainer's entry", () => {
   });
 
   it("writes only its own Words page", () => {
-    expect(entry).toContain("write.page");
+    expect(entry).toContain("writePage");
     // one write call site, and it is the Words page's id
-    expect(entry.match(/brain\.write\.page\(/g)).toHaveLength(1);
-    expect(entry).not.toContain("brain.create.page(");
+    expect(entry.match(/brain\.writePage\(/g)).toHaveLength(1);
+    expect(entry).not.toContain("brain.createPage(");
   });
 
   it("reads the tree and the pages under the chosen parent", () => {
-    expect(entry).toContain("brain.read.tree()");
-    expect(entry).toContain("brain.read.page(");
+    expect(entry).toContain("brain.readTree()");
+    expect(entry).toContain("brain.readPage(");
   });
 
   it("keeps its settings in state rather than in the frame's storage", () => {
-    expect(entry).toContain("brain.state.get()");
-    expect(entry).toContain("brain.state.set(");
+    expect(entry).toContain("brain.getState()");
+    expect(entry).toContain("brain.setState(");
     expect(entry).not.toContain("localStorage");
+  });
+
+  it("calls nothing the kit does not define", () => {
+    // The names are the kit's own (`lib/apps/kit.ts`), not a shape invented
+    // here: an app that calls a method the kit never had fails silently in a
+    // frame where an unhandled rejection reaches no console the owner opens.
+    const called = new Set(
+      [...entry.matchAll(/\bbrain\.([A-Za-z_$][\w$]*)/g)].map((match) => match[1]),
+    );
+    const defined = new Set([
+      "ready",
+      "readTree",
+      "readPage",
+      "readPages",
+      "writePage",
+      "createPage",
+      "getState",
+      "setState",
+      "open",
+      "toast",
+      "on",
+    ]);
+    expect([...called].filter((name) => !defined.has(name))).toEqual([]);
   });
 
   it("draws in the kit's own classes and adds no colour", () => {

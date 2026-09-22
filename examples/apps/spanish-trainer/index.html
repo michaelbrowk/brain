@@ -281,7 +281,7 @@ function parseWordsTable(markdown) {
     var index;
     if (settings.wordsPageId) {
       try {
-        var kept = await brain.read.page(settings.wordsPageId);
+        var kept = await brain.readPage(settings.wordsPageId);
         var keptRows = parseWordsTable(kept.markdown);
         for (index = 0; index < keptRows.length; index += 1) {
           byWord.set(keptRows[index].word.toLowerCase(), keptRows[index]);
@@ -296,7 +296,7 @@ function parseWordsTable(markdown) {
       if (node.id === settings.wordsPageId) continue;
       var body;
       try {
-        body = await brain.read.page(node.id);
+        body = await brain.readPage(node.id);
       } catch (error) {
         continue;
       }
@@ -331,13 +331,13 @@ function parseWordsTable(markdown) {
     for (var attempt = 0; attempt < 2; attempt += 1) {
       var current;
       try {
-        current = await brain.read.page(settings.wordsPageId);
+        current = await brain.readPage(settings.wordsPageId);
       } catch (error) {
         note("Brain could not read the Words page.");
         return;
       }
       try {
-        await brain.write.page(settings.wordsPageId, renderWordsTable(rows), current.rev);
+        await brain.writePage(settings.wordsPageId, renderWordsTable(rows), current.rev);
         note("");
         return;
       } catch (error) {
@@ -368,7 +368,7 @@ function parseWordsTable(markdown) {
     }
     settings = next;
     try {
-      await brain.state.set(settings);
+      await brain.setState(settings);
     } catch (error) {
       note("Brain could not remember which pages to read.");
     }
@@ -441,7 +441,7 @@ function parseWordsTable(markdown) {
   }
 
   async function reload() {
-    var answered = await brain.read.tree();
+    var answered = await brain.readTree();
     tree = answered.tree;
     var index;
     var parentId = settings.parentId;
@@ -464,10 +464,10 @@ function parseWordsTable(markdown) {
   }
 
   async function start() {
-    var hello = await brain.hello();
+    var hello = await brain.ready;
     page = hello.page;
     try {
-      var kept = await brain.state.get();
+      var kept = await brain.getState();
       if (kept && kept.state) {
         settings = {
           parentId: kept.state.parentId || null,

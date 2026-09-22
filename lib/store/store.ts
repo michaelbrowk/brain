@@ -126,6 +126,7 @@ import {
   type AppFilesInput,
   type CreateAppPageInput,
   AppSizeError,
+  NotAnAppError,
   AttachmentStoreUnavailableError,
   AttachmentValidationError,
   NotFoundError,
@@ -4008,11 +4009,13 @@ export class Store {
         }),
       );
     }
-    await this.writeAppFiles(meta.id, {
-      entryHtml: input.entryHtml,
-      assets: input.assets ?? [],
-      ...(input.state === undefined ? {} : { state: input.state }),
-    });
+    // THE METADATA BEFORE THE FILES, not after. `writeAppFiles` refuses a
+    // page that is not an app, which is what keeps it from renaming a child
+    // page's folder out of the tree, so the page has to say it is one before
+    // its first write. It also means a create that dies between the two
+    // leaves a page with `kind: app` and no entry, which the canvas draws as
+    // the missing-files state, rather than a page with an app's files and no
+    // sign that it has them.
     const app = appMetaSchema.parse({
       entry: APP_ENTRY_PATH,
       version: 1,
@@ -4023,6 +4026,11 @@ export class Store {
       ...(input.reason === undefined ? {} : { reason: input.reason }),
     });
     const withApp = await this.setAppMeta(meta.id, app, "claude", input.src);
+    await this.writeAppFiles(meta.id, {
+      entryHtml: input.entryHtml,
+      assets: input.assets ?? [],
+      ...(input.state === undefined ? {} : { state: input.state }),
+    });
     return { meta: withApp, owned };
   }
 
@@ -4062,6 +4070,16 @@ export class Store {
     }
     return this.mutate(async () => {
       const e = this.get(id);
+      // WHOSE FOLDER `app/` IS, decided before the first rename.
+      //
+      // The swap below renames `<dir>/app` out of the way and a staged set
+      // in. On a page that is not an app, `<dir>/app` is a CHILD PAGE's
+      // folder, because `slugify("App")` is `app`, and the pair would carry
+      // that page and its whole subtree out of the tree and then delete it.
+      // Portable import reached this on every restore, and so would every
+      // route that writes files to an existing page.
+      if (this.readAppMeta(id) === null) throw new NotAnAppError();
+      await assertAppFolderIsNotAPage(e.dir);
       const live = assertInRoot(this.root, path.join(e.dir, "app"));
       const staged = assertInRoot(this.root, path.join(e.dir, APP_STAGING_DIR));
       const retired = assertInRoot(
@@ -4114,7 +4132,11 @@ export class Store {
 
   /** The `app` map, and only it. Separate from `updateMeta` because that
    *  method is the owner's patch surface and an app map is never something a
-   *  person types into a field. */
+   *  person types into a field.
+   *
+   *  This is where a page BECOMES an app, so it is the one place that has to
+   *  ask whether `<dir>/app/` is already a child page's folder. Saying yes
+   *  here would hand the next `writeAppFiles` a page to rename away. */
   async setAppMeta(
     id: string,
     app: AppMeta,
@@ -4123,6 +4145,7 @@ export class Store {
   ): Promise<PageMeta> {
     return this.mutate(async () => {
       const e = this.get(id);
+      await assertAppFolderIsNotAPage(e.dir);
       e.meta.kind = "app";
       e.meta.app = appMetaSchema.parse(app);
       e.meta.updated = now();
@@ -4134,11 +4157,19 @@ export class Store {
     });
   }
 
-  /** The app's cross-device memory. Its own leaf because the bridge writes it
-   *  far more often than anything else an app does, and it must not drag the
-   *  entry and the assets through a rewrite each time. */
+  /** The app's cross-device memory. An unwrapped composite over two wrapped
+   *  leaves, because a first state write has to flip `app.state` as well as
+   *  land the file: `readAppState` answers null while the map says the app
+   *  keeps none, so an app that shipped without state would write `state.json`
+   *  on every answer and read its own memory back as empty for ever. The map
+   *  is touched only on that first write, so the ordinary case stays one
+   *  file write and one rename pair. */
   async writeAppState(id: string, json: unknown): Promise<void> {
     await this.writeAppFiles(id, { state: json });
+    const app = this.readAppMeta(id);
+    if (app && !app.state) {
+      await this.setAppMeta(id, { ...app, state: true });
+    }
   }
 
   /** The app map this page carries, or null when it carries none this release
@@ -8491,6 +8522,18 @@ async function copyDirIfPresent(from: string, to: string): Promise<void> {
     const target = path.join(to, entry.name);
     if (entry.isDirectory()) await copyDirIfPresent(source, target);
     else await copyIfPresent(source, target);
+  }
+}
+
+/** Refuse when `<dir>/app/` holds an `index.md`, which is to say when it is a
+ *  page's folder rather than an app's file set. The same reading the walk
+ *  uses for its one reservation exception, asked on the write side so the two
+ *  cannot disagree. An app's own set never holds one, because the name rule
+ *  in `lib/apps/model.ts` refuses every `.md` at every depth. */
+async function assertAppFolderIsNotAPage(dir: string): Promise<void> {
+  const legacyIndex = await readOptionalFile(path.join(dir, "app", "index.md"));
+  if (legacyIndex !== null) {
+    throw new NotAnAppError("this page already has a child page whose folder is app");
   }
 }
 

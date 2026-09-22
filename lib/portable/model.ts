@@ -758,20 +758,12 @@ export async function applyPortableBundle(
     for (const page of ordered.filter((item) => item.app !== undefined)) {
       const id = created.get(page.sourceId)!;
       const app = page.app!;
-      await store.writeAppFiles(id, {
-        entryHtml: new TextDecoder().decode(bundle.appFiles.get(app.entryPath)!),
-        assets: app.assets.map((asset) => ({
-          name: asset.name,
-          data: bundle.appFiles.get(asset.archivePath)!,
-        })),
-        ...(app.statePath === undefined
-          ? {}
-          : {
-              state: JSON.parse(
-                new TextDecoder().decode(bundle.appFiles.get(app.statePath)!),
-              ),
-            }),
-      });
+      // THE METADATA BEFORE THE FILES. `writeAppFiles` refuses a page that is
+      // not an app, which is what stops its rename pair carrying a child page
+      // whose folder is `app/` out of the tree. Every page in this archive
+      // was created as an ordinary page a moment ago, so the restore has to
+      // say what each app page is before it writes one byte into it.
+      //
       // `owns` names ids from the exporting notebook. Remapped onto the ids
       // this import minted, and an id the archive did not carry is dropped:
       // an app that may write a page it cannot see is a refusal waiting to
@@ -789,6 +781,20 @@ export async function applyPortableBundle(
         "me",
         options.src,
       );
+      await store.writeAppFiles(id, {
+        entryHtml: new TextDecoder().decode(bundle.appFiles.get(app.entryPath)!),
+        assets: app.assets.map((asset) => ({
+          name: asset.name,
+          data: bundle.appFiles.get(asset.archivePath)!,
+        })),
+        ...(app.statePath === undefined
+          ? {}
+          : {
+              state: JSON.parse(
+                new TextDecoder().decode(bundle.appFiles.get(app.statePath)!),
+              ),
+            }),
+      });
     }
     // Every task goes in through the store's own leaf, so the task index is
     // right the moment this returns and the note edits and the task writes

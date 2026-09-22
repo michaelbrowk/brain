@@ -14,6 +14,7 @@ import {
   APP_ASSETS_MAX_BYTES,
   APP_ENTRY_MAX_BYTES,
   APP_ENTRY_PATH,
+  APP_MAX_OWNED,
   APP_STAGING_DIR,
   APP_STATE_MAX_BYTES,
   APP_STATE_PATH,
@@ -124,6 +125,7 @@ import {
   type AppFileRead,
   type AppFilesInput,
   type CreateAppPageInput,
+  AppOwnsFullError,
   AppSizeError,
   AttachmentStoreUnavailableError,
   AttachmentValidationError,
@@ -186,6 +188,25 @@ interface Entry {
   dir: string;
   parentId: string | null;
   meta: PageMeta;
+}
+
+/** What `createPage` takes, named because the unlocked half of it takes the
+ *  same thing and two copies of a fourteen-key shape drift. */
+interface CreatePageOptions {
+  /** Server-derived identity for idempotent create operations. Never pass a
+   * raw client-supplied page id. */
+  id?: string;
+  quickCaptureFingerprint?: string;
+  markdown?: string;
+  notionId?: string;
+  icon?: string;
+  cover?: string;
+  status?: string;
+  font?: PageMeta["font"];
+  smallText?: boolean;
+  fullWidth?: boolean;
+  by?: "me" | "claude";
+  src?: string;
 }
 
 export interface PageMoveResult {
@@ -3872,24 +3893,21 @@ export class Store {
   async createPage(
     parentId: string | null,
     title = "Untitled",
-    opts: {
-      /** Server-derived identity for idempotent create operations. Never pass a
-       * raw client-supplied page id. */
-      id?: string;
-      quickCaptureFingerprint?: string;
-      markdown?: string;
-      notionId?: string;
-      icon?: string;
-      cover?: string;
-      status?: string;
-      font?: PageMeta["font"];
-      smallText?: boolean;
-      fullWidth?: boolean;
-      by?: "me" | "claude";
-      src?: string;
-    } = {},
+    opts: CreatePageOptions = {},
   ): Promise<PageMeta> {
-    return this.mutate(async () => {
+    return this.mutate(() => this.createPageUnlocked(parentId, title, opts));
+  }
+
+  /** The whole of `createPage` with the lock taken off, so a composite that
+   *  has to be atomic with something else can take the lock once and call
+   *  this (invariant 4: `mutate()` is not reentrant, so a wrapped method may
+   *  never call another). `createOwnedPage` is the one caller. */
+  private async createPageUnlocked(
+    parentId: string | null,
+    title: string,
+    opts: CreatePageOptions,
+  ): Promise<PageMeta> {
+    {
       if (
         opts.id !== undefined &&
         (!PAGE_ID_RE.test(opts.id) || opts.id.length > 128)
@@ -3969,6 +3987,52 @@ export class Store {
       scheduleCommit(this.root);
       emitStore({ type: "create", id: meta.id, src: opts.src });
       return meta;
+    }
+  }
+
+  /** A CHILD OF AN APP, OWNED FROM THE SAME WRITE THAT MADE IT.
+   *
+   *  The bridge's create route used to call `createPage` and then
+   *  `setAppMeta` with a spread of the `app` map it had read before either
+   *  ran. Two things were wrong with that and both are closed here.
+   *
+   *  It was two mutations. A crash between them leaves a child page under the
+   *  app that the app may never write, because `appMayWrite` asks `owns`, so
+   *  the app's next run creates it again, and again, up to the cap.
+   *
+   *  And the map it wrote back was a snapshot. `setAppMeta` REPLACES the map,
+   *  so a state write or a second create that landed in between was spread
+   *  away: a flag back to false and the app's memory unreadable, or a page
+   *  silently unowned. The map is re-read here, inside the lock, where
+   *  nothing else can have moved it.
+   *
+   *  Wrapped once and delegating only to unlocked internals, per invariant 4. */
+  async createOwnedPage(
+    appId: string,
+    input: { title: string; icon?: string; markdown?: string },
+    by: "me" | "claude" = "claude",
+    src?: string,
+  ): Promise<{ page: PageMeta; app: AppMeta }> {
+    return this.mutate(async () => {
+      const e = this.get(appId);
+      if (e.meta.kind !== "app" || !e.meta.app) throw new NotFoundError(appId);
+      const app = appMetaSchema.parse(e.meta.app);
+      // Checked in here rather than in the route, so two creates racing for
+      // the last slot cannot both read 63 and both write.
+      if (app.owns.length >= APP_MAX_OWNED) throw new AppOwnsFullError(appId);
+      const page = await this.createPageUnlocked(appId, input.title, {
+        icon: input.icon,
+        markdown: input.markdown ?? "",
+        by,
+        src,
+      });
+      e.meta.app = appMetaSchema.parse({ ...app, owns: [...app.owns, page.id] });
+      e.meta.updated = now();
+      e.meta.updatedBy = by;
+      await this.persist(e);
+      scheduleCommit(this.root);
+      emitStore({ type: "meta", id: appId, src });
+      return { page, app: e.meta.app };
     });
   }
 

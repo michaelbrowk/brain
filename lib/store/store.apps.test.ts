@@ -2,9 +2,14 @@ import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { APP_ENTRY_MAX_BYTES, APP_ENTRY_PATH, APP_STATE_MAX_BYTES } from "../apps/model";
+import {
+  APP_ENTRY_MAX_BYTES,
+  APP_ENTRY_PATH,
+  APP_MAX_OWNED,
+  APP_STATE_MAX_BYTES,
+} from "../apps/model";
 import { Store } from "./store";
-import { isAppSize } from "./types";
+import { isAppOwnsFull, isAppSize, isNotFound } from "./types";
 
 let root: string;
 let store: Store;
@@ -287,6 +292,84 @@ describe("app pages in the store", () => {
       await store.writeAppState(meta.id, { seen: 2 });
 
       expect(await readFile(path.join(dir, ".app-next-old", "index.html"), "utf8")).toBe(ENTRY);
+    });
+  });
+
+  /** THE CHILD AND THE OWNERSHIP ARE ONE WRITE.
+   *
+   *  The bridge's create route used to call `createPage` and then
+   *  `setAppMeta` with a spread of the `app` map it had read before either
+   *  ran. Two mutations and a stale snapshot: a crash between them leaves a
+   *  child the app may never write, and anything that landed in between, a
+   *  second create or a state write, is spread away. */
+  describe("a page an app creates under itself", () => {
+    const trainer = async () =>
+      (
+        await store.createAppPage(null, "Trainer", {
+          description: "d",
+          entryHtml: ENTRY,
+          builtBy: "Claude",
+        })
+      ).meta;
+
+    it("creates it under the app and owns it in the same breath", async () => {
+      const meta = await trainer();
+      const { page, app } = await store.createOwnedPage(meta.id, {
+        title: "Session log",
+        icon: "📓",
+        markdown: "first",
+      });
+
+      expect(page.title).toBe("Session log");
+      expect(page.icon).toBe("📓");
+      expect(app.owns).toEqual([page.id]);
+      expect(store.readAppMeta(meta.id)?.owns).toEqual([page.id]);
+      expect(store.appMayWrite(meta.id, page.id)).toBe(true);
+      expect((await store.readPage(page.id)).markdown).toBe("first");
+      expect(store.getTree()[0].children[0].id).toBe(page.id);
+    });
+
+    it("keeps both pages when two creates are in flight", async () => {
+      const meta = await trainer();
+      const [first, second] = await Promise.all([
+        store.createOwnedPage(meta.id, { title: "One" }),
+        store.createOwnedPage(meta.id, { title: "Two" }),
+      ]);
+      expect(store.readAppMeta(meta.id)?.owns).toEqual(
+        expect.arrayContaining([first.page.id, second.page.id]),
+      );
+      expect(store.readAppMeta(meta.id)?.owns).toHaveLength(2);
+    });
+
+    it("does not spread away a state write that landed first", async () => {
+      const meta = await trainer();
+      await store.writeAppState(meta.id, { seen: 1 });
+      const { page } = await store.createOwnedPage(meta.id, { title: "Log" });
+
+      // The `app` map is re-read inside the lock, so the flag the state write
+      // set is still true and the app's own memory is still readable.
+      expect(store.readAppMeta(meta.id)?.state).toBe(true);
+      expect(store.readAppMeta(meta.id)?.owns).toEqual([page.id]);
+      expect(await store.readAppState(meta.id)).toEqual({ seen: 1 });
+    });
+
+    it("refuses past the cap, inside the lock, and creates nothing", async () => {
+      const meta = await trainer();
+      await store.setAppMeta(meta.id, {
+        ...meta.app!,
+        owns: Array.from({ length: APP_MAX_OWNED }, (_, i) => `p${i}`),
+      });
+
+      await expect(
+        store.createOwnedPage(meta.id, { title: "One too many" }),
+      ).rejects.toSatisfy(isAppOwnsFull);
+      expect(store.getTree()[0].children).toEqual([]);
+      expect(store.readAppMeta(meta.id)?.owns).toHaveLength(APP_MAX_OWNED);
+    });
+
+    it("refuses a page that is not an app", async () => {
+      const plain = await store.createPage(null, "Notes");
+      await expect(store.createOwnedPage(plain.id, { title: "Log" })).rejects.toSatisfy(isNotFound);
     });
   });
 

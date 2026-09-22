@@ -649,6 +649,22 @@ export function isAppSize(e: unknown): e is AppSizeError {
   return e instanceof Error && e.name === "AppSizeError";
 }
 
+/** An app asked to own one page more than `APP_MAX_OWNED` allows. Its own
+ *  error rather than a boolean answer, because the cap is checked inside the
+ *  store's lock, where two creates racing for the last slot are serialised,
+ *  and a caller outside it has no way to ask first without racing. Nothing
+ *  was created. */
+export class AppOwnsFullError extends Error {
+  constructor(readonly id: string) {
+    super(`app owns list is full: ${id}`);
+    this.name = "AppOwnsFullError";
+  }
+}
+
+export function isAppOwnsFull(e: unknown): e is AppOwnsFullError {
+  return e instanceof Error && e.name === "AppOwnsFullError";
+}
+
 export interface AppAssetInput {
   readonly name: string;
   readonly data: Uint8Array;

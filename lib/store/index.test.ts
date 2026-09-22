@@ -83,8 +83,12 @@ describe("getStore", () => {
     vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "https://brain.example");
     mocks.init.mockResolvedValue(undefined);
     await getStore();
+    // `tasksEnabled` is the memoised peek at the Tasks switch, handed over as
+    // a getter rather than a value because this singleton outlives every flip
+    // of it (`lib/owner-settings.ts`).
     expect(mocks.construct).toHaveBeenCalledWith(expect.any(String), {
       publicOrigin: "https://brain.example",
+      tasksEnabled: expect.any(Function),
     });
   });
 });

@@ -2,9 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   MAIL_SEND_TOOLS,
   MAIL_TOOLS,
+  MODULE_OFF,
+  MODULE_OFF_SENTENCE,
   WRITE_TOOLS,
   clientNameOf,
   insufficientScope,
+  moduleOff,
   refusal,
   text,
   toolScopeOf,
@@ -171,5 +174,27 @@ describe("the static token's name", () => {
     expect(staticClientName()).toBe("N".repeat(40));
     vi.stubEnv("MCP_TOKEN_NAME", "Мишин токен");
     expect(staticClientName()).toBe("Мишин токен");
+  });
+});
+
+describe("the module refusal", () => {
+  it("answers the module's own sentence under one code", () => {
+    expect(JSON.parse(moduleOff("mail").content[0].text)).toEqual({
+      error: "Mail is turned off in Settings › Modules",
+      reason: MODULE_OFF,
+    });
+    expect(JSON.parse(moduleOff("tasks").content[0].text)).toEqual({
+      error: "Tasks are turned off in Settings › Modules",
+      reason: MODULE_OFF,
+    });
+    expect(moduleOff("mail").isError).toBe(true);
+  });
+
+  it("names a cure a person can act on, in one sentence", () => {
+    for (const sentence of Object.values(MODULE_OFF_SENTENCE)) {
+      expect(sentence).toContain("Settings");
+      expect(sentence).not.toContain("—");
+      expect(sentence.split(". ").length).toBe(1);
+    }
   });
 });

@@ -18,7 +18,7 @@
  *  an app under `img-src 'self'` paints no asset and says nothing about why,
  *  because a violation inside an opaque-origin frame reaches no console
  *  anybody opens. Every source list names the origin outright, down to the
- *  app's own asset folder, so one app's frame can load one app's assets.
+ *  app's own folder, so one app's frame can load one app's files.
  *
  *  The origin is the public one the deployment configured, and otherwise the
  *  one the request came in on, never a header: `Host` and `X-Forwarded-Host`
@@ -32,14 +32,18 @@ export function appFrameCsp(origin: string, pageId: string): string {
   // semicolon: a header split is how one policy becomes two.
   if (!ORIGIN.test(origin)) throw new Error("app frame CSP needs an exact origin");
   if (!PAGE_ID.test(pageId)) throw new Error("app frame CSP needs a page id");
-  const assets = `${origin}/api/app/${pageId}/assets/`;
+  // One segment short of the token. The grant lives in the path, so the token
+  // differs for every mint and a policy cannot name it; `/t/` is the longest
+  // prefix common to all of them, and it still names one app's files and no
+  // other app's.
+  const files = `${origin}/api/app/${pageId}/t/`;
   return [
     "default-src 'none'",
     "script-src 'unsafe-inline'",
     "style-src 'unsafe-inline'",
-    `img-src blob: data: ${assets}`,
-    `font-src data: ${assets}`,
-    `media-src data: ${assets}`,
+    `img-src blob: data: ${files}`,
+    `font-src data: ${files}`,
+    `media-src data: ${files}`,
     "connect-src 'none'",
     `frame-ancestors ${origin}`,
     "base-uri 'none'",

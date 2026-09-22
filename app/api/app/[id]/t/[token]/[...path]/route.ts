@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { SESSION_COOKIE, verifySession } from "@/lib/auth";
 import { configuredPublicOrigin, getStore } from "@/lib/store";
 import {
   resolveShareAccess,
@@ -9,8 +8,29 @@ import {
 import { APP_ASSETS_DIR, APP_ENTRY_PATH } from "@/lib/apps/model";
 import { appFrameCsp } from "@/lib/apps/csp";
 import { injectAppKit } from "@/lib/apps/kit";
+import { verifyAppFrameToken } from "@/lib/apps/frame-token";
 
 export const dynamic = "force-dynamic";
+
+/** ONE AUTHORITY, AND IT IS IN THE PATH.
+ *
+ *  THIS ROUTE READS NO COOKIE. It cannot: the frame is sandboxed without
+ *  `allow-same-origin`, so its document has an opaque origin and every
+ *  subresource it asks for is a cross-site request that carries no SameSite
+ *  cookie. The entry would load (that navigation is started by the same-site
+ *  top document) and then every `assets/card.png` under it would arrive with
+ *  nothing on it and be refused, invisibly: no CSP violation, no console line,
+ *  just a picture that never appears.
+ *
+ *  A query string cannot carry it either, because `assets/card.png` is
+ *  relative and resolves against the path, dropping the query. So the grant is
+ *  a signed token in a path segment, where a relative URL carries it by
+ *  construction, and the same token authorises the document and every file
+ *  under it.
+ *
+ *  A share token is re-resolved against the live share on every request, so a
+ *  link that has been revoked, has expired or has been rotated stops serving
+ *  an app's files at once rather than when the token ages out. */
 
 /** WHAT THE FRAME MAY ASK FOR.
  *
@@ -39,43 +59,50 @@ function storePathOf(segments: readonly string[]): string | null {
  *  It answers no `Content-Length`, because the length is the length after the
  *  kit is spliced in and finding it out is the work the verb exists to skip.
  *  A HEAD may omit it; a wrong one would be worse than none. */
-export async function HEAD(
-  req: NextRequest,
-  ctx: { params: Promise<{ id: string; path: string[] }> },
-) {
+type Params = { id: string; token: string; path: string[] };
+
+export async function HEAD(req: NextRequest, ctx: { params: Promise<Params> }) {
   return serve(req, ctx, "HEAD");
 }
 
-export async function GET(
-  req: NextRequest,
-  ctx: { params: Promise<{ id: string; path: string[] }> },
-) {
+export async function GET(req: NextRequest, ctx: { params: Promise<Params> }) {
   return serve(req, ctx, "GET");
 }
 
 async function serve(
   req: NextRequest,
-  { params }: { params: Promise<{ id: string; path: string[] }> },
+  { params }: { params: Promise<Params> },
   method: "GET" | "HEAD",
 ) {
-  const { id, path } = await params;
+  const { id, token, path } = await params;
   const relative = storePathOf(path ?? []);
   if (relative === null) return missing();
 
+  // The whole authority, in one line. A forged token, an edited one, an
+  // expired one and one minted for another app are all the same null and all
+  // the same 404: telling them apart would tell a caller which.
+  const grant = await verifyAppFrameToken(token, id);
+  if (grant === null) return missing();
+
   const store = await getStore();
-  if (!(await verifySession(req.cookies.get(SESSION_COOKIE)?.value))) {
-    // A link visitor reaches an app the same way they reach its media: the
-    // root they came through and the share version they were served, checked
-    // against the live grant on every request.
-    const rootId = req.nextUrl.searchParams.get("root");
-    const requestedVersion = req.nextUrl.searchParams.get("v");
-    if (!rootId || requestedVersion === null) return missing();
+  if (grant.kind === "share") {
+    // The token says a grant existed when it was cut. This says one exists
+    // now: the root still public and not expired, the version still the one
+    // the token names, the page still inside the subtree and not in the
+    // trash. A revoke or a rotation stops an app mid-session rather than when
+    // the token ages out.
     try {
       const access = await resolveShareAccess(store, {
-        rootId,
+        rootId: grant.root,
         targetId: id,
-        requestedVersion,
-        token: req.cookies.get(`brain_share_${rootId}`)?.value,
+        requestedVersion: String(grant.version),
+        // The password, where the link has one, was proven before this token
+        // was minted: the share page resolved a granted access with the
+        // visitor's own cookie and only then cut it. This request carries no
+        // cookie of any kind, so the gate would refuse every file of every
+        // locked link's app. Everything else the resolver checks still runs,
+        // before the gate and after it.
+        verifyToken: async () => true,
       });
       if (access.kind !== "granted") return missing();
     } catch (error) {
@@ -89,8 +116,8 @@ async function serve(
   // `kind: app`, or a restore that has not reached the frontmatter yet,
   // leaves a page that claims to be an app and is not one; `readAppMeta`
   // answers null for it and nothing of it is served. The canvas draws the
-  // missing-files state off the same 404. Asked after the session, so a
-  // caller who has shown nothing touches nothing, index included.
+  // missing-files state off the same 404. Asked after the grant, so a caller
+  // who has shown nothing touches nothing, index included.
   if (store.readAppMeta(id) === null) return missing();
 
   const file = await store.readAppFile(id, relative);

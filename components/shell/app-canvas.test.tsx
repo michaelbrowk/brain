@@ -20,8 +20,18 @@ beforeEach(() => {
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
   fetchMock.mockReset();
-  fetchMock.mockResolvedValue({ ok: true, status: 200 } as Response);
+  fetchMock.mockResolvedValue(minted());
 });
+
+/** What `POST /api/app/<id>/frame` answers: a signed address to mount. The
+ *  token is opaque to the canvas, which is the point of the shape. */
+const FRAME_SRC = "/api/app/app1/t/head.body.signature/index.html";
+const minted = (src: string | null = FRAME_SRC) =>
+  ({
+    ok: true,
+    status: 200,
+    json: async () => (src === null ? {} : { src }),
+  }) as Response;
 
 const settle = () =>
   act(async () => {
@@ -87,13 +97,16 @@ const rebuildButton = (mounted: HTMLElement) =>
   mounted.querySelector("[data-app-rebuild]") as HTMLButtonElement;
 
 describe("the app canvas", () => {
-  it("asks whether the files are there before it mounts a frame", async () => {
+  it("asks for an address before it mounts a frame", async () => {
+    // The frame's authority is in its path, so the canvas does not know where
+    // to mount it until the server says. One POST, and the answer is both the
+    // address and whether there is anything to show.
     render();
     await settle();
-    expect(fetchMock).toHaveBeenCalledWith("/api/app/app1/index.html", { method: "HEAD" });
+    expect(fetchMock).toHaveBeenCalledWith("/api/app/app1/frame", { method: "POST" });
   });
 
-  it("says so, and offers Rebuild, when the entry is missing", async () => {
+  it("says so, and offers Rebuild, when there is no address to mount", async () => {
     fetchMock.mockResolvedValue({ ok: false, status: 404 } as Response);
     const host = render();
     await settle();
@@ -102,9 +115,20 @@ describe("the app canvas", () => {
     expect(host.querySelector("[data-app-rebuild]")).not.toBeNull();
   });
 
-  it("mounts the frame at the app's own address, sandboxed", async () => {
+  it("says the same when the answer carries no address at all", async () => {
+    fetchMock.mockResolvedValue(minted(null));
+    const host = render();
+    await settle();
+    expect(host.querySelector("iframe")).toBeNull();
+    expect(host.textContent).toContain("App files are missing. Ask your agent to rebuild the page.");
+  });
+
+  it("mounts the frame at the address it was given, sandboxed", async () => {
     const frame = (await renderReady()).querySelector("iframe") as HTMLIFrameElement;
-    expect(frame.getAttribute("src")).toBe("/api/app/app1/index.html");
+    expect(frame.getAttribute("src")).toBe(FRAME_SRC);
+    // The token is a path segment, which is what lets a relative
+    // `assets/x.png` inside the frame carry it without the document knowing.
+    expect(frame.getAttribute("src")).toContain("/t/");
     expect(frame.getAttribute("sandbox")).toBe(APP_FRAME_SANDBOX);
     expect(frame.getAttribute("sandbox")).not.toContain("allow-same-origin");
     expect(frame.getAttribute("title")).toBe("Trainer");

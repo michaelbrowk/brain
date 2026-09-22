@@ -269,8 +269,15 @@ describe("Shell DOM contract", () => {
       // the bell asks the centre on mount, on every surface
       if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
-      // the app canvas asks whether its entry is on disk before it mounts
-      if (url === "/api/app/trainer/index.html") return response(null);
+      // The app canvas asks for an address before it mounts anything, because
+      // the frame's authority is in its path. The token is a fixed string
+      // here: a real one carries an issued-at and would put different bytes
+      // in the baseline on every run.
+      if (url === "/api/app/trainer/frame")
+        return response({
+          src: "/api/app/trainer/t/contract.token.fixture/index.html",
+          exp: 4_102_444_800,
+        });
       throw new Error(`unexpected request in DOM contract: ${url}`);
     });
 

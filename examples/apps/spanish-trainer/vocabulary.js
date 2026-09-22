@@ -135,16 +135,100 @@ export function parseWordsTable(markdown) {
     const line = raw.trim();
     if (!line.startsWith("|") || !line.endsWith("|")) continue;
     const cells = splitRow(line);
+    // Exactly five. Six means somebody added a column, and `next` is then not
+    // where this reader thinks it is: dropping the row costs one word's
+    // schedule, reading it wrong writes a date into the owner's page that
+    // means nothing.
     if (cells.length !== 5) continue;
-    if (cells[0] === "word" || /^:?-{3,}:?$/.test(cells[0])) continue;
+    if (/^word$/i.test(cells[0]) || /^:?-{3,}:?$/.test(cells[0])) continue;
     const seen = Number.parseInt(cells[3], 10);
+    // Case-folded, because `extractVocabulary` folds the header it skips and
+    // the likeliest hand edit of this page is a capital letter. A `Learning`
+    // that read as `new` would be the owner's own progress lost to their own
+    // tidying.
+    const status = cells[2].toLowerCase();
     rows.push({
       word: cells[0],
       translation: cells[1],
-      status: STATUSES.includes(cells[2]) ? cells[2] : "new",
+      status: STATUSES.includes(status) ? status : "new",
       seen: Number.isFinite(seen) ? seen : 0,
       next: cells[4],
     });
   }
   return rows;
+}
+
+/** `2 ** seen` days, with the exponent held at eight. A word answered well
+ *  nine times is a word the owner knows, and an unbounded exponent becomes a
+ *  date arithmetic cannot represent. */
+const MAX_STEP = 8;
+const DAY_MS = 86400000;
+
+export function nextInterval(seen) {
+  return Math.pow(2, Math.min(Number(seen) || 0, MAX_STEP));
+}
+
+/** A day count from a `YYYY-MM-DD`, in UTC so a timezone cannot move a card
+ *  by one day depending on where the owner opened it. */
+export function addDays(today, days) {
+  const start = Date.parse(`${today}T00:00:00Z`);
+  if (!Number.isFinite(start)) return today;
+  return new Date(start + days * DAY_MS).toISOString().slice(0, 10);
+}
+
+/** WHAT THE TRAINER DRAWS, AND WHAT IT HIDES.
+ *
+ *  A known word is never drawn again: that is the whole of Easy, and the one
+ *  rule a reader of this file should not have to find in a browser. A word
+ *  with no date has never been answered and is due now; one with a date is
+ *  due on it. */
+export function isDue(row, today) {
+  if (row.status === "known") return false;
+  if (!row.next) return true;
+  return row.next <= today;
+}
+
+export function dueRows(rows, today) {
+  return rows.filter((row) => isDue(row, today));
+}
+
+/** One answer, as a new row and a verdict on whether the word comes back in
+ *  this session. A new row rather than a changed one, because the deck and
+ *  the table hold the same objects and a mutation is then two things moving
+ *  when one was asked to. */
+export function applyAnswer(row, kind, today) {
+  const seen = row.seen + 1;
+  if (kind === "again") {
+    // Back in the deck, and due now: an answer of "I did not know this" is
+    // not a reason to put the word off until tomorrow.
+    return { row: { ...row, status: "learning", seen, next: "" }, repeat: true };
+  }
+  if (kind === "good") {
+    return {
+      row: { ...row, status: "learning", seen, next: addDays(today, nextInterval(row.seen)) },
+      repeat: false,
+    };
+  }
+  return {
+    row: { ...row, status: "known", seen, next: addDays(today, nextInterval(row.seen + 1)) },
+    repeat: false,
+  };
+}
+
+/** Every page under one parent, however deep, with one subtree left out: the
+ *  trainer's own, because its `Words` page is a list of answers rather than a
+ *  list of words to learn and reading it as a source would teach the owner
+ *  their own status column. */
+export function descendantsOf(nodes, rootId, skipId) {
+  const found = [];
+  const walk = (parentId) => {
+    for (const node of nodes) {
+      if (node.parentId !== parentId) continue;
+      if (node.id === skipId) continue;
+      found.push(node);
+      walk(node.id);
+    }
+  };
+  if (rootId) walk(rootId);
+  return found;
 }

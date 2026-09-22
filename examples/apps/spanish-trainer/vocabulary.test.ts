@@ -1,5 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { extractVocabulary, parseWordsTable, renderWordsTable } from "./vocabulary.js";
+import {
+  addDays,
+  applyAnswer,
+  descendantsOf,
+  dueRows,
+  extractVocabulary,
+  isDue,
+  nextInterval,
+  parseWordsTable,
+  renderWordsTable,
+} from "./vocabulary.js";
 
 describe("reading vocabulary out of a page", () => {
   it("reads a markdown table", () => {
@@ -120,5 +130,160 @@ describe("a cell that carries the table's own separator", () => {
       { word: "contra\\barra", translation: "backslash", status: "new" as const, seen: 0, next: "" },
     ];
     expect(parseWordsTable(renderWordsTable(rows))).toEqual(rows);
+  });
+});
+
+const TODAY = "2026-09-22";
+const word = (over: Partial<{ word: string; translation: string; status: "new" | "learning" | "known"; seen: number; next: string }> = {}) => ({
+  word: "hola",
+  translation: "hello",
+  status: "new" as "new" | "learning" | "known",
+  seen: 0,
+  next: "",
+  ...over,
+});
+
+/** THE RULES THE E2E USED TO BE THE ONLY WITNESS TO.
+ *
+ *  Spec §9 asks for a schedule, for Again to put the word back in the session
+ *  and for known words to be hidden. Those were three closures inside the
+ *  entry's IIFE, reachable only by driving a browser, which is why a mutation
+ *  that deleted the known filter survived a green suite. They are pure, so
+ *  they live here, and `build.mjs` splices them into the entry exactly as it
+ *  splices the reader. */
+describe("what is due", () => {
+  it("never draws a word the owner has marked known", () => {
+    expect(isDue(word({ status: "known" }), TODAY)).toBe(false);
+    expect(isDue(word({ status: "known", next: "" }), TODAY)).toBe(false);
+    expect(isDue(word({ status: "known", next: "2020-01-01" }), TODAY)).toBe(false);
+  });
+
+  it("draws a word that has never been seen", () => {
+    expect(isDue(word(), TODAY)).toBe(true);
+    expect(isDue(word({ status: "learning", next: "" }), TODAY)).toBe(true);
+  });
+
+  it("draws one whose date has come, and holds one whose date has not", () => {
+    expect(isDue(word({ status: "learning", next: "2026-09-21" }), TODAY)).toBe(true);
+    expect(isDue(word({ status: "learning", next: TODAY }), TODAY)).toBe(true);
+    expect(isDue(word({ status: "learning", next: "2026-09-23" }), TODAY)).toBe(false);
+  });
+
+  it("builds the session's deck in the order the words were found", () => {
+    const rows = [
+      word({ word: "hola" }),
+      word({ word: "adios", status: "known", seen: 9 }),
+      word({ word: "gracias", status: "learning", next: "2026-12-01" }),
+      word({ word: "buenos", status: "learning", next: "2026-09-01" }),
+    ];
+    expect(dueRows(rows, TODAY).map((row: { word: string }) => row.word)).toEqual([
+      "hola",
+      "buenos",
+    ]);
+  });
+});
+
+describe("the schedule", () => {
+  it("doubles the interval with every good answer", () => {
+    expect([0, 1, 2, 3, 4].map(nextInterval)).toEqual([1, 2, 4, 8, 16]);
+  });
+
+  it("stops doubling, because a date arithmetic cannot hold is not a date", () => {
+    expect(nextInterval(8)).toBe(256);
+    expect(nextInterval(9)).toBe(256);
+    expect(nextInterval(400)).toBe(256);
+  });
+
+  it("counts days from the day it is given, across a month and a year", () => {
+    expect(addDays(TODAY, 1)).toBe("2026-09-23");
+    expect(addDays(TODAY, 9)).toBe("2026-10-01");
+    expect(addDays("2026-12-31", 1)).toBe("2027-01-01");
+    expect(addDays(TODAY, 0)).toBe(TODAY);
+  });
+});
+
+describe("the three answers", () => {
+  it("Again puts the word back in this session and says it is being learned", () => {
+    const answered = applyAnswer(word({ status: "new", seen: 1, next: "2026-09-01" }), "again", TODAY);
+    expect(answered.repeat).toBe(true);
+    expect(answered.row).toMatchObject({ status: "learning", seen: 2, next: "" });
+    expect(isDue(answered.row, TODAY)).toBe(true);
+  });
+
+  it("Good pushes the date out by two to the power of the sightings so far", () => {
+    const answered = applyAnswer(word({ status: "learning", seen: 2 }), "good", TODAY);
+    expect(answered.repeat).toBe(false);
+    expect(answered.row).toMatchObject({ status: "learning", seen: 3, next: "2026-09-26" });
+    expect(isDue(answered.row, TODAY)).toBe(false);
+  });
+
+  it("Easy takes the word out of the rotation for good", () => {
+    const answered = applyAnswer(word({ status: "learning", seen: 2 }), "easy", TODAY);
+    expect(answered.repeat).toBe(false);
+    expect(answered.row).toMatchObject({ status: "known", seen: 3, next: "2026-09-30" });
+    expect(isDue(answered.row, TODAY)).toBe(false);
+  });
+
+  it("answers a row rather than changing the one it was handed", () => {
+    const before = word({ seen: 1 });
+    applyAnswer(before, "easy", TODAY);
+    expect(before).toEqual(word({ seen: 1 }));
+  });
+});
+
+describe("the pages a deck is read from", () => {
+  const tree = [
+    { id: "deck", parentId: null, title: "Spanish" },
+    { id: "week1", parentId: "deck", title: "Week one" },
+    { id: "day1", parentId: "week1", title: "Monday" },
+    { id: "app", parentId: "deck", title: "Trainer" },
+    { id: "words", parentId: "app", title: "Words" },
+    { id: "elsewhere", parentId: null, title: "Private" },
+  ];
+
+  it("reads every page under the parent, however deep", () => {
+    expect(descendantsOf(tree, "deck", "nothing").map((node) => node.id)).toEqual([
+      "week1",
+      "day1",
+      "app",
+      "words",
+    ]);
+  });
+
+  it("leaves the app's own subtree out, so it never drills its own answers", () => {
+    expect(descendantsOf(tree, "deck", "app").map((node) => node.id)).toEqual(["week1", "day1"]);
+  });
+
+  it("reads nothing at all when no parent was chosen", () => {
+    expect(descendantsOf(tree, null, "app")).toEqual([]);
+  });
+});
+
+describe("a Words page somebody edited by hand", () => {
+  const rows = (lines: string[]) =>
+    parseWordsTable(["| word | translation | status | seen | next |", "| --- | --- | --- | --- | --- |", ...lines].join("\n"));
+
+  it("reads a header the owner capitalised as a header, not as a word", () => {
+    const table = ["| Word | Translation | Status | Seen | Next |", "| --- | --- | --- | --- | --- |", "| hola | hello | new | 0 | |"].join("\n");
+    expect(parseWordsTable(table)).toEqual([
+      { word: "hola", translation: "hello", status: "new", seen: 0, next: "" },
+    ]);
+  });
+
+  it("reads a status the owner capitalised as that status, not as new", () => {
+    expect(rows(["| hola | hello | Learning | 3 | 2026-10-01 |"])[0].status).toBe("learning");
+    expect(rows(["| hola | hello | KNOWN | 3 | |"])[0].status).toBe("known");
+  });
+
+  it("still reads an unfamiliar status as new rather than losing the word", () => {
+    expect(rows(["| hola | hello | mastered | 3 | |"])[0].status).toBe("new");
+  });
+
+  it("drops a row with a column too many rather than reading the wrong cells", () => {
+    // Six cells means somebody added a column, and `next` is then not where
+    // this reader thinks it is. Dropping the row costs one word's schedule;
+    // reading it wrong writes a date into the owner's page that means nothing.
+    expect(rows(["| hola | hello | new | 0 | | extra |"])).toEqual([]);
+    expect(rows(["| hola | hello | new | 0 |"])).toEqual([]);
   });
 });

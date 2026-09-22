@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, verifySession } from "@/lib/auth";
 import { getStore, isNotFound, isRevConflict } from "@/lib/store";
-import { appendMcpActivity } from "@/lib/mcp/activity-log";
 import { appWriteClient } from "@/lib/apps/write-authority";
 import { APP_ENTRY_MAX_BYTES } from "@/lib/apps/model";
+import { logAppBridgeWrite } from "../../../activity";
 
 export const dynamic = "force-dynamic";
 
@@ -53,7 +53,14 @@ export async function PUT(
   // `readPageLabel` is the synchronous index reader the share surfaces use.
   const client = appWriteClient(store.readPageLabel(id)?.title ?? "");
   const line = (outcome: string, label?: string) =>
-    log(client, "write_page", target, "markdown", outcome, label);
+    logAppBridgeWrite({
+      client,
+      tool: "write_page",
+      change: "markdown",
+      page: target,
+      outcome,
+      ...(label === undefined ? {} : { label }),
+    });
 
   const body = (await req.json().catch(() => null)) as
     | { markdown?: unknown; rev?: unknown }
@@ -118,27 +125,5 @@ export async function PUT(
       { error: "the notes folder could not answer", reason: "store_failed" },
       { status: 500 },
     );
-  }
-}
-
-/** Swallowed for the reason every other activity append is: a write that has
- *  already landed must not reach the caller as a failure, or it will do it
- *  again. */
-async function log(
-  client: string,
-  tool: string,
-  page: string,
-  change: string,
-  outcome: string,
-  label?: string,
-): Promise<void> {
-  try {
-    await appendMcpActivity(
-      { at: new Date().toISOString(), client, tool, page, change, outcome },
-      label === undefined ? undefined : { label },
-    );
-  } catch (cause) {
-    const reason = cause instanceof Error ? cause.message : String(cause);
-    console.warn(`[brain/apps] activity line dropped: ${reason}`);
   }
 }

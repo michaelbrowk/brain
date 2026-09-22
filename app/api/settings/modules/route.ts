@@ -44,6 +44,20 @@ export async function PUT(req: NextRequest) {
   // Only on a real change: a no-op would take a slot in the 256-entry SSE
   // replay journal for a state nobody moved.
   if (changed) emitStore({ type: "modules", id: "modules", modules });
+  // Only when the mail switch itself moved: the mail service has no opinion
+  // about Tasks, and a socket round trip on a tasks flip would be a second
+  // process asked about something it does not own.
+  if (changed && patch.mail !== undefined) {
+    const { tellMailServiceAboutModules } = await import("@/lib/mail/module-sync");
+    if (!(await tellMailServiceAboutModules())) {
+      // The setting still stands, and the startup call repairs the service.
+      // The extra field is the only way the settings row can learn this.
+      return NextResponse.json(
+        { ...modules, mailService: "unreachable" },
+        { headers: HEADERS },
+      );
+    }
+  }
   return NextResponse.json(modules, { headers: HEADERS });
 }
 

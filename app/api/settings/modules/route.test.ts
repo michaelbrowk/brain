@@ -2,11 +2,18 @@ import { NextRequest } from "next/server";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { readModules, resetOwnerSettingsCache, setModules } from "@/lib/owner-settings";
 import { brainEvents } from "@/lib/store/events";
 import { GET, PUT } from "./route";
+
+// The mail service is a socket that is not there in a test, and the cases
+// below are about the setting rather than about the other process. The
+// service's own describe at the foot of this file replaces this per case.
+vi.mock("@/lib/mail/module-sync", () => ({
+  tellMailServiceAboutModules: async () => true,
+}));
 
 // The real settings file against a temp state directory rather than a mock:
 // the route is validation over it, and what matters is that the switch the
@@ -126,5 +133,64 @@ describe("PUT /api/settings/modules", () => {
     // one-writer invariant is untouched by a switch.
     const source = await fs.readFile(path.join(import.meta.dirname, "route.ts"), "utf8");
     expect(source).not.toContain("getStore");
+  });
+});
+
+/** THE OTHER PROCESS. The mail service cannot read the settings file, so the
+ *  switch reaches it over its socket, and the socket is a thing that fails.
+ *  What the owner asked for is written either way: the setting is the truth
+ *  and the startup call is the repair. */
+describe("PUT /api/settings/modules and the mail service", () => {
+  afterEach(() => {
+    vi.resetModules();
+    vi.doUnmock("@/lib/mail/module-sync");
+  });
+
+  async function putWith(told: () => Promise<boolean>, body: unknown) {
+    vi.doMock("@/lib/mail/module-sync", () => ({
+      tellMailServiceAboutModules: told,
+    }));
+    const { PUT: handler } = await import("./route");
+    return handler(
+      new NextRequest("https://brain.test/api/settings/modules", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+  }
+
+  it("tells the service the pause, and still answers the pair", async () => {
+    const told = vi.fn(async () => true);
+    const response = await putWith(told, { mail: false });
+    expect(await response.json()).toEqual({ mail: false, tasks: true });
+    expect(told).toHaveBeenCalledTimes(1);
+  });
+
+  it("writes the setting anyway when the service does not answer, and says so", async () => {
+    const response = await putWith(
+      vi.fn(async () => false),
+      { mail: false },
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      mail: false,
+      tasks: true,
+      mailService: "unreachable",
+    });
+    expect(await readModules(dir)).toEqual({ mail: false, tasks: true });
+  });
+
+  it("does not ask the service when only Tasks moved", async () => {
+    const told = vi.fn(async () => true);
+    await putWith(told, { tasks: false });
+    expect(told).not.toHaveBeenCalled();
+  });
+
+  it("does not ask the service when nothing changed", async () => {
+    await setModules({ mail: false }, dir);
+    const told = vi.fn(async () => true);
+    await putWith(told, { mail: false });
+    expect(told).not.toHaveBeenCalled();
   });
 });

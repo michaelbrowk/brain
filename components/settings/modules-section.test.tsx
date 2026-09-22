@@ -154,6 +154,29 @@ describe("the Modules section", () => {
       "Couldn't save that. Try again.",
     );
   });
+
+  it("says the mail service was not told, without undoing the switch", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => ({
+        ok: true,
+        json: async () => ({ mail: false, tasks: true, mailService: "unreachable" }),
+      })) as unknown as typeof fetch,
+    );
+    await render();
+    await act(async () => {
+      radio("Mail", "Off").click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    // The switch landed. The other process did not hear it yet, which the
+    // startup call repairs, so this is a sentence and not a revert.
+    expect(radio("Mail", "Off").getAttribute("aria-checked")).toBe("true");
+    expect(host.querySelector('[role="alert"]')?.textContent).toBe(
+      "The mail service did not answer; it will be told again on the next start",
+    );
+    expect(host.textContent).not.toContain("—");
+  });
 });
 
 describe("the settings registry", () => {

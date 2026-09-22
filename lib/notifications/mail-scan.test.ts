@@ -93,6 +93,9 @@ function harness(overrides: Record<string, unknown> = {}) {
     push: async (p: Push) => {
       pushed.push(p);
     },
+    // Supplied rather than defaulted, so no test in this file reads the real
+    // settings directory to answer an arithmetic question about letters.
+    modules: async () => ({ mail: true, tasks: true }),
     ...overrides,
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -384,9 +387,50 @@ describe("the mailbox the real port asks for", () => {
     // this file replaces, so this is the only place the choice is visible.
     // Under "all" the poll would list Sent and count the owner's own letters,
     // which is the failure the page below is guarding.
-    await runMailScan({ dir, push: async () => undefined });
+    await runMailScan({
+      dir,
+      push: async () => undefined,
+      modules: async () => ({ mail: true, tasks: true }),
+    });
     expect(service.mailboxCalls).toEqual([
       { accountId: ACCOUNT, mailboxId: "inbox", limit: MAIL_SCAN_PAGE },
     ]);
+  });
+});
+
+/** MAIL OFF: NOTHING IS POLLED AND NOTHING IS PRODUCED. Rows already in the
+ *  centre are somebody's morning and stay exactly where they are, which is
+ *  why nothing here removes one. */
+describe("the mail scan with the module off", () => {
+  it("produces nothing and asks the service nothing while Mail is off", async () => {
+    const accounts = vi.fn(async () => [{ accountId: ACCOUNT }]);
+    const h = harness({
+      accounts,
+      modules: async () => ({ mail: false, tasks: true }),
+    });
+    expect(await runMailScan(h.port)).toEqual({ produced: 0 });
+    expect(accounts).not.toHaveBeenCalled();
+    expect(h.mailboxCalls).toEqual([]);
+    expect(await listNotifications(dir)).toEqual([]);
+  });
+
+  it("leaves a row the centre already holds alone", async () => {
+    // A letter counted before the switch stays readable after it.
+    const first = harness({
+      inbox: async () => [thread({ lastMessageAt: Date.parse("2026-09-14T12:00:00.000Z") })],
+    });
+    await runMailScan(first.port);
+    await runMailScan(
+      harness({
+        inbox: async () => [thread({ lastMessageAt: Date.parse("2026-09-14T13:00:00.000Z") })],
+      }).port,
+    );
+    const before = await listNotifications(dir);
+    expect(before.filter((row) => row.kind === "mail-new")).toHaveLength(1);
+
+    await runMailScan(
+      harness({ modules: async () => ({ mail: false, tasks: true }) }).port,
+    );
+    expect(await listNotifications(dir)).toEqual(before);
   });
 });

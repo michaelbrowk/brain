@@ -66,7 +66,9 @@ import {
   validateMailSendInput,
   validateMailSendOperation,
   validateMailSendResult,
+  validateMailSyncEnabledInput,
   validateMailSyncInput,
+  validateMailSyncPauseResult,
   validateMailSyncResult,
   validateMailSystemMailbox,
   validateMailThreadDetail,
@@ -414,6 +416,13 @@ export interface BrainMailClient {
     input: { readonly accountId: string; readonly maxItems: number },
     signal?: AbortSignal,
   ): Promise<MailSyncResult>;
+  /** Brain's module switch, told to the process that has to act on it. The
+   *  body is `{ enabled }` and nothing else, and the answer is what stands
+   *  after the call, so a caller never has to ask a second time. */
+  setSyncEnabled(
+    enabled: boolean,
+    signal?: AbortSignal,
+  ): Promise<{ readonly paused: boolean }>;
   updateThread(
     threadId: string,
     mutation: MailThreadMutationInput,
@@ -788,6 +797,16 @@ export function createBrainMailClient(options?: {
         "POST",
         validateMessageRequest(() => validateMailSyncInput(input)),
         validateMailSyncResult,
+        signal,
+      ),
+    setSyncEnabled: async (enabled: boolean, signal?: AbortSignal) =>
+      requestMailService(
+        socketPath,
+        requestTimeoutMs,
+        SYNC_PATH,
+        "PATCH",
+        validateMessageRequest(() => validateMailSyncEnabledInput({ enabled })),
+        validateMailSyncPauseResult,
         signal,
       ),
     updateThread: async (

@@ -497,6 +497,22 @@ export function validateMailSyncResult(value: unknown): MailSyncResult {
   });
 }
 
+/** What `PATCH /v1/sync` answers: the state that stands after the call, so a
+ *  caller never has to ask a second time. */
+export function validateMailSyncPauseResult(value: unknown): {
+  readonly apiVersion: 1;
+  readonly paused: boolean;
+} {
+  if (
+    !isRecordWithExactFields(value, ["apiVersion", "paused"]) ||
+    value.apiVersion !== 1 ||
+    typeof value.paused !== "boolean"
+  ) {
+    throw responseInvalid();
+  }
+  return Object.freeze({ apiVersion: 1 as const, paused: value.paused });
+}
+
 export function validateMailThreadMutationResult(
   value: unknown,
 ): MailThreadMutationResult {

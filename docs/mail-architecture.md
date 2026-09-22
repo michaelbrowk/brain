@@ -316,6 +316,19 @@ row, and any value the service did not write, read as running: the fail-open is
 deliberate, because Brain sends the switch again at every startup, so a wrong
 `false` costs seconds of syncing while a wrong `true` is a mail client stuck
 off with nothing in the interface to explain it.
+
+Brain says it twice, from [`lib/mail/module-sync.ts`](../lib/mail/module-sync.ts):
+when the owner flips the switch, and once at startup from `instrumentation.ts`,
+not awaited, so a socket that does not answer never holds the web process at
+the door. The second call is the repair rather than belt and braces, because
+the service restarts on its own and a portable restore can land a settings file
+beside a service that never heard about it. A PATCH that does not land does not
+fail the switch: the setting is written either way, `PUT /api/settings/modules`
+answers the pair plus `mailService: "unreachable"`, and the Modules row says so
+in a sentence instead of reverting. Separately, every `/api/mail/*` route in
+Brain answers `409 { "error": "module_off", "module": "mail" }` while the switch
+is off, refused in `proxy.ts` before any handler builds a client.
+
 An edit may omit the password to keep the saved secret; first setup may not.
 `DELETE` is local-only, removes only the selected account and its cache, and
 never opens IMAP or mutates the remote mailbox. Once more than one account

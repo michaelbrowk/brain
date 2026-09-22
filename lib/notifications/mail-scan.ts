@@ -1,4 +1,5 @@
 import type { MailThreadListItem } from "@/lib/mail/message-types";
+import type { ModuleSwitches } from "@/lib/modules";
 import { MAIL_SCAN_PAGE, newMailLetters, type NewMailLetter } from "./mail-producer";
 import { countedMailRow, mailRow, openMailRow, type OpenMailRow } from "./mail-rows";
 import type { BrainNotification } from "./model";
@@ -39,15 +40,28 @@ export interface MailScanPort {
     folded: BrainNotification | null,
   ): Promise<"appended" | "folded" | "refused">;
   push(payload: { title: string; body?: string; href: string; tag?: string }): Promise<void>;
+  /** The owner's module switches. With Mail off no inbox is polled and no
+   *  `mail-new` row is produced; rows already in the centre are somebody's
+   *  morning and stay exactly where they are. */
+  modules(): Promise<ModuleSwitches>;
 }
 
-const PORT_MEMBERS = ["dir", "accounts", "inbox", "openMailRow", "notify", "push"] as const;
+const PORT_MEMBERS = [
+  "dir",
+  "accounts",
+  "inbox",
+  "openMailRow",
+  "notify",
+  "push",
+  "modules",
+] as const;
 
 function defaultPort(dir: string): Promise<MailScanPort> {
   return Promise.all([
     import("@/lib/mail/brain-mail-client"),
     import("@/lib/push/send"),
-  ]).then(([{ createBrainMailClient }, { sendPush }]) => {
+    import("@/lib/owner-settings"),
+  ]).then(([{ createBrainMailClient }, { sendPush }, { readModules }]) => {
     const client = createBrainMailClient();
     return {
       dir,
@@ -59,13 +73,14 @@ function defaultPort(dir: string): Promise<MailScanPort> {
       push: async (payload) => {
         await sendPush("mail-new", payload);
       },
+      modules: () => readModules(),
     };
   });
 }
 
 /** The real port is built only for the members the caller did not bring, the
- *  way the reminder scan resolves its own. A test that supplies all six gets
- *  exactly those six, and neither the mail socket nor the push keys is
+ *  way the reminder scan resolves its own. A test that supplies all seven
+ *  gets exactly those seven, and neither the mail socket nor the push keys is
  *  reached to run an arithmetic test. A test that brings only `dir` gets the
  *  real centre at that directory, which is where the fold is decided. */
 async function resolvePort(overrides: Partial<MailScanPort>): Promise<MailScanPort> {
@@ -91,6 +106,10 @@ export async function runMailScan(
   overrides: Partial<MailScanPort> = {},
 ): Promise<{ produced: number }> {
   const port = await resolvePort(overrides);
+  // Mail off: no inbox is polled and no `mail-new` row is produced. Rows
+  // already in the centre stay and read normally, which is why nothing here
+  // removes one.
+  if (!(await port.modules()).mail) return { produced: 0 };
 
   let accounts: readonly { readonly accountId: string }[];
   try {

@@ -4133,11 +4133,46 @@ export class Store {
     });
   }
 
-  /** The app's cross-device memory. Its own leaf because the bridge writes it
-   *  far more often than anything else an app does, and it must not drag the
-   *  entry and the assets through a rewrite each time. */
-  async writeAppState(id: string, json: unknown): Promise<void> {
-    await this.writeAppFiles(id, { state: json });
+  /** THE APP'S CROSS-DEVICE MEMORY, AND THE ONE FILE IT TOUCHES.
+   *
+   *  Its own leaf, not a `writeAppFiles({ state })`. That method stages a
+   *  whole new `app/` folder and swaps it in, which is right for a rewrite
+   *  and wrong here twice over. It copies the entry and every asset, up to
+   *  12 MiB, on a path the bridge runs once per card an app answers. And it
+   *  enters the rename window its own comment admits to: a crash between the
+   *  two renames leaves `app/` missing, and the next write through that path
+   *  carries nothing over and deletes the retired copy, so the entry is gone
+   *  for good. A rewrite is rare and agent-driven; this is a keystroke.
+   *
+   *  One atomic write of one small file, and the flag in the SAME mutation.
+   *  `readAppState` gates on `app.state === true`, so a file written without
+   *  the flag is a file nothing will read, and a flag written without the
+   *  file is a read that answers null. Neither half is worth having alone.
+   *
+   *  `writeAppFiles`'s own `state` branch stays, for the rewrite that
+   *  legitimately replaces the entry, the assets and the memory at once. */
+  async writeAppState(
+    id: string,
+    json: unknown,
+    by: "me" | "claude" = "claude",
+    src?: string,
+  ): Promise<void> {
+    assertAppStateSize(json);
+    return this.mutate(async () => {
+      const e = this.get(id);
+      if (e.meta.kind !== "app" || !e.meta.app) throw new NotFoundError(id);
+      const file = assertInRoot(this.root, path.join(e.dir, APP_STATE_PATH));
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await atomicWrite(file, JSON.stringify(json));
+      if (e.meta.app.state !== true) {
+        e.meta.app = appMetaSchema.parse({ ...e.meta.app, state: true });
+        e.meta.updated = now();
+        e.meta.updatedBy = by;
+        await this.persist(e);
+      }
+      scheduleCommit(this.root);
+      emitStore({ type: "write", id, src });
+    });
   }
 
   readAppMeta(id: string): AppMeta | null {

@@ -1,8 +1,8 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { APP_ENTRY_MAX_BYTES, APP_ENTRY_PATH } from "../apps/model";
+import { APP_ENTRY_MAX_BYTES, APP_ENTRY_PATH, APP_STATE_MAX_BYTES } from "../apps/model";
 import { Store } from "./store";
 import { isAppSize } from "./types";
 
@@ -211,6 +211,83 @@ describe("app pages in the store", () => {
     });
     await store.writeAppFiles(meta.id, { entryHtml: "<!doctype html><p>v2</p>" });
     expect((await store.readAppFile(meta.id, "app/assets/card.png")).kind).toBe("file");
+  });
+
+  /** A STATE WRITE IS NOT A REWRITE.
+   *
+   *  It used to delegate to `writeAppFiles`, which stages a whole new `app/`
+   *  folder and swaps it in: up to 12 MiB copied and a git commit scheduled
+   *  per card an app answers, through a rename pair whose window destroys the
+   *  entry if a crash lands in it. The state is one small file and it has its
+   *  own leaf now. */
+  describe("an app's state", () => {
+    const appPage = async () =>
+      (
+        await store.createAppPage(null, "Trainer", {
+          description: "d",
+          entryHtml: ENTRY,
+          assets: [{ name: "card.png", data: new Uint8Array([1, 2, 3]) }],
+          builtBy: "Claude",
+        })
+      ).meta;
+
+    it("leaves the entry and the assets untouched, and stages nothing", async () => {
+      const meta = await appPage();
+      const dir = path.join(root, "trainer");
+      const before = await stat(path.join(dir, "app", "index.html"));
+
+      await store.writeAppState(meta.id, { seen: 1 });
+
+      const entry = await store.readAppFile(meta.id, APP_ENTRY_PATH);
+      expect(entry.kind === "file" && Buffer.from(entry.data).toString("utf8")).toBe(ENTRY);
+      const asset = await store.readAppFile(meta.id, "app/assets/card.png");
+      expect(asset.kind === "file" && Array.from(asset.data)).toEqual([1, 2, 3]);
+      // The same file, not a copy of it. A staged rewrite replaces the entry
+      // with a new inode even when the bytes come out the same.
+      const after = await stat(path.join(dir, "app", "index.html"));
+      expect(after.ino).toBe(before.ino);
+      expect(after.mtimeMs).toBe(before.mtimeMs);
+      expect((await readdir(dir)).filter((name) => name.startsWith(".app-next"))).toEqual([]);
+    });
+
+    it("lands the file and the frontmatter flag in one write", async () => {
+      const meta = await appPage();
+      expect(meta.app?.state).toBe(false);
+
+      await store.writeAppState(meta.id, { seen: 1 });
+
+      expect(store.readAppMeta(meta.id)?.state).toBe(true);
+      expect(await store.readAppState(meta.id)).toEqual({ seen: 1 });
+      // On disk too, so a reader of `index.md` alone knows the file is there.
+      const front = await readFile(path.join(root, "trainer", "index.md"), "utf8");
+      expect(front).toContain("state: true");
+    });
+
+    it("refuses state over the cap and writes nothing", async () => {
+      const meta = await appPage();
+      await expect(
+        store.writeAppState(meta.id, { pad: "x".repeat(APP_STATE_MAX_BYTES) }),
+      ).rejects.toSatisfy(isAppSize);
+      expect(store.readAppMeta(meta.id)?.state).toBe(false);
+      expect(await store.readAppState(meta.id)).toBeNull();
+    });
+
+    it("does not destroy the entry an interrupted rewrite left behind", async () => {
+      // The crash window `writeAppFiles` admits to: `app/` renamed out to
+      // `.app-next-old`, `.app-next/` still on disk. A state write used to go
+      // straight back through that swap, `rm -rf` the retired folder and take
+      // the only surviving copy of the entry with it. It writes its own file
+      // now and touches neither folder, so the copy is still there for a
+      // recovery to find.
+      const meta = await appPage();
+      const dir = path.join(root, "trainer");
+      await rename(path.join(dir, "app"), path.join(dir, ".app-next-old"));
+      await mkdir(path.join(dir, ".app-next"), { recursive: true });
+
+      await store.writeAppState(meta.id, { seen: 2 });
+
+      expect(await readFile(path.join(dir, ".app-next-old", "index.html"), "utf8")).toBe(ENTRY);
+    });
   });
 
   it("still reads a page whose folder was already called app", async () => {

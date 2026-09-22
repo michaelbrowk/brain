@@ -46,21 +46,52 @@ describe("an app's own memory", () => {
     expect(await (await GET(new NextRequest(url), { params })).json()).toEqual({ state: null });
   });
 
-  it("writes it and flips the frontmatter flag the first time", async () => {
+  it("hands the payload to the store and patches no frontmatter of its own", async () => {
     const res = await PUT(
       new NextRequest(url, { method: "PUT", body: JSON.stringify({ json: { seen: 1 } }) }),
       { params },
     );
     expect(res.status).toBe(200);
     expect(writeAppState).toHaveBeenCalledWith("app1", { seen: 1 });
-    expect(setAppMeta).toHaveBeenCalledWith("app1", expect.objectContaining({ state: true }), "claude");
+    // The flag rides with the file inside one store mutation, so a route that
+    // patched it afterwards would be reopening the window that closed.
+    // `lib/store/store.apps.test.ts` holds the two landing together.
+    expect(setAppMeta).not.toHaveBeenCalled();
   });
 
-  it("does not rewrite the frontmatter on every later write", async () => {
-    readAppMeta.mockReturnValue({ ...base, state: true });
-    await PUT(new NextRequest(url, { method: "PUT", body: JSON.stringify({ json: { seen: 2 } }) }), { params });
-    expect(writeAppState).toHaveBeenCalled();
-    expect(setAppMeta).not.toHaveBeenCalled();
+  it("refuses a caller with no owner session, on both verbs", async () => {
+    verifySession.mockResolvedValue(false);
+    expect((await GET(new NextRequest(url), { params })).status).toBe(401);
+    const res = await PUT(
+      new NextRequest(url, { method: "PUT", body: JSON.stringify({ json: { seen: 1 } }) }),
+      { params },
+    );
+    expect(res.status).toBe(401);
+    expect(readAppState).not.toHaveBeenCalled();
+    expect(writeAppState).not.toHaveBeenCalled();
+  });
+
+  it("calls state it cannot serialize a bad request rather than a crash", async () => {
+    // A payload `req.json()` parses and `JSON.stringify` cannot walk. Left
+    // outside a try, the RangeError reaches Next as a bare 500 carrying no
+    // reason the app could branch on.
+    const deep: Record<string, unknown> = {};
+    let tip = deep;
+    for (let i = 0; i < 60_000; i += 1) {
+      const next: Record<string, unknown> = {};
+      tip.n = next;
+      tip = next;
+    }
+    const res = await PUT(
+      {
+        json: async () => ({ json: deep }),
+        cookies: { get: () => ({ value: "session" }) },
+      } as never,
+      { params },
+    );
+    expect(res.status).toBe(400);
+    expect(await res.json()).toMatchObject({ reason: "bad_request" });
+    expect(writeAppState).not.toHaveBeenCalled();
   });
 
   it("refuses state over the cap", async () => {

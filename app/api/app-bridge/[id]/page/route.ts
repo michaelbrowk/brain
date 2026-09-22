@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { SESSION_COOKIE, verifySession } from "@/lib/auth";
 import { getStore, isAppOwnsFull, isNotFound } from "@/lib/store";
 import { appWriteClient } from "@/lib/apps/write-authority";
+import { APP_ENTRY_MAX_BYTES } from "@/lib/apps/model";
 import { logAppBridgeWrite } from "../../activity";
 
 export const dynamic = "force-dynamic";
@@ -63,6 +64,19 @@ export async function POST(
     );
   }
 
+  // The same ceiling the write route takes, for the same reason: a page an app
+  // creates is a page, and a two-megabyte one is a runaway loop rather than a
+  // note. The bridge schema refuses it in the frame as well, which is the
+  // convenience; this is the authority.
+  const markdown = typeof body?.markdown === "string" ? body.markdown : "";
+  if (Buffer.byteLength(markdown, "utf8") > APP_ENTRY_MAX_BYTES) {
+    await line("too_large");
+    return NextResponse.json(
+      { error: "that page is too large to write", reason: "too_large" },
+      { status: 413 },
+    );
+  }
+
   try {
     /** THE PAGE AND THE OWNERSHIP ARE ONE WRITE, AND THE STORE OWNS BOTH.
      *
@@ -79,7 +93,7 @@ export async function POST(
         ...(typeof body?.icon === "string" && body.icon.length <= MAX_ICON_CHARS
           ? { icon: body.icon }
           : {}),
-        markdown: typeof body?.markdown === "string" ? body.markdown : "",
+        markdown,
       },
       "claude",
     );

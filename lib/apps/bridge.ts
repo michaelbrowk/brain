@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { APP_ENTRY_MAX_BYTES } from "./model";
 
 /** THE ONLY THING THAT CROSSES THE FRAME BOUNDARY.
  *
@@ -57,7 +58,11 @@ const appRequestUnion = z.discriminatedUnion("type", [
     type: z.literal("create.page"),
     title: z.string().min(1).max(200),
     icon: z.string().max(16).optional(),
-    markdown: z.string().default(""),
+    /** The same ceiling a page write takes. Without it the host relays a
+     *  create of any size at all, and an app may mint `APP_MAX_OWNED` pages
+     *  that way. The route measures it again, because a browser-side check is
+     *  a convenience and never an authority. */
+    markdown: z.string().max(APP_ENTRY_MAX_BYTES).default(""),
   }),
   z.object({ ...envelope, type: z.literal("state.get") }),
   z.object({ ...envelope, type: z.literal("state.set"), json: z.unknown() }),

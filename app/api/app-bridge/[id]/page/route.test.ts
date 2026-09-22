@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
+import { APP_ENTRY_MAX_BYTES } from "@/lib/apps/model";
 
 const createOwnedPage = vi.fn();
 const readAppMeta = vi.fn();
@@ -83,6 +84,16 @@ describe("an app creating a page under itself", () => {
     const res = await POST(post({ title: "One too many" }), { params });
     expect(res.status).toBe(413);
     expect(await res.json()).toMatchObject({ reason: "too_large" });
+  });
+
+  it("refuses markdown over the same cap a page write takes", async () => {
+    const res = await POST(
+      post({ title: "Runaway", markdown: "x".repeat(APP_ENTRY_MAX_BYTES + 1) }),
+      { params },
+    );
+    expect(res.status).toBe(413);
+    expect(await res.json()).toMatchObject({ reason: "too_large" });
+    expect(createOwnedPage).not.toHaveBeenCalled();
   });
 
   it("refuses a title that is not a title", async () => {

@@ -19,6 +19,11 @@ const PUBLIC_ASSETS = new Set([
   "/sw.js",
 ]);
 
+/** An app's own files, addressed through the grant in their own path, and
+ *  nothing else under `/api/app/`. `/t/` is the one shape a caller can reach
+ *  without a cookie, because it is the one whose authority does not need one. */
+const APP_FRAME_FILES = /^\/api\/app\/[^/]+\/t\//;
+
 /** `/api/app-bridge/<app>/share`, and nothing else under that prefix. */
 const APP_BRIDGE_SHARE = /^\/api\/app-bridge\/[^/]+\/share$/;
 
@@ -47,15 +52,20 @@ export async function proxy(req: NextRequest) {
     pathname.startsWith("/_attachments/") ||
     pathname.startsWith("/api/media/") ||
     // An app's own files, for the same reason and on the same terms as the
-    // attachment routes above: the route enforces the owner's session or a
-    // live share grant itself, and not every request that reaches it can
-    // carry a session. The frame's document has an opaque origin, so every
-    // subresource it asks for is a cross-site request with no SameSite cookie
-    // on it, and a link visitor's frame has no session at all. A 401 from the
-    // wall here is an app that never shows one of its own pictures and a
-    // shared app that is a blank rectangle, with nothing in any console the
-    // owner will ever open.
-    pathname.startsWith("/api/app/") ||
+    // attachment routes above: the route resolves the grant in the path
+    // itself, and no request that reaches it can carry a session. The frame's
+    // document has an opaque origin, so every subresource it asks for is a
+    // cross-site request with no SameSite cookie on it, and a link visitor's
+    // frame has no session at all. A 401 from the wall here is an app that
+    // never shows one of its own pictures and a shared app that is a blank
+    // rectangle, with nothing in any console the owner will ever open.
+    //
+    // One shape rather than the `/api/app/` prefix, for the reason the bridge
+    // matcher below states: `POST /api/app/<id>/frame` mints a capability and
+    // its caller is the shell, which is same-site and carries the session. It
+    // walls itself too, and this is what keeps the next route added under
+    // this prefix private until somebody decides otherwise.
+    APP_FRAME_FILES.test(pathname) ||
     // The one read a shared app's frame makes, and the only route under
     // `/api/app-bridge/` a link visitor may reach. The others are the owner's
     // three write doors and stay behind the wall; this matcher names one path

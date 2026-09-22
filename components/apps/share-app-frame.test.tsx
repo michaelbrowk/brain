@@ -15,6 +15,11 @@ const fetchMock = vi.mocked(apiFetch);
 const answer = (body: unknown) =>
   ({ ok: true, status: 200, json: async () => body }) as Response;
 
+/** The address the share page's server component minted and handed over. It
+ *  carries a token rather than a root and a version, because the frame's own
+ *  requests for its files drop a query string on the way. */
+const FRAME_SRC = "/api/app/app1/t/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJhcHA6YXBwMSJ9.sig/index.html";
+
 beforeEach(() => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
@@ -40,7 +45,13 @@ function mount() {
   act(() => {
     root = createRoot(host as HTMLDivElement);
     root.render(
-      <ShareAppFrame appId="app1" rootId="root1" shareVersion={2} title="Trainer" />,
+      <ShareAppFrame
+        appId="app1"
+        rootId="root1"
+        shareVersion={2}
+        src={FRAME_SRC}
+        title="Trainer"
+      />,
     );
   });
   const frame = (host as HTMLDivElement).querySelector("iframe") as HTMLIFrameElement;
@@ -71,9 +82,15 @@ async function ask(
 }
 
 describe("a shared app", () => {
-  it("mounts at the address the visitor's own grant reaches", () => {
+  it("mounts at the address it was given, and builds none of its own", () => {
     const { frame } = mount();
-    expect(frame.getAttribute("src")).toBe("/api/app/app1/index.html?root=root1&v=2");
+    // The token is the server's to cut. This island renders what it was
+    // handed and nothing it worked out: a root and a version in a query
+    // reached the entry and nothing under it, and a browser is the last place
+    // to be deciding what a visitor may reach.
+    expect(frame.getAttribute("src")).toBe(FRAME_SRC);
+    expect(frame.getAttribute("src")).not.toContain("root=");
+    expect(frame.getAttribute("src")).not.toContain("v=2");
     expect(frame.getAttribute("sandbox")).toBe(APP_FRAME_SANDBOX);
     expect(frame.getAttribute("sandbox")).not.toContain("allow-same-origin");
     expect(frame.getAttribute("title")).toBe("Trainer");

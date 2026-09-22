@@ -13,6 +13,11 @@ export interface ShareAppFrameProps {
   appId: string;
   rootId: string;
   shareVersion: number;
+  /** The frame's address, minted by the share page's server component from
+   *  the grant it resolved. This island does not build one and could not: the
+   *  token in that path is signed, and a visitor's browser is the last place
+   *  to be deciding what a visitor may reach. */
+  src: string;
   title: string;
 }
 
@@ -131,7 +136,13 @@ function sharePageHref(rootId: string, pageId: string): string {
  *  body the server always draws: a browser running no scripts reads the
  *  agent's description of the app, which is what spec §2 asks for, and it
  *  goes the moment this island is a sibling of it in the DOM. */
-export function ShareAppFrame({ appId, rootId, shareVersion, title }: ShareAppFrameProps) {
+export function ShareAppFrame({
+  appId,
+  rootId,
+  shareVersion,
+  src,
+  title,
+}: ShareAppFrameProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
   const [toast, setToast] = useState("");
 
@@ -152,10 +163,6 @@ export function ShareAppFrame({ appId, rootId, shareVersion, title }: ShareAppFr
     });
     return () => bridge.dispose();
   }, [appId, rootId, shareVersion, title]);
-
-  const src = `/api/app/${encodeURIComponent(appId)}/index.html?root=${encodeURIComponent(
-    rootId,
-  )}&v=${encodeURIComponent(String(shareVersion))}`;
 
   return (
     <div data-share-app className="brain-app-canvas">

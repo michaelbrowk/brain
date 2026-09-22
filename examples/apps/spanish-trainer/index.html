@@ -1,0 +1,498 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Spanish trainer</title>
+<link rel="brain-kit">
+<style>
+  /* Layout only. Every colour, radius and type size is the kit's, and the
+     kit's values are Brain's own tokens, which is why dark comes free. */
+  .wrap { display: flex; flex-direction: column; gap: 16px; max-width: 520px; margin: 0 auto; }
+  .head { display: flex; flex-direction: column; gap: 6px; }
+  .picker { display: flex; flex-direction: column; gap: 4px; margin-top: 6px; }
+  .face { display: flex; flex-direction: column; gap: 8px; justify-content: center; min-height: 112px; }
+  .answers { display: flex; gap: 8px; }
+  .answers .btn { flex: 1 1 0; padding: 0 8px; }
+  .wide { width: 100%; }
+  [hidden] { display: none !important; }
+</style>
+
+<main class="wrap">
+  <header class="head">
+    <h1 class="text-title" id="deckTitle">Spanish</h1>
+    <p class="text-caption" id="sourceLine">Reading your pages.</p>
+    <div class="picker">
+      <label class="text-label" for="picker">Words from</label>
+      <select class="field" id="picker"></select>
+    </div>
+  </header>
+
+  <section class="card" id="cardPane" hidden>
+    <div class="face">
+      <p class="text-label">Word</p>
+      <p class="text-title" id="wordEl"></p>
+      <p class="text-body" id="translationEl" hidden></p>
+    </div>
+    <button class="btn wide" data-primary id="showBtn">Show</button>
+    <div class="answers" id="answers" hidden>
+      <button class="btn" id="againBtn">Again</button>
+      <button class="btn" id="goodBtn">Good</button>
+      <button class="btn" data-primary id="easyBtn">Easy</button>
+    </div>
+  </section>
+
+  <section class="card" id="summaryPane" hidden>
+    <p class="text-body" id="summaryLine"></p>
+    <p class="text-caption" id="summaryNote"></p>
+    <button class="btn" id="restartBtn">Start again</button>
+  </section>
+
+  <p class="text-caption" id="statusLine" role="status" aria-live="polite"></p>
+</main>
+
+<script>
+// --- vocabulary.js ---
+/** THE THREE SHAPES A VOCABULARY PAGE COMES IN.
+ *
+ *  A person keeping Spanish words writes them one of three ways and never
+ *  tells anybody which: a markdown table, a bare `word — translation` line,
+ *  or the same line with a bullet in front of it. The trainer reads all
+ *  three, and reads nothing out of prose, a heading or a fenced block, where
+ *  a dash is punctuation rather than a separator.
+ *
+ *  It never writes the pages it reads. The only page it writes is its own
+ *  `Words`, through the bridge, which is the one page its `owns` list names. */
+
+const SEPARATOR = /\s+[—–-]\s+/;
+
+/** A line that ends the way a sentence ends is a sentence. It is the one
+ *  signal that separates `I am learning - slowly.` from `adios - goodbye`
+ *  without guessing at length: both sides of the first are short enough to
+ *  pass for a phrase, and only one of them is punctuated. */
+const SENTENCE_END = /[.!?]$/;
+
+function extractVocabulary(markdown) {
+  const rows = [];
+  let inFence = false;
+  for (const raw of String(markdown).split("\n")) {
+    const line = raw.trim();
+    if (line.startsWith("```") || line.startsWith("~~~")) {
+      inFence = !inFence;
+      continue;
+    }
+    if (inFence || line.length === 0 || line.startsWith("#")) continue;
+
+    if (line.startsWith("|") && line.endsWith("|")) {
+      const cells = line.slice(1, -1).split("|").map((cell) => cell.trim());
+      // A separator row, and a header row whose cells name the columns rather
+      // than being a pair of words.
+      if (cells.every((cell) => /^:?-{3,}:?$/.test(cell))) continue;
+      if (cells.length < 2) continue;
+      if (/^(word|spanish|term|palabra)$/i.test(cells[0])) continue;
+      if (cells[0].length > 0 && cells[1].length > 0) {
+        rows.push({ word: cells[0], translation: cells[1] });
+      }
+      continue;
+    }
+
+    if (SENTENCE_END.test(line)) continue;
+    const bare = line.replace(/^[-*+]\s+/, "");
+    // A bullet that was stripped is a list item; a line that was not must
+    // still have exactly one separator, or it is a sentence with a dash in it.
+    const parts = bare.split(SEPARATOR);
+    if (parts.length !== 2) continue;
+    const [word, translation] = parts.map((part) => part.trim());
+    if (word.length === 0 || translation.length === 0) continue;
+    // A sentence is longer than a word. Four words either side is generous
+    // for a phrase and short of anything anybody would call prose.
+    if (word.split(/\s+/).length > 4 || translation.split(/\s+/).length > 4) continue;
+    rows.push({ word, translation });
+  }
+  return rows;
+}
+
+const STATUSES = ["new", "learning", "known"];
+const HEADER = "| word | translation | status | seen | next |";
+const RULE = "| --- | --- | --- | --- | --- |";
+
+function renderWordsTable(rows) {
+  const seen = new Set();
+  const lines = [HEADER, RULE];
+  for (const row of rows) {
+    const key = row.word.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    lines.push(`| ${row.word} | ${row.translation} | ${row.status} | ${row.seen} | ${row.next} |`);
+  }
+  return lines.join("\n");
+}
+
+/** A page the owner may have edited by hand. A row that does not parse is
+ *  dropped rather than taking the file down with it, and an unfamiliar status
+ *  reads as `new`: the worst that costs is one more sighting of a word the
+ *  person already knows, and the alternative is losing the word. */
+function parseWordsTable(markdown) {
+  const rows = [];
+  for (const raw of String(markdown).split("\n")) {
+    const line = raw.trim();
+    if (!line.startsWith("|") || !line.endsWith("|")) continue;
+    const cells = line.slice(1, -1).split("|").map((cell) => cell.trim());
+    if (cells.length !== 5) continue;
+    if (cells[0] === "word" || /^:?-{3,}:?$/.test(cells[0])) continue;
+    const seen = Number.parseInt(cells[3], 10);
+    rows.push({
+      word: cells[0],
+      translation: cells[1],
+      status: STATUSES.includes(cells[2]) ? cells[2] : "new",
+      seen: Number.isFinite(seen) ? seen : 0,
+      next: cells[4],
+    });
+  }
+  return rows;
+}
+// --- end vocabulary.js ---
+
+/** THE SPANISH TRAINER.
+ *
+ *  It reads the pages under one parent the owner picks, takes every
+ *  `word / translation` pair out of them, and drills the ones that are due.
+ *  The record of what it knows is its own `Words` page, a markdown table the
+ *  owner can read and edit like any other page, and it is the only page this
+ *  app is allowed to write.
+ *
+ *  What lives in `state` is the two settings that cannot be worked out again:
+ *  which parent to read, and which page is `Words`. The words themselves are
+ *  NOT copied there. A second copy of the table would go out of date the
+ *  first time the owner corrected a translation by hand, and forgiving a
+ *  broken row is the whole reason `parseWordsTable` reads the page rather
+ *  than trusting a cache of it.
+ *
+ *  Nothing here is inside a module and nothing awaits at the top level: a
+ *  classic script is what the frame runs, so the whole app is one function
+ *  that calls itself. */
+(function () {
+  "use strict";
+
+  var brain = window.brain;
+  var el = function (id) { return document.getElementById(id); };
+
+  var deckTitle = el("deckTitle");
+  var sourceLine = el("sourceLine");
+  var picker = el("picker");
+  var cardPane = el("cardPane");
+  var wordEl = el("wordEl");
+  var translationEl = el("translationEl");
+  var showBtn = el("showBtn");
+  var answers = el("answers");
+  var summaryPane = el("summaryPane");
+  var summaryLine = el("summaryLine");
+  var summaryNote = el("summaryNote");
+  var statusLine = el("statusLine");
+
+  var DAY_MS = 86400000;
+  /** `2 ** seen` days, with the exponent held at eight. A word answered well
+   *  nine times is a word the owner knows, and an unbounded exponent turns
+   *  into a date arithmetic cannot represent. */
+  var MAX_STEP = 8;
+
+  var page = null;
+  var tree = [];
+  var settings = { parentId: null, wordsPageId: null };
+  var rows = [];
+  var deck = [];
+  var seen = new Set();
+  var learned = 0;
+  var started = 0;
+  var saving = Promise.resolve();
+
+  function today() {
+    return new Date().toISOString().slice(0, 10);
+  }
+
+  function inDays(days) {
+    return new Date(Date.now() + days * DAY_MS).toISOString().slice(0, 10);
+  }
+
+  function step(count) {
+    return Math.pow(2, Math.min(count, MAX_STEP));
+  }
+
+  function due(row) {
+    if (row.status === "known") return false;
+    if (row.next.length === 0) return true;
+    return row.next <= today();
+  }
+
+  function note(text) {
+    statusLine.textContent = text;
+  }
+
+  /** Every page under the chosen parent, the app's own subtree left out: the
+   *  trainer's `Words` page is a list of answers, not a list of words to
+   *  learn, and reading it as a source would teach the owner their own
+   *  status column. */
+  function descendants(rootId) {
+    var found = [];
+    var walk = function (parentId) {
+      for (var index = 0; index < tree.length; index += 1) {
+        var node = tree[index];
+        if (node.parentId !== parentId) continue;
+        if (node.id === page.id) continue;
+        found.push(node);
+        walk(node.id);
+      }
+    };
+    if (rootId) walk(rootId);
+    return found;
+  }
+
+  function findWordsPage() {
+    var index;
+    if (settings.wordsPageId) {
+      for (index = 0; index < tree.length; index += 1) {
+        if (tree[index].id === settings.wordsPageId) return settings.wordsPageId;
+      }
+    }
+    for (index = 0; index < tree.length; index += 1) {
+      if (tree[index].parentId === page.id && tree[index].title === "Words") {
+        return tree[index].id;
+      }
+    }
+    return null;
+  }
+
+  function fillPicker() {
+    picker.textContent = "";
+    for (var index = 0; index < tree.length; index += 1) {
+      var node = tree[index];
+      if (node.id === page.id) continue;
+      var option = document.createElement("option");
+      option.value = node.id;
+      option.textContent = node.title;
+      option.selected = node.id === settings.parentId;
+      picker.append(option);
+    }
+  }
+
+  /** What `Words` already holds, plus anything new the source pages name.
+   *  The kept row wins on every collision: it carries the status, the count
+   *  and the date, and a source page carries none of those. */
+  async function buildRows() {
+    var byWord = new Map();
+    var index;
+    if (settings.wordsPageId) {
+      try {
+        var kept = await brain.read.page(settings.wordsPageId);
+        var keptRows = parseWordsTable(kept.markdown);
+        for (index = 0; index < keptRows.length; index += 1) {
+          byWord.set(keptRows[index].word.toLowerCase(), keptRows[index]);
+        }
+      } catch (error) {
+        note("Brain could not read the Words page.");
+      }
+    }
+    var sources = descendants(settings.parentId);
+    for (var source = 0; source < sources.length; source += 1) {
+      var node = sources[source];
+      if (node.id === settings.wordsPageId) continue;
+      var body;
+      try {
+        body = await brain.read.page(node.id);
+      } catch (error) {
+        continue;
+      }
+      var found = extractVocabulary(body.markdown);
+      for (index = 0; index < found.length; index += 1) {
+        var key = found[index].word.toLowerCase();
+        if (byWord.has(key)) continue;
+        byWord.set(key, {
+          word: found[index].word,
+          translation: found[index].translation,
+          status: "new",
+          seen: 0,
+          next: "",
+        });
+      }
+    }
+    return Array.from(byWord.values());
+  }
+
+  /** ONE WRITE AT A TIME, AND ONE RETRY.
+   *
+   *  The rev is read back immediately before the write, because the owner may
+   *  have the `Words` page open in the editor beside the app. A conflict is
+   *  read again once and written again; a second conflict is the owner
+   *  typing, and the right answer then is to say so rather than to keep
+   *  overwriting them. */
+  async function saveWords() {
+    if (!settings.wordsPageId) {
+      note("There is no Words page for this trainer to write to.");
+      return;
+    }
+    for (var attempt = 0; attempt < 2; attempt += 1) {
+      var current;
+      try {
+        current = await brain.read.page(settings.wordsPageId);
+      } catch (error) {
+        note("Brain could not read the Words page.");
+        return;
+      }
+      try {
+        await brain.write.page(settings.wordsPageId, renderWordsTable(rows), current.rev);
+        note("");
+        return;
+      } catch (error) {
+        var reason = error && error.reason;
+        if (reason === "rev_conflict" && attempt === 0) continue;
+        if (reason === "read_only") {
+          note("This is a shared copy, so your answers stay in this browser.");
+          return;
+        }
+        if (reason === "rev_conflict") {
+          note("The Words page is being edited right now, so that answer is not saved.");
+          return;
+        }
+        note("Brain could not save that answer.");
+        return;
+      }
+    }
+  }
+
+  function save() {
+    saving = saving.then(saveWords, saveWords);
+    return saving;
+  }
+
+  async function rememberSettings(next) {
+    if (next.parentId === settings.parentId && next.wordsPageId === settings.wordsPageId) {
+      return;
+    }
+    settings = next;
+    try {
+      await brain.state.set(settings);
+    } catch (error) {
+      note("Brain could not remember which pages to read.");
+    }
+  }
+
+  function draw() {
+    if (deck.length === 0) {
+      cardPane.hidden = true;
+      summaryPane.hidden = false;
+      var count = seen.size;
+      summaryLine.textContent =
+        started === 0
+          ? "Nothing is due right now."
+          : "You saw " + count + (count === 1 ? " word." : " words.");
+      summaryNote.textContent =
+        started === 0
+          ? "Come back tomorrow, or write more words on the pages under this deck."
+          : learned + " of them moved to known.";
+      return;
+    }
+    summaryPane.hidden = true;
+    cardPane.hidden = false;
+    wordEl.textContent = deck[0].word;
+    translationEl.textContent = deck[0].translation;
+    translationEl.hidden = true;
+    answers.hidden = true;
+    showBtn.hidden = false;
+  }
+
+  function reveal() {
+    translationEl.hidden = false;
+    showBtn.hidden = true;
+    answers.hidden = false;
+  }
+
+  function answer(kind) {
+    if (deck.length === 0) return;
+    var row = deck.shift();
+    seen.add(row.word.toLowerCase());
+    if (kind === "again") {
+      row.status = "learning";
+      row.seen += 1;
+      row.next = "";
+      deck.push(row);
+    } else if (kind === "good") {
+      row.next = inDays(step(row.seen));
+      row.status = "learning";
+      row.seen += 1;
+    } else {
+      row.next = inDays(step(row.seen + 1));
+      row.status = "known";
+      row.seen += 1;
+      learned += 1;
+    }
+    save();
+    draw();
+  }
+
+  function startSession() {
+    deck = rows.filter(due);
+    started = deck.length;
+    seen = new Set();
+    learned = 0;
+    var total = rows.length;
+    sourceLine.textContent =
+      total === 0
+        ? "No words yet. Write some on the pages under this deck."
+        : total + (total === 1 ? " word, " : " words, ") + started + " due now.";
+    draw();
+  }
+
+  async function reload() {
+    var answered = await brain.read.tree();
+    tree = answered.tree;
+    var index;
+    var parentId = settings.parentId;
+    var known = false;
+    var own = null;
+    for (index = 0; index < tree.length; index += 1) {
+      if (tree[index].id === parentId) known = true;
+      if (tree[index].id === page.id) own = tree[index];
+    }
+    if (!known) parentId = own ? own.parentId : null;
+    settings = { parentId: parentId, wordsPageId: settings.wordsPageId };
+    await rememberSettings({ parentId: parentId, wordsPageId: findWordsPage() });
+    fillPicker();
+    deckTitle.textContent = page.title;
+    for (index = 0; index < tree.length; index += 1) {
+      if (tree[index].id === settings.parentId) deckTitle.textContent = tree[index].title;
+    }
+    rows = await buildRows();
+    startSession();
+  }
+
+  async function start() {
+    var hello = await brain.hello();
+    page = hello.page;
+    try {
+      var kept = await brain.state.get();
+      if (kept && kept.state) {
+        settings = {
+          parentId: kept.state.parentId || null,
+          wordsPageId: kept.state.wordsPageId || null,
+        };
+      }
+    } catch (error) {
+      note("Brain could not read what this trainer remembered.");
+    }
+    await reload();
+  }
+
+  showBtn.addEventListener("click", reveal);
+  el("againBtn").addEventListener("click", function () { answer("again"); });
+  el("goodBtn").addEventListener("click", function () { answer("good"); });
+  el("easyBtn").addEventListener("click", function () { answer("easy"); });
+  el("restartBtn").addEventListener("click", startSession);
+  picker.addEventListener("change", function () {
+    rememberSettings({ parentId: picker.value, wordsPageId: settings.wordsPageId })
+      .then(reload)
+      .catch(function () { note("Brain could not change the deck."); });
+  });
+
+  start().catch(function () {
+    note("Brain did not answer, so this trainer could not start.");
+  });
+})();
+</script>

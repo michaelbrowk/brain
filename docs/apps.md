@@ -80,9 +80,10 @@ connect-src 'none'; frame-ancestors <origin>; base-uri 'none'; form-action 'none
 The entry is served under a per-session token, at
 `/api/app/<id>/t/<token>/index.html`, and its assets sit beside it at
 `/api/app/<id>/t/<token>/assets/…`. The token changes every time the frame is
-mounted, so no path an app could write down stays valid and the policy names
-`/t/` rather than any one grant. **This is why an asset is addressed
-relatively and can be addressed no other way.**
+mounted, and it expires and is re-minted while the frame is still open, so no
+path an app could write down stays valid for long and the policy names `/t/`
+rather than any one grant. **This is why an asset is addressed relatively and
+can be addressed no other way.**
 
 Three things follow, and each of them is a way an app breaks silently if you
 forget it.

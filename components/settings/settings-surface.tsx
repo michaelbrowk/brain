@@ -8,15 +8,17 @@
 // Presentational — navigation (pushState / replaceState / back) lives in
 // <Shell>, which hands it down as callbacks.
 
+import type { ModuleSwitches } from "@/lib/owner-settings";
 import type { TreeNode } from "@/lib/store/types";
 import { Icon } from "../ui/icon";
 import {
   SETTINGS_SECTION_META,
-  SETTINGS_SECTION_ORDER,
   settingsSectionLabel,
+  visibleSettingsSections,
   type SettingsSection,
 } from "./sections";
 import { AppearanceSection } from "./appearance-section";
+import { ModulesSection } from "./modules-section";
 import { MailSection } from "./mail-section";
 import { ConnectionsSection } from "./connections-section";
 import { NotificationsSection } from "./notifications-section";
@@ -28,6 +30,9 @@ import { DonateSection } from "./donate-section";
 export interface SettingsSurfaceProps {
   /** The open section; null renders the mobile root list. */
   section: SettingsSection | null;
+  /** The owner's module switches. The section list and the Mail section
+   *  follow them, and the Modules section itself is how they change. */
+  modules: ModuleSwitches;
   tree: TreeNode[];
   /** Deep link /settings/mail?account=<id>: the account whose details open. */
   mailAccountId: string | null;
@@ -43,6 +48,7 @@ export interface SettingsSurfaceProps {
 
 export function SettingsSurface({
   section,
+  modules,
   tree,
   mailAccountId,
   onSelectSection,
@@ -61,7 +67,7 @@ export function SettingsSurface({
         <MobileSettingsHeader label="Settings" onBack={onBack} />
         <nav aria-label="Settings sections" className="brain-settings">
           <div className="brain-settings-group">
-            {SETTINGS_SECTION_ORDER.map((entry) => (
+            {visibleSettingsSections(modules).map((entry) => (
               <button
                 key={entry}
                 type="button"
@@ -97,7 +103,10 @@ export function SettingsSurface({
       </div>
       <div className="brain-settings">
         {section === "appearance" && <AppearanceSection />}
-        {section === "mail" && (
+        {section === "modules" && (
+          <ModulesSection modules={modules} onToast={onToast} />
+        )}
+        {section === "mail" && modules.mail && (
           <MailSection
             onOpenMail={onOpenMail}
             onAccountStatusChange={onMailAccountStatusChange}
@@ -109,7 +118,11 @@ export function SettingsSurface({
         {section === "notifications" && (
           // The zone row quotes a setting Account owns, and reaching it is a
           // section change on this surface rather than a document load.
-          <NotificationsSection onToast={onToast} onOpenSection={onSelectSection} />
+          <NotificationsSection
+            modules={modules}
+            onToast={onToast}
+            onOpenSection={onSelectSection}
+          />
         )}
         {section === "sharing" && (
           <SharingSection

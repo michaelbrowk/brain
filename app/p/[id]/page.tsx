@@ -1,4 +1,5 @@
 import { notFound } from "next/navigation";
+import { readModules } from "@/lib/owner-settings";
 import { getStore, isNotFound, redactPage } from "@/lib/store";
 import { Shell, type ShellInitialPage } from "@/components/shell";
 
@@ -13,7 +14,7 @@ export default async function PageRoute({
   params: Promise<{ id: string }>;
 }) {
   const { id } = await params;
-  const store = await getStore();
+  const [store, modules] = await Promise.all([getStore(), readModules()]);
   try {
     store.resolve(id);
   } catch {
@@ -45,6 +46,7 @@ export default async function PageRoute({
       tree={store.getTree()}
       initialSelectedId={id}
       initialPage={initialPage}
+      modules={modules}
     />
   );
 }

@@ -4,13 +4,17 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
+  ALL_MODULES_ON,
   OWNER_SETTINGS_FILE,
   captureTimeZone,
   isTimeZone,
   ownerSettingsDirectory,
+  peekModules,
+  readModules,
   readOwnerSettings,
   readTimeZone,
   resetOwnerSettingsCache,
+  setModules,
   setTimeZone,
 } from "./owner-settings";
 
@@ -29,7 +33,11 @@ afterEach(async () => {
 describe("the owner's zone", () => {
   it("reads as unset before anything has been written", async () => {
     expect(await readTimeZone(dir)).toBeNull();
-    expect(await readOwnerSettings(dir)).toEqual({ schema: 1, timeZone: null });
+    expect(await readOwnerSettings(dir)).toEqual({
+      schema: 2,
+      timeZone: null,
+      modules: { mail: true, tasks: true },
+    });
   });
 
   it("captures the first zone it is given", async () => {
@@ -122,5 +130,114 @@ describe("the owner's zone", () => {
     expect(
       ownerSettingsDirectory({ NODE_ENV: "production", BRAIN_SETTINGS_STATE_DIR: "/tmp/x" }),
     ).toBe("/tmp/x");
+  });
+});
+
+describe("the module switches", () => {
+  it("reads both modules as on before anything has been written", async () => {
+    expect(await readModules(dir)).toEqual({ mail: true, tasks: true });
+  });
+
+  // A schema 1 file is every installation before 0.14.0. It says nothing
+  // about modules, and the honest reading of silence is "nothing is off".
+  it("reads a schema 1 file as both modules on", async () => {
+    await fs.writeFile(
+      path.join(dir, OWNER_SETTINGS_FILE),
+      `${JSON.stringify({ schema: 1, timeZone: "Europe/Lisbon" })}\n`,
+      "utf8",
+    );
+    resetOwnerSettingsCache(dir);
+    expect(await readModules(dir)).toEqual({ mail: true, tasks: true });
+    expect(await readTimeZone(dir)).toBe("Europe/Lisbon");
+  });
+
+  it("reads a missing key as on, and a key that is not a boolean as on", async () => {
+    await fs.writeFile(
+      path.join(dir, OWNER_SETTINGS_FILE),
+      `${JSON.stringify({ schema: 2, timeZone: null, modules: { mail: false, tasks: "yes" } })}\n`,
+      "utf8",
+    );
+    resetOwnerSettingsCache(dir);
+    expect(await readModules(dir)).toEqual({ mail: false, tasks: true });
+  });
+
+  it("round trips a switch through the file", async () => {
+    expect(await setModules({ mail: false }, dir)).toEqual({
+      modules: { mail: false, tasks: true },
+      changed: true,
+    });
+    resetOwnerSettingsCache(dir);
+    expect(await readModules(dir)).toEqual({ mail: false, tasks: true });
+    expect(await setModules({ mail: true, tasks: false }, dir)).toEqual({
+      modules: { mail: true, tasks: false },
+      changed: true,
+    });
+    resetOwnerSettingsCache(dir);
+    expect(await readModules(dir)).toEqual({ mail: true, tasks: false });
+  });
+
+  // A PUT that changes nothing writes nothing: the file's mtime is the proof,
+  // because a rewrite of the same bytes is still a rewrite.
+  it("writes nothing when a switch is set to what it already is", async () => {
+    await setModules({ mail: false }, dir);
+    const before = await fs.stat(path.join(dir, OWNER_SETTINGS_FILE));
+    expect(await setModules({ mail: false }, dir)).toEqual({
+      modules: { mail: false, tasks: true },
+      changed: false,
+    });
+    const after = await fs.stat(path.join(dir, OWNER_SETTINGS_FILE));
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+  });
+
+  it("refuses a value that is not a boolean", async () => {
+    await expect(setModules({ mail: "off" as unknown as boolean }, dir)).rejects.toThrow(
+      "module switch must be a boolean",
+    );
+    expect(await readModules(dir)).toEqual({ mail: true, tasks: true });
+  });
+
+  it("keeps the zone when a module is switched, and the modules when a zone is set", async () => {
+    await setTimeZone("Asia/Dubai", dir);
+    await setModules({ tasks: false }, dir);
+    await setTimeZone("Europe/Lisbon", dir);
+    resetOwnerSettingsCache(dir);
+    expect(await readOwnerSettings(dir)).toEqual({
+      schema: 2,
+      timeZone: "Europe/Lisbon",
+      modules: { mail: true, tasks: false },
+    });
+  });
+
+  // THE SYNCHRONOUS READING, for the store's page-save guard. It answers only
+  // what the memoised read already holds, never the disk.
+  it("peeks nothing before a read and the live answer after one", async () => {
+    expect(peekModules(dir)).toBeNull();
+    await readModules(dir);
+    expect(peekModules(dir)).toEqual({ mail: true, tasks: true });
+    await setModules({ tasks: false }, dir);
+    // The write updates the same cell, so the peek is current with no read.
+    expect(peekModules(dir)).toEqual({ mail: true, tasks: false });
+    resetOwnerSettingsCache(dir);
+    expect(peekModules(dir)).toBeNull();
+  });
+
+  // `pnpm check` runs vitest with a shared globalThis across workers, so a
+  // blanket clear from one file would drop another file's entry mid-run.
+  it("clears one directory without touching another", async () => {
+    const other = await fs.mkdtemp(path.join(os.tmpdir(), "brain-owner-settings-b-"));
+    try {
+      await setModules({ mail: false }, dir);
+      await setModules({ tasks: false }, other);
+      resetOwnerSettingsCache(dir);
+      expect(peekModules(dir)).toBeNull();
+      expect(peekModules(other)).toEqual({ mail: true, tasks: false });
+    } finally {
+      resetOwnerSettingsCache(other);
+      await fs.rm(other, { recursive: true, force: true });
+    }
+  });
+
+  it("exports the default every caller uses for an unreadable file", () => {
+    expect(ALL_MODULES_ON).toEqual({ mail: true, tasks: true });
   });
 });

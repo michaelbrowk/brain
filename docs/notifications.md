@@ -281,12 +281,18 @@ go with it, so the next poll is a first pass and stays quiet.
 
 ## Turning it off
 
-Three controls, and each one does a different thing.
+Four controls, and each one does a different thing.
 
 - **`BRAIN_REMINDERS=0`** stops the background scan for the whole instance. No
   reminder is computed and no inbox is polled, so nothing reaches the centre and
   nothing is pushed. `off` and `false` do the same. Rows already in the centre
   stay where they are.
+- **A module switched off in Settings → Modules** stops that module's half of
+  the scan. With Tasks off no reminder is computed at all, and a reminder that
+  would have fired while it was off is gone rather than queued, exactly as it
+  would be under `BRAIN_REMINDERS=0`. With Mail off the inbox is not polled and
+  no `mail-new` row is produced. Rows already in the centre stay where they are
+  and read normally, and the kind's own push preference is untouched.
 - **A kind switched off in Settings → Notifications** stops the push for that
   kind alone. The row still lands in the centre and the bell still counts it.
 - **Removing a device** stops that device being rung. Other devices are

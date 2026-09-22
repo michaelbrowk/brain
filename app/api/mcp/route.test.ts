@@ -72,7 +72,14 @@ vi.mock("@/lib/store", () => ({
 // The one owner setting a task tool reads. Mocked rather than written to a
 // state directory so a test says what zone is captured in its own body, and so
 // a machine with a zone already captured cannot change what a test means.
-vi.mock("@/lib/owner-settings", () => ({ readTimeZone: mocks.readTimeZone }));
+// `readModules` is what `moduleGated` asks before every mail or task handler.
+// Both modules on is what this file is about: the tools' own answers, with the
+// module gate out of the way. `app/api/mcp/module-gate.test.ts` is where the
+// gate itself is pinned.
+vi.mock("@/lib/owner-settings", () => ({
+  readTimeZone: mocks.readTimeZone,
+  readModules: async () => ({ mail: true, tasks: true }),
+}));
 // The predicate reads the error's own name, the way the real one does and the
 // way the store's four above do. A stand-in that always answered false would
 // fold ripgrep's own failure back into the catch-all this pins it out of.

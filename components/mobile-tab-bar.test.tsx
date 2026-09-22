@@ -1,7 +1,8 @@
 // @vitest-environment jsdom
 
-// The phone's bottom line is two objects, not one: the five-slot bar on the
-// left inset and the New page circle on the right one. They are siblings with
+// The phone's bottom line is two objects, not one: the bar on the left inset,
+// five slots with both modules on, and the New page circle on the right one.
+// They are siblings with
 // no wrapper between them, so what holds them together is the state they
 // share: one `hidden`, two consumers. These cases pin the shape, the order
 // and that shared state; the geometry they resolve to is pinned by the CSS
@@ -29,6 +30,7 @@ async function render(
   await act(async () =>
     root.render(
       <MobileTabBar
+        modules={{ mail: true, tasks: true }}
         homeActive
         searchActive={false}
         tasksActive={false}
@@ -235,5 +237,35 @@ describe("the phone's bottom line", () => {
       await new Promise((resolve) => setTimeout(resolve, 0));
     });
     expect(onNewTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("draws three slots with both modules off, and says so to the grid", async () => {
+    await act(async () =>
+      root.render(
+        <MobileTabBar
+          modules={{ mail: false, tasks: false }}
+          homeActive
+          searchActive={false}
+          tasksActive={false}
+          pagesActive={false}
+          mailActive={false}
+          onHome={() => {}}
+          onSearch={() => {}}
+          onTasks={() => {}}
+          onNew={() => {}}
+          onNewTask={() => {}}
+          onNewMessage={() => {}}
+          onPages={() => {}}
+          onMail={() => {}}
+        />,
+      ),
+    );
+    const tabs = [...bar().querySelectorAll<HTMLElement>("[data-mobile-tab]")];
+    expect(tabs.map((tab) => tab.dataset.mobileTab)).toEqual([
+      "home",
+      "search",
+      "pages",
+    ]);
+    expect(bar().style.getPropertyValue("--tabbar-slots")).toBe("3");
   });
 });

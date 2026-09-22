@@ -565,3 +565,38 @@ describe("the boot timer", () => {
     expect(clear).toHaveBeenCalledWith(handle);
   });
 });
+
+describe("the scan and the module switches", () => {
+  const port = {
+    tasks: async () => [],
+    markReminded: async () => {},
+    zone: async () => "Europe/Lisbon",
+    notify: async () => true,
+    push: async () => {},
+    now: () => Date.parse("2026-09-22T13:00:00.000Z"),
+  };
+
+  it("skips the whole task half while Tasks are off", async () => {
+    const zone = vi.fn(port.zone);
+    const tasks = vi.fn(port.tasks);
+    const result = await runReminderScan({
+      ...port,
+      zone,
+      tasks,
+      modules: async () => ({ mail: true, tasks: false }),
+    });
+    expect(result).toEqual({ fired: 0, missed: 0, skipped: "off" });
+    // Not even the zone is read: a module that is off says nothing about a
+    // zone, and the no-zone warning is not this switch's to print.
+    expect(zone).not.toHaveBeenCalled();
+    expect(tasks).not.toHaveBeenCalled();
+  });
+
+  it("runs as before while Tasks are on", async () => {
+    const result = await runReminderScan({
+      ...port,
+      modules: async () => ({ mail: true, tasks: true }),
+    });
+    expect(result).toEqual({ fired: 0, missed: 0, skipped: null });
+  });
+});

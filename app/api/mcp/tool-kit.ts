@@ -222,3 +222,18 @@ export function toolScopeOf(name: string): McpToolScope | null {
   if (WRITE_TOOLS.has(name)) return "brain:write";
   return null;
 }
+
+/** The code a call into a module that is off answers under. */
+export const MODULE_OFF = "module_off";
+
+/** One sentence per module, naming where the switch is. An agent prints this
+ *  to a person, so it says the cure rather than the state: "off" alone leaves
+ *  a reader looking for a setting that is two words away. */
+export const MODULE_OFF_SENTENCE: Record<"mail" | "tasks", string> = {
+  mail: "Mail is turned off in Settings › Modules",
+  tasks: "Tasks are turned off in Settings › Modules",
+};
+
+export function moduleOff(module: "mail" | "tasks") {
+  return refusal(MODULE_OFF_SENTENCE[module], MODULE_OFF);
+}

@@ -2,7 +2,7 @@
 
 // Shell DOM contract.
 //
-// Renders <Shell> in jsdom in six states with the heavy children (Milkdown,
+// Renders <Shell> in jsdom in ten states with the heavy children (Milkdown,
 // MailSurface) stubbed, normalises the resulting markup and compares it with
 // the files in test/__contracts__/. The point is a mechanical refactor of
 // shell.tsx (S1–S5 in the glass-migration plan) proving "zero DOM diff":
@@ -179,7 +179,10 @@ type StateName =
   | "focus-mode"
   | "mobile-viewport"
   | "mobile-pages-open"
-  | "app-page";
+  | "app-page"
+  | "modules-mail-off"
+  | "modules-tasks-off"
+  | "modules-both-off";
 
 interface StateSetup {
   url: string;
@@ -243,6 +246,36 @@ const STATES: Record<StateName, () => StateSetup> = {
       tree: [...fixtureTree(), appPageNode()],
       initialSelectedId: "trainer",
       initialPage: pageBody("trainer"),
+    },
+  }),
+  // The three module states. `modules` defaults to both on, so the seven
+  // above are untouched by this addition; these are the only baselines that
+  // pass the prop at all. The both-off one is the mobile viewport, because
+  // the three-slot bar is the one piece of geometry a switch changes that a
+  // desktop state cannot show.
+  "modules-mail-off": () => ({
+    url: "/",
+    props: {
+      tree: fixtureTree(),
+      initialSelectedId: null,
+      modules: { mail: false, tasks: true },
+    },
+  }),
+  "modules-tasks-off": () => ({
+    url: "/",
+    props: {
+      tree: fixtureTree(),
+      initialSelectedId: null,
+      modules: { mail: true, tasks: false },
+    },
+  }),
+  "modules-both-off": () => ({
+    url: "/",
+    mobile: true,
+    props: {
+      tree: fixtureTree(),
+      initialSelectedId: null,
+      modules: { mail: false, tasks: false },
     },
   }),
 };

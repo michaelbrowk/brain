@@ -22,9 +22,10 @@ import { NotificationsBell } from "../notifications-bell";
 import type { ShellSurface } from "./helpers";
 import {
   SETTINGS_SECTION_META,
-  SETTINGS_SECTION_ORDER,
+  visibleSettingsSections,
   type SettingsSection,
 } from "../settings/sections";
+import type { ModuleSwitches } from "@/lib/modules";
 import { useUpdateStatus } from "../settings/use-update-status";
 import { AiChip } from "../ui/ai-chip";
 import { Icon } from "../ui/icon";
@@ -53,6 +54,9 @@ export interface ShellSidebarProps {
   sidebarSelectedId: string | null;
   expanded: Set<string>;
   focusMode: boolean;
+  /** The owner's module switches. A module that is off has no nav row, no
+   *  settings section and no row in the head's plus menu. */
+  modules: ModuleSwitches;
   /** Translated off-screen (mobile viewport, focus mode, a mobile surface
    *  open): also out of the tab order and the accessibility tree. */
   offCanvas: boolean;
@@ -120,6 +124,7 @@ export function ShellSidebar({
   sidebarSelectedId,
   expanded,
   focusMode,
+  modules,
   offCanvas,
   surface,
   settingsSection,
@@ -244,6 +249,8 @@ export function ShellSidebar({
               onPickTemplate={(t) => onCreatePage(selectedId, t)}
               onNewTask={onNewTask}
               onNewMessage={onNewMessage}
+              taskEnabled={modules.tasks}
+              mailEnabled={modules.mail}
             >
               <Button variant="accent" aria-label="New" title="New">
                 <Icon name="add-linear" size={17} />
@@ -258,7 +265,7 @@ export function ShellSidebar({
           <SlotBackRow onBack={onCloseSettings} />
           <nav aria-label="Settings sections" className="brain-sidebar-settings">
             <p className="brain-sidebar-label text-label">Settings</p>
-            {SETTINGS_SECTION_ORDER.map((section) => (
+            {visibleSettingsSections(modules).map((section) => (
               <NavRow
                 key={section}
                 icon={SETTINGS_SECTION_META[section].icon}
@@ -293,23 +300,27 @@ export function ShellSidebar({
             label="Journal"
             onClick={() => onOpenDailyPage()}
           />
-          <NavRow
-            icon="letter"
-            label="Mail"
-            selected={mailOpen}
-            reduce={reduce}
-            onClick={onOpenMail}
-          />
+          {modules.mail && (
+            <NavRow
+              icon="letter"
+              label="Mail"
+              selected={mailOpen}
+              reduce={reduce}
+              onClick={onOpenMail}
+            />
+          )}
           {/* the glyph the mobile tab bar's Tasks slot carries. One
               surface, one drawing */}
-          <NavRow
-            icon="checklist"
-            label="Tasks"
-            selected={tasksOpen}
-            reduce={reduce}
-            count={tasksOpenTodayCount}
-            onClick={onOpenTasks}
-          />
+          {modules.tasks && (
+            <NavRow
+              icon="checklist"
+              label="Tasks"
+              selected={tasksOpen}
+              reduce={reduce}
+              count={tasksOpenTodayCount}
+              onClick={onOpenTasks}
+            />
+          )}
 
           <SidebarTreeNav>
             {pinnedPages.length > 0 && (

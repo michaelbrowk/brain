@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifySession, SESSION_COOKIE } from "@/lib/auth";
+import { moduleOfApiPath } from "@/lib/module-gate";
+import { readModules } from "@/lib/owner-settings";
 
 const PUBLIC_ASSETS = new Set([
   "/favicon.ico",
@@ -92,8 +94,26 @@ export async function proxy(req: NextRequest) {
   const authed = await verifySession(req.cookies.get(SESSION_COOKIE)?.value);
 
   if (pathname.startsWith("/api/")) {
-    if (authed) return NextResponse.next();
-    return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    if (!authed) return NextResponse.json({ error: "unauthorized" }, { status: 401 });
+    // A MODULE THAT IS OFF HAS NO ROUTES, AND THE WALL STILL COMES FIRST.
+    //
+    // A 409 and not a 404: the route exists and the owner can have it back
+    // from Settings, which a 404 would deny. It is here rather than in each
+    // route file because this is the only place ahead of every handler, the
+    // proxy routes for attachments, images and sender icons included, and
+    // `lib/module-gate.test.ts` holds the table against the directories so
+    // nothing new slips past it. The read is memoised on `globalThis`, so it
+    // costs nothing per request and is current with the PUT that wrote it.
+    // `moduleName` and not `module`: `@next/next/no-assign-module-variable`
+    // refuses that binding anywhere in a file Next bundles.
+    const moduleName = moduleOfApiPath(pathname);
+    if (moduleName !== null && !(await readModules())[moduleName]) {
+      return NextResponse.json(
+        { error: "module_off", module: moduleName },
+        { status: 409 },
+      );
+    }
+    return NextResponse.next();
   }
 
   if (!authed) {

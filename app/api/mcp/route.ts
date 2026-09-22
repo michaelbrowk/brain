@@ -53,6 +53,7 @@ import { registerMailTools } from "./mail-tools";
 import { registerMailSendTools } from "./mail-send-tools";
 import { registerTaskTools } from "./task-tools";
 import { registerAppTools } from "./app-tools";
+import { moduleGated } from "./module-gate";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -240,11 +241,13 @@ const handler = createMcpHandler(
     // The mail tools and the task tools live in their own modules because this
     // file is already long enough. Their scope gate is `toolScopeOf` in
     // `tool-kit.ts`, which runs off the tool name before this handler is
-    // reached.
-    registerMailTools(server);
-    registerMailAttachmentTools(server);
-    registerMailSendTools(server);
-    registerTaskTools(server);
+    // reached; their module gate is the wrapper below, which runs before each
+    // handler and leaves the registration alone, so a tool out of a module
+    // that is off is listed and refused rather than missing.
+    registerMailTools(moduleGated(server, "mail"));
+    registerMailAttachmentTools(moduleGated(server, "mail"));
+    registerMailSendTools(moduleGated(server, "mail"));
+    registerTaskTools(moduleGated(server, "tasks"));
     registerAppTools(server);
 
     server.registerTool(

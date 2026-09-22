@@ -38,6 +38,20 @@ export interface TasksState {
 
 const EMPTY: readonly TaskView[] = [];
 
+/** THE ANSWER A DISABLED MODULE READS, WITH A STABLE IDENTITY.
+ *
+ *  `useSyncExternalStore` compares snapshots by reference and re-renders
+ *  forever on a fresh object, so this is one frozen value for the life of the
+ *  module rather than an object literal in the hook. */
+const EMPTY_TASKS: TasksState = Object.freeze({
+  day: null,
+  tasks: EMPTY,
+  loading: false,
+  error: null,
+});
+const NO_SUBSCRIBE = () => () => {};
+const readEmptyTasks = () => EMPTY_TASKS;
+
 let state: TasksState = { day: null, tasks: EMPTY, loading: false, error: null };
 const listeners = new Set<() => void>();
 
@@ -190,16 +204,29 @@ function releaseDay(): void {
 
 /** The records, the day they answer for, and the state of the request that
  *  fetched them. `refreshToken` is the shell's count of task events this tab
- *  did not write; a new one re-asks. */
-export function useTasks(refreshToken: number): TasksState {
-  const snapshot = useSyncExternalStore(subscribe, getState, getState);
+ *  did not write; a new one re-asks.
+ *
+ *  `enabled` is the Tasks module. False and this hook asks for nothing,
+ *  subscribes to nothing and holds no reference on the midnight timer, while
+ *  still calling every hook in the same order on every render: the flag
+ *  changes what the hooks do, never how many there are. `watchDay` and
+ *  `releaseDay` stay exactly as they are, because `onDayChange` (the
+ *  editor's own subscriber) counts on the same reference-counted clock. */
+export function useTasks(refreshToken: number, enabled = true): TasksState {
+  const snapshot = useSyncExternalStore(
+    enabled ? subscribe : NO_SUBSCRIBE,
+    enabled ? getState : readEmptyTasks,
+    enabled ? getState : readEmptyTasks,
+  );
   useEffect(() => {
+    if (!enabled) return;
     watchDay();
     return releaseDay;
-  }, []);
+  }, [enabled]);
   useEffect(() => {
+    if (!enabled) return;
     void load(refreshToken);
-  }, [refreshToken, snapshot.day]);
+  }, [enabled, refreshToken, snapshot.day]);
   return snapshot;
 }
 

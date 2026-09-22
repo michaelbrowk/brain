@@ -78,6 +78,21 @@ a bare `time: 905`, typed by somebody leaving the colon out of 9:05, is the
 same 905 that `15:05` resolves to and comes back as 15:05. Quote it and there
 is nothing to resolve.
 
+### With the Tasks module off
+
+**Settings → Modules** can turn Tasks off for this installation, and then the
+page-save reconcile is skipped whole. A tick changes only the note: the record
+under `_tasks/` is not rewritten, a task whose line the writer deleted is not
+detached, and no `task` event reaches an open tab. Every record is exactly what
+the switch found. A `- [ ]` line is ordinary Markdown, so it still draws a
+checkbox in the editor and still ticks; what it no longer offers is the word
+that would promote it to a record.
+
+Turning the module back on replays nothing. The first save of a note after it
+comes back reconciles that note, and the checkbox-aware merge takes the note's
+state as the truth for the tick, which is the same rule that already settles
+two writers and one checkbox.
+
 ## The lists
 
 **The column has a head, the one a note has.** The list you are in is named at

@@ -4,6 +4,7 @@ import {
   type BrainNotification,
 } from "@/lib/notifications/model";
 import { appendNotification } from "@/lib/notifications/store";
+import type { ModuleSwitches } from "@/lib/owner-settings";
 import type { TaskView } from "@/lib/tasks/model";
 import { dueReminders } from "./due";
 
@@ -75,12 +76,25 @@ export interface ReminderPort {
   notify(notification: BrainNotification): Promise<boolean>;
   push(payload: { title: string; body?: string; href: string; tag?: string }): Promise<void>;
   now(): number;
+  /** The owner's module switches. A reminder that would have fired while
+   *  Tasks were off is simply gone, the same as under BRAIN_REMINDERS=0: it
+   *  is not queued and it is not produced late, because a reminder arriving
+   *  for a day that has passed is noise, not a reminder. */
+  modules(): Promise<ModuleSwitches>;
 }
 
-const PORT_MEMBERS = ["tasks", "markReminded", "zone", "notify", "push", "now"] as const;
+const PORT_MEMBERS = [
+  "tasks",
+  "markReminded",
+  "zone",
+  "notify",
+  "push",
+  "now",
+  "modules",
+] as const;
 
 async function defaultPort(): Promise<ReminderPort> {
-  const [{ getStore }, { readTimeZone }, { sendPush }] = await Promise.all([
+  const [{ getStore }, { readTimeZone, readModules }, { sendPush }] = await Promise.all([
     import("@/lib/store"),
     import("@/lib/owner-settings"),
     import("@/lib/push/send"),
@@ -97,13 +111,14 @@ async function defaultPort(): Promise<ReminderPort> {
       await sendPush("task-reminder", payload);
     },
     now: () => Date.now(),
+    modules: () => readModules(),
   };
 }
 
 /** The real port is built only for the members the caller did not bring.
- *  A test that supplies all six gets exactly those six, and `getStore()` is
- *  never reached: opening the notes root to run an arithmetic test would make
- *  the scan's own suite depend on somebody's notes folder.
+ *  A test that supplies all seven gets exactly those seven, and `getStore()`
+ *  is never reached: opening the notes root to run an arithmetic test would
+ *  make the scan's own suite depend on somebody's notes folder.
  */
 async function resolvePort(overrides: Partial<ReminderPort>): Promise<ReminderPort> {
   if (PORT_MEMBERS.every((member) => overrides[member] !== undefined)) {
@@ -146,6 +161,9 @@ export async function runReminderScan(
   overrides: Partial<ReminderPort> = {},
 ): Promise<{ fired: number; missed: number; skipped: "no-zone" | "off" | null }> {
   const port = await resolvePort(overrides);
+  // Tasks off: no reminder is computed and none is owed. The zone is not read
+  // either, so the "no owner time zone" warning stays the zone's own business.
+  if (!(await port.modules()).tasks) return { fired: 0, missed: 0, skipped: "off" };
   const zone = await port.zone();
   // Guessing UTC would ring at the wrong hour and say nothing about it.
   // Settings says so instead, and the log says it once.

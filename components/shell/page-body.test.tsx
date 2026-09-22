@@ -38,6 +38,7 @@ function node(id: string, extra: Partial<TreeNode> = {}): TreeNode {
 function baseProps(overrides: Partial<PageBodyProps> = {}): PageBodyProps {
   const registerFlush = vi.fn(() => () => {});
   return {
+    tasksEnabled: true,
     page: {
       id: "alpha",
       title: "Alpha",

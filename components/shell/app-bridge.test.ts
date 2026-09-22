@@ -106,9 +106,40 @@ describe("the host side of the bridge", () => {
     expect(handle).toHaveBeenCalledTimes(30);
   });
 
-  it("sends a theme event without being asked", () => {
+  it("sends a theme event without being asked, with the tokens the theme changed", () => {
     bridge.sendTheme("dark");
-    expect(posted).toEqual([{ v: BRIDGE_VERSION, event: "theme", theme: "dark" }]);
+    expect(posted).toEqual([
+      {
+        v: BRIDGE_VERSION,
+        event: "theme",
+        theme: "dark",
+        tokens: { "--paper": "oklch(0.988 0.004 91)" },
+      },
+    ]);
+  });
+
+  it("reads the tokens at the moment it sends them, not once at hello", () => {
+    // The values are resolved off the live document, which is what has just
+    // changed. Reading them once when the bridge was made would send the
+    // light palette under the word dark.
+    const values = [{ "--paper": "light-paper" }, { "--paper": "dark-paper" }];
+    let reads = 0;
+    const live = createAppBridge({
+      frame,
+      page: { id: "app1", title: "Trainer" },
+      theme: () => "dark",
+      tokens: () => values[Math.min(reads++, values.length - 1)]!,
+      handle,
+      onOpenPage,
+      onToast,
+    });
+    live.sendTheme("light");
+    live.sendTheme("dark");
+    live.dispose();
+    expect(posted.map((message) => (message as { tokens: unknown }).tokens)).toEqual([
+      { "--paper": "light-paper" },
+      { "--paper": "dark-paper" },
+    ]);
   });
 
   it("sends a visibility event when the canvas leaves and returns", () => {

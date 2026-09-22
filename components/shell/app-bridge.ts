@@ -124,7 +124,10 @@ export function createAppBridge(options: AppBridgeOptions): AppBridge {
 
   return {
     dispose: () => window.removeEventListener("message", listener),
-    sendTheme: (theme) => post(appEvent("theme", theme)),
+    // The tokens are re-read here rather than carried over from `hello`: a
+    // theme change is a change of values, and the frame cannot read Brain's
+    // stylesheet to find the new ones for itself.
+    sendTheme: (theme) => post(appEvent("theme", theme, options.tokens())),
     sendVisibility: (visible) => post(appEvent("visibility", visible)),
   };
 }

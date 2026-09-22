@@ -197,6 +197,7 @@ function parseWordsTable(markdown) {
   var page = null;
   var tree = [];
   var settings = { parentId: null, wordsPageId: null };
+  var persisted = null;
   var rows = [];
   var deck = [];
   var seen = new Set();
@@ -362,16 +363,20 @@ function parseWordsTable(markdown) {
     return saving;
   }
 
-  async function rememberSettings(next) {
-    if (next.parentId === settings.parentId && next.wordsPageId === settings.wordsPageId) {
-      return;
-    }
-    settings = next;
-    try {
-      await brain.setState(settings);
-    } catch (error) {
+  /** KEEPING THE TWO SETTINGS IS NOT ON THE PATH TO THE FIRST CARD.
+   *
+   *  A state write is a file in the notes folder and a line in its git
+   *  history, so it is worth doing once and never on a value that has not
+   *  moved. It is also not awaited: the deck is already drawn by the time
+   *  this runs, and an app that will not show a card until Brain has
+   *  finished writing a preference is an app that stalls for a preference. */
+  function persist() {
+    var encoded = JSON.stringify(settings);
+    if (encoded === persisted) return;
+    persisted = encoded;
+    brain.setState(settings).catch(function () {
       note("Brain could not remember which pages to read.");
-    }
+    });
   }
 
   function draw() {
@@ -452,8 +457,7 @@ function parseWordsTable(markdown) {
       if (tree[index].id === page.id) own = tree[index];
     }
     if (!known) parentId = own ? own.parentId : null;
-    settings = { parentId: parentId, wordsPageId: settings.wordsPageId };
-    await rememberSettings({ parentId: parentId, wordsPageId: findWordsPage() });
+    settings = { parentId: parentId, wordsPageId: findWordsPage() };
     fillPicker();
     deckTitle.textContent = page.title;
     for (index = 0; index < tree.length; index += 1) {
@@ -461,6 +465,7 @@ function parseWordsTable(markdown) {
     }
     rows = await buildRows();
     startSession();
+    persist();
   }
 
   async function start() {
@@ -473,6 +478,7 @@ function parseWordsTable(markdown) {
           parentId: kept.state.parentId || null,
           wordsPageId: kept.state.wordsPageId || null,
         };
+        persisted = JSON.stringify(settings);
       }
     } catch (error) {
       note("Brain could not read what this trainer remembered.");
@@ -486,9 +492,8 @@ function parseWordsTable(markdown) {
   el("easyBtn").addEventListener("click", function () { answer("easy"); });
   el("restartBtn").addEventListener("click", startSession);
   picker.addEventListener("change", function () {
-    rememberSettings({ parentId: picker.value, wordsPageId: settings.wordsPageId })
-      .then(reload)
-      .catch(function () { note("Brain could not change the deck."); });
+    settings = { parentId: picker.value, wordsPageId: settings.wordsPageId };
+    reload().catch(function () { note("Brain could not change the deck."); });
   });
 
   start().catch(function () {

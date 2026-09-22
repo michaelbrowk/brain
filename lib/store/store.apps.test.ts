@@ -125,6 +125,45 @@ describe("app pages in the store", () => {
     expect(await store.readAppState(meta.id)).toEqual({ seen: 3 });
   });
 
+  it("evaluates a patch inside the lock, over whatever the map holds by then", async () => {
+    // A rebuild reads the map, spends a while writing files and committing,
+    // and only then writes the map back. Anything the running frame did in
+    // that window is in the live map and not in the caller's snapshot, so a
+    // caller that spread its own copy back would undo it. The two fields
+    // that move are the two this method exists to protect.
+    const { meta } = await store.createAppPage(null, "Trainer", {
+      description: "d",
+      entryHtml: ENTRY,
+      builtBy: "Claude",
+    });
+    const snapshot = meta.app!;
+    expect(snapshot.owns).toEqual([]);
+    expect(snapshot.state).toBe(false);
+
+    // the frame, in the window between the caller's read and its write
+    const session = await store.createPage(meta.id, "Session log");
+    await store.setAppMeta(meta.id, { ...snapshot, owns: [session.id] }, "claude");
+    await store.writeAppState(meta.id, { seen: 1 });
+    await store.setAppMeta(meta.id, (live) => ({ ...live, state: true }), "claude");
+
+    // the caller, arriving with a snapshot that knows none of it
+    const after = await store.setAppMeta(
+      meta.id,
+      (live) => ({ ...live, version: live.version + 1 }),
+      "claude",
+    );
+    expect(after.app?.version).toBe(2);
+    expect(after.app?.owns).toEqual([session.id]);
+    expect(after.app?.state).toBe(true);
+  });
+
+  it("refuses a patch on a page that is not an app", async () => {
+    const plain = await store.createPage(null, "Notes");
+    await expect(store.setAppMeta(plain.id, (live) => live, "claude")).rejects.toThrow(
+      /page not found/,
+    );
+  });
+
   it("survives a rebuild from disk", async () => {
     const { meta } = await store.createAppPage(null, "Trainer", {
       description: "d",

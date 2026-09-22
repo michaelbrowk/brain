@@ -277,9 +277,17 @@ what it is for once it sits in quotes on its own. Read the token instead:
 rebuild is a new entry for the same app, and widening what the frame may write
 is the owner's business, not the rebuild's.
 
+`owns` and `state` are read inside the store's own lock, not from what the
+rebuild read before it started, so a page the running frame created while the
+rebuild was writing is still owned when it finishes. `builtBy` and `builtAt`
+are restamped, so the page head names the connection that built it last.
+
 Assets left out of a rebuild are kept. An empty `assets` array is how an app
 clears them, which is a caller saying so rather than a caller forgetting to
-mention them.
+mention them. An asset's bytes are padded base64 on their own: no `data:`
+prefix, no whitespace, no url-safe characters. Anything else is refused as
+`bad_request` naming the asset, rather than written as the noise it decodes
+to.
 
 To change the description the owner reads, use `write_page` on the app page like
 any other page.

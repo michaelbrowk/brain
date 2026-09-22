@@ -4113,17 +4113,38 @@ export class Store {
 
   /** The `app` map, and only it. Separate from `updateMeta` because that
    *  method is the owner's patch surface and an app map is never something a
-   *  person types into a field. */
+   *  person types into a field.
+   *
+   *  TWO FORMS, AND THE SECOND IS THE ONE A REWRITE WANTS. An object replaces
+   *  the map outright, which is what a create does: there is nothing there to
+   *  keep. A FUNCTION is evaluated here, inside the lock, over whatever the
+   *  map holds at that moment.
+   *
+   *  A rebuild needs the second because of how long it takes. It reads the
+   *  map, then `writeAppFiles` copies the whole file set and commits it, and
+   *  only then does it write the map back. The frame is running throughout:
+   *  a `create.page` in that window appends an id to `owns`, and a first
+   *  `state.set` flips `state`. A caller spreading its own pre-write snapshot
+   *  back drops both, which leaves a page the app made and can no longer
+   *  write. Those two fields are the whole reason this method exists, so
+   *  losing them to the method meant to keep them is the bug worth a second
+   *  signature. */
   async setAppMeta(
     id: string,
-    app: AppMeta,
+    app: AppMeta | ((live: AppMeta) => AppMeta),
     by?: "me" | "claude",
     src?: string,
   ): Promise<PageMeta> {
     return this.mutate(async () => {
       const e = this.get(id);
+      // A patch has nothing to patch on a page that is not an app, and that
+      // reads as the page not being there, the same answer every other app
+      // read gives for one.
+      const live = e.meta.kind === "app" ? e.meta.app : undefined;
+      if (typeof app === "function" && live === undefined) throw new NotFoundError(id);
+      const next = typeof app === "function" ? app(live as AppMeta) : app;
       e.meta.kind = "app";
-      e.meta.app = appMetaSchema.parse(app);
+      e.meta.app = appMetaSchema.parse(next);
       e.meta.updated = now();
       if (by) e.meta.updatedBy = by;
       await this.persist(e);

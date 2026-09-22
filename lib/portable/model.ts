@@ -261,7 +261,13 @@ async function exportedTasks(
 export async function buildPortableArchive(
   store: Store,
   options: { rootId?: string; now?: Date } = {},
-): Promise<{ bytes: Uint8Array; manifest: PortableManifest }> {
+): Promise<{
+  bytes: Uint8Array;
+  manifest: PortableManifest;
+  /** The ids of pages that say `kind: app` whose files this archive does not
+   *  carry. Empty on every ordinary notebook. */
+  skippedApps: string[];
+}> {
   const tree = store.getTree();
   const selected = options.rootId
     ? (() => {
@@ -334,16 +340,27 @@ export async function buildPortableArchive(
   // One folder per app page, named by the same index its markdown takes.
   const appEntries: Array<{ path: string; data: Uint8Array }> = [];
   const appManifests = new Map<string, NonNullable<PortablePage["app"]>>();
+  // A page that says `kind: app` whose files this export could not carry,
+  // because the map does not validate or the entry is gone. It travels as an
+  // ordinary page and the caller is handed the list, rather than left to find
+  // out on the next import.
+  const skippedApps: string[] = [];
   for (const node of nodes) {
     const app = store.readAppMeta(node.id);
-    if (app === null) continue;
+    if (app === null) {
+      if (node.kind === "app") skippedApps.push(node.id);
+      continue;
+    }
     const prefix = `app/p${pagePaths
       .get(node.id)!
       .slice("pages/p".length, -".md".length)}`;
     const entry = await store.readAppFile(node.id, APP_ENTRY_PATH);
     // An app page whose entry has gone is exported as an ordinary page. The
     // archive is a copy of what is there, not a repair of what is not.
-    if (entry.kind !== "file") continue;
+    if (entry.kind !== "file") {
+      skippedApps.push(node.id);
+      continue;
+    }
     appEntries.push({ path: `${prefix}/index.html`, data: entry.data });
     const assets: { name: string; archivePath: string }[] = [];
     for (const name of await store.listAppAssets(node.id)) {
@@ -454,7 +471,7 @@ export async function buildPortableArchive(
         : [],
     ),
   ];
-  return { bytes: createPortableArchive(entries), manifest };
+  return { bytes: createPortableArchive(entries), manifest, skippedApps };
 }
 
 function orderedPages(pages: PortablePage[]): PortablePage[] {

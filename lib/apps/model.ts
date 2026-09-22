@@ -87,6 +87,26 @@ export const appMetaSchema = z.object({
  *  annotation on the schema will not typecheck. */
 export type AppMeta = z.infer<typeof appMetaSchema>;
 
+/** THE ONE VALIDATED READ OF AN `app` MAP.
+ *
+ *  Frontmatter is a file on somebody's disk and `parsePage` is a cast, so a
+ *  map that says `owns: "notalist"` arrives typed as `AppMeta` while being a
+ *  string where every caller expects an array. `appMayWrite` would then run
+ *  `String.prototype.includes` on it and authorise any page id that happened
+ *  to be a substring of it.
+ *
+ *  So nothing reads `meta.app` directly. A map that does not validate answers
+ *  null here, and the page is a page with `kind: app` and no usable app:
+ *  readable, renameable, movable, exportable, and unable to authorise
+ *  anything. The map itself is never rewritten on that basis. A shape this
+ *  release cannot read is more likely an older Brain's or a hand edit than
+ *  junk, and deleting somebody's data to tidy a type is not a repair. */
+export function validAppMeta(value: unknown): AppMeta | null {
+  if (value === undefined || value === null) return null;
+  const parsed = appMetaSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 /** The store path one asset name addresses, or null when the name is not one
  *  an app may hold. Answered before any path is joined, so a traversal never
  *  reaches the filesystem and `assertInRoot` is the second lock rather than

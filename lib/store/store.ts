@@ -20,6 +20,7 @@ import {
   appAssetMimeType,
   appAssetPath,
   appMetaSchema,
+  validAppMeta,
   type AppMeta,
 } from "../apps/model";
 import { ensureWritableNotesRoot } from "./notes-root";
@@ -4140,10 +4141,16 @@ export class Store {
     await this.writeAppFiles(id, { state: json });
   }
 
+  /** The app map this page carries, or null when it carries none this release
+   *  can read. Every app-aware caller comes through here rather than through
+   *  `meta.app`, so a shape off somebody's disk is never handed on typed as
+   *  an `AppMeta` it is not. A page whose map fails is a page with
+   *  `kind: app` and no usable app: still readable, renameable and movable,
+   *  and unable to authorise anything. */
   readAppMeta(id: string): AppMeta | null {
     const entry = this.index.get(id);
-    if (!entry || entry.meta.kind !== "app" || !entry.meta.app) return null;
-    return entry.meta.app;
+    if (!entry || entry.meta.kind !== "app") return null;
+    return validAppMeta(entry.meta.app);
   }
 
   /** One file out of an app's folder, by the path the frame asked for. A
@@ -4153,7 +4160,7 @@ export class Store {
    *  a caller can act on neither. */
   async readAppFile(id: string, relativePath: string): Promise<AppFileRead> {
     const entry = this.index.get(id);
-    if (!entry || entry.meta.kind !== "app") return { kind: "missing" };
+    if (this.readAppMeta(id) === null || !entry) return { kind: "missing" };
     let mimeType: string;
     let relative: string;
     if (relativePath === APP_ENTRY_PATH) {
@@ -4182,7 +4189,7 @@ export class Store {
    *  first and sorted, so an export writes the same archive twice running. */
   async listAppAssets(id: string): Promise<string[]> {
     const entry = this.index.get(id);
-    if (!entry || entry.meta.kind !== "app") return [];
+    if (this.readAppMeta(id) === null || !entry) return [];
     const base = assertInRoot(this.root, path.join(entry.dir, APP_ASSETS_DIR));
     const walkAssets = async (dir: string, prefix: string): Promise<string[]> => {
       const found = await fs.readdir(dir, { withFileTypes: true }).catch(() => null);
@@ -4200,7 +4207,7 @@ export class Store {
 
   async readAppState(id: string): Promise<unknown> {
     const entry = this.index.get(id);
-    if (!entry || entry.meta.app?.state !== true) return null;
+    if (!entry || this.readAppMeta(id)?.state !== true) return null;
     try {
       const file = assertInRoot(this.root, path.join(entry.dir, APP_STATE_PATH));
       return JSON.parse(await fs.readFile(file, "utf8"));

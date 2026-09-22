@@ -22,10 +22,28 @@ import { atomicWrite } from "./store/atomic";
  *  read is memoised: a list request in the steady state opens nothing.
  */
 
+/** Which modules this installation draws, serves and runs background work
+ *  for. A property of the instance, like the zone above it: it is not in a
+ *  portable archive and not in anybody's git history, because turning Mail
+ *  off on the laptop must not turn it off on the server a restore lands on. */
+export interface ModuleSwitches {
+  mail: boolean;
+  tasks: boolean;
+}
+
+/** The reading of an absent, half-written or unreadable answer. Silence is
+ *  "nothing is off": an installation that upgrades into 0.14.0 keeps every
+ *  surface it had the day before. */
+export const ALL_MODULES_ON: ModuleSwitches = Object.freeze({
+  mail: true,
+  tasks: true,
+});
+
 export interface OwnerSettings {
-  schema: 1;
+  schema: 2;
   /** An IANA name, "Europe/Lisbon". Null until a client has offered one. */
   timeZone: string | null;
+  modules: ModuleSwitches;
 }
 
 /** The slice of the environment this module reads. `process.env` fits it;
@@ -38,7 +56,11 @@ export interface OwnerSettingsEnv {
 
 export const OWNER_SETTINGS_FILE = "owner.json";
 
-const EMPTY: OwnerSettings = { schema: 1, timeZone: null };
+const EMPTY: OwnerSettings = {
+  schema: 2,
+  timeZone: null,
+  modules: ALL_MODULES_ON,
+};
 
 /** `scripts/check-env-docs.mjs` counts a read only when it is spelled
  *  `process.env.NAME`, so the default environment names the variable. */
@@ -58,11 +80,26 @@ export function ownerSettingsDirectory(env: OwnerSettingsEnv = processEnv()): st
   );
 }
 
-/** The one reading of the file, memoised per directory. */
-const cache = new Map<string, OwnerSettings>();
+/** THE ONE READING OF THE FILE, MEMOISED PER DIRECTORY, ACROSS LAYERS.
+ *
+ *  On `globalThis` and not in a module variable, for the reason
+ *  `lib/store/events.ts` gives about its emitter: Next bundles `proxy.ts`
+ *  separately from the route handlers, so a module-level Map is a different
+ *  instance in each. The module gate reads this in the proxy and the PUT
+ *  writes it in a handler, and with two caches the gate would answer from a
+ *  file it read once at boot for as long as the process lived.
+ *
+ *  Keyed by directory, and the reset takes one. `pnpm check` runs
+ *  `vitest run --maxWorkers=2`, whose default pool shares one `globalThis`,
+ *  so a blanket clear from one test file would drop another file's entry
+ *  while it was mid-case. The no-argument form still clears everything,
+ *  which is what the zone's own suite already asks for. */
+const g = globalThis as unknown as { __brainOwnerSettings?: Map<string, OwnerSettings> };
+const cache = (g.__brainOwnerSettings ??= new Map<string, OwnerSettings>());
 
-export function resetOwnerSettingsCache(): void {
-  cache.clear();
+export function resetOwnerSettingsCache(dir?: string): void {
+  if (dir === undefined) cache.clear();
+  else cache.delete(dir);
 }
 
 /** An IANA region name and nothing else: a letter, then letters, digits and
@@ -88,6 +125,17 @@ export function isTimeZone(value: unknown): value is string {
   }
 }
 
+function readModuleSwitches(raw: unknown): ModuleSwitches {
+  if (!raw || typeof raw !== "object") return ALL_MODULES_ON;
+  const held = raw as { mail?: unknown; tasks?: unknown };
+  // A key that is missing, or carries anything but a boolean, reads as on.
+  // The alternative is a typo in a hand-edited file silently hiding Mail.
+  return {
+    mail: held.mail !== false,
+    tasks: held.tasks !== false,
+  };
+}
+
 export async function readOwnerSettings(
   dir = ownerSettingsDirectory(),
 ): Promise<OwnerSettings> {
@@ -103,13 +151,37 @@ export async function readOwnerSettings(
     // and the next capture writes a whole file over it.
     if (raw && typeof raw === "object") {
       const zone = (raw as { timeZone?: unknown }).timeZone;
-      settings = { schema: 1, timeZone: isTimeZone(zone) ? zone : null };
+      settings = {
+        schema: 2,
+        timeZone: isTimeZone(zone) ? zone : null,
+        // A schema 1 file has no `modules` at all, which is the upgrade path
+        // and reads as both on.
+        modules: readModuleSwitches((raw as { modules?: unknown }).modules),
+      };
     }
   } catch {
     settings = EMPTY;
   }
   cache.set(dir, settings);
   return settings;
+}
+
+export async function readModules(
+  dir = ownerSettingsDirectory(),
+): Promise<ModuleSwitches> {
+  return (await readOwnerSettings(dir)).modules;
+}
+
+/** THE SWITCHES WITHOUT A FILE READ, for a caller that cannot await one.
+ *
+ *  `lib/store` checks the Tasks switch on the page-save path, inside a method
+ *  whose signature is synchronous and which runs on every write. It reads
+ *  what the memoised read already holds and nothing else, so a `null` here
+ *  means "nobody has read the file yet in this process" rather than "both
+ *  off"; the one caller treats that as on, which is the recoverable
+ *  direction. `getStore()` warms it once before the Store's first pass. */
+export function peekModules(dir = ownerSettingsDirectory()): ModuleSwitches | null {
+  return cache.get(dir)?.modules ?? null;
 }
 
 export async function readTimeZone(
@@ -165,16 +237,50 @@ export async function captureTimeZone(
     const current = await readOwnerSettings(dir);
     if (current.timeZone !== null) return current.timeZone;
     if (!isTimeZone(zone)) return null;
-    await write(dir, { schema: 1, timeZone: zone });
+    await write(dir, { ...current, timeZone: zone });
     return zone;
   });
 }
 
-/** The owner saying so, in Settings. This one does overwrite. */
+/** The owner saying so, in Settings. This one does overwrite. The read and
+ *  the write are one turn on the queue, so the modules beside the zone are
+ *  the modules that stood when the write began. */
 export async function setTimeZone(
   zone: string,
   dir = ownerSettingsDirectory(),
 ): Promise<void> {
   if (!isTimeZone(zone)) throw new Error(`unknown time zone: ${zone}`);
-  await serialise(() => write(dir, { schema: 1, timeZone: zone }));
+  await serialise(async () => {
+    const current = await readOwnerSettings(dir);
+    await write(dir, { ...current, timeZone: zone });
+  });
+}
+
+/** A switch the owner flipped. Answers what stands after the call and whether
+ *  anything was written: a PUT that changes nothing writes nothing, so the
+ *  file's mtime, its backups and the SSE journal all stay quiet. */
+export async function setModules(
+  patch: Partial<ModuleSwitches>,
+  dir = ownerSettingsDirectory(),
+): Promise<{ modules: ModuleSwitches; changed: boolean }> {
+  for (const value of Object.values(patch)) {
+    if (value !== undefined && typeof value !== "boolean") {
+      throw new Error("module switch must be a boolean");
+    }
+  }
+  return serialise(async () => {
+    const current = await readOwnerSettings(dir);
+    const modules: ModuleSwitches = {
+      mail: patch.mail ?? current.modules.mail,
+      tasks: patch.tasks ?? current.modules.tasks,
+    };
+    if (
+      modules.mail === current.modules.mail &&
+      modules.tasks === current.modules.tasks
+    ) {
+      return { modules: current.modules, changed: false };
+    }
+    await write(dir, { ...current, modules });
+    return { modules, changed: true };
+  });
 }

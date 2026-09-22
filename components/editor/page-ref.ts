@@ -210,22 +210,19 @@ export const pageRefSchema = $nodeSchema("page_ref", () => ({
     attrs.title = pageRefVisibleText(node);
 
     const parts = pageRefVisibleParts(node);
-    // The chip is drawn from `kind` and sits after the text, so a ref to an
-    // app page says so in the clipboard's own markup as well as on screen.
-    // `parseDOM` reads its label past it, which is what keeps it chrome.
-    const chip: DOMOutputSpec[] =
-      info?.kind === "app"
-        ? [["span", { class: "ai-chip", title: "Built by an agent" }, "AI"]]
-        : [];
+    // NO CHIP HERE. `toDOM` is the clipboard's markup and the schema's own
+    // serialization, not what a reader looks at: the NodeView below draws the
+    // live ref and is the one that wears the chip.
+    //
+    // A chip in here rides the clipboard, and commonmark's link-mark rule
+    // outranks this node's own `parseDOM`, so a copied ref comes back as an
+    // ordinary link whose TEXT is "🃏 TrainerAI". The serializer writes that
+    // to disk as the label, and the two letters are part of somebody's title
+    // for good. Guarding `getAttrs` does not help, because `getAttrs` is not
+    // the rule that matched.
     return parts.icon === null
-      ? ["a", attrs, parts.rest, ...chip]
-      : [
-          "a",
-          attrs,
-          ["span", { class: "brain-page-ref-icon" }, parts.icon],
-          parts.rest,
-          ...chip,
-        ];
+      ? ["a", attrs, parts.rest]
+      : ["a", attrs, ["span", { class: "brain-page-ref-icon" }, parts.icon], parts.rest];
   },
   parseMarkdown: {
     match: (node: MarkdownNode) => isPageRefMarkdownNode(node),

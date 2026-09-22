@@ -213,6 +213,26 @@ describe("app pages in the store", () => {
     expect((await store.readAppFile(meta.id, "app/assets/card.png")).kind).toBe("file");
   });
 
+  it("carries kind on the two projections a shared page reads", async () => {
+    // `readPageLabel` and `readDirectChildren` are what a visitor's page-ref
+    // label and the public page's derived tail are drawn from, so the chip
+    // reaches a shared page through these two and through nothing else.
+    const parent = await store.createPage(null, "Spanish");
+    const { meta } = await store.createAppPage(parent.id, "Trainer", {
+      description: "d",
+      entryHtml: ENTRY,
+      builtBy: "Claude",
+    });
+    const plain = await store.createPage(parent.id, "Words");
+
+    expect(store.readPageLabel(meta.id)?.kind).toBe("app");
+    expect(store.readPageLabel(plain.id)?.kind).toBeUndefined();
+
+    const children = store.readDirectChildren(parent.id);
+    expect(children.find((child) => child.id === meta.id)?.kind).toBe("app");
+    expect(children.find((child) => child.id === plain.id)?.kind).toBeUndefined();
+  });
+
   it("still reads a page whose folder was already called app", async () => {
     // `slugify("App")` is `app`, so a notebook written before this release can
     // hold a perfectly ordinary page in a folder the walk now skips. A page

@@ -61,6 +61,29 @@ const ASSET_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9._-]{0,63}$/;
  *  `.txt`, which the walk has never read. */
 const MARKDOWN_NAME = /\.md$/i;
 
+/** A NAME WINDOWS WOULD NOT STORE AS WRITTEN.
+ *
+ *  A notes folder syncs, and a name one host accepts and another rewrites
+ *  makes two notebooks that disagree about what is on disk: the asset an app
+ *  asks for stops being the file that is there. Windows strips a trailing dot
+ *  or space silently, and reserves the old device names whatever extension
+ *  follows them, so `CON.png` is not a file it will keep.
+ *
+ *  Refused here rather than repaired, because an agent that meant `card.png`
+ *  can be told to write `card.png`, while a rename behind its back leaves it
+ *  addressing a name that no longer exists.
+ *
+ *  A trailing SPACE is not asked about here, and not because it is allowed:
+ *  `ASSET_SEGMENT` has no space anywhere in its classes, so `card.png ` is
+ *  refused before this function is called and a branch for it would read as
+ *  the rule that catches the name while never running. A trailing DOT does
+ *  reach here, because the segment class carries `.` in its tail. */
+const WINDOWS_RESERVED_BASENAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i;
+
+function windowsWouldRewrite(segment: string): boolean {
+  return segment.endsWith(".") || WINDOWS_RESERVED_BASENAME.test(segment);
+}
+
 export const appMetaSchema = z.object({
   entry: z.literal(APP_ENTRY_PATH),
   /** The app's own version, the agent's to set. Brain reads it only to show
@@ -87,6 +110,26 @@ export const appMetaSchema = z.object({
  *  annotation on the schema will not typecheck. */
 export type AppMeta = z.infer<typeof appMetaSchema>;
 
+/** THE ONE VALIDATED READ OF AN `app` MAP.
+ *
+ *  Frontmatter is a file on somebody's disk and `parsePage` is a cast, so a
+ *  map that says `owns: "notalist"` arrives typed as `AppMeta` while being a
+ *  string where every caller expects an array. `appMayWrite` would then run
+ *  `String.prototype.includes` on it and authorise any page id that happened
+ *  to be a substring of it.
+ *
+ *  So nothing reads `meta.app` directly. A map that does not validate answers
+ *  null here, and the page is a page with `kind: app` and no usable app:
+ *  readable, renameable, movable, exportable, and unable to authorise
+ *  anything. The map itself is never rewritten on that basis. A shape this
+ *  release cannot read is more likely an older Brain's or a hand edit than
+ *  junk, and deleting somebody's data to tidy a type is not a repair. */
+export function validAppMeta(value: unknown): AppMeta | null {
+  if (value === undefined || value === null) return null;
+  const parsed = appMetaSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
 /** The store path one asset name addresses, or null when the name is not one
  *  an app may hold. Answered before any path is joined, so a traversal never
  *  reaches the filesystem and `assertInRoot` is the second lock rather than
@@ -96,6 +139,7 @@ export function appAssetPath(name: string): string | null {
   if (MARKDOWN_NAME.test(name)) return null;
   const segments = name.split("/");
   if (!segments.every((segment) => ASSET_SEGMENT.test(segment))) return null;
+  if (segments.some(windowsWouldRewrite)) return null;
   return `${APP_ASSETS_DIR}/${segments.join("/")}`;
 }
 

@@ -413,16 +413,27 @@ describe("design guardrails", () => {
     // DESIGN.md §4 and in the block comment over `.brain-mobile-tabbar`) and
     // once as a value, and a review found the prose stating a figure the CSS
     // does not produce. The arithmetic is not checkable from a file, but the
-    // numbers it runs on are: the slot, the track floor, the height the two
-    // objects share, and the widths those make. Five tracks since New left
-    // the bar for its own circle at the other inset.
+    // numbers it runs on are: the slot, the track count, the track floor, the
+    // height the two objects share, and the widths those make. Five tracks
+    // since New left the bar for its own circle at the other inset, and five
+    // is now the rule's default rather than a literal in it: the module
+    // switches take a slot out, so the count travels as `--tabbar-slots`
+    // written per render by `components/mobile-tab-bar.tsx`. Every figure
+    // below is the five-slot bar, which is what an installation with both
+    // modules on draws and what both prose copies describe.
     const css = readFileSync(path.join(ROOT, "app/globals.css"), "utf8");
     const design = readFileSync(path.join(ROOT, "DESIGN.md"), "utf8");
 
     const slot = /--tabbar-slot:\s*(\d+)px;/.exec(css)?.[1];
     expect(slot, "--tabbar-slot is missing from globals.css").toBeDefined();
 
-    const floor = /repeat\(5, minmax\((\d+)px, var\(--tabbar-slot\)\)\)/.exec(css)?.[1];
+    const slots = /--tabbar-slots:\s*(\d+);/.exec(css)?.[1];
+    expect(slots, "--tabbar-slots is missing from globals.css").toBe("5");
+
+    const floor =
+      /repeat\(var\(--tabbar-slots\), minmax\((\d+)px, var\(--tabbar-slot\)\)\)/.exec(
+        css,
+      )?.[1];
     expect(floor, "the tab bar grid is not minmax(<floor>, --tabbar-slot)").toBeDefined();
 
     // both objects stand 54 tall and the plus is that square

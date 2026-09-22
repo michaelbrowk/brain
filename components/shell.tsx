@@ -53,6 +53,7 @@ import {
   settingsPath,
   type SettingsSection,
 } from "./settings/sections";
+import { ALL_MODULES_ON, type ModuleSwitches } from "@/lib/owner-settings";
 // code-split the mail client out of the notes bundle the same way as the
 // editor — opening a note must not download ~9k lines of mail UI
 const MailSurface = dynamic(
@@ -284,6 +285,7 @@ export function Shell({
   initialSettingsSection = null,
   initialMailSettingsAccountId = null,
   initialPage,
+  modules: initialModules = ALL_MODULES_ON,
 }: {
   tree: TreeNode[];
   initialSelectedId?: string | null;
@@ -299,8 +301,17 @@ export function Shell({
    *  page cache so the first paint is content; the load effect still
    *  revalidates it against the server like any cache hit. */
   initialPage?: ShellInitialPage;
+  /** The owner's module switches, read by the server component that renders
+   *  this shell, so a page never paints a module that is off. Optional and
+   *  defaulting to both on, because the DOM contract and several unit
+   *  harnesses render <Shell> directly and none of them is about modules. */
+  modules?: ModuleSwitches;
 }) {
   const [tree, setTree] = useState(initialTree);
+  // Server truth that changes at runtime, held the way the tree is held: a
+  // useState seeded from a prop and refreshed by the live stream. It is not
+  // navigation, so it stays out of navigationPresenceReducer.
+  const [modules, setModules] = useState(initialModules);
   const [
     {
       selectedId,
@@ -554,6 +565,30 @@ export function Shell({
       settingsSection: "appearance",
     });
   }, [settingsActive, settingsSection, mobileViewport]);
+
+  // A MODULE THAT GOES OFF WHILE ITS SURFACE IS THE ONE ON SCREEN.
+  //
+  // The server component turns a fresh load away and `onPop` turns a back
+  // button away, and neither of those is the case where the switch moves
+  // under a tab that is already open: the canvas would sit on a Mail surface
+  // whose routes now answer 409. `replaceState` and not a push, because the
+  // surface the reader was on no longer exists and must not become a back
+  // target.
+  useEffect(() => {
+    if ((surface === "mail" && !modules.mail) || (surface === "tasks" && !modules.tasks)) {
+      window.history.replaceState({}, "", "/");
+      dispatchNavigationPresence({ type: "surface", surface: "notes" });
+      return;
+    }
+    if (surface === "settings" && settingsSection === "mail" && !modules.mail) {
+      window.history.replaceState({}, "", settingsPath("appearance"));
+      dispatchNavigationPresence({
+        type: "surface",
+        surface: "settings",
+        settingsSection: "appearance",
+      });
+    }
+  }, [modules, surface, settingsSection]);
 
   useEffect(() => {
     const mobile = window.matchMedia("(max-width: 767px)");
@@ -1369,7 +1404,13 @@ export function Shell({
         reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
       };
       source.onmessage = (e) => {
-      let ev: { type: string; id: string; rev?: string; src?: string };
+      let ev: {
+        type: string;
+        id: string;
+        rev?: string;
+        src?: string;
+        modules?: ModuleSwitches;
+      };
       try {
         ev = JSON.parse(e.data);
       } catch {
@@ -1377,6 +1418,16 @@ export function Shell({
       }
       // our own write echoed back — this tab already holds that state
       if (ev.src === CLIENT_ID) return;
+      // A switch flipped in Settings, in this tab or another. It carries the
+      // pair, so nothing is fetched, and it changes no page in the tree, so
+      // this returns before the tree refresh below. The guard above lets it
+      // by because the route emits it without a `src`: the tab that flipped
+      // the switch has to re-render too, and re-setting the value it already
+      // holds costs one render.
+      if (ev.type === "modules") {
+        if (ev.modules) setModules(ev.modules);
+        return;
+      }
       // A task write touches no page in the tree, so refreshing the tree here
       // would refetch the whole thing on every tick. The tasks surface takes
       // it instead.
@@ -1614,10 +1665,12 @@ export function Shell({
    *  whole reason it exists, so the subscription is the shell's and not the
    *  surface's.
    */
-  const taskRecords = useTasks(taskSurfaceRevision);
-  const tasksOpenToday = taskRecords.day
-    ? openTodayCount(taskRecords.tasks, taskRecords.day.today)
-    : undefined;
+  // A shell with Tasks off asks for no records at all.
+  const taskRecords = useTasks(taskSurfaceRevision, modules.tasks);
+  const tasksOpenToday =
+    modules.tasks && taskRecords.day
+      ? openTodayCount(taskRecords.tasks, taskRecords.day.today)
+      : undefined;
 
   /** A linked task names the note it came from, and the chip in an expanded
    *  row opens it. The tree is the shell's, so the lookup is too. */
@@ -1710,8 +1763,12 @@ export function Shell({
       }
       // startsWith, not ===: a category view is /tasks with the list in
       // navigation state, and a deep link later is /tasks/<list>
-      const nextTasksOpen = location.pathname.startsWith("/tasks");
-      const nextMailOpen = location.pathname === "/mail";
+      // A module that is off is not a destination, whichever way the reader
+      // arrived: a back button onto /tasks lands on Home, the same place the
+      // server component sends a fresh load.
+      const nextTasksOpen =
+        modules.tasks && location.pathname.startsWith("/tasks");
+      const nextMailOpen = modules.mail && location.pathname === "/mail";
       const m = location.pathname.match(/^\/p\/([\w-]+)/);
       const nextSelectedId = !nextMailOpen && !nextTasksOpen && m ? m[1] : null;
       setSelectedId(nextSelectedId);
@@ -1772,7 +1829,7 @@ export function Shell({
     };
     window.addEventListener("popstate", onPop);
     return () => window.removeEventListener("popstate", onPop);
-  }, [clearSearchHighlightIntent, discardSmartSort, setSelectedId, setSurface]);
+  }, [clearSearchHighlightIntent, discardSmartSort, modules, setSelectedId, setSurface]);
 
   const toggleExpand = useCallback((id: string) => {
     setExpanded((s) => {
@@ -5391,6 +5448,7 @@ export function Shell({
     !!smartSort;
 
   const mobileTabBarProps = {
+    modules,
     // Home owns the whole notes surface, hub and open page both. It used to
     // exclude an open page, which left the place the reader spends the day in
     // none of the five slots — and that is why each sheet had to draw a way
@@ -5475,10 +5533,12 @@ export function Shell({
       onNewChild={() => void runOverlayNavigation(createChildPage)}
       onToday={() => void runOverlayNavigation(() => openDailyPage())}
       onHome={goHome}
-      onOpenMail={openMail}
-      onOpenTasks={openTasks}
-      onNewTask={newTask}
-      onNewMessage={newMessage}
+      // Every one of these rows is built inside an `if (onX)` in the palette,
+      // so a module that is off simply has no row to reach.
+      onOpenMail={modules.mail ? openMail : undefined}
+      onOpenTasks={modules.tasks ? openTasks : undefined}
+      onNewTask={modules.tasks ? newTask : undefined}
+      onNewMessage={modules.mail ? newMessage : undefined}
       onOpenTrash={() => setTrashOpen(true)}
       onOpenSettings={openSettings}
       onToggleTheme={toggleTheme}
@@ -5644,6 +5704,7 @@ export function Shell({
       <Background />
       <ShellSidebar
         tree={tree}
+        modules={modules}
         selectedId={selectedId}
         sidebarSelectedId={sidebarSelectedId}
         expanded={expanded}
@@ -5728,7 +5789,7 @@ export function Shell({
                     : undefined
               }
             >
-            {tasksOpen ? (
+            {modules.tasks && tasksOpen ? (
               <TasksSurface
                 list={tasksList}
                 onSelectList={selectTasksList}
@@ -5738,7 +5799,7 @@ export function Shell({
                 pageTitleOf={pageTitleOf}
                 onOpenPage={(pageId) => select(pageId)}
               />
-            ) : mailOpen ? (
+            ) : modules.mail && mailOpen ? (
               <MailSurface
                 onOpenSettings={(invoker, accountId) =>
                   openSettings("mail", { accountId })
@@ -5749,6 +5810,7 @@ export function Shell({
             ) : settingsActive ? (
               <SettingsSurface
                 section={settingsSection}
+                modules={modules}
                 tree={tree}
                 mailAccountId={mailSettingsAccountId}
                 onSelectSection={selectSettingsSection}
@@ -5905,6 +5967,7 @@ export function Shell({
 
                 <PageBody
                   page={page}
+                  tasksEnabled={modules.tasks}
                   currentNode={currentNode}
                   isBoard={isBoard}
                   isCollection={isCollection}
@@ -5946,8 +6009,9 @@ export function Shell({
                 // subscribe with, so the three are one request and one
                 // optimistic commit rather than three answers to one question.
                 taskRefreshToken={taskSurfaceRevision}
-                onOpenTasks={openTasks}
-                onOpenMail={openMail}
+                onOpenTasks={modules.tasks ? openTasks : undefined}
+                onOpenMail={modules.mail ? openMail : undefined}
+                taskCaptureEnabled={modules.tasks}
                 onToast={showToast}
                 pageTitleOf={pageTitleOf}
               />

@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { Shell } from "@/components/shell";
 import { isSettingsSection } from "@/components/settings/sections";
+import { readModules } from "@/lib/owner-settings";
 import { getStore } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
@@ -19,14 +20,18 @@ export default async function SettingsSectionPage({
   if (!isSettingsSection(section)) notFound();
   const query = await searchParams;
   const account = typeof query.account === "string" ? query.account : null;
-  const store = await getStore();
+  const [store, modules] = await Promise.all([getStore(), readModules()]);
+  // A bookmark into a section a switch has hidden opens the first section
+  // rather than 404ing: the slug is still legal, it just has nothing to draw.
+  const open = section === "mail" && !modules.mail ? "appearance" : section;
   return (
     <Shell
       tree={store.getTree()}
       initialSelectedId={null}
       initialSurface="settings"
-      initialSettingsSection={section}
-      initialMailSettingsAccountId={section === "mail" ? account : null}
+      initialSettingsSection={open}
+      initialMailSettingsAccountId={open === "mail" ? account : null}
+      modules={modules}
     />
   );
 }

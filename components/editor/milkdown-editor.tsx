@@ -58,7 +58,7 @@ import {
   searchHighlight as searchHighlightPlugin,
   showSearchHighlight,
 } from "./search-highlight";
-import { taskCheckbox } from "./task-checkbox";
+import { taskCheckbox, taskCheckboxMarkdown } from "./task-checkbox";
 import { toggle } from "./toggle";
 import { images } from "./image";
 import { handleWrapperImageDrop, imageUploadPlugin } from "./image-upload";
@@ -167,6 +167,10 @@ interface EditorProps {
   /** Defaults to nothing: an editor that is not told what it may do may not
    *  upload, unfurl or call AI. The owner shell passes its full set. */
   capabilities?: EditorCapabilities;
+  /** The Tasks module, defaulting to on. Off and only the Markdown half of
+   *  the checkbox bundle goes in: a `- [ ]` line still draws and still ticks,
+   *  and nothing offers to make a record out of it. */
+  tasksEnabled?: boolean;
 }
 
 type CalloutEmojiAnchor = CalloutEmojiEventDetail & { id: number };
@@ -383,6 +387,7 @@ function Inner({
   onCreatePageAtCursor,
   caretOnMount,
   capabilities = {},
+  tasksEnabled = true,
 }: EditorProps) {
   // One directory for the page-ref blocks and the serializer, whichever half
   // the surface has.
@@ -524,8 +529,10 @@ function Inner({
       .use(commonmarkWithoutHeadingIdSync)
       .use(gfm)
       // after the preset, like every view below: the checkbox attaches to the
-      // preset's own `list_item`, and gfm is what puts `checked` on it
-      .use(taskCheckbox)
+      // preset's own `list_item`, and gfm is what puts `checked` on it. With
+      // Tasks off only the Markdown half goes in: the box still draws and
+      // still ticks, and nothing offers to make a record out of it.
+      .use(tasksEnabled ? taskCheckbox : taskCheckboxMarkdown)
       // after the preset: the extended image and link schemas replace it
       .use(attachmentRefs)
       .use(noNestedTables)
@@ -957,9 +964,15 @@ function Inner({
       }}
     >
       <Milkdown />
-      <FloatingToolbar container={wrap} pages={pages} ai={!!capabilities.ai} />
+      <FloatingToolbar
+        container={wrap}
+        pages={pages}
+        ai={!!capabilities.ai}
+        tasks={tasksEnabled}
+      />
       <SlashMenu
         container={wrap}
+        tasks={tasksEnabled}
         onCreatePageAtCursor={onCreatePageAtCursor}
         ai={!!capabilities.ai}
         upload={capabilities.upload}

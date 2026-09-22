@@ -31,6 +31,7 @@ function sidebarProps(
     sidebarSelectedId: null,
     expanded: new Set<string>(),
     focusMode: false,
+    modules: { mail: true, tasks: true },
     offCanvas: false,
     surface: "notes",
     settingsSection: null,

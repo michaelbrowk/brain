@@ -3661,6 +3661,10 @@ a.brain-share-url:active {
    over it. Every figure per width by e2e/mail-shots.spec.ts. */
 .brain-mobile-tabbar {
   --tabbar-slot: 56px;
+  /* How many slots the bar draws. Five with both modules on, four with one
+     off, three with both; the component writes it, this is the default so
+     the rule reads on its own. */
+  --tabbar-slots: 5;
   position: fixed;
   z-index: calc(var(--z-drawer) - 20);
   left: calc(var(--inset) + env(safe-area-inset-left, 0px));
@@ -3731,7 +3735,7 @@ a.brain-share-url:active {
 }
 .brain-mobile-tabbar-items {
   display: grid;
-  grid-template-columns: repeat(5, minmax(44px, var(--tabbar-slot)));
+  grid-template-columns: repeat(var(--tabbar-slots), minmax(44px, var(--tabbar-slot)));
   height: var(--tabbar-h);
   padding: 0 4px;
 }

@@ -93,12 +93,26 @@ test("@release the served VAPID key decodes to a P-256 point", async ({ page }) 
 test("@release the bell opens the centre and says when nothing is waiting", async ({ page }) => {
   await login(page);
 
-  // ONLY THE EMPTY HALF IS PROVED HERE, on purpose. A row reaches the centre
-  // through the reminder scan or the mail poll: this server runs with
-  // BRAIN_REMINDERS=0 over a fresh temp notes root and has no mail account, so
-  // there is no way to make one appear inside a test's patience, and a
-  // test-only route to write one would be a second way into a store that
-  // ships. That same fact is what makes the empty state below deterministic.
+  // WHAT IS THE SERVER'S OWN HERE, AND WHAT STOPPED BEING SO.
+  //
+  // This case used to assert a centre with nothing in it, on the reasoning
+  // that nothing on this server could put a row there: a row arrives through
+  // the reminder scan or the mail poll, and the server runs with
+  // BRAIN_REMINDERS=0 over a fresh temp notes root and no mail account.
+  //
+  // An app's write through the bridge is a third producer, and it needs no
+  // scan and no poll: `e2e/apps.spec.ts` answers three cards and the centre
+  // holds "Trainer updated Words" from that moment. Every spec shares one
+  // server and that file sorts before this one, so emptiness is now a
+  // property of the run order rather than of the server, and asserting it
+  // would be asserting the alphabet.
+  //
+  // What is still the server's own is the shape of the answer and what the
+  // bell does with it, which is what this asserts: the badge follows
+  // `unread`, and the menu says "Nothing waiting" exactly when nothing is
+  // waiting. Both are read off the centre this test fetched rather than
+  // branched on, so a bell that drew the wrong half fails either way.
+  //
   // The produced-row path is covered by
   // components/notifications-bell.test.tsx: the glyph per kind, the unread
   // mark, the open handler, and the counted mail row that opens Mail and
@@ -108,16 +122,33 @@ test("@release the bell opens the centre and says when nothing is waiting", asyn
   // that cookie.
   const centre = await page.evaluate(async () => {
     const response = await fetch("/api/notifications");
-    return { status: response.status, body: await response.json() };
+    return {
+      status: response.status,
+      body: (await response.json()) as {
+        notifications: unknown[];
+        unread: number;
+      },
+    };
   });
-  expect(centre).toEqual({ status: 200, body: { notifications: [], unread: 0 } });
+  expect(centre.status).toBe(200);
+  expect(Array.isArray(centre.body.notifications)).toBe(true);
+  expect(typeof centre.body.unread).toBe("number");
+  expect(centre.body.unread).toBeLessThanOrEqual(centre.body.notifications.length);
 
   const bell = page.getByRole("button", { name: /^Notifications/ });
   await expect(bell).toBeVisible();
-  await expect(bell).toHaveAccessibleName("Notifications");
-  await expect(page.locator(".brain-bell-badge")).toHaveCount(0);
+  await expect(bell).toHaveAccessibleName(
+    centre.body.unread > 0
+      ? `Notifications, ${centre.body.unread} unread`
+      : "Notifications",
+  );
+  await expect(page.locator(".brain-bell-badge")).toHaveCount(
+    centre.body.unread > 0 ? 1 : 0,
+  );
 
   await bell.click();
   await expect(page.getByRole("menu")).toBeVisible();
-  await expect(page.getByText("Nothing waiting")).toBeVisible();
+  await expect(page.getByText("Nothing waiting")).toHaveCount(
+    centre.body.notifications.length === 0 ? 1 : 0,
+  );
 });

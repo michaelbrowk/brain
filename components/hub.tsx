@@ -9,6 +9,7 @@ import { HubMail } from "./hub-mail";
 import { HubRow } from "./hub-row";
 import { HUB_CAPTURE_FLIGHT_ID, HubToday } from "./hub-today";
 import { TaskRequestError, createTask, localDay, mutateTasks } from "./tasks-client";
+import { AiChip } from "./ui/ai-chip";
 import { Empty } from "./ui/empty";
 import { Field } from "./ui/field";
 import { Kbd, useShortcutTitle, type ToastOptions } from "./ui/primitives";
@@ -179,6 +180,7 @@ interface FlatPage {
   id: string;
   title: string;
   icon?: string;
+  kind?: "app";
   created: string;
   updated: string;
   updatedBy?: TreeNode["updatedBy"];
@@ -194,6 +196,7 @@ function flatten(tree: TreeNode[]): FlatPage[] {
         id: n.id,
         title: n.title,
         icon: n.icon,
+        kind: n.kind,
         created: n.created,
         updated: n.updated,
         updatedBy: n.updatedBy,
@@ -740,6 +743,7 @@ function Row({
         />
       )}
       <span className="min-w-0 flex-1 truncate text-[14px] text-ink">{page.title}</span>
+      {page.kind === "app" && <AiChip />}
       {actor === "claude" && (
         <span className="shrink-0 rounded-xs border border-line px-1.5 py-0.5 font-mono text-[10px] text-ink-2">
           Brain AI

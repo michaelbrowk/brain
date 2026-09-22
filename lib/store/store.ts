@@ -1876,7 +1876,12 @@ export class Store {
 
   readDirectChildren(
     parentId: string,
-  ): readonly Readonly<{ id: string; title: string; icon?: string }>[] {
+  ): readonly Readonly<{
+    id: string;
+    title: string;
+    icon?: string;
+    kind?: "app";
+  }>[] {
     this.get(parentId);
     return Object.freeze(
       this.siblings(parentId)
@@ -1888,6 +1893,9 @@ export class Store {
             ...(entry.meta.icon === undefined
               ? {}
               : { icon: entry.meta.icon }),
+            ...(entry.meta.kind === undefined
+              ? {}
+              : { kind: entry.meta.kind }),
           }),
         ),
     );
@@ -1903,13 +1911,19 @@ export class Store {
    *  never existed. */
   readPageLabel(
     id: string,
-  ): Readonly<{ id: string; title: string; icon?: string }> | null {
+  ): Readonly<{
+    id: string;
+    title: string;
+    icon?: string;
+    kind?: "app";
+  }> | null {
     const entry = this.index.get(id);
     if (!entry || entry.meta.collectionRow) return null;
     return Object.freeze({
       id: entry.meta.id,
       title: entry.meta.title,
       ...(entry.meta.icon === undefined ? {} : { icon: entry.meta.icon }),
+      ...(entry.meta.kind === undefined ? {} : { kind: entry.meta.kind }),
     });
   }
 
@@ -2019,6 +2033,7 @@ export class Store {
       .map((entry) => ({
         rootId: entry.meta.id,
         title: entry.meta.title,
+        ...(entry.meta.kind === undefined ? {} : { kind: entry.meta.kind }),
         relation: (this.isWithinSubtree(entry.meta.id, id)
           ? "ancestor"
           : "descendant") as "ancestor" | "descendant",

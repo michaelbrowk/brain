@@ -329,6 +329,7 @@ function Breadcrumb({
     ...trimmed.map((n) => ({
       label: n.title,
       emoji: n.icon || undefined,
+      ai: n.kind === "app",
       onClick: () => onSelect(n.id),
     })),
   ];

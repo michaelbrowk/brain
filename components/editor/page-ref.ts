@@ -9,6 +9,25 @@ import { classifyInternalPageLink } from "@/lib/internal-page-link";
 export interface PageInfo {
   title: string;
   icon?: string;
+  /** An app page. The chip is chrome the NodeView draws; it never enters
+   *  `pageRefVisibleText`, which is what the serializer writes and what
+   *  search indexes. */
+  kind?: "app";
+}
+
+/** The label text one page-ref anchor carries, with the AI chip left out.
+ *  `parseDOM` bakes this into the node's `label`, which is the string a ref
+ *  falls back to once the page it names is gone, so a chip that slipped into
+ *  it would become part of a title on the next paste. */
+export function pageRefLabelFromDom(dom: HTMLElement): string {
+  let text = "";
+  for (const child of Array.from(dom.childNodes)) {
+    if (child.nodeType === 1 && (child as Element).classList.contains("ai-chip")) {
+      continue;
+    }
+    text += child.textContent ?? "";
+  }
+  return text;
 }
 
 /** Single live page directory shared by the serializer and mounted NodeViews.
@@ -57,11 +76,11 @@ export function hasPageRefHrefResolver(): boolean {
  * This deliberately does not dispatch a ProseMirror transaction: a rename,
  * icon update, or newly resolved page is live display state, not a note edit. */
 export function syncLivePageInfo(
-  pages?: readonly { id: string; title: string; icon?: string }[],
+  pages?: readonly { id: string; title: string; icon?: string; kind?: "app" }[],
 ) {
   livePageInfo.clear();
   for (const page of pages ?? []) {
-    livePageInfo.set(page.id, { title: page.title, icon: page.icon });
+    livePageInfo.set(page.id, { title: page.title, icon: page.icon, kind: page.kind });
   }
   mountedPageRefViews.forEach((refresh) => refresh());
 }
@@ -168,7 +187,7 @@ export const pageRefSchema = $nodeSchema("page_ref", () => ({
       tag: 'a[data-page-ref]',
       getAttrs: (dom: HTMLElement) => ({
         id: dom.getAttribute("data-page-ref") || "",
-        label: dom.textContent || "",
+        label: pageRefLabelFromDom(dom),
       }),
     },
   ],
@@ -191,9 +210,22 @@ export const pageRefSchema = $nodeSchema("page_ref", () => ({
     attrs.title = pageRefVisibleText(node);
 
     const parts = pageRefVisibleParts(node);
+    // The chip is drawn from `kind` and sits after the text, so a ref to an
+    // app page says so in the clipboard's own markup as well as on screen.
+    // `parseDOM` reads its label past it, which is what keeps it chrome.
+    const chip: DOMOutputSpec[] =
+      info?.kind === "app"
+        ? [["span", { class: "ai-chip", title: "Built by an agent" }, "AI"]]
+        : [];
     return parts.icon === null
-      ? ["a", attrs, parts.rest]
-      : ["a", attrs, ["span", { class: "brain-page-ref-icon" }, parts.icon], parts.rest];
+      ? ["a", attrs, parts.rest, ...chip]
+      : [
+          "a",
+          attrs,
+          ["span", { class: "brain-page-ref-icon" }, parts.icon],
+          parts.rest,
+          ...chip,
+        ];
   },
   parseMarkdown: {
     match: (node: MarkdownNode) => isPageRefMarkdownNode(node),
@@ -250,6 +282,13 @@ export const pageRefView = $view(pageRefSchema.node, () => ((initial: ProseNode)
       icon.className = "brain-page-ref-icon";
       icon.textContent = parts.icon;
       dom.replaceChildren(icon, document.createTextNode(parts.rest));
+    }
+    if (livePageInfo.get(id)?.kind === "app") {
+      const chip = document.createElement("span");
+      chip.className = "ai-chip";
+      chip.title = "Built by an agent";
+      chip.textContent = "AI";
+      dom.append(chip);
     }
   };
   const refresh = () => render(current);

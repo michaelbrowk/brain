@@ -10,6 +10,8 @@ export interface SearchHit {
   id: string;
   title: string;
   icon?: string;
+  /** An app page, so a result wears the AI chip the way a tree row does. */
+  kind?: "app";
   /** match window: emphasis is applied client-side by weight, not colour */
   snippet: { before: string; match: string; after: string };
   /** Lets the command palette avoid repeating title-only matches it already
@@ -113,6 +115,7 @@ async function doSearch(q: string): Promise<SearchHit[]> {
     id: string;
     title: string;
     icon?: string;
+    kind?: "app";
     updated: string;
   };
   const dirToId = new Map<string, SearchPage>();
@@ -127,6 +130,7 @@ async function doSearch(q: string): Promise<SearchHit[]> {
         id: n.id,
         title: n.title,
         icon: n.icon,
+        kind: n.kind,
         updated: n.updated,
       };
       dirToId.set(store.resolve(n.id), page);
@@ -213,6 +217,7 @@ async function doSearch(q: string): Promise<SearchHit[]> {
         id: candidate.id,
         title: candidate.title,
         icon: candidate.icon,
+        kind: candidate.kind,
         updated: candidate.updated,
         rank: rankSearchCandidate(candidate.title, candidate.lines, q),
         phrase: candidate.phrase,
@@ -251,6 +256,7 @@ async function doSearch(q: string): Promise<SearchHit[]> {
         id: result.id,
         title: result.title,
         icon: result.icon,
+        kind: result.kind,
         source: result.source,
         snippet: result.snippet,
         target,

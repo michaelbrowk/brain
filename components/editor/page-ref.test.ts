@@ -14,6 +14,7 @@ import {
   hasPageRefHrefResolver,
   pageRef,
   pageRefHref,
+  pageRefLabelFromDom,
   setPageRefHrefResolver,
   setPageRefOrigin,
   syncLivePageInfo,
@@ -197,6 +198,51 @@ describe("page references", () => {
     } finally {
       await editor.destroy();
     }
+  });
+
+  it("draws the chip on a ref to an app page and not on an ordinary one", async () => {
+    setPageRefOrigin(ORIGIN);
+    syncLivePageInfo([
+      { id: "app1", title: "Trainer", icon: "🃏", kind: "app" },
+      { id: "page1", title: "Spanish", icon: "📄" },
+    ]);
+    const root = document.createElement("div");
+    document.body.append(root);
+    const editor = await Editor.make()
+      .config((ctx) => {
+        ctx.set(rootCtx, root);
+        ctx.set(defaultValueCtx, "[🃏 Trainer](/p/app1)\n\n[📄 Spanish](/p/page1)");
+      })
+      .use(commonmark)
+      .use(gfm)
+      .use(pageRef)
+      .create();
+
+    try {
+      const appRef = root.querySelector<HTMLAnchorElement>('[data-page-ref="app1"]')!;
+      const plain = root.querySelector<HTMLAnchorElement>('[data-page-ref="page1"]')!;
+      expect(appRef.querySelector(".ai-chip")?.textContent).toBe("AI");
+      expect(plain.querySelector(".ai-chip")).toBeNull();
+
+      // The chip is chrome, not content: it must not enter the text the
+      // serializer writes or the label a paste bakes back into the node.
+      expect(appRef.title).toBe("🃏 Trainer");
+      expect(editor.action(getMarkdown())).toContain("[🃏 Trainer](/p/app1)");
+    } finally {
+      await editor.destroy();
+    }
+  });
+
+  it("keeps the chip out of the label a pasted ref bakes", () => {
+    syncLivePageInfo([{ id: "app1", title: "Trainer", icon: "🃏", kind: "app" }]);
+    const anchor = document.createElement("a");
+    anchor.setAttribute("data-page-ref", "app1");
+    anchor.append(document.createTextNode("🃏 Trainer"));
+    const chip = document.createElement("span");
+    chip.className = "ai-chip";
+    chip.textContent = "AI";
+    anchor.append(chip);
+    expect(pageRefLabelFromDom(anchor)).toBe("🃏 Trainer");
   });
 
   it("says whether a host is placing page ids, which the click handler asks", () => {

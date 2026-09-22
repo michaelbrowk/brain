@@ -441,6 +441,9 @@ export interface ShareScopeSnapshot {
   overlappingRoots: Array<{
     rootId: string;
     title: string;
+    /** An app page, so the overlap list names it the way every other surface
+     *  that names a page does. */
+    kind?: "app";
     relation: "ancestor" | "descendant";
     shareExpiresAt: string | null;
     /** A nested grant that asks for a password cannot be folded into a parent

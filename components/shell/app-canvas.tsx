@@ -1,20 +1,20 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useTheme } from "next-themes";
 import { apiFetch } from "@/lib/client";
 import type { TreeNode } from "@/lib/store/types";
 import { APP_FRAME_SANDBOX } from "@/lib/apps/csp";
 import { readAppTokens } from "@/lib/apps/tokens";
 import { createAppBridge } from "./app-bridge";
+import { AppBridgeError, createAppReads } from "./app-reads";
 import { Empty } from "../ui/empty";
 import { Icon } from "../ui/icon";
 
 export interface AppCanvasProps {
   node: TreeNode;
   /** The shell's own tree, read on every request rather than snapshotted:
-   *  what an app may read has to follow what the notebook holds now. The read
-   *  handler is what consumes it, so nothing in this component does yet. */
+   *  what an app may read has to follow what the notebook holds now. */
   liveTree: () => readonly TreeNode[];
   onOpenPage: (id: string) => void;
   onToast: (text: string) => void;
@@ -33,8 +33,9 @@ export interface AppCanvasProps {
  *  One prop shape: the tree node. It already carries the id, the title, the
  *  icon and the `app` map, so a second `page` prop would be a second place
  *  for the same four facts to come from. */
-export function AppCanvas({ node, onOpenPage, onToast }: AppCanvasProps) {
+export function AppCanvas({ node, liveTree, onOpenPage, onToast }: AppCanvasProps) {
   const frameRef = useRef<HTMLIFrameElement>(null);
+  const reads = useMemo(() => createAppReads(liveTree), [liveTree]);
   const { resolvedTheme } = useTheme();
   const theme = resolvedTheme === "dark" ? "dark" : "light";
   const bridgeRef = useRef<ReturnType<typeof createAppBridge> | null>(null);
@@ -83,13 +84,13 @@ export function AppCanvas({ node, onOpenPage, onToast }: AppCanvasProps) {
       page: { id: node.id, title: node.title },
       theme: () => (document.documentElement.classList.contains("dark") ? "dark" : "light"),
       tokens: () => readAppTokens(document.documentElement),
-      // The read side and the write side replace this. Until then an app can
-      // say hello, open a page and raise a toast, and can reach the notebook
-      // through nothing.
-      handle: async () => {
-        throw Object.assign(new Error("that request is not available yet"), {
-          reason: "bad_request",
-        });
+      // The reads answer what they own and hand back `undefined` for the
+      // rest, so the write side layers over this with one more `??` rather
+      // than a second switch that could disagree with the first.
+      handle: async (request) => {
+        const answer = await reads(request);
+        if (answer !== undefined) return answer;
+        throw new AppBridgeError("that request is not available yet", "bad_request");
       },
       onOpenPage,
       onToast,
@@ -99,7 +100,7 @@ export function AppCanvas({ node, onOpenPage, onToast }: AppCanvasProps) {
       bridge.dispose();
       bridgeRef.current = null;
     };
-  }, [files, node.id, node.title, onOpenPage, onToast]);
+  }, [files, node.id, node.title, reads, onOpenPage, onToast]);
 
   useEffect(() => {
     bridgeRef.current?.sendTheme(theme);

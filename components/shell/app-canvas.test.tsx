@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { APP_FRAME_SANDBOX } from "@/lib/apps/csp";
 import { apiFetch } from "@/lib/client";
 import { AppCanvas } from "./app-canvas";
+import { createAppWrites } from "./app-writes";
 
 vi.mock("next-themes", () => ({ useTheme: () => ({ resolvedTheme: "light" }) }));
 
@@ -15,12 +16,21 @@ vi.mock("next-themes", () => ({ useTheme: () => ({ resolvedTheme: "light" }) }))
 vi.mock("@/lib/client", () => ({ apiFetch: vi.fn(), CLIENT_ID: "test-client" }));
 const fetchMock = vi.mocked(apiFetch);
 
+/** The real write side, watched. Nothing here changes what it does: the case
+ *  at the foot of the file only asks which app id the canvas handed it. */
+vi.mock("./app-writes", async () => {
+  const actual = await vi.importActual<typeof import("./app-writes")>("./app-writes");
+  return { ...actual, createAppWrites: vi.fn(actual.createAppWrites) };
+});
+const writesMock = vi.mocked(createAppWrites);
+
 beforeEach(() => {
   (
     globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
   ).IS_REACT_ACT_ENVIRONMENT = true;
   fetchMock.mockReset();
   fetchMock.mockResolvedValue({ ok: true, status: 200 } as Response);
+  writesMock.mockClear();
 });
 
 const settle = () =>
@@ -134,5 +144,19 @@ describe("the app canvas", () => {
 
   it("carries no em-dash in anything a reader sees", async () => {
     expect((await renderReady()).textContent ?? "").not.toContain("—");
+  });
+
+  /** WHICH APP THE WRITES BELONG TO IS THIS ONE LINE.
+   *
+   *  `AppRequest` carries no app id, so the only thing pinning a frame's
+   *  writes to the app on screen is the id the canvas hands `createAppWrites`.
+   *  Every route under `/api/app-bridge/<appId>/` is built from it, and a
+   *  different id here would put one app's pages in another's `owns`. The
+   *  relay's own suite proves it builds the path from its argument; nothing
+   *  proved which argument arrives. */
+  it("builds the write side with the app on screen, not another one", async () => {
+    await renderReady();
+    expect(writesMock).toHaveBeenCalledWith(node.id, expect.any(Function));
+    expect(writesMock.mock.calls.every(([appId]) => appId === node.id)).toBe(true);
   });
 });

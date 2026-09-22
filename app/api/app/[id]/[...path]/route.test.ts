@@ -166,4 +166,108 @@ describe("an app's files", () => {
     });
     expect(res.status).toBe(404);
   });
+
+  it("refuses a visitor whose grant stops short of one", async () => {
+    // `password-required` is the other kind the resolver answers with, and it
+    // is the link whose password has not been entered in this browser. An app
+    // is not a preview: nothing of it is served until the grant says granted.
+    // Without this case the whole check can be deleted and the suite stays
+    // green.
+    verifySession.mockResolvedValue(false);
+    resolveShareAccess.mockResolvedValue({
+      kind: "password-required",
+      root: { id: "root1" },
+      shareVersion: 3,
+    });
+    const res = await GET(request("/api/app/app1/index.html?root=root1&v=3"), {
+      params: Promise.resolve({ id: "app1", path: ["index.html"] }),
+    });
+    expect(res.status).toBe(404);
+    expect(readAppFile).not.toHaveBeenCalled();
+  });
+
+  it("refuses a visitor the resolver cannot find a grant for at all", async () => {
+    // A root that does not contain this page, a page in the trash, a link
+    // that was revoked or has expired, a version older than the one the link
+    // now serves: every one of those reaches the route as this error, and
+    // every one of them is the same 404 a stranger gets.
+    verifySession.mockResolvedValue(false);
+    const { ShareAccessNotFoundError } = await import("@/lib/share-access");
+    resolveShareAccess.mockRejectedValue(new ShareAccessNotFoundError());
+    const res = await GET(request("/api/app/app1/index.html?root=root1&v=9"), {
+      params: Promise.resolve({ id: "app1", path: ["index.html"] }),
+    });
+    expect(res.status).toBe(404);
+    expect(readAppFile).not.toHaveBeenCalled();
+  });
+
+  it("refuses a visitor who names no root or no version", async () => {
+    // The two the grant is resolved from. A link visitor without them is a
+    // stranger, and guessing either for them would be the route granting
+    // itself access.
+    for (const url of [
+      "/api/app/app1/index.html",
+      "/api/app/app1/index.html?root=root1",
+      "/api/app/app1/index.html?v=3",
+    ]) {
+      vi.clearAllMocks();
+      verifySession.mockResolvedValue(false);
+      const res = await GET(request(url), {
+        params: Promise.resolve({ id: "app1", path: ["index.html"] }),
+      });
+      expect(res.status).toBe(404);
+      expect(resolveShareAccess).not.toHaveBeenCalled();
+      expect(readAppFile).not.toHaveBeenCalled();
+    }
+  });
+
+  it("answers 503 while the share is being read and cannot be settled", async () => {
+    verifySession.mockResolvedValue(false);
+    const { ShareAccessBusyError } = await import("@/lib/share-access");
+    resolveShareAccess.mockRejectedValue(new ShareAccessBusyError());
+    const res = await GET(request("/api/app/app1/index.html?root=root1&v=3"), {
+      params: Promise.resolve({ id: "app1", path: ["index.html"] }),
+    });
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Retry-After")).toBe("1");
+    expect(readAppFile).not.toHaveBeenCalled();
+  });
+
+  it("refuses a traversal in the URL before the store is asked", async () => {
+    // The store's own `appAssetPath` is the lock that decides an asset name.
+    // This is the first one, and it exists so a `..` never becomes a path at
+    // all. Without this case it can be deleted and the suite stays green.
+    for (const path of [
+      ["assets", "..", "index.html"],
+      ["assets", "cards", "..", "..", "index.html"],
+      ["assets", "."],
+      ["assets", "..", "..", "..", "etc", "passwd"],
+    ]) {
+      vi.clearAllMocks();
+      verifySession.mockResolvedValue(true);
+      const res = await GET(request("/api/app/app1/x"), {
+        params: Promise.resolve({ id: "app1", path }),
+      });
+      expect(res.status).toBe(404);
+      expect(readAppFile).not.toHaveBeenCalled();
+    }
+  });
+
+  it("types every answer nosniff, so a served asset is what it says it is", async () => {
+    // The config block sets this too, and this one is the route's own: an
+    // asset whose bytes disagree with its name must not be sniffed into
+    // something executable, and a response that leaves this file already
+    // carries the answer.
+    readAppFile.mockResolvedValue({
+      kind: "file",
+      mimeType: "image/png",
+      data: new Uint8Array([1, 2, 3]),
+    });
+    const res = await GET(request("/api/app/app1/assets/a.png"), {
+      params: Promise.resolve({ id: "app1", path: ["assets", "a.png"] }),
+    });
+    expect(res.headers.get("X-Content-Type-Options")).toBe("nosniff");
+    expect(res.headers.get("Content-Type")).toBe("image/png");
+    expect(res.headers.get("Content-Length")).toBe("3");
+  });
 });

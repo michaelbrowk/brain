@@ -1,3 +1,4 @@
+import type { AppMeta } from "../apps/model";
 import type {
   CollectionDefinition,
   CollectionRow,
@@ -58,6 +59,12 @@ export interface PageMeta {
   title: string; // display, mutable
   icon?: string;
   cover?: string;
+  /** An app page: its body is an HTML application under `app/`, not Markdown
+   *  the editor may open. The Markdown body stays the agent's one-paragraph
+   *  description, which is what search indexes and what a client that cannot
+   *  run the app sees. */
+  kind?: "app";
+  app?: AppMeta;
   order: string; // fractional-index key among siblings
   created: string; // ISO
   updated: string; // ISO
@@ -396,6 +403,10 @@ export interface TreeNode {
   title: string;
   icon?: string;
   cover?: string;
+  /** Drawn as the AI chip wherever this page is named, and read by the shell
+   *  to pick the app canvas instead of the editor. */
+  kind?: "app";
+  app?: AppMeta;
   order: string;
   public?: boolean;
   shareLocked?: boolean; // sharePass is set (the hash itself never leaves the server)

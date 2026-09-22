@@ -29,6 +29,8 @@ const MANAGED_PAGE_META_KEYS = new Set([
   "title",
   "icon",
   "cover",
+  "kind",
+  "app",
   "order",
   "created",
   "updated",
@@ -89,6 +91,23 @@ export function serializePage(meta: PageMeta, markdown: string): string {
   const ordered: Record<string, unknown> = { id: meta.id, title: meta.title };
   if (meta.icon) ordered.icon = meta.icon;
   if (meta.cover) ordered.cover = meta.cover;
+  // Before `order`, so the two keys that say what this page IS sit with the
+  // title and the icon rather than among the bookkeeping. The nested map is
+  // written whole and in the schema's own order, which is the order
+  // `lib/apps/model.ts` declares it in, so a rebuild that bumps `version`
+  // leaves a one-line diff.
+  if (meta.kind) ordered.kind = meta.kind;
+  if (meta.app) {
+    ordered.app = {
+      entry: meta.app.entry,
+      version: meta.app.version,
+      builtBy: meta.app.builtBy,
+      builtAt: meta.app.builtAt,
+      owns: meta.app.owns,
+      state: meta.app.state,
+      ...(meta.app.reason === undefined ? {} : { reason: meta.app.reason }),
+    };
+  }
   ordered.order = meta.order;
   ordered.created = meta.created;
   ordered.updated = meta.updated;

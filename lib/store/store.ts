@@ -4054,9 +4054,13 @@ export class Store {
    *  rather than a caller forgetting to mention them.
    *
    *  The rename pair is not one atomic operation on any filesystem, so the
-   *  window between them is real. It is two renames inside the store's own
-   *  lock, with no I/O between, and a crash there leaves `.app-next/` on disk
-   *  where the next write replaces it. */
+   *  window between them is real: a crash there leaves the page with no
+   *  `app/` at all and the ONLY copy of its files in `.app-next-old/`. That
+   *  is the artefact that holds the data, not `.app-next/`, and the recovery
+   *  at the top of the swap is what puts it back. Without it the next write
+   *  carried nothing over from a live set that was not there and then
+   *  deleted the retired one, which cost an app its entry and every asset on
+   *  one ordinary state write. */
   async writeAppFiles(id: string, files: AppFilesInput): Promise<void> {
     assertAppEntrySize(files.entryHtml);
     assertAppAssetsSize(files.assets);
@@ -4086,6 +4090,21 @@ export class Store {
         this.root,
         path.join(e.dir, `${APP_STAGING_DIR}-old`),
       );
+      // RECOVER A CRASHED SWAP BEFORE STAGING A NEW ONE.
+      //
+      // Two states a crash can leave, and they are told apart by whether
+      // `app/` is there. No `app/` and a `.app-next-old/` means the crash
+      // landed between the renames and the retired folder is the only copy
+      // of the app: put it back. Both present means the crash landed after
+      // the second rename, so `app/` is already the new set and the retired
+      // one is a stale copy: drop it. Doing neither is what let one state
+      // write carry nothing over and then delete the only surviving files.
+      const liveExists = await directoryExists(path.join(e.dir, "app"));
+      const retiredExists = await directoryExists(retired);
+      if (retiredExists) {
+        if (liveExists) await fs.rm(retired, { recursive: true, force: true });
+        else await fs.rename(retired, path.join(e.dir, "app"));
+      }
       await fs.rm(staged, { recursive: true, force: true });
       await fs.mkdir(staged, { recursive: true });
       try {
@@ -8523,6 +8542,16 @@ async function copyDirIfPresent(from: string, to: string): Promise<void> {
     if (entry.isDirectory()) await copyDirIfPresent(source, target);
     else await copyIfPresent(source, target);
   }
+}
+
+/** Whether this path is a directory. A missing one is not an error here: the
+ *  swap's recovery asks about two folders that are each absent most of the
+ *  time. */
+async function directoryExists(dir: string): Promise<boolean> {
+  return fs.stat(dir).then(
+    (stats) => stats.isDirectory(),
+    () => false,
+  );
 }
 
 /** Refuse when `<dir>/app/` holds an `index.md`, which is to say when it is a

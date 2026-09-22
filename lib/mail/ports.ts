@@ -536,7 +536,7 @@ export interface MailServiceHealth {
     readonly commit: string;
     readonly builtAt: string;
   };
-  readonly status: "ok" | "degraded";
+  readonly status: "ok" | "degraded" | "paused";
   readonly localSchemaVersion: number | null;
   readonly cacheSchemaVersion: number | null;
   readonly receiveReadiness: "not_configured" | "ready" | "degraded";

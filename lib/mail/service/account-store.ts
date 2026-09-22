@@ -59,6 +59,7 @@ const LEGACY_ARCHIVE_FILE = "account.v1.migrated.json";
 const LOCAL_SCHEMA_VERSION = 2;
 const LEGACY_MIGRATION_META_KEY = "legacy_account_v1_migrated";
 const SMTP_ACCOUNT_META_PREFIX = "smtp_account_config:";
+const SYNC_PAUSED_META_KEY = "sync_paused";
 const ACCOUNT_ID_PATTERN = /^account-a[0-9a-f]{32}$/;
 const ACCOUNT_CACHE_STAGE_PATTERN =
   /^\.deleting-cache-(account-a[0-9a-f]{32})-([0-9a-f]{24})$/;
@@ -1447,6 +1448,26 @@ export class SqliteMailAccountStore
          ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
       )
       .run(key, value);
+  }
+
+  /** Whether the owner has paused this service. A `meta` row and not a new
+   *  table: `initializeSchema` asserts the table set is exactly accounts,
+   *  credentials and meta, and a fourth one fails the service's own startup
+   *  with `account_state_invalid`. */
+  readSyncPaused(): boolean {
+    const row = this.requireDatabase()
+      .prepare("SELECT value FROM meta WHERE key = ?")
+      .get(SYNC_PAUSED_META_KEY);
+    return row !== undefined && row.value === "1";
+  }
+
+  writeSyncPaused(paused: boolean): void {
+    this.requireDatabase()
+      .prepare(
+        `INSERT INTO meta (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      )
+      .run(SYNC_PAUSED_META_KEY, paused ? "1" : "0");
   }
 
   private storedFromRow(row: Record<string, unknown>): StoredMailAccount {

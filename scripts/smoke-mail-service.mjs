@@ -157,6 +157,30 @@ try {
   );
   assert.equal(release.status, 204);
 
+  // The pause, end to end against the real service over the real socket.
+  const paused = await requestJson(activeSocketPath, "PATCH", "/v1/sync", {
+    enabled: false,
+  });
+  assert.deepEqual(paused, { status: 200, body: { apiVersion: 1, paused: true } });
+  const pausedHealth = await requestJson(activeSocketPath, "GET", "/v1/health");
+  assert.equal(pausedHealth.body.status, "paused");
+  // The readinesses do not move: a pause is not a verdict about them, and
+  // `queuedSubmissions` stays 0 here because this smoke has no account.
+  assert.equal(pausedHealth.body.sendReadiness, "not_configured");
+  assert.equal(pausedHealth.body.queuedSubmissions, 0);
+  const refusedSync = await requestJson(activeSocketPath, "POST", "/v1/sync", {
+    accountId: "account-a0123456789abcdef0123456789abcdef",
+    maxItems: 5,
+  });
+  assert.equal(refusedSync.status, 409);
+  assert.equal(refusedSync.body.error.code, "sync_paused");
+  const resumed = await requestJson(activeSocketPath, "PATCH", "/v1/sync", {
+    enabled: true,
+  });
+  assert.deepEqual(resumed, { status: 200, body: { apiVersion: 1, paused: false } });
+  const resumedHealth = await requestJson(activeSocketPath, "GET", "/v1/health");
+  assert.equal(resumedHealth.body.status, "ok");
+
   const afterRequests = await stat(activeSocketPath);
   assert.equal(afterRequests.ino, before.ino, "service replaced the inherited socket");
   assert.equal(afterRequests.mode & 0o777, 0o660, "service changed socket mode");
@@ -185,6 +209,11 @@ try {
         event: "mail_request_failed",
         phase: "admission_reservation_post",
         errorCode: "capacity_exceeded",
+      },
+      {
+        event: "mail_request_failed",
+        phase: "sync_post",
+        errorCode: "sync_paused",
       },
     ]),
   );

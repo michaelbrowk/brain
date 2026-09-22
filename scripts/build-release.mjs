@@ -144,7 +144,7 @@ export const MAIL_RUNTIME_LISTING = Object.freeze({
     "outbound-attachments.js|f", "outbound-message.js|f", "outbound-store.js|f",
     "outbound-worker.js|f",
     "outbound.js|f", "remote-image-fetcher.js|f", "runtime-config.js|f",
-    "smtp-runtime.js|f", "smtp-state-store.js|f",
+    "smtp-runtime.js|f", "smtp-state-store.js|f", "sync-pause.js|f",
   ],
 });
 

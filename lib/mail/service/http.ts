@@ -36,6 +36,7 @@ import {
   MailAdmissionError,
 } from "./admission";
 import { MAIL_SERVICE_HTTP_LIMITS } from "./limits";
+import type { MailSyncPausePort } from "./sync-pause";
 import {
   GmailOAuthError,
 } from "../providers/gmail/oauth";
@@ -62,6 +63,7 @@ import {
   validateMailResourceId,
   validateMailSearchInput,
   validateMailSendInput,
+  validateMailSyncEnabledInput,
   validateMailSyncInput,
   validateMailSystemMailbox,
   validateMailThreadListFilter,
@@ -109,6 +111,7 @@ interface MailServiceHttpOptions {
   readonly send?: MailSendService;
   readonly drafts?: MailDraftService;
   readonly content?: MailContentService;
+  readonly syncPause?: MailSyncPausePort;
 }
 
 /**
@@ -157,6 +160,7 @@ export const MAIL_SERVICE_ERROR_CODES = Object.freeze({
     "mail_sync_in_progress",
     "mail_sync_rate_limited",
     "mail_sync_unavailable",
+    "sync_paused",
     "mail_send_request_invalid",
     "mail_send_account_not_found",
     "mail_send_account_reauth_required",
@@ -257,6 +261,7 @@ export function createMailServiceHttpServer(
   const send = options.send;
   const drafts = options.drafts;
   const content = options.content;
+  const syncPause = options.syncPause;
   const build = validateBuildIdentity(options.build);
   const server = createServer(
     {
@@ -279,6 +284,7 @@ export function createMailServiceHttpServer(
         send,
         drafts,
         content,
+        syncPause,
       );
     },
   );
@@ -332,6 +338,7 @@ async function handleRequest(
   send: MailSendService | undefined,
   drafts: MailDraftService | undefined,
   content: MailContentService | undefined,
+  syncPause: MailSyncPausePort | undefined,
 ): Promise<void> {
   const requestStartedAt = Date.now();
   const deadlineAt =
@@ -473,6 +480,7 @@ async function handleRequest(
           send !== undefined,
           syncHealth,
           requestStartedAt,
+          syncPause?.isPaused() ?? false,
         ),
       );
       return;
@@ -672,7 +680,29 @@ async function handleRequest(
     }
 
     if (url.pathname === "/v1/sync") {
+      if (method === "PATCH") {
+        // Brain's module switch, arriving over the socket because the switch
+        // lives in a settings file this process cannot read. Nothing here
+        // deletes an account, a credential, a cached body or a queued row.
+        const input = validateMailSyncEnabledInput(
+          await readJsonBody(request, deadlineAt),
+        );
+        // A build with no pause port cannot honour the switch, and saying so
+        // is better than answering 200 to a promise it will not keep.
+        if (syncPause === undefined) {
+          throw new MailHttpError(503, "mail_sync_unavailable");
+        }
+        await syncPause.setPaused(!input.enabled);
+        writeJson(response, 200, {
+          apiVersion: 1,
+          paused: syncPause.isPaused(),
+        });
+        return;
+      }
       if (method !== "POST") throw new MailHttpError(405, "method_not_allowed");
+      // A trigger while paused is refused rather than queued: a sync the
+      // owner switched off must not arrive the moment they switch it on.
+      if (syncPause?.isPaused()) throw new MailHttpError(409, "sync_paused");
       const service = requireMessageService(messages);
       const input = validateMailSyncInput(await readJsonBody(request, deadlineAt));
       writeJson(
@@ -816,6 +846,9 @@ async function handleRequest(
 
     if (url.pathname === "/v1/send") {
       if (method !== "POST") throw new MailHttpError(405, "method_not_allowed");
+      // Off means nothing leaves. Refused before admission, which is also why
+      // the SMTP worker's `isReady()` going false with it is invisible here.
+      if (syncPause?.isPaused()) throw new MailHttpError(409, "sync_paused");
       const service = requireSendService(send);
       const input = validateMailSendInput(
         await readJsonBody(
@@ -1097,6 +1130,7 @@ function createHealth(
     readonly lastErrorCode: string | null;
   } | null = null,
   now = Date.now(),
+  paused = false,
 ): MailServiceHealth {
   const activeAccounts = Math.max(accountCount, usage.accounts);
   const cacheSchemaVersion = messagesConfigured ? 1 : null;
@@ -1132,15 +1166,19 @@ function createHealth(
       : lastErrorCode !== null || localSchemaVersion === null
         ? "degraded"
         : "ready";
+  /*
+    A pause outranks the rest of the sentence. It is what the owner asked for
+    rather than a verdict about either readiness, so the readinesses below are
+    left saying what they would have said anyway and only the headline moves.
+  */
+  const degraded =
+    receiveReadiness === "degraded" ||
+    sendReadiness === "degraded" ||
+    lastErrorCode !== null;
   return validateMailServiceHealth({
     apiVersion: 1,
     build,
-    status:
-      receiveReadiness === "degraded" ||
-      sendReadiness === "degraded" ||
-      lastErrorCode !== null
-        ? "degraded"
-        : "ok",
+    status: paused ? "paused" : degraded ? "degraded" : "ok",
     localSchemaVersion,
     cacheSchemaVersion,
     receiveReadiness,

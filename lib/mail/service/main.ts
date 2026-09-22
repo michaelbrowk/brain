@@ -38,6 +38,7 @@ import {
 import { SqliteMailSendStore } from "./outbound-store";
 import { MailOutboundWorker } from "./outbound-worker";
 import { readMailServiceRuntimePaths } from "./runtime-config";
+import { createMailSyncPause } from "./sync-pause";
 import { UnixSocketMailMimeParser } from "./mime-parser-client";
 import { StoredGmailAccessTokenPort } from "../providers/gmail/access-token-port";
 import { MultiAccountGmailSendAdapter } from "../providers/gmail/send-adapter";
@@ -204,6 +205,22 @@ async function main(): Promise<void> {
     process.env,
     store,
   );
+  const backgroundSync = new MailBackgroundSyncScheduler(messages, {
+    privacyCache: content,
+  });
+  kickBackgroundSync = () => backgroundSync.kick();
+  // Everything the pause turns off, in the order they are started below.
+  // "Off means nothing leaves" is why the two send-side workers are in this
+  // list beside the receive-side scheduler.
+  const syncPause = createMailSyncPause({
+    readPaused: () => store.readSyncPaused(),
+    writePaused: (paused) => store.writeSyncPaused(paused),
+    workers: [
+      outboundWorker,
+      ...(smtpRuntime ? [smtpRuntime.worker] : []),
+      { start: () => backgroundSync.start(), stop: () => backgroundSync.stop() },
+    ],
+  });
   const server = createMailServiceHttpServer({
     build,
     accounts,
@@ -212,11 +229,8 @@ async function main(): Promise<void> {
     send,
     drafts,
     content,
+    syncPause,
   });
-  const backgroundSync = new MailBackgroundSyncScheduler(messages, {
-    privacyCache: content,
-  });
-  kickBackgroundSync = () => backgroundSync.kick();
 
   await new Promise<void>((resolve, reject) => {
     server.once("error", reject);
@@ -225,9 +239,14 @@ async function main(): Promise<void> {
       resolve();
     });
   });
-  await outboundWorker.start();
-  await smtpRuntime?.worker.start();
-  backgroundSync.start();
+  // Comes up the way it went down. Without this a paused service would sync
+  // and send for one interval after every restart, and `Restart=on-failure`
+  // means a restart is not something anybody schedules.
+  if (!syncPause.isPaused()) {
+    await outboundWorker.start();
+    await smtpRuntime?.worker.start();
+    backgroundSync.start();
+  }
   writeServiceLog({ event: "mail_service_started" });
 
   let stopping = false;

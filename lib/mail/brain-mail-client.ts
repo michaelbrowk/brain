@@ -154,6 +154,7 @@ export const SAFE_SERVICE_ERROR_CODES = new Set([
   "mail_sync_in_progress",
   "mail_sync_rate_limited",
   "mail_sync_unavailable",
+  "sync_paused",
   "mail_send_request_invalid",
   "mail_send_account_not_found",
   "mail_send_account_reauth_required",

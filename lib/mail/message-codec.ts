@@ -199,6 +199,17 @@ export function validateMailSyncInput(value: unknown): {
   });
 }
 
+/** The whole body of `PATCH /v1/sync`: one boolean and nothing beside it.
+ *  Brain's module switch is the only caller, and a field it did not mean to
+ *  send is a disagreement about the contract rather than a value to ignore. */
+export function validateMailSyncEnabledInput(value: unknown): {
+  readonly enabled: boolean;
+} {
+  if (!isRecordWithExactFields(value, ["enabled"])) throw requestInvalid();
+  if (typeof value.enabled !== "boolean") throw requestInvalid();
+  return Object.freeze({ enabled: value.enabled });
+}
+
 export function validateMailThreadMutationInput(
   value: unknown,
 ): MailThreadMutationInput {

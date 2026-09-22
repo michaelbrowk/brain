@@ -94,6 +94,7 @@ REQUIRED_FILES = (
     Path("service/runtime-config.js"),
     Path("service/smtp-runtime.js"),
     Path("service/smtp-state-store.js"),
+    Path("service/sync-pause.js"),
 )
 IMAP_PROVIDER_FILES = (Path("providers/imap/sync-adapter.js"),)
 SMTP_RUNTIME_FILES = (

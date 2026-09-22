@@ -16,6 +16,7 @@ import {
 } from "./outbound";
 import { SqliteMailSendStore } from "./outbound-store";
 import { MailOutboundWorker } from "./outbound-worker";
+import { createMailSyncPause } from "./sync-pause";
 
 const ACCOUNT_ID = `account-a${"1".repeat(32)}`;
 const roots: string[] = [];
@@ -513,6 +514,95 @@ describe("durable mail outbound worker integration", () => {
 
     expect(prepared.length).toBeGreaterThan(0);
     expect(prepared.filter((sql) => sql.includes("raw_rfc2822"))).toEqual([]);
+    await store.close();
+  });
+
+  /** OFF MEANS NOTHING LEAVES, AND NOTHING IS LOST EITHER.
+   *
+   *  The owner's switch reaches this worker as `stop()` through the pause
+   *  port, and a row already in the outbox has to be exactly where it was
+   *  when the switch comes back on. Nothing here is theoretical: the
+   *  retention sweep deletes only terminal rows and only inside a pass, and
+   *  `SMTP_MAX_ATTEMPTS` counts attempts rather than wall clock, so a stopped
+   *  worker costs the row neither a deletion nor an attempt however long the
+   *  pause lasts. */
+  it("keeps a queued row through a pause and delivers it on resume", async () => {
+    const now = Date.parse("2026-07-20T00:00:00.000Z");
+    const root = await mkdtemp(path.join(tmpdir(), "brain-mail-pause-"));
+    roots.push(root);
+    const cacheRoot = path.join(root, "cache");
+    await mkdir(cacheRoot, { mode: 0o700 });
+
+    const store = new SqliteMailSendStore({ cacheRoot, now: () => now });
+    await store.initialize();
+    const queued = submission(31, {
+      nextAttemptAt: now - 1_000,
+      createdAt: now - 1_000,
+      updatedAt: now - 1_000,
+    });
+    await store.enqueue(queued);
+
+    const provider: MailSendProvider = {
+      providerKind: "gmail",
+      send: vi.fn(async (message, hooks) => {
+        await hooks.beforeDelivery();
+        const suffix = message.operationId.slice(-12);
+        return {
+          kind: "accepted",
+          providerMessageId: `gmail-message-${suffix}`,
+          providerThreadId: `gmail-thread-${suffix}`,
+        } as const;
+      }),
+    };
+    const service = new ProviderNeutralMailSendService({
+      store,
+      accounts: {
+        readSendAccount: async () => ({
+          accountId: ACCOUNT_ID,
+          providerKind: "gmail",
+          emailAddress: "me@example.com",
+          status: "connected",
+        }),
+      },
+      replies: { resolveReplyContext: async () => null },
+      providers: [provider],
+      now: () => now,
+    });
+    const worker = new MailOutboundWorker({
+      store,
+      processor: service,
+      now: () => now,
+      // Long enough that `start()` schedules rather than runs, so what makes
+      // the row move below is the resume and the pass, not a race.
+      initialDelayMs: 60_000,
+      batchSize: 10,
+    });
+
+    let storedPaused = false;
+    const pause = createMailSyncPause({
+      readPaused: () => storedPaused,
+      writePaused: (value) => {
+        storedPaused = value;
+      },
+      workers: [worker],
+    });
+
+    await worker.start();
+    await pause.setPaused(true);
+    expect(storedPaused).toBe(true);
+    expect(provider.send).not.toHaveBeenCalled();
+    await expect(
+      store.readByOperationId(queued.operationId),
+    ).resolves.toMatchObject({ status: "queued", attemptCount: 0 });
+
+    await pause.setPaused(false);
+    await worker.runNow();
+    expect(provider.send).toHaveBeenCalledTimes(1);
+    await expect(
+      store.readByOperationId(queued.operationId),
+    ).resolves.toMatchObject({ status: "sent" });
+
+    await worker.stop();
     await store.close();
   });
 });

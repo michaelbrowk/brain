@@ -370,3 +370,67 @@ describe("what a burst of the same thing folds into", () => {
     expect(folded!.row.title).toBe(title);
   });
 });
+
+describe("a row an app earned", () => {
+  const entry = {
+    at: "2026-09-22T10:00:00.000Z",
+    client: "Trainer (app)",
+    tool: "write_page",
+    page: "words1",
+    change: "markdown",
+    outcome: "ok",
+  };
+
+  it("reads as the app doing the thing, not as a grant writing a page", () => {
+    const row = agentActionNotification(entry, "Words");
+    expect(row?.title).toBe("Trainer updated Words");
+    expect(row?.href).toBe("/p/words1");
+    expect(row?.kind).toBe("agent-action");
+  });
+
+  it("names the page it made when an app creates one", () => {
+    const row = agentActionNotification({ ...entry, tool: "create_page", change: "create" }, "Session log");
+    expect(row?.title).toBe("Trainer added Session log");
+  });
+
+  it("says something sensible when the page has no title to name", () => {
+    expect(agentActionNotification(entry)?.title).toBe("Trainer updated a page");
+  });
+
+  it("folds a burst into one row with a count", () => {
+    const first = agentActionNotification(entry, "Words")!;
+    const second = { ...entry, at: "2026-09-22T10:01:00.000Z" };
+    const next = agentActionNotification(second, "Words")!;
+    const folded = agentActionFold(second, next, {
+      id: first.id,
+      first: first.at,
+      at: first.at,
+      count: 1,
+      href: first.href,
+    });
+    expect(folded?.row.title).toBe("Trainer updated 2 pages");
+  });
+
+  it("still reads normally for an ordinary grant", () => {
+    expect(agentActionNotification({ ...entry, client: "Claude" }, "Words")?.title).toBe("Claude wrote a page");
+  });
+
+  it("does not repeat the page's name under a title that already says it", () => {
+    expect(agentActionNotification(entry, "Words")?.body).toBeUndefined();
+    // a grant's row still carries one, because its title does not
+    expect(agentActionNotification({ ...entry, client: "Claude" }, "Words")?.body).toBe("Words");
+  });
+
+  it("cuts one assembled title rather than its parts", () => {
+    const long = agentActionNotification(
+      { ...entry, client: `${"T".repeat(150)} (app)` },
+      "W".repeat(150),
+    )!;
+    expect(long.title).toHaveLength(200);
+    expect(long.title.startsWith("T".repeat(150))).toBe(true);
+  });
+
+  it("carries no em-dash", () => {
+    expect(agentActionNotification(entry, "Words")?.title).not.toContain("—");
+  });
+});

@@ -173,6 +173,15 @@ archived a thread".
   reach a row at all is a subject, an address, a recipient or a message body,
   because the activity line the row comes from has no field any of them could
   enter through.
+- **A page an agent built says so in its own words.** An app page writes
+  through the bridge under its own title, and its rows read as sentences:
+  "Trainer updated Words", "Trainer added Session log". The page's name is in
+  the title rather than under it, because an app works on the small set of
+  pages its `owns` list holds, so naming one of them is useful rather than
+  arbitrary. A burst folds the way every other burst does, "Trainer updated 3
+  pages", and the name drops away with the count. What an app keeps as its own
+  state is not a row at all: nothing in your notes moves, and a line per card
+  answered would bury the writes that did.
 - **A burst is one row.** The same app doing the same thing inside five
   minutes is counted, not repeated: "Claude archived 12 threads". The row keeps
   the first action's id and takes the newest one's time, so it rises to the top

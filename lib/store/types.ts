@@ -619,13 +619,62 @@ export class AttachmentValidationError extends Error {
       | "blocked_mime"
       | "mime_mismatch"
       | "hash_mismatch"
-      | "quota_exceeded",
+      | "quota_exceeded"
+      // An app asset whose name is not one an app may hold. The routes that
+      // read this code already answer anything but `too_large` as an unsafe
+      // type, which is what a refused name is.
+      | "bad_type",
     message: string,
   ) {
     super(message);
     this.name = "AttachmentValidationError";
   }
 }
+
+/** A write whose bytes are over one of the three caps in `lib/apps/model.ts`.
+ *  Nothing was written: the size is answered before the file is opened, the
+ *  same way an attachment's is, so a caller collecting several files never
+ *  holds more than the total it allows. */
+export class AppSizeError extends Error {
+  constructor(readonly what: "entry" | "assets" | "state") {
+    super(`app ${what} is too large`);
+    this.name = "AppSizeError";
+  }
+}
+
+export function isAppSize(e: unknown): e is AppSizeError {
+  return e instanceof Error && e.name === "AppSizeError";
+}
+
+export interface AppAssetInput {
+  readonly name: string;
+  readonly data: Uint8Array;
+}
+
+export interface AppFilesInput {
+  readonly entryHtml?: string;
+  /** Replaces the asset folder whole. A rebuild that names no assets keeps
+   *  the ones already there; one that names an empty array clears them. */
+  readonly assets?: readonly AppAssetInput[];
+  readonly state?: unknown;
+}
+
+export interface CreateAppPageInput {
+  readonly icon?: string;
+  readonly description: string;
+  readonly entryHtml: string;
+  readonly assets?: readonly AppAssetInput[];
+  readonly owns?: readonly { title: string; icon?: string; markdown?: string }[];
+  readonly state?: unknown;
+  /** The client name out of the grant. */
+  readonly builtBy: string;
+  readonly reason?: string;
+  readonly src?: string;
+}
+
+export type AppFileRead =
+  | { readonly kind: "file"; readonly mimeType: string; readonly data: Uint8Array }
+  | { readonly kind: "missing" };
 
 /** Match store errors by NAME, never `instanceof`. Next bundles route handlers
  *  and RSC pages into separate module layers, each with its own copy of these

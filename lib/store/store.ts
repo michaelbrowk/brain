@@ -9,6 +9,19 @@ import { generateKeyBetween, generateNKeysBetween } from "fractional-indexing";
 import { parsePage, serializeLivePage, serializePage } from "./frontmatter";
 import { atomicWrite, hashRev, syncDirectory } from "./atomic";
 import { slugify, assertInRoot, isReservedDir } from "./paths";
+import {
+  APP_ASSETS_DIR,
+  APP_ASSETS_MAX_BYTES,
+  APP_ENTRY_MAX_BYTES,
+  APP_ENTRY_PATH,
+  APP_STAGING_DIR,
+  APP_STATE_MAX_BYTES,
+  APP_STATE_PATH,
+  appAssetMimeType,
+  appAssetPath,
+  appMetaSchema,
+  type AppMeta,
+} from "../apps/model";
 import { ensureWritableNotesRoot } from "./notes-root";
 import {
   assertRealDirectory,
@@ -107,6 +120,11 @@ import {
   type VerifiedNotionAttachment,
   type VerifyFinalizedNotionAttachmentInput,
   type VerifyNotionAttachmentInput,
+  type AppAssetInput,
+  type AppFileRead,
+  type AppFilesInput,
+  type CreateAppPageInput,
+  AppSizeError,
   AttachmentStoreUnavailableError,
   AttachmentValidationError,
   NotFoundError,
@@ -666,7 +684,19 @@ export class Store {
     // used to be one blocking readFile at a time down the whole tree
     await Promise.all(
       entries.map(async (e) => {
-        if (!e.isDirectory() || isReservedDir(e.name)) return;
+        if (!e.isDirectory()) return;
+        if (isReservedDir(e.name)) {
+          // ONE EXCEPTION, AND ONLY THIS ONE. `slugify("App")` is `app`, so a
+          // notebook written before apps existed can hold an ordinary page in
+          // the folder this release reserves. Skipping it would take that page
+          // out of the tree on upgrade with nothing said and the file still on
+          // disk. An app's own file set never holds an `index.md`, because the
+          // name rule in `lib/apps/model.ts` refuses every `.md` at every
+          // depth, so the presence of one is what tells the two apart.
+          if (e.name !== "app") return;
+          const legacyIndex = path.join(dir, e.name, "index.md");
+          if (!(await readOptionalFile(legacyIndex))) return;
+        }
         const pageDir = path.join(dir, e.name);
         const indexPath = path.join(pageDir, "index.md");
         let raw: string;
@@ -1914,6 +1944,8 @@ export class Store {
           notionId: e.meta.notionId,
           collection: e.meta.collection,
           collectionRow: e.meta.collectionRow,
+          kind: e.meta.kind,
+          app: e.meta.app,
           hasChildren: children.length > 0,
           children,
         };
@@ -3923,6 +3955,234 @@ export class Store {
       emitStore({ type: "create", id: meta.id, src: opts.src });
       return meta;
     });
+  }
+
+  /** AN APP PAGE, ITS FILES, AND THE CHILDREN IT IS ALLOWED TO WRITE.
+   *
+   *  Unwrapped on purpose (invariant 4): it delegates to `createPage` for the
+   *  page and for each owned child, and to the two leaves below for the files
+   *  and the metadata, every one of which takes the lock itself. A composite
+   *  that took the lock as well would deadlock on its own first delegate.
+   *
+   *  `owns` arrives as titles because the agent has no ids to give yet, and
+   *  leaves as ids: a title is a label somebody may change, and the write
+   *  check has to mean the same page tomorrow. */
+  async createAppPage(
+    parentId: string | null,
+    title: string,
+    input: CreateAppPageInput,
+  ): Promise<{ meta: PageMeta; owned: readonly PageMeta[] }> {
+    assertAppEntrySize(input.entryHtml);
+    assertAppAssetsSize(input.assets);
+    assertAppStateSize(input.state);
+    const meta = await this.createPage(parentId, title, {
+      icon: input.icon,
+      markdown: input.description,
+      by: "claude",
+      src: input.src,
+    });
+    const owned: PageMeta[] = [];
+    for (const child of input.owns ?? []) {
+      owned.push(
+        await this.createPage(meta.id, child.title, {
+          icon: child.icon,
+          markdown: child.markdown,
+          by: "claude",
+          src: input.src,
+        }),
+      );
+    }
+    await this.writeAppFiles(meta.id, {
+      entryHtml: input.entryHtml,
+      assets: input.assets ?? [],
+      ...(input.state === undefined ? {} : { state: input.state }),
+    });
+    const app = appMetaSchema.parse({
+      entry: APP_ENTRY_PATH,
+      version: 1,
+      builtBy: input.builtBy,
+      builtAt: now(),
+      owns: owned.map((child) => child.id),
+      state: input.state !== undefined,
+      ...(input.reason === undefined ? {} : { reason: input.reason }),
+    });
+    const withApp = await this.setAppMeta(meta.id, app, "claude", input.src);
+    return { meta: withApp, owned };
+  }
+
+  /** THE WHOLE FILE SET, OR NONE OF IT.
+   *
+   *  A rewrite would otherwise be `rm -rf app/assets` followed by one
+   *  `atomicWrite` per file. Each write is atomic and the SET is not: a
+   *  refused asset half way down, or a full disk, leaves the owner with the
+   *  old entry, some of the new assets and none of the old ones. That is an
+   *  app that loads and paints nothing, which is worse than a refusal.
+   *
+   *  So the new set is assembled in `.app-next/` beside `app/` and then
+   *  swapped in: validate everything, write everything, rename the old set
+   *  out and the new set in, delete the old. The staging directory is
+   *  dot-prefixed, which `isReservedDir` already skips, so an `init()` that
+   *  runs against a half-written set never walks it.
+   *
+   *  Files the caller does not name are carried over, not dropped: a rewrite
+   *  that changes only the entry keeps the assets the app was shipped with.
+   *  `assets: []` is how an app clears them, which is a caller saying so
+   *  rather than a caller forgetting to mention them.
+   *
+   *  The rename pair is not one atomic operation on any filesystem, so the
+   *  window between them is real. It is two renames inside the store's own
+   *  lock, with no I/O between, and a crash there leaves `.app-next/` on disk
+   *  where the next write replaces it. */
+  async writeAppFiles(id: string, files: AppFilesInput): Promise<void> {
+    assertAppEntrySize(files.entryHtml);
+    assertAppAssetsSize(files.assets);
+    assertAppStateSize(files.state);
+    // Every asset's name is checked before the first byte is written, so a
+    // set holding one bad name costs nothing and changes nothing.
+    for (const asset of files.assets ?? []) {
+      if (appAssetPath(asset.name) === null || appAssetMimeType(asset.name) === null) {
+        throw new AttachmentValidationError("bad_type", `app asset refused: ${asset.name}`);
+      }
+    }
+    return this.mutate(async () => {
+      const e = this.get(id);
+      const live = assertInRoot(this.root, path.join(e.dir, "app"));
+      const staged = assertInRoot(this.root, path.join(e.dir, APP_STAGING_DIR));
+      const retired = assertInRoot(
+        this.root,
+        path.join(e.dir, `${APP_STAGING_DIR}-old`),
+      );
+      await fs.rm(staged, { recursive: true, force: true });
+      await fs.mkdir(staged, { recursive: true });
+      try {
+        // What the caller did not name, carried over from the live set.
+        if (files.entryHtml === undefined) {
+          await copyIfPresent(path.join(live, "index.html"), path.join(staged, "index.html"));
+        } else {
+          await atomicWrite(path.join(staged, "index.html"), files.entryHtml);
+        }
+        if (files.assets === undefined) {
+          await copyDirIfPresent(path.join(live, "assets"), path.join(staged, "assets"));
+        } else {
+          for (const asset of files.assets) {
+            const relative = appAssetPath(asset.name)!.slice("app/".length);
+            await atomicWrite(
+              assertInRoot(staged, path.join(staged, relative)),
+              asset.data,
+            );
+          }
+        }
+        if (files.state === undefined) {
+          await copyIfPresent(path.join(live, "state.json"), path.join(staged, "state.json"));
+        } else {
+          await atomicWrite(path.join(staged, "state.json"), JSON.stringify(files.state));
+        }
+      } catch (error) {
+        await fs.rm(staged, { recursive: true, force: true });
+        throw error;
+      }
+      // The swap. `retired` is dot-prefixed too, so neither half of the pair
+      // is ever a folder the walk would read.
+      await fs.rm(retired, { recursive: true, force: true });
+      const hadLive = await fs.rename(live, retired).then(
+        () => true,
+        () => false,
+      );
+      await fs.rename(staged, live);
+      await syncDirectory(e.dir);
+      if (hadLive) await fs.rm(retired, { recursive: true, force: true });
+      scheduleCommit(this.root);
+      emitStore({ type: "write", id });
+    });
+  }
+
+  /** The `app` map, and only it. Separate from `updateMeta` because that
+   *  method is the owner's patch surface and an app map is never something a
+   *  person types into a field. */
+  async setAppMeta(
+    id: string,
+    app: AppMeta,
+    by?: "me" | "claude",
+    src?: string,
+  ): Promise<PageMeta> {
+    return this.mutate(async () => {
+      const e = this.get(id);
+      e.meta.kind = "app";
+      e.meta.app = appMetaSchema.parse(app);
+      e.meta.updated = now();
+      if (by) e.meta.updatedBy = by;
+      await this.persist(e);
+      scheduleCommit(this.root);
+      emitStore({ type: "meta", id, src });
+      return e.meta;
+    });
+  }
+
+  /** The app's cross-device memory. Its own leaf because the bridge writes it
+   *  far more often than anything else an app does, and it must not drag the
+   *  entry and the assets through a rewrite each time. */
+  async writeAppState(id: string, json: unknown): Promise<void> {
+    await this.writeAppFiles(id, { state: json });
+  }
+
+  readAppMeta(id: string): AppMeta | null {
+    const entry = this.index.get(id);
+    if (!entry || entry.meta.kind !== "app" || !entry.meta.app) return null;
+    return entry.meta.app;
+  }
+
+  /** One file out of an app's folder, by the path the frame asked for. A
+   *  read, so it takes no `mutate()`. The path is matched against the two
+   *  names an app may hold before it is joined, and the join goes through
+   *  `assertInRoot`, so a traversal reads as missing rather than as an error:
+   *  a caller can act on neither. */
+  async readAppFile(id: string, relativePath: string): Promise<AppFileRead> {
+    const entry = this.index.get(id);
+    if (!entry || entry.meta.kind !== "app") return { kind: "missing" };
+    let mimeType: string;
+    let relative: string;
+    if (relativePath === APP_ENTRY_PATH) {
+      relative = APP_ENTRY_PATH;
+      mimeType = "text/html; charset=utf-8";
+    } else {
+      const name = relativePath.startsWith(`${APP_ASSETS_DIR}/`)
+        ? relativePath.slice(APP_ASSETS_DIR.length + 1)
+        : null;
+      const checked = name === null ? null : appAssetPath(name);
+      const type = name === null ? null : appAssetMimeType(name);
+      if (checked === null || type === null) return { kind: "missing" };
+      relative = checked;
+      mimeType = type;
+    }
+    try {
+      const file = assertInRoot(this.root, path.join(entry.dir, relative));
+      const data = await fs.readFile(file);
+      return { kind: "file", mimeType, data: new Uint8Array(data) };
+    } catch {
+      return { kind: "missing" };
+    }
+  }
+
+  async readAppState(id: string): Promise<unknown> {
+    const entry = this.index.get(id);
+    if (!entry || entry.meta.app?.state !== true) return null;
+    try {
+      const file = assertInRoot(this.root, path.join(entry.dir, APP_STATE_PATH));
+      return JSON.parse(await fs.readFile(file, "utf8"));
+    } catch {
+      return null;
+    }
+  }
+
+  /** Whether this app may write this page. `owns` and nothing else: not the
+   *  app page itself, whose body is the agent's description, and not a
+   *  descendant that is not in the list. A page that has left the app's
+   *  subtree is refused too, so moving a page out of an app takes it away. */
+  appMayWrite(appId: string, targetId: string): boolean {
+    const app = this.readAppMeta(appId);
+    if (!app || appId === targetId) return false;
+    if (!app.owns.includes(targetId)) return false;
+    return this.isWithinSubtree(appId, targetId) && !this.isDeleted(targetId);
   }
 
   /** Attachments share the same one-writer queue and atomic write primitive as
@@ -8168,6 +8428,47 @@ async function readOptionalFile(file: string): Promise<string | null> {
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;
+  }
+}
+
+/** Carry one file over into the staged set. A file that is not there is not
+ *  an error: an app that has never written state has no `state.json`, and a
+ *  rewrite that does not mention state must leave it that way. */
+async function copyIfPresent(from: string, to: string): Promise<void> {
+  const data = await fs.readFile(from).catch(() => null);
+  if (data === null) return;
+  await atomicWrite(to, new Uint8Array(data));
+}
+
+async function copyDirIfPresent(from: string, to: string): Promise<void> {
+  const entries = await fs.readdir(from, { withFileTypes: true }).catch(() => null);
+  if (entries === null) return;
+  await fs.mkdir(to, { recursive: true });
+  for (const entry of entries) {
+    const source = path.join(from, entry.name);
+    const target = path.join(to, entry.name);
+    if (entry.isDirectory()) await copyDirIfPresent(source, target);
+    else await copyIfPresent(source, target);
+  }
+}
+
+function assertAppEntrySize(html: string | undefined): void {
+  if (html === undefined) return;
+  if (Buffer.byteLength(html, "utf8") > APP_ENTRY_MAX_BYTES) {
+    throw new AppSizeError("entry");
+  }
+}
+
+function assertAppAssetsSize(assets: readonly AppAssetInput[] | undefined): void {
+  if (assets === undefined) return;
+  const total = assets.reduce((sum, asset) => sum + asset.data.byteLength, 0);
+  if (total > APP_ASSETS_MAX_BYTES) throw new AppSizeError("assets");
+}
+
+function assertAppStateSize(state: unknown): void {
+  if (state === undefined) return;
+  if (Buffer.byteLength(JSON.stringify(state) ?? "", "utf8") > APP_STATE_MAX_BYTES) {
+    throw new AppSizeError("state");
   }
 }
 

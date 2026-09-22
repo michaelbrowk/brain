@@ -118,6 +118,39 @@ describe("the /share surface", () => {
   });
 });
 
+describe("an app's own files", () => {
+  it("serves an app's files framable, and leaves the policy to the route", async () => {
+    const headers = await nextConfig.headers!();
+    const block = headers.find((rule) => rule.source === "/api/app/:path*");
+    expect(block).toBeDefined();
+    const by = Object.fromEntries(block!.headers.map((h) => [h.key, h.value]));
+
+    // No CSP here. A block in this file can only carry a static string, and the
+    // frame's policy names the request's own origin and the app's own id, so
+    // the route handler sets it. A static one here would replace that.
+    expect(by["Content-Security-Policy"]).toBeUndefined();
+    // The catch-all's DENY would make the frame unloadable inside its own app;
+    // the route's frame-ancestors is what replaces it.
+    expect(by["X-Frame-Options"]).toBeUndefined();
+    expect(by["X-Content-Type-Options"]).toBe("nosniff");
+    // The same value the catch-all sets. A stricter one here would be a second
+    // referrer rule to keep in step with the first for no gain: these responses
+    // are same-origin subresources of a page that already sets it.
+    expect(by["Referrer-Policy"]).toBe("strict-origin-when-cross-origin");
+    expect(by["Cache-Control"]).toBe("private, no-store");
+    expect(by["Strict-Transport-Security"]).toBe(
+      "max-age=31536000; includeSubDomains",
+    );
+  });
+
+  it("keeps the app block after the catch-all so it wins", async () => {
+    const headers = await nextConfig.headers!();
+    const catchAll = headers.findIndex((rule) => rule.source === "/:path*");
+    const app = headers.findIndex((rule) => rule.source === "/api/app/:path*");
+    expect(app).toBeGreaterThan(catchAll);
+  });
+});
+
 describe("the service worker's headers", () => {
   it("serves /sw.js with Service-Worker-Allowed: / and no cache", async () => {
     const rules = await nextConfig.headers?.();

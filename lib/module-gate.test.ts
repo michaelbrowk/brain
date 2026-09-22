@@ -40,9 +40,35 @@ describe("the module API gate", () => {
   it("claims every route file under /api/mail", async () => {
     const root = path.join(import.meta.dirname, "..", "app", "api", "mail");
     const urls = await routeUrls(root, "/api/mail");
-    // Every one of them, the proxy routes for attachments, remote images and
-    // sender icons included: a picture fetched out of a mailbox is mail.
-    expect(urls.length).toBeGreaterThanOrEqual(20);
+    // Pinned exactly, the way the tasks sweep above is. A prefix that claims
+    // every file that happens to exist is a weaker promise than one held
+    // against the list, which also notices a route quietly deleted. The three
+    // proxies for attachments, remote images and sender icons are in it on
+    // purpose: a picture fetched out of a mailbox is mail.
+    expect(urls).toEqual([
+      "/api/mail/account",
+      "/api/mail/accounts",
+      "/api/mail/accounts/capabilities",
+      "/api/mail/accounts/x",
+      "/api/mail/agent-marks",
+      "/api/mail/attachments/x",
+      "/api/mail/drafts",
+      "/api/mail/drafts/x",
+      "/api/mail/drafts/x/send",
+      "/api/mail/mailboxes/x/threads",
+      "/api/mail/mailboxes/x/threads/x",
+      "/api/mail/message-content/x",
+      "/api/mail/oauth/google/callback",
+      "/api/mail/oauth/google/start",
+      "/api/mail/remote-images/x",
+      "/api/mail/search",
+      "/api/mail/send",
+      "/api/mail/send/x",
+      "/api/mail/sender-icon/x",
+      "/api/mail/sync",
+      "/api/mail/threads",
+      "/api/mail/threads/x",
+    ]);
     for (const url of urls) expect(moduleOfApiPath(url), url).toBe("mail");
   });
 

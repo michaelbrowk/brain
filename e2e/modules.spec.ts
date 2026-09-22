@@ -120,7 +120,9 @@ test("@release turning Mail off takes its surfaces and its routes away", async (
     const refused = await browserJson(page, "/api/mail/accounts");
     expect(refused.status).toBe(409);
     expect(refused.body).toEqual({ error: "module_off", module: "mail" });
-    // A proxy route for a picture out of a mailbox is a mail route too.
+    // A second route, so the gate reads as a prefix rather than one lucky
+    // path. Every file under it, the three picture proxies included, is
+    // pinned by the directory sweep in `lib/module-gate.test.ts`.
     expect((await browserJson(page, "/api/mail/threads")).status).toBe(409);
 
     // A deep link lands on Home rather than on an empty Mail, server-side and

@@ -109,6 +109,32 @@ describe("register", () => {
     );
   });
 
+  /** A rejection here has no other handler. `tellMailServiceAboutModules`
+   *  answers `false` rather than throwing, so this arm exists for the day
+   *  that stops being true: without it Node's default would take the web
+   *  process down over one wrong environment variable. */
+  it("warns rather than crashing boot when the call rejects", async () => {
+    vi.stubEnv("NODE_ENV", "production");
+    mocks.tellMail.mockRejectedValueOnce(new Error("mail_service_unavailable"));
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      await register();
+      await new Promise((resolve) => setImmediate(resolve));
+      await new Promise((resolve) => setImmediate(resolve));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    expect(unhandled).toEqual([]);
+    expect(warn).toHaveBeenCalledOnce();
+    expect(warn.mock.calls[0]!.join(" ")).toContain(
+      "did not answer the module switch",
+    );
+  });
+
   it("says nothing when the service took the switch", async () => {
     vi.stubEnv("NODE_ENV", "production");
     const warn = vi.spyOn(console, "warn").mockImplementation(() => undefined);

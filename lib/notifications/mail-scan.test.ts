@@ -14,20 +14,28 @@ import { readMailWatermarks } from "./watermarks";
 const service = vi.hoisted(() => ({
   accounts: [] as { accountId: string }[],
   mailboxCalls: [] as { accountId: string; mailboxId: string; limit?: number }[],
+  /** How many times a client was built. The real `createBrainMailClient`
+   *  throws on a malformed socket path, so with Mail off this has to stay at
+   *  zero: the switch must not be reachable only through a constructor that
+   *  can refuse. */
+  constructed: 0,
 }));
 
 vi.mock("@/lib/mail/brain-mail-client", () => ({
-  createBrainMailClient: () => ({
-    listAccounts: async () => ({ apiVersion: 2, accounts: service.accounts }),
-    listMailboxThreads: async (
-      accountId: string,
-      mailboxId: string,
-      options?: { limit?: number },
-    ) => {
-      service.mailboxCalls.push({ accountId, mailboxId, limit: options?.limit });
-      return { apiVersion: 1, mailboxId, items: [], nextCursor: null };
-    },
-  }),
+  createBrainMailClient: () => {
+    service.constructed += 1;
+    return {
+      listAccounts: async () => ({ apiVersion: 2, accounts: service.accounts }),
+      listMailboxThreads: async (
+        accountId: string,
+        mailboxId: string,
+        options?: { limit?: number },
+      ) => {
+        service.mailboxCalls.push({ accountId, mailboxId, limit: options?.limit });
+        return { apiVersion: 1, mailboxId, items: [], nextCursor: null };
+      },
+    };
+  },
 }));
 
 vi.mock("@/lib/push/send", () => ({
@@ -412,6 +420,34 @@ describe("the mail scan with the module off", () => {
     expect(accounts).not.toHaveBeenCalled();
     expect(h.mailboxCalls).toEqual([]);
     expect(await listNotifications(dir)).toEqual([]);
+  });
+
+  /** AND NO CLIENT IS EVEN BUILT. The real `createBrainMailClient` throws on
+   *  a malformed `BRAIN_MAIL_SOCKET_PATH`, and this runs on the reminder
+   *  timer's every second tick, so a switch answerable only after the port is
+   *  resolved would be a warning a minute over a module nobody asked to use.
+   *  Only `dir` and `modules` are brought, so the port would otherwise be the
+   *  real one. */
+  it("builds no mail client while Mail is off", async () => {
+    service.constructed = 0;
+    expect(
+      await runMailScan({
+        dir,
+        modules: async () => ({ mail: false, tasks: true }),
+      }),
+    ).toEqual({ produced: 0 });
+    expect(service.constructed).toBe(0);
+
+    // And the same call with the switch on does build one, so the assertion
+    // above is about the switch rather than about the fixture.
+    expect(
+      await runMailScan({
+        dir,
+        push: async () => undefined,
+        modules: async () => ({ mail: true, tasks: true }),
+      }),
+    ).toEqual({ produced: 0 });
+    expect(service.constructed).toBe(1);
   });
 
   it("leaves a row the centre already holds alone", async () => {

@@ -317,8 +317,9 @@ deliberate, because Brain sends the switch again at every startup, so a wrong
 `false` costs seconds of syncing while a wrong `true` is a mail client stuck
 off with nothing in the interface to explain it.
 
-Brain says it twice, from [`lib/mail/module-sync.ts`](../lib/mail/module-sync.ts):
-when the owner flips the switch, and once at startup from `instrumentation.ts`,
+Brain says the Mail switch to the service twice, from
+[`lib/mail/module-sync.ts`](../lib/mail/module-sync.ts):
+when the owner flips it, and once at startup from `instrumentation.ts`,
 not awaited, so a socket that does not answer never holds the web process at
 the door. The second call is the repair rather than belt and braces, because
 the service restarts on its own and a portable restore can land a settings file

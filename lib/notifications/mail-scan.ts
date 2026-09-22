@@ -56,12 +56,20 @@ const PORT_MEMBERS = [
   "modules",
 ] as const;
 
+/** The switch, answerable without building anything. `createBrainMailClient`
+ *  throws on a malformed `BRAIN_MAIL_SOCKET_PATH`, so a module the owner
+ *  turned off must not be reached through a constructor that can refuse. Same
+ *  function the port carries, so the two cannot drift. */
+async function defaultModules(): Promise<ModuleSwitches> {
+  const { readModules } = await import("@/lib/owner-settings");
+  return readModules();
+}
+
 function defaultPort(dir: string): Promise<MailScanPort> {
   return Promise.all([
     import("@/lib/mail/brain-mail-client"),
     import("@/lib/push/send"),
-    import("@/lib/owner-settings"),
-  ]).then(([{ createBrainMailClient }, { sendPush }, { readModules }]) => {
+  ]).then(([{ createBrainMailClient }, { sendPush }]) => {
     const client = createBrainMailClient();
     return {
       dir,
@@ -73,7 +81,7 @@ function defaultPort(dir: string): Promise<MailScanPort> {
       push: async (payload) => {
         await sendPush("mail-new", payload);
       },
-      modules: () => readModules(),
+      modules: defaultModules,
     };
   });
 }
@@ -105,11 +113,19 @@ function reason(cause: unknown): string {
 export async function runMailScan(
   overrides: Partial<MailScanPort> = {},
 ): Promise<{ produced: number }> {
-  const port = await resolvePort(overrides);
   // Mail off: no inbox is polled and no `mail-new` row is produced. Rows
   // already in the centre stay and read normally, which is why nothing here
   // removes one.
-  if (!(await port.modules()).mail) return { produced: 0 };
+  //
+  // Answered BEFORE the port is resolved, because resolving it builds a mail
+  // client and `createBrainMailClient` throws on a malformed socket path. A
+  // module the owner switched off must not depend on the path to a service it
+  // is not going to call, and this runs on the reminder timer's every second
+  // tick, where a throw would be a warning a minute forever.
+  if (!(await (overrides.modules ?? defaultModules)()).mail) {
+    return { produced: 0 };
+  }
+  const port = await resolvePort(overrides);
 
   let accounts: readonly { readonly accountId: string }[];
   try {

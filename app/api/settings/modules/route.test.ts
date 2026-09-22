@@ -193,4 +193,62 @@ describe("PUT /api/settings/modules and the mail service", () => {
     await putWith(told, { mail: false });
     expect(told).not.toHaveBeenCalled();
   });
+
+  // `changed` is true when EITHER switch moved, so this body would PATCH off
+  // the tasks half alone if the condition read that flag instead of comparing
+  // the mail switch before against after.
+  it("does not ask the service when only Tasks moved inside a two-key body", async () => {
+    await setModules({ mail: false }, dir);
+    const told = vi.fn(async () => true);
+    await putWith(told, { mail: false, tasks: false });
+    expect(told).not.toHaveBeenCalled();
+  });
+});
+
+/** THE VALUE ON THE WIRE, not just the fact of a call.
+ *
+ *  The route hands the pair it wrote to `tellMailServiceAboutModules`, and
+ *  this is the only place that is checked end to end: the real module-sync
+ *  runs, and it is the mail client underneath that is replaced. Without it,
+ *  a version that read the file before the write instead of after would pass
+ *  every other case in this file and leave the service syncing with Mail off.
+ */
+describe("PUT /api/settings/modules and the value the socket is handed", () => {
+  afterEach(() => {
+    vi.resetModules();
+    vi.doUnmock("@/lib/mail/brain-mail-client");
+  });
+
+  async function putThroughTheRealSync(body: unknown) {
+    const setSyncEnabled = vi.fn(async () => ({ paused: true }));
+    vi.resetModules();
+    // The module under test stays real; the socket underneath it does not.
+    vi.doUnmock("@/lib/mail/module-sync");
+    vi.doMock("@/lib/mail/brain-mail-client", () => ({
+      createBrainMailClient: () => ({ setSyncEnabled }),
+    }));
+    const { PUT: handler } = await import("./route");
+    const response = await handler(
+      new NextRequest("https://brain.test/api/settings/modules", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }),
+    );
+    return { response, setSyncEnabled };
+  }
+
+  it("sends the service the switch the PUT just wrote, both ways", async () => {
+    const off = await putThroughTheRealSync({ mail: false });
+    expect(off.response.status).toBe(200);
+    expect(await off.response.json()).toEqual({ mail: false, tasks: true });
+    expect(off.setSyncEnabled).toHaveBeenCalledTimes(1);
+    expect(off.setSyncEnabled).toHaveBeenCalledWith(false);
+    expect(await readModules(dir)).toEqual({ mail: false, tasks: true });
+
+    const on = await putThroughTheRealSync({ mail: true });
+    expect(await on.response.json()).toEqual({ mail: true, tasks: true });
+    expect(on.setSyncEnabled).toHaveBeenCalledWith(true);
+    expect(await readModules(dir)).toEqual({ mail: true, tasks: true });
+  });
 });

@@ -89,6 +89,22 @@ describe("a page whose app map does not validate", () => {
       expect(reopened.getTree()[0].kind).toBe("app");
     });
 
+    it(`is a tree node with no app on it: ${name}`, async () => {
+      // The tree is the projection the whole client reads, and it used to
+      // hand `meta.app` straight out, typed as `AppMeta`. `validAppMeta`
+      // guarded the store's own readers and not this one, so a map off
+      // somebody's disk reached React as a shape it is not. The node keeps
+      // its `kind`, because the page IS an app page: what it does not keep is
+      // a map nothing can use.
+      await seedPage("broken-app", app);
+      const reopened = new Store(root);
+      await reopened.init();
+
+      const node = reopened.getTree()[0];
+      expect(node.kind).toBe("app");
+      expect(node.app).toBeUndefined();
+    });
+
     it(`keeps the map on disk byte for byte: ${name}`, async () => {
       await seedPage("broken-app", app);
       const reopened = new Store(root);

@@ -1962,7 +1962,13 @@ export class Store {
           collection: e.meta.collection,
           collectionRow: e.meta.collectionRow,
           kind: e.meta.kind,
-          app: e.meta.app,
+          // Through the same validation every other app-aware reader uses.
+          // `TreeNode.app` is typed `AppMeta` and this projection is what the
+          // whole client reads, so a map off somebody's disk handed on here
+          // is a shape React is told it can trust and cannot. The node keeps
+          // its `kind`: the page is an app page with no usable app, which is
+          // what the canvas has to draw.
+          app: validAppMeta(e.meta.app) ?? undefined,
           hasChildren: children.length > 0,
           children,
         };

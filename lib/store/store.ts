@@ -2535,7 +2535,12 @@ export class Store {
           input.parentId,
           beforeIsCurrent ? desiredBeforeId : null,
         );
-        const dir = await uniqueDir(parentDir, slugify(title));
+        const slug = slugify(title);
+        const dir = await uniqueDir(
+          parentDir,
+          slug,
+          this.appReservesChildDir(input.parentId ?? null, slug),
+        );
         const started = now();
         const token = reservationToken;
         if (
@@ -3945,7 +3950,12 @@ export class Store {
         ...referencedAttachmentNames(opts.markdown || ""),
       ]);
       const parentDir = parentId ? this.get(parentId).dir : this.root;
-      const dir = await uniqueDir(parentDir, slugify(title));
+      const slug = slugify(title);
+      const dir = await uniqueDir(
+        parentDir,
+        slug,
+        this.appReservesChildDir(parentId, slug),
+      );
       const last = this.siblings(parentId).at(-1);
       const meta: PageMeta = {
         id: opts.id ?? nanoid(),
@@ -3973,6 +3983,28 @@ export class Store {
       emitStore({ type: "create", id: meta.id, src: opts.src });
       return meta;
     });
+  }
+
+  /** WHOSE NAME `app` IS, ASKED BEFORE A FOLDER IS PICKED.
+   *
+   *  `slugify("App")` is `app`, and under an app page that is the name of the
+   *  app's OWN file set: `isReservedDir` skips it, so a page that landed
+   *  there would be gone from the tree on the next reopen, and
+   *  `writeAppFiles` renames it out of the way on every write, so the rewrite
+   *  after that would carry it and its whole subtree off. The second such
+   *  child was always safe, because the app's `app/` folder was already on
+   *  disk and `uniqueDir` stepped past it. This makes the FIRST one safe too,
+   *  and makes it safe before the folder exists, which is the window a
+   *  portable restore and `createAppPage` both open.
+   *
+   *  `kind` is the reading, not the folder: a page says it is an app before
+   *  it writes a byte, and an app whose map this release cannot validate
+   *  still owns its own `app/`. Ordinary pages are untouched, so a notebook
+   *  that has a page called "App" under a plain parent keeps it exactly
+   *  where it is. */
+  private appReservesChildDir(parentId: string | null, base: string): boolean {
+    if (base !== "app" || parentId === null) return false;
+    return this.index.get(parentId)?.meta.kind === "app";
   }
 
   /** AN APP PAGE, ITS FILES, AND THE CHILDREN IT IS ALLOWED TO WRITE.
@@ -4023,6 +4055,30 @@ export class Store {
       by: "claude",
       src: input.src,
     });
+    const app = appMetaSchema.parse({
+      entry: APP_ENTRY_PATH,
+      version: 1,
+      builtBy: input.builtBy,
+      builtAt: now(),
+      owns: [],
+      state: input.state !== undefined,
+      ...(input.reason === undefined ? {} : { reason: input.reason }),
+    });
+    // THE METADATA BEFORE THE CHILDREN, and before the files.
+    //
+    // Before the children because `slugify("App")` is `app`: an owned page
+    // with that title would take the folder this app's own file set is about
+    // to use, and the write that followed refused the whole create with the
+    // page and the child already on disk. `appReservesChildDir` reads `kind`,
+    // so saying what this page is here is what sends the child to `app-2`.
+    //
+    // Before the files because `writeAppFiles` refuses a page that is not an
+    // app, which is what keeps it from renaming a child page's folder out of
+    // the tree. It also means a create that dies between the two leaves a
+    // page with `kind: app` and no entry, which the canvas draws as the
+    // missing-files state, rather than a page with an app's files and no sign
+    // that it has them.
+    await this.setAppMeta(meta.id, app, "claude", input.src);
     const owned: PageMeta[] = [];
     for (const child of input.owns ?? []) {
       owned.push(
@@ -4034,23 +4090,15 @@ export class Store {
         }),
       );
     }
-    // THE METADATA BEFORE THE FILES, not after. `writeAppFiles` refuses a
-    // page that is not an app, which is what keeps it from renaming a child
-    // page's folder out of the tree, so the page has to say it is one before
-    // its first write. It also means a create that dies between the two
-    // leaves a page with `kind: app` and no entry, which the canvas draws as
-    // the missing-files state, rather than a page with an app's files and no
-    // sign that it has them.
-    const app = appMetaSchema.parse({
-      entry: APP_ENTRY_PATH,
-      version: 1,
-      builtBy: input.builtBy,
-      builtAt: now(),
-      owns: owned.map((child) => child.id),
-      state: input.state !== undefined,
-      ...(input.reason === undefined ? {} : { reason: input.reason }),
-    });
-    const withApp = await this.setAppMeta(meta.id, app, "claude", input.src);
+    // The same map again, now that `owns` has ids to name. A title is a label
+    // somebody may change and the write check has to mean the same page
+    // tomorrow, so the list only exists once the children do.
+    const withApp = await this.setAppMeta(
+      meta.id,
+      appMetaSchema.parse({ ...app, owns: owned.map((child) => child.id) }),
+      "claude",
+      input.src,
+    );
     await this.writeAppFiles(meta.id, {
       entryHtml: input.entryHtml,
       assets: input.assets ?? [],
@@ -4705,7 +4753,12 @@ export class Store {
           !this.isDeleted(entry.meta.id),
       ).length;
       if (live >= MAX_SHARE_SUBTREE_PAGES) throw new ShareSubtreeFullError();
-      const dir = await uniqueDir(parent.dir, slugify(input.title));
+      const slug = slugify(input.title);
+      const dir = await uniqueDir(
+        parent.dir,
+        slug,
+        this.appReservesChildDir(input.parentId, slug),
+      );
       const last = this.siblings(input.parentId).at(-1);
       const meta: PageMeta = {
         id: nanoid(),
@@ -5950,6 +6003,7 @@ export class Store {
     const targetDir = await availableUniqueDir(
       destinationPage ? destinationPage.dir : this.root,
       path.basename(source.dir),
+      this.appReservesChildDir(newParentId, path.basename(source.dir)),
     );
     const participantUpdated = [
       source.meta.updated,
@@ -6470,6 +6524,7 @@ export class Store {
       const destination = await availableUniqueDir(
         targetParentDir,
         path.basename(originalDir),
+        this.appReservesChildDir(targetId, path.basename(originalDir)),
       );
       const moveIntent: MoveIntent = {
         version: 1,
@@ -6643,9 +6698,14 @@ export class Store {
         ? this.get(newParentId).dir
         : this.root;
       const sourceParentDir = path.dirname(originalDir);
+      const moveBase = path.basename(originalDir);
       const dest = preparedIntent
         ? moveIntentDirectory(this.root, preparedIntent.targetDir)
-        : await uniqueDir(targetParentDir, path.basename(originalDir));
+        : await uniqueDir(
+            targetParentDir,
+            moveBase,
+            this.appReservesChildDir(newParentId, moveBase),
+          );
       if (preparedIntent) {
         if (
           preparedIntent.pageId !== id ||
@@ -8113,9 +8173,16 @@ function deslug(name: string): string {
     .replace(/^\w/, (c) => c.toUpperCase());
 }
 
-async function uniqueDir(parentDir: string, base: string): Promise<string> {
-  let name = base;
-  let n = 1;
+/** `skipBase` starts the search at `<base>-2` instead of at `base`, for the
+ *  one name a caller may not hand out even when the folder is free. See
+ *  `Store.appReservesChildDir`. */
+async function uniqueDir(
+  parentDir: string,
+  base: string,
+  skipBase = false,
+): Promise<string> {
+  let n = skipBase ? 2 : 1;
+  let name = skipBase ? `${base}-${n}` : base;
   for (;;) {
     const dir = path.join(parentDir, name);
     try {
@@ -8140,9 +8207,10 @@ async function uniqueDir(parentDir: string, base: string): Promise<string> {
 async function availableUniqueDir(
   parentDir: string,
   base: string,
+  skipBase = false,
 ): Promise<string> {
-  let name = base;
-  let n = 1;
+  let n = skipBase ? 2 : 1;
+  let name = skipBase ? `${base}-${n}` : base;
   for (;;) {
     const dir = path.join(parentDir, name);
     try {

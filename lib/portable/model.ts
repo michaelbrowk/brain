@@ -732,6 +732,29 @@ export async function applyPortableBundle(
       });
       created.set(page.sourceId, meta.id);
       if (page.parentSourceId === null) rootIds.push(meta.id);
+      // AN APP PAGE SAYS SO BEFORE ITS CHILDREN EXIST.
+      //
+      // `ordered` puts a parent before its children, and `slugify("App")` is
+      // `app`, the folder name an app's own file set uses. In the exporting
+      // notebook such a child was pushed aside because the app's folder was
+      // already on disk; here nothing holds it yet, so the child took it and
+      // the metadata write below refused the WHOLE archive. A notebook that
+      // cannot be restored from its own backup is worse than either.
+      //
+      // `owns` waits for the loop that remaps it: the ids this import mints
+      // are not known until every page is created.
+      if (page.app) {
+        await store.setAppMeta(
+          meta.id,
+          appMetaSchema.parse({
+            ...appMetaSchema.parse(page.app.meta),
+            owns: [],
+            state: page.app.statePath !== undefined,
+          }),
+          "me",
+          options.src,
+        );
+      }
     }
     const pageLinks = new Map<string, string>();
     for (const page of ordered) {
@@ -784,16 +807,17 @@ export async function applyPortableBundle(
     for (const page of ordered.filter((item) => item.app !== undefined)) {
       const id = created.get(page.sourceId)!;
       const app = page.app!;
-      // THE METADATA BEFORE THE FILES. `writeAppFiles` refuses a page that is
-      // not an app, which is what stops its rename pair carrying a child page
-      // whose folder is `app/` out of the tree. Every page in this archive
-      // was created as an ordinary page a moment ago, so the restore has to
-      // say what each app page is before it writes one byte into it.
+      // The map again, this time with `owns`. It names ids from the exporting
+      // notebook, so it is remapped onto the ids this import minted, and an
+      // id the archive did not carry is dropped: an app that may write a page
+      // it cannot see is a refusal waiting to confuse somebody. The rest of
+      // the map is what the create loop already wrote, so a restore that dies
+      // here leaves an app that runs and owns nothing rather than a page with
+      // no `kind`.
       //
-      // `owns` names ids from the exporting notebook. Remapped onto the ids
-      // this import minted, and an id the archive did not carry is dropped:
-      // an app that may write a page it cannot see is a refusal waiting to
-      // confuse somebody.
+      // Still before the files: `writeAppFiles` refuses a page that is not an
+      // app, which is what stops its rename pair carrying a child page whose
+      // folder is `app/` out of the tree.
       const source = appMetaSchema.parse(app.meta);
       await store.setAppMeta(
         id,

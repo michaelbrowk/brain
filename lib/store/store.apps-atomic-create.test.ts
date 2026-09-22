@@ -2,7 +2,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { APP_ENTRY_MAX_BYTES, APP_MAX_OWNED } from "../apps/model";
+import {
+  APP_ENTRY_MAX_BYTES,
+  APP_ENTRY_PATH,
+  APP_MAX_OWNED,
+} from "../apps/model";
 import { Store } from "./store";
 import type { CreateAppPageInput } from "./types";
 
@@ -94,5 +98,67 @@ describe("a create that is going to be refused", () => {
     expect(meta.app?.reason).toBe("build me a trainer");
     expect(owned).toHaveLength(1);
     expect(store.getTree()).toHaveLength(1);
+  });
+});
+
+/** A CHILD OF AN APP PAGE NEVER TAKES THE FOLDER NAME `app`.
+ *
+ *  `slugify("App")` is `app`, which under an app page is the name of the
+ *  app's OWN file set: the walk skips it, and `writeAppFiles` renames it out
+ *  of the way on every write. A child that took it would be invisible after a
+ *  reopen and carried off on the next rewrite, so the app's folder is spoken
+ *  for from the first child, and a child called "App" becomes `app-2`
+ *  exactly as a second one already does. */
+describe("an owned page somebody called App", () => {
+  it("is owned like any other, and leaves the app's folder alone", async () => {
+    const { meta, owned } = await store.createAppPage(null, "Trainer", {
+      ...base,
+      owns: [{ title: "App", markdown: "| word |" }],
+      assets: [{ name: "card.png", data: new Uint8Array([1]) }],
+    });
+
+    expect(owned).toHaveLength(1);
+    expect(owned[0].title).toBe("App");
+    expect(store.appMayWrite(meta.id, owned[0].id)).toBe(true);
+    expect(path.basename(store.resolve(owned[0].id))).not.toBe("app");
+
+    // The app itself runs: its entry and its asset are where they belong.
+    expect((await store.readAppFile(meta.id, APP_ENTRY_PATH)).kind).toBe("file");
+    expect((await store.readAppFile(meta.id, "app/assets/card.png")).kind).toBe(
+      "file",
+    );
+
+    // And the child is still a page after a rebuild from disk, rather than a
+    // folder the walk reads as somebody's app.
+    const reopened = new Store(root);
+    await reopened.init();
+    const tree = reopened.getTree();
+    expect(tree).toHaveLength(1);
+    expect(tree[0].children.map((node) => node.title)).toEqual(["App"]);
+    expect(reopened.readAppMeta(meta.id)?.owns).toEqual([owned[0].id]);
+  });
+
+  it("takes no app folder when it is added to an app page later", async () => {
+    const { meta } = await store.createAppPage(null, "Trainer", base);
+    const child = await store.createPage(meta.id, "App");
+    expect(path.basename(store.resolve(child.id))).not.toBe("app");
+
+    // The rewrite that follows is the one that used to carry a child away.
+    await store.writeAppFiles(meta.id, { entryHtml: `${ENTRY}<!-- v2 -->` });
+    const reopened = new Store(root);
+    await reopened.init();
+    expect(reopened.getTree()[0].children.map((node) => node.title)).toEqual([
+      "App",
+    ]);
+  });
+
+  it("takes no app folder when it is moved under an app page", async () => {
+    const { meta } = await store.createAppPage(null, "Trainer", base);
+    const child = await store.createPage(null, "App");
+    expect(path.basename(store.resolve(child.id))).toBe("app");
+
+    await store.movePage(child.id, meta.id, null);
+    expect(path.basename(store.resolve(child.id))).not.toBe("app");
+    expect((await store.readAppFile(meta.id, APP_ENTRY_PATH)).kind).toBe("file");
   });
 });

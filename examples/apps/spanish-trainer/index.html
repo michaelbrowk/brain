@@ -268,6 +268,41 @@ function applyAnswer(row, kind, today) {
   };
 }
 
+/** THE PAGE AND THE SESSION, WHEN BOTH MOVED.
+ *
+ *  A `rev_conflict` means somebody wrote the `Words` page between the app's
+ *  read and its write, and the only somebody who can is the owner with it
+ *  open in the editor beside the app. Writing the deck the app is holding
+ *  would replace what they just saved, so the fresh page is parsed and the
+ *  two are merged on one rule:
+ *
+ *  THE OWNER OWNS THE WORDS. A translation they corrected, a word they
+ *  respelled, a status they set on a row the app has not touched this
+ *  session — all theirs, because they meant it and the app did not.
+ *
+ *  THE APP OWNS THE SCHEDULE OF WHAT IT ANSWERED. A card answered a second
+ *  ago is newer than the page, and `answered` is the list of those words.
+ *
+ *  A row only one side has is kept: the owner added it, or the app found it
+ *  on a source page. Matching is case-folded, because the two sides can
+ *  disagree about a capital and still mean one word. */
+function mergeWordRows(appRows, ownerRows, answered) {
+  const mine = new Set(Array.from(answered || [], (value) => String(value).toLowerCase()));
+  const byKey = new Map();
+  for (const row of ownerRows) byKey.set(row.word.toLowerCase(), { ...row });
+  for (const row of appRows) {
+    const key = row.word.toLowerCase();
+    const theirs = byKey.get(key);
+    if (theirs === undefined) {
+      byKey.set(key, { ...row });
+      continue;
+    }
+    if (!mine.has(key)) continue;
+    byKey.set(key, { ...theirs, status: row.status, seen: row.seen, next: row.next });
+  }
+  return Array.from(byKey.values());
+}
+
 /** Every page under one parent, however deep, with one subtree left out: the
  *  trainer's own, because its `Words` page is a list of answers rather than a
  *  list of words to learn and reading it as a source would teach the owner
@@ -417,13 +452,34 @@ function descendantsOf(nodes, rootId, skipId) {
     return Array.from(byWord.values());
   }
 
-  /** ONE WRITE AT A TIME, AND ONE RETRY.
+  /** A merge answers new row objects, and the deck was holding the old ones.
+   *  Without this the cards still queued would be answered into rows nothing
+   *  reads, and a word the owner deleted while the app was open would stay in
+   *  the deck as a card that can never be saved. */
+  function relinkDeck() {
+    var byKey = new Map();
+    for (var index = 0; index < rows.length; index += 1) {
+      byKey.set(rows[index].word.toLowerCase(), rows[index]);
+    }
+    var next = [];
+    for (var card = 0; card < deck.length; card += 1) {
+      var live = byKey.get(deck[card].word.toLowerCase());
+      if (live !== undefined) next.push(live);
+    }
+    deck = next;
+  }
+
+  /** ONE WRITE AT A TIME, AND WHAT IS ON THE PAGE WHEN IT HAPPENS.
    *
-   *  The rev is read back immediately before the write, because the owner may
-   *  have the `Words` page open in the editor beside the app. A conflict is
-   *  read again once and written again; a second conflict is the owner
-   *  typing, and the right answer then is to say so rather than to keep
-   *  overwriting them. */
+   *  The page is read back immediately before every write, because the owner
+   *  may have it open in the editor beside the app, and what comes back is
+   *  MERGED rather than replaced: `mergeWordRows` keeps their words and this
+   *  session's answers, on the rule its own comment states. Writing the deck
+   *  the app is holding would throw away the correction they made a second
+   *  ago, and a conflict is the notice that they made one.
+   *
+   *  One retry. A second conflict is the owner still typing, and the right
+   *  answer then is to say so rather than to keep racing them. */
   async function saveWords() {
     if (!settings.wordsPageId) {
       note("There is no Words page for this trainer to write to.");
@@ -437,6 +493,8 @@ function descendantsOf(nodes, rootId, skipId) {
         note("Brain could not read the Words page.");
         return;
       }
+      rows = mergeWordRows(rows, parseWordsTable(current.markdown), seen);
+      relinkDeck();
       try {
         await brain.writePage(settings.wordsPageId, renderWordsTable(rows), current.rev);
         note("");

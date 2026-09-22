@@ -6,6 +6,7 @@ import {
   dueRows,
   extractVocabulary,
   isDue,
+  mergeWordRows,
   nextInterval,
   parseWordsTable,
   renderWordsTable,
@@ -285,5 +286,74 @@ describe("a Words page somebody edited by hand", () => {
     // reading it wrong writes a date into the owner's page that means nothing.
     expect(rows(["| hola | hello | new | 0 | | extra |"])).toEqual([]);
     expect(rows(["| hola | hello | new | 0 |"])).toEqual([]);
+  });
+});
+
+/** THE RETRY THAT USED TO THROW THE OWNER'S EDIT AWAY.
+ *
+ *  A `rev_conflict` means somebody wrote the page between the app's read and
+ *  its write, and the only somebody who can is the owner, in the editor, with
+ *  it open beside the app. Retrying with the deck the app is holding replaces
+ *  what they just saved. So the fresh page is read again, parsed again, and
+ *  merged: the owner owns the words, the app owns the schedule of the rows it
+ *  answered in this session, and a row only one of them has is kept. */
+describe("merging the owner's page with the app's session", () => {
+  const app = [
+    { word: "hola", translation: "hello", status: "known" as const, seen: 4, next: "2026-10-01" },
+    { word: "adios", translation: "goodbye", status: "new" as const, seen: 0, next: "" },
+    { word: "buenos", translation: "good", status: "learning" as const, seen: 1, next: "2026-09-24" },
+  ];
+  const owner = [
+    { word: "hola", translation: "hi there", status: "new" as const, seen: 0, next: "" },
+    { word: "adios", translation: "goodbye", status: "known" as const, seen: 7, next: "2027-01-01" },
+    { word: "gracias", translation: "thanks", status: "learning" as const, seen: 2, next: "2026-09-25" },
+  ];
+
+  it("keeps the owner's correction and the app's answer on the same row", () => {
+    const merged = mergeWordRows(app, owner, ["hola"]);
+    expect(merged[0]).toEqual({
+      word: "hola",
+      translation: "hi there",
+      status: "known",
+      seen: 4,
+      next: "2026-10-01",
+    });
+  });
+
+  it("leaves a row the app did not answer entirely to the owner", () => {
+    // The owner marked adios known on their phone while the app sat on it.
+    // The app's `new` is not an answer, it is the absence of one.
+    expect(mergeWordRows(app, owner, ["hola"])[1]).toEqual(owner[1]);
+  });
+
+  it("keeps a row only the owner has, and a row only the app has", () => {
+    const merged = mergeWordRows(app, owner, ["hola"]);
+    expect(merged.map((row: { word: string }) => row.word)).toEqual([
+      "hola",
+      "adios",
+      "gracias",
+      "buenos",
+    ]);
+    expect(merged[3]).toEqual(app[2]);
+  });
+
+  it("matches the two sides however either of them is capitalised", () => {
+    const merged = mergeWordRows(
+      [{ word: "Hola", translation: "hello", status: "known" as const, seen: 4, next: "2026-10-01" }],
+      [{ word: "hola", translation: "hi there", status: "new" as const, seen: 0, next: "" }],
+      ["HOLA"],
+    );
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({ translation: "hi there", status: "known", seen: 4 });
+  });
+
+  it("is the app's own table when the owner's page is empty", () => {
+    expect(mergeWordRows(app, [], ["hola"])).toEqual(app);
+  });
+
+  it("changes neither side", () => {
+    const before = JSON.stringify([app, owner]);
+    mergeWordRows(app, owner, ["hola"]);
+    expect(JSON.stringify([app, owner])).toBe(before);
   });
 });

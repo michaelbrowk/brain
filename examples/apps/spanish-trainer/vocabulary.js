@@ -215,6 +215,41 @@ export function applyAnswer(row, kind, today) {
   };
 }
 
+/** THE PAGE AND THE SESSION, WHEN BOTH MOVED.
+ *
+ *  A `rev_conflict` means somebody wrote the `Words` page between the app's
+ *  read and its write, and the only somebody who can is the owner with it
+ *  open in the editor beside the app. Writing the deck the app is holding
+ *  would replace what they just saved, so the fresh page is parsed and the
+ *  two are merged on one rule:
+ *
+ *  THE OWNER OWNS THE WORDS. A translation they corrected, a word they
+ *  respelled, a status they set on a row the app has not touched this
+ *  session — all theirs, because they meant it and the app did not.
+ *
+ *  THE APP OWNS THE SCHEDULE OF WHAT IT ANSWERED. A card answered a second
+ *  ago is newer than the page, and `answered` is the list of those words.
+ *
+ *  A row only one side has is kept: the owner added it, or the app found it
+ *  on a source page. Matching is case-folded, because the two sides can
+ *  disagree about a capital and still mean one word. */
+export function mergeWordRows(appRows, ownerRows, answered) {
+  const mine = new Set(Array.from(answered || [], (value) => String(value).toLowerCase()));
+  const byKey = new Map();
+  for (const row of ownerRows) byKey.set(row.word.toLowerCase(), { ...row });
+  for (const row of appRows) {
+    const key = row.word.toLowerCase();
+    const theirs = byKey.get(key);
+    if (theirs === undefined) {
+      byKey.set(key, { ...row });
+      continue;
+    }
+    if (!mine.has(key)) continue;
+    byKey.set(key, { ...theirs, status: row.status, seen: row.seen, next: row.next });
+  }
+  return Array.from(byKey.values());
+}
+
 /** Every page under one parent, however deep, with one subtree left out: the
  *  trainer's own, because its `Words` page is a list of answers rather than a
  *  list of words to learn and reading it as a source would teach the owner

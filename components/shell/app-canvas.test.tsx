@@ -66,6 +66,12 @@ const BUILT_ON = new Date(node.app.builtAt).toLocaleDateString(undefined, {
   day: "numeric",
 });
 
+/** One page, so a read driven through the bridge has something to answer
+ *  with. The other cases never ask, and the shape is the shell's own. */
+const LIVE_TREE = [
+  { id: "p1", parentId: null, title: "Words", hasChildren: false, children: [] },
+];
+
 let host: HTMLDivElement | null = null;
 let root: Root | null = null;
 
@@ -87,7 +93,7 @@ function render(onToast: (text: string) => void = () => {}) {
     root!.render(
       <AppCanvas
         node={node as never}
-        liveTree={() => []}
+        liveTree={() => LIVE_TREE as never}
         onOpenPage={() => {}}
         onToast={onToast}
       />,
@@ -215,6 +221,37 @@ describe("the app canvas", () => {
   it("keeps the phone's tab bar reserve under the frame", async () => {
     const shell = (await renderReady()).querySelector("[data-app-canvas]") as HTMLElement;
     expect(shell.className).toContain("brain-app-canvas");
+  });
+
+  it("answers a read the frame asks for", async () => {
+    const frame = (await renderReady()).querySelector("iframe") as HTMLIFrameElement;
+    const posted: unknown[] = [];
+    // The bridge reads `contentWindow` when it posts, so a double installed
+    // after mount is the one it answers into, and the one a message has to
+    // name as its source to be heard at all.
+    Object.defineProperty(frame, "contentWindow", {
+      configurable: true,
+      value: { postMessage: (message: unknown) => posted.push(message) },
+    });
+
+    await act(async () => {
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          data: { v: 1, rid: "r1", type: "read.tree" },
+          source: frame.contentWindow as Window,
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(posted).toEqual([
+      {
+        v: 1,
+        rid: "r1",
+        ok: true,
+        data: { tree: [{ id: "p1", parentId: null, title: "Words" }] },
+      },
+    ]);
   });
 
   it("draws a page whose app map the tree withheld, without inventing one", async () => {

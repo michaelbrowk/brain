@@ -122,22 +122,46 @@ const nextConfig: NextConfig = {
     ];
   },
   // security headers on every response. CSP is deliberately narrow —
-  // frame-ancestors/object-src/base-uri only — a full script-src policy would
-  // need per-request nonces for Next's inline hydration and Milkdown's inline
-  // styles. Clickjacking + base-tag hijack are covered. Active SVG uploads are
-  // rejected; hypothetical legacy SVG files are served as octet-stream
-  // downloads with nosniff instead of relying on a route-specific CSP.
+  // frame-ancestors/object-src/base-uri/frame-src only — a full script-src
+  // policy would need per-request nonces for Next's inline hydration and
+  // Milkdown's inline styles. Clickjacking + base-tag hijack are covered.
+  // Active SVG uploads are rejected; hypothetical legacy SVG files are served
+  // as octet-stream downloads with nosniff instead of relying on a
+  // route-specific CSP.
+  //
+  // RULES ACCUMULATE, THEY DO NOT REPLACE. Next matches every rule below whose
+  // source matches the path and writes each header into one object, last value
+  // winning per key, and nothing downstream can remove a key a rule set: a
+  // route handler's own header is appended only where the key is absent. So a
+  // later block that omits a header does not drop it, and the only way to keep
+  // a header off a path is for no matching rule to set it.
+  //
+  // That is why this source names a negative lookahead rather than `/:path*`.
+  // An app's frame is served from `/api/app/`, and X-Frame-Options: DENY makes
+  // that document unloadable in a frame while this CSP's frame-ancestors
+  // 'none' would be enforced alongside the route's own policy as the
+  // intersection of the two. Both would be invisible: a CSP violation inside
+  // an opaque-origin frame is reported to nobody. Everything else, `/api/app`
+  // with no file after it included, still gets the global set.
+  //
+  // frame-src 'self' is here for the frame this exempts: connect-src governs
+  // fetch and not navigation, and a nested context's navigation is governed by
+  // its PARENT's policy, which is this one. Without it an app could put
+  // anything the bridge hands it into its own address bar and navigate to
+  // another origin. The mail reader's message frame is a `srcdoc`, which
+  // renders without a navigation request and so is not governed by frame-src.
   async headers() {
     return [
       {
-        source: "/:path*",
+        source: "/((?!api/app/).*)",
         headers: [
           { key: "X-Frame-Options", value: "DENY" },
           { key: "X-Content-Type-Options", value: "nosniff" },
           { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
           {
             key: "Content-Security-Policy",
-            value: "frame-ancestors 'none'; object-src 'none'; base-uri 'self'",
+            value:
+              "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; frame-src 'self'",
           },
           {
             key: "Strict-Transport-Security",
@@ -145,12 +169,14 @@ const nextConfig: NextConfig = {
           },
         ],
       },
-      // The push service worker. A route block REPLACES the catch-all rather
-      // than merging with it (the three mail overrides below are the proof),
-      // so this restates four of the five global headers and adds two of its
-      // own. The fifth, the CSP, is deliberately dropped: frame-ancestors,
-      // object-src and base-uri govern a document and say nothing about a
-      // script response, and X-Frame-Options: DENY is restated here anyway.
+      // The push service worker. This block adds to the catch-all rather than
+      // replacing it, so the four global headers it restates are restatements
+      // of the same values and the two below are what it adds. The CSP is NOT
+      // dropped by being left out — the catch-all above still sets it on this
+      // path, and nothing here could remove it. It is left out because
+      // repeating it would be a second place to keep in step with the first:
+      // frame-ancestors, object-src and base-uri govern a document and say
+      // nothing about a script response.
       //
       // THE CONTENT TYPE IS NOT SET HERE. `public/sw.js` is served by Next's
       // own static route, which types a `.js` file
@@ -218,10 +244,11 @@ const nextConfig: NextConfig = {
           },
         ],
       },
-      // A route block REPLACES the catch-all rather than merging with it — the
-      // three mail overrides above are the proof — so this restates the global
-      // directives and then narrows. connect-src 'self' is the one that matters
-      // here: the editor island may talk to this origin and to nothing else.
+      // This block comes after the catch-all, so for a key both set its value
+      // is the one that stands — which is how this CSP replaces the global one
+      // on a share page. It restates the global directives and then narrows.
+      // connect-src 'self' is the one that matters here: the editor island may
+      // talk to this origin and to nothing else.
       //
       // img-src and media-src matter for the same reason once a link visitor
       // authors the body: without them a remote <img>, <video> or <audio> in
@@ -252,6 +279,25 @@ const nextConfig: NextConfig = {
               "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; connect-src 'self'; form-action 'none'; frame-src 'none'; img-src 'self' data:; media-src 'self'",
           },
           { key: "X-Robots-Tag", value: "noindex, nofollow" },
+          { key: "Cache-Control", value: "private, no-store" },
+        ],
+      },
+      // An app's own files. These are the paths the catch-all's lookahead
+      // exempts, so this is the only rule that names them and the four headers
+      // below are the whole set the response carries out of this file. Two
+      // headers are deliberately absent and could not be removed here if they
+      // were not: X-Frame-Options, because DENY makes an app unloadable inside
+      // the page that IS the app, and the CSP, because only the route handler
+      // can build one that names the public origin and this app's id.
+      {
+        source: "/api/app/:path*",
+        headers: [
+          { key: "X-Content-Type-Options", value: "nosniff" },
+          { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+          {
+            key: "Strict-Transport-Security",
+            value: "max-age=31536000; includeSubDomains",
+          },
           { key: "Cache-Control", value: "private, no-store" },
         ],
       },

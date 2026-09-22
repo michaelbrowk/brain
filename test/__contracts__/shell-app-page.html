@@ -1,0 +1,440 @@
+<div>
+<div class="brain-shell flex h-dvh overflow-hidden">
+<div aria-hidden="true" class="brain-bg brain-bg-auto ">
+<i>
+</i>
+<i>
+</i>
+</div>
+<aside class="brain-sidebar mat-thick">
+<div class="brain-sidebar-head">
+<button type="button" class="brain-wordmark brain-touch-min focus-inset" aria-label="Home">
+<img alt="" class="size-[18px] rounded-[4px] object-cover" src="/logo-small.png">
+<span class="text-h3">Brain</span>
+</button>
+<div class="flex items-center gap-3">
+<button data-size="34" class="brain-touch-min icon-btn focus-inset relative" aria-label="Notifications" type="button" id="radix-_r_id_" aria-haspopup="menu" aria-expanded="false" data-state="closed">
+<span aria-hidden="true" data-bell-glyph="" class="flex">
+<svg width="17" height="17" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<path d="M18.75 9.71v-.705C18.75 5.136 15.726 2 12 2S5.25 5.136 5.25 9.005v.705a4.4 4.4 0 0 1-.692 2.375L3.45 13.81c-1.011 1.575-.239 3.716 1.52 4.214a25.8 25.8 0 0 0 14.06 0c1.759-.498 2.531-2.639 1.52-4.213l-1.108-1.725a4.4 4.4 0 0 1-.693-2.375Z">
+</path>
+<path stroke-linecap="round" d="M7.5 19c.655 1.748 2.422 3 4.5 3s3.845-1.252 4.5-3">
+</path>
+</g>
+</svg>
+</span>
+</button>
+<button class="brain-touch-min btn btn-accent " aria-label="New" title="New" type="button" id="radix-_r_id_" aria-haspopup="menu" aria-expanded="false" data-state="closed">
+<svg width="17" height="17" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5">
+<path d="M4 12L20 12">
+</path>
+<path d="M12.0204 4L12.0205 20.0003">
+</path>
+</g>
+</svg>
+</button>
+</div>
+</div>
+<button type="button" data-search-trigger="desktop" class="field field-glass search-capsule brain-sidebar-search focus-inset">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<circle cx="11.5" cy="11.5" r="9.5">
+</circle>
+<path stroke-linecap="round" d="M18.5 18.5L22 22">
+</path>
+</g>
+</svg>
+<span>Search</span>
+<kbd class="kbd ">
+<span class="kbd-mac">⌘K</span>
+<span class="kbd-pc">Ctrl+K</span>
+</kbd>
+</button>
+<button type="button" class="tree-row focus-inset">
+<span class="tree-row-glyph" aria-hidden="true">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<circle cx="12" cy="12" r="6">
+</circle>
+<path stroke-linecap="round" d="M12 2v1m0 18v1m10-10h-1M3 12H2m17.07-7.07l-.392.393M5.322 18.678l-.393.393m14.141-.001l-.392-.393M5.322 5.322l-.393-.393">
+</path>
+</g>
+</svg>
+</span>
+<span class="tree-row-title">Journal</span>
+</button>
+<button type="button" class="tree-row focus-inset">
+<span class="tree-row-glyph" aria-hidden="true">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<path d="M2 12c0-3.771 0-5.657 1.172-6.828S6.229 4 10 4h4c3.771 0 5.657 0 6.828 1.172S22 8.229 22 12s0 5.657-1.172 6.828S17.771 20 14 20h-4c-3.771 0-5.657 0-6.828-1.172S2 15.771 2 12Z">
+</path>
+<path stroke-linecap="round" d="m6 8l2.159 1.8c1.837 1.53 2.755 2.295 3.841 2.295s2.005-.765 3.841-2.296L18 8">
+</path>
+</g>
+</svg>
+</span>
+<span class="tree-row-title">Mail</span>
+</button>
+<button type="button" class="tree-row focus-inset">
+<span class="tree-row-glyph" aria-hidden="true">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5">
+<path stroke-linejoin="round" d="M2 5.5L3.214 7L7.5 3M2 12.5L3.214 14L7.5 10M2 19.5L3.214 21L7.5 17">
+</path>
+<path d="M22 19H12m10-7H12m10-7H12">
+</path>
+</g>
+</svg>
+</span>
+<span class="tree-row-title">Tasks</span>
+</button>
+<nav class="brain-sidebar-tree edge-fade overflow-y-auto">
+<div aria-hidden="true" class="-mb-px h-px w-full shrink-0">
+</div>
+<div>
+<p class="brain-sidebar-label text-label">Pinned</p>
+<div class="brain-sidebar-pinned">
+<button type="button" class="chip tint-hover focus-inset ">
+<span class="chip-glyph" aria-hidden="true">📘</span>
+<span class="truncate">Work</span>
+</button>
+</div>
+</div>
+<p class="brain-sidebar-label text-label">Pages</p>
+<div style="overflow: visible;">
+<div class="tree-row focus-inset touch-manipulation" style="padding-left: 10px;" data-tree-page-id="work" role="button" tabindex="0" aria-disabled="false" aria-roledescription="sortable" aria-describedby="brain-page-tree" data-state="closed">
+<button type="button" class="tree-row-toggle focus-inset" aria-label="Expand" aria-expanded="false" tabindex="0">
+<svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
+<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="m9 5l6 7l-6 7">
+</path>
+</svg>
+</button>
+<span class="tree-row-glyph" aria-hidden="true">📘</span>
+<span class="tree-row-title">Work</span>
+<span class="tree-row-more">
+<button data-size="28" class="brain-touch-min icon-btn focus-inset " aria-label="More actions" type="button" id="radix-_r_id_" aria-haspopup="menu" aria-expanded="false" data-state="closed">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<path fill="currentColor" d="M7 12a2 2 0 1 1-4 0a2 2 0 0 1 4 0m7 0a2 2 0 1 1-4 0a2 2 0 0 1 4 0m7 0a2 2 0 1 1-4 0a2 2 0 0 1 4 0">
+</path>
+</svg>
+</button>
+</span>
+</div>
+</div>
+<div style="overflow: visible;">
+<div class="tree-row focus-inset touch-manipulation" style="padding-left: 10px;" data-tree-page-id="personal" role="button" tabindex="0" aria-disabled="false" aria-roledescription="sortable" aria-describedby="brain-page-tree" data-state="closed">
+<button type="button" class="tree-row-toggle focus-inset" aria-label="Expand" data-leaf="" tabindex="-1">
+<svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
+<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="m9 5l6 7l-6 7">
+</path>
+</svg>
+</button>
+<span class="tree-row-glyph" aria-hidden="true">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10 3L5 21M19 3l-5 18m8-12H4m16 7H2">
+</path>
+</svg>
+</span>
+<span class="tree-row-title">Personal</span>
+<span class="tree-row-more">
+<button data-size="28" class="brain-touch-min icon-btn focus-inset " aria-label="More actions" type="button" id="radix-_r_id_" aria-haspopup="menu" aria-expanded="false" data-state="closed">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<path fill="currentColor" d="M7 12a2 2 0 1 1-4 0a2 2 0 0 1 4 0m7 0a2 2 0 1 1-4 0a2 2 0 0 1 4 0m7 0a2 2 0 1 1-4 0a2 2 0 0 1 4 0">
+</path>
+</svg>
+</button>
+</span>
+</div>
+</div>
+<div style="overflow: visible;">
+<div class="tree-row focus-inset touch-manipulation" style="padding-left: 10px;" data-tree-page-id="reading" role="button" tabindex="0" aria-disabled="false" aria-roledescription="sortable" aria-describedby="brain-page-tree" data-state="closed">
+<button type="button" class="tree-row-toggle focus-inset" aria-label="Expand" data-leaf="" tabindex="-1">
+<svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
+<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="m9 5l6 7l-6 7">
+</path>
+</svg>
+</button>
+<span class="tree-row-glyph" aria-hidden="true">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M10 3L5 21M19 3l-5 18m8-12H4m16 7H2">
+</path>
+</svg>
+</span>
+<span class="tree-row-title">Reading list</span>
+<span class="tree-row-more">
+<button data-size="28" class="brain-touch-min icon-btn focus-inset " aria-label="More actions" type="button" id="radix-_r_id_" aria-haspopup="menu" aria-expanded="false" data-state="closed">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<path fill="currentColor" d="M7 12a2 2 0 1 1-4 0a2 2 0 0 1 4 0m7 0a2 2 0 1 1-4 0a2 2 0 0 1 4 0m7 0a2 2 0 1 1-4 0a2 2 0 0 1 4 0">
+</path>
+</svg>
+</button>
+</span>
+</div>
+</div>
+<div style="overflow: visible;">
+<div class="tree-row focus-inset touch-manipulation" data-selected="" aria-current="page" style="padding-left: 10px;" data-tree-page-id="trainer" role="button" tabindex="0" aria-disabled="false" aria-roledescription="sortable" aria-describedby="brain-page-tree" data-state="closed">
+<span aria-hidden="true" class="tree-row-capsule">
+</span>
+<button type="button" class="tree-row-toggle focus-inset" aria-label="Expand" data-leaf="" tabindex="-1">
+<svg width="13" height="13" viewBox="0 0 24 24" aria-hidden="true">
+<path fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="m9 5l6 7l-6 7">
+</path>
+</svg>
+</button>
+<span class="tree-row-glyph" aria-hidden="true">🃏</span>
+<span class="tree-row-title">Trainer</span>
+<span class="ai-chip" title="Built by an agent" aria-label="Built by an agent">AI</span>
+<span class="tree-row-more">
+<button data-size="28" class="brain-touch-min icon-btn focus-inset " aria-label="More actions" type="button" id="radix-_r_id_" aria-haspopup="menu" aria-expanded="false" data-state="closed">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<path fill="currentColor" d="M7 12a2 2 0 1 1-4 0a2 2 0 0 1 4 0m7 0a2 2 0 1 1-4 0a2 2 0 0 1 4 0m7 0a2 2 0 1 1-4 0a2 2 0 0 1 4 0">
+</path>
+</svg>
+</button>
+</span>
+</div>
+</div>
+<div id="brain-page-tree" style="display: none;"> To pick up a draggable item, press the space bar. While dragging, use the arrow keys to move the item. Press space again to drop the item in its new position, or press escape to cancel. </div>
+<div id="DndLiveRegion-n" style="position: fixed; top: 0px; left: 0px; width: 1px; height: 1px; margin: -1px; border: 0px; padding: 0px; overflow: hidden; clip: rect(0px); clip-path: inset(100%); white-space: nowrap;" role="status" aria-live="assertive" aria-atomic="true">
+</div>
+<div aria-hidden="true" class="-mt-px h-px w-full shrink-0">
+</div>
+</nav>
+<div class="brain-sidebar-foot">
+<button type="button" class="tree-row focus-inset" data-settings-trigger="desktop">
+<span class="tree-row-glyph" aria-hidden="true">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<circle cx="12" cy="12" r="3">
+</circle>
+<path d="M13.765 2.152C13.398 2 12.932 2 12 2s-1.398 0-1.765.152a2 2 0 0 0-1.083 1.083c-.092.223-.129.484-.143.863a1.62 1.62 0 0 1-.79 1.353a1.62 1.62 0 0 1-1.567.008c-.336-.178-.579-.276-.82-.308a2 2 0 0 0-1.478.396C4.04 5.79 3.806 6.193 3.34 7s-.7 1.21-.751 1.605a2 2 0 0 0 .396 1.479c.148.192.355.353.676.555c.473.297.777.803.777 1.361s-.304 1.064-.777 1.36c-.321.203-.529.364-.676.556a2 2 0 0 0-.396 1.479c.052.394.285.798.75 1.605c.467.807.7 1.21 1.015 1.453a2 2 0 0 0 1.479.396c.24-.032.483-.13.819-.308a1.62 1.62 0 0 1 1.567.008c.483.28.77.795.79 1.353c.014.38.05.64.143.863a2 2 0 0 0 1.083 1.083C10.602 22 11.068 22 12 22s1.398 0 1.765-.152a2 2 0 0 0 1.083-1.083c.092-.223.129-.483.143-.863c.02-.558.307-1.074.79-1.353a1.62 1.62 0 0 1 1.567-.008c.336.178.579.276.819.308a2 2 0 0 0 1.479-.396c.315-.242.548-.646 1.014-1.453s.7-1.21.751-1.605a2 2 0 0 0-.396-1.479c-.148-.192-.355-.353-.676-.555A1.62 1.62 0 0 1 19.562 12c0-.558.304-1.064.777-1.36c.321-.203.529-.364.676-.556a2 2 0 0 0 .396-1.479c-.052-.394-.285-.798-.75-1.605c-.467-.807-.7-1.21-1.015-1.453a2 2 0 0 0-1.479-.396c-.24.032-.483.13-.82.308a1.62 1.62 0 0 1-1.566-.008a1.62 1.62 0 0 1-.79-1.353c-.014-.38-.05-.64-.143-.863a2 2 0 0 0-1.083-1.083Z">
+</path>
+</g>
+</svg>
+</span>
+<span class="tree-row-title">Settings</span>
+</button>
+<button data-size="28" class="brain-touch-min icon-btn focus-inset " aria-label="Trash">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<path stroke-linecap="round" d="M20.5 6h-17m15.333 2.5l-.46 6.9c-.177 2.654-.265 3.981-1.13 4.79s-2.196.81-4.856.81h-.774c-2.66 0-3.991 0-4.856-.81c-.865-.809-.954-2.136-1.13-4.79l-.46-6.9M9.5 11l.5 5m4.5-5l-.5 5">
+</path>
+<path d="M6.5 6h.11a2 2 0 0 0 1.83-1.32l.034-.103l.097-.291c.083-.249.125-.373.18-.479a1.5 1.5 0 0 1 1.094-.788C9.962 3 10.093 3 10.355 3h3.29c.262 0 .393 0 .51.019a1.5 1.5 0 0 1 1.094.788c.055.106.097.23.18.479l.097.291A2 2 0 0 0 17.5 6">
+</path>
+</g>
+</svg>
+</button>
+<button data-size="28" class="brain-touch-min icon-btn focus-inset " aria-label="Toggle theme">
+<span class="col-start-1 row-start-1 flex" aria-hidden="true">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<circle cx="12" cy="12" r="6">
+</circle>
+<path stroke-linecap="round" d="M12 2v1m0 18v1m10-10h-1M3 12H2m17.07-7.07l-.392.393M5.322 18.678l-.393.393m14.141-.001l-.392-.393M5.322 5.322l-.393-.393">
+</path>
+</g>
+</svg>
+</span>
+<span class="col-start-1 row-start-1 flex" aria-hidden="false">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<path fill="currentColor" d="m21.067 11.857l-.642-.388zm-8.924-8.924l-.388-.642zM21.25 12A9.25 9.25 0 0 1 12 21.25v1.5c5.937 0 10.75-4.813 10.75-10.75zM12 21.25A9.25 9.25 0 0 1 2.75 12h-1.5c0 5.937 4.813 10.75 10.75 10.75zM2.75 12A9.25 9.25 0 0 1 12 2.75v-1.5C6.063 1.25 1.25 6.063 1.25 12zm12.75 2.25A5.75 5.75 0 0 1 9.75 8.5h-1.5a7.25 7.25 0 0 0 7.25 7.25zm4.925-2.781A5.75 5.75 0 0 1 15.5 14.25v1.5a7.25 7.25 0 0 0 6.21-3.505zM9.75 8.5a5.75 5.75 0 0 1 2.781-4.925l-.776-1.284A7.25 7.25 0 0 0 8.25 8.5zM12 2.75a.38.38 0 0 1-.268-.118a.3.3 0 0 1-.082-.155c-.004-.031-.002-.121.105-.186l.776 1.284c.503-.304.665-.861.606-1.299c-.062-.455-.42-1.026-1.137-1.026zm9.71 9.495c-.066.107-.156.109-.187.105a.3.3 0 0 1-.155-.082a.38.38 0 0 1-.118-.268h1.5c0-.717-.571-1.075-1.026-1.137c-.438-.059-.995.103-1.299.606z">
+</path>
+</svg>
+</span>
+</button>
+</div>
+</aside>
+<main tabindex="-1" data-dialog-focus-fallback="true" class="brain-main flex min-w-0 flex-1 flex-col outline-none">
+<div class="brain-topbar brain-topbar-mobile">
+<nav aria-label="Breadcrumb" class="crumb brain-crumb brain-crumb-lone">
+<span class="crumb-seg" aria-current="page">
+<span class="crumb-glyph" aria-hidden="true">🃏</span>
+<span class="crumb-label truncate">Trainer</span>
+<span class="ai-chip" title="Built by an agent" aria-label="Built by an agent">AI</span>
+</span>
+</nav>
+<div role="group" class="toolbar-pill " aria-label="Page">
+<button class="brain-touch-min btn btn-quiet brain-touch-hit" aria-label="Share" type="button" aria-haspopup="dialog" aria-expanded="false" data-state="closed">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<path d="M9 12a2.5 2.5 0 1 1-5 0a2.5 2.5 0 0 1 5 0Z">
+</path>
+<path stroke-linecap="round" d="M14 6.5L9 10m5 7.5L9 14">
+</path>
+<path d="M19 18.5a2.5 2.5 0 1 1-5 0a2.5 2.5 0 0 1 5 0Zm0-13a2.5 2.5 0 1 1-5 0a2.5 2.5 0 0 1 5 0Z">
+</path>
+</g>
+</svg>
+</button>
+<span aria-hidden="true" class="toolbar-divider">
+</span>
+<button data-size="36" class="brain-touch-min icon-btn focus-inset brain-touch-hit" aria-label="Page actions" type="button" id="radix-_r_id_" aria-haspopup="menu" aria-expanded="false" data-state="closed">
+<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+<path fill="currentColor" d="M7 12a2 2 0 1 1-4 0a2 2 0 0 1 4 0m7 0a2 2 0 1 1-4 0a2 2 0 0 1 4 0m7 0a2 2 0 1 1-4 0a2 2 0 0 1 4 0">
+</path>
+</svg>
+</button>
+</div>
+</div>
+<div class="brain-topbar brain-topbar-desktop">
+<nav aria-label="Breadcrumb" class="crumb brain-crumb brain-crumb-lone">
+<span class="crumb-seg" aria-current="page">
+<span class="crumb-glyph" aria-hidden="true">🃏</span>
+<span class="crumb-label truncate">Trainer</span>
+<span class="ai-chip" title="Built by an agent" aria-label="Built by an agent">AI</span>
+</span>
+</nav>
+<div class="brain-topbar-actions">
+<div role="group" class="toolbar-pill ">
+<button class="brain-touch-min btn btn-quiet " aria-label="Share" type="button" aria-haspopup="dialog" aria-expanded="false" data-state="closed">
+<svg width="16" height="16" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<path d="M9 12a2.5 2.5 0 1 1-5 0a2.5 2.5 0 0 1 5 0Z">
+</path>
+<path stroke-linecap="round" d="M14 6.5L9 10m5 7.5L9 14">
+</path>
+<path d="M19 18.5a2.5 2.5 0 1 1-5 0a2.5 2.5 0 0 1 5 0Zm0-13a2.5 2.5 0 1 1-5 0a2.5 2.5 0 0 1 5 0Z">
+</path>
+</g>
+</svg>Share</button>
+</div>
+<div role="group" class="toolbar-pill " aria-label="Page">
+<button data-size="36" class="brain-touch-min icon-btn focus-inset " aria-label="Pin page" aria-pressed="false">
+<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+<path fill="currentColor" d="m15.99 4.95l.53-.53zm3.082 3.086l-.531.53zM8.738 19.429l-.53.53zm-4.116-4.12l.53-.53zm12.945-.315l-.264-.702zm-1.917.72l.264.703zM8.332 8.383l-.704-.258zm.695-1.896l.704.258zm-3.182 4.188l.2.723zm1.457-.539l-.439-.609zm.374-.345l.57.487zm6.575 6.59l.491.568zm-.87 1.821l-.724-.199zm.536-1.454l-.61-.438zM2.718 12.755l-.75.005zm.212-.803l-.65-.374zm8.375 9.391l.001-.75zm.788-.208l-.371-.652zm-.396-19.099l.162.732zM1.47 21.47a.75.75 0 0 0 1.062 1.06zm5.715-3.598a.75.75 0 0 0-1.061-1.06zM15.459 5.48l3.082 3.086l1.061-1.06L16.52 4.42zM9.269 18.9l-4.117-4.12l-1.06 1.06l4.116 4.12zm8.034-4.607l-1.917.72l.528 1.405l1.917-.72zM9.036 8.64l.695-1.896l-1.409-.516l-.694 1.896zm-2.992 2.756c.712-.196 1.253-.334 1.696-.652l-.877-1.218c-.172.125-.397.198-1.217.424zm1.584-3.272c-.293.8-.385 1.018-.523 1.18l1.142.973c.353-.415.535-.944.79-1.637zm.112 2.62q.281-.203.507-.467l-1.142-.973a1.4 1.4 0 0 1-.242.222zm7.646 4.268c-.689.26-1.214.445-1.626.801l.982 1.135c.16-.14.377-.233 1.172-.531zM14.104 18.4c.225-.819.298-1.043.422-1.216l-1.219-.875c-.317.443-.454.983-.65 1.693zm-.344-2.586q-.256.22-.453.495l1.22.875q.093-.132.215-.236zm-8.608-1.036c-.646-.647-1.084-1.087-1.368-1.444c-.286-.359-.315-.514-.316-.583l-1.5.009c.004.582.293 1.07.642 1.508c.35.44.861.95 1.481 1.57zm.494-4.828c-.846.234-1.542.424-2.063.634c-.52.208-1.012.49-1.302.994l1.3.748c.034-.06.136-.18.56-.35s1.022-.337 1.903-.58zm-2.178 2.8a.84.84 0 0 1 .112-.424l-1.3-.748a2.34 2.34 0 0 0-.312 1.182zm4.74 7.21c.624.624 1.137 1.139 1.578 1.49c.441.352.932.642 1.518.643l.002-1.5c-.07 0-.225-.029-.585-.316c-.36-.286-.802-.727-1.452-1.378zm4.45-1.958c-.245.888-.412 1.49-.583 1.917c-.172.428-.293.53-.353.564l.743 1.303c.509-.29.792-.786 1.002-1.309c.21-.524.402-1.225.637-2.077zm-1.354 4.091c.407 0 .807-.105 1.161-.307l-.743-1.303a.84.84 0 0 1-.416.11zm7.237-13.527c1.064 1.064 1.8 1.803 2.25 2.413c.444.598.495.917.441 1.167l1.466.317c.19-.878-.16-1.647-.701-2.377c-.534-.72-1.366-1.551-2.395-2.58zm-.71 7.13c1.361-.511 2.463-.923 3.246-1.358c.795-.44 1.431-.996 1.621-1.875l-1.466-.317c-.054.25-.232.52-.883.88c-.663.369-1.638.737-3.046 1.266zM16.52 4.42c-1.036-1.037-1.872-1.876-2.595-2.414c-.734-.544-1.508-.897-2.39-.702l.324 1.464c.25-.055.569-.005 1.171.443c.613.455 1.358 1.197 2.429 2.27zM9.73 6.744c.522-1.423.886-2.41 1.251-3.08c.36-.66.628-.84.878-.896l-.323-1.464c-.882.194-1.435.84-1.872 1.642c-.431.792-.837 1.906-1.342 3.282zM2.53 22.53l4.654-4.658l-1.061-1.06l-4.654 4.658z">
+</path>
+</svg>
+</button>
+<span aria-hidden="true" class="toolbar-divider">
+</span>
+<button data-size="36" class="brain-touch-min icon-btn focus-inset " aria-label="Page actions" type="button" id="radix-_r_id_" aria-haspopup="menu" aria-expanded="false" data-state="closed">
+<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+<path fill="currentColor" d="M7 12a2 2 0 1 1-4 0a2 2 0 0 1 4 0m7 0a2 2 0 1 1-4 0a2 2 0 0 1 4 0m7 0a2 2 0 1 1-4 0a2 2 0 0 1 4 0">
+</path>
+</svg>
+</button>
+</div>
+</div>
+</div>
+<div class="brain-page-scroll flex-1 overflow-y-auto overflow-x-clip">
+<div class="brain-page-frame relative pb-40">
+<div data-app-canvas="true" class="brain-app-canvas brain-page-top">
+<div class="mx-auto w-full max-w-[720px] px-5 md:px-6">
+<div class="mb-5 text-[44px] leading-none">🃏</div>
+<h1 class="text-title text-ink">Trainer</h1>
+<p class="brain-page-meta text-caption">Built by Claude<span data-app-built="true">«locale»</span>
+</p>
+<p class="mt-1 text-caption text-ink-3">build me a trainer for my Spanish words</p>
+<div class="mt-4 mb-5 flex items-center gap-2">
+<button type="button" data-app-rebuild="true" class="brain-touch-min flex items-center gap-1.5 rounded-full px-2 py-0.5 text-[12px] text-ink-2 transition-colors hover:bg-fill-hover hover:text-ink">
+<svg width="13" height="13" viewBox="0 0 24 24" class="text-ink-3" aria-hidden="true">
+<path fill="currentColor" d="M3.68 11.333h-.75zm0 1.667l-.528.532a.75.75 0 0 0 1.056 0zm2.208-1.134A.75.75 0 1 0 4.83 10.8zM2.528 10.8a.75.75 0 0 0-1.056 1.065zm16.088-3.408a.75.75 0 1 0 1.277-.786zM12.079 2.25c-5.047 0-9.15 4.061-9.15 9.083h1.5c0-4.182 3.42-7.583 7.65-7.583zm-9.15 9.083V13h1.5v-1.667zm1.28 2.2l1.679-1.667L4.83 10.8l-1.68 1.667zm0-1.065L2.528 10.8l-1.057 1.065l1.68 1.666zm15.684-5.86A9.16 9.16 0 0 0 12.08 2.25v1.5a7.66 7.66 0 0 1 6.537 3.643zM20.314 11l.527-.533a.75.75 0 0 0-1.054 0zM18.1 12.133a.75.75 0 0 0 1.055 1.067zm3.373 1.067a.75.75 0 1 0 1.054-1.067zM5.318 16.606a.75.75 0 1 0-1.277.788zm6.565 5.144c5.062 0 9.18-4.058 9.18-9.083h-1.5c0 4.18-3.43 7.583-7.68 7.583zm9.18-9.083V11h-1.5v1.667zm-1.276-2.2L18.1 12.133l1.055 1.067l1.686-1.667zm0 1.066l1.686 1.667l1.054-1.067l-1.686-1.666zM4.04 17.393a9.2 9.2 0 0 0 7.842 4.357v-1.5a7.7 7.7 0 0 1-6.565-3.644z">
+</path>
+</svg>Rebuild</button>
+<span class="text-caption text-ink-3">Copy a prompt for your agent</span>
+</div>
+</div>
+<iframe title="Trainer" sandbox="allow-scripts allow-forms allow-modals" src="/api/app/trainer/t/contract.token.fixture/index.html" class="brain-app-frame">
+</iframe>
+</div>
+</div>
+</div>
+</main>
+<nav aria-label="Primary" class="brain-mobile-tabbar mat-thick">
+<div class="brain-mobile-tabbar-items">
+<button data-mobile-tab="home" type="button" aria-current="page" class="brain-mobile-tab brain-touch-min focus-inset">
+<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+<defs>
+<path id="SVGEuPeJeiy" fill="currentColor" d="M10.75 9.5a1.25 1.25 0 1 1 2.5 0a1.25 1.25 0 0 1-2.5 0">
+</path>
+</defs>
+<path fill="currentColor" d="M18.5 3H16a.5.5 0 0 0-.5.5v.059l3.5 2.8V3.5a.5.5 0 0 0-.5-.5">
+</path>
+<use href="#SVGEuPeJeiy" fill-rule="evenodd" clip-rule="evenodd">
+</use>
+<path fill="currentColor" fill-rule="evenodd" d="m20.75 10.96l.782.626a.75.75 0 0 0 .936-1.172l-8.125-6.5a3.75 3.75 0 0 0-4.686 0l-8.125 6.5a.75.75 0 0 0 .937 1.172l.781-.626v10.29H2a.75.75 0 0 0 0 1.5h20a.75.75 0 0 0 0-1.5h-1.25zM9.25 9.5a2.75 2.75 0 1 1 5.5 0a2.75 2.75 0 0 1-5.5 0m2.8 3.75c.664 0 1.237 0 1.696.062c.492.066.963.215 1.345.597s.531.853.597 1.345c.058.43.062.96.062 1.573v4.423h-1.5V17c0-.728-.002-1.2-.048-1.546c-.044-.325-.114-.427-.172-.484s-.159-.128-.484-.172c-.347-.046-.818-.048-1.546-.048s-1.2.002-1.546.048c-.325.044-.427.115-.484.172s-.128.159-.172.484c-.046.347-.048.818-.048 1.546v4.25h-1.5v-4.3c0-.664 0-1.237.062-1.696c.066-.492.215-.963.597-1.345s.854-.531 1.345-.597c.459-.062 1.032-.062 1.697-.062z" clip-rule="evenodd">
+</path>
+<use href="#SVGEuPeJeiy" fill-rule="evenodd" clip-rule="evenodd">
+</use>
+</svg>
+<span>Home</span>
+</button>
+<button data-mobile-tab="search" type="button" class="brain-mobile-tab brain-touch-min focus-inset">
+<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<circle cx="11.5" cy="11.5" r="9.5">
+</circle>
+<path stroke-linecap="round" d="M18.5 18.5L22 22">
+</path>
+</g>
+</svg>
+<span>Search</span>
+</button>
+<button data-mobile-tab="tasks" type="button" class="brain-mobile-tab brain-touch-min focus-inset">
+<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5">
+<path stroke-linejoin="round" d="M2 5.5L3.214 7L7.5 3M2 12.5L3.214 14L7.5 10M2 19.5L3.214 21L7.5 17">
+</path>
+<path d="M22 19H12m10-7H12m10-7H12">
+</path>
+</g>
+</svg>
+<span>Tasks</span>
+</button>
+<button data-mobile-tab="pages" type="button" class="brain-mobile-tab brain-touch-min focus-inset">
+<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<path d="M3 10c0-3.771 0-5.657 1.172-6.828S7.229 2 11 2h2c3.771 0 5.657 0 6.828 1.172S21 6.229 21 10v4c0 3.771 0 5.657-1.172 6.828S16.771 22 13 22h-2c-3.771 0-5.657 0-6.828-1.172S3 17.771 3 14z">
+</path>
+<path stroke-linecap="round" d="M8 12h8M8 8h8m-8 8h5">
+</path>
+</g>
+</svg>
+<span>Pages</span>
+</button>
+<button data-mobile-tab="mail" type="button" class="brain-mobile-tab brain-touch-min focus-inset">
+<svg width="18" height="18" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-width="1.5">
+<path d="M2 12c0-3.771 0-5.657 1.172-6.828S6.229 4 10 4h4c3.771 0 5.657 0 6.828 1.172S22 8.229 22 12s0 5.657-1.172 6.828S17.771 20 14 20h-4c-3.771 0-5.657 0-6.828-1.172S2 15.771 2 12Z">
+</path>
+<path stroke-linecap="round" d="m6 8l2.159 1.8c1.837 1.53 2.755 2.295 3.841 2.295s2.005-.765 3.841-2.296L18 8">
+</path>
+</g>
+</svg>
+<span>Mail</span>
+</button>
+</div>
+</nav>
+<button type="button" aria-label="New" class="brain-mobile-new fixed brain-touch-min focus-inset" id="radix-_r_id_" aria-haspopup="menu" aria-expanded="false" data-state="closed">
+<span class="brain-mobile-new-circle" aria-hidden="true">
+<svg width="17" height="17" viewBox="0 0 24 24" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5">
+<path d="M4 12L20 12">
+</path>
+<path d="M12.0204 4L12.0205 20.0003">
+</path>
+</g>
+</svg>
+</span>
+</button>
+<div class="brain-toast-stack">
+<div role="status" aria-live="assertive" aria-atomic="true" class="brain-toast-slot">
+</div>
+<div role="status" aria-live="polite" aria-atomic="true" class="brain-toast-slot">
+</div>
+<div role="status" aria-live="polite" aria-atomic="true" class="brain-toast-slot">
+</div>
+<div role="status" aria-live="polite" aria-atomic="true" class="brain-toast-slot">
+</div>
+<div role="status" aria-live="polite" aria-atomic="true" class="brain-toast-slot">
+</div>
+<div role="status" aria-live="polite" aria-atomic="true" class="brain-toast-slot">
+</div>
+<div role="status" aria-live="polite" aria-atomic="true" class="brain-toast-slot">
+</div>
+</div>
+</div>
+</div>

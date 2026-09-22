@@ -88,8 +88,30 @@ function fixtureTree(): TreeNode[] {
   ];
 }
 
+/** The app page lives outside `fixtureTree()` on purpose: the sidebar draws
+ *  the tree, so adding a seventh row to the shared fixture would move all six
+ *  baselines that were already there. Only the app state's own tree carries
+ *  it. */
+function appPageNode(): TreeNode {
+  return node("trainer", "Trainer", {
+    icon: "🃏",
+    kind: "app",
+    app: {
+      entry: "app/index.html",
+      version: 1,
+      builtBy: "Claude",
+      builtAt: STAMP,
+      owns: [],
+      state: false,
+      reason: "build me a trainer for my Spanish words",
+    },
+  });
+}
+
 function pageBody(id: string): ShellInitialPage {
-  const entry = fixtureTree().find((candidate) => candidate.id === id);
+  const entry = [...fixtureTree(), appPageNode()].find(
+    (candidate) => candidate.id === id,
+  );
   if (!entry) throw new Error(`fixture page missing: ${id}`);
   return {
     id,
@@ -140,6 +162,9 @@ function normalise(html: string) {
       .replace(/:r[0-9a-z]+:/g, ":id:")
       .replace(/(Dnd[A-Za-z]+-)\d+/g, "$1n")
       .replace(/(<time\b[^>]*\btitle=")[^"]*(")/g, "$1«locale»$2")
+      // The app head's build date, for the same reason: a fixed instant
+      // rendered in the machine's own locale.
+      .replace(/(<span data-app-built="[^"]*">)[^<]*(<\/span>)/g, "$1«locale»$2")
       .replace(/\s+/g, " ")
       .replace(/> </g, "><")
       .replace(/></g, ">\n<")
@@ -153,7 +178,8 @@ type StateName =
   | "mail"
   | "focus-mode"
   | "mobile-viewport"
-  | "mobile-pages-open";
+  | "mobile-pages-open"
+  | "app-page";
 
 interface StateSetup {
   url: string;
@@ -211,6 +237,14 @@ const STATES: Record<StateName, () => StateSetup> = {
       await act(async () => pages.click());
     },
   }),
+  "app-page": () => ({
+    url: "/p/trainer",
+    props: {
+      tree: [...fixtureTree(), appPageNode()],
+      initialSelectedId: "trainer",
+      initialPage: pageBody("trainer"),
+    },
+  }),
 };
 
 describe("Shell DOM contract", () => {
@@ -235,6 +269,15 @@ describe("Shell DOM contract", () => {
       // the bell asks the centre on mount, on every surface
       if (url === "/api/notifications")
         return response({ notifications: [], unread: 0 });
+      // The app canvas asks for an address before it mounts anything, because
+      // the frame's authority is in its path. The token is a fixed string
+      // here: a real one carries an issued-at and would put different bytes
+      // in the baseline on every run.
+      if (url === "/api/app/trainer/frame")
+        return response({
+          src: "/api/app/trainer/t/contract.token.fixture/index.html",
+          exp: 4_102_444_800,
+        });
       throw new Error(`unexpected request in DOM contract: ${url}`);
     });
 

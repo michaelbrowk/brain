@@ -126,9 +126,20 @@ function authSecret(): string {
 
 /** New human and share tokens use separate signing domains. The raw key is
  *  retained only to verify already-issued legacy cookies during migration. */
-function secret(scope?: "session" | "share" | "share-edit"): Uint8Array {
+function secret(
+  scope?: "session" | "share" | "share-edit" | "app-frame",
+): Uint8Array {
   const raw = authSecret();
   return new TextEncoder().encode(scope ? `${raw}\0brain:${scope}:v1` : raw);
+}
+
+/** The fourth signing domain, for the token in an app frame's address
+ *  (`lib/apps/frame-token.ts`). It lives here rather than there so every key
+ *  this installation derives is derived in one function: a domain added
+ *  somewhere else is a domain nobody can see is separate. The key itself
+ *  never leaves the process. */
+export function appFrameSigningKey(): Uint8Array {
+  return secret("app-frame");
 }
 
 export async function createSession(): Promise<string> {

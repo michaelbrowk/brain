@@ -110,7 +110,7 @@ one is a `postMessage` the host validates, rate-limits and answers. The rate is
 | `read.pages` | `brain.readPages(query)` | `{ hits }`, matching pages with snippets | `store_failed` |
 | `write.page` | `brain.writePage(id, markdown, rev)` | `{ rev }`, the new one | `not_owned`, `rev_conflict`, `too_large`, `not_found`, `store_failed` |
 | `create.page` | `brain.createPage(title, markdown, icon)` | `{ id }`, and the app now owns it | `bad_request`, `too_large`, `store_failed` |
-| `state.get` | `brain.getState()` | `{ state }`, or `null` for an app that has kept none | `store_failed` |
+| `state.get` | `brain.getState()` | `{ state }`, where `state` is `null` when none was kept. Always the object, never a bare `null` | `store_failed` |
 | `state.set` | `brain.setState(json)` | `{ ok: true }` | `too_large`, `store_failed` |
 | `open` | `brain.open(id)` | `{ ok: true }`, and Brain navigates to the page | nothing |
 | `toast` | `brain.toast(text)` | `{ ok: true }` | nothing |
@@ -207,10 +207,31 @@ backgrounds, `--r-xs` through `--r-xl` for radii, `--font-sf` for the type, and
   <button class="btn" data-primary id="next">Next</button>
 </div>
 <script>
-  const state = await brain.getState();
-  document.getElementById("next").onclick = () => brain.toast("saved");
+  async function start() {
+    const saved = await brain.getState();
+    const word = document.getElementById("word");
+    word.textContent = (saved.state && saved.state.word) || "hola";
+    document.getElementById("next").onclick = async () => {
+      word.textContent = "adios";
+      await brain.setState({ word: "adios" });
+      brain.toast("Saved");
+    };
+  }
+  // The entry is a classic script, so `await` lives inside a function and
+  // never at the top level, where it is a SyntaxError that takes the whole
+  // block with it. `brain.ready` settles once the host has answered the
+  // kit's first hello, and it rejects after five seconds if nothing does.
+  brain.ready.then(start, () => {
+    document.getElementById("word").textContent = "Brain did not answer. Reload the page.";
+  });
 </script>
 ```
+
+Two things in that block are the whole shape of an app. Everything starts from
+`brain.ready`, because the tokens are not on the page until the host has
+answered. And `await` sits inside a function: the entry is a classic script,
+not a module, so a top-level `await` is a SyntaxError that silently takes
+every line of the block with it.
 
 ## The design rules
 

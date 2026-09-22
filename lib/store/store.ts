@@ -21,6 +21,7 @@ import {
   appAssetMimeType,
   appAssetPath,
   appMetaSchema,
+  validAppMeta,
   type AppMeta,
 } from "../apps/model";
 import { ensureWritableNotesRoot } from "./notes-root";
@@ -127,6 +128,7 @@ import {
   type CreateAppPageInput,
   AppOwnsFullError,
   AppSizeError,
+  NotAnAppError,
   AttachmentStoreUnavailableError,
   AttachmentValidationError,
   NotFoundError,
@@ -1980,7 +1982,13 @@ export class Store {
           collection: e.meta.collection,
           collectionRow: e.meta.collectionRow,
           kind: e.meta.kind,
-          app: e.meta.app,
+          // Through the same validation every other app-aware reader uses.
+          // `TreeNode.app` is typed `AppMeta` and this projection is what the
+          // whole client reads, so a map off somebody's disk handed on here
+          // is a shape React is told it can trust and cannot. The node keeps
+          // its `kind`: the page is an app page with no usable app, which is
+          // what the canvas has to draw.
+          app: validAppMeta(e.meta.app) ?? undefined,
           hasChildren: children.length > 0,
           children,
         };
@@ -2553,7 +2561,12 @@ export class Store {
           input.parentId,
           beforeIsCurrent ? desiredBeforeId : null,
         );
-        const dir = await uniqueDir(parentDir, slugify(title));
+        const slug = slugify(title);
+        const dir = await uniqueDir(
+          parentDir,
+          slug,
+          this.appReservesChildDir(input.parentId ?? null, slug),
+        );
         const started = now();
         const token = reservationToken;
         if (
@@ -3960,7 +3973,12 @@ export class Store {
         ...referencedAttachmentNames(opts.markdown || ""),
       ]);
       const parentDir = parentId ? this.get(parentId).dir : this.root;
-      const dir = await uniqueDir(parentDir, slugify(title));
+      const slug = slugify(title);
+      const dir = await uniqueDir(
+        parentDir,
+        slug,
+        this.appReservesChildDir(parentId, slug),
+      );
       const last = this.siblings(parentId).at(-1);
       const meta: PageMeta = {
         id: opts.id ?? nanoid(),
@@ -4015,8 +4033,11 @@ export class Store {
   ): Promise<{ page: PageMeta; app: AppMeta }> {
     return this.mutate(async () => {
       const e = this.get(appId);
-      if (e.meta.kind !== "app" || !e.meta.app) throw new NotFoundError(appId);
-      const app = appMetaSchema.parse(e.meta.app);
+      // Through `readAppMeta`, never off `meta.app`: it is the one validation
+      // every app-aware caller comes through, so a map that does not parse
+      // authorises nothing here either.
+      const app = this.readAppMeta(appId);
+      if (app === null) throw new NotAnAppError();
       // Checked in here rather than in the route, so two creates racing for
       // the last slot cannot both read 63 and both write.
       if (app.owns.length >= APP_MAX_OWNED) throw new AppOwnsFullError(appId);
@@ -4036,6 +4057,28 @@ export class Store {
     });
   }
 
+  /** WHOSE NAME `app` IS, ASKED BEFORE A FOLDER IS PICKED.
+   *
+   *  `slugify("App")` is `app`, and under an app page that is the name of the
+   *  app's OWN file set: `isReservedDir` skips it, so a page that landed
+   *  there would be gone from the tree on the next reopen, and
+   *  `writeAppFiles` renames it out of the way on every write, so the rewrite
+   *  after that would carry it and its whole subtree off. The second such
+   *  child was always safe, because the app's `app/` folder was already on
+   *  disk and `uniqueDir` stepped past it. This makes the FIRST one safe too,
+   *  and makes it safe before the folder exists, which is the window a
+   *  portable restore and `createAppPage` both open.
+   *
+   *  `kind` is the reading, not the folder: a page says it is an app before
+   *  it writes a byte, and an app whose map this release cannot validate
+   *  still owns its own `app/`. Ordinary pages are untouched, so a notebook
+   *  that has a page called "App" under a plain parent keeps it exactly
+   *  where it is. */
+  private appReservesChildDir(parentId: string | null, base: string): boolean {
+    if (base !== "app" || parentId === null) return false;
+    return this.index.get(parentId)?.meta.kind === "app";
+  }
+
   /** AN APP PAGE, ITS FILES, AND THE CHILDREN IT IS ALLOWED TO WRITE.
    *
    *  Unwrapped on purpose (invariant 4): it delegates to `createPage` for the
@@ -4051,15 +4094,63 @@ export class Store {
     title: string,
     input: CreateAppPageInput,
   ): Promise<{ meta: PageMeta; owned: readonly PageMeta[] }> {
+    // EVERY QUESTION BEFORE THE FIRST WRITE.
+    //
+    // The page, each owned child, the files and the metadata are four
+    // separate writes, and this composite has no rollback of its own. A
+    // question asked late therefore costs the owner an orphan: a page in
+    // their tree with no `kind`, no files and children they never asked for.
+    // The sizes were always checked here; the reason, the asset names and the
+    // owned titles were checked inside the writes that follow, which is too
+    // late. They are all asked here now, and the code below may assume the
+    // answers.
     assertAppEntrySize(input.entryHtml);
     assertAppAssetsSize(input.assets);
     assertAppStateSize(input.state);
+    assertAppAssetNames(input.assets);
+    // Through the schema's own transform, so what is validated here is the
+    // string `setAppMeta` will later store, not the one the caller passed.
+    if (input.reason !== undefined) {
+      appMetaSchema.shape.reason.parse(input.reason);
+    }
+    if ((input.owns?.length ?? 0) > APP_MAX_OWNED) {
+      throw new Error(`an app may own at most ${APP_MAX_OWNED} pages`);
+    }
+    for (const child of input.owns ?? []) {
+      if (typeof child.title !== "string" || child.title.trim().length === 0) {
+        throw new Error("an owned page needs a title");
+      }
+    }
     const meta = await this.createPage(parentId, title, {
       icon: input.icon,
       markdown: input.description,
       by: "claude",
       src: input.src,
     });
+    const app = appMetaSchema.parse({
+      entry: APP_ENTRY_PATH,
+      version: 1,
+      builtBy: input.builtBy,
+      builtAt: now(),
+      owns: [],
+      state: input.state !== undefined,
+      ...(input.reason === undefined ? {} : { reason: input.reason }),
+    });
+    // THE METADATA BEFORE THE CHILDREN, and before the files.
+    //
+    // Before the children because `slugify("App")` is `app`: an owned page
+    // with that title would take the folder this app's own file set is about
+    // to use, and the write that followed refused the whole create with the
+    // page and the child already on disk. `appReservesChildDir` reads `kind`,
+    // so saying what this page is here is what sends the child to `app-2`.
+    //
+    // Before the files because `writeAppFiles` refuses a page that is not an
+    // app, which is what keeps it from renaming a child page's folder out of
+    // the tree. It also means a create that dies between the two leaves a
+    // page with `kind: app` and no entry, which the canvas draws as the
+    // missing-files state, rather than a page with an app's files and no sign
+    // that it has them.
+    await this.setAppMeta(meta.id, app, "claude", input.src);
     const owned: PageMeta[] = [];
     for (const child of input.owns ?? []) {
       owned.push(
@@ -4071,21 +4162,20 @@ export class Store {
         }),
       );
     }
+    // The same map again, now that `owns` has ids to name. A title is a label
+    // somebody may change and the write check has to mean the same page
+    // tomorrow, so the list only exists once the children do.
+    const withApp = await this.setAppMeta(
+      meta.id,
+      appMetaSchema.parse({ ...app, owns: owned.map((child) => child.id) }),
+      "claude",
+      input.src,
+    );
     await this.writeAppFiles(meta.id, {
       entryHtml: input.entryHtml,
       assets: input.assets ?? [],
       ...(input.state === undefined ? {} : { state: input.state }),
     });
-    const app = appMetaSchema.parse({
-      entry: APP_ENTRY_PATH,
-      version: 1,
-      builtBy: input.builtBy,
-      builtAt: now(),
-      owns: owned.map((child) => child.id),
-      state: input.state !== undefined,
-      ...(input.reason === undefined ? {} : { reason: input.reason }),
-    });
-    const withApp = await this.setAppMeta(meta.id, app, "claude", input.src);
     return { meta: withApp, owned };
   }
 
@@ -4109,28 +4199,37 @@ export class Store {
    *  rather than a caller forgetting to mention them.
    *
    *  The rename pair is not one atomic operation on any filesystem, so the
-   *  window between them is real. It is two renames inside the store's own
-   *  lock, with no I/O between, and a crash there leaves `.app-next/` on disk
-   *  where the next write replaces it. */
+   *  window between them is real: a crash there leaves the page with no
+   *  `app/` at all and the ONLY copy of its files in `.app-next-old/`. That
+   *  is the artefact that holds the data, not `.app-next/`, and the recovery
+   *  at the top of the swap is what puts it back. Without it the next write
+   *  carried nothing over from a live set that was not there and then
+   *  deleted the retired one, which cost an app its entry and every asset on
+   *  one ordinary state write. */
   async writeAppFiles(id: string, files: AppFilesInput): Promise<void> {
     assertAppEntrySize(files.entryHtml);
     assertAppAssetsSize(files.assets);
     assertAppStateSize(files.state);
-    // Every asset's name is checked before the first byte is written, so a
-    // set holding one bad name costs nothing and changes nothing.
-    for (const asset of files.assets ?? []) {
-      if (appAssetPath(asset.name) === null || appAssetMimeType(asset.name) === null) {
-        throw new AttachmentValidationError("bad_type", `app asset refused: ${asset.name}`);
-      }
-    }
+    assertAppAssetNames(files.assets);
     return this.mutate(async () => {
       const e = this.get(id);
+      // WHOSE FOLDER `app/` IS, decided before the first rename.
+      //
+      // The swap below renames `<dir>/app` out of the way and a staged set
+      // in. On a page that is not an app, `<dir>/app` is a CHILD PAGE's
+      // folder, because `slugify("App")` is `app`, and the pair would carry
+      // that page and its whole subtree out of the tree and then delete it.
+      // Portable import reached this on every restore, and so would every
+      // route that writes files to an existing page.
+      if (this.readAppMeta(id) === null) throw new NotAnAppError();
+      await assertAppFolderIsNotAPage(e.dir);
       const live = assertInRoot(this.root, path.join(e.dir, "app"));
       const staged = assertInRoot(this.root, path.join(e.dir, APP_STAGING_DIR));
       const retired = assertInRoot(
         this.root,
         path.join(e.dir, `${APP_STAGING_DIR}-old`),
       );
+      await recoverCrashedAppSwap(e.dir);
       await fs.rm(staged, { recursive: true, force: true });
       await fs.mkdir(staged, { recursive: true });
       try {
@@ -4177,7 +4276,11 @@ export class Store {
 
   /** The `app` map, and only it. Separate from `updateMeta` because that
    *  method is the owner's patch surface and an app map is never something a
-   *  person types into a field. */
+   *  person types into a field.
+   *
+   *  This is where a page BECOMES an app, so it is the one place that has to
+   *  ask whether `<dir>/app/` is already a child page's folder. Saying yes
+   *  here would hand the next `writeAppFiles` a page to rename away. */
   async setAppMeta(
     id: string,
     app: AppMeta,
@@ -4186,6 +4289,7 @@ export class Store {
   ): Promise<PageMeta> {
     return this.mutate(async () => {
       const e = this.get(id);
+      await assertAppFolderIsNotAPage(e.dir);
       e.meta.kind = "app";
       e.meta.app = appMetaSchema.parse(app);
       e.meta.updated = now();
@@ -4214,7 +4318,10 @@ export class Store {
    *  file is a read that answers null. Neither half is worth having alone.
    *
    *  `writeAppFiles`'s own `state` branch stays, for the rewrite that
-   *  legitimately replaces the entry, the assets and the memory at once. */
+   *  legitimately replaces the entry, the assets and the memory at once, and
+   *  this asks the two questions that method asks before it touches `app/`:
+   *  the page validates as an app, and `app/` is its file set rather than a
+   *  child page's folder. */
   async writeAppState(
     id: string,
     json: unknown,
@@ -4224,11 +4331,17 @@ export class Store {
     assertAppStateSize(json);
     return this.mutate(async () => {
       const e = this.get(id);
-      if (e.meta.kind !== "app" || !e.meta.app) throw new NotFoundError(id);
+      if (this.readAppMeta(id) === null) throw new NotAnAppError();
+      await assertAppFolderIsNotAPage(e.dir);
+      // A crashed rewrite left the app's only copy in `.app-next-old/`, and a
+      // state write is the likeliest next write there is. Put it back before
+      // writing into `app/`, or this leaf would create a folder holding one
+      // `state.json` beside the files nobody goes on to look for.
+      await recoverCrashedAppSwap(e.dir);
       const file = assertInRoot(this.root, path.join(e.dir, APP_STATE_PATH));
       await fs.mkdir(path.dirname(file), { recursive: true });
       await atomicWrite(file, JSON.stringify(json));
-      if (e.meta.app.state !== true) {
+      if (e.meta.app?.state !== true) {
         e.meta.app = appMetaSchema.parse({ ...e.meta.app, state: true });
         e.meta.updated = now();
         e.meta.updatedBy = by;
@@ -4239,10 +4352,16 @@ export class Store {
     });
   }
 
+  /** The app map this page carries, or null when it carries none this release
+   *  can read. Every app-aware caller comes through here rather than through
+   *  `meta.app`, so a shape off somebody's disk is never handed on typed as
+   *  an `AppMeta` it is not. A page whose map fails is a page with
+   *  `kind: app` and no usable app: still readable, renameable and movable,
+   *  and unable to authorise anything. */
   readAppMeta(id: string): AppMeta | null {
     const entry = this.index.get(id);
-    if (!entry || entry.meta.kind !== "app" || !entry.meta.app) return null;
-    return entry.meta.app;
+    if (!entry || entry.meta.kind !== "app") return null;
+    return validAppMeta(entry.meta.app);
   }
 
   /** One file out of an app's folder, by the path the frame asked for. A
@@ -4252,7 +4371,7 @@ export class Store {
    *  a caller can act on neither. */
   async readAppFile(id: string, relativePath: string): Promise<AppFileRead> {
     const entry = this.index.get(id);
-    if (!entry || entry.meta.kind !== "app") return { kind: "missing" };
+    if (this.readAppMeta(id) === null || !entry) return { kind: "missing" };
     let mimeType: string;
     let relative: string;
     if (relativePath === APP_ENTRY_PATH) {
@@ -4281,7 +4400,7 @@ export class Store {
    *  first and sorted, so an export writes the same archive twice running. */
   async listAppAssets(id: string): Promise<string[]> {
     const entry = this.index.get(id);
-    if (!entry || entry.meta.kind !== "app") return [];
+    if (this.readAppMeta(id) === null || !entry) return [];
     const base = assertInRoot(this.root, path.join(entry.dir, APP_ASSETS_DIR));
     const walkAssets = async (dir: string, prefix: string): Promise<string[]> => {
       const found = await fs.readdir(dir, { withFileTypes: true }).catch(() => null);
@@ -4299,7 +4418,7 @@ export class Store {
 
   async readAppState(id: string): Promise<unknown> {
     const entry = this.index.get(id);
-    if (!entry || entry.meta.app?.state !== true) return null;
+    if (!entry || this.readAppMeta(id)?.state !== true) return null;
     try {
       const file = assertInRoot(this.root, path.join(entry.dir, APP_STATE_PATH));
       return JSON.parse(await fs.readFile(file, "utf8"));
@@ -4734,7 +4853,12 @@ export class Store {
           !this.isDeleted(entry.meta.id),
       ).length;
       if (live >= MAX_SHARE_SUBTREE_PAGES) throw new ShareSubtreeFullError();
-      const dir = await uniqueDir(parent.dir, slugify(input.title));
+      const slug = slugify(input.title);
+      const dir = await uniqueDir(
+        parent.dir,
+        slug,
+        this.appReservesChildDir(input.parentId, slug),
+      );
       const last = this.siblings(input.parentId).at(-1);
       const meta: PageMeta = {
         id: nanoid(),
@@ -5979,6 +6103,7 @@ export class Store {
     const targetDir = await availableUniqueDir(
       destinationPage ? destinationPage.dir : this.root,
       path.basename(source.dir),
+      this.appReservesChildDir(newParentId, path.basename(source.dir)),
     );
     const participantUpdated = [
       source.meta.updated,
@@ -6499,6 +6624,7 @@ export class Store {
       const destination = await availableUniqueDir(
         targetParentDir,
         path.basename(originalDir),
+        this.appReservesChildDir(targetId, path.basename(originalDir)),
       );
       const moveIntent: MoveIntent = {
         version: 1,
@@ -6672,9 +6798,14 @@ export class Store {
         ? this.get(newParentId).dir
         : this.root;
       const sourceParentDir = path.dirname(originalDir);
+      const moveBase = path.basename(originalDir);
       const dest = preparedIntent
         ? moveIntentDirectory(this.root, preparedIntent.targetDir)
-        : await uniqueDir(targetParentDir, path.basename(originalDir));
+        : await uniqueDir(
+            targetParentDir,
+            moveBase,
+            this.appReservesChildDir(newParentId, moveBase),
+          );
       if (preparedIntent) {
         if (
           preparedIntent.pageId !== id ||
@@ -6963,7 +7094,13 @@ export class Store {
 
   /** Roots of trashed subtrees (a deleted page under a deleted parent isn't
    *  listed separately). Most-recently-deleted first. */
-  trashList(): { id: string; title: string; icon?: string; deleted: string }[] {
+  trashList(): {
+    id: string;
+    title: string;
+    icon?: string;
+    kind?: "app";
+    deleted: string;
+  }[] {
     // Root detection walks the whole ancestor chain, not just the immediate
     // parent: a flagged page inside another trashed subtree is not separately
     // restorable, so listing it implied an operation that could not work.
@@ -6978,6 +7115,7 @@ export class Store {
         id: e.meta.id,
         title: e.meta.title,
         icon: e.meta.icon,
+        ...(e.meta.kind === undefined ? {} : { kind: e.meta.kind }),
         deleted: e.meta.deleted!,
       }));
   }
@@ -8135,9 +8273,16 @@ function deslug(name: string): string {
     .replace(/^\w/, (c) => c.toUpperCase());
 }
 
-async function uniqueDir(parentDir: string, base: string): Promise<string> {
-  let name = base;
-  let n = 1;
+/** `skipBase` starts the search at `<base>-2` instead of at `base`, for the
+ *  one name a caller may not hand out even when the folder is free. See
+ *  `Store.appReservesChildDir`. */
+async function uniqueDir(
+  parentDir: string,
+  base: string,
+  skipBase = false,
+): Promise<string> {
+  let n = skipBase ? 2 : 1;
+  let name = skipBase ? `${base}-${n}` : base;
   for (;;) {
     const dir = path.join(parentDir, name);
     try {
@@ -8162,9 +8307,10 @@ async function uniqueDir(parentDir: string, base: string): Promise<string> {
 async function availableUniqueDir(
   parentDir: string,
   base: string,
+  skipBase = false,
 ): Promise<string> {
-  let name = base;
-  let n = 1;
+  let n = skipBase ? 2 : 1;
+  let name = skipBase ? `${base}-${n}` : base;
   for (;;) {
     const dir = path.join(parentDir, name);
     try {
@@ -8589,6 +8735,81 @@ async function copyDirIfPresent(from: string, to: string): Promise<void> {
     const target = path.join(to, entry.name);
     if (entry.isDirectory()) await copyDirIfPresent(source, target);
     else await copyIfPresent(source, target);
+  }
+}
+
+/** Whether this path is a directory. A missing one is not an error here: the
+ *  swap's recovery asks about two folders that are each absent most of the
+ *  time. */
+async function directoryExists(dir: string): Promise<boolean> {
+  return fs.stat(dir).then(
+    (stats) => stats.isDirectory(),
+    () => false,
+  );
+}
+
+/** Refuse when `<dir>/app/` holds an `index.md`, which is to say when it is a
+ *  page's folder rather than an app's file set. The same reading the walk
+ *  uses for its one reservation exception, asked on the write side so the two
+ *  cannot disagree. An app's own set never holds one, because the name rule
+ *  in `lib/apps/model.ts` refuses every `.md` at every depth. */
+/** RECOVER A CRASHED SWAP BEFORE ANY APP WRITE TOUCHES `app/`.
+ *
+ *  `writeAppFiles` swaps a staged set in by renaming `app/` out to
+ *  `.app-next-old/` and `.app-next/` in. That pair is not one operation on
+ *  any filesystem, so a crash can land between the two.
+ *
+ *  Two states it can leave, told apart by whether `app/` is there. No `app/`
+ *  beside a `.app-next-old/` means the crash landed between the renames and
+ *  the retired folder is the only copy of the app: put it back. Both present
+ *  means the crash landed after the second rename, so `app/` is already the
+ *  new set and the retired one is stale: drop it. Doing neither is what let
+ *  one state write carry nothing over and then delete the only surviving
+ *  files.
+ *
+ *  Run by the rewrite AND by the state leaf, which no longer goes through the
+ *  swap: the state write is by far the most frequent thing an app does, so it
+ *  is the write most likely to be the next one after a crash, and the promise
+ *  is that the next write finds the files. Two `stat`s in the ordinary case. */
+async function recoverCrashedAppSwap(dir: string): Promise<void> {
+  const retired = path.join(dir, `${APP_STAGING_DIR}-old`);
+  if (await directoryExists(retired)) {
+    if (await directoryExists(path.join(dir, "app"))) {
+      await fs.rm(retired, { recursive: true, force: true });
+    } else {
+      await fs.rename(retired, path.join(dir, "app"));
+    }
+  }
+  // The staged set is only ever meaningful inside the one `writeAppFiles`
+  // call that made it, so anything still here is a half-written folder a
+  // crash left. Dropped after the decision above, never before it: in the
+  // between-the-renames case it is exactly the half-written set that must NOT
+  // become `app/`.
+  await fs.rm(path.join(dir, APP_STAGING_DIR), { recursive: true, force: true });
+}
+
+async function assertAppFolderIsNotAPage(dir: string): Promise<void> {
+  const legacyIndex = await readOptionalFile(path.join(dir, "app", "index.md"));
+  if (legacyIndex !== null) {
+    throw new NotAnAppError("this page already has a child page whose folder is app");
+  }
+}
+
+/** Every asset's name, before the first byte of the set is written, so a set
+ *  holding one refused name costs nothing and changes nothing. Both the
+ *  create and the rewrite ask this, and they ask the same function: a create
+ *  that left the check to the write it delegates to has already minted the
+ *  page by the time the answer comes back. */
+function assertAppAssetNames(
+  assets: readonly AppAssetInput[] | undefined,
+): void {
+  for (const asset of assets ?? []) {
+    if (appAssetPath(asset.name) === null || appAssetMimeType(asset.name) === null) {
+      throw new AttachmentValidationError(
+        "bad_type",
+        `app asset refused: ${asset.name}`,
+      );
+    }
   }
 }
 

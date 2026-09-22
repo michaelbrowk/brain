@@ -28,15 +28,22 @@ export class AppBridgeError extends Error {
   }
 }
 
-/** WHAT AN APP MAY SEE OF ONE PAGE IN THE TREE.
+/** WHAT AN APP MAY SEE OF A PAGE.
  *
  *  Michael's decision (spec §4): an app may read the whole notebook. That is
- *  about REACH, not about detail. `/api/tree` answers the full node, which
- *  carries the shadow of a share's credentials (`shareLocked`,
- *  `shareExpiresAt`), collection definitions and Notion binding ids — none of
+ *  about REACH, not about detail. `/api/tree` answers the full node and
+ *  `/api/page` the full meta, both of which carry the shadow of a share's
+ *  credentials (`public`, `shareLocked`, `shareExpiresAt`, `shareEdit`,
+ *  `sharedUnder`), collection definitions and Notion binding ids — none of
  *  which an app has a use for, and all of which would be crossing a frame
- *  boundary for nothing. Five fields, chosen rather than filtered: a new key
- *  on TreeNode does not silently become something an app can read. */
+ *  boundary for nothing.
+ *
+ *  So both reads are allowlists and they agree: the tree's five fields, and
+ *  the same five plus the page facts an app can draw with. Chosen rather
+ *  than filtered, so a new key on `TreeNode` or on `PageMeta` does not
+ *  silently become something an app can read. An app holds every page id
+ *  from `read.tree`, so a pass-through on one of the two would be the whole
+ *  notebook, one request at a time, whatever the other one withheld. */
 interface AppTreeNode {
   id: string;
   parentId: string | null;
@@ -59,22 +66,58 @@ function flatten(nodes: readonly TreeNode[], into: AppTreeNode[]): AppTreeNode[]
   return into;
 }
 
+/** The tree's five, and then what an app needs to draw a page it read: when
+ *  it was written and by whom, and the labels the owner put on it. `cover`
+ *  and the body's own attachment links are left out because the frame can
+ *  paint neither of them: `img-src` is the app's own asset folder, `blob:`
+ *  and `data:`, nothing else. `parentId` is here for agreement with the tree
+ *  and is never present, because hierarchy comes only from the folder tree. */
+const APP_PAGE_META_KEYS = [
+  "id",
+  "parentId",
+  "title",
+  "icon",
+  "kind",
+  "created",
+  "updated",
+  "updatedBy",
+  "tags",
+  "status",
+  "category",
+  "view",
+  "sections",
+  "pinned",
+] as const;
+
+function projectMeta(meta: Record<string, unknown>): Record<string, unknown> {
+  const into: Record<string, unknown> = {};
+  for (const key of APP_PAGE_META_KEYS) {
+    // A key that is merely absent stays absent, so an app's JSON is the
+    // shape it reads rather than a map of undefined.
+    if (meta[key] !== undefined) into[key] = meta[key];
+  }
+  return into;
+}
+
 /** The same two words the MCP uses for the same two failures, so an app and
  *  an agent branch on one vocabulary. */
 async function read(path: string): Promise<unknown> {
-  let response: Response;
   try {
-    response = await apiFetch(path);
-  } catch {
+    const response = await apiFetch(path);
+    if (response.status === 404) {
+      throw new AppBridgeError("that page is not there", "not_found");
+    }
+    if (!response.ok) {
+      throw new AppBridgeError("Brain could not answer that request", "store_failed");
+    }
+    // Parsing is inside the try as well: a body that is not the JSON this
+    // asked for would otherwise reach the app as the engine's own SyntaxError
+    // text, which says nothing an app or its owner can act on.
+    return await response.json();
+  } catch (error) {
+    if (error instanceof AppBridgeError) throw error;
     throw new AppBridgeError("Brain could not answer that request", "store_failed");
   }
-  if (response.status === 404) {
-    throw new AppBridgeError("that page is not there", "not_found");
-  }
-  if (!response.ok) {
-    throw new AppBridgeError("Brain could not answer that request", "store_failed");
-  }
-  return response.json();
 }
 
 /** The owner's read side. Every request the spec lists as a read, and
@@ -123,13 +166,9 @@ export function createAppReads(
         markdown: string;
         rev: string;
       };
-      // The route already redacted the secrets; this drops the keys that are
-      // merely undefined, so an app's JSON is the shape it reads rather than
-      // a map of absences.
-      const meta = Object.fromEntries(
-        Object.entries(body.meta ?? {}).filter(([, value]) => value !== undefined),
-      );
-      return { meta, markdown: body.markdown, rev: body.rev };
+      // The route redacted the secrets; this is the allowlist above it, so
+      // what an app reads of a page agrees with what it reads of the tree.
+      return { meta: projectMeta(body.meta ?? {}), markdown: body.markdown, rev: body.rev };
     }
     if (request.type === "read.pages") {
       const body = (await read(`/api/search?q=${encodeURIComponent(request.query)}`)) as {

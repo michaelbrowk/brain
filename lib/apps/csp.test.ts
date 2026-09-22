@@ -5,11 +5,14 @@ const ORIGIN = "https://brain.example";
 
 describe("the app frame's policy", () => {
   it("is the exact string, for one origin and one app", () => {
+    // The host-source stops at `/t/`, one segment short of the token: the
+    // token varies per grant and a policy cannot be re-cut per mint. It still
+    // names one app, which is what it is for.
     expect(appFrameCsp(ORIGIN, "app1")).toBe(
       "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; " +
-        "img-src blob: data: https://brain.example/api/app/app1/assets/; " +
-        "font-src data: https://brain.example/api/app/app1/assets/; " +
-        "media-src data: https://brain.example/api/app/app1/assets/; " +
+        "img-src blob: data: https://brain.example/api/app/app1/t/; " +
+        "font-src data: https://brain.example/api/app/app1/t/; " +
+        "media-src data: https://brain.example/api/app/app1/t/; " +
         "connect-src 'none'; frame-ancestors https://brain.example; " +
         "base-uri 'none'; form-action 'none'",
     );
@@ -26,9 +29,9 @@ describe("the app frame's policy", () => {
     }
   });
 
-  it("scopes one app's frame to one app's assets", () => {
+  it("scopes one app's frame to one app's files", () => {
     expect(appFrameCsp(ORIGIN, "app1")).not.toContain("/api/app/app2/");
-    expect(appFrameCsp(ORIGIN, "app2")).toContain("/api/app/app2/assets/");
+    expect(appFrameCsp(ORIGIN, "app2")).toContain("/api/app/app2/t/");
   });
 
   it("lets the frame reach nothing on the network", () => {

@@ -104,11 +104,22 @@ describe("the bridge protocol", () => {
   });
 
   it("sends an event with no request id, because nothing asked for it", () => {
-    expect(appEvent("theme", "dark")).toEqual({ v: BRIDGE_VERSION, event: "theme", theme: "dark" });
     expect(appEvent("visibility", false)).toEqual({
       v: BRIDGE_VERSION,
       event: "visibility",
       visible: false,
+    });
+  });
+
+  it("carries the tokens with the theme, because the values are what changed", () => {
+    // Spec §6: the frame is handed Brain's tokens at hello AND on every theme
+    // change. The name of the theme on its own would leave an app repainting
+    // in dark with the values it cached in light.
+    expect(appEvent("theme", "dark", { "--paper": "oklch(0.18 0.004 285)" })).toEqual({
+      v: BRIDGE_VERSION,
+      event: "theme",
+      theme: "dark",
+      tokens: { "--paper": "oklch(0.18 0.004 285)" },
     });
   });
 });

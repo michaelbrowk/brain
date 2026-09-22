@@ -9,7 +9,7 @@ import {
   APP_STATE_MAX_BYTES,
 } from "../apps/model";
 import { Store } from "./store";
-import { isAppOwnsFull, isAppSize, isNotFound } from "./types";
+import { isAppOwnsFull, isAppSize, isNotApp } from "./types";
 
 let root: string;
 let store: Store;
@@ -298,13 +298,14 @@ describe("app pages in the store", () => {
       expect(await store.readAppState(meta.id)).toBeNull();
     });
 
-    it("does not destroy the entry an interrupted rewrite left behind", async () => {
+    it("puts back the entry an interrupted rewrite left behind", async () => {
       // The crash window `writeAppFiles` admits to: `app/` renamed out to
       // `.app-next-old`, `.app-next/` still on disk. A state write used to go
       // straight back through that swap, `rm -rf` the retired folder and take
       // the only surviving copy of the entry with it. It writes its own file
-      // now and touches neither folder, so the copy is still there for a
-      // recovery to find.
+      // now, and it runs the same recovery the rewrite runs first, so the app
+      // is whole again rather than merely not destroyed.
+      // `store.apps-swap.test.ts` drives the same recovery through both paths.
       const meta = await appPage();
       const dir = path.join(root, "trainer");
       await rename(path.join(dir, "app"), path.join(dir, ".app-next-old"));
@@ -312,7 +313,10 @@ describe("app pages in the store", () => {
 
       await store.writeAppState(meta.id, { seen: 2 });
 
-      expect(await readFile(path.join(dir, ".app-next-old", "index.html"), "utf8")).toBe(ENTRY);
+      const entry = await store.readAppFile(meta.id, APP_ENTRY_PATH);
+      expect(entry.kind === "file" && Buffer.from(entry.data).toString("utf8")).toBe(ENTRY);
+      expect(await store.readAppState(meta.id)).toEqual({ seen: 2 });
+      expect((await readdir(dir)).filter((name) => name.startsWith(".app-next"))).toEqual([]);
     });
   });
 
@@ -390,8 +394,28 @@ describe("app pages in the store", () => {
 
     it("refuses a page that is not an app", async () => {
       const plain = await store.createPage(null, "Notes");
-      await expect(store.createOwnedPage(plain.id, { title: "Log" })).rejects.toSatisfy(isNotFound);
+      await expect(store.createOwnedPage(plain.id, { title: "Log" })).rejects.toSatisfy(isNotApp);
     });
+  });
+
+  it("carries kind on the two projections a shared page reads", async () => {
+    // `readPageLabel` and `readDirectChildren` are what a visitor's page-ref
+    // label and the public page's derived tail are drawn from, so the chip
+    // reaches a shared page through these two and through nothing else.
+    const parent = await store.createPage(null, "Spanish");
+    const { meta } = await store.createAppPage(parent.id, "Trainer", {
+      description: "d",
+      entryHtml: ENTRY,
+      builtBy: "Claude",
+    });
+    const plain = await store.createPage(parent.id, "Words");
+
+    expect(store.readPageLabel(meta.id)?.kind).toBe("app");
+    expect(store.readPageLabel(plain.id)?.kind).toBeUndefined();
+
+    const children = store.readDirectChildren(parent.id);
+    expect(children.find((child) => child.id === meta.id)?.kind).toBe("app");
+    expect(children.find((child) => child.id === plain.id)?.kind).toBeUndefined();
   });
 
   it("still reads a page whose folder was already called app", async () => {

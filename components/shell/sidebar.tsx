@@ -26,6 +26,7 @@ import {
   type SettingsSection,
 } from "../settings/sections";
 import { useUpdateStatus } from "../settings/use-update-status";
+import { AiChip } from "../ui/ai-chip";
 import { Icon } from "../ui/icon";
 import { Kbd } from "../ui/primitives";
 import { Button, IconButton } from "../ui/button";
@@ -63,7 +64,7 @@ export interface ShellSidebarProps {
   /** The active settings section (null = the mobile root list). */
   settingsSection: SettingsSection | null;
   onSelectSettingsSection: (section: SettingsSection) => void;
-  pinnedPages: Pick<TreeNode, "id" | "title" | "icon">[];
+  pinnedPages: Pick<TreeNode, "id" | "title" | "icon" | "kind">[];
   onGoHome: () => void;
   /** The settings slot's back row: the surface's close semantics —
    *  history.back when entered in-app, else go home. It is the only one left
@@ -515,7 +516,7 @@ const NavRow = forwardRef<
 /** A pinned page as a chip (2×2 grid). Keeps the page-ref drop target the
  *  pinned row had: a page reference dragged from the editor onto it nests
  *  under that page. */
-function PinnedChip({
+export function PinnedChip({
   page,
   tree,
   pageRefSourcePageId,
@@ -523,7 +524,7 @@ function PinnedChip({
   onSelect,
   onReparentPageRef,
 }: {
-  page: Pick<TreeNode, "id" | "title" | "icon">;
+  page: Pick<TreeNode, "id" | "title" | "icon" | "kind">;
   tree: TreeNode[];
   pageRefSourcePageId: string | null;
   selected: boolean;
@@ -614,6 +615,7 @@ function PinnedChip({
       }}
     >
       {page.title}
+      {page.kind === "app" && <AiChip />}
     </Chip>
   );
 }

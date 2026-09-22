@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { Store } from "./store";
+import { brainEvents } from "./events";
 import { serializeLivePage } from "./frontmatter";
 import { RevConflictError } from "./types";
 import { parseTaskLines } from "../tasks/task-lines";
@@ -45,7 +46,9 @@ async function readTaskFile(root: string, id: string): Promise<string> {
   return fs.readFile(path.join(root, "_tasks", `${id}.md`), "utf8");
 }
 
-async function tmpStore(options: { publicOrigin?: string | null } = {}) {
+async function tmpStore(
+  options: { publicOrigin?: string | null; tasksEnabled?: () => boolean } = {},
+) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-tasks-reconcile-"));
   const s = new Store(root, options);
   await s.init();
@@ -1108,5 +1111,82 @@ describe("the order a page write takes", () => {
     expect((await s.readPage(page.id)).markdown).toBe(BASE_BODY);
     expect(s.getTask(task.id)?.done).toBe(false);
     expect(await readTaskFile(root, task.id)).toBe(before);
+  });
+});
+
+describe("the Tasks module off", () => {
+  /** The switch is a function and not a value because the Store is a
+   *  process-wide singleton with no invalidation: it has to be able to change
+   *  under a live Store, which is exactly the case below. */
+  async function switchableStore() {
+    let tasksOn = true;
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-tasks-module-off-"));
+    const s = new Store(root, { tasksEnabled: () => tasksOn });
+    await s.init();
+    return { s, root, off: () => (tasksOn = false), on: () => (tasksOn = true) };
+  }
+
+  function recordEvents(): { types: string[]; stop: () => void } {
+    const types: string[] = [];
+    const listen = (event: { type: string }) => types.push(event.type);
+    brainEvents.on("change", listen);
+    return { types, stop: () => brainEvents.off("change", listen) };
+  }
+
+  // THE SPEC'S PROMISE, IN ONE CASE. A tick on a line that is a task changes
+  // only the note: the record under `_tasks/` is not written and no task
+  // event is emitted. The line was promoted BEFORE the switch went off,
+  // because a line that was never a task proves nothing about the reconcile.
+  it("leaves a promoted line's record byte-identical when it is ticked", async () => {
+    const { s, root, off } = await switchableStore();
+    const { pageId, taskId } = await gardenPage(s);
+    const before = await readTaskFile(root, taskId);
+
+    off();
+    const events = recordEvents();
+    try {
+      await s.writePage(pageId, TICKED_BODY, undefined, "me");
+    } finally {
+      events.stop();
+    }
+
+    // The note carries the tick.
+    expect((await s.readPage(pageId)).markdown).toContain("- [x] Water the plants");
+    // The record does not, byte for byte, `updated` included.
+    expect(await readTaskFile(root, taskId)).toBe(before);
+    // And nothing told a surface that a task moved.
+    expect(events.types).not.toContain("task");
+    expect(events.types).toContain("write");
+  });
+
+  it("does not detach a task whose line the writer deleted", async () => {
+    const { s, root, off } = await switchableStore();
+    const { pageId, taskId } = await gardenPage(s);
+    const before = await readTaskFile(root, taskId);
+    off();
+    await s.writePage(pageId, "A note about the garden.", undefined, "me");
+    expect(await readTaskFile(root, taskId)).toBe(before);
+  });
+
+  // WHEN TASKS COMES BACK ON, the note's state is the truth for the tick.
+  // Nothing replays: the next save of this note reconciles it, which is the
+  // existing checkbox-aware merge rule doing what it already does.
+  it("takes the note's state on the next save after the module comes back", async () => {
+    const { s, off, on } = await switchableStore();
+    const { pageId, taskId } = await gardenPage(s);
+    off();
+    await s.writePage(pageId, TICKED_BODY, undefined, "me");
+    expect(viewOf(s, taskId).done).toBe(false);
+
+    on();
+    await s.writePage(pageId, `${TICKED_BODY}\nAnd another sentence.`, undefined, "me");
+    expect(viewOf(s, taskId).done).toBe(true);
+  });
+
+  it("reconciles as it always did when nothing sets the option", async () => {
+    const { s } = await tmpStore();
+    const { pageId, taskId } = await gardenPage(s);
+    await s.writePage(pageId, TICKED_BODY, undefined, "me");
+    expect(viewOf(s, taskId).done).toBe(true);
   });
 });

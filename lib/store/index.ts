@@ -1,5 +1,6 @@
 import path from "node:path";
 import os from "node:os";
+import { peekModules, readModules } from "@/lib/owner-settings";
 import { Store } from "./store";
 
 export * from "./types";
@@ -49,19 +50,36 @@ const g = globalThis as unknown as {
 export async function getStore(): Promise<Store> {
   if (g.__brainStore) return g.__brainStore;
   if (!g.__brainStoreInit) {
-    const s = new Store(NOTES_ROOT, { publicOrigin: configuredPublicOrigin() });
+    const s = new Store(NOTES_ROOT, {
+      publicOrigin: configuredPublicOrigin(),
+      // The peek and not the value: this singleton outlives every switch
+      // flip, and `setModules` writes the same memoised cell, so the getter
+      // is current without a read. A `null` peek is a process that has not
+      // read the settings file yet and reads as on, which is the recoverable
+      // direction: a record written when it need not have been is a commit,
+      // and a record not written when it should have been is a lost tick.
+      tasksEnabled: () => peekModules()?.tasks ?? true,
+    });
     // A start that fails closed — a move journal the disk no longer matches —
     // must not be remembered as the answer. Nothing before the throw wrote
     // anything, `mkdir` is idempotent and a fresh instance rebuilds its index
     // from scratch, so the next request tries again and comes back on its own
     // once the operator has repaired the notes.
-    g.__brainStoreInit = s.init().then(
-      () => (g.__brainStore = s),
-      (error: unknown) => {
-        g.__brainStoreInit = undefined;
-        throw error;
-      },
-    );
+    g.__brainStoreInit = readModules()
+      // Best effort, and inside the chain rather than before `new Store`:
+      // `init()` walks the tree and reconciles every page it finds, so the
+      // answer has to be in the cache before that runs, and an `await`
+      // between the guard above and this assignment would let two concurrent
+      // callers each build a Store.
+      .catch(() => undefined)
+      .then(() => s.init())
+      .then(
+        () => (g.__brainStore = s),
+        (error: unknown) => {
+          g.__brainStoreInit = undefined;
+          throw error;
+        },
+      );
   }
   return g.__brainStoreInit;
 }

@@ -71,11 +71,18 @@ content policy is:
 
 ```
 default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline';
-img-src blob: data: <origin>/api/app/<id>/assets/;
-font-src data: <origin>/api/app/<id>/assets/;
-media-src data: <origin>/api/app/<id>/assets/;
+img-src blob: data: <origin>/api/app/<id>/t/;
+font-src data: <origin>/api/app/<id>/t/;
+media-src data: <origin>/api/app/<id>/t/;
 connect-src 'none'; frame-ancestors <origin>; base-uri 'none'; form-action 'none'
 ```
+
+The entry is served under a per-session token, at
+`/api/app/<id>/t/<token>/index.html`, and its assets sit beside it at
+`/api/app/<id>/t/<token>/assets/…`. The token changes every time the frame is
+mounted, so no path an app could write down stays valid and the policy names
+`/t/` rather than any one grant. **This is why an asset is addressed
+relatively and can be addressed no other way.**
 
 Three things follow, and each of them is a way an app breaks silently if you
 forget it.
@@ -88,10 +95,11 @@ forget it.
   is why `script-src` and `style-src` allow inline: the entry is an inline
   script and an inline stylesheet. There is no second file to load.
 - **An asset is addressed relatively.** Write `assets/card.png`, never
-  `/api/app/<id>/assets/card.png` and never an absolute URL. The `img-src`
-  source list names the app's own asset folder as a host-source, and a request
-  the policy blocks inside an opaque-origin frame reaches no console the owner
-  will ever open: the app simply paints nothing.
+  `/api/app/<id>/assets/card.png` and never an absolute URL. The path the
+  frame is actually served from carries a token the app cannot know, so a
+  written-out path is wrong on the next mount even when it is right on this
+  one, and a request the policy blocks inside an opaque-origin frame reaches
+  no console the owner will ever open: the app simply paints nothing.
 
 A `data:` URI works everywhere an asset does, so a handful of small icons can
 live in the entry with no asset at all.
@@ -110,7 +118,7 @@ one is a `postMessage` the host validates, rate-limits and answers. The rate is
 | `read.pages` | `brain.readPages(query)` | `{ hits }`, matching pages with snippets | `store_failed` |
 | `write.page` | `brain.writePage(id, markdown, rev)` | `{ rev }`, the new one | `not_owned`, `rev_conflict`, `too_large`, `not_found`, `store_failed` |
 | `create.page` | `brain.createPage(title, markdown, icon)` | `{ id }`, and the app now owns it | `bad_request`, `too_large`, `store_failed` |
-| `state.get` | `brain.getState()` | `{ state }`, or `null` for an app that has kept none | `store_failed` |
+| `state.get` | `brain.getState()` | `{ state }`, where `state` is `null` when none was kept. Always the object, never a bare `null` | `store_failed` |
 | `state.set` | `brain.setState(json)` | `{ ok: true }` | `too_large`, `store_failed` |
 | `open` | `brain.open(id)` | `{ ok: true }`, and Brain navigates to the page | nothing |
 | `toast` | `brain.toast(text)` | `{ ok: true }` | nothing |
@@ -207,10 +215,31 @@ backgrounds, `--r-xs` through `--r-xl` for radii, `--font-sf` for the type, and
   <button class="btn" data-primary id="next">Next</button>
 </div>
 <script>
-  const state = await brain.getState();
-  document.getElementById("next").onclick = () => brain.toast("saved");
+  async function start() {
+    const saved = await brain.getState();
+    const word = document.getElementById("word");
+    word.textContent = (saved.state && saved.state.word) || "hola";
+    document.getElementById("next").onclick = async () => {
+      word.textContent = "adios";
+      await brain.setState({ word: "adios" });
+      brain.toast("Saved");
+    };
+  }
+  // The entry is a classic script, so `await` lives inside a function and
+  // never at the top level, where it is a SyntaxError that takes the whole
+  // block with it. `brain.ready` settles once the host has answered the
+  // kit's first hello, and it rejects after five seconds if nothing does.
+  brain.ready.then(start, () => {
+    document.getElementById("word").textContent = "Brain did not answer. Reload the page.";
+  });
 </script>
 ```
+
+Two things in that block are the whole shape of an app. Everything starts from
+`brain.ready`, because the tokens are not on the page until the host has
+answered. And `await` sits inside a function: the entry is a classic script,
+not a module, so a top-level `await` is a SyntaxError that silently takes
+every line of the block with it.
 
 ## The design rules
 
@@ -243,10 +272,31 @@ It cannot judge taste, and does not try. An ugly app passes. Three rules:
 | Rule | What it caught | Why it is a rule |
 | --- | --- | --- |
 | `color_scheme` | the entry declares no `color-scheme` and asks for no kit | without one the frame paints in the browser's default scheme and ignores the owner's dark theme |
-| `hard_coded_colour` | a `#hex`, `rgb(`, `hsl(`, `oklch(` or the like outside a `var(…)` | a written colour cannot follow a theme. A colour inside a `var()` fallback is fine, because that is the token path |
-| `external_resource` | an `@import`, or a `src` / `href` / `url()` pointing at another origin or at an absolute path | the frame's policy blocks it with nothing said, so the app loads and paints nothing, and the lint is the only place anybody can be told |
+| `hard_coded_colour` | a `#hex`, `rgb(`, `hsl(`, `oklch(` or the like outside a `var(…)`, and a named CSS colour used as a declaration's value | a written colour cannot follow a theme. A colour inside a `var()` fallback is fine, because that is the token path |
+| `external_resource` | an `@import`, a `url()`, or a `src` / `srcset` / `href` / `data` / `poster` / `action` / `formaction` / `ping` / `background` pointing at another origin, at a protocol-relative host or at an absolute path | the frame's policy blocks it with nothing said, so the app loads and paints nothing, and the lint is the only place anybody can be told |
 
-`data:` URIs and the app's own `assets/…` names pass all three.
+A comment hides nothing: the lint blanks every `<!-- … -->` before the first
+rule runs, so a commented-out `color-scheme` does not satisfy one and a
+commented-out kit link does not carry the rest of its line past the others.
+An attribute value may be unquoted, single-quoted or double-quoted and is read
+the same way either way, and an `href` to another site is refused along with
+the rest — an app links out through `brain.open(id)` or not at all.
+
+**Named colours.** `background: red`, `color: white` and `border: 1px solid black`
+are refused, in a `<style>` block and in a `style=` attribute, which is where
+the browser reads a value as a colour. The same word anywhere else — in prose,
+in a class name, in a JavaScript string — passes, and so do `transparent`,
+`currentcolor` and the CSS-wide keywords, because none of those fixes a value.
+What the lint cannot catch is a colour assembled from halves at runtime, so it
+is a guard and not a proof.
+
+**A `#` that is a name.** `href="#dead"`, `url(#face)`, `querySelector("#abc")`,
+an `id=` and an `aria-*=` fragment are all read as names rather than as hex. A
+bare `#abc` in a JavaScript string is still refused, because nothing can tell
+what it is for once it sits in quotes on its own. Read the token instead:
+`getComputedStyle(document.documentElement).getPropertyValue("--ink")`.
+
+`data:` URIs and the app's own `assets/…` names pass all three rules.
 
 ## Rebuilding
 
@@ -256,9 +306,17 @@ It cannot judge taste, and does not try. An ugly app passes. Three rules:
 rebuild is a new entry for the same app, and widening what the frame may write
 is the owner's business, not the rebuild's.
 
+`owns` and `state` are read inside the store's own lock, not from what the
+rebuild read before it started, so a page the running frame created while the
+rebuild was writing is still owned when it finishes. `builtBy` and `builtAt`
+are restamped, so the page head names the connection that built it last.
+
 Assets left out of a rebuild are kept. An empty `assets` array is how an app
 clears them, which is a caller saying so rather than a caller forgetting to
-mention them.
+mention them. An asset's bytes are padded base64 on their own: no `data:`
+prefix, no whitespace, no url-safe characters. Anything else is refused as
+`bad_request` naming the asset, rather than written as the noise it decodes
+to.
 
 To change the description the owner reads, use `write_page` on the app page like
 any other page.

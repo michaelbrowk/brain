@@ -71,13 +71,18 @@ export function createAppBridge(options: AppBridgeOptions): AppBridge {
     const rid = typeof raw?.rid === "string" && raw.rid.length > 0 ? raw.rid : null;
     if (rid === null) return;
 
+    // The budget is spent BEFORE the message is parsed, because a refusal is
+    // itself a postMessage back into the frame: refusing outside the limiter
+    // would let a frame in a tight loop of junk pull an unbounded stream of
+    // answers out of the host, which is the cost the budget exists to bound.
+    if (!limiter.consume(options.page.id).allowed) {
+      refuse(rid, "that app is asking too often", "too_many");
+      return;
+    }
+
     const parsed = appRequestSchema.safeParse(event.data);
     if (!parsed.success) {
       refuse(rid, "Brain did not understand that request", "bad_request");
-      return;
-    }
-    if (!limiter.consume(options.page.id).allowed) {
-      refuse(rid, "that app is asking too often", "too_many");
       return;
     }
 
@@ -124,7 +129,10 @@ export function createAppBridge(options: AppBridgeOptions): AppBridge {
 
   return {
     dispose: () => window.removeEventListener("message", listener),
-    sendTheme: (theme) => post(appEvent("theme", theme)),
+    // The tokens are re-read here rather than carried over from `hello`: a
+    // theme change is a change of values, and the frame cannot read Brain's
+    // stylesheet to find the new ones for itself.
+    sendTheme: (theme) => post(appEvent("theme", theme, options.tokens())),
     sendVisibility: (visible) => post(appEvent("visibility", visible)),
   };
 }

@@ -301,15 +301,13 @@ const nextConfig: NextConfig = {
           { key: "Cache-Control", value: "private, no-store" },
         ],
       },
-      // An app's own files. This block replaces the catch-all rather than
-      // merging with it, which is the point twice over. The catch-all's
-      // X-Frame-Options: DENY would make an app unloadable inside the page
-      // that IS the app, so it is dropped and the route's own
-      // frame-ancestors takes its place. And the catch-all's CSP would
-      // replace the route's, which is the only one that can name the
-      // request's origin and the app's id, so no CSP is set here at all. The
-      // other four global headers are restated, so dropping one is a decision
-      // rather than an accident.
+      // An app's own files. These are the paths the catch-all's lookahead
+      // exempts, so this is the only rule that names them and the four headers
+      // below are the whole set the response carries out of this file. Two
+      // headers are deliberately absent and could not be removed here if they
+      // were not: X-Frame-Options, because DENY makes an app unloadable inside
+      // the page that IS the app, and the CSP, because only the route handler
+      // can build one that names the public origin and this app's id.
       {
         source: "/api/app/:path*",
         headers: [

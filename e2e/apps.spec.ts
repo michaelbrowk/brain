@@ -68,7 +68,12 @@ const TRAINER = readFileSync(
  *  its inline script ran under `script-src 'unsafe-inline'`, and that the host
  *  answered it over the bridge. It keeps asking until it is answered, because
  *  the frame can finish loading before the host has attached its listener, and
- *  five asks a second sits well under the thirty the limiter allows. */
+ *  five asks a second sits well under the thirty the limiter allows.
+ *
+ *  And it asks for its own asset with a RELATIVE url, which is the whole
+ *  reason the grant is in the path. A blocked subresource inside an
+ *  opaque-origin frame reports nothing anywhere, so the image says out loud
+ *  whether it painted and how wide it came out. */
 const PROBE = `<!doctype html>
 <meta charset="utf-8">
 <meta name="color-scheme" content="light dark">
@@ -76,7 +81,20 @@ const PROBE = `<!doctype html>
 <body style="font: 14px system-ui">
 <p id="loaded">the frame document rendered</p>
 <p id="said">no answer yet</p>
+<img id="dot" src="assets/dot.png" alt="">
+<p id="asset">the asset has not settled</p>
 <script>
+  var dot = document.getElementById("dot");
+  var asset = document.getElementById("asset");
+  dot.addEventListener("load", function () {
+    asset.textContent = "the asset painted, " + dot.naturalWidth + " wide";
+  });
+  dot.addEventListener("error", function () {
+    asset.textContent = "the asset was refused";
+  });
+  if (dot.complete && dot.naturalWidth > 0) {
+    asset.textContent = "the asset painted, " + dot.naturalWidth + " wide";
+  }
   var asking = setInterval(ask, 200);
   window.addEventListener("message", function (event) {
     var data = event.data;
@@ -131,18 +149,10 @@ const ESCAPE = `<!doctype html>
 </body>
 `;
 
-/** One image, addressed the only way an app may address one. */
-const PAINTER = `<!doctype html>
-<meta charset="utf-8">
-<meta name="color-scheme" content="light dark">
-<title>Painter</title>
-<body>
-<img id="dot" src="assets/dot.png" alt="a dot">
-</body>
-`;
-
-/** A real 1x1 PNG. Base64 rather than a fixture file, so the case carries the
- *  bytes it depends on. */
+/** One opaque pixel, so the asset cases measure a real decode rather than an
+ *  element that happens to exist. `naturalWidth` is 1 only if the bytes
+ *  arrived and the browser read them as a PNG. Base64 rather than a fixture
+ *  file, so the case carries the bytes it depends on. */
 const DOT_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
@@ -379,6 +389,11 @@ interface Trainer {
   deck: string;
   trainer: string;
   words: string;
+  /** A second app in the same subtree, carrying one image. A visitor's token
+   *  has to reach an app's files as well as its entry, and the trainer has no
+   *  picture of its own to prove it with. */
+  probeTitle: string;
+  probe: string;
 }
 
 /** The notebook seeded for the trainer: a deck, a page of words in all three
@@ -388,6 +403,7 @@ interface Trainer {
 async function seedTrainer(page: Page): Promise<Trainer> {
   const run = tag();
   const title = `Trainer ${run}`;
+  const probeTitle = `Frame probe ${run}`;
   await seed(page, `Spanish ${run}`, [
     {
       sourceId: "deck",
@@ -404,6 +420,15 @@ async function seedTrainer(page: Page): Promise<Trainer> {
       app: { entryHtml: TRAINER, owns: ["words"] },
     },
     { sourceId: "words", parentSourceId: "trainer", title: "Words", markdown: "" },
+    {
+      sourceId: "probe",
+      parentSourceId: "deck",
+      title: probeTitle,
+      // No separator on this line, so the trainer reads no word out of it and
+      // the deck stays the four the source page names.
+      markdown: "An app with a picture in it.\n",
+      app: { entryHtml: PROBE, assets: [{ name: "dot.png", base64: DOT_PNG_BASE64 }] },
+    },
   ]);
 
   const nodes = await flatTree(page);
@@ -413,11 +438,15 @@ async function seedTrainer(page: Page): Promise<Trainer> {
     (node) => node.parentId === trainer!.id && node.title === "Words",
   );
   expect(words, "the trainer has no Words page under it").toBeTruthy();
+  const probe = nodes.find((node) => node.title === probeTitle);
+  expect(probe, `no page titled ${probeTitle}`).toBeTruthy();
   return {
     title,
     deck: trainer!.parentId!,
     trainer: trainer!.id,
     words: words!.id,
+    probeTitle,
+    probe: probe!.id,
   };
 }
 
@@ -432,7 +461,7 @@ test("@release an app page's frame loads under its own policy and answers hello"
       parentSourceId: null,
       title,
       markdown: "The release case for an app page's frame.\n",
-      app: { entryHtml: PROBE },
+      app: { entryHtml: PROBE, assets: [{ name: "dot.png", base64: DOT_PNG_BASE64 }] },
     },
   ]);
   const id = await idOf(page, title);
@@ -455,8 +484,29 @@ test("@release an app page's frame loads under its own policy and answers hello"
     { timeout: 20_000 },
   );
 
-  // The headers the browser actually received for the entry.
-  const entry = await headersOf(page, `/api/app/${id}/index.html`);
+  // THE CASE THAT CATCHES A FRAME THAT CANNOT REACH ITS OWN FILES.
+  //
+  // The image is asked for with a relative url, so the browser resolves it
+  // against the entry's path and the grant in that path rides along. Under the
+  // old shape the same request arrived with no session (the frame's origin is
+  // opaque, so nothing cross-site carries a cookie) and no query (a relative
+  // url drops it), was answered 404, and Chrome reported it as
+  // ERR_BLOCKED_BY_ORB with no CSP violation, no securitypolicyviolation event
+  // and no console line anywhere. The picture simply never appeared.
+  await expect(frame.locator("#asset")).toHaveText("the asset painted, 1 wide", {
+    timeout: 20_000,
+  });
+  expect(
+    await frame.locator("#dot").evaluate((img) => (img as HTMLImageElement).naturalWidth),
+  ).toBeGreaterThan(0);
+
+  // The address the frame is actually mounted at, and the headers the browser
+  // received for it. Read from inside the page so the request carries the
+  // owner's session the way the mint call did.
+  const src = await page.locator(`iframe[title="${title}"]`).getAttribute("src");
+  expect(src).toMatch(new RegExp(`^/api/app/${id}/t/[^/]+/index\\.html$`));
+
+  const entry = await headersOf(page, src!);
   expect(entry.status).toBe(200);
   expect(entry.headers["x-frame-options"]).toBeUndefined();
   expect(entry.headers["content-security-policy"]).toContain(
@@ -466,8 +516,17 @@ test("@release an app page's frame loads under its own policy and answers hello"
   expect(entry.headers["content-security-policy"]).not.toContain(
     "frame-ancestors 'none'",
   );
+  // The host-source has to be a prefix of the asset's own address, or the
+  // browser refuses it before the route is reached.
+  expect(entry.headers["content-security-policy"]).toContain(
+    `${ORIGIN}/api/app/${id}/t/`,
+  );
   expect(entry.headers["cache-control"]).toBe("private, no-store");
   expect(entry.headers["x-content-type-options"]).toBe("nosniff");
+
+  // And the same address with the token segment taken out is nothing at all.
+  const untokened = await headersOf(page, `/api/app/${id}/index.html`);
+  expect(untokened.status).toBe(404);
 
   // Narrowing the catch-all took nothing away from every other path.
   const shell = await headersOf(page, `/p/${id}`);
@@ -576,101 +635,6 @@ test("@release an app cannot read Brain's API, its cookies, or the top window", 
   expect(found.parentName).toBe("threw");
 });
 
-/** One app with one image, for the two cases below. */
-async function seedPainter(page: Page) {
-  const title = `Painter ${tag()}`;
-  await seed(page, title, [
-    {
-      sourceId: "painter",
-      parentSourceId: null,
-      title,
-      markdown: "One image, addressed relatively.\n",
-      app: {
-        entryHtml: PAINTER,
-        assets: [{ name: "dot.png", base64: DOT_PNG_BASE64 }],
-      },
-    },
-  ]);
-  return { title, id: await idOf(page, title) };
-}
-
-test("@release an app's asset is served under the app's own policy", async ({ page }) => {
-  await login(page);
-  const painter = await seedPainter(page);
-
-  const asset = await page.evaluate(async (path: string) => {
-    const response = await fetch(path);
-    const headers: Record<string, string> = {};
-    response.headers.forEach((value, key) => {
-      headers[key] = value;
-    });
-    const bytes = new Uint8Array(await response.arrayBuffer());
-    return { status: response.status, headers, head: Array.from(bytes.slice(0, 4)) };
-  }, `/api/app/${painter.id}/assets/dot.png`);
-
-  expect(asset.status).toBe(200);
-  expect(asset.headers["content-type"]).toBe("image/png");
-  // The bytes the store kept, not a re-encode of them.
-  expect(asset.head).toEqual([137, 80, 78, 71]);
-
-  // And the policy the entry carried, which is the only one that can name the
-  // app's own asset folder as a host-source. `'self'` would match no origin
-  // at all inside a sandbox with no allow-same-origin.
-  const entry = await headersOf(page, `/api/app/${painter.id}/index.html`);
-  expect(entry.headers["content-security-policy"]).toContain(
-    `${ORIGIN}/api/app/${painter.id}/assets/`,
-  );
-  expect(entry.headers["content-security-policy"]).not.toContain("'self'");
-});
-
-/** THE CASE THAT CATCHES A POLICY THAT SILENTLY ALLOWS NOTHING, AND THE ONE
- *  THING IT CAUGHT.
- *
- *  It is `fixme` because it fails, reproducibly, against a real defect that is
- *  bigger than this file and not this branch's to fix. What it found:
- *
- *  The frame's document has an OPAQUE ORIGIN, so every subresource it asks for
- *  is a cross-site request and carries no SameSite cookie. The owner is signed
- *  in and their app's own `assets/dot.png` still arrives at the server with no
- *  session on it. `proxy.ts` used to answer that with 401 before the route saw
- *  it; this branch opens `/api/app/` at the wall so the route decides, and the
- *  route then answers 404, because a caller with no session and no share grant
- *  is a caller it has nothing for. Chrome reports the blocked image as
- *  `net::ERR_BLOCKED_BY_ORB` with no CSP violation and no console line inside
- *  a sandbox nobody can open, and `<img>` simply never paints.
- *
- *  It is NOT the policy: the case above proves the asset is served correctly,
- *  with the right bytes, the right type and a CSP naming its own folder, and
- *  the same document opened at top level paints the same image.
- *
- *  A query string cannot carry the authority either, which is what a share
- *  visitor's `?root=&v=` does for the ENTRY: a relative `assets/dot.png`
- *  resolves against the path and drops the query, so a shared app is in the
- *  same position. Whatever authorises an asset has to sit in the PATH, where a
- *  relative URL carries it. That is a route shape, and the decision is the
- *  owner of PR 2's.
- *
- *  Until then an app may use `data:` URIs, which the policy allows and which
- *  `docs/apps.md` already names. */
-test.fixme("@release an app's own image asset paints inside the frame", async ({ page }) => {
-  await login(page);
-  const painter = await seedPainter(page);
-  await page.goto(`/p/${painter.id}`);
-
-  const frame = page.frameLocator(`iframe[title="${painter.title}"]`);
-  // naturalWidth rather than a screenshot, because a blocked image is still
-  // laid out and a visual diff would pass on the alt box.
-  await expect
-    .poll(
-      () =>
-        frame
-          .locator("#dot")
-          .evaluate((img: HTMLImageElement) => (img.complete ? img.naturalWidth : 0)),
-      { timeout: 20_000 },
-    )
-    .toBeGreaterThan(0);
-});
-
 test("@release a shared trainer runs, and refuses to write", async ({ page, browser }) => {
   test.setTimeout(120_000);
   await login(page);
@@ -721,6 +685,31 @@ test("@release a shared trainer runs, and refuses to write", async ({ page, brow
     );
     // And the owner's page is exactly as it was.
     expect(await markdownOf(page, seeded.words)).toBe(before);
+
+    // THE VISITOR'S OWN TOKEN, AND THE HALF OF IT NOTHING ELSE MEASURES.
+    //
+    // The share page mints the frame's address from the grant it resolved, so
+    // the visitor's authority is in the path the way the owner's is. Its
+    // entry loading proves the mint; an asset painting proves the rest of the
+    // path, which is the request that carries no cookie and no query and used
+    // to be a picture that simply never appeared.
+    await visitor.goto(`/share/${seeded.deck}?page=${seeded.probe}`);
+    const probe = visitor.frameLocator(`iframe[title="${seeded.probeTitle}"]`);
+    await expect(probe.locator("#loaded")).toHaveText("the frame document rendered", {
+      timeout: 20_000,
+    });
+    await expect(probe.locator("#asset")).toHaveText("the asset painted, 1 wide", {
+      timeout: 20_000,
+    });
+
+    const probeSrc = await visitor
+      .locator(`iframe[title="${seeded.probeTitle}"]`)
+      .getAttribute("src");
+    expect(probeSrc).toMatch(new RegExp(`^/api/app/${seeded.probe}/t/[^/]+/index\\.html$`));
+    // The address a visitor's frame is given carries no root and no version in
+    // a query, because a relative asset url would drop them.
+    expect(probeSrc).not.toContain("root=");
+    expect(probeSrc).not.toContain("v=");
   } finally {
     await visitorContext.close();
   }

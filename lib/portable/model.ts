@@ -176,6 +176,11 @@ export interface PortableBundle {
    *  `attachments` is, so the restore looks each file up by the name the
    *  manifest gave it rather than by walking the archive again. */
   appFiles: Map<string, Uint8Array>;
+  /** Each app's state, already parsed, by the same archive path. Parsed
+   *  during validation rather than during the restore, so a state file that
+   *  is not JSON is one refusal among the archive's others and not a bare
+   *  SyntaxError half way through an import. */
+  appState: Map<string, unknown>;
 }
 
 export interface PortableImportSummary {
@@ -261,7 +266,13 @@ async function exportedTasks(
 export async function buildPortableArchive(
   store: Store,
   options: { rootId?: string; now?: Date } = {},
-): Promise<{ bytes: Uint8Array; manifest: PortableManifest }> {
+): Promise<{
+  bytes: Uint8Array;
+  manifest: PortableManifest;
+  /** The ids of pages that say `kind: app` whose files this archive does not
+   *  carry. Empty on every ordinary notebook. */
+  skippedApps: string[];
+}> {
   const tree = store.getTree();
   const selected = options.rootId
     ? (() => {
@@ -334,16 +345,27 @@ export async function buildPortableArchive(
   // One folder per app page, named by the same index its markdown takes.
   const appEntries: Array<{ path: string; data: Uint8Array }> = [];
   const appManifests = new Map<string, NonNullable<PortablePage["app"]>>();
+  // A page that says `kind: app` whose files this export could not carry,
+  // because the map does not validate or the entry is gone. It travels as an
+  // ordinary page and the caller is handed the list, rather than left to find
+  // out on the next import.
+  const skippedApps: string[] = [];
   for (const node of nodes) {
     const app = store.readAppMeta(node.id);
-    if (app === null) continue;
+    if (app === null) {
+      if (node.kind === "app") skippedApps.push(node.id);
+      continue;
+    }
     const prefix = `app/p${pagePaths
       .get(node.id)!
       .slice("pages/p".length, -".md".length)}`;
     const entry = await store.readAppFile(node.id, APP_ENTRY_PATH);
     // An app page whose entry has gone is exported as an ordinary page. The
     // archive is a copy of what is there, not a repair of what is not.
-    if (entry.kind !== "file") continue;
+    if (entry.kind !== "file") {
+      skippedApps.push(node.id);
+      continue;
+    }
     appEntries.push({ path: `${prefix}/index.html`, data: entry.data });
     const assets: { name: string; archivePath: string }[] = [];
     for (const name of await store.listAppAssets(node.id)) {
@@ -454,7 +476,7 @@ export async function buildPortableArchive(
         : [],
     ),
   ];
-  return { bytes: createPortableArchive(entries), manifest };
+  return { bytes: createPortableArchive(entries), manifest, skippedApps };
 }
 
 function orderedPages(pages: PortablePage[]): PortablePage[] {
@@ -566,6 +588,7 @@ export function validatePortableArchive(
   // and the unlisted-file sweep below then makes the converse true, so no
   // file rides under `app/` that no page claims.
   const appFiles = new Map<string, Uint8Array>();
+  const appState = new Map<string, unknown>();
   for (const page of manifest.pages) {
     if (!page.app) continue;
     const prefix = page.app.entryPath.slice(0, -"/index.html".length);
@@ -588,6 +611,26 @@ export function validatePortableArchive(
       const data = entries.get(appPath);
       if (!data) throw new Error(`portable app file is missing: ${appPath}`);
       appFiles.set(appPath, data);
+    }
+    // The state file is the one app entry with a shape, and the restore hands
+    // it straight to `JSON.parse`. Read here, where every other malformed
+    // archive is caught and named, it is one refusal among its peers; left to
+    // the restore it arrives as a bare SyntaxError after the import has
+    // begun, and the owner reads a parser's words about a file they never
+    // saw.
+    if (page.app.statePath) {
+      try {
+        appState.set(
+          page.app.statePath,
+          JSON.parse(
+            new TextDecoder("utf-8", { fatal: true }).decode(
+              appFiles.get(page.app.statePath)!,
+            ),
+          ),
+        );
+      } catch {
+        throw new Error(`portable app state is not JSON: ${page.app.statePath}`);
+      }
     }
   }
   const taskBodies = new Map<string, string>();
@@ -635,7 +678,7 @@ export function validatePortableArchive(
     }
   }
   return {
-    bundle: { manifest, markdown, attachments, taskBodies, appFiles },
+    bundle: { manifest, markdown, attachments, taskBodies, appFiles, appState },
     summary: {
       title: manifest.title,
       pages: manifest.pages.length,
@@ -689,6 +732,29 @@ export async function applyPortableBundle(
       });
       created.set(page.sourceId, meta.id);
       if (page.parentSourceId === null) rootIds.push(meta.id);
+      // AN APP PAGE SAYS SO BEFORE ITS CHILDREN EXIST.
+      //
+      // `ordered` puts a parent before its children, and `slugify("App")` is
+      // `app`, the folder name an app's own file set uses. In the exporting
+      // notebook such a child was pushed aside because the app's folder was
+      // already on disk; here nothing holds it yet, so the child took it and
+      // the metadata write below refused the WHOLE archive. A notebook that
+      // cannot be restored from its own backup is worse than either.
+      //
+      // `owns` waits for the loop that remaps it: the ids this import mints
+      // are not known until every page is created.
+      if (page.app) {
+        await store.setAppMeta(
+          meta.id,
+          appMetaSchema.parse({
+            ...appMetaSchema.parse(page.app.meta),
+            owns: [],
+            state: page.app.statePath !== undefined,
+          }),
+          "me",
+          options.src,
+        );
+      }
     }
     const pageLinks = new Map<string, string>();
     for (const page of ordered) {
@@ -741,24 +807,17 @@ export async function applyPortableBundle(
     for (const page of ordered.filter((item) => item.app !== undefined)) {
       const id = created.get(page.sourceId)!;
       const app = page.app!;
-      await store.writeAppFiles(id, {
-        entryHtml: new TextDecoder().decode(bundle.appFiles.get(app.entryPath)!),
-        assets: app.assets.map((asset) => ({
-          name: asset.name,
-          data: bundle.appFiles.get(asset.archivePath)!,
-        })),
-        ...(app.statePath === undefined
-          ? {}
-          : {
-              state: JSON.parse(
-                new TextDecoder().decode(bundle.appFiles.get(app.statePath)!),
-              ),
-            }),
-      });
-      // `owns` names ids from the exporting notebook. Remapped onto the ids
-      // this import minted, and an id the archive did not carry is dropped:
-      // an app that may write a page it cannot see is a refusal waiting to
-      // confuse somebody.
+      // The map again, this time with `owns`. It names ids from the exporting
+      // notebook, so it is remapped onto the ids this import minted, and an
+      // id the archive did not carry is dropped: an app that may write a page
+      // it cannot see is a refusal waiting to confuse somebody. The rest of
+      // the map is what the create loop already wrote, so a restore that dies
+      // here leaves an app that runs and owns nothing rather than a page with
+      // no `kind`.
+      //
+      // Still before the files: `writeAppFiles` refuses a page that is not an
+      // app, which is what stops its rename pair carrying a child page whose
+      // folder is `app/` out of the tree.
       const source = appMetaSchema.parse(app.meta);
       await store.setAppMeta(
         id,
@@ -772,6 +831,16 @@ export async function applyPortableBundle(
         "me",
         options.src,
       );
+      await store.writeAppFiles(id, {
+        entryHtml: new TextDecoder().decode(bundle.appFiles.get(app.entryPath)!),
+        assets: app.assets.map((asset) => ({
+          name: asset.name,
+          data: bundle.appFiles.get(asset.archivePath)!,
+        })),
+        ...(app.statePath === undefined
+          ? {}
+          : { state: bundle.appState.get(app.statePath) }),
+      });
     }
     // Every task goes in through the store's own leaf, so the task index is
     // right the moment this returns and the note edits and the task writes

@@ -1,10 +1,15 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { APP_ENTRY_MAX_BYTES, APP_ENTRY_PATH } from "../apps/model";
+import {
+  APP_ENTRY_MAX_BYTES,
+  APP_ENTRY_PATH,
+  APP_MAX_OWNED,
+  APP_STATE_MAX_BYTES,
+} from "../apps/model";
 import { Store } from "./store";
-import { isAppSize } from "./types";
+import { isAppOwnsFull, isAppSize, isNotApp } from "./types";
 
 let root: string;
 let store: Store;
@@ -108,6 +113,27 @@ describe("app pages in the store", () => {
     expect(store.appMayWrite(meta.id, meta.id)).toBe(false);
   });
 
+  it("refuses an owned page that is itself an app", async () => {
+    // A page's own body is the agent's description of it, which an app has no
+    // business replacing: `appMayWrite` already refuses the app's own page,
+    // and a second app underneath it is the same page by another name. The
+    // `owns` entry is not enough, because `owns` is written by an agent.
+    const { meta } = await store.createAppPage(null, "Trainer", {
+      description: "d",
+      entryHtml: ENTRY,
+      builtBy: "Claude",
+    });
+    const inner = await store.createAppPage(meta.id, "Inner", {
+      description: "d",
+      entryHtml: ENTRY,
+      builtBy: "Claude",
+    });
+    await store.setAppMeta(meta.id, { ...meta.app!, owns: [inner.meta.id] });
+
+    expect(store.readAppMeta(meta.id)?.owns).toEqual([inner.meta.id]);
+    expect(store.appMayWrite(meta.id, inner.meta.id)).toBe(false);
+  });
+
   it("bumps the version and keeps owns and state across a rewrite", async () => {
     const { meta, owned } = await store.createAppPage(null, "Trainer", {
       description: "d",
@@ -123,6 +149,50 @@ describe("app pages in the store", () => {
     expect(after.app?.version).toBe(2);
     expect(after.app?.owns).toEqual([owned[0].id]);
     expect(await store.readAppState(meta.id)).toEqual({ seen: 3 });
+  });
+
+  it("evaluates a patch inside the lock, over whatever the map holds by then", async () => {
+    // A rebuild reads the map, spends a while writing files and committing,
+    // and only then writes the map back. Anything the running frame did in
+    // that window is in the live map and not in the caller's snapshot, so a
+    // caller that spread its own copy back would undo it. The two fields
+    // that move are the two this method exists to protect.
+    const { meta } = await store.createAppPage(null, "Trainer", {
+      description: "d",
+      entryHtml: ENTRY,
+      builtBy: "Claude",
+    });
+    const snapshot = meta.app!;
+    expect(snapshot.owns).toEqual([]);
+    expect(snapshot.state).toBe(false);
+
+    // the frame, in the window between the caller's read and its write
+    const session = await store.createPage(meta.id, "Session log");
+    await store.setAppMeta(meta.id, { ...snapshot, owns: [session.id] }, "claude");
+    await store.writeAppState(meta.id, { seen: 1 });
+    await store.setAppMeta(meta.id, (live) => ({ ...live, state: true }), "claude");
+
+    // the caller, arriving with a snapshot that knows none of it
+    const after = await store.setAppMeta(
+      meta.id,
+      (live) => ({ ...live, version: live.version + 1 }),
+      "claude",
+    );
+    expect(after.app?.version).toBe(2);
+    expect(after.app?.owns).toEqual([session.id]);
+    expect(after.app?.state).toBe(true);
+  });
+
+  it("refuses a patch on a page that is not an app", async () => {
+    // `readAppMeta` is the one validation every app-aware caller comes
+    // through, so the patch form asks it too and answers in the same word
+    // the rest of the app surface uses. A map that does not parse authorises
+    // no patch either, rather than handing the caller something half-read to
+    // spread back over the live one.
+    const plain = await store.createPage(null, "Notes");
+    await expect(
+      store.setAppMeta(plain.id, (live) => live, "claude"),
+    ).rejects.toSatisfy(isNotApp);
   });
 
   it("survives a rebuild from disk", async () => {
@@ -211,6 +281,185 @@ describe("app pages in the store", () => {
     });
     await store.writeAppFiles(meta.id, { entryHtml: "<!doctype html><p>v2</p>" });
     expect((await store.readAppFile(meta.id, "app/assets/card.png")).kind).toBe("file");
+  });
+
+  /** A STATE WRITE IS NOT A REWRITE.
+   *
+   *  It used to delegate to `writeAppFiles`, which stages a whole new `app/`
+   *  folder and swaps it in: up to 12 MiB copied and a git commit scheduled
+   *  per card an app answers, through a rename pair whose window destroys the
+   *  entry if a crash lands in it. The state is one small file and it has its
+   *  own leaf now. */
+  describe("an app's state", () => {
+    const appPage = async () =>
+      (
+        await store.createAppPage(null, "Trainer", {
+          description: "d",
+          entryHtml: ENTRY,
+          assets: [{ name: "card.png", data: new Uint8Array([1, 2, 3]) }],
+          builtBy: "Claude",
+        })
+      ).meta;
+
+    it("leaves the entry and the assets untouched, and stages nothing", async () => {
+      const meta = await appPage();
+      const dir = path.join(root, "trainer");
+      const before = await stat(path.join(dir, "app", "index.html"));
+
+      await store.writeAppState(meta.id, { seen: 1 });
+
+      const entry = await store.readAppFile(meta.id, APP_ENTRY_PATH);
+      expect(entry.kind === "file" && Buffer.from(entry.data).toString("utf8")).toBe(ENTRY);
+      const asset = await store.readAppFile(meta.id, "app/assets/card.png");
+      expect(asset.kind === "file" && Array.from(asset.data)).toEqual([1, 2, 3]);
+      // The same file, not a copy of it. A staged rewrite replaces the entry
+      // with a new inode even when the bytes come out the same.
+      const after = await stat(path.join(dir, "app", "index.html"));
+      expect(after.ino).toBe(before.ino);
+      expect(after.mtimeMs).toBe(before.mtimeMs);
+      expect((await readdir(dir)).filter((name) => name.startsWith(".app-next"))).toEqual([]);
+    });
+
+    it("lands the file and the frontmatter flag in one write", async () => {
+      const meta = await appPage();
+      expect(meta.app?.state).toBe(false);
+
+      await store.writeAppState(meta.id, { seen: 1 });
+
+      expect(store.readAppMeta(meta.id)?.state).toBe(true);
+      expect(await store.readAppState(meta.id)).toEqual({ seen: 1 });
+      // On disk too, so a reader of `index.md` alone knows the file is there.
+      const front = await readFile(path.join(root, "trainer", "index.md"), "utf8");
+      expect(front).toContain("state: true");
+    });
+
+    it("refuses state over the cap and writes nothing", async () => {
+      const meta = await appPage();
+      await expect(
+        store.writeAppState(meta.id, { pad: "x".repeat(APP_STATE_MAX_BYTES) }),
+      ).rejects.toSatisfy(isAppSize);
+      expect(store.readAppMeta(meta.id)?.state).toBe(false);
+      expect(await store.readAppState(meta.id)).toBeNull();
+    });
+
+    it("puts back the entry an interrupted rewrite left behind", async () => {
+      // The crash window `writeAppFiles` admits to: `app/` renamed out to
+      // `.app-next-old`, `.app-next/` still on disk. A state write used to go
+      // straight back through that swap, `rm -rf` the retired folder and take
+      // the only surviving copy of the entry with it. It writes its own file
+      // now, and it runs the same recovery the rewrite runs first, so the app
+      // is whole again rather than merely not destroyed.
+      // `store.apps-swap.test.ts` drives the same recovery through both paths.
+      const meta = await appPage();
+      const dir = path.join(root, "trainer");
+      await rename(path.join(dir, "app"), path.join(dir, ".app-next-old"));
+      await mkdir(path.join(dir, ".app-next"), { recursive: true });
+
+      await store.writeAppState(meta.id, { seen: 2 });
+
+      const entry = await store.readAppFile(meta.id, APP_ENTRY_PATH);
+      expect(entry.kind === "file" && Buffer.from(entry.data).toString("utf8")).toBe(ENTRY);
+      expect(await store.readAppState(meta.id)).toEqual({ seen: 2 });
+      expect((await readdir(dir)).filter((name) => name.startsWith(".app-next"))).toEqual([]);
+    });
+  });
+
+  /** THE CHILD AND THE OWNERSHIP ARE ONE WRITE.
+   *
+   *  The bridge's create route used to call `createPage` and then
+   *  `setAppMeta` with a spread of the `app` map it had read before either
+   *  ran. Two mutations and a stale snapshot: a crash between them leaves a
+   *  child the app may never write, and anything that landed in between, a
+   *  second create or a state write, is spread away. */
+  describe("a page an app creates under itself", () => {
+    const trainer = async () =>
+      (
+        await store.createAppPage(null, "Trainer", {
+          description: "d",
+          entryHtml: ENTRY,
+          builtBy: "Claude",
+        })
+      ).meta;
+
+    it("creates it under the app and owns it in the same breath", async () => {
+      const meta = await trainer();
+      const { page, app } = await store.createOwnedPage(meta.id, {
+        title: "Session log",
+        icon: "📓",
+        markdown: "first",
+      });
+
+      expect(page.title).toBe("Session log");
+      expect(page.icon).toBe("📓");
+      expect(app.owns).toEqual([page.id]);
+      expect(store.readAppMeta(meta.id)?.owns).toEqual([page.id]);
+      expect(store.appMayWrite(meta.id, page.id)).toBe(true);
+      expect((await store.readPage(page.id)).markdown).toBe("first");
+      expect(store.getTree()[0].children[0].id).toBe(page.id);
+    });
+
+    it("keeps both pages when two creates are in flight", async () => {
+      const meta = await trainer();
+      const [first, second] = await Promise.all([
+        store.createOwnedPage(meta.id, { title: "One" }),
+        store.createOwnedPage(meta.id, { title: "Two" }),
+      ]);
+      expect(store.readAppMeta(meta.id)?.owns).toEqual(
+        expect.arrayContaining([first.page.id, second.page.id]),
+      );
+      expect(store.readAppMeta(meta.id)?.owns).toHaveLength(2);
+    });
+
+    it("does not spread away a state write that landed first", async () => {
+      const meta = await trainer();
+      await store.writeAppState(meta.id, { seen: 1 });
+      const { page } = await store.createOwnedPage(meta.id, { title: "Log" });
+
+      // The `app` map is re-read inside the lock, so the flag the state write
+      // set is still true and the app's own memory is still readable.
+      expect(store.readAppMeta(meta.id)?.state).toBe(true);
+      expect(store.readAppMeta(meta.id)?.owns).toEqual([page.id]);
+      expect(await store.readAppState(meta.id)).toEqual({ seen: 1 });
+    });
+
+    it("refuses past the cap, inside the lock, and creates nothing", async () => {
+      const meta = await trainer();
+      await store.setAppMeta(meta.id, {
+        ...meta.app!,
+        owns: Array.from({ length: APP_MAX_OWNED }, (_, i) => `p${i}`),
+      });
+
+      await expect(
+        store.createOwnedPage(meta.id, { title: "One too many" }),
+      ).rejects.toSatisfy(isAppOwnsFull);
+      expect(store.getTree()[0].children).toEqual([]);
+      expect(store.readAppMeta(meta.id)?.owns).toHaveLength(APP_MAX_OWNED);
+    });
+
+    it("refuses a page that is not an app", async () => {
+      const plain = await store.createPage(null, "Notes");
+      await expect(store.createOwnedPage(plain.id, { title: "Log" })).rejects.toSatisfy(isNotApp);
+    });
+  });
+
+  it("carries kind on the two projections a shared page reads", async () => {
+    // `readPageLabel` and `readDirectChildren` are what a visitor's page-ref
+    // label and the public page's derived tail are drawn from, so the chip
+    // reaches a shared page through these two and through nothing else.
+    const parent = await store.createPage(null, "Spanish");
+    const { meta } = await store.createAppPage(parent.id, "Trainer", {
+      description: "d",
+      entryHtml: ENTRY,
+      builtBy: "Claude",
+    });
+    const plain = await store.createPage(parent.id, "Words");
+
+    expect(store.readPageLabel(meta.id)?.kind).toBe("app");
+    expect(store.readPageLabel(plain.id)?.kind).toBeUndefined();
+
+    const children = store.readDirectChildren(parent.id);
+    expect(children.find((child) => child.id === meta.id)?.kind).toBe("app");
+    expect(children.find((child) => child.id === plain.id)?.kind).toBeUndefined();
   });
 
   it("still reads a page whose folder was already called app", async () => {

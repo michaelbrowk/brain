@@ -146,6 +146,35 @@ describe("read-only attachment rendering", () => {
     );
   });
 
+  it("marks an app page a shared body links, and says what the mark means", () => {
+    // The public page is the one surface where the chip is raw markup rather
+    // than `AiChip`, so it has to carry the same `aria-label`. Without one a
+    // screen reader reads the two letters "AI" and nothing else, which names
+    // no origin and is the whole of what the chip exists to say.
+    const html = renderReadOnly("[Trainer](/p/child)", {
+      shareNavigation: {
+        rootId: "root",
+        isAllowedPage: () => true,
+        pageLabel: () => ({ title: "Trainer", icon: "🃏", kind: "app" as const }),
+      },
+    });
+
+    expect(html).toContain('class="ai-chip"');
+    expect(html).toContain('aria-label="Built by an agent"');
+  });
+
+  it("marks no ordinary page a shared body links", () => {
+    const html = renderReadOnly("[Words](/p/child)", {
+      shareNavigation: {
+        rootId: "root",
+        isAllowedPage: () => true,
+        pageLabel: () => ({ title: "Words", icon: "📄" }),
+      },
+    });
+
+    expect(html).not.toContain("ai-chip");
+  });
+
   it("keeps the written label when the share has no live title for the target", () => {
     const html = renderReadOnly("[Written label](/p/child)", {
       shareNavigation: {

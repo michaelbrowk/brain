@@ -649,6 +649,43 @@ export function isAppSize(e: unknown): e is AppSizeError {
   return e instanceof Error && e.name === "AppSizeError";
 }
 
+/** An app asked to own one page more than `APP_MAX_OWNED` allows. Its own
+ *  error rather than a boolean answer, because the cap is checked inside the
+ *  store's lock, where two creates racing for the last slot are serialised,
+ *  and a caller outside it has no way to ask first without racing. Nothing
+ *  was created. */
+export class AppOwnsFullError extends Error {
+  constructor(readonly id: string) {
+    super(`app owns list is full: ${id}`);
+    this.name = "AppOwnsFullError";
+  }
+}
+
+export function isAppOwnsFull(e: unknown): e is AppOwnsFullError {
+  return e instanceof Error && e.name === "AppOwnsFullError";
+}
+
+/** A write aimed at a page that is not an app, or at one whose `app/` folder
+ *  is a child page's rather than an app's file set.
+ *
+ *  The second half is the one that matters. `slugify("App")` is `app`, so
+ *  `<parent>/app/` is an ordinary page's own folder in some notebooks, and
+ *  the rename pair in `writeAppFiles` would carry that page and everything
+ *  under it out of the tree and then delete it. `kind` on the page's own
+ *  index, and the absence of an `index.md` under `app/`, are what tell the
+ *  two apart, and both are read before the first rename rather than after. */
+export class NotAnAppError extends Error {
+  readonly code = "not_app";
+  constructor(message = "page is not an app") {
+    super(message);
+    this.name = "NotAnAppError";
+  }
+}
+
+export function isNotApp(e: unknown): e is NotAnAppError {
+  return e instanceof Error && e.name === "NotAnAppError";
+}
+
 export interface AppAssetInput {
   readonly name: string;
   readonly data: Uint8Array;

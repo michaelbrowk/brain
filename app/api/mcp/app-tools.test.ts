@@ -78,6 +78,16 @@ async function call(
   return { ...answer, body: JSON.parse(answer.content[0].text) as Record<string, unknown> };
 }
 
+/** The mutator `write_app_page` hands `setAppMeta`, which the store evaluates
+ *  inside its own lock. Calling it here with a map of the test's choosing is
+ *  how the concurrent-write case is driven: the store's lock is the thing
+ *  being relied on, and this asserts what the caller puts inside it. */
+function patchOf(): (live: Record<string, unknown>) => Record<string, unknown> {
+  return setAppMeta.mock.calls[0][1] as (
+    live: Record<string, unknown>,
+  ) => Record<string, unknown>;
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   createAppPage.mockResolvedValue({
@@ -241,10 +251,95 @@ describe("create_app_page", () => {
       title: "T",
       description: "d",
       entryHtml: ENTRY,
-      assets: [{ name: "notes.md", base64: "AA" }],
+      assets: [{ name: "notes.md", base64: "AAEC" }],
       reason: "r",
     });
     expect(answer.body).toMatchObject({ reason: "bad_type" });
+  });
+
+  it("refuses a blank owned title before the store has to", async () => {
+    // `createAppPage` asks the same question before its first write and
+    // throws a bare Error for it, which would reach the agent as
+    // `store_failed`: the notes folder is broken, stop writing. The fix is
+    // one field of the agent's own call, so it is asked here too.
+    const answer = await call("create_app_page", {
+      parentId: null,
+      title: "T",
+      description: "d",
+      entryHtml: ENTRY,
+      owns: [{ title: "Words" }, { title: "  " }],
+      reason: "r",
+    });
+    expect(answer.isError).toBe(true);
+    expect(answer.body.reason).toBe("bad_request");
+    expect(createAppPage).not.toHaveBeenCalled();
+  });
+
+  it("answers not_found when the store says the page is not an app", async () => {
+    const { NotAnAppError } = await import("@/lib/store/types");
+    createAppPage.mockRejectedValue(new NotAnAppError());
+    const answer = await call("create_app_page", {
+      parentId: null,
+      title: "T",
+      description: "d",
+      entryHtml: ENTRY,
+      reason: "r",
+    });
+    expect(answer.body).toMatchObject({ reason: "not_found" });
+  });
+
+  describe("an asset that is not base64", () => {
+    // `Buffer.from(s, "base64")` never throws. It drops what it cannot read
+    // and answers whatever is left, so the likeliest agent mistake of all,
+    // passing the data URL the docs recommend elsewhere, wrote twenty bytes
+    // of noise into the notes folder under the name of a PNG and answered ok.
+    const send = (base64: string) =>
+      call("create_app_page", {
+        parentId: null,
+        title: "T",
+        description: "d",
+        entryHtml: ENTRY,
+        assets: [{ name: "cards/front.png", base64 }],
+        reason: "r",
+      });
+
+    it.each([
+      ["a data URL", "data:image/png;base64,iVBORw0KGgo="],
+      ["whitespace between the lines", "AAEC\nAAEC"],
+      ["a space", "AAEC AAEC"],
+      ["a character outside the alphabet", "AA$C"],
+      ["url-safe base64, which decodes to different bytes", "_-EC"],
+      ["missing padding", "AAECA"],
+      ["padding in the middle", "AA==EC"],
+      ["bits that do not survive the round trip", "AB=="],
+    ])("refuses %s", async (_name, base64) => {
+      const answer = await send(base64);
+      expect(answer.isError).toBe(true);
+      expect(answer.body.reason).toBe("bad_request");
+      expect(String(answer.body.error)).toContain("cards/front.png");
+      expect(createAppPage).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["padded bytes", "AA=="],
+      ["a full quantum", "AAEC"],
+      ["an empty asset", ""],
+    ])("takes %s", async (_name, base64) => {
+      const answer = await send(base64);
+      expect(answer.isError).toBeUndefined();
+      expect(createAppPage).toHaveBeenCalled();
+    });
+
+    it("refuses on the rebuild path too", async () => {
+      const answer = await call("write_app_page", {
+        id: "app1",
+        rev: "r1",
+        assets: [{ name: "cards/back.png", base64: "data:image/png;base64,AA==" }],
+      });
+      expect(answer.body).toMatchObject({ reason: "bad_request" });
+      expect(String(answer.body.error)).toContain("cards/back.png");
+      expect(writeAppFiles).not.toHaveBeenCalled();
+    });
   });
 
   it("refuses a grant with no write scope", async () => {
@@ -298,12 +393,37 @@ describe("write_app_page", () => {
       "app1",
       expect.objectContaining({ entryHtml: ENTRY }),
     );
-    expect(setAppMeta).toHaveBeenCalledWith(
-      "app1",
-      expect.objectContaining({ version: 2, owns: ["words1"], state: true }),
-      "claude",
-    );
+    expect(setAppMeta).toHaveBeenCalledWith("app1", expect.any(Function), "claude");
+    expect(patchOf()(readAppMeta())).toMatchObject({
+      version: 2,
+      owns: ["words1"],
+      state: true,
+    });
     expect(answer.body).toMatchObject({ id: "app1" });
+  });
+
+  it("keeps a page the frame created while the rebuild was still writing", async () => {
+    // `writeAppFiles` copies the whole file set and commits it, which is long
+    // enough for the running frame to call create.page and state.set. Both
+    // land on the live map, and neither is in the snapshot this tool read
+    // before it started. A rebuild that spread its own copy back would take
+    // the new page out of `owns`, leaving a page the app made and can no
+    // longer write, which is the exact harm `owns` exists to stop.
+    await call("write_app_page", { id: "app1", entryHtml: ENTRY, rev: "r1" });
+    const live = { ...readAppMeta(), owns: ["words1", "session1"], state: true };
+    expect(patchOf()(live)).toMatchObject({
+      version: 2,
+      owns: ["words1", "session1"],
+      state: true,
+    });
+  });
+
+  it("stamps the rebuild with who did it and when", async () => {
+    await call("write_app_page", { id: "app1", entryHtml: ENTRY, rev: "r1" });
+    const next = patchOf()(readAppMeta());
+    expect(next.builtBy).toBe("Claude");
+    expect(next.builtAt).not.toBe("2026-09-22T10:00:00.000Z");
+    expect(Number.isNaN(Date.parse(String(next.builtAt)))).toBe(false);
   });
 
   it("refuses a stale rev", async () => {

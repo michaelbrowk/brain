@@ -1,5 +1,6 @@
 import matter from "gray-matter";
 import type { PageMeta } from "./types";
+import { validAppMeta } from "../apps/model";
 import { canonicalPageMarkdown } from "../page-markdown";
 
 /** Parse an index.md into (partial) metadata + body markdown. */
@@ -97,16 +98,30 @@ export function serializePage(meta: PageMeta, markdown: string): string {
   // `lib/apps/model.ts` declares it in, so a rebuild that bumps `version`
   // leaves a one-line diff.
   if (meta.kind) ordered.kind = meta.kind;
-  if (meta.app) {
-    ordered.app = {
-      entry: meta.app.entry,
-      version: meta.app.version,
-      builtBy: meta.app.builtBy,
-      builtAt: meta.app.builtAt,
-      owns: meta.app.owns,
-      state: meta.app.state,
-      ...(meta.app.reason === undefined ? {} : { reason: meta.app.reason }),
-    };
+  if (meta.app !== undefined) {
+    // Read through `validAppMeta`, never field by field. Dereferencing
+    // `meta.app.entry` and the six keys beside it turns a map of the wrong
+    // shape into an object of `undefined`s, and js-yaml refuses to dump one
+    // of those: the page became unrenameable, unreorderable and unmovable,
+    // for good, on its very next save.
+    //
+    // A map this release cannot read goes back by value instead: the same
+    // keys with the same values, re-dumped the way js-yaml re-dumps every
+    // other field, so `version: "notanumber"` lands as `version: notanumber`.
+    // It is somebody's file, most likely an older Brain's or a hand edit, and
+    // nothing in it is dropped or corrected until whoever wrote it fixes it.
+    const app = validAppMeta(meta.app);
+    ordered.app = app
+      ? {
+          entry: app.entry,
+          version: app.version,
+          builtBy: app.builtBy,
+          builtAt: app.builtAt,
+          owns: app.owns,
+          state: app.state,
+          ...(app.reason === undefined ? {} : { reason: app.reason }),
+        }
+      : meta.app;
   }
   ordered.order = meta.order;
   ordered.created = meta.created;

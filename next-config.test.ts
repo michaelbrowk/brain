@@ -172,10 +172,12 @@ describe("an app's own files", () => {
 
     // No CSP here. A block in this file can only carry a static string, and the
     // frame's policy names the request's own origin and the app's own id, so
-    // the route handler sets it. A static one here would replace that.
+    // the route handler sets it. A static one here would be set on the
+    // response first, and the handler's own could then only be appended
+    // beside it, where two policies are enforced as their intersection.
     expect(by["Content-Security-Policy"]).toBeUndefined();
-    // The catch-all's DENY would make the frame unloadable inside its own app;
-    // the route's frame-ancestors is what replaces it.
+    // DENY would make the frame unloadable inside its own app, and nothing
+    // downstream can remove a header a rule here sets.
     expect(by["X-Frame-Options"]).toBeUndefined();
     expect(by["X-Content-Type-Options"]).toBe("nosniff");
     // The same value the catch-all sets. A stricter one here would be a second

@@ -83,14 +83,80 @@ describe("the app's read side", () => {
     expect(apiFetch).toHaveBeenCalledWith("/api/page/b");
     expect(answer.markdown).toBe("| word |");
     expect(answer.rev).toBe("abc");
-    expect(answer.meta).toEqual({ id: "b", title: "Words", icon: "📄", updated: "y" });
+    // Strict: `toEqual` treats a key whose value is undefined as absent, so
+    // it would pass against a meta this handed straight through.
+    expect(answer.meta).toStrictEqual({ id: "b", title: "Words", icon: "📄", updated: "y" });
+  });
+
+  it("hands over an allowlisted meta, not whatever the route left in it", async () => {
+    apiFetch.mockResolvedValue(
+      json({
+        meta: {
+          id: "b",
+          title: "Words",
+          icon: "📄",
+          kind: "app",
+          created: "c",
+          updated: "u",
+          updatedBy: "me",
+          tags: ["spanish"],
+          status: "doing",
+          category: "Language",
+          view: "board",
+          sections: ["A"],
+          pinned: true,
+          // Everything below is the notebook's own business. An app holds
+          // every page id from read.tree, so a pass-through here would be
+          // the whole notebook's share posture, one request at a time.
+          order: "a1",
+          cover: "/api/attachment/cover.png",
+          public: true,
+          shareLocked: true,
+          shareExpiresAt: "2027-01-01",
+          shareEdit: true,
+          shareVersion: 3,
+          sharedUnder: "root9",
+          notionId: "n1",
+          notionSourceHash: "h",
+          collection: { version: 1 },
+          collectionRow: { values: {} },
+          app: { entry: "app/index.html", owns: ["c"] },
+          deleted: "2026-01-01",
+        },
+        markdown: "x",
+        rev: "r",
+      }),
+    );
+    const answer = (await createAppReads(() => TREE as never)({
+      ...envelope,
+      type: "read.page",
+      id: "b",
+    })) as { meta: Record<string, unknown> };
+    expect(answer.meta).toStrictEqual({
+      id: "b",
+      title: "Words",
+      icon: "📄",
+      kind: "app",
+      created: "c",
+      updated: "u",
+      updatedBy: "me",
+      tags: ["spanish"],
+      status: "doing",
+      category: "Language",
+      view: "board",
+      sections: ["A"],
+      pinned: true,
+    });
   });
 
   it("refuses a page that is not there in the MCP's own word", async () => {
     apiFetch.mockResolvedValue(json({ error: "not found" }, 404));
+    // An id the live tree holds, so the 404 branch is what answers rather
+    // than the tree guard in front of it.
     await expect(
-      createAppReads(() => TREE as never)({ ...envelope, type: "read.page", id: "gone" }),
+      createAppReads(() => TREE as never)({ ...envelope, type: "read.page", id: "b" }),
     ).rejects.toMatchObject({ reason: "not_found" });
+    expect(apiFetch).toHaveBeenCalledWith("/api/page/b");
   });
 
   it("answers read.pages with the hits the search route gave", async () => {
@@ -110,6 +176,22 @@ describe("the app's read side", () => {
       createAppReads(() => TREE as never)({ ...envelope, type: "read.pages", query: "hola" }),
     ).rejects.toMatchObject({
       reason: "store_failed",
+    });
+  });
+
+  it("says the same sentence when a body is not the JSON it asked for", async () => {
+    apiFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => {
+        throw new SyntaxError("Unexpected token < in JSON at position 0");
+      },
+    } as unknown as Response);
+    await expect(
+      createAppReads(() => TREE as never)({ ...envelope, type: "read.pages", query: "hola" }),
+    ).rejects.toMatchObject({
+      reason: "store_failed",
+      message: "Brain could not answer that request",
     });
   });
 

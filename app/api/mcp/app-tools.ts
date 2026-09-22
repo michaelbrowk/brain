@@ -4,6 +4,7 @@ import {
   getStore,
   isAppSize,
   isAttachmentValidation,
+  isNotApp,
   isNotFound,
   isRevConflict,
   type AppAssetInput,
@@ -132,7 +133,11 @@ function appRefusal(error: unknown): AppAnswer {
       outcome: "rev_conflict",
     };
   }
-  if (isNotFound(error)) {
+  // A page that is not an app and a page that is not there are one answer to
+  // an agent: go and find the right id. The store tells them apart because
+  // `NotAnAppError` is also what stops `writeAppFiles` renaming a child
+  // page's folder out of the tree, which is a different job from this one.
+  if (isNotFound(error) || isNotApp(error)) {
     return no("not_found", "there is no app page with that id", "not_found");
   }
   return { answer: storeFailed("that app could not be saved"), outcome: STORE_FAILED };
@@ -216,14 +221,53 @@ const assetSchema = z.object({
   base64: z.string(),
 });
 
+/** BASE64, STRICTLY, BECAUSE `Buffer` WILL NOT SAY NO.
+ *
+ *  `Buffer.from(value, "base64")` never throws. It skips what it cannot read
+ *  and answers whatever is left, so `data:image/png;base64,iVBORw0K` comes
+ *  back as twenty bytes of noise, gets written into the notes folder under
+ *  the name of a PNG, and the agent is told the build worked. Passing a data
+ *  URL is the likeliest mistake of all, because the frame's own policy makes
+ *  a data URL the right answer everywhere else.
+ *
+ *  So: the alphabet, the padding, and then the round trip. The round trip is
+ *  what catches the rest, url-safe base64 and a final quantum whose spare
+ *  bits are not zero included, both of which decode to bytes that are not the
+ *  bytes the caller meant. */
+const BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
+
+function decodeBase64(value: string): Uint8Array | null {
+  if (value.length === 0) return new Uint8Array();
+  if (value.length % 4 !== 0) return null;
+  if (!BASE64.test(value)) return null;
+  const buffer = Buffer.from(value, "base64");
+  if (buffer.toString("base64") !== value) return null;
+  return new Uint8Array(buffer);
+}
+
+type DecodedAssets =
+  | { readonly ok: true; readonly assets: AppAssetInput[] | undefined }
+  | { readonly ok: false; readonly name: string };
+
 function decodeAssets(
   assets: readonly { name: string; base64: string }[] | undefined,
-): AppAssetInput[] | undefined {
-  if (assets === undefined) return undefined;
-  return assets.map((asset) => ({
-    name: asset.name,
-    data: new Uint8Array(Buffer.from(asset.base64, "base64")),
-  }));
+): DecodedAssets {
+  if (assets === undefined) return { ok: true, assets: undefined };
+  const decoded: AppAssetInput[] = [];
+  for (const asset of assets) {
+    const data = decodeBase64(asset.base64);
+    if (data === null) return { ok: false, name: asset.name };
+    decoded.push({ name: asset.name, data });
+  }
+  return { ok: true, assets: decoded };
+}
+
+function badBase64(name: string): AppAnswer {
+  return no(
+    "bad_request",
+    `that asset is not base64: ${name}. Send the padded bytes on their own, with no data: prefix, no whitespace and no url-safe characters`,
+    "bad_request",
+  );
 }
 
 const ownedSchema = z.object({
@@ -302,13 +346,22 @@ export function registerAppTools(server: McpToolServer): void {
         }
         const finding = lintAppEntry(entryHtml);
         if (finding !== null) return lintRefused(finding.rule, finding.line);
+        const decoded = decodeAssets(assets);
+        if (!decoded.ok) return badBase64(decoded.name);
+        // `createAppPage` asks this too, before its first write, and throws a
+        // bare Error for it. That arrives here as `store_failed`, which tells
+        // an agent the notes folder is broken when the fix is one field of
+        // its own call. Asked here as well, in the word an agent branches on.
+        if ((owns ?? []).some((child) => child.title.trim().length === 0)) {
+          return no("bad_request", "every owned page needs a title", "bad_request");
+        }
 
         const store = await getStore();
         const { meta, owned } = await store.createAppPage(parentId ?? null, title, {
           icon,
           description,
           entryHtml,
-          assets: decodeAssets(assets),
+          assets: decoded.assets,
           owns,
           ...(state === undefined ? {} : { state }),
           builtBy: await clientNameOf(extra),
@@ -369,6 +422,8 @@ export function registerAppTools(server: McpToolServer): void {
           const finding = lintAppEntry(entryHtml);
           if (finding !== null) return lintRefused(finding.rule, finding.line);
         }
+        const decoded = decodeAssets(assets);
+        if (!decoded.ok) return badBase64(decoded.name);
 
         const store = await getStore();
         // A page that is not an app reads as missing rather than as a page
@@ -395,14 +450,27 @@ export function registerAppTools(server: McpToolServer): void {
 
         await store.writeAppFiles(id, {
           ...(entryHtml === undefined ? {} : { entryHtml }),
-          ...(assets === undefined ? {} : { assets: decodeAssets(assets) }),
+          ...(decoded.assets === undefined ? {} : { assets: decoded.assets }),
         });
-        // `owns` and `state` come off the live map, never off the caller: a
-        // rebuild is a new entry for the same app, and an agent that could
-        // send an owns list here could widen what the frame may write.
+        // `owns` and `state` come off the LIVE map inside the store's own
+        // lock, never off `app`, which was read before the file rewrite above
+        // copied the whole set and committed it. The frame runs throughout
+        // that: a `create.page` in the window appends to `owns` and a first
+        // `state.set` flips `state`, and spreading the pre-write snapshot
+        // back would drop both, leaving a page the app made and can no longer
+        // write. Neither is ever taken from the caller either, so an agent
+        // cannot widen what the frame may write by sending a list.
+        const builtBy = await clientNameOf(extra);
+        const builtAt = new Date().toISOString();
         const meta = await store.setAppMeta(
           id,
-          appMetaSchema.parse({ ...app, version: app.version + 1 }),
+          (current) =>
+            appMetaSchema.parse({
+              ...current,
+              version: current.version + 1,
+              builtBy,
+              builtAt,
+            }),
           "claude",
         );
         marks.label = meta.title;

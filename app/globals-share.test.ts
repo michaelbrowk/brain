@@ -29,7 +29,11 @@ describe("the share fallback rule", () => {
     const hiders = rulesWith("display: none").filter((selector) =>
       selector.includes("data-share-fallback"),
     );
-    expect(hiders).toEqual(["[data-share-editor] ~ [data-share-fallback]"]);
+    // One rule, two islands: the visitor's editor and a shared app's frame
+    // are both drawn over the same render, and both hide it the same way.
+    expect(hiders).toEqual([
+      "[data-share-editor] ~ [data-share-fallback], [data-share-app] ~ [data-share-fallback]",
+    ]);
   });
 
   it("never leans on :has(), which the browsers share links land in may not have", () => {

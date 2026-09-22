@@ -18,6 +18,11 @@ import { ShareGate } from "@/components/share-gate";
 import { ShareBusyRetry } from "@/components/share-busy-retry";
 import { ShareNameDialog } from "@/components/share-name-dialog";
 import { ShareEditorMount } from "@/components/editor/share-editor-mount";
+import { ShareAppFrame } from "@/components/apps/share-app-frame";
+import {
+  APP_FRAME_TOKEN_MAX_AGE_SECONDS,
+  mintAppFrameToken,
+} from "@/lib/apps/frame-token";
 import { Icon } from "@/components/ui/icon";
 import "@/components/editor/milkdown.css";
 
@@ -93,9 +98,22 @@ export default async function SharePage({
   if (access.kind === "password-required") return <ShareGate id={id} />;
   const page = access.target;
 
+  // An app page is run, not read and not written. The editor is never mounted
+  // over one: an editable share is a licence to write Markdown, and an app's
+  // body is the agent's description of it rather than anything a visitor came
+  // here to type. Rebuilding an app is the owner's business and it is not a
+  // thing a link can do at all.
+  const isApp = page.meta.kind === "app";
+
+  // The frame's address, cut from the grant resolved above and nowhere else.
+  // `visitorFrameSrc` says why it is the only place it can be cut.
+  const appFrameSrc = isApp
+    ? await visitorFrameSrc(page.meta.id, id, access.shareVersion, access.root.meta.shareExpiresAt)
+    : null;
+
   // The edit cookie is root-scoped and bound to the share version, so it
   // answers for every page of the share and dies with every rotation.
-  const editable = access.root.meta.shareEdit === true;
+  const editable = !isApp && access.root.meta.shareEdit === true;
   const editing = editable
     ? await verifyShareEditToken(
         jar.get(shareEditCookieName(id))?.value,
@@ -194,12 +212,23 @@ export default async function SharePage({
               linkablePages={linkablePages}
             />
           )}
+          {isApp && appFrameSrc !== null && (
+            <ShareAppFrame
+              appId={page.meta.id}
+              rootId={id}
+              shareVersion={access.shareVersion}
+              src={appFrameSrc}
+              title={page.meta.title}
+            />
+          )}
           {/* Always drawn: the no-JS fallback a crawler and a script-blocked
               browser read, and the page as it stands until the island's chunk
-              arrives, which hides it the moment it mounts. */}
+              arrives, which hides it the moment it mounts. For an app that
+              body is the agent's description of what the app does, which is
+              what spec §2 asks a client that cannot run one to be shown. */}
           <div
             className="ProseMirror brain-read-only"
-            data-share-fallback={editing ? "true" : undefined}
+            data-share-fallback={editing || isApp ? "true" : undefined}
             dangerouslySetInnerHTML={{ __html: html }}
           />
         </div>
@@ -234,6 +263,44 @@ export default async function SharePage({
       </article>
     </div>
   );
+}
+
+/** THE VISITOR'S OWN KEY TO THE FRAME, CUT FROM THE GRANT THAT LET THEM IN.
+ *
+ *  The frame's document has an opaque origin, so every file it asks for is a
+ *  cross-site request carrying no cookie, and a relative `assets/x.png` drops
+ *  a query string on the way. So the authority rides in the path, and this is
+ *  where a visitor's copy of it is cut.
+ *
+ *  It is cut only after `resolveShareAccess` has answered `granted`, which is
+ *  the line a password gate returns at rather than passes. A locked link
+ *  therefore mints nothing until the password has been proven, and the route
+ *  downstream reads no cookie at all: that render is the only place a
+ *  visitor's own credentials are ever checked.
+ *
+ *  `version` is the one the resolver just returned, never a value read
+ *  separately: the route asks the live share for exactly that version, so a
+ *  rotation makes every token cut before it a 404 without anything expiring.
+ *  And `exp` is the sooner of the owner's window and the link's own end, so a
+ *  token never outlives the share it came from.
+ *
+ *  Out here rather than in the component because it reads the clock, and a
+ *  render is not allowed to. */
+async function visitorFrameSrc(
+  pageId: string,
+  rootId: string,
+  shareVersion: number,
+  shareExpiresAt: string | undefined,
+): Promise<string> {
+  const token = await mintAppFrameToken({
+    pageId,
+    grant: { kind: "share", root: rootId, version: shareVersion },
+    exp: Math.min(
+      Math.floor(Date.now() / 1000) + APP_FRAME_TOKEN_MAX_AGE_SECONDS,
+      shareExpiresAt ? Math.floor(Date.parse(shareExpiresAt) / 1000) : Infinity,
+    ),
+  });
+  return `/api/app/${encodeURIComponent(pageId)}/t/${token}/index.html`;
 }
 
 /** The address of one page of a share, the one form both the read-only render

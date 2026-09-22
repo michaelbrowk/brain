@@ -2557,8 +2557,14 @@ a.brain-share-url:active {
    editor root is drawn immediately before the fallback, so the two say the
    same thing, and share links get opened in old webviews and in Firefox ESR
    where :has() is not there and the body would be drawn twice. Pinned by
-   app/globals-share.test.ts. */
-[data-share-editor] ~ [data-share-fallback] {
+   app/globals-share.test.ts.
+
+   A shared app page is the second island drawn over that same render, on the
+   same terms: a browser that cannot run the app reads the agent's own
+   description of it. One rule rather than two, so the two surfaces cannot
+   drift apart. */
+[data-share-editor] ~ [data-share-fallback],
+[data-share-app] ~ [data-share-fallback] {
   display: none;
 }
 

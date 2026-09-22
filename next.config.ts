@@ -9,9 +9,19 @@ const nextConfig: NextConfig = {
   // Do not let unrelated lockfiles above this checkout move the standalone
   // root. A stable root makes local smoke artifacts match CI/release layout.
   turbopack: { root: process.cwd() },
-  // Runtime note paths are deliberately dynamic and live outside the release.
-  // Turbopack can otherwise copy repository source, tests, and .git into the
-  // standalone artifact while following those filesystem calls.
+  // Runtime note paths are deliberately dynamic and live outside the release,
+  // and a tracer following those filesystem calls copies repository source,
+  // tests and .git into the standalone artifact. This list names what it must
+  // not take.
+  //
+  // MEASURED, AND IT IS NOT HONOURED TODAY. The 0.13.0 build carries `app/`,
+  // `docs/`, `.git` and every other directory named below into
+  // `.next/standalone` regardless, which is this Turbopack rather than this
+  // list: the entries are correct and inert. They stay, because the day the
+  // tracer reads them is not a day anybody will think to write them, and
+  // because the jsdom exclude two entries down IS read and is load-bearing
+  // (see its own comment). Do not read a green build as evidence that a new
+  // entry here works; measure the artifact.
   outputFileTracingExcludes: {
     "/*": [
       "./.git/**/*",
@@ -21,6 +31,7 @@ const nextConfig: NextConfig = {
       "./components/**/*",
       "./docs/**/*",
       "./e2e/**/*",
+      "./examples/**/*",
       "./lib/**/*",
       "./ops/**/*",
       "./scripts/**/*",
@@ -263,6 +274,14 @@ const nextConfig: NextConfig = {
       // Nothing a visitor writes survives the sanitizer as script, so what is
       // still open is defence in depth for the app's own bundle rather than a
       // channel a visitor can reach.
+      //
+      // frame-src is 'self' rather than 'none' because a shared page
+      // can BE an app: `kind: app` renders the same sandboxed frame
+      // the owner sees, served from this origin. The directive reads
+      // the frame's URL, which is same-origin; the opaque origin the
+      // sandbox gives the document inside it is not what is measured
+      // here. No other source is allowed, so a visitor's Markdown
+      // still cannot frame anything at all.
       {
         source: "/share/:path*",
         headers: [
@@ -276,7 +295,7 @@ const nextConfig: NextConfig = {
           {
             key: "Content-Security-Policy",
             value:
-              "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; connect-src 'self'; form-action 'none'; frame-src 'none'; img-src 'self' data:; media-src 'self'",
+              "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; connect-src 'self'; form-action 'none'; frame-src 'self'; img-src 'self' data:; media-src 'self'",
           },
           { key: "X-Robots-Tag", value: "noindex, nofollow" },
           { key: "Cache-Control", value: "private, no-store" },

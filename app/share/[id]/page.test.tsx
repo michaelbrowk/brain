@@ -7,6 +7,10 @@ const root = {
     title: "Root",
     public: true,
     shareVersion: 7,
+    /** A link with no end of its own, which is the ordinary case. One that
+     *  does end is the `shareExpiresAt` case under "an app page behind a
+     *  link": a frame token may not outlive the share it was cut from. */
+    shareExpiresAt: undefined as string | undefined,
   },
   markdown: "[Child](/p/child)",
   rev: "root-rev",
@@ -82,6 +86,14 @@ async function loadPage(
   const mount = vi.fn((props: Record<string, unknown>) => (
     <div data-share-editor-mount={JSON.stringify(props)} />
   ));
+  const appFrame = vi.fn((props: Record<string, unknown>) => (
+    <div data-share-app-frame={JSON.stringify(props)} />
+  ));
+  const mintAppFrameToken = vi.fn().mockResolvedValue("minted.frame.token");
+  vi.doMock("@/lib/apps/frame-token", () => ({
+    mintAppFrameToken,
+    APP_FRAME_TOKEN_MAX_AGE_SECONDS: 12 * 60 * 60,
+  }));
   vi.doMock("@/lib/store", () => ({
     getStore: async () => store,
     configuredPublicOrigin: () =>
@@ -104,6 +116,9 @@ async function loadPage(
   }));
   vi.doMock("@/components/editor/share-editor-mount", () => ({
     ShareEditorMount: mount,
+  }));
+  vi.doMock("@/components/apps/share-app-frame", () => ({
+    ShareAppFrame: appFrame,
   }));
   vi.doMock("next/headers", () => ({
     cookies: async () => ({
@@ -133,6 +148,8 @@ async function loadPage(
     store,
     verifyShareEditToken,
     mount,
+    appFrame,
+    mintAppFrameToken,
   };
 }
 
@@ -143,6 +160,8 @@ describe("shared subtree page", () => {
     vi.doUnmock("@/lib/render-md");
     vi.doUnmock("@/lib/auth");
     vi.doUnmock("@/components/editor/share-editor-mount");
+    vi.doUnmock("@/components/apps/share-app-frame");
+    vi.doUnmock("@/lib/apps/frame-token");
     vi.doUnmock("next/headers");
     vi.doUnmock("next/navigation");
     vi.restoreAllMocks();
@@ -520,6 +539,167 @@ describe("shared subtree page", () => {
       });
       expect(findDialog(result)?.props).toEqual({ id: "root" });
       expect(renderToStaticMarkup(result)).not.toContain("Password");
+    });
+  });
+
+  describe("an app page behind a link", () => {
+    const trainer = {
+      meta: { id: "app1", title: "Trainer", icon: "🃏", kind: "app" as const },
+      markdown: "A trainer for the Spanish words on these pages.",
+      rev: "app-rev",
+    };
+
+    it("runs the app in place of the body it would have drawn", async () => {
+      const { default: SharePage, appFrame } = await loadPage({
+        kind: "granted",
+        root,
+        target: trainer as unknown as typeof child,
+        shareVersion: 7,
+      });
+
+      const result = await SharePage({
+        params: Promise.resolve({ id: "root" }),
+        searchParams: Promise.resolve({ page: "app1" }),
+      });
+      const markup = renderToStaticMarkup(result);
+
+      expect(appFrame).toHaveBeenCalledTimes(1);
+      expect(appFrame.mock.calls[0]![0]).toEqual({
+        appId: "app1",
+        rootId: "root",
+        shareVersion: 7,
+        src: "/api/app/app1/t/minted.frame.token/index.html",
+        title: "Trainer",
+      });
+      // The title block and the back link are the page's, not the app's, and
+      // they stay exactly where a shared page draws them.
+      expect(markup).toContain("Trainer");
+      expect(markup).toContain("/share/root");
+      // Spec §2: a client that cannot run the app reads the agent's own
+      // description of it. The server always draws it, and the island is the
+      // sibling that hides it.
+      expect(markup).toContain('data-share-fallback="true"');
+      expect(markup).toContain("<p>rendered</p>");
+    });
+
+    it("cuts the frame's key from the grant it just resolved", async () => {
+      // The version is the resolver's own, never one read separately: the
+      // route asks the live share for exactly that version, so a rotation
+      // makes every token cut before it a 404 without anything expiring.
+      const { default: SharePage, mintAppFrameToken } = await loadPage({
+        kind: "granted",
+        root,
+        target: trainer as unknown as typeof child,
+        shareVersion: 7,
+      });
+      const before = Math.floor(Date.now() / 1000);
+
+      await SharePage({
+        params: Promise.resolve({ id: "root" }),
+        searchParams: Promise.resolve({ page: "app1" }),
+      });
+
+      expect(mintAppFrameToken).toHaveBeenCalledTimes(1);
+      const minted = mintAppFrameToken.mock.calls[0]![0] as {
+        pageId: string;
+        grant: { kind: string; root: string; version: number };
+        exp: number;
+      };
+      expect(minted.pageId).toBe("app1");
+      expect(minted.grant).toEqual({ kind: "share", root: "root", version: 7 });
+      // The owner's window, because this root carries no expiry of its own.
+      expect(minted.exp).toBeGreaterThanOrEqual(before + 12 * 60 * 60);
+      expect(minted.exp).toBeLessThanOrEqual(before + 12 * 60 * 60 + 5);
+    });
+
+    it("cuts a key that dies with the link rather than on the clock", async () => {
+      // A share that ends this afternoon does not hand out a key good until
+      // tomorrow morning. `exp` is the sooner of the two, always.
+      const endsSoon = new Date(Date.now() + 60_000).toISOString();
+      const { default: SharePage, mintAppFrameToken } = await loadPage({
+        kind: "granted",
+        root: { ...root, meta: { ...root.meta, shareExpiresAt: endsSoon } },
+        target: trainer as unknown as typeof child,
+        shareVersion: 7,
+      });
+
+      await SharePage({
+        params: Promise.resolve({ id: "root" }),
+        searchParams: Promise.resolve({ page: "app1" }),
+      });
+
+      const minted = mintAppFrameToken.mock.calls[0]![0] as { exp: number };
+      expect(minted.exp).toBe(Math.floor(Date.parse(endsSoon) / 1000));
+    });
+
+    it("mints nothing for a locked link until the password is proven", async () => {
+      // The gate returns before the mint, which is the whole of it: a token
+      // is a bearer capability, and cutting one for somebody who has not
+      // shown the password would hand them the app's files through a route
+      // that reads no cookie and could not tell the difference.
+      const { default: SharePage, mintAppFrameToken, appFrame } = await loadPage({
+        kind: "password-required",
+        root,
+        shareVersion: 7,
+      });
+
+      const result = await SharePage({
+        params: Promise.resolve({ id: "root" }),
+        searchParams: Promise.resolve({ page: "app1" }),
+      });
+
+      expect(mintAppFrameToken).not.toHaveBeenCalled();
+      expect(appFrame).not.toHaveBeenCalled();
+      expect(renderToStaticMarkup(result)).not.toContain("/api/app/");
+    });
+
+    it("cuts nothing at all for a page that is not an app", async () => {
+      const { default: SharePage, mintAppFrameToken } = await loadPage({
+        kind: "granted",
+        root,
+        target: child,
+        shareVersion: 7,
+      });
+
+      await SharePage({
+        params: Promise.resolve({ id: "root" }),
+        searchParams: Promise.resolve({ page: "child" }),
+      });
+
+      expect(mintAppFrameToken).not.toHaveBeenCalled();
+    });
+
+    it("does not make an app editable because the share is", async () => {
+      // An editable share is a licence to write Markdown, and an app's body
+      // is not what a visitor would be writing. The editor island is never
+      // mounted over one, and the name dialog that precedes it is not asked
+      // for either.
+      const editableRoot = {
+        ...root,
+        meta: { ...root.meta, shareEdit: true },
+      };
+      const { default: SharePage, appFrame, mount, verifyShareEditToken } =
+        await loadPage(
+          {
+            kind: "granted",
+            root: editableRoot,
+            target: trainer as unknown as typeof child,
+            shareVersion: 7,
+          },
+          { editing: { vid: "vid-1", name: "Ann" } },
+        );
+
+      const result = await SharePage({
+        params: Promise.resolve({ id: "root" }),
+        searchParams: Promise.resolve({ page: "app1" }),
+      });
+      const markup = renderToStaticMarkup(result);
+
+      expect(appFrame).toHaveBeenCalledTimes(1);
+      expect(mount).not.toHaveBeenCalled();
+      expect(verifyShareEditToken).not.toHaveBeenCalled();
+      expect(markup).not.toContain("data-share-editor-mount");
+      expect(markup).not.toContain("data-share-name-dialog");
     });
   });
 

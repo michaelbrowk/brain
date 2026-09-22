@@ -82,6 +82,10 @@ describe("Next standalone tracing", () => {
     }
   });
 
+  it("leaves the example apps out of the standalone artifact", () => {
+    expect(excludes).toContain("./examples/**/*");
+  });
+
   it("keeps jsdom's own files, which the exclude deliberately spares", () => {
     expect(includes).toContain(
       "./node_modules/.pnpm/jsdom@*/node_modules/jsdom/**/*",
@@ -114,7 +118,7 @@ describe("Next response headers", () => {
 });
 
 const SHARE_CSP =
-  "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; connect-src 'self'; form-action 'none'; frame-src 'none'; img-src 'self' data:; media-src 'self'";
+  "frame-ancestors 'none'; object-src 'none'; base-uri 'self'; connect-src 'self'; form-action 'none'; frame-src 'self'; img-src 'self' data:; media-src 'self'";
 
 describe("the /share surface", () => {
   it("carries exactly one CSP, after the catch-all, with connect-src 'self'", async () => {
@@ -247,6 +251,22 @@ describe("an app's own files", () => {
     // could carry anything it is handed out in its own address bar.
     const headers = await effectiveHeaders("/p/page1");
     expect(headers["Content-Security-Policy"]).toContain("frame-src 'self'");
+  });
+
+  it("lets a shared page frame an app, and nothing from anywhere else", async () => {
+    const headers = await nextConfig.headers!();
+    const share = headers.find((rule) => rule.source === "/share/:path*")!;
+    const csp = share.headers.find((header) => header.key === "Content-Security-Policy")!.value;
+
+    // 'none' here is what made the public frame a blank rectangle: the
+    // directive is measured against the frame's URL, which is same-origin.
+    expect(csp).toContain("frame-src 'self'");
+    expect(csp).not.toContain("frame-src 'none'");
+    // and the rest of the share policy is untouched
+    expect(csp).toContain("frame-ancestors 'none'");
+    expect(csp).toContain("connect-src 'self'");
+    expect(csp).toContain("form-action 'none'");
+    expect(csp).toContain("img-src 'self' data:");
   });
 });
 

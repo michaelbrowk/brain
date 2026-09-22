@@ -182,6 +182,37 @@ describe("the app canvas", () => {
     expect(shell.className).toContain("brain-app-canvas");
   });
 
+  it("draws a page whose app map the tree withheld, without inventing one", async () => {
+    // `getTree` hands out `app` only when it validates, so a page carrying
+    // `kind: app` and a map this release cannot read arrives here as a node
+    // with no `app` at all. The route refuses it for the same reason, so the
+    // two ends agree: the head says the little it knows and the canvas draws
+    // the missing-files state rather than a frame onto a 404.
+    fetchMock.mockResolvedValue({ ok: false, status: 404 } as Response);
+    host = document.createElement("div");
+    document.body.append(host);
+    const withheld = { id: "app1", title: "Trainer", icon: "🃏", kind: "app" as const };
+    act(() => {
+      createRoot(host as HTMLDivElement).render(
+        <AppCanvas
+          node={withheld as never}
+          liveTree={() => []}
+          onOpenPage={() => {}}
+          onToast={() => {}}
+        />,
+      );
+    });
+    await settle();
+    expect(host.textContent).toContain("Built by an agent");
+    // No timestamp, so no separator left standing on its own beside it.
+    expect(host.querySelector("[data-app-built]")).toBeNull();
+    expect(host.textContent).toContain(
+      "App files are missing. Ask your agent to rebuild the page.",
+    );
+    expect(host.querySelector("iframe")).toBeNull();
+    expect(host.querySelector("[data-app-rebuild]")).not.toBeNull();
+  });
+
   it("carries no em-dash in anything a reader sees", async () => {
     expect((await renderReady()).textContent ?? "").not.toContain("—");
   });

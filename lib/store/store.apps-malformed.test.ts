@@ -105,7 +105,13 @@ describe("a page whose app map does not validate", () => {
       expect(node.app).toBeUndefined();
     });
 
-    it(`keeps the map on disk byte for byte: ${name}`, async () => {
+    it(`keeps every value of the map on disk: ${name}`, async () => {
+      // Not byte for byte, which is what this case used to claim. js-yaml
+      // re-dumps the whole frontmatter on every write, so `version:
+      // "notanumber"` comes back as `version: notanumber` — the same
+      // normalisation every other field gets. What survives unchanged is the
+      // VALUE: no key is dropped and none is rewritten to something this
+      // release would rather read.
       await seedPage("broken-app", app);
       const reopened = new Store(root);
       await reopened.init();

@@ -88,8 +88,12 @@ describe("app metadata", () => {
     // Trailing dots and spaces are stripped silently there, and the device
     // names are reserved whatever extension follows them.
     expect(appAssetPath("a.png.")).toBeNull();
-    expect(appAssetPath("a.png ")).toBeNull();
     expect(appAssetPath("cards/front.png.")).toBeNull();
+    // The space is refused by the segment class rather than by the Windows
+    // rule, which is why the rule carries no branch for it. Asserted all the
+    // same: it is the NAME that has to stay refused, whichever rule says so.
+    expect(appAssetPath("a.png ")).toBeNull();
+    expect(appAssetPath("cards/front .png")).toBeNull();
     for (const reserved of ["CON", "PRN", "AUX", "NUL", "COM1", "COM9", "LPT1", "LPT9"]) {
       expect(appAssetPath(`${reserved}.png`)).toBeNull();
       expect(appAssetPath(`${reserved.toLowerCase()}.png`)).toBeNull();

@@ -71,15 +71,17 @@ const MARKDOWN_NAME = /\.md$/i;
  *
  *  Refused here rather than repaired, because an agent that meant `card.png`
  *  can be told to write `card.png`, while a rename behind its back leaves it
- *  addressing a name that no longer exists. */
+ *  addressing a name that no longer exists.
+ *
+ *  A trailing SPACE is not asked about here, and not because it is allowed:
+ *  `ASSET_SEGMENT` has no space anywhere in its classes, so `card.png ` is
+ *  refused before this function is called and a branch for it would read as
+ *  the rule that catches the name while never running. A trailing DOT does
+ *  reach here, because the segment class carries `.` in its tail. */
 const WINDOWS_RESERVED_BASENAME = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\.|$)/i;
 
 function windowsWouldRewrite(segment: string): boolean {
-  return (
-    segment.endsWith(".") ||
-    segment.endsWith(" ") ||
-    WINDOWS_RESERVED_BASENAME.test(segment)
-  );
+  return segment.endsWith(".") || WINDOWS_RESERVED_BASENAME.test(segment);
 }
 
 export const appMetaSchema = z.object({

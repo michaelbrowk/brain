@@ -105,9 +105,11 @@ export function serializePage(meta: PageMeta, markdown: string): string {
     // of those: the page became unrenameable, unreorderable and unmovable,
     // for good, on its very next save.
     //
-    // A map this release cannot read goes back exactly as it came instead. It
-    // is somebody's file, most likely an older Brain's or a hand edit, and it
-    // survives every save until whoever wrote it fixes it.
+    // A map this release cannot read goes back by value instead: the same
+    // keys with the same values, re-dumped the way js-yaml re-dumps every
+    // other field, so `version: "notanumber"` lands as `version: notanumber`.
+    // It is somebody's file, most likely an older Brain's or a hand edit, and
+    // nothing in it is dropped or corrected until whoever wrote it fixes it.
     const app = validAppMeta(meta.app);
     ordered.app = app
       ? {

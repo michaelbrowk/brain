@@ -12,6 +12,8 @@ Brain is a personal knowledge workspace you host yourself. You write and retriev
 
 Brain is a self-hosted minimalist editor whose plain Markdown files remain useful without the application. It should feel fast and quiet next to the all-in-one workspaces, preserve every edit without semantic loss, and give LLMs a controlled door into the same durable note tree.
 
+A page can also be an app: an HTML application an agent builds for the owner, kept beside its `index.md` like everything else and run in a sandboxed frame with no network, reaching the notebook only through a bridge whose writes are authorised on the server against a list the app does not control. It is the last resort and not a shortcut. An agent builds one when the owner asks for one, or when what they asked for cannot be done with the notebook's own means, and says which it was before building. The page stays a page: it has a title, a parent and a body the owner reads, and a client that cannot run the app reads that body instead. `docs/apps.md` is the whole of it.
+
 ## Brand Personality
 
 Quiet, exact, personal. The interface should feel alive through precise motion and immediate feedback, while disappearing behind the text during focused writing.
@@ -21,6 +23,7 @@ Quiet, exact, personal. The interface should feel alive through precise motion a
 - Workspace-suite feature sprawl: databases, properties, collaboration chrome, and nested configuration.
 - Generic shadcn or SaaS surfaces, decorative card grids, and decorative colour or material. Glass, tint and hue exist in Brain only where they do a job, bounded by `DESIGN.md`.
 - An in-product AI chat that competes with the editor.
+- An app page built around a missing Brain feature rather than naming the gap. The right answer then is a page and a note to the owner saying what is not there.
 - Any interaction or custom block that cannot round-trip to clean Markdown.
 
 ## Design Principles

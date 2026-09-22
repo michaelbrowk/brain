@@ -400,6 +400,11 @@ secrets stay outside every release.
   Live imports use the authenticated `notion_*` MCP reserve/upload/finalize
   lifecycle, so notes and attachments still have exactly one writer. The
   resumable operator protocol is documented in `docs/notion-import.md`.
+- `lib/apps/` — everything an app page is, with no React and no Next in it:
+  the `app` map and the size caps, the frame's per-request policy, the bridge
+  protocol, the kit the frame runs, and the lint that refuses an entry before
+  anything is written. `docs/apps.md` is what an agent building one reads, and
+  `examples/apps/spanish-trainer/` is one already built.
 - `components/editor/` — Milkdown plugins; each custom block has a
   `scripts/verify-*-roundtrip.mjs` harness.
 - `components/shell.tsx` — the app shell (sidebar tree, editor host, dialogs).

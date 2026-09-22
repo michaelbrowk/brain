@@ -21,6 +21,7 @@ const nextConfig: NextConfig = {
       "./components/**/*",
       "./docs/**/*",
       "./e2e/**/*",
+      "./examples/**/*",
       "./lib/**/*",
       "./ops/**/*",
       "./scripts/**/*",

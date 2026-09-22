@@ -82,6 +82,10 @@ describe("Next standalone tracing", () => {
     }
   });
 
+  it("leaves the example apps out of the standalone artifact", () => {
+    expect(excludes).toContain("./examples/**/*");
+  });
+
   it("keeps jsdom's own files, which the exclude deliberately spares", () => {
     expect(includes).toContain(
       "./node_modules/.pnpm/jsdom@*/node_modules/jsdom/**/*",

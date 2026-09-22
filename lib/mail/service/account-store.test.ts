@@ -1312,6 +1312,41 @@ describe("SQLite multi-account store", () => {
     ).toMatchObject({ value: "ran" });
     inspect.close();
   });
+
+  /** THE OWNER'S PAUSE, AND WHAT AN UNREADABLE ONE MEANS.
+   *
+   *  The flag round-trips as a `meta` row, and anything that is not the one
+   *  value Brain writes reads as running. Fail-open is deliberate: a mail
+   *  client stuck off is worse than one that syncs for the few seconds before
+   *  Brain's startup PATCH says what the setting actually is. */
+  it("round-trips the sync pause and reads an unrecognised value as running", async () => {
+    const fixture = await createStore();
+    const store = new SqliteMailAccountStore(fixture);
+    await store.initialize();
+    // A fresh install has no row at all, and comes up running.
+    expect(store.readSyncPaused()).toBe(false);
+    store.writeSyncPaused(true);
+    expect(store.readSyncPaused()).toBe(true);
+    store.writeSyncPaused(false);
+    expect(store.readSyncPaused()).toBe(false);
+    store.writeSyncPaused(true);
+    store.close();
+
+    const databasePath = path.join(fixture.stateDirectory, "local.sqlite3");
+    const tamper = new DatabaseSync(databasePath);
+    tamper
+      .prepare(
+        `INSERT INTO meta (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      )
+      .run("sync_paused", "true");
+    tamper.close();
+
+    const reopened = new SqliteMailAccountStore(fixture);
+    await reopened.initialize();
+    expect(reopened.readSyncPaused()).toBe(false);
+    reopened.close();
+  });
 });
 
 async function createStore() {

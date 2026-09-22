@@ -16,6 +16,10 @@ import type { ModuleSwitches } from "@/lib/modules";
 import { SettingsGroup, SettingsRow, Segmented } from "./shared";
 
 const SAVE_FAILED = "Couldn't save that. Try again.";
+/** The switch landed and the other process did not hear it. Not a failure of
+ *  the flip: the setting is the truth, and boot tells the service again. */
+const MAIL_SERVICE_SILENT =
+  "The mail service did not answer; it will be told again on the next start";
 
 const ROWS: { key: keyof ModuleSwitches; label: string; hint: string }[] = [
   { key: "mail", label: "Mail", hint: "Accounts stay connected; syncing stops." },
@@ -84,6 +88,7 @@ export function ModulesSection({
         mail?: unknown;
         tasks?: unknown;
         reason?: unknown;
+        mailService?: unknown;
       };
       if (!answer.ok) {
         setShownOverride(null);
@@ -95,7 +100,10 @@ export function ModulesSection({
       } else {
         setShownOverride(null);
       }
-      onToast(on ? `${labelOf(key)} is on` : `${labelOf(key)} is off`);
+      // The switch landed; the other process did not hear it yet. Not a
+      // revert: the setting is written and the startup call repairs it.
+      if (body.mailService === "unreachable") setProblem(MAIL_SERVICE_SILENT);
+      else onToast(on ? `${labelOf(key)} is on` : `${labelOf(key)} is off`);
     } catch {
       setShownOverride(null);
       setProblem(SAVE_FAILED);

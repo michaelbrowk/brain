@@ -1717,7 +1717,11 @@ export function validateMailServiceHealth(health: MailServiceHealth): MailServic
   if ((health.build.commit === "dev") !== (health.build.builtAt === "dev")) {
     throw new Error("mail service build identity is inconsistent");
   }
-  if (health.status !== "ok" && health.status !== "degraded") {
+  if (
+    health.status !== "ok" &&
+    health.status !== "degraded" &&
+    health.status !== "paused"
+  ) {
     throw new Error("mail service health status is invalid");
   }
   if (health.localSchemaVersion !== null) {
@@ -1775,7 +1779,15 @@ export function validateMailServiceHealth(health: MailServiceHealth): MailServic
     health.sendReadiness === "egress_blocked" ||
     health.cachePressure === "critical" ||
     health.lastErrorCode !== null;
-  if ((health.status === "degraded") !== degraded) {
+  /*
+    A paused service is a deliberate state the owner asked for, not a verdict
+    about either readiness, so the consistency rule does not apply to it.
+    Every other status keeps the rule, and the sentence, exactly as they were.
+  */
+  if (
+    health.status !== "paused" &&
+    (health.status === "degraded") !== degraded
+  ) {
     throw new Error("mail service health status is inconsistent with readiness");
   }
   return Object.freeze({

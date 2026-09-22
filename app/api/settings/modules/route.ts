@@ -39,11 +39,29 @@ export async function PUT(req: NextRequest) {
   // its switch landed.
   if (Object.keys(patch).length === 0) return badModules();
 
+  const before = await readModules();
   const { modules, changed } = await setModules(patch);
   // The event carries the pair, so a tab re-renders without a second request.
   // Only on a real change: a no-op would take a slot in the 256-entry SSE
   // replay journal for a state nobody moved.
   if (changed) emitStore({ type: "modules", id: "modules", modules });
+  // The mail switch itself, and nothing else: the mail service has no opinion
+  // about Tasks, so a tasks-only flip is a second process asked about
+  // something it does not own. Compared before against after rather than read
+  // off `changed`, which is true when either switch moved.
+  if (modules.mail !== before.mail) {
+    const { tellMailServiceAboutModules } = await import("@/lib/mail/module-sync");
+    // The pair that was just written travels with the call, so what reaches
+    // the socket is this write rather than a second read of the file.
+    if (!(await tellMailServiceAboutModules({ modules }))) {
+      // The setting still stands, and the startup call repairs the service.
+      // The extra field is the only way the settings row can learn this.
+      return NextResponse.json(
+        { ...modules, mailService: "unreachable" },
+        { headers: HEADERS },
+      );
+    }
+  }
   return NextResponse.json(modules, { headers: HEADERS });
 }
 

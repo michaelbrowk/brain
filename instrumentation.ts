@@ -34,4 +34,26 @@ export async function register() {
   // It also carries the new-mail poll, on every second tick.
   const { scheduleReminderScans } = await import("./lib/reminders/scheduler");
   scheduleReminderScans();
+
+  // The mail service is another process with its own restarts, so it is told
+  // the module switch once here as a repair. Off under NODE_ENV=test like its
+  // two neighbours above, and deliberately NOT awaited: boot must not wait on
+  // a socket, the client carries its own timeout, and a service that did not
+  // answer is repaired by the next start or the next flip.
+  if (process.env.NODE_ENV !== "test") {
+    const { tellMailServiceAboutModules } = await import("./lib/mail/module-sync");
+    const silent = () => {
+      console.warn(
+        "[brain/mail] the mail service did not answer the module switch; it will be told again on the next start",
+      );
+    };
+    // The rejection arm is not decoration. `tellMailServiceAboutModules`
+    // answers `false` rather than throwing, and this is what keeps a future
+    // regression in that promise a warn line instead of a boot crash: nothing
+    // in this process installs an `unhandledRejection` handler, so Node's
+    // default would stop Brain starting over one wrong environment variable.
+    void tellMailServiceAboutModules().then((told) => {
+      if (!told) silent();
+    }, silent);
+  }
 }

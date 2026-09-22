@@ -37,8 +37,51 @@ describe("the module API gate", () => {
     for (const url of urls) expect(moduleOfApiPath(url), url).toBe("tasks");
   });
 
+  it("claims every route file under /api/mail", async () => {
+    const root = path.join(import.meta.dirname, "..", "app", "api", "mail");
+    const urls = await routeUrls(root, "/api/mail");
+    // Pinned exactly, the way the tasks sweep above is. A prefix that claims
+    // every file that happens to exist is a weaker promise than one held
+    // against the list, which also notices a route quietly deleted. The three
+    // proxies for attachments, remote images and sender icons are in it on
+    // purpose: a picture fetched out of a mailbox is mail.
+    expect(urls).toEqual([
+      "/api/mail/account",
+      "/api/mail/accounts",
+      "/api/mail/accounts/capabilities",
+      "/api/mail/accounts/x",
+      "/api/mail/agent-marks",
+      "/api/mail/attachments/x",
+      "/api/mail/drafts",
+      "/api/mail/drafts/x",
+      "/api/mail/drafts/x/send",
+      "/api/mail/mailboxes/x/threads",
+      "/api/mail/mailboxes/x/threads/x",
+      "/api/mail/message-content/x",
+      "/api/mail/oauth/google/callback",
+      "/api/mail/oauth/google/start",
+      "/api/mail/remote-images/x",
+      "/api/mail/search",
+      "/api/mail/send",
+      "/api/mail/send/x",
+      "/api/mail/sender-icon/x",
+      "/api/mail/sync",
+      "/api/mail/threads",
+      "/api/mail/threads/x",
+    ]);
+    for (const url of urls) expect(moduleOfApiPath(url), url).toBe("mail");
+  });
+
+  // Acceptable and deliberate: with Mail off there is no connect flow to be
+  // in the middle of, so the provider's redirect landing on a 409 is the
+  // right answer rather than a half-finished account.
+  it("claims the OAuth callback too", () => {
+    expect(moduleOfApiPath("/api/mail/oauth/google/callback")).toBe("mail");
+  });
+
   it("claims a route nested under a prefix it has never seen", () => {
     expect(moduleOfApiPath("/api/tasks/anything/at/all")).toBe("tasks");
+    expect(moduleOfApiPath("/api/mail/anything/at/all")).toBe("mail");
   });
 
   it("claims nothing outside the prefixes", () => {
@@ -47,6 +90,7 @@ describe("the module API gate", () => {
       "/api/settings/modules",
       "/api/notifications",
       "/api/tasksomething",
+      "/api/mailbox",
       "/api/mcp",
       "/tasks",
     ]) {

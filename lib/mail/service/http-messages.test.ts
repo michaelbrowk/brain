@@ -1060,6 +1060,146 @@ describe("brain-mail message HTTP surface", () => {
   });
 });
 
+describe("PATCH /v1/sync", () => {
+  function pauseFixture(startPaused = false) {
+    let paused = startPaused;
+    return {
+      isPaused: () => paused,
+      setPaused: vi.fn(async (next: boolean) => {
+        paused = next;
+      }),
+    };
+  }
+
+  it("pauses, and says so in the health", async () => {
+    const syncPause = pauseFixture();
+    const socketPath = await startServer(
+      messageServiceFixture(),
+      sendServiceFixture(),
+      undefined,
+      syncPause,
+    );
+
+    const patched = await requestJson(
+      socketPath,
+      "PATCH",
+      "/v1/sync",
+      JSON.stringify({ enabled: false }),
+    );
+    expect(patched.status).toBe(200);
+    expect(patched.body).toEqual({ apiVersion: 1, paused: true });
+    expect(syncPause.setPaused).toHaveBeenCalledWith(true);
+
+    const health = await requestJson(socketPath, "GET", "/v1/health");
+    expect(health.body).toMatchObject({ status: "paused" });
+  });
+
+  it("refuses a sync trigger and a send while paused, and nothing else", async () => {
+    const messages = messageServiceFixture();
+    const sendService = sendServiceFixture();
+    const socketPath = await startServer(
+      messages,
+      sendService,
+      undefined,
+      pauseFixture(true),
+    );
+
+    const sync = await requestJson(
+      socketPath,
+      "POST",
+      "/v1/sync",
+      JSON.stringify({ accountId: ACCOUNT_ID, maxItems: 5 }),
+    );
+    expect(sync.status).toBe(409);
+    expect(sync.body).toMatchObject({ error: { code: "sync_paused" } });
+    expect(messages.sync).not.toHaveBeenCalled();
+
+    const send = await requestJson(
+      socketPath,
+      "POST",
+      "/v1/send",
+      JSON.stringify(sendInput()),
+    );
+    expect(send.status).toBe(409);
+    expect(send.body).toMatchObject({ error: { code: "sync_paused" } });
+    // Nothing is admitted and nothing is enqueued: the send service, which is
+    // what reserves capacity and writes the outbox row, is never reached.
+    expect(sendService.send).not.toHaveBeenCalled();
+
+    // And the refusal is ahead of the body, which is the ordering the comment
+    // beside it promises. A guard moved down to the mutation callback would
+    // answer 415 here, because a request carrying no Content-Type would
+    // already have been through `readJsonBody`.
+    const bodyless = await requestJson(socketPath, "POST", "/v1/send");
+    expect(bodyless.status).toBe(409);
+    expect(bodyless.body).toMatchObject({ error: { code: "sync_paused" } });
+
+    // Reads are not the pause's business: a cached thread still opens, and
+    // asking what became of a letter already on the wire is a read.
+    const threads = await requestJson(
+      socketPath,
+      "GET",
+      `/v1/threads?accountId=${ACCOUNT_ID}&limit=20`,
+    );
+    expect(threads.status).toBe(200);
+    const operation = await requestJson(
+      socketPath,
+      "GET",
+      `/v1/send/${OPERATION_ID}`,
+    );
+    expect(operation.status).toBe(200);
+  });
+
+  it("starts again on enabled true", async () => {
+    const syncPause = pauseFixture(true);
+    const socketPath = await startServer(
+      messageServiceFixture(),
+      sendServiceFixture(),
+      undefined,
+      syncPause,
+    );
+    const patched = await requestJson(
+      socketPath,
+      "PATCH",
+      "/v1/sync",
+      JSON.stringify({ enabled: true }),
+    );
+    expect(patched.body).toEqual({ apiVersion: 1, paused: false });
+    expect(syncPause.setPaused).toHaveBeenCalledWith(false);
+  });
+
+  it("refuses a body that is not exactly { enabled }", async () => {
+    const socketPath = await startServer(
+      messageServiceFixture(),
+      sendServiceFixture(),
+      undefined,
+      pauseFixture(),
+    );
+    for (const body of ['{"enabled":"no"}', "{}", '{"enabled":true,"extra":1}']) {
+      const answer = await requestJson(socketPath, "PATCH", "/v1/sync", body);
+      expect(answer.status, body).toBe(400);
+    }
+  });
+
+  it("keeps the POST it always had", async () => {
+    const messages = messageServiceFixture();
+    const socketPath = await startServer(
+      messages,
+      sendServiceFixture(),
+      undefined,
+      pauseFixture(),
+    );
+    const answer = await requestJson(
+      socketPath,
+      "POST",
+      "/v1/sync",
+      JSON.stringify({ accountId: ACCOUNT_ID, maxItems: 5 }),
+    );
+    expect(answer.status).toBe(200);
+    expect(messages.sync).toHaveBeenCalled();
+  });
+});
+
 function messageServiceFixture(): MailMessageService & Record<string, ReturnType<typeof vi.fn>> {
   const thread = threadFixture();
   return {
@@ -1294,6 +1434,7 @@ async function startServer(
   messages?: MailMessageService,
   send?: MailSendService,
   accounts?: Parameters<typeof createMailServiceHttpServer>[0]["accounts"],
+  syncPause?: Parameters<typeof createMailServiceHttpServer>[0]["syncPause"],
 ): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "brain-mail-http-messages-"));
   const socketPath = path.join(root, "mail.sock");
@@ -1302,6 +1443,7 @@ async function startServer(
     messages,
     send,
     accounts,
+    syncPause,
   });
   running.push({ server, root });
   await new Promise<void>((resolve, reject) => {

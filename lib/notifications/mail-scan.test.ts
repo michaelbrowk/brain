@@ -14,20 +14,28 @@ import { readMailWatermarks } from "./watermarks";
 const service = vi.hoisted(() => ({
   accounts: [] as { accountId: string }[],
   mailboxCalls: [] as { accountId: string; mailboxId: string; limit?: number }[],
+  /** How many times a client was built. The real `createBrainMailClient`
+   *  throws on a malformed socket path, so with Mail off this has to stay at
+   *  zero: the switch must not be reachable only through a constructor that
+   *  can refuse. */
+  constructed: 0,
 }));
 
 vi.mock("@/lib/mail/brain-mail-client", () => ({
-  createBrainMailClient: () => ({
-    listAccounts: async () => ({ apiVersion: 2, accounts: service.accounts }),
-    listMailboxThreads: async (
-      accountId: string,
-      mailboxId: string,
-      options?: { limit?: number },
-    ) => {
-      service.mailboxCalls.push({ accountId, mailboxId, limit: options?.limit });
-      return { apiVersion: 1, mailboxId, items: [], nextCursor: null };
-    },
-  }),
+  createBrainMailClient: () => {
+    service.constructed += 1;
+    return {
+      listAccounts: async () => ({ apiVersion: 2, accounts: service.accounts }),
+      listMailboxThreads: async (
+        accountId: string,
+        mailboxId: string,
+        options?: { limit?: number },
+      ) => {
+        service.mailboxCalls.push({ accountId, mailboxId, limit: options?.limit });
+        return { apiVersion: 1, mailboxId, items: [], nextCursor: null };
+      },
+    };
+  },
 }));
 
 vi.mock("@/lib/push/send", () => ({
@@ -93,6 +101,9 @@ function harness(overrides: Record<string, unknown> = {}) {
     push: async (p: Push) => {
       pushed.push(p);
     },
+    // Supplied rather than defaulted, so no test in this file reads the real
+    // settings directory to answer an arithmetic question about letters.
+    modules: async () => ({ mail: true, tasks: true }),
     ...overrides,
   };
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -384,9 +395,78 @@ describe("the mailbox the real port asks for", () => {
     // this file replaces, so this is the only place the choice is visible.
     // Under "all" the poll would list Sent and count the owner's own letters,
     // which is the failure the page below is guarding.
-    await runMailScan({ dir, push: async () => undefined });
+    await runMailScan({
+      dir,
+      push: async () => undefined,
+      modules: async () => ({ mail: true, tasks: true }),
+    });
     expect(service.mailboxCalls).toEqual([
       { accountId: ACCOUNT, mailboxId: "inbox", limit: MAIL_SCAN_PAGE },
     ]);
+  });
+});
+
+/** MAIL OFF: NOTHING IS POLLED AND NOTHING IS PRODUCED. Rows already in the
+ *  centre are somebody's morning and stay exactly where they are, which is
+ *  why nothing here removes one. */
+describe("the mail scan with the module off", () => {
+  it("produces nothing and asks the service nothing while Mail is off", async () => {
+    const accounts = vi.fn(async () => [{ accountId: ACCOUNT }]);
+    const h = harness({
+      accounts,
+      modules: async () => ({ mail: false, tasks: true }),
+    });
+    expect(await runMailScan(h.port)).toEqual({ produced: 0 });
+    expect(accounts).not.toHaveBeenCalled();
+    expect(h.mailboxCalls).toEqual([]);
+    expect(await listNotifications(dir)).toEqual([]);
+  });
+
+  /** AND NO CLIENT IS EVEN BUILT. The real `createBrainMailClient` throws on
+   *  a malformed `BRAIN_MAIL_SOCKET_PATH`, and this runs on the reminder
+   *  timer's every second tick, so a switch answerable only after the port is
+   *  resolved would be a warning a minute over a module nobody asked to use.
+   *  Only `dir` and `modules` are brought, so the port would otherwise be the
+   *  real one. */
+  it("builds no mail client while Mail is off", async () => {
+    service.constructed = 0;
+    expect(
+      await runMailScan({
+        dir,
+        modules: async () => ({ mail: false, tasks: true }),
+      }),
+    ).toEqual({ produced: 0 });
+    expect(service.constructed).toBe(0);
+
+    // And the same call with the switch on does build one, so the assertion
+    // above is about the switch rather than about the fixture.
+    expect(
+      await runMailScan({
+        dir,
+        push: async () => undefined,
+        modules: async () => ({ mail: true, tasks: true }),
+      }),
+    ).toEqual({ produced: 0 });
+    expect(service.constructed).toBe(1);
+  });
+
+  it("leaves a row the centre already holds alone", async () => {
+    // A letter counted before the switch stays readable after it.
+    const first = harness({
+      inbox: async () => [thread({ lastMessageAt: Date.parse("2026-09-14T12:00:00.000Z") })],
+    });
+    await runMailScan(first.port);
+    await runMailScan(
+      harness({
+        inbox: async () => [thread({ lastMessageAt: Date.parse("2026-09-14T13:00:00.000Z") })],
+      }).port,
+    );
+    const before = await listNotifications(dir);
+    expect(before.filter((row) => row.kind === "mail-new")).toHaveLength(1);
+
+    await runMailScan(
+      harness({ modules: async () => ({ mail: false, tasks: true }) }).port,
+    );
+    expect(await listNotifications(dir)).toEqual(before);
   });
 });

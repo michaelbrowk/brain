@@ -1,4 +1,5 @@
 import type { MailThreadListItem } from "@/lib/mail/message-types";
+import type { ModuleSwitches } from "@/lib/modules";
 import { MAIL_SCAN_PAGE, newMailLetters, type NewMailLetter } from "./mail-producer";
 import { countedMailRow, mailRow, openMailRow, type OpenMailRow } from "./mail-rows";
 import type { BrainNotification } from "./model";
@@ -39,9 +40,30 @@ export interface MailScanPort {
     folded: BrainNotification | null,
   ): Promise<"appended" | "folded" | "refused">;
   push(payload: { title: string; body?: string; href: string; tag?: string }): Promise<void>;
+  /** The owner's module switches. With Mail off no inbox is polled and no
+   *  `mail-new` row is produced; rows already in the centre are somebody's
+   *  morning and stay exactly where they are. */
+  modules(): Promise<ModuleSwitches>;
 }
 
-const PORT_MEMBERS = ["dir", "accounts", "inbox", "openMailRow", "notify", "push"] as const;
+const PORT_MEMBERS = [
+  "dir",
+  "accounts",
+  "inbox",
+  "openMailRow",
+  "notify",
+  "push",
+  "modules",
+] as const;
+
+/** The switch, answerable without building anything. `createBrainMailClient`
+ *  throws on a malformed `BRAIN_MAIL_SOCKET_PATH`, so a module the owner
+ *  turned off must not be reached through a constructor that can refuse. Same
+ *  function the port carries, so the two cannot drift. */
+async function defaultModules(): Promise<ModuleSwitches> {
+  const { readModules } = await import("@/lib/owner-settings");
+  return readModules();
+}
 
 function defaultPort(dir: string): Promise<MailScanPort> {
   return Promise.all([
@@ -59,13 +81,14 @@ function defaultPort(dir: string): Promise<MailScanPort> {
       push: async (payload) => {
         await sendPush("mail-new", payload);
       },
+      modules: defaultModules,
     };
   });
 }
 
 /** The real port is built only for the members the caller did not bring, the
- *  way the reminder scan resolves its own. A test that supplies all six gets
- *  exactly those six, and neither the mail socket nor the push keys is
+ *  way the reminder scan resolves its own. A test that supplies all seven
+ *  gets exactly those seven, and neither the mail socket nor the push keys is
  *  reached to run an arithmetic test. A test that brings only `dir` gets the
  *  real centre at that directory, which is where the fold is decided. */
 async function resolvePort(overrides: Partial<MailScanPort>): Promise<MailScanPort> {
@@ -90,6 +113,18 @@ function reason(cause: unknown): string {
 export async function runMailScan(
   overrides: Partial<MailScanPort> = {},
 ): Promise<{ produced: number }> {
+  // Mail off: no inbox is polled and no `mail-new` row is produced. Rows
+  // already in the centre stay and read normally, which is why nothing here
+  // removes one.
+  //
+  // Answered BEFORE the port is resolved, because resolving it builds a mail
+  // client and `createBrainMailClient` throws on a malformed socket path. A
+  // module the owner switched off must not depend on the path to a service it
+  // is not going to call, and this runs on the reminder timer's every second
+  // tick, where a throw would be a warning a minute forever.
+  if (!(await (overrides.modules ?? defaultModules)()).mail) {
+    return { produced: 0 };
+  }
   const port = await resolvePort(overrides);
 
   let accounts: readonly { readonly accountId: string }[];

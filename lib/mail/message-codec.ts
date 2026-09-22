@@ -199,6 +199,17 @@ export function validateMailSyncInput(value: unknown): {
   });
 }
 
+/** The whole body of `PATCH /v1/sync`: one boolean and nothing beside it.
+ *  Brain's module switch is the only caller, and a field it did not mean to
+ *  send is a disagreement about the contract rather than a value to ignore. */
+export function validateMailSyncEnabledInput(value: unknown): {
+  readonly enabled: boolean;
+} {
+  if (!isRecordWithExactFields(value, ["enabled"])) throw requestInvalid();
+  if (typeof value.enabled !== "boolean") throw requestInvalid();
+  return Object.freeze({ enabled: value.enabled });
+}
+
 export function validateMailThreadMutationInput(
   value: unknown,
 ): MailThreadMutationInput {
@@ -484,6 +495,22 @@ export function validateMailSyncResult(value: unknown): MailSyncResult {
     changedCount: value.changedCount as number,
     hasMore: value.hasMore,
   });
+}
+
+/** What `PATCH /v1/sync` answers: the state that stands after the call, so a
+ *  caller never has to ask a second time. */
+export function validateMailSyncPauseResult(value: unknown): {
+  readonly apiVersion: 1;
+  readonly paused: boolean;
+} {
+  if (
+    !isRecordWithExactFields(value, ["apiVersion", "paused"]) ||
+    value.apiVersion !== 1 ||
+    typeof value.paused !== "boolean"
+  ) {
+    throw responseInvalid();
+  }
+  return Object.freeze({ apiVersion: 1 as const, paused: value.paused });
 }
 
 export function validateMailThreadMutationResult(

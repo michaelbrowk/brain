@@ -265,6 +265,7 @@ describe("brain-mail systemd contracts", () => {
       "service/runtime-config.js",
       "service/smtp-runtime.js",
       "service/smtp-state-store.js",
+      "service/sync-pause.js",
     ];
     const requiredFilesBlock = /REQUIRED_FILES = \(\n([\s\S]*?)\n\)/.exec(
       projector,

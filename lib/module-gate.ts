@@ -15,7 +15,10 @@ import type { ModuleSwitches } from "./modules";
 export type ModuleName = keyof ModuleSwitches;
 
 export const MODULE_API_PREFIXES: readonly (readonly [string, ModuleName])[] =
-  Object.freeze([Object.freeze(["/api/tasks", "tasks"] as const)]);
+  Object.freeze([
+    Object.freeze(["/api/tasks", "tasks"] as const),
+    Object.freeze(["/api/mail", "mail"] as const),
+  ]);
 
 export function moduleOfApiPath(pathname: string): ModuleName | null {
   for (const [prefix, module] of MODULE_API_PREFIXES) {

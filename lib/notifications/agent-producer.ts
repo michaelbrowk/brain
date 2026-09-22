@@ -88,6 +88,13 @@ const VERB: Readonly<Record<string, Verb>> = {
   update_meta: { one: "changed a page", many: "changed %n pages" },
   move_page: { one: "moved a page", many: "moved %n pages" },
   delete_page: { one: "deleted a page", many: "deleted %n pages" },
+  /** An app page says so. A page that appeared with a program in it is a
+   *  different thing to go and look at from a page that appeared with a
+   *  paragraph in it, and the row is where the owner decides whether to. The
+   *  body is still the page's own title, read back out of the store at the
+   *  call site: the reason the agent was given stays on the page. */
+  create_app_page: { one: "built an app page", many: "built %n app pages" },
+  write_app_page: { one: "rebuilt an app page", many: "rebuilt %n app pages" },
 };
 
 /** THE SUFFIX THAT SAYS A CLIENT IS AN APP.

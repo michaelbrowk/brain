@@ -116,6 +116,13 @@ const TRUTH_TABLE: Record<string, string> = {
   notion_upload_attachment: "write keeps idempotent outside",
   notion_finalize_page: "write keeps idempotent outside",
   notion_abort_page: "write destroys idempotent outside",
+  // Apps. A build makes a new page every time it is called, so `repeats`; a
+  // rebuild replaces the same page's files, so `idempotent`. Neither
+  // destroys: the page and its children stay, and every file set is
+  // committed to the notes folder's own git history.
+  create_app_page: "write keeps repeats local",
+  write_app_page: "write keeps idempotent local",
+  read_app_page: "read keeps idempotent local",
 };
 
 interface ListedTool {

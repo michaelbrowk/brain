@@ -69,6 +69,12 @@ describe("what an agent did, as a row", () => {
     ["update_meta", { tool: "update_meta", page: "notes" }, "Claude changed a page", "/p/notes"],
     ["move_page", { tool: "move_page", page: "notes" }, "Claude moved a page", "/p/notes"],
     ["delete_page", { tool: "delete_page", page: "notes" }, "Claude deleted a page", "/"],
+    // An app page is a page, so its row opens `/p/<id>` like any other. The
+    // verb says "app page" because that is the thing the owner has to go and
+    // look at: a page that appeared with a program in it reads differently
+    // from a page that appeared with a paragraph in it.
+    ["create_app_page", { tool: "create_app_page", page: "app1" }, "Claude built an app page", "/p/app1"],
+    ["write_app_page", { tool: "write_app_page", page: "app1" }, "Claude rebuilt an app page", "/p/app1"],
   ];
 
   it.each(verbs)("%s", (_name, patch, title, href) => {

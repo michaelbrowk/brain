@@ -52,6 +52,7 @@ import { registerMailAttachmentTools } from "./mail-attachment-tools";
 import { registerMailTools } from "./mail-tools";
 import { registerMailSendTools } from "./mail-send-tools";
 import { registerTaskTools } from "./task-tools";
+import { registerAppTools } from "./app-tools";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -244,6 +245,7 @@ const handler = createMcpHandler(
     registerMailAttachmentTools(server);
     registerMailSendTools(server);
     registerTaskTools(server);
+    registerAppTools(server);
 
     server.registerTool(
       "list_tree",

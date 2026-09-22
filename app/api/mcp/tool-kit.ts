@@ -168,10 +168,17 @@ export async function clientNameOf(extra: {
   return (await getOAuthStateStore().getClient(clientId))?.name ?? "Unknown app";
 }
 
-/** Page mutations plus the task writes. The task names are here before their
- *  tools exist on purpose: the gate is a name check that runs ahead of the
- *  handler, so a name listed here and not yet registered is refused rather
- *  than mis-scoped, and the task that registers it cannot forget one. */
+/** Page mutations plus the task writes and the two app builds. The task names
+ *  are here before their tools exist on purpose: the gate is a name check
+ *  that runs ahead of the handler, so a name listed here and not yet
+ *  registered is refused rather than mis-scoped, and the task that registers
+ *  it cannot forget one.
+ *
+ *  An app page is a page, so building one needs `brain:write` and nothing
+ *  more: Michael's ruling of 2026-09-22, no extra consent line. What stops an
+ *  agent reaching for one is the rule in `create_app_page`'s description, not
+ *  a scope. `read_app_page` is absent, which is how a read stays on the
+ *  floor every connection already holds. */
 export const WRITE_TOOLS: ReadonlySet<string> = new Set([
   "write_page",
   "append_page",
@@ -185,6 +192,8 @@ export const WRITE_TOOLS: ReadonlySet<string> = new Set([
   "complete_task",
   "reopen_task",
   "delete_task",
+  "create_app_page",
+  "write_app_page",
 ]);
 
 /** Reading and sorting mail, and saving one of its attachments into a note. */

@@ -45,6 +45,12 @@ describe("the tool scope table", () => {
     expect(toolScopeOf(name)).toBe(scope);
   });
 
+  it("puts the two app writes behind brain:write and leaves the read on the floor", () => {
+    expect(toolScopeOf("create_app_page")).toBe("brain:write");
+    expect(toolScopeOf("write_app_page")).toBe("brain:write");
+    expect(toolScopeOf("read_app_page")).toBeNull();
+  });
+
   it("keeps the three sets disjoint", () => {
     for (const name of MAIL_TOOLS) expect(WRITE_TOOLS.has(name)).toBe(false);
     for (const name of MAIL_SEND_TOOLS) expect(MAIL_TOOLS.has(name)).toBe(false);

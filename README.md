@@ -313,7 +313,9 @@ Human access = password → signed httpOnly cookie. MCP clients connect to
 `/api/mcp`, discover Brain OAuth automatically, and open a Brain consent screen.
 The legacy bearer token remains available only as a migration path. Details and
 the operator checklist are in `docs/mcp-oauth.md`; every tool, its scope, its
-inputs and its refusals are in `docs/mcp-tools.md`.
+inputs and its refusals are in `docs/mcp-tools.md`. An agent building an app
+page — a page whose body is an HTML application Brain runs in a sandboxed
+frame with no network — reads `docs/apps.md` first.
 
 ## Smart sort
 

@@ -166,6 +166,47 @@ without all four hints fails there.
 | `move_page` | `brain:write` | `id`, `newParentId?`, `beforeId?` | the moved page's meta plus `unlinkedFrom`, the old parent whose body stopped listing it | `store_failed` |
 | `delete_page` | `brain:write` | `id` | `{ ok: true }`. The page and its subtree go to Trash and are recoverable | `store_failed` |
 
+## Apps
+
+An app page is a page whose body is an HTML application the owner runs inside
+Brain, in a sandboxed frame with no network of its own. Building one needs
+`brain:write` and nothing more — an app is a page — so what governs it is a
+rule rather than a scope.
+
+**An app is the last resort, not a shortcut.** Build one only when the owner
+asked for an app, or when what they asked for cannot be done with the
+notebook's own means: a page, a table, a checklist, tasks, mail, a collection
+view. Say which it was before building. Do not build an app to work around a
+missing Brain feature without naming the gap — the right move then is a page
+plus a note to the owner. `create_app_page` carries this rule in its own
+description, and `docs/apps.md` is the whole of it: the frame, the bridge's ten
+requests, the limits, the kit and the design rules. Read it before the first
+one.
+
+`reason` is required on a build and is the owner's own request in one line. It
+is kept on the page as `app.reason` and shown in the page head, so the owner
+can see why an app appeared. It never enters the activity log or the bell.
+
+Both writes run the entry through a lint before anything is written, and refuse
+`lint_failed` with `rule` and a 1-based `line` beside the two standard fields.
+The three rules are `color_scheme` (nothing declares one and the entry asks for
+no kit), `hard_coded_colour` (a colour written out rather than read from a
+`var(…)` token) and `external_resource` (an `@import` or a `src` / `href` /
+`url()` reaching another origin, which the frame's policy blocks silently).
+Nothing is created or replaced when the lint refuses.
+
+| Tool | Scope | Inputs | Answers | Refuses |
+| --- | --- | --- | --- | --- |
+| `create_app_page` | `brain:write` | `title`, `reason`, `description`, `entryHtml`, `parentId?`, `icon?`, `assets?` as `[{ name, base64 }]`, `owns?` as `[{ title, icon?, markdown? }]`, `state?` | the new page's `id` and `title`, its `app` map, and the `owns` children it created with their ids | `bad_request` for a missing `reason`, `lint_failed` with `rule` and `line`, `too_large` for an entry, an asset set or a state over the caps, `bad_type` for an asset name an app may not hold. `store_failed` |
+| `write_app_page` | `brain:write` | `id`, `rev`, `entryHtml?`, `assets?` | the page's `id`, `title` and its `app` map with `version` bumped | `not_found` for a page that is not an app, `rev_conflict` with `currentRev` to re-read from, `lint_failed`, `too_large`, `bad_type`. `store_failed` |
+| `read_app_page` | | `id` | `{ id, title, rev, app, entryHtml, assets }`, where `assets` is the list of names and not their bytes | `not_found`. `store_failed` |
+
+`write_app_page` keeps `owns` and `state` from the live page and takes neither
+as an argument: widening what an app's frame may write is the owner's business,
+not a rebuild's. Assets left out are kept and an empty array clears them. To
+change the description the owner reads, use `write_page` on the app page, which
+also answers the `app` map like any other page read.
+
 ## Tasks
 
 A task is a record, not a note. A derived list is read against a day, so

@@ -172,6 +172,7 @@ import { ShellSidebar } from "./shell/sidebar";
 import { ShellTopbar, type ShellTopbarProps } from "./shell/topbar";
 import { PageCover, PageHead } from "./shell/page-head";
 import { PageBody } from "./shell/page-body";
+import { AppCanvas } from "./shell/app-canvas";
 import { ShellOverlays } from "./shell/overlays";
 import {
   draftSourcesForOperation,
@@ -3507,6 +3508,10 @@ export function Shell({
     [tree, selectedId],
   );
   const currentNode = path.at(-1) ?? null;
+  /** The tree as it stands, for the app canvas to hand its bridge. A ref
+   *  rather than the state value, so the getter is stable across renders and
+   *  still answers with what the last SSE event left. */
+  const liveTree = useCallback(() => treeRef.current, []);
   const inheritedShareGrants = resolveInheritedShareGrants(path);
   const inheritedShareRoot = inheritedShareGrants.active;
   const expiredInheritedShareRoot = inheritedShareGrants.expired;
@@ -5755,6 +5760,13 @@ export function Shell({
                   showToast("Sharing is off");
                 }}
                 onCopyShareLink={(id) => copyVerifiedShareLink(id, id)}
+                onToast={showToast}
+              />
+            ) : selectedId && currentNode?.kind === "app" ? (
+              <AppCanvas
+                node={currentNode}
+                liveTree={liveTree}
+                onOpenPage={select}
                 onToast={showToast}
               />
             ) : selectedId ? (

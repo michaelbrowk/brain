@@ -93,6 +93,11 @@ const WANT = [
   // above it in the same menu meaning one mailbox, and §13 refuses four
   // identical trays in a column that names none of them.
   "layers-minimalistic-linear",
+  // An app page's canvas. Rebuild copies the prompt that asks the agent to
+  // build the page again, and the corrupted file names an app whose entry is
+  // not on disk.
+  "refresh-linear",
+  "file-corrupted-linear",
 ];
 
 /**

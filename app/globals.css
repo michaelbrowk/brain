@@ -1694,6 +1694,23 @@ html[data-kbd] [contenteditable]:focus-visible {
   user-select: none;
 }
 
+/* An app's canvas — paper under a frame that fills what the head leaves.
+   The phone keeps the tab bar's reserve under it: an app's own bottom
+   control must not sit behind Brain's. */
+.brain-app-canvas {
+  display: flex;
+  flex-direction: column;
+  min-height: 100%;
+  padding-bottom: var(--tabbar-reserve);
+}
+.brain-app-frame {
+  flex: 1;
+  width: 100%;
+  min-height: 420px;
+  border: 0;
+  background: var(--paper);
+}
+
 /* Smart sort's heap, and the band that reads it. One layer for the whole
    pile rather than sixty-one animations: the pages are being read in the
    order they are stacked, and a single 96px gradient sweeping down says that

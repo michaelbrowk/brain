@@ -90,6 +90,26 @@ const VERB: Readonly<Record<string, Verb>> = {
   delete_page: { one: "deleted a page", many: "deleted %n pages" },
 };
 
+/** THE SUFFIX THAT SAYS A CLIENT IS AN APP.
+ *
+ *  `lib/apps/write-authority.ts` writes it and this reads it. A string match
+ *  rather than a field on the line, because the line's shape is a redaction
+ *  boundary this module deliberately keeps a structural copy of, and one more
+ *  field there is one more thing two files have to agree about. */
+const APP_CLIENT = /^(.*) \(app\)$/;
+
+/** An app's own verbs. "Trainer updated Words" is a sentence a person reads
+ *  as one thing happening; "Trainer (app) wrote a page" is two nouns and a
+ *  parenthesis. The row names the page because an app works on a small,
+ *  named set of them, which is exactly the case where naming one is useful
+ *  rather than arbitrary. */
+const APP_VERB: Readonly<Record<string, Verb>> = {
+  write_page: { one: "updated", many: "updated %n pages" },
+  append_page: { one: "added to", many: "added to %n pages" },
+  create_page: { one: "added", many: "added %n pages" },
+  update_meta: { one: "changed", many: "changed %n pages" },
+};
+
 const TRIAGE_TOOL = "update_mail_thread";
 
 /** One tool, six changes, and the line names which one it ran
@@ -177,6 +197,16 @@ function clientName(value: string): string {
   return tidy.length > 0 ? tidy : CLIENT_FALLBACK;
 }
 
+/** The app's own name and its verb, or null for a client that is not an app
+ *  or a tool an app's row has no sentence for. Both `agentActionNotification`
+ *  and `agentActionFold` ask, so the two cannot disagree about which lines
+ *  read as an app's. */
+function appVerbOf(entry: AgentActivityEntry): { name: string; verb: Verb } | null {
+  const match = APP_CLIENT.exec(entry.client);
+  const verb = match === null ? undefined : APP_VERB[entry.tool];
+  return match === null || verb === undefined ? null : { name: clientName(match[1]), verb };
+}
+
 function verbOf(entry: AgentActivityEntry): Verb | null {
   if (entry.tool === TRIAGE_TOOL) {
     if (entry.change === SILENT_CHANGE) return null;
@@ -256,12 +286,26 @@ export function agentActionNotification(
 
   const href = hrefOf(entry);
   const body = label?.replace(/\s+/g, " ").trim().slice(0, MAX_BODY);
+  const app = appVerbOf(entry);
+  // An app's row names the page in the title, because an app works on a
+  // small, named set of them: "Trainer updated Words" is one sentence and
+  // "Trainer (app) wrote a page" is two nouns and a parenthesis. With no
+  // title to name, the row still says what happened.
+  const named = body !== undefined && body.length > 0 ? body : "a page";
+  const title =
+    app === null
+      ? `${clientName(entry.client)} ${verb.one}`
+      : `${app.name} ${app.verb.one} ${named}`;
   return {
     id: agentActionNotificationId(entry),
     kind: "agent-action",
     at: entry.at,
-    title: `${clientName(entry.client)} ${verb.one}`.slice(0, MAX_TITLE),
-    ...(body !== undefined && body.length > 0 ? { body } : {}),
+    // Cut once, after the whole title is assembled. Applied to the parts it
+    // would leave a cut in the middle of one and then a space and a word.
+    title: title.slice(0, MAX_TITLE),
+    // The body is the page's name, and an app's title already carries it.
+    // Repeating it under the title is the same word twice in one row.
+    ...(app === null && body !== undefined && body.length > 0 ? { body } : {}),
     // An id the store minted is a path already; an id from anywhere else is
     // checked before it becomes one, and the surface is the fallback.
     href: isNotificationHref(href) ? href : SURFACE_HREF[surfaceOf(entry.tool)],
@@ -338,15 +382,20 @@ export function agentActionFold(
   // The destination survives only while every line named the same thing. A
   // burst over a dozen threads goes to Mail, not to the twelfth thread.
   const href = held.href === next.href ? held.href : SURFACE_HREF[surfaceOf(entry.tool)];
+  const app = appVerbOf(entry);
+  // No page name past the first, for an app as for a grant: a count with one
+  // name beside it reads as a lie about the other eleven. So the plural verb
+  // carries the count and nothing else, and the row keeps no body.
+  const foldedTitle =
+    app === null
+      ? `${clientName(entry.client)} ${verb.many.replace(COUNT_MARK, String(count))}`
+      : `${app.name} ${app.verb.many.replace(COUNT_MARK, String(count))}`;
   return {
     row: {
       id: held.id,
       kind: "agent-action",
       at,
-      title: `${clientName(entry.client)} ${verb.many.replace(COUNT_MARK, String(count))}`.slice(
-        0,
-        MAX_TITLE,
-      ),
+      title: foldedTitle.slice(0, MAX_TITLE),
       // No body past the first: it named one of the things and says nothing
       // about the rest, and a count with one name beside it reads as a lie.
       href,

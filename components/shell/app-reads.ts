@@ -2,6 +2,20 @@ import { apiFetch } from "@/lib/client";
 import type { AppRefusalReason, AppRequest } from "@/lib/apps/bridge";
 import type { TreeNode } from "@/lib/store/types";
 
+/** WHAT "NOBODY HERE ANSWERED THAT" LOOKS LIKE.
+ *
+ *  The host is two halves, reads and writes, and the second is asked only
+ *  what the first did not answer. A `??` between them cannot carry that:
+ *  `state.get` on an app that has never kept any answers `null`, and a
+ *  composition that reads a falsy answer as an absent one turns an app's
+ *  empty memory into "Brain did not understand that request". A symbol no
+ *  route can produce is the one value that means only this. */
+export const UNHANDLED: unique symbol = Symbol("brain.app.unhandled");
+
+/** One half of the host: an answer for the requests it owns, `UNHANDLED` for
+ *  the rest. */
+export type AppRequestHandler = (request: AppRequest) => Promise<unknown>;
+
 /** A refusal on its way back through the bridge. The host reads `reason` off
  *  it, so a read that fails says the same word the MCP would. */
 export class AppBridgeError extends Error {
@@ -107,8 +121,8 @@ async function read(path: string): Promise<unknown> {
 }
 
 /** The owner's read side. Every request the spec lists as a read, and
- *  `undefined` for everything else, so the write side layers over it with a
- *  `??` rather than a second switch that could disagree with this one.
+ *  `UNHANDLED` for everything else, so the write side layers over it rather
+ *  than a second switch that could disagree with this one.
  *
  *  THE LIVE TREE IS ALSO THE GUEST LIST.
  *
@@ -121,11 +135,21 @@ async function read(path: string): Promise<unknown> {
  *  one the SSE stream keeps current, so a page deleted while an app is open
  *  is refused on the next read and a page created while it is open becomes
  *  readable at once. A set cached at the first `read.tree` would answer both
- *  of those with the notebook as it looked when the app started. */
+ *  of those with the notebook as it looked when the app started.
+ *
+ *  `created` is the one thing the tree is behind on rather than ahead of. A
+ *  page the app has just made through `create.page` exists in the notes
+ *  folder before the shell's SSE stream has heard about it, so an app that
+ *  creates a page and reads it in its next request would be told the page is
+ *  not there. The set is the write side's, filled the moment a create is
+ *  answered, and it is bounded by construction: every create appends to
+ *  `owns`, which the route caps at `APP_MAX_OWNED`. */
 export function createAppReads(
   liveTree: () => readonly TreeNode[],
-): (request: AppRequest) => Promise<unknown> {
+  created?: ReadonlySet<string>,
+): AppRequestHandler {
   const has = (id: string): boolean => {
+    if (created?.has(id) === true) return true;
     const walk = (nodes: readonly TreeNode[]): boolean =>
       nodes.some((node) => node.id === id || walk(node.children));
     return walk(liveTree());
@@ -152,6 +176,6 @@ export function createAppReads(
       };
       return { hits: body.hits ?? [] };
     }
-    return undefined;
+    return UNHANDLED;
   };
 }

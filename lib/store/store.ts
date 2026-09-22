@@ -126,6 +126,7 @@ import {
   type AppFileRead,
   type AppFilesInput,
   type CreateAppPageInput,
+  AppOwnsFullError,
   AppSizeError,
   NotAnAppError,
   AttachmentStoreUnavailableError,
@@ -189,6 +190,25 @@ interface Entry {
   dir: string;
   parentId: string | null;
   meta: PageMeta;
+}
+
+/** What `createPage` takes, named because the unlocked half of it takes the
+ *  same thing and two copies of a fourteen-key shape drift. */
+interface CreatePageOptions {
+  /** Server-derived identity for idempotent create operations. Never pass a
+   * raw client-supplied page id. */
+  id?: string;
+  quickCaptureFingerprint?: string;
+  markdown?: string;
+  notionId?: string;
+  icon?: string;
+  cover?: string;
+  status?: string;
+  font?: PageMeta["font"];
+  smallText?: boolean;
+  fullWidth?: boolean;
+  by?: "me" | "claude";
+  src?: string;
 }
 
 export interface PageMoveResult {
@@ -3886,24 +3906,21 @@ export class Store {
   async createPage(
     parentId: string | null,
     title = "Untitled",
-    opts: {
-      /** Server-derived identity for idempotent create operations. Never pass a
-       * raw client-supplied page id. */
-      id?: string;
-      quickCaptureFingerprint?: string;
-      markdown?: string;
-      notionId?: string;
-      icon?: string;
-      cover?: string;
-      status?: string;
-      font?: PageMeta["font"];
-      smallText?: boolean;
-      fullWidth?: boolean;
-      by?: "me" | "claude";
-      src?: string;
-    } = {},
+    opts: CreatePageOptions = {},
   ): Promise<PageMeta> {
-    return this.mutate(async () => {
+    return this.mutate(() => this.createPageUnlocked(parentId, title, opts));
+  }
+
+  /** The whole of `createPage` with the lock taken off, so a composite that
+   *  has to be atomic with something else can take the lock once and call
+   *  this (invariant 4: `mutate()` is not reentrant, so a wrapped method may
+   *  never call another). `createOwnedPage` is the one caller. */
+  private async createPageUnlocked(
+    parentId: string | null,
+    title: string,
+    opts: CreatePageOptions,
+  ): Promise<PageMeta> {
+    {
       if (
         opts.id !== undefined &&
         (!PAGE_ID_RE.test(opts.id) || opts.id.length > 128)
@@ -3988,6 +4005,55 @@ export class Store {
       scheduleCommit(this.root);
       emitStore({ type: "create", id: meta.id, src: opts.src });
       return meta;
+    }
+  }
+
+  /** A CHILD OF AN APP, OWNED FROM THE SAME WRITE THAT MADE IT.
+   *
+   *  The bridge's create route used to call `createPage` and then
+   *  `setAppMeta` with a spread of the `app` map it had read before either
+   *  ran. Two things were wrong with that and both are closed here.
+   *
+   *  It was two mutations. A crash between them leaves a child page under the
+   *  app that the app may never write, because `appMayWrite` asks `owns`, so
+   *  the app's next run creates it again, and again, up to the cap.
+   *
+   *  And the map it wrote back was a snapshot. `setAppMeta` REPLACES the map,
+   *  so a state write or a second create that landed in between was spread
+   *  away: a flag back to false and the app's memory unreadable, or a page
+   *  silently unowned. The map is re-read here, inside the lock, where
+   *  nothing else can have moved it.
+   *
+   *  Wrapped once and delegating only to unlocked internals, per invariant 4. */
+  async createOwnedPage(
+    appId: string,
+    input: { title: string; icon?: string; markdown?: string },
+    by: "me" | "claude" = "claude",
+    src?: string,
+  ): Promise<{ page: PageMeta; app: AppMeta }> {
+    return this.mutate(async () => {
+      const e = this.get(appId);
+      // Through `readAppMeta`, never off `meta.app`: it is the one validation
+      // every app-aware caller comes through, so a map that does not parse
+      // authorises nothing here either.
+      const app = this.readAppMeta(appId);
+      if (app === null) throw new NotAnAppError();
+      // Checked in here rather than in the route, so two creates racing for
+      // the last slot cannot both read 63 and both write.
+      if (app.owns.length >= APP_MAX_OWNED) throw new AppOwnsFullError(appId);
+      const page = await this.createPageUnlocked(appId, input.title, {
+        icon: input.icon,
+        markdown: input.markdown ?? "",
+        by,
+        src,
+      });
+      e.meta.app = appMetaSchema.parse({ ...app, owns: [...app.owns, page.id] });
+      e.meta.updated = now();
+      e.meta.updatedBy = by;
+      await this.persist(e);
+      scheduleCommit(this.root);
+      emitStore({ type: "meta", id: appId, src });
+      return { page, app: e.meta.app };
     });
   }
 
@@ -4163,21 +4229,7 @@ export class Store {
         this.root,
         path.join(e.dir, `${APP_STAGING_DIR}-old`),
       );
-      // RECOVER A CRASHED SWAP BEFORE STAGING A NEW ONE.
-      //
-      // Two states a crash can leave, and they are told apart by whether
-      // `app/` is there. No `app/` and a `.app-next-old/` means the crash
-      // landed between the renames and the retired folder is the only copy
-      // of the app: put it back. Both present means the crash landed after
-      // the second rename, so `app/` is already the new set and the retired
-      // one is a stale copy: drop it. Doing neither is what let one state
-      // write carry nothing over and then delete the only surviving files.
-      const liveExists = await directoryExists(path.join(e.dir, "app"));
-      const retiredExists = await directoryExists(retired);
-      if (retiredExists) {
-        if (liveExists) await fs.rm(retired, { recursive: true, force: true });
-        else await fs.rename(retired, path.join(e.dir, "app"));
-      }
+      await recoverCrashedAppSwap(e.dir);
       await fs.rm(staged, { recursive: true, force: true });
       await fs.mkdir(staged, { recursive: true });
       try {
@@ -4249,19 +4301,55 @@ export class Store {
     });
   }
 
-  /** The app's cross-device memory. An unwrapped composite over two wrapped
-   *  leaves, because a first state write has to flip `app.state` as well as
-   *  land the file: `readAppState` answers null while the map says the app
-   *  keeps none, so an app that shipped without state would write `state.json`
-   *  on every answer and read its own memory back as empty for ever. The map
-   *  is touched only on that first write, so the ordinary case stays one
-   *  file write and one rename pair. */
-  async writeAppState(id: string, json: unknown): Promise<void> {
-    await this.writeAppFiles(id, { state: json });
-    const app = this.readAppMeta(id);
-    if (app && !app.state) {
-      await this.setAppMeta(id, { ...app, state: true });
-    }
+  /** THE APP'S CROSS-DEVICE MEMORY, AND THE ONE FILE IT TOUCHES.
+   *
+   *  Its own leaf, not a `writeAppFiles({ state })`. That method stages a
+   *  whole new `app/` folder and swaps it in, which is right for a rewrite
+   *  and wrong here twice over. It copies the entry and every asset, up to
+   *  12 MiB, on a path the bridge runs once per card an app answers. And it
+   *  enters the rename window its own comment admits to: a crash between the
+   *  two renames leaves `app/` missing, and the next write through that path
+   *  carries nothing over and deletes the retired copy, so the entry is gone
+   *  for good. A rewrite is rare and agent-driven; this is a keystroke.
+   *
+   *  One atomic write of one small file, and the flag in the SAME mutation.
+   *  `readAppState` gates on `app.state === true`, so a file written without
+   *  the flag is a file nothing will read, and a flag written without the
+   *  file is a read that answers null. Neither half is worth having alone.
+   *
+   *  `writeAppFiles`'s own `state` branch stays, for the rewrite that
+   *  legitimately replaces the entry, the assets and the memory at once, and
+   *  this asks the two questions that method asks before it touches `app/`:
+   *  the page validates as an app, and `app/` is its file set rather than a
+   *  child page's folder. */
+  async writeAppState(
+    id: string,
+    json: unknown,
+    by: "me" | "claude" = "claude",
+    src?: string,
+  ): Promise<void> {
+    assertAppStateSize(json);
+    return this.mutate(async () => {
+      const e = this.get(id);
+      if (this.readAppMeta(id) === null) throw new NotAnAppError();
+      await assertAppFolderIsNotAPage(e.dir);
+      // A crashed rewrite left the app's only copy in `.app-next-old/`, and a
+      // state write is the likeliest next write there is. Put it back before
+      // writing into `app/`, or this leaf would create a folder holding one
+      // `state.json` beside the files nobody goes on to look for.
+      await recoverCrashedAppSwap(e.dir);
+      const file = assertInRoot(this.root, path.join(e.dir, APP_STATE_PATH));
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await atomicWrite(file, JSON.stringify(json));
+      if (e.meta.app?.state !== true) {
+        e.meta.app = appMetaSchema.parse({ ...e.meta.app, state: true });
+        e.meta.updated = now();
+        e.meta.updatedBy = by;
+        await this.persist(e);
+      }
+      scheduleCommit(this.root);
+      emitStore({ type: "write", id, src });
+    });
   }
 
   /** The app map this page carries, or null when it carries none this release
@@ -4347,6 +4435,12 @@ export class Store {
     const app = this.readAppMeta(appId);
     if (!app || appId === targetId) return false;
     if (!app.owns.includes(targetId)) return false;
+    // An app page's body is the agent's description of it, which the canvas
+    // draws and the owner reads under the title. `appId === targetId` above
+    // keeps an app off its own, and a second app page underneath it is the
+    // same page by another name. `owns` cannot settle this: it is a list an
+    // agent wrote, and this is the check that does not take its word.
+    if (this.index.get(targetId)?.meta.kind === "app") return false;
     return this.isWithinSubtree(appId, targetId) && !this.isDeleted(targetId);
   }
 
@@ -8659,6 +8753,41 @@ async function directoryExists(dir: string): Promise<boolean> {
  *  uses for its one reservation exception, asked on the write side so the two
  *  cannot disagree. An app's own set never holds one, because the name rule
  *  in `lib/apps/model.ts` refuses every `.md` at every depth. */
+/** RECOVER A CRASHED SWAP BEFORE ANY APP WRITE TOUCHES `app/`.
+ *
+ *  `writeAppFiles` swaps a staged set in by renaming `app/` out to
+ *  `.app-next-old/` and `.app-next/` in. That pair is not one operation on
+ *  any filesystem, so a crash can land between the two.
+ *
+ *  Two states it can leave, told apart by whether `app/` is there. No `app/`
+ *  beside a `.app-next-old/` means the crash landed between the renames and
+ *  the retired folder is the only copy of the app: put it back. Both present
+ *  means the crash landed after the second rename, so `app/` is already the
+ *  new set and the retired one is stale: drop it. Doing neither is what let
+ *  one state write carry nothing over and then delete the only surviving
+ *  files.
+ *
+ *  Run by the rewrite AND by the state leaf, which no longer goes through the
+ *  swap: the state write is by far the most frequent thing an app does, so it
+ *  is the write most likely to be the next one after a crash, and the promise
+ *  is that the next write finds the files. Two `stat`s in the ordinary case. */
+async function recoverCrashedAppSwap(dir: string): Promise<void> {
+  const retired = path.join(dir, `${APP_STAGING_DIR}-old`);
+  if (await directoryExists(retired)) {
+    if (await directoryExists(path.join(dir, "app"))) {
+      await fs.rm(retired, { recursive: true, force: true });
+    } else {
+      await fs.rename(retired, path.join(dir, "app"));
+    }
+  }
+  // The staged set is only ever meaningful inside the one `writeAppFiles`
+  // call that made it, so anything still here is a half-written folder a
+  // crash left. Dropped after the decision above, never before it: in the
+  // between-the-renames case it is exactly the half-written set that must NOT
+  // become `app/`.
+  await fs.rm(path.join(dir, APP_STAGING_DIR), { recursive: true, force: true });
+}
+
 async function assertAppFolderIsNotAPage(dir: string): Promise<void> {
   const legacyIndex = await readOptionalFile(path.join(dir, "app", "index.md"));
   if (legacyIndex !== null) {

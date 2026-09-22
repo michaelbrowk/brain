@@ -6,6 +6,7 @@ import {
   appRefusal,
   appRequestSchema,
 } from "./bridge";
+import { APP_ENTRY_MAX_BYTES } from "./model";
 
 const envelope = { v: 1, rid: "r1" } as const;
 
@@ -43,6 +44,28 @@ describe("the bridge protocol", () => {
       appRequestSchema.safeParse({ ...envelope, type: "write.page", id: "p", markdown: "x" }).success,
     ).toBe(false);
     expect(appRequestSchema.safeParse({ ...envelope, type: "toast", text: "x".repeat(400) }).success).toBe(false);
+  });
+
+  it("bounds the markdown of a create the way a page write is bounded", () => {
+    // Without the max the host relays a create of any size at all, and an app
+    // may mint sixty-four pages that way. The route refuses it too; this is
+    // the half that refuses before anything crosses the network.
+    expect(
+      appRequestSchema.safeParse({
+        ...envelope,
+        type: "create.page",
+        title: "Words",
+        markdown: "x".repeat(APP_ENTRY_MAX_BYTES + 1),
+      }).success,
+    ).toBe(false);
+    expect(
+      appRequestSchema.safeParse({
+        ...envelope,
+        type: "create.page",
+        title: "Words",
+        markdown: "x".repeat(APP_ENTRY_MAX_BYTES),
+      }).success,
+    ).toBe(true);
   });
 
   it("needs state.set to carry a payload, and takes any JSON under it", () => {

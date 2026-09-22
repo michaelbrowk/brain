@@ -92,6 +92,25 @@ describe("the host side of the bridge", () => {
     expect(posted).toHaveLength(0);
   });
 
+  it("counts a message it could not parse against the same budget", async () => {
+    // Junk is not free. Refused outside the limiter, a frame in a tight loop
+    // of malformed messages spends the host a schema parse each time and
+    // never runs out of budget, however long it keeps going. The budget is
+    // the frame's whole cost to the host, not the cost of the requests that
+    // happened to be well formed.
+    for (let i = 0; i < 40; i += 1) speak({ v: 1, rid: `r${i}`, type: "delete.page" });
+    await settle();
+    const reasons = posted.map((message) => (message as { reason: string }).reason);
+    expect(reasons.filter((reason) => reason === "bad_request")).toHaveLength(30);
+    expect(reasons.filter((reason) => reason === "too_many")).toHaveLength(10);
+    // And the well-formed request that follows them is refused too: the junk
+    // spent the budget it would have used.
+    speak({ v: 1, rid: "after", type: "read.tree" });
+    await settle();
+    expect((posted.at(-1) as { reason: string }).reason).toBe("too_many");
+    expect(handle).not.toHaveBeenCalled();
+  });
+
   it("stops at 30 requests a second and says too_many", async () => {
     for (let i = 0; i < 31; i += 1) speak({ v: 1, rid: `r${i}`, type: "read.tree" });
     await settle();

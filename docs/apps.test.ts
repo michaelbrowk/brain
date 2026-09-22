@@ -82,6 +82,21 @@ describe("docs/apps.md", () => {
       expect(apps).toContain(rule);
     }
   });
+
+  it("states the two narrowings, so an agent is not left guessing at a refusal", () => {
+    // Both are rules a reader would otherwise have to discover by being
+    // refused: a named colour is only a colour inside CSS, and a `#` inside a
+    // reference is a name.
+    expect(apps).toContain("**Named colours.**");
+    expect(apps).toContain("transparent");
+    expect(apps).toContain("**A `#` that is a name.**");
+    expect(apps).toContain('querySelector("#abc")');
+  });
+
+  it("says a comment hides nothing, and that an unquoted value is read the same", () => {
+    expect(apps).toContain("A comment hides nothing");
+    expect(apps).toContain("unquoted");
+  });
 });
 
 describe("docs/mcp-tools.md", () => {

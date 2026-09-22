@@ -243,10 +243,31 @@ It cannot judge taste, and does not try. An ugly app passes. Three rules:
 | Rule | What it caught | Why it is a rule |
 | --- | --- | --- |
 | `color_scheme` | the entry declares no `color-scheme` and asks for no kit | without one the frame paints in the browser's default scheme and ignores the owner's dark theme |
-| `hard_coded_colour` | a `#hex`, `rgb(`, `hsl(`, `oklch(` or the like outside a `var(…)` | a written colour cannot follow a theme. A colour inside a `var()` fallback is fine, because that is the token path |
-| `external_resource` | an `@import`, or a `src` / `href` / `url()` pointing at another origin or at an absolute path | the frame's policy blocks it with nothing said, so the app loads and paints nothing, and the lint is the only place anybody can be told |
+| `hard_coded_colour` | a `#hex`, `rgb(`, `hsl(`, `oklch(` or the like outside a `var(…)`, and a named CSS colour used as a declaration's value | a written colour cannot follow a theme. A colour inside a `var()` fallback is fine, because that is the token path |
+| `external_resource` | an `@import`, a `url()`, or a `src` / `srcset` / `href` / `data` / `poster` / `action` / `formaction` / `ping` / `background` pointing at another origin, at a protocol-relative host or at an absolute path | the frame's policy blocks it with nothing said, so the app loads and paints nothing, and the lint is the only place anybody can be told |
 
-`data:` URIs and the app's own `assets/…` names pass all three.
+A comment hides nothing: the lint blanks every `<!-- … -->` before the first
+rule runs, so a commented-out `color-scheme` does not satisfy one and a
+commented-out kit link does not carry the rest of its line past the others.
+An attribute value may be unquoted, single-quoted or double-quoted and is read
+the same way either way, and an `href` to another site is refused along with
+the rest — an app links out through `brain.open(id)` or not at all.
+
+**Named colours.** `background: red`, `color: white` and `border: 1px solid black`
+are refused, in a `<style>` block and in a `style=` attribute, which is where
+the browser reads a value as a colour. The same word anywhere else — in prose,
+in a class name, in a JavaScript string — passes, and so do `transparent`,
+`currentcolor` and the CSS-wide keywords, because none of those fixes a value.
+What the lint cannot catch is a colour assembled from halves at runtime, so it
+is a guard and not a proof.
+
+**A `#` that is a name.** `href="#dead"`, `url(#face)`, `querySelector("#abc")`,
+an `id=` and an `aria-*=` fragment are all read as names rather than as hex. A
+bare `#abc` in a JavaScript string is still refused, because nothing can tell
+what it is for once it sits in quotes on its own. Read the token instead:
+`getComputedStyle(document.documentElement).getPropertyValue("--ink")`.
+
+`data:` URIs and the app's own `assets/…` names pass all three rules.
 
 ## Rebuilding
 

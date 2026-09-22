@@ -38,7 +38,7 @@ import {
 import { SqliteMailSendStore } from "./outbound-store";
 import { MailOutboundWorker } from "./outbound-worker";
 import { readMailServiceRuntimePaths } from "./runtime-config";
-import { createMailSyncPause } from "./sync-pause";
+import { createMailSyncPause, mailSyncPauseWorkers } from "./sync-pause";
 import { UnixSocketMailMimeParser } from "./mime-parser-client";
 import { StoredGmailAccessTokenPort } from "../providers/gmail/access-token-port";
 import { MultiAccountGmailSendAdapter } from "../providers/gmail/send-adapter";
@@ -210,16 +210,18 @@ async function main(): Promise<void> {
   });
   kickBackgroundSync = () => backgroundSync.kick();
   // Everything the pause turns off, in the order they are started below.
-  // "Off means nothing leaves" is why the two send-side workers are in this
-  // list beside the receive-side scheduler.
+  // "Off means nothing leaves" is why the two send-side workers travel in
+  // that list beside the receive-side scheduler, and why the list is built by
+  // `mailSyncPauseWorkers` rather than spelled here: this file has no test,
+  // and a worker missing from the list would be invisible.
   const syncPause = createMailSyncPause({
     readPaused: () => store.readSyncPaused(),
     writePaused: (paused) => store.writeSyncPaused(paused),
-    workers: [
+    workers: mailSyncPauseWorkers({
       outboundWorker,
-      ...(smtpRuntime ? [smtpRuntime.worker] : []),
-      { start: () => backgroundSync.start(), stop: () => backgroundSync.stop() },
-    ],
+      ...(smtpRuntime ? { smtpWorker: smtpRuntime.worker } : {}),
+      backgroundSync,
+    }),
   });
   const server = createMailServiceHttpServer({
     build,
@@ -242,12 +244,22 @@ async function main(): Promise<void> {
   // Comes up the way it went down. Without this a paused service would sync
   // and send for one interval after every restart, and `Restart=on-failure`
   // means a restart is not something anybody schedules.
+  let workersRunning = false;
   if (!syncPause.isPaused()) {
     await outboundWorker.start();
     await smtpRuntime?.worker.start();
     backgroundSync.start();
+    workersRunning = true;
   }
-  writeServiceLog({ event: "mail_service_started" });
+  // The `phase` is what this start actually did, not what the stored flag
+  // says. An operator reading the journal after a restart needs to see that
+  // the silence is the switch rather than a fault, and it is the only place
+  // outside the process where the branch above is visible: the artifact smoke
+  // reads this line to hold the restart honest.
+  writeServiceLog({
+    event: "mail_service_started",
+    phase: workersRunning ? "running" : "paused",
+  });
 
   let stopping = false;
   const stop = () => {

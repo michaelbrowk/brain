@@ -19,6 +19,9 @@ const PUBLIC_ASSETS = new Set([
   "/sw.js",
 ]);
 
+/** `/api/app-bridge/<app>/share`, and nothing else under that prefix. */
+const APP_BRIDGE_SHARE = /^\/api\/app-bridge\/[^/]+\/share$/;
+
 export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
 
@@ -43,6 +46,23 @@ export async function proxy(req: NextRequest) {
     pathname.startsWith("/_attachments-v2/") ||
     pathname.startsWith("/_attachments/") ||
     pathname.startsWith("/api/media/") ||
+    // An app's own files, for the same reason and on the same terms as the
+    // attachment routes above: the route enforces the owner's session or a
+    // live share grant itself, and not every request that reaches it can
+    // carry a session. The frame's document has an opaque origin, so every
+    // subresource it asks for is a cross-site request with no SameSite cookie
+    // on it, and a link visitor's frame has no session at all. A 401 from the
+    // wall here is an app that never shows one of its own pictures and a
+    // shared app that is a blank rectangle, with nothing in any console the
+    // owner will ever open.
+    pathname.startsWith("/api/app/") ||
+    // The one read a shared app's frame makes, and the only route under
+    // `/api/app-bridge/` a link visitor may reach. The others are the owner's
+    // three write doors and stay behind the wall; this matcher names one path
+    // shape rather than a prefix so a route added beside it is not let out by
+    // accident. The route itself resolves the live grant on every request and
+    // has no write verb at all.
+    APP_BRIDGE_SHARE.test(pathname) ||
     pathname.startsWith("/share/")
   )
     return NextResponse.next();

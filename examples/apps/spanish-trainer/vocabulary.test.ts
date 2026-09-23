@@ -83,6 +83,98 @@ describe("reading vocabulary out of a page", () => {
   });
 });
 
+/** THE THREE THINGS THE READER GOT WRONG ON A REAL NOTEBOOK.
+ *
+ *  The pages above are the ones this file invented. The owner's own Spanish
+ *  pages are bolder, bilingual and full of grammar, and on those the reader
+ *  put three kinds of rubbish into the deck: emphasis marks carried into the
+ *  card, a table's header row drilled as a pair because its cells are Russian
+ *  rather than English, and whole grammar tables read as vocabulary because a
+ *  conjugation looks exactly like a pair.
+ *
+ *  The rows below are the ones that were measured, spelled as they sit on the
+ *  pages. */
+describe("a page the owner wrote rather than one this file invented", () => {
+  it("takes the emphasis off both sides", () => {
+    const md = [
+      "| Испанский | Русский |",
+      "| --- | --- |",
+      "| **yo tengo** | у меня есть |",
+      "| **Me gusta** bailar | инфинитив |",
+    ].join("\n");
+    expect(extractVocabulary(md)).toEqual([
+      { word: "yo tengo", translation: "у меня есть" },
+      { word: "Me gusta bailar", translation: "инфинитив" },
+    ]);
+  });
+
+  it("keeps a parenthesis, which is spelling rather than emphasis", () => {
+    const md = [
+      "| Palabra | Перевод |",
+      "| --- | --- |",
+      "| Acostarse (me acuesto) | ложиться спать |",
+    ].join("\n");
+    expect(extractVocabulary(md)).toEqual([
+      { word: "Acostarse (me acuesto)", translation: "ложиться спать" },
+    ]);
+  });
+
+  it("reads a bullet line once the marks come off", () => {
+    const line = "- **ningún** (м.р.) / **ninguna** (ж.р.) — «никакой / никакая»";
+    expect(extractVocabulary(line)).toEqual([
+      { word: "ningún (м.р.) / ninguna (ж.р.)", translation: "«никакой / никакая»" },
+    ]);
+  });
+
+  it("skips the header row whatever language its cells are in", () => {
+    // The row before the rule row is the header. Nothing about the words in
+    // it says so, and on these pages they are Russian, which is why the
+    // English list alone let four of them into the deck.
+    const md = ["| Испанский | Русский |", "| --- | --- |", "| hola | привет |"].join("\n");
+    expect(extractVocabulary(md)).toEqual([{ word: "hola", translation: "привет" }]);
+  });
+
+  it("skips a header the script rule would have let through", () => {
+    // `Palabra` is Spanish and `Перевод` is Russian, so this header is a
+    // well-formed pair by every rule but the structural one.
+    const md = ["| Palabra | Перевод |", "| --- | --- |", "| hola | привет |"].join("\n");
+    expect(extractVocabulary(md)).toEqual([{ word: "hola", translation: "привет" }]);
+  });
+
+  it("still knows an English header in a table with no rule row", () => {
+    const md = ["| word | translation |", "| hola | привет |"].join("\n");
+    expect(extractVocabulary(md)).toEqual([{ word: "hola", translation: "привет" }]);
+  });
+
+  it("takes nothing out of a conjugation table", () => {
+    // A conjugation is Spanish on both sides, and a numbering column is
+    // Russian on both. Neither is a word to learn.
+    const md = [
+      "| Лицо | gustar |",
+      "| --- | --- |",
+      "| 1-е | -ar |",
+      "| tener | tengo |",
+    ].join("\n");
+    expect(extractVocabulary(md)).toEqual([]);
+  });
+
+  it("takes only the row the bargain cannot reach out of a table of possessives", () => {
+    // `yo (мой)` carries the Russian on the word side, so the pair is Spanish
+    // to Spanish and goes. `tú (твой)` is the row the bargain does not reach:
+    // both sides carry both scripts, so it still reads as a pair. Naming it
+    // here is cheaper than a rule that would cost real pairs.
+    const md = [
+      "| Кому принадлежит | Ед. число |",
+      "| --- | --- |",
+      "| yo (мой) | **mi** |",
+      "| tú (твой) | **tu** (без акцента!) |",
+    ].join("\n");
+    expect(extractVocabulary(md)).toEqual([
+      { word: "tú (твой)", translation: "tu (без акцента!)" },
+    ]);
+  });
+});
+
 describe("the Words page", () => {
   const rows = [
     { word: "hola", translation: "hello", status: "known" as const, seen: 4, next: "2026-09-30" },

@@ -15,24 +15,24 @@ import {
 
 describe("reading vocabulary out of a page", () => {
   it("reads a markdown table", () => {
-    const md = ["| Spanish | English |", "| --- | --- |", "| hola | hello |", "| adios | goodbye |"].join("\n");
+    const md = ["| Spanish | Русский |", "| --- | --- |", "| hola | привет |", "| adios | пока |"].join("\n");
     expect(extractVocabulary(md)).toEqual([
-      { word: "hola", translation: "hello" },
-      { word: "adios", translation: "goodbye" },
+      { word: "hola", translation: "привет" },
+      { word: "adios", translation: "пока" },
     ]);
   });
 
   it("reads a word and its translation on one line", () => {
-    const md = ["hola — hello", "adios - goodbye", "gracias – thanks"].join("\n");
+    const md = ["hola — привет", "adios - пока", "gracias – спасибо"].join("\n");
     expect(extractVocabulary(md)).toEqual([
-      { word: "hola", translation: "hello" },
-      { word: "adios", translation: "goodbye" },
-      { word: "gracias", translation: "thanks" },
+      { word: "hola", translation: "привет" },
+      { word: "adios", translation: "пока" },
+      { word: "gracias", translation: "спасибо" },
     ]);
   });
 
   it("reads a bulleted list of the same", () => {
-    const md = ["- hola — hello", "* adios — goodbye", "+ gracias — thanks"].join("\n");
+    const md = ["- hola — привет", "* adios — пока", "+ gracias — спасибо"].join("\n");
     expect(extractVocabulary(md)).toHaveLength(3);
   });
 
@@ -43,7 +43,7 @@ describe("reading vocabulary out of a page", () => {
       "I am learning - slowly.",
       "",
       "```",
-      "hola — hello",
+      "hola — привет",
       "```",
     ].join("\n");
     expect(extractVocabulary(md)).toEqual([]);
@@ -53,14 +53,14 @@ describe("reading vocabulary out of a page", () => {
     // The sentence guard is there for `I am learning - slowly.`, and it used
     // to cost this line too. A full stop is what a person writes at the end
     // of a list item; it is not what makes the line prose. Length is.
-    expect(extractVocabulary("adios — goodbye.")).toEqual([
-      { word: "adios", translation: "goodbye" },
+    expect(extractVocabulary("adios — пока.")).toEqual([
+      { word: "adios", translation: "пока" },
     ]);
-    expect(extractVocabulary("- gracias — thanks!")).toEqual([
-      { word: "gracias", translation: "thanks" },
+    expect(extractVocabulary("- gracias — спасибо!")).toEqual([
+      { word: "gracias", translation: "спасибо" },
     ]);
-    expect(extractVocabulary("buenos dias — good morning.")).toEqual([
-      { word: "buenos dias", translation: "good morning" },
+    expect(extractVocabulary("buenos dias — доброе утро.")).toEqual([
+      { word: "buenos dias", translation: "доброе утро" },
     ]);
   });
 
@@ -70,16 +70,108 @@ describe("reading vocabulary out of a page", () => {
   });
 
   it("does not take the table's own header row", () => {
-    const md = ["| word | translation |", "| --- | --- |", "| hola | hello |"].join("\n");
-    expect(extractVocabulary(md)).toEqual([{ word: "hola", translation: "hello" }]);
+    const md = ["| word | translation |", "| --- | --- |", "| hola | привет |"].join("\n");
+    expect(extractVocabulary(md)).toEqual([{ word: "hola", translation: "привет" }]);
   });
 
   it("reads one word once however many pages name it", () => {
-    const rows = [...extractVocabulary("hola — hello"), ...extractVocabulary("hola — hi")];
+    const rows = [...extractVocabulary("hola — привет"), ...extractVocabulary("hola — здравствуй")];
     const table = renderWordsTable(
       rows.map((row) => ({ ...row, status: "new" as const, seen: 0, next: "" })),
     );
     expect(parseWordsTable(table)).toHaveLength(1);
+  });
+});
+
+/** THE THREE THINGS THE READER GOT WRONG ON A REAL NOTEBOOK.
+ *
+ *  The pages above are the ones this file invented. The owner's own Spanish
+ *  pages are bolder, bilingual and full of grammar, and on those the reader
+ *  put three kinds of rubbish into the deck: emphasis marks carried into the
+ *  card, a table's header row drilled as a pair because its cells are Russian
+ *  rather than English, and whole grammar tables read as vocabulary because a
+ *  conjugation looks exactly like a pair.
+ *
+ *  The rows below are the ones that were measured, spelled as they sit on the
+ *  pages. */
+describe("a page the owner wrote rather than one this file invented", () => {
+  it("takes the emphasis off both sides", () => {
+    const md = [
+      "| Испанский | Русский |",
+      "| --- | --- |",
+      "| **yo tengo** | у меня есть |",
+      "| **Me gusta** bailar | инфинитив |",
+    ].join("\n");
+    expect(extractVocabulary(md)).toEqual([
+      { word: "yo tengo", translation: "у меня есть" },
+      { word: "Me gusta bailar", translation: "инфинитив" },
+    ]);
+  });
+
+  it("keeps a parenthesis, which is spelling rather than emphasis", () => {
+    const md = [
+      "| Palabra | Перевод |",
+      "| --- | --- |",
+      "| Acostarse (me acuesto) | ложиться спать |",
+    ].join("\n");
+    expect(extractVocabulary(md)).toEqual([
+      { word: "Acostarse (me acuesto)", translation: "ложиться спать" },
+    ]);
+  });
+
+  it("reads a bullet line once the marks come off", () => {
+    const line = "- **ningún** (м.р.) / **ninguna** (ж.р.) — «никакой / никакая»";
+    expect(extractVocabulary(line)).toEqual([
+      { word: "ningún (м.р.) / ninguna (ж.р.)", translation: "«никакой / никакая»" },
+    ]);
+  });
+
+  it("skips the header row whatever language its cells are in", () => {
+    // The row before the rule row is the header. Nothing about the words in
+    // it says so, and on these pages they are Russian, which is why the
+    // English list alone let four of them into the deck.
+    const md = ["| Испанский | Русский |", "| --- | --- |", "| hola | привет |"].join("\n");
+    expect(extractVocabulary(md)).toEqual([{ word: "hola", translation: "привет" }]);
+  });
+
+  it("skips a header the script rule would have let through", () => {
+    // `Palabra` is Spanish and `Перевод` is Russian, so this header is a
+    // well-formed pair by every rule but the structural one.
+    const md = ["| Palabra | Перевод |", "| --- | --- |", "| hola | привет |"].join("\n");
+    expect(extractVocabulary(md)).toEqual([{ word: "hola", translation: "привет" }]);
+  });
+
+  it("still knows an English header in a table with no rule row", () => {
+    const md = ["| word | translation |", "| hola | привет |"].join("\n");
+    expect(extractVocabulary(md)).toEqual([{ word: "hola", translation: "привет" }]);
+  });
+
+  it("takes nothing out of a conjugation table", () => {
+    // A conjugation is Spanish on both sides, and a numbering column is
+    // Russian on both. Neither is a word to learn.
+    const md = [
+      "| Лицо | gustar |",
+      "| --- | --- |",
+      "| 1-е | -ar |",
+      "| tener | tengo |",
+    ].join("\n");
+    expect(extractVocabulary(md)).toEqual([]);
+  });
+
+  it("takes only the row the bargain cannot reach out of a table of possessives", () => {
+    // `yo (мой)` carries the Russian on the word side, so the pair is Spanish
+    // to Spanish and goes. `tú (твой)` is the row the bargain does not reach:
+    // both sides carry both scripts, so it still reads as a pair. Naming it
+    // here is cheaper than a rule that would cost real pairs.
+    const md = [
+      "| Кому принадлежит | Ед. число |",
+      "| --- | --- |",
+      "| yo (мой) | **mi** |",
+      "| tú (твой) | **tu** (без акцента!) |",
+    ].join("\n");
+    expect(extractVocabulary(md)).toEqual([
+      { word: "tú (твой)", translation: "tu (без акцента!)" },
+    ]);
   });
 });
 
@@ -135,8 +227,8 @@ describe("a cell that carries the table's own separator", () => {
   });
 
   it("reads an escaped separator out of a source page too", () => {
-    const md = ["| Spanish | English |", "| --- | --- |", "| o\\|u | or |"].join("\n");
-    expect(extractVocabulary(md)).toEqual([{ word: "o|u", translation: "or" }]);
+    const md = ["| Spanish | Русский |", "| --- | --- |", "| o\\|u | или |"].join("\n");
+    expect(extractVocabulary(md)).toEqual([{ word: "o|u", translation: "или" }]);
   });
 
   it("keeps a cell on one line, whatever it was given", () => {
@@ -398,7 +490,7 @@ describe("reading the pages a deck is built from", () => {
   }
 
   it("reads every page and keeps the words in the order it found them", async () => {
-    const answers: Record<string, string> = { p0: "hola — hello", p1: "adios — goodbye" };
+    const answers: Record<string, string> = { p0: "hola — привет", p1: "adios — пока" };
     const answered = await readVocabulary(
       pages(2),
       async (id: string) => ({ markdown: answers[id] }),
@@ -406,8 +498,8 @@ describe("reading the pages a deck is built from", () => {
     );
     expect(answered.failed).toBe(0);
     expect(answered.rows).toEqual([
-      { word: "hola", translation: "hello" },
-      { word: "adios", translation: "goodbye" },
+      { word: "hola", translation: "привет" },
+      { word: "adios", translation: "пока" },
     ]);
   });
 
@@ -421,12 +513,12 @@ describe("reading the pages a deck is built from", () => {
           refused = true;
           throw Object.assign(new Error("that app is asking too often"), { reason: "too_many" });
         }
-        return { markdown: "hola — hello" };
+        return { markdown: "hola — привет" };
       },
       timing,
     );
     expect(answered.failed).toBe(0);
-    expect(answered.rows).toEqual([{ word: "hola", translation: "hello" }]);
+    expect(answered.rows).toEqual([{ word: "hola", translation: "привет" }]);
     expect(timing.waits).toEqual([1000]);
   });
 
@@ -435,7 +527,7 @@ describe("reading the pages a deck is built from", () => {
       pages(3),
       async (id: string) => {
         if (id === "p1") throw Object.assign(new Error("gone"), { reason: "not_found" });
-        return { markdown: "hola — hello" };
+        return { markdown: "hola — привет" };
       },
       clock(),
     );
@@ -463,7 +555,7 @@ describe("reading the pages a deck is built from", () => {
     const timing = clock();
     const answered = await readVocabulary(
       pages(45),
-      async () => ({ markdown: "hola — hello" }),
+      async () => ({ markdown: "hola — привет" }),
       { ...timing, perSecond: 20 },
     );
     expect(answered.failed).toBe(0);

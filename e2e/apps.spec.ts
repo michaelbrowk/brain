@@ -157,18 +157,21 @@ const DOT_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
 /** The three shapes a vocabulary page comes in, on one page, so the trainer
- *  is reading what `vocabulary.test.ts` says it reads. */
+ *  is reading what `vocabulary.test.ts` says it reads. The translations are
+ *  Russian because the reader's bargain is Spanish on the left and a
+ *  non-Latin script on the right, which is what tells a pair from a
+ *  conjugation. `examples/apps/spanish-trainer/README.md` has the rule. */
 const WEEK_ONE = [
   "# Week one",
   "",
-  "| Spanish | English |",
+  "| Spanish | Русский |",
   "| --- | --- |",
-  "| hola | hello |",
-  "| adios | goodbye |",
+  "| hola | привет |",
+  "| adios | пока |",
   "",
-  "- gracias — thanks",
+  "- gracias — спасибо",
   "",
-  "buenos - good",
+  "buenos - добрый",
   "",
 ].join("\n");
 

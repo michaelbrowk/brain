@@ -4,7 +4,9 @@
  *  tells anybody which: a markdown table, a bare `word — translation` line,
  *  or the same line with a bullet in front of it. The trainer reads all
  *  three, and reads nothing out of prose, a heading or a fenced block, where
- *  a dash is punctuation rather than a separator.
+ *  a dash is punctuation rather than a separator. What it takes out of those
+ *  three shapes is narrowed by one bargain, `isPair` below: Spanish on the
+ *  left, the owner's own non-Latin language on the right.
  *
  *  It never writes the pages it reads. The only page it writes is its own
  *  `Words`, through the bridge, which is the one page its `owns` list names. */
@@ -73,15 +75,64 @@ const SENTENCE_END = /[.!?]+$/;
 const MAX_PHRASE_WORDS = 4;
 const MAX_SENTENCE_WORDS = 2;
 
+/** A slash offers the same word twice rather than adding another one, so
+ *  `ningún / ninguna` is two words and not three. Without this the owner's
+ *  own habit of writing both genders on one line pushed the line past the
+ *  phrase limit and the pair was dropped for being prose. */
 function countWords(value) {
-  return value.split(/\s+/).length;
+  return value.split(/[\s/]+/).filter((part) => part.length > 0).length;
+}
+
+/** EMPHASIS IS MARKUP, AND MARKUP IS NOT PART OF THE WORD.
+ *
+ *  The owner bolds the Spanish, so the deck filled with cards reading
+ *  `**yo tengo**` and a `Words` page carrying the asterisks into its own
+ *  table, where the next read saw a different word and added it again.
+ *
+ *  Only the four marks come off. A parenthesis is spelling on these pages —
+ *  `Acostarse (me acuesto)` names the stem change and the card wants it — and
+ *  `¿` and `¡` open a real Spanish sentence, so no punctuation is touched. */
+function stripEmphasis(value) {
+  return value.replace(/[*_`]/g, "").trim();
+}
+
+const RULE_CELL = /^:?-{3,}:?$/;
+const ENGLISH_HEADER = /^(word|spanish|term|palabra)$/i;
+
+function isRuleRow(line) {
+  if (!line.startsWith("|") || !line.endsWith("|")) return false;
+  const cells = splitRow(line);
+  return cells.length > 0 && cells.every((cell) => RULE_CELL.test(cell));
+}
+
+/** THE TRAINER'S BARGAIN: SPANISH ON THE LEFT, ANOTHER SCRIPT ON THE RIGHT.
+ *
+ *  A conjugation table is shaped exactly like a vocabulary table, and the
+ *  reader used to drill `tener` against `tengo` and `1-е` against `-ar`. What
+ *  tells the two apart is not the shape, it is the writing: a pair the owner
+ *  means to learn has the Spanish on one side and their own language on the
+ *  other, and their own language is not written in Latin letters. Spanish on
+ *  both sides is grammar; the owner's language on both sides is a heading or
+ *  a numbering column.
+ *
+ *  It is a bargain and not a law. A notebook kept in English gets nothing out
+ *  of this reader, which is why the README says so and why choosing the two
+ *  scripts belongs in the app's settings later. */
+const LATIN_LETTER = /\p{Script=Latin}/u;
+const OTHER_SCRIPT_LETTER = /(?!\p{Script=Latin})\p{L}/u;
+
+function isPair(word, translation) {
+  return LATIN_LETTER.test(word) && OTHER_SCRIPT_LETTER.test(translation);
 }
 
 export function extractVocabulary(markdown) {
   const rows = [];
+  const lines = String(markdown)
+    .split("\n")
+    .map((raw) => raw.trim());
   let inFence = false;
-  for (const raw of String(markdown).split("\n")) {
-    const line = raw.trim();
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     if (line.startsWith("```") || line.startsWith("~~~")) {
       inFence = !inFence;
       continue;
@@ -89,15 +140,21 @@ export function extractVocabulary(markdown) {
     if (inFence || line.length === 0 || line.startsWith("#")) continue;
 
     if (line.startsWith("|") && line.endsWith("|")) {
-      const cells = splitRow(line);
-      // A separator row, and a header row whose cells name the columns rather
-      // than being a pair of words.
-      if (cells.every((cell) => /^:?-{3,}:?$/.test(cell))) continue;
+      if (isRuleRow(line)) continue;
+      // A HEADER IS A POSITION, NOT A VOCABULARY.
+      //
+      // The row above the rule row is the header, and that is all a markdown
+      // table ever says about it. Reading the cells instead worked only while
+      // they said `word` or `Spanish`; on a page written in Russian it let
+      // `Род и число` into the deck as a word to learn. The English list
+      // stays for a table somebody wrote without a rule row.
+      if (index + 1 < lines.length && isRuleRow(lines[index + 1])) continue;
+      const cells = splitRow(line).map(stripEmphasis);
       if (cells.length < 2) continue;
-      if (/^(word|spanish|term|palabra)$/i.test(cells[0])) continue;
-      if (cells[0].length > 0 && cells[1].length > 0) {
-        rows.push({ word: cells[0], translation: cells[1] });
-      }
+      if (ENGLISH_HEADER.test(cells[0])) continue;
+      if (cells[0].length === 0 || cells[1].length === 0) continue;
+      if (!isPair(cells[0], cells[1])) continue;
+      rows.push({ word: cells[0], translation: cells[1] });
       continue;
     }
 
@@ -106,15 +163,16 @@ export function extractVocabulary(markdown) {
     // still have exactly one separator, or it is a sentence with a dash in it.
     const parts = bare.split(SEPARATOR);
     if (parts.length !== 2) continue;
-    const [word, rest] = parts.map((part) => part.trim());
+    const [word, rest] = parts.map(stripEmphasis);
     if (word.length === 0 || rest.length === 0) continue;
     // A sentence is longer than a word. Four words either side is generous
     // for a phrase and short of anything anybody would call prose; a line
     // that ends like a sentence is held to two, which a pair still passes.
-    const limit = SENTENCE_END.test(bare) ? MAX_SENTENCE_WORDS : MAX_PHRASE_WORDS;
+    const limit = SENTENCE_END.test(rest) ? MAX_SENTENCE_WORDS : MAX_PHRASE_WORDS;
     if (countWords(word) > limit || countWords(rest) > limit) continue;
     const translation = rest.replace(SENTENCE_END, "").trim();
     if (translation.length === 0) continue;
+    if (!isPair(word, translation)) continue;
     rows.push({ word, translation });
   }
   return rows;

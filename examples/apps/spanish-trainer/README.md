@@ -45,8 +45,26 @@ node examples/apps/spanish-trainer/build.mjs
   whatever still could not be read is counted and said out loud, because a page
   silently missing from a deck is a word the owner thinks they have finished.
 - A line ending in a full stop is held to a shorter length before it counts as
-  a pair, so `adios — goodbye.` is a word and `I am learning - slowly.` is not.
+  a pair, so `adios — пока.` is a word and `I am learning - slowly.` is not.
   A long phrase with a full stop after it is the case this gets wrong.
+
+## What counts as a word
+
+The reader takes a pair on a bargain: the Spanish is on the left and the
+owner's own language is on the right, and the two are told apart by the script
+they are written in, so a pair counts only when the left side carries a Latin
+letter and the right side carries a letter that is not Latin. That single rule
+is what keeps a grammar table out of the deck, because a conjugation
+(`tener | tengo`) is Spanish on both sides and a numbering column (`1-е | -ar`)
+is Russian on both. Two smaller rules sit beside it: emphasis marks (`**`, `*`,
+`_`, backticks) come off both sides before anything else, while parentheses and
+a leading `¿` or `¡` stay because they are spelling rather than markup, and a
+table's header row is found by position — it is the row above the `| --- |`
+rule row, whatever language its cells are in — with the old English list of
+column names kept only for a table somebody wrote without a rule row. The
+bargain is also the limit: a notebook kept in Spanish and English gets nothing
+out of this reader, and letting the owner name the two scripts in the app's
+settings is the follow-up.
 
 ## How the e2e seeds it
 

@@ -217,9 +217,11 @@ export function PasswordGate({
           {/* The one ink-filled control on this surface (§2 → Primary). It
               keeps the field's height, width and radius, so the two read as a
               pair, and the label swaps inside a box that never changes size:
-              the width is the field's, not the word's. The blur is there
-              because two words crossfading in one place read as two words
-              rather than as one changing, and a blur bridges them. */}
+              the width is the field's, not the word's. The blur belongs to the
+              swap and not to the wait — two words changing in one place read
+              as two words unless something bridges them, while a word held
+              out of focus for the length of a request reads as a fault. So
+              the key remounts the span and the blur resolves in 160ms. */}
           <Button
             type="submit"
             variant="ink"
@@ -227,14 +229,9 @@ export function PasswordGate({
             className="mt-3 h-11! w-full rounded-field! text-body!"
           >
             <motion.span
-              animate={
-                reduce
-                  ? { opacity: busy ? 0.7 : 1 }
-                  : {
-                      opacity: busy ? 0.7 : 1,
-                      filter: busy ? "blur(2px)" : "blur(0px)",
-                    }
-              }
+              key={busy ? "working" : "waiting"}
+              initial={reduce ? false : { opacity: 0.5, filter: "blur(2px)" }}
+              animate={{ opacity: busy ? 0.7 : 1, filter: "blur(0px)" }}
               transition={{ duration: DUR.base, ease: EASE_OUT }}
               className="inline-block"
             >

@@ -2,21 +2,26 @@ import bcrypt from "bcryptjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-function request(body: string, cookie?: string): NextRequest {
+function request(
+  body: string,
+  cookie?: string,
+  headers?: Record<string, string>,
+): NextRequest {
   return new NextRequest("https://brain.example/api/auth", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       ...(cookie ? { cookie } : {}),
+      ...headers,
     },
     body,
   });
 }
 
-const wrongGuess = (cookie?: string) =>
-  request(JSON.stringify({ password: "definitely wrong" }), cookie);
-const rightGuess = (cookie?: string) =>
-  request(JSON.stringify({ password: "correct horse" }), cookie);
+const wrongGuess = (cookie?: string, headers?: Record<string, string>) =>
+  request(JSON.stringify({ password: "definitely wrong" }), cookie, headers);
+const rightGuess = (cookie?: string, headers?: Record<string, string>) =>
+  request(JSON.stringify({ password: "correct horse" }), cookie, headers);
 
 async function configure() {
   process.env.AUTH_PASSWORD_HASH = await bcrypt.hash("correct horse", 4);
@@ -27,6 +32,7 @@ describe("login rate limiting", () => {
   afterEach(() => {
     delete process.env.AUTH_PASSWORD_HASH;
     delete process.env.AUTH_SECRET;
+    delete process.env.BRAIN_PUBLIC_ORIGIN;
     vi.restoreAllMocks();
     vi.resetModules();
   });
@@ -168,6 +174,69 @@ describe("login rate limiting", () => {
     await expect(
       POST(rightGuess(`${DEVICE_COOKIE}=${createDeviceCookie()}`)),
     ).resolves.toMatchObject({ status: 200 });
+  });
+
+  /** Before this gate, a page a visitor happened to open could POST a form with
+   *  `enctype="text/plain"` to somebody's Brain and drain the shared budget from
+   *  their browser, burning a bcrypt comparison per request on the way. No script
+   *  and no reply needed: the request is the whole attack. */
+  it("refuses a cross-site POST before it can spend a comparison", async () => {
+    await configure();
+    process.env.BRAIN_PUBLIC_ORIGIN = "https://brain.example";
+    const compare = vi.spyOn(bcrypt, "compare");
+    const { POST } = await import("./route");
+
+    const foreign = await POST(
+      rightGuess(undefined, { Origin: "https://evil.test" }),
+    );
+    expect(foreign.status).toBe(403);
+    await expect(foreign.json()).resolves.toEqual({ error: "bad_origin" });
+
+    const attested = await POST(
+      rightGuess(undefined, { "Sec-Fetch-Site": "cross-site" }),
+    );
+    expect(attested.status).toBe(403);
+
+    const plainText = await POST(
+      rightGuess(undefined, {
+        Origin: "https://brain.example",
+        "Content-Type": "text/plain;charset=UTF-8",
+      }),
+    );
+    expect(plainText.status).toBe(400);
+    await expect(plainText.json()).resolves.toEqual({ error: "bad request" });
+
+    // Nothing above reached bcrypt, and nothing above spent a budget: all ten of
+    // the shared bucket's comparisons are still there.
+    expect(compare).not.toHaveBeenCalled();
+    for (let index = 0; index < 10; index += 1) {
+      await expect(
+        POST(wrongGuess(undefined, { Origin: "https://brain.example" })),
+      ).resolves.toMatchObject({ status: 401 });
+    }
+    expect(compare).toHaveBeenCalledTimes(10);
+  });
+
+  it("admits the app's own form, and a client that sends no origin at all", async () => {
+    await configure();
+    process.env.BRAIN_PUBLIC_ORIGIN = "https://brain.example";
+    const { POST } = await import("./route");
+
+    // What the login form sends: same-origin JSON, with the Origin a browser
+    // attaches to every POST.
+    await expect(
+      POST(
+        rightGuess(undefined, {
+          Origin: "https://brain.example",
+          "Sec-Fetch-Site": "same-origin",
+        }),
+      ),
+    ).resolves.toMatchObject({ status: 200 });
+
+    // What the standalone and compose smokes send: node `fetch`, which attaches
+    // neither header. A client outside a browser is not what this gate is for,
+    // and the rate budget is what bounds one that lies.
+    await expect(POST(rightGuess())).resolves.toMatchObject({ status: 200 });
   });
 
   it("sets the device cookie on every success, never on a failure", async () => {

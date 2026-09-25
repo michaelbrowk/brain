@@ -13,7 +13,10 @@ import {
   DEVICE_COOKIE_MAX_AGE_SECONDS,
   deviceBucketKey,
 } from "@/lib/device-cookie";
+import { declaresJson } from "@/lib/json-body";
 import { FixedWindowRateLimiter } from "@/lib/rate-limit";
+import { shareOriginAllowed } from "@/lib/share-origin";
+import { configuredPublicOrigin } from "@/lib/store";
 
 export const dynamic = "force-dynamic";
 
@@ -49,6 +52,31 @@ const deviceLimiter = new FixedWindowRateLimiter({
   evictOldest: true,
 });
 
+/** WHETHER THIS POST CAME FROM SOMEWHERE ALLOWED TO SEND IT.
+ *
+ *  Asked before the budget and before bcrypt, because a cross-site
+ *  `<form enctype="text/plain">` POST needs neither script nor a reply to be an
+ *  attack here: from any page a visitor opens, it drained the shared budget and
+ *  burned a comparison per request in somebody else's Brain.
+ *
+ *  Same rule as the share-edit mint (`lib/share-origin.ts`), with one difference
+ *  it cannot have: an installation with no `BRAIN_PUBLIC_ORIGIN` must still be
+ *  able to log in. With nothing to compare an Origin against, the browser's own
+ *  account of where the request came from is what decides, and a client outside a
+ *  browser — the standalone and compose smokes both post with node `fetch` —
+ *  sends neither header and is admitted, bounded by the budget like everything
+ *  else. */
+function originAllowed(req: NextRequest): boolean {
+  const expected = configuredPublicOrigin();
+  if (expected !== null) {
+    return shareOriginAllowed(req.headers, expected, {
+      attestationMayDecide: true,
+    });
+  }
+  const site = req.headers.get("sec-fetch-site");
+  return site === null || site === "same-origin";
+}
+
 interface SpentBudget {
   /** The limiter and key a comparison was charged to, so a success can clear it. */
   readonly limiter: FixedWindowRateLimiter;
@@ -72,6 +100,14 @@ function chargeComparison(device: string | null): SpentBudget | { retryAfterSeco
 }
 
 export async function POST(req: NextRequest) {
+  if (!originAllowed(req)) {
+    return NextResponse.json({ error: "bad_origin" }, { status: 403 });
+  }
+  // `req.json()` ignores the header, so this refuses the request rather than
+  // reads it: the three enctypes a form can declare are none of them this one.
+  if (!declaresJson(req.headers)) {
+    return NextResponse.json({ error: "bad request" }, { status: 400 });
+  }
   let password: unknown;
   try {
     ({ password } = await req.json());

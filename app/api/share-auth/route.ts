@@ -11,6 +11,7 @@ import {
   SHARE_EDIT_MAX_AGE_SECONDS,
 } from "@/lib/auth";
 import { DEVICE_COOKIE, deviceBucketKey } from "@/lib/device-cookie";
+import { declaresJson } from "@/lib/json-body";
 import { isShareExpired, normalizeVisitorName } from "@/lib/sharing";
 import { FixedWindowRateLimiter } from "@/lib/rate-limit";
 import { shareOriginAllowed } from "@/lib/share-origin";
@@ -52,15 +53,6 @@ const editLimiter = new FixedWindowRateLimiter({
   windowMs: 60 * 1000,
   maxEntries: 1_024,
 });
-
-/** The read path predates this branch and is left byte for byte as it was, so
- *  this is asked only where the new capability is minted. A cross-site form
- *  can declare application/x-www-form-urlencoded, multipart/form-data or
- *  text/plain, and nothing else. */
-function declaresJson(req: NextRequest): boolean {
-  const type = req.headers.get("content-type");
-  return type !== null && type.split(";", 1)[0].trim().toLowerCase() === "application/json";
-}
 
 const badRequest = () =>
   NextResponse.json({ error: "bad request" }, { status: 400 });
@@ -165,7 +157,7 @@ async function mintEditToken(
   if (!shareOriginAllowed(req.headers, configuredPublicOrigin())) {
     return NextResponse.json({ error: "bad_origin" }, { status: 403 });
   }
-  if (!declaresJson(req)) return badRequest();
+  if (!declaresJson(req.headers)) return badRequest();
   if (typeof id !== "string") return badRequest();
   // The mint carries no root/version context of its own, so an empty name is
   // the route's ordinary 400, not a share denial.

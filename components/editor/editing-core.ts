@@ -137,23 +137,13 @@ export function focusedWithoutCaret(
   return !anchor || !dom.contains(anchor);
 }
 
-/** Where a caret handed the editor from outside should land, or null when the
- *  selection is to be left alone.
- *
- *  Only a collapsed caret parked in a block that drops keystrokes is moved. A
- *  node selection — a rule, an image the reader picked — and a range the
- *  reader drew are selections they mean, not a missing caret. And it moves to
- *  the *nearest* top-level block that takes a key, the one after on a tie:
- *  a caret on a page row in the middle of a long page used to jump to the
- *  first line of the document, off screen, and the next keys landed there.
- *  Top-level blocks only, because a focus the reader did not aim should not
- *  drop them inside a column, a callout or a table cell. */
-export function writableCaretPos(state: EditorState): number | null {
-  const { doc, selection } = state;
-  if (!selection.empty) return null;
-  const { $from } = selection;
-  if (acceptsTypedText($from.parent)) return null;
-  const origin = $from.index(0);
+/** The first caret position in the *nearest* top-level block that takes a key,
+ *  measured from `origin`, the index of the block the caret is in now, and the
+ *  one after it on a tie: a caret on a page row in the middle of a long page
+ *  used to jump to the first line of the document, off screen, and the next
+ *  keys landed there. Top-level blocks only, because a caret the reader did
+ *  not place should not drop them inside a column, a callout or a table cell. */
+function nearestWritablePos(doc: ProseNode, origin: number): number | null {
   let best: { pos: number; distance: number } | null = null;
   let pos = 0;
   for (let index = 0; index < doc.childCount; index += 1) {
@@ -171,6 +161,58 @@ export function writableCaretPos(state: EditorState): number | null {
     pos += child.nodeSize;
   }
   return best?.pos ?? null;
+}
+
+/** Where a caret handed the editor from outside should land, or null when the
+ *  selection is to be left alone.
+ *
+ *  Only a collapsed caret parked in a block that drops keystrokes is moved. A
+ *  node selection — a rule, an image the reader picked — and a range the
+ *  reader drew are selections they mean, not a missing caret. */
+export function writableCaretPos(state: EditorState): number | null {
+  const { doc, selection } = state;
+  if (!selection.empty) return null;
+  const { $from } = selection;
+  if (acceptsTypedText($from.parent)) return null;
+  return nearestWritablePos(doc, $from.index(0));
+}
+
+/** Where a click that landed on a page row should put the caret.
+ *
+ *  A row draws its chip as a block, so most of its line is blank paper, and
+ *  clicking there means "write beside this row" — the editor's own click
+ *  handler says as much, and only the chip itself navigates. The browser
+ *  answers that click instead by putting its caret inside the chip's own
+ *  `contenteditable="false"` anchor, which emits no input event at all: the
+ *  caret shows beside the chip and every key after it is
+ *  dropped in silence. ProseMirror cannot repair that on its own either,
+ *  because the row's NodeView ignores every mutation it is asked about, the
+ *  selection ones included, so the document's own selection never hears about
+ *  the click. Answer it here instead, with the same line the focus path uses.
+ *
+ *  Only a row that cannot take a key. Prose, a rule, an image and the gap
+ *  between two blocks are positions the reader can hold, and they keep them.
+ *  And only a row of the document's own, not one inside a column, a callout or
+ *  a cell: the line beside such a row is outside the thing the reader clicked
+ *  into, and carrying their caret out of it would be its own surprise. */
+export function writableCaretPosForClick(
+  state: EditorState,
+  clickPos: number,
+): number | null {
+  const { doc } = state;
+  if (clickPos < 0 || clickPos > doc.content.size) return null;
+  const $pos = doc.resolve(clickPos);
+  if ($pos.depth !== 1) return null;
+  if (!$pos.parent.isTextblock || acceptsTypedText($pos.parent)) return null;
+  return nearestWritablePos(doc, $pos.index(0));
+}
+
+/** Whether a click landed on an island the editor does not edit — a page chip,
+ *  an image — whose own handler owns what happens next. A chip's navigates. */
+export function clickLandedOnUneditable(target: unknown): boolean {
+  const element = target as { closest?: (selector: string) => unknown } | null;
+  if (typeof element?.closest !== "function") return false;
+  return element.closest('[contenteditable="false"]') !== null;
 }
 
 /** The view the focus handler needs — narrowed so a test can hand it a stub. */
@@ -222,11 +264,26 @@ export function settleFocusCaret(view: FocusCaretView): boolean {
  *  exactly that. And the document's selection has to be a collapsed caret in
  *  a block that drops keys (`writableCaretPos`): a rule the reader selected or
  *  a range they drew is a selection they mean, and once read "no caret" and
- *  sent them to the top of the page. */
+ *  sent them to the top of the page.
+ *
+ *  A click on the blank paper beside a page row is the same fact reached by the
+ *  reader's own gesture, and `writableCaretPosForClick` answers it the same
+ *  way. */
 export function createFocusCaretPlugin(): Plugin {
   return new Plugin({
     key: new PluginKey("brainFocusCaret"),
     props: {
+      handleClick: (view, pos, event) => {
+        if (clickLandedOnUneditable(event.target)) return false;
+        const caret = writableCaretPosForClick(view.state, pos);
+        if (caret === null) return false;
+        view.dispatch(
+          view.state.tr
+            .setSelection(TextSelection.create(view.state.doc, caret))
+            .scrollIntoView(),
+        );
+        return true;
+      },
       handleDOMEvents: {
         focus: (view) => {
           // After the browser has had its own chance to place the caret, and

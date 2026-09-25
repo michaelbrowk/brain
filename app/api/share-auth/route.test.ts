@@ -347,6 +347,29 @@ describe("the edit mint", () => {
     expect(blocked.headers.get("Retry-After")).toBeTruthy();
   });
 
+  it("gives a browser with a device cookie its own mint budget", async () => {
+    // The read path keys on the device cookie; this bucket kept one key per page
+    // for everyone, so thirty mints from a stranger stopped the owner minting at
+    // all. Same cookie, same key, one line.
+    mockRoot({ public: true, shareEdit: true, shareVersion: 2 });
+    const { POST } = await import("./route");
+    const { createDeviceCookie, DEVICE_COOKIE } = await import(
+      "@/lib/device-cookie"
+    );
+    const device = `${DEVICE_COOKIE}=${createDeviceCookie()}`;
+
+    for (let i = 0; i < 30; i += 1) {
+      expect((await POST(editRequest({ id: "root-1", name: `V${i}` }))).status).toBe(
+        200,
+      );
+    }
+    expect((await POST(editRequest({ id: "root-1", name: "V30" }))).status).toBe(429);
+
+    const mine = await POST(editRequest({ id: "root-1", name: "Ada" }, device));
+    expect(mine.status).toBe(200);
+    expect(mine.cookies.get("brain_edit_share_root-1")?.value).toBeTruthy();
+  });
+
   it("refuses a root that is not editable, with the same 404 as a missing one", async () => {
     mockRoot({ public: true, shareVersion: 2 });
     const { POST } = await import("./route");

@@ -39,10 +39,14 @@ const limiter = new FixedWindowRateLimiter({
  *  cookie this installation signed is counted under a key of its own, so the
  *  owner, and any reader who has logged into this Brain, is unaffected by a
  *  flood aimed at the link. A single flooding source is bounded at the edge by
- *  the per-visitor zone in `ops/nginx/brain.conf.example`. */
-function readBucketKey(req: NextRequest, id: string): string {
+ *  the per-visitor zone in `ops/nginx/brain.conf.example`.
+ *
+ *  Both of this route's buckets ask it, the comparisons and the mints alike:
+ *  thirty cheap mints from a stranger denied the owner a mint of their own for
+ *  the same reason, and it is the same cookie that answers it. */
+function perDeviceKey(req: NextRequest, base: string): string {
   const device = deviceBucketKey(req.cookies.get(DEVICE_COOKIE)?.value);
-  return device ? `share:${id}:${device}` : `share:${id}`;
+  return device ? `${base}:${device}` : base;
 }
 
 // A separate bucket, deliberately. An unlocked edit mint costs no bcrypt, and
@@ -93,7 +97,7 @@ export async function POST(req: NextRequest) {
     )
       return notFound();
 
-    const bucket = readBucketKey(req, id);
+    const bucket = perDeviceKey(req, `share:${id}`);
     const attempt = limiter.consume(bucket);
     if (!attempt.allowed)
       return NextResponse.json(
@@ -175,7 +179,9 @@ async function mintEditToken(
     )
       return notFound();
 
-    const attempt = editLimiter.consume(`share-edit-session:${id}`);
+    const attempt = editLimiter.consume(
+      perDeviceKey(req, `share-edit-session:${id}`),
+    );
     if (!attempt.allowed)
       return NextResponse.json(
         { error: "too many attempts" },
@@ -203,7 +209,7 @@ async function mintEditToken(
         // A guess is a guess whichever branch carries it, so it goes through the
         // read path's bucket: the mint cannot widen a brute force on a locked
         // root by thirty attempts a minute.
-        const bucket = readBucketKey(req, id);
+        const bucket = perDeviceKey(req, `share:${id}`);
         const guess = limiter.consume(bucket);
         if (!guess.allowed)
           return NextResponse.json(

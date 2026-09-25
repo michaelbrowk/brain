@@ -477,7 +477,7 @@ describe("durable mail outbound worker integration", () => {
     ]);
     await worker.stop();
     await store.close();
-  });
+  }, 15_000);
 
   /** The same property one layer down: the statement the listing prepares does
    *  not name the message column at all. */

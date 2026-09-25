@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions and ideas
+    url: https://github.com/michaelbrowk/brain/discussions
+    about: Anything that is not a defect, and anything that moves the architecture.
+  - name: Report a vulnerability
+    url: https://github.com/michaelbrowk/brain/security/advisories/new
+    about: Private report on the Security tab, never a public issue.

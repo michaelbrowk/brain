@@ -1,0 +1,65 @@
+name: Bug report
+description: Something in Brain does not do what it says it does.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        A failing case beats a description. If you have one, put it in the first
+        box.
+
+
+        Anything that looks like a security problem goes through GitHub's
+        **Report a vulnerability** button on the Security tab instead, not into
+        a public issue.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you ran or clicked, and what Brain did.
+      placeholder: |
+        Saved a page with a table in it, reloaded, and the last column was gone.
+    validations:
+      required: true
+  - type: textarea
+    id: what-you-expected
+    attributes:
+      label: What you expected instead
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Brain version
+      description: Settings, then Account, shows it.
+      placeholder: 0.14.0
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How it is installed
+      options:
+        - The one command (install.sh)
+        - Docker Compose by hand
+        - From source (pnpm dev or a local build)
+        - Something else, described below
+    validations:
+      required: true
+  - type: input
+    id: browser
+    attributes:
+      label: Browser
+      description: Name and version, and the phone or desktop it runs on.
+      placeholder: Safari 26 on iOS 27
+    validations:
+      required: true
+  - type: textarea
+    id: anything-else
+    attributes:
+      label: Anything else
+      description: >
+        Server logs, a screenshot, the Markdown of the page that broke. Leave it
+        empty if there is nothing to add.
+    validations:
+      required: false

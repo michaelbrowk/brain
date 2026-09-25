@@ -450,6 +450,32 @@ export function mergeWordRows(appRows, ownerRows, answered) {
   return Array.from(byKey.values());
 }
 
+/** THE DECK AFTER A MERGE, AND THE CARD THAT IS NO LONGER A WORD.
+ *
+ *  A merge answers new row objects and the deck was holding the old ones, so
+ *  every card is looked up again by its word. A card whose word is not in the
+ *  rows at all is a word the owner deleted from the `Words` page while the app
+ *  was open: it comes out of the deck, because an answer to it would be written
+ *  into a row nothing reads.
+ *
+ *  `redraw` is whether the card at the FRONT moved, which is the only case the
+ *  screen has to be told about: the owner is looking at that one. It compares
+ *  words and not objects, because a merge hands back a new object for the same
+ *  word every time and a redraw on every save would hide a translation the
+ *  owner had just revealed. Matching is case-folded, the same as the merge's. */
+export function relinkCards(deck, rows) {
+  const byKey = new Map();
+  for (const row of rows) byKey.set(row.word.toLowerCase(), row);
+  const next = [];
+  for (const card of deck) {
+    const live = byKey.get(card.word.toLowerCase());
+    if (live !== undefined) next.push(live);
+  }
+  const was = deck.length > 0 ? deck[0].word.toLowerCase() : "";
+  const now = next.length > 0 ? next[0].word.toLowerCase() : "";
+  return { deck: next, redraw: now !== was };
+}
+
 /** Every page under one parent, however deep, with one subtree left out: the
  *  trainer's own, because its `Words` page is a list of answers rather than a
  *  list of words to learn and reading it as a source would teach the owner

@@ -11,6 +11,7 @@ import {
   nextInterval,
   parseWordsTable,
   readVocabulary,
+  relinkCards,
   renderWordsTable,
   SCRIPT_NAMES,
 } from "./vocabulary.js";
@@ -573,6 +574,72 @@ describe("merging the owner's page with the app's session", () => {
     const before = JSON.stringify([app, owner]);
     mergeWordRows(app, owner, ["hola"]);
     expect(JSON.stringify([app, owner])).toBe(before);
+  });
+});
+
+/** THE CARD THAT WAS A WORD THE OWNER HAD DELETED.
+ *
+ *  Every answer reads the `Words` page back and merges it, and the merge hands
+ *  back new row objects, so the deck — which was holding the old ones — is
+ *  relinked to them. A word the owner deleted from the page mid-session has no
+ *  new row at all and its card comes out of the deck, and nothing told the
+ *  screen: the owner went on looking at a word that no longer existed, and
+ *  every answer they gave it was written into a row nothing read.
+ *
+ *  So the relink also says whether the card at the FRONT moved, which is the
+ *  only case the screen has to be redrawn for. It compares words rather than
+ *  objects, because a merge answers a new object for the same word every time
+ *  and a redraw on every save would hide a translation the owner had just
+ *  revealed. */
+describe("relinking the deck to the rows a merge answered", () => {
+  const row = (word: string, over: { seen?: number } = {}) => ({
+    word,
+    translation: "x",
+    status: "new" as const,
+    seen: 0,
+    next: "",
+    ...over,
+  });
+
+  it("hands back the live row for each card, in the deck's own order", () => {
+    const deck = [row("hola"), row("adios")];
+    const rows = [row("adios", { seen: 3 }), row("hola", { seen: 1 })];
+    const relinked = relinkCards(deck, rows);
+    expect(relinked.deck).toEqual([rows[1], rows[0]]);
+    expect(relinked.deck[0]).toBe(rows[1]);
+    expect(relinked.redraw).toBe(false);
+  });
+
+  it("drops the card the owner deleted, and asks for a redraw", () => {
+    const relinked = relinkCards([row("hola"), row("adios")], [row("adios")]);
+    expect(relinked.deck.map((card: { word: string }) => card.word)).toEqual(["adios"]);
+    expect(relinked.redraw).toBe(true);
+  });
+
+  it("asks for no redraw when what went was behind the front", () => {
+    const relinked = relinkCards([row("hola"), row("adios")], [row("hola")]);
+    expect(relinked.deck.map((card: { word: string }) => card.word)).toEqual(["hola"]);
+    expect(relinked.redraw).toBe(false);
+  });
+
+  it("asks for a redraw when the last card goes, and for none when there was none", () => {
+    expect(relinkCards([row("hola")], []).redraw).toBe(true);
+    expect(relinkCards([], []).redraw).toBe(false);
+  });
+
+  it("matches a card to its row however either of them is capitalised", () => {
+    const rows = [row("Hola")];
+    const relinked = relinkCards([row("hola")], rows);
+    expect(relinked.deck).toEqual([rows[0]]);
+    expect(relinked.redraw).toBe(false);
+  });
+
+  it("changes neither the deck it was handed nor the rows", () => {
+    const deck = [row("hola"), row("adios")];
+    const rows = [row("hola")];
+    const before = JSON.stringify([deck, rows]);
+    relinkCards(deck, rows);
+    expect(JSON.stringify([deck, rows])).toBe(before);
   });
 });
 

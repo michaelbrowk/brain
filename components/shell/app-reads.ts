@@ -75,8 +75,8 @@ function flatten(nodes: readonly TreeNode[], into: AppTreeNode[]): AppTreeNode[]
   return into;
 }
 
-/** The tree's five, and then what an app needs to draw a page it read: when
- *  it was written and by whom, and the labels the owner put on it. `cover`
+/** The tree's six, and then what an app needs to draw a page it read: when it
+ *  was created, who wrote it last, and the labels the owner put on it. `cover`
  *  and the body's own attachment links are left out because the frame can
  *  paint neither of them: `img-src` is the app's own asset folder, `blob:`
  *  and `data:`, nothing else. `parentId` is here for agreement with the tree

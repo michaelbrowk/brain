@@ -83,6 +83,11 @@ the translation side has one more: **any other than the word's**, spelled
 word side is offered no such choice, because two sides that each meant
 "anything but the other one" would between them mean nothing.
 
+`Kana` is Hiragana and Katakana, and kanji are neither of those — they are
+`Han`. A Japanese notebook named as `Kana` therefore loses every row written in
+kanji, and the default, `any other than the word's`, is the choice that reads
+all three.
+
 Naming the pair is what opens the reader to a notebook it used to return
 nothing from: `Latin` against `Latin` reads a Spanish-and-English notebook,
 `Cyrillic` against `Latin` reads one written the other way round.

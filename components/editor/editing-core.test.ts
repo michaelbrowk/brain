@@ -8,6 +8,8 @@ import { DecorationSet } from "@milkdown/kit/prose/view";
 import { describe, expect, it, vi } from "vitest";
 import {
   acceptsTypedText,
+  clickLandedOnUneditable,
+  createFocusCaretPlugin,
   createSlashHintPlugin,
   createTrailingParagraphPlugin,
   firstEmptyBlockPos,
@@ -19,6 +21,7 @@ import {
   redirectTrailingPageRefTextInput,
   TRAILING_PARAGRAPH_TRANSACTION_META,
   writableCaretPos,
+  writableCaretPosForClick,
 } from "./editing-core";
 
 const schema = new Schema({
@@ -30,6 +33,7 @@ const schema = new Schema({
     text: { group: "inline" },
     page_ref: { atom: true, group: "inline", inline: true },
     horizontal_rule: { group: "block" },
+    column: { content: "block+", group: "block" },
   },
 });
 
@@ -399,6 +403,115 @@ describe("a caret handed the editor from outside", () => {
     );
 
     expect(writableCaretPos(onRow)).toBe(1);
+  });
+});
+
+describe("a click in the blank space beside a page row", () => {
+  it("answers it with the writable line the document keeps", () => {
+    const doc = schema.nodes.doc.create(null, [
+      paragraph.create(null, pageRef.create()),
+      paragraph.create(),
+    ]);
+    const state = EditorState.create({ schema, doc });
+
+    // the row opens at 0 and is 3 wide, so the writable line's first text
+    // position is 4
+    expect(writableCaretPosForClick(state, 1)).toBe(4);
+  });
+
+  it("takes the line beside a row in the middle, not the top of the page", () => {
+    const doc = schema.nodes.doc.create(null, [
+      paragraph.create(null, schema.text("before")),
+      paragraph.create(null, pageRef.create()),
+      paragraph.create(null, schema.text("after")),
+    ]);
+    const state = EditorState.create({ schema, doc });
+
+    expect(writableCaretPosForClick(state, 9)).toBe(12);
+    expect(state.doc.resolve(12).parent.textContent).toBe("after");
+  });
+
+  it("leaves a click on prose, on a rule, and in a gap where it landed", () => {
+    const doc = schema.nodes.doc.create(null, [
+      paragraph.create(null, schema.text("prose")),
+      schema.nodes.horizontal_rule.create(),
+      paragraph.create(),
+    ]);
+    const state = EditorState.create({ schema, doc });
+
+    expect(writableCaretPosForClick(state, 3)).toBe(null);
+    // the rule, and the gap between two blocks, resolve outside a textblock
+    expect(writableCaretPosForClick(state, 7)).toBe(null);
+    expect(writableCaretPosForClick(state, 0)).toBe(null);
+  });
+
+  it("leaves a row inside a column alone — the line beside it is outside", () => {
+    const doc = schema.nodes.doc.create(null, [
+      schema.nodes.column.create(null, [paragraph.create(null, pageRef.create())]),
+      paragraph.create(),
+    ]);
+    const state = EditorState.create({ schema, doc });
+
+    // the column opens at 0, the row inside it at 1, its content at 2
+    expect(state.doc.resolve(2).parent.type).toBe(paragraph);
+    expect(writableCaretPosForClick(state, 2)).toBe(null);
+  });
+
+  it("refuses a position the document does not hold", () => {
+    const doc = schema.nodes.doc.create(null, [
+      paragraph.create(null, pageRef.create()),
+      paragraph.create(),
+    ]);
+    const state = EditorState.create({ schema, doc });
+
+    expect(writableCaretPosForClick(state, -1)).toBe(null);
+    expect(writableCaretPosForClick(state, doc.content.size + 1)).toBe(null);
+  });
+
+  it("reads the chip itself as an island whose own handler owns the click", () => {
+    const chip = { closest: (selector: string) => (selector.includes("contenteditable") ? {} : null) };
+    const paper = { closest: () => null };
+
+    expect(clickLandedOnUneditable(chip)).toBe(true);
+    expect(clickLandedOnUneditable(paper)).toBe(false);
+    expect(clickLandedOnUneditable(null)).toBe(false);
+  });
+
+  it("moves the caret through the plugin, and lets the chip's click pass", () => {
+    const doc = schema.nodes.doc.create(null, [
+      paragraph.create(null, pageRef.create()),
+      paragraph.create(),
+    ]);
+    let current = EditorState.create({ schema, doc });
+    const dispatch = vi.fn((tr: ReturnType<EditorState["tr"]["setMeta"]>) => {
+      current = current.apply(tr);
+    });
+    const view = {
+      get state() {
+        return current;
+      },
+      dispatch,
+    };
+    const handleClick = createFocusCaretPlugin().props
+      .handleClick as unknown as (
+      view: unknown,
+      pos: number,
+      event: { target: unknown },
+    ) => boolean;
+
+    expect(
+      handleClick(view, 1, { target: { closest: () => null } }),
+    ).toBe(true);
+    expect(current.selection.from).toBe(4);
+    expect(current.selection.$from.parent).toBe(current.doc.lastChild);
+
+    // The chip navigates. Its own click handler owns that, so this one keeps
+    // its hands off and ProseMirror's node selection still happens.
+    dispatch.mockClear();
+    expect(
+      handleClick(view, 1, { target: { closest: () => ({}) } }),
+    ).toBe(false);
+    expect(dispatch).not.toHaveBeenCalled();
   });
 });
 

@@ -4,7 +4,10 @@ import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { apiFetch } from "@/lib/client";
-import LoginPage from "@/app/login/page";
+// The island, not the route: `app/login/page.tsx` is a server component now,
+// because the running version at the foot of the screen is the one thing the
+// server knows that the form does not.
+import { LoginForm } from "@/app/login/login-form";
 import { ShareGate } from "./share-gate";
 import { TrashDialog } from "./trash-dialog";
 import { HistoryDialog } from "./history-dialog";
@@ -109,7 +112,7 @@ describe("client reliability states", () => {
       return 1;
     });
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("offline")));
-    await act(async () => root.render(<LoginPage />));
+    await act(async () => root.render(<LoginForm version={null} />));
 
     const input = container.querySelector("input") as HTMLInputElement;
     const form = container.querySelector("form") as HTMLFormElement;
@@ -119,8 +122,14 @@ describe("client reliability states", () => {
     });
     await settle();
 
-    expect(container.textContent).toContain("Couldn't connect. Try again.");
-    const button = container.querySelector("button") as HTMLButtonElement;
+    expect(container.textContent).toContain(
+      "No connection to the server. Try again.",
+    );
+    // by type, not by document order: the field's own show/hide glyph is a
+    // button too, and it comes first
+    const button = container.querySelector(
+      'button[type="submit"]',
+    ) as HTMLButtonElement;
     expect(button.disabled).toBe(false);
     expect(input.value).toBe("keep-this-password");
     expect(input.getAttribute("aria-invalid")).toBe("true");
@@ -152,7 +161,7 @@ describe("client reliability states", () => {
       "",
       `/login?returnTo=${encodeURIComponent(returnTo)}`,
     );
-    await act(async () => root.render(<LoginPage />));
+    await act(async () => root.render(<LoginForm version={null} />));
 
     const input = container.querySelector("input") as HTMLInputElement;
     const form = container.querySelector("form") as HTMLFormElement;
@@ -188,8 +197,13 @@ describe("client reliability states", () => {
     });
     await settle();
 
-    expect(container.textContent).toContain("Couldn't connect. Try again.");
-    expect((container.querySelector("button") as HTMLButtonElement).disabled).toBe(false);
+    expect(container.textContent).toContain(
+      "No connection to the server. Try again.",
+    );
+    expect(
+      (container.querySelector('button[type="submit"]') as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
     expect(input.value).toBe("keep-this-password");
     expect(input.getAttribute("aria-invalid")).toBe("true");
     expect(

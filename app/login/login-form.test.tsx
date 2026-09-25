@@ -163,21 +163,29 @@ describe("the sign-in screen", () => {
     // themes rather than a colour written here.
     expect(field().getAttribute("style")).toBeNull();
 
+    // Comments come out first: they quote selectors and declarations, and a
+    // sentence about a rule is not the rule.
     const css = readFileSync(
       path.join(process.cwd(), "app", "globals.css"),
       "utf8",
-    );
-    const rule = (selector: string) => {
-      const start = css.indexOf(`${selector},`);
-      expect(start, `${selector} is not in globals.css`).toBeGreaterThan(-1);
-      return css.slice(start, css.indexOf("}", start));
+    ).replace(/\/\*[\s\S]*?\*\//g, "");
+    /** What the first rule that names this selector declares, wherever the
+     *  selector stands in its list: the ladder is written as a group, and
+     *  which half of the group is written first is not a fact about the
+     *  ring. */
+    const declarationsOf = (selector: string) => {
+      for (const rule of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+        const named = rule[1].split(",").map((one) => one.trim());
+        if (named.includes(selector)) return rule[2];
+      }
+      return null;
     };
-    expect(rule(".field:focus-within")).toContain(
-      "box-shadow: 0 0 0 1.5px var(--blue)",
-    );
-    expect(css.slice(css.indexOf(".field > input {"))).toMatch(
-      /^\.field > input \{[^}]*outline: none/,
-    );
+    const focus = declarationsOf(".field:focus-within");
+    expect(focus, ".field:focus-within is not in globals.css").not.toBeNull();
+    expect(focus).toContain("box-shadow: 0 0 0 1.5px var(--blue)");
+    const input = declarationsOf(".field > input");
+    expect(input, ".field > input is not in globals.css").not.toBeNull();
+    expect(input).toContain("outline: none");
   });
 
   it("asks the server the one question it answers", async () => {

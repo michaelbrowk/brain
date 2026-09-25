@@ -94,6 +94,26 @@ describe("Store.readAttachment", () => {
     });
   });
 
+  /** NOTHING WAS MIGRATED WHEN THE NAMING CHANGED.
+   *
+   *  Files saved before the store named them by content carry a `nanoid(12)`,
+   *  and their urls sit in bodies nothing rewrote. They read exactly as they
+   *  always did: the name rule in `lib/attachments.ts` admits both shapes, and
+   *  nothing on this path asks a name what shape it is. */
+  it("answers a file saved under the older nanoid name", async () => {
+    const { store, root } = await tmpStore();
+    const directory = path.join(root, "_attachments");
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, "MX6Z4uQ4-5X1.pdf"), PDF_BYTES);
+
+    expect(await store.readAttachment("MX6Z4uQ4-5X1.pdf", 1024)).toEqual({
+      kind: "file",
+      name: "MX6Z4uQ4-5X1.pdf",
+      mimeType: "application/pdf",
+      data: PDF_BYTES,
+    });
+  });
+
   it("answers missing for a name that is not an attachment name", async () => {
     const { store, root } = await tmpStore();
     await fs.writeFile(path.join(root, "secret.md"), "not yours", "utf8");

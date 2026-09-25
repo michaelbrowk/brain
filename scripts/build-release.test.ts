@@ -108,6 +108,34 @@ describe("release packaging", () => {
     await expect(verifyStage(stage)).rejects.toThrow("mail-service/service listing differs");
   });
 
+  // The probe is what lets the outgoing attachment cap be measured against the
+  // memory contract on the machine that contract applies to, so a stage that
+  // reached the operator without it is a release that cannot be checked there.
+  // `verifyStage` lists it as required and the staging test above asserts where
+  // it lands; this is the refusal, which nothing held it to.
+  it("refuses a stage with no mail outbox memory probe", async () => {
+    const root = await syntheticRoot();
+    const stage = path.join(root, "stage");
+    await stageStandalone({ root, stage });
+    await rm(path.join(stage, "bin", "mail-outbox-memory-probe.mjs"));
+    await expect(verifyStage(stage)).rejects.toThrow(
+      "bin/mail-outbox-memory-probe.mjs is not a regular file",
+    );
+  });
+
+  // The same refusal for a path that exists and is not a file: a directory
+  // where the probe should be passes an existence check and fails to run.
+  it("refuses a stage whose probe is a directory", async () => {
+    const root = await syntheticRoot();
+    const stage = path.join(root, "stage");
+    await stageStandalone({ root, stage });
+    await rm(path.join(stage, "bin", "mail-outbox-memory-probe.mjs"));
+    await mkdir(path.join(stage, "bin", "mail-outbox-memory-probe.mjs"));
+    await expect(verifyStage(stage)).rejects.toThrow(
+      "bin/mail-outbox-memory-probe.mjs is not a regular file",
+    );
+  });
+
   it("refuses a tampered brain-mail-ops payload", async () => {
     const root = await syntheticRoot();
     const stage = path.join(root, "stage");

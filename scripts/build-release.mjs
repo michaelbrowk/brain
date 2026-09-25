@@ -212,7 +212,12 @@ export async function stageStandalone({ root, stage }) {
 
 export async function verifyStage(stage, { layout = "legacy" } = {}) {
   for (const required of ["server.js", "brain-next-server.js", "brain-shutdown-preload.mjs", "brain-mail-ops/project_mail_runtime.py", `bin/${PROBE_BUNDLE_NAME}`]) {
-    if (!(await stat(path.join(stage, required))).isFile()) throw new Error(`${required} is not a regular file`);
+    // A path that is absent and one that is the wrong kind of thing are the
+    // same failure to the operator who has to run it, and they are said the
+    // same way: a bare ENOENT from `stat` names the temp directory the stage
+    // happens to sit in and not the file the release is missing.
+    const found = await stat(path.join(stage, required)).catch(() => null);
+    if (!found?.isFile()) throw new Error(`${required} is not a regular file`);
   }
   for (const [relative, expected] of Object.entries(MAIL_RUNTIME_LISTING)) {
     const actual = await listing(path.join(stage, "mail-service", relative));

@@ -84,9 +84,14 @@ export async function GET(
 
 const noStore = { "Cache-Control": "private, no-store" };
 
-/** The shared subtree as a flat list, the same shape and the same five fields
+/** The shared subtree as a flat list, the same shape and the same six fields
  *  the owner's `read.tree` projects. Chosen rather than filtered: a new key
- *  on `TreeNode` does not become something a stranger's browser can read. */
+ *  on `TreeNode` does not become something a stranger's browser can read.
+ *
+ *  `updated` is one of the six because an app reading a subtree has no other
+ *  way to tell a page it already holds from one that has been written since,
+ *  and a shared app is the same app against the same request budget. It says
+ *  when a page inside this share changed, to a reader who may read that page. */
 function withinSubtree(
   store: { getTree(): readonly TreeNode[]; isWithinSubtree(rootId: string, id: string): boolean },
   rootId: string,
@@ -97,6 +102,7 @@ function withinSubtree(
     title: string;
     icon?: string;
     kind?: "app";
+    updated: string;
   }[] = [];
   const walk = (nodes: readonly TreeNode[]) => {
     for (const node of nodes) {
@@ -107,6 +113,7 @@ function withinSubtree(
           title: node.title,
           ...(node.icon === undefined ? {} : { icon: node.icon }),
           ...(node.kind === undefined ? {} : { kind: node.kind }),
+          updated: node.updated,
         });
       }
       walk(node.children);
@@ -118,18 +125,25 @@ function withinSubtree(
 
 /** WHAT A STRANGER'S BROWSER MAY SEE OF ONE PAGE.
  *
- *  Four fields, the ones the tree already carries. The owner's own
+ *  The fields the tree already carries, and no more. The owner's own
  *  `read.page` answers more because it is answering the owner; here the
  *  reader is whoever has the link, so this is the shorter list on purpose and
  *  it is an allowlist rather than a filter for the same reason the tree
  *  projection is. The body and the rev are the two the app is actually
  *  after. */
-function visitorMeta(meta: { id: string; title: string; icon?: string; kind?: "app" }) {
+function visitorMeta(meta: {
+  id: string;
+  title: string;
+  icon?: string;
+  kind?: "app";
+  updated: string;
+}) {
   return {
     id: meta.id,
     title: meta.title,
     ...(meta.icon === undefined ? {} : { icon: meta.icon }),
     ...(meta.kind === undefined ? {} : { kind: meta.kind }),
+    updated: meta.updated,
   };
 }
 

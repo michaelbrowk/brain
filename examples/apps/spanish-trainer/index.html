@@ -412,7 +412,16 @@ function applyAnswer(row, kind, today) {
  *  So the reads are paced under the limit rather than up against it, a
  *  refusal is waited out once, and whatever still could not be read is
  *  COUNTED and handed back for the app to say out loud. The clock and the
- *  waiting are arguments, so this has a test that takes no time to run. */
+ *  waiting are arguments, so this has a test that takes no time to run.
+ *
+ *  AND A PAGE NOBODY HAS WRITTEN IS NOT READ TWICE. The tree says when each
+ *  page was last written, so `options.cache` — a Map the caller owns, keyed by
+ *  id and holding the `updated` it was read at — answers a page the frame has
+ *  already seen without spending a request on it. A node the host did not date
+ *  is never kept: there would be nothing to compare it against, and a page
+ *  read once and trusted after that is a page frozen for the life of the
+ *  frame. Neither is a page that could not be read, so a refusal is retried on
+ *  the next reload rather than remembered as an absence. */
 const READS_PER_SECOND = 20;
 
 async function readVocabulary(nodes, readPage, options) {
@@ -420,6 +429,7 @@ async function readVocabulary(nodes, readPage, options) {
   const perSecond = settings.perSecond || READS_PER_SECOND;
   const wait = settings.wait || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const now = settings.now || (() => Date.now());
+  const cache = settings.cache || null;
 
   const rows = [];
   let failed = 0;
@@ -427,6 +437,12 @@ async function readVocabulary(nodes, readPage, options) {
   let used = 0;
 
   for (const node of nodes) {
+    const datable = cache !== null && typeof node.updated === "string" && node.updated.length > 0;
+    const kept = datable ? cache.get(node.id) : undefined;
+    if (kept !== undefined && kept.updated === node.updated) {
+      for (const row of kept.rows) rows.push(row);
+      continue;
+    }
     if (used >= perSecond) {
       const elapsed = now() - windowStart;
       if (elapsed < 1000) await wait(1000 - elapsed);
@@ -457,7 +473,9 @@ async function readVocabulary(nodes, readPage, options) {
       failed += 1;
       continue;
     }
-    for (const row of extractVocabulary(page.markdown, settings.scripts)) rows.push(row);
+    const found = extractVocabulary(page.markdown, settings.scripts);
+    if (datable) cache.set(node.id, { updated: node.updated, rows: found });
+    for (const row of found) rows.push(row);
   }
   return { rows, failed };
 }
@@ -582,6 +600,15 @@ function descendantsOf(nodes, rootId, skipId) {
   var learned = 0;
   var started = 0;
   var saving = Promise.resolve();
+  /** THE SOURCE PAGES THIS FRAME HAS ALREADY READ.
+   *
+   *  Keyed by page id and holding the `updated` the page carried when it was
+   *  read, so a reload asks the bridge only for the pages the owner has
+   *  written since. It lives as long as the frame does: closing the app, or
+   *  reloading Brain, reads all of them again. That is the difference between
+   *  a cache for a session and a second copy of the notebook, and the reason
+   *  the owner never has to know this exists. */
+  var readPages = new Map();
   /** How many source pages the last reload could not read. Nothing else in
    *  the app knows a page was dropped, so this is the only way the owner can
    *  be told why a deck is smaller than they expected. */
@@ -681,9 +708,11 @@ function descendantsOf(nodes, rootId, skipId) {
     var sources = descendantsOf(tree, settings.parentId, page.id).filter(function (node) {
       return node.id !== settings.wordsPageId;
     });
-    // Paced under the bridge's thirty a second, and counting whatever it
-    // still could not read, because a page silently missing from a deck is a
-    // word the owner thinks they have finished with.
+    // Paced under the bridge's thirty a second, skipping the pages this frame
+    // has already read, and counting whatever it still could not read, because
+    // a page silently missing from a deck is a word the owner thinks they have
+    // finished with.
+    //
     // The settings object carries the two script names and `readVocabulary`
     // reads only those two off it, so there is no second copy of them to keep
     // in step with this one.
@@ -692,7 +721,7 @@ function descendantsOf(nodes, rootId, skipId) {
       function (id) {
         return brain.readPage(id);
       },
-      { scripts: settings },
+      { scripts: settings, cache: readPages },
     );
     unread = read.failed;
     for (index = 0; index < read.rows.length; index += 1) {
@@ -926,8 +955,12 @@ function descendantsOf(nodes, rootId, skipId) {
   });
 
   /** A different pair of scripts is a different reading of every source page,
-   *  so the deck is built again rather than filtered. */
+   *  so the deck is built again rather than filtered — and the pages this
+   *  frame has already read are dropped with it. The cache remembers the rows
+   *  a page gave, not its markdown, and those rows are the answer to the old
+   *  question. */
   function rereadScripts() {
+    readPages.clear();
     fillScriptPickers();
     reload().catch(function () { note("Brain could not read the pages again."); });
   }

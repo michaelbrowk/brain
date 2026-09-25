@@ -49,7 +49,7 @@ describe("the app's read side", () => {
     },
   ];
 
-  it("answers read.tree with ids, titles, icons, kinds and parents only", async () => {
+  it("answers read.tree with ids, titles, icons, kinds, parents and updated only", async () => {
     const answer = (await createAppReads(() => TREE as never)({
       ...envelope,
       type: "read.tree",
@@ -57,9 +57,12 @@ describe("the app's read side", () => {
 
     // The shell already holds this answer, so nothing is fetched for it.
     expect(apiFetch).not.toHaveBeenCalled();
+    // `updated` is here so an app can tell a page it has already read from one
+    // the owner has written since. Without it an app that reads a subtree has
+    // to read every page of it again on every reload to find out.
     expect(answer.tree).toEqual([
-      { id: "a", parentId: null, title: "Spanish", icon: "🇪🇸" },
-      { id: "b", parentId: "a", title: "Trainer", kind: "app" },
+      { id: "a", parentId: null, title: "Spanish", icon: "🇪🇸", updated: "y" },
+      { id: "b", parentId: "a", title: "Trainer", kind: "app", updated: "y" },
     ]);
   });
 

@@ -347,7 +347,16 @@ export function applyAnswer(row, kind, today) {
  *  So the reads are paced under the limit rather than up against it, a
  *  refusal is waited out once, and whatever still could not be read is
  *  COUNTED and handed back for the app to say out loud. The clock and the
- *  waiting are arguments, so this has a test that takes no time to run. */
+ *  waiting are arguments, so this has a test that takes no time to run.
+ *
+ *  AND A PAGE NOBODY HAS WRITTEN IS NOT READ TWICE. The tree says when each
+ *  page was last written, so `options.cache` — a Map the caller owns, keyed by
+ *  id and holding the `updated` it was read at — answers a page the frame has
+ *  already seen without spending a request on it. A node the host did not date
+ *  is never kept: there would be nothing to compare it against, and a page
+ *  read once and trusted after that is a page frozen for the life of the
+ *  frame. Neither is a page that could not be read, so a refusal is retried on
+ *  the next reload rather than remembered as an absence. */
 const READS_PER_SECOND = 20;
 
 export async function readVocabulary(nodes, readPage, options) {
@@ -355,6 +364,7 @@ export async function readVocabulary(nodes, readPage, options) {
   const perSecond = settings.perSecond || READS_PER_SECOND;
   const wait = settings.wait || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const now = settings.now || (() => Date.now());
+  const cache = settings.cache || null;
 
   const rows = [];
   let failed = 0;
@@ -362,6 +372,12 @@ export async function readVocabulary(nodes, readPage, options) {
   let used = 0;
 
   for (const node of nodes) {
+    const datable = cache !== null && typeof node.updated === "string" && node.updated.length > 0;
+    const kept = datable ? cache.get(node.id) : undefined;
+    if (kept !== undefined && kept.updated === node.updated) {
+      for (const row of kept.rows) rows.push(row);
+      continue;
+    }
     if (used >= perSecond) {
       const elapsed = now() - windowStart;
       if (elapsed < 1000) await wait(1000 - elapsed);
@@ -392,7 +408,9 @@ export async function readVocabulary(nodes, readPage, options) {
       failed += 1;
       continue;
     }
-    for (const row of extractVocabulary(page.markdown, settings.scripts)) rows.push(row);
+    const found = extractVocabulary(page.markdown, settings.scripts);
+    if (datable) cache.set(node.id, { updated: node.updated, rows: found });
+    for (const row of found) rows.push(row);
   }
   return { rows, failed };
 }

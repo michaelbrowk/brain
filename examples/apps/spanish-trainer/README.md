@@ -48,6 +48,12 @@ node examples/apps/spanish-trainer/build.mjs
 - Source pages are read paced under the bridge's thirty requests a second, and
   whatever still could not be read is counted and said out loud, because a page
   silently missing from a deck is a word the owner thinks they have finished.
+- A page the frame has already read is not read again while its `updated` in
+  the tree has not moved, which is what keeps a reload of sixty-six pages off
+  the request budget. The cache is in memory and belongs to the frame, so
+  closing the app or reloading Brain reads every page again. Changing either
+  script drops it, because the rows it holds are the answer to the old
+  question.
 - A line ending in a full stop is held to a shorter length before it counts as
   a pair, so `adios — пока.` is a word and `I am learning - slowly.` is not.
   A long phrase with a full stop after it is the case this gets wrong.

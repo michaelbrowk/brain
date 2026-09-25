@@ -114,7 +114,7 @@ one is a `postMessage` the host validates, rate-limits and answers. The rate is
 | Request | Kit method | Answers | Can refuse |
 | --- | --- | --- | --- |
 | `hello` | `brain.ready` | `{ theme, page, kit: { tokens } }` | nothing |
-| `read.tree` | `brain.readTree()` | `{ tree }`, the whole page tree as a flat list | `store_failed` |
+| `read.tree` | `brain.readTree()` | `{ tree }`, the whole page tree as a flat list of `{ id, parentId, title, icon, kind, updated }` | `store_failed` |
 | `read.page` | `brain.readPage(id)` | `{ meta, markdown, rev }` | `not_found`, `store_failed` |
 | `read.pages` | `brain.readPages(query)` | `{ hits }`, matching pages with snippets | `store_failed` |
 | `write.page` | `brain.writePage(id, markdown, rev)` | `{ rev }`, the new one | `not_owned`, `rev_conflict`, `too_large`, `not_found`, `store_failed` |
@@ -126,6 +126,13 @@ one is a `postMessage` the host validates, rate-limits and answers. The rate is
 
 A refusal arrives as a rejected promise whose `Error` carries a `reason`
 property holding one of those codes. Branch on `reason`, not on the sentence.
+
+**`updated` on a tree node is how an app reads a subtree twice without paying
+for it twice.** It is the page's own last-written stamp, so an app can hold what
+it read beside the stamp it read it at and ask the bridge only for the pages
+that have moved since. Thirty requests a second is the whole budget and a
+notebook has more pages than that, so an app that re-reads everything on every
+reload spends the budget on answers it already has.
 
 **`write.page` only writes a page in `owns`.** Not the app's own page, whose body
 is the description the owner reads, and not a descendant that is not in the

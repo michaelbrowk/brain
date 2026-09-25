@@ -34,12 +34,12 @@ beforeEach(() => {
   isDeleted.mockReturnValue(false);
   getTree.mockReturnValue([
     {
-      id: "root1", parentId: null, title: "Spanish", hasChildren: true,
-      children: [{ id: "app1", parentId: "root1", title: "Trainer", kind: "app", hasChildren: false, children: [] }],
+      id: "root1", parentId: null, title: "Spanish", updated: "u1", hasChildren: true,
+      children: [{ id: "app1", parentId: "root1", title: "Trainer", kind: "app", updated: "u2", hasChildren: false, children: [] }],
     },
-    { id: "outside", parentId: null, title: "Private", hasChildren: false, children: [] },
+    { id: "outside", parentId: null, title: "Private", updated: "u3", hasChildren: false, children: [] },
   ]);
-  readPage.mockResolvedValue({ meta: { id: "app1", title: "Trainer" }, markdown: "d", rev: "r" });
+  readPage.mockResolvedValue({ meta: { id: "app1", title: "Trainer", updated: "u2" }, markdown: "d", rev: "r" });
 });
 
 describe("a visitor's read side", () => {
@@ -50,9 +50,26 @@ describe("a visitor's read side", () => {
     expect(body.tree.map((node) => node.id)).toEqual(["root1", "app1"]);
   });
 
+  it("answers the subtree in the same fields the owner's own tree carries", async () => {
+    // A shared app reads the same shape as the owner's copy, `updated` and
+    // all, so a trainer that skips a page it has already read behaves the
+    // same way on a link as it does under the owner's own sidebar.
+    isWithinSubtree.mockImplementation((_root: string, target: string) => target !== "outside");
+    const res = await route.GET(get("?root=root1&v=2"), { params });
+    const body = (await res.json()) as { tree: unknown[] };
+    expect(body.tree).toEqual([
+      { id: "root1", parentId: null, title: "Spanish", updated: "u1" },
+      { id: "app1", parentId: "root1", title: "Trainer", kind: "app", updated: "u2" },
+    ]);
+  });
+
   it("answers a page inside the subtree", async () => {
     const res = await route.GET(get("?root=root1&v=2&page=app1"), { params });
-    expect(await res.json()).toMatchObject({ rev: "r" });
+    const body = (await res.json()) as { rev: string; meta: unknown };
+    expect(body.rev).toBe("r");
+    // The page's fields agree with the tree's, `updated` included, so a shared
+    // app reads one vocabulary whichever of the two it asked.
+    expect(body.meta).toEqual({ id: "app1", title: "Trainer", updated: "u2" });
   });
 
   it("refuses a page outside it, and reads nothing on the way", async () => {

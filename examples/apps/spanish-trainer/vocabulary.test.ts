@@ -680,3 +680,94 @@ describe("reading the pages a deck is built from", () => {
     expect(timing.waits).toEqual([1000, 1000]);
   });
 });
+
+/** SIXTY-SIX PAGES, EVERY TIME THE OWNER TOUCHED THE PICKER.
+ *
+ *  Every reload read every page under the parent again, and on Michael's own
+ *  notebook that is sixty-six requests against a budget of thirty a second for
+ *  pages that had not changed since the last one. The tree says when each page
+ *  was last written, so a page whose `updated` has not moved is the rows it
+ *  gave last time.
+ *
+ *  The cache is the caller's Map and it lives as long as the frame does. A
+ *  reload of the app is a new Map and reads everything, which is the point: it
+ *  is a cache for a session, not a copy of the notebook. */
+describe("reading the same pages twice in one session", () => {
+  const timing = () => ({ wait: async () => {}, now: () => 0 });
+  const page = (id: string, updated?: string) => ({ id, ...(updated === undefined ? {} : { updated }) });
+
+  function counted(markdown: string) {
+    const asked: string[] = [];
+    return {
+      asked,
+      read: async (id: string) => {
+        asked.push(id);
+        return { markdown };
+      },
+    };
+  }
+
+  it("reads a page once while its updated has not moved", async () => {
+    const cache = new Map();
+    const source = counted("hola — привет");
+    const nodes = [page("p0", "u1")];
+    const first = await readVocabulary(nodes, source.read, { ...timing(), cache });
+    const second = await readVocabulary(nodes, source.read, { ...timing(), cache });
+    expect(source.asked).toEqual(["p0"]);
+    expect(second.rows).toEqual(first.rows);
+    expect(second.failed).toBe(0);
+  });
+
+  it("reads it again once the owner has written to it", async () => {
+    const cache = new Map();
+    const source = counted("hola — привет");
+    await readVocabulary([page("p0", "u1")], source.read, { ...timing(), cache });
+    await readVocabulary([page("p0", "u2")], source.read, { ...timing(), cache });
+    expect(source.asked).toEqual(["p0", "p0"]);
+  });
+
+  it("keeps nothing for a page the host did not date", async () => {
+    // A host that projects fewer fields answers a tree with no `updated` on
+    // it. There is then nothing to compare, and a page read once and trusted
+    // for the life of the frame would be a page frozen for the life of the
+    // frame.
+    const cache = new Map();
+    const source = counted("hola — привет");
+    await readVocabulary([page("p0")], source.read, { ...timing(), cache });
+    await readVocabulary([page("p0")], source.read, { ...timing(), cache });
+    expect(source.asked).toEqual(["p0", "p0"]);
+    expect(cache.size).toBe(0);
+  });
+
+  it("spends no pacing budget on a page it did not read", async () => {
+    // Forty-five cached pages are not forty-five requests, so the second pass
+    // does not wait out two seconds it has no reason to wait.
+    const cache = new Map();
+    const nodes = Array.from({ length: 45 }, (_value, index) => page(`p${index}`, "u1"));
+    const source = counted("hola — привет");
+    const waits: number[] = [];
+    await readVocabulary(nodes, source.read, { ...timing(), cache, perSecond: 20 });
+    await readVocabulary(nodes, source.read, {
+      wait: async (ms: number) => void waits.push(ms),
+      now: () => 0,
+      cache,
+      perSecond: 20,
+    });
+    expect(source.asked).toHaveLength(45);
+    expect(waits).toEqual([]);
+  });
+
+  it("counts a page it could not read, and keeps nothing for it", async () => {
+    const cache = new Map();
+    let asked = 0;
+    const read = async () => {
+      asked += 1;
+      throw Object.assign(new Error("gone"), { reason: "not_found" });
+    };
+    const answered = await readVocabulary([page("p0", "u1")], read, { ...timing(), cache });
+    expect(answered.failed).toBe(1);
+    expect(cache.size).toBe(0);
+    await readVocabulary([page("p0", "u1")], read, { ...timing(), cache });
+    expect(asked).toBe(2);
+  });
+});

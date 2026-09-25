@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { join } from "node:path";
 
 import { modifyRouteRegex } from "next/dist/lib/redirect-status";
 import { getPathMatch } from "next/dist/shared/lib/router/utils/path-match";
@@ -90,6 +91,70 @@ describe("Next standalone tracing", () => {
     expect(includes).toContain(
       "./node_modules/.pnpm/jsdom@*/node_modules/jsdom/**/*",
     );
+  });
+});
+
+/** WHAT PUT THE WHOLE SOURCE TREE IN THE ARTIFACT, AND WHY A CONFIG ENTRY
+ *  COULD NOT TAKE IT OUT AGAIN.
+ *
+ *  Turbopack answers a filesystem call whose path it cannot resolve statically
+ *  by tracing the whole project into that entry's `.nft.json`, and
+ *  `copyTracedFiles` then puts every one of those files in `.next/standalone`.
+ *  The excludes in `next.config.ts` are keyed by ROUTE, and no key form reaches
+ *  the entries that are not routes — `instrumentation.js.nft.json` above all —
+ *  so a whole-project trace from a module the instrumentation hook imports is
+ *  unremovable after the fact. The cure is at the call: name the dynamic
+ *  argument with `turbopackIgnore` so nothing is traced from it.
+ *
+ *  Two shapes did it, and both are cheap to let back in, which is why they are
+ *  scanned for rather than remembered:
+ *
+ *  - a path whose leading segments are dynamic and whose tail is a literal, as
+ *    `path.join(root, ".git")` in `lib/store/git.ts` and
+ *    `path.join(dir, "app")` in `lib/store/store.ts`. The literal is resolved
+ *    against the project root, so the artifact carried `.git/**` and `app/**`;
+ *  - `path.resolve(value)` used to CHECK a path rather than read one, in the
+ *    mail socket validation. That one the build warned about by name, and it
+ *    was the whole of `public/`, `test/`, `workers/`, and every root file. */
+describe("Turbopack's project trace", () => {
+  const LITERAL_TAIL = /path\.(?:join|resolve)\([^;]*,\s*"(?:\.git|app)"/;
+
+  function sources(directory: string): string[] {
+    const out: string[] = [];
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const full = join(directory, entry.name);
+      if (entry.isDirectory()) out.push(...sources(full));
+      else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) {
+        out.push(full);
+      }
+    }
+    return out;
+  }
+
+  it("opts every dynamic path with a literal tail out of the trace", () => {
+    const offenders: string[] = [];
+    for (const file of sources("lib")) {
+      readFileSync(file, "utf8")
+        .split("\n")
+        .forEach((line, index) => {
+          if (!LITERAL_TAIL.test(line)) return;
+          if (line.includes("turbopackIgnore")) return;
+          offenders.push(`${file}:${index + 1}`);
+        });
+    }
+    expect(offenders).toEqual([]);
+  });
+
+  it("opts the mail socket path check out of the trace", () => {
+    const body = readFileSync(
+      "lib/mail/providers/gmail/public-proxy.ts",
+      "utf8",
+    );
+    const checks = body
+      .split("\n")
+      .filter((line) => line.includes("path.resolve("));
+    expect(checks.length).toBeGreaterThan(0);
+    for (const line of checks) expect(line).toContain("turbopackIgnore");
   });
 });
 

@@ -4234,7 +4234,12 @@ export class Store {
       // route that writes files to an existing page.
       if (this.readAppMeta(id) === null) throw new NotAnAppError();
       await assertAppFolderIsNotAPage(e.dir);
-      const live = assertInRoot(this.root, path.join(e.dir, "app"));
+      // `turbopackIgnore` on this and the two `"app"` joins in
+      // `assertAppFolderIsNotAPage` below: `e.dir` is inside the notes folder
+      // and is a runtime value, so Turbopack resolves the literal tail against
+      // the PROJECT root instead and traces `app/**` — this repository's App
+      // Router source, test files and all — into the standalone artifact.
+      const live = assertInRoot(this.root, path.join(/*turbopackIgnore: true*/ e.dir, "app"));
       const staged = assertInRoot(this.root, path.join(e.dir, APP_STAGING_DIR));
       const retired = assertInRoot(
         this.root,
@@ -8830,10 +8835,10 @@ async function directoryExists(dir: string): Promise<boolean> {
 async function recoverCrashedAppSwap(dir: string): Promise<void> {
   const retired = path.join(dir, `${APP_STAGING_DIR}-old`);
   if (await directoryExists(retired)) {
-    if (await directoryExists(path.join(dir, "app"))) {
+    if (await directoryExists(path.join(/*turbopackIgnore: true*/ dir, "app"))) {
       await fs.rm(retired, { recursive: true, force: true });
     } else {
-      await fs.rename(retired, path.join(dir, "app"));
+      await fs.rename(retired, path.join(/*turbopackIgnore: true*/ dir, "app"));
     }
   }
   // The staged set is only ever meaningful inside the one `writeAppFiles`
@@ -8845,7 +8850,9 @@ async function recoverCrashedAppSwap(dir: string): Promise<void> {
 }
 
 async function assertAppFolderIsNotAPage(dir: string): Promise<void> {
-  const legacyIndex = await readOptionalFile(path.join(dir, "app", "index.md"));
+  const legacyIndex = await readOptionalFile(
+    path.join(/*turbopackIgnore: true*/ dir, "app", "index.md"),
+  );
   if (legacyIndex !== null) {
     throw new NotAnAppError("this page already has a child page whose folder is app");
   }

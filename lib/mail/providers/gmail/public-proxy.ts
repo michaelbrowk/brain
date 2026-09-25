@@ -451,9 +451,14 @@ function readPublicOrigin(override: string | undefined): string {
 function readSocketPath(override: string | undefined): string {
   const value =
     override ?? process.env.BRAIN_MAIL_SOCKET_PATH ?? DEFAULT_SOCKET_PATH;
+  // `turbopackIgnore` because this `resolve` CHECKS a path and never reads one:
+  // the comparison is the normalisation test. Without it the build warns that
+  // "dynamic filesystem access causes tracing of the whole project" and then
+  // does it — the standalone artifact carried every root file, `public/`,
+  // `test/`, `workers/` and `hooks/` out of this one line.
   if (
     !path.isAbsolute(value) ||
-    path.resolve(value) !== value ||
+    path.resolve(/*turbopackIgnore: true*/ value) !== value ||
     value.includes("\u0000") ||
     value.length > 512
   ) {

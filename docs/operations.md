@@ -205,9 +205,18 @@ one year, set and refreshed by every successful login — it holds no identity, 
 session and no reference to anything on disk, it authorizes nothing, and a
 stranger cannot have one, because only a login that already succeeded sets it. A
 missing or forged cookie is counted against the shared bucket, ten in thirty
-seconds. The share gate keys the same way per page, and it also admits a password
-whose comparison already came back right inside the current window, so a flood on
-a password-protected link cannot deny it to the readers who know its password.
+seconds.
+
+The share gate keys the same way, per page, and one residual is left standing
+there on purpose. Five comparisons a minute per page is five a minute for all of
+that page's anonymous readers together, so a stranger who floods one
+password-gated link does deny it to anonymous readers until the window resets. A
+reader who is logged into this Brain — the owner, on any browser that has logged
+in — carries `brain_device` and is unaffected, and the edge's per-visitor zone
+bounds what one source can send. Nothing admits a password past a spent window:
+an earlier version of this branch remembered a comparison that came back right
+and let that password through without one, which is an unmetered oracle for the
+password and was removed.
 
 The example also ships a commented `map` and `log_format` that write an app
 frame's bearer as `[redacted]` in the access log. That token rides in the path,

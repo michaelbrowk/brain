@@ -59,10 +59,13 @@ describe("shared-page password rate limiting", () => {
     expect(compare).toHaveBeenCalledTimes(5);
   });
 
-  /** Same shape as the login defect, one page at a time: every reader of a
-   *  password-protected link shared that page's bucket, so five wrong guesses a
-   *  minute took the link away from all of them. */
-  it("admits the right password past a window somebody else emptied", async () => {
+  /** An earlier round of this branch remembered a comparison that came back
+   *  right and admitted that password again for the rest of the window without
+   *  one. Past a spent window that answer cost nothing and was bounded by
+   *  nothing: an unmetered oracle telling a guesser which password is right,
+   *  which is the one thing a cap spent before bcrypt exists to prevent. Nothing
+   *  gets past a spent window now, however right it is. */
+  it("admits nothing past a spent window, however right the password", async () => {
     const compare = vi.fn(async (password: string) => password === "right");
     vi.doMock("bcryptjs", () => ({ default: { compare } }));
     vi.doMock("@/lib/store", () => ({
@@ -95,13 +98,9 @@ describe("shared-page password rate limiting", () => {
     }
     expect(compare).toHaveBeenCalledTimes(6);
 
-    // The reader who knows the password is let in, and no comparison was spent
-    // doing it: the verdict from this window is what admitted them.
-    await expect(POST(request("right"))).resolves.toMatchObject({ status: 200 });
-    expect(compare).toHaveBeenCalledTimes(6);
-
-    // The flood stays capped. Only the password already proven right in this
-    // window skips the window.
+    // The password that was right a moment ago is refused with the rest, and no
+    // answer of any kind comes out of the route without a comparison behind it.
+    await expect(POST(request("right"))).resolves.toMatchObject({ status: 429 });
     await expect(POST(request("also wrong"))).resolves.toMatchObject({
       status: 429,
     });

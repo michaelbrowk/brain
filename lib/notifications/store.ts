@@ -4,7 +4,7 @@ import { atomicWrite } from "@/lib/store/atomic";
 import { emitStore } from "@/lib/store/events";
 import { foldLegacyMailRows } from "./mail-rows";
 import {
-  NOTIFICATION_CAP,
+  NOTIFICATION_KIND_CAP,
   isNotificationInstant,
   notificationSchema,
   type BrainNotification,
@@ -100,6 +100,25 @@ function sorted(items: BrainNotification[]): BrainNotification[] {
   return [...items].sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : a.id < b.id ? 1 : -1));
 }
 
+/** NEWEST FIRST, AND AT MOST `NOTIFICATION_KIND_CAP` OF EACH KIND.
+ *
+ *  The bound every write applies. Counting per kind rather than over the whole
+ *  file is what keeps a burst of mail from evicting the reminders under it: the
+ *  rows arrive here newest first, so what a kind keeps is its newest and what it
+ *  drops is its own oldest. The file's total is bounded by the sum of the four,
+ *  which is `NOTIFICATION_CAP`. */
+function capped(items: BrainNotification[]): BrainNotification[] {
+  const kept: BrainNotification[] = [];
+  const held = new Map<BrainNotification["kind"], number>();
+  for (const row of sorted(items)) {
+    const already = held.get(row.kind) ?? 0;
+    if (already >= NOTIFICATION_KIND_CAP) continue;
+    held.set(row.kind, already + 1);
+    kept.push(row);
+  }
+  return kept;
+}
+
 export async function listNotifications(
   dir = notificationStateDirectory(),
 ): Promise<BrainNotification[]> {
@@ -137,7 +156,7 @@ export async function appendNotification(
     const row = parsed.data;
     const items = await readAll(dir);
     if (items.some((held) => held.id === row.id)) return false;
-    const next = sorted([...items, row]).slice(0, NOTIFICATION_CAP);
+    const next = capped([...items, row]);
     if (!next.some((held) => held.id === row.id)) return false;
     await writeAll(dir, next);
     return true;
@@ -170,14 +189,15 @@ export async function appendOrFoldNotification(
       const parsed = notificationSchema.safeParse(folded);
       const held = items.find((candidate) => candidate.id === folded.id);
       if (parsed.success && held !== undefined && held.readAt === undefined) {
-        // The cap is re-applied on this branch too, though a fold is
-        // count-preserving and cannot push the file past it on its own: a file
-        // that already holds more than the cap, from an older writer or a hand
-        // edit, is then trimmed by either branch rather than by one of them.
-        const next = sorted([
+        // The bound is re-applied on this branch too, though a fold is
+        // count-preserving and cannot push a kind past it on its own: a file
+        // that already holds more than the kind's share, from an older writer
+        // or a hand edit, is then trimmed by either branch rather than by one
+        // of them.
+        const next = capped([
           ...items.filter((candidate) => candidate.id !== folded.id),
           parsed.data,
-        ]).slice(0, NOTIFICATION_CAP);
+        ]);
         await writeAll(dir, next);
         return "folded" as const;
       }
@@ -185,7 +205,7 @@ export async function appendOrFoldNotification(
     const parsed = notificationSchema.safeParse(row);
     if (!parsed.success) return "refused" as const;
     if (items.some((held) => held.id === parsed.data.id)) return "refused" as const;
-    const next = sorted([...items, parsed.data]).slice(0, NOTIFICATION_CAP);
+    const next = capped([...items, parsed.data]);
     if (!next.some((held) => held.id === parsed.data.id)) return "refused" as const;
     await writeAll(dir, next);
     return "appended" as const;

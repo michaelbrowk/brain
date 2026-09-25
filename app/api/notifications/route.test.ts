@@ -11,6 +11,7 @@ vi.mock("@/lib/notifications/state-dir", () => ({
   notificationStateDirectory: () => dirHolder.current,
 }));
 
+import { NOTIFICATION_CAP } from "@/lib/notifications/model";
 import { appendNotification } from "@/lib/notifications/store";
 import { GET } from "./route";
 import { POST as readPost } from "./read/route";
@@ -85,7 +86,10 @@ describe("POST /api/notifications/read", () => {
   });
 
   it("answers 400 bad_ids for a missing, empty or oversized list", async () => {
-    for (const ids of [undefined, [], Array.from({ length: 501 }, (_, i) => `row-${i}`), [1]]) {
+    // One past the whole centre: no request can name more rows than the file
+    // can hold.
+    const tooMany = Array.from({ length: NOTIFICATION_CAP + 1 }, (_, i) => `row-${i}`);
+    for (const ids of [undefined, [], tooMany, [1]]) {
       const response = await post(JSON.stringify({ ids }));
       expect(response.status).toBe(400);
       const body = (await response.json()) as { error: string; reason?: string };

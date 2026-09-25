@@ -3,7 +3,12 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { brainEvents, type SequencedStoreEvent } from "@/lib/store/events";
-import { NOTIFICATION_CAP, type BrainNotification } from "./model";
+import { mailRow } from "./mail-rows";
+import {
+  NOTIFICATION_CAP,
+  NOTIFICATION_KIND_CAP,
+  type BrainNotification,
+} from "./model";
 import {
   NOTIFICATIONS_FILE,
   appendNotification,
@@ -31,8 +36,15 @@ function row(id: string, at: string): BrainNotification {
   return { id, kind: "task-reminder", at, title: "Water the plants", href: "/tasks" };
 }
 
-/** A centre at the cap, written straight to the file. Five hundred real
- *  appends are five hundred fsyncs for a boundary that is one comparison, and
+/** One counted mail row, of the shape a scan writes: the instant it opened is
+ *  its id, so a read row is never counted into again and the next scan opens
+ *  another beside it. */
+function mail(at: string): BrainNotification {
+  return mailRow(at, 1, at);
+}
+
+/** A kind's whole share, written straight to the file. Two hundred real
+ *  appends are two hundred fsyncs for a boundary that is one comparison, and
  *  seeding is also the only way to reach it with rows NEWER than the one under
  *  test, which is the case that matters. */
 async function seed(target: string, items: BrainNotification[]): Promise<void> {
@@ -44,7 +56,7 @@ async function seed(target: string, items: BrainNotification[]): Promise<void> {
 }
 
 function fullCentre(): BrainNotification[] {
-  return Array.from({ length: NOTIFICATION_CAP }, (_, index) =>
+  return Array.from({ length: NOTIFICATION_KIND_CAP }, (_, index) =>
     row(`row-${index}`, new Date(Date.UTC(2026, 8, 14, 1, 0, index)).toISOString()),
   );
 }
@@ -85,19 +97,57 @@ describe("the notification store", () => {
     expect(await listNotifications(dir)).toHaveLength(1);
   });
 
-  it("drops the oldest past the cap and keeps exactly five hundred", async () => {
+  it("drops a kind's oldest past its share and keeps exactly two hundred", async () => {
     await seed(dir, fullCentre());
     for (let index = 0; index < 5; index += 1) {
       const at = new Date(Date.UTC(2026, 8, 14, 2, 0, index)).toISOString();
       expect(await appendNotification(row(`fresh-${index}`, at), dir)).toBe(true);
     }
     const rows = await listNotifications(dir);
-    expect(rows).toHaveLength(NOTIFICATION_CAP);
+    expect(rows).toHaveLength(NOTIFICATION_KIND_CAP);
     expect(rows[0].id).toBe("fresh-4");
     expect(rows.at(-1)!.id).toBe("row-5");
   });
 
-  it("refuses a row older than everything a full centre holds, and stores nothing", async () => {
+  // A KIND CANNOT PUSH ANOTHER KIND OUT.
+  //
+  // Mail opens a new row whenever the last one was read, so a few busy days of
+  // letters are a few hundred rows of one kind, all newer than the reminders
+  // under them. Against one shared bound those reminders go: the thing that
+  // wanted the reader at 13:00 is evicted by the mail they had already dealt
+  // with. Each kind holds its own share instead, and the total is still bounded
+  // because every kind's share is.
+  it("keeps the reminders when a burst of mail fills the centre", async () => {
+    const reminders = [
+      row("reminder-1", "2026-09-14T09:00:00.000Z"),
+      row("reminder-2", "2026-09-14T09:05:00.000Z"),
+      row("reminder-3", "2026-09-14T09:10:00.000Z"),
+    ];
+    // Every letter newer than every reminder, which is the shape that hurts.
+    const burst = Array.from({ length: NOTIFICATION_CAP }, (_, index) =>
+      mail(new Date(Date.UTC(2026, 8, 14, 10, 0, index)).toISOString()),
+    );
+    await seed(dir, [...reminders, ...burst]);
+
+    // One more letter, and with it the write that applies the bound.
+    expect(
+      await appendNotification(mail("2026-09-14T23:00:00.000Z"), dir),
+    ).toBe(true);
+
+    const rows = await listNotifications(dir);
+    expect(rows.filter((held) => held.kind === "task-reminder").map((held) => held.id)).toEqual([
+      "reminder-3",
+      "reminder-2",
+      "reminder-1",
+    ]);
+    expect(rows.filter((held) => held.kind === "mail-new")).toHaveLength(
+      NOTIFICATION_KIND_CAP,
+    );
+    // The newest letter is the one that stayed, and the oldest went.
+    expect(rows[0].id).toBe("mail-new:2026-09-14T23:00:00.000Z");
+  });
+
+  it("refuses a row older than everything its kind's share holds, and stores nothing", async () => {
     await seed(dir, fullCentre());
     // The shape Task 2 produces: a reminder missed while the server was down,
     // written with the instant it was due rather than the instant it was found.
@@ -105,7 +155,7 @@ describe("the notification store", () => {
       false,
     );
     const rows = await listNotifications(dir);
-    expect(rows).toHaveLength(NOTIFICATION_CAP);
+    expect(rows).toHaveLength(NOTIFICATION_KIND_CAP);
     expect(rows.some((n) => n.id === "missed-yesterday")).toBe(false);
   });
 
@@ -330,13 +380,21 @@ describe("appending, or folding into what is already there", () => {
     expect(await listNotifications(dir)).toHaveLength(1);
   });
 
-  it("trims to the cap on the fold branch as well as on the append", async () => {
-    // A fold is count-preserving, so it cannot push the file past the cap on
-    // its own. A file that already holds more than the cap can: from an older
+  it("trims to the kind's share on the fold branch as well as on the append", async () => {
+    // A fold is count-preserving, so it cannot push a kind past its share on
+    // its own. A file that already holds more than the share can: from an older
     // writer, or a hand edit. Both branches trim, so which one ran is not a
-    // thing a reader has to know.
+    // thing a reader has to know. The reminders beside it are untouched either
+    // way, which is what a share per kind is for.
     const target = agent("agent-1", "2026-09-14T12:00:00.000Z", "Claude archived a thread");
-    await seed(dir, [...fullCentre(), target]);
+    const overFull = Array.from({ length: NOTIFICATION_KIND_CAP }, (_, index) =>
+      agent(
+        `agent-old-${index}`,
+        new Date(Date.UTC(2026, 8, 14, 11, 0, index)).toISOString(),
+        "Claude archived a thread",
+      ),
+    );
+    await seed(dir, [...fullCentre(), ...overFull, target]);
 
     const outcome = await appendOrFoldNotification(
       agent("agent-2", "2026-09-14T12:01:00.000Z", "Claude archived a thread"),
@@ -346,7 +404,12 @@ describe("appending, or folding into what is already there", () => {
 
     expect(outcome).toBe("folded");
     const rows = await listNotifications(dir);
-    expect(rows).toHaveLength(NOTIFICATION_CAP);
+    expect(rows.filter((held) => held.kind === "agent-action")).toHaveLength(
+      NOTIFICATION_KIND_CAP,
+    );
+    expect(rows.filter((held) => held.kind === "task-reminder")).toHaveLength(
+      NOTIFICATION_KIND_CAP,
+    );
     expect(rows[0]).toMatchObject({ id: "agent-1", title: "Claude archived 2 threads" });
   });
 

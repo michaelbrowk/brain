@@ -49,9 +49,12 @@ A row is `{ id, kind, at, title, body?, href, readAt? }`, and the kind is one of
 (`lib/notifications/model.ts`). Nothing in the shape is about a task, a letter
 or a tool call, so another kind can join later without a second store.
 
-- **Five hundred rows.** The oldest goes when the five hundred and first
-  arrives. The file is read whole on every request, and the cap is what keeps
-  that cheap.
+- **Two hundred rows of each kind**, eight hundred in all. A kind's oldest goes
+  when its two hundred and first arrives, and a kind can only ever push out its
+  own: mail opens a new row every time the last one was read, so against one
+  shared bound a few busy days of letters evicted the reminders under them. The
+  file is read whole on every request, and the four shares are what keep that
+  cheap.
 - **Read state is on the server**, so a row read on a phone is read on the
   laptop. `GET /api/notifications` answers the rows and the unread count at one
   instant, which is what keeps the count and the list from disagreeing.

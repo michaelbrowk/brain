@@ -3,6 +3,8 @@ import { mailPushTag } from "./ids";
 import { mailRowId } from "./mail-rows";
 import {
   NOTIFICATION_CAP,
+  NOTIFICATION_KINDS,
+  NOTIFICATION_KIND_CAP,
   decodeTaskNotificationId,
   notificationSchema,
   taskMissedNotificationId,
@@ -60,8 +62,12 @@ describe("the notification model", () => {
     expect(notificationSchema.safeParse({ ...base, taskId: "task-alpha" }).success).toBe(false);
   });
 
-  it("caps the centre at five hundred", () => {
-    expect(NOTIFICATION_CAP).toBe(500);
+  // Per kind, so a burst of one cannot evict another, and the file is still
+  // bounded because the whole centre is the sum of the four shares.
+  it("caps each kind at two hundred, and the centre at their sum", () => {
+    expect(NOTIFICATION_KIND_CAP).toBe(200);
+    expect(NOTIFICATION_CAP).toBe(NOTIFICATION_KIND_CAP * NOTIFICATION_KINDS.length);
+    expect(NOTIFICATION_CAP).toBe(800);
   });
 
   it("derives a reminder id from the task, the day and the clock", () => {

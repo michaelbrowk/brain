@@ -20,9 +20,23 @@ export const NOTIFICATION_KINDS = [
 ] as const;
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
 
-/** Five hundred rows, oldest dropped first. The file is read whole on every
- *  request, so the cap is what keeps it a few hundred kilobytes. */
-export const NOTIFICATION_CAP = 500;
+/** TWO HUNDRED ROWS OF EACH KIND, OLDEST OF THAT KIND DROPPED FIRST.
+ *
+ *  The bound is per kind and not over the file, because mail opens a new row
+ *  every time the last one was read: a few busy days of letters are a few
+ *  hundred rows, all newer than the reminders under them, and one shared bound
+ *  let them evict the thing that wanted the reader at 13:00. A kind can now
+ *  only ever push out its own.
+ *
+ *  The file is still read whole on every request, so it still has to stay a few
+ *  hundred kilobytes: four kinds of two hundred is what bounds it. */
+export const NOTIFICATION_KIND_CAP = 200;
+
+/** Every kind at its own bound, which is the most the file can hold. Nothing
+ *  trims to this figure — it is what trimming each kind adds up to — and the
+ *  read route's bound on how many ids one request may mark read is the same
+ *  number for the same reason: the whole centre, and no more. */
+export const NOTIFICATION_CAP = NOTIFICATION_KIND_CAP * NOTIFICATION_KINDS.length;
 
 /** An id is derived, never minted: the same reminder computed by two scans
  *  has to be one row, and the mail row carries the instant it opened. The

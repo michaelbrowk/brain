@@ -47,6 +47,11 @@ LockPersonality=true
 MemoryDenyWriteExecute=false
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# The set a service like this one needs: Node, sqlite, sockets, and the child
+# git and ripgrep processes. What it withholds is what Brain never does —
+# loading a module, mounting a filesystem, setting the clock, raw I/O, swap.
+SystemCallFilter=@system-service
+RestrictNamespaces=yes
 ReadWritePaths=/opt/brain/notes /var/lib/brain
 
 [Install]

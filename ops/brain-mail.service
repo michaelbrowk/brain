@@ -60,6 +60,11 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SocketBindDeny=any
 RemoveIPC=true
 SystemCallArchitectures=native
+# Node, sqlite, the unix socket it is handed and the IMAP connections it opens
+# are all in @system-service; mounting, module loading, raw I/O and the clock
+# are not, and this service does none of them.
+SystemCallFilter=@system-service
+RestrictNamespaces=yes
 
 [Install]
 WantedBy=multi-user.target

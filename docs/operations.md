@@ -394,8 +394,9 @@ max-age=31536000, immutable`. Every other branch keeps `private, no-store`:
 the share-scoped read, the `404`, and the `503`. What the cutover protects
 stays protected, because the unauthenticated case and anything a CDN could
 hold are still uncacheable, and because an attachment URL is immutable by
-construction. An owner upload is named by a fresh nanoid and a Notion import
-by the sha256 of its own bytes, so a name never comes to mean different bytes.
+construction. Every name the store mints is the sha256 of the bytes under it,
+and the nanoid names it minted for uploads before that were never reused, so a
+name never comes to mean different bytes.
 The cost is that an owner's own browser can keep the bytes of a cover from a
 page they have since deleted, for up to a year, and no change at the origin
 evicts it. Clearing site data in that browser is what drops it early. That

@@ -87,11 +87,10 @@ Naming the pair is what opens the reader to a notebook it used to return
 nothing from: `Latin` against `Latin` reads a Spanish-and-English notebook,
 `Cyrillic` against `Latin` reads one written the other way round.
 
-The rule is exactly this and nothing more: **the word side must carry a letter
-of the word script and the translation side a letter of the translation
-script.** Neither side has to carry only its own, and that is deliberate —
+Neither side has to carry **only** its own script, and that is deliberate:
 `Acostarse (me acuesto)` and every pair the owner glossed in their own language
-depend on it.
+depend on it. It is also why the second row of the table below is still in the
+deck.
 
 ## What this gets wrong
 

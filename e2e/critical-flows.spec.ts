@@ -6908,8 +6908,18 @@ test("a click beside a page row types on the line, not into the row", async ({
   const box = await pageRef.boundingBox();
   expect(box).not.toBeNull();
   if (!box) throw new Error("Missing page-ref geometry");
-  await page.mouse.click(box.x + box.width + 60, box.y + box.height / 2);
-  await expect(writableLine).toHaveClass(/brain-slash-hint/);
+  // The hint is drawn on the empty line the caret is in, and asking again is
+  // the bounded retry the sibling case needs for the same reason: a page still
+  // settling takes a click and leaves no caret behind.
+  await expect
+    .poll(
+      async () => {
+        await page.mouse.click(box.x + box.width + 60, box.y + box.height / 2);
+        return (await writableLine.getAttribute("class")) ?? "";
+      },
+      { timeout: 15_000 },
+    )
+    .toContain("brain-slash-hint");
 
   await page.keyboard.type("/");
   await expect(page.getByTestId("slash-menu")).toBeVisible();

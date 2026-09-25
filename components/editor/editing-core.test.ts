@@ -34,6 +34,7 @@ const schema = new Schema({
     page_ref: { atom: true, group: "inline", inline: true },
     horizontal_rule: { group: "block" },
     column: { content: "block+", group: "block" },
+    code_block: { content: "text*", group: "block", code: true },
   },
 });
 
@@ -391,7 +392,9 @@ describe("a caret handed the editor from outside", () => {
     expect(landed.textContent).toBe("after");
   });
 
-  it("takes the line before the row when nothing after it can take a key", () => {
+  it("takes the END of the line before the row when nothing after it can take a key", () => {
+    // The end, not the start: a caret answered with the first position of a
+    // line that already holds a sentence puts the next keys in front of it.
     const doc = schema.nodes.doc.create(null, [
       paragraph.create(null, schema.text("before")),
       paragraph.create(null, pageRef.create()),
@@ -402,7 +405,7 @@ describe("a caret handed the editor from outside", () => {
       base.tr.setSelection(TextSelection.create(doc, 9)),
     );
 
-    expect(writableCaretPos(onRow)).toBe(1);
+    expect(writableCaretPos(onRow)).toBe(7);
   });
 });
 
@@ -477,11 +480,76 @@ describe("a click in the blank space beside a page row", () => {
     expect(clickLandedOnUneditable(null)).toBe(false);
   });
 
-  it("moves the caret through the plugin, and lets the chip's click pass", () => {
+  it("lands at the END of a line above, and prefers an empty line to prose", () => {
+    // Two subpages under a line of prose is an everyday page. The line above is
+    // the nearer candidate, and answering a click with its FIRST position put
+    // the next keys in front of somebody's sentence.
     const doc = schema.nodes.doc.create(null, [
+      paragraph.create(null, schema.text("Before")),
+      paragraph.create(null, pageRef.create()),
       paragraph.create(null, pageRef.create()),
       paragraph.create(),
     ]);
+    const state = EditorState.create({ schema, doc });
+
+    const caret = writableCaretPosForClick(state, 9);
+    expect(caret).toBe(15);
+    expect(state.doc.resolve(caret!).parent).toBe(state.doc.lastChild);
+    expect(state.doc.resolve(caret!).parent.content.size).toBe(0);
+  });
+
+  it("takes the end of the line above when nothing else can take a key", () => {
+    const doc = schema.nodes.doc.create(null, [
+      paragraph.create(null, schema.text("before")),
+      paragraph.create(null, pageRef.create()),
+      schema.nodes.horizontal_rule.create(),
+    ]);
+    const state = EditorState.create({ schema, doc });
+
+    // "before" opens at 0 and holds six characters, so its last position is 7
+    expect(writableCaretPosForClick(state, 9)).toBe(7);
+  });
+
+  it("refuses a heading and a code block as the line beside a row", () => {
+    // A `/` answered inside a code block is a literal slash in somebody's
+    // program, and prose meant for a new line becomes part of a title.
+    const beforeCode = schema.nodes.doc.create(null, [
+      paragraph.create(null, pageRef.create()),
+      schema.nodes.code_block.create(null, schema.text("const x = 1")),
+    ]);
+    const beforeHeading = schema.nodes.doc.create(null, [
+      paragraph.create(null, pageRef.create()),
+      schema.nodes.heading.create(null, schema.text("Title")),
+    ]);
+
+    expect(
+      writableCaretPosForClick(EditorState.create({ schema, doc: beforeCode }), 1),
+    ).toBe(null);
+    expect(
+      writableCaretPosForClick(EditorState.create({ schema, doc: beforeHeading }), 1),
+    ).toBe(null);
+  });
+
+  it("takes the empty line after a list rather than the prose above it", () => {
+    // Distance is counted in top-level blocks, so a whole list is one step. The
+    // empty line after it wins over the end of the prose line above: a scroll
+    // is recoverable, a key in a sentence the reader did not click on is not.
+    const doc = schema.nodes.doc.create(null, [
+      paragraph.create(null, schema.text("prose")),
+      paragraph.create(null, pageRef.create()),
+      schema.nodes.column.create(null, [paragraph.create(null, schema.text("item"))]),
+      paragraph.create(),
+    ]);
+    const state = EditorState.create({ schema, doc });
+
+    const caret = writableCaretPosForClick(state, 8);
+    expect(state.doc.resolve(caret!).parent).toBe(state.doc.lastChild);
+  });
+
+  /** The plugin prop under test, with a view stub that keeps the state it is
+   *  handed. `event` is only ever read for its button, its modifiers and its
+   *  target, so a plain object stands in for a real MouseEvent. */
+  function clickHarness(doc: ReturnType<typeof schema.nodes.doc.create>) {
     let current = EditorState.create({ schema, doc });
     const dispatch = vi.fn((tr: ReturnType<EditorState["tr"]["setMeta"]>) => {
       current = current.apply(tr);
@@ -496,22 +564,80 @@ describe("a click in the blank space beside a page row", () => {
       .handleClick as unknown as (
       view: unknown,
       pos: number,
-      event: { target: unknown },
+      event: Record<string, unknown>,
     ) => boolean;
+    return {
+      dispatch,
+      state: () => current,
+      click: (pos: number, event: Record<string, unknown> = {}) =>
+        handleClick(view, pos, {
+          button: 0,
+          target: { closest: () => null },
+          ...event,
+        }),
+    };
+  }
 
-    expect(
-      handleClick(view, 1, { target: { closest: () => null } }),
-    ).toBe(true);
-    expect(current.selection.from).toBe(4);
-    expect(current.selection.$from.parent).toBe(current.doc.lastChild);
+  const rowThenLine = () =>
+    schema.nodes.doc.create(null, [
+      paragraph.create(null, pageRef.create()),
+      paragraph.create(),
+    ]);
+
+  it("moves the caret through the plugin, and lets the chip's click pass", () => {
+    const harness = clickHarness(rowThenLine());
+
+    expect(harness.click(1)).toBe(true);
+    expect(harness.state().selection.from).toBe(4);
+    expect(harness.state().selection.$from.parent).toBe(
+      harness.state().doc.lastChild,
+    );
 
     // The chip navigates. Its own click handler owns that, so this one keeps
     // its hands off and ProseMirror's node selection still happens.
-    dispatch.mockClear();
-    expect(
-      handleClick(view, 1, { target: { closest: () => ({}) } }),
-    ).toBe(false);
-    expect(dispatch).not.toHaveBeenCalled();
+    harness.dispatch.mockClear();
+    expect(harness.click(1, { target: { closest: () => ({}) } })).toBe(false);
+    expect(harness.dispatch).not.toHaveBeenCalled();
+  });
+
+  it("leaves every button but the left one, and every modifier, alone", () => {
+    // ProseMirror runs handleClick for any button, and the context menu only
+    // flushes the DOM, so a right-click here used to move the caret before the
+    // menu opened. A modifier belongs to the gesture it names: Cmd-click is
+    // ProseMirror's own node select.
+    for (const event of [
+      { button: 2 },
+      { button: 1 },
+      { metaKey: true },
+      { ctrlKey: true },
+      { shiftKey: true },
+      { altKey: true },
+    ]) {
+      const harness = clickHarness(rowThenLine());
+      expect(harness.click(1, event)).toBe(false);
+      expect(harness.dispatch).not.toHaveBeenCalled();
+    }
+  });
+
+  it("reads the click's own position, not wherever the caret was parked", () => {
+    // The caret sits on a row and the reader clicks a line of prose. The
+    // position that decides this is the one they clicked, so the handler stands
+    // aside and ProseMirror places the caret where the pointer went.
+    const doc = schema.nodes.doc.create(null, [
+      paragraph.create(null, schema.text("prose")),
+      paragraph.create(null, pageRef.create()),
+      paragraph.create(),
+    ]);
+    const harness = clickHarness(doc);
+    const parked = harness.state();
+    harness.dispatch(
+      parked.tr.setSelection(TextSelection.create(parked.doc, 8)),
+    );
+    harness.dispatch.mockClear();
+    expect(harness.state().selection.$from.parent.firstChild?.type).toBe(pageRef);
+
+    expect(harness.click(3)).toBe(false);
+    expect(harness.dispatch).not.toHaveBeenCalled();
   });
 });
 

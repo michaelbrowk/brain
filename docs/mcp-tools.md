@@ -4,6 +4,16 @@ Every tool Brain registers on `/api/mcp`, the scope it is declared against,
 what it takes, what it answers and what it turns down. Connecting and
 authorizing is `docs/mcp-oauth.md`.
 
+The endpoint needs `BRAIN_PUBLIC_ORIGIN` set to the exact origin the browser
+shows. An https origin is the ordinary case. Plain `http` is accepted only when
+the host is the owner's own network — loopback, a private or link-local address,
+or a name ending in `.local`, `.lan`, `.home.arpa` or `.internal` — so a house
+install on `http://brain.lan` or `http://192.168.1.10:3000` has MCP without a
+TLS terminator in front of it. Brain logs one warning when it starts serving
+such an origin, and it is worth reading: the bearer tokens cross that network in
+the clear, and anything else on it can read them. Every other `http` origin,
+including a public name like `http://brain.example.com`, is refused.
+
 Two rules hold for every row. An answer is JSON in one text block, so a client
 parses `content[0].text` and nothing else. A refusal Brain decided on is an
 `{ error, reason }` object with `isError` set, not a transport error, so the

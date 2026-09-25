@@ -199,13 +199,16 @@ The login limit exists at the edge and in the application for one reason. Brain
 spends its comparison budget before bcrypt, and with no trusted client address
 that budget was one bucket for the whole internet: a stranger sending wrong
 passwords at the cap kept the owner out for as long as they cared to keep
-sending. A request that carries `brain_device` is now counted against a bucket of
-its own, five a minute. That cookie is 32 random bytes and their HMAC, HttpOnly,
-one year, set and refreshed by every successful login — it holds no identity, no
-session and no reference to anything on disk, it authorizes nothing, and a
-stranger cannot have one, because only a login that already succeeded sets it. A
-missing or forged cookie is counted against the shared bucket, ten in thirty
-seconds.
+sending. A request that carries `brain_device` now spends a budget of its own
+first, five a minute, and falls through to the shared bucket when that one is
+spent — the cookie adds a budget, it never replaces one, so a browser carrying it
+can never end up with less than a browser that carries none. That cookie is 32
+random bytes and their HMAC, HttpOnly, one year, set and refreshed by every
+successful login — it holds no identity, no session and no reference to anything
+on disk, it authorizes nothing, and a stranger cannot have one, because only a
+login that already succeeded sets it. A missing or forged cookie goes straight to
+the shared bucket, ten in thirty seconds, and a request is refused only when every
+budget it can reach is spent.
 
 The share gate keys the same way, per page, and one residual is left standing
 there on purpose. Five comparisons a minute per page is five a minute for all of

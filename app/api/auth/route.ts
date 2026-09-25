@@ -22,11 +22,17 @@ export const dynamic = "force-dynamic";
 // not get to skip the cap — otherwise the route is an unlimited password oracle
 // and a bcrypt CPU DoS.
 //
-// Two buckets, because one was a weapon. Every request that arrives without a
-// device cookie this installation signed counts against the shared key below,
-// and a stranger who exhausts it used to lock the owner out with it. A request
-// that carries one counts against a key of its own, which a stranger cannot
-// reach: a cookie exists on a browser because a login there already succeeded.
+// Two buckets, because one was a weapon. Every request counts against the shared
+// key below, and a stranger who exhausts it used to lock the owner out with it. A
+// request carrying a device cookie this installation signed gets a budget of its
+// own FIRST, which a stranger cannot reach: such a cookie exists on a browser
+// because a login there already succeeded.
+//
+// The device budget is spent before the shared one and falls through to it, never
+// instead of it. Keying on the cookie alone left a browser whose own five were
+// spent — or whose cookie somebody had copied and spent for it — with less than a
+// browser carrying no cookie at all, which is backwards for the one thing the
+// cookie exists to protect.
 const SHARED_KEY = "human-login";
 const sharedLimiter = new FixedWindowRateLimiter({
   limit: 10,
@@ -43,6 +49,28 @@ const deviceLimiter = new FixedWindowRateLimiter({
   evictOldest: true,
 });
 
+interface SpentBudget {
+  /** The limiter and key a comparison was charged to, so a success can clear it. */
+  readonly limiter: FixedWindowRateLimiter;
+  readonly key: string;
+}
+
+/** Charge this request's comparison to the device's own budget if it has one and
+ *  there is any left, and to the shared budget otherwise. Null is a refusal, and
+ *  only both of them saying no is a refusal; its number is the sooner of the two
+ *  windows, which is the first moment a budget exists again. */
+function chargeComparison(device: string | null): SpentBudget | { retryAfterSeconds: number } {
+  let soonest = Infinity;
+  if (device) {
+    const attempt = deviceLimiter.consume(device);
+    if (attempt.allowed) return { limiter: deviceLimiter, key: device };
+    soonest = attempt.retryAfterSeconds;
+  }
+  const shared = sharedLimiter.consume(SHARED_KEY);
+  if (shared.allowed) return { limiter: sharedLimiter, key: SHARED_KEY };
+  return { retryAfterSeconds: Math.min(soonest, shared.retryAfterSeconds) };
+}
+
 export async function POST(req: NextRequest) {
   let password: unknown;
   try {
@@ -56,19 +84,17 @@ export async function POST(req: NextRequest) {
   const hash = process.env.AUTH_PASSWORD_HASH;
   if (!hash) return NextResponse.json({ error: "auth not configured" }, { status: 500 });
 
-  // Consume before bcrypt. Once the window is exhausted, no supplied password
-  // (including a correct one) reaches the expensive verifier.
+  // Charge before bcrypt. Once every budget this request can reach is spent, no
+  // supplied password (including a correct one) reaches the expensive verifier.
   const presented = req.cookies.get(DEVICE_COOKIE)?.value;
   const device = deviceBucketKey(presented);
-  const limiter = device ? deviceLimiter : sharedLimiter;
-  const key = device ?? SHARED_KEY;
-  const attempt = limiter.consume(key);
-  if (!attempt.allowed) {
+  const charged = chargeComparison(device);
+  if (!("limiter" in charged)) {
     return NextResponse.json(
       { error: "too many attempts" },
       {
         status: 429,
-        headers: { "Retry-After": String(attempt.retryAfterSeconds) },
+        headers: { "Retry-After": String(charged.retryAfterSeconds) },
       },
     );
   }
@@ -78,7 +104,10 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "wrong password" }, { status: 401 });
   }
 
-  limiter.reset(key);
+  // The password was right, so every bucket this browser could have been counted
+  // in is cleared, not only the one that paid for this comparison.
+  charged.limiter.reset(charged.key);
+  if (device) deviceLimiter.reset(device);
   const res = NextResponse.json({ ok: true });
   res.cookies.set(SESSION_COOKIE, await createSession(), {
     httpOnly: true,

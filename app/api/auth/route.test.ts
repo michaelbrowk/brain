@@ -86,16 +86,65 @@ describe("login rate limiting", () => {
         status: 401,
       });
     }
-    await expect(POST(rightGuess(device))).resolves.toMatchObject({
-      status: 429,
-    });
 
-    // The shared bucket never saw any of it, and neither did a second device.
-    await expect(POST(wrongGuess())).resolves.toMatchObject({ status: 401 });
+    // The shared bucket never saw any of those five: all ten of its own still
+    // reach bcrypt, and only the eleventh is refused.
+    for (let index = 0; index < 10; index += 1) {
+      await expect(POST(wrongGuess())).resolves.toMatchObject({ status: 401 });
+    }
+    await expect(POST(wrongGuess())).resolves.toMatchObject({ status: 429 });
+
+    // A second device is untouched by either of them.
     const other = `${DEVICE_COOKIE}=${createDeviceCookie()}`;
     await expect(POST(rightGuess(other))).resolves.toMatchObject({
       status: 200,
     });
+  });
+
+  /** The device bucket ADDS a budget, it does not replace one. Keying on the
+   *  cookie alone left a browser whose own five were spent — or whose cookie a
+   *  stranger had copied and spent for it — with less than a browser carrying no
+   *  cookie at all, which is the wrong way round for the one thing the cookie
+   *  exists to protect. */
+  it("falls through to the shared bucket when the device's own is spent", async () => {
+    await configure();
+    const { POST } = await import("./route");
+    const { createDeviceCookie, DEVICE_COOKIE } = await import(
+      "@/lib/device-cookie"
+    );
+    const device = `${DEVICE_COOKIE}=${createDeviceCookie()}`;
+
+    for (let index = 0; index < 5; index += 1) {
+      await expect(POST(wrongGuess(device))).resolves.toMatchObject({
+        status: 401,
+      });
+    }
+    await expect(POST(rightGuess(device))).resolves.toMatchObject({
+      status: 200,
+    });
+  });
+
+  it("refuses only when both the device's bucket and the shared one are spent", async () => {
+    await configure();
+    const { POST } = await import("./route");
+    const { createDeviceCookie, DEVICE_COOKIE } = await import(
+      "@/lib/device-cookie"
+    );
+    const device = `${DEVICE_COOKIE}=${createDeviceCookie()}`;
+
+    for (let index = 0; index < 5; index += 1) {
+      await expect(POST(wrongGuess(device))).resolves.toMatchObject({
+        status: 401,
+      });
+    }
+    for (let index = 0; index < 10; index += 1) {
+      await expect(POST(wrongGuess())).resolves.toMatchObject({ status: 401 });
+    }
+
+    const refused = await POST(rightGuess(device));
+    expect(refused.status).toBe(429);
+    // The sooner of the two windows: the first moment any budget exists again.
+    expect(Number(refused.headers.get("Retry-After"))).toBeLessThanOrEqual(30);
   });
 
   it("counts a forged device cookie against the shared bucket", async () => {

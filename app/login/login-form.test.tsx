@@ -9,6 +9,8 @@
 
 import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MotionRender } from "@/test/framer-motion-mock";
 
@@ -136,6 +138,46 @@ describe("the sign-in screen", () => {
     // and the attribute every password manager fills through. Nothing else
     // on this screen notices if it goes, so it is pinned where it is read.
     expect(field().getAttribute("autocomplete")).toBe("current-password");
+  });
+
+  /** THE RING THE FIELD WEARS WHEN THE CARET IS IN IT.
+   *
+   *  The launch audit read this ring as the browser's own default blue. It
+   *  is not, in either theme: the input sits inside the `Field` atom, whose
+   *  `:focus-within` paints `--blue` at 1.5px and whose input has the UA
+   *  outline turned off, and the global rule turns the keyboard ring off for
+   *  text inputs because the caret already says where focus is. What keeps
+   *  that true is only that this screen uses the atom rather than a bare
+   *  input, which is what this case is for: a gate built out of bare inputs
+   *  would look right until the caret arrived in one.
+   */
+  it("wears the field atom's own focus ring, never the browser's outline", async () => {
+    vi.stubGlobal("fetch", vi.fn());
+    await act(async () => root.render(<LoginForm version="0.15.0" />));
+
+    const label = field().closest("label") as HTMLElement;
+    expect(label.className).toContain("field");
+    // Paper, not glass: this screen has no material for a fill to sit on.
+    expect(label.className).not.toContain("field-glass");
+    // And nothing of its own inline, so the ladder is the atom's in both
+    // themes rather than a colour written here.
+    expect(field().getAttribute("style")).toBeNull();
+
+    const css = readFileSync(
+      path.join(process.cwd(), "app", "globals.css"),
+      "utf8",
+    );
+    const rule = (selector: string) => {
+      const start = css.indexOf(`${selector},`);
+      expect(start, `${selector} is not in globals.css`).toBeGreaterThan(-1);
+      return css.slice(start, css.indexOf("}", start));
+    };
+    expect(rule(".field:focus-within")).toContain(
+      "box-shadow: 0 0 0 1.5px var(--blue)",
+    );
+    expect(css.slice(css.indexOf(".field > input {"))).toMatch(
+      /^\.field > input \{[^}]*outline: none/,
+    );
   });
 
   it("asks the server the one question it answers", async () => {

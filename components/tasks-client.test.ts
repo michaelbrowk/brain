@@ -92,8 +92,12 @@ describe("a load in flight against an optimistic insert", () => {
   let host: HTMLDivElement;
   let root: Root;
 
-  function Reader() {
-    useTasks(0);
+  /** The shell's own reader. `token` is its count of task events this tab did
+   *  not write, which is how a remote write reaches the set: MCP creates a
+   *  task, the SSE event bumps the token, and the load for that bump is the
+   *  only thing that fetches the new row. */
+  function Reader({ token = 0 }: { token?: number }) {
+    useTasks(token);
     return null;
   }
 
@@ -154,30 +158,68 @@ describe("a load in flight against an optimistic insert", () => {
     stop();
   });
 
-  // THE KEY GOES WITH THE ANSWER THAT WAS DROPPED.
+  // A DROPPED ANSWER IS ASKED FOR AGAIN, AND NOTHING ELSE WILL ASK.
   //
-  // A load records the day, the offset and the token it asked under, and a
-  // later load on the same three is skipped as a repeat of it — which is what
-  // makes two subscribers one request. An answer that was dropped never
-  // arrived, so the key it was asked under has to go with it, or the surface
-  // remounting on the same token asks nothing and the reader is left with the
-  // optimistic set for ever.
-  it("is askable again on the same token after an answer it dropped", async () => {
-    await act(async () => root.render(createElement(Reader)));
+  // Dropping the answer and stopping loses whatever that request was fetching.
+  // The token has not moved, the day has not changed, and `error` is null, so
+  // the surface shows no Try again: the reader waits for another remote event,
+  // for midnight or for a remount. The load re-asks itself instead, and the key
+  // it was asked under goes with the answer that never arrived, or the re-ask
+  // would be skipped as a repeat of it.
+  //
+  // Bounded: every round re-reads the write count, so it converges unless a
+  // gesture lands inside every one of them.
+  /** A mounted reader with its first list in hand, and then the token bump a
+   *  remote write arrives as. The load for that bump is the request under test:
+   *  it is the only thing fetching the row MCP just created. */
+  async function bumpedByARemoteWrite() {
+    await act(async () => root.render(createElement(Reader, { token: 0 })));
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
-    mutateTasks((tasks) => [task("fresh", "Buy bread"), ...tasks]);
     answer({ tasks: [] });
     await settled();
-
-    // The surface goes and comes back on the same refresh token and the same
-    // day: the only reason to ask again is the answer that was not taken.
-    await act(async () => root.render(null));
-    await act(async () => root.render(createElement(Reader)));
+    await act(async () => root.render(createElement(Reader, { token: 1 })));
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
-    answer({ tasks: [task("fresh", "Buy bread"), task("older", "Water the plants")] });
+  }
+
+  it("re-asks after a local tick swallowed a remote task's load", async () => {
+    await bumpedByARemoteWrite();
+
+    // The reader ticks a row of their own while that request is out.
+    mutateTasks((tasks) => [task("mine", "Buy bread"), ...tasks]);
+
+    // The answer is older than the tick, so it is dropped — and with it, for
+    // as long as nothing re-asks, the task MCP created.
+    answer({ tasks: [task("from-mcp", "Read the brief")] });
     await settled();
-    expect(liveTask("older")?.title).toBe("Water the plants");
-    expect(liveTask("fresh")?.title).toBe("Buy bread");
+    expect(liveTask("from-mcp")).toBeUndefined();
+
+    // The re-ask is the only thing that can bring it in.
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    answer({ tasks: [task("from-mcp", "Read the brief"), task("mine", "Buy bread")] });
+    await settled();
+    expect(liveTask("from-mcp")?.title).toBe("Read the brief");
+    expect(liveTask("mine")?.title).toBe("Buy bread");
+  });
+
+  // A write that was REFUSED moves the count twice — the optimistic row, then
+  // the revert — and calls no reload of its own. So a load out at that moment
+  // is discarded although the set it answers for is the set in hand, and only
+  // the re-ask brings the records back.
+  it("re-asks when a write went out and came back refused", async () => {
+    await bumpedByARemoteWrite();
+
+    mutateTasks((tasks) => [task("mine", "Buy bread"), ...tasks]);
+    mutateTasks((tasks) => tasks.filter((held) => held.id !== "mine"));
+
+    answer({ tasks: [task("from-mcp", "Read the brief")] });
+    await settled();
+    expect(liveTask("from-mcp")).toBeUndefined();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    answer({ tasks: [task("from-mcp", "Read the brief")] });
+    await settled();
+    expect(liveTask("from-mcp")?.title).toBe("Read the brief");
+    expect(liveTask("mine")).toBeUndefined();
   });
 });
 

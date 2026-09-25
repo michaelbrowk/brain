@@ -156,11 +156,24 @@ async function load(token: number): Promise<void> {
     if (controller.signal.aborted) return;
     if (writes !== writesBefore) {
       // A write landed while this was out, so this answer is the older of the
-      // two and the records in hand stay. The key goes, because the set is no
-      // longer the one this load was asked for and the next ask must not be
-      // skipped as a repeat of it.
+      // two and the records in hand stay. The key goes with it, because the set
+      // is no longer the one this load was asked for and the ask below must not
+      // be skipped as a repeat of it.
+      //
+      // AND IT IS ASKED AGAIN, here, because nothing else will. Whatever this
+      // request was fetching is not in the set: a task an agent created reaches
+      // this tab only through the token bump that started this load, and that
+      // token has not moved, the day has not changed, and no error was recorded,
+      // so the surface offers no Try again either. Dropping the answer and
+      // stopping loses the row until the next remote event, midnight or a
+      // remount.
+      //
+      // Bounded: every round reads the write count afresh, so it converges
+      // unless a gesture lands inside every one of them — and a gesture landing
+      // is itself a reason to ask again.
       loadedKey = null;
       set({ loading: false, error: null });
+      queueMicrotask(() => void load(token));
       return;
     }
     set({ tasks: body.tasks ?? EMPTY, loading: false, error: null });

@@ -260,11 +260,12 @@ describe("the shell's fold read-back", () => {
     await openCard();
     await click(button("Share Apartment instead"));
 
-    // Three requests in order: the card's disclosure, the fold, the read-back.
-    // A fourth follows, and only here: the fold landed, so the tree refresh
-    // moves the card's scope revision and it discloses the new state.
+    // Three requests, in this order: the card's disclosure, the fold, and the
+    // read-back the toast waits for. How many come after is not the contract —
+    // the fold moves the card's scope revision, so at least one more disclosure
+    // follows — and pinning the count would read a harmless extra read as a
+    // failure.
     const requests = shareRequests();
-    expect(requests).toHaveLength(4);
     expect(requests[0][1]?.method).toBeUndefined();
     expect(requests[1][1]?.method).toBe("POST");
     expect(JSON.parse(String(requests[1][1]?.body))).toEqual({

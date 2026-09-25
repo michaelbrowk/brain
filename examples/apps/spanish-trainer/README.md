@@ -56,7 +56,6 @@ node examples/apps/spanish-trainer/build.mjs
   question.
 - A line ending in a full stop is held to a shorter length before it counts as
   a pair, so `adios — пока.` is a word and `I am learning - slowly.` is not.
-  A long phrase with a full stop after it is the case this gets wrong.
 
 ## What counts as a word
 
@@ -87,6 +86,29 @@ word side is offered no such choice, because two sides that each meant
 Naming the pair is what opens the reader to a notebook it used to return
 nothing from: `Latin` against `Latin` reads a Spanish-and-English notebook,
 `Cyrillic` against `Latin` reads one written the other way round.
+
+The rule is exactly this and nothing more: **the word side must carry a letter
+of the word script and the translation side a letter of the translation
+script.** Neither side has to carry only its own, and that is deliberate —
+`Acostarse (me acuesto)` and every pair the owner glossed in their own language
+depend on it.
+
+## What this gets wrong
+
+Three misreads are known and measured, and each one is a row in
+`vocabulary.test.ts` rather than a rule waiting to be written.
+
+| The row | What happens | Why it is left alone |
+| --- | --- | --- |
+| a long phrase with a full stop after it | dropped, because the stop holds the line to the shorter length | the guard is what keeps `I am learning - slowly.` out, and a phrase that long is rarer than a sentence with a dash in it |
+| `tú (твой)` against `tu (без акцента!)` | drilled as a word, though it is a row out of a possessives table | both sides carry both scripts, so the pair of scripts cannot separate them. Asking the translation side to carry only its own script would cost every glossed pair |
+| `1-е` against `-ar`, with the pair reversed to `Cyrillic` against `Latin` | drilled as a word, though it is a numbering column | a numbering column in a Russian notebook is the same two scripts a vocabulary row is. The reader is told which scripts, not which tables |
+
+A row the trainer got wrong is a row the owner can correct on the `Words` page,
+and the correction survives, because the app merges that page rather than
+replacing it. Deleting the row does not keep the word away: it is still on its
+source page, and the next reload finds it again as new. Marking it Easy is what
+takes a word out of the rotation for good.
 
 ## How the e2e seeds it
 

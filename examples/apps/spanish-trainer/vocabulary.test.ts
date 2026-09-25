@@ -175,6 +175,15 @@ describe("a page the owner wrote rather than one this file invented", () => {
     expect(extractVocabulary(md)).toEqual([
       { word: "tú (твой)", translation: "tu (без акцента!)" },
     ]);
+    // NAMING THE TWO SCRIPTS DOES NOT REACH IT EITHER, and the rule is why:
+    // the word side must carry the word script and the translation side the
+    // translation script, and this row carries both scripts on both sides. A
+    // rule that asked for the translation side to carry ONLY its own script
+    // would cost `Acostarse (me acuesto)` and every pair the owner glossed in
+    // their own language. The README lists this row instead.
+    expect(extractVocabulary(md, { wordScript: "Latin", translationScript: "Cyrillic" })).toEqual([
+      { word: "tú (твой)", translation: "tu (без акцента!)" },
+    ]);
   });
 });
 

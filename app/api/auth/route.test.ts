@@ -176,6 +176,55 @@ describe("login rate limiting", () => {
     ).resolves.toMatchObject({ status: 200 });
   });
 
+  /** The device map is bounded, and what it does when it is full is the whole
+   *  question: refusing a key it has no room for would hand the newest device a
+   *  lockout, which is what the shared bucket's own refusal is there to avoid
+   *  handing anyone. It evicts the oldest window instead — the one with the least
+   *  of itself left to spend. */
+  it("holds a thousand devices, then evicts the oldest rather than refusing the newest", async () => {
+    await configure();
+    // A real comparison per request would be a thousand bcrypt hashes for one
+    // assertion about a Map.
+    const compare = vi
+      .spyOn(bcrypt, "compare")
+      .mockImplementation(async (password) => password === "correct horse");
+    const { POST } = await import("./route");
+    const { createDeviceCookie, DEVICE_COOKIE } = await import(
+      "@/lib/device-cookie"
+    );
+    const cookie = () => `${DEVICE_COOKIE}=${createDeviceCookie()}`;
+
+    const first = cookie();
+    await expect(POST(wrongGuess(first))).resolves.toMatchObject({ status: 401 });
+    for (let index = 1; index < 1_024; index += 1) {
+      await expect(POST(wrongGuess(cookie()))).resolves.toMatchObject({
+        status: 401,
+      });
+    }
+
+    // With the shared bucket spent as well, a denial is a denial: nothing is left
+    // to fall through to.
+    for (let index = 0; index < 10; index += 1) {
+      await expect(POST(wrongGuess())).resolves.toMatchObject({ status: 401 });
+    }
+
+    // The first device's own window survived a thousand later ones, so its four
+    // remaining comparisons are still its own and the fifth is refused. An
+    // eviction that came early would have given it a fresh window instead.
+    for (let index = 0; index < 4; index += 1) {
+      await expect(POST(wrongGuess(first))).resolves.toMatchObject({
+        status: 401,
+      });
+    }
+    await expect(POST(rightGuess(first))).resolves.toMatchObject({ status: 429 });
+
+    // And the device that arrives to a full map is admitted, not refused.
+    await expect(POST(rightGuess(cookie()))).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(compare).toHaveBeenCalledTimes(1_024 + 10 + 4 + 1);
+  });
+
   /** Before this gate, a page a visitor happened to open could POST a form with
    *  `enctype="text/plain"` to somebody's Brain and drain the shared budget from
    *  their browser, burning a bcrypt comparison per request on the way. No script

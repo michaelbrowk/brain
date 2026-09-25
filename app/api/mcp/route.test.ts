@@ -261,6 +261,34 @@ describe("Notion MCP route validation", () => {
     await fs.rm(centreRoot, { recursive: true, force: true });
   });
 
+  it("refuses a request body over the endpoint's cap before it is parsed", async () => {
+    // The endpoint had no limit of its own: `requiredToolScopes` parsed
+    // whatever arrived so it could pre-gate the batch, and the handler parsed
+    // it again, so a body of any size was read into memory twice before a
+    // single tool was asked anything. Sixteen mebibytes is the ceiling, and it
+    // is answered as HTTP rather than as a tool refusal, because a request of
+    // this shape never reached a tool and the model cannot fix it by reading a
+    // sentence.
+    const oversize = "a".repeat(17 * 1024 * 1024);
+    const response = await POST(
+      new Request("https://brain.example.test/api/mcp", {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: "Bearer test-machine-token",
+          "content-type": "application/json",
+        },
+        body: `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"write_page","arguments":{"id":"p1","markdown":"${oversize}"}}}`,
+      }),
+    );
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({
+      reason: "too_large",
+    });
+    expect(mocks.getStore).not.toHaveBeenCalled();
+    expect(mocks.verifyMcpBearerToken).not.toHaveBeenCalled();
+  });
+
   it("blocks write tools for a read-only OAuth connection before Store access", async () => {
     const response = await POST(
       new Request("https://brain.example.test/api/mcp", {

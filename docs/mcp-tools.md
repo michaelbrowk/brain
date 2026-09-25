@@ -22,8 +22,16 @@ write implies read, and mail never implies write.
 
 ## What an agent should know
 
-Five rules no single row states.
+Rules no single row states.
 
+- **The largest request this endpoint accepts is 16 MiB.** The whole body, so a
+  batch is measured whole and an app's base64 assets count towards it at their
+  encoded length. Over it the answer is HTTP `413` with
+  `{ error, reason: "too_large" }` and no tool is called at all — there is no
+  tool result, so there is no `isError` envelope to read it out of. Every tool's
+  own cap sits well under it: an app entry is 2 MiB and its asset set 10 MiB,
+  and both are measured before the base64 is decoded, so an oversized build
+  costs one round trip rather than the memory it claimed.
 - **A refusal is an answer, not an error.** Read it and do not retry a
   permanent one. Every tool but the `notion_*` family answers the same two
   fields: `error` is the sentence and `reason` is what names the cause, which
@@ -201,6 +209,12 @@ no kit), `hard_coded_colour` (a colour written out rather than read from a
 `var(…)` token) and `external_resource` (an `@import` or a `src` / `href` /
 `url()` reaching another origin, which the frame's policy blocks silently).
 Nothing is created or replaced when the lint refuses.
+
+The three caps are an entry of 2 MiB, an asset set of 10 MiB and a state of
+256 KiB, and all three answer `too_large` with the same sentence. The entry and the asset set are measured on what was sent rather than
+on what it decodes to — base64 says how many bytes it carries without being
+decoded — so a build over either one is refused before a single asset is
+materialised.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |

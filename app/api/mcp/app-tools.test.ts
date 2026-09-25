@@ -342,6 +342,82 @@ describe("create_app_page", () => {
     });
   });
 
+  describe("a request too large to decode", () => {
+    // The store measures the set it is handed, so every asset was already a
+    // Buffer by the time it said no: a hundred-megabyte request allocated a
+    // hundred megabytes to be told ninety were too many. Base64 says how many
+    // bytes it carries without being decoded, so the same refusal is available
+    // for the price of a string length, and it has to be the same sentence —
+    // an agent must not be able to tell the two checks apart.
+    const overAssets = "A".repeat(4 * (3 * 1024 * 1024 + 1));
+    const overEntry = "x".repeat(2 * 1024 * 1024 + 1);
+
+    it("refuses an asset set over the cap without decoding it", async () => {
+      const answer = await call("create_app_page", {
+        parentId: null,
+        title: "T",
+        description: "d",
+        entryHtml: ENTRY,
+        assets: [
+          { name: "a/one.png", base64: overAssets },
+          { name: "a/two.png", base64: overAssets },
+          { name: "a/three.png", base64: overAssets },
+          { name: "a/four.png", base64: overAssets },
+        ],
+        reason: "r",
+      });
+      expect(answer.isError).toBe(true);
+      expect(answer.body).toEqual({
+        error: "that app's assets is over the size Brain keeps for one",
+        reason: "too_large",
+      });
+      expect(createAppPage).not.toHaveBeenCalled();
+    });
+
+    it("refuses an entry over the cap before the lint reads it", async () => {
+      const answer = await call("create_app_page", {
+        parentId: null,
+        title: "T",
+        description: "d",
+        entryHtml: overEntry,
+        reason: "r",
+      });
+      expect(answer.body).toEqual({
+        error: "that app's entry is over the size Brain keeps for one",
+        reason: "too_large",
+      });
+      expect(createAppPage).not.toHaveBeenCalled();
+    });
+
+    it("answers the store's own sentence for the same measurement", async () => {
+      const { AppSizeError } = await import("@/lib/store/types");
+      createAppPage.mockRejectedValue(new AppSizeError("assets"));
+      const answer = await call("create_app_page", {
+        parentId: null,
+        title: "T",
+        description: "d",
+        entryHtml: ENTRY,
+        assets: [{ name: "a/one.png", base64: "AAEC" }],
+        reason: "r",
+      });
+      expect(answer.body).toEqual({
+        error: "that app's assets is over the size Brain keeps for one",
+        reason: "too_large",
+      });
+    });
+
+    it("refuses on the rebuild path too, before the store is asked", async () => {
+      const answer = await call("write_app_page", {
+        id: "app1",
+        rev: "r1",
+        entryHtml: overEntry,
+      });
+      expect(answer.body).toMatchObject({ reason: "too_large" });
+      expect(writeAppFiles).not.toHaveBeenCalled();
+      expect(readAppMeta).not.toHaveBeenCalled();
+    });
+  });
+
   it("refuses a grant with no write scope", async () => {
     const answer = await call(
       "create_app_page",

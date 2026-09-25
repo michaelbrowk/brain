@@ -93,6 +93,14 @@ describe("the share gate", () => {
     expect(container.textContent).not.toContain("shared-page");
     expect(field().placeholder).toBe("Password");
     expect(submit().textContent).toContain("Open");
+    expect(field().getAttribute("autocomplete")).toBe("current-password");
+    // A stray submit costs more on this door than on the owner's: five of
+    // them in a minute lock the page for every visitor, so the glyph that
+    // shows what was typed must not be one.
+    const eye = container.querySelector(
+      'button[aria-label="Show password"]',
+    ) as HTMLButtonElement;
+    expect(eye.type).toBe("button");
   });
 
   it.each([

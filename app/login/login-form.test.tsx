@@ -133,6 +133,24 @@ describe("the sign-in screen", () => {
     // the placeholder the release e2e's login helper reaches the field by
     expect(field().placeholder).toBe("Password");
     expect(submit().textContent).toContain("Sign in");
+    // and the attribute every password manager fills through. Nothing else
+    // on this screen notices if it goes, so it is pinned where it is read.
+    expect(field().getAttribute("autocomplete")).toBe("current-password");
+  });
+
+  it("asks the server the one question it answers", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response(401));
+    vi.stubGlobal("fetch", fetchMock);
+    await act(async () => root.render(<LoginForm version={null} />));
+    await attempt("a-password");
+
+    // The release e2e is the only other guard on this call, and this is the
+    // one screen a wrong body cannot be hot-fixed from inside the app.
+    expect(fetchMock).toHaveBeenCalledWith("/api/auth", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "a-password" }),
+    });
   });
 
   it("says nothing at the foot when the running release is unknown", async () => {
@@ -221,6 +239,10 @@ describe("the sign-in screen", () => {
     vi.stubGlobal("fetch", vi.fn());
     await act(async () => root.render(<LoginForm version={null} />));
 
+    // Inside a form a button with no type submits it, so "let me check what
+    // I typed" would spend one of the five tries a minute the rate limiter
+    // allows, and on a share it would lock the page for everyone.
+    expect(eye().type).toBe("button");
     expect(field().type).toBe("password");
     expect(eye().getAttribute("aria-pressed")).toBe("false");
     await act(async () => eye().click());

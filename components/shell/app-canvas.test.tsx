@@ -233,6 +233,63 @@ describe("the app canvas", () => {
     expect(shell.className).toContain("brain-app-canvas");
   });
 
+  /** WHAT STANDS WHERE THE APP WILL BE WHILE IT IS STILL ARRIVING.
+   *
+   *  A frame mounts with an empty document, and on a cold load the seconds
+   *  before the app paints were bare paper under the head: a page that had
+   *  finished loading with nothing on it, which is a different sentence from
+   *  a page that is still loading. Until `load` the canvas carries the fill
+   *  this app puts wherever work is in progress. The fill is static, so
+   *  reduced motion is shown the same thing and there is nothing to flatten.
+   */
+  it("holds the frame's place until its document has painted", async () => {
+    const mounted = await renderReady();
+    const canvas = mounted.querySelector("[data-app-canvas]") as HTMLElement;
+    expect(canvas.className).toContain("brain-app-canvas_loading");
+
+    const frame = mounted.querySelector("iframe") as HTMLIFrameElement;
+    await act(async () => {
+      frame.dispatchEvent(new Event("load"));
+    });
+    expect(canvas.className).not.toContain("brain-app-canvas_loading");
+  });
+
+  it("waits again when a remint hands the frame a new address", async () => {
+    // A new address is a new token, so the frame reloads and the wait for the
+    // second document is the same wait as the first.
+    vi.useFakeTimers();
+    try {
+      fetchMock.mockResolvedValue(minted(FRAME_SRC, 600));
+      const mounted = render();
+      await settle();
+      const canvas = mounted.querySelector("[data-app-canvas]") as HTMLElement;
+      await act(async () => {
+        (mounted.querySelector("iframe") as HTMLIFrameElement).dispatchEvent(
+          new Event("load"),
+        );
+      });
+      expect(canvas.className).not.toContain("brain-app-canvas_loading");
+
+      fetchMock.mockResolvedValue(minted("/api/app/app1/t/second.token/index.html", 600));
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync((600 - 300) * 1000);
+      });
+      expect(canvas.className).toContain("brain-app-canvas_loading");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("holds nothing when there is no frame to wait for", async () => {
+    // The missing-files state draws a sentence, not a frame. Nothing is on
+    // its way, so nothing says it is.
+    fetchMock.mockResolvedValue({ ok: false, status: 404 } as Response);
+    const canvas = (await renderReady()).querySelector(
+      "[data-app-canvas]",
+    ) as HTMLElement;
+    expect(canvas.className).not.toContain("brain-app-canvas_loading");
+  });
+
   it("answers a read the frame asks for", async () => {
     const frame = (await renderReady()).querySelector("iframe") as HTMLIFrameElement;
     const posted: unknown[] = [];

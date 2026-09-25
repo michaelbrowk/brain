@@ -1726,6 +1726,17 @@ html[data-kbd] [contenteditable]:focus-visible {
   border: 0;
   background: var(--paper);
 }
+/* WHILE THE APP IS STILL ARRIVING. A frame mounts with an empty document,
+   and on a cold load the seconds before the app paints were paper the width
+   of the canvas: a page that finished loading with nothing on it, which is a
+   different sentence from a page still loading. So the frame's own ground is
+   `--skeleton-fill` until its `load`, which is what this app already puts
+   wherever work is in progress, and the paper again once the document is
+   there to cover it. One static fill and no animation, so reduced motion is
+   shown the same thing. */
+.brain-app-canvas_loading > .brain-app-frame {
+  background: var(--skeleton-fill);
+}
 
 /* Smart sort's heap, and the band that reads it. One layer for the whole
    pile rather than sixty-one animations: the pages are being read in the

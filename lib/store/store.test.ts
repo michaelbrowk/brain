@@ -8757,6 +8757,50 @@ describe("Store", () => {
     });
   });
 
+  /** ONE FILE, TWO PAGES, AND A PURGE OF ONE OF THEM.
+   *
+   *  The sweep collects by reference rather than by owner, so this has always
+   *  been its rule. What is new is that two saves of the same bytes are the
+   *  way two pages come to carry one file, so the rule now decides a case an
+   *  owner reaches by pasting the same picture twice rather than by hand. */
+  it("keeps a file two pages carry until the last of them is purged", async () => {
+    const { s, root } = await tmpStore();
+    const attachmentsDir = path.join(root, "_attachments");
+    const picture = () => ({
+      data: new TextEncoder().encode("one diagram"),
+      originalName: "diagram.txt",
+      mimeType: "text/plain",
+    });
+
+    const first = await s.saveAttachment(picture());
+    const second = await s.saveAttachment(picture());
+    expect(second.url).toBe(first.url);
+    const name = first.url.slice("/_attachments-v2/".length);
+    const doomed = await s.createPage(null, "Pasted it first");
+    const keeper = await s.createPage(null, "Pasted the same one");
+    await s.writePage(doomed.id, `[a](${first.url})`);
+    await s.writePage(keeper.id, `[a](${second.url})`);
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await fs.utimes(path.join(attachmentsDir, name), old, old);
+
+    await s.deletePage(doomed.id);
+    await s.purgePage(doomed.id);
+
+    await expect(
+      fs.access(path.join(attachmentsDir, name)),
+    ).resolves.toBeUndefined();
+    await expect(s.readPage(keeper.id)).resolves.toMatchObject({
+      markdown: expect.stringContaining(first.url),
+    });
+
+    await s.deletePage(keeper.id);
+    await s.purgePage(keeper.id);
+
+    await expect(
+      fs.access(path.join(attachmentsDir, name)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("refuses to permanently purge a page that was restored", async () => {
     const { s } = await tmpStore();
     const page = await s.createPage(null, "Restore before purge");
@@ -10373,6 +10417,80 @@ describe("share-aware Store leaves", () => {
       markdown: "first visit builds the baseline",
       visitorName: "Ada",
     });
+
+  /** A SECOND LINK IN THE SAME NOTES FOLDER.
+   *
+   *  One file can now be carried by pages under two different links, because
+   *  the saved name is the sha256 of the bytes. The index is keyed by that
+   *  name, so both of the tests below are about what one key may say for two
+   *  roots. Siblings, not nested: an overlapping enable is its own refusal. */
+  async function secondEditableRoot(s: Store) {
+    const page = await s.createPage(null, "Other shared root");
+    const child = await s.createPage(page.id, "Other child");
+    const before = await s.readShareScope(page.id);
+    await s.configureShare(page.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+    });
+    const version = (await s.readShareScope(page.id)).shareVersion;
+    return { rootId: page.id, childId: child.id, version };
+  }
+
+  it("grants one shared file only to the link whose page carries it", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const other = await secondEditableRoot(s);
+    await scopeTheRoot(s, rootId, childId, version);
+    await scopeTheRoot(s, other.rootId, other.childId, other.version);
+
+    // Saved twice and one file, which is the whole reason this test exists:
+    // before the name was the bytes, two links could not collide on one key.
+    const picture = shot();
+    const saved = await s.saveAttachment(picture);
+    expect((await s.saveAttachment(picture)).url).toBe(saved.url);
+    const name = attachmentName(saved.url);
+    await s.writePage(childId, `![](${saved.url})`, undefined, "me");
+
+    const scope = await readAttachmentScope(root);
+    expect(attachmentGrantsRoot(scope, name, rootId)).toBe(true);
+    // The second link shows no page that names the file, so the key it shares
+    // with the first link does not put it on that link.
+    expect(attachmentGrantsRoot(scope, name, other.rootId)).toBe(false);
+  });
+
+  it("keeps the second link's grant on a shared file when the first is revoked", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const other = await secondEditableRoot(s);
+    await scopeTheRoot(s, rootId, childId, version);
+    await scopeTheRoot(s, other.rootId, other.childId, other.version);
+
+    const picture = shot();
+    const saved = await s.saveAttachment(picture);
+    expect((await s.saveAttachment(picture)).url).toBe(saved.url);
+    const name = attachmentName(saved.url);
+    await s.writePage(childId, `![](${saved.url})`, undefined, "me");
+    await s.writePage(other.childId, `![](${saved.url})`, undefined, "me");
+    expect(
+      attachmentGrantsRoot(await readAttachmentScope(root), name, other.rootId),
+    ).toBe(true);
+
+    await s.configureShare(rootId, { enabled: false });
+
+    // Revoking a link ends that link. It does not reach into a key another
+    // link is standing on, and it does not take the bytes away.
+    const scope = await readAttachmentScope(root);
+    expect(attachmentGrantsRoot(scope, name, other.rootId)).toBe(true);
+    await expect(
+      fs.access(path.join(root, "_attachments", name)),
+    ).resolves.toBeUndefined();
+    await expect(
+      resolveShareAccess(s, {
+        rootId,
+        targetId: childId,
+        requestedVersion: String(version),
+      }),
+    ).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+  });
 
   it("grants an image the owner adds after the baseline was taken", async () => {
     const { s, root, rootId, childId, version } = await editableRoot();

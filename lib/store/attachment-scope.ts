@@ -23,8 +23,19 @@ export interface AttachmentScope {
    *  still decides for it. The new rule applies to these and to no others, so
    *  no existing read-only share changes behaviour. */
   roots: string[];
-  /** Uploaded by a visitor: name → the one root it belongs to. */
-  uploads: Record<string, { root: string; bytes: number; at: string }>;
+  /** Uploaded by a visitor: name → the root charged for the bytes, plus every
+   *  other root a visitor uploaded the same file into. A saved name is the
+   *  sha256 of the bytes, so a second upload of one picture writes nothing and
+   *  arrives on the first one's key. `root` is the link whose upload put the
+   *  bytes on the disk and the only one they are charged against; `alsoRoots`
+   *  is how the later links keep the one grant no page can give them, which is
+   *  naming bytes nothing shows yet. It is absent from every index written
+   *  before one file could have two uploaders, which reads as the single root
+   *  it was. */
+  uploads: Record<
+    string,
+    { root: string; bytes: number; at: string; alsoRoots?: string[] }
+  >;
   /** Named by the subtree before the first visitor write to the root, which
    *  is when the walk that builds this runs: name → roots. */
   baseline: Record<string, string[]>;
@@ -140,7 +151,17 @@ function readUploads(value: unknown): AttachmentScope["uploads"] {
       Number.isFinite(entry.bytes) &&
       typeof entry.at === "string"
     ) {
-      uploads[name] = { root: entry.root, bytes: entry.bytes, at: entry.at };
+      const alsoRoots = Array.isArray(entry.alsoRoots)
+        ? entry.alsoRoots.filter(
+            (root): root is string => typeof root === "string",
+          )
+        : [];
+      uploads[name] = {
+        root: entry.root,
+        bytes: entry.bytes,
+        at: entry.at,
+        ...(alsoRoots.length > 0 ? { alsoRoots } : {}),
+      };
     }
   }
   return uploads;
@@ -177,6 +198,12 @@ export async function writeAttachmentScope(
   await assertRealDirectory(dir, identity);
 }
 
+/** A visitor's upload, against the root they came through.
+ *
+ *  A second upload of bytes the folder already holds wrote nothing, so it
+ *  neither moves the charge nor takes the first link's grant away: it joins the
+ *  entry. Moving the charge would bill a link that added nothing to the folder
+ *  and un-grant the link whose visitor is about to name the file. */
 export function recordUpload(
   scope: AttachmentScope,
   name: string,
@@ -184,9 +211,27 @@ export function recordUpload(
   bytes: number,
   at: string,
 ): AttachmentScope {
+  const roots = scope.roots.includes(root)
+    ? scope.roots
+    : [...scope.roots, root];
+  const held = scope.uploads[name];
+  const entry =
+    held && held.root !== root
+      ? {
+          ...held,
+          ...(held.alsoRoots?.includes(root)
+            ? {}
+            : { alsoRoots: [...(held.alsoRoots ?? []), root] }),
+        }
+      : {
+          root,
+          bytes,
+          at,
+          ...(held?.alsoRoots ? { alsoRoots: held.alsoRoots } : {}),
+        };
   return {
-    roots: scope.roots.includes(root) ? scope.roots : [...scope.roots, root],
-    uploads: { ...scope.uploads, [name]: { root, bytes, at } },
+    roots,
+    uploads: { ...scope.uploads, [name]: entry },
     baseline: scope.baseline,
   };
 }
@@ -277,14 +322,18 @@ export function rootUploadBytes(scope: AttachmentScope, root: string): number {
 
 /** Where a visitor uploaded the file. The one grant that stands with no live
  *  page behind it: the upload is the reason the write naming it exists, and
- *  nothing shows it yet. Its bytes are charged to this root and no other, so
- *  an owner move never re-charges a quota. */
+ *  nothing shows it yet. Every link a visitor uploaded these bytes into has
+ *  that reason, and only the first of them is charged for them, so an owner
+ *  move never re-charges a quota and a second uploader never re-charges one
+ *  either. */
 export function rootOwnsUpload(
   scope: AttachmentScope,
   name: string,
   root: string,
 ): boolean {
-  return scope.uploads[name]?.root === root;
+  const entry = scope.uploads[name];
+  if (!entry) return false;
+  return entry.root === root || (entry.alsoRoots?.includes(root) ?? false);
 }
 
 /** Whether the index puts this attachment on this root's link at all. A name

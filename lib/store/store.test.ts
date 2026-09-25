@@ -10437,6 +10437,61 @@ describe("share-aware Store leaves", () => {
     return { rootId: page.id, childId: child.id, version };
   }
 
+  /** TWO VISITORS, ONE PICTURE, AND A LEDGER KEYED BY THE NAME.
+   *
+   *  An upload's entry in the index is the one grant that stands with no live
+   *  page behind it: nothing shows the bytes yet and the visitor is the one who
+   *  put them there. The name used to be a fresh nanoid, so two uploads were
+   *  two entries and could not disagree. Now the second upload writes nothing
+   *  and lands on the first one's key, so the entry has to hold both links or
+   *  one visitor's next write is refused for a file they uploaded themselves.
+   *
+   *  The bytes stay charged to the link whose upload put them on the disk: the
+   *  quota is about what lands in the notes folder, and the second upload
+   *  landed nothing. */
+  it("lets both links name a picture two visitors uploaded from the same bytes", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const other = await secondEditableRoot(s);
+    const picture = shot();
+
+    const mine = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: picture,
+    });
+    const theirs = await s.saveSharedAttachment({
+      rootId: other.rootId,
+      targetId: other.childId,
+      shareVersion: other.version,
+      file: picture,
+    });
+    expect(theirs.url).toBe(mine.url);
+
+    await expect(
+      s.writeSharedPage({
+        rootId: other.rootId,
+        targetId: other.childId,
+        shareVersion: other.version,
+        markdown: `![](${theirs.url})`,
+        visitorName: "Bo",
+      }),
+    ).resolves.toMatchObject({ markdown: `![](${theirs.url})` });
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${mine.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toMatchObject({ markdown: `![](${mine.url})` });
+
+    const scope = await readAttachmentScope(root);
+    expect(rootUploadBytes(scope, rootId)).toBe(PNG.byteLength);
+    expect(rootUploadBytes(scope, other.rootId)).toBe(0);
+  });
+
   it("grants one shared file only to the link whose page carries it", async () => {
     const { s, root, rootId, childId, version } = await editableRoot();
     const other = await secondEditableRoot(s);

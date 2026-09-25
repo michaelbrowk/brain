@@ -933,11 +933,17 @@ function RevokeRow({
               ? "This page's own link stops working."
               : "Everyone with the link loses access."}
         </span>
-        <span className={NOTE}>
-          {inheritedFrom
-            ? `Access through ${inheritedFrom.title} will remain.`
-            : "The link will stop working."}
-        </span>
+        {/* The note carries what the value above it cannot. For a page whose
+            access also comes from an ancestor that is the half that survives,
+            which is the thing the owner is about to be surprised by. For a
+            root link there is no second half: "The link will stop working."
+            was "Everyone with the link loses access." again, one register
+            quieter, so it is not drawn at all. */}
+        {inheritedFrom && (
+          <span className={NOTE}>
+            {`Access through ${inheritedFrom.title} will remain.`}
+          </span>
+        )}
         {activeParents > 0 && (
           <span className={NOTE}>{`Stopping this root link will leave ${activeParents} parent public ${activeParents === 1 ? "link" : "links"} active.`}</span>
         )}

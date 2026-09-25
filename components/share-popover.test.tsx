@@ -1247,7 +1247,10 @@ describe("SharePopover redesign", () => {
     });
     await click(button("Stop sharing"));
     expect(document.body.textContent).toContain("Everyone with the link loses access.");
-    expect(document.body.textContent).toContain("The link will stop working.");
+    // And says it once. The note under the value carries what the value
+    // cannot, which for a root link is nothing: "The link will stop working."
+    // is the same sentence twice, in two registers.
+    expect(document.body.textContent).not.toContain("The link will stop working.");
     await click(button("Stop sharing"));
     expect(document.body.textContent).toContain("Stopping sharing…");
     expect(document.body.textContent).toContain("Waiting for durable confirmation…");

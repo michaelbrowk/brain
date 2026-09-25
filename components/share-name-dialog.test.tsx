@@ -6,6 +6,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("framer-motion", () => import("@/test/framer-motion-mock"));
 
+import {
+  GATE_NO_CONNECTION,
+  GATE_RATE_LIMITED,
+  GATE_WRONG_PASSWORD,
+} from "./password-gate";
 import { ShareNameDialog } from "./share-name-dialog";
 
 let root: Root;
@@ -146,8 +151,11 @@ describe("the name dialog", () => {
       name: "Ann",
       password: "nope",
     });
-    expect(alertText()).toBe("Wrong password");
-    expect(input("password")!.value).toBe("");
+    // The same sentence the two password screens say, and the same treatment
+    // of the value: a refused password is usually a typo in one the reader
+    // has, and the gate three clicks away hands it back to be typed over.
+    expect(alertText()).toBe(GATE_WRONG_PASSWORD);
+    expect(input("password")!.value).toBe("nope");
     expect(input("password")!.getAttribute("aria-invalid")).toBe("true");
 
     await type(input("password")!, "right");
@@ -202,7 +210,7 @@ describe("the name dialog", () => {
     await type(input("name")!, "Ann");
 
     await submit();
-    expect(alertText()).toBe("Too many attempts. Wait a bit.");
+    expect(alertText()).toBe(GATE_RATE_LIMITED);
     // The owner closed editing while this page stood open: trying again
     // cannot fix that, so the message does not ask for it.
     await submit();
@@ -210,9 +218,11 @@ describe("the name dialog", () => {
       "This page is no longer open for editing. You can still read it.",
     );
     await submit();
+    // The two states only this dialog has keep their own sentences: neither
+    // is a password being refused, so neither is one of the gate's four.
     expect(alertText()).toBe("Couldn't start editing. Try again.");
     await submit();
-    expect(alertText()).toBe("Couldn't connect. Try again.");
+    expect(alertText()).toBe(GATE_NO_CONNECTION);
     expect(onMinted).not.toHaveBeenCalled();
     expect(button().disabled).toBe(false);
   });

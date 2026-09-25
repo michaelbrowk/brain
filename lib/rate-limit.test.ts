@@ -35,6 +35,28 @@ describe("FixedWindowRateLimiter", () => {
     expect(limiter.size).toBe(1);
   });
 
+  it("evicts the bucket closest to its reset when the owner asked for that", () => {
+    // Only a bucket nobody but the owner can create opts into this: the login
+    // route keys one per device cookie, and a device cookie exists because a
+    // login succeeded. Failing closed there would hand the last device that
+    // logged in a lockout the owner cannot clear, so the oldest window goes
+    // instead — the one with the least of itself left to spend.
+    const limiter = new FixedWindowRateLimiter({
+      limit: 1,
+      windowMs: 100,
+      maxEntries: 2,
+      evictOldest: true,
+    });
+
+    expect(limiter.consume("a", 0).allowed).toBe(true);
+    expect(limiter.consume("b", 10).allowed).toBe(true);
+    expect(limiter.consume("c", 20).allowed).toBe(true);
+    expect(limiter.size).toBe(2);
+    // "a" reset first, so "a" is what went. "b" keeps the window it was in.
+    expect(limiter.consume("b", 30).allowed).toBe(false);
+    expect(limiter.consume("a", 40).allowed).toBe(true);
+  });
+
   it("can reset a key after successful authentication", () => {
     const limiter = new FixedWindowRateLimiter({
       limit: 1,

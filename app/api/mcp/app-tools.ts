@@ -2,6 +2,7 @@ import type { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import {
   getStore,
+  isAppOwnsFull,
   isAppSize,
   isAttachmentValidation,
   isNotApp,
@@ -127,6 +128,19 @@ function lintRefused(rule: AppLintRule, line: number): AppAnswer {
  *  the notes folder. */
 function appRefusal(error: unknown): AppAnswer {
   if (isAppSize(error)) return tooLarge(error.what);
+  // An app that has minted every page it may is a full list, not a broken
+  // notes folder, and `store_failed` sent an agent to look at the disk for
+  // something only its own next call could change. The store owns this cap —
+  // it is checked inside the mutex, where two creates racing for the last slot
+  // are serialised — and it exports the predicate, so this is the answer for
+  // whatever reaches these two tools holding it.
+  if (isAppOwnsFull(error)) {
+    return no(
+      "too_many_owned",
+      `that app already owns the ${APP_MAX_OWNED} pages an app may own`,
+      "too_many_owned",
+    );
+  }
   if (isAttachmentValidation(error)) {
     return no(error.code, "that asset is not a file an app may hold", error.code);
   }

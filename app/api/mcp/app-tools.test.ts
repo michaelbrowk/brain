@@ -241,6 +241,28 @@ describe("create_app_page", () => {
     expect(answer.body).toMatchObject({ reason: "too_large" });
   });
 
+  it("names the owns cap rather than blaming the notes folder", async () => {
+    // `store_failed` is the disk. An app that has minted all the pages it may
+    // has a full list, not a broken folder, and an agent told the folder
+    // failed goes and checks the mount instead of the one thing it can fix.
+    const { AppOwnsFullError } = await import("@/lib/store/types");
+    createAppPage.mockRejectedValue(new AppOwnsFullError("app1"));
+    const answer = await call("create_app_page", {
+      parentId: null,
+      title: "T",
+      description: "d",
+      entryHtml: ENTRY,
+      reason: "r",
+    });
+    expect(answer.isError).toBe(true);
+    expect(answer.body.reason).toBe("too_many_owned");
+    expect(String(answer.body.error)).toContain("64");
+    expect(appendMcpActivity).toHaveBeenCalledWith(
+      expect.objectContaining({ outcome: "too_many_owned" }),
+      undefined,
+    );
+  });
+
   it("refuses an asset name an app may not hold as bad_type", async () => {
     const { AttachmentValidationError } = await import("@/lib/store/types");
     createAppPage.mockRejectedValue(

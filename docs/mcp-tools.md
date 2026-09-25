@@ -216,10 +216,14 @@ on what it decodes to — base64 says how many bytes it carries without being
 decoded — so a build over either one is refused before a single asset is
 materialised.
 
+An app may own at most 64 pages, counting the ones its own frame mints while it
+runs. Past that the answer is `too_many_owned`, which is a full list rather than
+a notes folder that failed: nothing about the disk will change it.
+
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `create_app_page` | `brain:write` | `title`, `reason`, `description`, `entryHtml`, `parentId?`, `icon?`, `assets?` as `[{ name, base64 }]`, `owns?` as `[{ title, icon?, markdown? }]`, `state?` | the new page's `id` and `title`, its `app` map, and the `owns` children it created with their ids | `bad_request` for a missing `reason`, `lint_failed` with `rule` and `line`, `too_large` for an entry, an asset set or a state over the caps, `bad_type` for an asset name an app may not hold. `store_failed` |
-| `write_app_page` | `brain:write` | `id`, `rev`, `entryHtml?`, `assets?` | the page's `id`, `title` and its `app` map with `version` bumped | `not_found` for a page that is not an app, `rev_conflict` with `currentRev` to re-read from, `lint_failed`, `too_large`, `bad_type`. `store_failed` |
+| `create_app_page` | `brain:write` | `title`, `reason`, `description`, `entryHtml`, `parentId?`, `icon?`, `assets?` as `[{ name, base64 }]`, `owns?` as `[{ title, icon?, markdown? }]`, `state?` | the new page's `id` and `title`, its `app` map, and the `owns` children it created with their ids | `bad_request` for a missing `reason`, `lint_failed` with `rule` and `line`, `too_large` for an entry, an asset set or a state over the caps, `bad_type` for an asset name an app may not hold, `too_many_owned` for an app that already owns the 64 pages an app may. `store_failed` |
+| `write_app_page` | `brain:write` | `id`, `rev`, `entryHtml?`, `assets?` | the page's `id`, `title` and its `app` map with `version` bumped | `not_found` for a page that is not an app, `rev_conflict` with `currentRev` to re-read from, `lint_failed`, `too_large`, `bad_type`, `too_many_owned`. `store_failed` |
 | `read_app_page` | | `id` | `{ id, title, rev, app, entryHtml, assets }`, where `assets` is the list of names and not their bytes | `not_found`. `store_failed` |
 
 `write_app_page` keeps `owns` and `state` from the live page and takes neither

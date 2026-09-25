@@ -67,7 +67,9 @@ export function LoginForm({ version }: { version: string | null }) {
           <h1 className="flex items-center gap-3 text-ink">
             <Wordmark size="lg" />
           </h1>
-          <p className="mt-3 text-body text-ink-2">
+          {/* Balanced: at 320 the line broke with "server." alone under it,
+              and an orphan under a lockup reads as a mistake in the copy. */}
+          <p className="mt-3 text-balance text-body text-ink-2">
             A notes app you keep on your own server.
           </p>
         </>

@@ -5,7 +5,7 @@ import { useRef, useState, type FormEvent, type ReactNode } from "react";
 import { Button, IconButton } from "./ui/button";
 import { Field } from "./ui/field";
 import { Icon } from "./ui/icon";
-import { DUR, EASE_OUT } from "@/lib/motion";
+import { DUR, EASE_OUT, SPIN } from "@/lib/motion";
 
 /** One password screen, two doors. The owner's sign-in after `install.sh` and
  *  a visitor's locked share are the same refusal seen from two sides, so they
@@ -162,7 +162,7 @@ export function PasswordGate({
             placeholder="Password"
             autoFocus
             autoComplete="current-password"
-            className="h-11! rounded-field! text-body!"
+            className="h-11! text-body!"
             trailing={
               <IconButton
                 type="button"
@@ -180,39 +180,41 @@ export function PasswordGate({
             }
           />
 
-          {/* The refusal opens a slot under the field it belongs to, rather
-              than crossing the screen as a toast: what is wrong is the value
-              in that box, and the box is where a reader is looking. The height
-              travels so the button makes room instead of jumping; reduced
-              motion keeps the fade and drops the travel. */}
-          <AnimatePresence initial={false}>
-            {error && (
-              <motion.div
-                initial={reduce ? { opacity: 0 } : { opacity: 0, height: 0 }}
-                animate={
-                  reduce ? { opacity: 1 } : { opacity: 1, height: "auto" }
-                }
-                exit={
-                  reduce
-                    ? { opacity: 0, transition: { duration: DUR.fast } }
-                    : {
-                        opacity: 0,
-                        height: 0,
-                        transition: { duration: DUR.fast, ease: "easeIn" },
-                      }
-                }
-                transition={{ duration: DUR.base, ease: EASE_OUT }}
-                className="overflow-hidden"
-              >
-                {/* `role="alert"` and nothing beside it: the role already
-                    implies an assertive live region, and a second declaration
-                    of the same thing is a second thing to keep in step. */}
-                <p id={errorId} role="alert" className="pt-2 text-table text-red">
+          {/* The refusal belongs under the field it is about, rather than
+              crossing the screen as a toast: what is wrong is the value in
+              that box, and the box is where the reader is looking.
+
+              THE ROOM IS KEPT WHETHER OR NOT THERE IS ANYTHING IN IT. An
+              opening slot used to push the card apart and, because the card
+              is centred on its own height, it moved the lockup, the sentence
+              and the field up while it pushed the button down — every object
+              on the screen travelling at the one instant the reader is told
+              they were wrong, and the button travelling under the hand that
+              had just pressed it. So the slot is always this tall, the line
+              arrives inside it, and the only thing that moves is the sentence.
+              `min-h` rather than a fixed height: a refusal that wraps on a
+              narrow phone grows rather than being clipped. */}
+          <div data-gate-slot className="min-h-9 pt-2">
+            <AnimatePresence initial={false}>
+              {error && (
+                <motion.p
+                  key="refusal"
+                  id={errorId}
+                  // `role="alert"` and nothing beside it: the role already
+                  // implies an assertive live region, and a second
+                  // declaration is a second thing to keep in step.
+                  role="alert"
+                  initial={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
+                  animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, transition: { duration: DUR.fast } }}
+                  transition={{ duration: DUR.base, ease: EASE_OUT }}
+                  className="text-table text-red"
+                >
                   {error}
-                </p>
-              </motion.div>
-            )}
-          </AnimatePresence>
+                </motion.p>
+              )}
+            </AnimatePresence>
+          </div>
 
           {/* The one ink-filled control on this surface (§2 → Primary). It
               keeps the field's height, width and radius, so the two read as a
@@ -221,17 +223,34 @@ export function PasswordGate({
               swap and not to the wait — two words changing in one place read
               as two words unless something bridges them, while a word held
               out of focus for the length of a request reads as a fault. So
-              the key remounts the span and the blur resolves in 160ms. */}
+              the key remounts the span and the blur resolves in 160ms.
+
+              The wait is a turning glyph, and the label stays at full ink. A
+              label dimmed for the 300–800ms a bcrypt compare takes is what a
+              control taken away looks like, and this control has not been
+              taken away: the press is refused by the submit handler rather
+              than by `disabled`, so the button still reads as the way in. */}
           <Button
             type="submit"
             variant="ink"
             aria-busy={busy || undefined}
-            className="mt-3 h-11! w-full rounded-field! text-body!"
+            className="h-11! w-full text-body!"
           >
+            {busy && (
+              <motion.span
+                data-gate-working
+                animate={reduce ? {} : { rotate: 360 }}
+                transition={reduce ? undefined : SPIN}
+                className="inline-flex"
+              >
+                <Icon name="restart-linear" size={16} />
+              </motion.span>
+            )}
             <motion.span
               key={busy ? "working" : "waiting"}
+              data-gate-label
               initial={reduce ? false : { opacity: 0.5, filter: "blur(2px)" }}
-              animate={{ opacity: busy ? 0.7 : 1, filter: "blur(0px)" }}
+              animate={{ opacity: 1, filter: "blur(0px)" }}
               transition={{ duration: DUR.base, ease: EASE_OUT }}
               className="inline-block"
             >
@@ -239,12 +258,12 @@ export function PasswordGate({
             </motion.span>
           </Button>
         </form>
+        {/* The one quiet fact this screen carries, under the card rather than
+            pinned to the window: at the foot of the viewport it was an orphan
+            280px below everything it belongs to on a desktop, and on a
+            landscape phone it landed on the button. */}
+        {foot && <div className="mt-6">{foot}</div>}
       </motion.div>
-      {foot && (
-        <div className="absolute inset-x-0 bottom-0 px-6 pb-[calc(env(safe-area-inset-bottom,0px)+var(--inset))] text-center">
-          {foot}
-        </div>
-      )}
     </div>
   );
 }

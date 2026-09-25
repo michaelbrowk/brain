@@ -5,18 +5,18 @@ import {
   PasswordGate,
   type GateAttempt,
 } from "./password-gate";
+import { Wordmark } from "./shell/wordmark";
 import { Icon } from "./ui/icon";
 
 /** Password prompt on a protected shared page. On success the server sets a
  *  page-scoped cookie and a reload renders the content.
  *
  *  It stands the same objects in the same places as the sign-in screen: a 36px
- *  mark, a line in the Title register, a sentence in Body, the field, the ink
- *  pill, and one quiet fact at the foot in Caption. On sign-in the mark is the
- *  lockup and the fact is the running version; here the mark is the lock and
- *  the fact is whose software this is, in the words the granted page's own
- *  metadata already uses, since a visitor arrived from a link and may never
- *  have seen Brain before.
+ *  mark, a name, a sentence in Body, the field, the ink pill, and one quiet
+ *  fact under the card. On sign-in the mark is the lockup and the fact is the
+ *  running version; here the mark is the lock and the fact is whose software
+ *  this is, since a visitor arrived from a link and may never have seen Brain
+ *  before.
  *
  *  What it does not say is anything about the page behind it. That is not
  *  restraint, it is the decision `generateMetadata` in `app/share/[id]/page.tsx`
@@ -43,13 +43,27 @@ export function ShareGate({ id }: { id: string }) {
           <span className="flex size-9 items-center justify-center rounded-block bg-(--fill-tint) text-ink-2">
             <Icon name="lock-keyhole-minimalistic-linear" size={20} />
           </span>
-          <h1 className="mt-4 text-title text-ink">Shared page</h1>
-          <p className="mt-3 text-body text-ink-2">
+          {/* Body, not Title. In the display register "Shared page" was the
+              loudest thing on the screen and said the least, standing over
+              the field it exists to introduce. It names what the reader has
+              arrived at and then gets out of the way, and ink against the
+              sentence's ink-2 is what separates the two lines — §3's own
+              distinction between a subject and a sentence. */}
+          <h1 className="mt-4 text-body text-ink">Shared page</h1>
+          <p className="mt-1 text-balance text-body text-ink-2">
             This page is shared with a password.
           </p>
         </>
       }
-      foot={<p className="text-caption text-ink-3">Shared from Brain</p>}
+      /* A stranger who followed a link may never have seen Brain, and on a
+         launch week a locked share is the first thing some of them meet. The
+         lockup says whose software this is where a 12px caption whispered it. */
+      foot={
+        <span className="inline-flex items-center gap-2 text-ink-2">
+          <span className="text-caption">Shared from</span>
+          <Wordmark />
+        </span>
+      }
       inputLabel="Page password"
       errorId={`share-error-${id}`}
       submitLabel="Open"

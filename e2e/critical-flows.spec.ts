@@ -6770,6 +6770,176 @@ test("slash menu creates a page at the cursor and saves before opening it", asyn
   }
 });
 
+// The whole gesture the reader makes, in one go: a subpage made from inside a
+// note, a step back into the note, and the next thing they type. The caret
+// shows on the line under the new row, and what it takes has to land there —
+// the slash included, which is the door to every block.
+test("a subpage made from the note leaves a line under it that takes a slash", async ({
+  page,
+}) => {
+  test.setTimeout(60_000);
+  await login(page);
+
+  const parentResponse = await browserJson(page, "/api/page", {
+    method: "POST",
+    body: { title: "Note with a subpage", markdown: "Before" },
+  });
+  expect(parentResponse.ok).toBeTruthy();
+  const parent = parentResponse.body as { id: string };
+
+  await page.goto(`/p/${parent.id}`);
+  const content = page.getByRole("textbox", { name: "Page content" });
+  await expect(content).toBeVisible();
+  const beforeParagraph = content.locator("p").filter({ hasText: /^Before$/ });
+  await expect(beforeParagraph).toHaveCount(1);
+  await content.focus();
+  await beforeParagraph.evaluate((element) => {
+    const text = element.firstChild;
+    if (!text) throw new Error("Before paragraph has no text node");
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.setStart(text, text.textContent?.length ?? 0);
+    range.collapse(true);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("/");
+  await expect(page.getByTestId("slash-menu")).toBeVisible();
+
+  const createdResponse = page.waitForResponse((response) => {
+    if (
+      response.request().method() !== "POST" ||
+      new URL(response.url()).pathname !== "/api/page"
+    ) {
+      return false;
+    }
+    const body = response.request().postDataJSON() as { parentId?: string };
+    return body.parentId === parent.id;
+  });
+  await page
+    .getByTestId("slash-menu")
+    .getByRole("button", { name: "New page", exact: true })
+    .click();
+  const response = await createdResponse;
+  expect(response.ok()).toBeTruthy();
+  const created = (await response.json()) as { id: string };
+  await expect(page).toHaveURL(`/p/${created.id}`, { timeout: 20_000 });
+
+  await page.goBack();
+  await expect(page).toHaveURL(`/p/${parent.id}`);
+  const pageRef = content.locator(
+    `a.brain-page-ref[data-page-ref="${created.id}"]`,
+  );
+  await expect(pageRef).toHaveCount(1);
+  const writableLine = content.locator("p").last();
+  await expect(writableLine).toHaveText("");
+
+  // The hint is drawn on the empty line the caret is in, so it is the signal
+  // that the click landed. A page that has only just come back can still be
+  // settling, and a click it takes then leaves no caret behind, so ask again
+  // rather than type into nothing.
+  await expect
+    .poll(
+      async () => {
+        await writableLine.click();
+        return (await writableLine.getAttribute("class")) ?? "";
+      },
+      { timeout: 15_000 },
+    )
+    .toContain("brain-slash-hint");
+  await page.keyboard.type("/");
+  await expect(page.getByTestId("slash-menu")).toBeVisible();
+  await expect(writableLine).toHaveText("/");
+  await expect(pageRef).toContainText("Untitled");
+
+  await page.keyboard.press("Backspace");
+  await expect(page.getByTestId("slash-menu")).toBeHidden();
+  await page.keyboard.type("under the new row");
+  await expect
+    .poll(async () => {
+      const read = await browserJson(page, `/api/page/${parent.id}`);
+      return (read.body as { markdown?: string }).markdown;
+    })
+    .toBe(
+      `Before\n\n[📄 Untitled](/p/${created.id})\n\nunder the new row`,
+    );
+});
+
+// A row draws its chip as a block, so most of its line is blank paper, and the
+// editor has said since it became a block that clicking there places the
+// cursor. The browser answers that click by putting its caret inside the
+// chip's own `contenteditable="false"` anchor, which emits no input event at
+// all: the caret shows beside the chip and every key after it is dropped in
+// silence. ProseMirror cannot repair it either — the row's NodeView ignores
+// every mutation it is asked about, the selection ones included.
+test("a click beside a page row types on the line, not into the row", async ({
+  page,
+}) => {
+  await login(page);
+
+  const childResponse = await browserJson(page, "/api/page", {
+    method: "POST",
+    body: { title: "Clicked-beside child" },
+  });
+  expect(childResponse.ok).toBeTruthy();
+  const child = childResponse.body as { id: string };
+
+  const parentResponse = await browserJson(page, "/api/page", {
+    method: "POST",
+    body: {
+      title: "Clicked beside a page row",
+      markdown: `Before\n\n[Clicked-beside child](/p/${child.id})`,
+    },
+  });
+  expect(parentResponse.ok).toBeTruthy();
+  const parent = parentResponse.body as { id: string };
+
+  await page.goto(`/p/${parent.id}`);
+  const content = page.getByRole("textbox", { name: "Page content" });
+  const pageRef = content.locator(
+    `a.brain-page-ref[data-page-ref="${child.id}"]`,
+  );
+  await expect(pageRef).toHaveCount(1);
+  const writableLine = content.locator("p").last();
+  await expect(writableLine).toHaveText("");
+
+  const box = await pageRef.boundingBox();
+  expect(box).not.toBeNull();
+  if (!box) throw new Error("Missing page-ref geometry");
+  // The hint is drawn on the empty line the caret is in, and asking again is
+  // the bounded retry the sibling case needs for the same reason: a page still
+  // settling takes a click and leaves no caret behind.
+  await expect
+    .poll(
+      async () => {
+        await page.mouse.click(box.x + box.width + 60, box.y + box.height / 2);
+        return (await writableLine.getAttribute("class")) ?? "";
+      },
+      { timeout: 15_000 },
+    )
+    .toContain("brain-slash-hint");
+
+  await page.keyboard.type("/");
+  await expect(page.getByTestId("slash-menu")).toBeVisible();
+  await expect(writableLine).toHaveText("/");
+  await expect(pageRef).toContainText("Clicked-beside child");
+
+  // And the prose that follows reaches the file, with the reference intact.
+  await page.keyboard.press("Backspace");
+  await expect(page.getByTestId("slash-menu")).toBeHidden();
+  await page.keyboard.type("beside the row");
+  await expect
+    .poll(async () => {
+      const read = await browserJson(page, `/api/page/${parent.id}`);
+      return (read.body as { markdown?: string }).markdown;
+    })
+    .toBe(
+      `Before\n\n[📄 Clicked-beside child](/p/${child.id})\n\nbeside the row`,
+    );
+});
+
 test("failed slash page creation unlocks the editor without losing the trigger", async ({
   page,
 }) => {

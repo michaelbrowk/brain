@@ -215,8 +215,14 @@ export async function verifyStage(stage, { layout = "legacy" } = {}) {
     // A path that is absent and one that is the wrong kind of thing are the
     // same failure to the operator who has to run it, and they are said the
     // same way: a bare ENOENT from `stat` names the temp directory the stage
-    // happens to sit in and not the file the release is missing.
-    const found = await stat(path.join(stage, required)).catch(() => null);
+    // happens to sit in and not the file the release is missing. Only those two
+    // errnos, though — a file that is there and unreadable is a permission to
+    // fix, and reported as a missing artifact it sends the operator looking for
+    // a build step that ran.
+    const found = await stat(path.join(stage, required)).catch((error) => {
+      if (error?.code === "ENOENT" || error?.code === "ENOTDIR") return null;
+      throw error;
+    });
     if (!found?.isFile()) throw new Error(`${required} is not a regular file`);
   }
   for (const [relative, expected] of Object.entries(MAIL_RUNTIME_LISTING)) {

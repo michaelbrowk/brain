@@ -1765,6 +1765,35 @@ describe("Store", () => {
     }
   });
 
+  /** A NAME ALWAYS HOLDS THE BYTES IT IS THE DIGEST OF.
+   *
+   *  That invariant is what the whole share index rests on: a grant recorded
+   *  against a name can never come to point at different content. The disk
+   *  probe asks for the digest and not merely for a file, so a name carrying
+   *  anything else is corruption to be repaired rather than a second version of
+   *  these bytes to be answered. Reachable by a truncated write from an older
+   *  install, a restore that put half a file back, or a notes folder edited by
+   *  hand. */
+  it("rewrites a file whose bytes do not match the name it is under", async () => {
+    const { s, root } = await tmpStore();
+    const directory = path.join(root, "_attachments");
+    const data = new TextEncoder().encode("the real bytes");
+    const name = `${createHash("sha256").update(data).digest("hex")}.txt`;
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, name), "not these bytes at all");
+
+    const saved = await s.saveAttachment({
+      data,
+      originalName: "notes.txt",
+      mimeType: "text/plain",
+    });
+
+    expect(saved.url).toBe(`/_attachments-v2/${name}`);
+    await expect(
+      fs.readFile(path.join(directory, name), "utf8"),
+    ).resolves.toBe("the real bytes");
+  });
+
   it("writes a second file when one original name carries different bytes", async () => {
     const { s, root } = await tmpStore();
     const save = (body: string) =>

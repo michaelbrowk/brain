@@ -185,8 +185,17 @@ function isRuleRow(line) {
  *  out of the reader at all. The pair is an argument now, the head offers it as
  *  two selects and the app keeps it in `state`, and the default is the bargain
  *  Michael's own notebook was measured on, so those pages read the same as
- *  before. */
-const SCRIPT_CLASSES = {
+ *  before.
+ *
+ *  THE TABLE INHERITS NOTHING, because it is looked up by a name off the
+ *  owner's disk. On a plain object literal every name `Object.prototype` carries
+ *  read as a script that is defined: `constructor` built
+ *  `/[function Object() { [native code] }]/u`, which throws and leaves the deck
+ *  empty on every reload, and `__proto__` built `/[object Object]/u`, which
+ *  throws nothing at all and quietly matches the letters of that phrase. With no
+ *  prototype there are only the eight names below, and anything else falls back
+ *  the way `scriptTest` promises. */
+const SCRIPT_CLASSES = Object.assign(Object.create(null), {
   Latin: "\\p{Script=Latin}",
   Cyrillic: "\\p{Script=Cyrillic}",
   Greek: "\\p{Script=Greek}",
@@ -197,7 +206,7 @@ const SCRIPT_CLASSES = {
   // choice the head offers covers both.
   Kana: "\\p{Script=Hiragana}\\p{Script=Katakana}",
   Hangul: "\\p{Script=Hangul}",
-};
+});
 
 /** The scripts the head offers, in the order it offers them. */
 const SCRIPT_NAMES = Object.keys(SCRIPT_CLASSES);

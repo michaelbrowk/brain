@@ -276,6 +276,35 @@ describe("the pair of scripts the owner named", () => {
     ).toEqual([{ word: "hola", translation: "привет" }]);
   });
 
+  it("falls back for a name that is only Object's, and not a script", () => {
+    // Every name `Object.prototype` carries used to read as a script that is
+    // defined, because the table was looked up on a plain object literal.
+    // `constructor` built `/[function Object() { [native code] }]/u` and threw,
+    // which reaches the owner as "Brain could not read the pages again." and an
+    // empty deck on every reload until they hand-edit `state.json` back.
+    // `__proto__` built `/[object Object]/u`, which throws nothing at all and
+    // quietly matches the letters of that phrase.
+    for (const name of ["constructor", "__proto__", "toString", "valueOf", "hasOwnProperty"]) {
+      expect(
+        extractVocabulary("hola — привет", { wordScript: name, translationScript: "not-Latin" }),
+      ).toEqual([{ word: "hola", translation: "привет" }]);
+      expect(
+        extractVocabulary("hola — привет", { wordScript: "Latin", translationScript: name }),
+      ).toEqual([{ word: "hola", translation: "привет" }]);
+      // And the fallback is that side's own default rather than something
+      // laxer: an English translation is not a pair under `not-Latin`.
+      expect(
+        extractVocabulary("hola — hello", { wordScript: "Latin", translationScript: name }),
+      ).toEqual([]);
+    }
+    expect(
+      extractVocabulary("hola — привет", {
+        wordScript: "not-__proto__",
+        translationScript: "not-constructor",
+      }),
+    ).toEqual([{ word: "hola", translation: "привет" }]);
+  });
+
   it("names the scripts the head offers, in the order it offers them", () => {
     expect(SCRIPT_NAMES).toEqual([
       "Latin",

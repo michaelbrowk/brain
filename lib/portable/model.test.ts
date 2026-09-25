@@ -161,11 +161,18 @@ describe("Brain portable packages", () => {
       `/p/${importedRoot!.children[0].id}`,
     );
     expect(imported.markdown).not.toContain(child.id);
-    expect(imported.markdown).not.toContain(attachment.url);
+    // A page id is reminted on import and an attachment name is not: the name
+    // is the sha256 of the bytes, so one file has one name in every notes
+    // folder it lands in. The import still goes through `saveAttachment`, so
+    // what is asserted here is that the url it answers is the url the source
+    // had, and that the bytes are readable under it.
+    expect(imported.markdown).toContain(attachment.url);
     const importedAttachmentName = [...imported.markdown.matchAll(
       /\/_attachments-v2\/([A-Za-z0-9_.-]+)/g,
     )][0]?.[1];
-    expect(importedAttachmentName).toBeTruthy();
+    expect(importedAttachmentName).toBe(
+      attachment.url.slice("/_attachments-v2/".length),
+    );
     expect(
       new TextDecoder().decode(
         await destination.readPortableAttachment(importedAttachmentName!),

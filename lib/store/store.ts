@@ -4922,8 +4922,8 @@ export class Store {
   }
 
   /** A link visitor's upload. Nothing is relaxed: the same size cap, the same
-   *  blocked MIME list, the same magic-byte checks, the same nanoid(12) name
-   *  and the same extension canonicalisation as the owner's route. */
+   *  blocked MIME list, the same magic-byte checks, the same content-addressed
+   *  name and the same extension canonicalisation as the owner's route. */
   async saveSharedAttachment(input: {
     rootId: string;
     targetId: string;
@@ -5345,7 +5345,19 @@ export class Store {
     return { url: input.url, size: digest.size, sha256: digest.sha256 };
   }
 
-  /** Caller owns mutate(). */
+  /** THE FILE IS NAMED BY ITS OWN BYTES.
+   *
+   *  `sha256(bytes) + extension`, the way `stageNotionAttachment` has always
+   *  named a Notion download. A fresh `nanoid(12)` per call meant the same
+   *  mail attachment saved twice left two files, two urls and therefore two
+   *  Markdown lines, so the line guard in `save_mail_attachment` could never
+   *  match and the tool could not honestly call itself idempotent. It also
+   *  meant the notes folder kept N copies of one picture, whoever uploaded it.
+   *
+   *  Files saved under the old names keep working: nothing reads a name for
+   *  its shape, `localAttachmentName` admits both, and no migration is needed.
+   *
+   *  Caller owns mutate(). */
   private async saveAttachmentUnlocked(
     input: AttachmentInput,
     src?: string,
@@ -5353,7 +5365,8 @@ export class Store {
     const mimeType = validateAttachment(input);
     const displayName = normalizeAttachmentDisplayName(input.originalName);
     const extension = canonicalAttachmentExtension(displayName, mimeType);
-    const savedName = `${nanoid(12)}${extension}`;
+    const contentHash = createHash("sha256").update(input.data).digest("hex");
+    const savedName = `${contentHash}${extension}`;
     const dir = assertInRoot(
       this.root,
       path.join(/* turbopackIgnore: true */ this.root, "_attachments"),
@@ -5363,18 +5376,31 @@ export class Store {
       path.join(/* turbopackIgnore: true */ dir, savedName),
     );
     const identity = await ensureRealDirectory(dir);
+    const answer: SavedAttachment = {
+      url: `/_attachments-v2/${savedName}`,
+      name: displayName,
+      size: input.data.byteLength,
+      type: mimeType,
+    };
+    // A file already under this name holds these bytes, so there is nothing to
+    // write and nothing for the notes history to say. Skipping the write is
+    // what keeps a second save from renaming a fresh copy over a file other
+    // pages are reading, and skipping the commit is what keeps it from asking
+    // for a snapshot of an unchanged folder. A file whose digest does not
+    // match its own name is corruption rather than a second version of it, and
+    // the write below is the repair.
+    const existing = await regularFileDigestNoFollow(file);
+    if (existing?.sha256 === contentHash) {
+      await assertRealDirectory(dir, identity);
+      return answer;
+    }
     await atomicWrite(file, input.data);
     await assertRealDirectory(dir, identity);
     scheduleCommit(this.root);
     // Existing event vocabulary is intentionally reused: clients refresh
     // their tree, while no open page id can match this generated filename.
     emitStore({ type: "write", id: savedName, src });
-    return {
-      url: `/_attachments-v2/${savedName}`,
-      name: displayName,
-      size: input.data.byteLength,
-      type: mimeType,
-    };
+    return answer;
   }
 
   async renamePage(id: string, title: string): Promise<PageMeta> {

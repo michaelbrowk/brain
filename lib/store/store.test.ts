@@ -9340,11 +9340,20 @@ describe("share-aware Store leaves", () => {
   const PNG = new Uint8Array([
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0,
   ]);
-  const shot = (): AttachmentInput => ({
-    data: PNG,
-    originalName: "shot.png",
-    mimeType: "image/png",
-  });
+  /** A DIFFERENT PICTURE EVERY CALL.
+   *
+   *  The store names a saved file by the sha256 of its bytes, so a fixture
+   *  that wants to be a second attachment has to be a second picture. The
+   *  counter goes in the four bytes after the signature, which keeps every
+   *  fixture the same length as `PNG` and the quota arithmetic below exact.
+   *  A test that wants one file twice reuses one `shot()`. */
+  let shotSequence = 0;
+  const shot = (): AttachmentInput => {
+    shotSequence += 1;
+    const data = Uint8Array.from(PNG);
+    new DataView(data.buffer).setUint32(8, shotSequence);
+    return { data, originalName: "shot.png", mimeType: "image/png" };
+  };
 
   async function editableRoot(shareExpiresAt?: string) {
     const { s, root } = await tmpStore({ publicOrigin: "https://brain.test" });
@@ -9775,7 +9784,7 @@ describe("share-aware Store leaves", () => {
       shareVersion: version,
       file: shot(),
     });
-    expect(saved.url).toMatch(/^\/_attachments-v2\/[A-Za-z0-9_-]{12}\.png$/);
+    expect(saved.url).toMatch(/^\/_attachments-v2\/[a-f0-9]{64}\.png$/);
     expect(saved).toMatchObject({
       name: "shot.png",
       size: PNG.byteLength,

@@ -28,9 +28,9 @@ export const dynamic = "force-dynamic";
  *  below is the only place that difference shows. */
 type AttachmentAccess = "owner" | "share";
 
-/** An attachment URL is immutable by construction: an owner upload is named
- *  by a fresh nanoid and a Notion import by the sha256 of its own bytes, so a
- *  name is never reused for different bytes. The owner's browser may keep the
+/** An attachment URL is immutable by construction: every name the store mints
+ *  is now the sha256 of the bytes under it, and the nanoid names it minted
+ *  before that were never reused either. The owner's browser may keep the
  *  response and stop re-downloading a cover on every mount. A share is
  *  revocable and a cache is not, so that branch stays no-store. See
  *  docs/operations.md, "Attachment privacy cache cutover". */

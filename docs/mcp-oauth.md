@@ -7,6 +7,12 @@ discover the remaining endpoints automatically.
 ## Security model
 
 - The Brain owner must have a valid human session before approving a client.
+- `BRAIN_PUBLIC_ORIGIN` must be an exact HTTPS origin, with one exception:
+  plain HTTP is accepted when the host is the owner's own network (loopback, a
+  private or link-local address, or a name ending in `.local`, `.lan`,
+  `.home.arpa` or `.internal`), which is what makes a LAN-only install
+  possible. Brain warns once at first use that the tokens cross that network
+  unencrypted. A public name over HTTP is still refused.
 - Dynamic Client Registration accepts only exact HTTPS callbacks or loopback
   HTTP callbacks. Authorization and token requests must carry the exact Brain
   MCP resource URL.

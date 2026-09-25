@@ -4,6 +4,16 @@ Every tool Brain registers on `/api/mcp`, the scope it is declared against,
 what it takes, what it answers and what it turns down. Connecting and
 authorizing is `docs/mcp-oauth.md`.
 
+The endpoint needs `BRAIN_PUBLIC_ORIGIN` set to the exact origin the browser
+shows. An https origin is the ordinary case. Plain `http` is accepted only when
+the host is the owner's own network — loopback, a private or link-local address,
+or a name ending in `.local`, `.lan`, `.home.arpa` or `.internal` — so a house
+install on `http://brain.lan` or `http://192.168.1.10:3000` has MCP without a
+TLS terminator in front of it. Brain logs one warning when it starts serving
+such an origin, and it is worth reading: the bearer tokens cross that network in
+the clear, and anything else on it can read them. Every other `http` origin,
+including a public name like `http://brain.example.com`, is refused.
+
 Two rules hold for every row. An answer is JSON in one text block, so a client
 parses `content[0].text` and nothing else. A refusal Brain decided on is an
 `{ error, reason }` object with `isError` set, not a transport error, so the
@@ -22,8 +32,18 @@ write implies read, and mail never implies write.
 
 ## What an agent should know
 
-Five rules no single row states.
+Rules no single row states.
 
+- **The largest request this endpoint accepts is 16 MiB.** The whole body, so a
+  batch is measured whole and an app's base64 assets count towards it at their
+  encoded length. Over it the answer is HTTP `413` with
+  `{ error, reason: "too_large" }` and no tool is called at all — there is no
+  tool result, so there is no `isError` envelope to read it out of. Every tool's
+  own cap sits well under it: an app entry is 2 MiB and its asset set 10 MiB,
+  and both are measured on what you sent rather than on what it becomes — the
+  entry as its own bytes, the assets as the length of their base64 before any of
+  it is decoded — so an oversized build costs one round trip rather than the
+  memory it claimed.
 - **A refusal is an answer, not an error.** Read it and do not retry a
   permanent one. Every tool but the `notion_*` family answers the same two
   fields: `error` is the sentence and `reason` is what names the cause, which
@@ -202,10 +222,24 @@ no kit), `hard_coded_colour` (a colour written out rather than read from a
 `url()` reaching another origin, which the frame's policy blocks silently).
 Nothing is created or replaced when the lint refuses.
 
+The three caps are an entry of 2 MiB, an asset set of 10 MiB and a state of
+256 KiB, and all three answer `too_large` with the same sentence. The entry is
+measured as its own bytes and the asset set as the length of the base64 you sent
+rather than as what it decodes to, so a build over either one is refused before a
+single asset is materialised.
+
+An app may own at most 64 pages. A build asking for more than that is refused by
+input validation before the tool runs at all, as a schema error rather than as
+one of the words below, and `write_app_page` does not take `owns`. The cap's own
+word, `too_many_owned`, belongs to the frame's `create.page`: an app that mints
+pages while it runs meets it there, and a build meets it only if it lands on an
+app whose list the frame has already filled. Either way it is a full list rather
+than a notes folder that failed, and nothing about the disk will change it.
+
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `create_app_page` | `brain:write` | `title`, `reason`, `description`, `entryHtml`, `parentId?`, `icon?`, `assets?` as `[{ name, base64 }]`, `owns?` as `[{ title, icon?, markdown? }]`, `state?` | the new page's `id` and `title`, its `app` map, and the `owns` children it created with their ids | `bad_request` for a missing `reason`, `lint_failed` with `rule` and `line`, `too_large` for an entry, an asset set or a state over the caps, `bad_type` for an asset name an app may not hold. `store_failed` |
-| `write_app_page` | `brain:write` | `id`, `rev`, `entryHtml?`, `assets?` | the page's `id`, `title` and its `app` map with `version` bumped | `not_found` for a page that is not an app, `rev_conflict` with `currentRev` to re-read from, `lint_failed`, `too_large`, `bad_type`. `store_failed` |
+| `create_app_page` | `brain:write` | `title`, `reason`, `description`, `entryHtml`, `parentId?`, `icon?`, `assets?` as `[{ name, base64 }]`, `owns?` as `[{ title, icon?, markdown? }]`, `state?` | the new page's `id` and `title`, its `app` map, and the `owns` children it created with their ids | `bad_request` for a missing `reason`, `lint_failed` with `rule` and `line`, `too_large` for an entry, an asset set or a state over the caps, `bad_type` for an asset name an app may not hold, `too_many_owned` for an app whose owns list the frame has already filled — more than 64 in the call itself is a schema error, not this. `store_failed` |
+| `write_app_page` | `brain:write` | `id`, `rev`, `entryHtml?`, `assets?` | the page's `id`, `title` and its `app` map with `version` bumped | `not_found` for a page that is not an app, `rev_conflict` with `currentRev` to re-read from, `lint_failed`, `too_large`, `bad_type`, `too_many_owned`. `store_failed` |
 | `read_app_page` | | `id` | `{ id, title, rev, app, entryHtml, assets }`, where `assets` is the list of names and not their bytes | `not_found`. `store_failed` |
 
 `write_app_page` keeps `owns` and `state` from the live page and takes neither

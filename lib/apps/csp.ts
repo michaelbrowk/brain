@@ -24,7 +24,15 @@
  *  one the request came in on, never a header: `Host` and `X-Forwarded-Host`
  *  are the client's to set, and a policy built from one is a policy the
  *  client wrote. */
-const ORIGIN = /^https?:\/\/[A-Za-z0-9.-]+(?::\d{1,5})?$/;
+/** A host is a name, a dotted address, or an IPv6 literal in its brackets.
+ *  The third arm is not decoration: `lib/private-origin.ts` accepts
+ *  `http://[fd12:3456::1]:3020` as the owner's own network, so an install can
+ *  be on one, and a pattern of `[A-Za-z0-9.-]+` matched neither the brackets
+ *  nor the colons — every app page on such an install threw instead of drawing.
+ *  The brackets hold hex, colons and a trailing dotted quad and nothing else, so
+ *  what this refuses is unchanged: a newline, a space, a semicolon and a path
+ *  are still not a host, which is what keeps one policy from becoming two. */
+const ORIGIN = /^https?:\/\/(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:.]+\])(?::\d{1,5})?$/;
 const PAGE_ID = /^[A-Za-z0-9_-]{1,128}$/;
 
 export function appFrameCsp(origin: string, pageId: string): string {

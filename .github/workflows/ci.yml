@@ -57,6 +57,13 @@ jobs:
         if: github.event_name == 'push'
         run: sudo apt-get install --yes acl shellcheck nginx
       - run: pnpm install --frozen-lockfile
+      - name: Audit production dependencies
+        # Next 16.2 was installed here carrying two critical advisories and
+        # nobody noticed, because running the audit was a human habit rather
+        # than a step (2026-09-21). A habit is not a gate. Runtime
+        # dependencies only and high severity upward: this answers for what
+        # ships, and a dev-only advisory must not be what stops a merge.
+        run: pnpm audit:prod
       - name: Verify operational contracts
         if: github.event_name == 'push'
         run: bash scripts/verify-ops.sh

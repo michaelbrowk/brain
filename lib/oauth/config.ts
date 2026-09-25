@@ -1,3 +1,8 @@
+import {
+  isPrivateNetworkHost,
+  warnPlainHttpOriginOnce,
+} from "@/lib/private-origin";
+
 const DEFAULT_PUBLIC_ORIGIN = "https://brain.example.com";
 
 // Order is the output order of `normalizeScopes`, which filters this list, so
@@ -88,11 +93,36 @@ export const MCP_SCOPE_LABELS: Record<McpScope, string> = {
   "brain:mail:send": "Send mail as you",
 };
 
+/** WHY THIS ACCEPTS PLAIN HTTP ON A PRIVATE NAME.
+ *
+ *  Everything MCP is sits behind this function, so an origin it refuses is an
+ *  install with no MCP at all: no discovery documents, no tools, not even the
+ *  static bearer. It refused anything that was not https, which turned away the
+ *  house install Brain is written for, `http://brain.lan` or
+ *  `http://192.168.1.10:3000`, because nobody terminates TLS for a name a home
+ *  router invented.
+ *
+ *  `lib/private-origin.ts` owns the reading of which names are the owner's own
+ *  network, and is the reading every caller uses. A public name stays
+ *  https-only with the message it always had: `http://brain.example.com` is a
+ *  box on the internet whatever its owner calls it. */
 export function oauthIssuer(): string {
   const raw = process.env.BRAIN_PUBLIC_ORIGIN || DEFAULT_PUBLIC_ORIGIN;
-  const url = new URL(raw);
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    // `new URL` throws `TypeError: Invalid URL`, which reaches the owner as a
+    // stack trace and says nothing about which variable it was. One sentence,
+    // the same one every other refused value gets. The shape most likely to
+    // land here is an IPv6 address with a zone id, `http://[fe80::1%eth0]`,
+    // pasted out of `ip addr` now that the docs invite IPv6 origins.
+    throw new Error("BRAIN_PUBLIC_ORIGIN must be an exact HTTPS origin");
+  }
+  const plainHttpOnPrivateNetwork =
+    url.protocol === "http:" && isPrivateNetworkHost(url.hostname);
   if (
-    url.protocol !== "https:" ||
+    (url.protocol !== "https:" && !plainHttpOnPrivateNetwork) ||
     url.username ||
     url.password ||
     url.pathname !== "/" ||
@@ -101,6 +131,7 @@ export function oauthIssuer(): string {
   ) {
     throw new Error("BRAIN_PUBLIC_ORIGIN must be an exact HTTPS origin");
   }
+  if (plainHttpOnPrivateNetwork) warnPlainHttpOriginOnce(url.origin);
   return url.origin;
 }
 

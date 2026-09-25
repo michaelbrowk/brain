@@ -32,17 +32,18 @@
 // which is the sentence the whole feature makes.
 //
 // WHY THE APP PAGES ARE SEEDED THROUGH THE PORTABLE IMPORT AND NOT THROUGH
-// `create_app_page`. The plan asks for the MCP round trip here. It cannot run:
-// `/api/mcp` evaluates `oauthIssuer()` at module load and throws for any
-// `BRAIN_PUBLIC_ORIGIN` that is not an exact https origin, and this harness
-// serves `http://127.0.0.1:<port>`, which is also what the share links and the
-// frame's own policy are built from. `.env.example` states that rule as
-// product behaviour ("MCP ... wait for a real https:// origin"), so the
-// endpoint is off here by design rather than broken. The three tools are
-// covered at the unit level in `app/api/mcp/app-tools.test.ts`; the portable
-// import is the other surface that reaches `writeAppFiles` and `setAppMeta`,
-// and what these cases are about is everything downstream of whichever wrote
-// the files.
+// `create_app_page`. The plan asks for the MCP round trip here, and it used to
+// be impossible: `oauthIssuer()` threw for any `BRAIN_PUBLIC_ORIGIN` that was
+// not an exact https origin, and this harness serves `http://127.0.0.1:<port>`.
+// `lib/private-origin.ts` ended that — loopback is the owner's own network, so
+// the route's module now loads here and `/api/mcp` answers as an endpoint
+// rather than as a crash. No case in this file should be read as saying MCP is
+// off on a loopback origin. What remains is that seeding through the tool would
+// need a bearer and a grant this harness does not mint, which is a separate
+// piece of work and not a rule about the endpoint. The three tools are covered at the
+// unit level in `app/api/mcp/app-tools.test.ts`; the portable import is the
+// other surface that reaches `writeAppFiles` and `setAppMeta`, and what these
+// cases are about is everything downstream of whichever wrote the files.
 //
 // EVERY TEST IN THIS FILE IS `@release`, for the reason `e2e/tasks.spec.ts`
 // states at its head: `ci.yml` and `release.yml` both run `--grep @release`,

@@ -72,7 +72,11 @@ describe("shared-page password rate limiting", () => {
       }),
       isNotFound: () => false,
     }));
-    vi.doMock("@/lib/auth", () => ({
+    // Spread rather than replaced: this route also asks `cookieSecure`, which
+    // reads the configured origin, and a bare stub for it would be a second
+    // opinion about the cookie's own flags inside the one case that reads them.
+    vi.doMock("@/lib/auth", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/auth")>()),
       createShareToken: async () => "share-token",
     }));
     const { POST } = await import("./route");
@@ -393,5 +397,48 @@ describe("the edit mint", () => {
 
     expect(res.status).toBe(401);
     await expect(res.json()).resolves.toEqual({ error: "wrong password" });
+  });
+
+  /** These cookies read `NODE_ENV` rather than the origin, which meant a
+   *  production build on `http://brain.lan` marked them `Secure` and the
+   *  browser dropped them: a visitor typed the password, got a 200, and was
+   *  asked for it again. The origin is what decides now, the same rule the
+   *  session cookie takes. */
+  describe("the Secure flag follows the configured origin", () => {
+    const mintAt = async (origin: string) => {
+      vi.stubEnv("BRAIN_PUBLIC_ORIGIN", origin);
+      vi.stubEnv("NODE_ENV", "production");
+      vi.doMock("@/lib/store", () => ({
+        getStore: async () => ({
+          readPage: async () => ({
+            meta: { id: "root-1", public: true, shareEdit: true, shareVersion: 2 },
+          }),
+          isDeleted: () => false,
+        }),
+        isNotFound: () => false,
+        configuredPublicOrigin: () => origin,
+      }));
+      const { POST } = await import("./route");
+      const res = await POST(
+        new NextRequest(`${origin}/api/share-auth`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: origin,
+          },
+          body: JSON.stringify({ intent: "edit", id: "root-1", name: "Ada" }),
+        }),
+      );
+      expect(res.status).toBe(200);
+      return res.cookies.get("brain_edit_share_root-1");
+    };
+
+    it("drops it on a plain-http private origin", async () => {
+      expect((await mintAt("http://brain.lan"))?.secure).toBe(false);
+    });
+
+    it("keeps it on an https origin", async () => {
+      expect((await mintAt("https://brain.example"))?.secure).toBe(true);
+    });
   });
 });

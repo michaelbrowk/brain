@@ -2,6 +2,7 @@ import type { createMcpHandler } from "mcp-handler";
 import { z } from "zod";
 import {
   getStore,
+  isAppOwnsFull,
   isAppSize,
   isAttachmentValidation,
   isNotApp,
@@ -9,7 +10,12 @@ import {
   isRevConflict,
   type AppAssetInput,
 } from "@/lib/store";
-import { appMetaSchema, APP_MAX_OWNED } from "@/lib/apps/model";
+import {
+  appMetaSchema,
+  APP_ASSETS_MAX_BYTES,
+  APP_ENTRY_MAX_BYTES,
+  APP_MAX_OWNED,
+} from "@/lib/apps/model";
 import { lintAppEntry, type AppLintRule } from "@/lib/apps/lint";
 import { appendMcpActivity } from "@/lib/mcp/activity-log";
 import {
@@ -85,6 +91,17 @@ const no = (outcome: string, error: string, reason: string): AppAnswer => ({
   outcome,
 });
 
+/** The one sentence a cap answers with, wherever the measurement was taken.
+ *  The store takes it on the bytes it is handed and `oversized` below takes it
+ *  on the base64 that would have become them, and an agent must not be able to
+ *  tell which one refused it: the fix is the same either way. */
+const tooLarge = (what: "entry" | "assets" | "state"): AppAnswer =>
+  no(
+    "too_large",
+    `that app's ${what} is over the size Brain keeps for one`,
+    "too_large",
+  );
+
 /** The lint's refusal, with the rule and the line beside the two fields every
  *  refusal on this endpoint carries. The same shape `rev_conflict` uses for
  *  `currentRev`: what the caller needs to fix it rides alongside rather than
@@ -110,11 +127,18 @@ function lintRefused(rule: AppLintRule, line: number): AppAnswer {
  *  as well as the shape, and the store's message names the absolute path of
  *  the notes folder. */
 function appRefusal(error: unknown): AppAnswer {
-  if (isAppSize(error)) {
+  if (isAppSize(error)) return tooLarge(error.what);
+  // An app that has minted every page it may is a full list, not a broken
+  // notes folder, and `store_failed` sent an agent to look at the disk for
+  // something only its own next call could change. The store owns this cap —
+  // it is checked inside the mutex, where two creates racing for the last slot
+  // are serialised — and it exports the predicate, so this is the answer for
+  // whatever reaches these two tools holding it.
+  if (isAppOwnsFull(error)) {
     return no(
-      "too_large",
-      `that app's ${error.what} is over the size Brain keeps for one`,
-      "too_large",
+      "too_many_owned",
+      `that app already owns the ${APP_MAX_OWNED} pages an app may own`,
+      "too_many_owned",
     );
   }
   if (isAttachmentValidation(error)) {
@@ -245,6 +269,46 @@ function decodeBase64(value: string): Uint8Array | null {
   return new Uint8Array(buffer);
 }
 
+/** THE SIZE IS ANSWERED BEFORE THE BYTES EXIST.
+ *
+ *  `assertAppAssetsSize` in the store adds up `data.byteLength`, which means
+ *  every asset in the request is already a `Buffer` by the time it says no: a
+ *  hundred-megabyte set allocated a hundred megabytes to be told ninety of
+ *  them were too many, and a caller retrying that in a loop is an out-of-memory
+ *  crash rather than a refusal. Base64 says how much it carries without being
+ *  decoded — four characters are three bytes, less the padding — so the same
+ *  answer is available for the price of a string length.
+ *
+ *  Exact for a string the decoder will accept, which is the only case that can
+ *  reach the store: a length that is not a multiple of four is refused a moment
+ *  later as `bad_request`, and this is only ever an estimate for those.
+ *
+ *  The entry is measured here too, ahead of the lint rather than after it: the
+ *  lint walks the whole document with three regexes, and there is no reason to
+ *  read two megabytes of HTML that cannot be written whatever it says. */
+function encodedByteLength(value: string): number {
+  const padding = value.endsWith("==") ? 2 : value.endsWith("=") ? 1 : 0;
+  return Math.floor((value.length * 3) / 4) - padding;
+}
+
+function oversized(
+  entryHtml: string | undefined,
+  assets: readonly { base64: string }[] | undefined,
+): AppAnswer | null {
+  if (
+    entryHtml !== undefined &&
+    Buffer.byteLength(entryHtml, "utf8") > APP_ENTRY_MAX_BYTES
+  ) {
+    return tooLarge("entry");
+  }
+  let total = 0;
+  for (const asset of assets ?? []) {
+    total += encodedByteLength(asset.base64);
+    if (total > APP_ASSETS_MAX_BYTES) return tooLarge("assets");
+  }
+  return null;
+}
+
 type DecodedAssets =
   | { readonly ok: true; readonly assets: AppAssetInput[] | undefined }
   | { readonly ok: false; readonly name: string };
@@ -344,6 +408,8 @@ export function registerAppTools(server: McpToolServer): void {
             "bad_request",
           );
         }
+        const over = oversized(entryHtml, assets);
+        if (over !== null) return over;
         const finding = lintAppEntry(entryHtml);
         if (finding !== null) return lintRefused(finding.rule, finding.line);
         const decoded = decodeAssets(assets);
@@ -418,6 +484,8 @@ export function registerAppTools(server: McpToolServer): void {
         }
         marks.page = id;
         marks.change = "write_app";
+        const over = oversized(entryHtml, assets);
+        if (over !== null) return over;
         if (entryHtml !== undefined) {
           const finding = lintAppEntry(entryHtml);
           if (finding !== null) return lintRefused(finding.rule, finding.line);

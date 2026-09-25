@@ -926,9 +926,96 @@ const authenticatedHandler = withMcpAuth(
   },
 );
 
+/** THE LARGEST REQUEST THIS ENDPOINT ACCEPTS.
+ *
+ *  There was no number here at all. `requiredToolScopes` parses the body so it
+ *  can pre-gate a batch on every scope every call in it needs, and the handler
+ *  parses it again, so a body of any size whatsoever was read into memory twice
+ *  before one tool was asked anything. The tools have their own caps — an app
+ *  entry is two mebibytes and its assets ten — and none of them was reached.
+ *
+ *  Sixteen mebibytes is above every one of those, and above a batch of them,
+ *  and well under what the request the store would refuse anyway can cost. It
+ *  is answered as HTTP rather than as a tool refusal, the way `docs/mcp-tools.md`
+ *  says the caps are: the request never reached a tool, so there is no tool to
+ *  answer for it, and nothing the model could read and fix.
+ *
+ *  A declared `Content-Length` over the cap is refused on the header alone,
+ *  before a byte is read. Everything else is read here once, stopping the
+ *  moment it passes the cap, and handed on as a request carrying the bytes
+ *  already in hand — a body cannot be read twice, and a clone cannot be
+ *  counted without the other branch of the tee being read in step with it,
+ *  which deadlocks. So the endpoint holds at most the cap, whatever the
+ *  sender declared. */
+export const MAX_BODY_BYTES = 16 * 1024 * 1024;
+
+type Bounded =
+  | { readonly ok: true; readonly request: Request }
+  | { readonly ok: false };
+
+async function boundBody(request: Request): Promise<Bounded> {
+  if (request.method !== "POST") return { ok: true, request };
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
+    return { ok: false };
+  }
+  if (request.body === null) return { ok: true, request };
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > MAX_BODY_BYTES) {
+      await reader.cancel("MCP request too large");
+      return { ok: false };
+    }
+    chunks.push(value);
+  }
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return {
+    ok: true,
+    request: new Request(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body: bytes,
+      // THE SIGNAL IS NOT OPTIONAL. `mcp-handler` hands `request.signal` to
+      // `createServerResponseAdapter`, which turns an abort into the `close`
+      // the streamable transport tears its session down on. A rebuilt request
+      // carrying a fresh signal that can never fire means a client hanging up
+      // mid-call emits no `close` at all: the response stream stays open and
+      // the per-request state is held until the sixty-second ceiling.
+      signal: request.signal,
+    }),
+  };
+}
+
+/** The bounding, for the cases that are about the request rather than about a
+ *  tool: the abort signal surviving the rebuild, and the cap's own boundary,
+ *  which a `>=` for a `>` would otherwise move by one byte unnoticed. */
+export const boundBodyForTests = boundBody;
+
+function tooLargeResponse(): Response {
+  return Response.json(
+    {
+      error: "that request is larger than this endpoint accepts",
+      reason: "too_large",
+    },
+    { status: 413, headers: { "Cache-Control": "no-store" } },
+  );
+}
+
 async function routeHandler(request: Request): Promise<Response> {
+  const bounded = await boundBody(request);
+  if (!bounded.ok) return tooLargeResponse();
   return withMcpChallengeScopes(
-    await authenticatedHandler(request),
+    await authenticatedHandler(bounded.request),
     MCP_CONNECTION_SCOPES,
   );
 }

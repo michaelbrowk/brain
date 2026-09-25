@@ -126,6 +126,33 @@ describe("CI cost guardrails", () => {
     ).toBe(true);
   });
 
+  it("audits the production dependency tree on every event", () => {
+    // The audit was a human habit until Next 16.2 shipped with two critical
+    // advisories nobody ran it against. A habit is not a gate, so it is a
+    // step, and a cheap one: no push-only guard, so a pull request answers
+    // for what it adds to the lockfile before it is merged.
+    expect(workflow).toContain("- name: Audit production dependencies\n");
+    const index = workflow.indexOf("- name: Audit production dependencies\n");
+    const stepStart = workflow.lastIndexOf("\n      - ", index);
+    let stepEnd = workflow.indexOf("\n      - ", index + 1);
+    if (stepEnd === -1) stepEnd = workflow.length;
+    const step = workflow.slice(stepStart, stepEnd);
+    expect(step).not.toContain("if: github.event_name == 'push'");
+    expect(step).toContain("run: pnpm audit:prod");
+    // After the install, because there is no tree to audit before it.
+    expect(index).toBeGreaterThan(
+      workflow.indexOf("run: pnpm install --frozen-lockfile"),
+    );
+    expect(packageScripts["audit:prod"]).toBe(
+      "pnpm audit --prod --audit-level=high",
+    );
+    // First in the local run too: a known-vulnerable dependency is not worth
+    // a build and three browser suites to find out about.
+    expect(packageScripts["ci:local"]?.startsWith("pnpm audit:prod &&")).toBe(
+      true,
+    );
+  });
+
   it("scans for secrets on every event, with the deliberate test keys allowlisted", () => {
     expect(workflow).toContain("- name: Scan for secrets\n");
     const index = workflow.indexOf("- name: Scan for secrets\n");

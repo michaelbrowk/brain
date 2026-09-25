@@ -438,6 +438,16 @@ function safeHeaders(additional?: HeadersInit): Headers {
   return headers;
 }
 
+/** HTTPS ONLY, AND NOT FOR BRAIN'S OWN REASON.
+ *
+ *  `lib/private-origin.ts` lets MCP run over plain http on the owner's own
+ *  network, because the only thing at stake there is Brain's own tokens on
+ *  Brain's own wire. This flow cannot take the same rule: the origin becomes
+ *  the redirect URI Google is handed, and Google refuses a plain-http callback
+ *  on anything but loopback. An origin this accepted and Google then rejected
+ *  would fail at the consent screen, on Google's wording, after the owner had
+ *  already picked an account. So it is refused here instead, and
+ *  `.env.example` says as much beside the variable. */
 function readPublicOrigin(override: string | undefined): string {
   const value = override ?? process.env.BRAIN_PUBLIC_ORIGIN;
   if (typeof value !== "string") throw new Error("missing public origin");

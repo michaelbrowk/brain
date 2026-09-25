@@ -1,6 +1,7 @@
 import { SignJWT } from "jose";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  cookieSecure,
   createSession,
   createShareEditToken,
   createShareToken,
@@ -183,5 +184,48 @@ describe("the share-edit token domain", () => {
 
   it("names the cookie after the root", () => {
     expect(shareEditCookieName("root-1")).toBe("brain_edit_share_root-1");
+  });
+});
+
+describe("cookieSecure", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("marks a cookie Secure on an https origin, whatever the caller's default", () => {
+    vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "https://brain.example.com");
+    expect(cookieSecure(false)).toBe(true);
+    expect(cookieSecure(true)).toBe(true);
+  });
+
+  it.each([
+    "http://brain.lan",
+    "http://brain.local:3020",
+    "http://192.168.1.10:3000",
+    "http://10.0.0.1",
+    "http://127.0.0.1:3020",
+    "http://localhost:3000",
+    "http://[fd12:3456::1]:3020",
+  ])("does not, on the plain-http private origin %s", (origin) => {
+    // Only `localhost`, `127.0.0.1` and `[::1]` are potentially-trustworthy
+    // origins, so on any other private name a Secure cookie is discarded in
+    // silence and the owner cannot log in at all. The two loopback names are in
+    // here as well: one rule reads better than one rule with an exception, and
+    // a cookie sent in the clear to 127.0.0.1 reaches nobody the session does
+    // not already belong to.
+    vi.stubEnv("BRAIN_PUBLIC_ORIGIN", origin);
+    expect(cookieSecure(true)).toBe(false);
+    expect(cookieSecure(false)).toBe(false);
+  });
+
+  it.each([
+    ["nothing configured", undefined],
+    ["an empty value", ""],
+    ["a value that is not a URL at all", "brain.lan"],
+    ["plain http on a public name, which MCP refuses outright", "http://brain.example.com"],
+  ])("leaves the caller's own default alone for %s", (_name, origin) => {
+    vi.stubEnv("BRAIN_PUBLIC_ORIGIN", origin);
+    expect(cookieSecure(true)).toBe(true);
+    expect(cookieSecure(false)).toBe(false);
   });
 });

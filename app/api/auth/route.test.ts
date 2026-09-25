@@ -59,6 +59,50 @@ describe("login rate limiting", () => {
   });
 });
 
+/** A `Secure` cookie is only accepted from a potentially-trustworthy origin, and
+ *  of the private names Brain now invites, only `localhost`, `127.0.0.1` and
+ *  `[::1]` are. So on `http://brain.lan` the login POST answered 200 and the
+ *  browser threw the cookie away: the password screen came back, every time,
+ *  with nothing anywhere saying why. */
+describe("the session cookie's Secure flag follows the configured origin", () => {
+  afterEach(() => {
+    delete process.env.AUTH_PASSWORD_HASH;
+    delete process.env.AUTH_SECRET;
+    delete process.env.BRAIN_PUBLIC_ORIGIN;
+    vi.resetModules();
+  });
+
+  const login = async (origin: string | undefined) => {
+    process.env.AUTH_PASSWORD_HASH = await bcrypt.hash("correct horse", 4);
+    process.env.AUTH_SECRET = "test-secret-that-never-leaves-this-process";
+    if (origin === undefined) delete process.env.BRAIN_PUBLIC_ORIGIN;
+    else process.env.BRAIN_PUBLIC_ORIGIN = origin;
+    vi.resetModules();
+    const { POST } = await import("./route");
+    const response = await POST(
+      request(JSON.stringify({ password: "correct horse" })),
+    );
+    expect(response.status).toBe(200);
+    return response.headers.get("set-cookie") ?? "";
+  };
+
+  it.each([
+    "http://brain.lan",
+    "http://192.168.1.10:3000",
+    "http://127.0.0.1:3020",
+  ])("drops it on the plain-http private origin %s", async (origin) => {
+    expect(await login(origin)).not.toContain("Secure");
+  });
+
+  it("keeps it on an https origin", async () => {
+    expect(await login("https://brain.example.com")).toContain("Secure");
+  });
+
+  it("keeps it when no origin is configured at all", async () => {
+    expect(await login(undefined)).toContain("Secure");
+  });
+});
+
 describe("logout everywhere", () => {
   afterEach(() => {
     delete process.env.AUTH_PASSWORD_HASH;

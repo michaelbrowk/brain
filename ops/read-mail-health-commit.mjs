@@ -30,9 +30,13 @@ process.stdin.on("end", () => {
         ? build.commit
         : null;
 
+    // `paused` is the owner having turned Mail off in Settings, which the
+    // service's own health says outranks the readiness sentence; it is not a
+    // broken release, so a deploy must go through it. Seen 2026-09-23: a
+    // paused instance refused every deploy for two days.
     if (
       apiVersion !== 1 ||
-      (status !== "ok" && status !== "degraded") ||
+      (status !== "ok" && status !== "degraded" && status !== "paused") ||
       typeof commit !== "string" ||
       !/^[a-f0-9]{40}$/.test(commit)
     ) {

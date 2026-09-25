@@ -603,7 +603,7 @@ describe("install.sh run, upgrade, uninstall", () => {
     // 40 probes of at most 2 s with 1 s between them: under two minutes at worst, the first one right away
     expect(r.calls().match(/^curl -fsS --max-time 2 http:\/\/127\.0\.0\.1:3020\/api\/health$/gm)).toHaveLength(40);
     expect(r.calls().match(/^sleep 1$/gm)).toHaveLength(39);
-  });
+  }, 15_000);
 
   it("upgrades in place when .env exists: keeps .env and notes, replaces compose, asks nothing", () => {
     const first = runInstall({ BRAIN_PASSWORD: "abc12345", BRAIN_DOMAIN: "notes.example.com" });

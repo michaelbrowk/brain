@@ -112,6 +112,12 @@ server {
         proxy_read_timeout 60s;
     }
 
+    # Brain uses no next/image: every image ships as-is, never through the
+    # optimizer route. The block stays as defence in depth if that changes.
+    location ^~ /_next/image {
+        return 404;
+    }
+
     # Server-sent events: unbuffered, long-lived.
     location = /api/events {
         proxy_pass http://brain_app;

@@ -3,6 +3,19 @@
   "version": "0.15.0",
   "description": "Self-hosted notes and mail on a folder of Markdown files.",
   "license": "MIT",
+  "homepage": "https://www.michaelbrowk.com/brain",
+  "bugs": {
+    "url": "https://github.com/michaelbrowk/brain/issues"
+  },
+  "keywords": [
+    "notes",
+    "markdown",
+    "self-hosted",
+    "mail",
+    "tasks",
+    "mcp",
+    "knowledge-base"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/michaelbrowk/brain.git"

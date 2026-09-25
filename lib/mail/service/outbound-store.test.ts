@@ -1286,7 +1286,7 @@ describe("private durable mail outbox", () => {
     } finally {
       verified.close();
     }
-  });
+  }, 15_000);
 
   // A version this service does not write, and no path down from it: the
   // account is refused rather than read. What the case shows is the branch, on

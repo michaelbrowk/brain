@@ -5,8 +5,9 @@
  *  or the same line with a bullet in front of it. The trainer reads all
  *  three, and reads nothing out of prose, a heading or a fenced block, where
  *  a dash is punctuation rather than a separator. What it takes out of those
- *  three shapes is narrowed by one bargain, `isPair` below: Spanish on the
- *  left, the owner's own non-Latin language on the right.
+ *  three shapes is narrowed by one bargain, `isPair` below: the language being
+ *  learned on the left, the owner's own on the right, told apart by the two
+ *  scripts the owner names in the app's head.
  *
  *  It never writes the pages it reads. The only page it writes is its own
  *  `Words`, through the bridge, which is the one page its `owns` list names. */
@@ -105,27 +106,75 @@ function isRuleRow(line) {
   return cells.length > 0 && cells.every((cell) => RULE_CELL.test(cell));
 }
 
-/** THE TRAINER'S BARGAIN: SPANISH ON THE LEFT, ANOTHER SCRIPT ON THE RIGHT.
+/** THE TRAINER'S BARGAIN: ONE SCRIPT ON THE LEFT, ANOTHER ON THE RIGHT.
  *
  *  A conjugation table is shaped exactly like a vocabulary table, and the
  *  reader used to drill `tener` against `tengo` and `1-е` against `-ar`. What
  *  tells the two apart is not the shape, it is the writing: a pair the owner
- *  means to learn has the Spanish on one side and their own language on the
- *  other, and their own language is not written in Latin letters. Spanish on
- *  both sides is grammar; the owner's language on both sides is a heading or
- *  a numbering column.
+ *  means to learn has the language they are learning on one side and their own
+ *  on the other. Spanish on both sides is grammar; the owner's own language on
+ *  both sides is a heading or a numbering column.
  *
- *  It is a bargain and not a law. A notebook kept in English gets nothing out
- *  of this reader, which is why the README says so and why choosing the two
- *  scripts belongs in the app's settings later. */
-const LATIN_LETTER = /\p{Script=Latin}/u;
-const OTHER_SCRIPT_LETTER = /(?!\p{Script=Latin})\p{L}/u;
+ *  WHICH TWO SCRIPTS THOSE ARE IS THE OWNER'S TO SAY. It used to be written
+ *  into this file, and a notebook kept in Spanish and English then got nothing
+ *  out of the reader at all. The pair is an argument now, the head offers it as
+ *  two selects and the app keeps it in `state`, and the default is the bargain
+ *  Michael's own notebook was measured on, so those pages read the same as
+ *  before. */
+const SCRIPT_CLASSES = {
+  Latin: "\\p{Script=Latin}",
+  Cyrillic: "\\p{Script=Cyrillic}",
+  Greek: "\\p{Script=Greek}",
+  Arabic: "\\p{Script=Arabic}",
+  Hebrew: "\\p{Script=Hebrew}",
+  Han: "\\p{Script=Han}",
+  // Japanese writes its kana in two, and a notebook uses both, so the one
+  // choice the head offers covers both.
+  Kana: "\\p{Script=Hiragana}\\p{Script=Katakana}",
+  Hangul: "\\p{Script=Hangul}",
+};
 
-function isPair(word, translation) {
-  return LATIN_LETTER.test(word) && OTHER_SCRIPT_LETTER.test(translation);
+/** The scripts the head offers, in the order it offers them. */
+export const SCRIPT_NAMES = Object.keys(SCRIPT_CLASSES);
+
+export const DEFAULT_SCRIPTS = { wordScript: "Latin", translationScript: "not-Latin" };
+
+/** A script name, or `not-<name>` for the side the head calls "any other than
+ *  the word's": a letter of any script but that one. The tests are built once
+ *  each and kept, because `extractVocabulary` asks for them on every line of
+ *  every page and a notebook is thousands of lines.
+ *
+ *  A name nothing defines reads as the default for that side rather than
+ *  refusing: the setting is JSON on the owner's own disk, and a hand edit that
+ *  spells a script wrong should cost them the setting, not the deck. */
+const scriptTests = new Map();
+
+function classesFor(name) {
+  return SCRIPT_CLASSES[name.indexOf("not-") === 0 ? name.slice(4) : name];
 }
 
-export function extractVocabulary(markdown) {
+function scriptTest(name, fallback) {
+  const asked = typeof name === "string" && name.length > 0 ? name : fallback;
+  const chosen = classesFor(asked) === undefined ? fallback : asked;
+  const kept = scriptTests.get(chosen);
+  if (kept !== undefined) return kept;
+  const built =
+    chosen.indexOf("not-") === 0
+      ? new RegExp("(?![" + classesFor(chosen) + "])\\p{L}", "u")
+      : new RegExp("[" + classesFor(chosen) + "]", "u");
+  scriptTests.set(chosen, built);
+  return built;
+}
+
+export function isPair(word, translation, scripts) {
+  const chosen = scripts || DEFAULT_SCRIPTS;
+  return (
+    scriptTest(chosen.wordScript, DEFAULT_SCRIPTS.wordScript).test(word) &&
+    scriptTest(chosen.translationScript, DEFAULT_SCRIPTS.translationScript).test(translation)
+  );
+}
+
+export function extractVocabulary(markdown, scripts) {
   const rows = [];
   const lines = String(markdown)
     .split("\n")
@@ -153,7 +202,7 @@ export function extractVocabulary(markdown) {
       if (cells.length < 2) continue;
       if (ENGLISH_HEADER.test(cells[0])) continue;
       if (cells[0].length === 0 || cells[1].length === 0) continue;
-      if (!isPair(cells[0], cells[1])) continue;
+      if (!isPair(cells[0], cells[1], scripts)) continue;
       rows.push({ word: cells[0], translation: cells[1] });
       continue;
     }
@@ -172,7 +221,7 @@ export function extractVocabulary(markdown) {
     if (countWords(word) > limit || countWords(rest) > limit) continue;
     const translation = rest.replace(SENTENCE_END, "").trim();
     if (translation.length === 0) continue;
-    if (!isPair(word, translation)) continue;
+    if (!isPair(word, translation, scripts)) continue;
     rows.push({ word, translation });
   }
   return rows;
@@ -343,7 +392,7 @@ export async function readVocabulary(nodes, readPage, options) {
       failed += 1;
       continue;
     }
-    for (const row of extractVocabulary(page.markdown)) rows.push(row);
+    for (const row of extractVocabulary(page.markdown, settings.scripts)) rows.push(row);
   }
   return { rows, failed };
 }

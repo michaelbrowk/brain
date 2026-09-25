@@ -29,10 +29,14 @@ node examples/apps/spanish-trainer/build.mjs
 ## How it behaves
 
 - It asks the kit for `hello`, then reads the settings it kept in `state`:
-  which parent to read, and which page is `Words`. Nothing else is in `state` —
-  the words themselves live on the `Words` page, which is the one copy.
+  which parent to read, which page is `Words`, and the two scripts that tell a
+  word from its translation. Nothing else is in `state` — the words themselves
+  live on the `Words` page, which is the one copy.
 - The parent defaults to the app page's own parent. The picker in the head
   changes it, and a change is a `state.set`.
+- The two scripts are two more selects in the head, and a change there is a
+  `state.set` too. Changing either one re-reads every source page, because the
+  pair is what decides whether a line is a pair at all.
 - A card shows the word, Show reveals the translation, and the three answers
   are Again, Good and Easy. Again puts the word back in this session, Good
   pushes it out by `2 ** seen` days, Easy marks it known and takes it out of
@@ -50,21 +54,33 @@ node examples/apps/spanish-trainer/build.mjs
 
 ## What counts as a word
 
-The reader takes a pair on a bargain: the Spanish is on the left and the
-owner's own language is on the right, and the two are told apart by the script
-they are written in, so a pair counts only when the left side carries a Latin
-letter and the right side carries a letter that is not Latin. That single rule
-is what keeps a grammar table out of the deck, because a conjugation
-(`tener | tengo`) is Spanish on both sides and a numbering column (`1-е | -ar`)
-is Russian on both. Two smaller rules sit beside it: emphasis marks (`**`, `*`,
-`_`, backticks) come off both sides before anything else, while parentheses and
-a leading `¿` or `¡` stay because they are spelling rather than markup, and a
-table's header row is found by position — it is the row above the `| --- |`
-rule row, whatever language its cells are in — with the old English list of
-column names kept only for a table somebody wrote without a rule row. The
-bargain is also the limit: a notebook kept in Spanish and English gets nothing
-out of this reader, and letting the owner name the two scripts in the app's
-settings is the follow-up.
+The reader takes a pair on a bargain: the language being learned is on the left
+and the owner's own is on the right, and the two are told apart by the script
+they are written in. A pair counts only when the left side carries a letter of
+the word script and the right side carries a letter of the translation script.
+That single rule is what keeps a grammar table out of the deck, because a
+conjugation (`tener | tengo`) is Spanish on both sides and a numbering column
+(`1-е | -ar`) is Russian on both. Two smaller rules sit beside it: emphasis
+marks (`**`, `*`, `_`, backticks) come off both sides before anything else,
+while parentheses and a leading `¿` or `¡` stay because they are spelling
+rather than markup, and a table's header row is found by position — it is the
+row above the `| --- |` rule row, whatever language its cells are in — with the
+old English list of column names kept only for a table somebody wrote without a
+rule row.
+
+**The two scripts are the owner's to name.** They sit in the head beside the
+"Words from" picker, they live in `state` as `wordScript` and
+`translationScript`, and the default is `Latin` against `any other than the
+word's`, which is the bargain Michael's own notebook was measured on. The
+choices are Latin, Cyrillic, Greek, Arabic, Hebrew, Han, Kana and Hangul, and
+the translation side has one more: **any other than the word's**, spelled
+`not-<script>` in `state`, which is any letter of any script but that one. The
+word side is offered no such choice, because two sides that each meant
+"anything but the other one" would between them mean nothing.
+
+Naming the pair is what opens the reader to a notebook it used to return
+nothing from: `Latin` against `Latin` reads a Spanish-and-English notebook,
+`Cyrillic` against `Latin` reads one written the other way round.
 
 ## How the e2e seeds it
 

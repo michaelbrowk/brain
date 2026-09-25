@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   addDays,
   applyAnswer,
+  DEFAULT_SCRIPTS,
   descendantsOf,
   dueRows,
   extractVocabulary,
@@ -11,6 +12,7 @@ import {
   parseWordsTable,
   readVocabulary,
   renderWordsTable,
+  SCRIPT_NAMES,
 } from "./vocabulary.js";
 
 describe("reading vocabulary out of a page", () => {
@@ -171,6 +173,109 @@ describe("a page the owner wrote rather than one this file invented", () => {
     ].join("\n");
     expect(extractVocabulary(md)).toEqual([
       { word: "tú (твой)", translation: "tu (без акцента!)" },
+    ]);
+  });
+});
+
+/** THE PAIR OF SCRIPTS IS A SETTING, NOT A LAW.
+ *
+ *  Latin on the word side and anything but Latin on the translation side is
+ *  Michael's notebook, and it was written into the reader. A notebook kept in
+ *  Spanish and English got nothing out of it, and so did a Greek one and an
+ *  Arabic one. The pair is an argument now, the app keeps it in `state`, and
+ *  the default is the old bargain, so the cases above are still read the way
+ *  they were measured.
+ *
+ *  `not-<script>` is the translation side the head calls "any other than the
+ *  word's": any letter that is not of that script. */
+describe("the pair of scripts the owner named", () => {
+  it("defaults to the bargain Michael's notebook was read on", () => {
+    expect(DEFAULT_SCRIPTS).toEqual({ wordScript: "Latin", translationScript: "not-Latin" });
+    expect(extractVocabulary("hola — привет")).toEqual([{ word: "hola", translation: "привет" }]);
+    expect(extractVocabulary("hola — привет", DEFAULT_SCRIPTS)).toEqual([
+      { word: "hola", translation: "привет" },
+    ]);
+  });
+
+  it("reads a notebook kept in Spanish and English once both sides are Latin", () => {
+    expect(
+      extractVocabulary("hola — hello", { wordScript: "Latin", translationScript: "Latin" }),
+    ).toEqual([{ word: "hola", translation: "hello" }]);
+    // The reason the setting exists: under the default this page is empty.
+    expect(extractVocabulary("hola — hello")).toEqual([]);
+  });
+
+  it("reads every script the head offers on the translation side", () => {
+    const notebooks = [
+      ["Cyrillic", "привет"],
+      ["Greek", "γεια"],
+      ["Arabic", "مرحبا"],
+      ["Hebrew", "שלום"],
+      ["Han", "你好"],
+      ["Kana", "こんにちは"],
+      ["Kana", "コンニチハ"],
+      ["Hangul", "안녕"],
+    ];
+    for (const [translationScript, translation] of notebooks) {
+      expect(
+        extractVocabulary(`hola — ${translation}`, { wordScript: "Latin", translationScript }),
+      ).toEqual([{ word: "hola", translation }]);
+    }
+  });
+
+  it("reads a notebook whose words are Cyrillic and whose translations are Latin", () => {
+    const scripts = { wordScript: "Cyrillic", translationScript: "Latin" };
+    expect(extractVocabulary("привет — hola", scripts)).toEqual([
+      { word: "привет", translation: "hola" },
+    ]);
+    expect(extractVocabulary("hola — привет", scripts)).toEqual([]);
+  });
+
+  it("reads `any other than the word's` against the word's own script", () => {
+    const scripts = { wordScript: "Cyrillic", translationScript: "not-Cyrillic" };
+    expect(extractVocabulary("привет — hola", scripts)).toEqual([
+      { word: "привет", translation: "hola" },
+    ]);
+    expect(extractVocabulary("привет — здравствуй", scripts)).toEqual([]);
+  });
+
+  it("keeps a conjugation out of the deck under either pair, and says what it lets in", () => {
+    const md = ["| Лицо | gustar |", "| --- | --- |", "| 1-е | -ar |", "| tener | tengo |"].join(
+      "\n",
+    );
+    // A conjugation is Spanish on both sides, so neither pair reaches it.
+    expect(extractVocabulary(md, { wordScript: "Latin", translationScript: "Cyrillic" })).toEqual(
+      [],
+    );
+    // Reversing the pair is the owner saying their words are Russian and the
+    // translations Latin, and a numbering column is then exactly that shape.
+    // The rule is about the two scripts and nothing else; a table it cannot
+    // tell from a vocabulary is the price, and the README names it.
+    expect(extractVocabulary(md, { wordScript: "Cyrillic", translationScript: "Latin" })).toEqual([
+      { word: "1-е", translation: "-ar" },
+    ]);
+  });
+
+  it("falls back to the default for a script name nothing defines", () => {
+    // The setting is JSON on the owner's own disk, so a hand edit that spells
+    // a script wrong is a thing that happens. Reading it as the default costs
+    // them a setting they thought they had changed; refusing it would empty
+    // their deck and say nothing about why.
+    expect(
+      extractVocabulary("hola — привет", { wordScript: "Klingon", translationScript: "not-Latin" }),
+    ).toEqual([{ word: "hola", translation: "привет" }]);
+  });
+
+  it("names the scripts the head offers, in the order it offers them", () => {
+    expect(SCRIPT_NAMES).toEqual([
+      "Latin",
+      "Cyrillic",
+      "Greek",
+      "Arabic",
+      "Hebrew",
+      "Han",
+      "Kana",
+      "Hangul",
     ]);
   });
 });
@@ -549,6 +654,18 @@ describe("reading the pages a deck is built from", () => {
     expect(asked).toBe(2);
     expect(answered.failed).toBe(1);
     expect(answered.rows).toEqual([]);
+  });
+
+  it("reads the pages against the pair of scripts it was given", async () => {
+    // The setting reaches the reader through here, so a trainer whose owner
+    // named two Latin scripts and whose pages are Spanish and English gets a
+    // deck rather than an empty one.
+    const answered = await readVocabulary(
+      pages(1),
+      async () => ({ markdown: "hola — hello" }),
+      { ...clock(), scripts: { wordScript: "Latin", translationScript: "Latin" } },
+    );
+    expect(answered.rows).toEqual([{ word: "hola", translation: "hello" }]);
   });
 
   it("holds itself under the bridge's own limit rather than being refused by it", async () => {

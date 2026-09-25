@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { nanoid } from "nanoid";
 import { configuredPublicOrigin, getStore, isNotFound } from "@/lib/store";
 import {
+  cookieSecure,
   createShareEditToken,
   createShareToken,
   shareEditCookieName,
@@ -105,7 +106,11 @@ export async function POST(req: NextRequest) {
       {
         httpOnly: true,
         sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
+        // The build kind was the wrong thing to read: a production build on a
+        // plain-http private origin marked these Secure and the browser dropped
+        // them. `cookieSecure` reads the origin and keeps the old answer for an
+        // installation that configured none.
+        secure: cookieSecure(process.env.NODE_ENV === "production"),
         // The page-scoped token is also needed by /api/media for attachments
         // referenced by this exact shared page. Its signed audience still binds
         // it to id + shareVersion, so a root cookie broadens delivery, not power.
@@ -212,7 +217,7 @@ async function mintEditToken(
       {
         httpOnly: true,
         sameSite: "lax",
-        secure: process.env.NODE_ENV === "production",
+        secure: cookieSecure(process.env.NODE_ENV === "production"),
         path: "/",
         maxAge: SHARE_EDIT_MAX_AGE_SECONDS,
       },
@@ -226,7 +231,7 @@ async function mintEditToken(
         {
           httpOnly: true,
           sameSite: "lax",
-          secure: process.env.NODE_ENV === "production",
+          secure: cookieSecure(process.env.NODE_ENV === "production"),
           path: "/",
           maxAge: 30 * 24 * 60 * 60,
         },

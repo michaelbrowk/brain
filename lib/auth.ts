@@ -3,6 +3,8 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { isPrivateNetworkHost } from "@/lib/private-origin";
+
 export const SESSION_COOKIE = "brain_session";
 const SESSION_DAYS = 90;
 const ISSUER = "brain";
@@ -32,6 +34,42 @@ export const LEGACY_OWNER_SUBJECT = "michael";
  */
 export function isOwnerSubject(subject: unknown): boolean {
   return subject === OWNER_SUBJECT || subject === LEGACY_OWNER_SUBJECT;
+}
+
+/** WHETHER A COOKIE THIS INSTALLATION SETS MAY BE MARKED `Secure`.
+ *
+ *  `Secure` is not a hint. A browser accepts such a cookie only from a
+ *  potentially-trustworthy origin, and of the private names Brain now serves on
+ *  (`lib/private-origin.ts`) only `localhost`, `127.0.0.1` and `[::1]` are one.
+ *  So on `http://brain.lan` the session cookie was set with `Secure: true`,
+ *  the login POST answered 200, the browser threw the cookie away, and the
+ *  password screen came back — with nothing in any log saying why, and every
+ *  session-gated route unreachable. The same held for the two share cookies,
+ *  which read `NODE_ENV` and so went `Secure` in any production build.
+ *
+ *  One rule, read off the origin the owner configured, for every cookie Brain
+ *  sets. The two loopback names are in the plain-http set as well: one rule
+ *  reads better than one rule with an exception, and a cookie sent in the clear
+ *  to `127.0.0.1` reaches nobody the session does not already belong to.
+ *
+ *  `whenUnconfigured` is what the caller did before there was a rule, and it is
+ *  what an installation with no `BRAIN_PUBLIC_ORIGIN` — or one whose value is
+ *  not an origin, or is plain http on a public name, which MCP refuses outright
+ *  — still gets. Nothing about those cases is safer for being changed here. */
+export function cookieSecure(whenUnconfigured: boolean): boolean {
+  const raw = process.env.BRAIN_PUBLIC_ORIGIN?.trim();
+  if (!raw) return whenUnconfigured;
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return whenUnconfigured;
+  }
+  if (url.protocol === "https:") return true;
+  if (url.protocol === "http:" && isPrivateNetworkHost(url.hostname)) {
+    return false;
+  }
+  return whenUnconfigured;
 }
 const SESSION_KIND = "session";
 const SHARE_KIND = "share";

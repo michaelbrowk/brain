@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import {
   bumpSessionEpoch,
+  cookieSecure,
   createSession,
   SESSION_COOKIE,
   verifySession,
@@ -56,7 +57,10 @@ export async function POST(req: NextRequest) {
   const res = NextResponse.json({ ok: true });
   res.cookies.set(SESSION_COOKIE, await createSession(), {
     httpOnly: true,
-    secure: true,
+    // `true` unless the owner configured a plain-http private origin, where a
+    // Secure cookie is discarded and the login loops. `cookieSecure` has the
+    // whole of it.
+    secure: cookieSecure(true),
     sameSite: "lax",
     path: "/",
     maxAge: 90 * 24 * 3600,

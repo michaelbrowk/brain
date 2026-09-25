@@ -1700,8 +1700,24 @@ html[data-kbd] [contenteditable]:focus-visible {
 .brain-app-canvas {
   display: flex;
   flex-direction: column;
-  min-height: 100%;
   padding-bottom: var(--tabbar-reserve);
+}
+/* IN THE SHELL THE CANVAS IS AS TALL AS THE WINDOW, AND SAYS SO IN WINDOW
+   UNITS. It used to say `min-height: 100%`, which is nothing at all here: the
+   scroller's child is a block of its own content's height, and a percentage
+   measured against a height that comes from content resolves to auto. So the
+   column had no room to hand out, `flex: 1` on the frame grew by nothing, and
+   the frame stood at its 420px floor with 600px of empty paper under it and
+   the app's own bottom button cut in half. Its top is the window's top — the
+   topbar is an absolute layer over the scroller, not a row above it — so what
+   is left for the frame is the window less the head above it, less the tab
+   bar's reserve this element already holds below. Under 420 plus that head
+   the frame keeps its floor and the canvas scrolls instead.
+   The share page's copy of the canvas is deliberately not here: it sits
+   inside a document column with the page's own title above it, and there the
+   frame is a block in the body rather than the surface. */
+.brain-app-canvas[data-app-canvas] {
+  min-height: 100dvh;
 }
 .brain-app-frame {
   flex: 1;

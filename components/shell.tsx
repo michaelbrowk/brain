@@ -5788,7 +5788,12 @@ export function Shell({
                 mailOpen || settingsActive || tasksOpen
                   ? "min-h-full"
                   : selectedId
-                    ? "brain-page-frame relative pb-40"
+                    ? // The tail is the document's: 160px of paper under the
+                      // last line, where a click starts a new paragraph. An
+                      // app page has no last line and its canvas measures
+                      // itself against the window, so under one the same
+                      // padding is only paper to scroll past.
+                      `brain-page-frame relative${currentNode?.kind === "app" ? "" : " pb-40"}`
                     : undefined
               }
             >

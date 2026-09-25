@@ -103,6 +103,24 @@ function treeNode(id: string, title: string): TreeNode {
   };
 }
 
+/** A page an agent built. What the shell puts under it is a running frame,
+ *  not a document with a last line to click below. */
+function appNode(id: string, title: string): TreeNode {
+  return {
+    ...treeNode(id, title),
+    kind: "app",
+    app: {
+      entry: "app/index.html",
+      version: 1,
+      builtBy: "Claude",
+      builtAt: "2026-07-27T08:00:00.000Z",
+      owns: [],
+      state: false,
+      reason: "build me a trainer for my Spanish words",
+    },
+  };
+}
+
 async function settle() {
   await act(async () => {
     await Promise.resolve();
@@ -543,5 +561,58 @@ describe("Shell page transitions", () => {
     expect(shareCalls[0][1]?.method).toBe("POST");
     expect(shareCalls[1][1]?.method).toBeUndefined();
     expect(document.body.textContent).toContain("Sharing is off");
+  });
+
+  /** WHY AN APP PAGE'S WRAPPER CARRIES NO TAIL.
+   *
+   *  A document keeps 160px of paper under its last line, where a click
+   *  starts a new paragraph. An app has no last line, and that padding was
+   *  window its frame should have had: the frame fills what the head leaves,
+   *  so a tail under it is paper the reader has to scroll past with nothing
+   *  in it. The fill itself is CSS, which jsdom cannot measure; the half that
+   *  has to come from the shell is this one, because the padding is a utility
+   *  on the wrapper and no rule under it can give the room back.
+   */
+  it("leaves no editor tail under an app page's canvas", async () => {
+    apiFetchMock.mockImplementation(async (input, init) => {
+      if (String(input) === "/api/app/trainer/frame" && init?.method === "POST") {
+        return response({
+          src: "/api/app/trainer/t/token/index.html",
+          exp: Math.floor(Date.now() / 1000) + 12 * 60 * 60,
+        });
+      }
+      if (String(input) === "/api/page/page-a") {
+        return response({
+          meta: { title: "Page A", stickers: [] },
+          markdown: "Body A",
+          rev: "rev-a",
+        });
+      }
+      // the bell asks the centre on mount, on every surface
+      if (String(input) === "/api/notifications")
+        return response({ notifications: [], unread: 0 });
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    window.history.replaceState({}, "", "/p/trainer");
+    const tree = [appNode("trainer", "Trainer"), treeNode("page-a", "Page A")];
+    await act(async () =>
+      root.render(<Shell tree={tree} initialSelectedId="trainer" />),
+    );
+    await flushAnimationFrames();
+
+    const appWrapper = container.querySelector(".brain-page-frame");
+    expect(appWrapper?.querySelector("[data-app-canvas]")).not.toBeNull();
+    expect(appWrapper?.className).not.toContain("pb-40");
+
+    // And the tail is still there for a document, which is what it is for.
+    await act(async () => {
+      window.history.pushState({}, "", "/p/page-a");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await flushAnimationFrames();
+    const pageWrapper = container.querySelector(".brain-page-frame");
+    expect(pageWrapper?.querySelector("[data-app-canvas]")).toBeNull();
+    expect(pageWrapper?.className).toContain("pb-40");
   });
 });

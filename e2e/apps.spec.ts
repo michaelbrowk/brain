@@ -722,6 +722,94 @@ test("@release a shared trainer runs, and refuses to write", async ({ page, brow
   }
 });
 
+/** The frame's box, the reserve the canvas holds under it, and the window it
+ *  is measured against, all read in the page in one go so the three numbers
+ *  come from the same layout. `scrolls` is the scroller's own overflow: an
+ *  app page has nothing below the frame to scroll to, so anything over a
+ *  pixel of it is paper that should have been the frame's. */
+async function frameFill(page: Page, title: string) {
+  return page.evaluate((frameTitle: string) => {
+    const canvas = document.querySelector<HTMLElement>("[data-app-canvas]");
+    const frame = document.querySelector<HTMLIFrameElement>(
+      `iframe[title="${frameTitle}"]`,
+    );
+    const scroller = document.querySelector<HTMLElement>(".brain-page-scroll");
+    if (!canvas || !frame || !scroller) throw new Error("the app canvas is not mounted");
+    const box = frame.getBoundingClientRect();
+    return {
+      top: box.top,
+      bottom: box.bottom,
+      height: box.height,
+      reserve: parseFloat(getComputedStyle(canvas).paddingBottom),
+      viewport: window.innerHeight,
+      scrolls: scroller.scrollHeight - scroller.clientHeight,
+    };
+  }, title);
+}
+
+/** THE CASE THAT CATCHES A FRAME THAT DOES NOT FILL ITS OWN CANVAS.
+ *
+ *  `.brain-app-canvas` used to ask for `min-height: 100%` of a parent whose
+ *  height came from its content, which resolves to nothing, so `flex: 1` on
+ *  the frame grew by nothing and the frame stood at its 420px floor. On a
+ *  1021px window that left 600px of empty paper under it and cut the app's
+ *  own bottom button in half, with nothing to scroll it into view. Only a
+ *  browser answers this: jsdom has no layout and would pass whatever we
+ *  wrote, and a screenshot diff reads a half-drawn button as a design.
+ *
+ *  Both sizes, because the two ends of the rule differ: on the desktop the
+ *  frame runs to the bottom of the window, on the phone it stops above the
+ *  tab bar's reserve, and the same arithmetic has to produce both. */
+test("@release the frame fills the window the head leaves, at 1280 and at 390", async ({
+  page,
+}) => {
+  await login(page);
+  const title = `Frame fill ${tag()}`;
+  await seed(page, title, [
+    {
+      sourceId: "probe",
+      parentSourceId: null,
+      title,
+      markdown: "The release case for how tall an app's frame is.\n",
+      app: { entryHtml: PROBE, assets: [{ name: "dot.png", base64: DOT_PNG_BASE64 }] },
+    },
+  ]);
+  const id = await idOf(page, title);
+
+  await page.setViewportSize({ width: 1280, height: 1021 });
+  await page.goto(`/p/${id}`);
+  await expect(page.locator(`iframe[title="${title}"]`)).toBeVisible({
+    timeout: 20_000,
+  });
+
+  const desktop = await frameFill(page, title);
+  expect(desktop.viewport).toBe(1021);
+  // Nothing is held back below the frame above 768, so it runs to the very
+  // bottom of the window.
+  expect(desktop.reserve).toBe(0);
+  expect(Math.round(desktop.bottom)).toBe(desktop.viewport);
+  // The head is still above it, and what is left is far more than the floor.
+  expect(desktop.top).toBeGreaterThan(200);
+  expect(desktop.height).toBeGreaterThanOrEqual(420);
+  expect(desktop.height).toBe(desktop.viewport - desktop.top);
+  expect(desktop.scrolls).toBeLessThanOrEqual(1);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.reload();
+  await expect(page.locator(`iframe[title="${title}"]`)).toBeVisible({
+    timeout: 20_000,
+  });
+
+  const phone = await frameFill(page, title);
+  expect(phone.viewport).toBe(844);
+  // On the phone the tab bar's reserve stays under the frame: an app's own
+  // bottom control must not sit behind Brain's.
+  expect(phone.reserve).toBeGreaterThan(0);
+  expect(Math.round(phone.bottom + phone.reserve)).toBe(phone.viewport);
+  expect(phone.height).toBeGreaterThanOrEqual(420);
+  expect(phone.scrolls).toBeLessThanOrEqual(1);
+});
+
 test("@release @mobile the frame fills the canvas above the tab bar at 390", async ({
   page,
 }) => {

@@ -100,3 +100,11 @@ export function warnPlainHttpOriginOnce(origin: string): void {
       "tokens travel unencrypted on your network.",
   );
 }
+
+/** The latch lives as long as the process, which is right in a server and wrong
+ *  in a suite: a second case asking what the warning says read the first one's
+ *  leftovers and proved nothing. Exported so a test states which state it starts
+ *  from rather than depending on the order its own file happens to run in. */
+export function resetPlainHttpWarnForTests(): void {
+  warned = false;
+}

@@ -40,8 +40,10 @@ Rules no single row states.
   `{ error, reason: "too_large" }` and no tool is called at all — there is no
   tool result, so there is no `isError` envelope to read it out of. Every tool's
   own cap sits well under it: an app entry is 2 MiB and its asset set 10 MiB,
-  and both are measured before the base64 is decoded, so an oversized build
-  costs one round trip rather than the memory it claimed.
+  and both are measured on what you sent rather than on what it becomes — the
+  entry as its own bytes, the assets as the length of their base64 before any of
+  it is decoded — so an oversized build costs one round trip rather than the
+  memory it claimed.
 - **A refusal is an answer, not an error.** Read it and do not retry a
   permanent one. Every tool but the `notion_*` family answers the same two
   fields: `error` is the sentence and `reason` is what names the cause, which
@@ -221,18 +223,22 @@ no kit), `hard_coded_colour` (a colour written out rather than read from a
 Nothing is created or replaced when the lint refuses.
 
 The three caps are an entry of 2 MiB, an asset set of 10 MiB and a state of
-256 KiB, and all three answer `too_large` with the same sentence. The entry and the asset set are measured on what was sent rather than
-on what it decodes to — base64 says how many bytes it carries without being
-decoded — so a build over either one is refused before a single asset is
-materialised.
+256 KiB, and all three answer `too_large` with the same sentence. The entry is
+measured as its own bytes and the asset set as the length of the base64 you sent
+rather than as what it decodes to, so a build over either one is refused before a
+single asset is materialised.
 
-An app may own at most 64 pages, counting the ones its own frame mints while it
-runs. Past that the answer is `too_many_owned`, which is a full list rather than
-a notes folder that failed: nothing about the disk will change it.
+An app may own at most 64 pages. A build asking for more than that is refused by
+input validation before the tool runs at all, as a schema error rather than as
+one of the words below, and `write_app_page` does not take `owns`. The cap's own
+word, `too_many_owned`, belongs to the frame's `create.page`: an app that mints
+pages while it runs meets it there, and a build meets it only if it lands on an
+app whose list the frame has already filled. Either way it is a full list rather
+than a notes folder that failed, and nothing about the disk will change it.
 
 | Tool | Scope | Inputs | Answers | Refuses |
 | --- | --- | --- | --- | --- |
-| `create_app_page` | `brain:write` | `title`, `reason`, `description`, `entryHtml`, `parentId?`, `icon?`, `assets?` as `[{ name, base64 }]`, `owns?` as `[{ title, icon?, markdown? }]`, `state?` | the new page's `id` and `title`, its `app` map, and the `owns` children it created with their ids | `bad_request` for a missing `reason`, `lint_failed` with `rule` and `line`, `too_large` for an entry, an asset set or a state over the caps, `bad_type` for an asset name an app may not hold, `too_many_owned` for an app that already owns the 64 pages an app may. `store_failed` |
+| `create_app_page` | `brain:write` | `title`, `reason`, `description`, `entryHtml`, `parentId?`, `icon?`, `assets?` as `[{ name, base64 }]`, `owns?` as `[{ title, icon?, markdown? }]`, `state?` | the new page's `id` and `title`, its `app` map, and the `owns` children it created with their ids | `bad_request` for a missing `reason`, `lint_failed` with `rule` and `line`, `too_large` for an entry, an asset set or a state over the caps, `bad_type` for an asset name an app may not hold, `too_many_owned` for an app whose owns list the frame has already filled — more than 64 in the call itself is a schema error, not this. `store_failed` |
 | `write_app_page` | `brain:write` | `id`, `rev`, `entryHtml?`, `assets?` | the page's `id`, `title` and its `app` map with `version` bumped | `not_found` for a page that is not an app, `rev_conflict` with `currentRev` to re-read from, `lint_failed`, `too_large`, `bad_type`, `too_many_owned`. `store_failed` |
 | `read_app_page` | | `id` | `{ id, title, rev, app, entryHtml, assets }`, where `assets` is the list of names and not their bytes | `not_found`. `store_failed` |
 

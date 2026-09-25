@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { mcpResource, oauthIssuer } from "./config";
+import { resetPlainHttpWarnForTests } from "@/lib/private-origin";
 
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -47,16 +48,32 @@ describe("oauthIssuer", () => {
     );
   });
 
-  it("warns that the tokens are in the clear before answering", async () => {
-    // A fresh module instance, because the warning is latched once per process
-    // and the cases above have already spent this file's. What the latch does
-    // is pinned in `lib/private-origin.test.ts`; what this asks is that the
-    // issuer reaches it at all, which is the half a refactor drops in silence.
-    vi.resetModules();
-    const fresh = await import("./config");
+  it.each([
+    ["a zone id, the shape somebody pastes out of ip addr", "http://[fe80::1%25eth0]"],
+    ["a bracket left open", "http://[fd12:3456::1"],
+    ["a value that is not a URL at all", "brain.lan"],
+    ["a space in the host", "http://brain .lan"],
+  ])("answers the same sentence for %s, not a raw parser error", (_name, origin) => {
+    // `new URL` throws its own `TypeError: Invalid URL` for each of these, which
+    // reached the owner as a stack rather than as the one line saying what the
+    // variable wants. The docs now invite IPv6 origins, so the zone-id shape is
+    // the one a self-hoster is most likely to paste.
+    vi.stubEnv("BRAIN_PUBLIC_ORIGIN", origin);
+    expect(() => oauthIssuer()).toThrow(
+      "BRAIN_PUBLIC_ORIGIN must be an exact HTTPS origin",
+    );
+  });
+
+  it("warns that the tokens are in the clear before answering", () => {
+    // The latch is per process and the cases above have already spent this
+    // file's, so it is reset here rather than worked around with a fresh module
+    // instance. What the latch does is pinned in `lib/private-origin.test.ts`;
+    // what this asks is that the issuer reaches it at all, which is the half a
+    // refactor drops in silence.
+    resetPlainHttpWarnForTests();
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     vi.stubEnv("BRAIN_PUBLIC_ORIGIN", "http://brain.lan");
-    expect(fresh.oauthIssuer()).toBe("http://brain.lan");
+    expect(oauthIssuer()).toBe("http://brain.lan");
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]![0])).toContain(
       "tokens travel unencrypted on your network",

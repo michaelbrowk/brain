@@ -108,7 +108,17 @@ export const MCP_SCOPE_LABELS: Record<McpScope, string> = {
  *  box on the internet whatever its owner calls it. */
 export function oauthIssuer(): string {
   const raw = process.env.BRAIN_PUBLIC_ORIGIN || DEFAULT_PUBLIC_ORIGIN;
-  const url = new URL(raw);
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    // `new URL` throws `TypeError: Invalid URL`, which reaches the owner as a
+    // stack trace and says nothing about which variable it was. One sentence,
+    // the same one every other refused value gets. The shape most likely to
+    // land here is an IPv6 address with a zone id, `http://[fe80::1%eth0]`,
+    // pasted out of `ip addr` now that the docs invite IPv6 origins.
+    throw new Error("BRAIN_PUBLIC_ORIGIN must be an exact HTTPS origin");
+  }
   const plainHttpOnPrivateNetwork =
     url.protocol === "http:" && isPrivateNetworkHost(url.hostname);
   if (

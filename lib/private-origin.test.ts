@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
   isPrivateNetworkHost,
+  resetPlainHttpWarnForTests,
   warnPlainHttpOriginOnce,
 } from "./private-origin";
 
@@ -46,12 +47,31 @@ describe("isPrivateNetworkHost", () => {
     ["http://0.0.0.0", "the unspecified address, which is not loopback"],
     ["http://[2001:db8::1]", "a global IPv6 address"],
     ["http://[fec0::1]", "site-local, deprecated and not link-local"],
+    // IPv4-mapped IPv6, all three of them. The parser rewrites the quad into
+    // hex, so `::ffff:8.8.8.8` arrives as `[::ffff:808:808]`: a rule that read
+    // the `::ffff:` prefix as "this is really IPv4, go and read the quad" would
+    // hand plain http to a public address. None of the three is accepted, the
+    // loopback one included — `127.0.0.1` is right there to write instead.
+    ["http://[::ffff:8.8.8.8]", "a public address as IPv4-mapped IPv6"],
+    ["http://[::ffff:7f00:1]", "loopback as IPv4-mapped IPv6"],
+    ["http://[::ffff:192.168.0.1]", "a private address as IPv4-mapped IPv6"],
     ["http://localhost.evil.example", "a public name wearing the word"],
     ["http://brain.lan.evil.example", "a public name ending in something else"],
     ["http://internal", "a bare label, which is not a private zone"],
     ["http://local", "the suffix on its own"],
   ])("refuses %s (%s)", (origin) => {
     expect(isPrivateNetworkHost(hostOf(origin))).toBe(false);
+  });
+
+  it("refuses a suffix that is the whole host", () => {
+    // The one live input for the length guard beside the suffix check. The two
+    // bare labels above never reach it, because `"local".endsWith(".local")` is
+    // already false; `new URL("http://.local").hostname` is `".local"`, which
+    // ends with the suffix and is nothing in front of it.
+    expect(isPrivateNetworkHost(".local")).toBe(false);
+    expect(isPrivateNetworkHost(".lan")).toBe(false);
+    expect(isPrivateNetworkHost(".home.arpa")).toBe(false);
+    expect(isPrivateNetworkHost(".internal")).toBe(false);
   });
 
   it("reads the suffixes without regard to case", () => {
@@ -61,8 +81,15 @@ describe("isPrivateNetworkHost", () => {
 });
 
 describe("warnPlainHttpOriginOnce", () => {
+  // The latch is per process, so a second case in this file would have read the
+  // first one's leftovers. Reset it rather than rely on the order.
+  beforeEach(() => {
+    resetPlainHttpWarnForTests();
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
+    resetPlainHttpWarnForTests();
   });
 
   it("says it once, with the cost spelled out", () => {
@@ -74,5 +101,11 @@ describe("warnPlainHttpOriginOnce", () => {
     expect(String(warn.mock.calls[0]![0])).toContain(
       "tokens travel unencrypted on your network",
     );
+  });
+
+  it("names the origin it is serving, so a log line says which install", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    warnPlainHttpOriginOnce("http://192.168.1.10:3000");
+    expect(String(warn.mock.calls[0]![0])).toContain("http://192.168.1.10:3000");
   });
 });

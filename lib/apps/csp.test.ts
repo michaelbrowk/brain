@@ -38,10 +38,40 @@ describe("the app frame's policy", () => {
     expect(appFrameCsp(ORIGIN, "app1")).toContain("connect-src 'none'");
   });
 
+  it("builds for an IPv6-literal origin, which a private install can have", () => {
+    // `oauthIssuer()` accepts `http://[fd12:3456::1]:3020` as the owner's own
+    // network, so an install can genuinely be on one. The pattern here read
+    // `[A-Za-z0-9.-]+`, which matches no bracket and no colon, so every app
+    // page on such an install threw "app frame CSP needs an exact origin"
+    // instead of drawing.
+    for (const origin of [
+      "http://[fd12:3456::1]:3020",
+      "http://[fe80::1]",
+      "https://[2001:db8::1]:8443",
+    ]) {
+      const policy = appFrameCsp(origin, "app1");
+      expect(policy).toContain(`${origin}/api/app/app1/t/`);
+      expect(policy).toContain("connect-src 'none'");
+    }
+  });
+
   it("refuses an origin or an id that is not one", () => {
     // Both reach a header, so neither may carry a newline, a semicolon or a
     // space: a header split is how a policy becomes two policies.
-    for (const bad of ["https://a\nb", "https://a b", "https://a;b", "not-an-origin", "https://a/path"]) {
+    for (const bad of [
+      "https://a\nb",
+      "https://a b",
+      "https://a;b",
+      "not-an-origin",
+      "https://a/path",
+      // An IPv6 origin is accepted now, so the shapes that are not one have to
+      // be asked for by name: an unclosed bracket, a bracket around something
+      // that is not hex, and a bracketed host carrying a separator.
+      "http://[fd12:3456::1",
+      "http://[not:hex::zz]",
+      "http://[fd12::1];x",
+      "http://[fd12::1]/path",
+    ]) {
       expect(() => appFrameCsp(bad, "app1")).toThrow();
     }
     for (const bad of ["a b", "a;b", "a/b", "../x", ""]) {

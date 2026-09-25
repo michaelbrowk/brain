@@ -38,18 +38,26 @@ export class AppBridgeError extends Error {
  *  which an app has a use for, and all of which would be crossing a frame
  *  boundary for nothing.
  *
- *  So both reads are allowlists and they agree: the tree's five fields, and
- *  the same five plus the page facts an app can draw with. Chosen rather
+ *  So both reads are allowlists and they agree: the tree's six fields, and
+ *  the same six plus the page facts an app can draw with. Chosen rather
  *  than filtered, so a new key on `TreeNode` or on `PageMeta` does not
  *  silently become something an app can read. An app holds every page id
  *  from `read.tree`, so a pass-through on one of the two would be the whole
- *  notebook, one request at a time, whatever the other one withheld. */
+ *  notebook, one request at a time, whatever the other one withheld.
+ *
+ *  `updated` is the sixth, and it is here to save requests rather than to be
+ *  drawn. An app reading a subtree — the trainer reads sixty-six pages on
+ *  Michael's own notebook — had no way to tell a page it already holds from
+ *  one the owner has written since, so every reload read every page again
+ *  against a budget of thirty requests a second. It says when, not what, and
+ *  the app could have had it by reading the page it is asking about anyway. */
 interface AppTreeNode {
   id: string;
   parentId: string | null;
   title: string;
   icon?: string;
   kind?: "app";
+  updated: string;
 }
 
 function flatten(nodes: readonly TreeNode[], into: AppTreeNode[]): AppTreeNode[] {
@@ -60,14 +68,15 @@ function flatten(nodes: readonly TreeNode[], into: AppTreeNode[]): AppTreeNode[]
       title: node.title,
       ...(node.icon === undefined ? {} : { icon: node.icon }),
       ...(node.kind === undefined ? {} : { kind: node.kind }),
+      updated: node.updated,
     });
     flatten(node.children, into);
   }
   return into;
 }
 
-/** The tree's five, and then what an app needs to draw a page it read: when
- *  it was written and by whom, and the labels the owner put on it. `cover`
+/** The tree's six, and then what an app needs to draw a page it read: when it
+ *  was created, who wrote it last, and the labels the owner put on it. `cover`
  *  and the body's own attachment links are left out because the frame can
  *  paint neither of them: `img-src` is the app's own asset folder, `blob:`
  *  and `data:`, nothing else. `parentId` is here for agreement with the tree

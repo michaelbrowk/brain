@@ -29,22 +29,29 @@ describe("the AI chip's CSS", () => {
 
 /** The arithmetic behind how tall an app's frame is. `e2e/apps.spec.ts`
  *  measures the result in a browser, which is the only place it can be
- *  measured; what is here is the line that produces it, because the failure
- *  it replaces was a rule that read as if it did something and did nothing:
- *  `min-height: 100%` against a parent whose height comes from its content
- *  resolves to auto, so the column had no room to hand out and the frame sat
- *  at its floor with the window empty under it. */
+ *  measured; what is here is the line that produces it. The failure it
+ *  replaces was a chain with a gap in it: the canvas asked for 100% of a
+ *  wrapper whose height property is `auto`, and `min-height` on a box never
+ *  makes its height definite, so the percentage measured against `auto` and
+ *  was handed nothing. The column had no room to give out and the frame sat
+ *  at its floor with the window empty under it. The height comes down the
+ *  flex chain instead: the scroller is the window's height, the wrapper is a
+ *  column, the canvas is the item that fills it. */
 describe("an app canvas's CSS", () => {
-  it("measures the shell's canvas against the window, never a parent's content", () => {
-    expect(block(".brain-app-canvas[data-app-canvas]")).toContain(
-      "min-height: 100dvh",
-    );
+  it("takes the height its scroller has, never a window unit of its own", () => {
     const canvas = block(".brain-app-canvas");
+    // The item in the wrapper's column, not a percentage of a box whose
+    // height is auto.
+    expect(canvas).toContain("flex: 1");
+    expect(canvas).not.toContain("min-height");
     expect(canvas).toContain("flex-direction: column");
     // The phone's reserve stays under the frame: an app's own bottom control
     // must not sit behind Brain's.
     expect(canvas).toContain("padding-bottom: var(--tabbar-reserve)");
-    expect(canvas).not.toContain("min-height: 100%");
+    // Nothing here measures the window for itself. The scroller is already
+    // the window's height, and a second source for the same number is a
+    // second thing to keep in step with the chrome above it.
+    expect(css).not.toContain(".brain-app-canvas[data-app-canvas]");
     // And the frame takes what the head leaves, down to its own floor.
     const frame = block(".brain-app-frame");
     expect(frame).toContain("flex: 1");

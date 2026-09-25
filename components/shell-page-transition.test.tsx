@@ -563,17 +563,27 @@ describe("Shell page transitions", () => {
     expect(document.body.textContent).toContain("Sharing is off");
   });
 
-  /** WHY AN APP PAGE'S WRAPPER CARRIES NO TAIL.
+  /** THE TWO THINGS THE SHELL OWES AN APP PAGE'S CANVAS.
    *
-   *  A document keeps 160px of paper under its last line, where a click
-   *  starts a new paragraph. An app has no last line, and that padding was
-   *  window its frame should have had: the frame fills what the head leaves,
-   *  so a tail under it is paper the reader has to scroll past with nothing
-   *  in it. The fill itself is CSS, which jsdom cannot measure; the half that
-   *  has to come from the shell is this one, because the padding is a utility
-   *  on the wrapper and no rule under it can give the room back.
+   *  The scroller's height, and no tail under it.
+   *
+   *  The height is a chain. The scroller is as tall as the window, the
+   *  wrapper takes that with `min-h-full` the way it already does for Mail,
+   *  Settings and Tasks, and for an app page it becomes a column so the
+   *  canvas can be the item that fills it. Both links are needed: `min-height`
+   *  never makes a box's height definite, so a canvas asking for 100% of this
+   *  wrapper is handed nothing, which is how the frame came to sit at its
+   *  420px floor with the window empty under it.
+   *
+   *  The tail is a document's: 160px of paper under its last line, where a
+   *  click starts a new paragraph. An app has no last line, so under a frame
+   *  that fills the canvas it is only paper to scroll past.
+   *
+   *  What the chain adds up to is measured in a browser, in
+   *  `e2e/apps.spec.ts`. jsdom has no layout, so what is pinned here is that
+   *  the two links the shell owns are on the element.
    */
-  it("leaves no editor tail under an app page's canvas", async () => {
+  it("gives an app page's canvas the scroller's height and no editor tail", async () => {
     apiFetchMock.mockImplementation(async (input, init) => {
       if (String(input) === "/api/app/trainer/frame" && init?.method === "POST") {
         return response({
@@ -603,9 +613,14 @@ describe("Shell page transitions", () => {
 
     const appWrapper = container.querySelector(".brain-page-frame");
     expect(appWrapper?.querySelector("[data-app-canvas]")).not.toBeNull();
+    expect(appWrapper?.className).toContain("min-h-full");
+    expect(appWrapper?.className).toContain("flex flex-col");
     expect(appWrapper?.className).not.toContain("pb-40");
 
     // And the tail is still there for a document, which is what it is for.
+    // The height goes down to a document too: it costs nothing there, where
+    // the wrapper is usually taller than the window already, and one rule
+    // for the page branch beats two that can drift.
     await act(async () => {
       window.history.pushState({}, "", "/p/page-a");
       window.dispatchEvent(new PopStateEvent("popstate"));
@@ -613,6 +628,10 @@ describe("Shell page transitions", () => {
     await flushAnimationFrames();
     const pageWrapper = container.querySelector(".brain-page-frame");
     expect(pageWrapper?.querySelector("[data-app-canvas]")).toBeNull();
+    expect(pageWrapper?.className).toContain("min-h-full");
     expect(pageWrapper?.className).toContain("pb-40");
+    // And it stays a block: a document's canvas is a column of its own and
+    // has no use for the room, so nothing about its layout changes.
+    expect(pageWrapper?.className).not.toContain("flex flex-col");
   });
 });

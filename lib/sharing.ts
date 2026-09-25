@@ -1,9 +1,19 @@
 const MAX_SHARE_LIFETIME_MS = 366 * 24 * 60 * 60 * 1_000;
 
-/** Malformed persisted values fail closed: an invalid deadline never keeps a
- * public page available. */
+/** WHETHER A SHARE'S DEADLINE HAS PASSED. THE ONLY READING OF IT.
+ *
+ * Malformed persisted values fail closed: an invalid deadline never keeps a
+ * public page available. `null` is a grant with no deadline, the same answer as
+ * an absent one, because that is the shape a tree node and a scope snapshot
+ * carry.
+ *
+ * `lib/share-grants.ts` re-exports this as `isShareGrantExpired`, which is the
+ * name the tree walk and the shell's read-backs use. Two bodies would be two
+ * clocks the moment one of them learned something, and the fold path asks both:
+ * the store's refusal through this name, the browser's read-back through the
+ * other. */
 export function isShareExpired(
-  expiresAt: string | undefined,
+  expiresAt?: string | null,
   now = Date.now(),
 ): boolean {
   if (!expiresAt) return false;

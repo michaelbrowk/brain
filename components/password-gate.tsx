@@ -204,12 +204,10 @@ export function PasswordGate({
                 transition={{ duration: DUR.base, ease: EASE_OUT }}
                 className="overflow-hidden"
               >
-                <p
-                  id={errorId}
-                  role="alert"
-                  aria-live="assertive"
-                  className="pt-2 text-table text-red"
-                >
+                {/* `role="alert"` and nothing beside it: the role already
+                    implies an assertive live region, and a second declaration
+                    of the same thing is a second thing to keep in step. */}
+                <p id={errorId} role="alert" className="pt-2 text-table text-red">
                   {error}
                 </p>
               </motion.div>

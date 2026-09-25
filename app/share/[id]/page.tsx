@@ -49,16 +49,17 @@ export async function generateMetadata({
     if (access.kind !== "granted") return { title: "Brain" };
     // A link pasted into a chat becomes a card, and this one was the page's
     // title over an empty box: nothing on it said what the page was or where
-    // it came from. The card carries Brain's name now. `robots` is not here
-    // and does not move — the response headers hold the noindex, and a shared
-    // page is still not for a crawler. Nothing is added to the page itself
-    // either: a shared page carries no badge and no link home.
+    // it came from. The card carries Brain's name now. Open Graph is all of
+    // it: Next builds the Twitter card out of these same fields, so writing
+    // one here would be a second copy of the title to keep in step. `robots`
+    // is not here and does not move — the response headers hold the noindex,
+    // and a shared page is still not for a crawler. Nothing is added to the
+    // page itself either: a shared page carries no badge and no link home.
     const title = access.target.meta.title;
     return {
       title,
       description: "Shared from Brain",
       openGraph: { title, siteName: "Brain", type: "article" },
-      twitter: { card: "summary", title },
     };
   } catch {
     return { title: "Brain" };

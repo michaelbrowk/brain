@@ -50,10 +50,12 @@ body:
     id: browser
     attributes:
       label: Browser
-      description: Name and version, and the phone or desktop it runs on.
+      description: >
+        Name and version, and the phone or desktop it runs on. Leave it empty
+        for a bug with no browser in it, in the server, the installer or MCP.
       placeholder: Safari 26 on iOS 27
     validations:
-      required: true
+      required: false
   - type: textarea
     id: anything-else
     attributes:

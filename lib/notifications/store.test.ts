@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -202,6 +202,28 @@ describe("the notification store", () => {
   it("clears a centre that has no file yet without creating one", async () => {
     expect(await clearNotifications(dir)).toBe(0);
     await expect(stat(path.join(dir, NOTIFICATIONS_FILE))).rejects.toThrow();
+  });
+
+  // THE CLEAR GOES THROUGH `writeAll` LIKE EVERY OTHER WRITE HERE, AND THE
+  // INODE IS HOW THAT IS VISIBLE.
+  //
+  // A bare `fs.writeFile([])` would pass every assertion above: the rows are
+  // gone either way. What it would lose is the temp-then-rename that keeps a
+  // reader from ever seeing a half-written file, and the 0600 the systemd unit's
+  // umask supplies in production and a developer's 0022 does not. `atomicWrite`
+  // renames a new file over the old one, so the number changes; an in-place
+  // write keeps it. No leftover `.tmp-` either, which is the other half of the
+  // rename having happened.
+  it("clears through an atomic write: a new file, 0600, no temp left", async () => {
+    await seed(dir, [row("a", "2026-09-14T09:00:00.000Z")]);
+    const file = path.join(dir, NOTIFICATIONS_FILE);
+    await chmod(file, 0o644);
+    const before = await stat(file);
+    expect(await clearNotifications(dir)).toBe(1);
+    const after = await stat(file);
+    expect(after.ino).not.toBe(before.ino);
+    expect(after.mode & 0o777).toBe(0o600);
+    expect((await readdir(dir)).sort()).toEqual([NOTIFICATIONS_FILE]);
   });
 
   it("leaves nothing in the notes folder", async () => {

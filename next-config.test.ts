@@ -117,7 +117,38 @@ describe("Next standalone tracing", () => {
  *    mail socket validation. That one the build warned about by name, and it
  *    was the whole of `public/`, `test/`, `workers/`, and every root file. */
 describe("Turbopack's project trace", () => {
-  const LITERAL_TAIL = /path\.(?:join|resolve)\([^;]*,\s*"(?:\.git|app)"/;
+  // THE COMMENT IS POSITIONAL, SO THE SCAN IS TOO.
+  //
+  // `turbopackIgnore` applies to the argument it sits in front of. Anywhere else
+  // it is a comment and nothing more: put it on the literal tail instead of the
+  // dynamic first argument and that argument is traced exactly as before, and
+  // reduced to a trailing line comment it does nothing at all. A scan for the
+  // word alone passes both of those while the artifact re-inflates, so this one
+  // takes the text between a call's `(` and its first argument and requires the
+  // block comment there. Both spellings in the tree are accepted: the four sites
+  // this branch added write it tight, `lib/notifications/store.ts` spaced.
+  const OPT_OUT = /^\s*\/\*\s*turbopackIgnore:\s*true\s*\*\/\s*\S/;
+  const LITERAL_TAIL = /,\s*"(?:\.git|app)"\s*(?:,|$)/;
+  const CALL = /\bpath\.(?:join|resolve)\(/g;
+
+  /** Every `path.join` / `path.resolve` call in a file, as the text between its
+   *  parentheses. Depth-counted rather than line-based, so a call split over
+   *  several lines is one call and a mutation cannot hide in a newline. */
+  function pathCalls(source: string): string[] {
+    const out: string[] = [];
+    for (const match of source.matchAll(CALL)) {
+      const open = match.index + match[0].length;
+      let depth = 1;
+      let at = open;
+      while (at < source.length && depth > 0) {
+        if (source[at] === "(") depth += 1;
+        else if (source[at] === ")") depth -= 1;
+        at += 1;
+      }
+      out.push(source.slice(open, at - 1));
+    }
+    return out;
+  }
 
   function sources(directory: string): string[] {
     const out: string[] = [];
@@ -133,28 +164,32 @@ describe("Turbopack's project trace", () => {
 
   it("opts every dynamic path with a literal tail out of the trace", () => {
     const offenders: string[] = [];
+    let checked = 0;
     for (const file of sources("lib")) {
-      readFileSync(file, "utf8")
-        .split("\n")
-        .forEach((line, index) => {
-          if (!LITERAL_TAIL.test(line)) return;
-          if (line.includes("turbopackIgnore")) return;
-          offenders.push(`${file}:${index + 1}`);
-        });
+      for (const args of pathCalls(readFileSync(file, "utf8"))) {
+        if (!LITERAL_TAIL.test(args)) continue;
+        checked += 1;
+        if (OPT_OUT.test(args)) continue;
+        offenders.push(`${file}: path.join(${args.trim()})`);
+      }
     }
+    // The count guards the scanner itself: a regex that stopped matching would
+    // otherwise report a clean tree.
+    expect(checked).toBeGreaterThanOrEqual(10);
     expect(offenders).toEqual([]);
   });
 
+  // The one the build warned about by name. It is pinned on its own rather than
+  // by a pattern, because the shape that made it dangerous — `path.resolve(x)`
+  // with a single dynamic argument, used to compare rather than to read — is the
+  // ordinary shape of a correct `resolve` everywhere else, and a rule against it
+  // would refuse the next honest one.
   it("opts the mail socket path check out of the trace", () => {
-    const body = readFileSync(
-      "lib/mail/providers/gmail/public-proxy.ts",
-      "utf8",
+    const calls = pathCalls(
+      readFileSync("lib/mail/providers/gmail/public-proxy.ts", "utf8"),
     );
-    const checks = body
-      .split("\n")
-      .filter((line) => line.includes("path.resolve("));
-    expect(checks.length).toBeGreaterThan(0);
-    for (const line of checks) expect(line).toContain("turbopackIgnore");
+    expect(calls).toHaveLength(1);
+    expect(calls[0], calls[0]).toMatch(OPT_OUT);
   });
 });
 

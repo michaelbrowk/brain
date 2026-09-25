@@ -13,7 +13,8 @@ import { expect, test } from "playwright/test";
  *  that empties the notebook and the notification centre, so the file's
  *  premises are its own. It is per FILE and not per case: a case that seeds a
  *  fixture two cases in the same file also seed still has to tell them apart by
- *  name, which is what the run tags in `apps.spec.ts` are for.
+ *  name, which is what the run tags in `apps.spec.ts` are for. It is safe only
+ *  while one file runs at a time, which the hook itself checks.
  *
  *  The reset itself is `app/api/dev/reset/route.ts`, which says why the root is
  *  emptied rather than exchanged and what the four gates on it are. The call
@@ -23,6 +24,20 @@ import { expect, test } from "playwright/test";
  *  through `page.evaluate`. */
 export function freshNotes(): void {
   test.beforeAll(async ({ browser }, workerInfo) => {
+    // ONE WORKER IS WHAT MAKES THIS SAFE, SO IT IS CHECKED AND NOT ASSUMED.
+    //
+    // A wipe is scoped to a file only while one file runs at a time. With two
+    // workers against one server and one notes root, this hook deletes the pages
+    // another file is mid-test on, and the failure shows up as that other file's
+    // assertions going strange rather than as anything to do with a reset.
+    // `playwright.config.ts` says `workers: 1` and `playwright-config.test.ts`
+    // holds it there; a `--workers=2` on the command line answers to neither,
+    // which is why the run checks itself here.
+    if (workerInfo.config.workers !== 1) {
+      throw new Error(
+        `freshNotes() empties the notes root of the whole server, which is only safe one file at a time, and this run has ${workerInfo.config.workers} workers. Drop the --workers override, or take freshNotes() out of every spec file before raising it.`,
+      );
+    }
     const baseURL = workerInfo.project.use.baseURL;
     expect(baseURL, "the project has no baseURL to reset against").toBeTruthy();
     const page = await browser.newPage({ baseURL });

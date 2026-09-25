@@ -7,19 +7,40 @@ import {
   SESSION_COOKIE,
   verifySession,
 } from "@/lib/auth";
+import {
+  createDeviceCookie,
+  DEVICE_COOKIE,
+  DEVICE_COOKIE_MAX_AGE_SECONDS,
+  deviceBucketKey,
+} from "@/lib/device-cookie";
 import { FixedWindowRateLimiter } from "@/lib/rate-limit";
 
 export const dynamic = "force-dynamic";
 
-// Single-owner app: a server-controlled global key cannot be bypassed with
-// spoofed proxy headers. This deliberately imposes a short global lockout after
-// five comparisons: without a trusted edge identity, letting the correct guess
-// bypass the cap would leave an unlimited password oracle and bcrypt CPU DoS.
-const LOGIN_KEY = "human-login";
-const limiter = new FixedWindowRateLimiter({
+// Single-owner app: a server-controlled key cannot be bypassed with spoofed
+// proxy headers, so the budget is spent before bcrypt and the correct guess does
+// not get to skip the cap — otherwise the route is an unlimited password oracle
+// and a bcrypt CPU DoS.
+//
+// Two buckets, because one was a weapon. Every request that arrives without a
+// device cookie this installation signed counts against the shared key below,
+// and a stranger who exhausts it used to lock the owner out with it. A request
+// that carries one counts against a key of its own, which a stranger cannot
+// reach: a cookie exists on a browser because a login there already succeeded.
+const SHARED_KEY = "human-login";
+const sharedLimiter = new FixedWindowRateLimiter({
+  limit: 10,
+  windowMs: 30 * 1000,
+  maxEntries: 1,
+});
+// One bucket per device, as many devices as an owner plausibly has, and the
+// oldest window goes when they are all in use — see `lib/rate-limit.ts` for why
+// this map evicts where the shared one refuses.
+const deviceLimiter = new FixedWindowRateLimiter({
   limit: 5,
   windowMs: 60 * 1000,
-  maxEntries: 1,
+  maxEntries: 1_024,
+  evictOldest: true,
 });
 
 export async function POST(req: NextRequest) {
@@ -37,7 +58,11 @@ export async function POST(req: NextRequest) {
 
   // Consume before bcrypt. Once the window is exhausted, no supplied password
   // (including a correct one) reaches the expensive verifier.
-  const attempt = limiter.consume(LOGIN_KEY);
+  const presented = req.cookies.get(DEVICE_COOKIE)?.value;
+  const device = deviceBucketKey(presented);
+  const limiter = device ? deviceLimiter : sharedLimiter;
+  const key = device ?? SHARED_KEY;
+  const attempt = limiter.consume(key);
   if (!attempt.allowed) {
     return NextResponse.json(
       { error: "too many attempts" },
@@ -53,7 +78,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "wrong password" }, { status: 401 });
   }
 
-  limiter.reset(LOGIN_KEY);
+  limiter.reset(key);
   const res = NextResponse.json({ ok: true });
   res.cookies.set(SESSION_COOKIE, await createSession(), {
     httpOnly: true,
@@ -64,6 +89,16 @@ export async function POST(req: NextRequest) {
     sameSite: "lax",
     path: "/",
     maxAge: 90 * 24 * 3600,
+  });
+  // A login is the only thing that mints this, and every login refreshes the
+  // year. The value a valid cookie already carries is kept, so a browser keeps
+  // the bucket it has been counting against.
+  res.cookies.set(DEVICE_COOKIE, device && presented ? presented : createDeviceCookie(), {
+    httpOnly: true,
+    secure: cookieSecure(true),
+    sameSite: "lax",
+    path: "/",
+    maxAge: DEVICE_COOKIE_MAX_AGE_SECONDS,
   });
   return res;
 }

@@ -2,12 +2,25 @@ import bcrypt from "bcryptjs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 
-function request(body: string): NextRequest {
+function request(body: string, cookie?: string): NextRequest {
   return new NextRequest("https://brain.example/api/auth", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(cookie ? { cookie } : {}),
+    },
     body,
   });
+}
+
+const wrongGuess = (cookie?: string) =>
+  request(JSON.stringify({ password: "definitely wrong" }), cookie);
+const rightGuess = (cookie?: string) =>
+  request(JSON.stringify({ password: "correct horse" }), cookie);
+
+async function configure() {
+  process.env.AUTH_PASSWORD_HASH = await bcrypt.hash("correct horse", 4);
+  process.env.AUTH_SECRET = "test-secret-that-never-leaves-this-process";
 }
 
 describe("login rate limiting", () => {
@@ -18,9 +31,8 @@ describe("login rate limiting", () => {
     vi.resetModules();
   });
 
-  it("stops invoking bcrypt after the global comparison cap", async () => {
-    process.env.AUTH_PASSWORD_HASH = await bcrypt.hash("correct horse", 4);
-    process.env.AUTH_SECRET = "test-secret-that-never-leaves-this-process";
+  it("stops invoking bcrypt after the shared comparison cap", async () => {
+    await configure();
     const compare = vi.spyOn(bcrypt, "compare");
     const { POST } = await import("./route");
 
@@ -29,20 +41,116 @@ describe("login rate limiting", () => {
     }
     expect(compare).not.toHaveBeenCalled();
 
-    for (let index = 0; index < 5; index += 1) {
-      await expect(
-        POST(
-        request(JSON.stringify({ password: "definitely wrong" })),
-        ),
-      ).resolves.toMatchObject({ status: 401 });
+    for (let index = 0; index < 10; index += 1) {
+      await expect(POST(wrongGuess())).resolves.toMatchObject({ status: 401 });
     }
 
-    const blockedCorrect = await POST(
-      request(JSON.stringify({ password: "correct horse" })),
-    );
+    const blockedCorrect = await POST(rightGuess());
     expect(blockedCorrect.status).toBe(429);
     expect(blockedCorrect.headers.get("Retry-After")).toBeTruthy();
-    expect(compare).toHaveBeenCalledTimes(5);
+    expect(compare).toHaveBeenCalledTimes(10);
+  });
+
+  /** The defect this replaced: one bucket, keyed on a constant, consumed before
+   *  bcrypt and reset only by a success. A stranger sending wrong passwords at
+   *  the cap kept the owner out for as long as they cared to keep sending, and
+   *  no move the owner had from the login screen shortened it. */
+  it("lets a device that has logged in before through a stranger's flood", async () => {
+    await configure();
+    const { POST } = await import("./route");
+    const { createDeviceCookie, DEVICE_COOKIE } = await import(
+      "@/lib/device-cookie"
+    );
+    const device = `${DEVICE_COOKIE}=${createDeviceCookie()}`;
+
+    for (let index = 0; index < 10; index += 1) {
+      await expect(POST(wrongGuess())).resolves.toMatchObject({ status: 401 });
+    }
+    await expect(POST(rightGuess())).resolves.toMatchObject({ status: 429 });
+
+    const throughTheFlood = await POST(rightGuess(device));
+    expect(throughTheFlood.status).toBe(200);
+    expect(throughTheFlood.cookies.get("brain_session")?.value).toBeTruthy();
+  });
+
+  it("spends only its own bucket on a wrong password from a known device", async () => {
+    await configure();
+    const { POST } = await import("./route");
+    const { createDeviceCookie, DEVICE_COOKIE } = await import(
+      "@/lib/device-cookie"
+    );
+    const device = `${DEVICE_COOKIE}=${createDeviceCookie()}`;
+
+    for (let index = 0; index < 5; index += 1) {
+      await expect(POST(wrongGuess(device))).resolves.toMatchObject({
+        status: 401,
+      });
+    }
+    await expect(POST(rightGuess(device))).resolves.toMatchObject({
+      status: 429,
+    });
+
+    // The shared bucket never saw any of it, and neither did a second device.
+    await expect(POST(wrongGuess())).resolves.toMatchObject({ status: 401 });
+    const other = `${DEVICE_COOKIE}=${createDeviceCookie()}`;
+    await expect(POST(rightGuess(other))).resolves.toMatchObject({
+      status: 200,
+    });
+  });
+
+  it("counts a forged device cookie against the shared bucket", async () => {
+    await configure();
+    const { POST } = await import("./route");
+    const { createDeviceCookie, DEVICE_COOKIE } = await import(
+      "@/lib/device-cookie"
+    );
+    const forged = `${DEVICE_COOKIE}=deadbeef.${Buffer.alloc(32).toString("base64url")}`;
+
+    for (let index = 0; index < 10; index += 1) {
+      await expect(POST(wrongGuess(forged))).resolves.toMatchObject({
+        status: 401,
+      });
+    }
+    await expect(POST(rightGuess(forged))).resolves.toMatchObject({
+      status: 429,
+    });
+    // An unsigned cookie buys a stranger the bucket a stranger already had, and
+    // costs the owner nothing.
+    await expect(
+      POST(rightGuess(`${DEVICE_COOKIE}=${createDeviceCookie()}`)),
+    ).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("sets the device cookie on every success, never on a failure", async () => {
+    await configure();
+    const { POST } = await import("./route");
+    const { deviceBucketKey } = await import("@/lib/device-cookie");
+
+    const first = await POST(rightGuess());
+    const minted = first.cookies.get("brain_device");
+    expect(minted?.value).toBeTruthy();
+    expect(deviceBucketKey(minted!.value)).not.toBeNull();
+    expect(minted).toMatchObject({
+      httpOnly: true,
+      sameSite: "lax",
+      secure: true,
+      path: "/",
+      maxAge: 365 * 24 * 60 * 60,
+    });
+    expect(first.headers.get("set-cookie")).toContain("brain_device=");
+
+    // Refreshed rather than replaced: a new value on every login would hand the
+    // same browser a new bucket on every login.
+    const again = await POST(rightGuess(`brain_device=${minted!.value}`));
+    expect(again.status).toBe(200);
+    expect(again.cookies.get("brain_device")?.value).toBe(minted!.value);
+    expect(again.cookies.get("brain_device")?.maxAge).toBe(365 * 24 * 60 * 60);
+
+    // A wrong password mints nothing: the cookie says a login succeeded on this
+    // browser, and a stranger's guess is not that.
+    const refused = await POST(wrongGuess());
+    expect(refused.status).toBe(401);
+    expect(refused.cookies.get("brain_device")).toBeUndefined();
   });
 
   it("creates a session when the correct password is within the cap", async () => {

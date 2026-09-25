@@ -112,7 +112,7 @@ vi.mock("@/lib/mail/brain-mail-client", async (importOriginal) => ({
   createBrainMailClient: mocks.createBrainMailClient,
 }));
 
-import { POST } from "./route";
+import { boundBodyForTests, MAX_BODY_BYTES, POST } from "./route";
 import {
   FAKE_ACCOUNT_ID,
   FAKE_ACCOUNT_ID_TWO,
@@ -259,6 +259,75 @@ describe("Notion MCP route validation", () => {
     vi.unstubAllEnvs();
     await fs.rm(stateRoot, { recursive: true, force: true });
     await fs.rm(centreRoot, { recursive: true, force: true });
+  });
+
+  it("carries the caller's abort signal onto the request it rebuilds", async () => {
+    // `mcp-handler` hangs its whole cleanup off `request.signal`: it passes the
+    // signal to `createServerResponseAdapter`, which turns an abort into the
+    // `close` the streamable transport tears the session down on. The rebuilt
+    // request used to carry a fresh signal that could never fire, so a client
+    // that hung up mid-call left the response stream open and the per-request
+    // state held until the sixty-second ceiling. Every POST goes through here,
+    // so this is the hot path, and GET is untouched, which is what made the
+    // asymmetry easy to miss.
+    const controller = new AbortController();
+    const bounded = await boundBodyForTests(
+      new Request("https://brain.example.test/api/mcp", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: '{"jsonrpc":"2.0","id":1,"method":"tools/list"}',
+        signal: controller.signal,
+      }),
+    );
+    expect(bounded.ok).toBe(true);
+    if (!bounded.ok) return;
+    let closed = false;
+    bounded.request.signal.addEventListener("abort", () => {
+      closed = true;
+    });
+    controller.abort();
+    expect(bounded.request.signal.aborted).toBe(true);
+    expect(closed).toBe(true);
+  });
+
+  it("takes a body of exactly the cap and refuses one byte more", async () => {
+    // The boundary itself, because `>` and `>=` are one keystroke apart and the
+    // suite could not tell them apart: nothing asserted that a body sitting
+    // exactly on the cap is still served.
+    const at = await boundBodyForTests(
+      new Request("https://brain.example.test/api/mcp", {
+        method: "POST",
+        body: "a".repeat(MAX_BODY_BYTES),
+      }),
+    );
+    expect(at.ok).toBe(true);
+    const over = await boundBodyForTests(
+      new Request("https://brain.example.test/api/mcp", {
+        method: "POST",
+        body: "a".repeat(MAX_BODY_BYTES + 1),
+      }),
+    );
+    expect(over.ok).toBe(false);
+  });
+
+  it("refuses on a declared content-length without reading the body", async () => {
+    // The cheap half of the check, and the half every real client takes. A
+    // sender that declares more than the cap is answered on the header alone,
+    // so the two-byte body below is never read.
+    const response = await POST(
+      new Request("https://brain.example.test/api/mcp", {
+        method: "POST",
+        headers: {
+          accept: "application/json, text/event-stream",
+          authorization: "Bearer test-machine-token",
+          "content-type": "application/json",
+          "content-length": String(MAX_BODY_BYTES + 1),
+        },
+        body: "{}",
+      }),
+    );
+    expect(response.status).toBe(413);
+    expect(mocks.verifyMcpBearerToken).not.toHaveBeenCalled();
   });
 
   it("refuses a request body over the endpoint's cap before it is parsed", async () => {

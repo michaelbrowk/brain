@@ -947,7 +947,7 @@ const authenticatedHandler = withMcpAuth(
  *  counted without the other branch of the tee being read in step with it,
  *  which deadlocks. So the endpoint holds at most the cap, whatever the
  *  sender declared. */
-const MAX_BODY_BYTES = 16 * 1024 * 1024;
+export const MAX_BODY_BYTES = 16 * 1024 * 1024;
 
 type Bounded =
   | { readonly ok: true; readonly request: Request }
@@ -985,9 +985,21 @@ async function boundBody(request: Request): Promise<Bounded> {
       method: request.method,
       headers: request.headers,
       body: bytes,
+      // THE SIGNAL IS NOT OPTIONAL. `mcp-handler` hands `request.signal` to
+      // `createServerResponseAdapter`, which turns an abort into the `close`
+      // the streamable transport tears its session down on. A rebuilt request
+      // carrying a fresh signal that can never fire means a client hanging up
+      // mid-call emits no `close` at all: the response stream stays open and
+      // the per-request state is held until the sixty-second ceiling.
+      signal: request.signal,
     }),
   };
 }
+
+/** The bounding, for the cases that are about the request rather than about a
+ *  tool: the abort signal surviving the rebuild, and the cap's own boundary,
+ *  which a `>=` for a `>` would otherwise move by one byte unnoticed. */
+export const boundBodyForTests = boundBody;
 
 function tooLargeResponse(): Response {
   return Response.json(

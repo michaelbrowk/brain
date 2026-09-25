@@ -78,6 +78,22 @@ describe("attachment scope index", () => {
     expect(attachmentGrantsRoot(scope, "abc123456789.png", "root-2")).toBe(false);
   });
 
+  it("joins a second upload of the same bytes to the entry that paid for them", () => {
+    let scope = recordUpload(EMPTY, "abc123456789.png", "root-1", 10, AT);
+    scope = recordUpload(scope, "abc123456789.png", "root-2", 10, AT);
+
+    expect(attachmentGrantsRoot(scope, "abc123456789.png", "root-1")).toBe(true);
+    expect(attachmentGrantsRoot(scope, "abc123456789.png", "root-2")).toBe(true);
+    expect(attachmentGrantsRoot(scope, "abc123456789.png", "root-3")).toBe(false);
+    // One file on the disk is one charge, against the link whose upload wrote
+    // it. The repeat wrote nothing and pays nothing.
+    expect(rootUploadBytes(scope, "root-1")).toBe(10);
+    expect(rootUploadBytes(scope, "root-2")).toBe(0);
+    // A third arrival from the same link is not a third mention of it.
+    scope = recordUpload(scope, "abc123456789.png", "root-2", 10, AT);
+    expect(scope.uploads["abc123456789.png"].alsoRoots).toEqual(["root-2"]);
+  });
+
   it("grants a baseline name only to the roots that already referenced it", () => {
     const scope = recordBaseline(EMPTY, "root-1", ["old000000001.png"]);
     expect(attachmentGrantsRoot(scope, "old000000001.png", "root-1")).toBe(true);

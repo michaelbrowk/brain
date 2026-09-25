@@ -18,12 +18,16 @@ import {
 
 const temporaryRoots: string[] = [];
 
-async function temporaryStore(): Promise<Store> {
+async function temporaryStoreAt(): Promise<{ store: Store; root: string }> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "brain-portable-"));
   temporaryRoots.push(root);
   const store = new Store(root);
   await store.init();
-  return store;
+  return { store, root };
+}
+
+async function temporaryStore(): Promise<Store> {
+  return (await temporaryStoreAt()).store;
 }
 
 afterEach(async () => {
@@ -161,11 +165,18 @@ describe("Brain portable packages", () => {
       `/p/${importedRoot!.children[0].id}`,
     );
     expect(imported.markdown).not.toContain(child.id);
-    expect(imported.markdown).not.toContain(attachment.url);
+    // A page id is reminted on import and an attachment name is not: the name
+    // is the sha256 of the bytes, so one file has one name in every notes
+    // folder it lands in. The import still goes through `saveAttachment`, so
+    // what is asserted here is that the url it answers is the url the source
+    // had, and that the bytes are readable under it.
+    expect(imported.markdown).toContain(attachment.url);
     const importedAttachmentName = [...imported.markdown.matchAll(
       /\/_attachments-v2\/([A-Za-z0-9_.-]+)/g,
     )][0]?.[1];
-    expect(importedAttachmentName).toBeTruthy();
+    expect(importedAttachmentName).toBe(
+      attachment.url.slice("/_attachments-v2/".length),
+    );
     expect(
       new TextDecoder().decode(
         await destination.readPortableAttachment(importedAttachmentName!),
@@ -174,6 +185,51 @@ describe("Brain portable packages", () => {
     expect(await destination.readPage(existing.id)).toMatchObject({
       meta: { title: "Existing" },
     });
+  });
+
+  /** TWO PAGES SHOWING ONE FILE STAY TWO PAGES SHOWING ONE FILE.
+   *
+   *  The export keys its assets by attachment name, and the import saves each
+   *  asset once. Now that the saved name is the sha256 of the bytes, two saves
+   *  of one picture are how an owner ends up with two pages naming one url, so
+   *  the archive has to carry one asset and land one file rather than one per
+   *  page that names it. */
+  it("round-trips two pages sharing one attachment as one asset", async () => {
+    const source = await temporaryStore();
+    const root = await source.createPage(null, "Shared Diagram");
+    const child = await source.createPage(root.id, "Shows it too");
+    const picture = () => ({
+      data: new TextEncoder().encode("one shared diagram"),
+      originalName: "diagram.txt",
+      mimeType: "text/plain",
+    });
+    const first = await source.saveAttachment(picture());
+    const second = await source.saveAttachment(picture());
+    expect(second.url).toBe(first.url);
+    await source.writePage(root.id, `[Diagram](${first.url})`);
+    await source.writePage(child.id, `[The same diagram](${second.url})`);
+
+    const exported = await buildPortableArchive(source, { rootId: root.id });
+    expect(exported.manifest.attachments).toHaveLength(1);
+
+    const { store: destination, root: destinationRoot } =
+      await temporaryStoreAt();
+    const checked = validatePortableArchive(exported.bytes, destination);
+    expect(checked.summary).toMatchObject({ pages: 2, attachments: 1 });
+    const applied = await applyPortableBundle(destination, checked.bundle);
+    const importedRoot = destination
+      .getTree()
+      .find((node) => node.id === applied.rootIds[0])!;
+
+    const parentBody = await destination.readPage(importedRoot.id);
+    const childBody = await destination.readPage(
+      importedRoot.children[0].id,
+    );
+    expect(parentBody.markdown).toContain(first.url);
+    expect(childBody.markdown).toContain(first.url);
+    expect(
+      await fs.readdir(path.join(destinationRoot, "_attachments")),
+    ).toEqual([first.url.slice("/_attachments-v2/".length)]);
   });
 
   it("uses a Finder-friendly deterministic extension", () => {

@@ -135,8 +135,8 @@ function boundedName(name: string): string {
  *  the download path emits both and only the extended one carries a name
  *  outside ASCII, which is why the quoted branch is a fallback the real
  *  client never reaches rather than a rule anything depends on. With neither,
- *  the name is the word `attachment`; the store re-reads it anyway, mints its
- *  own `<id>.<ext>` and keeps this as display metadata. */
+ *  the name is the word `attachment`; the store re-reads it anyway, names the
+ *  file by the sha256 of its bytes and keeps this as display metadata. */
 function filenameOf(disposition: string): string {
   const extended = /filename\*=UTF-8''([^;]+)/i.exec(disposition);
   if (extended) {
@@ -203,15 +203,12 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
       // `keeps`: nothing the page already had is replaced or removed, only
       // added to.
       //
-      // `repeats`: the same attachment saved twice is a second file, because
-      // `store.saveAttachment` names a file `nanoid(12)` plus its extension
-      // rather than by its content. The line guard below is not idempotency
-      // and is not claimed as any: it stops a second copy of a line the page
-      // already carries, and two saves do not produce the same line to begin
-      // with. Naming the general save by content hash, the way
-      // `stageNotionAttachment` already does, is what would turn this word
-      // over, and it is a store-wide change filed as its own follow-up.
-      annotations: hints("write keeps repeats outside"),
+      // `idempotent`: `store.saveAttachment` names a file by the sha256 of its
+      // bytes, so the same attachment saved twice is the same file under the
+      // same url. The two calls therefore produce the same Markdown line,
+      // which is the line the guard below finds already on the page and does
+      // not add again. Both halves are needed for the word and both hold.
+      annotations: hints("write keeps idempotent outside"),
     },
     async ({ accountId, attachmentId, page, append }, extra) => {
       // The ids first, and a malformed one writes no line: an id Brain never
@@ -376,20 +373,14 @@ export function registerMailAttachmentTools(server: McpToolServer): void {
       // the download, because the download is where the time goes and the page
       // may have gained the line meanwhile.
       //
-      // TWO THINGS THIS DOES NOT CLOSE, both of them worth knowing before
-      // trusting `save_mail_attachment`'s `idempotentHint`.
+      // The guard has the naming behind it now: `store.saveAttachment` names a
+      // file by the sha256 of its bytes, so the second save of one attachment
+      // is the same url and therefore the same line, which is the line this
+      // finds. That pair is what `idempotentHint` claims.
       //
-      // The first is the naming. `store.saveAttachment` names the file
-      // `nanoid(12)` plus the extension, so saving one mail attachment twice
-      // writes two files with two urls and two different lines, and this guard
-      // never matches. Only the Notion staging path is content-addressed
-      // (`stageNotionAttachment`, sha256 of the bytes). This guard is what the
-      // general save being named by content would need, and it is inert until
-      // then.
-      //
-      // The second is the window. The read and the append are two `mutate()`
-      // calls — `mutate` is not reentrant — so two saves racing inside it can
-      // both see a body without the line. Closing that needs an
+      // WHAT IT DOES NOT CLOSE is the window. The read and the append are two
+      // `mutate()` calls — `mutate` is not reentrant — so two saves racing
+      // inside it can both see a body without the line. Closing that needs an
       // append-if-absent on the store.
       const line = attachmentLine(saved);
       try {

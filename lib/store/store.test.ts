@@ -37,6 +37,7 @@ import {
 } from "../notion/protocol";
 import { notionAttachmentUrl } from "../attachments";
 import {
+  assertGitSnapshotHealthy,
   beginGitSnapshotBarrier,
   scheduleCommit,
   scheduleDirtyCommit,
@@ -149,6 +150,17 @@ async function commitAll(root: string, message: string): Promise<string> {
   await git(root, "add", "-A");
   await git(root, "commit", "-q", "-m", message);
   return (await git(root, "rev-parse", "HEAD")).trim();
+}
+
+/** Run the snapshot debounce out, under fake timers, until nothing is left in
+ *  flight. One pass is not enough: a commit that was still running when the
+ *  debounce fired re-arms the timer behind itself, so the pass that waits for
+ *  it has to be followed by one that lets the re-armed timer fire. */
+async function settleGitSnapshot(root: string): Promise<void> {
+  for (let pass = 0; pass < 3; pass += 1) {
+    await vi.advanceTimersByTimeAsync(5_000);
+    await assertGitSnapshotHealthy(root);
+  }
 }
 
 async function waitForHeadChange(
@@ -1649,11 +1661,153 @@ describe("Store", () => {
     });
 
     expect(saved.name).toBe("notes.txt");
-    expect(saved.url).toMatch(/^\/_attachments-v2\/[A-Za-z0-9_-]{12}\.txt$/);
+    expect(saved.url).toBe(
+      `/_attachments-v2/${createHash("sha256").update("hello").digest("hex")}.txt`,
+    );
     const fileName = saved.url.slice("/_attachments-v2/".length);
     await expect(
       fs.readFile(path.join(root, "_attachments", fileName), "utf8"),
     ).resolves.toBe("hello");
+  });
+
+  /** THE NAME IS THE BYTES, SO A SECOND SAVE IS THE FIRST FILE.
+   *
+   *  The general save used to mint a fresh `nanoid(12)`, which meant the same
+   *  mail attachment saved twice left two files, two urls and two Markdown
+   *  lines. The inode is what says the second call wrote nothing: an
+   *  `atomicWrite` renames a fresh temp file into place, so a rewrite would
+   *  show up as a different one even though the bytes match.
+   *
+   *  The mtime is the other half, and it moves. The sweep collects an
+   *  unreferenced file 24 hours after that stamp, so a save that left the stamp
+   *  alone would answer a url whose grace had already run out. Backdated before
+   *  the second save so the refresh is visible rather than a tie inside one
+   *  millisecond. */
+  it("answers the existing file for a second save of the same bytes", async () => {
+    const { s, root } = await tmpStore();
+    const file = () => ({
+      data: new TextEncoder().encode("one invoice"),
+      originalName: "invoice.txt",
+      mimeType: "text/plain",
+    });
+    const directory = path.join(root, "_attachments");
+
+    const first = await s.saveAttachment(file());
+    const name = first.url.slice("/_attachments-v2/".length);
+    const before = await fs.stat(path.join(directory, name));
+    const backdated = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await fs.utimes(path.join(directory, name), backdated, backdated);
+    const second = await s.saveAttachment(file());
+
+    expect(second).toEqual(first);
+    expect(await fs.readdir(directory)).toEqual([name]);
+    const after = await fs.stat(path.join(directory, name));
+    expect(after.ino).toBe(before.ino);
+    expect(after.mtimeMs).toBeGreaterThan(backdated.getTime());
+  });
+
+  /** A URL A SWEEP IS ABOUT TO DELETE IS NOT AN ANSWER.
+   *
+   *  An abandoned file sits in the folder until the sweep's 24 hours are up.
+   *  Saving those bytes again hands the caller its url, and the line naming it
+   *  is written after that: under the old naming the file was always brand new,
+   *  so the window was zero, and a save that wrote nothing and touched nothing
+   *  would have made it the whole grace period. */
+  it("keeps a file a second save handed out, even one the sweep was about to take", async () => {
+    const { s, root } = await tmpStore();
+    const directory = path.join(root, "_attachments");
+    const file = () => ({
+      data: new TextEncoder().encode("abandoned once"),
+      originalName: "draft.txt",
+      mimeType: "text/plain",
+    });
+
+    const first = await s.saveAttachment(file());
+    const name = first.url.slice("/_attachments-v2/".length);
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await fs.utimes(path.join(directory, name), old, old);
+
+    const second = await s.saveAttachment(file());
+    expect(second.url).toBe(first.url);
+
+    // A purge is what runs the sweep, and nothing references the file.
+    const doomed = await s.createPage(null, "Doomed");
+    await s.deletePage(doomed.id);
+    await s.purgePage(doomed.id);
+
+    await expect(
+      fs.access(path.join(directory, name)),
+    ).resolves.toBeUndefined();
+  });
+
+  it("adds no commit for a second save of the same bytes", async () => {
+    const { s, root } = await tmpStore();
+    await git(root, "init", "-q");
+    await git(root, "commit", "--allow-empty", "-q", "-m", "initial notes");
+    const file = () => ({
+      data: new TextEncoder().encode("one receipt"),
+      originalName: "receipt.txt",
+      mimeType: "text/plain",
+    });
+
+    vi.useFakeTimers();
+    try {
+      await s.saveAttachment(file());
+      await settleGitSnapshot(root);
+      const afterFirst = (await git(root, "rev-parse", "HEAD")).trim();
+      await s.saveAttachment(file());
+      await settleGitSnapshot(root);
+
+      expect((await git(root, "rev-parse", "HEAD")).trim()).toBe(afterFirst);
+      expect((await git(root, "status", "--porcelain")).trim()).toBe("");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  /** A NAME ALWAYS HOLDS THE BYTES IT IS THE DIGEST OF.
+   *
+   *  That invariant is what the whole share index rests on: a grant recorded
+   *  against a name can never come to point at different content. The disk
+   *  probe asks for the digest and not merely for a file, so a name carrying
+   *  anything else is corruption to be repaired rather than a second version of
+   *  these bytes to be answered. Reachable by a truncated write from an older
+   *  install, a restore that put half a file back, or a notes folder edited by
+   *  hand. */
+  it("rewrites a file whose bytes do not match the name it is under", async () => {
+    const { s, root } = await tmpStore();
+    const directory = path.join(root, "_attachments");
+    const data = new TextEncoder().encode("the real bytes");
+    const name = `${createHash("sha256").update(data).digest("hex")}.txt`;
+    await fs.mkdir(directory, { recursive: true });
+    await fs.writeFile(path.join(directory, name), "not these bytes at all");
+
+    const saved = await s.saveAttachment({
+      data,
+      originalName: "notes.txt",
+      mimeType: "text/plain",
+    });
+
+    expect(saved.url).toBe(`/_attachments-v2/${name}`);
+    await expect(
+      fs.readFile(path.join(directory, name), "utf8"),
+    ).resolves.toBe("the real bytes");
+  });
+
+  it("writes a second file when one original name carries different bytes", async () => {
+    const { s, root } = await tmpStore();
+    const save = (body: string) =>
+      s.saveAttachment({
+        data: new TextEncoder().encode(body),
+        originalName: "invoice.txt",
+        mimeType: "text/plain",
+      });
+
+    const first = await save("March");
+    const second = await save("April");
+
+    expect(second.url).not.toBe(first.url);
+    expect(await fs.readdir(path.join(root, "_attachments"))).toHaveLength(2);
   });
 
   it.each(["generic", "notion"] as const)(
@@ -8669,6 +8823,50 @@ describe("Store", () => {
     });
   });
 
+  /** ONE FILE, TWO PAGES, AND A PURGE OF ONE OF THEM.
+   *
+   *  The sweep collects by reference rather than by owner, so this has always
+   *  been its rule. What is new is that two saves of the same bytes are the
+   *  way two pages come to carry one file, so the rule now decides a case an
+   *  owner reaches by pasting the same picture twice rather than by hand. */
+  it("keeps a file two pages carry until the last of them is purged", async () => {
+    const { s, root } = await tmpStore();
+    const attachmentsDir = path.join(root, "_attachments");
+    const picture = () => ({
+      data: new TextEncoder().encode("one diagram"),
+      originalName: "diagram.txt",
+      mimeType: "text/plain",
+    });
+
+    const first = await s.saveAttachment(picture());
+    const second = await s.saveAttachment(picture());
+    expect(second.url).toBe(first.url);
+    const name = first.url.slice("/_attachments-v2/".length);
+    const doomed = await s.createPage(null, "Pasted it first");
+    const keeper = await s.createPage(null, "Pasted the same one");
+    await s.writePage(doomed.id, `[a](${first.url})`);
+    await s.writePage(keeper.id, `[a](${second.url})`);
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await fs.utimes(path.join(attachmentsDir, name), old, old);
+
+    await s.deletePage(doomed.id);
+    await s.purgePage(doomed.id);
+
+    await expect(
+      fs.access(path.join(attachmentsDir, name)),
+    ).resolves.toBeUndefined();
+    await expect(s.readPage(keeper.id)).resolves.toMatchObject({
+      markdown: expect.stringContaining(first.url),
+    });
+
+    await s.deletePage(keeper.id);
+    await s.purgePage(keeper.id);
+
+    await expect(
+      fs.access(path.join(attachmentsDir, name)),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
   it("refuses to permanently purge a page that was restored", async () => {
     const { s } = await tmpStore();
     const page = await s.createPage(null, "Restore before purge");
@@ -9252,11 +9450,20 @@ describe("share-aware Store leaves", () => {
   const PNG = new Uint8Array([
     0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0,
   ]);
-  const shot = (): AttachmentInput => ({
-    data: PNG,
-    originalName: "shot.png",
-    mimeType: "image/png",
-  });
+  /** A DIFFERENT PICTURE EVERY CALL.
+   *
+   *  The store names a saved file by the sha256 of its bytes, so a fixture
+   *  that wants to be a second attachment has to be a second picture. The
+   *  counter goes in the four bytes after the signature, which keeps every
+   *  fixture the same length as `PNG` and the quota arithmetic below exact.
+   *  A test that wants one file twice reuses one `shot()`. */
+  let shotSequence = 0;
+  const shot = (): AttachmentInput => {
+    shotSequence += 1;
+    const data = Uint8Array.from(PNG);
+    new DataView(data.buffer).setUint32(8, shotSequence);
+    return { data, originalName: "shot.png", mimeType: "image/png" };
+  };
 
   async function editableRoot(shareExpiresAt?: string) {
     const { s, root } = await tmpStore({ publicOrigin: "https://brain.test" });
@@ -9687,7 +9894,7 @@ describe("share-aware Store leaves", () => {
       shareVersion: version,
       file: shot(),
     });
-    expect(saved.url).toMatch(/^\/_attachments-v2\/[A-Za-z0-9_-]{12}\.png$/);
+    expect(saved.url).toMatch(/^\/_attachments-v2\/[a-f0-9]{64}\.png$/);
     expect(saved).toMatchObject({
       name: "shot.png",
       size: PNG.byteLength,
@@ -10113,6 +10320,104 @@ describe("share-aware Store leaves", () => {
     );
   });
 
+  /** BYTES THE FOLDER ALREADY HOLDS ARE A GRANT, NOT A DEBT.
+   *
+   *  The name is the digest, so a visitor can upload bytes that are already on
+   *  the disk: the owner's own private picture, or one the link itself shows.
+   *  Nothing lands, so nothing may be charged. Charging for it was a quota a
+   *  visitor could burn to the last byte at no disk cost and that no sweep could
+   *  give back, because `forgetUploads` only fires when the sweep removes a file
+   *  and the owner's page keeps this one forever.
+   *
+   *  The grant is still recorded. The visitor supplied these bytes, so naming
+   *  them in their own page is theirs to do, which is the rule for any upload
+   *  whose bytes no page shows yet. */
+  it("charges a visitor nothing for bytes the notes folder already holds", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const picture = shot();
+    const priv = await s.createPage(null, "The owner's own page");
+    const owned = await s.saveAttachment(picture);
+    await s.writePage(priv.id, `![](${owned.url})`, undefined, "me");
+    const before = await fs.readdir(path.join(root, "_attachments"));
+
+    const uploaded = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: picture,
+    });
+
+    expect(uploaded.url).toBe(owned.url);
+    expect(
+      (await fs.readdir(path.join(root, "_attachments"))).sort(),
+    ).toEqual([...before, "scope.json"].sort());
+    expect(rootUploadBytes(await readAttachmentScope(root), rootId)).toBe(0);
+    // The grant stands, so the visitor may show what they uploaded.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${uploaded.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toMatchObject({ markdown: `![](${uploaded.url})` });
+  });
+
+  it("does not refuse bytes the folder already holds to a root with no quota left", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const picture = shot();
+    const held = await s.saveAttachment(picture);
+    const priv = await s.createPage(null, "The owner's own page");
+    await s.writePage(priv.id, `![](${held.url})`, undefined, "me");
+    // Full to the last byte, and nothing unreferenced for the sweep to reclaim.
+    await writeAttachmentScope(
+      root,
+      recordUpload(
+        recordBaseline(await readAttachmentScope(root), rootId, []),
+        "filler000001.bin",
+        rootId,
+        SHARE_ROOT_UPLOAD_BYTES,
+        "2026-09-05T10:00:00.000Z",
+      ),
+    );
+
+    await expect(
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: picture,
+      }),
+    ).resolves.toMatchObject({ url: held.url });
+    expect(rootUploadBytes(await readAttachmentScope(root), rootId)).toBe(
+      SHARE_ROOT_UPLOAD_BYTES,
+    );
+  });
+
+  it("keeps the charge on a visitor's own upload when they send it twice", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const picture = shot();
+    const upload = () =>
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: picture,
+      });
+
+    const first = await upload();
+    expect(rootUploadBytes(await readAttachmentScope(root), rootId)).toBe(
+      PNG.byteLength,
+    );
+    // The bytes are on the disk and charged where they landed. A repeat wrote
+    // nothing, and must not discharge what the first one paid for either.
+    await expect(upload()).resolves.toMatchObject({ url: first.url });
+    expect(rootUploadBytes(await readAttachmentScope(root), rootId)).toBe(
+      PNG.byteLength,
+    );
+  });
+
   it("frees a root's quota when the sweep collects an unreferenced visitor upload", async () => {
     const { s, root, rootId, childId, version } = await editableRoot();
     const upload = () =>
@@ -10276,6 +10581,135 @@ describe("share-aware Store leaves", () => {
       markdown: "first visit builds the baseline",
       visitorName: "Ada",
     });
+
+  /** A SECOND LINK IN THE SAME NOTES FOLDER.
+   *
+   *  One file can now be carried by pages under two different links, because
+   *  the saved name is the sha256 of the bytes. The index is keyed by that
+   *  name, so both of the tests below are about what one key may say for two
+   *  roots. Siblings, not nested: an overlapping enable is its own refusal. */
+  async function secondEditableRoot(s: Store) {
+    const page = await s.createPage(null, "Other shared root");
+    const child = await s.createPage(page.id, "Other child");
+    const before = await s.readShareScope(page.id);
+    await s.configureShare(page.id, {
+      enabled: true,
+      expectedScopeToken: before.scopeToken,
+      canEdit: true,
+    });
+    const version = (await s.readShareScope(page.id)).shareVersion;
+    return { rootId: page.id, childId: child.id, version };
+  }
+
+  /** TWO VISITORS, ONE PICTURE, AND A LEDGER KEYED BY THE NAME.
+   *
+   *  An upload's entry in the index is the one grant that stands with no live
+   *  page behind it: nothing shows the bytes yet and the visitor is the one who
+   *  put them there. The name used to be a fresh nanoid, so two uploads were
+   *  two entries and could not disagree. Now the second upload writes nothing
+   *  and lands on the first one's key, so the entry has to hold both links or
+   *  one visitor's next write is refused for a file they uploaded themselves.
+   *
+   *  The bytes stay charged to the link whose upload put them on the disk: the
+   *  quota is about what lands in the notes folder, and the second upload
+   *  landed nothing. */
+  it("lets both links name a picture two visitors uploaded from the same bytes", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const other = await secondEditableRoot(s);
+    const picture = shot();
+
+    const mine = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: picture,
+    });
+    const theirs = await s.saveSharedAttachment({
+      rootId: other.rootId,
+      targetId: other.childId,
+      shareVersion: other.version,
+      file: picture,
+    });
+    expect(theirs.url).toBe(mine.url);
+
+    await expect(
+      s.writeSharedPage({
+        rootId: other.rootId,
+        targetId: other.childId,
+        shareVersion: other.version,
+        markdown: `![](${theirs.url})`,
+        visitorName: "Bo",
+      }),
+    ).resolves.toMatchObject({ markdown: `![](${theirs.url})` });
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${mine.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toMatchObject({ markdown: `![](${mine.url})` });
+
+    const scope = await readAttachmentScope(root);
+    expect(rootUploadBytes(scope, rootId)).toBe(PNG.byteLength);
+    expect(rootUploadBytes(scope, other.rootId)).toBe(0);
+  });
+
+  it("grants one shared file only to the link whose page carries it", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const other = await secondEditableRoot(s);
+    await scopeTheRoot(s, rootId, childId, version);
+    await scopeTheRoot(s, other.rootId, other.childId, other.version);
+
+    // Saved twice and one file, which is the whole reason this test exists:
+    // before the name was the bytes, two links could not collide on one key.
+    const picture = shot();
+    const saved = await s.saveAttachment(picture);
+    expect((await s.saveAttachment(picture)).url).toBe(saved.url);
+    const name = attachmentName(saved.url);
+    await s.writePage(childId, `![](${saved.url})`, undefined, "me");
+
+    const scope = await readAttachmentScope(root);
+    expect(attachmentGrantsRoot(scope, name, rootId)).toBe(true);
+    // The second link shows no page that names the file, so the key it shares
+    // with the first link does not put it on that link.
+    expect(attachmentGrantsRoot(scope, name, other.rootId)).toBe(false);
+  });
+
+  it("keeps the second link's grant on a shared file when the first is revoked", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const other = await secondEditableRoot(s);
+    await scopeTheRoot(s, rootId, childId, version);
+    await scopeTheRoot(s, other.rootId, other.childId, other.version);
+
+    const picture = shot();
+    const saved = await s.saveAttachment(picture);
+    expect((await s.saveAttachment(picture)).url).toBe(saved.url);
+    const name = attachmentName(saved.url);
+    await s.writePage(childId, `![](${saved.url})`, undefined, "me");
+    await s.writePage(other.childId, `![](${saved.url})`, undefined, "me");
+    expect(
+      attachmentGrantsRoot(await readAttachmentScope(root), name, other.rootId),
+    ).toBe(true);
+
+    await s.configureShare(rootId, { enabled: false });
+
+    // Revoking a link ends that link. It does not reach into a key another
+    // link is standing on, and it does not take the bytes away.
+    const scope = await readAttachmentScope(root);
+    expect(attachmentGrantsRoot(scope, name, other.rootId)).toBe(true);
+    await expect(
+      fs.access(path.join(root, "_attachments", name)),
+    ).resolves.toBeUndefined();
+    await expect(
+      resolveShareAccess(s, {
+        rootId,
+        targetId: childId,
+        requestedVersion: String(version),
+      }),
+    ).rejects.toBeInstanceOf(ShareAccessNotFoundError);
+  });
 
   it("grants an image the owner adds after the baseline was taken", async () => {
     const { s, root, rootId, childId, version } = await editableRoot();

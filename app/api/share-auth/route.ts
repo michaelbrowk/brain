@@ -10,21 +10,39 @@ import {
   verifyShareToken,
   SHARE_EDIT_MAX_AGE_SECONDS,
 } from "@/lib/auth";
+import { DEVICE_COOKIE, deviceBucketKey } from "@/lib/device-cookie";
 import { isShareExpired, normalizeVisitorName } from "@/lib/sharing";
 import { FixedWindowRateLimiter } from "@/lib/rate-limit";
+import {
+  rememberSharePasswordVerdict,
+  sharePasswordVerdictHolds,
+  sharePasswordVerdictKey,
+} from "@/lib/share-password-verdict";
 import { shareOriginAllowed } from "@/lib/share-origin";
 
 export const dynamic = "force-dynamic";
 
 // The key is a validated, existing page id. It cannot be multiplied with fake
-// forwarding headers, and the hard cap bounds memory even with many pages. As
-// on owner login, five comparisons can cause a short one-minute page lockout;
-// that tradeoff is required for a real pre-bcrypt cap without trusted client IP.
+// forwarding headers, and the hard cap bounds memory even with many pages. The
+// budget is spent before bcrypt, so a correct password does not get to skip it.
 const limiter = new FixedWindowRateLimiter({
   limit: 5,
   windowMs: 60 * 1000,
   maxEntries: 1_024,
 });
+
+/** Which bucket this request's guess is counted in.
+ *
+ *  Five comparisons a minute per page was five a minute for everyone holding the
+ *  link: a stranger who emptied the window took the page away from every reader
+ *  of it. Two things answer that, and this is the first — a browser carrying a
+ *  device cookie this installation signed is counted under a key of its own, so
+ *  the owner, and any reader who has logged in here, keeps a budget a flood
+ *  cannot spend. The second is the remembered verdict, for everyone else. */
+function readBucketKey(req: NextRequest, id: string): string {
+  const device = deviceBucketKey(req.cookies.get(DEVICE_COOKIE)?.value);
+  return device ? `share:${id}:${device}` : `share:${id}`;
+}
 
 // A separate bucket, deliberately. An unlocked edit mint costs no bcrypt, and
 // letting cheap mints consume the comparison budget above would let one visitor
@@ -83,8 +101,10 @@ export async function POST(req: NextRequest) {
     )
       return notFound();
 
-    const attempt = limiter.consume(`share:${id}`);
-    if (!attempt.allowed)
+    const bucket = readBucketKey(req, id);
+    const verdict = sharePasswordVerdictKey(id, page.meta.sharePass, password);
+    const attempt = limiter.consume(bucket);
+    if (!attempt.allowed && !sharePasswordVerdictHolds(verdict))
       return NextResponse.json(
         { error: "too many attempts" },
         {
@@ -93,12 +113,21 @@ export async function POST(req: NextRequest) {
         },
       );
 
-    const ok = await bcrypt.compare(password, page.meta.sharePass);
+    // An exhausted window reaches here only for a password already proven right
+    // in this window, and it is admitted without a comparison — so the cap on
+    // bcrypt is exactly what it was, and the flood denies nobody who knows the
+    // password.
+    const ok = attempt.allowed
+      ? await bcrypt.compare(password, page.meta.sharePass)
+      : true;
     if (!ok) {
       return NextResponse.json({ error: "wrong password" }, { status: 401 });
     }
 
-    limiter.reset(`share:${id}`);
+    if (attempt.allowed) {
+      limiter.reset(bucket);
+      rememberSharePasswordVerdict(verdict);
+    }
     const res = NextResponse.json({ ok: true });
     res.cookies.set(
       `brain_share_${id}`,
@@ -189,11 +218,14 @@ async function mintEditToken(
         if (typeof password !== "string" || !password) {
           return NextResponse.json({ error: "wrong password" }, { status: 401 });
         }
-        // A guess is a guess whichever branch carries it. The comparison spends
-        // the read path's five-per-minute budget, so the mint cannot widen a
-        // brute force on a locked root by thirty attempts a minute.
-        const guess = limiter.consume(`share:${id}`);
-        if (!guess.allowed)
+        // A guess is a guess whichever branch carries it, so it goes through the
+        // read path's bucket and its remembered verdict: the mint cannot widen a
+        // brute force on a locked root by thirty attempts a minute, and it
+        // cannot be denied by a flood the read path is already admitting past.
+        const bucket = readBucketKey(req, id);
+        const verdict = sharePasswordVerdictKey(id, page.meta.sharePass, password);
+        const guess = limiter.consume(bucket);
+        if (!guess.allowed && !sharePasswordVerdictHolds(verdict))
           return NextResponse.json(
             { error: "too many attempts" },
             {
@@ -201,11 +233,16 @@ async function mintEditToken(
               headers: { "Retry-After": String(guess.retryAfterSeconds) },
             },
           );
-        const ok = await bcrypt.compare(password, page.meta.sharePass);
+        const ok = guess.allowed
+          ? await bcrypt.compare(password, page.meta.sharePass)
+          : true;
         if (!ok) {
           return NextResponse.json({ error: "wrong password" }, { status: 401 });
         }
-        limiter.reset(`share:${id}`);
+        if (guess.allowed) {
+          limiter.reset(bucket);
+          rememberSharePasswordVerdict(verdict);
+        }
         verifiedPassword = true;
       }
     }

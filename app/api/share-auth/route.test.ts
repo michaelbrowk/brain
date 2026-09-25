@@ -4,10 +4,13 @@ import { createShareToken, verifyShareEditToken } from "@/lib/auth";
 
 const ORIGIN = "https://brain.example";
 
-function request(password: string): NextRequest {
+function request(password: string, cookie?: string): NextRequest {
   return new NextRequest("https://brain.example/api/share-auth", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(cookie ? { cookie } : {}),
+    },
     body: JSON.stringify({ id: "shared-page", password }),
   });
 }
@@ -18,6 +21,7 @@ describe("shared-page password rate limiting", () => {
     vi.doUnmock("@/lib/store");
     vi.doUnmock("@/lib/auth");
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     vi.resetModules();
   });
 
@@ -53,6 +57,98 @@ describe("shared-page password rate limiting", () => {
     expect(blockedCorrect.status).toBe(429);
     expect(blockedCorrect.headers.get("Retry-After")).toBeTruthy();
     expect(compare).toHaveBeenCalledTimes(5);
+  });
+
+  /** Same shape as the login defect, one page at a time: every reader of a
+   *  password-protected link shared that page's bucket, so five wrong guesses a
+   *  minute took the link away from all of them. */
+  it("admits the right password past a window somebody else emptied", async () => {
+    const compare = vi.fn(async (password: string) => password === "right");
+    vi.doMock("bcryptjs", () => ({ default: { compare } }));
+    vi.doMock("@/lib/store", () => ({
+      getStore: async () => ({
+        readPage: async () => ({
+          meta: {
+            id: "shared-page",
+            public: true,
+            sharePass: "bcrypt-hash",
+            shareVersion: 1,
+          },
+        }),
+        isDeleted: () => false,
+      }),
+      isNotFound: () => false,
+    }));
+    vi.doMock("@/lib/auth", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/auth")>()),
+      createShareToken: async () => "share-token",
+    }));
+    const { POST } = await import("./route");
+
+    await expect(POST(request("right"))).resolves.toMatchObject({ status: 200 });
+    expect(compare).toHaveBeenCalledTimes(1);
+
+    for (let index = 0; index < 5; index += 1) {
+      await expect(POST(request("wrong"))).resolves.toMatchObject({
+        status: 401,
+      });
+    }
+    expect(compare).toHaveBeenCalledTimes(6);
+
+    // The reader who knows the password is let in, and no comparison was spent
+    // doing it: the verdict from this window is what admitted them.
+    await expect(POST(request("right"))).resolves.toMatchObject({ status: 200 });
+    expect(compare).toHaveBeenCalledTimes(6);
+
+    // The flood stays capped. Only the password already proven right in this
+    // window skips the window.
+    await expect(POST(request("also wrong"))).resolves.toMatchObject({
+      status: 429,
+    });
+    expect(compare).toHaveBeenCalledTimes(6);
+  });
+
+  it("gives a reader carrying a device cookie a bucket of its own", async () => {
+    vi.stubEnv("AUTH_SECRET", "share-auth-device-secret-with-entropy");
+    const compare = vi.fn().mockResolvedValue(false);
+    vi.doMock("bcryptjs", () => ({ default: { compare } }));
+    vi.doMock("@/lib/store", () => ({
+      getStore: async () => ({
+        readPage: async () => ({
+          meta: {
+            id: "shared-page",
+            public: true,
+            sharePass: "bcrypt-hash",
+            shareVersion: 1,
+          },
+        }),
+        isDeleted: () => false,
+      }),
+      isNotFound: () => false,
+    }));
+    vi.doMock("@/lib/auth", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/auth")>()),
+      createShareToken: async () => "share-token",
+    }));
+    const { POST } = await import("./route");
+    const { createDeviceCookie, DEVICE_COOKIE } = await import(
+      "@/lib/device-cookie"
+    );
+    const device = `${DEVICE_COOKIE}=${createDeviceCookie()}`;
+
+    for (let index = 0; index < 5; index += 1) {
+      await expect(POST(request("wrong"))).resolves.toMatchObject({
+        status: 401,
+      });
+    }
+    await expect(POST(request("wrong"))).resolves.toMatchObject({ status: 429 });
+
+    // The owner, and any reader who has logged in on this browser, is counted
+    // under a key the flood never touches.
+    await expect(POST(request("wrong", device))).resolves.toMatchObject({
+      status: 401,
+    });
+    expect(compare).toHaveBeenCalledTimes(6);
   });
 
   it("sets a root-path page-scoped cookie so shared attachments can verify it", async () => {

@@ -13,7 +13,9 @@ function parse(value: unknown) {
 }
 
 describe("Mail deploy health parser", () => {
-  it.each(["ok", "degraded"])("accepts %s with an immutable build commit", (status) => {
+  // `paused` is the owner's own request (Settings › Modules turned Mail off),
+  // not a verdict about the release; the puller must still deploy through it.
+  it.each(["ok", "degraded", "paused"])("accepts %s with an immutable build commit", (status) => {
     const result = parse({ apiVersion: 1, build: { commit }, status });
 
     expect(result.status).toBe(0);

@@ -372,6 +372,12 @@ describe("shared subtree page", () => {
     ).resolves.toEqual({
       title: "Child",
       description: "Shared from Brain",
+      // A link pasted into a chat is a card, and the card used to carry the
+      // title and nothing else: no source, no kind, nothing saying where the
+      // page came from. `robots` stays where it is, on the response headers:
+      // a shared page is still not for a crawler.
+      openGraph: { title: "Child", siteName: "Brain", type: "article" },
+      twitter: { card: "summary", title: "Child" },
     });
   });
 

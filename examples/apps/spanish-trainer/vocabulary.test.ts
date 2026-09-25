@@ -586,14 +586,14 @@ describe("merging the owner's page with the app's session", () => {
   });
 });
 
-/** THE CARD THAT WAS A WORD THE OWNER HAD DELETED.
+/** THE CARD ON SCREEN IS NEVER A WORD THE DECK NO LONGER HAS.
  *
  *  Every answer reads the `Words` page back and merges it, and the merge hands
  *  back new row objects, so the deck — which was holding the old ones — is
- *  relinked to them. A word the owner deleted from the page mid-session has no
- *  new row at all and its card comes out of the deck, and nothing told the
- *  screen: the owner went on looking at a word that no longer existed, and
- *  every answer they gave it was written into a row nothing read.
+ *  relinked to them. A card with no row among them comes out of the deck, and
+ *  until now nothing told the screen: it would go on showing a word that was no
+ *  longer in the deck, and an answer to it would be written into a row nothing
+ *  reads.
  *
  *  So the relink also says whether the card at the FRONT moved, which is the
  *  only case the screen has to be redrawn for. It compares words rather than

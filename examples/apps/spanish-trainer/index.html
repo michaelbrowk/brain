@@ -518,10 +518,9 @@ function mergeWordRows(appRows, ownerRows, answered) {
 /** THE DECK AFTER A MERGE, AND THE CARD THAT IS NO LONGER A WORD.
  *
  *  A merge answers new row objects and the deck was holding the old ones, so
- *  every card is looked up again by its word. A card whose word is not in the
- *  rows at all is a word the owner deleted from the `Words` page while the app
- *  was open: it comes out of the deck, because an answer to it would be written
- *  into a row nothing reads.
+ *  every card is looked up again by its word. A card whose word is not among
+ *  the rows at all comes out of the deck, because an answer to it would be
+ *  written into a row nothing reads.
  *
  *  `redraw` is whether the card at the FRONT moved, which is the only case the
  *  screen has to be told about: the owner is looking at that one. It compares
@@ -765,16 +764,22 @@ function descendantsOf(nodes, rootId, skipId) {
   }
 
   /** A merge answers new row objects, and the deck was holding the old ones.
-   *  Without this the cards still queued would be answered into rows nothing
-   *  reads, and a word the owner deleted while the app was open would stay in
-   *  the deck as a card that can never be saved.
+   *  Without this a card still queued would be answered into a row nothing
+   *  reads: `answer` finds the row by identity, and the table that gets written
+   *  is the merged one.
    *
-   *  AND THE SCREEN IS TOLD WHEN THE CARD IT IS SHOWING GOES. `relinkCards`
-   *  says whether the front of the deck moved, because that is the card the
-   *  owner is looking at, and a word deleted from the `Words` page has to come
-   *  off the screen and not only out of the queue. It is the front and not the
-   *  whole deck for a reason: `draw()` hides the translation, so redrawing
-   *  after every save would take back a Show the owner had just pressed. */
+   *  A card whose word is not among the merged rows at all comes out of the
+   *  deck, and `relinkCards` says whether that took the card the owner is
+   *  LOOKING at, which is the only case the screen has to be redrawn for. The
+   *  front and not the whole deck, for a reason: `draw()` hides the
+   *  translation, so redrawing after every save would take back a Show they
+   *  had just pressed.
+   *
+   *  Nothing reaches that through the merge today. `mergeWordRows` keeps a row
+   *  only one side has, so a word the owner deletes from `Words` is put back by
+   *  the app's own copy of it and its card survives the save. The guard stands
+   *  here rather than inside the merge's rules because it is an invariant about
+   *  the screen, and those rules are free to change. */
   function relinkDeck() {
     var relinked = relinkCards(deck, rows);
     deck = relinked.deck;

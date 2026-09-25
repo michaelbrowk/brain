@@ -453,10 +453,9 @@ export function mergeWordRows(appRows, ownerRows, answered) {
 /** THE DECK AFTER A MERGE, AND THE CARD THAT IS NO LONGER A WORD.
  *
  *  A merge answers new row objects and the deck was holding the old ones, so
- *  every card is looked up again by its word. A card whose word is not in the
- *  rows at all is a word the owner deleted from the `Words` page while the app
- *  was open: it comes out of the deck, because an answer to it would be written
- *  into a row nothing reads.
+ *  every card is looked up again by its word. A card whose word is not among
+ *  the rows at all comes out of the deck, because an answer to it would be
+ *  written into a row nothing reads.
  *
  *  `redraw` is whether the card at the FRONT moved, which is the only case the
  *  screen has to be told about: the owner is looking at that one. It compares

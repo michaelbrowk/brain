@@ -15,6 +15,9 @@
 import { expect, test, type Page } from "playwright/test";
 
 import { parseTaskLines } from "../lib/tasks/task-lines";
+import { freshNotes } from "./fresh-notes";
+
+freshNotes();
 
 async function login(page: Page) {
   await page.goto("/login");

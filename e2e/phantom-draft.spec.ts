@@ -5,6 +5,9 @@
 // PUT of the same body on leave, a "Recovered unsaved draft" on return.
 
 import { expect, test, type Page } from "playwright/test";
+import { freshNotes } from "./fresh-notes";
+
+freshNotes();
 
 const RECOVERED = "Recovered unsaved draft";
 

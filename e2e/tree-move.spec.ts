@@ -1,4 +1,7 @@
 import { expect, test, type Page } from "playwright/test";
+import { freshNotes } from "./fresh-notes";
+
+freshNotes();
 
 // Real pointer drags on the sidebar tree. dnd-kit reads pointer events, so a
 // synthetic DragEvent would prove nothing about the gesture a reader performs —

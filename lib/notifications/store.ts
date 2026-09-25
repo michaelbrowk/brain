@@ -241,3 +241,27 @@ export async function markAllNotificationsRead(
     return changed;
   });
 }
+
+/** Every row gone, and the count that were there. There is no owner surface
+ *  for this and there is deliberately none: a reader who has seen a row marks
+ *  it read, and a centre that forgets on request would lose the one record of
+ *  a reminder nobody acted on. The caller is the harness reset
+ *  (`app/api/dev/reset/route.ts`), which needs a spec file to open the bell on
+ *  its own run rather than on the run of the file that sorted before it.
+ *
+ *  No announcement. `appendNotification` broadcasts because an open tab has to
+ *  light its bell without polling; a reset happens between two spec files with
+ *  no tab open, and the event vocabulary is a produced row's, not an erased
+ *  one's. An empty centre is written whole rather than unlinked, so the file
+ *  keeps the mode and the temp-then-rename path every other write here uses,
+ *  and a centre with no file yet stays a centre with no file. */
+export async function clearNotifications(
+  dir = notificationStateDirectory(),
+): Promise<number> {
+  return serialise(async () => {
+    const items = await readAll(dir);
+    if (items.length === 0) return 0;
+    await writeAll(dir, []);
+    return items.length;
+  });
+}

@@ -11,6 +11,13 @@
 // @release, because a worker that fails to register is invisible until
 // somebody's phone stops ringing.
 import { expect, test, type Page } from "playwright/test";
+import { freshNotes } from "./fresh-notes";
+
+// An empty centre is this file's premise, and the reset is what makes it one
+// again. An app's write through the bridge is a producer that needs neither the
+// reminder scan nor the mail poll: `e2e/apps.spec.ts` answers three cards, and
+// it sorts before this file.
+freshNotes();
 
 async function login(page: Page) {
   await page.goto("/login");
@@ -93,25 +100,13 @@ test("@release the served VAPID key decodes to a P-256 point", async ({ page }) 
 test("@release the bell opens the centre and says when nothing is waiting", async ({ page }) => {
   await login(page);
 
-  // WHAT IS THE SERVER'S OWN HERE, AND WHAT STOPPED BEING SO.
+  // NOTHING ON THIS SERVER CAN HAVE PUT A ROW HERE.
   //
-  // This case used to assert a centre with nothing in it, on the reasoning
-  // that nothing on this server could put a row there: a row arrives through
-  // the reminder scan or the mail poll, and the server runs with
-  // BRAIN_REMINDERS=0 over a fresh temp notes root and no mail account.
-  //
-  // An app's write through the bridge is a third producer, and it needs no
-  // scan and no poll: `e2e/apps.spec.ts` answers three cards and the centre
-  // holds "Trainer updated Words" from that moment. Every spec shares one
-  // server and that file sorts before this one, so emptiness is now a
-  // property of the run order rather than of the server, and asserting it
-  // would be asserting the alphabet.
-  //
-  // What is still the server's own is the shape of the answer and what the
-  // bell does with it, which is what this asserts: the badge follows
-  // `unread`, and the menu says "Nothing waiting" exactly when nothing is
-  // waiting. Both are read off the centre this test fetched rather than
-  // branched on, so a bell that drew the wrong half fails either way.
+  // A row arrives three ways: the reminder scan, the mail poll, and an app's
+  // write through the bridge. The harness runs with BRAIN_REMINDERS=0 and no
+  // mail account, and `freshNotes()` at the top of this file empties the centre
+  // the bridge writer filled, so the assertions below are exact rather than
+  // read off whatever the run happens to hold.
   //
   // The produced-row path is covered by
   // components/notifications-bell.test.tsx: the glyph per kind, the unread
@@ -122,33 +117,17 @@ test("@release the bell opens the centre and says when nothing is waiting", asyn
   // that cookie.
   const centre = await page.evaluate(async () => {
     const response = await fetch("/api/notifications");
-    return {
-      status: response.status,
-      body: (await response.json()) as {
-        notifications: unknown[];
-        unread: number;
-      },
-    };
+    return { status: response.status, body: await response.json() };
   });
   expect(centre.status).toBe(200);
-  expect(Array.isArray(centre.body.notifications)).toBe(true);
-  expect(typeof centre.body.unread).toBe("number");
-  expect(centre.body.unread).toBeLessThanOrEqual(centre.body.notifications.length);
+  expect(centre.body).toEqual({ notifications: [], unread: 0 });
 
   const bell = page.getByRole("button", { name: /^Notifications/ });
   await expect(bell).toBeVisible();
-  await expect(bell).toHaveAccessibleName(
-    centre.body.unread > 0
-      ? `Notifications, ${centre.body.unread} unread`
-      : "Notifications",
-  );
-  await expect(page.locator(".brain-bell-badge")).toHaveCount(
-    centre.body.unread > 0 ? 1 : 0,
-  );
+  await expect(bell).toHaveAccessibleName("Notifications");
+  await expect(page.locator(".brain-bell-badge")).toHaveCount(0);
 
   await bell.click();
   await expect(page.getByRole("menu")).toBeVisible();
-  await expect(page.getByText("Nothing waiting")).toHaveCount(
-    centre.body.notifications.length === 0 ? 1 : 0,
-  );
+  await expect(page.getByText("Nothing waiting")).toBeVisible();
 });

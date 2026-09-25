@@ -1,4 +1,7 @@
 import { expect, test, type Page, type Route } from "playwright/test";
+import { freshNotes } from "./fresh-notes";
+
+freshNotes();
 
 // Design audit on the Liquid Glass dev stand (/dev/glass, development only —
 // the e2e server is `next dev`). Deterministic DOM checks that a static grep

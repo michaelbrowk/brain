@@ -8,6 +8,7 @@ import {
   NOTIFICATIONS_FILE,
   appendNotification,
   appendOrFoldNotification,
+  clearNotifications,
   listNotifications,
   markAllNotificationsRead,
   markNotificationsRead,
@@ -186,6 +187,21 @@ describe("the notification store", () => {
       { id: "b", kind: "nope" } as unknown as BrainNotification,
     ]);
     expect((await listNotifications(dir)).map((n) => n.id)).toEqual(["a"]);
+  });
+
+  it("clears every row and says how many it removed", async () => {
+    await seed(dir, [
+      row("a", "2026-09-14T09:00:00.000Z"),
+      row("b", "2026-09-14T10:00:00.000Z"),
+    ]);
+    expect(await clearNotifications(dir)).toBe(2);
+    expect(await listNotifications(dir)).toEqual([]);
+    expect(await unreadNotificationCount(dir)).toBe(0);
+  });
+
+  it("clears a centre that has no file yet without creating one", async () => {
+    expect(await clearNotifications(dir)).toBe(0);
+    await expect(stat(path.join(dir, NOTIFICATIONS_FILE))).rejects.toThrow();
   });
 
   it("leaves nothing in the notes folder", async () => {

@@ -5,6 +5,11 @@ import {
   type Page,
   type Route,
 } from "playwright/test";
+import { freshNotes } from "./fresh-notes";
+
+// A notebook of its own, so the page this file titles `E2E note` is the only
+// one the search palette can match.
+freshNotes();
 
 interface TouchRect {
   left: number;

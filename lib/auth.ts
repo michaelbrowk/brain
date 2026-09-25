@@ -1,3 +1,4 @@
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { SignJWT, jwtVerify } from "jose";
 import fs from "node:fs/promises";
 import os from "node:os";
@@ -337,15 +338,25 @@ export async function verifyShareEditToken(
   }
 }
 
-/** Constant-time compare for a strictly formed MCP bearer credential. */
+/** A digest of a credential, keyed with a value minted once per process: it is
+ *  comparable inside this process, means nothing outside it, and turns a string
+ *  of any length into 32 fixed bytes. */
+const COMPARISON_KEY = randomBytes(32);
+function comparisonDigest(value: string): Buffer {
+  return createHmac("sha256", COMPARISON_KEY).update(value, "utf8").digest();
+}
+
+/** Constant-time compare for a strictly formed MCP bearer credential.
+ *
+ *  Both sides are folded to a fixed-width digest before they are compared, so a
+ *  token of the wrong length is refused by the same comparison as one of the
+ *  right length with the wrong bytes. The earlier version returned early on a
+ *  length mismatch, and that answer came back fast enough to tell a prober how
+ *  long the real token is — the one thing about it a prober cannot guess. */
 export function verifyMcpToken(header: string | null): boolean {
   const expected = process.env.MCP_TOKEN;
   if (!expected || !header) return false;
   const match = /^Bearer ([^\s]+)$/i.exec(header);
   if (!match) return false;
-  const got = match[1];
-  if (got.length !== expected.length) return false;
-  let diff = 0;
-  for (let i = 0; i < got.length; i++) diff |= got.charCodeAt(i) ^ expected.charCodeAt(i);
-  return diff === 0;
+  return timingSafeEqual(comparisonDigest(match[1]), comparisonDigest(expected));
 }

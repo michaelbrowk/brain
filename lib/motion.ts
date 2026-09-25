@@ -114,6 +114,13 @@ export const PRESS = { scale: 0.97, duration: 0.1 } as const;
 export const PRESS_ICON = { scale: 0.9, duration: 0.1 } as const;
 export const HOVER = { in: 0.08, out: 0.16 } as const;
 
+/** The one indeterminate wait in the product: a glyph turning at a steady rate
+ *  while a request no progress bar can measure is out. Linear because constant
+ *  motion has no beginning and no end to ease, and 900ms because faster reads
+ *  as alarm while slower reads as stalled. Reduced motion drops the turn
+ *  entirely, and the word beside it is what says the work is happening. */
+export const SPIN = { duration: 0.9, ease: "linear", repeat: Infinity } as const;
+
 /** The spring `materialize()` runs on, for a surface that has to give its own
  *  elements the same arrival rather than take the whole preset (Smart sort's
  *  chips, which enter staggered and with no transform origin of their own).

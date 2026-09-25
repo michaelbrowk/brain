@@ -225,6 +225,16 @@ describe("the sign-in screen", () => {
 
     expect(submit().textContent).toContain("Signing in");
     expect(submit().getAttribute("aria-busy")).toBe("true");
+    // The wait is carried by a glyph, not by the label going quiet: a label
+    // at .4 or .7 is what a control taken away looks like, and this one is
+    // still the way in. It stays at full ink.
+    expect(submit().querySelector("[data-gate-working]")).not.toBeNull();
+    const label = harness.renders.findLast(
+      (render) => render.props["data-gate-label"] !== undefined,
+    );
+    expect(
+      (label?.motion.animate as { opacity?: number } | undefined)?.opacity,
+    ).toBe(1);
 
     await send();
     expect(fetchMock).toHaveBeenCalledTimes(1);
@@ -233,6 +243,29 @@ describe("the sign-in screen", () => {
       pending.resolve(response(200));
       await pending.promise;
     });
+  });
+
+  it("keeps the refusal's room whether or not it has anything to say", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(401)));
+    await act(async () => root.render(<LoginForm version={null} />));
+
+    // The slot stands empty from the first frame, so the lockup, the field
+    // and the button do not travel at the instant the reader is told they
+    // were wrong — and the button does not move under the hand that just
+    // pressed it.
+    const slot = container.querySelector("[data-gate-slot]") as HTMLElement;
+    expect(slot).not.toBeNull();
+    expect(slot.className).toContain("min-h-9");
+    expect(slot.textContent).toBe("");
+
+    await attempt("wrong-password");
+    expect(slot.textContent).toBe("That password did not match.");
+    // and nothing animates a height any more, because there is no longer a
+    // height for the refusal to take
+    for (const render of harness.renders) {
+      expect(render.motion.initial ?? {}).not.toHaveProperty("height");
+      expect(render.motion.animate ?? {}).not.toHaveProperty("height");
+    }
   });
 
   it("shows and hides the password behind one glyph", async () => {
@@ -272,16 +305,28 @@ describe("the sign-in screen", () => {
     }
   });
 
-  it("opens the error slot by its height, and by opacity alone under reduced motion", async () => {
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(401)));
+  it("stands the refusal still, and turns nothing, under reduced motion", async () => {
+    harness.reduce = true;
+    const pending = deferred<Response>();
+    vi.stubGlobal("fetch", vi.fn().mockReturnValue(pending.promise));
     await act(async () => root.render(<LoginForm version={null} />));
-    await attempt("wrong-password");
-    const slot = harness.renders.find(
-      (render) =>
-        typeof render.motion.animate === "object" &&
-        render.motion.animate !== null &&
-        "height" in (render.motion.animate as Record<string, unknown>),
-    );
-    expect(slot?.motion.animate).toEqual({ opacity: 1, height: "auto" });
+    await act(async () => typeInto(field(), "right-password"));
+    await act(async () => {
+      form().dispatchEvent(
+        new Event("submit", { bubbles: true, cancelable: true }),
+      );
+    });
+
+    for (const render of harness.renders) {
+      expect(render.motion.initial ?? {}).not.toHaveProperty("y");
+      expect(render.motion.animate ?? {}).not.toHaveProperty("y");
+      expect(render.motion.animate ?? {}).not.toHaveProperty("rotate");
+    }
+
+    await act(async () => {
+      pending.resolve(response(401));
+      await pending.promise;
+    });
+    await settle();
   });
 });

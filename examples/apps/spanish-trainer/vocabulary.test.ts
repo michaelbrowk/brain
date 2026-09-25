@@ -862,6 +862,54 @@ describe("reading the same pages twice in one session", () => {
     expect(waits).toEqual([]);
   });
 
+  it("counts only the pages it really read against the window", async () => {
+    // Forty-five hits and then one real read, in one pass. A hit that spent
+    // budget would fill the window long before the read, and the read would
+    // wait a second it has no reason to wait. Nothing forbade that: the hit
+    // returns before the pacing gate, and only this case says it must.
+    const cache = new Map();
+    const nodes = Array.from({ length: 45 }, (_value, index) => page(`p${index}`, "u1"));
+    const source = counted("hola — привет");
+    await readVocabulary(nodes, source.read, { ...timing(), cache, perSecond: 20 });
+    const waits: number[] = [];
+    const answered = await readVocabulary([...nodes, page("fresh", "u1")], source.read, {
+      wait: async (ms: number) => void waits.push(ms),
+      now: () => 0,
+      cache,
+      perSecond: 20,
+    });
+    expect(source.asked).toEqual([...nodes.map((node) => node.id), "fresh"]);
+    expect(waits).toEqual([]);
+    expect(answered.failed).toBe(0);
+  });
+
+  it("reads a page again when the pair of scripts changed", async () => {
+    // THE ROWS ARE THE ANSWER TO ONE PAIR OF SCRIPTS.
+    //
+    // A page read under `Latin` / `not-Latin` gave nothing, because it is
+    // Spanish and English. Switching the translation side to `Latin` is the
+    // owner asking a different question, so serving them the old answer out of
+    // the cache would mean the rows they made the change for never appear. The
+    // app also drops its Map on a script change, but that is an optimisation
+    // and this is the invariant.
+    const cache = new Map();
+    const source = counted("hola — hello");
+    const nodes = [page("p0", "u1")];
+    const first = await readVocabulary(nodes, source.read, { ...timing(), cache });
+    expect(first.rows).toEqual([]);
+    const second = await readVocabulary(nodes, source.read, {
+      ...timing(),
+      cache,
+      scripts: { wordScript: "Latin", translationScript: "Latin" },
+    });
+    expect(source.asked).toEqual(["p0", "p0"]);
+    expect(second.rows).toEqual([{ word: "hola", translation: "hello" }]);
+    // And back again: the pair it was last read under is the one it holds.
+    const third = await readVocabulary(nodes, source.read, { ...timing(), cache });
+    expect(source.asked).toEqual(["p0", "p0", "p0"]);
+    expect(third.rows).toEqual([]);
+  });
+
   it("counts a page it could not read, and keeps nothing for it", async () => {
     const cache = new Map();
     let asked = 0;

@@ -425,13 +425,35 @@ function applyAnswer(row, kind, today) {
  *
  *  AND A PAGE NOBODY HAS WRITTEN IS NOT READ TWICE. The tree says when each
  *  page was last written, so `options.cache` — a Map the caller owns, keyed by
- *  id and holding the `updated` it was read at — answers a page the frame has
- *  already seen without spending a request on it. A node the host did not date
- *  is never kept: there would be nothing to compare it against, and a page
- *  read once and trusted after that is a page frozen for the life of the
- *  frame. Neither is a page that could not be read, so a refusal is retried on
- *  the next reload rather than remembered as an absence. */
+ *  id and holding the `updated` it was read at AND the pair of scripts it was
+ *  read under — answers a page the frame has already seen without spending a
+ *  request on it. A hit is answered before the pacing gate, so it spends no
+ *  budget either.
+ *
+ *  The pair is part of what is held because the rows ARE the answer to it: a
+ *  page read under `Latin` / `not-Latin` gave nothing on a Spanish-and-English
+ *  notebook, and serving that nothing back after the owner switched the
+ *  translation side to `Latin` would mean the rows they made the change for
+ *  never appear. The app drops its Map on a script change as well, but that is
+ *  an optimisation and this is the invariant.
+ *
+ *  A node the host did not date is never kept: there would be nothing to
+ *  compare it against, and a page read once and trusted after that is a page
+ *  frozen for the life of the frame. Neither is a page that could not be read,
+ *  so a refusal is retried on the next reload rather than remembered as an
+ *  absence. */
 const READS_PER_SECOND = 20;
+
+/** The pair of scripts as one string, for telling one pair from another. Both
+ *  names are letters and hyphens, so a slash between them is unambiguous. */
+function scriptSignature(scripts) {
+  const chosen = scripts || DEFAULT_SCRIPTS;
+  return (
+    (chosen.wordScript || DEFAULT_SCRIPTS.wordScript) +
+    "/" +
+    (chosen.translationScript || DEFAULT_SCRIPTS.translationScript)
+  );
+}
 
 async function readVocabulary(nodes, readPage, options) {
   const settings = options || {};
@@ -439,6 +461,7 @@ async function readVocabulary(nodes, readPage, options) {
   const wait = settings.wait || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   const now = settings.now || (() => Date.now());
   const cache = settings.cache || null;
+  const signature = scriptSignature(settings.scripts);
 
   const rows = [];
   let failed = 0;
@@ -448,7 +471,7 @@ async function readVocabulary(nodes, readPage, options) {
   for (const node of nodes) {
     const datable = cache !== null && typeof node.updated === "string" && node.updated.length > 0;
     const kept = datable ? cache.get(node.id) : undefined;
-    if (kept !== undefined && kept.updated === node.updated) {
+    if (kept !== undefined && kept.updated === node.updated && kept.scripts === signature) {
       for (const row of kept.rows) rows.push(row);
       continue;
     }
@@ -483,7 +506,7 @@ async function readVocabulary(nodes, readPage, options) {
       continue;
     }
     const found = extractVocabulary(page.markdown, settings.scripts);
-    if (datable) cache.set(node.id, { updated: node.updated, rows: found });
+    if (datable) cache.set(node.id, { updated: node.updated, scripts: signature, rows: found });
     for (const row of found) rows.push(row);
   }
   return { rows, failed };
@@ -995,10 +1018,11 @@ function descendantsOf(nodes, rootId, skipId) {
   });
 
   /** A different pair of scripts is a different reading of every source page,
-   *  so the deck is built again rather than filtered — and the pages this
-   *  frame has already read are dropped with it. The cache remembers the rows
-   *  a page gave, not its markdown, and those rows are the answer to the old
-   *  question. */
+   *  so the deck is built again rather than filtered, and the pages this frame
+   *  has already read are dropped with it. Dropping them is housekeeping rather
+   *  than the guarantee: a cache entry holds the pair it was read under, so
+   *  `readVocabulary` would miss on every one of them anyway. Clearing the Map
+   *  keeps it from holding rows nothing will ask for again. */
   function rereadScripts() {
     readPages.clear();
     fillScriptPickers();

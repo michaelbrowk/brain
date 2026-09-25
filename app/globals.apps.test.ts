@@ -26,3 +26,36 @@ describe("the AI chip's CSS", () => {
     expect(rule).not.toMatch(/\b(rgb|rgba|hsl|oklch)\(/);
   });
 });
+
+/** The arithmetic behind how tall an app's frame is. `e2e/apps.spec.ts`
+ *  measures the result in a browser, which is the only place it can be
+ *  measured; what is here is the line that produces it, because the failure
+ *  it replaces was a rule that read as if it did something and did nothing:
+ *  `min-height: 100%` against a parent whose height comes from its content
+ *  resolves to auto, so the column had no room to hand out and the frame sat
+ *  at its floor with the window empty under it. */
+describe("an app canvas's CSS", () => {
+  it("measures the shell's canvas against the window, never a parent's content", () => {
+    expect(block(".brain-app-canvas[data-app-canvas]")).toContain(
+      "min-height: 100dvh",
+    );
+    const canvas = block(".brain-app-canvas");
+    expect(canvas).toContain("flex-direction: column");
+    // The phone's reserve stays under the frame: an app's own bottom control
+    // must not sit behind Brain's.
+    expect(canvas).toContain("padding-bottom: var(--tabbar-reserve)");
+    expect(canvas).not.toContain("min-height: 100%");
+    // And the frame takes what the head leaves, down to its own floor.
+    const frame = block(".brain-app-frame");
+    expect(frame).toContain("flex: 1");
+    expect(frame).toContain("min-height: 420px");
+  });
+
+  it("paints the in-progress fill behind a frame whose document has not arrived", () => {
+    expect(block(".brain-app-canvas_loading > .brain-app-frame")).toContain(
+      "background: var(--skeleton-fill)",
+    );
+    // And the paper again once there is a document to cover it.
+    expect(block(".brain-app-frame")).toContain("background: var(--paper)");
+  });
+});

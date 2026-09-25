@@ -1,9 +1,9 @@
 import { NextResponse } from "next/server";
 import { listNotifications } from "@/lib/notifications/store";
 
-/** The centre, whole. It is capped at five hundred rows, so there is no page
- *  cursor and no filter: one request answers the bell, the badge and the list
- *  at one instant, which is what keeps the count and the rows from
+/** The centre, whole. It is capped at two hundred rows of each kind, so there
+ *  is no page cursor and no filter: one request answers the bell, the badge and
+ *  the list at one instant, which is what keeps the count and the rows from
  *  disagreeing.
  *
  *  Human session authentication is enforced by proxy.ts, which exempts no path

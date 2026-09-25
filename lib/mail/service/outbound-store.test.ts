@@ -116,8 +116,17 @@ describe("private durable mail outbox", () => {
     const other = otherMessageFixture();
     expect(other.rawRfc2822Sha256).not.toBe(queued.message.rawRfc2822Sha256);
 
+    // `other` differs in both digest fields at once — a different body of a
+    // different length — so it reddens on either comparison and pins neither.
+    // This is the same message rewritten to the same length, which only the
+    // digest tells apart.
+    const sameLength = otherMessageFixture("Bodz");
+    expect(sameLength.rawRfc2822Bytes).toBe(queued.message.rawRfc2822Bytes);
+    expect(sameLength.rawRfc2822Sha256).not.toBe(queued.message.rawRfc2822Sha256);
+
     for (const changed of [
       other,
+      sameLength,
       // One field at a time, so a comparison that forgot any of them is caught
       // by the field it forgot.
       Object.freeze({ ...queued.message, messageId: "<other@example.com>" }),
@@ -126,7 +135,28 @@ describe("private durable mail outbox", () => {
         ...queued.message,
         envelope: Object.freeze({
           ...queued.message.envelope,
+          from: "someone-else@example.com",
+        }),
+      }),
+      Object.freeze({
+        ...queued.message,
+        envelope: Object.freeze({
+          ...queued.message.envelope,
           to: Object.freeze(["stranger@example.net"]),
+        }),
+      }),
+      Object.freeze({
+        ...queued.message,
+        envelope: Object.freeze({
+          ...queued.message.envelope,
+          cc: Object.freeze(["copied@example.net"]),
+        }),
+      }),
+      Object.freeze({
+        ...queued.message,
+        envelope: Object.freeze({
+          ...queued.message.envelope,
+          bcc: Object.freeze(["hidden@example.net"]),
         }),
       }),
     ]) {
@@ -157,6 +187,61 @@ describe("private durable mail outbox", () => {
       queued,
     );
     await fixture.store.close();
+  });
+
+  // THE BYTE COUNT, WHICH ONLY A ROW WRITTEN BY SOMETHING ELSE CAN MOVE ALONE.
+  //
+  // A caller's message is checked against its own digests by `withMessageBytes`
+  // before it reaches the comparison, so a swap can never present a byte count
+  // that disagrees with its own body: a different length is a different digest.
+  // A row on disk is not checked that way — a hand edit, or a writer that
+  // computed the count from something other than the bytes, leaves the two
+  // disagreeing — and the swap that follows must still be refused rather than
+  // let through on the digest alone.
+  it("refuses a swap against a row whose byte count was written wrong", async () => {
+    const fixture = await createStore();
+    const queued = submissionFixture();
+    // One ordinary enqueue, so the account's database exists to write into.
+    await fixture.store.enqueue(
+      submissionFixture({
+        operationId: operationId(9_001),
+        idempotencyKey: "byte-count-seed",
+      }),
+    );
+    await fixture.store.close();
+
+    const database = openDatabase(fixture.cacheRoot);
+    try {
+      insertSubmissionRowDirectly(database, {
+        ...queued,
+        message: { ...queued.message, rawRfc2822Bytes: queued.message.rawRfc2822Bytes + 1 },
+      });
+    } finally {
+      database.close();
+    }
+
+    const reopened = new SqliteMailSendStore({ cacheRoot: fixture.cacheRoot });
+    await reopened.initialize();
+    await expect(
+      reopened.compareAndSwap(
+        queued.operationId,
+        0,
+        Object.freeze({
+          ...queued,
+          version: 1,
+          status: "sending" as const,
+          attemptCount: 1,
+          lease: Object.freeze({
+            attemptId: "attempt-00000000-0000-4000-8000-000000000009",
+            expiresAt: queued.updatedAt + 60_000,
+            deliveryRisk: false,
+          }),
+          nextAttemptAt: null,
+          updatedAt: queued.updatedAt + 1,
+        }),
+      ),
+    ).rejects.toEqual(new MailSendError("mail_send_service_unavailable"));
+    await reopened.close();
   });
 
   // Once COMMIT has returned the row is durable. The bookkeeping that follows
@@ -3967,10 +4052,14 @@ function expectSameSubmission(
 }
 
 /** A different message, digests and all: another operation's, near enough to
- *  the fixture's that only the message tells them apart. */
-function otherMessageFixture(): StoredMailSendSubmission["message"] {
+ *  the fixture's that only the message tells them apart. `body` names the one
+ *  thing that differs, so a caller can ask for a message of the fixture's own
+ *  length and leave the byte count as the one digest field that agrees. */
+function otherMessageFixture(
+  body = "Another body",
+): StoredMailSendSubmission["message"] {
   const raw = Buffer.from(
-    "From: me@example.com\r\nTo: friend@example.net\r\n\r\nAnother body\r\n",
+    `From: me@example.com\r\nTo: friend@example.net\r\n\r\n${body}\r\n`,
     "utf8",
   );
   return Object.freeze({

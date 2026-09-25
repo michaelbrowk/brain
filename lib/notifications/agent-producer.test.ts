@@ -220,9 +220,9 @@ describe("what an agent did, as a row", () => {
 });
 
 /** BURSTS COALESCE (Michael's ruling). An agent archiving a mailbox left one
- *  row per thread, and the centre's five hundred are shared with the reminders
- *  it was pushing out. Rows of the same shape inside five minutes are one row
- *  with a count. */
+ *  row per thread, and two hundred of them are the whole share its kind has, so
+ *  the burst was pushing its own history out of the bell. Rows of the same shape
+ *  inside five minutes are one row with a count. */
 describe("what a burst of the same thing folds into", () => {
   const held = (patch: Partial<AgentFold> = {}): AgentFold => ({
     id: "agent:2026-09-14T12:00:00.000Z:update_mail_thread:1111111111111111",

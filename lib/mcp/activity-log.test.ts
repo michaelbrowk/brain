@@ -596,9 +596,10 @@ describe("the row a mutation leaves in the centre", () => {
 
 /** A BURST IS ONE ROW (Michael's ruling).
  *
- *  An agent working through a mailbox left one row per thread, and the centre's
- *  five hundred are shared with the reminders that burst was pushing out. The
- *  same client, tool and change inside five minutes is one row with a count.
+ *  An agent working through a mailbox left one row per thread, and two hundred
+ *  of them are the whole share its kind has: the burst was pushing its own
+ *  history out of the bell one thread at a time. The same client, tool and
+ *  change inside five minutes is one row with a count.
  */
 describe("what a burst of the same action leaves in the centre", () => {
   const archive = (at: string, thread: string, client = "Claude") =>

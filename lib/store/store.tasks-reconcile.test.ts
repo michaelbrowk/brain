@@ -680,6 +680,34 @@ describe("a share visitor and the reconcile", () => {
     expect(s.getTask(taskId)?.updatedByName).toBeUndefined();
   });
 
+  // A WRITE'S OWN ANSWER IS A READ TOO.
+  //
+  // The surface moves its rows from what a write answered rather than waiting
+  // for the next list, which is what makes a reschedule land at once. So the
+  // answer has to carry what a list read of the same record carries, or the row
+  // loses "done by ‹name› via link" until something else invalidates the set —
+  // and the Logbook, where a visitor's tick is the whole point of the sentence,
+  // is exactly where the reader is looking.
+  it("carries the visitor's name on the answer a patch gives back", async () => {
+    const { s, rootId, pageId, taskId, rev, shareVersion } = await sharedGarden();
+    await s.writeSharedPage({
+      rootId,
+      targetId: pageId,
+      shareVersion,
+      markdown: TICKED_BODY,
+      expectedRev: rev,
+      visitorName: "Ada",
+    });
+    expect(s.getTask(taskId)?.updatedByName).toBe("Ada");
+
+    // A reschedule of the done, still-linked task. The note keeps the tick, so
+    // the record stays done and the page's last writer is still the visitor.
+    const answered = await s.updateTask(taskId, { when: "2026-09-15" });
+    expect(answered.done).toBe(true);
+    expect(answered.when).toBe("2026-09-15");
+    expect(answered.updatedByName).toBe("Ada");
+  });
+
   it("changes no when, deadline or category on any visitor write", async () => {
     const { s, rootId, pageId, taskId, rev, shareVersion } = await sharedGarden();
 

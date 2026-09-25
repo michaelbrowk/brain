@@ -82,7 +82,7 @@ export function notificationBody(body: string): string {
  *  A task row's href is "/tasks": it opens the column and names nothing in it,
  *  and the reader who pressed a reminder is looking for one row. The task is
  *  in the row's own id, so the query is derived here rather than by rewriting
- *  five hundred stored rows, and a row the decoder cannot read a task out of
+ *  every stored row, and a row the decoder cannot read a task out of
  *  keeps the href it came with. `components/tasks-surface.tsx` reads `?task=`,
  *  selects that row wherever it lives and takes the query back off.
  *

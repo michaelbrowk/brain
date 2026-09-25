@@ -7417,7 +7417,13 @@ export class Store {
    *
    *  Only for a task that is DONE and still LINKED. A detached or unlinked
    *  record owns its own completion, and a page whose last writer was the
-   *  owner has nothing to attribute. */
+   *  owner has nothing to attribute.
+   *
+   *  Every answer a caller can hold a record in goes through here, the writes
+   *  included: the surface moves its rows from what `createTask` and
+   *  `updateTask` answered rather than waiting for the next list, so an answer
+   *  that skipped this dropped the name off the row until something else
+   *  invalidated the set. */
   private attributed(view: TaskView): TaskView {
     if (!view.done || !isLinkedTask(view)) return view;
     const entry = view.page !== undefined ? this.index.get(view.page) : undefined;
@@ -7647,7 +7653,7 @@ export class Store {
         updated: now,
       });
       await this.writeTaskUnlocked(record, input.src);
-      return this.taskIndex.view(record.id) as TaskView;
+      return this.attributed(this.taskIndex.view(record.id) as TaskView);
     });
   }
 
@@ -7673,7 +7679,7 @@ export class Store {
       const ownsItsDone = patch.done === false && current.done === true;
       if (patch.done !== undefined && current.repeat && !ownsItsDone) {
         await this.advanceTaskUnlocked(current, patch);
-        return this.taskIndex.view(id) as TaskView;
+        return this.attributed(this.taskIndex.view(id) as TaskView);
       }
       if (patch.done !== undefined && isLinkedTask(current)) {
         // A linked task's completion lives in the note, so completing one
@@ -7691,10 +7697,12 @@ export class Store {
         // Otherwise the line went between the list being drawn and this
         // write, the reconcile detached the record, and the record owns its
         // completion now, so the ordinary path below applies it.
-        if (isLinkedTask(current)) return this.taskIndex.view(id) as TaskView;
+        if (isLinkedTask(current)) {
+          return this.attributed(this.taskIndex.view(id) as TaskView);
+        }
       }
       await this.writeTaskUnlocked(applyTaskPatch(current, patch), patch.src);
-      return this.taskIndex.view(id) as TaskView;
+      return this.attributed(this.taskIndex.view(id) as TaskView);
     });
   }
 

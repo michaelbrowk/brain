@@ -1,13 +1,12 @@
 import type { TreeNode } from "./store/types";
+import { isShareExpired } from "./sharing";
 
-export function isShareGrantExpired(
-  expiresAt?: string | null,
-  now = Date.now(),
-): boolean {
-  if (!expiresAt) return false;
-  const deadline = Date.parse(expiresAt);
-  return !Number.isFinite(deadline) || deadline <= now;
-}
+/** The expiry rule under the name the grant side reads it by, and the same
+ *  function: this module and `lib/sharing.ts` held the same predicate written
+ *  twice, and the fold path asks both — the store's refusal through one, the
+ *  browser's read-back through the other — so two bodies were a skew between
+ *  them waiting for the first change to either. */
+export const isShareGrantExpired = isShareExpired;
 
 export function isActiveShareGrant(
   node: Pick<TreeNode, "public" | "shareExpiresAt">,

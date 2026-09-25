@@ -1676,7 +1676,13 @@ describe("Store", () => {
    *  mail attachment saved twice left two files, two urls and two Markdown
    *  lines. The inode is what says the second call wrote nothing: an
    *  `atomicWrite` renames a fresh temp file into place, so a rewrite would
-   *  show up as a different one even though the bytes match. */
+   *  show up as a different one even though the bytes match.
+   *
+   *  The mtime is the other half, and it moves. The sweep collects an
+   *  unreferenced file 24 hours after that stamp, so a save that left the stamp
+   *  alone would answer a url whose grace had already run out. Backdated before
+   *  the second save so the refresh is visible rather than a tie inside one
+   *  millisecond. */
   it("answers the existing file for a second save of the same bytes", async () => {
     const { s, root } = await tmpStore();
     const file = () => ({
@@ -1687,20 +1693,51 @@ describe("Store", () => {
     const directory = path.join(root, "_attachments");
 
     const first = await s.saveAttachment(file());
-    const before = await fs.stat(
-      path.join(directory, first.url.slice("/_attachments-v2/".length)),
-    );
+    const name = first.url.slice("/_attachments-v2/".length);
+    const before = await fs.stat(path.join(directory, name));
+    const backdated = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await fs.utimes(path.join(directory, name), backdated, backdated);
     const second = await s.saveAttachment(file());
 
     expect(second).toEqual(first);
-    expect(await fs.readdir(directory)).toEqual([
-      first.url.slice("/_attachments-v2/".length),
-    ]);
-    const after = await fs.stat(
-      path.join(directory, first.url.slice("/_attachments-v2/".length)),
-    );
+    expect(await fs.readdir(directory)).toEqual([name]);
+    const after = await fs.stat(path.join(directory, name));
     expect(after.ino).toBe(before.ino);
-    expect(after.mtimeMs).toBe(before.mtimeMs);
+    expect(after.mtimeMs).toBeGreaterThan(backdated.getTime());
+  });
+
+  /** A URL A SWEEP IS ABOUT TO DELETE IS NOT AN ANSWER.
+   *
+   *  An abandoned file sits in the folder until the sweep's 24 hours are up.
+   *  Saving those bytes again hands the caller its url, and the line naming it
+   *  is written after that: under the old naming the file was always brand new,
+   *  so the window was zero, and a save that wrote nothing and touched nothing
+   *  would have made it the whole grace period. */
+  it("keeps a file a second save handed out, even one the sweep was about to take", async () => {
+    const { s, root } = await tmpStore();
+    const directory = path.join(root, "_attachments");
+    const file = () => ({
+      data: new TextEncoder().encode("abandoned once"),
+      originalName: "draft.txt",
+      mimeType: "text/plain",
+    });
+
+    const first = await s.saveAttachment(file());
+    const name = first.url.slice("/_attachments-v2/".length);
+    const old = new Date(Date.now() - 48 * 60 * 60 * 1000);
+    await fs.utimes(path.join(directory, name), old, old);
+
+    const second = await s.saveAttachment(file());
+    expect(second.url).toBe(first.url);
+
+    // A purge is what runs the sweep, and nothing references the file.
+    const doomed = await s.createPage(null, "Doomed");
+    await s.deletePage(doomed.id);
+    await s.purgePage(doomed.id);
+
+    await expect(
+      fs.access(path.join(directory, name)),
+    ).resolves.toBeUndefined();
   });
 
   it("adds no commit for a second save of the same bytes", async () => {

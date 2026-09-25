@@ -5391,6 +5391,17 @@ export class Store {
     // the write below is the repair.
     const existing = await regularFileDigestNoFollow(file);
     if (existing?.sha256 === contentHash) {
+      // THE GRACE RESTARTS EVEN THOUGH NOTHING IS WRITTEN.
+      //
+      // The sweep collects an unreferenced file 24 hours after its mtime, and
+      // under the old naming every save minted a brand new file with a brand
+      // new 24 hours. Leaving the stamp alone would hand a caller a url whose
+      // grace had already run out, and the next purge, empty-trash or
+      // quota-full sweep would delete the file between that answer and the line
+      // that names it. The bytes do not change, so the inode does not and the
+      // notes history has nothing to say: only the clock moves.
+      const now = new Date();
+      await fs.utimes(file, now, now);
       await assertRealDirectory(dir, identity);
       return { saved, wrote: false };
     }

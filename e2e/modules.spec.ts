@@ -16,6 +16,7 @@ import { expect, test, type Page } from "playwright/test";
 
 import { parseTaskLines } from "../lib/tasks/task-lines";
 import { freshNotes } from "./fresh-notes";
+import { openPalette } from "./open-palette";
 
 freshNotes();
 
@@ -141,8 +142,7 @@ test("@release turning Mail off takes its surfaces and its routes away", async (
 
     // The palette does not offer a destination that is gone.
     await page.goto("/");
-    await page.keyboard.press("Meta+k");
-    await expect(page.getByRole("dialog")).toBeVisible();
+    await openPalette(page);
     await expect(page.getByRole("option", { name: "Open Mail" })).toHaveCount(0);
     await page.keyboard.press("Escape");
   } finally {

@@ -6,6 +6,7 @@ import {
   type Route,
 } from "playwright/test";
 import { freshNotes } from "./fresh-notes";
+import { openPalette } from "./open-palette";
 
 // A notebook of its own, so the page this file titles `E2E note` is the only
 // one the search palette can match.
@@ -4257,9 +4258,8 @@ test("the Inbox is gone from the sidebar, the palette, and its own address", asy
     sidebar.getByRole("button", { name: "Inbox", exact: true }),
   ).toHaveCount(0);
 
-  await page.keyboard.press("Meta+k");
+  await openPalette(page);
   const palette = page.getByRole("dialog");
-  await expect(palette).toBeVisible();
   await palette
     .getByRole("combobox")
     .or(palette.locator("input"))

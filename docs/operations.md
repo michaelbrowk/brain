@@ -188,12 +188,13 @@ the three `/oauth/*` routes at ten a minute, `= /api/auth` at ten a minute with
 five in hand for a typo, and `= /api/mcp` at six hundred a minute, which is far
 above one assistant session and far below a flood. All five set
 `limit_req_status 429`, because nginx answers a limited request with 503 by
-default and a client reads that as an outage rather than a limit. The two exact
-locations repeat every proxy header `location /` sets, the two blanked trusted
-headers included: an exact location replaces that block rather than adding to it.
-None of these limits mean anything while `$binary_remote_addr` holds a proxy's
-address instead of a visitor's, so configure the real-ip block at the top of the
-example before relying on them.
+default and a client reads that as an outage rather than a limit. An exact
+location replaces `location /` rather than adding to it, so `= /api/auth` and
+`= /api/mcp` repeat the headers it sets, the two blanked trusted headers
+included, with one difference: neither route is ever a websocket, so they clear
+`Connection` and do not pass `Upgrade` at all. None of these limits mean anything
+while `$binary_remote_addr` holds a proxy's address instead of a visitor's, so
+configure the real-ip block at the top of the example before relying on them.
 
 The login limit exists at the edge and in the application for one reason. Brain
 spends its comparison budget before bcrypt, and with no trusted client address
@@ -210,6 +211,21 @@ login that already succeeded sets it. A missing or forged cookie goes straight t
 the shared bucket, ten in thirty seconds, and a request is refused only when every
 budget it can reach is spent.
 
+The two limits do different work, and the edge one does less than it looks. The
+zone caps one source at ten a minute; the shared bucket admits twenty comparisons
+a minute, so two sources at that rate hold it open and a botnet is not short of
+sources. That bucket is the last line and is meant to be reachable — what keeps
+the owner out of it is the cookie, not the zone. `POST /api/auth` also refuses a
+request whose `Origin` is not this installation's, and one that does not declare
+`application/json`, both before it spends anything: a cross-site
+`<form enctype="text/plain">` needed no script to drain the bucket and burn a
+comparison per request from a visitor's browser.
+
+"Log out everywhere" does not revoke `brain_device`, and nothing is lost by that:
+the cookie carries no session, cannot be spent for access, and can only ever add
+a rate budget to the browser holding it. A browser that should forget it clears
+its site data.
+
 The share gate keys the same way, per page, and one residual is left standing
 there on purpose. Five comparisons a minute per page is five a minute for all of
 that page's anonymous readers together, so a stranger who floods one
@@ -222,10 +238,14 @@ and let that password through without one, which is an unmetered oracle for the
 password and was removed.
 
 The example also ships a commented `map` and `log_format` that write an app
-frame's bearer as `[redacted]` in the access log. That token rides in the path,
-so `$request` carries it into the log; uncomment both and add
+frame's bearer as `[redacted]` in the access log. That token rides in the path, so
+the request line carries it into the log; uncomment both and add
 `access_log /var/log/nginx/brain.access.log brain_scrubbed;` to the HTTPS server
-to use them.
+to use them. The pattern is anchored to `/api/app/<id>/t/`, the one route that
+carries a token in its path, rather than matching `/t/` anywhere: an unanchored
+rule rewrites paths it has no business touching, and a greedy one keeps the last
+`/t/` in the URI, which let a token with its own `/t/` segment after it through
+into the log.
 
 ## Failure alerting
 

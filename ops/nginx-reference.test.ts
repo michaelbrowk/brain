@@ -73,20 +73,31 @@ describe("reference nginx vhost", () => {
     }
   });
   it("ships a commented log format that keeps an app-frame token out of the log", () => {
-    // An app frame carries its bearer in the path, so $request holds it and the
-    // access log keeps it for as long as the log is kept. Off by default, like
-    // every other optional stanza here: a self-hoster who has not changed
+    // An app frame carries its bearer in the path, so the request line holds it
+    // and the access log keeps it for as long as the log is kept. Off by default,
+    // like every other optional stanza here: a self-hoster who has not changed
     // access_log keeps the log they already know how to read.
     const live = (needle: string) =>
       vhost
         .split("\n")
         .map((line) => line.trim())
         .some((line) => !line.startsWith("#") && line.includes(needle));
-    expect(vhost).toContain("# map $request $brain_scrubbed_request {");
+    expect(vhost).toContain("# map $request_uri $brain_scrubbed_uri {");
     expect(vhost).toContain("# log_format brain_scrubbed");
     expect(vhost).toContain("[redacted]");
     expect(live("log_format")).toBe(false);
     expect(live("access_log")).toBe(false);
+    // Anchored to the one route that carries a token in its path. An unanchored
+    // rule rewrites paths it has no business touching, and a greedy one keeps the
+    // LAST such segment in the URI, so a token with another one after it went
+    // into the log in full.
+    const pattern = vhost
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line.startsWith('#     "~'));
+    expect(pattern).toBe(
+      '#     "~^(?<brain_app_frame>/api/app/[^/]+/t/)[^/]+(?<brain_frame_path>(/.*)?)$" "$brain_app_frame[redacted]$brain_frame_path";',
+    );
   });
   it("ships the real-ip stanza off, and never lets one run unpaired", () => {
     const live = (needle: string) =>

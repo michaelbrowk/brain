@@ -239,11 +239,11 @@ describe("verifyMcpToken", () => {
   });
 
   it("refuses a token of the wrong length through the comparison, not before it", async () => {
-    vi.stubEnv("MCP_TOKEN", "0123456789abcdef0123456789abcdef");
-    for (const token of ["short", "0123456789abcdef0123456789abcdef-and-more", ""]) {
+    vi.stubEnv("MCP_TOKEN", "mcp-token-not-for-production-0001");
+    for (const token of ["short", "mcp-token-not-for-production-0001-and-more", ""]) {
       expect(verifyMcpToken(`Bearer ${token}`)).toBe(false);
     }
-    expect(verifyMcpToken("Bearer 0123456789abcdef0123456789abcdef")).toBe(true);
+    expect(verifyMcpToken("Bearer mcp-token-not-for-production-0001")).toBe(true);
 
     // The property under test is the absence of a shortcut, and no input can
     // observe it from the outside: a wrong-length token is refused either way,
@@ -258,11 +258,11 @@ describe("verifyMcpToken", () => {
   });
 
   it("refuses anything that is not one strictly formed bearer credential", () => {
-    vi.stubEnv("MCP_TOKEN", "0123456789abcdef0123456789abcdef");
+    vi.stubEnv("MCP_TOKEN", "mcp-token-not-for-production-0001");
     expect(verifyMcpToken(null)).toBe(false);
-    expect(verifyMcpToken("0123456789abcdef0123456789abcdef")).toBe(false);
-    expect(verifyMcpToken("Bearer 0123456789abcdef0123456789abcdef extra")).toBe(false);
+    expect(verifyMcpToken("mcp-token-not-for-production-0001")).toBe(false);
+    expect(verifyMcpToken("Bearer mcp-token-not-for-production-0001 extra")).toBe(false);
     vi.stubEnv("MCP_TOKEN", "");
-    expect(verifyMcpToken("Bearer 0123456789abcdef0123456789abcdef")).toBe(false);
+    expect(verifyMcpToken("Bearer mcp-token-not-for-production-0001")).toBe(false);
   });
 });

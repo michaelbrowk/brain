@@ -1,4 +1,7 @@
 import { expect, test, type Page } from "playwright/test";
+import { freshNotes } from "./fresh-notes";
+
+freshNotes();
 
 /** The whole visitor journey, from a link to a saved edit to a revoke, in the
  *  browser. Everything under it is already unit-tested; what this proves is

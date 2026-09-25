@@ -14,14 +14,23 @@ const nextConfig: NextConfig = {
   // tests and .git into the standalone artifact. This list names what it must
   // not take.
   //
-  // MEASURED, AND IT IS NOT HONOURED TODAY. The 0.13.0 build carries `app/`,
-  // `docs/`, `.git` and every other directory named below into
-  // `.next/standalone` regardless, which is this Turbopack rather than this
-  // list: the entries are correct and inert. They stay, because the day the
-  // tracer reads them is not a day anybody will think to write them, and
-  // because the jsdom exclude two entries down IS read and is load-bearing
-  // (see its own comment). Do not read a green build as evidence that a new
-  // entry here works; measure the artifact.
+  // MEASURED ON NEXT 16.3.5, AND IT IS HONOURED — on every per-route trace and
+  // on nothing else. Turbopack writes one `.nft.json` per route and applies
+  // these lists to each, matching the key against the route path, so an entry
+  // added here does keep its files out of `.next/standalone`. What no key form
+  // reaches is an entry that is not a route: `instrumentation.js.nft.json`,
+  // `next-server.js.nft.json` and `middleware.js.nft.json` took a probe file
+  // from none of `/*`, `**`, `*`, `""` or `instrumentation`. So a module the
+  // instrumentation hook imports that makes Turbopack trace the whole project
+  // puts the source tree in the artifact and nothing below can take it out
+  // again. That is why the cure for the 125 MiB artifact was `turbopackIgnore`
+  // at four call sites — `lib/store/git.ts`, `lib/store/store.ts`,
+  // `lib/notes-status.ts`, `lib/mail/providers/gmail/public-proxy.ts` — and not
+  // another line here.
+  //
+  // The jsdom exclude two entries down is load-bearing for a reason of its own,
+  // which its own comment gives. A new entry here is still worth measuring
+  // rather than trusting: `du -sh .next/standalone` and a look inside it.
   outputFileTracingExcludes: {
     "/*": [
       "./.git/**/*",

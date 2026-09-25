@@ -6,6 +6,9 @@
 // does not, and is on screen throughout.
 
 import { expect, test, type Page } from "playwright/test";
+import { freshNotes } from "./fresh-notes";
+
+freshNotes();
 
 async function login(page: Page) {
   await page.goto("/login");

@@ -8,6 +8,15 @@ import { parsePage } from "./frontmatter";
  *  the folder carries its own history/undo/backup. Saves remain independent
  *  from git, but failures are always written to the process error log. */
 
+/** WHY EVERY `.git` JOIN BELOW CARRIES `turbopackIgnore`.
+ *
+ *  `root` is the notes folder and is known only at runtime, so Turbopack cannot
+ *  resolve the join below. Left to itself it resolves the literal tail against
+ *  the PROJECT root instead and traces this repository's own `.git` into the
+ *  standalone artifact — the whole object store of the checkout the release was
+ *  built in. The comment says the path is not one to trace and changes nothing
+ *  about the call. `next-config.test.ts` scans for a site that lost it. */
+
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 const pending = new Set<string>();
 const deferred = new Set<string>();
@@ -174,7 +183,7 @@ export async function assertGitReady(root: string): Promise<void> {
  * must never turn green before the first post-restart snapshot has either
  * succeeded or recorded a sticky failure. */
 export async function scheduleDirtyCommit(root: string): Promise<boolean> {
-  if (!fs.existsSync(path.join(root, ".git"))) return false;
+  if (!fs.existsSync(path.join(/*turbopackIgnore: true*/ root, ".git"))) return false;
   const status = await runGit(root, [
     "status",
     "--porcelain",
@@ -215,7 +224,7 @@ export async function scheduleDirtyCommit(root: string): Promise<boolean> {
 const COMMIT_EXCLUDES = [":(exclude,glob)**/.app-next", ":(exclude,glob)**/.app-next/**", ":(exclude,glob)**/.app-next-old", ":(exclude,glob)**/.app-next-old/**"];
 
 async function commit(root: string): Promise<void> {
-  if (!fs.existsSync(path.join(root, ".git"))) {
+  if (!fs.existsSync(path.join(/*turbopackIgnore: true*/ root, ".git"))) {
     await runGit(root, ["init", "-q"]);
   }
   await runGit(root, ["add", "-A", "--", ".", ...COMMIT_EXCLUDES]);
@@ -319,7 +328,7 @@ export interface HeadCommit {
  *  has no commit yet (a `git init` before the first save). Read-only, never
  *  initialises anything. */
 export async function headCommit(root: string): Promise<HeadCommit | null> {
-  if (!fs.existsSync(path.join(root, ".git"))) return null;
+  if (!fs.existsSync(path.join(/*turbopackIgnore: true*/ root, ".git"))) return null;
   // 128 = "does not have any commits yet" on an empty repository.
   const log = await runGit(root, ["log", "-1", "--format=%H%x00%aI"], [0, 128]);
   if (log.code !== 0) return null;
@@ -337,7 +346,7 @@ export interface Version {
 /** Commits that touched a file, newest first (capped). --follow keeps history
  *  visible after a page folder is moved in the hierarchy. */
 export async function logForPath(root: string, rel: string): Promise<Version[]> {
-  if (!fs.existsSync(path.join(root, ".git"))) return [];
+  if (!fs.existsSync(path.join(/*turbopackIgnore: true*/ root, ".git"))) return [];
   try {
     const { stdout } = await runGit(root, [
       "log",
@@ -379,7 +388,7 @@ export async function showPageAtRevision(
   pageId: string,
 ): Promise<string> {
   if (!/^[0-9a-f]{7,40}$/i.test(sha)) return "";
-  if (!fs.existsSync(path.join(root, ".git"))) return "";
+  if (!fs.existsSync(path.join(/*turbopackIgnore: true*/ root, ".git"))) return "";
   try {
     const current = await showRevisionPath(root, sha, currentRel);
     if (current) {

@@ -44,6 +44,11 @@ const child = spawn(
       // nobody would diagnose twice. NODE_ENV is development here, so the
       // scan's own test guard does not cover this process.
       BRAIN_REMINDERS: "0",
+      // Unlocks POST /api/dev/reset, which every spec file calls once so its
+      // premises are its own rather than the leavings of the file that sorted
+      // before it (e2e/fresh-notes.ts). The route names the other three gates
+      // on it; this seam is the one only the harness sets.
+      BRAIN_E2E_RESET: "1",
       GIT_AUTHOR_NAME: "Brain E2E",
       GIT_AUTHOR_EMAIL: "brain-e2e@example.invalid",
       GIT_COMMITTER_NAME: "Brain E2E",

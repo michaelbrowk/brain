@@ -54,6 +54,9 @@ import path from "node:path";
 import { expect, test, type Page } from "playwright/test";
 
 import { createPortableArchive } from "../lib/portable/archive";
+import { freshNotes } from "./fresh-notes";
+
+freshNotes();
 
 const PORT = process.env.BRAIN_E2E_PORT ?? "3021";
 const ORIGIN = `http://127.0.0.1:${PORT}`;

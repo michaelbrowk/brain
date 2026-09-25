@@ -21,7 +21,10 @@ export async function readNotesStatus(): Promise<NotesStatus> {
   return {
     apiVersion: 1,
     root: store.root,
-    repository: fs.existsSync(path.join(store.root, ".git")),
+    // `turbopackIgnore` for the reason lib/store/git.ts states at its own
+    // `.git` joins: the notes root is a runtime value, and the literal tail
+    // otherwise traces this repository's `.git` into the release.
+    repository: fs.existsSync(path.join(/*turbopackIgnore: true*/ store.root, ".git")),
     head: await headCommit(store.root),
     commitDelaySeconds: Math.round(COMMIT_DELAY_MS / 1000),
   };

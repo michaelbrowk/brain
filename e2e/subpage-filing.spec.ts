@@ -7,6 +7,9 @@
 // through Milkdown's own external-drop path, and this editor's drag work has
 // broken before in ways only a real gesture caught.
 import { expect, test, type Page } from "playwright/test";
+import { freshNotes } from "./fresh-notes";
+
+freshNotes();
 
 async function login(page: Page) {
   await page.goto("/login");

@@ -1,4 +1,8 @@
 import { expect, test, type Page, type Route } from "playwright/test";
+import { freshNotes } from "./fresh-notes";
+import { openPalette } from "./open-palette";
+
+freshNotes();
 
 // Design audit on the Liquid Glass dev stand (/dev/glass, development only —
 // the e2e server is `next dev`). Deterministic DOM checks that a static grep
@@ -286,7 +290,7 @@ test("@release the live palette's results scroll under the fade atom", async ({ 
   });
   await page.setViewportSize({ width: 1280, height: 600 });
   await page.goto("/");
-  await page.keyboard.press("Meta+k");
+  await openPalette(page);
   const palette = page.getByTestId("desktop-command-palette");
   await expect(palette).toBeVisible();
   await page.keyboard.type("Palette fade");

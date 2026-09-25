@@ -1,5 +1,6 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
+import { join } from "node:path";
 
 import { modifyRouteRegex } from "next/dist/lib/redirect-status";
 import { getPathMatch } from "next/dist/shared/lib/router/utils/path-match";
@@ -90,6 +91,105 @@ describe("Next standalone tracing", () => {
     expect(includes).toContain(
       "./node_modules/.pnpm/jsdom@*/node_modules/jsdom/**/*",
     );
+  });
+});
+
+/** WHAT PUT THE WHOLE SOURCE TREE IN THE ARTIFACT, AND WHY A CONFIG ENTRY
+ *  COULD NOT TAKE IT OUT AGAIN.
+ *
+ *  Turbopack answers a filesystem call whose path it cannot resolve statically
+ *  by tracing the whole project into that entry's `.nft.json`, and
+ *  `copyTracedFiles` then puts every one of those files in `.next/standalone`.
+ *  The excludes in `next.config.ts` are keyed by ROUTE, and no key form reaches
+ *  the entries that are not routes — `instrumentation.js.nft.json` above all —
+ *  so a whole-project trace from a module the instrumentation hook imports is
+ *  unremovable after the fact. The cure is at the call: name the dynamic
+ *  argument with `turbopackIgnore` so nothing is traced from it.
+ *
+ *  Two shapes did it, and both are cheap to let back in, which is why they are
+ *  scanned for rather than remembered:
+ *
+ *  - a path whose leading segments are dynamic and whose tail is a literal, as
+ *    `path.join(root, ".git")` in `lib/store/git.ts` and
+ *    `path.join(dir, "app")` in `lib/store/store.ts`. The literal is resolved
+ *    against the project root, so the artifact carried `.git/**` and `app/**`;
+ *  - `path.resolve(value)` used to CHECK a path rather than read one, in the
+ *    mail socket validation. That one the build warned about by name, and it
+ *    was the whole of `public/`, `test/`, `workers/`, and every root file. */
+describe("Turbopack's project trace", () => {
+  // THE COMMENT IS POSITIONAL, SO THE SCAN IS TOO.
+  //
+  // `turbopackIgnore` applies to the argument it sits in front of. Anywhere else
+  // it is a comment and nothing more: put it on the literal tail instead of the
+  // dynamic first argument and that argument is traced exactly as before, and
+  // reduced to a trailing line comment it does nothing at all. A scan for the
+  // word alone passes both of those while the artifact re-inflates, so this one
+  // takes the text between a call's `(` and its first argument and requires the
+  // block comment there. Both spellings in the tree are accepted: the four sites
+  // this branch added write it tight, `lib/notifications/store.ts` spaced.
+  const OPT_OUT = /^\s*\/\*\s*turbopackIgnore:\s*true\s*\*\/\s*\S/;
+  const LITERAL_TAIL = /,\s*"(?:\.git|app)"\s*(?:,|$)/;
+  const CALL = /\bpath\.(?:join|resolve)\(/g;
+
+  /** Every `path.join` / `path.resolve` call in a file, as the text between its
+   *  parentheses. Depth-counted rather than line-based, so a call split over
+   *  several lines is one call and a mutation cannot hide in a newline. */
+  function pathCalls(source: string): string[] {
+    const out: string[] = [];
+    for (const match of source.matchAll(CALL)) {
+      const open = match.index + match[0].length;
+      let depth = 1;
+      let at = open;
+      while (at < source.length && depth > 0) {
+        if (source[at] === "(") depth += 1;
+        else if (source[at] === ")") depth -= 1;
+        at += 1;
+      }
+      out.push(source.slice(open, at - 1));
+    }
+    return out;
+  }
+
+  function sources(directory: string): string[] {
+    const out: string[] = [];
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const full = join(directory, entry.name);
+      if (entry.isDirectory()) out.push(...sources(full));
+      else if (/\.tsx?$/.test(entry.name) && !/\.test\.tsx?$/.test(entry.name)) {
+        out.push(full);
+      }
+    }
+    return out;
+  }
+
+  it("opts every dynamic path with a literal tail out of the trace", () => {
+    const offenders: string[] = [];
+    let checked = 0;
+    for (const file of sources("lib")) {
+      for (const args of pathCalls(readFileSync(file, "utf8"))) {
+        if (!LITERAL_TAIL.test(args)) continue;
+        checked += 1;
+        if (OPT_OUT.test(args)) continue;
+        offenders.push(`${file}: path.join(${args.trim()})`);
+      }
+    }
+    // The count guards the scanner itself: a regex that stopped matching would
+    // otherwise report a clean tree.
+    expect(checked).toBeGreaterThanOrEqual(10);
+    expect(offenders).toEqual([]);
+  });
+
+  // The one the build warned about by name. It is pinned on its own rather than
+  // by a pattern, because the shape that made it dangerous — `path.resolve(x)`
+  // with a single dynamic argument, used to compare rather than to read — is the
+  // ordinary shape of a correct `resolve` everywhere else, and a rule against it
+  // would refuse the next honest one.
+  it("opts the mail socket path check out of the trace", () => {
+    const calls = pathCalls(
+      readFileSync("lib/mail/providers/gmail/public-proxy.ts", "utf8"),
+    );
+    expect(calls).toHaveLength(1);
+    expect(calls[0], calls[0]).toMatch(OPT_OUT);
   });
 });
 

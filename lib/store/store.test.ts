@@ -10254,6 +10254,104 @@ describe("share-aware Store leaves", () => {
     );
   });
 
+  /** BYTES THE FOLDER ALREADY HOLDS ARE A GRANT, NOT A DEBT.
+   *
+   *  The name is the digest, so a visitor can upload bytes that are already on
+   *  the disk: the owner's own private picture, or one the link itself shows.
+   *  Nothing lands, so nothing may be charged. Charging for it was a quota a
+   *  visitor could burn to the last byte at no disk cost and that no sweep could
+   *  give back, because `forgetUploads` only fires when the sweep removes a file
+   *  and the owner's page keeps this one forever.
+   *
+   *  The grant is still recorded. The visitor supplied these bytes, so naming
+   *  them in their own page is theirs to do, which is the rule for any upload
+   *  whose bytes no page shows yet. */
+  it("charges a visitor nothing for bytes the notes folder already holds", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const picture = shot();
+    const priv = await s.createPage(null, "The owner's own page");
+    const owned = await s.saveAttachment(picture);
+    await s.writePage(priv.id, `![](${owned.url})`, undefined, "me");
+    const before = await fs.readdir(path.join(root, "_attachments"));
+
+    const uploaded = await s.saveSharedAttachment({
+      rootId,
+      targetId: childId,
+      shareVersion: version,
+      file: picture,
+    });
+
+    expect(uploaded.url).toBe(owned.url);
+    expect(
+      (await fs.readdir(path.join(root, "_attachments"))).sort(),
+    ).toEqual([...before, "scope.json"].sort());
+    expect(rootUploadBytes(await readAttachmentScope(root), rootId)).toBe(0);
+    // The grant stands, so the visitor may show what they uploaded.
+    await expect(
+      s.writeSharedPage({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        markdown: `![](${uploaded.url})`,
+        visitorName: "Ada",
+      }),
+    ).resolves.toMatchObject({ markdown: `![](${uploaded.url})` });
+  });
+
+  it("does not refuse bytes the folder already holds to a root with no quota left", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const picture = shot();
+    const held = await s.saveAttachment(picture);
+    const priv = await s.createPage(null, "The owner's own page");
+    await s.writePage(priv.id, `![](${held.url})`, undefined, "me");
+    // Full to the last byte, and nothing unreferenced for the sweep to reclaim.
+    await writeAttachmentScope(
+      root,
+      recordUpload(
+        recordBaseline(await readAttachmentScope(root), rootId, []),
+        "filler000001.bin",
+        rootId,
+        SHARE_ROOT_UPLOAD_BYTES,
+        "2026-09-05T10:00:00.000Z",
+      ),
+    );
+
+    await expect(
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: picture,
+      }),
+    ).resolves.toMatchObject({ url: held.url });
+    expect(rootUploadBytes(await readAttachmentScope(root), rootId)).toBe(
+      SHARE_ROOT_UPLOAD_BYTES,
+    );
+  });
+
+  it("keeps the charge on a visitor's own upload when they send it twice", async () => {
+    const { s, root, rootId, childId, version } = await editableRoot();
+    const picture = shot();
+    const upload = () =>
+      s.saveSharedAttachment({
+        rootId,
+        targetId: childId,
+        shareVersion: version,
+        file: picture,
+      });
+
+    const first = await upload();
+    expect(rootUploadBytes(await readAttachmentScope(root), rootId)).toBe(
+      PNG.byteLength,
+    );
+    // The bytes are on the disk and charged where they landed. A repeat wrote
+    // nothing, and must not discharge what the first one paid for either.
+    await expect(upload()).resolves.toMatchObject({ url: first.url });
+    expect(rootUploadBytes(await readAttachmentScope(root), rootId)).toBe(
+      PNG.byteLength,
+    );
+  });
+
   it("frees a root's quota when the sweep collects an unreferenced visitor upload", async () => {
     const { s, root, rootId, childId, version } = await editableRoot();
     const upload = () =>

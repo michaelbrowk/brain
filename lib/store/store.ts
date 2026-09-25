@@ -4494,11 +4494,12 @@ export class Store {
     input: AttachmentInput,
     src?: string,
   ): Promise<SavedAttachment> {
-    return this.mutate(() =>
-      this.saveAttachmentUnlocked(input, src).catch(
+    return this.mutate(async () => {
+      const { saved } = await this.saveAttachmentUnlocked(input, src).catch(
         rethrowAttachmentStoreFailure,
-      ),
-    );
+      );
+      return saved;
+    });
   }
 
   /**
@@ -4941,12 +4942,19 @@ export class Store {
         input.rootId,
         input.targetId,
       );
+      // Bytes the folder already holds are not an upload. The save below will
+      // write nothing for them, so the quota has nothing to weigh and nothing
+      // to refuse: asking first is what keeps a full root from turning down a
+      // picture it is already showing.
+      const held = await this.attachmentIsHeldUnlocked(input.file).catch(
+        rethrowSharedAttachmentFailure,
+      );
       // Checked before a byte is written: the quota is about what lands on
       // the disk and in git history, not about what was attempted.
       const overQuota = (index: AttachmentScope) =>
         rootUploadBytes(index, input.rootId) + input.file.data.byteLength >
         SHARE_ROOT_UPLOAD_BYTES;
-      if (overQuota(scope)) {
+      if (!held && overQuota(scope)) {
         // The sweep used to run only on an owner purge and on empty-trash, so
         // a visitor who uploaded and then closed the tab left bytes charged
         // against the root with nothing referencing them, and no visitor
@@ -4962,7 +4970,7 @@ export class Store {
         }
         if (overQuota(scope)) throw new ShareUploadQuotaError();
       }
-      const saved = await this.saveAttachmentUnlocked(
+      const { saved, wrote } = await this.saveAttachmentUnlocked(
         input.file,
         input.src,
       ).catch(rethrowSharedAttachmentFailure);
@@ -4972,7 +4980,10 @@ export class Store {
             scope,
             name,
             input.rootId,
-            saved.size,
+            // What the save reports, not what the probe above saw: the sweep
+            // the gate may have run can have removed the file between them, and
+            // a root is charged for bytes exactly when they land.
+            wrote ? saved.size : 0,
             new Date().toISOString(),
           )
         : scope;
@@ -5361,22 +5372,11 @@ export class Store {
   private async saveAttachmentUnlocked(
     input: AttachmentInput,
     src?: string,
-  ): Promise<SavedAttachment> {
-    const mimeType = validateAttachment(input);
-    const displayName = normalizeAttachmentDisplayName(input.originalName);
-    const extension = canonicalAttachmentExtension(displayName, mimeType);
-    const contentHash = createHash("sha256").update(input.data).digest("hex");
-    const savedName = `${contentHash}${extension}`;
-    const dir = assertInRoot(
-      this.root,
-      path.join(/* turbopackIgnore: true */ this.root, "_attachments"),
-    );
-    const file = assertInRoot(
-      this.root,
-      path.join(/* turbopackIgnore: true */ dir, savedName),
-    );
+  ): Promise<{ saved: SavedAttachment; wrote: boolean }> {
+    const { mimeType, displayName, contentHash, savedName, dir, file } =
+      this.prepareAttachment(input);
     const identity = await ensureRealDirectory(dir);
-    const answer: SavedAttachment = {
+    const saved: SavedAttachment = {
       url: `/_attachments-v2/${savedName}`,
       name: displayName,
       size: input.data.byteLength,
@@ -5392,7 +5392,7 @@ export class Store {
     const existing = await regularFileDigestNoFollow(file);
     if (existing?.sha256 === contentHash) {
       await assertRealDirectory(dir, identity);
-      return answer;
+      return { saved, wrote: false };
     }
     await atomicWrite(file, input.data);
     await assertRealDirectory(dir, identity);
@@ -5400,7 +5400,63 @@ export class Store {
     // Existing event vocabulary is intentionally reused: clients refresh
     // their tree, while no open page id can match this generated filename.
     emitStore({ type: "write", id: savedName, src });
-    return answer;
+    return { saved, wrote: true };
+  }
+
+  /** The name these bytes take and the path they take it at: the validation,
+   *  the extension rule, the digest and the path jail, with nothing written and
+   *  nothing read. */
+  private prepareAttachment(input: AttachmentInput): {
+    mimeType: string;
+    displayName: string;
+    contentHash: string;
+    savedName: string;
+    dir: string;
+    file: string;
+  } {
+    const mimeType = validateAttachment(input);
+    const displayName = normalizeAttachmentDisplayName(input.originalName);
+    const extension = canonicalAttachmentExtension(displayName, mimeType);
+    const contentHash = createHash("sha256").update(input.data).digest("hex");
+    const savedName = `${contentHash}${extension}`;
+    const dir = assertInRoot(
+      this.root,
+      path.join(/* turbopackIgnore: true */ this.root, "_attachments"),
+    );
+    const file = assertInRoot(
+      this.root,
+      path.join(/* turbopackIgnore: true */ dir, savedName),
+    );
+    return { mimeType, displayName, contentHash, savedName, dir, file };
+  }
+
+  /** Whether the folder already holds exactly these bytes under their own name,
+   *  so a save of them would write nothing.
+   *
+   *  `saveSharedAttachment` asks before its quota gate, because bytes that are
+   *  already there cost the folder nothing: they must neither be refused for
+   *  want of room nor charged against it. The directory is proven real before
+   *  anything under it is opened, the same order the write takes, so a
+   *  symlinked `_attachments` cannot turn this into a read outside the notes
+   *  folder. A folder with nothing in it yet holds nothing.
+   *
+   *  This is a read, and the sweep the quota gate may run can remove the file
+   *  it saw, which is why the charge is decided by what the save reports rather
+   *  than by this. Caller owns mutate(). */
+  private async attachmentIsHeldUnlocked(
+    input: AttachmentInput,
+  ): Promise<boolean> {
+    const { contentHash, dir, file } = this.prepareAttachment(input);
+    const identity = await assertRealDirectory(dir).catch(
+      (error: NodeJS.ErrnoException) => {
+        if (error.code === "ENOENT") return null;
+        throw error;
+      },
+    );
+    if (identity === null) return false;
+    const existing = await regularFileDigestNoFollow(file);
+    await assertRealDirectory(dir, identity);
+    return existing?.sha256 === contentHash;
   }
 
   async renamePage(id: string, title: string): Promise<PageMeta> {

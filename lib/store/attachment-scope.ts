@@ -200,10 +200,16 @@ export async function writeAttachmentScope(
 
 /** A visitor's upload, against the root they came through.
  *
- *  A second upload of bytes the folder already holds wrote nothing, so it
- *  neither moves the charge nor takes the first link's grant away: it joins the
- *  entry. Moving the charge would bill a link that added nothing to the folder
- *  and un-grant the link whose visitor is about to name the file. */
+ *  AN ENTRY IS CHARGED ONCE, WHEN THE BYTES LAND. A name is the digest of the
+ *  bytes under it, so a later upload of the same file writes nothing: it neither
+ *  moves the charge nor takes the first link's grant away, and it must not
+ *  discharge what the first one paid for either. A second link joins the entry
+ *  through `alsoRoots`, which is the grant without the bill: the folder grew by
+ *  nothing, and billing a link that added nothing while un-granting the one
+ *  whose visitor is about to name the file would be wrong twice over.
+ *
+ *  Returns the same object when there was nothing to record, so a caller can
+ *  tell by identity whether there is anything to persist. */
 export function recordUpload(
   scope: AttachmentScope,
   name: string,
@@ -215,23 +221,22 @@ export function recordUpload(
     ? scope.roots
     : [...scope.roots, root];
   const held = scope.uploads[name];
-  const entry =
-    held && held.root !== root
-      ? {
-          ...held,
-          ...(held.alsoRoots?.includes(root)
-            ? {}
-            : { alsoRoots: [...(held.alsoRoots ?? []), root] }),
-        }
-      : {
-          root,
-          bytes,
-          at,
-          ...(held?.alsoRoots ? { alsoRoots: held.alsoRoots } : {}),
-        };
+  if (held) {
+    if (held.root === root || held.alsoRoots?.includes(root)) {
+      return roots === scope.roots ? scope : { ...scope, roots };
+    }
+    return {
+      roots,
+      uploads: {
+        ...scope.uploads,
+        [name]: { ...held, alsoRoots: [...(held.alsoRoots ?? []), root] },
+      },
+      baseline: scope.baseline,
+    };
+  }
   return {
     roots,
-    uploads: { ...scope.uploads, [name]: entry },
+    uploads: { ...scope.uploads, [name]: { root, bytes, at } },
     baseline: scope.baseline,
   };
 }

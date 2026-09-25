@@ -2,10 +2,19 @@
 
 import { useId, useState } from "react";
 import { normalizeVisitorName, VISITOR_NAME_MAX } from "@/lib/sharing";
+import {
+  GATE_NO_CONNECTION,
+  GATE_RATE_LIMITED,
+  GATE_WRONG_PASSWORD,
+} from "./password-gate";
 import { Button } from "./ui/button";
 import { Field } from "./ui/field";
 
-const WRONG_PASSWORD = "Wrong password";
+// This is the third password door on the same link, and the other two are
+// `PasswordGate`. A visitor who opens a locked editable share meets the gate
+// and then this dialog a few clicks apart, so the sentences come from there
+// rather than being said again in different words. The two states only this
+// dialog has keep their own: neither is a password being refused.
 const NEEDS_PASSWORD = "Enter the password to edit.";
 // The owner closed editing, or the link expired, while this page was open.
 // Trying again cannot fix that, so the message does not ask for it.
@@ -81,8 +90,10 @@ export function ShareNameDialog({
       }
       if (res.status === 401) {
         if (askPassword && password) {
-          setError(WRONG_PASSWORD);
-          setPassword("");
+          // The value stays, the way the gate's does: a refused password is
+          // usually a typo in one the reader has, and wiping it makes them
+          // type the whole thing again to change one character.
+          setError(GATE_WRONG_PASSWORD);
         } else {
           setError(NEEDS_PASSWORD);
           setAskPassword(true);
@@ -90,14 +101,14 @@ export function ShareNameDialog({
       } else {
         setError(
           res.status === 429
-            ? "Too many attempts. Wait a bit."
+            ? GATE_RATE_LIMITED
             : res.status === 404
               ? CLOSED
               : "Couldn't start editing. Try again.",
         );
       }
     } catch {
-      setError("Couldn't connect. Try again.");
+      setError(GATE_NO_CONNECTION);
     } finally {
       if (!minted) setBusy(false);
     }
@@ -154,7 +165,7 @@ export function ShareNameDialog({
               name="password"
               type="password"
               autoComplete="current-password"
-              aria-invalid={error === WRONG_PASSWORD || undefined}
+              aria-invalid={error === GATE_WRONG_PASSWORD || undefined}
               aria-describedby={describedBy}
               value={password}
               onChange={(event) => setPassword(event.target.value)}

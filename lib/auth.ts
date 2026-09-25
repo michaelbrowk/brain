@@ -166,7 +166,7 @@ function authSecret(): string {
 /** New human and share tokens use separate signing domains. The raw key is
  *  retained only to verify already-issued legacy cookies during migration. */
 function secret(
-  scope?: "session" | "share" | "share-edit" | "app-frame",
+  scope?: "session" | "share" | "share-edit" | "app-frame" | "device",
 ): Uint8Array {
   const raw = authSecret();
   return new TextEncoder().encode(scope ? `${raw}\0brain:${scope}:v1` : raw);
@@ -179,6 +179,14 @@ function secret(
  *  never leaves the process. */
 export function appFrameSigningKey(): Uint8Array {
   return secret("app-frame");
+}
+
+/** The fifth, for the device cookie the login limiter keys on
+ *  (`lib/device-cookie.ts`). It signs no claim and grants nothing, so it is the
+ *  weakest of the five — and it is derived here anyway, because a domain
+ *  derived somewhere else is a domain nobody can see is separate. */
+export function deviceSigningKey(): Uint8Array {
+  return secret("device");
 }
 
 export async function createSession(): Promise<string> {

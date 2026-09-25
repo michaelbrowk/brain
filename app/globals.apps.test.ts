@@ -58,9 +58,17 @@ describe("an app canvas's CSS", () => {
     expect(frame).toContain("min-height: 420px");
   });
 
-  it("paints the in-progress fill behind a frame whose document has not arrived", () => {
-    expect(block(".brain-app-canvas_loading > .brain-app-frame")).toContain(
+  it("paints the in-progress fill on the canvas, not only behind the frame", () => {
+    // The canvas, because the wait starts before there is a frame: the
+    // address is asked for first, and a fill on the frame alone leaves that
+    // phase as the bare paper the audit photographed.
+    expect(block(".brain-app-canvas_loading")).toContain(
       "background: var(--skeleton-fill)",
+    );
+    // The frame stands out of the way while it waits, so the two are one
+    // plate rather than a tint over a tint.
+    expect(block(".brain-app-canvas_loading > .brain-app-frame")).toContain(
+      "background: transparent",
     );
     // And the paper again once there is a document to cover it.
     expect(block(".brain-app-frame")).toContain("background: var(--paper)");

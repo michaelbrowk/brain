@@ -242,6 +242,19 @@ describe("the app canvas", () => {
    *  this app puts wherever work is in progress. The fill is static, so
    *  reduced motion is shown the same thing and there is nothing to flatten.
    */
+  it("says it is working before there is an address to mount", async () => {
+    // THE PHASE THE AUDIT PHOTOGRAPHED. The canvas asks the server where to
+    // mount the frame, and until that answer arrives there is no frame at
+    // all: a fill painted on the frame alone leaves this phase as bare paper
+    // under the head, which is the picture. The class is on the canvas, and
+    // so is the fill.
+    const mounted = render();
+    const canvas = mounted.querySelector("[data-app-canvas]") as HTMLElement;
+    expect(mounted.querySelector("iframe")).toBeNull();
+    expect(canvas.className).toContain("brain-app-canvas_loading");
+    await settle();
+  });
+
   it("holds the frame's place until its document has painted", async () => {
     const mounted = await renderReady();
     const canvas = mounted.querySelector("[data-app-canvas]") as HTMLElement;

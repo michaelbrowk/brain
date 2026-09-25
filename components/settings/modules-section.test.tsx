@@ -70,6 +70,10 @@ describe("the Modules section", () => {
     expect(host.textContent).toContain(
       "Checkboxes in notes keep working; tasks and reminders sleep.",
     );
+    // The section's own sentence, which ends the way the two above it do.
+    expect(host.textContent).toContain(
+      "What this Brain runs. Turning one off hides it and stops its background work; nothing is deleted.",
+    );
     // The house rule for reader-visible strings.
     expect(host.textContent).not.toContain("—");
   });

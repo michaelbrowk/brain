@@ -99,11 +99,12 @@ const TRUTH_TABLE: Record<string, string> = {
   read_mail_message: "read keeps idempotent outside",
   get_mail_send_status: "read keeps idempotent outside",
   update_mail_thread: "write destroys idempotent outside",
-  // `repeats`, not `idempotent`: the same attachment saved twice is a second
-  // file, because the general save names a file `nanoid(12)` rather than by
-  // its content. Not adding a second copy of a line the page already carries
-  // is a different property, and it is the only one this tool has.
-  save_mail_attachment: "write keeps repeats outside",
+  // `idempotent` in both halves. The general save names a file by the sha256
+  // of its bytes, so the same attachment saved twice is the same file under
+  // the same url, and the guard before the append then finds the exact line
+  // the page already carries and leaves it alone. `outside` because the bytes
+  // still come off the mail service, whatever happens to them afterwards.
+  save_mail_attachment: "write keeps idempotent outside",
   send_mail: "write destroys idempotent outside",
   reply_mail: "write destroys idempotent outside",
   // Notion import

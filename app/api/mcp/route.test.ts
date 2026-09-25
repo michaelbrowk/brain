@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -3449,34 +3450,41 @@ describe("save_mail_attachment", () => {
     );
   });
 
-  /** A LINE THE PAGE ALREADY CARRIES IS NOT ADDED TWICE.
+  /** SAVING ONE ATTACHMENT TWICE IS ONE FILE, ONE URL AND ONE LINE.
    *
    *  The page is read again immediately before the append, and a body that
    *  already holds the exact line is left alone. `lineAdded` says which of the
    *  two happened, because an agent that cannot tell them apart goes looking
    *  for a line it thinks it wrote.
    *
-   *  WHAT THIS DOES NOT PROVE, and does not claim to. The store here answers
-   *  one url for both saves. The real `saveAttachment` does not:
-   *  `saveAttachmentUnlocked` names the file `nanoid(12)` plus the extension,
-   *  so saving one mail attachment twice writes two files with two urls and
-   *  therefore two different lines, which this guard never matches. Only the
-   *  Notion staging path is content-addressed (`stageNotionAttachment`, sha256
-   *  of the bytes). That is why the tool is declared `repeats` and not
-   *  `idempotent` in `tool-annotations.test.ts`: this is a guard against a
-   *  duplicated line, not a dedupe. The guard becomes effective the day the
-   *  general save is named by content, which is its own follow-up.
+   *  The store stand-in names the file the way the real one does, by the sha256
+   *  of the bytes handed to it, because that is the half of this the line guard
+   *  stands on: a fresh name per call would make the two lines different and
+   *  the guard would never match. Both halves together are why the tool
+   *  declares `idempotent` in `tool-annotations.test.ts`.
    *
    *  A store that holds its own body rather than a `readPage` answering a
    *  constant: the point is what the first call left behind for the second to
    *  find, which a fixed answer cannot show. */
-  it("does not add a second copy of a line the page already carries, and says so", async () => {
+  it("saves one attachment twice as one url and one line, and says so", async () => {
     const saved = {
-      url: "/_attachments-v2/aaaa.pdf",
+      url: `/_attachments-v2/${createHash("sha256")
+        .update(PDF_BYTES)
+        .digest("hex")}.pdf`,
       name: "invoice.pdf",
-      size: 9,
+      size: PDF_BYTES.byteLength,
       type: "application/pdf",
     };
+    const saveAttachment = vi.fn(
+      async (input: { data: Uint8Array; originalName: string }) => ({
+        url: `/_attachments-v2/${createHash("sha256")
+          .update(input.data)
+          .digest("hex")}.pdf`,
+        name: input.originalName,
+        size: input.data.byteLength,
+        type: "application/pdf",
+      }),
+    );
     let body = "a page";
     const appendPage = vi.fn(async (_id: string, markdown: string) => {
       body = `${body}\n\n${markdown}`;
@@ -3488,7 +3496,7 @@ describe("save_mail_attachment", () => {
         markdown: body,
         rev: "rev-1",
       })),
-      saveAttachment: vi.fn().mockResolvedValue(saved),
+      saveAttachment,
       appendPage,
     });
     mocks.createBrainMailClient.mockReturnValue(
@@ -3518,6 +3526,7 @@ describe("save_mail_attachment", () => {
 
     expect(first.payload).toEqual({ ...saved, lineAdded: true });
     expect(second.payload).toEqual({ ...saved, lineAdded: false });
+    expect(saveAttachment).toHaveBeenCalledTimes(2);
     expect(appendPage).toHaveBeenCalledTimes(1);
     // One link on the page, not two.
     expect(body.match(/\[invoice\.pdf\]/g)).toHaveLength(1);

@@ -37,6 +37,7 @@ import {
 } from "../notion/protocol";
 import { notionAttachmentUrl } from "../attachments";
 import {
+  assertGitSnapshotHealthy,
   beginGitSnapshotBarrier,
   scheduleCommit,
   scheduleDirtyCommit,
@@ -149,6 +150,17 @@ async function commitAll(root: string, message: string): Promise<string> {
   await git(root, "add", "-A");
   await git(root, "commit", "-q", "-m", message);
   return (await git(root, "rev-parse", "HEAD")).trim();
+}
+
+/** Run the snapshot debounce out, under fake timers, until nothing is left in
+ *  flight. One pass is not enough: a commit that was still running when the
+ *  debounce fired re-arms the timer behind itself, so the pass that waits for
+ *  it has to be followed by one that lets the re-armed timer fire. */
+async function settleGitSnapshot(root: string): Promise<void> {
+  for (let pass = 0; pass < 3; pass += 1) {
+    await vi.advanceTimersByTimeAsync(5_000);
+    await assertGitSnapshotHealthy(root);
+  }
 }
 
 async function waitForHeadChange(
@@ -1649,11 +1661,87 @@ describe("Store", () => {
     });
 
     expect(saved.name).toBe("notes.txt");
-    expect(saved.url).toMatch(/^\/_attachments-v2\/[A-Za-z0-9_-]{12}\.txt$/);
+    expect(saved.url).toBe(
+      `/_attachments-v2/${createHash("sha256").update("hello").digest("hex")}.txt`,
+    );
     const fileName = saved.url.slice("/_attachments-v2/".length);
     await expect(
       fs.readFile(path.join(root, "_attachments", fileName), "utf8"),
     ).resolves.toBe("hello");
+  });
+
+  /** THE NAME IS THE BYTES, SO A SECOND SAVE IS THE FIRST FILE.
+   *
+   *  The general save used to mint a fresh `nanoid(12)`, which meant the same
+   *  mail attachment saved twice left two files, two urls and two Markdown
+   *  lines. The inode is what says the second call wrote nothing: an
+   *  `atomicWrite` renames a fresh temp file into place, so a rewrite would
+   *  show up as a different one even though the bytes match. */
+  it("answers the existing file for a second save of the same bytes", async () => {
+    const { s, root } = await tmpStore();
+    const file = () => ({
+      data: new TextEncoder().encode("one invoice"),
+      originalName: "invoice.txt",
+      mimeType: "text/plain",
+    });
+    const directory = path.join(root, "_attachments");
+
+    const first = await s.saveAttachment(file());
+    const before = await fs.stat(
+      path.join(directory, first.url.slice("/_attachments-v2/".length)),
+    );
+    const second = await s.saveAttachment(file());
+
+    expect(second).toEqual(first);
+    expect(await fs.readdir(directory)).toEqual([
+      first.url.slice("/_attachments-v2/".length),
+    ]);
+    const after = await fs.stat(
+      path.join(directory, first.url.slice("/_attachments-v2/".length)),
+    );
+    expect(after.ino).toBe(before.ino);
+    expect(after.mtimeMs).toBe(before.mtimeMs);
+  });
+
+  it("adds no commit for a second save of the same bytes", async () => {
+    const { s, root } = await tmpStore();
+    await git(root, "init", "-q");
+    await git(root, "commit", "--allow-empty", "-q", "-m", "initial notes");
+    const file = () => ({
+      data: new TextEncoder().encode("one receipt"),
+      originalName: "receipt.txt",
+      mimeType: "text/plain",
+    });
+
+    vi.useFakeTimers();
+    try {
+      await s.saveAttachment(file());
+      await settleGitSnapshot(root);
+      const afterFirst = (await git(root, "rev-parse", "HEAD")).trim();
+      await s.saveAttachment(file());
+      await settleGitSnapshot(root);
+
+      expect((await git(root, "rev-parse", "HEAD")).trim()).toBe(afterFirst);
+      expect((await git(root, "status", "--porcelain")).trim()).toBe("");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("writes a second file when one original name carries different bytes", async () => {
+    const { s, root } = await tmpStore();
+    const save = (body: string) =>
+      s.saveAttachment({
+        data: new TextEncoder().encode(body),
+        originalName: "invoice.txt",
+        mimeType: "text/plain",
+      });
+
+    const first = await save("March");
+    const second = await save("April");
+
+    expect(second.url).not.toBe(first.url);
+    expect(await fs.readdir(path.join(root, "_attachments"))).toHaveLength(2);
   });
 
   it.each(["generic", "notion"] as const)(

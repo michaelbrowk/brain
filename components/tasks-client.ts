@@ -60,6 +60,16 @@ const listeners = new Set<() => void>();
  *  request. */
 let loadedKey: string | null = null;
 let lastToken = 0;
+/** HOW MANY LOCAL WRITES THE SET HAS TAKEN.
+ *
+ *  A `load()` answers for the set as it stood when the request left, so a write
+ *  that lands while it is out makes its answer older than what is in hand — and
+ *  the answer replaces the records wholesale. That is how a captured task
+ *  disappeared from Today a beat after it appeared: the fetch the surface's own
+ *  mount started came back with a snapshot from before the POST. The load reads
+ *  this before it asks and again when it answers, and writes only if nothing
+ *  moved under it. */
+let writes = 0;
 let inFlight: AbortController | null = null;
 let dayTimer: ReturnType<typeof setTimeout> | null = null;
 let watchers = 0;
@@ -131,6 +141,7 @@ async function load(token: number): Promise<void> {
   inFlight?.abort();
   const controller = new AbortController();
   inFlight = controller;
+  const writesBefore = writes;
   set({ loading: true, error: null });
   try {
     const response = await apiFetch(
@@ -143,6 +154,15 @@ async function load(token: number): Promise<void> {
     if (!response.ok) throw new Error(await reasonOf(response));
     const body = (await response.json()) as { tasks?: readonly TaskView[] };
     if (controller.signal.aborted) return;
+    if (writes !== writesBefore) {
+      // A write landed while this was out, so this answer is the older of the
+      // two and the records in hand stay. The key goes, because the set is no
+      // longer the one this load was asked for and the next ask must not be
+      // skipped as a repeat of it.
+      loadedKey = null;
+      set({ loading: false, error: null });
+      return;
+    }
     set({ tasks: body.tasks ?? EMPTY, loading: false, error: null });
   } catch (error) {
     if (controller.signal.aborted) return;
@@ -264,6 +284,7 @@ export function onDayChange(listener: () => void): () => void {
 export function mutateTasks(
   update: (tasks: readonly TaskView[]) => readonly TaskView[],
 ): void {
+  writes += 1;
   set({ tasks: update(state.tasks) });
 }
 
@@ -291,6 +312,7 @@ export function resetTasksStore(): void {
   watchers = 0;
   loadedKey = null;
   lastToken = 0;
+  writes = 0;
   state = { day: null, tasks: EMPTY, loading: false, error: null };
   listeners.clear();
 }

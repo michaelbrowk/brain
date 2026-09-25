@@ -4,8 +4,11 @@ import { act, createElement } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { isTimeZone } from "@/lib/owner-settings";
+import type { TaskView } from "@/lib/tasks/model";
 import {
   deviceZone,
+  liveTask,
+  localDay,
   mutateTasks,
   onDayChange,
   resetTasksStore,
@@ -61,6 +64,120 @@ describe("the list request", () => {
     expect(url).toContain(`zone=${encodeURIComponent(deviceZone())}`);
     expect(url).toContain("today=");
     expect(url).toContain("offset=");
+  });
+});
+
+// A WRITE THAT LANDS WHILE A LIST REQUEST IS OUT.
+//
+// `load()` replaces the records wholesale, so a fetch that left before the
+// write answers for a set that predates it. The capture row on the hub inserts
+// the created task and asks for nothing else, so the row appeared under Today
+// and vanished a beat later when the mount's own fetch came back. The answer is
+// only written if nothing moved under it.
+describe("a load in flight against an optimistic insert", () => {
+  let answer: (body: { tasks: TaskView[] }) => void;
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  function task(id: string, title: string): TaskView {
+    return {
+      id,
+      title,
+      when: localDay().today,
+      created: "2026-09-20T08:00:00.000Z",
+      updated: "2026-09-20T08:00:00.000Z",
+      done: false,
+    };
+  }
+
+  let host: HTMLDivElement;
+  let root: Root;
+
+  function Reader() {
+    useTasks(0);
+    return null;
+  }
+
+  beforeEach(() => {
+    (
+      globalThis as typeof globalThis & { IS_REACT_ACT_ENVIRONMENT: boolean }
+    ).IS_REACT_ACT_ENVIRONMENT = true;
+    resetTasksStore();
+    fetchMock = vi.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          answer = (body) => {
+            resolve(new Response(JSON.stringify(body), { status: 200 }));
+          };
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    host = document.createElement("div");
+    document.body.append(host);
+    root = createRoot(host);
+  });
+
+  afterEach(async () => {
+    await act(async () => root.unmount());
+    host.remove();
+    resetTasksStore();
+    vi.unstubAllGlobals();
+  });
+
+  /** Past the response, its `json()` and the write that follows them, so the
+   *  assertions read a load that has finished rather than one that has not
+   *  started. A `waitFor` on an absence passes on its first look and proves
+   *  nothing here. */
+  const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+  it("keeps the record the writer landed, and drops the older answer", async () => {
+    const stop = onDayChange(() => {});
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+
+    // The POST answered while the list request was still out.
+    mutateTasks((tasks) => [task("fresh", "Buy bread"), ...tasks]);
+    expect(liveTask("fresh")?.title).toBe("Buy bread");
+
+    // The server's snapshot, taken before that write landed.
+    answer({ tasks: [task("older", "Water the plants")] });
+    await settled();
+    expect(liveTask("fresh")?.title).toBe("Buy bread");
+    expect(liveTask("older")).toBeUndefined();
+    stop();
+  });
+
+  it("takes an answer that nothing moved under", async () => {
+    const stop = onDayChange(() => {});
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    answer({ tasks: [task("older", "Water the plants")] });
+    await settled();
+    expect(liveTask("older")?.title).toBe("Water the plants");
+    stop();
+  });
+
+  // THE KEY GOES WITH THE ANSWER THAT WAS DROPPED.
+  //
+  // A load records the day, the offset and the token it asked under, and a
+  // later load on the same three is skipped as a repeat of it — which is what
+  // makes two subscribers one request. An answer that was dropped never
+  // arrived, so the key it was asked under has to go with it, or the surface
+  // remounting on the same token asks nothing and the reader is left with the
+  // optimistic set for ever.
+  it("is askable again on the same token after an answer it dropped", async () => {
+    await act(async () => root.render(createElement(Reader)));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    mutateTasks((tasks) => [task("fresh", "Buy bread"), ...tasks]);
+    answer({ tasks: [] });
+    await settled();
+
+    // The surface goes and comes back on the same refresh token and the same
+    // day: the only reason to ask again is the answer that was not taken.
+    await act(async () => root.render(null));
+    await act(async () => root.render(createElement(Reader)));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    answer({ tasks: [task("fresh", "Buy bread"), task("older", "Water the plants")] });
+    await settled();
+    expect(liveTask("older")?.title).toBe("Water the plants");
+    expect(liveTask("fresh")?.title).toBe("Buy bread");
   });
 });
 

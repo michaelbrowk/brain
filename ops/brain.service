@@ -47,10 +47,11 @@ LockPersonality=true
 MemoryDenyWriteExecute=false
 CapabilityBoundingSet=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
-# The set a service like this one needs: Node, sqlite, sockets, and the child
-# git and ripgrep processes. What it withholds is what Brain never does —
-# loading a module, mounting a filesystem, setting the clock, raw I/O, swap.
-SystemCallFilter=@system-service
+# Node creates no namespace, so withholding them costs this service nothing.
+# SystemCallFilter is deliberately absent: a whitelist kills the process with
+# SIGSYS on the first call outside it, libuv probes io_uring at startup on a
+# kernel that has one, and nothing here has executed the filter on Linux yet.
+# It ships after a staged restart on the box, with SystemCallErrorNumber=EPERM.
 RestrictNamespaces=yes
 ReadWritePaths=/opt/brain/notes /var/lib/brain
 

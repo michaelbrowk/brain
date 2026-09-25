@@ -60,10 +60,9 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SocketBindDeny=any
 RemoveIPC=true
 SystemCallArchitectures=native
-# Node, sqlite, the unix socket it is handed and the IMAP connections it opens
-# are all in @system-service; mounting, module loading, raw I/O and the clock
-# are not, and this service does none of them.
-SystemCallFilter=@system-service
+# This service creates no namespace either. SystemCallFilter is absent for the
+# reason brain.service states: a whitelist answers a miss with SIGSYS, and the
+# io_uring probe libuv makes at startup has to be checked on the box first.
 RestrictNamespaces=yes
 
 [Install]

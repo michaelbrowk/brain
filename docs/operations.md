@@ -181,6 +181,40 @@ Perform this in a maintenance window. Keep `/opt/brain/ecosystem.config.js` inta
 
 Other applications on the server must also move away from root-owned PM2 processes. A root process can still read Brain even after Brain itself is isolated.
 
+## Edge rate limits and the login device cookie
+
+`ops/nginx/brain.conf.example` limits five public locations per source address:
+the three `/oauth/*` routes at ten a minute, `= /api/auth` at ten a minute with
+five in hand for a typo, and `= /api/mcp` at six hundred a minute, which is far
+above one assistant session and far below a flood. All five set
+`limit_req_status 429`, because nginx answers a limited request with 503 by
+default and a client reads that as an outage rather than a limit. The two exact
+locations repeat every proxy header `location /` sets, the two blanked trusted
+headers included: an exact location replaces that block rather than adding to it.
+None of these limits mean anything while `$binary_remote_addr` holds a proxy's
+address instead of a visitor's, so configure the real-ip block at the top of the
+example before relying on them.
+
+The login limit exists at the edge and in the application for one reason. Brain
+spends its comparison budget before bcrypt, and with no trusted client address
+that budget was one bucket for the whole internet: a stranger sending wrong
+passwords at the cap kept the owner out for as long as they cared to keep
+sending. A request that carries `brain_device` is now counted against a bucket of
+its own, five a minute. That cookie is 32 random bytes and their HMAC, HttpOnly,
+one year, set and refreshed by every successful login — it holds no identity, no
+session and no reference to anything on disk, it authorizes nothing, and a
+stranger cannot have one, because only a login that already succeeded sets it. A
+missing or forged cookie is counted against the shared bucket, ten in thirty
+seconds. The share gate keys the same way per page, and it also admits a password
+whose comparison already came back right inside the current window, so a flood on
+a password-protected link cannot deny it to the readers who know its password.
+
+The example also ships a commented `map` and `log_format` that write an app
+frame's bearer as `[redacted]` in the access log. That token rides in the path,
+so `$request` carries it into the log; uncomment both and add
+`access_log /var/log/nginx/brain.access.log brain_scrubbed;` to the HTTPS server
+to use them.
+
 ## Failure alerting
 
 Every Brain unit (`brain.service`, `brain-mail.service`, `brain-backup.service`,

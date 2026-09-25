@@ -14,6 +14,26 @@ map $http_upgrade $brain_connection_upgrade {
     ""      close;
 }
 
+# --- Optional: keep an app-frame token out of the access log ------------------
+#
+# An app frame carries its bearer in the path
+# (/api/app/<id>/t/<token>/index.html), because a sandboxed frame's relative
+# requests carry no cookie and no query of their own. So $request holds the
+# token and the access log keeps it for as long as the log is kept. The token is
+# short-lived and the log is the owner's, but a log is a log: uncomment these
+# two, add `access_log /var/log/nginx/brain.access.log brain_scrubbed;` to the
+# HTTPS server below, and that path segment is written as [redacted] instead.
+#
+# map $request $brain_scrubbed_request {
+#     default "$request";
+#     "~^(?<brain_verb>\S+) (?<brain_head>.*/t/)[^/]+(?<brain_tail>(/.*)?)$" "$brain_verb $brain_head[redacted]$brain_tail";
+# }
+# log_format brain_scrubbed '$remote_addr - $remote_user [$time_local] '
+#                           '"$brain_scrubbed_request" $status $body_bytes_sent '
+#                           '"$http_referer" "$http_user_agent"';
+#
+# -----------------------------------------------------------------------------
+
 # --- Optional: a proxy in front of nginx -------------------------------------
 #
 # Everything here is OFF by default, because a rule that rewrites the client
@@ -44,6 +64,18 @@ map $http_upgrade $brain_connection_upgrade {
 
 # Outer per-source limit on the public OAuth routes.
 limit_req_zone $binary_remote_addr zone=brain_oauth:10m rate=10r/m;
+
+# The owner's login. Brain caps password comparisons before bcrypt, and with no
+# trusted client address that cap is one bucket for the whole internet — which is
+# why a stranger's flood used to lock the owner out. The app now keys a bucket
+# per device cookie, and this is the other half: ten a minute per source, five to
+# spare for a typo, so a flood never reaches the shared bucket at all.
+limit_req_zone $binary_remote_addr zone=brain_login:10m rate=10r/m;
+
+# MCP answers an unauthenticated call with a cheap 401, and a stranger can ask
+# for as many as they like. Ten a second is far above what a real assistant
+# session asks for and far below what a flood wants.
+limit_req_zone $binary_remote_addr zone=brain_mcp:10m rate=600r/m;
 
 upstream brain_app {
     server 127.0.0.1:3020;
@@ -149,9 +181,45 @@ server {
         proxy_send_timeout 120s;
     }
 
+    # The owner's login: per-source limit, and both trusted headers blanked the
+    # way `location /` blanks them. An exact location replaces that block
+    # wholesale, so everything it does is repeated here.
+    location = /api/auth {
+        limit_req zone=brain_login burst=5 nodelay;
+        limit_req_status 429;
+        proxy_pass http://brain_app;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Connection "";
+        proxy_set_header X-Brain-Edge-Secret "";
+        proxy_set_header X-Brain-Rate-Source "";
+        proxy_read_timeout 60s;
+    }
+
+    # The MCP endpoint an assistant talks to. The larger burst is one session's
+    # opening flurry of tool calls.
+    location = /api/mcp {
+        limit_req zone=brain_mcp burst=20 nodelay;
+        limit_req_status 429;
+        proxy_pass http://brain_app;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Connection "";
+        proxy_set_header X-Brain-Edge-Secret "";
+        proxy_set_header X-Brain-Rate-Source "";
+        proxy_read_timeout 60s;
+    }
+
     # Public OAuth routes: overwrite both trusted headers, outer source limit.
+    # `limit_req_status` on every one of them: nginx's own answer to a limited
+    # request is 503, which a client reads as an outage rather than a limit.
     location = /oauth/register {
         limit_req zone=brain_oauth burst=5 nodelay;
+        limit_req_status 429;
         proxy_pass http://brain_app;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -164,6 +232,7 @@ server {
 
     location = /oauth/token {
         limit_req zone=brain_oauth burst=5 nodelay;
+        limit_req_status 429;
         proxy_pass http://brain_app;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
@@ -176,6 +245,7 @@ server {
 
     location = /oauth/revoke {
         limit_req zone=brain_oauth burst=5 nodelay;
+        limit_req_status 429;
         proxy_pass http://brain_app;
         proxy_http_version 1.1;
         proxy_set_header Host $host;

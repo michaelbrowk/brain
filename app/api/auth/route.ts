@@ -59,22 +59,39 @@ const deviceLimiter = new FixedWindowRateLimiter({
  *  attack here: from any page a visitor opens, it drained the shared budget and
  *  burned a comparison per request in somebody else's Brain.
  *
- *  Same rule as the share-edit mint (`lib/share-origin.ts`), with one difference
- *  it cannot have: an installation with no `BRAIN_PUBLIC_ORIGIN` must still be
- *  able to log in. With nothing to compare an Origin against, the browser's own
- *  account of where the request came from is what decides, and a client outside a
- *  browser — the standalone and compose smokes both post with node `fetch` —
- *  sends neither header and is admitted, bounded by the budget like everything
- *  else. */
+ *  The share-edit mint's rule (`lib/share-origin.ts`) answers the main case, and
+ *  the login has two more of its own, because refusing here does not cost a
+ *  visitor an edit banner — it costs the owner their own Brain:
+ *
+ *  - `Sec-Fetch-Site` is the browser's own account of where the request came
+ *    from, and script cannot set it (a forbidden header name). When it says
+ *    same-origin the request is same-origin whatever host the owner typed, which
+ *    matters for the owner who browses on `http://brain.lan` while
+ *    `BRAIN_PUBLIC_ORIGIN` names the address from outside. When it says anything
+ *    else the request is cross-site and there is nothing more to ask.
+ *  - With no attestation and nothing configured there is no ground truth, so the
+ *    Origin is compared with the Host the request was sent to, the way Next's own
+ *    Server Action check does it. A client outside a browser — the standalone and
+ *    compose smokes both post with node `fetch` — sends neither header and is
+ *    admitted, bounded by the budget like everything else. */
 function originAllowed(req: NextRequest): boolean {
   const expected = configuredPublicOrigin();
-  if (expected !== null) {
-    return shareOriginAllowed(req.headers, expected, {
-      attestationMayDecide: true,
-    });
+  if (
+    expected !== null &&
+    shareOriginAllowed(req.headers, expected, { attestationMayDecide: true })
+  ) {
+    return true;
   }
   const site = req.headers.get("sec-fetch-site");
-  return site === null || site === "same-origin";
+  if (site !== null) return site === "same-origin";
+  const sent = req.headers.get("origin");
+  if (sent === null) return true;
+  const host = req.headers.get("host");
+  try {
+    return host !== null && new URL(sent).host === host;
+  } catch {
+    return false;
+  }
 }
 
 interface SpentBudget {

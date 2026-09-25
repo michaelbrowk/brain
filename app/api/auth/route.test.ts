@@ -286,6 +286,44 @@ describe("login rate limiting", () => {
     // neither header. A client outside a browser is not what this gate is for,
     // and the rate budget is what bounds one that lies.
     await expect(POST(rightGuess())).resolves.toMatchObject({ status: 200 });
+
+    // The owner who browses on the private name while BRAIN_PUBLIC_ORIGIN names
+    // the address from outside. The browser says the request is same-origin, and
+    // it is: refusing here would lock the owner out of their own Brain over a
+    // hostname, which is not what this gate is for either.
+    await expect(
+      POST(
+        rightGuess(undefined, {
+          Origin: "http://brain.lan",
+          "Sec-Fetch-Site": "same-origin",
+        }),
+      ),
+    ).resolves.toMatchObject({ status: 200 });
+  });
+
+  it("compares the origin with the host when nothing is configured to compare it to", async () => {
+    await configure();
+    const { POST } = await import("./route");
+
+    // An older browser or a header-stripping proxy sends no attestation, and an
+    // installation that has set no public origin has nothing to check against but
+    // the host the request was addressed to — the header nginx forwards as $host.
+    await expect(
+      POST(
+        rightGuess(undefined, {
+          Host: "brain.example",
+          Origin: "https://brain.example",
+        }),
+      ),
+    ).resolves.toMatchObject({ status: 200 });
+    await expect(
+      POST(
+        rightGuess(undefined, {
+          Host: "brain.example",
+          Origin: "https://evil.test",
+        }),
+      ),
+    ).resolves.toMatchObject({ status: 403 });
   });
 
   it("sets the device cookie on every success, never on a failure", async () => {

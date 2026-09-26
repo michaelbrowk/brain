@@ -98,8 +98,10 @@ not trusted. Keep port 3020 bound to loopback so nobody can bypass nginx.
 
 The token endpoint consumes a bounded aggregate source bucket before its
 source+client bucket, so rotating client ids cannot bypass the source limit.
-Every limiter fails closed when its bounded map is full; it never evicts an
-active bucket to admit a new key. nginx or Cloudflare must additionally enforce
+Every limiter on these routes fails closed when its bounded map is full; it
+never evicts an active bucket to admit a new key, because a stranger can mint
+keys here and eviction would let a flood of fresh ones clear the bucket holding
+it back. nginx or Cloudflare must additionally enforce
 a source-level limit on these public routes, especially registration. Requests
 reaching Brain without valid edge proof deliberately fail closed. The reference
 vhost `ops/nginx/brain.conf.example` carries the three locations and the

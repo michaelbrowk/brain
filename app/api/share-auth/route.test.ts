@@ -4,10 +4,13 @@ import { createShareToken, verifyShareEditToken } from "@/lib/auth";
 
 const ORIGIN = "https://brain.example";
 
-function request(password: string): NextRequest {
+function request(password: string, cookie?: string): NextRequest {
   return new NextRequest("https://brain.example/api/share-auth", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      ...(cookie ? { cookie } : {}),
+    },
     body: JSON.stringify({ id: "shared-page", password }),
   });
 }
@@ -18,6 +21,7 @@ describe("shared-page password rate limiting", () => {
     vi.doUnmock("@/lib/store");
     vi.doUnmock("@/lib/auth");
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
     vi.resetModules();
   });
 
@@ -53,6 +57,106 @@ describe("shared-page password rate limiting", () => {
     expect(blockedCorrect.status).toBe(429);
     expect(blockedCorrect.headers.get("Retry-After")).toBeTruthy();
     expect(compare).toHaveBeenCalledTimes(5);
+  });
+
+  /** An earlier round of this branch remembered a comparison that came back
+   *  right and admitted that password again for the rest of the window without
+   *  one. Past a spent window that answer cost nothing and was bounded by
+   *  nothing: an unmetered oracle telling a guesser which password is right,
+   *  which is the one thing a cap spent before bcrypt exists to prevent. Nothing
+   *  gets past a spent window now, however right it is. */
+  it("admits nothing past a spent window, however right the password", async () => {
+    const compare = vi.fn(async (password: string) => password === "right");
+    vi.doMock("bcryptjs", () => ({ default: { compare } }));
+    vi.doMock("@/lib/store", () => ({
+      getStore: async () => ({
+        readPage: async () => ({
+          meta: {
+            id: "shared-page",
+            public: true,
+            sharePass: "bcrypt-hash",
+            shareVersion: 1,
+          },
+        }),
+        isDeleted: () => false,
+      }),
+      isNotFound: () => false,
+    }));
+    vi.doMock("@/lib/auth", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/auth")>()),
+      createShareToken: async () => "share-token",
+    }));
+    const { POST } = await import("./route");
+
+    await expect(POST(request("right"))).resolves.toMatchObject({ status: 200 });
+    expect(compare).toHaveBeenCalledTimes(1);
+
+    for (let index = 0; index < 5; index += 1) {
+      await expect(POST(request("wrong"))).resolves.toMatchObject({
+        status: 401,
+      });
+    }
+    expect(compare).toHaveBeenCalledTimes(6);
+
+    // The password that was right a moment ago is refused with the rest, and no
+    // answer of any kind comes out of the route without a comparison behind it.
+    await expect(POST(request("right"))).resolves.toMatchObject({ status: 429 });
+    await expect(POST(request("also wrong"))).resolves.toMatchObject({
+      status: 429,
+    });
+    expect(compare).toHaveBeenCalledTimes(6);
+  });
+
+  it("gives a reader carrying a device cookie a bucket of its own", async () => {
+    vi.stubEnv("AUTH_SECRET", "share-auth-device-secret-with-entropy");
+    const compare = vi.fn().mockResolvedValue(false);
+    vi.doMock("bcryptjs", () => ({ default: { compare } }));
+    vi.doMock("@/lib/store", () => ({
+      getStore: async () => ({
+        readPage: async () => ({
+          meta: {
+            id: "shared-page",
+            public: true,
+            sharePass: "bcrypt-hash",
+            shareVersion: 1,
+          },
+        }),
+        isDeleted: () => false,
+      }),
+      isNotFound: () => false,
+    }));
+    vi.doMock("@/lib/auth", async (importOriginal) => ({
+      ...(await importOriginal<typeof import("@/lib/auth")>()),
+      createShareToken: async () => "share-token",
+    }));
+    const { POST } = await import("./route");
+    const { createDeviceCookie, DEVICE_COOKIE } = await import(
+      "@/lib/device-cookie"
+    );
+    const device = `${DEVICE_COOKIE}=${createDeviceCookie()}`;
+
+    for (let index = 0; index < 5; index += 1) {
+      await expect(POST(request("wrong"))).resolves.toMatchObject({
+        status: 401,
+      });
+    }
+    await expect(POST(request("wrong"))).resolves.toMatchObject({ status: 429 });
+
+    // The owner, and any reader who has logged in on this browser, is counted
+    // under a key the flood never touches.
+    await expect(POST(request("wrong", device))).resolves.toMatchObject({
+      status: 401,
+    });
+    expect(compare).toHaveBeenCalledTimes(6);
+
+    // A cookie this installation did not sign is no cookie: the flooder cannot
+    // mint keys of their own, so a forged one lands in the spent shared bucket
+    // and costs no comparison.
+    const forged = `${DEVICE_COOKIE}=${"a".repeat(43)}.${"b".repeat(43)}`;
+    await expect(POST(request("wrong", forged))).resolves.toMatchObject({
+      status: 429,
+    });
+    expect(compare).toHaveBeenCalledTimes(6);
   });
 
   it("sets a root-path page-scoped cookie so shared attachments can verify it", async () => {
@@ -250,6 +354,29 @@ describe("the edit mint", () => {
     const blocked = await POST(editRequest({ id: "root-1", name: "V30" }));
     expect(blocked.status).toBe(429);
     expect(blocked.headers.get("Retry-After")).toBeTruthy();
+  });
+
+  it("gives a browser with a device cookie its own mint budget", async () => {
+    // The read path keys on the device cookie; this bucket kept one key per page
+    // for everyone, so thirty mints from a stranger stopped the owner minting at
+    // all. Same cookie, same key, one line.
+    mockRoot({ public: true, shareEdit: true, shareVersion: 2 });
+    const { POST } = await import("./route");
+    const { createDeviceCookie, DEVICE_COOKIE } = await import(
+      "@/lib/device-cookie"
+    );
+    const device = `${DEVICE_COOKIE}=${createDeviceCookie()}`;
+
+    for (let i = 0; i < 30; i += 1) {
+      expect((await POST(editRequest({ id: "root-1", name: `V${i}` }))).status).toBe(
+        200,
+      );
+    }
+    expect((await POST(editRequest({ id: "root-1", name: "V30" }))).status).toBe(429);
+
+    const mine = await POST(editRequest({ id: "root-1", name: "Ada" }, device));
+    expect(mine.status).toBe(200);
+    expect(mine.cookies.get("brain_edit_share_root-1")?.value).toBeTruthy();
   });
 
   it("refuses a root that is not editable, with the same 404 as a missing one", async () => {

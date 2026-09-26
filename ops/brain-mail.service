@@ -60,6 +60,10 @@ RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SocketBindDeny=any
 RemoveIPC=true
 SystemCallArchitectures=native
+# This service creates no namespace either. SystemCallFilter is absent for the
+# reason brain.service states: a whitelist answers a miss with SIGSYS, and the
+# io_uring probe libuv makes at startup has to be checked on the box first.
+RestrictNamespaces=yes
 
 [Install]
 WantedBy=multi-user.target

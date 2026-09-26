@@ -36,6 +36,75 @@ describe("reference nginx vhost", () => {
     expect(edge).toMatch(/^set \$brain_edge_secret "replace-with-the-64-hex-BRAIN_EDGE_RATE_SECRET";\n$/);
     expect(vhost).not.toMatch(/[0-9a-f]{64}/);
   });
+  it("answers a limited request 429 rather than nginx's own 503", () => {
+    // Without this nginx answers a rate-limited request with 503, which every
+    // client reads as "the server is down" and none reads as "slow down".
+    for (const route of [
+      "= /oauth/register",
+      "= /oauth/token",
+      "= /oauth/revoke",
+      "= /api/auth",
+      "= /api/share-auth",
+      "= /api/mcp",
+    ]) {
+      expect(block(route)).toContain("limit_req_status 429;");
+    }
+  });
+  it("limits login and MCP per source, which the app itself cannot do", () => {
+    // The app's login limiter counts before bcrypt and has no trusted client
+    // address to count on, so its shared bucket is one bucket for the whole
+    // internet. This is the per-source half of that cap.
+    expect(vhost).toContain(
+      "limit_req_zone $binary_remote_addr zone=brain_login:10m rate=10r/m;",
+    );
+    expect(block("= /api/auth")).toContain(
+      "limit_req zone=brain_login burst=5 nodelay;",
+    );
+    // The share gate's bucket is five comparisons a minute for every anonymous
+    // reader of a page together; one address must not be able to spend them all.
+    expect(block("= /api/share-auth")).toContain(
+      "limit_req zone=brain_login burst=5 nodelay;",
+    );
+    // MCP answers an unauthenticated call with a cheap 401 and a stranger can
+    // ask for as many as they like. Ten a second is far above a real session.
+    expect(vhost).toContain(
+      "limit_req_zone $binary_remote_addr zone=brain_mcp:10m rate=600r/m;",
+    );
+    expect(block("= /api/mcp")).toContain("limit_req zone=brain_mcp burst=20 nodelay;");
+    // Both trusted headers are blanked here as everywhere but the OAuth routes:
+    // an exact location overrides `location /`, so it repeats what that one does.
+    for (const route of ["= /api/auth", "= /api/share-auth", "= /api/mcp"]) {
+      expect(block(route)).toContain('proxy_set_header X-Brain-Edge-Secret "";');
+      expect(block(route)).toContain('proxy_set_header X-Brain-Rate-Source "";');
+    }
+  });
+  it("ships a commented log format that keeps an app-frame token out of the log", () => {
+    // An app frame carries its bearer in the path, so the request line holds it
+    // and the access log keeps it for as long as the log is kept. Off by default,
+    // like every other optional stanza here: a self-hoster who has not changed
+    // access_log keeps the log they already know how to read.
+    const live = (needle: string) =>
+      vhost
+        .split("\n")
+        .map((line) => line.trim())
+        .some((line) => !line.startsWith("#") && line.includes(needle));
+    expect(vhost).toContain("# map $request_uri $brain_scrubbed_uri {");
+    expect(vhost).toContain("# log_format brain_scrubbed");
+    expect(vhost).toContain("[redacted]");
+    expect(live("log_format")).toBe(false);
+    expect(live("access_log")).toBe(false);
+    // Anchored to the one route that carries a token in its path. An unanchored
+    // rule rewrites paths it has no business touching, and a greedy one keeps the
+    // LAST such segment in the URI, so a token with another one after it went
+    // into the log in full.
+    const pattern = vhost
+      .split("\n")
+      .map((line) => line.trim())
+      .find((line) => line.startsWith('#     "~'));
+    expect(pattern).toBe(
+      '#     "~^(?<brain_app_frame>/api/app/[^/]+/t/)[^/]+(?<brain_frame_path>(/.*)?)$" "$brain_app_frame[redacted]$brain_frame_path";',
+    );
+  });
   it("ships the real-ip stanza off, and never lets one run unpaired", () => {
     const live = (needle: string) =>
       vhost

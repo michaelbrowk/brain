@@ -10,6 +10,8 @@ import {
   verifyShareToken,
   SHARE_EDIT_MAX_AGE_SECONDS,
 } from "@/lib/auth";
+import { DEVICE_COOKIE, deviceBucketKey } from "@/lib/device-cookie";
+import { declaresJson } from "@/lib/json-body";
 import { isShareExpired, normalizeVisitorName } from "@/lib/sharing";
 import { FixedWindowRateLimiter } from "@/lib/rate-limit";
 import { shareOriginAllowed } from "@/lib/share-origin";
@@ -17,14 +19,36 @@ import { shareOriginAllowed } from "@/lib/share-origin";
 export const dynamic = "force-dynamic";
 
 // The key is a validated, existing page id. It cannot be multiplied with fake
-// forwarding headers, and the hard cap bounds memory even with many pages. As
-// on owner login, five comparisons can cause a short one-minute page lockout;
-// that tradeoff is required for a real pre-bcrypt cap without trusted client IP.
+// forwarding headers, and the hard cap bounds memory even with many pages. The
+// budget is spent before bcrypt, so a correct password does not get to skip it.
 const limiter = new FixedWindowRateLimiter({
   limit: 5,
   windowMs: 60 * 1000,
   maxEntries: 1_024,
 });
+
+/** Which bucket this request's guess is counted in.
+ *
+ *  Five comparisons a minute per page is five a minute for every anonymous
+ *  reader of that link together, so a stranger who empties the window does deny
+ *  the page to the rest of them until it resets. That residual is deliberate:
+ *  the budget is spent before bcrypt, and any path that admits a password past a
+ *  spent window is an unmetered oracle for the password.
+ *
+ *  What this narrows is who shares that bucket. A browser carrying a device
+ *  cookie this installation signed is counted under a key of its own, so the
+ *  owner, and any reader who has logged into this Brain, is unaffected by a
+ *  flood aimed at the link. A single flooding source is bounded at the edge by
+ *  the per-visitor `= /api/share-auth` zone in `ops/nginx/brain.conf.example`;
+ *  a distributed one is not, and the paragraph in docs/operations.md says so.
+ *
+ *  Both of this route's buckets ask it, the comparisons and the mints alike:
+ *  thirty cheap mints from a stranger denied the owner a mint of their own for
+ *  the same reason, and it is the same cookie that answers it. */
+function perDeviceKey(req: NextRequest, base: string): string {
+  const device = deviceBucketKey(req.cookies.get(DEVICE_COOKIE)?.value);
+  return device ? `${base}:${device}` : base;
+}
 
 // A separate bucket, deliberately. An unlocked edit mint costs no bcrypt, and
 // letting cheap mints consume the comparison budget above would let one visitor
@@ -34,15 +58,6 @@ const editLimiter = new FixedWindowRateLimiter({
   windowMs: 60 * 1000,
   maxEntries: 1_024,
 });
-
-/** The read path predates this branch and is left byte for byte as it was, so
- *  this is asked only where the new capability is minted. A cross-site form
- *  can declare application/x-www-form-urlencoded, multipart/form-data or
- *  text/plain, and nothing else. */
-function declaresJson(req: NextRequest): boolean {
-  const type = req.headers.get("content-type");
-  return type !== null && type.split(";", 1)[0].trim().toLowerCase() === "application/json";
-}
 
 const badRequest = () =>
   NextResponse.json({ error: "bad request" }, { status: 400 });
@@ -83,7 +98,8 @@ export async function POST(req: NextRequest) {
     )
       return notFound();
 
-    const attempt = limiter.consume(`share:${id}`);
+    const bucket = perDeviceKey(req, `share:${id}`);
+    const attempt = limiter.consume(bucket);
     if (!attempt.allowed)
       return NextResponse.json(
         { error: "too many attempts" },
@@ -98,7 +114,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: "wrong password" }, { status: 401 });
     }
 
-    limiter.reset(`share:${id}`);
+    limiter.reset(bucket);
     const res = NextResponse.json({ ok: true });
     res.cookies.set(
       `brain_share_${id}`,
@@ -146,7 +162,7 @@ async function mintEditToken(
   if (!shareOriginAllowed(req.headers, configuredPublicOrigin())) {
     return NextResponse.json({ error: "bad_origin" }, { status: 403 });
   }
-  if (!declaresJson(req)) return badRequest();
+  if (!declaresJson(req.headers)) return badRequest();
   if (typeof id !== "string") return badRequest();
   // The mint carries no root/version context of its own, so an empty name is
   // the route's ordinary 400, not a share denial.
@@ -164,7 +180,9 @@ async function mintEditToken(
     )
       return notFound();
 
-    const attempt = editLimiter.consume(`share-edit-session:${id}`);
+    const attempt = editLimiter.consume(
+      perDeviceKey(req, `share-edit-session:${id}`),
+    );
     if (!attempt.allowed)
       return NextResponse.json(
         { error: "too many attempts" },
@@ -189,10 +207,11 @@ async function mintEditToken(
         if (typeof password !== "string" || !password) {
           return NextResponse.json({ error: "wrong password" }, { status: 401 });
         }
-        // A guess is a guess whichever branch carries it. The comparison spends
-        // the read path's five-per-minute budget, so the mint cannot widen a
-        // brute force on a locked root by thirty attempts a minute.
-        const guess = limiter.consume(`share:${id}`);
+        // A guess is a guess whichever branch carries it, so it goes through the
+        // read path's bucket: the mint cannot widen a brute force on a locked
+        // root by thirty attempts a minute.
+        const bucket = perDeviceKey(req, `share:${id}`);
+        const guess = limiter.consume(bucket);
         if (!guess.allowed)
           return NextResponse.json(
             { error: "too many attempts" },
@@ -205,7 +224,7 @@ async function mintEditToken(
         if (!ok) {
           return NextResponse.json({ error: "wrong password" }, { status: 401 });
         }
-        limiter.reset(`share:${id}`);
+        limiter.reset(bucket);
         verifiedPassword = true;
       }
     }

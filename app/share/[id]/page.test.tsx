@@ -406,7 +406,7 @@ describe("shared subtree page", () => {
         params: Promise.resolve({ id: "root" }),
         searchParams: Promise.resolve({}),
       }),
-    ).resolves.toEqual({ title: "Brain" });
+    ).resolves.toStrictEqual({ title: "Brain" });
   });
 
   it("says only Brain when there is no share left to describe", async () => {
@@ -417,7 +417,7 @@ describe("shared subtree page", () => {
         params: Promise.resolve({ id: "root" }),
         searchParams: Promise.resolve({ page: "child" }),
       }),
-    ).resolves.toEqual({ title: "Brain" });
+    ).resolves.toStrictEqual({ title: "Brain" });
   });
 
   it("rejects a duplicate page query instead of falling back to the root", async () => {

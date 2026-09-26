@@ -1,6 +1,6 @@
 {
   "name": "brain",
-  "version": "0.15.1",
+  "version": "0.15.2",
   "description": "Self-hosted notes and mail on a folder of Markdown files.",
   "license": "MIT",
   "homepage": "https://www.michaelbrowk.com/brain",

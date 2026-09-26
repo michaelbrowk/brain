@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { NotFoundError } from "@/lib/store/types";
 import {
   resolveFoldedShareRoot,
   resolveShareAccess,
@@ -669,7 +670,13 @@ describe("a folded share's old address", () => {
               sharedUnder: nodes[id].sharedUnder ?? null,
             }
           : null,
-      isDeleted: (id: string) => nodes[id]?.deleted === true,
+      // The real store's `isDeleted` throws for an id it does not know (it
+      // walks the entry's ancestors, and there is no entry); a fake that
+      // answered false hid a 500 on every mistyped share address.
+      isDeleted: (id: string) => {
+        if (!nodes[id]) throw new NotFoundError(`page not found: ${id}`);
+        return nodes[id].deleted === true;
+      },
       isWithinSubtree: (rootId: string, targetId: string) => {
         let current: string | null | undefined = targetId;
         const seen = new Set<string>();

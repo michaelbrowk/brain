@@ -78,9 +78,12 @@ export function resolveFoldedShareRoot(
   id: string,
   now = Date.now(),
 ): string | null {
-  if (store.isDeleted(id)) return null;
-  const seen = new Set<string>([id]);
+  // An address the store has never heard of folds nowhere, and it is asked
+  // first: `isDeleted` walks an entry's ancestors and throws for an id with no
+  // entry, which turned every mistyped share link into a 500 instead of a 404.
   let current = store.readShareNode(id);
+  if (current === null || store.isDeleted(id)) return null;
+  const seen = new Set<string>([id]);
   if (isLiveGrant(current, now)) return null;
   while (current?.sharedUnder) {
     const rootId: string = current.sharedUnder;

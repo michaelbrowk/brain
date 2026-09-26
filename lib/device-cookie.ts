@@ -17,8 +17,9 @@ import { deviceSigningKey } from "@/lib/auth";
  *  reaches.
  *
  *  It is not a credential and it authorizes nothing — a stolen one buys its
- *  holder five password guesses a minute, which is what the login screen offers
- *  anyone. It is not an identifier either: 32 random bytes and their signature,
+ *  holder five password guesses a minute on top of the shared budget the login
+ *  screen offers anyone, and takes nothing from the owner, whose browser falls
+ *  through to that shared budget when its own is spent. It is not an identifier either: 32 random bytes and their signature,
  *  no name, no session, no reference to anything on disk. A year, because the
  *  point is to still be there the day a stranger starts knocking. */
 export const DEVICE_COOKIE = "brain_device";

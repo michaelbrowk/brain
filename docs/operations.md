@@ -183,14 +183,14 @@ Other applications on the server must also move away from root-owned PM2 process
 
 ## Edge rate limits and the login device cookie
 
-`ops/nginx/brain.conf.example` limits five public locations per source address:
-the three `/oauth/*` routes at ten a minute, `= /api/auth` at ten a minute with
-five in hand for a typo, and `= /api/mcp` at six hundred a minute, which is far
-above one assistant session and far below a flood. All five set
+`ops/nginx/brain.conf.example` limits six public locations per source address:
+the three `/oauth/*` routes at ten a minute, `= /api/auth` and `= /api/share-auth`
+at ten a minute with five in hand for a typo, and `= /api/mcp` at six hundred a
+minute, which is far above one assistant session and far below a flood. All six set
 `limit_req_status 429`, because nginx answers a limited request with 503 by
 default and a client reads that as an outage rather than a limit. An exact
-location replaces `location /` rather than adding to it, so `= /api/auth` and
-`= /api/mcp` repeat the headers it sets, the two blanked trusted headers
+location replaces `location /` rather than adding to it, so `= /api/auth`,
+`= /api/share-auth` and `= /api/mcp` repeat the headers it sets, the two blanked trusted headers
 included, with one difference: neither route is ever a websocket, so they clear
 `Connection` and do not pass `Upgrade` at all. None of these limits mean anything
 while `$binary_remote_addr` holds a proxy's address instead of a visitor's, so
@@ -231,8 +231,10 @@ there on purpose. Five comparisons a minute per page is five a minute for all of
 that page's anonymous readers together, so a stranger who floods one
 password-gated link does deny it to anonymous readers until the window resets. A
 reader who is logged into this Brain — the owner, on any browser that has logged
-in — carries `brain_device` and is unaffected, and the edge's per-visitor zone
-bounds what one source can send. Nothing admits a password past a spent window:
+in — carries `brain_device` and is unaffected. The example config gives
+`= /api/share-auth` the same per-visitor zone as the login, which bounds one
+source and nothing more: a flood from many addresses still spends the page's
+bucket. Nothing admits a password past a spent window:
 an earlier version of this branch remembered a comparison that came back right
 and let that password through without one, which is an unmetered oracle for the
 password and was removed.

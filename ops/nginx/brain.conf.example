@@ -213,6 +213,24 @@ server {
         proxy_read_timeout 60s;
     }
 
+    # The password gate on a shared link: the same per-source bucket as the
+    # login. The app counts five comparisons a minute per page for every
+    # anonymous reader together, so one flooding address must not be able to
+    # spend them all; many addresses still can, and docs/operations.md says so.
+    location = /api/share-auth {
+        limit_req zone=brain_login burst=5 nodelay;
+        limit_req_status 429;
+        proxy_pass http://brain_app;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header Connection "";
+        proxy_set_header X-Brain-Edge-Secret "";
+        proxy_set_header X-Brain-Rate-Source "";
+        proxy_read_timeout 60s;
+    }
+
     # The MCP endpoint an assistant talks to. The larger burst is one session's
     # opening flurry of tool calls.
     location = /api/mcp {

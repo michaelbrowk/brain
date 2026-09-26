@@ -107,6 +107,45 @@ describe("login rate limiting", () => {
     });
   });
 
+  it("clears the bucket a right password was counted in, and the device's own", async () => {
+    await configure();
+    const { POST } = await import("./route");
+    const { createDeviceCookie, DEVICE_COOKIE } = await import(
+      "@/lib/device-cookie"
+    );
+
+    // Four wrong from a browser with no cookie, then the right one: the shared
+    // bucket starts over, so ten more wrong ones reach bcrypt before the 429.
+    for (let index = 0; index < 4; index += 1) {
+      await expect(POST(wrongGuess())).resolves.toMatchObject({ status: 401 });
+    }
+    await expect(POST(rightGuess())).resolves.toMatchObject({ status: 200 });
+    for (let index = 0; index < 10; index += 1) {
+      await expect(POST(wrongGuess())).resolves.toMatchObject({ status: 401 });
+    }
+    await expect(POST(wrongGuess())).resolves.toMatchObject({ status: 429 });
+
+    // The same for a device: four wrong, one right, and its own five are whole
+    // again (the shared bucket is spent, so a sixth would have to be 429).
+    const device = `${DEVICE_COOKIE}=${createDeviceCookie()}`;
+    for (let index = 0; index < 4; index += 1) {
+      await expect(POST(wrongGuess(device))).resolves.toMatchObject({
+        status: 401,
+      });
+    }
+    await expect(POST(rightGuess(device))).resolves.toMatchObject({
+      status: 200,
+    });
+    for (let index = 0; index < 5; index += 1) {
+      await expect(POST(wrongGuess(device))).resolves.toMatchObject({
+        status: 401,
+      });
+    }
+    await expect(POST(wrongGuess(device))).resolves.toMatchObject({
+      status: 429,
+    });
+  });
+
   /** The device bucket ADDS a budget, it does not replace one. Keying on the
    *  cookie alone left a browser whose own five were spent — or whose cookie a
    *  stranger had copied and spent for it — with less than a browser carrying no

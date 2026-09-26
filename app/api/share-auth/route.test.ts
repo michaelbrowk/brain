@@ -148,6 +148,15 @@ describe("shared-page password rate limiting", () => {
       status: 401,
     });
     expect(compare).toHaveBeenCalledTimes(6);
+
+    // A cookie this installation did not sign is no cookie: the flooder cannot
+    // mint keys of their own, so a forged one lands in the spent shared bucket
+    // and costs no comparison.
+    const forged = `${DEVICE_COOKIE}=${"a".repeat(43)}.${"b".repeat(43)}`;
+    await expect(POST(request("wrong", forged))).resolves.toMatchObject({
+      status: 429,
+    });
+    expect(compare).toHaveBeenCalledTimes(6);
   });
 
   it("sets a root-path page-scoped cookie so shared attachments can verify it", async () => {

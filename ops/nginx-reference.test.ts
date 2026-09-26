@@ -44,6 +44,7 @@ describe("reference nginx vhost", () => {
       "= /oauth/token",
       "= /oauth/revoke",
       "= /api/auth",
+      "= /api/share-auth",
       "= /api/mcp",
     ]) {
       expect(block(route)).toContain("limit_req_status 429;");
@@ -59,6 +60,11 @@ describe("reference nginx vhost", () => {
     expect(block("= /api/auth")).toContain(
       "limit_req zone=brain_login burst=5 nodelay;",
     );
+    // The share gate's bucket is five comparisons a minute for every anonymous
+    // reader of a page together; one address must not be able to spend them all.
+    expect(block("= /api/share-auth")).toContain(
+      "limit_req zone=brain_login burst=5 nodelay;",
+    );
     // MCP answers an unauthenticated call with a cheap 401 and a stranger can
     // ask for as many as they like. Ten a second is far above a real session.
     expect(vhost).toContain(
@@ -67,7 +73,7 @@ describe("reference nginx vhost", () => {
     expect(block("= /api/mcp")).toContain("limit_req zone=brain_mcp burst=20 nodelay;");
     // Both trusted headers are blanked here as everywhere but the OAuth routes:
     // an exact location overrides `location /`, so it repeats what that one does.
-    for (const route of ["= /api/auth", "= /api/mcp"]) {
+    for (const route of ["= /api/auth", "= /api/share-auth", "= /api/mcp"]) {
       expect(block(route)).toContain('proxy_set_header X-Brain-Edge-Secret "";');
       expect(block(route)).toContain('proxy_set_header X-Brain-Rate-Source "";');
     }

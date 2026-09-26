@@ -1696,11 +1696,31 @@ html[data-kbd] [contenteditable]:focus-visible {
 
 /* An app's canvas — paper under a frame that fills what the head leaves.
    The phone keeps the tab bar's reserve under it: an app's own bottom
-   control must not sit behind Brain's. */
+   control must not sit behind Brain's.
+
+   THE HEIGHT IS A CHAIN, AND IT IS FLEX ALL THE WAY DOWN RATHER THAN A
+   PERCENTAGE. `.brain-page-scroll` is the window's height, the wrapper the
+   shell puts an app page in is a column that takes it, and the canvas is the
+   item that fills that column — which is why this rule is `flex: 1` and not
+   `min-height: 100%`. The percentage was the bug: `min-height` on a parent,
+   a length or a percentage alike, never makes that parent's height definite,
+   so a child measuring 100% of it is measuring against `auto` and is handed
+   nothing. Measured in Chrome on the real page: with the wrapper at
+   `min-h-full` and this rule a percentage the frame is 420px, its floor,
+   with 600px of window empty under it and the app's own bottom button cut in
+   half; with the wrapper a column and this rule `flex: 1`, 812px. The
+   scroller rather than the window is the source, because the scroller is
+   where that arithmetic already lives and a second reading of the window
+   would be a second thing to keep in step with the chrome above it.
+
+   On the share page the same class sits inside a document column, under the
+   page's own title, where nothing above it is a flex container and this
+   resolves to nothing on purpose: there the frame is a block in a body,
+   not the surface. */
 .brain-app-canvas {
   display: flex;
+  flex: 1;
   flex-direction: column;
-  min-height: 100%;
   padding-bottom: var(--tabbar-reserve);
 }
 .brain-app-frame {
@@ -1709,6 +1729,23 @@ html[data-kbd] [contenteditable]:focus-visible {
   min-height: 420px;
   border: 0;
   background: var(--paper);
+}
+/* WHILE THE APP IS STILL ARRIVING. On a cold load the canvas was paper with
+   a head on it and nothing underneath: a page that finished loading with
+   nothing on it, which is a different sentence from a page still loading.
+   The fill is `--skeleton-fill`, what this app already puts wherever work is
+   in progress, and it goes on THE CANVAS rather than on the frame, because
+   the wait starts before the frame exists — the address is asked for first,
+   and for that phase a fill on the frame would paint nothing at all. The
+   frame stands out of the way meanwhile, so the two are one plate rather
+   than a tint over a tint, and takes its paper back the moment its own
+   document is there to cover it. One static fill and no animation, so
+   reduced motion is shown the same thing. */
+.brain-app-canvas_loading {
+  background: var(--skeleton-fill);
+}
+.brain-app-canvas_loading > .brain-app-frame {
+  background: transparent;
 }
 
 /* Smart sort's heap, and the band that reads it. One layer for the whole

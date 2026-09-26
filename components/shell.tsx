@@ -5788,7 +5788,20 @@ export function Shell({
                 mailOpen || settingsActive || tasksOpen
                   ? "min-h-full"
                   : selectedId
-                    ? "brain-page-frame relative pb-40"
+                    ? // `min-h-full` for the reason the three surfaces above
+                      // take it: the wrapper is at least as tall as the
+                      // scroller, which is as tall as the window. An app page
+                      // then becomes a column, because that is the only way
+                      // the height reaches its canvas — `min-height` never
+                      // makes a box's height definite, so a canvas asking for
+                      // 100% of this wrapper is handed nothing and its frame
+                      // stands at its floor. The tail is the document's:
+                      // 160px of paper under the last line, where a click
+                      // starts a new paragraph. An app has no last line, so
+                      // under one that padding is only paper to scroll past.
+                      `brain-page-frame relative min-h-full${
+                        currentNode?.kind === "app" ? " flex flex-col" : " pb-40"
+                      }`
                     : undefined
               }
             >

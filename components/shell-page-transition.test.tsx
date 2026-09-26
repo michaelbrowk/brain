@@ -103,6 +103,24 @@ function treeNode(id: string, title: string): TreeNode {
   };
 }
 
+/** A page an agent built. What the shell puts under it is a running frame,
+ *  not a document with a last line to click below. */
+function appNode(id: string, title: string): TreeNode {
+  return {
+    ...treeNode(id, title),
+    kind: "app",
+    app: {
+      entry: "app/index.html",
+      version: 1,
+      builtBy: "Claude",
+      builtAt: "2026-07-27T08:00:00.000Z",
+      owns: [],
+      state: false,
+      reason: "build me a trainer for my Spanish words",
+    },
+  };
+}
+
 async function settle() {
   await act(async () => {
     await Promise.resolve();
@@ -543,5 +561,77 @@ describe("Shell page transitions", () => {
     expect(shareCalls[0][1]?.method).toBe("POST");
     expect(shareCalls[1][1]?.method).toBeUndefined();
     expect(document.body.textContent).toContain("Sharing is off");
+  });
+
+  /** THE TWO THINGS THE SHELL OWES AN APP PAGE'S CANVAS.
+   *
+   *  The scroller's height, and no tail under it.
+   *
+   *  The height is a chain. The scroller is as tall as the window, the
+   *  wrapper takes that with `min-h-full` the way it already does for Mail,
+   *  Settings and Tasks, and for an app page it becomes a column so the
+   *  canvas can be the item that fills it. Both links are needed: `min-height`
+   *  never makes a box's height definite, so a canvas asking for 100% of this
+   *  wrapper is handed nothing, which is how the frame came to sit at its
+   *  420px floor with the window empty under it.
+   *
+   *  The tail is a document's: 160px of paper under its last line, where a
+   *  click starts a new paragraph. An app has no last line, so under a frame
+   *  that fills the canvas it is only paper to scroll past.
+   *
+   *  What the chain adds up to is measured in a browser, in
+   *  `e2e/apps.spec.ts`. jsdom has no layout, so what is pinned here is that
+   *  the two links the shell owns are on the element.
+   */
+  it("gives an app page's canvas the scroller's height and no editor tail", async () => {
+    apiFetchMock.mockImplementation(async (input, init) => {
+      if (String(input) === "/api/app/trainer/frame" && init?.method === "POST") {
+        return response({
+          src: "/api/app/trainer/t/token/index.html",
+          exp: Math.floor(Date.now() / 1000) + 12 * 60 * 60,
+        });
+      }
+      if (String(input) === "/api/page/page-a") {
+        return response({
+          meta: { title: "Page A", stickers: [] },
+          markdown: "Body A",
+          rev: "rev-a",
+        });
+      }
+      // the bell asks the centre on mount, on every surface
+      if (String(input) === "/api/notifications")
+        return response({ notifications: [], unread: 0 });
+      throw new Error(`Unexpected request: ${String(input)}`);
+    });
+
+    window.history.replaceState({}, "", "/p/trainer");
+    const tree = [appNode("trainer", "Trainer"), treeNode("page-a", "Page A")];
+    await act(async () =>
+      root.render(<Shell tree={tree} initialSelectedId="trainer" />),
+    );
+    await flushAnimationFrames();
+
+    const appWrapper = container.querySelector(".brain-page-frame");
+    expect(appWrapper?.querySelector("[data-app-canvas]")).not.toBeNull();
+    expect(appWrapper?.className).toContain("min-h-full");
+    expect(appWrapper?.className).toContain("flex flex-col");
+    expect(appWrapper?.className).not.toContain("pb-40");
+
+    // And the tail is still there for a document, which is what it is for.
+    // The height goes down to a document too: it costs nothing there, where
+    // the wrapper is usually taller than the window already, and one rule
+    // for the page branch beats two that can drift.
+    await act(async () => {
+      window.history.pushState({}, "", "/p/page-a");
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
+    await flushAnimationFrames();
+    const pageWrapper = container.querySelector(".brain-page-frame");
+    expect(pageWrapper?.querySelector("[data-app-canvas]")).toBeNull();
+    expect(pageWrapper?.className).toContain("min-h-full");
+    expect(pageWrapper?.className).toContain("pb-40");
+    // And it stays a block: a document's canvas is a column of its own and
+    // has no use for the room, so nothing about its layout changes.
+    expect(pageWrapper?.className).not.toContain("flex flex-col");
   });
 });

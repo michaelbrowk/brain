@@ -116,7 +116,7 @@ export function ModulesSection({
     <div className="space-y-7">
       <SettingsGroup
         title="Modules"
-        description="What this Brain runs. Turning one off hides it and stops its background work; nothing is deleted"
+        description="What this Brain runs. Turning one off hides it and stops its background work; nothing is deleted."
       >
         {ROWS.map((row) => (
           <SettingsRow key={row.key} label={row.label} hint={row.hint}>

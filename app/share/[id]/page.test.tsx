@@ -42,7 +42,7 @@ type PasswordRequired = {
 };
 
 async function loadPage(
-  access: Granted | PasswordRequired | { kind: "busy" },
+  access: Granted | PasswordRequired | { kind: "busy" } | { kind: "not-found" },
   options: {
     /** What the edit cookie verifies to; the cookie itself is on the jar
      *  only when this is set. */
@@ -59,6 +59,8 @@ async function loadPage(
   const resolveShareAccess = vi.fn();
   if (access.kind === "busy") {
     resolveShareAccess.mockRejectedValue(new ShareAccessBusyError());
+  } else if (access.kind === "not-found") {
+    resolveShareAccess.mockRejectedValue(new ShareAccessNotFoundError());
   } else {
     resolveShareAccess.mockResolvedValue(
       access.kind === "granted"
@@ -372,7 +374,50 @@ describe("shared subtree page", () => {
     ).resolves.toEqual({
       title: "Child",
       description: "Shared from Brain",
+      // A link pasted into a chat is a card, and the card used to carry the
+      // title and nothing else: no source, no kind, nothing saying where the
+      // page came from. Open Graph is the whole of it — Next derives the
+      // Twitter card from these same fields, so a `twitter` block here would
+      // be a second copy of them to keep in step. `robots` stays where it is,
+      // on the response headers: a shared page is still not for a crawler.
+      openGraph: { title: "Child", siteName: "Brain", type: "article" },
     });
+  });
+
+  /** THE TWO ANSWERS THAT MUST CARRY NOTHING OF THE PAGE.
+   *
+   *  `generateMetadata` runs with no cookie read at all, so it cannot know
+   *  whether the reader has the password; it asks with `allowPasswordGate`
+   *  and says "Brain" to anything that is not an outright grant. The card is
+   *  where that decision is easiest to undo by accident — an `openGraph`
+   *  block built before the branch, or a title read off `access.root`, hands
+   *  a locked page's name to anyone who pastes the link. Exact equality, so
+   *  a field added above the branch fails here rather than shipping.
+   */
+  it("says only Brain while the password is still the answer", async () => {
+    const { generateMetadata } = await loadPage({
+      kind: "password-required",
+      root,
+      shareVersion: 7,
+    });
+
+    await expect(
+      generateMetadata({
+        params: Promise.resolve({ id: "root" }),
+        searchParams: Promise.resolve({}),
+      }),
+    ).resolves.toStrictEqual({ title: "Brain" });
+  });
+
+  it("says only Brain when there is no share left to describe", async () => {
+    const { generateMetadata } = await loadPage({ kind: "not-found" });
+
+    await expect(
+      generateMetadata({
+        params: Promise.resolve({ id: "root" }),
+        searchParams: Promise.resolve({ page: "child" }),
+      }),
+    ).resolves.toStrictEqual({ title: "Brain" });
   });
 
   it("rejects a duplicate page query instead of falling back to the root", async () => {

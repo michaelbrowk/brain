@@ -157,6 +157,9 @@ per hint, in the order the tables below use them:
 | `notion_upload_attachment` | write keeps idempotent outside |
 | `notion_finalize_page` | write keeps idempotent outside |
 | `notion_abort_page` | write **destroys** idempotent outside |
+| `create_app_page` | write keeps repeats local |
+| `write_app_page` | write keeps idempotent local |
+| `read_app_page` | read keeps idempotent local |
 
 Two rows carry a note the four words cannot.
 

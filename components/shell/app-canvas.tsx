@@ -91,6 +91,22 @@ export function AppCanvas({ node, liveTree, onOpenPage, onToast }: AppCanvasProp
   const src = probe?.id === node.id ? probe.src : undefined;
   const exp = probe?.id === node.id ? probe.exp : undefined;
 
+  /** THE ADDRESS WHOSE DOCUMENT HAS PAINTED.
+   *
+   *  A frame mounts with an empty document, and on a cold load the seconds
+   *  before the app draws anything were bare paper under the head: a page
+   *  that has finished loading with nothing on it, which is a different
+   *  sentence from a page still loading. Until `load` the canvas carries the
+   *  fill this app puts wherever work is in progress. The fill is static, so
+   *  reduced motion is shown the same thing and there is nothing to flatten.
+   *
+   *  Held as the address rather than as a flag, because a remint hands the
+   *  frame a new one and it reloads: the wait for that document is the same
+   *  wait as the first. `src === null` is the missing-files state, where
+   *  there is no frame on its way and so nothing to say so about. */
+  const [paintedSrc, setPaintedSrc] = useState<string | null>(null);
+  const loading = src !== null && paintedSrc !== src;
+
   const askForAddress = useCallback(async (id: string) => {
     try {
       const response = await apiFetch(`/api/app/${encodeURIComponent(id)}/frame`, {
@@ -228,7 +244,10 @@ export function AppCanvas({ node, liveTree, onOpenPage, onToast }: AppCanvasProp
   }, [copyState]);
 
   return (
-    <div data-app-canvas className="brain-app-canvas brain-page-top">
+    <div
+      data-app-canvas
+      className={`brain-app-canvas brain-page-top${loading ? " brain-app-canvas_loading" : ""}`}
+    >
       <div className="mx-auto w-full max-w-[720px] px-5 md:px-6">
         {node.icon && <div className="mb-5 text-[44px] leading-none">{node.icon}</div>}
         <h1 className="text-title text-ink">{node.title}</h1>
@@ -279,6 +298,7 @@ export function AppCanvas({ node, liveTree, onOpenPage, onToast }: AppCanvasProp
           title={node.title}
           sandbox={APP_FRAME_SANDBOX}
           src={src}
+          onLoad={() => setPaintedSrc(src)}
           className="brain-app-frame"
         />
       ) : null}

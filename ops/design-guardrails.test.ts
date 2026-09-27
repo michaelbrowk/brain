@@ -273,6 +273,26 @@ describe("design guardrails", () => {
     ).toBe(true);
   });
 
+  it("keeps source files free of raw control bytes", () => {
+    // A regex once carried a literal NUL where ` ` was meant. The code
+    // ran, and grep and ripgrep both declared the file binary and skipped it
+    // from then on: every search of the tree quietly missed one component.
+    // Tab, newline and carriage return are text; every other C0 byte is a
+    // paste that went wrong and belongs in the file as an escape.
+    const control = /[ --]/;
+
+    const offenders: string[] = [];
+    for (const file of sourceFiles()) {
+      lines(file).forEach((line, index) => {
+        if (control.test(line)) offenders.push(`${file}:${index + 1}`);
+      });
+    }
+    expect(
+      offenders,
+      "a raw control byte in source: write it as an escape such as \\u0000",
+    ).toEqual([]);
+  });
+
   it("keeps the reader strip's label line on the numbers it is made of", () => {
     // `--breakpoint-strip` is where the action pill's resting labels stop
     // fitting beside the subject on ONE pane. What it is made of sits in

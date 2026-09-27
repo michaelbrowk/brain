@@ -453,7 +453,7 @@ export function MailAccountSettings({
       if (!normalizedSmtpHostname || /[\s/]/.test(normalizedSmtpHostname)) {
         next.smtpHostname = "Enter the outgoing (SMTP) server name.";
       }
-      if (!smtpUsername || /[\r\n ]/.test(smtpUsername)) {
+      if (!smtpUsername || /[\r\n\u0000]/.test(smtpUsername)) {
         next.smtpUsername = "Enter the username for the outgoing server.";
       }
       if (!isValidPort(Number(smtpPort))) {

@@ -619,6 +619,55 @@ describe("MailAccountSettings", () => {
     expect(document.body.textContent).not.toContain("Mail setup is unavailable");
     expect(document.getElementById("mail-email")).not.toBeNull();
     expect(onOpenMail).not.toHaveBeenCalled();
+    // only the 503 is not the settings' fault, so only it gets the offer
+    expect(document.body.textContent?.includes("Connect without outgoing server")).toBe(
+      code === "smtp_submission_unavailable",
+    );
+  });
+
+  it("connects receive-only in one press when this Brain has no outgoing mail", async () => {
+    const created = imapAccount();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(accounts()))
+      .mockResolvedValueOnce(
+        response({ apiVersion: 2, error: { code: "smtp_submission_unavailable" } }, 503),
+      )
+      .mockResolvedValueOnce(response(result(created)));
+    vi.stubGlobal("fetch", fetchMock);
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+    await openOtherEmail();
+    await act(async () => {
+      inputValue(field("mail-email"), created.emailAddress);
+      inputValue(field("mail-password"), "password");
+    });
+    await act(async () => submitForm(host));
+    await settle();
+
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1].body)).smtp).toBeDefined();
+    expect(document.body.textContent).toContain("Outgoing mail isn't enabled on this Brain server.");
+    expect(onOpenMail).not.toHaveBeenCalled();
+
+    // the same form, the switch off, no second round of typing
+    await act(async () => button("Connect without outgoing server").click());
+    await settle();
+
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    const body = JSON.parse(String(fetchMock.mock.calls[2][1].body));
+    expect(Object.prototype.hasOwnProperty.call(body, "smtp")).toBe(false);
+    expect(body.imap).toEqual({
+      hostname: "imap.example.test",
+      port: 993,
+      tls: "implicit",
+      username: created.emailAddress,
+      password: "password",
+    });
+    expect(document.body.textContent).not.toContain("Connect without outgoing server");
+    expect(onToast).toHaveBeenCalledWith("Mail account connected");
+    expect(onOpenMail).toHaveBeenCalledTimes(1);
   });
 
   async function openFormWithAccounts() {

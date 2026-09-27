@@ -157,6 +157,10 @@ export function MailAccountSettings({
   const [smtpPort, setSmtpPort] = useState("465");
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [requestError, setRequestError] = useState<string | null>(null);
+  // True after the service answered the 503 for a payload carrying `smtp`:
+  // the settings are not at fault, so the form offers the one change that
+  // gets this account connected on this Brain, receive-only.
+  const [receiveOnlyOffered, setReceiveOnlyOffered] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
@@ -221,6 +225,7 @@ export function MailAccountSettings({
   const resetForm = useCallback((account: PublicMailAccount | null) => {
     setFieldErrors({});
     setRequestError(null);
+    setReceiveOnlyOffered(false);
     setPassword("");
     if (account?.providerKind === "imap") {
       setDisplayName(account.displayName ?? "");
@@ -440,7 +445,7 @@ export function MailAccountSettings({
     });
   };
 
-  const validate = (): FieldErrors => {
+  const validate = (sendOutgoing = smtpEnabled): FieldErrors => {
     const next: FieldErrors = {};
     const normalizedEmail = email.trim();
     const normalizedHostname = hostname.trim();
@@ -461,7 +466,7 @@ export function MailAccountSettings({
     if (!isValidPort(normalizedPort)) {
       next.port = "Enter a port from 1 to 65535.";
     }
-    if (smtpEnabled) {
+    if (sendOutgoing) {
       const normalizedSmtpHostname = smtpHostname.trim();
       if (!normalizedSmtpHostname || /[\s/]/.test(normalizedSmtpHostname)) {
         next.smtpHostname = "Enter the outgoing (SMTP) server name.";
@@ -486,10 +491,18 @@ export function MailAccountSettings({
     });
   };
 
-  const submit = async (event: React.FormEvent) => {
+  const submit = (event: React.FormEvent) => {
     event.preventDefault();
+    void send(smtpEnabled);
+  };
+
+  /** Validate and post the form, with or without the outgoing server. The
+   *  switch's state is the ordinary argument. "Connect without outgoing
+   *  server" passes false in the same press that turns the switch off, since
+   *  that state update has not landed yet when this runs. */
+  const send = async (sendOutgoing: boolean) => {
     if (submitting) return;
-    const nextErrors = validate();
+    const nextErrors = validate(sendOutgoing);
     setFieldErrors(nextErrors);
     const firstError = FORM_FIELD_ORDER.find((field) => nextErrors[field]);
     if (firstError) {
@@ -507,10 +520,11 @@ export function MailAccountSettings({
 
     setSubmitting(true);
     setRequestError(null);
+    setReceiveOnlyOffered(false);
     const editing = editingAccount !== null;
     // The outgoing server carries no password of its own: the service signs
     // in to it with the mailbox password it already holds inside `imap`.
-    const smtp = smtpEnabled
+    const smtp = sendOutgoing
       ? {
           hostname: smtpHostname.trim(),
           port: Number(smtpPort),
@@ -596,6 +610,9 @@ export function MailAccountSettings({
     } catch (error) {
       if (!isCurrentRequest()) return;
       setRequestError(messageForError(error));
+      setReceiveOnlyOffered(
+        error instanceof Error && error.message === "smtp_submission_unavailable",
+      );
     } finally {
       if (isCurrentRequest()) {
         mutationControllerRef.current = null;
@@ -1273,6 +1290,23 @@ export function MailAccountSettings({
         )}
 
         <div className="flex flex-wrap justify-end gap-2">
+          {/* Beside the primary, quiet, and only after the 503: one press
+              turns the switch off and posts the same form, so the reader
+              types nothing twice. It goes with the switch: turned off by
+              hand, the offer has nothing left to offer. */}
+          {receiveOnlyOffered && smtpEnabled && (
+            <Button
+              type="button"
+              variant="quiet"
+              disabled={submitting}
+              onClick={() => {
+                setSmtpChoice("off");
+                void send(false);
+              }}
+            >
+              {editingAccount ? "Save without outgoing server" : "Connect without outgoing server"}
+            </Button>
+          )}
           <Button type="submit" variant="ink" disabled={submitting}>
             {submitting
               ? editingAccount

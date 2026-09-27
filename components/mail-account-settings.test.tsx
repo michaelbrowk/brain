@@ -563,18 +563,26 @@ describe("MailAccountSettings", () => {
     — the sentence for an outage, under a refusal the owner has to act on.
   */
   it.each([
-    ["smtp_authentication_failed", "The outgoing server rejected the username or password."],
+    [
+      "smtp_authentication_failed",
+      "The outgoing server rejected the username or password. Providers with two-step sign-in need an app password.",
+    ],
     ["smtp_dns_failed", "We couldn't find this outgoing (SMTP) server."],
     ["smtp_tls_failed", "The secure connection to the outgoing server failed."],
     ["smtp_connection_failed", "We couldn't reach the outgoing (SMTP) server."],
     ["smtp_connection_timeout", "The outgoing (SMTP) server didn't respond."],
+    // the service has no direct SMTP: the owner either connects receive-only
+    // or enables it on the host, and the sentence names both ways out
+    [
+      "smtp_submission_unavailable",
+      'Outgoing mail isn\'t enabled on this Brain server. Turn off "Send from this account" to connect receive-only, or enable direct SMTP in the server settings.',
+    ],
   ])("explains %s as the server's answer, not an outage", async (code, sentence) => {
+    const status = code.endsWith("timeout") ? 408 : code.endsWith("unavailable") ? 503 : 422;
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(response(accounts()))
-      .mockResolvedValueOnce(
-        response({ apiVersion: 2, error: { code } }, code.endsWith("timeout") ? 408 : 422),
-      );
+      .mockResolvedValueOnce(response({ apiVersion: 2, error: { code } }, status));
     vi.stubGlobal("fetch", fetchMock);
     await act(async () =>
       root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),

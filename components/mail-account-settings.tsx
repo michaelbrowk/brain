@@ -1736,12 +1736,20 @@ function messageForError(error: unknown): string {
       return "We couldn't find this outgoing (SMTP) server. Check the server name.";
     case "smtp_tls_failed":
       return "The secure connection to the outgoing server failed. Check the server and security setting.";
+    // The one credential works for incoming and fails for outgoing at the
+    // providers that gate submission behind an app password, so the second
+    // sentence names the fix the first cannot.
     case "smtp_authentication_failed":
-      return "The outgoing server rejected the username or password.";
+      return "The outgoing server rejected the username or password. Providers with two-step sign-in need an app password.";
     case "smtp_connection_timeout":
       return "The outgoing (SMTP) server didn't respond. Check the port, or whether this server only accepts connections from your work network.";
     case "smtp_connection_failed":
       return "We couldn't reach the outgoing (SMTP) server. Check the server and port, or whether this server only accepts connections from your work network.";
+    // 503 from the service when the payload carries smtp and direct SMTP is
+    // not enabled on this Brain. Not retryable and not the settings' fault,
+    // so the sentence names both ways out.
+    case "smtp_submission_unavailable":
+      return 'Outgoing mail isn\'t enabled on this Brain server. Turn off "Send from this account" to connect receive-only, or enable direct SMTP in the server settings.';
     case "mail_service_timeout":
       return "Mail setup took too long to respond. Try again.";
     default:

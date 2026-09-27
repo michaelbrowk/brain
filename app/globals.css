@@ -5819,9 +5819,13 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
     transform: none !important;
   }
 
-  /* no sidebar on paper: no canvas offset, no bleed, no left fade */
-  .brain-shell {
+  /* no sidebar on paper: no canvas offset, no bleed, no left fade. The offset
+     lives on :root (see the shell block), so it is closed there, with the
+     shell's own :has() specificity so this beats the md rule above it. */
+  :root:has(.brain-shell) {
     --canvas-offset: 0px;
+  }
+  .brain-shell {
     --cover-glass: 0px;
     --cover-ramp: 0px;
   }

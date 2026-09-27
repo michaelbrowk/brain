@@ -3894,6 +3894,74 @@ describe("MailSurface", () => {
     ).toBe("saved@example.test");
   });
 
+  it("says in the slot that sending is not available for an account that can compose but not send", async () => {
+    // An account that stores drafts but has no transport: a custom domain
+    // whose SMTP is not set up. New message is not offered for it, but a
+    // saved draft still resumes, and the press on Send has to be answered on
+    // the sheet, in the slot, not in a pill under it.
+    const draftsOnly: PublicMailAccount = {
+      ...accountA,
+      capabilities: { ...gmailCapabilities, send: false },
+    };
+    const savedDraftId = "draft-55555555-5555-4555-8555-555555555555";
+    const listDrafts = vi.fn().mockResolvedValue([
+      {
+        draftId: savedDraftId,
+        accountId: draftsOnly.accountId,
+        revision: 2,
+        state: "editing",
+        intent: { kind: "compose" },
+        subject: "No transport yet",
+        updatedAt: 1_700_000_000_000,
+      },
+    ]);
+    const getDraft = vi.fn().mockResolvedValue({
+      draftId: savedDraftId,
+      accountId: draftsOnly.accountId,
+      revision: 2,
+      state: "editing",
+      intent: { kind: "compose" },
+      to: "friend@example.test",
+      cc: "",
+      bcc: "",
+      subject: "No transport yet",
+      text: "Written before the transport was.",
+      updatedAt: 1_700_000_000_000,
+    });
+    const onToast = vi.fn();
+    const client = makeClient({
+      loadAccounts: vi.fn().mockResolvedValue([draftsOnly]),
+      listDrafts,
+      getDraft,
+    });
+    await act(async () =>
+      root.render(
+        <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+      ),
+    );
+    await settle();
+    await enterSingleAccount(draftsOnly);
+    await goTo("Drafts");
+    await vi.waitFor(() =>
+      expect(document.body.textContent).toContain("No transport yet"),
+    );
+    await click(findButton("No transport yet"));
+    await vi.waitFor(() => expect(getDraft).toHaveBeenCalledTimes(1));
+
+    await click(findButton("Send"));
+    await settle();
+    const alert = document.body.querySelector('.brain-compose-slot [role="alert"]');
+    expect(alert?.textContent).toBe("Sending isn’t available for this account yet.");
+    expect(client.sendDraft).not.toHaveBeenCalled();
+    expect(client.send).not.toHaveBeenCalled();
+    // The sheet stays up with the letter as it was, Send live for a later try.
+    expect(
+      (document.body.querySelector("textarea") as HTMLTextAreaElement).value,
+    ).toBe("Written before the transport was.");
+    expect(findButton("Send").getAttribute("aria-busy")).toBeNull();
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
   it("does not let a slow draft resume replace a newer draft", async () => {
     const slowDraftId = "draft-33333333-3333-4333-8333-333333333333";
     const newerDraftId = "draft-44444444-4444-4444-8444-444444444444";

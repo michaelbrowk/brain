@@ -257,4 +257,84 @@ describe("the compose ask, through the assembled shell", () => {
     );
     expect(composer).not.toBeNull();
   });
+
+  // THE SHEET TAKES THE SHELL OVER, ON EVERY WIDTH. What Pages and the phone's
+  // search already did below md, the composer does everywhere: the shell goes
+  // inert and out of the accessibility tree, the tab bar leaves, and the two
+  // chords that live on the shell (⌘K, ⌘\) fall silent, because a palette or
+  // a folding sidebar under an opaque sheet is a thing that happens to a
+  // window nobody can see. The proof is the same chord working again the
+  // moment the sheet is gone: the guard is the composer, not the harness.
+  it("makes the shell inert and silences its chords while the composer is up", async () => {
+    // A desktop, so ⌘\ has a sidebar to fold and the control case is real.
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(min-width: 768px)",
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+    window.history.replaceState({}, "", "/mail");
+    await act(async () =>
+      root.render(<Shell tree={[]} initialSelectedId={null} initialSurface="mail" />),
+    );
+    await settle();
+    const compose = await findLazy(
+      () =>
+        [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+          (button) => button.getAttribute("aria-label") === "New message",
+        ),
+      "the column's New message",
+    );
+    const main = document.body.querySelector("main");
+    const shell = document.body.querySelector(".brain-shell");
+    expect(main?.hasAttribute("inert")).toBe(false);
+    expect(document.body.querySelector('nav[aria-label="Primary"]')).not.toBeNull();
+
+    await act(async () => compose.click());
+    await settle();
+    await findLazy(
+      () => document.body.querySelector('textarea[placeholder="Write a message…"]'),
+      "the open composer",
+    );
+
+    expect(main?.hasAttribute("inert")).toBe(true);
+    expect(main?.getAttribute("aria-hidden")).toBe("true");
+    expect(shell?.hasAttribute("inert")).toBe(true);
+    expect(shell?.getAttribute("aria-hidden")).toBe("true");
+    expect(document.body.querySelector('nav[aria-label="Primary"]')).toBeNull();
+
+    const chord = async (key: string, code: string) => {
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", { key, code, metaKey: true, bubbles: true }),
+        );
+      });
+      await settle();
+    };
+    const focusChip = () =>
+      [...document.body.querySelectorAll("button")].some((button) =>
+        button.getAttribute("title")?.startsWith("Exit focus mode"),
+      );
+    await chord("k", "KeyK");
+    expect(document.body.querySelector("[cmdk-input]")).toBeNull();
+    await chord("\\", "Backslash");
+    expect(focusChip()).toBe(false);
+
+    const close = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.getAttribute("aria-label") === "Close draft",
+    );
+    expect(close).toBeDefined();
+    await act(async () => close?.click());
+    await settle();
+    expect(main?.hasAttribute("inert")).toBe(false);
+    expect(shell?.hasAttribute("inert")).toBe(false);
+    expect(document.body.querySelector('nav[aria-label="Primary"]')).not.toBeNull();
+
+    await chord("\\", "Backslash");
+    expect(focusChip()).toBe(true);
+  });
 });

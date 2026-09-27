@@ -408,6 +408,11 @@ export function Shell({
   const [localRecoveryUnavailableIds, setLocalRecoveryUnavailableIds] =
     useState<Set<string>>(new Set());
   const [mobilePagesOpen, setMobilePagesOpen] = useState(false);
+  /** The mail composer is up. It reports through `MailSurface`'s
+   *  `onComposeOpenChange`, the way the surface already reports its account
+   *  status: the sheet is a portal at the body and the shell cannot see it in
+   *  its own tree, but the shell is what has to step back from it. */
+  const [composeOpen, setComposeOpen] = useState(false);
   const [mobileViewport, setMobileViewport] = useState(false);
   const mobileSearchTabRef = useRef<HTMLButtonElement | null>(null);
   const mobilePagesTabRef = useRef<HTMLButtonElement | null>(null);
@@ -2670,6 +2675,10 @@ export function Shell({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!e.metaKey && !e.ctrlKey) return;
+      // The compose sheet owns the window while it is up. The shell under it
+      // is inert, and a chord that opened the palette or folded the sidebar
+      // there would act on a window nobody can see. ⌘↵ is the sheet's own.
+      if (composeOpen) return;
       // ⌘K — match by key (K is never a dead key)
       if (e.key.toLowerCase() === "k" && !e.altKey) {
         e.preventDefault();
@@ -2698,7 +2707,7 @@ export function Shell({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [createPage, onPaletteOpenChange, openPalette, paletteOpen]);
+  }, [composeOpen, createPage, onPaletteOpenChange, openPalette, paletteOpen]);
 
   const clearDeleteTimers = useCallback(() => {
     if (deleteTimer.current) clearTimeout(deleteTimer.current);
@@ -5430,7 +5439,11 @@ export function Shell({
   }, [closePaletteForNavigation, paletteOpen]);
 
   const mobileSearchOpen = paletteOpen && mobileViewport;
-  const mobileBlockingSurfaceOpen = mobilePagesOpen || mobileSearchOpen;
+  // A surface that owns the whole window. Pages and the phone's search did
+  // this below md; the compose sheet does it on every width. While one is up
+  // the canvas is inert and out of the accessibility tree and the tab bar is
+  // gone, because what is under an opaque sheet is not a place.
+  const blockingSurfaceOpen = mobilePagesOpen || mobileSearchOpen || composeOpen;
   // The sidebar is translated off-canvas on mobile (Pages is its own view)
   // and in desktop focus mode. Off-screen must also mean out of the tab order
   // and the accessibility tree, or Tab walks into invisible controls. That is
@@ -5438,8 +5451,13 @@ export function Shell({
   // rail was on screen to own account and folder navigation, and mail's head
   // read it. Mail's navigation has one owner in its own column at every width,
   // so the sidebar has nothing left to say about it.
+  //
+  // The compose sheet is not in this list on purpose: it covers the sidebar
+  // rather than replacing it, so folding the panel away under the sheet would
+  // play a slide nobody sees and then a slide back as the sheet leaves. The
+  // sidebar goes inert with the whole shell root instead (below).
   const sidebarOffCanvas =
-    mobileViewport || focusMode || mobileBlockingSurfaceOpen;
+    mobileViewport || focusMode || mobilePagesOpen || mobileSearchOpen;
 
   const mobileTabBarHidden =
     mobileKeyboardOpen ||
@@ -5701,6 +5719,12 @@ export function Shell({
     <div
       className="brain-shell flex h-dvh overflow-hidden"
       data-sidebar-collapsed={focusMode && sidebarCollapsed ? "" : undefined}
+      // The compose sheet is a portal at the body, so the whole shell, the
+      // sidebar and the pills included, is what stands under it. `<main>`
+      // alone carried this for the phone's surfaces because their tab bar
+      // still had to be reachable; the sheet takes the bar with it.
+      aria-hidden={composeOpen || undefined}
+      inert={composeOpen || undefined}
     >
       {/* the paper and the static edge tints the glass refracts — on the
           shell, which never scrolls; the scroller above it is transparent */}
@@ -5750,8 +5774,8 @@ export function Shell({
         ref={mainRef}
         tabIndex={-1}
         data-dialog-focus-fallback
-        aria-hidden={mobileBlockingSurfaceOpen || undefined}
-        inert={mobileBlockingSurfaceOpen || undefined}
+        aria-hidden={blockingSurfaceOpen || undefined}
+        inert={blockingSurfaceOpen || undefined}
         className="brain-main flex min-w-0 flex-1 flex-col outline-none"
       >
         {focusMode && (
@@ -5821,6 +5845,7 @@ export function Shell({
                   openSettings("mail", { accountId })
                 }
                 onToast={showToast}
+                onComposeOpenChange={setComposeOpen}
                 refreshToken={mailSurfaceRevision}
               />
             ) : settingsActive ? (
@@ -6050,7 +6075,7 @@ export function Shell({
         onSelect={select}
       />
 
-      {!mobileBlockingSurfaceOpen && <MobileTabBar {...mobileTabBarProps} />}
+      {!blockingSurfaceOpen && <MobileTabBar {...mobileTabBarProps} />}
       {commandPalette}
 
       <ShellOverlays

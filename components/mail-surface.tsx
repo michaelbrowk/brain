@@ -328,6 +328,7 @@ function threadWord(count: number): string {
 export function MailSurface({
   onOpenSettings,
   onAccountStatusChange,
+  onComposeOpenChange,
   onToast,
   refreshToken,
   client = defaultMailSurfaceClient,
@@ -336,6 +337,10 @@ export function MailSurface({
    *  (/settings/mail?account=<id>) — the reauth affordances pass it. */
   onOpenSettings: (invoker: HTMLElement, accountId?: string) => void;
   onAccountStatusChange?: (configured: boolean) => void;
+  /** Whether a composer is up. The sheet is a portal at the body, so the
+   *  shell learns it here and steps back (inert, tab bar gone, chords silent)
+   *  rather than reading it off its own tree. Reported false on unmount. */
+  onComposeOpenChange?: (open: boolean) => void;
   onToast?: (title: string, options?: ToastOptions) => void;
   refreshToken?: number;
   client?: MailSurfaceClient;
@@ -1055,6 +1060,13 @@ export function MailSurface({
   useEffect(() => {
     composerRef.current = composer;
   }, [composer]);
+
+  const composeOpen = composer !== null;
+  useEffect(() => {
+    onComposeOpenChange?.(composeOpen);
+    // Leaving Mail with a sheet up (a route change) must give the shell back.
+    return () => onComposeOpenChange?.(false);
+  }, [composeOpen, onComposeOpenChange]);
 
   useEffect(() => {
     readerStateRef.current = readerState;

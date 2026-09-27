@@ -21,6 +21,12 @@ type PublicMailAccountBase = {
   readonly connectedAt: number;
   readonly createdAt: number;
   readonly updatedAt: number;
+  /** What the service will do for this account right now, from the
+   *  capabilities list. Only `send` is read here: an outgoing server can be
+   *  saved while the worker behind it is down, and the card has to say so.
+   *  Null after a mutation, whose answer carries no capabilities; the next
+   *  load of the list fills it in again. */
+  readonly capabilities: { readonly send: boolean } | null;
 };
 
 /** One server of an IMAP account, incoming or outgoing. The outgoing one
@@ -149,6 +155,12 @@ export function MailAccountSettings({
   const [submitting, setSubmitting] = useState(false);
   const [removing, setRemoving] = useState(false);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [removingSmtp, setRemovingSmtp] = useState(false);
+  const [confirmRemoveSmtp, setConfirmRemoveSmtp] = useState(false);
+  // "Add outgoing server" opens the form on the SMTP server field. The field
+  // exists only once the form has rendered with the switch on, so the focus
+  // waits for that commit instead of racing it.
+  const pendingSmtpFocusRef = useRef(false);
   const manuallyEdited = useRef({
     hostname: false,
     username: false,
@@ -264,11 +276,19 @@ export function MailAccountSettings({
     if (loadState === "ready") lastLoadedAccounts = accounts;
   }, [accounts, loadState]);
 
+  useEffect(() => {
+    if (view !== "imap-form" || !pendingSmtpFocusRef.current) return;
+    pendingSmtpFocusRef.current = false;
+    document.getElementById(FIELD_IDS.smtpHostname)?.focus();
+  }, [view]);
+
   const load = useCallback(async (signal?: AbortSignal, silent = false) => {
     if (!silent) setLoadState("loading");
     setRequestError(null);
     try {
-      const response = await fetch("/api/mail/accounts", {
+      // The capabilities list, not the plain one: it is the same accounts
+      // with what the service can do for each, and the card needs `send`.
+      const response = await fetch("/api/mail/accounts/capabilities", {
         cache: "no-store",
         signal,
       });
@@ -617,6 +637,54 @@ export function MailAccountSettings({
     }
   };
 
+  const removeOutgoingServer = async () => {
+    if (selectedAccount?.providerKind !== "imap" || !selectedAccount.smtp || removingSmtp) {
+      return;
+    }
+    setRemovingSmtp(true);
+    setRequestError(null);
+    const accountId = selectedAccount.accountId;
+    mutationControllerRef.current?.abort();
+    const controller = new AbortController();
+    const requestSequence = mutationSequenceRef.current + 1;
+    mutationSequenceRef.current = requestSequence;
+    mutationControllerRef.current = controller;
+    const isCurrentRequest = () =>
+      mountedRef.current &&
+      !controller.signal.aborted &&
+      mutationSequenceRef.current === requestSequence;
+    try {
+      // Removal never needs the password (the service rule: taking the
+      // outgoing server away discloses nothing), so the patch is the one key.
+      const response = await fetch(`/api/mail/accounts/${encodeURIComponent(accountId)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        signal: controller.signal,
+        body: JSON.stringify({ smtp: null }),
+      });
+      const payload: unknown = await response.json();
+      if (!response.ok) throw new Error(readErrorCode(payload));
+      const nextAccount = parseAccountResult(payload);
+      if (nextAccount.accountId !== accountId) {
+        throw new Error("mail_service_invalid_response");
+      }
+      if (!isCurrentRequest()) return;
+      setAccounts((current) =>
+        current.map((account) => (account.accountId === accountId ? nextAccount : account)),
+      );
+      setConfirmRemoveSmtp(false);
+      onToast("Outgoing server removed");
+    } catch (error) {
+      if (!isCurrentRequest()) return;
+      setRequestError(messageForError(error));
+    } finally {
+      if (isCurrentRequest()) {
+        mutationControllerRef.current = null;
+        setRemovingSmtp(false);
+      }
+    }
+  };
+
   if (loadState === "loading") return <MailSettingsSkeleton />;
 
   if (loadState === "error") {
@@ -672,7 +740,19 @@ export function MailAccountSettings({
     const connectionLabel =
       selectedAccount.providerKind === "gmail"
         ? "Google"
-        : `${selectedAccount.imap.hostname}:${selectedAccount.imap.port} · ${securityLabel(selectedAccount.imap.tls)}`;
+        : endpointLabel(selectedAccount.imap);
+    // The outgoing half of an IMAP account, on its own caption line: the
+    // server it sends through, or the plain fact that it does not send.
+    // Google sends through Google and has no such line.
+    const outgoing = selectedAccount.providerKind === "imap" ? selectedAccount.smtp : undefined;
+    const outgoingLabel =
+      selectedAccount.providerKind === "imap"
+        ? outgoing
+          ? endpointLabel(outgoing)
+          : "Receive only"
+        : null;
+    const sendUnavailable =
+      outgoing !== undefined && selectedAccount.capabilities?.send === false;
     return (
       <div className="space-y-7">
         <SectionBack label="Mail accounts" onBack={() => setView("list")} />
@@ -688,8 +768,21 @@ export function MailAccountSettings({
                   ? `${selectedAccount.emailAddress} · ${connectionLabel}`
                   : connectionLabel}
               </p>
+              {outgoingLabel && (
+                <p className="truncate text-caption text-ink-3">{outgoingLabel}</p>
+              )}
             </div>
           </div>
+          {sendUnavailable && (
+            <div className="brain-settings-row">
+              {/* the server is saved and verified; what is missing is the
+                  worker on this Brain, which the owner repairs on the host,
+                  not in this form, so the row offers no control */}
+              <p role="status" className="min-w-0 flex-1 text-table text-ink-2">
+                Outgoing server is saved, but sending is unavailable on this Brain right now.
+              </p>
+            </div>
+          )}
           {selectedAccount.status === "reauth_required" && (
             <div className="brain-settings-row">
               {/* only a Google account is repaired through OAuth; an IMAP
@@ -776,6 +869,43 @@ export function MailAccountSettings({
               />
             </button>
           )}
+          {selectedAccount.providerKind === "imap" && !outgoing && (
+            <button
+              type="button"
+              onClick={() => {
+                resetForm(selectedAccount);
+                setSmtpChoice("on");
+                pendingSmtpFocusRef.current = true;
+                setView("imap-form");
+              }}
+              className={NAVROW_CLASS}
+            >
+              <span className="min-w-0 flex-1 truncate text-table font-medium text-ink">
+                Add outgoing server
+              </span>
+              <Icon
+                name="alt-arrow-right-linear"
+                size={16}
+                className="shrink-0 text-ink-3"
+              />
+            </button>
+          )}
+          {outgoing && (
+            <SettingsRow
+              label="Outgoing server"
+              hint="Reply and send from Brain go through it"
+            >
+              <Button
+                type="button"
+                variant="quiet"
+                className="shrink-0"
+                disabled={removingSmtp}
+                onClick={() => setConfirmRemoveSmtp(true)}
+              >
+                {removingSmtp ? "Removing…" : "Remove outgoing server"}
+              </Button>
+            </SettingsRow>
+          )}
         </SettingsGroup>
 
         <SettingsGroup>
@@ -801,6 +931,14 @@ export function MailAccountSettings({
           description="Brain will delete this account, its credentials, settings, cached mail, local drafts, search index, and sync state. Nothing will be deleted from your mail provider."
           confirmLabel="Remove from Brain"
           onConfirm={() => void removeSelected()}
+        />
+        <ConfirmDialog
+          open={confirmRemoveSmtp}
+          onOpenChange={setConfirmRemoveSmtp}
+          title="Remove the outgoing server?"
+          description="Brain will stop sending from this account. Incoming mail keeps syncing."
+          confirmLabel="Stop sending"
+          onConfirm={() => void removeOutgoingServer()}
         />
       </div>
     );
@@ -1432,10 +1570,18 @@ function securityLabel(value: MailTlsMode): string {
   return value === "implicit" ? "TLS" : "STARTTLS";
 }
 
+function endpointLabel(endpoint: MailEndpoint): string {
+  return `${endpoint.hostname}:${endpoint.port} · ${securityLabel(endpoint.tls)}`;
+}
+
+/** The capabilities route answers apiVersion 3, each account carrying its
+ *  capabilities. A service from before that route answers the plain list as
+ *  apiVersion 2, the same accounts without them, and the Brain client passes
+ *  that through; both shapes are the account list. */
 function parseAccounts(value: unknown): PublicMailAccount[] {
   if (
     !isExactRecord(value, ["apiVersion", "accounts"]) ||
-    value.apiVersion !== 2 ||
+    (value.apiVersion !== 2 && value.apiVersion !== 3) ||
     !Array.isArray(value.accounts)
   ) {
     throw new Error("mail_service_invalid_response");
@@ -1472,6 +1618,8 @@ function parsePublicAccount(value: unknown): PublicMailAccount {
     ...(value.providerKind === "imap" && Object.prototype.hasOwnProperty.call(value, "smtp")
       ? ["smtp"]
       : []),
+    // present on the capabilities list, absent from a mutation's answer
+    ...(Object.prototype.hasOwnProperty.call(value, "capabilities") ? ["capabilities"] : []),
   ];
   if (
     !isExactRecord(value, fields) ||
@@ -1487,6 +1635,16 @@ function parsePublicAccount(value: unknown): PublicMailAccount {
   ) {
     throw new Error("mail_service_invalid_response");
   }
+  // Only `send` is read, so only `send` is checked: the full capability set
+  // belongs to the mail surface and its client, and a capability added there
+  // must not make this card fail closed.
+  const capabilities = "capabilities" in value ? value.capabilities : undefined;
+  if (
+    capabilities !== undefined &&
+    (!isRecord(capabilities) || typeof capabilities.send !== "boolean")
+  ) {
+    throw new Error("mail_service_invalid_response");
+  }
   const base: PublicMailAccountBase = {
     accountId: value.accountId,
     emailAddress: value.emailAddress,
@@ -1495,6 +1653,8 @@ function parsePublicAccount(value: unknown): PublicMailAccount {
     connectedAt: value.connectedAt,
     createdAt: value.createdAt,
     updatedAt: value.updatedAt,
+    capabilities:
+      capabilities !== undefined ? { send: capabilities.send as boolean } : null,
   };
   if (value.providerKind === "gmail") {
     return { ...base, providerKind: "gmail" };

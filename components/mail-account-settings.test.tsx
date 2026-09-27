@@ -1052,6 +1052,134 @@ describe("MailAccountSettings", () => {
     expect(document.body.textContent).not.toContain("person@example.test");
   });
 
+  const SEND_UNAVAILABLE =
+    "Outgoing server is saved, but sending is unavailable on this Brain right now.";
+  const capabilities = (send: boolean) => ({
+    mailboxes: ["inbox"],
+    listThreads: true,
+    sync: true,
+    headerPreview: true,
+    messageBodies: true,
+    threadMutations: true,
+    compose: send,
+    send,
+    reply: send,
+  });
+  const accountsWithCapabilities = (...items: Array<Record<string, unknown> & { providerKind: string }>) => ({
+    apiVersion: 3,
+    accounts: items.map((item) => ({
+      ...item,
+      capabilities: capabilities(item.providerKind === "gmail" || "smtp" in item),
+    })),
+  });
+
+  it("reads the account list from the capabilities route", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response(accountsWithCapabilities(imapAccount())));
+    vi.stubGlobal("fetch", fetchMock);
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/mail/accounts/capabilities");
+    expect(document.body.textContent).toContain("person@example.test");
+  });
+
+  it("shows the outgoing server on the card and removes it as smtp: null after confirmation", async () => {
+    const withSmtp = imapAccountWithSmtp();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(accountsWithCapabilities(withSmtp)))
+      .mockResolvedValueOnce(response(result(imapAccount())));
+    vi.stubGlobal("fetch", fetchMock);
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+    await act(async () => button("Personalperson@example.test · IMAP").click());
+
+    expect(document.body.textContent).toContain("imap.example.test:993 · TLS");
+    expect(document.body.textContent).toContain("smtp.example.test:465 · TLS");
+    expect(document.body.textContent).not.toContain("Receive only");
+    expect(document.body.textContent).not.toContain("Add outgoing server");
+    expect(document.body.querySelector('[role="status"]')).toBeNull();
+    await act(async () => button("Remove outgoing server").click());
+    expect(document.body.textContent).toContain(
+      "Brain will stop sending from this account. Incoming mail keeps syncing.",
+    );
+    await act(async () => button("Stop sending").click());
+    await settle();
+
+    expect(fetchMock.mock.calls[1][0]).toBe(`/api/mail/accounts/${withSmtp.accountId}`);
+    const request = fetchMock.mock.calls[1][1] as RequestInit;
+    expect(request.method).toBe("PATCH");
+    expect(JSON.parse(String(request.body))).toEqual({ smtp: null });
+    expect(document.body.textContent).toContain("Receive only");
+    expect(document.body.textContent).toContain("Add outgoing server");
+    expect(document.body.textContent).not.toContain("Remove outgoing server");
+    expect(onToast).toHaveBeenCalledWith("Outgoing server removed");
+  });
+
+  it("opens the form on the outgoing server from a receive-only card", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(accountsWithCapabilities(imapAccount()))));
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+    await act(async () => button("Personalperson@example.test · IMAP").click());
+
+    expect(document.body.textContent).toContain("Receive only");
+    expect(document.body.textContent).not.toContain("Remove outgoing server");
+    await act(async () => button("Add outgoing server").click());
+
+    expect(sendSwitchIs("on")).toBe(true);
+    expect(field("mail-smtp-hostname").value).toBe("smtp.example.test");
+    expect(document.activeElement).toBe(field("mail-smtp-hostname"));
+    // the account is being edited, so the same password rule applies
+    expect(document.getElementById("mail-password-hint")?.textContent).toBe(
+      "Re-enter the password to add or change the outgoing server.",
+    );
+  });
+
+  it("says when a saved outgoing server cannot send on this Brain", async () => {
+    const withSmtp = imapAccountWithSmtp();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        response({
+          apiVersion: 3,
+          accounts: [{ ...withSmtp, capabilities: capabilities(false) }],
+        }),
+      ),
+    );
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+    await act(async () => button("Personalperson@example.test · IMAP").click());
+
+    const status = document.body.querySelector('[role="status"]');
+    expect(status?.textContent).toBe(SEND_UNAVAILABLE);
+    expect(document.body.textContent).toContain("smtp.example.test:465 · TLS");
+    expect(button("Remove outgoing server")).not.toBeNull();
+  });
+
+  it("keeps the Google card free of the outgoing line", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(response(accountsWithCapabilities(gmailAccount()))),
+    );
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+    await act(async () => button("person@gmail.testGoogleReconnect needed").click());
+
+    expect(document.body.textContent).not.toContain("Receive only");
+    expect(document.body.textContent).not.toContain("outgoing server");
+    expect(document.body.textContent).not.toContain(SEND_UNAVAILABLE);
+  });
+
   it("still derives imap.<domain> for a domain with no provider entry", async () => {
     await openFormWithAccounts();
     await act(async () => inputValue(field("mail-email"), "misha@studio.example"));

@@ -507,8 +507,8 @@ export function MailComposer({
             where no keyboard can cover it: the phone's standing failure was a
             footer under the keys. The slot in the middle always keeps its
             place, so a sentence arriving in it moves nothing else. On the
-            phone From reads here as quiet text and yields the row to the slot
-            while a sentence stands (`data-message`). */}
+            phone From reads here as quiet text and keeps the row; a sentence
+            takes a second line under the actions (`data-message` opens it). */}
         {/* While a send is out the cross, the trash and Cc Bcc do not only
             refuse, they read as inert: `aria-disabled` and `disabled` take
             the atoms' own dimmed state, and `data-sending` names the row's. */}

@@ -626,6 +626,31 @@ describe("the compose sheet", () => {
     );
   });
 
+  it("on the phone gives a sentence its own line under the actions, grown over DUR.base, and From keeps the row", () => {
+    /** A rule scoped to the phone's sheet (`[data-sheet]`). */
+    const phone = (selector: string) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const match = css.match(
+        new RegExp(`^\\.brain-compose-paper\\[data-sheet\\] ${escaped} \\{([^}]*)\\}`, "m"),
+      );
+      if (!match) throw new Error(`no phone rule for ${selector}`);
+      return match[1];
+    };
+    // The row wraps; the slot is the second line, closed until a sentence
+    // stands and grown to its content on the base duration.
+    expect(phone(".brain-compose-actions")).toContain("flex-wrap: wrap");
+    expect(phone(".brain-compose-slot")).toContain("grid-template-rows: 0fr");
+    expect(phone(".brain-compose-slot")).toContain(
+      "transition: grid-template-rows 160ms var(--ease-out)",
+    );
+    expect(phone(".brain-compose-actions[data-message] .brain-compose-slot")).toContain(
+      "grid-template-rows: 1fr",
+    );
+    // From no longer yields the row: nothing hides it while a sentence stands.
+    expect(css).not.toMatch(/:not\(\[data-message\]\) \.brain-compose-actions-from/);
+    expect(phone(".brain-compose-actions-from")).toContain("display: flex");
+  });
+
   it("keeps the phone's bottom safe area under the letter", () => {
     expect(rule(".brain-compose-column")).toContain(
       "calc(24px + env(safe-area-inset-bottom, 0px))",

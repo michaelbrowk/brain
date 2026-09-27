@@ -4825,8 +4825,9 @@ a.brain-share-url:active {
   padding-inline: max(var(--inset), env(safe-area-inset-left, 0px))
     max(var(--inset), env(safe-area-inset-right, 0px));
 }
-/* From as quiet text in the row, on the phone only; while a sentence stands
-   in the slot the row is the slot's (`data-message`) */
+/* From as quiet text in the row, on the phone only. It keeps the row: a
+   sentence takes a second line under the actions (below) rather than the
+   From's room. */
 .brain-compose-actions-from {
   display: none;
   min-width: 0;
@@ -4838,12 +4839,51 @@ a.brain-share-url:active {
   line-height: 1.25;
   color: var(--ink-2);
 }
-.brain-compose-paper[data-sheet] .brain-compose-actions:not([data-message]) .brain-compose-actions-from {
-  display: block;
+/* THE PHONE'S SECOND LINE. Five controls and From already share the 44, and a
+   sentence squeezed in beside them was a truncated sentence with its "Mail
+   settings" cut off. So on the phone the row wraps: From stands in the first
+   line at the row's 44 and the slot is the whole second line, a grid row
+   closed at 0fr that opens to its content over the base duration when a
+   sentence stands (`data-message`, which the sheet keeps until the sentence
+   has finished leaving, so the line closes after the fade, not under it).
+   The sentence may wrap to two lines there, with the action beside it. */
+.brain-compose-paper[data-sheet] .brain-compose-actions {
+  flex-wrap: wrap;
+  height: auto;
+  min-height: 44px;
+  row-gap: 0;
 }
-.brain-compose-paper[data-sheet] .brain-compose-actions:not([data-message]) .brain-compose-slot {
-  flex: 0 0 0px;
+.brain-compose-paper[data-sheet] .brain-compose-actions-from {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+}
+.brain-compose-paper[data-sheet] .brain-compose-slot {
+  order: 10;
+  display: grid;
+  flex: 0 0 100%;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 160ms var(--ease-out);
+}
+.brain-compose-paper[data-sheet] .brain-compose-actions[data-message] .brain-compose-slot {
+  grid-template-rows: 1fr;
+}
+.brain-compose-paper[data-sheet] .brain-compose-slot-line {
+  min-height: 0;
+  flex-wrap: wrap;
+  row-gap: 2px;
   overflow: hidden;
+  padding-bottom: 8px;
+}
+.brain-compose-paper[data-sheet] .brain-compose-slot-line > [role] {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+@media (prefers-reduced-motion: reduce) {
+  .brain-compose-paper[data-sheet] .brain-compose-slot {
+    transition: none;
+  }
 }
 /* the slot always keeps its place: a sentence arriving in it moves nothing */
 .brain-compose-slot {

@@ -1548,7 +1548,11 @@ const MAIL_LOG_CODE_FIELDS = Object.freeze([
   "phase",
   "durationBucket",
   "errorCode",
-  "transport",
+] as const);
+/** The only two things the start record may say about the SMTP transport. */
+const MAIL_LOG_TRANSPORT_KINDS = Object.freeze([
+  "direct",
+  "authenticated_byte_relay",
 ] as const);
 const MAIL_LOG_STABLE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const MAIL_LOG_SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
@@ -1595,6 +1599,16 @@ export function projectMailLogRecord(value: unknown): MailLogRecord | null {
     for (const field of MAIL_LOG_CODE_FIELDS) {
       const fieldValue = dataPropertyValue(descriptors[field]);
       if (isStableMailLogCode(fieldValue)) projected[field] = fieldValue;
+    }
+    // A closed set rather than the stable-code shape: a host or a relay URL
+    // could never pass the regex, but a wrong literal could, and the field
+    // exists to name one of two composed transports.
+    const transport = dataPropertyValue(descriptors.transport);
+    if (
+      typeof transport === "string" &&
+      (MAIL_LOG_TRANSPORT_KINDS as readonly string[]).includes(transport)
+    ) {
+      projected.transport = transport;
     }
     for (const field of MAIL_LOG_NUMERIC_FIELDS) {
       const fieldValue = dataPropertyValue(descriptors[field]);

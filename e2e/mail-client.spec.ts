@@ -2326,22 +2326,21 @@ test("@release the From switch moves the letter to another account, and a reply 
   await from.click();
   const rows = page.getByRole("menuitemradio");
   await expect(rows).toHaveCount(2);
-  // Keyboard: what the arrows do is recorded in the run's output (the
-  // dialog's and the menu's focus scopes are two copies of Radix's that
-  // cannot see each other), and Esc closes the menu alone: the sheet stands
-  // because it holds Esc itself while a menu of its own is up.
+  // Keyboard: the arrows walk the rows (the dialog and the menu share one
+  // copy of Radix's focus scope now), and Esc closes the menu alone: the
+  // sheet stands because it holds Esc itself while a menu of its own is up.
   await page.keyboard.press("ArrowDown");
-  const afterArrow = await page.evaluate(() => ({
-    role: document.activeElement?.getAttribute("role") ?? null,
-    text: document.activeElement?.textContent ?? null,
-  }));
-  console.log(`from-menu ArrowDown focus: ${JSON.stringify(afterArrow)}`);
+  await expect(rows.nth(0)).toBeFocused();
   await page.keyboard.press("Escape");
   await expect(rows).toHaveCount(0);
   await expect(sheet).toBeVisible();
   await from.click();
   await expect(rows).toHaveCount(2);
-  await rows.filter({ hasText: "second@example.test" }).click();
+  await page.keyboard.press("ArrowDown");
+  await page.keyboard.press("ArrowDown");
+  await expect(rows.nth(1)).toBeFocused();
+  await expect(rows.nth(1)).toContainText("second@example.test");
+  await page.keyboard.press("Enter");
 
   // The next create carries the second accountId and the same fields; the
   // first draft is deleted rather than left in the first account's Drafts.

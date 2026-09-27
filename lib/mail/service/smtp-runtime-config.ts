@@ -11,9 +11,43 @@ export const SMTP_EGRESS_CREDENTIAL_NAMES = Object.freeze({
   accessClientSecret: "smtp-egress-access-client-secret",
 });
 
+export type SmtpTransportConfig =
+  | { readonly kind: "relay"; readonly relay: CloudflareEgressClientOptions }
+  | { readonly kind: "direct" };
+
 /**
- * SMTP egress is an explicit production feature flag. Disabled or incomplete
- * configuration never falls back to direct SMTP or a weaker transport.
+ * Which byte transport the SMTP runtime composes, or null for a service that
+ * does not send. Two flags, each explicit: `BRAIN_MAIL_SMTP_DIRECT_ENABLED=1`
+ * dials the provider from this host, `BRAIN_MAIL_SMTP_EGRESS_ENABLED=1` goes
+ * through the authenticated Cloudflare relay. Both at once is a configuration
+ * error rather than a preference, because an operator who set both has not
+ * decided, and a value that is not "0" or "1" is refused for the same reason.
+ * Unset or "0" everywhere keeps the service receive-only, byte for byte as
+ * before the direct flag existed.
+ */
+export async function readOptionalSmtpTransportConfig(
+  environment: Readonly<Record<string, string | undefined>>,
+): Promise<SmtpTransportConfig | null> {
+  const direct = environment.BRAIN_MAIL_SMTP_DIRECT_ENABLED;
+  if (direct !== undefined && direct !== "0" && direct !== "1") {
+    throw new Error("SMTP egress configuration is invalid");
+  }
+  if (direct === "1") {
+    const relay = environment.BRAIN_MAIL_SMTP_EGRESS_ENABLED;
+    if (relay !== undefined && relay !== "0") {
+      throw new Error("SMTP egress configuration is invalid");
+    }
+    return Object.freeze({ kind: "direct" });
+  }
+  const relay = await readOptionalSmtpEgressConfig(environment);
+  return relay === null ? null : Object.freeze({ kind: "relay", relay });
+}
+
+/**
+ * The relay branch of the transport selection. Disabled or incomplete relay
+ * configuration never falls back to direct SMTP or a weaker transport: direct
+ * submission is its own explicit flag, read by
+ * `readOptionalSmtpTransportConfig` above.
  */
 export async function readOptionalSmtpEgressConfig(
   environment: Readonly<Record<string, string | undefined>>,

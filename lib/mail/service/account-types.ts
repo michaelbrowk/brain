@@ -281,7 +281,10 @@ export type MailAccountErrorCode =
   | "smtp_tls_failed"
   | "smtp_connection_failed"
   | "smtp_authentication_failed"
-  | "smtp_connection_timeout";
+  | "smtp_connection_timeout"
+  /** The payload carries SMTP settings and this service composed no SMTP
+   *  runtime: neither transport flag is set. Receive-only still connects. */
+  | "smtp_submission_unavailable";
 
 export class MailAccountError extends Error {
   readonly code: MailAccountErrorCode;

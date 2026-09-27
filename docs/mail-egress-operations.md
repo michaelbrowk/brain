@@ -1,12 +1,12 @@
 # Brain Mail SMTP egress: feasibility operations
 
-- Status: local feasibility implementation; disabled by default
-- Date: 2026-07-13
-- Production impact: none until a separately reviewed Worker deployment and Brain configuration
+- Status: two transports, both disabled by default. Direct submission (the section at the end of this file) is the primary one; the Cloudflare relay below is the alternative
+- Date: 2026-07-13, direct submission added 2026-09-27
+- Production impact: none until an operator sets one of the two flags in `/etc/brain/brain-mail.env` and restarts `brain-mail.service`
 
 ## What this component does
 
-DigitalOcean blocks outbound SMTP ports 465 and 587. The feasibility Worker opens one raw TCP connection to an already validated public IP and relays bytes over WebSocket. Brain still owns SMTP, STARTTLS, TLS certificate verification, original-hostname SNI, AUTH, and the message body.
+DigitalOcean blocked outbound SMTP ports 465 and 587 when this component was designed, and the feasibility Worker was the answer: it opens one raw TCP connection to an already validated public IP and relays bytes over WebSocket. The block has since been lifted for Brain's droplet, so the relay is now the alternative route and direct submission from the host is the primary one; see "Direct submission" at the end. Either way Brain owns SMTP, STARTTLS, TLS certificate verification, original-hostname SNI, AUTH, and the message body.
 
 The control envelope never contains a provider hostname, SMTP password, token, MIME metadata, or a request to “send mail”. On port 587 the pre-STARTTLS greeting and EHLO remain ordinary transport bytes and can contain hostnames; the Worker does not parse or log them. It accepts only a signed literal IPv4/IPv6 address on port 465 or 587.
 
@@ -233,7 +233,9 @@ re-send queued or ambiguous operations:
    healthy;
 5. disable the Worker route or set its separate `MAIL_EGRESS_ENABLED=false`;
 6. rotate the HMAC and Access service token if exposure is suspected;
-7. never fall back to direct DigitalOcean SMTP or retry an ambiguous SMTP handoff.
+7. never retry an ambiguous SMTP handoff. Direct submission is not a fallback
+   the service takes on its own: it is the separate flag in the next section,
+   set by hand, and the service refuses to start with both flags set.
 
 Removing the Brain drop-in is sufficient for the application rollback even if
 the protected Worker stays online: no Brain process retains the credentials or
@@ -242,3 +244,86 @@ must be deleted after rollback if the canary is abandoned.
 
 No Worker deployment, DNS route, Access policy, secret, or production
 configuration is created merely by installing this dark release.
+
+## Direct submission (BRAIN_MAIL_SMTP_DIRECT_ENABLED)
+
+The service dials the owner's SMTP host itself: the same first-party wire
+engine, verifier and worker as the relay route, over a socket
+`DirectSmtpConnectionFactory` opens to the validated literal address. Nothing
+else changes. The DNS generation, the forbidden ranges, the observed-peer
+check, original-hostname SNI with certificate verification, AUTH only after
+TLS, one worker and one operation per pass, the 10 s connect and 60 s session
+ceilings all sit on this path already, and the unit needs no edit:
+`RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6` with no `IPAddressDeny` is
+what lets IMAP out today. No Cloudflare resource, credential file or drop-in
+is involved. The flag is read by `readOptionalSmtpTransportConfig` in
+[`lib/mail/service/smtp-runtime-config.ts`](../lib/mail/service/smtp-runtime-config.ts).
+One limit is worth knowing before the first provider is configured: a
+hostname that resolves to more than 16 addresses across A and AAAA
+(`MAIL_RESOURCE_LIMITS.maxDnsAnswers`) fails the whole DNS generation and
+surfaces as `smtp_dns_failed`, on save and on every send attempt, the same
+rule IMAP already lives under.
+
+The value is exactly `0`, `1` or absent. `1` together with
+`BRAIN_MAIL_SMTP_EGRESS_ENABLED=1` is a refusal at start
+(`SMTP egress configuration is invalid`, the journal shows
+`mail_service_start_failed`), so switching transports means removing one flag
+and adding the other in the same edit. Any other value is the same refusal.
+
+### Enable
+
+The deploy puller never refreshes environment or units, so this is a hand
+edit followed by a restart. The file is root-owned, mode `0600`, and already
+holds `BRAIN_PUBLIC_ORIGIN`; append, do not rewrite:
+
+```bash
+sudo test -f /etc/brain/brain-mail.env
+sudo grep -q '^BRAIN_MAIL_SMTP_EGRESS_ENABLED=1' /etc/brain/brain-mail.env && { echo "relay is on: remove it first"; false; }
+printf 'BRAIN_MAIL_SMTP_DIRECT_ENABLED=1\n' | sudo tee -a /etc/brain/brain-mail.env >/dev/null
+sudo systemctl restart brain-mail.service
+```
+
+### Verify
+
+```bash
+sudo systemctl is-active --quiet brain-mail.service
+sudo curl --fail --silent --show-error \
+  --unix-socket /run/brain-mail/brain-mail.sock \
+  http://brain-mail/v1/health
+sudo journalctl -u brain-mail.service -n 50 --no-pager | grep '"event":"mail_service_started"'
+```
+
+The health answer proves the service came up on the new environment. It does
+not say which transport was composed: `sendReadiness` follows the send door,
+which exists whenever Gmail send is compiled in, and `egress_blocked` is not
+emitted by any code path today. The start record is what says it: the line
+must read `"phase":"running"` and `"transport":"direct"`. A line without a
+`transport` field means the flag was not read (the edit landed in the wrong
+file, or the restart did not happen). Per account, `capabilities.send` on the
+accounts list turns true only once the account has an outgoing server saved
+and the worker is started and healthy; the Mail settings page shows the same
+state.
+
+The first real send is a canary, not a soak: one message from the account to
+itself, `GET /v1/send/:id` reaching `sent`, and the copy visible in the
+provider's Sent folder. A `sent_copy_failed` on a provider without
+SPECIAL-USE `\Sent` is the known gap in `imap-sent-copy.ts` and does not mean
+the message was lost.
+
+### Rollback
+
+```bash
+sudo sed -i '/^BRAIN_MAIL_SMTP_DIRECT_ENABLED=/d' /etc/brain/brain-mail.env
+sudo systemctl restart brain-mail.service
+sudo journalctl -u brain-mail.service -n 20 --no-pager | grep '"event":"mail_service_started"'
+```
+
+The start record now has no `transport` field. The SMTP runtime is null:
+accounts that carry an outgoing server keep it saved and become receive-only
+(`capabilities.send` false, the settings page says so), a new connect that
+carries `smtp` is refused with `smtp_submission_unavailable` until the flag
+returns, and queued rows stay queued in the outbox. Nothing is re-sent, nothing
+is deleted, and IMAP and Gmail are untouched. If the provider or the platform
+starts refusing 465/587, the queue moves `retry_wait` to `failed` at the
+attempt cap with the message still readable; the relay route above is the
+alternative, behind its own flag, never both.

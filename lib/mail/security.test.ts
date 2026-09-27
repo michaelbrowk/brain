@@ -1205,6 +1205,7 @@ describe("mail security and resource contracts", () => {
       remoteImageCount: 3,
       remoteImageAttemptCount: 2,
       errorCode: "imap_timeout",
+      transport: "direct",
       queueDepth: 9,
       nested: {
         errorCode: "must_not_survive",
@@ -1223,6 +1224,29 @@ describe("mail security and resource contracts", () => {
       remoteImageCount: 3,
       remoteImageAttemptCount: 2,
       errorCode: "imap_timeout",
+      transport: "direct",
+    });
+    // The transport is one of two names, never a host and never a code that
+    // merely looks stable: anything but the two literals is dropped.
+    for (const transport of [
+      "smtp.example.test",
+      "relay_v2",
+      "direct_smtp",
+      "DIRECT",
+      "",
+    ]) {
+      expect(
+        projectMailLogRecord({ event: "mail_service_started", transport }),
+      ).toEqual({ event: "mail_service_started" });
+    }
+    expect(
+      projectMailLogRecord({
+        event: "mail_service_started",
+        transport: "authenticated_byte_relay",
+      }),
+    ).toEqual({
+      event: "mail_service_started",
+      transport: "authenticated_byte_relay",
     });
   });
 

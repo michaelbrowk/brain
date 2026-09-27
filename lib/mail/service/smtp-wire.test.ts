@@ -8,7 +8,7 @@ import {
   SMTP_TEST_CA_CERT,
   type FakeSmtpServerOptions,
 } from "../testing/smtp-fixtures";
-import { submitSmtpMessage } from "./smtp-wire";
+import { submitSmtpMessage, verifySmtpAuthentication } from "./smtp-wire";
 
 const RAW_MESSAGE = Buffer.from(
   "From: me@test.local\r\nTo: friend@example.net\r\nSubject: hi\r\n\r\nBody line\r\n.leading dot line\r\n",
@@ -77,6 +77,33 @@ async function runSubmission(
 }
 
 describe("first-party SMTP wire client", () => {
+  it("returns an authenticated verdict inside the caller's deadline when QUIT goes unanswered", async () => {
+    // The account connect budget is 10 s and the SMTP check runs after the
+    // IMAP one inside it. QUIT is best effort, but its own two-second timer
+    // must not run past the deadline the caller handed in, or a correct
+    // password comes back as a timeout.
+    const server = await startServer({ mode: "implicit", quitBehavior: "silence" });
+    const socket = net.connect(server.port, "127.0.0.1");
+    sockets.push(socket);
+    await once(socket, "connect");
+    const startedAt = Date.now();
+    const deadlineAt = startedAt + 1_000;
+
+    const outcome = await verifySmtpAuthentication({
+      connection: socket,
+      tls: "implicit",
+      servername: "smtp.test.local",
+      username: "user@test.local",
+      password: Buffer.from("swordfish", "utf8"),
+      deadlineAt,
+      trustedRootCertificates: [SMTP_TEST_CA_CERT],
+    });
+
+    expect(outcome).toEqual({ kind: "authenticated" });
+    expect(server.commands).toContain("QUIT");
+    expect(Date.now()).toBeLessThanOrEqual(deadlineAt + 200);
+  });
+
   it("submits over implicit TLS with dot-stuffed DATA behind the barrier", async () => {
     const server = await startServer({ mode: "implicit" });
     const { outcome, beforeDataCalls } = await runSubmission(server, {

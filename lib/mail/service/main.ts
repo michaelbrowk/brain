@@ -255,10 +255,13 @@ async function main(): Promise<void> {
   // says. An operator reading the journal after a restart needs to see that
   // the silence is the switch rather than a fault, and it is the only place
   // outside the process where the branch above is visible: the artifact smoke
-  // reads this line to hold the restart honest.
+  // reads this line to hold the restart honest. The `transport` names which
+  // SMTP byte transport the flags selected, direct or the relay, and is absent
+  // for a receive-only service; it never carries a relay URL or a provider host.
   writeServiceLog({
     event: "mail_service_started",
     phase: workersRunning ? "running" : "paused",
+    ...(smtpRuntime ? { transport: smtpRuntime.transport } : {}),
   });
 
   let stopping = false;

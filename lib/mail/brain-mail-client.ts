@@ -147,6 +147,7 @@ export const SAFE_SERVICE_ERROR_CODES = new Set([
   "smtp_connection_failed",
   "smtp_authentication_failed",
   "smtp_connection_timeout",
+  "smtp_submission_unavailable",
   "mail_request_invalid",
   "mail_account_not_found",
   "mail_account_reauth_required",

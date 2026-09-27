@@ -430,6 +430,13 @@ describe("brain-mail HTTP-over-UDS shell", () => {
         status: 503,
         code: "account_unavailable",
       },
+      // A service without an SMTP runtime says so by name, so the settings
+      // surface can offer receive-only instead of reading it as an outage.
+      {
+        error: new MailAccountError("smtp_submission_unavailable"),
+        status: 503,
+        code: "smtp_submission_unavailable",
+      },
     ]) {
       const accounts: MailAccountService = {
         status: async () => ({ apiVersion: 1, configured: false, account: null }),

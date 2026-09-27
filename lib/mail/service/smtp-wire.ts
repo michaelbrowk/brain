@@ -373,7 +373,7 @@ export async function submitSmtpMessage(
     }
     const finalReply = await readReply(channel, phaseDeadline(now, deadlineAt));
     if (finalReply.code === 250) {
-      await quitQuietly(channel, now);
+      await quitQuietly(channel, now, deadlineAt);
       return Object.freeze({
         kind: "accepted",
         responseCode: 250,
@@ -466,7 +466,7 @@ export async function verifySmtpAuthentication(
         { readonly kind: "accepted" }
       >;
     }
-    await quitQuietly(channel, now);
+    await quitQuietly(channel, now, deadlineAt);
     return Object.freeze({ kind: "authenticated" });
   } catch (error) {
     if (error instanceof SmtpWireFailure) {
@@ -672,13 +672,15 @@ function transportError(
 async function quitQuietly(
   channel: SmtpChannel,
   now: () => number,
+  deadlineAt: number,
 ): Promise<void> {
+  // QUIT gets its own short timer, but never more than what is left of the
+  // caller's budget: the verdict is already final, and a provider that sits
+  // on QUIT must not turn a correct password into a timeout upstream.
+  const quitDeadlineAt = Math.min(deadlineAt, now() + QUIT_TIMEOUT_MS);
   try {
-    await channel.write(
-      Buffer.from(`QUIT${CRLF}`),
-      now() + QUIT_TIMEOUT_MS,
-    );
-    await channel.readLine(now() + QUIT_TIMEOUT_MS);
+    await channel.write(Buffer.from(`QUIT${CRLF}`), quitDeadlineAt);
+    await channel.readLine(quitDeadlineAt);
   } catch {
     // The submission outcome is already final; QUIT is best effort.
   }

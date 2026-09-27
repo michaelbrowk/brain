@@ -251,6 +251,26 @@ describe("IMAP thread mutations", () => {
     expect(server.mailbox("INBOX").messages.has(1)).toBe(true);
   });
 
+  it("treats a throttled CREATE as unavailable, not as a refusal", async () => {
+    // A tagged NO that asks the client to wait is the server's mood, not its
+    // verdict on the folder; read as a refusal it would burn the one CREATE
+    // this adapter gets and refuse the account until a restart.
+    const server = serverFixture({
+      mailboxes: [{ path: "Sent" }],
+      createAnswers: "throttle",
+    });
+    const { provider, opened } = providerFor(server);
+
+    await expect(
+      provider.archiveThread("i77u1", signal()),
+    ).rejects.toMatchObject({ code: "mail_provider_unavailable" });
+    await provider.archiveThread("i77u1", signal());
+
+    expect(opened.count).toBe(2);
+    expect(server.commands.filter((command) => command.name === "create")).toHaveLength(2);
+    expect(server.mailbox("Archive").messages.size).toBe(1);
+  });
+
   it("reports a session that died under CREATE as unavailable and tries again next time", async () => {
     // No answer is not a refusal. The adapter is long-lived, so a 409 here
     // would refuse the account from cache until a restart over a socket that
@@ -665,7 +685,7 @@ function serverFixture(options?: {
    * answer at all, ImapFlow's `NoConnection`; the next session finds the
    * server well.
    */
-  readonly createAnswers?: "created" | "already_exists" | "no" | "drop";
+  readonly createAnswers?: "created" | "already_exists" | "no" | "drop" | "throttle";
   /** CREATE answers OK, and LIST still does not show the folder afterwards. */
   readonly hideCreated?: boolean;
 }): FakeServer {
@@ -815,6 +835,19 @@ function serverFixture(options?: {
       ) {
         throw Object.assign(new Error("Connection not available"), {
           code: "NoConnection",
+        });
+      }
+      if (
+        answer === "throttle" &&
+        commands.filter((command) => command.name === "create").length === 1
+      ) {
+        // ImapFlow's shape for a tagged NO that says "wait": the server did
+        // answer, but not about the folder.
+        throw Object.assign(new Error("Too many requests, wait 5 seconds"), {
+          code: "ETHROTTLE",
+          response: { command: "NO" },
+          responseStatus: "NO",
+          throttleReset: 5000,
         });
       }
       if (!mailboxes.has(path) && options?.hideCreated !== true) {

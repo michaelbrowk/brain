@@ -1821,7 +1821,7 @@ async function createArchiveMailbox(
     if (!isServerAnswer(error)) throw mapImapProviderError(error);
     return false;
   }
-  if (outcome.created) return true;
+  if (outcome?.created) return true;
   try {
     await client.mailboxSubscribe(outcome.path);
   } catch {
@@ -1839,10 +1839,18 @@ async function createArchiveMailbox(
 function isServerAnswer(error: unknown): boolean {
   if (error === null || typeof error !== "object") return false;
   const answer = error as {
+    readonly code?: unknown;
     readonly response?: unknown;
     readonly responseStatus?: unknown;
     readonly serverResponseCode?: unknown;
   };
+  // Two tagged replies ImapFlow turns into errors are not the server's verdict
+  // on the folder: a throttle ("wait N seconds", ETHROTTLE) and a reply it could
+  // not parse (InvalidResponse). Both are as transient as a dead socket and
+  // are answered like one, so the next archive asks again.
+  if (answer.code === "ETHROTTLE" || answer.code === "InvalidResponse") {
+    return false;
+  }
   return (
     answer.response !== undefined ||
     typeof answer.responseStatus === "string" ||

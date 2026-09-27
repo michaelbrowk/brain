@@ -222,8 +222,9 @@ the top of the panel. Today stays, because a deadline of today is a deadline.
 Below 768px the picker is full width under the row it belongs to, riding a
 sheet a grip drags away: it rises from the bottom edge on one spring and, when
 it is dismissed, continues off the bottom on the same one rather than fading
-where it stands. The panel is drawn on the thicker glass the mail composer's
-sheet uses, so nothing behind it can be read through the grid. There is no
+where it stands. The panel is drawn on the thick glass (the material dialogs
+and the New menu's sheet use), so nothing behind it can be read through the
+grid. There is no
 `input[type=date]` and no `input[type=time]` anywhere under `components/`, on a
 pointer or on touch, and `ops/design-guardrails.test.ts` refuses one.
 

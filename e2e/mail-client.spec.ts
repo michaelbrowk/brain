@@ -1942,6 +1942,9 @@ test("@release the compose sheet takes the window and the shell goes inert under
   const sheet = page.locator('[role="dialog"][aria-label="New message"]');
   await expect(sheet).toBeVisible();
   await expect(sheet).toHaveAttribute("aria-modal", "true");
+  // One account: From is text, not a switch.
+  await expect(sheet.getByRole("button", { name: /^From:/ })).toHaveCount(0);
+  await expect(sheet.locator(".brain-compose-from .brain-compose-value")).toHaveText("Personal");
 
   // Sidebar, list and tab bar: inert and out of the accessibility tree.
   const under = await page.evaluate(() => {
@@ -2286,6 +2289,63 @@ test("@release Discard takes the sheet down at once and parks the delete behind 
   await expect(page.locator(".brain-toast")).toHaveCount(0);
   expect(deleteRequests).toHaveLength(1);
   expect(created).toHaveLength(1);
+});
+
+test("@release the From switch moves the letter to another account, and a reply keeps From as text", async ({
+  page,
+}) => {
+  await login(page);
+  const { deleteRequests } = await installMailRoutes(page);
+  await installSecondAccount(page);
+  const creates: Array<{ accountId: string; to: string; subject: string; text: string }> = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/mail/drafts") {
+      creates.push(request.postDataJSON());
+    }
+  });
+  await page.goto("/mail");
+  await enterSingleAccount(page);
+
+  await page.getByRole("button", { name: "New message" }).click();
+  const sheet = page.locator('[role="dialog"][aria-label="New message"]');
+  await expect(page.getByLabel("To", { exact: true })).toBeFocused();
+  await page.getByLabel("To", { exact: true }).fill("ben@example.test");
+  await page.getByPlaceholder("Subject").fill("Thursday, then");
+  await page.getByLabel("Message", { exact: true }).fill("See you there.");
+  await expect.poll(() => creates.length).toBe(1);
+  expect(creates[0]?.accountId).toBe(account.accountId);
+
+  // The From value is a quiet menu button; the second account is one row.
+  const from = sheet.getByRole("button", { name: "From: Personal" });
+  await expect(from).toHaveAttribute("aria-haspopup", "menu");
+  await from.click();
+  const rows = page.getByRole("menuitemradio");
+  await expect(rows).toHaveCount(2);
+  await rows.filter({ hasText: "second@example.test" }).click();
+
+  // The next create carries the second accountId and the same fields; the
+  // first draft is deleted rather than left in the first account's Drafts.
+  await expect.poll(() => creates.length).toBe(2);
+  expect(creates[1]).toMatchObject({
+    accountId: secondAccount.accountId,
+    to: "ben@example.test",
+    subject: "Thursday, then",
+    text: "See you there.",
+  });
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("See you there.");
+  await expect(sheet.getByRole("button", { name: "From: second@example.test" })).toBeVisible();
+  await expect.poll(() => deleteRequests.length).toBe(1);
+  expect(deleteRequests[0]?.accountId).toBe(account.accountId);
+  await page.keyboard.press("Escape");
+  await expect(sheet).toHaveCount(0);
+
+  // A reply is sent from the account the letter arrived in: From is text.
+  await page.getByText(thread.subject, { exact: true }).click();
+  await page.getByRole("button", { name: "Reply", exact: true }).click();
+  const reply = page.locator('[role="dialog"][aria-label="Reply"]');
+  await expect(reply).toBeVisible();
+  await expect(reply.getByRole("button", { name: /^From:/ })).toHaveCount(0);
+  await expect(reply.locator(".brain-compose-from .brain-compose-value")).toHaveText("Personal");
 });
 
 /** The sheet and its rows arrive on transforms, and a box measured while they

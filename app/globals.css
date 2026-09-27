@@ -4947,8 +4947,69 @@ a.brain-share-url:active {
   display: none;
 }
 .brain-compose-value {
+  display: flex;
   min-width: 0;
+  align-items: center;
   color: var(--ink-2);
+}
+/* the From switch: the value itself, quiet ink-2 text with a chevron, that
+   turns to ink under the pointer and while its menu is open. No capsule and
+   no glass fill: it is a word on the rule, not a control beside it. The
+   register is the wrapper's (Table in the row, Control in the phone's
+   actions row), so the button inherits rather than declares one. */
+.brain-compose-from-switch {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: color 160ms var(--ease-out);
+}
+.brain-compose-from-switch > .truncate {
+  min-width: 0;
+}
+.brain-compose-from-mark {
+  flex-shrink: 0;
+  color: var(--ink-3);
+  transition: color 160ms var(--ease-out);
+}
+.brain-compose-from-switch[data-state="open"],
+.brain-compose-from-switch[data-state="open"] > .brain-compose-from-mark {
+  color: var(--ink);
+}
+@media (hover: hover) {
+  .brain-compose-from-switch:hover,
+  .brain-compose-from-switch:hover > .brain-compose-from-mark {
+    color: var(--ink);
+    transition-duration: 80ms;
+  }
+}
+.brain-compose-from-switch:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+/* its menu: two lines a row, the name over the address as a caption, so the
+   rows grow past the menu's 32 */
+.brain-compose-from-menu .brain-menu-item {
+  height: auto;
+  min-height: 32px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.brain-compose-from-lines {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.25;
 }
 .brain-compose-input {
   min-width: 0;

@@ -11,6 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
+import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   DUR,
@@ -205,6 +206,7 @@ export function MailComposePaper({
 
 export function MailComposer({
   account,
+  accounts = [],
   initialDraft,
   sending,
   sendError,
@@ -217,8 +219,13 @@ export function MailComposer({
   onRetrySave,
   onSend,
   onOpenSettings,
+  onSwitchAccount,
 }: {
   account: PublicMailAccount;
+  /** Every account the letter could go from: the ones that can compose and
+   *  send. With two or more, and a surface to hand the switch to, the From
+   *  value becomes a menu; a lone account keeps it as text. */
+  accounts?: readonly PublicMailAccount[];
   initialDraft: MailComposerDraft;
   sending: boolean;
   sendError: string | null;
@@ -232,6 +239,10 @@ export function MailComposer({
   onRetrySave: () => void;
   onSend: (input: MailSendInput) => void;
   onOpenSettings?: (invoker: HTMLElement) => void;
+  /** The writer chose another account in the From menu. The surface opens
+   *  the same letter there and closes this draft with delete; the fields are
+   *  handed over as they stand, so nothing typed is lost to the move. */
+  onSwitchAccount?: (accountId: string, fields: MailComposerFields) => void;
 }) {
   const sendTitle = useShortcutTitle("Send", "⌘↵");
   const [to, setTo] = useState(initialDraft.to);
@@ -274,6 +285,77 @@ export function MailComposer({
   const swapping = swaps.count > 0;
   const title = composerTitle(initialDraft.mode);
   const fromName = account.displayName || account.emailAddress;
+
+  /**
+   * THE FROM SWITCH. Compose only, and only with two or more accounts that
+   * can send: a reply or a forward goes from the account the letter arrived
+   * in, and one account is not a choice. The value stays what it is, quiet
+   * ink-2 text on the rule, and gains the chevron and a menu (the reader's
+   * `MailActionsMenu` pattern) listing each account by name with its address
+   * as a caption, the current one marked with a bare check. Choosing another
+   * hands the fields over as they stand. It is drawn twice, in the envelope
+   * row and in the phone's actions row, and CSS shows one at any width, so the
+   * phone can switch too.
+   */
+  const canSwitchFrom =
+    initialDraft.mode === "compose" && accounts.length >= 2 && onSwitchAccount !== undefined;
+  const fromValue = () =>
+    canSwitchFrom ? (
+      <Dropdown.Root>
+        <Dropdown.Trigger asChild>
+          <button
+            type="button"
+            className="brain-compose-from-switch"
+            aria-label={`From: ${fromName}`}
+            disabled={sending}
+          >
+            <span className="truncate">{fromName}</span>
+            <Icon name="alt-arrow-down-linear" size={14} className="brain-compose-from-mark" />
+          </button>
+        </Dropdown.Trigger>
+        <Dropdown.Portal>
+          <Dropdown.Content
+            side="bottom"
+            align="start"
+            sideOffset={6}
+            collisionPadding={8}
+            className="brain-menu brain-compose-from-menu z-[var(--z-modal)]"
+          >
+            <Dropdown.RadioGroup
+              value={account.accountId}
+              onValueChange={(accountId) => {
+                if (accountId === account.accountId) return;
+                onSwitchAccount?.(accountId, { to, cc, bcc, subject, text });
+              }}
+            >
+              {accounts.map((candidate) => (
+                <Dropdown.RadioItem
+                  key={candidate.accountId}
+                  value={candidate.accountId}
+                  className="brain-menu-item"
+                >
+                  <span className="brain-compose-from-lines">
+                    <span className="truncate">
+                      {candidate.displayName || candidate.emailAddress}
+                    </span>
+                    {candidate.displayName && (
+                      <span className="text-caption truncate text-ink-3">
+                        {candidate.emailAddress}
+                      </span>
+                    )}
+                  </span>
+                  {candidate.accountId === account.accountId && (
+                    <Icon name="check-linear" size={14} className="shrink-0 text-ink-2" />
+                  )}
+                </Dropdown.RadioItem>
+              ))}
+            </Dropdown.RadioGroup>
+          </Dropdown.Content>
+        </Dropdown.Portal>
+      </Dropdown.Root>
+    ) : (
+      <span className="truncate">{fromName}</span>
+    );
 
   /** The rows arrive one after another, each a 4px rise over `DUR.base`:
    *  From, To, Subject, then the fold and the body together, so the last of
@@ -443,7 +525,7 @@ export function MailComposer({
           >
             <Icon name="close-linear" size={16} />
           </IconButton>
-          <span className="brain-compose-actions-from text-control">{fromName}</span>
+          <span className="brain-compose-actions-from text-control">{fromValue()}</span>
           <div className="brain-compose-slot text-control">
             <AnimatePresence
               initial={false}
@@ -578,7 +660,7 @@ export function MailComposer({
             <div className="brain-compose-envelope">
               <motion.div className="brain-compose-row brain-compose-from" {...arrive(0)}>
                 <span className="brain-compose-label text-control">From</span>
-                <span className="brain-compose-value text-table truncate">{fromName}</span>
+                <span className="brain-compose-value text-table">{fromValue()}</span>
               </motion.div>
               <motion.div className="brain-compose-row" {...arrive(1)}>
                 <label htmlFor={toId} className="brain-compose-label text-control">

@@ -1824,6 +1824,70 @@ describe("MailSurface", () => {
     );
   });
 
+  it("moves the letter to another account from the From menu, keeping the fields and deleting the old draft", async () => {
+    vi.useFakeTimers();
+    const client = makeClient({
+      loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+    });
+    await act(async () =>
+      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+    );
+    await settle();
+    await enterSingleAccount(accountA);
+    await click(findButton("New message"));
+    await setInput(
+      document.body.querySelector('input[autocomplete="email"]') as HTMLInputElement,
+      "ben@example.test",
+    );
+    await setInput(
+      document.body.querySelector("textarea") as HTMLTextAreaElement,
+      "Moving house",
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(700);
+    });
+    await settle();
+    expect(client.createDraft).toHaveBeenCalledTimes(1);
+    const first = vi.mocked(client.createDraft).mock.calls[0]?.[0];
+    expect(first?.accountId).toBe(accountA.accountId);
+
+    const trigger = document.body.querySelector<HTMLButtonElement>(
+      '.brain-compose-from button[aria-label^="From:"]',
+    );
+    expect(trigger).not.toBeNull();
+    await act(async () => {
+      trigger!.dispatchEvent(
+        new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+      );
+    });
+    await settle();
+    const row = [...document.body.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find(
+      (item) => item.textContent?.includes(accountB.emailAddress),
+    );
+    expect(row).toBeDefined();
+    await click(row!);
+    await settle();
+
+    // The old draft leaves the provider, so Drafts never lists a letter the
+    // writer moved; the new one is created in the other account with what was
+    // typed, and the sheet shows the same words under the new From.
+    expect(client.deleteDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ draftId: first?.draftId, accountId: accountA.accountId }),
+    );
+    await vi.waitFor(() => expect(client.createDraft).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(client.createDraft).mock.calls[1]?.[0]).toMatchObject({
+      accountId: accountB.accountId,
+      to: "ben@example.test",
+      text: "Moving house",
+    });
+    expect(
+      (document.body.querySelector("textarea") as HTMLTextAreaElement).value,
+    ).toBe("Moving house");
+    expect(
+      document.body.querySelector(".brain-compose-from")?.textContent,
+    ).toContain(accountB.emailAddress);
+  });
+
   it("autosaves and closes the open draft when the account switches", async () => {
     const client = makeClient({
       loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),

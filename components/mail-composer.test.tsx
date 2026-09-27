@@ -398,6 +398,109 @@ describe("the compose sheet", () => {
     expect(busy.onDiscard).not.toHaveBeenCalled();
   });
 
+  // THE FROM SWITCH. With two accounts that can send, the From value is a
+  // quiet menu button; with one, or on a reply or forward, it is text.
+  describe("the From switch", () => {
+    const second: PublicMailAccount = {
+      ...account,
+      accountId: `account-a${"b".repeat(32)}`,
+      emailAddress: "second@example.test",
+      displayName: null,
+    };
+    /** Every From button on the sheet: the envelope row's and the phone's
+     *  copy in the actions row, one of which CSS hides at any width. */
+    const fromButtons = () =>
+      [...document.body.querySelectorAll<HTMLButtonElement>("button")].filter((button) =>
+        button.getAttribute("aria-label")?.startsWith("From:"),
+      );
+    const openFrom = async () => {
+      const trigger = document.body.querySelector<HTMLButtonElement>(
+        '.brain-compose-from button[aria-label^="From:"]',
+      );
+      if (!trigger) throw new Error("no From button in the envelope row");
+      await act(async () => {
+        trigger.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+        );
+      });
+      await settle();
+    };
+
+    it("is a quiet menu button only in compose mode with two sendable accounts", async () => {
+      await render({ accounts: [account, second], onSwitchAccount: vi.fn() });
+      const buttons = fromButtons();
+      expect(buttons.length).toBeGreaterThan(0);
+      for (const button of buttons) {
+        expect(button.getAttribute("aria-haspopup")).toBe("menu");
+        expect(button.getAttribute("aria-label")).toBe("From: Personal");
+        expect(button.textContent).toContain("Personal");
+        // The chevron, and no glass: the value reads as text with a mark.
+        expect(button.querySelector("svg")).not.toBeNull();
+        expect(button.className).not.toContain("btn-glass");
+      }
+      expect(dialog()!.querySelector(".brain-compose-from .brain-compose-value")).not.toBeNull();
+
+      // One account: text.
+      await render({ accounts: [account], onSwitchAccount: vi.fn() });
+      expect(fromButtons()).toHaveLength(0);
+      expect(dialog()!.querySelector(".brain-compose-from .brain-compose-value")?.textContent).toBe(
+        "Personal",
+      );
+
+      // A reply: text, whatever the accounts.
+      await render({
+        accounts: [account, second],
+        onSwitchAccount: vi.fn(),
+        initialDraft: draft({ mode: "reply", to: "ben@example.test" }),
+      });
+      expect(fromButtons()).toHaveLength(0);
+
+      // No one to hand the switch to: text.
+      await render({ accounts: [account, second] });
+      expect(fromButtons()).toHaveLength(0);
+    });
+
+    it("lists each account with its address, marks the current one, and hands the fields over on a switch", async () => {
+      const onSwitchAccount = vi.fn();
+      await render({
+        accounts: [account, second],
+        onSwitchAccount,
+        initialDraft: draft({ to: "ben@example.test", subject: "Thursday", text: "Hi" }),
+      });
+      await openFrom();
+      const items = [...document.body.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
+      expect(items.map((item) => item.textContent)).toEqual([
+        "Personalperson@example.test",
+        "second@example.test",
+      ]);
+      expect(items[0]?.getAttribute("data-state")).toBe("checked");
+      expect(items[0]?.querySelector("svg")).not.toBeNull();
+      expect(items[1]?.getAttribute("data-state")).toBe("unchecked");
+      expect(items[1]?.querySelector("svg")).toBeNull();
+
+      await act(async () => items[1]?.click());
+      await settle();
+      expect(onSwitchAccount).toHaveBeenCalledTimes(1);
+      expect(onSwitchAccount).toHaveBeenCalledWith(second.accountId, {
+        to: "ben@example.test",
+        cc: "",
+        bcc: "",
+        subject: "Thursday",
+        text: "Hi",
+      });
+    });
+
+    it("choosing the account already in From changes nothing", async () => {
+      const onSwitchAccount = vi.fn();
+      await render({ accounts: [account, second], onSwitchAccount });
+      await openFrom();
+      const current = [...document.body.querySelectorAll<HTMLElement>('[role="menuitemradio"]')][0];
+      await act(async () => current?.click());
+      await settle();
+      expect(onSwitchAccount).not.toHaveBeenCalled();
+    });
+  });
+
   it("reveals Cc and Bcc from the quiet text at To's end and puts the caret in Cc", async () => {
     await render();
     const sheet = dialog()!;

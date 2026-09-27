@@ -2702,6 +2702,34 @@ export function MailSurface({
     [onToast, openComposer],
   );
 
+  /**
+   * The From menu chose another account. The same letter opens there with
+   * the fields as they stand, and the draft it leaves behind closes with
+   * delete at once, so the first account's Drafts never lists a letter the
+   * writer moved. Compose only: a reply goes from the account it arrived in.
+   */
+  const switchComposerAccount = useCallback(
+    (accountId: string, fields: MailComposerFields) => {
+      const account = selectedMailAccount(accountsStateRef.current, accountId);
+      if (!account?.capabilities.compose || !account.capabilities.send) return;
+      closeComposer(true);
+      composerActionEpochRef.current += 1;
+      openComposer({
+        accountId,
+        mode: "compose",
+        intent: { kind: "compose" },
+        to: fields.to,
+        cc: fields.cc,
+        bcc: fields.bcc,
+        subject: fields.subject,
+        text: fields.text,
+        replyToMessageId: null,
+        notice: null,
+      });
+    },
+    [closeComposer, openComposer],
+  );
+
   const startReply = useCallback(
     (detail: MailThreadDetail) => {
       composerActionEpochRef.current += 1;
@@ -4516,6 +4544,11 @@ export function MailSurface({
   const composerAccount = composer
     ? accountsState.accounts.find((account) => account.accountId === composer.accountId)
     : null;
+  // Where else the letter could go from: the composer draws its From switch
+  // only when there are two or more of these.
+  const sendableAccounts = accountsState.accounts.filter(
+    (account) => account.capabilities.compose && account.capabilities.send,
+  );
   // Compose in unified mode targets the first compose-capable account.
   const composeTarget = unifiedMode
     ? firstComposeAccount(accountsState)
@@ -4722,6 +4755,7 @@ export function MailSurface({
           <MailComposer
             key={composer.draft.idempotencyKey}
             account={composerAccount}
+            accounts={sendableAccounts}
             initialDraft={composer.draft}
             sending={composer.sending}
             sendError={composer.error}
@@ -4738,6 +4772,7 @@ export function MailSurface({
             onDraftChange={onComposerDraftChange}
             onRetrySave={retryDraftSave}
             onSend={(input) => void send(input)}
+            onSwitchAccount={switchComposerAccount}
           />
         )}
       </AnimatePresence>

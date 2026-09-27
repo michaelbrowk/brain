@@ -85,6 +85,37 @@ describe("liquid glass foundations", () => {
     expect(hits, "use mat-thin / mat-reg / mat-thick or <ScrollEdge>, never a raw backdrop").toEqual([]);
   });
 
+  // THE CANVAS OFFSET LIVES ON :root. The toast column is a portal at the body,
+  // outside the shell root, and still centres on the canvas: it reads the same
+  // `--canvas-offset` the shell's descendants read, which is only possible if
+  // the variable is declared where both can see it. These pins hold the rule
+  // text itself, because a refactor that moved the variable back onto
+  // `.brain-shell` would render fine in every jsdom test and put the pills
+  // back over the sidebar.
+  describe("the canvas offset on :root", () => {
+    it("declares the offset and the sidebar width on :root, and follows the shell through :has()", () => {
+      expect(css).toMatch(/:root \{[^}]*--sidebar-w: 280px;[^}]*--canvas-offset: 0px;/);
+      expect(css).toMatch(
+        /@media \(min-width: 768px\) \{\s*:root:has\(\.brain-shell\) \{\s*--canvas-offset: calc\(var\(--inset\) \* 2 \+ var\(--sidebar-w\)\);\s*\}\s*:root:has\(\.brain-shell\[data-sidebar-collapsed\]\) \{\s*--canvas-offset: 0px;\s*\}\s*\}/,
+      );
+    });
+
+    it("never declares the offset on .brain-shell itself, print included", () => {
+      const shellRules = [...css.matchAll(/(^|[\s,])\.brain-shell\s*\{([^}]*)\}/g)].map((m) => m[2]);
+      expect(shellRules.length).toBeGreaterThan(0);
+      // Reading the offset (`var(--canvas-offset)`) is fine; declaring it is not.
+      for (const body of shellRules) expect(body).not.toMatch(/(^|;|\{)\s*--canvas-offset:/);
+      // On paper there is no sidebar and no offset: said on :root with the
+      // shell's own specificity, so it beats the md rule above it.
+      const print = css.slice(css.indexOf("@media print {"));
+      expect(print).toMatch(/:root:has\(\.brain-shell\) \{\s*--canvas-offset: 0px;/);
+    });
+
+    it("the toast column centres on the same offset", () => {
+      expect(css).toMatch(/\.brain-toast-stack \{[^}]*left: var\(--canvas-offset, 0px\);/);
+    });
+  });
+
   it("matte fallback remaps every material and edge token in each condition", () => {
     const blocks = [
       /@media \(prefers-reduced-transparency: reduce\) \{\s*:root \{([^}]*)\}/,

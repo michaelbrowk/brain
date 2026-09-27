@@ -641,6 +641,30 @@ describe("defaultMailSurfaceClient drafts", () => {
     );
   });
 
+  it("deletes a draft with keepalive when the page is unloading", async () => {
+    // The delete a discard parked behind its Undo goes out at pagehide the
+    // way the last autosave does: bounded, and allowed to outlive the tab.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(response({ apiVersion: 1, deleted: true, replayed: false }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await defaultMailSurfaceClient.deleteDraft(
+      {
+        accountId: ACCOUNT_ID,
+        draftId: DRAFT_ID,
+        mutationId: MUTATION_ID,
+        expectedRevision: 4,
+      },
+      undefined,
+      { keepalive: true },
+    );
+    expect(fetchMock).toHaveBeenCalledWith(
+      `/api/mail/drafts/${DRAFT_ID}`,
+      expect.objectContaining({ method: "DELETE", keepalive: true }),
+    );
+  });
+
   it("sends a draft through the atomic send route", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       response(

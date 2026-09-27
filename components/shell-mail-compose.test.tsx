@@ -323,7 +323,12 @@ describe("the compose ask, through the assembled shell", () => {
     expect(main?.getAttribute("aria-hidden")).toBe("true");
     expect(shell?.hasAttribute("inert")).toBe(true);
     expect(shell?.getAttribute("aria-hidden")).toBe("true");
-    expect(document.body.querySelector('nav[aria-label="Primary"]')).toBeNull();
+    // The tab bar stays mounted and leaves on its own 200ms (`data-hidden`),
+    // instead of unmounting in a frame while the shell recedes around it.
+    const tabbar = document.body.querySelector('nav[aria-label="Primary"]');
+    expect(tabbar).not.toBeNull();
+    expect(tabbar?.hasAttribute("data-hidden")).toBe(true);
+    expect(tabbar?.getAttribute("aria-hidden")).toBe("true");
     // The toast column stands at the body, outside the shell root, so a pill
     // that fires while the sheet is up is over it, pressable and in the
     // accessibility tree: not inside the inert shell, and not aria-hidden by
@@ -368,7 +373,9 @@ describe("the compose ask, through the assembled shell", () => {
     await settle();
     expect(main?.hasAttribute("inert")).toBe(false);
     expect(shell?.hasAttribute("inert")).toBe(false);
-    expect(document.body.querySelector('nav[aria-label="Primary"]')).not.toBeNull();
+    expect(
+      document.body.querySelector('nav[aria-label="Primary"]')?.hasAttribute("data-hidden"),
+    ).toBe(false);
     expect(shellMotion.renders.at(-1)?.animate).toEqual({ scale: 1, opacity: 1 });
 
     await chord("\\", "Backslash");

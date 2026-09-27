@@ -16,6 +16,7 @@ import {
   type MailComposerFields,
   type MailComposerSaveStatus,
 } from "./mail-composer";
+import { parkDiscard, type DeferredDiscard } from "./mail-deferred-discard";
 import { MailDraftsList, type MailDraftsState } from "./mail-drafts";
 import {
   directActionForMailbox,
@@ -56,6 +57,7 @@ import {
 } from "./mail-surface-client";
 import { MailNav } from "./mail-nav";
 import { markMailCentreRead } from "./notifications-read";
+import { SMART_UNDO_MS } from "./shell/helpers";
 import {
   MailThreadList,
   mailSmartViewItems,
@@ -215,6 +217,16 @@ type DraftSync = {
   frozen: boolean;
 };
 
+/**
+ * What Discard parks behind its Undo: the draft's sync record, detached from
+ * `draftSyncRef` so nothing mistakes it for an open draft, and the composer
+ * state that brings the sheet back exactly as it was.
+ */
+type DiscardParcel = {
+  readonly sync: DraftSync;
+  readonly composer: ComposerState;
+};
+
 type DraftRecovery = {
   readonly version: 1;
   readonly draftId: string;
@@ -234,6 +246,9 @@ type DraftRecovery = {
 const MAIL_PANES_MIN_WIDTH = 1160;
 
 const DRAFT_AUTOSAVE_DELAY_MS = 700;
+/** The discard pill's id: the sentence said again under it, without an Undo,
+ *  takes the standing pill rather than queueing behind its own way back. */
+const DISCARD_TOAST_ID = "mail-draft-discard";
 const DRAFT_RECOVERY_PREFIX = "brain:mail:draft-recovery:v1:";
 const THREAD_SORT_PREFIX = "brain:mail:sort:v1:";
 const SEND_POLL_BASE_DELAY_MS = 5_000;
@@ -409,6 +424,9 @@ export function MailSurface({
   const composerActionEpochRef = useRef(0);
   const recoveryAccountsRef = useRef(new Set<string>());
   const draftSyncRef = useRef<DraftSync | null>(null);
+  /** The discard whose delete is waiting behind the pill's Undo. Apart from
+   *  `draftSyncRef` on purpose: a parked draft is not an open one. */
+  const deferredDiscardRef = useRef<DeferredDiscard<DiscardParcel> | null>(null);
   const draftDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const listEpochRef = useRef(0);
   const threadStateRef = useRef<MailThreadListState>({ kind: "loading" });
@@ -625,6 +643,74 @@ export function MailSurface({
     void enqueueDraftSync(sync);
   }, [enqueueDraftSync]);
 
+  /**
+   * Deletes the draft behind `sync`, after whatever it still owes the server:
+   * a create or a patch whose response was lost is replayed first, so the
+   * delete has a revision to name and leaves no orphan in Drafts. A draft that
+   * never reached the server has only its local recovery copy to clear. Run
+   * by the close-with-delete path at once, and by a parked discard the moment
+   * its way back is gone.
+   */
+  const deleteDraftSync = useCallback(
+    (sync: DraftSync, options?: { readonly keepalive?: boolean }) => {
+      sync.closed = true;
+      sync.chain = sync.chain
+        .then(async () => {
+          const createAttempt = sync.inFlightCreate;
+          if (createAttempt) {
+            const created = await client.createDraft(createAttempt);
+            sync.revision = created.revision;
+            sync.savedFields = fieldsFromCreateInput(createAttempt);
+            if (sync.inFlightCreate === createAttempt) {
+              sync.inFlightCreate = null;
+            }
+          }
+          const attempt = sync.inFlightPatch;
+          if (attempt) {
+            const result = await client.patchDraft({
+              accountId: sync.accountId,
+              draftId: sync.draftId,
+              mutationId: attempt.mutationId,
+              expectedRevision: attempt.expectedRevision,
+              patch: {
+                to: attempt.fields.to,
+                cc: attempt.fields.cc,
+                bcc: attempt.fields.bcc,
+                subject: attempt.fields.subject,
+                text: attempt.fields.text,
+              },
+            });
+            sync.revision = result.appliedRevision;
+            sync.savedFields = attempt.fields;
+            if (sync.inFlightPatch === attempt) sync.inFlightPatch = null;
+          }
+          if (sync.revision === null) return true;
+          const input = {
+            accountId: sync.accountId,
+            draftId: sync.draftId,
+            mutationId: createMutationId(),
+            expectedRevision: sync.revision,
+          };
+          if (options?.keepalive) {
+            await client.deleteDraft(input, undefined, { keepalive: true });
+          } else {
+            await client.deleteDraft(input);
+          }
+          return true;
+        })
+        .then((discarded) => {
+          if (!discarded) return;
+          clearDraftRecovery(sync.draftId);
+          if (sync.recoverySourceDraftId) {
+            clearDraftRecovery(sync.recoverySourceDraftId);
+            sync.recoverySourceDraftId = null;
+          }
+        })
+        .catch(() => undefined);
+    },
+    [client],
+  );
+
   const closeComposer = useCallback(
     (deleteDraft: boolean) => {
       if (draftDebounceRef.current) {
@@ -638,55 +724,7 @@ export function MailSurface({
       setSaveStatus("idle");
       if (!sync) return;
       if (deleteDraft) {
-        sync.closed = true;
-        sync.chain = sync.chain
-          .then(async () => {
-            const createAttempt = sync.inFlightCreate;
-            if (createAttempt) {
-              const created = await client.createDraft(createAttempt);
-              sync.revision = created.revision;
-              sync.savedFields = fieldsFromCreateInput(createAttempt);
-              if (sync.inFlightCreate === createAttempt) {
-                sync.inFlightCreate = null;
-              }
-            }
-            const attempt = sync.inFlightPatch;
-            if (attempt) {
-              const result = await client.patchDraft({
-                accountId: sync.accountId,
-                draftId: sync.draftId,
-                mutationId: attempt.mutationId,
-                expectedRevision: attempt.expectedRevision,
-                patch: {
-                  to: attempt.fields.to,
-                  cc: attempt.fields.cc,
-                  bcc: attempt.fields.bcc,
-                  subject: attempt.fields.subject,
-                  text: attempt.fields.text,
-                },
-              });
-              sync.revision = result.appliedRevision;
-              sync.savedFields = attempt.fields;
-              if (sync.inFlightPatch === attempt) sync.inFlightPatch = null;
-            }
-            if (sync.revision === null) return true;
-            await client.deleteDraft({
-              accountId: sync.accountId,
-              draftId: sync.draftId,
-              mutationId: createMutationId(),
-              expectedRevision: sync.revision,
-            });
-            return true;
-          })
-          .then((discarded) => {
-            if (!discarded) return;
-            clearDraftRecovery(sync.draftId);
-            if (sync.recoverySourceDraftId) {
-              clearDraftRecovery(sync.recoverySourceDraftId);
-              sync.recoverySourceDraftId = null;
-            }
-          })
-          .catch(() => undefined);
+        deleteDraftSync(sync);
       } else {
         // Keep the draft: flush the newest edit, then release it. A detached
         // draft still persists here, so navigating away never drops an edit.
@@ -698,7 +736,7 @@ export function MailSurface({
           });
       }
     },
-    [client, persistDraftStep],
+    [deleteDraftSync, persistDraftStep],
   );
 
   const detachRemovedAccountComposer = useCallback(() => {
@@ -722,6 +760,142 @@ export function MailSurface({
     }
   }, []);
 
+  /**
+   * The way back is gone: the parked delete goes out now. The pill is said
+   * again under its id without an Undo, so it takes the standing one instead
+   * of leaving an Undo on screen that could bring nothing back, and the
+   * sentence is still true. Said at pagehide (`keepalive`) too: the page may
+   * come back from the back-forward cache with this very DOM, and the pill
+   * it shows must not offer an Undo whose delete already went out.
+   */
+  const flushDeferredDiscard = useCallback(
+    (options?: { readonly keepalive?: boolean }) => {
+      const parked = deferredDiscardRef.current;
+      if (!parked) return;
+      deferredDiscardRef.current = null;
+      if (!parked.flush(options)) return;
+      onToast?.("Draft discarded", {
+        id: DISCARD_TOAST_ID,
+        icon: "trash-bin-trash-linear",
+      });
+    },
+    [onToast],
+  );
+  /** The latest `flushDeferredDiscard`, for the unmount cleanup below: a
+   *  cleanup that closed over the callback would run when the callback's
+   *  identity changed, and let a parked discard go while its pill stood. */
+  const flushDeferredDiscardRef = useRef(flushDeferredDiscard);
+  useEffect(() => {
+    flushDeferredDiscardRef.current = flushDeferredDiscard;
+  }, [flushDeferredDiscard]);
+
+  /**
+   * Undo. The sheet comes back as it was: the same draftId and revision, the
+   * fields as last typed (the pending edit over the saved one), and the
+   * autosave the press cut off is re-armed on its own pause rather than fired,
+   * so a draft that had not reached the server yet still waits for the writer
+   * the way it did before.
+   */
+  const restoreDiscardedComposer = useCallback(
+    (parcel: DiscardParcel) => {
+      const { sync, composer: parked } = parcel;
+      const fields = sync.pendingFields ?? sync.savedFields;
+      draftSyncRef.current = sync;
+      const next: ComposerState = {
+        ...parked,
+        draft: { ...parked.draft, ...fields },
+        sending: false,
+        error: null,
+      };
+      composerRef.current = next;
+      setComposer(next);
+      setSaveStatus("idle");
+      if (
+        sync.pendingFields &&
+        !draftFieldsEqual(sync.pendingFields, sync.savedFields)
+      ) {
+        if (draftDebounceRef.current) clearTimeout(draftDebounceRef.current);
+        draftDebounceRef.current = setTimeout(() => {
+          draftDebounceRef.current = null;
+          void enqueueDraftSync(sync);
+        }, DRAFT_AUTOSAVE_DELAY_MS);
+      }
+    },
+    [enqueueDraftSync],
+  );
+
+  /**
+   * DISCARD IS NOT CLOSE, and it no longer asks. Closing keeps the draft;
+   * Discard removes it, and instead of a question in the way the protection
+   * is the way back: the sheet goes at the press, a pill with Undo stands for
+   * `SMART_UNDO_MS`, and the provider delete waits behind it
+   * (`mail-deferred-discard.ts`). It goes out when the window closes (the
+   * shell says so through `onExpire`), when the page unloads, or when the
+   * writer opens another message. Undo brings the same draft back and no
+   * delete ever goes out. An empty composer has nothing to bring back and
+   * leaves without a pill; so does one with no toast channel to offer it in.
+   * One discard is parked at a time: a second press lets the first go.
+   */
+  const discardComposer = useCallback(() => {
+    const sync = draftSyncRef.current;
+    const current = composerRef.current;
+    if (!sync || !current || !onToast || isDraftSyncEmpty(sync)) {
+      closeComposer(true);
+      return;
+    }
+    if (draftDebounceRef.current) {
+      clearTimeout(draftDebounceRef.current);
+      draftDebounceRef.current = null;
+    }
+    flushDeferredDiscard();
+    draftSyncRef.current = null;
+    composerRef.current = null;
+    setComposer(null);
+    setSaveStatus("idle");
+    const parked = parkDiscard<DiscardParcel>(
+      { sync, composer: current },
+      (parcel, { keepalive }) =>
+        deleteDraftSync(parcel.sync, keepalive ? { keepalive: true } : undefined),
+    );
+    deferredDiscardRef.current = parked;
+    onToast("Draft discarded", {
+      id: DISCARD_TOAST_ID,
+      icon: "trash-bin-trash-linear",
+      actionLabel: "Undo",
+      durationMs: SMART_UNDO_MS,
+      onAction: () => {
+        // Nothing left to bring back (the discard settled elsewhere): the
+        // press is refused rather than spending a pill that was replaced.
+        if (parked.state !== "parked") return false;
+        if (deferredDiscardRef.current === parked) deferredDiscardRef.current = null;
+        // The account left while the pill stood: a restored sheet would have
+        // no account to draw for, so this press is the flush instead, said
+        // again without an Undo.
+        if (!selectedMailAccount(accountsStateRef.current, sync.accountId)) {
+          parked.flush();
+          onToast("Draft discarded", {
+            id: DISCARD_TOAST_ID,
+            icon: "trash-bin-trash-linear",
+          });
+          return false;
+        }
+        const parcel = parked.restore();
+        if (!parcel) return false;
+        restoreDiscardedComposer(parcel);
+      },
+      onExpire: () => {
+        if (deferredDiscardRef.current === parked) deferredDiscardRef.current = null;
+        parked.flush();
+      },
+    });
+  }, [
+    closeComposer,
+    deleteDraftSync,
+    flushDeferredDiscard,
+    onToast,
+    restoreDiscardedComposer,
+  ]);
+
   const openComposer = useCallback(
     (params: {
       readonly accountId: string;
@@ -738,6 +912,9 @@ export function MailSurface({
     }) => {
       const existing = draftSyncRef.current;
       if (existing) closeComposer(isDraftSyncEmpty(existing));
+      // Another letter is being started: the way back to a discarded one
+      // closes, and its delete goes out.
+      flushDeferredDiscard();
       const draftId = createDraftId();
       const idempotencyKey = createIdempotencyKey();
       const createInput: MailDraftCreateInput = {
@@ -796,13 +973,26 @@ export function MailSurface({
         void enqueueDraftSync(sync);
       }
     },
-    [closeComposer, enqueueDraftSync],
+    [closeComposer, enqueueDraftSync, flushDeferredDiscard],
   );
 
   const resumeComposer = useCallback(
     (draft: MailDraft) => {
       const existing = draftSyncRef.current;
       if (existing) closeComposer(isDraftSyncEmpty(existing));
+      // The draft whose delete is parked is still listed in Drafts, since
+      // nothing has left yet. Opening that row is its Undo, not a resume that
+      // would let the delete go on the way in and then find nothing to open.
+      const parked = deferredDiscardRef.current;
+      if (parked && parked.parcel.sync.draftId === draft.draftId) {
+        deferredDiscardRef.current = null;
+        const parcel = parked.restore();
+        if (parcel) {
+          restoreDiscardedComposer(parcel);
+          return;
+        }
+      }
+      flushDeferredDiscard();
       const idempotencyKey = createIdempotencyKey();
       const replyToMessageId =
         draft.intent.kind === "reply" || draft.intent.kind === "reply_all"
@@ -858,7 +1048,7 @@ export function MailSurface({
       setComposer(next);
       setSaveStatus("idle");
     },
-    [closeComposer],
+    [closeComposer, flushDeferredDiscard, restoreDiscardedComposer],
   );
 
   const refreshDrafts = useCallback(
@@ -1070,6 +1260,10 @@ export function MailSurface({
     readerStateRef.current = readerState;
   }, [readerState]);
 
+  // Leaving Mail with a discard parked: the surface that could bring the
+  // sheet back is going, so the delete goes out and the pill loses its Undo.
+  useEffect(() => () => flushDeferredDiscardRef.current(), []);
+
   useEffect(
     () => () => {
       if (draftDebounceRef.current) clearTimeout(draftDebounceRef.current);
@@ -1101,6 +1295,9 @@ export function MailSurface({
         clearTimeout(draftDebounceRef.current);
         draftDebounceRef.current = null;
       }
+      // A delete parked behind an Undo leaves with the page, bounded and
+      // allowed to outlive the tab like the last autosave below.
+      flushDeferredDiscardRef.current({ keepalive: true });
       const sync = draftSyncRef.current;
       if (!sync || sync.closed || sync.frozen) return;
       // `keepalive` lets the browser finish this bounded request after the tab
@@ -1108,12 +1305,22 @@ export function MailSurface({
       // autosave and pagehide retry are idempotent rather than two writes.
       void persistDraftStep(sync, { keepalive: true }).catch(() => undefined);
     };
+    // Back from the back-forward cache: the DOM returns as it was left, with
+    // frozen timers, so a parcel still parked would become a dead Undo the
+    // moment its window ran out. It goes now, and the pill says so without
+    // an Undo. A plain load's pageshow has nothing parked and touches nothing.
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (!event.persisted) return;
+      flushDeferredDiscardRef.current();
+    };
 
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
     };
   }, [flushDraftSync, persistDraftStep]);
 
@@ -1162,6 +1369,17 @@ export function MailSurface({
           )
         ) {
           detachRemovedAccountComposer();
+        }
+        // A discard parked behind an Undo whose account has left: Undo would
+        // restore a composer with no account to draw it for (the shell inert
+        // under nothing), so the way back closes here and the pill is said
+        // again without it.
+        const parked = deferredDiscardRef.current;
+        if (
+          parked &&
+          !accounts.some((account) => account.accountId === parked.parcel.sync.accountId)
+        ) {
+          flushDeferredDiscardRef.current();
         }
 
         // The merged mode needs something to merge. A lone account mounts
@@ -2518,6 +2736,34 @@ export function MailSurface({
       });
     },
     [onToast, openComposer],
+  );
+
+  /**
+   * The From menu chose another account. The same letter opens there with
+   * the fields as they stand, and the draft it leaves behind closes with
+   * delete at once, so the first account's Drafts never lists a letter the
+   * writer moved. Compose only: a reply goes from the account it arrived in.
+   */
+  const switchComposerAccount = useCallback(
+    (accountId: string, fields: MailComposerFields) => {
+      const account = selectedMailAccount(accountsStateRef.current, accountId);
+      if (!account?.capabilities.compose || !account.capabilities.send) return;
+      closeComposer(true);
+      composerActionEpochRef.current += 1;
+      openComposer({
+        accountId,
+        mode: "compose",
+        intent: { kind: "compose" },
+        to: fields.to,
+        cc: fields.cc,
+        bcc: fields.bcc,
+        subject: fields.subject,
+        text: fields.text,
+        replyToMessageId: null,
+        notice: null,
+      });
+    },
+    [closeComposer, openComposer],
   );
 
   const startReply = useCallback(
@@ -4334,6 +4580,11 @@ export function MailSurface({
   const composerAccount = composer
     ? accountsState.accounts.find((account) => account.accountId === composer.accountId)
     : null;
+  // Where else the letter could go from: the composer draws its From switch
+  // only when there are two or more of these.
+  const sendableAccounts = accountsState.accounts.filter(
+    (account) => account.capabilities.compose && account.capabilities.send,
+  );
   // Compose in unified mode targets the first compose-capable account.
   const composeTarget = unifiedMode
     ? firstComposeAccount(accountsState)
@@ -4540,6 +4791,7 @@ export function MailSurface({
           <MailComposer
             key={composer.draft.idempotencyKey}
             account={composerAccount}
+            accounts={sendableAccounts}
             initialDraft={composer.draft}
             sending={composer.sending}
             sendError={composer.error}
@@ -4552,10 +4804,11 @@ export function MailSurface({
                 draftSyncRef.current ? isDraftSyncEmpty(draftSyncRef.current) : false,
               )
             }
-            onDiscard={() => closeComposer(true)}
+            onDiscard={discardComposer}
             onDraftChange={onComposerDraftChange}
             onRetrySave={retryDraftSave}
             onSend={(input) => void send(input)}
+            onSwitchAccount={switchComposerAccount}
           />
         )}
       </AnimatePresence>

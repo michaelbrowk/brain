@@ -382,6 +382,165 @@ describe("the compose sheet", () => {
     expect(p.onCancel).toHaveBeenCalledTimes(2);
   });
 
+  it("names the body 'Message' through aria-labelledby, so its value never joins its name", async () => {
+    // A wrapping label names an embedded textbox with its value (accname's
+    // embedded-control rule): "Message" became "Message Never mind" the
+    // moment a letter stood, and nothing could find the body by its name.
+    await render({ initialDraft: draft({ text: "Never mind" }) });
+    const body = dialog()!.querySelector("textarea")!;
+    expect(body.closest("label")).toBeNull();
+    const labelledBy = body.getAttribute("aria-labelledby");
+    expect(labelledBy).toBeTruthy();
+    expect(document.getElementById(labelledBy!)?.textContent).toBe("Message");
+  });
+
+  it("takes the sheet down from the trash without a question, and not while sending", async () => {
+    // Discard used to ask through a ConfirmDialog. The way back is the
+    // surface's undo pill now, so the press is answered at once and the sheet
+    // owns no second dialog.
+    const p = await render({ initialDraft: draft({ subject: "Half a thought", text: "Hi" }) });
+    await act(async () => byLabel("Discard draft")?.click());
+    await settle();
+    expect(p.onDiscard).toHaveBeenCalledTimes(1);
+    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(document.body.textContent).not.toContain("Discard this draft?");
+
+    const busy = await render({ initialDraft: draft({ text: "Hi" }), sending: true });
+    await act(async () => byLabel("Discard draft")?.click());
+    expect(busy.onDiscard).not.toHaveBeenCalled();
+  });
+
+  // THE FROM SWITCH. With two accounts that can send, the From value is a
+  // quiet menu button; with one, or on a reply or forward, it is text.
+  describe("the From switch", () => {
+    const second: PublicMailAccount = {
+      ...account,
+      accountId: `account-a${"b".repeat(32)}`,
+      emailAddress: "second@example.test",
+      displayName: null,
+    };
+    /** Every From button on the sheet: the envelope row's and the phone's
+     *  copy in the actions row, one of which CSS hides at any width. */
+    const fromButtons = () =>
+      [...document.body.querySelectorAll<HTMLButtonElement>("button")].filter((button) =>
+        button.getAttribute("aria-label")?.startsWith("From:"),
+      );
+    const openFrom = async () => {
+      const trigger = document.body.querySelector<HTMLButtonElement>(
+        '.brain-compose-from button[aria-label^="From:"]',
+      );
+      if (!trigger) throw new Error("no From button in the envelope row");
+      await act(async () => {
+        trigger.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+        );
+      });
+      await settle();
+    };
+
+    it("is a quiet menu button only in compose mode with two sendable accounts", async () => {
+      await render({ accounts: [account, second], onSwitchAccount: vi.fn() });
+      const buttons = fromButtons();
+      expect(buttons.length).toBeGreaterThan(0);
+      for (const button of buttons) {
+        expect(button.getAttribute("aria-haspopup")).toBe("menu");
+        expect(button.getAttribute("aria-label")).toBe("From: Personal");
+        expect(button.textContent).toContain("Personal");
+        // The chevron, and no glass: the value reads as text with a mark.
+        expect(button.querySelector("svg")).not.toBeNull();
+        expect(button.className).not.toContain("btn-glass");
+      }
+      expect(dialog()!.querySelector(".brain-compose-from .brain-compose-value")).not.toBeNull();
+
+      // One account: text.
+      await render({ accounts: [account], onSwitchAccount: vi.fn() });
+      expect(fromButtons()).toHaveLength(0);
+      expect(dialog()!.querySelector(".brain-compose-from .brain-compose-value")?.textContent).toBe(
+        "Personal",
+      );
+
+      // A reply: text, whatever the accounts.
+      await render({
+        accounts: [account, second],
+        onSwitchAccount: vi.fn(),
+        initialDraft: draft({ mode: "reply", to: "ben@example.test" }),
+      });
+      expect(fromButtons()).toHaveLength(0);
+
+      // No one to hand the switch to: text.
+      await render({ accounts: [account, second] });
+      expect(fromButtons()).toHaveLength(0);
+    });
+
+    it("lists each account with its address, marks the current one, and hands the fields over on a switch", async () => {
+      const onSwitchAccount = vi.fn();
+      await render({
+        accounts: [account, second],
+        onSwitchAccount,
+        initialDraft: draft({ to: "ben@example.test", subject: "Thursday", text: "Hi" }),
+      });
+      await openFrom();
+      const items = [...document.body.querySelectorAll<HTMLElement>('[role="menuitemradio"]')];
+      expect(items.map((item) => item.textContent)).toEqual([
+        "Personalperson@example.test",
+        "second@example.test",
+      ]);
+      expect(items[0]?.getAttribute("data-state")).toBe("checked");
+      expect(items[0]?.querySelector("svg")).not.toBeNull();
+      expect(items[1]?.getAttribute("data-state")).toBe("unchecked");
+      expect(items[1]?.querySelector("svg")).toBeNull();
+
+      await act(async () => items[1]?.click());
+      await settle();
+      expect(onSwitchAccount).toHaveBeenCalledTimes(1);
+      expect(onSwitchAccount).toHaveBeenCalledWith(second.accountId, {
+        to: "ben@example.test",
+        cc: "",
+        bcc: "",
+        subject: "Thursday",
+        text: "Hi",
+      });
+    });
+
+    it("Esc inside the From menu closes the menu and leaves the sheet standing", async () => {
+      // Two copies of Radix's dismissable layer live in node_modules (the
+      // dialog's and the menu's), so each thinks it is the top layer and one
+      // Esc used to reach both: the menu closed and the letter went with it.
+      // Real Radix here, not a stub: the seam under test is theirs.
+      const p = await render({ accounts: [account, second], onSwitchAccount: vi.fn() });
+      await openFrom();
+      expect(document.body.querySelectorAll('[role="menuitemradio"]')).toHaveLength(2);
+      await act(async () => {
+        document.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+        );
+      });
+      await settle();
+      expect(document.body.querySelectorAll('[role="menuitemradio"]')).toHaveLength(0);
+      expect(dialog()).not.toBeNull();
+      expect(p.onCancel).not.toHaveBeenCalled();
+
+      // With the menu closed, Esc is the sheet's again.
+      await act(async () => {
+        document.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+        );
+      });
+      await settle();
+      expect(p.onCancel).toHaveBeenCalledTimes(1);
+    });
+
+    it("choosing the account already in From changes nothing", async () => {
+      const onSwitchAccount = vi.fn();
+      await render({ accounts: [account, second], onSwitchAccount });
+      await openFrom();
+      const current = [...document.body.querySelectorAll<HTMLElement>('[role="menuitemradio"]')][0];
+      await act(async () => current?.click());
+      await settle();
+      expect(onSwitchAccount).not.toHaveBeenCalled();
+    });
+  });
+
   it("reveals Cc and Bcc from the quiet text at To's end and puts the caret in Cc", async () => {
     await render();
     const sheet = dialog()!;
@@ -486,6 +645,50 @@ describe("the compose sheet", () => {
     });
     await settle();
     expect(dialog()!.querySelector('.brain-compose-slot [role="status"]')).toBeNull();
+  });
+
+  it("keeps 16px inputs on a touch screen at any width: the 14 at md is gated on a fine pointer", () => {
+    expect(rule(".brain-compose-input")).toContain("font-size: 16px");
+    // The plain md step no longer sizes the input: an iPad at 1024 is past md
+    // and would zoom on a 14.
+    expect(composeMd()).not.toMatch(/\.brain-compose-input \{[^}]*font-size: 14px/);
+    expect(css).toMatch(
+      /@media \(min-width: 768px\) and \(pointer: fine\) \{\s*\.brain-compose-input \{[^}]*font-size: 14px/,
+    );
+  });
+
+  it("draws Cc Bcc as quiet ink-3 text that turns to ink under the pointer, with no glass fill", () => {
+    expect(rule(".brain-compose-copies")).toContain("color: var(--ink-3)");
+    // The quiet atom's hover is a capsule's glass fill; at the row's end this
+    // is a word, and a word answers the pointer with its colour alone.
+    expect(css).toMatch(
+      /@media \(hover: hover\) \{\s*\.brain-compose-copies:hover,\s*\.brain-compose-copies\[data-hover\] \{[^}]*background-color: transparent;[^}]*color: var\(--ink\)/,
+    );
+  });
+
+  it("on the phone gives a sentence its own line under the actions, grown over DUR.base, and From keeps the row", () => {
+    /** A rule scoped to the phone's sheet (`[data-sheet]`). */
+    const phone = (selector: string) => {
+      const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const match = css.match(
+        new RegExp(`^\\.brain-compose-paper\\[data-sheet\\] ${escaped} \\{([^}]*)\\}`, "m"),
+      );
+      if (!match) throw new Error(`no phone rule for ${selector}`);
+      return match[1];
+    };
+    // The row wraps; the slot is the second line, closed until a sentence
+    // stands and grown to its content on the base duration.
+    expect(phone(".brain-compose-actions")).toContain("flex-wrap: wrap");
+    expect(phone(".brain-compose-slot")).toContain("grid-template-rows: 0fr");
+    expect(phone(".brain-compose-slot")).toContain(
+      "transition: grid-template-rows 160ms var(--ease-out)",
+    );
+    expect(phone(".brain-compose-actions[data-message] .brain-compose-slot")).toContain(
+      "grid-template-rows: 1fr",
+    );
+    // From no longer yields the row: nothing hides it while a sentence stands.
+    expect(css).not.toMatch(/:not\(\[data-message\]\) \.brain-compose-actions-from/);
+    expect(phone(".brain-compose-actions-from")).toContain("display: flex");
   });
 
   it("keeps the phone's bottom safe area under the letter", () => {
@@ -658,8 +861,42 @@ describe("the compose sheet", () => {
       expect(rows?.animate).toEqual({ height: "auto", opacity: 1 });
       expect(rows?.transition).toEqual(SPRING_SELECT);
 
+      // A resumed copy does not grow: it stands, and arrives with the rest.
       await render({ initialDraft: draft({ cc: "casey@example.test" }) });
+      expect(motionOf("brain-compose-copies-rows")?.initial).toEqual({ opacity: 0, y: 4 });
+    });
+
+    it("lets a resumed Cc/Bcc and the notice join the stagger at 95ms, between To and Subject", async () => {
+      await render({
+        initialDraft: draft({
+          mode: "forward",
+          cc: "casey@example.test",
+          notice: "Attachments from the original message are not included.",
+        }),
+      });
+      for (const className of ["brain-compose-copies-rows", "brain-compose-notice"]) {
+        const part = motionOf(className);
+        expect(part?.initial, className).toEqual({ opacity: 0, y: 4 });
+        expect(part?.animate, className).toEqual({ opacity: 1, y: 0 });
+        expect(part?.transition, className).toEqual({
+          duration: DUR.base,
+          ease: EASE_OUT,
+          delay: 0.095,
+        });
+      }
+      // The rows around them keep their steps.
+      const rows = harness.renders.filter((render) =>
+        render.className.split(" ").includes("brain-compose-row"),
+      );
+      expect(rows.map((render) => (render.motion.transition as { delay: number }).delay)).toEqual([
+        0.05, 0.08, 0.11,
+      ]);
+      expect((motionOf("brain-compose-body")?.transition as { delay: number }).delay).toBe(0.14);
+
+      harness.reduce = true;
+      await render({ initialDraft: draft({ cc: "casey@example.test", notice: "Kept." }) });
       expect(motionOf("brain-compose-copies-rows")?.initial).toBe(false);
+      expect(motionOf("brain-compose-notice")?.initial).toBe(false);
     });
 
     it("swaps Send for Sending through a 2px blur and turns the glyph on SPIN, in place", async () => {

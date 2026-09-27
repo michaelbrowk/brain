@@ -419,4 +419,89 @@ describe("shell toast channels, as mail uses them", () => {
     });
     expect(event.defaultPrevented).toBe(false);
   });
+
+  // THE PILL LEAVING UNSPENT IS AN EVENT THE CALLER CAN WAIT ON. Discard on
+  // the compose sheet parks the provider delete behind its Undo; the delete
+  // has to go out when the way back is gone, and only then. The shell owns
+  // the window (hover holds it), so the shell says when it closed.
+  describe("onExpire", () => {
+    const discardReport = (
+      onExpire: () => void,
+      onAction: () => boolean | void | Promise<unknown> = () => {},
+    ): ToastOptions => ({
+      icon: "trash-bin-trash-linear",
+      actionLabel: "Undo",
+      onAction,
+      onExpire,
+      durationMs: 9_000,
+      id: "mail-draft-discard",
+    });
+
+    it("fires once when the window runs out", async () => {
+      const onExpire = vi.fn();
+      await say("Draft discarded", discardReport(onExpire));
+      await act(async () => {
+        vi.advanceTimersByTime(8_999);
+      });
+      expect(onExpire).not.toHaveBeenCalled();
+      await act(async () => {
+        vi.advanceTimersByTime(2);
+      });
+      expect(onExpire).toHaveBeenCalledTimes(1);
+      expect(pills().join(" | ")).not.toContain("Draft discarded");
+    });
+
+    it("never fires when the action spent the pill", async () => {
+      const onExpire = vi.fn();
+      const undo = vi.fn();
+      await say("Draft discarded", discardReport(onExpire, undo));
+      await act(async () => {
+        document.body.querySelector<HTMLButtonElement>(".brain-toast button")!.click();
+      });
+      expect(undo).toHaveBeenCalledTimes(1);
+      expect(pills().join(" | ")).not.toContain("Draft discarded");
+      await act(async () => {
+        vi.advanceTimersByTime(20_000);
+      });
+      expect(onExpire).not.toHaveBeenCalled();
+    });
+
+    it("fires when a message wearing the same id takes the pill", async () => {
+      const onExpire = vi.fn();
+      await say("Draft discarded", discardReport(onExpire));
+      await say("Draft discarded", { id: "mail-draft-discard" });
+      expect(onExpire).toHaveBeenCalledTimes(1);
+      // The replacement has no window of its own to hand on: nothing fires
+      // twice when it leaves.
+      await act(async () => {
+        vi.advanceTimersByTime(20_000);
+      });
+      expect(onExpire).toHaveBeenCalledTimes(1);
+    });
+
+    it("never fires for a pill its own action replaces from inside the press", async () => {
+      // The discard's Undo, pressed after the account left: the action runs
+      // the flush itself and says the pill again under the same id, without
+      // an Undo, before it returns. That replacement is the press spending
+      // the pill, not the window closing on it: `onExpire` would flush a
+      // second time over the flush the action just ran.
+      const onExpire = vi.fn();
+      const respeak = () => {
+        if (!mailToast) throw new Error("the mail surface never got onToast");
+        mailToast("Draft discarded", { id: "mail-draft-discard" });
+        return false;
+      };
+      await say("Draft discarded", discardReport(onExpire, respeak));
+      await act(async () => {
+        document.body.querySelector<HTMLButtonElement>(".brain-toast button")!.click();
+      });
+      expect(onExpire).not.toHaveBeenCalled();
+      expect(pills().join(" | ")).toContain("Draft discarded");
+      expect(document.body.querySelector(".brain-toast button")).toBeNull();
+      await act(async () => {
+        vi.advanceTimersByTime(20_000);
+      });
+      expect(onExpire).not.toHaveBeenCalled();
+    });
+  });
 });

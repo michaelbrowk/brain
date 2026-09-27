@@ -4825,8 +4825,9 @@ a.brain-share-url:active {
   padding-inline: max(var(--inset), env(safe-area-inset-left, 0px))
     max(var(--inset), env(safe-area-inset-right, 0px));
 }
-/* From as quiet text in the row, on the phone only; while a sentence stands
-   in the slot the row is the slot's (`data-message`) */
+/* From as quiet text in the row, on the phone only. It keeps the row: a
+   sentence takes a second line under the actions (below) rather than the
+   From's room. */
 .brain-compose-actions-from {
   display: none;
   min-width: 0;
@@ -4838,12 +4839,51 @@ a.brain-share-url:active {
   line-height: 1.25;
   color: var(--ink-2);
 }
-.brain-compose-paper[data-sheet] .brain-compose-actions:not([data-message]) .brain-compose-actions-from {
-  display: block;
+/* THE PHONE'S SECOND LINE. Five controls and From already share the 44, and a
+   sentence squeezed in beside them was a truncated sentence with its "Mail
+   settings" cut off. So on the phone the row wraps: From stands in the first
+   line at the row's 44 and the slot is the whole second line, a grid row
+   closed at 0fr that opens to its content over the base duration when a
+   sentence stands (`data-message`, which the sheet keeps until the sentence
+   has finished leaving, so the line closes after the fade, not under it).
+   The sentence may wrap to two lines there, with the action beside it. */
+.brain-compose-paper[data-sheet] .brain-compose-actions {
+  flex-wrap: wrap;
+  height: auto;
+  min-height: 44px;
+  row-gap: 0;
 }
-.brain-compose-paper[data-sheet] .brain-compose-actions:not([data-message]) .brain-compose-slot {
-  flex: 0 0 0px;
+.brain-compose-paper[data-sheet] .brain-compose-actions-from {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+}
+.brain-compose-paper[data-sheet] .brain-compose-slot {
+  order: 10;
+  display: grid;
+  flex: 0 0 100%;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 160ms var(--ease-out);
+}
+.brain-compose-paper[data-sheet] .brain-compose-actions[data-message] .brain-compose-slot {
+  grid-template-rows: 1fr;
+}
+.brain-compose-paper[data-sheet] .brain-compose-slot-line {
+  min-height: 0;
+  flex-wrap: wrap;
+  row-gap: 2px;
   overflow: hidden;
+  padding-bottom: 8px;
+}
+.brain-compose-paper[data-sheet] .brain-compose-slot-line > [role] {
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+@media (prefers-reduced-motion: reduce) {
+  .brain-compose-paper[data-sheet] .brain-compose-slot {
+    transition: none;
+  }
 }
 /* the slot always keeps its place: a sentence arriving in it moves nothing */
 .brain-compose-slot {
@@ -4947,8 +4987,69 @@ a.brain-share-url:active {
   display: none;
 }
 .brain-compose-value {
+  display: flex;
   min-width: 0;
+  align-items: center;
   color: var(--ink-2);
+}
+/* the From switch: the value itself, quiet ink-2 text with a chevron, that
+   turns to ink under the pointer and while its menu is open. No capsule and
+   no glass fill: it is a word on the rule, not a control beside it. The
+   register is the wrapper's (Table in the row, Control in the phone's
+   actions row), so the button inherits rather than declares one. */
+.brain-compose-from-switch {
+  display: inline-flex;
+  max-width: 100%;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: color 160ms var(--ease-out);
+}
+.brain-compose-from-switch > .truncate {
+  min-width: 0;
+}
+.brain-compose-from-mark {
+  flex-shrink: 0;
+  color: var(--ink-3);
+  transition: color 160ms var(--ease-out);
+}
+.brain-compose-from-switch[data-state="open"],
+.brain-compose-from-switch[data-state="open"] > .brain-compose-from-mark {
+  color: var(--ink);
+}
+@media (hover: hover) {
+  .brain-compose-from-switch:hover,
+  .brain-compose-from-switch:hover > .brain-compose-from-mark {
+    color: var(--ink);
+    transition-duration: 80ms;
+  }
+}
+.brain-compose-from-switch:disabled {
+  opacity: 0.45;
+  pointer-events: none;
+}
+/* its menu: two lines a row, the name over the address as a caption, so the
+   rows grow past the menu's 32 */
+.brain-compose-from-menu .brain-menu-item {
+  height: auto;
+  min-height: 32px;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.brain-compose-from-lines {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  line-height: 1.25;
 }
 .brain-compose-input {
   min-width: 0;
@@ -4958,7 +5059,8 @@ a.brain-share-url:active {
   background: transparent;
   color: var(--ink);
   outline: none;
-  /* 16px on touch: iOS zooms the page on any focused field below it */
+  /* 16px wherever the screen may be touched: iOS zooms the page on any
+     focused field below it. The 14 for a fine pointer is gated below. */
   font-size: 16px;
 }
 .brain-compose-input::placeholder {
@@ -4969,10 +5071,22 @@ a.brain-share-url:active {
 .brain-compose-subject > .brain-compose-input {
   font-size: 17px;
 }
+/* quiet text at the row's end, not a capsule: ink-3 that turns to ink under
+   the pointer and nothing else changes. The quiet atom's hover is a glass
+   fill, which is right for a capsule in a pill and wrong for a word standing
+   on the rule beside the address, so the fill is taken back here. */
 .brain-compose-copies {
   height: 28px;
   padding: 0 8px;
   flex-shrink: 0;
+  color: var(--ink-3);
+}
+@media (hover: hover) {
+  .brain-compose-copies:hover,
+  .brain-compose-copies[data-hover] {
+    background-color: transparent;
+    color: var(--ink);
+  }
 }
 /* the two rows grow from height 0 when revealed, so the box clips while
    that plays; the inputs draw no ring of their own for it to cut */
@@ -5039,11 +5153,14 @@ a.brain-share-url:active {
   .brain-compose-from {
     display: flex;
   }
+}
+/* Table 14 for the values only where a pointer is fine: width alone is not
+   the desktop, and an iPad at 1024 is past md with a touch screen that zooms
+   on any focused field below 16. The subject keeps its own 17 by its own
+   specificity, so it needs no line here. */
+@media (min-width: 768px) and (pointer: fine) {
   .brain-compose-input {
     font-size: 14px;
-  }
-  .brain-compose-subject > .brain-compose-input {
-    font-size: 17px;
   }
 }
 
@@ -5702,9 +5819,13 @@ html[data-kbd] .brain-palette-sheet .brain-palette-item[data-selected="true"] {
     transform: none !important;
   }
 
-  /* no sidebar on paper: no canvas offset, no bleed, no left fade */
-  .brain-shell {
+  /* no sidebar on paper: no canvas offset, no bleed, no left fade. The offset
+     lives on :root (see the shell block), so it is closed there, with the
+     shell's own :has() specificity so this beats the md rule above it. */
+  :root:has(.brain-shell) {
     --canvas-offset: 0px;
+  }
+  .brain-shell {
     --cover-glass: 0px;
     --cover-ramp: 0px;
   }

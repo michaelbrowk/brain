@@ -505,6 +505,11 @@ export function Shell({
   const urgentTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** The standing toast, readable synchronously from inside `showToast`. */
   const toastRef = useRef<ShellToast | null>(null);
+  /** True from the moment an action spends the standing pill until the next
+   *  message is presented, so `presentToast` can tell a pill its action took
+   *  down from one the window or a same-id message took: only the second
+   *  owes its caller `onExpire`. */
+  const toastSpentRef = useRef(false);
   /** Messages waiting for a standing undo to live out its window. */
   const toastQueue = useRef<ShellToast[]>([]);
   const toastEndsAt = useRef(0);
@@ -767,8 +772,16 @@ export function Shell({
    */
   const presentToast = useCallback(
     (next: ShellToast | null) => {
+      // A pill leaving unspent is an event its caller may be waiting on — a
+      // delete parked behind an Undo goes out at this moment and no other.
+      // Spent by its own action it owes nothing; taken by its window or by a
+      // message wearing its id, it says so through `onExpire`.
+      const standing = toastRef.current;
+      const spent = toastSpentRef.current;
+      toastSpentRef.current = false;
       toastRef.current = next;
       setToast(next);
+      if (standing && standing !== next && !spent) standing.onExpire?.();
       if (!next || next.durationMs === null) {
         if (toastTimer.current) clearTimeout(toastTimer.current);
         toastTimer.current = null;
@@ -833,12 +846,24 @@ export function Shell({
       // One open action at a time. A second press, or ⌘Z, while the first is
       // still settling would start the same reversal twice.
       if (toastActionPendingRef.current) return;
+      // Spent BEFORE the action runs: an action may say the same pill again
+      // from inside the press (the discard's Undo after its account left
+      // flushes and respeaks), and that replacement is the press spending
+      // the pill, not the window closing on it, so no `onExpire` is owed. A
+      // refusal hands the flag back, since the pill goes on standing with
+      // its window; a pending promise hands it back too and takes it again
+      // when it settles.
+      toastSpentRef.current = true;
       const outcome = action();
-      if (outcome === false) return;
+      if (outcome === false) {
+        toastSpentRef.current = false;
+        return;
+      }
       if (!(outcome instanceof Promise)) {
         presentToastRef.current(toastQueue.current.shift() ?? null);
         return;
       }
+      toastSpentRef.current = false;
       /* The action has begun but cannot finish yet — an undo waiting for the
          loop it stops to drop the mail lock. The pill stands, its button out
          of reach, until the promise settles; only THEN is it spent. The
@@ -855,6 +880,7 @@ export function Shell({
         toastActionPendingRef.current = false;
         setToastActionPending(false);
         if (toastRef.current !== standing) return;
+        toastSpentRef.current = true;
         presentToastRef.current(toastQueue.current.shift() ?? null);
       });
     },
@@ -5441,8 +5467,10 @@ export function Shell({
   const mobileSearchOpen = paletteOpen && mobileViewport;
   // A surface that owns the whole window. Pages and the phone's search did
   // this below md; the compose sheet does it on every width. While one is up
-  // the canvas is inert and out of the accessibility tree and the tab bar is
-  // gone, because what is under an opaque sheet is not a place.
+  // the canvas is inert and out of the accessibility tree and the tab bar
+  // leaves (unmounted under Pages and search, which draw their own; hidden on
+  // its 200ms under the sheet), because what is under an opaque sheet is not
+  // a place.
   const blockingSurfaceOpen = mobilePagesOpen || mobileSearchOpen || composeOpen;
   // The sidebar is translated off-canvas on mobile (Pages is its own view)
   // and in desktop focus mode. Off-screen must also mean out of the tab order
@@ -6085,7 +6113,14 @@ export function Shell({
         onSelect={select}
       />
 
-      {!blockingSurfaceOpen && <MobileTabBar {...mobileTabBarProps} />}
+      {/* Pages and the phone's search bring their own copy of the bar, so it
+          unmounts under them. The compose sheet does not: the bar stays and
+          leaves on its own 200ms (`data-hidden`), the way it does under the
+          keyboard, rather than vanishing in a frame while the shell recedes
+          around it. */}
+      {!(mobilePagesOpen || mobileSearchOpen) && (
+        <MobileTabBar {...mobileTabBarProps} hidden={mobileTabBarHidden || composeOpen} />
+      )}
       {commandPalette}
 
       <ShellOverlays

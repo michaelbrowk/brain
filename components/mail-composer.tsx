@@ -11,6 +11,7 @@ import {
   type ReactNode,
 } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
+import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
   DUR,
@@ -28,7 +29,6 @@ import {
   type MailRecipientField,
 } from "@/lib/mail/recipients";
 import { Button, IconButton } from "./ui/button";
-import { ConfirmDialog } from "./ui/confirm-dialog";
 import { Icon } from "./ui/icon";
 import { Kbd, useShortcutTitle } from "./ui/primitives";
 import { ScrollEdge } from "./ui/scroll-edge";
@@ -77,8 +77,10 @@ type SlotMessage = {
 };
 
 /** When each part of the letter arrives, in seconds after the sheet: From,
- *  To, Subject, then the fold and the body together at the last step. */
-const ROW_DELAYS = [0.05, 0.08, 0.11, 0.14] as const;
+ *  To, then a resumed Cc/Bcc and the notice (the parts a draft may or may not
+ *  carry, on a half step so the rows around them keep theirs), Subject, and
+ *  the fold with the body together at the last step. */
+const ROW_DELAYS = [0.05, 0.08, 0.095, 0.11, 0.14] as const;
 
 /**
  * THE SHEET. Writing a letter takes the whole window: the composer is an
@@ -95,6 +97,7 @@ const ROW_DELAYS = [0.05, 0.08, 0.11, 0.14] as const;
 export function MailComposePaper({
   title,
   sending,
+  holdEscape = false,
   focusOnOpen,
   onDismiss,
   children,
@@ -103,6 +106,13 @@ export function MailComposePaper({
   /** While a send is out nothing on the sheet answers: Esc and the cross are
    *  inert, so the dialog refuses its own dismissal until it is over. */
   sending: boolean;
+  /** A menu inside the sheet is open, and Esc belongs to it. Two copies of
+   *  Radix's dismissable layer live in node_modules (the dialog's and the
+   *  menu's), so neither knows the other is above it and one Esc used to
+   *  reach both: the menu closed and the letter went with it. Until the
+   *  copies are deduplicated the sheet refuses Esc while a menu of its own
+   *  is up; after, this stays harmless. */
+  holdEscape?: boolean;
   /** Where the caret goes the moment the sheet stands. Placed from Radix's
    *  own mount hook rather than `autoFocus`, so the element Radix remembers
    *  as "focused before" is the button that opened the sheet and not the
@@ -113,6 +123,15 @@ export function MailComposePaper({
 }) {
   const reduce = useReducedMotion();
   const sheet = useSheetGesture();
+  /** Read by the Esc guard through a ref rather than its closure: Radix
+   *  registers the document listener once and its effect-event wrapper hands
+   *  it the handler of the layer's own last render, which is not always the
+   *  sheet's last render. A ref is current whichever render the handler
+   *  came from. */
+  const escapeHeldRef = useRef(sending || holdEscape);
+  useEffect(() => {
+    escapeHeldRef.current = sending || holdEscape;
+  }, [sending, holdEscape]);
   /** Whatever had the focus when the sheet was asked for: the New message
    *  pill, a Reply button in the reader, a draft's row. Read on the first
    *  render, before Radix moves the caret in, and focused again when the
@@ -173,7 +192,7 @@ export function MailComposePaper({
             focusOnOpen()?.focus({ preventScroll: true });
           }}
           onEscapeKeyDown={(event) => {
-            if (sending) event.preventDefault();
+            if (escapeHeldRef.current) event.preventDefault();
           }}
           onCloseAutoFocus={(event) => {
             event.preventDefault();
@@ -206,6 +225,7 @@ export function MailComposePaper({
 
 export function MailComposer({
   account,
+  accounts = [],
   initialDraft,
   sending,
   sendError,
@@ -218,8 +238,13 @@ export function MailComposer({
   onRetrySave,
   onSend,
   onOpenSettings,
+  onSwitchAccount,
 }: {
   account: PublicMailAccount;
+  /** Every account the letter could go from: the ones that can compose and
+   *  send. With two or more, and a surface to hand the switch to, the From
+   *  value becomes a menu; a lone account keeps it as text. */
+  accounts?: readonly PublicMailAccount[];
   initialDraft: MailComposerDraft;
   sending: boolean;
   sendError: string | null;
@@ -233,6 +258,10 @@ export function MailComposer({
   onRetrySave: () => void;
   onSend: (input: MailSendInput) => void;
   onOpenSettings?: (invoker: HTMLElement) => void;
+  /** The writer chose another account in the From menu. The surface opens
+   *  the same letter there and closes this draft with delete; the fields are
+   *  handed over as they stand, so nothing typed is lost to the move. */
+  onSwitchAccount?: (accountId: string, fields: MailComposerFields) => void;
 }) {
   const sendTitle = useShortcutTitle("Send", "⌘↵");
   const [to, setTo] = useState(initialDraft.to);
@@ -252,11 +281,6 @@ export function MailComposer({
    *  the writer types on: it answered a gesture, and the next gesture is
    *  the writer moving past it. */
   const [dropRefused, setDropRefused] = useState(false);
-  const [confirmDiscard, setConfirmDiscard] = useState(false);
-  /** The Discard button, held past the state clear so the confirmation can
-   *  hand focus back to it — Radix asks where focus goes as it unmounts, and
-   *  Cancel has to leave the composer exactly as it was. */
-  const discardInvokerRef = useRef<HTMLElement | null>(null);
   const toRef = useRef<HTMLInputElement | null>(null);
   const ccRef = useRef<HTMLInputElement | null>(null);
   const bodyRef = useRef<HTMLTextAreaElement | null>(null);
@@ -268,6 +292,7 @@ export function MailComposer({
   const ccId = useId();
   const bccId = useId();
   const subjectId = useId();
+  const bodyLabelId = useId();
   const reportedInitial = useRef(false);
   const reduce = useReducedMotion();
   /** How many times `sending` has flipped since the sheet stood, so the label
@@ -281,11 +306,42 @@ export function MailComposer({
   const title = composerTitle(initialDraft.mode);
   const fromName = account.displayName || account.emailAddress;
 
+  /**
+   * THE FROM SWITCH. Compose only, and only with two or more accounts that
+   * can send: a reply or a forward goes from the account the letter arrived
+   * in, and one account is not a choice. The value stays what it is, quiet
+   * ink-2 text on the rule, and gains the chevron and a menu (the reader's
+   * `MailActionsMenu` pattern) listing each account by name with its address
+   * as a caption, the current one marked with a bare check. Choosing another
+   * hands the fields over as they stand. It is drawn twice, in the envelope
+   * row and in the phone's actions row, and CSS shows one at any width, so the
+   * phone can switch too.
+   */
+  const canSwitchFrom =
+    initialDraft.mode === "compose" && accounts.length >= 2 && onSwitchAccount !== undefined;
+  /** Whether either copy of the From menu is open: while one is, Esc is the
+   *  menu's and the sheet holds still (`holdEscape`). */
+  const [fromMenuOpen, setFromMenuOpen] = useState(false);
+  const fromValue = () =>
+    canSwitchFrom ? (
+      <FromSwitch
+        account={account}
+        accounts={accounts}
+        fromName={fromName}
+        disabled={sending}
+        onOpenChange={setFromMenuOpen}
+        onSwitch={(accountId) => onSwitchAccount?.(accountId, { to, cc, bcc, subject, text })}
+      />
+    ) : (
+      <span className="truncate">{fromName}</span>
+    );
+
   /** The rows arrive one after another, each a 4px rise over `DUR.base`:
-   *  From, To, Subject, then the fold and the body together, so the last of
-   *  them lands at 300ms with the sheet. Reduced motion: they are simply
-   *  there. The steps are the spec's own numbers. */
-  const arrive = (step: 0 | 1 | 2 | 3) =>
+   *  From, To, a resumed copy and the notice, Subject, then the fold and the
+   *  body together, so the last of them lands at 300ms with the sheet.
+   *  Reduced motion: they are simply there. The steps are the spec's own
+   *  numbers. */
+  const arrive = (step: 0 | 1 | 2 | 3 | 4) =>
     reduce
       ? { initial: false as const }
       : {
@@ -308,8 +364,6 @@ export function MailComposer({
     ccRef.current?.focus({ preventScroll: true });
   }, [showCopies]);
 
-  const dirty = Boolean(to.trim() || cc.trim() || bcc.trim() || subject.trim() || text.trim());
-
   /** Close keeps the draft and asks nothing. Inert while a send is out. */
   const close = () => {
     if (sending) return;
@@ -318,18 +372,14 @@ export function MailComposer({
 
   /**
    * Discard is not Close. Closing keeps the draft — it is already saved and
-   * the writer finds it in Drafts — and asks nothing. Discard DELETES it from
-   * the provider, which nothing undoes, so it asks, and the question names
-   * what disappears rather than saying "this draft". An empty composer has
-   * nothing to lose and goes without a word.
+   * the writer finds it in Drafts. Discard removes it, and it no longer asks
+   * first: the sheet goes at the press and the surface puts up a pill with
+   * Undo, holding the provider delete behind it for the pill's window. The
+   * protection is the way back, not a question in the way. Inert while a
+   * send is out.
    */
-  const discard = (event: { currentTarget: HTMLElement }) => {
+  const discard = () => {
     if (sending) return;
-    if (dirty) {
-      discardInvokerRef.current = event.currentTarget;
-      setConfirmDiscard(true);
-      return;
-    }
     onDiscard();
   };
 
@@ -411,6 +461,7 @@ export function MailComposer({
     <MailComposePaper
       title={title}
       sending={sending}
+      holdEscape={fromMenuOpen}
       focusOnOpen={() => (initialDraft.mode === "compose" ? toRef.current : bodyRef.current)}
       onDismiss={close}
     >
@@ -434,8 +485,8 @@ export function MailComposer({
             where no keyboard can cover it: the phone's standing failure was a
             footer under the keys. The slot in the middle always keeps its
             place, so a sentence arriving in it moves nothing else. On the
-            phone From reads here as quiet text and yields the row to the slot
-            while a sentence stands (`data-message`). */}
+            phone From reads here as quiet text and keeps the row; a sentence
+            takes a second line under the actions (`data-message` opens it). */}
         {/* While a send is out the cross, the trash and Cc Bcc do not only
             refuse, they read as inert: `aria-disabled` and `disabled` take
             the atoms' own dimmed state, and `data-sending` names the row's. */}
@@ -455,7 +506,7 @@ export function MailComposer({
           >
             <Icon name="close-linear" size={16} />
           </IconButton>
-          <span className="brain-compose-actions-from text-control">{fromName}</span>
+          <span className="brain-compose-actions-from text-control">{fromValue()}</span>
           <div className="brain-compose-slot text-control">
             <AnimatePresence
               initial={false}
@@ -520,7 +571,7 @@ export function MailComposer({
               aria-label="Discard draft"
               title="Discard draft"
               aria-disabled={sending || undefined}
-              onClick={(event) => discard(event)}
+              onClick={discard}
               className="brain-touch-hit"
             >
               <Icon name="trash-bin-trash-linear" size={16} />
@@ -590,7 +641,7 @@ export function MailComposer({
             <div className="brain-compose-envelope">
               <motion.div className="brain-compose-row brain-compose-from" {...arrive(0)}>
                 <span className="brain-compose-label text-control">From</span>
-                <span className="brain-compose-value text-table truncate">{fromName}</span>
+                <span className="brain-compose-value text-table">{fromValue()}</span>
               </motion.div>
               <motion.div className="brain-compose-row" {...arrive(1)}>
                 <label htmlFor={toId} className="brain-compose-label text-control">
@@ -632,12 +683,17 @@ export function MailComposer({
               {showCopies && (
                 /* From a press the two rows grow into place on the select
                    spring and the caret lands in Cc; a resumed draft that
-                   already carries a copy shows them standing. */
+                   already carries a copy shows them standing, arriving in the
+                   stagger between To and Subject. */
                 <motion.div
                   className="brain-compose-copies-rows"
-                  initial={reduce || !revealedByPress ? false : { height: 0, opacity: 0 }}
-                  animate={{ height: "auto", opacity: 1 }}
-                  transition={SPRING_SELECT}
+                  {...(revealedByPress
+                    ? {
+                        initial: reduce ? (false as const) : { height: 0, opacity: 0 },
+                        animate: { height: "auto", opacity: 1 },
+                        transition: SPRING_SELECT,
+                      }
+                    : arrive(2))}
                 >
                   <div className="brain-compose-row">
                     <label htmlFor={ccId} className="brain-compose-label text-control">
@@ -676,7 +732,7 @@ export function MailComposer({
               )}
               {/* The subject is the letter's heading, not a field with a
                   label: it stands on the values' rule at the subheading size. */}
-              <motion.div className="brain-compose-row brain-compose-subject" {...arrive(2)}>
+              <motion.div className="brain-compose-row brain-compose-subject" {...arrive(3)}>
                 <label htmlFor={subjectId} className="sr-only">
                   Subject
                 </label>
@@ -696,17 +752,28 @@ export function MailComposer({
             </div>
 
             {initialDraft.notice && (
-              <p className="brain-compose-notice text-caption">{initialDraft.notice}</p>
+              /* What a forward or a recovered draft has to say about itself
+                 arrives on the same half step as a resumed copy. */
+              <motion.p className="brain-compose-notice text-caption" {...arrive(2)}>
+                {initialDraft.notice}
+              </motion.p>
             )}
 
             {/* The one line on the sheet: where the envelope ends and the
                 letter begins. It arrives with the body. */}
-            <motion.div className="brain-compose-fold" aria-hidden {...arrive(3)} />
+            <motion.div className="brain-compose-fold" aria-hidden {...arrive(4)} />
 
-            <motion.label className="brain-compose-body" {...arrive(3)}>
-              <span className="sr-only">Message</span>
+            {/* Named through `aria-labelledby`, not a wrapping label: a label
+                around an embedded textbox names it with its VALUE too (the
+                accessible-name rule for embedded controls), so "Message" grew
+                into "Message Never mind" the moment a letter stood. */}
+            <motion.div className="brain-compose-body" {...arrive(4)}>
+              <span id={bodyLabelId} className="sr-only">
+                Message
+              </span>
               <textarea
                 ref={bodyRef}
+                aria-labelledby={bodyLabelId}
                 value={text}
                 onChange={(event) => {
                   setText(event.currentTarget.value);
@@ -716,28 +783,98 @@ export function MailComposer({
                 placeholder="Write a message…"
                 className="text-body"
               />
-            </motion.label>
+            </motion.div>
           </div>
         </ScrollEdge>
       </form>
-
-      <ConfirmDialog
-        open={confirmDiscard}
-        onOpenChange={setConfirmDiscard}
-        title="Discard this draft?"
-        description={
-          subject.trim()
-            ? `“${subject.trim()}” will be deleted from Drafts. This can’t be undone — closing the composer instead keeps it there.`
-            : "This draft will be deleted from Drafts. This can’t be undone — closing the composer instead keeps it there."
-        }
-        confirmLabel="Discard"
-        returnFocus={() => discardInvokerRef.current}
-        onConfirm={() => {
-          setConfirmDiscard(false);
-          onDiscard();
-        }}
-      />
     </MailComposePaper>
+  );
+}
+
+/**
+ * The From menu: the value as a quiet button with a chevron, and a Radix menu
+ * of the accounts that can send, the current one marked. Controlled, so Esc
+ * can close it by hand: the menu's dismissable layer and the dialog's are two
+ * copies that cannot see each other, so the menu takes Esc itself and the
+ * sheet, told through `onOpenChange`, refuses the same key.
+ */
+function FromSwitch({
+  account,
+  accounts,
+  fromName,
+  disabled,
+  onOpenChange,
+  onSwitch,
+}: {
+  account: PublicMailAccount;
+  accounts: readonly PublicMailAccount[];
+  fromName: string;
+  disabled: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSwitch: (accountId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const setOpenState = (next: boolean) => {
+    setOpen(next);
+    onOpenChange(next);
+  };
+  return (
+    <Dropdown.Root open={open} onOpenChange={setOpenState}>
+      <Dropdown.Trigger asChild>
+        <button
+          type="button"
+          className="brain-compose-from-switch"
+          aria-label={`From: ${fromName}`}
+          disabled={disabled}
+        >
+          <span className="truncate">{fromName}</span>
+          <Icon name="alt-arrow-down-linear" size={14} className="brain-compose-from-mark" />
+        </button>
+      </Dropdown.Trigger>
+      <Dropdown.Portal>
+        <Dropdown.Content
+          side="bottom"
+          align="start"
+          sideOffset={6}
+          collisionPadding={8}
+          className="brain-menu brain-compose-from-menu z-[var(--z-modal)]"
+          onEscapeKeyDown={(event) => {
+            event.preventDefault();
+            setOpenState(false);
+          }}
+        >
+          <Dropdown.RadioGroup
+            value={account.accountId}
+            onValueChange={(accountId) => {
+              if (accountId === account.accountId) return;
+              onSwitch(accountId);
+            }}
+          >
+            {accounts.map((candidate) => (
+              <Dropdown.RadioItem
+                key={candidate.accountId}
+                value={candidate.accountId}
+                className="brain-menu-item"
+              >
+                <span className="brain-compose-from-lines">
+                  <span className="truncate">
+                    {candidate.displayName || candidate.emailAddress}
+                  </span>
+                  {candidate.displayName && (
+                    <span className="text-caption truncate text-ink-3">
+                      {candidate.emailAddress}
+                    </span>
+                  )}
+                </span>
+                {candidate.accountId === account.accountId && (
+                  <Icon name="check-linear" size={14} className="shrink-0 text-ink-2" />
+                )}
+              </Dropdown.RadioItem>
+            ))}
+          </Dropdown.RadioGroup>
+        </Dropdown.Content>
+      </Dropdown.Portal>
+    </Dropdown.Root>
   );
 }
 

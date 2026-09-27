@@ -175,7 +175,7 @@ async function createThirdPartyNotices(inputs) {
   if (!packages.has("imapflow@1.4.7")) {
     throw new Error("mail bundle does not contain the pinned ImapFlow package");
   }
-  if (!packages.has("jose@6.2.9")) {
+  if (!packages.has("jose@6.2.12")) {
     throw new Error("mail bundle does not contain the pinned jose package");
   }
   if (!packages.has("mailparser@3.9.14")) {

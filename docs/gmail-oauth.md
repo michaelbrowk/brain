@@ -196,7 +196,7 @@ OAuth credentials.
 - exact runtime projection followed by a real service start from the projected
   tree, with Gmail disabled and no application `node_modules` access
 - isolated CommonJS load of the built Gmail provider from `/tmp`
-- generated third-party notices contain pinned `jose@6.2.9` and
+- generated third-party notices contain pinned `jose@6.2.12` and
   `imapflow@1.4.7`
 - SQLite create, restart, mixed-provider uniqueness/cap, scoped deletion,
   reconnect rotation, corrupted-row isolation, and token-absence checks

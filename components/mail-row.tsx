@@ -132,7 +132,6 @@ export function MailRow({
   thread,
   active,
   avatar,
-  account,
   sizeLabel,
   timeLabel,
   sentByAgent,
@@ -142,8 +141,6 @@ export function MailRow({
   active: boolean;
   /** The 32 sender avatar — unified only; the single-account list has none. */
   avatar?: React.ReactNode;
-  /** The source account word — unified only, for the same reason. */
-  account?: string;
   /** Replaces the time while the single-account list is sorted by size. */
   sizeLabel?: string;
   timeLabel: string;
@@ -192,11 +189,6 @@ export function MailRow({
           </span>
           {thread.starred && (
             <Icon name="star-linear" size={12} className="shrink-0 self-center text-ink-3" />
-          )}
-          {account !== undefined && (
-            <span className="text-caption max-w-[9ch] shrink-0 truncate text-ink-3">
-              {account}
-            </span>
           )}
           {sizeLabel === undefined ? (
             <time

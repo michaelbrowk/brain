@@ -603,9 +603,10 @@ describe("MailUnifiedList", () => {
     expect(bundle.querySelectorAll(".brain-mail-avstack > *").length).toBe(2);
   });
 
-  it("gives every account a word no other account answers to", async () => {
-    // Two mailboxes, one local part. The word is the only thing on the row
-    // that says which one a letter landed in, so it cannot be "misha" twice.
+  it("prints no account word on a row", async () => {
+    // The merged list used to name the source account left of the time on
+    // every row. Michael read it as noise: the section head and the reader
+    // say where a letter landed, the row is the sender and the subject.
     const personal = { ...accountA, emailAddress: "misha@example.test" };
     const studio = { ...accountB, emailAddress: "misha@studio.example" };
     const items = [
@@ -623,10 +624,11 @@ describe("MailUnifiedList", () => {
       },
       sections: deriveUnifiedSections(items, [personal, studio]),
     });
-    const words = [...host.querySelectorAll(".brain-mail-row")].map(
-      (row) => row.querySelector(".max-w-\\[9ch\\]")?.textContent ?? "",
-    );
-    expect(words).toEqual(["example", "studio"]);
+    const rows = [...host.querySelectorAll(".brain-mail-row")];
+    expect(rows.length).toBe(2);
+    for (const row of rows) {
+      expect(row.textContent).not.toMatch(/\b(example|studio)\b/);
+    }
   });
 
   it("collapses Seen to a count rather than to a preview", async () => {

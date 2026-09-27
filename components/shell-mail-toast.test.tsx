@@ -478,5 +478,30 @@ describe("shell toast channels, as mail uses them", () => {
       });
       expect(onExpire).toHaveBeenCalledTimes(1);
     });
+
+    it("never fires for a pill its own action replaces from inside the press", async () => {
+      // The discard's Undo, pressed after the account left: the action runs
+      // the flush itself and says the pill again under the same id, without
+      // an Undo, before it returns. That replacement is the press spending
+      // the pill, not the window closing on it: `onExpire` would flush a
+      // second time over the flush the action just ran.
+      const onExpire = vi.fn();
+      const respeak = () => {
+        if (!mailToast) throw new Error("the mail surface never got onToast");
+        mailToast("Draft discarded", { id: "mail-draft-discard" });
+        return false;
+      };
+      await say("Draft discarded", discardReport(onExpire, respeak));
+      await act(async () => {
+        document.body.querySelector<HTMLButtonElement>(".brain-toast button")!.click();
+      });
+      expect(onExpire).not.toHaveBeenCalled();
+      expect(pills().join(" | ")).toContain("Draft discarded");
+      expect(document.body.querySelector(".brain-toast button")).toBeNull();
+      await act(async () => {
+        vi.advanceTimersByTime(20_000);
+      });
+      expect(onExpire).not.toHaveBeenCalled();
+    });
   });
 });

@@ -846,13 +846,24 @@ export function Shell({
       // One open action at a time. A second press, or ⌘Z, while the first is
       // still settling would start the same reversal twice.
       if (toastActionPendingRef.current) return;
+      // Spent BEFORE the action runs: an action may say the same pill again
+      // from inside the press (the discard's Undo after its account left
+      // flushes and respeaks), and that replacement is the press spending
+      // the pill, not the window closing on it, so no `onExpire` is owed. A
+      // refusal hands the flag back, since the pill goes on standing with
+      // its window; a pending promise hands it back too and takes it again
+      // when it settles.
+      toastSpentRef.current = true;
       const outcome = action();
-      if (outcome === false) return;
+      if (outcome === false) {
+        toastSpentRef.current = false;
+        return;
+      }
       if (!(outcome instanceof Promise)) {
-        toastSpentRef.current = true;
         presentToastRef.current(toastQueue.current.shift() ?? null);
         return;
       }
+      toastSpentRef.current = false;
       /* The action has begun but cannot finish yet — an undo waiting for the
          loop it stops to drop the mail lock. The pill stands, its button out
          of reach, until the promise settles; only THEN is it spent. The

@@ -79,6 +79,8 @@ export interface FakeSmtpServerOptions {
   readonly dataCode?: number;
   /** Behavior after the terminating dot. Default 250. */
   readonly finalBehavior?: FakeSmtpFinalBehavior;
+  /** "silence" never answers QUIT and keeps the socket open. Default "reply". */
+  readonly quitBehavior?: "reply" | "silence";
 }
 
 interface FakeSmtpConnectionState {
@@ -245,6 +247,7 @@ export class FakeSmtpServer {
         continue;
       }
       if (keyword === "QUIT") {
+        if (this.options.quitBehavior === "silence") return;
         state.socket.write("221 bye\r\n");
         state.socket.end();
         return;

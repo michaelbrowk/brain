@@ -152,6 +152,7 @@ export const MAIL_SERVICE_ERROR_CODES = Object.freeze({
     "smtp_connection_failed",
     "smtp_authentication_failed",
     "smtp_connection_timeout",
+    "smtp_submission_unavailable",
     "mail_request_invalid",
     "mail_account_reauth_required",
     "mail_thread_not_found",
@@ -1669,6 +1670,12 @@ function toHttpError(error: unknown): MailHttpError {
       error.code === "smtp_connection_timeout"
     ) {
       return new MailHttpError(408, error.code, true);
+    }
+    // Not an outage and not retryable: this service was started without an
+    // SMTP transport, and asking again gets the same answer until an operator
+    // sets the flag. The code is kept so the surface can offer receive-only.
+    if (error.code === "smtp_submission_unavailable") {
+      return new MailHttpError(503, error.code);
     }
     // Corrupt state, filesystem details, and wrapping-key availability all use
     // one public code. The API never reveals credential_key_invalid.

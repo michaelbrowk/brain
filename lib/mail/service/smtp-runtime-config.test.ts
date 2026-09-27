@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
   readOptionalSmtpEgressConfig,
+  readOptionalSmtpTransportConfig,
   SMTP_EGRESS_CREDENTIAL_NAMES,
 } from "./smtp-runtime-config";
 
@@ -75,6 +76,97 @@ describe("SMTP production egress configuration", () => {
         CREDENTIALS_DIRECTORY: directory,
       }),
     ).rejects.toThrow("SMTP egress configuration is unavailable");
+  });
+});
+
+describe("SMTP transport selection", () => {
+  it("selects nothing when neither flag is set", async () => {
+    await expect(readOptionalSmtpTransportConfig({})).resolves.toBeNull();
+    await expect(
+      readOptionalSmtpTransportConfig({ BRAIN_MAIL_SMTP_DIRECT_ENABLED: "0" }),
+    ).resolves.toBeNull();
+    await expect(
+      readOptionalSmtpTransportConfig({
+        BRAIN_MAIL_SMTP_DIRECT_ENABLED: "0",
+        BRAIN_MAIL_SMTP_EGRESS_ENABLED: "0",
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("selects direct submission on the flag alone, without credentials", async () => {
+    await expect(
+      readOptionalSmtpTransportConfig({ BRAIN_MAIL_SMTP_DIRECT_ENABLED: "1" }),
+    ).resolves.toEqual({ kind: "direct" });
+    await expect(
+      readOptionalSmtpTransportConfig({
+        BRAIN_MAIL_SMTP_DIRECT_ENABLED: "1",
+        BRAIN_MAIL_SMTP_EGRESS_ENABLED: "0",
+      }),
+    ).resolves.toEqual({ kind: "direct" });
+    // Relay settings left behind are ignored, not read: the direct flag never
+    // opens a credentials directory.
+    await expect(
+      readOptionalSmtpTransportConfig({
+        BRAIN_MAIL_SMTP_DIRECT_ENABLED: "1",
+        BRAIN_MAIL_SMTP_EGRESS_URL: "wss://relay.example.test/v1/tunnel",
+        BRAIN_MAIL_SMTP_EGRESS_ACCESS_ENABLED: "1",
+        CREDENTIALS_DIRECTORY: "/nonexistent/credentials",
+      }),
+    ).resolves.toEqual({ kind: "direct" });
+  });
+
+  it("selects the relay exactly as the egress reader does", async () => {
+    const directory = await credentials();
+    const environment = {
+      BRAIN_MAIL_SMTP_EGRESS_ENABLED: "1",
+      BRAIN_MAIL_SMTP_EGRESS_URL: "wss://relay.example.test/v1/tunnel",
+      BRAIN_MAIL_SMTP_EGRESS_ACCESS_ENABLED: "1",
+      CREDENTIALS_DIRECTORY: directory,
+    };
+    await expect(readOptionalSmtpTransportConfig(environment)).resolves.toEqual({
+      kind: "relay",
+      relay: await readOptionalSmtpEgressConfig(environment),
+    });
+    await expect(
+      readOptionalSmtpTransportConfig({
+        ...environment,
+        BRAIN_MAIL_SMTP_DIRECT_ENABLED: "0",
+      }),
+    ).resolves.toEqual({
+      kind: "relay",
+      relay: await readOptionalSmtpEgressConfig(environment),
+    });
+  });
+
+  it("refuses both transports at once and any value that is not 0 or 1", async () => {
+    const directory = await credentials();
+    await expect(
+      readOptionalSmtpTransportConfig({
+        BRAIN_MAIL_SMTP_DIRECT_ENABLED: "1",
+        BRAIN_MAIL_SMTP_EGRESS_ENABLED: "1",
+        BRAIN_MAIL_SMTP_EGRESS_URL: "wss://relay.example.test/v1/tunnel",
+        BRAIN_MAIL_SMTP_EGRESS_ACCESS_ENABLED: "1",
+        CREDENTIALS_DIRECTORY: directory,
+      }),
+    ).rejects.toThrow("SMTP egress configuration is invalid");
+    await expect(
+      readOptionalSmtpTransportConfig({
+        BRAIN_MAIL_SMTP_DIRECT_ENABLED: "1",
+        BRAIN_MAIL_SMTP_EGRESS_ENABLED: "yes",
+      }),
+    ).rejects.toThrow("SMTP egress configuration is invalid");
+    for (const value of ["true", "yes", "", " 1", "01"]) {
+      await expect(
+        readOptionalSmtpTransportConfig({
+          BRAIN_MAIL_SMTP_DIRECT_ENABLED: value,
+        }),
+      ).rejects.toThrow("SMTP egress configuration is invalid");
+    }
+    await expect(
+      readOptionalSmtpTransportConfig({
+        BRAIN_MAIL_SMTP_EGRESS_ENABLED: "yes",
+      }),
+    ).rejects.toThrow("SMTP egress configuration is invalid");
   });
 });
 

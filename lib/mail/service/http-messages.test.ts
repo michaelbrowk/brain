@@ -594,6 +594,7 @@ describe("brain-mail message HTTP surface", () => {
     ["smtp_connection_failed", 422],
     ["smtp_authentication_failed", 422],
     ["smtp_connection_timeout", 408],
+    ["smtp_submission_unavailable", 503],
   ] as const)(
     "carries %s through the proxy with its status and code",
     async (code, status) => {

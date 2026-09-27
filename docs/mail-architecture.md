@@ -88,7 +88,12 @@ LIST order, and a localized name is not matched. A server
 that advertises nothing and names nothing has no mailbox for that role, and the
 mutation is refused with `mail_provider_mutation_unsupported` — a 409, not a
 retryable 503, because retrying cannot conjure a folder. Nothing is moved on a
-refusal.
+refusal. The archive role is the one exception: a server that lists no archive
+mailbox gets one, `Archive` at the account root, or `INBOX.Archive` where the
+listed trash, junk, sent and drafts all sit under the Inbox with that
+delimiter, created and subscribed once per adapter, with ALREADYEXISTS counted
+as success and any other refusal as the same 409. LIST is then asked again and
+the role resolved from its answer. Trash and junk are never invented.
 
 A MOVE changes the message's UID, so the adapter remembers where it put each
 thread for its own lifetime and keeps the Brain thread id stable across the

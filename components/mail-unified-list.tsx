@@ -12,7 +12,6 @@ import { MailSenderIcon } from "./mail-sender-icon";
 import {
   MailRow,
   MailRowSkeleton,
-  accountWords as resolveAccountWords,
   formatParticipants,
   stripSubjectSenderPrefix,
 } from "./mail-row";
@@ -150,21 +149,6 @@ export function MailUnifiedList({
           `${item.accountId}:${item.threadId}`,
           index,
         ]),
-  );
-
-  // The source account as a word on every row — the merged column is the one
-  // place a reader cannot tell where a letter landed without being told, so
-  // the word has to be unique across the connected set or the field says
-  // nothing. Resolved for all of them at once (two accounts can share a local
-  // part), then keyed by account id for the rows.
-  const wordByAddress = resolveAccountWords(
-    accounts.map((account) => account.emailAddress),
-  );
-  const accountWords = new Map(
-    accounts.map((account) => [
-      account.accountId,
-      wordByAddress.get(account.emailAddress) ?? account.emailAddress,
-    ]),
   );
 
   // The merge window loads on scroll: skeleton rows stand at the bottom for
@@ -340,7 +324,6 @@ export function MailUnifiedList({
                           <UnifiedRow
                             key={`${thread.accountId}:${thread.threadId}`}
                             thread={thread}
-                            account={accountWords.get(thread.accountId)}
                             index={
                               rowIndexByKey.get(
                                 `${thread.accountId}:${thread.threadId}`,
@@ -374,7 +357,6 @@ export function MailUnifiedList({
                 exitFades={exitFades}
                 selectedThreadKey={selectedThreadKey}
                 rowIndexByKey={rowIndexByKey}
-                accountWords={accountWords}
                 onToggleExpand={onToggleExpand}
                 onSelectThread={onSelectThread}
                 onSectionDone={onSectionDone}
@@ -393,7 +375,6 @@ export function MailUnifiedList({
                 exitFades={exitFades}
                 selectedThreadKey={selectedThreadKey}
                 rowIndexByKey={rowIndexByKey}
-                accountWords={accountWords}
                 onToggleExpand={onToggleExpand}
                 onSelectThread={onSelectThread}
                 onSectionDone={onSectionDone}
@@ -421,7 +402,6 @@ export function MailUnifiedList({
                         <UnifiedRow
                           key={`${thread.accountId}:${thread.threadId}`}
                           thread={thread}
-                          account={accountWords.get(thread.accountId)}
                           index={
                             rowIndexByKey.get(
                               `${thread.accountId}:${thread.threadId}`,
@@ -513,7 +493,6 @@ function PlainSection({
   exitFades,
   selectedThreadKey,
   rowIndexByKey,
-  accountWords,
   onToggleExpand,
   onSelectThread,
   onSectionDone,
@@ -529,7 +508,6 @@ function PlainSection({
   exitFades: boolean;
   selectedThreadKey: string | null;
   rowIndexByKey: ReadonlyMap<string, number>;
-  accountWords: ReadonlyMap<string, string>;
   onToggleExpand: (key: UnifiedExpandKey) => void;
   onSelectThread: (thread: MailThreadListItem) => void;
   onSectionDone: (items: readonly MailThreadListItem[], label: string) => void;
@@ -562,7 +540,6 @@ function PlainSection({
               <UnifiedRow
                 key={`${thread.accountId}:${thread.threadId}`}
                 thread={thread}
-                account={accountWords.get(thread.accountId)}
                 index={
                   rowIndexByKey.get(`${thread.accountId}:${thread.threadId}`) ??
                   8
@@ -867,7 +844,6 @@ function SectionHeader({
  */
 function UnifiedRow({
   thread,
-  account,
   index,
   reduce,
   entrance,
@@ -876,7 +852,6 @@ function UnifiedRow({
   onSelect,
 }: {
   thread: MailThreadListItem;
-  account: string | undefined;
   index: number;
   reduce: boolean | null;
   entrance: boolean;
@@ -904,7 +879,6 @@ function UnifiedRow({
       <MailRow
         thread={thread}
         active={active}
-        account={account}
         avatar={<MailSenderIcon participants={thread.participants} size={32} />}
         timeLabel={formatThreadTime(thread.lastMessageAt)}
         onSelect={onSelect}

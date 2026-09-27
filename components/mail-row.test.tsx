@@ -131,13 +131,12 @@ describe("MailRow", () => {
     host.remove();
   });
 
-  async function render(thread: MailThreadListItem, account?: string) {
+  async function render(thread: MailThreadListItem) {
     await act(async () =>
       root.render(
         <MailRow
           thread={thread}
           active={false}
-          account={account}
           timeLabel="18:24"
           onSelect={() => {}}
         />,
@@ -179,11 +178,13 @@ describe("MailRow", () => {
     ).toBeTruthy();
   });
 
-  it("names the source account only when it is given one", async () => {
-    const withAccount = await render(makeThread(), "design");
-    expect(withAccount.textContent).toContain("design");
-    const without = await render(makeThread());
-    expect(without.textContent).not.toContain("design");
+  it("never prints the source account beside the time", async () => {
+    // The merged list used to put the account's word left of the time on every
+    // row. Michael read it as noise: the sender and the subject are the row,
+    // and the account is answered by the section head and the reader.
+    const row = await render(makeThread());
+    expect(row.textContent).not.toContain("design");
+    expect(row.querySelector("time")!.previousElementSibling?.textContent ?? "").not.toMatch(/^design$/);
   });
 
   it("lets the subject and snippet resolve their own direction", async () => {

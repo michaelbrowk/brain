@@ -141,6 +141,14 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
   private readonly pending = new Map<string, CachedProviderThread>();
   private readonly relocations = new Map<string, ThreadLocation>();
   private mailboxRoles: ReadonlyMap<ImapMailboxRole, string | null> | null = null;
+  /** Where a CREATE would put an Archive on this server, read off the same LIST. */
+  private archiveCreatePath = archiveCreatePath([]);
+  /**
+   * Whether this adapter has already asked the server to CREATE an Archive.
+   * One attempt per adapter: a server that refuses once will refuse the next
+   * thread too, and a section Done must not become a CREATE per thread.
+   */
+  private archiveCreateAttempted = false;
 
   constructor(
     account: StoredImapMailAccount,
@@ -560,6 +568,12 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    * Which server mailbox plays a role. LIST is issued once per session-backed
    * adapter and the answer is cached until a move fails, because a failing move
    * is the one signal that the folder layout is not what LIST said it was.
+   *
+   * A server with no archive mailbox gets one. Trash and junk are never
+   * invented: a folder for them that no client knows is where the owner's mail
+   * disappears. An `Archive` at the account root, or under the Inbox on a
+   * server that files everything there, is where every mail client looks, so
+   * creating it is the one exception, made once per adapter.
    */
   private async rolePath(
     client: ImapSessionClient,
@@ -580,15 +594,35 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
         ["trash", selectImapMailboxPath("trash", listed)],
         ["junk", selectImapMailboxPath("junk", listed)],
       ]);
+      this.archiveCreatePath = archiveCreatePath(listed);
     }
     const path = this.mailboxRoles.get(role) ?? null;
-    if (path === null) {
-      // The server offers no mailbox for this role. Refusing is the honest
-      // answer; inventing a destination would move the owner's mail somewhere
-      // no mail client will look for it.
-      throw new MailProviderSyncError("mail_provider_mutation_unsupported");
+    if (path !== null) return path;
+    if (role === "archive" && !this.archiveCreateAttempted) {
+      let exists: boolean;
+      try {
+        exists = await createArchiveMailbox(client, this.archiveCreatePath);
+      } catch (error) {
+        // The server never answered: the socket died, or the deadline closed
+        // it. Nothing is known about the folder, so the attempt does not
+        // count and LIST is asked again next time, the way a failed move asks.
+        this.mailboxRoles = null;
+        throw error;
+      }
+      // Only a server answer spends the one attempt, whichever way it went.
+      this.archiveCreateAttempted = true;
+      if (exists) {
+        // The folder exists now. LIST is the only reading of the layout this
+        // adapter trusts, so the cache is dropped and the role resolved from a
+        // fresh answer rather than from the path that was sent.
+        this.mailboxRoles = null;
+        return this.rolePath(client, role);
+      }
     }
-    return path;
+    // The server offers no mailbox for this role, or refused to make one.
+    // Refusing is the honest answer; inventing a destination would move the
+    // owner's mail somewhere no mail client will look for it.
+    throw new MailProviderSyncError("mail_provider_mutation_unsupported");
   }
 
   /**
@@ -1579,7 +1613,10 @@ function mapImapProviderError(error: unknown): MailProviderSyncError {
  * states nothing is matched against a short list of well-known names, at the
  * account root or directly under the Inbox and only when exactly one folder
  * answers, and a server that matches neither has no mailbox for that role:
- * the mutation is refused rather than moved into a guessed destination.
+ * the mutation is refused rather than moved into a guessed destination. The
+ * archive role is the one exception: a server without one gets an `Archive`
+ * created where its other role folders live, because that is the folder every
+ * mail client shows.
  *
  * This lives in the adapter file rather than beside it because the isolated
  * mail runtime projects an exact allowlist of compiled files, and a new module
@@ -1702,6 +1739,123 @@ function isRoleMountPoint(entry: ImapMailboxDescriptor): boolean {
 
 export function isSupportedMailboxList(value: unknown): value is readonly ImapMailboxDescriptor[] {
   return Array.isArray(value) && value.length <= MAX_LISTED_MAILBOXES;
+}
+
+const ARCHIVE_MAILBOX_NAME = "Archive";
+
+/**
+ * The folders that show where a server keeps its role mailboxes: the stated
+ * trash, junk, sent and drafts, or the well-known names for them. Where these
+ * sit is where a mail client would create an Archive too.
+ */
+const NAMESPACE_ANCHOR_ATTRIBUTES = Object.freeze([
+  "\\trash",
+  "\\junk",
+  "\\sent",
+  "\\drafts",
+]);
+const NAMESPACE_ANCHOR_NAMES = Object.freeze([
+  ...ROLE_TIERS.trash.flatMap((tier) => (tier.kind === "name" ? tier.names : [])),
+  ...ROLE_TIERS.junk.flatMap((tier) => (tier.kind === "name" ? tier.names : [])),
+  "sent",
+  "sent items",
+  "sent messages",
+  "drafts",
+]);
+
+/**
+ * Where to CREATE an Archive on a server that lists none: `Archive` at the
+ * account root, or `INBOX<d>Archive` on a server whose trash, junk, sent and
+ * drafts all sit directly under the Inbox with one delimiter `d`, as Dovecot
+ * and Courier lay them out. A server that anchors nothing, or anchors folders
+ * in both places, gets the root path, and ImapFlow still prefixes the personal
+ * namespace the server advertised if the root path lacks it.
+ */
+export function archiveCreatePath(mailboxes: readonly ImapMailboxDescriptor[]): string {
+  const anchors = mailboxes.filter(
+    (entry) =>
+      isSelectableMailbox(entry) &&
+      (NAMESPACE_ANCHOR_ATTRIBUTES.includes(normalizedAttribute(entry.specialUse) ?? "") ||
+        (isRoleMountPoint(entry) &&
+          NAMESPACE_ANCHOR_NAMES.includes(leafName(entry).toLowerCase()))),
+  );
+  const prefixes = new Set(anchors.map(inboxChildPrefix));
+  if (prefixes.size !== 1) return ARCHIVE_MAILBOX_NAME;
+  const [prefix] = prefixes;
+  return prefix === null ? ARCHIVE_MAILBOX_NAME : `${prefix}${ARCHIVE_MAILBOX_NAME}`;
+}
+
+/** `INBOX.` for `INBOX.Sent`, null for a root folder or a deeper one. */
+function inboxChildPrefix(entry: ImapMailboxDescriptor): string | null {
+  const delimiter = entry.delimiter;
+  if (typeof delimiter !== "string" || delimiter.length !== 1) return null;
+  const first = entry.path.indexOf(delimiter);
+  if (first === -1 || !isInboxPath(entry.path.slice(0, first))) return null;
+  if (entry.path.indexOf(delimiter, first + 1) !== -1) return null;
+  return `${INBOX}${delimiter}`;
+}
+
+/**
+ * CREATE the Archive. True when the folder is there afterwards, false when
+ * the server answered the CREATE with a refusal, which is the same 409 as
+ * having no folder at all, because retrying cannot make a server accept a
+ * CREATE it declined. An error with no server answer in it, a socket that
+ * closed or a deadline that closed it, is not a refusal and is thrown as the
+ * transport failure it is.
+ *
+ * ImapFlow subscribes to what it creates and answers `created: false` to the
+ * server's ALREADYEXISTS, which is success too: another client made the folder
+ * between our LIST and our CREATE. That folder is the one nobody subscribed
+ * for us, so the SUBSCRIBE goes out only then, and a declined one is ignored:
+ * the folder is usable unsubscribed, and only clients that list LSUB would
+ * miss it.
+ */
+async function createArchiveMailbox(
+  client: ImapSessionClient,
+  path: string,
+): Promise<boolean> {
+  let outcome: { readonly path: string; readonly created: boolean };
+  try {
+    outcome = await client.mailboxCreate(path);
+  } catch (error) {
+    if (!isServerAnswer(error)) throw mapImapProviderError(error);
+    return false;
+  }
+  if (outcome?.created) return true;
+  try {
+    await client.mailboxSubscribe(outcome.path);
+  } catch {
+    // Subscription is a courtesy to other clients, not a condition of the move.
+  }
+  return true;
+}
+
+/**
+ * Whether the error carries a tagged NO or BAD from the server. ImapFlow puts
+ * the parsed response on `response`, its status on `responseStatus` and any
+ * bracketed code on `serverResponseCode`; a `NoConnection` error, the shape a
+ * dead socket takes, has none of the three.
+ */
+function isServerAnswer(error: unknown): boolean {
+  if (error === null || typeof error !== "object") return false;
+  const answer = error as {
+    readonly code?: unknown;
+    readonly response?: unknown;
+    readonly responseStatus?: unknown;
+    readonly serverResponseCode?: unknown;
+  };
+  // Two tagged replies ImapFlow turns into errors are not the server's verdict
+  // on the folder: a throttle ("wait N seconds", ETHROTTLE) and a reply it could
+  // not parse (InvalidResponse). Both are as transient as a dead socket and
+  // are answered like one, so the next archive asks again.
+  if (answer.code === "ETHROTTLE" || answer.code === "InvalidResponse") {
+    return false;
+  }
+  return (
+    answer.response !== undefined ||
+    typeof answer.responseStatus === "string" ||
+    typeof answer.serverResponseCode === "string"
+  );
 }
 
 function isSelectableMailbox(entry: ImapMailboxDescriptor): boolean {

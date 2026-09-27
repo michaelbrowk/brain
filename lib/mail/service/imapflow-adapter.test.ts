@@ -555,6 +555,8 @@ function readClientFixture() {
     getMailboxLock: vi.fn(),
     fetchAll: vi.fn(),
     list: vi.fn(),
+    mailboxCreate: vi.fn(),
+    mailboxSubscribe: vi.fn(),
     search: vi.fn(),
     messageFlagsAdd: vi.fn(),
     messageFlagsRemove: vi.fn(),

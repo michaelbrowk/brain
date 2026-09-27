@@ -110,6 +110,16 @@ export interface ImapMutationCommands {
    */
   readonly capabilities: ReadonlyMap<string, boolean | number>;
   list(options?: ListOptions): Promise<ListResponse[]>;
+  /**
+   * `CREATE`, then ImapFlow's own `SUBSCRIBE`. A server that answers
+   * ALREADYEXISTS (RFC 5530) is reported as `created: false` rather than
+   * thrown; any other refusal throws, with the server's response code on
+   * `serverResponseCode` when it gave one. The path is created as given, so a
+   * caller decides where in the hierarchy the folder goes.
+   */
+  mailboxCreate(path: string): Promise<{ path: string; created: boolean }>;
+  /** `SUBSCRIBE`. False when the server declined, never thrown. */
+  mailboxSubscribe(path: string): Promise<boolean>;
   search(
     query: SearchObject,
     options?: { readonly uid?: boolean },

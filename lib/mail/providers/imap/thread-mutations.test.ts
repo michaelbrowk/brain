@@ -157,16 +157,153 @@ describe("IMAP thread mutations", () => {
     expect(server.mailbox("INBOX.Archive").messages.size).toBe(1);
   });
 
-  it("refuses instead of guessing when the server has no archive mailbox", async () => {
-    const server = serverFixture({ mailboxes: [{ path: "INBOX.Sent" }] });
+  it("creates a top-level Archive when the server lists none, then moves into it", async () => {
+    // A folder literally named Archive at the account root is where every
+    // mail client looks, so inventing this one destination is not a guess.
+    const server = serverFixture({
+      mailboxes: [{ path: "Sent" }, { path: "Trash", specialUse: "\\Trash" }],
+    });
+    const { provider, opened } = providerFor(server);
+
+    await provider.archiveThread("i77u1", signal());
+
+    expect(
+      server.commands
+        .filter((command) => command.name !== "store" && command.name !== "search")
+        .map((command) =>
+          command.name === "move" ? `move ${command.destination}` : commandLabel(command),
+        ),
+    ).toEqual(["list", "create Archive", "list", "move Archive"]);
+    expect(server.mailbox("INBOX").messages.has(1)).toBe(false);
+    expect(server.mailbox("Archive").messages.size).toBe(1);
+    expect(opened.count).toBe(1);
+  });
+
+  it("creates the Archive under the Inbox on a server that files everything there", async () => {
+    const server = serverFixture({
+      mailboxes: [{ path: "INBOX.Sent" }, { path: "INBOX.Trash", specialUse: "\\Trash" }],
+    });
+    const { provider } = providerFor(server);
+
+    await provider.archiveThread("i77u1", signal());
+
+    expect(server.commands).toContainEqual({ name: "create", path: "INBOX.Archive" });
+    expect(server.mailbox("INBOX.Archive").messages.size).toBe(1);
+  });
+
+  it("treats a folder another client created first (created: false) as success and subscribes to it", async () => {
+    // Another client created the folder between our LIST and our CREATE.
+    // ImapFlow reports the server's ALREADYEXISTS as `created: false` and
+    // subscribes only what it created itself, so this is the one case where
+    // the adapter sends the SUBSCRIBE.
+    const server = serverFixture({
+      mailboxes: [{ path: "Sent" }],
+      createAnswers: "already_exists",
+    });
+    const { provider } = providerFor(server);
+
+    await provider.archiveThread("i77u1", signal());
+
+    expect(server.commands).toContainEqual({ name: "create", path: "Archive" });
+    expect(server.commands).toContainEqual({ name: "subscribe", path: "Archive" });
+    expect(server.commands.filter((command) => command.name === "list")).toHaveLength(2);
+    expect(server.mailbox("Archive").messages.size).toBe(1);
+  });
+
+  it("refuses when CREATE fails, and tries CREATE once per adapter", async () => {
+    const server = serverFixture({
+      mailboxes: [{ path: "Sent" }],
+      createAnswers: "no",
+    });
+    const { provider, opened } = providerFor(server);
+
+    await expect(
+      provider.archiveThread("i77u1", signal()),
+    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+    await expect(
+      provider.archiveThread("i77u1", signal()),
+    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+
+    expect(server.commands.filter((command) => command.name === "create")).toHaveLength(1);
+    expect(server.commands.some((command) => command.name === "move")).toBe(false);
+    expect(server.mailbox("INBOX").messages.has(1)).toBe(true);
+    expect(opened.count).toBe(1);
+  });
+
+  it("refuses, after one CREATE and two LISTs, when the created folder never shows up", async () => {
+    // A server that says OK to the CREATE and then hides the folder from LIST
+    // is not a server this adapter can archive into. Without the once-per-adapter
+    // flag the fresh LIST would lead to another CREATE, and that to another
+    // LIST, with nothing to stop it.
+    const server = serverFixture({
+      mailboxes: [{ path: "Sent" }],
+      hideCreated: true,
+    });
     const { provider } = providerFor(server);
 
     await expect(
       provider.archiveThread("i77u1", signal()),
     ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
 
-    expect(server.mailbox("INBOX").messages.has(1)).toBe(true);
+    expect(server.commands.filter((command) => command.name === "create")).toHaveLength(1);
+    expect(server.commands.filter((command) => command.name === "list")).toHaveLength(2);
     expect(server.commands.some((command) => command.name === "move")).toBe(false);
+    expect(server.mailbox("INBOX").messages.has(1)).toBe(true);
+  });
+
+  it("treats a throttled CREATE as unavailable, not as a refusal", async () => {
+    // A tagged NO that asks the client to wait is the server's mood, not its
+    // verdict on the folder; read as a refusal it would burn the one CREATE
+    // this adapter gets and refuse the account until a restart.
+    const server = serverFixture({
+      mailboxes: [{ path: "Sent" }],
+      createAnswers: "throttle",
+    });
+    const { provider, opened } = providerFor(server);
+
+    await expect(
+      provider.archiveThread("i77u1", signal()),
+    ).rejects.toMatchObject({ code: "mail_provider_unavailable" });
+    await provider.archiveThread("i77u1", signal());
+
+    expect(opened.count).toBe(2);
+    expect(server.commands.filter((command) => command.name === "create")).toHaveLength(2);
+    expect(server.mailbox("Archive").messages.size).toBe(1);
+  });
+
+  it("reports a session that died under CREATE as unavailable and tries again next time", async () => {
+    // No answer is not a refusal. The adapter is long-lived, so a 409 here
+    // would refuse the account from cache until a restart over a socket that
+    // happened to close; the next session asks LIST again and CREATEs again.
+    const server = serverFixture({
+      mailboxes: [{ path: "Sent" }],
+      createAnswers: "drop",
+    });
+    const { provider, opened } = providerFor(server);
+
+    await expect(
+      provider.archiveThread("i77u1", signal()),
+    ).rejects.toMatchObject({ code: "mail_provider_unavailable" });
+    expect(server.mailbox("INBOX").messages.has(1)).toBe(true);
+
+    await provider.archiveThread("i77u1", signal());
+
+    expect(opened.count).toBe(2);
+    expect(server.commands.filter((command) => command.name === "create")).toHaveLength(2);
+    expect(server.mailbox("Archive").messages.size).toBe(1);
+  });
+
+  it("still refuses trash on a server without a trash folder, and creates nothing", async () => {
+    const server = serverFixture({ mailboxes: [{ path: "Sent" }] });
+    const { provider } = providerFor(server);
+
+    await expect(
+      provider.trashThread("i77u1", signal()),
+    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+
+    expect(server.commands.some((command) => command.name === "create")).toBe(false);
+    expect(server.commands.some((command) => command.name === "move")).toBe(false);
+    expect(server.mailbox("INBOX").messages.has(1)).toBe(true);
   });
 
   it("refuses the move when the server does not advertise MOVE", async () => {
@@ -209,14 +346,14 @@ describe("IMAP thread mutations", () => {
     const { provider, opened } = providerFor(server);
 
     await expect(
-      provider.archiveThread("i77u1", signal()),
+      provider.trashThread("i77u1", signal()),
     ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
     expect(opened.count).toBe(1);
 
     // LIST has already answered for this account. Connecting again to say the
     // same no is a login per thread for a whole section Done.
     await expect(
-      provider.archiveThread("i77u1", signal()),
+      provider.trashThread("i77u1", signal()),
     ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
     expect(opened.count).toBe(1);
     expect(server.commands.filter((command) => command.name === "list")).toHaveLength(1);
@@ -413,16 +550,15 @@ describe("IMAP thread mutations", () => {
     // Without SPECIAL-USE the name tier is all there is, and a leaf called
     // Archive three levels down a project tree is a folder about something
     // else. Only the account root and the Inbox's own children are places a
-    // mail client creates an Archive.
+    // mail client creates an Archive, so that is where one is created instead.
     const server = serverFixture({ mailboxes: [{ path: "Projects.2019.Archive" }] });
     const { provider } = providerFor(server);
 
-    await expect(
-      provider.archiveThread("i77u1", signal()),
-    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+    await provider.archiveThread("i77u1", signal());
 
-    expect(server.commands.some((command) => command.name === "move")).toBe(false);
-    expect(server.mailbox("INBOX").messages.has(1)).toBe(true);
+    expect(server.commands).toContainEqual({ name: "create", path: "Archive" });
+    expect(server.mailbox("Projects.2019.Archive").messages.size).toBe(0);
+    expect(server.mailbox("Archive").messages.size).toBe(1);
   });
 
   it("does nothing on the wire when the thread is already where it was asked to go", async () => {
@@ -472,6 +608,8 @@ describe("IMAP thread mutations", () => {
 
 type FakeCommand =
   | { readonly name: "list" }
+  | { readonly name: "create"; readonly path: string }
+  | { readonly name: "subscribe"; readonly path: string }
   | { readonly name: "search"; readonly mailbox: string; readonly messageId: string }
   | {
       readonly name: "store";
@@ -538,6 +676,18 @@ function serverFixture(options?: {
   /** The session dies under the MOVE, before any answer. */
   readonly dropDuringMove?: boolean;
   readonly refuseStore?: boolean;
+  /**
+   * What CREATE answers. `already_exists` is the ALREADYEXISTS a server gives
+   * when another client made the folder first, which ImapFlow hands back as
+   * `created: false`; the folder is there from then on either way. `no` is a
+   * refusal, as an ACL or a quota would give, in the shape ImapFlow gives a
+   * tagged NO. `drop` is a session that dies under the first CREATE with no
+   * answer at all, ImapFlow's `NoConnection`; the next session finds the
+   * server well.
+   */
+  readonly createAnswers?: "created" | "already_exists" | "no" | "drop" | "throttle";
+  /** CREATE answers OK, and LIST still does not show the folder afterwards. */
+  readonly hideCreated?: boolean;
 }): FakeServer {
   const uidplus = options?.uidplus ?? true;
   const capabilities = new Map<string, boolean | number>([["IMAP4rev1", true]]);
@@ -669,6 +819,51 @@ function serverFixture(options?: {
           subscribed: true,
         }));
     },
+    async mailboxCreate(path: string) {
+      commands.push({ name: "create", path });
+      const answer = options?.createAnswers ?? "created";
+      if (answer === "no") {
+        throw Object.assign(new Error("Command failed"), {
+          response: "NO [CANNOT] Permission denied",
+          responseStatus: "NO",
+          serverResponseCode: "CANNOT",
+        });
+      }
+      if (
+        answer === "drop" &&
+        commands.filter((command) => command.name === "create").length === 1
+      ) {
+        throw Object.assign(new Error("Connection not available"), {
+          code: "NoConnection",
+        });
+      }
+      if (
+        answer === "throttle" &&
+        commands.filter((command) => command.name === "create").length === 1
+      ) {
+        // ImapFlow's shape for a tagged NO that says "wait": the server did
+        // answer, but not about the folder.
+        throw Object.assign(new Error("Too many requests, wait 5 seconds"), {
+          code: "ETHROTTLE",
+          response: { command: "NO" },
+          responseStatus: "NO",
+          throttleReset: 5000,
+        });
+      }
+      if (!mailboxes.has(path) && options?.hideCreated !== true) {
+        mailboxes.set(path, {
+          path,
+          uidValidity: BigInt(900 + mailboxes.size),
+          uidNext: 1,
+          messages: new Map(),
+        });
+      }
+      return { path, created: answer === "created" };
+    },
+    async mailboxSubscribe(path: string) {
+      commands.push({ name: "subscribe", path });
+      return true;
+    },
     async search(
       query: { readonly header?: Record<string, string> },
       searchOptions?: { readonly uid?: boolean },
@@ -753,6 +948,11 @@ function serverFixture(options?: {
     client: client as unknown as ImapSessionClient,
     mailbox: require,
   };
+}
+
+/** `list`, `create Archive`, `subscribe Archive`: the wire order in one line. */
+function commandLabel(command: FakeCommand): string {
+  return "path" in command ? `${command.name} ${command.path}` : command.name;
 }
 
 function projected(message: FakeMessage): FetchMessageObject {

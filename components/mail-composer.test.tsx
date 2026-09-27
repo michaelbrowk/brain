@@ -17,15 +17,38 @@ import type { MotionProps } from "@/test/framer-motion-mock";
 const harness: {
   reduce: boolean;
   renders: Array<{ tag: string; className: string; motion: MotionProps }>;
-} = { reduce: false, renders: [] };
+  /** The `onExitComplete` of a presence whose children just left, held
+   *  until the test lets the exit finish. */
+  pendingExit: (() => void) | null;
+} = { reduce: false, renders: [], pendingExit: null };
 
 vi.mock("framer-motion", async () => {
   const { createFramerMotionMock } = await import("@/test/framer-motion-mock");
+  const React = await import("react");
+  /** The passthrough presence, plus the one thing the slot relies on: the
+   *  exit callback, fired by the test rather than by a clock, so the moment
+   *  between a sentence leaving and its box collapsing can be looked at. */
+  function StubPresence({
+    children,
+    onExitComplete,
+  }: {
+    children?: React.ReactNode;
+    onExitComplete?: () => void;
+  }) {
+    const count = React.Children.toArray(children).length;
+    const had = React.useRef(count > 0);
+    React.useEffect(() => {
+      if (had.current && count === 0 && onExitComplete) harness.pendingExit = onExitComplete;
+      had.current = count > 0;
+    }, [count, onExitComplete]);
+    return React.createElement(React.Fragment, null, children);
+  }
   return createFramerMotionMock({
     reducedMotion: () => harness.reduce,
     onRender: ({ tag, motion, props }) => {
       harness.renders.push({ tag, className: String(props.className ?? ""), motion });
     },
+    AnimatePresence: StubPresence,
   });
 });
 
@@ -463,6 +486,34 @@ describe("the compose sheet", () => {
     });
     await settle();
     expect(dialog()!.querySelector('.brain-compose-slot [role="status"]')).toBeNull();
+  });
+
+  it("keeps the phone's bottom safe area under the letter", () => {
+    expect(rule(".brain-compose-column")).toContain(
+      "calc(24px + env(safe-area-inset-bottom, 0px))",
+    );
+    expect(mdRule(".brain-compose-column")).toContain(
+      "calc(40px + env(safe-area-inset-bottom, 0px))",
+    );
+  });
+
+  it("keeps the slot's box until a leaving sentence has finished leaving", async () => {
+    harness.pendingExit = null;
+    const p = await render({ sendError: "Message wasn’t sent. Try again." });
+    const actions = () => dialog()!.querySelector(".brain-compose-actions")!;
+    expect(actions().hasAttribute("data-message")).toBe(true);
+
+    // The sentence is taken back; the box stays for the exit to play in.
+    await act(async () => root.render(<MailComposer {...p} sendError={null} />));
+    await settle();
+    expect(dialog()!.querySelector(".brain-compose-slot-line")).toBeNull();
+    expect(actions().hasAttribute("data-message")).toBe(true);
+    expect(harness.pendingExit).not.toBeNull();
+
+    // The exit completes; now the box goes.
+    await act(async () => harness.pendingExit?.());
+    await settle();
+    expect(actions().hasAttribute("data-message")).toBe(false);
   });
 
   it("says From once on the phone: the envelope's From row is hidden below 768 and stands from it", () => {

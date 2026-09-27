@@ -4914,7 +4914,8 @@ a.brain-share-url:active {
   flex: 1 0 auto;
   flex-direction: column;
   margin-inline: auto;
-  padding: 4px 16px 24px;
+  /* the phone's home indicator sits under the last line otherwise */
+  padding: 4px 16px calc(24px + env(safe-area-inset-bottom, 0px));
 }
 .brain-compose-envelope {
   display: flex;
@@ -5030,7 +5031,7 @@ a.brain-share-url:active {
     padding: 0 10px;
   }
   .brain-compose-column {
-    padding: 24px 32px 40px;
+    padding: 24px 32px calc(40px + env(safe-area-inset-bottom, 0px));
   }
   .brain-compose-row {
     min-height: 32px;

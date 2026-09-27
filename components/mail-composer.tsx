@@ -399,6 +399,13 @@ export function MailComposer({
         : saveStatus === "error"
           ? { key: "save", text: "Not saved", role: "status" }
           : null;
+  /** The slot's box outlives its sentence by the sentence's exit: on the
+   *  phone the box collapses to give the row back to From, and collapsing
+   *  it the instant the sentence is taken back clipped the fade. Raised in
+   *  the render that shows a sentence, lowered when the presence reports
+   *  the exit complete. */
+  const [slotStanding, setSlotStanding] = useState(message !== null);
+  if (message && !slotStanding) setSlotStanding(true);
 
   return (
     <MailComposePaper
@@ -434,7 +441,7 @@ export function MailComposer({
             the atoms' own dimmed state, and `data-sending` names the row's. */}
         <div
           className="brain-compose-actions"
-          data-message={message ? "" : undefined}
+          data-message={message || slotStanding ? "" : undefined}
           data-sending={sending ? "" : undefined}
         >
           <IconButton
@@ -450,7 +457,10 @@ export function MailComposer({
           </IconButton>
           <span className="brain-compose-actions-from text-control">{fromName}</span>
           <div className="brain-compose-slot text-control">
-            <AnimatePresence initial={false}>
+            <AnimatePresence
+              initial={false}
+              onExitComplete={() => setSlotStanding(message !== null)}
+            >
               {message && (
                 <motion.span
                   key={message.key}

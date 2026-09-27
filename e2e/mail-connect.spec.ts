@@ -1,5 +1,12 @@
 import { expect, test, type Locator, type Page, type Route } from "playwright/test";
 
+type Endpoint = {
+  hostname: string;
+  port: number;
+  tls: "implicit" | "starttls";
+  username: string;
+};
+
 type Account = {
   accountId: string;
   emailAddress: string;
@@ -9,13 +16,28 @@ type Account = {
   createdAt: number;
   updatedAt: number;
   providerKind: "imap";
-  imap: {
-    hostname: string;
-    port: number;
-    tls: "implicit" | "starttls";
-    username: string;
-  };
+  imap: Endpoint;
+  /** Missing means receive only, as on the wire. */
+  smtp?: Endpoint;
 };
+
+/** The one account the card scenarios start from: connected with an
+ *  outgoing server, so removing it and adding it back are both reachable
+ *  without a connect flow first. */
+function seededAccount(): Account {
+  return {
+    accountId: `account-a${"1".padStart(32, "0")}`,
+    emailAddress: "first@example.test",
+    displayName: "Work",
+    status: "connected",
+    providerKind: "imap",
+    connectedAt: 1_700_000_000_000,
+    createdAt: 1_700_000_000_000,
+    updatedAt: 1_700_000_000_000,
+    imap: { hostname: "imap.example.test", port: 993, tls: "implicit", username: "first@example.test" },
+    smtp: { hostname: "smtp.example.test", port: 465, tls: "implicit", username: "first@example.test" },
+  };
+}
 
 async function login(page: Page) {
   await page.goto("/login");
@@ -32,8 +54,8 @@ async function login(page: Page) {
   await expect(page).toHaveURL("/", { timeout: 20_000 });
 }
 
-function installMailAccountsRoute(page: Page) {
-  let accounts: Account[] = [];
+function installMailAccountsRoute(page: Page, seed: Account[] = []) {
+  let accounts: Account[] = seed;
   const mutationBodies: unknown[] = [];
   let deletes = 0;
 
@@ -65,9 +87,12 @@ function installMailAccountsRoute(page: Page) {
                     headerPreview: true,
                     messageBodies: true,
                     threadMutations: true,
-                    compose: false,
-                    send: false,
-                    reply: false,
+                    // an account sends exactly when it carries an outgoing
+                    // server, and the surface's reader holds the three
+                    // sending capabilities to one answer
+                    compose: account.smtp !== undefined,
+                    send: account.smtp !== undefined,
+                    reply: account.smtp !== undefined,
                   },
                 })),
               }
@@ -79,7 +104,8 @@ function installMailAccountsRoute(page: Page) {
         const body = request.postDataJSON() as {
           emailAddress: string;
           displayName: string | null;
-          imap: Account["imap"] & { password: string };
+          imap: Endpoint & { password: string };
+          smtp?: Endpoint;
         };
         mutationBodies.push(body);
         const now = 1_700_000_000_000 + accounts.length;
@@ -98,6 +124,7 @@ function installMailAccountsRoute(page: Page) {
             tls: body.imap.tls,
             username: body.imap.username,
           },
+          ...(body.smtp ? { smtp: { ...body.smtp } } : {}),
         };
         accounts = [...accounts, account];
         await fulfill(route, { apiVersion: 2, account });
@@ -113,24 +140,34 @@ function installMailAccountsRoute(page: Page) {
         return;
       }
       if (method === "PATCH") {
+        // Every key is optional on a patch: the form sends the whole
+        // account, the card's "Remove outgoing server" sends `smtp: null`
+        // alone.
         const body = request.postDataJSON() as {
-          emailAddress: string;
-          displayName: string | null;
-          imap: Account["imap"] & { password: string | null };
+          emailAddress?: string;
+          displayName?: string | null;
+          imap?: Endpoint & { password: string | null };
+          smtp?: Endpoint | null;
         };
         mutationBodies.push(body);
         const current = accounts[index];
+        const { smtp: currentSmtp, ...rest } = current;
+        const smtp =
+          body.smtp === undefined ? currentSmtp : body.smtp === null ? undefined : { ...body.smtp };
         const account: Account = {
-          ...current,
-          emailAddress: body.emailAddress,
-          displayName: body.displayName,
+          ...rest,
+          emailAddress: body.emailAddress ?? current.emailAddress,
+          displayName: body.displayName === undefined ? current.displayName : body.displayName,
           updatedAt: current.updatedAt + 1,
-          imap: {
-            hostname: body.imap.hostname,
-            port: body.imap.port,
-            tls: body.imap.tls,
-            username: body.imap.username,
-          },
+          imap: body.imap
+            ? {
+                hostname: body.imap.hostname,
+                port: body.imap.port,
+                tls: body.imap.tls,
+                username: body.imap.username,
+              }
+            : current.imap,
+          ...(smtp ? { smtp } : {}),
         };
         accounts = accounts.map((item) =>
           item.accountId === account.accountId ? account : item,
@@ -271,10 +308,15 @@ test("Mail stays first-class with zero accounts, then connects, edits, and remov
   await expect(google.locator("xpath=ancestor::form")).toHaveAttribute("method", "post");
   await settings.getByRole("button", { name: "Other email Connect with IMAP" }).click();
 
+  // Both groups of the form label a Username, a Port and an Advanced row,
+  // so the incoming ones are read inside their own group.
+  const incoming = settings
+    .locator("section")
+    .filter({ has: page.getByLabel("IMAP server") });
   const name = settings.getByLabel("Name", { exact: true });
   const email = settings.getByLabel("Email");
   const hostname = settings.getByLabel("IMAP server");
-  const username = settings.getByLabel("Username");
+  const username = incoming.getByLabel("Username");
   const password = settings.getByLabel("Password or app password");
   await expect(settings.locator('form[autocomplete="off"]')).toBeVisible();
   await expect(username).toHaveAttribute(
@@ -292,13 +334,26 @@ test("Mail stays first-class with zero accounts, then connects, edits, and remov
     .toBe(true);
   await expectFieldBoundaryContrast(password);
   await page.emulateMedia({ colorScheme: "light" });
+  // receive-only until the address names a domain, then the outgoing server
+  // comes on with the derived guess
+  const sendSwitch = settings.getByRole("radiogroup", { name: "Send from this account" });
+  await expect(sendSwitch.getByRole("radio", { name: "Off" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(settings.getByText("Turn on to reply and send from Brain")).toBeVisible();
   await name.fill("Work");
   await email.fill("first@example.test");
   await expect(hostname).toHaveValue("imap.example.test");
   await expect(username).toHaveValue("first@example.test");
+  await expect(sendSwitch.getByRole("radio", { name: "On" })).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(settings.getByLabel("SMTP server")).toHaveValue("smtp.example.test");
   await password.fill("e2e-app-password");
-  await settings.getByText("Advanced", { exact: true }).click();
-  await settings.getByLabel("Port").fill("7993");
+  await incoming.getByText("Advanced", { exact: true }).click();
+  await incoming.getByLabel("Port").fill("7993");
   await settings.getByRole("button", { name: "Connect", exact: true }).click();
 
   await expect(settings).toBeHidden();
@@ -311,7 +366,8 @@ test("Mail stays first-class with zero accounts, then connects, edits, and remov
   await expect(nav).toHaveAttribute("aria-label", "Mailbox: Inbox");
   await expect(page.locator("select")).toHaveCount(0);
   expect(mailApi.readAccounts()).toHaveLength(1);
-  expect(mailApi.readMutationBodies()[0]).toEqual({
+  const connectBody = mailApi.readMutationBodies()[0] as { smtp: Record<string, unknown> };
+  expect(connectBody).toEqual({
     providerKind: "imap",
     emailAddress: "first@example.test",
     displayName: "Work",
@@ -322,7 +378,15 @@ test("Mail stays first-class with zero accounts, then connects, edits, and remov
       username: "first@example.test",
       password: "e2e-app-password",
     },
+    smtp: {
+      hostname: "smtp.example.test",
+      port: 465,
+      tls: "implicit",
+      username: "first@example.test",
+    },
   });
+  // one credential: the password travels inside imap and never beside smtp
+  expect(Object.prototype.hasOwnProperty.call(connectBody.smtp, "password")).toBe(false);
   await page.screenshot({
     path: testInfo.outputPath("mail-accounts-connected.png"),
     fullPage: true,
@@ -357,6 +421,8 @@ test("Mail stays first-class with zero accounts, then connects, edits, and remov
   await settings.getByLabel("Password or app password").fill("new-app-password");
   await settings.getByRole("button", { name: "Save changes" }).click();
   await expect(settings.getByText("imap.attacker.test:7993")).toBeVisible();
+  // the card carries the outgoing server on its own caption line
+  await expect(settings.getByText("smtp.example.test:465 · TLS")).toBeVisible();
   expect(mailApi.readMutationBodies()).toHaveLength(2);
 
   await settings.getByRole("button", { name: "Remove", exact: true }).click();
@@ -372,6 +438,63 @@ test("Mail stays first-class with zero accounts, then connects, edits, and remov
   await expect(settings).toBeHidden();
   await expect(page).toHaveURL("/mail");
   await expect(page.getByRole("button", { name: "Connect account" })).toBeVisible();
+});
+
+test("The outgoing server is removed from the account card and added back through the form", async ({
+  page,
+}) => {
+  const mailApi = await installMailAccountsRoute(page, [seededAccount()]);
+  await login(page);
+  await page.goto("/settings/mail");
+  const settings = page.getByTestId("mobile-settings-detail");
+  await expect(settings).toBeVisible();
+  await settings.getByRole("button", { name: /Work.*first@example\.test.*IMAP/ }).click();
+  await expect(settings.getByText("smtp.example.test:465 · TLS")).toBeVisible();
+  await expect(settings.getByText("Receive only")).toHaveCount(0);
+
+  // Remove: a confirmation, then the one-key patch, with no password asked
+  await settings.getByRole("button", { name: "Remove outgoing server" }).click();
+  await expect(
+    page.getByText("Brain will stop sending from this account. Incoming mail keeps syncing."),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Stop sending" }).click();
+  await expect(settings.getByText("Receive only")).toBeVisible();
+  await expect(settings.getByText("smtp.example.test:465 · TLS")).toHaveCount(0);
+  expect(mailApi.readMutationBodies()).toEqual([{ smtp: null }]);
+  expect(mailApi.readAccounts()[0].smtp).toBeUndefined();
+
+  // Add back: the form opens on the SMTP server field with the switch on,
+  // and adding the server is a change the password has to accompany
+  await settings.getByRole("button", { name: "Add outgoing server" }).click();
+  const smtpServer = settings.getByLabel("SMTP server");
+  await expect(smtpServer).toBeFocused();
+  await expect(smtpServer).toHaveValue("smtp.example.test");
+  await expect(
+    settings.getByRole("radiogroup", { name: "Send from this account" }).getByRole("radio", { name: "On" }),
+  ).toHaveAttribute("aria-checked", "true");
+  await settings.getByRole("button", { name: "Save changes" }).click();
+  await expect(settings.locator("#mail-password-error")).toHaveText(
+    "Re-enter the password to add or change the outgoing server.",
+  );
+  expect(mailApi.readMutationBodies()).toHaveLength(1);
+  await settings.getByLabel("Password or app password").fill("e2e-app-password");
+  await settings.getByRole("button", { name: "Save changes" }).click();
+  await expect(settings.getByText("smtp.example.test:465 · TLS")).toBeVisible();
+  expect(mailApi.readMutationBodies()[1]).toMatchObject({
+    imap: { password: "e2e-app-password" },
+    smtp: {
+      hostname: "smtp.example.test",
+      port: 465,
+      tls: "implicit",
+      username: "first@example.test",
+    },
+  });
+  expect(mailApi.readAccounts()[0].smtp).toEqual({
+    hostname: "smtp.example.test",
+    port: 465,
+    tls: "implicit",
+    username: "first@example.test",
+  });
 });
 
 test("@mobile Mail tab and full-screen account setup stay readable at 390 and 320", async ({

@@ -399,6 +399,10 @@ describe("the compose sheet", () => {
     }
   });
 
+  it("keeps the window's inset above the actions row, like every strip of chrome", () => {
+    expect(rule(".brain-compose-actions")).toContain("margin-top: var(--inset)");
+  });
+
   it("says From once on the phone: the envelope's From row is hidden below 768 and stands from it", () => {
     expect(rule(".brain-compose-from")).toContain("display: none");
     expect(mdRule(".brain-compose-from")).toContain("display: flex");

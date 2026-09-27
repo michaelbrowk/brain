@@ -4806,13 +4806,15 @@ a.brain-share-url:active {
   flex-direction: column;
 }
 /* the actions row: 44 on a phone (a thumb's row), 36 on a desktop; the
-   window's own inset from either edge, like every other strip of chrome */
+   window's own inset above it and from either edge, like every other strip
+   of chrome (§4: nothing floating touches the window edge) */
 .brain-compose-actions {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-shrink: 0;
   height: 44px;
+  margin-top: var(--inset);
   padding-inline: max(var(--inset), env(safe-area-inset-left, 0px))
     max(var(--inset), env(safe-area-inset-right, 0px));
 }

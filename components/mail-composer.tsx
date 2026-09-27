@@ -112,6 +112,16 @@ export function MailComposePaper({
 }) {
   const reduce = useReducedMotion();
   const sheet = useSheetGesture();
+  /** Whatever had the focus when the sheet was asked for: the New message
+   *  pill, a Reply button in the reader, a draft's row. Read on the first
+   *  render, before Radix moves the caret in, and focused again when the
+   *  sheet goes. Radix's modal content would hand focus to a `Dialog.Trigger`
+   *  and there is none here, so the return is written out. */
+  const [opener] = useState<HTMLElement | null>(() =>
+    typeof document !== "undefined" && document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null,
+  );
   /** The arrival. A desktop sheet fades up 12px over the page duration while
    *  the shell recedes behind it; a phone sheet rises from `SHEET_ENTER_Y` on
    *  the sheet spring, the way every sheet on the phone arrives. Reduced
@@ -163,6 +173,14 @@ export function MailComposePaper({
           }}
           onEscapeKeyDown={(event) => {
             if (sending) event.preventDefault();
+          }}
+          onCloseAutoFocus={(event) => {
+            event.preventDefault();
+            const target =
+              opener?.isConnected && opener.closest("[inert]") === null
+                ? opener
+                : document.querySelector<HTMLElement>("[data-dialog-focus-fallback]");
+            target?.focus({ preventScroll: true });
           }}
           // The sheet is the whole window, so nothing outside it is a place
           // to press: a toast standing over it must not close the letter.

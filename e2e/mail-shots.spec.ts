@@ -460,39 +460,32 @@ for (const scheme of ["light", "dark"] as const) {
     await page.waitForTimeout(600);
     await page.screenshot({ path: path.join(OUT, `reader-${scheme}.png`) });
 
-    // 3 — the composer: the thick sheet, paper fields and paper body.
+    // 3 — the compose sheet: the whole window as paper, the actions row on
+    // top, the envelope, the fold and the letter as one document with no
+    // ring around any of it. Autosave is silent, so the save is waited for
+    // on the wire rather than on a label.
     await page.getByRole("button", { name: "New message" }).click();
-    const sheet = page.locator(".brain-composer-sheet");
+    const sheet = page.getByRole("dialog", { name: "New message" });
     await expect(sheet).toBeVisible();
     await sheet.getByPlaceholder("name@example.com").fill("ben@example.test");
     await sheet.getByPlaceholder("Subject").fill("Re: the stairwell quotes");
-    await sheet
-      .getByPlaceholder("Write a message…")
-      .fill(
-        "Thursday works. I would run the beat a week early and publish the summary — the numbers hold up on their own.",
-      );
-    await expect(sheet.getByText("Saved", { exact: true }).first()).toBeVisible();
+    await Promise.all([
+      page.waitForResponse(
+        (response) =>
+          /\/api\/mail\/drafts/.test(response.url()) &&
+          response.request().method() !== "GET",
+      ),
+      sheet
+        .getByPlaceholder("Write a message…")
+        .fill(
+          "Thursday works. I would run the beat a week early and publish the summary — the numbers hold up on their own.",
+        ),
+    ]);
     await page.waitForTimeout(500);
     await page.screenshot({ path: path.join(OUT, `composer-${scheme}.png`) });
 
-    // 4 — the SIDEBAR while the sheet is open. It used to be the rail's
-    // frame, showing Compose drop its ink fill so Send could be the surface's
-    // only filled control. There is no rail and no Compose in the sidebar any
-    // more, and what the frame says now is the opposite thing: nothing in the
-    // panel moves, restyles or reorders when the mail surface does. The accent
-    // circle is the shell's New page on every surface, and the panel holds the
-    // page tree with the Mail row marked in it.
-    const sidebar = page.locator(".brain-sidebar");
-    const box = await sidebar.boundingBox();
-    if (box) {
-      await page.screenshot({
-        path: path.join(OUT, `sidebar-while-composing-${scheme}.png`),
-        clip: { x: 0, y: 0, width: Math.ceil(box.x + box.width + 40), height: 900 },
-      });
-    }
-
-    // 5 — Cc and Bcc expanded: three stacked fields that all have to hold the
-    // 32px control height (they used to collapse to their content).
+    // 4 — Cc and Bcc unfolded under To: three rows on the same rule, the
+    // labels in the gutter, still nothing drawn around them.
     await sheet.getByRole("button", { name: "Cc Bcc" }).click();
     await expect(sheet.getByLabel("Cc", { exact: true })).toBeVisible();
     await page.waitForTimeout(400);
@@ -576,7 +569,7 @@ for (const scheme of ["light", "dark"] as const) {
     // draft and asks nothing; this button deletes it, which is the whole
     // difference the text has to carry.
     await page.getByRole("button", { name: "New message" }).click();
-    const sheet = page.locator(".brain-composer-sheet");
+    const sheet = page.getByRole("dialog", { name: "New message" });
     await expect(sheet).toBeVisible();
     await sheet.getByPlaceholder("Subject").fill("Thursday, then");
     await sheet
@@ -1701,14 +1694,13 @@ test.describe("mail on a phone", () => {
       await page.waitForTimeout(600);
       await page.screenshot({ path: slot("reader-scrolled", scheme) });
 
-      // The composer, keyboard down: the sheet, its paper fields, and the
-      // room left under it.
+      // The compose sheet, keyboard down: the whole window as paper, From as
+      // quiet text in the actions row, Send on top where no keyboard reaches.
       await page.getByRole("button", { name: /^Back to / }).click();
       await page.getByRole("button", { name: "New message" }).click();
-      const sheet = page.locator(".brain-composer-sheet");
+      const sheet = page.getByRole("dialog", { name: "New message" });
       await expect(sheet).toBeVisible();
-      // The save stamp is `sm:flex` — below 640 the sheet does not draw it, so
-      // the autosave is waited for on the wire instead of on a label.
+      // Autosave is silent, so it is waited for on the wire.
       await Promise.all([
         page.waitForResponse(
           (response) =>

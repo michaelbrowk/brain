@@ -523,7 +523,7 @@ test("Mail opens a conversation and queues a reply", async ({ page }) => {
   await expect(page.locator('img[src*="tracker.example"]')).toHaveCount(0);
 
   await page.getByRole("button", { name: "Reply", exact: true }).click();
-  await expect(page.getByRole("form", { name: "Reply" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Reply" })).toBeVisible();
   await expect(page.getByLabel("To", { exact: true })).toHaveValue("ben@example.test");
   await expect(page.getByPlaceholder("Subject")).toHaveValue("Re: Lunch this Friday?");
   await page.getByLabel("Message", { exact: true }).fill("See you there.");
@@ -803,18 +803,18 @@ test("@release the reader strip keeps its resting label only where the subject k
   expect(tablet.subjectWidth ?? 0).toBeGreaterThanOrEqual(159);
   await page.getByRole("button", { name: "More mail actions" }).click();
   await expect(page.getByRole("menuitem", { name: "Mark unread" })).toBeVisible();
+  // One Escape closes one layer: the menu goes and the reader stays. (It used
+  // to close both, the menu's own Escape falling through to mail's window
+  // handler, and this test then reopened the thread at 390 without knowing
+  // why it had to.)
   await page.keyboard.press("Escape");
+  await expect(page.getByRole("menuitem", { name: "Mark unread" })).toHaveCount(0);
+  await expect(page.getByText("Lunch at 12PM sounds great to me.")).toBeVisible();
 
   // A phone in portrait: the label stays in the menu, the pill sits on the 8
   // inset, and the subject lands 9 under the caption's floor — §13's known
   // gap, held at its figure so a move either way is a move someone made.
   await page.setViewportSize({ width: 390, height: 844 });
-  // crossing `md` hands mail to the mobile shell, which mounts the surface
-  // afresh on the column — open the thread again from there
-  await page
-    .locator('section[aria-label="Mailbox"]')
-    .getByText(thread.subject, { exact: true })
-    .click();
   await expect(page.getByText("Lunch at 12PM sounds great to me.")).toBeVisible();
   await expect(label).toBeHidden();
   const phone = await paneGeometry(page);
@@ -1099,18 +1099,23 @@ test("@release Mail hands the single pane between list, reader and composer", as
   await expect(page.getByText("Lunch at 12PM sounds great to me.")).toHaveCount(0);
   expect((await paneGeometry(page)).listShown).toBe(true);
 
-  // The composer is the third occupant, and it wins over the open thread.
+  // The composer is a sheet over the whole window, not a third occupant: the
+  // open thread keeps the pane under it, and the shell around it goes inert.
   await page.getByText(thread.subject, { exact: true }).click();
   await expect(page.getByText("Lunch at 12PM sounds great to me.")).toBeVisible();
   await page.getByRole("button", { name: "Reply", exact: true }).click();
-  await expect(page.getByRole("form", { name: "Reply" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Reply" })).toBeVisible();
   expect((await paneGeometry(page)).listShown).toBe(false);
-  await expect(page.getByText("Lunch at 12PM sounds great to me.")).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () => document.querySelector(".brain-mail-reader-head")?.closest("[inert]") !== null,
+    ),
+  ).toBe(true);
 
-  // Closing the draft gives the pane back to the thread that was open under it,
-  // and Back from there gives it to the column.
+  // Closing the draft hands the window back to the thread that was open under
+  // it, and Back from there gives the pane to the column.
   await page.getByRole("button", { name: "Close draft" }).click();
-  await expect(page.getByRole("form", { name: "Reply" })).toHaveCount(0);
+  await expect(page.getByRole("dialog", { name: "Reply" })).toHaveCount(0);
   await expect(page.getByText("Lunch at 12PM sounds great to me.")).toBeVisible();
   expect((await paneGeometry(page)).listShown).toBe(false);
   await page.getByRole("button", { name: "Back to Inbox" }).click();
@@ -1174,7 +1179,7 @@ test("Mail builds Reply all and Forward without client-owned threading", async (
 
   await page.getByRole("button", { name: "More mail actions" }).click();
   await page.getByRole("menuitem", { name: "Reply all" }).click();
-  await expect(page.getByRole("form", { name: "Reply all" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Reply all" })).toBeVisible();
   await expect(page.getByLabel("To", { exact: true })).toHaveValue(
     "ben@example.test, alex@example.test",
   );
@@ -1236,13 +1241,13 @@ test("@mobile Mail moves from list to reader and compose without zoom triggers",
 
   await page.getByRole("button", { name: "Back to Inbox" }).click();
   await page.getByRole("button", { name: "New message" }).click();
-  await expect(page.getByRole("form", { name: "New message" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "New message" })).toBeVisible();
 
   // Only rendered fields can trigger iOS focus zoom, and the nav control is a
   // BUTTON — the 16px floor is the search input's rule, not a button's, so the
   // trigger keeps Control 13 at every width and the sweep passes it by.
   const fontSizes = await page.locator(
-    'select, input[aria-label="Search mail"], form input, form textarea',
+    'select, input[aria-label="Search mail"], [role="dialog"] input, [role="dialog"] textarea',
   ).evaluateAll((fields) =>
     fields
       .filter((field) => field.getClientRects().length > 0)
@@ -1252,13 +1257,14 @@ test("@mobile Mail moves from list to reader and compose without zoom triggers",
   expect(fontSizes.every((size) => size >= 16)).toBe(true);
   await assertNoHorizontalOverflow(page);
 
-  const mailboxBottom = await page
-    .getByRole("form", { name: "New message" })
+  // The sheet is the window and the tab bar has left with the shell: there is
+  // no line for Send to stand under any more, it stands on top.
+  await expect(page.getByRole("navigation", { name: "Primary" })).toHaveCount(0);
+  const sendBottom = await page
+    .getByRole("dialog", { name: "New message" })
+    .getByRole("button", { name: "Send", exact: true })
     .evaluate((node) => node.getBoundingClientRect().bottom);
-  const tabbarTop = await page
-    .getByRole("navigation", { name: "Primary" })
-    .evaluate((node) => node.getBoundingClientRect().top);
-  expect(mailboxBottom).toBeLessThanOrEqual(tabbarTop + 1);
+  expect(sendBottom).toBeLessThanOrEqual(120);
 });
 
 test("@mobile HTML mail grows with its content without nested scrollbars", async ({
@@ -1896,6 +1902,318 @@ test("@release a mutation nobody answers cannot hold the lock, or Undo, for good
       { accountId: account.accountId, read: true },
     ]);
 });
+
+// ── The compose sheet ───────────────────────────────────────────────────────
+// Writing a letter takes the whole window. The composer is an opaque paper
+// sheet in a portal over the shell, the shell under it is inert, and the
+// actions row stands on top. What is pinned here is the takeover, the caret,
+// the Cc Bcc reveal, the stillness of a send, where a refusal lands, and the
+// phone. What the sheet looks like (no glass, no rings, one fold) is the
+// design audit's: e2e/design-audit.spec.ts "writes on paper".
+
+test("@release the compose sheet takes the window and the shell goes inert under it", async ({
+  page,
+}) => {
+  await login(page);
+  await installMailRoutes(page);
+  await page.goto("/mail");
+  await enterSingleAccount(page);
+
+  await page.getByRole("button", { name: "New message" }).click();
+  const sheet = page.locator('[role="dialog"][aria-label="New message"]');
+  await expect(sheet).toBeVisible();
+  await expect(sheet).toHaveAttribute("aria-modal", "true");
+
+  // Sidebar, list and tab bar: inert and out of the accessibility tree.
+  const under = await page.evaluate(() => {
+    const state = (selector: string) => {
+      const node = document.querySelector(selector);
+      return node
+        ? {
+            inert: node.closest("[inert]") !== null,
+            hidden: node.closest('[aria-hidden="true"]') !== null,
+          }
+        : null;
+    };
+    return {
+      sidebar: state(".brain-sidebar"),
+      list: state(".brain-mail-list"),
+      tabbar: document.querySelector('nav[aria-label="Primary"]') === null,
+    };
+  });
+  expect(under.sidebar).toEqual({ inert: true, hidden: true });
+  expect(under.list).toEqual({ inert: true, hidden: true });
+  expect(under.tabbar).toBe(true);
+
+  // The caret is in To, and ten Tabs never leave the sheet.
+  await expect(page.getByLabel("To", { exact: true })).toBeFocused();
+  for (let step = 0; step < 10; step += 1) {
+    await page.keyboard.press("Tab");
+    expect(await sheet.evaluate((node) => node.contains(document.activeElement))).toBe(true);
+  }
+
+  // Esc closes it and gives the window back.
+  await page.keyboard.press("Escape");
+  await expect(sheet).toHaveCount(0);
+  expect(
+    await page.evaluate(() => document.querySelector(".brain-shell")?.hasAttribute("inert")),
+  ).toBe(false);
+
+  // A reply is the same sheet with the caret in the body, and Esc returns to
+  // the open message: the reader stayed under the sheet and the button that
+  // opened it has the focus back.
+  await page.getByText(thread.subject, { exact: true }).click();
+  await expect(page.getByText("Lunch at 12PM sounds great to me.")).toBeVisible();
+  await page.getByRole("button", { name: "Reply", exact: true }).click();
+  const reply = page.locator('[role="dialog"][aria-label="Reply"]');
+  await expect(reply).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(reply).toHaveCount(0);
+  await expect(page.getByText("Lunch at 12PM sounds great to me.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Reply", exact: true })).toBeFocused();
+});
+
+test("@release Cc and Bcc unfold from To's end, and a resumed draft with a copy shows them standing", async ({
+  page,
+}) => {
+  await login(page);
+  await installMailRoutes(page);
+  const savedDraft = {
+    apiVersion: 1,
+    draftId: "draft-1a2b3c4d-4444-4a7b-8c9d-0e1f2a3b4c5d",
+    accountId: account.accountId,
+    revision: 2,
+    state: "editing",
+    intent: { kind: "compose" },
+    to: "ben@example.test",
+    cc: "casey@example.test",
+    bcc: "",
+    subject: "Thursday, then",
+    text: "Half a thought.",
+    attachments: [],
+    sendOperationId: null,
+    sendErrorCode: null,
+    createdAt: 1_755_000_000_000,
+    updatedAt: 1_755_000_000_000,
+    sentAt: null,
+  } as const;
+  // The list carries summaries, the row's own GET carries the whole draft.
+  const { to, cc, bcc, text, attachments, ...summary } = savedDraft;
+  void to;
+  void cc;
+  void bcc;
+  void text;
+  void attachments;
+  await page.route("**/api/mail/drafts**", (route) => {
+    const url = new URL(route.request().url());
+    if (route.request().method() !== "GET") return route.fallback();
+    if (url.pathname === "/api/mail/drafts") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json; charset=utf-8",
+        body: JSON.stringify({ apiVersion: 1, drafts: [summary] }),
+      });
+    }
+    if (url.pathname === `/api/mail/drafts/${savedDraft.draftId}`) {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json; charset=utf-8",
+        body: JSON.stringify(savedDraft),
+      });
+    }
+    return route.fallback();
+  });
+  await page.goto("/mail");
+  await enterSingleAccount(page);
+
+  await page.getByRole("button", { name: "New message" }).click();
+  const sheet = page.locator('[role="dialog"][aria-label="New message"]');
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByLabel("Cc", { exact: true })).toHaveCount(0);
+  await sheet.getByRole("button", { name: "Cc Bcc" }).click();
+  await expect(sheet.getByLabel("Cc", { exact: true })).toBeVisible();
+  await expect(sheet.getByLabel("Cc", { exact: true })).toBeFocused();
+  await expect(sheet.getByLabel("Bcc", { exact: true })).toBeVisible();
+  await expect(sheet.getByRole("button", { name: "Cc Bcc" })).toHaveCount(0);
+  await page.keyboard.press("Escape");
+  await expect(sheet).toHaveCount(0);
+
+  await goTo(page, /^Drafts/);
+  // The row itself, not its delete button, which carries the same subject.
+  await page
+    .locator('[aria-label="Saved drafts"] [role="listitem"] button.brain-mail-row', {
+      hasText: "Thursday, then",
+    })
+    .click();
+  await expect(sheet).toBeVisible();
+  await expect(sheet.getByLabel("Cc", { exact: true })).toHaveValue("casey@example.test");
+  await expect(sheet.getByLabel("Bcc", { exact: true })).toBeVisible();
+  await expect(sheet.getByRole("button", { name: "Cc Bcc" })).toHaveCount(0);
+});
+
+test("@release a send holds the sheet still, refuses Esc, and then the sheet is gone and the toast stands", async ({
+  page,
+}) => {
+  await login(page);
+  await installMailRoutes(page);
+  // The send is held open until the test lets it go, so the busy state can be
+  // measured while it lasts.
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(/\/api\/mail\/drafts\/[^/?]+\/send$/, async (route) => {
+    const input = route.request().postDataJSON();
+    await gate;
+    return route.fulfill({
+      status: 200,
+      contentType: "application/json; charset=utf-8",
+      body: JSON.stringify({
+        apiVersion: 1,
+        replayed: false,
+        appliedRevision: input.expectedRevision + 1,
+        operationId: input.sendOperationId,
+        created: true,
+        status: "queued",
+      }),
+    });
+  });
+  await page.goto("/mail");
+  await enterSingleAccount(page);
+  await page.getByRole("button", { name: "New message" }).click();
+  const sheet = page.locator('[role="dialog"][aria-label="New message"]');
+  await expect(page.getByLabel("To", { exact: true })).toBeFocused();
+  await page.getByLabel("To", { exact: true }).fill("ben@example.test");
+  await page.getByPlaceholder("Subject").fill("Thursday, then");
+  await page.getByLabel("Message", { exact: true }).fill("See you there.");
+  await composeSettled(page);
+
+  // The form's one submit, by what it is: its accessible name is "Send" and
+  // then "Sending", and the point is that the object stays the same.
+  const send = sheet.locator('button[type="submit"]');
+  await expect(send).toHaveAccessibleName("Send");
+  const before = (await send.boundingBox())!;
+  await send.click();
+  await expect(send).toHaveAttribute("aria-busy", "true");
+  await expect(send).toContainText("Sending");
+  const during = (await send.boundingBox())!;
+  for (const side of ["x", "y", "width", "height"] as const) {
+    expect(Math.abs(during[side] - before[side]), side).toBeLessThanOrEqual(0.5);
+  }
+  expect(
+    await sheet
+      .locator("input, textarea")
+      .evaluateAll((fields) =>
+        fields.every((field) => (field as HTMLInputElement).readOnly),
+      ),
+  ).toBe(true);
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+  await expect(sheet).toHaveCount(1);
+
+  release();
+  await expect(sheet).toHaveCount(0);
+  await expect(page.getByText("Message queued", { exact: true })).toBeVisible();
+});
+
+test("@release a refused send stands in the slot, moves nothing, and offers Mail settings on reauth", async ({
+  page,
+}) => {
+  await login(page);
+  await installMailRoutes(page);
+  await page.route(/\/api\/mail\/drafts\/[^/?]+\/send$/, (route) =>
+    route.fulfill({
+      status: 401,
+      contentType: "application/json; charset=utf-8",
+      body: JSON.stringify({ error: { code: "mail_send_account_reauth_required" } }),
+    }),
+  );
+  await page.goto("/mail");
+  await enterSingleAccount(page);
+  await page.getByRole("button", { name: "New message" }).click();
+  const sheet = page.locator('[role="dialog"][aria-label="New message"]');
+  await expect(page.getByLabel("To", { exact: true })).toBeFocused();
+  await page.getByLabel("To", { exact: true }).fill("ben@example.test");
+  await page.getByLabel("Message", { exact: true }).fill("See you there.");
+  await composeSettled(page);
+
+  const envelope = sheet.locator(".brain-compose-envelope");
+  const before = (await envelope.boundingBox())!;
+  await sheet.getByRole("button", { name: "Send", exact: true }).click();
+  const alert = sheet.locator('.brain-compose-slot [role="alert"]');
+  await expect(alert).toHaveText("This account needs to be reconnected in Settings.");
+  await expect(sheet.locator(".brain-compose-slot").getByRole("button", { name: "Mail settings" })).toBeVisible();
+  const after = (await envelope.boundingBox())!;
+  expect(Math.abs(after.y - before.y)).toBeLessThanOrEqual(0.5);
+  // The sentence is in the slot and nowhere else: no toast.
+  await expect(page.locator(".brain-toast")).toHaveCount(0);
+  await expect(sheet.getByRole("button", { name: "Send", exact: true })).not.toHaveAttribute(
+    "aria-busy",
+    "true",
+  );
+});
+
+test("@mobile @release on a phone the sheet is the window, Send is on top, and reduced motion moves nothing", async ({
+  page,
+}) => {
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await login(page);
+  await installMailRoutes(page);
+  await page.goto("/mail");
+  await enterSingleAccount(page);
+  await page.getByRole("button", { name: "New message" }).click();
+  const sheet = page.locator('[role="dialog"][aria-label="New message"]');
+  await expect(sheet).toBeVisible();
+  await page.waitForTimeout(50);
+
+  const geometry = await page.evaluate(() => {
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    const box = dialog.getBoundingClientRect();
+    const send = dialog.querySelector('button[type="submit"]')!.getBoundingClientRect();
+    return {
+      box: { x: box.x, y: box.y, width: box.width, height: box.height },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      sendBottom: send.bottom,
+      dialogTransform: getComputedStyle(dialog).transform,
+      shellTransform: getComputedStyle(document.querySelector(".brain-shell")!).transform,
+      tabbarGone: document.querySelector('nav[aria-label="Primary"]') === null,
+      fontSizes: [...dialog.querySelectorAll("input, textarea")].map((field) =>
+        Number.parseFloat(getComputedStyle(field).fontSize),
+      ),
+    };
+  });
+  expect(geometry.box.x).toBe(0);
+  expect(geometry.box.y).toBe(0);
+  expect(Math.abs(geometry.box.width - geometry.viewport.width)).toBeLessThanOrEqual(1);
+  expect(Math.abs(geometry.box.height - geometry.viewport.height)).toBeLessThanOrEqual(1);
+  expect(geometry.sendBottom).toBeLessThanOrEqual(120);
+  expect(geometry.tabbarGone).toBe(true);
+  expect(geometry.fontSizes.length).toBeGreaterThan(1);
+  expect(geometry.fontSizes.every((size) => size >= 16)).toBe(true);
+  expect(geometry.dialogTransform).toBe("none");
+  expect(geometry.shellTransform).toBe("none");
+});
+
+/** The sheet and its rows arrive on transforms, and a box measured while they
+ *  are still arriving is a box that will move. Framer writes `transform:
+ *  none` once a value is at rest, so that is what "arrived" means here. */
+async function composeSettled(page: Page) {
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        [
+          ...document.querySelectorAll(
+            '[role="dialog"], [role="dialog"] .brain-compose-row, [role="dialog"] .brain-compose-fold, [role="dialog"] .brain-compose-body',
+          ),
+        ].every((node) => {
+          const style = getComputedStyle(node);
+          return style.transform === "none" && style.opacity === "1";
+        }),
+      ),
+    )
+    .toBe(true);
+}
 
 async function assertNoHorizontalOverflow(page: Page) {
   const overflow = await page.evaluate(() => ({

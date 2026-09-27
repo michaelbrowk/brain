@@ -751,8 +751,13 @@ export function MailAccountSettings({
           ? endpointLabel(outgoing)
           : "Receive only"
         : null;
+    // `send` is false for any account that is not connected, so the line is
+    // for a connected one only: a reauth-required account has its own row
+    // below, naming the one fault the reader can repair.
     const sendUnavailable =
-      outgoing !== undefined && selectedAccount.capabilities?.send === false;
+      outgoing !== undefined &&
+      selectedAccount.status === "connected" &&
+      selectedAccount.capabilities?.send === false;
     return (
       <div className="space-y-7">
         <SectionBack label="Mail accounts" onBack={() => setView("list")} />

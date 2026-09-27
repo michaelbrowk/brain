@@ -1172,6 +1172,33 @@ describe("MailAccountSettings", () => {
     expect(button("Remove outgoing server")).not.toBeNull();
   });
 
+  it("blames the password, not this Brain, when a reauth-required account cannot send", async () => {
+    // `send` is false for every account that is not connected, so the card
+    // would otherwise announce two faults for the one the reader can repair.
+    const withSmtp = { ...imapAccountWithSmtp(), status: "reauth_required" };
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        response({
+          apiVersion: 3,
+          accounts: [{ ...withSmtp, capabilities: capabilities(false) }],
+        }),
+      ),
+    );
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+    await act(async () => button("Personalperson@example.test · IMAPReconnect needed").click());
+
+    const statuses = [...document.body.querySelectorAll('[role="status"]')];
+    expect(statuses.map((node) => node.textContent)).toEqual([
+      "This mailbox needs its password again before Brain can sync.",
+    ]);
+    expect(document.body.textContent).not.toContain(SEND_UNAVAILABLE);
+    expect(button("Update password")).not.toBeNull();
+  });
+
   it("keeps the Google card free of the outgoing line", async () => {
     vi.stubGlobal(
       "fetch",

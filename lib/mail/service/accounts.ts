@@ -571,16 +571,22 @@ export class MultiMailAccountService implements MailAccountServiceV2 {
         signal: request.signal,
       });
       if (account.smtp) {
-        if (!this.smtpVerifier) {
+        if (this.smtpVerifier) {
+          await this.smtpVerifier.verify({
+            endpoint: account.smtp.endpoint,
+            username: account.smtp.username,
+            password,
+            deadlineAt: request.deadlineAt,
+            signal: request.signal,
+          });
+        } else if (patch.smtp !== undefined) {
+          // Adding or changing the outgoing server on a service that cannot
+          // send would save a server nothing verified. A patch that leaves it
+          // alone (a password rotation, reauth recovery) keeps the server that
+          // was verified when it was added, and capabilities already say the
+          // account is receive-only until the flag returns.
           throw new MailAccountError("smtp_submission_unavailable");
         }
-        await this.smtpVerifier.verify({
-          endpoint: account.smtp.endpoint,
-          username: account.smtp.username,
-          password,
-          deadlineAt: request.deadlineAt,
-          signal: request.signal,
-        });
       }
       this.assertRequestActive(request);
       await this.store.save(stored, password, request.signal);

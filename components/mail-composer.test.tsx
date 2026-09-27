@@ -382,6 +382,18 @@ describe("the compose sheet", () => {
     expect(p.onCancel).toHaveBeenCalledTimes(2);
   });
 
+  it("names the body 'Message' through aria-labelledby, so its value never joins its name", async () => {
+    // A wrapping label names an embedded textbox with its value (accname's
+    // embedded-control rule): "Message" became "Message Never mind" the
+    // moment a letter stood, and nothing could find the body by its name.
+    await render({ initialDraft: draft({ text: "Never mind" }) });
+    const body = dialog()!.querySelector("textarea")!;
+    expect(body.closest("label")).toBeNull();
+    const labelledBy = body.getAttribute("aria-labelledby");
+    expect(labelledBy).toBeTruthy();
+    expect(document.getElementById(labelledBy!)?.textContent).toBe("Message");
+  });
+
   it("takes the sheet down from the trash without a question, and not while sending", async () => {
     // Discard used to ask through a ConfirmDialog. The way back is the
     // surface's undo pill now, so the press is answered at once and the sheet

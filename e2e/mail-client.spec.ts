@@ -2266,9 +2266,7 @@ test("@release Discard takes the sheet down at once and parks the delete behind 
   // Undo brings the same letter back, and no delete ever goes out.
   await pill.getByRole("button", { name: "Undo" }).click();
   await expect(sheet).toBeVisible();
-  // By element, not by label: the body's wrapping label names the textarea
-  // "Message" plus its value once one stands.
-  await expect(sheet.locator(".brain-compose-body textarea")).toHaveValue("Never mind");
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("Never mind");
   await expect(pill).toHaveCount(0);
   await page.waitForTimeout(500);
   expect(deleteRequests).toHaveLength(0);
@@ -2357,7 +2355,7 @@ test("@release the From switch moves the letter to another account, and a reply 
   // The old sheet plays its dismiss exit while the new one stands: one sheet
   // again before reading it.
   await expect(sheet).toHaveCount(1);
-  await expect(sheet.locator(".brain-compose-body textarea")).toHaveValue("See you there.");
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("See you there.");
   await expect(sheet.getByRole("button", { name: "From: second@example.test" })).toBeVisible();
   await expect.poll(() => deleteRequests.length).toBe(1);
   expect(deleteRequests[0]?.accountId).toBe(account.accountId);

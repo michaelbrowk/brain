@@ -292,6 +292,7 @@ export function MailComposer({
   const ccId = useId();
   const bccId = useId();
   const subjectId = useId();
+  const bodyLabelId = useId();
   const reportedInitial = useRef(false);
   const reduce = useReducedMotion();
   /** How many times `sending` has flipped since the sheet stood, so the label
@@ -762,10 +763,17 @@ export function MailComposer({
                 letter begins. It arrives with the body. */}
             <motion.div className="brain-compose-fold" aria-hidden {...arrive(4)} />
 
-            <motion.label className="brain-compose-body" {...arrive(4)}>
-              <span className="sr-only">Message</span>
+            {/* Named through `aria-labelledby`, not a wrapping label: a label
+                around an embedded textbox names it with its VALUE too (the
+                accessible-name rule for embedded controls), so "Message" grew
+                into "Message Never mind" the moment a letter stood. */}
+            <motion.div className="brain-compose-body" {...arrive(4)}>
+              <span id={bodyLabelId} className="sr-only">
+                Message
+              </span>
               <textarea
                 ref={bodyRef}
+                aria-labelledby={bodyLabelId}
                 value={text}
                 onChange={(event) => {
                   setText(event.currentTarget.value);
@@ -775,7 +783,7 @@ export function MailComposer({
                 placeholder="Write a message…"
                 className="text-body"
               />
-            </motion.label>
+            </motion.div>
           </div>
         </ScrollEdge>
       </form>

@@ -77,8 +77,10 @@ type SlotMessage = {
 };
 
 /** When each part of the letter arrives, in seconds after the sheet: From,
- *  To, Subject, then the fold and the body together at the last step. */
-const ROW_DELAYS = [0.05, 0.08, 0.11, 0.14] as const;
+ *  To, then a resumed Cc/Bcc and the notice (the parts a draft may or may not
+ *  carry, on a half step so the rows around them keep theirs), Subject, and
+ *  the fold with the body together at the last step. */
+const ROW_DELAYS = [0.05, 0.08, 0.095, 0.11, 0.14] as const;
 
 /**
  * THE SHEET. Writing a letter takes the whole window: the composer is an
@@ -358,10 +360,11 @@ export function MailComposer({
     );
 
   /** The rows arrive one after another, each a 4px rise over `DUR.base`:
-   *  From, To, Subject, then the fold and the body together, so the last of
-   *  them lands at 300ms with the sheet. Reduced motion: they are simply
-   *  there. The steps are the spec's own numbers. */
-  const arrive = (step: 0 | 1 | 2 | 3) =>
+   *  From, To, a resumed copy and the notice, Subject, then the fold and the
+   *  body together, so the last of them lands at 300ms with the sheet.
+   *  Reduced motion: they are simply there. The steps are the spec's own
+   *  numbers. */
+  const arrive = (step: 0 | 1 | 2 | 3 | 4) =>
     reduce
       ? { initial: false as const }
       : {
@@ -702,12 +705,17 @@ export function MailComposer({
               {showCopies && (
                 /* From a press the two rows grow into place on the select
                    spring and the caret lands in Cc; a resumed draft that
-                   already carries a copy shows them standing. */
+                   already carries a copy shows them standing, arriving in the
+                   stagger between To and Subject. */
                 <motion.div
                   className="brain-compose-copies-rows"
-                  initial={reduce || !revealedByPress ? false : { height: 0, opacity: 0 }}
-                  animate={{ height: "auto", opacity: 1 }}
-                  transition={SPRING_SELECT}
+                  {...(revealedByPress
+                    ? {
+                        initial: reduce ? (false as const) : { height: 0, opacity: 0 },
+                        animate: { height: "auto", opacity: 1 },
+                        transition: SPRING_SELECT,
+                      }
+                    : arrive(2))}
                 >
                   <div className="brain-compose-row">
                     <label htmlFor={ccId} className="brain-compose-label text-control">
@@ -746,7 +754,7 @@ export function MailComposer({
               )}
               {/* The subject is the letter's heading, not a field with a
                   label: it stands on the values' rule at the subheading size. */}
-              <motion.div className="brain-compose-row brain-compose-subject" {...arrive(2)}>
+              <motion.div className="brain-compose-row brain-compose-subject" {...arrive(3)}>
                 <label htmlFor={subjectId} className="sr-only">
                   Subject
                 </label>
@@ -766,14 +774,18 @@ export function MailComposer({
             </div>
 
             {initialDraft.notice && (
-              <p className="brain-compose-notice text-caption">{initialDraft.notice}</p>
+              /* What a forward or a recovered draft has to say about itself
+                 arrives on the same half step as a resumed copy. */
+              <motion.p className="brain-compose-notice text-caption" {...arrive(2)}>
+                {initialDraft.notice}
+              </motion.p>
             )}
 
             {/* The one line on the sheet: where the envelope ends and the
                 letter begins. It arrives with the body. */}
-            <motion.div className="brain-compose-fold" aria-hidden {...arrive(3)} />
+            <motion.div className="brain-compose-fold" aria-hidden {...arrive(4)} />
 
-            <motion.label className="brain-compose-body" {...arrive(3)}>
+            <motion.label className="brain-compose-body" {...arrive(4)}>
               <span className="sr-only">Message</span>
               <textarea
                 ref={bodyRef}

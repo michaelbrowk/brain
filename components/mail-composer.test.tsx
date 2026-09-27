@@ -777,8 +777,42 @@ describe("the compose sheet", () => {
       expect(rows?.animate).toEqual({ height: "auto", opacity: 1 });
       expect(rows?.transition).toEqual(SPRING_SELECT);
 
+      // A resumed copy does not grow: it stands, and arrives with the rest.
       await render({ initialDraft: draft({ cc: "casey@example.test" }) });
+      expect(motionOf("brain-compose-copies-rows")?.initial).toEqual({ opacity: 0, y: 4 });
+    });
+
+    it("lets a resumed Cc/Bcc and the notice join the stagger at 95ms, between To and Subject", async () => {
+      await render({
+        initialDraft: draft({
+          mode: "forward",
+          cc: "casey@example.test",
+          notice: "Attachments from the original message are not included.",
+        }),
+      });
+      for (const className of ["brain-compose-copies-rows", "brain-compose-notice"]) {
+        const part = motionOf(className);
+        expect(part?.initial, className).toEqual({ opacity: 0, y: 4 });
+        expect(part?.animate, className).toEqual({ opacity: 1, y: 0 });
+        expect(part?.transition, className).toEqual({
+          duration: DUR.base,
+          ease: EASE_OUT,
+          delay: 0.095,
+        });
+      }
+      // The rows around them keep their steps.
+      const rows = harness.renders.filter((render) =>
+        render.className.split(" ").includes("brain-compose-row"),
+      );
+      expect(rows.map((render) => (render.motion.transition as { delay: number }).delay)).toEqual([
+        0.05, 0.08, 0.11,
+      ]);
+      expect((motionOf("brain-compose-body")?.transition as { delay: number }).delay).toBe(0.14);
+
+      harness.reduce = true;
+      await render({ initialDraft: draft({ cc: "casey@example.test", notice: "Kept." }) });
       expect(motionOf("brain-compose-copies-rows")?.initial).toBe(false);
+      expect(motionOf("brain-compose-notice")?.initial).toBe(false);
     });
 
     it("swaps Send for Sending through a 2px blur and turns the glyph on SPIN, in place", async () => {

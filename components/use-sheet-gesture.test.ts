@@ -3,10 +3,11 @@
 // THE PHONE-SHAPED QUESTION, AND THE GESTURE THAT ANSWERS IT.
 //
 // The hook is one media query, and the sheet it turns on is drawn by the
-// panels that ask it. Two of them ask now (the mail composer and the When
-// picker), so the query and the two thresholds are pinned here rather than in
-// each panel's own file, where a second copy is how one of them ends up on a
-// different breakpoint from the rest of the app.
+// panels that ask it. The When picker and the New menu ride it with a grip;
+// the mail composer asks the same question for its entrance alone, so the
+// query and the two thresholds are pinned here rather than in each panel's
+// own file, where a second copy is how one of them ends up on a different
+// breakpoint from the rest of the app.
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
@@ -271,10 +272,11 @@ describe("the sheet the When picker rides", () => {
 /** THE OTHER PANEL THAT ASKS THE QUESTION.
  *
  *  The hook was pulled out of the composer, and the picker's cases above
- *  measure it on the picker alone. A shared hook proves nothing about the two
- *  surfaces agreeing: the composer could stop asking it, or keep asking it and
- *  hand the grip different numbers, and every case above would stay green. So
- *  the composer states the same three facts here.
+ *  measure it on the picker alone. The composer is a full-window paper sheet
+ *  now and asks the question only to choose its entrance: it draws no grip
+ *  and hands nothing a drag, on either side of the breakpoint, because a
+ *  surface that is the whole window has no edge to pull it away by. That is
+ *  the fact pinned here, so a grip cannot quietly come back.
  */
 describe("the sheet the mail composer rides", () => {
   const account = {
@@ -334,42 +336,24 @@ describe("the sheet the mail composer rides", () => {
     });
   };
 
-  /** The one render that declared `drag: "y"`, which is the sheet itself. */
-  const panel = () => [...renders].reverse().find((render) => render.motion.drag === "y");
+  /** Any render that declared a drag, which none of the composer's may. */
+  const dragged = () => renders.find((render) => render.motion.drag !== undefined);
 
-  it("draws the grip below the breakpoint and hands it the drag, and nothing else", async () => {
+  /** The sheet is a portal at the body, so it is looked for there. */
+  const paper = () => document.body.querySelector<HTMLElement>(".brain-compose-paper");
+
+  it("marks the phone form on the sheet and draws no grip and no drag there", async () => {
     await openComposer(true);
-    expect(host.querySelector(".brain-composer-grip")).not.toBeNull();
-    expect(panel()?.motion.dragListener).toBe(false);
-    expect(panel()?.motion.dragConstraints).toEqual({ top: 0 });
+    expect(paper()?.hasAttribute("data-sheet")).toBe(true);
+    expect(document.body.querySelector(".brain-composer-grip")).toBeNull();
+    expect(dragged()).toBeUndefined();
   });
 
-  it("is not a sheet above it, where the composer is a pane", async () => {
+  it("is the same sheet above the breakpoint, without the phone mark", async () => {
     await openComposer(false);
-    expect(host.querySelector(".brain-composer-grip")).toBeNull();
-    expect(panel()).toBeUndefined();
-  });
-
-  it("closes on the same two numbers the picker closes on", async () => {
-    await openComposer(true);
-    const dragEnded = panel()?.motion.onDragEnd as (
-      event: unknown,
-      info: { offset: { y: number }; velocity: { y: number } },
-    ) => void;
-
-    await act(async () => {
-      dragEnded(null, { offset: { y: SHEET_DISMISS_OFFSET - 1 }, velocity: { y: 0 } });
-    });
+    expect(paper()?.hasAttribute("data-sheet")).toBe(false);
+    expect(document.body.querySelector(".brain-composer-grip")).toBeNull();
+    expect(dragged()).toBeUndefined();
     expect(cancelled).not.toHaveBeenCalled();
-
-    await act(async () => {
-      dragEnded(null, { offset: { y: SHEET_DISMISS_OFFSET + 1 }, velocity: { y: 0 } });
-    });
-    expect(cancelled).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      dragEnded(null, { offset: { y: 8 }, velocity: { y: SHEET_DISMISS_VELOCITY + 1 } });
-    });
-    expect(cancelled).toHaveBeenCalledTimes(2);
   });
 });

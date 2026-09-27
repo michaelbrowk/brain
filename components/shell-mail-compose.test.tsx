@@ -219,7 +219,9 @@ describe("the compose ask, through the assembled shell", () => {
 
     await act(async () => root.render(<Shell tree={[]} initialSelectedId={null} />));
     await settle();
-    expect(document.body.querySelector('form[aria-label="New message"]')).toBeNull();
+    expect(
+      document.body.querySelector('[role="dialog"][aria-label="New message"]'),
+    ).toBeNull();
 
     // The palette's "New message" row: unconditional on `onNewMessage`, so
     // the ask does not have to wait on the compose-availability fetch first.
@@ -252,7 +254,7 @@ describe("the compose ask, through the assembled shell", () => {
     // is what this proves: dropping it (review mutation M4) leaves the ask
     // standing and this composer never opens.
     const composer = await findLazy(
-      () => document.body.querySelector('form[aria-label="New message"]'),
+      () => document.body.querySelector('[role="dialog"][aria-label="New message"]'),
       "the composer opened by the standing ask",
     );
     expect(composer).not.toBeNull();

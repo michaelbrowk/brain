@@ -5,9 +5,10 @@ import { useEffect, useState } from "react";
 /** THE PHONE-SHAPED QUESTION, ASKED ONCE.
  *
  *  Below md a panel keeps the sheet form: it slides in from the bottom edge
- *  and a grip drags it away. Two surfaces ask this now (the mail composer and
- *  the When picker), and a second copy of the query string is how one of them
- *  ends up on a different breakpoint from the rest of the app. */
+ *  and a grip drags it away. The When picker and the New menu ask this, and
+ *  the mail composer asks it for its entrance alone (a full-window sheet has
+ *  no grip); a second copy of the query string is how one of them ends up on
+ *  a different breakpoint from the rest of the app. */
 const SHEET_QUERY = "(max-width: 767px)";
 
 /** Read synchronously on the first client render, so the entrance actually

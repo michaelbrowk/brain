@@ -7,8 +7,7 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { DUR, EASE_OUT, pageTransition } from "@/lib/motion";
+import { AnimatePresence } from "framer-motion";
 import { isEditableEventTarget } from "@/lib/editable-target";
 import { PROJECT_URL } from "@/lib/project";
 import {
@@ -345,7 +344,6 @@ export function MailSurface({
   refreshToken?: number;
   client?: MailSurfaceClient;
 }) {
-  const reduce = useReducedMotion();
   const [accountsState, setAccountsState] = useState<AccountsState>({ kind: "loading" });
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [selectedMailboxId, setSelectedMailboxId] =
@@ -3973,6 +3971,11 @@ export function MailSurface({
     (event: KeyboardEvent) => {
       if (event.metaKey || event.ctrlKey || event.altKey) return;
       if (event.isComposing) return;
+      /* The compose sheet answers Escape itself (Radix, at the document, and
+         it marks the event handled), and it has already closed the composer
+         by the time this window listener runs. Without this the same press
+         fell through to the next branch and closed the reader under it. */
+      if (event.defaultPrevented) return;
       if (isEditableEventTarget(event.target)) return;
       /* A question on top owns the keyboard. Radix dismisses its dialog from
          a document listener and this window listener runs after it, with the
@@ -4356,10 +4359,10 @@ export function MailSurface({
     ? deriveUnifiedSections(unifiedMerged.items, accountsState.accounts, stickyOpen)
     : null;
 
-  // Which pane owns the surface when only one fits (below `panes`). Three
-  // things can occupy it and the composer is one of them, so it is named
-  // ahead of the open thread: composing over an open message replaces it.
-  const singlePane = composer ? "composer" : selectedThreadId ? "reader" : "list";
+  // Which pane owns the surface when only one fits (below `panes`). The
+  // composer used to be a third occupant; it is a sheet over the whole window
+  // now, so the pane keeps whatever it held and Esc returns to it.
+  const singlePane = selectedThreadId ? "reader" : "list";
   // The badge only reports a count it can stand behind: the plain Inbox
   // list, no smart view, no search. Anything else renders nothing — no zero.
   const inboxUnreadCount =
@@ -4495,70 +4498,62 @@ export function MailSurface({
         ) : null}
       </div>
 
-      {/* Composer and reader swap under one presence: the leaving pane is
-          popped out of flow and fades over 80ms while the arriving one fades
-          in, instead of a hard cut. `relative` anchors the popped pane.
-          The pane declares no ground: the canvas is the only ground (v3), so
-          an empty pane, a loading one and a crossfade between two of them all
-          stand on the same canvas the column beside them stands on, and no
-          plate edge runs down the gutter. The one opaque plane left on this
-          surface is the message sheet inside the reader — foreign HTML needs
-          its white page, our own markup does not. */}
+      {/* The reader pane. It declares no ground: the canvas is the only
+          ground (v3), so an empty pane and a loading one stand on the same
+          canvas the column beside them stands on, and no plate edge runs down
+          the gutter. The one opaque plane left on this surface is the message
+          sheet inside the reader — foreign HTML needs its white page, our own
+          markup does not. The composer used to swap in here; it is a sheet
+          over the whole window now (below), so the open message stays put
+          under it and is what Esc comes back to. */}
       <div
-        className={`${singlePane === "list" ? "hidden" : "flex"} relative min-h-0 min-w-0 flex-1 panes:flex`}
+        className={`${singlePane === "list" ? "hidden" : "flex"} min-h-0 min-w-0 flex-1 panes:flex`}
       >
-        <AnimatePresence mode="popLayout" initial={false}>
-          <motion.div
-            key={composer && composerAccount ? composer.draft.idempotencyKey : "reader"}
-            className="flex min-h-0 min-w-0 flex-1"
-            initial={reduce ? { opacity: 0 } : { opacity: 0, y: 2 }}
-            animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
-            exit={pageTransition.exit}
-            transition={{ duration: DUR.fast, ease: EASE_OUT }}
-          >
-            {composer && composerAccount ? (
-              <MailComposer
-                account={composerAccount}
-                initialDraft={composer.draft}
-                sending={composer.sending}
-                sendError={composer.error}
-                sendBlocked={composer.blocked}
-                sendErrorSettings={composer.errorSettings}
-                onOpenSettings={(invoker) =>
-                  onOpenSettings(invoker, composerAccount.accountId)
-                }
-                saveStatus={saveStatus}
-                onCancel={() =>
-                  closeComposer(
-                    draftSyncRef.current
-                      ? isDraftSyncEmpty(draftSyncRef.current)
-                      : false,
-                  )
-                }
-                onDiscard={() => closeComposer(true)}
-                onDraftChange={onComposerDraftChange}
-                onRetrySave={retryDraftSave}
-                onSend={(input) => void send(input)}
-                onToast={onToast}
-              />
-            ) : (
-              <MailReader
-                state={readerState}
-                mutating={mutating}
-                onBack={closeReader}
-                onRetry={retryReader}
-                onReply={startReply}
-                onReplyAll={startReplyAll}
-                onForward={(detail) => void startForward(detail)}
-                mailboxId={selectedMailboxId}
-                capabilities={readerCapabilities}
-                onAction={(thread, action) => void mutateOpenThread(thread, action)}
-                contentClient={client}
-              />
-            )}
-          </motion.div>
-        </AnimatePresence>
+        <MailReader
+          state={readerState}
+          mutating={mutating}
+          onBack={closeReader}
+          onRetry={retryReader}
+          onReply={startReply}
+          onReplyAll={startReplyAll}
+          onForward={(detail) => void startForward(detail)}
+          mailboxId={selectedMailboxId}
+          capabilities={readerCapabilities}
+          onAction={(thread, action) => void mutateOpenThread(thread, action)}
+          contentClient={client}
+        />
       </div>
+
+      {/* THE COMPOSE SHEET. A portal at the body over the whole window; the
+          shell under it is inert (`onComposeOpenChange`). The presence keeps
+          the sheet mounted through its exit, so the surface's state can go
+          null the moment a send lands or a draft closes and the sheet still
+          gets to leave the way it was dismissed. */}
+      <AnimatePresence>
+        {composer && composerAccount && (
+          <MailComposer
+            key={composer.draft.idempotencyKey}
+            account={composerAccount}
+            initialDraft={composer.draft}
+            sending={composer.sending}
+            sendError={composer.error}
+            sendBlocked={composer.blocked}
+            sendErrorSettings={composer.errorSettings}
+            onOpenSettings={(invoker) => onOpenSettings(invoker, composerAccount.accountId)}
+            saveStatus={saveStatus}
+            onCancel={() =>
+              closeComposer(
+                draftSyncRef.current ? isDraftSyncEmpty(draftSyncRef.current) : false,
+              )
+            }
+            onDiscard={() => closeComposer(true)}
+            onDraftChange={onComposerDraftChange}
+            onRetrySave={retryDraftSave}
+            onSend={(input) => void send(input)}
+            onToast={onToast}
+          />
+        )}
+      </AnimatePresence>
 
       {/* Deleting a stored draft is the one thing on this surface that cannot
           be taken back, so it is the one thing that asks. The browser used to

@@ -1760,7 +1760,9 @@ describe("MailSurface", () => {
     await settle();
     await click(findMenuItem("Forward"));
 
-    expect(document.body.querySelector('form[aria-label="Forward"]')).not.toBeNull();
+    expect(
+      document.body.querySelector('[role="dialog"][aria-label="Forward"]'),
+    ).not.toBeNull();
     expect(document.body.textContent).toContain("Original attachments aren’t included.");
     const to = document.body.querySelector('input[autocomplete="email"]') as HTMLInputElement;
     const subject = [...document.body.querySelectorAll("input")].find(
@@ -2583,9 +2585,9 @@ describe("MailSurface", () => {
       expect((document.body.querySelector("textarea") as HTMLTextAreaElement).value).toBe(
         "Replacement account A draft",
       );
-      // From is meta on the fields now, label and value in their own spans.
+      // From is the envelope's first row, label and value in their own spans.
       expect(
-        document.body.querySelector(".brain-composer-from")?.textContent,
+        document.body.querySelector(".brain-compose-from")?.textContent,
       ).toBe("FromPersonal");
       expect(onToast).not.toHaveBeenCalled();
     },
@@ -2926,7 +2928,8 @@ describe("MailSurface", () => {
         patch: expect.objectContaining({ text: "Draft in progress" }),
       }),
     );
-    expect(document.body.textContent).toContain("Saved");
+    // Autosave is silent: only a failure speaks.
+    expect(document.body.textContent).not.toContain("Not saved");
   });
 
   it("retries a failed autosave without losing the edit or changing its mutation", async () => {
@@ -2972,7 +2975,7 @@ describe("MailSurface", () => {
     expect(
       (document.body.querySelector("textarea") as HTMLTextAreaElement).value,
     ).toBe("Keep this exact edit");
-    expect(document.body.textContent).toContain("Saved");
+    expect(document.body.textContent).not.toContain("Not saved");
   });
 
   it("replays a response-lost mutation before saving a newer edit", async () => {
@@ -3043,7 +3046,7 @@ describe("MailSurface", () => {
     expect(
       (document.body.querySelector("textarea") as HTMLTextAreaElement).value,
     ).toBe("Newer unsaved edit");
-    expect(document.body.textContent).toContain("Saved");
+    expect(document.body.textContent).not.toContain("Not saved");
   });
 
   it("reconciles a response-lost autosave before discarding its draft", async () => {
@@ -3295,11 +3298,15 @@ describe("MailSurface", () => {
     );
     await settle();
 
+    // The composer is a portal at the body, not a child of its surface's
+    // host: the recovering surface's sheet is the last dialog standing.
+    const recoverySheet = () =>
+      [...document.body.querySelectorAll<HTMLElement>('[role="dialog"]')].at(-1);
     await vi.waitFor(() => {
-      const textarea = recoveryHost.querySelector("textarea");
+      const textarea = recoverySheet()?.querySelector("textarea");
       expect(textarea?.value).toBe(largeFinalBody);
     });
-    expect(recoveryHost.textContent).toContain("Recovered after Brain closed");
+    expect(recoverySheet()?.textContent).toContain("Recovered after Brain closed");
 
     await act(async () => recoveryRoot.unmount());
     recoveryHost.remove();
@@ -5212,7 +5219,7 @@ describe("MailSurface", () => {
 
       await pressKey("c");
       expect(
-        document.body.querySelector('form[aria-label="New message"]'),
+        document.body.querySelector('[role="dialog"][aria-label="New message"]'),
       ).not.toBeNull();
 
       await pressKey("j");
@@ -5220,7 +5227,7 @@ describe("MailSurface", () => {
 
       await pressKey("Escape");
       expect(
-        document.body.querySelector('form[aria-label="New message"]'),
+        document.body.querySelector('[role="dialog"][aria-label="New message"]'),
       ).toBeNull();
     });
 
@@ -5235,7 +5242,7 @@ describe("MailSurface", () => {
       await enterSingleAccount();
 
       await pressKey("c");
-      expect(document.body.querySelector("form[aria-label]")).toBeNull();
+      expect(document.body.querySelector('[role="dialog"]')).toBeNull();
     });
 
     it("/ focuses the search input and Escape then clears the query", async () => {
@@ -5368,7 +5375,7 @@ describe("MailSurface", () => {
 
       await emit("compose");
       expect(
-        document.body.querySelector('form[aria-label="New message"]'),
+        document.body.querySelector('[role="dialog"][aria-label="New message"]'),
       ).not.toBeNull();
     });
 
@@ -5383,7 +5390,7 @@ describe("MailSurface", () => {
       await enterSingleAccount();
 
       await emit("compose");
-      expect(document.body.querySelector("form[aria-label]")).toBeNull();
+      expect(document.body.querySelector('[role="dialog"]')).toBeNull();
 
       await emit("goto-drafts");
       expect(

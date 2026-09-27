@@ -819,7 +819,7 @@ export function renderWhenPicker(options: WhenPickerOptions): WhenPickerHandle {
 /* ── The same control, mounted from React ─────────────────────────────────
  *
  *  A host element with the DOM above inside it, the way the Tasks row mounts
- *  the one checkbox. Below md the body rides the sheet the composer already
+ *  the one checkbox. Below md the body rides the sheet the New menu also
  *  draws, and the grip drags it away. */
 
 export function TasksWhenPicker({

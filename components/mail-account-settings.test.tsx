@@ -785,20 +785,54 @@ describe("MailAccountSettings", () => {
     expect(outgoingSecurityOption("implicit").getAttribute("aria-checked")).toBe("true");
   });
 
-  it("pairs outgoing security with its port unless the port was entered by hand", async () => {
+  it("pairs the outgoing port and security both ways", async () => {
+    // The service accepts exactly two outgoing pairs, 465 with TLS and 587
+    // with STARTTLS, so either half of the pair sets the other. The incoming
+    // server keeps its own, looser rule and is untouched by any of this.
     await openFormWithAccounts();
     await act(async () => inputValue(field("mail-email"), "misha@studio.example"));
     await act(async () => outgoingSecurityOption("starttls").click());
     expect(field("mail-smtp-port").value).toBe("587");
     await act(async () => outgoingSecurityOption("implicit").click());
     expect(field("mail-smtp-port").value).toBe("465");
-    // the incoming pair is untouched by the outgoing choice
     expect(field("mail-port").value).toBe("993");
     expect(securityChecked("implicit")).toBe(true);
 
+    await act(async () => inputValue(field("mail-smtp-port"), "587"));
+    expect(outgoingSecurityOption("starttls").getAttribute("aria-checked")).toBe("true");
+    await act(async () => inputValue(field("mail-smtp-port"), "465"));
+    expect(outgoingSecurityOption("implicit").getAttribute("aria-checked")).toBe("true");
+    expect(securityChecked("implicit")).toBe(true);
+
+    // a port typed by hand does not survive a security choice: the pair does
     await act(async () => inputValue(field("mail-smtp-port"), "2525"));
     await act(async () => outgoingSecurityOption("starttls").click());
-    expect(field("mail-smtp-port").value).toBe("2525");
+    expect(field("mail-smtp-port").value).toBe("587");
+  });
+
+  it("refuses an outgoing port other than 465 or 587 before it reaches the wire", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response(accounts()));
+    vi.stubGlobal("fetch", fetchMock);
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+    await openOtherEmail();
+    await act(async () => {
+      inputValue(field("mail-email"), "misha@studio.example");
+      inputValue(field("mail-password"), "password");
+      inputValue(field("mail-smtp-port"), "2525");
+    });
+    await act(async () => submitForm(host));
+
+    expect(document.getElementById("mail-smtp-port-error")?.textContent).toBe(
+      "The outgoing server uses port 465 with TLS or 587 with STARTTLS.",
+    );
+    expect(document.activeElement).toBe(field("mail-smtp-port"));
+    expect((field("mail-smtp-port").closest("details") as HTMLDetailsElement).open).toBe(true);
+    // the incoming Advanced stays as it was: the fault is the outgoing one
+    expect((field("mail-port").closest("details") as HTMLDetailsElement).open).toBe(false);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("follows the incoming username until the outgoing one is edited by hand", async () => {

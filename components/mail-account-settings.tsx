@@ -110,6 +110,11 @@ const REENTER_PASSWORD_SMTP_COPY =
   "Re-enter the password to add or change the outgoing server.";
 const SEND_SWITCH_LABEL = "Send from this account";
 const SEND_SWITCH_OFF_HINT = "Turn on to reply and send from Brain";
+/** The service accepts exactly two outgoing pairs (`expectedTlsForPort` in
+ *  `lib/mail/security`), so the form refuses everything else here instead
+ *  of letting it reach the wire and come back as a generic 400. */
+const OUTGOING_PAIR_COPY =
+  "The outgoing server uses port 465 with TLS or 587 with STARTTLS.";
 // Last parsed account list. A revisit of the Mail tab renders it at once and
 // revalidates in the background instead of flashing the skeleton again.
 let lastLoadedAccounts: PublicMailAccount[] | null = null;
@@ -161,6 +166,9 @@ export function MailAccountSettings({
   // exists only once the form has rendered with the switch on, so the focus
   // waits for that commit instead of racing it.
   const pendingSmtpFocusRef = useRef(false);
+  // The outgoing port and security are one choice (465 with TLS or 587 with
+  // STARTTLS, nothing else), so one flag covers the pair where the incoming
+  // server, which accepts any port, keeps a flag for each.
   const manuallyEdited = useRef({
     hostname: false,
     username: false,
@@ -168,8 +176,7 @@ export function MailAccountSettings({
     tls: false,
     smtpHostname: false,
     smtpUsername: false,
-    smtpPort: false,
-    smtpTls: false,
+    smtpPair: false,
   });
   const advancedRef = useRef<HTMLDetailsElement | null>(null);
   const smtpAdvancedRef = useRef<HTMLDetailsElement | null>(null);
@@ -244,8 +251,7 @@ export function MailAccountSettings({
         tls: true,
         smtpHostname: account.smtp !== undefined,
         smtpUsername: account.smtp !== undefined,
-        smtpPort: account.smtp !== undefined,
-        smtpTls: account.smtp !== undefined,
+        smtpPair: account.smtp !== undefined,
       };
       return;
     }
@@ -267,8 +273,7 @@ export function MailAccountSettings({
       tls: false,
       smtpHostname: false,
       smtpUsername: false,
-      smtpPort: false,
-      smtpTls: false,
+      smtpPair: false,
     };
   }, []);
 
@@ -381,12 +386,10 @@ export function MailAccountSettings({
       setSmtpHostname(smtpDefaults?.hostname ?? "");
       clearFieldError("smtpHostname");
     }
-    if (smtpDefaults && !manuallyEdited.current.smtpTls) {
+    if (smtpDefaults && !manuallyEdited.current.smtpPair) {
       setSmtpTls(smtpDefaults.tls);
-      if (!manuallyEdited.current.smtpPort) {
-        setSmtpPort(String(smtpDefaults.port));
-        clearFieldError("smtpPort");
-      }
+      setSmtpPort(String(smtpDefaults.port));
+      clearFieldError("smtpPort");
     }
   };
 
@@ -409,13 +412,23 @@ export function MailAccountSettings({
     }
   };
 
+  // Either half of the outgoing pair sets the other. A security choice always
+  // brings its port, since no other port is accepted for it; a typed 465 or
+  // 587 brings its security, and any other port stands as typed so the
+  // refusal on submit can name it.
   const changeSmtpTls = (value: MailTlsMode) => {
-    manuallyEdited.current.smtpTls = true;
+    manuallyEdited.current.smtpPair = true;
     setSmtpTls(value);
-    if (!manuallyEdited.current.smtpPort) {
-      setSmtpPort(value === "implicit" ? "465" : "587");
-      clearFieldError("smtpPort");
-    }
+    setSmtpPort(value === "implicit" ? "465" : "587");
+    clearFieldError("smtpPort");
+  };
+
+  const changeSmtpPort = (value: string) => {
+    manuallyEdited.current.smtpPair = true;
+    setSmtpPort(value);
+    if (value === "465") setSmtpTls("implicit");
+    if (value === "587") setSmtpTls("starttls");
+    clearFieldError("smtpPort");
   };
 
   const clearFieldError = (field: FormField) => {
@@ -456,8 +469,8 @@ export function MailAccountSettings({
       if (!smtpUsername || /[\r\n\u0000]/.test(smtpUsername)) {
         next.smtpUsername = "Enter the username for the outgoing server.";
       }
-      if (!isValidPort(Number(smtpPort))) {
-        next.smtpPort = "Enter a port from 1 to 65535.";
+      if (!isOutgoingPair(Number(smtpPort), smtpTls)) {
+        next.smtpPort = OUTGOING_PAIR_COPY;
       }
     }
     return next;
@@ -1243,11 +1256,7 @@ export function MailAccountSettings({
                     aria-describedby={
                       fieldErrors.smtpPort ? "mail-smtp-port-error" : undefined
                     }
-                    onChange={(event) => {
-                      manuallyEdited.current.smtpPort = true;
-                      setSmtpPort(event.target.value);
-                      clearFieldError("smtpPort");
-                    }}
+                    onChange={(event) => changeSmtpPort(event.target.value)}
                     onBlur={() => validateOne("smtpPort")}
                     className="w-24"
                   />
@@ -1551,6 +1560,11 @@ function smtpDefaultsForEmail(value: string): SmtpDefaults | null {
 
 function isValidPort(value: number): boolean {
   return Number.isInteger(value) && value >= 1 && value <= 65_535;
+}
+
+/** The two outgoing pairs the service accepts, and nothing else. */
+function isOutgoingPair(port: number, tls: MailTlsMode): boolean {
+  return (port === 465 && tls === "implicit") || (port === 587 && tls === "starttls");
 }
 
 /** Lowercased domain of a complete address, or "" when it is not one yet. */

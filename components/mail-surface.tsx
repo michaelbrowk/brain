@@ -863,9 +863,23 @@ export function MailSurface({
       actionLabel: "Undo",
       durationMs: SMART_UNDO_MS,
       onAction: () => {
-        const parcel = parked.restore();
-        if (!parcel) return;
+        // Nothing left to bring back (the discard settled elsewhere): the
+        // press is refused rather than spending a pill that was replaced.
+        if (parked.state !== "parked") return false;
         if (deferredDiscardRef.current === parked) deferredDiscardRef.current = null;
+        // The account left while the pill stood: a restored sheet would have
+        // no account to draw for, so this press is the flush instead, said
+        // again without an Undo.
+        if (!selectedMailAccount(accountsStateRef.current, sync.accountId)) {
+          parked.flush();
+          onToast("Draft discarded", {
+            id: DISCARD_TOAST_ID,
+            icon: "trash-bin-trash-linear",
+          });
+          return false;
+        }
+        const parcel = parked.restore();
+        if (!parcel) return false;
         restoreDiscardedComposer(parcel);
       },
       onExpire: () => {
@@ -1344,6 +1358,17 @@ export function MailSurface({
           )
         ) {
           detachRemovedAccountComposer();
+        }
+        // A discard parked behind an Undo whose account has left: Undo would
+        // restore a composer with no account to draw it for (the shell inert
+        // under nothing), so the way back closes here and the pill is said
+        // again without it.
+        const parked = deferredDiscardRef.current;
+        if (
+          parked &&
+          !accounts.some((account) => account.accountId === parked.parcel.sync.accountId)
+        ) {
+          flushDeferredDiscardRef.current();
         }
 
         // The merged mode needs something to merge. A lone account mounts

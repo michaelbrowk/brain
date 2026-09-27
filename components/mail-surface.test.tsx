@@ -3684,6 +3684,66 @@ describe("MailSurface", () => {
     expect(document.body.querySelector("textarea")).not.toBeNull();
   });
 
+  it("lets a parked discard go when its account vanishes, and the pill loses its Undo", async () => {
+    // Undo after the account is gone would restore a composer with no
+    // account to draw it for: `composeOpen` true, the shell inert, nothing on
+    // top. So the accounts load flushes a parcel whose account left, and the
+    // pill is said again without a way back.
+    vi.useFakeTimers();
+    const loadAccounts = vi
+      .fn()
+      .mockResolvedValueOnce([accountA, accountB])
+      .mockResolvedValueOnce([accountB]);
+    const client = makeClient({ loadAccounts });
+    const onToast = vi.fn();
+    const onComposeOpenChange = vi.fn();
+    const surface = (refreshToken: number) => (
+      <MailSurface
+        client={client}
+        onOpenSettings={() => {}}
+        onToast={onToast}
+        onComposeOpenChange={onComposeOpenChange}
+        refreshToken={refreshToken}
+      />
+    );
+    await act(async () => root.render(surface(0)));
+    await settle();
+    await enterSingleAccount(accountA);
+    await click(findButton("New message"));
+    await setInput(
+      document.body.querySelector("textarea") as HTMLTextAreaElement,
+      "Never mind",
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(700);
+    });
+    await settle();
+    const draftId = vi.mocked(client.createDraft).mock.calls[0]?.[0].draftId as string;
+    await click(findButton("Discard draft"));
+    await settle();
+    const pill = discardPill(onToast);
+    onToast.mockClear();
+
+    await act(async () => root.render(surface(1)));
+    await settle();
+    await settle();
+    expect(client.deleteDraft).toHaveBeenCalledTimes(1);
+    expect(client.deleteDraft).toHaveBeenCalledWith(expect.objectContaining({ draftId }));
+    const respoken = onToast.mock.calls.find(([title]) => title === "Draft discarded");
+    expect(respoken?.[1]).toMatchObject({ id: "mail-draft-discard" });
+    expect((respoken?.[1] as ToastOptions | undefined)?.actionLabel).toBeUndefined();
+
+    // A late press on the old pill brings nothing back and refuses the press
+    // rather than spending a pill that was already replaced.
+    await act(async () => {
+      expect(pill.onAction?.()).toBe(false);
+    });
+    await settle();
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(onComposeOpenChange.mock.calls.at(-1)?.[0]).toBe(false);
+    expect(client.deleteDraft).toHaveBeenCalledTimes(1);
+  });
+
   it("flushes a parked discard with keepalive when the page starts unloading", async () => {
     vi.useFakeTimers();
     const client = makeClient();

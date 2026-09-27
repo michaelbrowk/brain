@@ -47,6 +47,34 @@ function rule(selector: string): string {
   return blocks.join("\n");
 }
 
+/** The compose block's own `@media (min-width: 768px)` step, whole. */
+function composeMd(): string {
+  const start = css.indexOf(".brain-compose-form {");
+  const media = css.indexOf("@media (min-width: 768px) {", start);
+  if (start === -1 || media === -1) throw new Error("no compose md block in app/globals.css");
+  let depth = 0;
+  let end = media;
+  for (let i = media; i < css.length; i += 1) {
+    if (css[i] === "{") depth += 1;
+    if (css[i] === "}") {
+      depth -= 1;
+      if (depth === 0) {
+        end = i + 1;
+        break;
+      }
+    }
+  }
+  return css.slice(media, end);
+}
+
+/** One rule inside the compose block's md step. */
+function mdRule(selector: string): string {
+  const escaped = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = composeMd().match(new RegExp(`${escaped} \\{([^}]*)\\}`));
+  if (!match) throw new Error(`no ${selector} rule in the compose md step`);
+  return match[1];
+}
+
 const account: PublicMailAccount = {
   accountId: "account-a0123456789abcdef0123456789abcdef",
   emailAddress: "person@example.test",
@@ -353,6 +381,11 @@ describe("the compose sheet", () => {
     expect(
       [...dialog()!.querySelectorAll("label")].some((l) => l.textContent === "Bcc"),
     ).toBe(true);
+  });
+
+  it("says From once on the phone: the envelope's From row is hidden below 768 and stands from it", () => {
+    expect(rule(".brain-compose-from")).toContain("display: none");
+    expect(mdRule(".brain-compose-from")).toContain("display: flex");
   });
 
   it("on the phone puts From in the actions row as quiet text and gives the slot its place under an error", async () => {

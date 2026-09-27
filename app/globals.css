@@ -4925,6 +4925,11 @@ a.brain-share-url:active {
 .brain-compose-row:has(> [aria-invalid="true"]) > .brain-compose-label {
   color: var(--red);
 }
+/* From is said once: on the phone it reads as quiet text in the actions row,
+   so the envelope's row stands only from 768 */
+.brain-compose-from {
+  display: none;
+}
 .brain-compose-value {
   min-width: 0;
   color: var(--ink-2);
@@ -5011,6 +5016,9 @@ a.brain-share-url:active {
   }
   .brain-compose-row {
     min-height: 32px;
+  }
+  .brain-compose-from {
+    display: flex;
   }
   .brain-compose-input {
     font-size: 14px;

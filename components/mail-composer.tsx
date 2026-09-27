@@ -68,9 +68,10 @@ function draggingFiles(event: DragEvent<HTMLElement>): boolean {
 
 /** What the actions row's slot says, if anything. One sentence at a time, in
  *  this order: a refusal the writer can fix stands over a refusal from the
- *  service, and both stand over a save that did not land. */
+ *  service, both stand over a refused drop, and all of them over a save that
+ *  did not land. */
 type SlotMessage = {
-  readonly key: "validation" | "send" | "save";
+  readonly key: "validation" | "send" | "drop" | "save";
   readonly text: string;
   readonly role: "alert" | "status";
 };
@@ -217,7 +218,6 @@ export function MailComposer({
   onRetrySave,
   onSend,
   onOpenSettings,
-  onToast,
 }: {
   account: PublicMailAccount;
   initialDraft: MailComposerDraft;
@@ -233,7 +233,6 @@ export function MailComposer({
   onRetrySave: () => void;
   onSend: (input: MailSendInput) => void;
   onOpenSettings?: (invoker: HTMLElement) => void;
-  onToast?: (title: string) => void;
 }) {
   const sendTitle = useShortcutTitle("Send", "⌘↵");
   const [to, setTo] = useState(initialDraft.to);
@@ -249,6 +248,10 @@ export function MailComposer({
     readonly field: MailRecipientField;
     readonly message: string;
   } | null>(null);
+  /** A file was dropped on the sheet. The refusal stands in the slot until
+   *  the writer types on: it answered a gesture, and the next gesture is
+   *  the writer moving past it. */
+  const [dropRefused, setDropRefused] = useState(false);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   /** The Discard button, held past the state clear so the confirmation can
    *  hand focus back to it — Radix asks where focus goes as it unmounts, and
@@ -375,11 +378,15 @@ export function MailComposer({
     }
   };
 
-  /** A recipient field edited after a refusal clears it: the writer is
-   *  already doing what the sentence asked. */
+  /** Typing on clears what the writer was told about a gesture: the drop
+   *  refusal, and a recipient refusal once that field is being edited. */
+  const typed = () => {
+    if (dropRefused) setDropRefused(false);
+  };
   const recipient =
     (set: (value: string) => void) => (event: FormEvent<HTMLInputElement>) => {
       set(event.currentTarget.value);
+      typed();
       if (validation) setValidation(null);
     };
 
@@ -387,9 +394,11 @@ export function MailComposer({
     ? { key: "validation", text: validation.message, role: "alert" }
     : sendError
       ? { key: "send", text: sendError, role: "alert" }
-      : saveStatus === "error"
-        ? { key: "save", text: "Not saved", role: "status" }
-        : null;
+      : dropRefused
+        ? { key: "drop", text: "Attachments aren’t available yet.", role: "status" }
+        : saveStatus === "error"
+          ? { key: "save", text: "Not saved", role: "status" }
+          : null;
 
   return (
     <MailComposePaper
@@ -409,7 +418,9 @@ export function MailComposer({
         onDrop={(event) => {
           if (!draggingFiles(event)) return;
           event.preventDefault();
-          onToast?.("Attachments aren’t supported yet.");
+          // The sheet is the whole window, so the refusal is said on it, in
+          // the slot, and not in a pill somewhere under it.
+          setDropRefused(true);
         }}
       >
         {/* THE ACTIONS ROW, ON TOP. Send stands where a thumb reaches it and
@@ -664,7 +675,10 @@ export function MailComposer({
                   className="brain-compose-input text-subheading"
                   type="text"
                   value={subject}
-                  onChange={(event) => setSubject(event.currentTarget.value)}
+                  onChange={(event) => {
+                    setSubject(event.currentTarget.value);
+                    typed();
+                  }}
                   readOnly={sending}
                   placeholder="Subject"
                 />
@@ -684,7 +698,10 @@ export function MailComposer({
               <textarea
                 ref={bodyRef}
                 value={text}
-                onChange={(event) => setText(event.currentTarget.value)}
+                onChange={(event) => {
+                  setText(event.currentTarget.value);
+                  typed();
+                }}
                 readOnly={sending}
                 placeholder="Write a message…"
                 className="text-body"

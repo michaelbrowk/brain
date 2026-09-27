@@ -126,7 +126,6 @@ function props(overrides: Partial<Props> = {}): Props {
     onDraftChange: vi.fn(),
     onRetrySave: vi.fn(),
     onSend: vi.fn(),
-    onToast: vi.fn(),
     ...overrides,
   };
 }
@@ -295,7 +294,7 @@ describe("the compose sheet", () => {
     expect(slot.contains(settings ?? null)).toBe(true);
     await act(async () => settings?.click());
     expect(p.onOpenSettings).toHaveBeenCalledTimes(1);
-    expect(p.onToast).not.toHaveBeenCalled();
+    expect(document.body.querySelector(".brain-toast")).toBeNull();
   });
 
   it("colours the To label through aria-invalid when the recipients are refused", async () => {
@@ -307,7 +306,7 @@ describe("the compose sheet", () => {
     const alert = dialog()!.querySelector('.brain-compose-slot [role="alert"]');
     expect(alert?.textContent).toContain("is not an email address");
     expect(p.onSend).not.toHaveBeenCalled();
-    expect(p.onToast).not.toHaveBeenCalled();
+    expect(document.body.querySelector(".brain-toast")).toBeNull();
     // The label reads its colour off the input's state, in the stylesheet.
     expect(css).toMatch(/\.brain-compose-row:has\(> \[aria-invalid="true"\]\) > \.brain-compose-label \{[^}]*color: var\(--red\)/);
   });
@@ -436,6 +435,34 @@ describe("the compose sheet", () => {
     expect(byLabel("Close draft")?.getAttribute("aria-disabled")).toBeNull();
     expect(byLabel("Discard draft")?.getAttribute("aria-disabled")).toBeNull();
     expect(byText("Cc Bcc")?.disabled).toBe(false);
+  });
+
+  it("refuses a dropped file in the slot, as a status, and clears it when the writer types on", async () => {
+    await render();
+    const form = dialog()!.querySelector("form")!;
+    const drop = new Event("drop", { bubbles: true, cancelable: true });
+    Object.defineProperty(drop, "dataTransfer", { value: { types: ["Files"] } });
+    await act(async () => {
+      form.dispatchEvent(drop);
+    });
+    await settle();
+    expect(drop.defaultPrevented).toBe(true);
+    const slot = dialog()!.querySelector(".brain-compose-slot")!;
+    expect(slot.querySelector('[role="status"]')?.textContent).toBe(
+      "Attachments aren’t available yet.",
+    );
+    expect(slot.querySelector('[role="alert"]')).toBeNull();
+    // No toast: the sheet is the whole window and the sentence belongs on it.
+    expect(document.body.querySelector(".brain-toast")).toBeNull();
+
+    const subject = dialog()!.querySelector<HTMLInputElement>('input[placeholder="Subject"]')!;
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
+    await act(async () => {
+      setter?.call(subject, "Thursday, then");
+      subject.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    await settle();
+    expect(dialog()!.querySelector('.brain-compose-slot [role="status"]')).toBeNull();
   });
 
   it("says From once on the phone: the envelope's From row is hidden below 768 and stands from it", () => {

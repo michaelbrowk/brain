@@ -2673,14 +2673,6 @@ export function MailSurface({
         onToast?.("Draft account changed. Open a new message and try again.");
         return;
       }
-      const account = selectedMailAccount(
-        accountsStateRef.current,
-        input.accountId,
-      );
-      if (!account?.capabilities.send) {
-        onToast?.("Sending isn’t available for this account yet.");
-        return;
-      }
       const updateSubmittedComposer = (
         update: (current: ComposerState) => ComposerState,
       ) => {
@@ -2691,6 +2683,20 @@ export function MailSurface({
           return next;
         });
       };
+      const account = selectedMailAccount(
+        accountsStateRef.current,
+        input.accountId,
+      );
+      if (!account?.capabilities.send) {
+        // A refusal of the writer's own press, said on the sheet in its slot:
+        // the composer is up and is where they are looking.
+        updateSubmittedComposer((current) => ({
+          ...current,
+          sending: false,
+          error: "Sending isn’t available for this account yet.",
+        }));
+        return;
+      }
       updateSubmittedComposer((current) => ({
         ...current,
         sending: true,
@@ -4550,7 +4556,6 @@ export function MailSurface({
             onDraftChange={onComposerDraftChange}
             onRetrySave={retryDraftSave}
             onSend={(input) => void send(input)}
-            onToast={onToast}
           />
         )}
       </AnimatePresence>

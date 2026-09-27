@@ -324,6 +324,17 @@ describe("the compose ask, through the assembled shell", () => {
     expect(shell?.hasAttribute("inert")).toBe(true);
     expect(shell?.getAttribute("aria-hidden")).toBe("true");
     expect(document.body.querySelector('nav[aria-label="Primary"]')).toBeNull();
+    // The toast column stands at the body, outside the shell root, so a pill
+    // that fires while the sheet is up is over it, pressable and in the
+    // accessibility tree: not inside the inert shell, and not aria-hidden by
+    // the dialog (Radix's hideOthers leaves live regions alone).
+    const stack = document.body.querySelector(".brain-toast-stack");
+    expect(stack).not.toBeNull();
+    expect(stack?.closest(".brain-shell")).toBeNull();
+    expect(stack?.closest("[inert]")).toBeNull();
+    expect(
+      stack?.querySelector('[aria-live]')?.closest('[aria-hidden="true"]') ?? null,
+    ).toBeNull();
     // The shell recedes under the sheet: scale .98 at half opacity over the
     // page duration, and comes back the same way.
     expect(shellMotion.renders.at(-1)?.animate).toEqual({ scale: 0.98, opacity: 0.5 });

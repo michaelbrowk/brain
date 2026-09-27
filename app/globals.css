@@ -2885,9 +2885,16 @@ a.brain-share-url:active {
   font-family: var(--font-sf);
   font-optical-sizing: auto;
 }
-.brain-shell {
+/* The sidebar's width and the canvas offset live on :root, not on the shell:
+   the toast column is a portal at the body (outside the shell root, so it
+   stands over the compose sheet) and still centres on the canvas, so it has
+   to read the same offset the shell's own descendants read. The offset
+   follows the shell's collapsed state through :has(). */
+:root {
   --sidebar-w: 280px;
   --canvas-offset: 0px;
+}
+.brain-shell {
   /* the band the floating chrome occupies at the top of the canvas */
   --chrome-top: calc(env(safe-area-inset-top, 0px) + var(--inset) + 36px);
   position: relative;
@@ -2896,10 +2903,10 @@ a.brain-share-url:active {
   background: transparent;
 }
 @media (min-width: 768px) {
-  .brain-shell {
+  :root:has(.brain-shell) {
     --canvas-offset: calc(var(--inset) * 2 + var(--sidebar-w));
   }
-  .brain-shell[data-sidebar-collapsed] {
+  :root:has(.brain-shell[data-sidebar-collapsed]) {
     --canvas-offset: 0px;
   }
 }

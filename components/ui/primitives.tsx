@@ -1,6 +1,7 @@
 "use client";
 
 import { useSyncExternalStore } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 import { slideUp } from "@/lib/motion";
 import { pcShortcut } from "@/lib/shortcut-keys";
@@ -135,9 +136,28 @@ export type ToastOptions = {
  * safe+62 and the pills sat at safe+24, so ten seconds of undo left Search,
  * New and Pages unpressable. Below md the column stands on the same reserve
  * the mail scroller already keeps for that strip (`.brain-mail-scrollfoot`).
+ *
+ * It stands at the BODY, in a portal, not inside the shell root. A transient
+ * must read over anything (§1), and the compose sheet is a portal at the body
+ * on `--z-modal` with the whole shell root `inert` and receding under it: a
+ * column left inside that root drew every pill fired while a letter was being
+ * written under the sheet, unpressable and out of the accessibility tree. At
+ * the body `--z-toast` stands over `--z-modal`, the pill is pressable, and
+ * Radix's `hideOthers` leaves live regions alone. The canvas offset it centres
+ * on is read from `:root` (globals.css), which is why the offset lives there
+ * and not on the shell. The portal mounts after hydration; a pill is never
+ * part of the server's markup anyway.
  */
 export function SnackbarStack({ children }: { children: React.ReactNode }) {
-  return <div className="brain-toast-stack">{children}</div>;
+  // Hydrated or not, the way `usePlatform` asks it: the server has no body
+  // to portal into and renders nothing, the client renders the column.
+  const hydrated = useSyncExternalStore(
+    subscribeToPlatform,
+    () => true,
+    () => false,
+  );
+  if (!hydrated) return null;
+  return createPortal(<div className="brain-toast-stack">{children}</div>, document.body);
 }
 
 /** Bottom-center pill snackbar with optional action (the undo pattern).

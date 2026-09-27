@@ -764,15 +764,16 @@ export function MailSurface({
    * The way back is gone: the parked delete goes out now. The pill is said
    * again under its id without an Undo, so it takes the standing one instead
    * of leaving an Undo on screen that could bring nothing back, and the
-   * sentence is still true. `keepalive` is the pagehide case, where the pill
-   * is leaving with the page and nothing is said.
+   * sentence is still true. Said at pagehide (`keepalive`) too: the page may
+   * come back from the back-forward cache with this very DOM, and the pill
+   * it shows must not offer an Undo whose delete already went out.
    */
   const flushDeferredDiscard = useCallback(
     (options?: { readonly keepalive?: boolean }) => {
       const parked = deferredDiscardRef.current;
       if (!parked) return;
       deferredDiscardRef.current = null;
-      if (!parked.flush(options) || options?.keepalive) return;
+      if (!parked.flush(options)) return;
       onToast?.("Draft discarded", {
         id: DISCARD_TOAST_ID,
         icon: "trash-bin-trash-linear",
@@ -1304,12 +1305,22 @@ export function MailSurface({
       // autosave and pagehide retry are idempotent rather than two writes.
       void persistDraftStep(sync, { keepalive: true }).catch(() => undefined);
     };
+    // Back from the back-forward cache: the DOM returns as it was left, with
+    // frozen timers, so a parcel still parked would become a dead Undo the
+    // moment its window ran out. It goes now, and the pill says so without
+    // an Undo. A plain load's pageshow has nothing parked and touches nothing.
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (!event.persisted) return;
+      flushDeferredDiscardRef.current();
+    };
 
     document.addEventListener("visibilitychange", onVisibilityChange);
     window.addEventListener("pagehide", onPageHide);
+    window.addEventListener("pageshow", onPageShow);
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
       window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("pageshow", onPageShow);
     };
   }, [flushDraftSync, persistDraftStep]);
 

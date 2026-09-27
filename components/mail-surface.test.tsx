@@ -3744,10 +3744,11 @@ describe("MailSurface", () => {
     expect(client.deleteDraft).toHaveBeenCalledTimes(1);
   });
 
-  it("flushes a parked discard with keepalive when the page starts unloading", async () => {
+  it("flushes a parked discard with keepalive when the page starts unloading, and the pill loses its Undo", async () => {
     vi.useFakeTimers();
     const client = makeClient();
-    const { draftId } = await parkedDiscard(client);
+    const { onToast, draftId } = await parkedDiscard(client);
+    onToast.mockClear();
 
     await act(async () => {
       window.dispatchEvent(new Event("pagehide"));
@@ -3759,6 +3760,40 @@ describe("MailSurface", () => {
       undefined,
       { keepalive: true },
     );
+    // The page may come back from the back-forward cache with this DOM: the
+    // pill it shows must not offer an Undo whose delete already went out.
+    const respoken = onToast.mock.calls.find(([title]) => title === "Draft discarded");
+    expect(respoken?.[1]).toMatchObject({ id: "mail-draft-discard" });
+    expect((respoken?.[1] as ToastOptions | undefined)?.actionLabel).toBeUndefined();
+  });
+
+  it("lets a parked discard go when the page is restored from the back-forward cache", async () => {
+    // Back inside the window: the DOM returns as it was left, pill and all,
+    // and a parcel still parked (no pagehide reached it) would be a dead Undo
+    // the moment its window expires in a page that had frozen timers.
+    vi.useFakeTimers();
+    const client = makeClient();
+    const { onToast, draftId } = await parkedDiscard(client);
+    onToast.mockClear();
+
+    await act(async () => {
+      window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true }));
+    });
+    await settle();
+    expect(client.deleteDraft).toHaveBeenCalledTimes(1);
+    expect(client.deleteDraft).toHaveBeenCalledWith(expect.objectContaining({ draftId }));
+    const respoken = onToast.mock.calls.find(([title]) => title === "Draft discarded");
+    expect(respoken?.[1]).toMatchObject({ id: "mail-draft-discard" });
+    expect((respoken?.[1] as ToastOptions | undefined)?.actionLabel).toBeUndefined();
+
+    // A plain load's pageshow touches nothing.
+    onToast.mockClear();
+    await act(async () => {
+      window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: false }));
+    });
+    await settle();
+    expect(onToast).not.toHaveBeenCalled();
+    expect(client.deleteDraft).toHaveBeenCalledTimes(1);
   });
 
   it("resuming the draft that was just discarded is its Undo", async () => {

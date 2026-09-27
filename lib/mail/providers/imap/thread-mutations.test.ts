@@ -228,6 +228,28 @@ describe("IMAP thread mutations", () => {
     expect(opened.count).toBe(1);
   });
 
+  it("reports a session that died under CREATE as unavailable and tries again next time", async () => {
+    // No answer is not a refusal. The adapter is long-lived, so a 409 here
+    // would refuse the account from cache until a restart over a socket that
+    // happened to close; the next session asks LIST again and CREATEs again.
+    const server = serverFixture({
+      mailboxes: [{ path: "Sent" }],
+      createAnswers: "drop",
+    });
+    const { provider, opened } = providerFor(server);
+
+    await expect(
+      provider.archiveThread("i77u1", signal()),
+    ).rejects.toMatchObject({ code: "mail_provider_unavailable" });
+    expect(server.mailbox("INBOX").messages.has(1)).toBe(true);
+
+    await provider.archiveThread("i77u1", signal());
+
+    expect(opened.count).toBe(2);
+    expect(server.commands.filter((command) => command.name === "create")).toHaveLength(2);
+    expect(server.mailbox("Archive").messages.size).toBe(1);
+  });
+
   it("still refuses trash on a server without a trash folder, and creates nothing", async () => {
     const server = serverFixture({ mailboxes: [{ path: "Sent" }] });
     const { provider } = providerFor(server);
@@ -615,9 +637,12 @@ function serverFixture(options?: {
    * What CREATE answers. `already_exists` is the ALREADYEXISTS a server gives
    * when another client made the folder first, which ImapFlow hands back as
    * `created: false`; the folder is there from then on either way. `no` is a
-   * refusal, as an ACL or a quota would give.
+   * refusal, as an ACL or a quota would give, in the shape ImapFlow gives a
+   * tagged NO. `drop` is a session that dies under the first CREATE with no
+   * answer at all, ImapFlow's `NoConnection`; the next session finds the
+   * server well.
    */
-  readonly createAnswers?: "created" | "already_exists" | "no";
+  readonly createAnswers?: "created" | "already_exists" | "no" | "drop";
 }): FakeServer {
   const uidplus = options?.uidplus ?? true;
   const capabilities = new Map<string, boolean | number>([["IMAP4rev1", true]]);
@@ -752,7 +777,21 @@ function serverFixture(options?: {
     async mailboxCreate(path: string) {
       commands.push({ name: "create", path });
       const answer = options?.createAnswers ?? "created";
-      if (answer === "no") throw new Error("NO [CANNOT] Permission denied");
+      if (answer === "no") {
+        throw Object.assign(new Error("Command failed"), {
+          response: "NO [CANNOT] Permission denied",
+          responseStatus: "NO",
+          serverResponseCode: "CANNOT",
+        });
+      }
+      if (
+        answer === "drop" &&
+        commands.filter((command) => command.name === "create").length === 1
+      ) {
+        throw Object.assign(new Error("Connection not available"), {
+          code: "NoConnection",
+        });
+      }
       if (!mailboxes.has(path)) {
         mailboxes.set(path, {
           path,

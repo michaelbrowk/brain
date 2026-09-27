@@ -603,13 +603,25 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
       !this.archiveCreateAttempted &&
       this.archiveCreatePath !== null
     ) {
+      let exists: boolean;
+      try {
+        exists = await createArchiveMailbox(client, this.archiveCreatePath);
+      } catch (error) {
+        // The server never answered: the socket died, or the deadline closed
+        // it. Nothing is known about the folder, so the attempt does not
+        // count and LIST is asked again next time, the way a failed move asks.
+        this.mailboxRoles = null;
+        throw error;
+      }
+      // Only a server answer spends the one attempt, whichever way it went.
       this.archiveCreateAttempted = true;
-      await createArchiveMailbox(client, this.archiveCreatePath);
-      // The folder exists now. LIST is the only reading of the layout this
-      // adapter trusts, so the cache is dropped and the role resolved from a
-      // fresh answer rather than from the path that was sent.
-      this.mailboxRoles = null;
-      return this.rolePath(client, role);
+      if (exists) {
+        // The folder exists now. LIST is the only reading of the layout this
+        // adapter trusts, so the cache is dropped and the role resolved from a
+        // fresh answer rather than from the path that was sent.
+        this.mailboxRoles = null;
+        return this.rolePath(client, role);
+      }
     }
     // The server offers no mailbox for this role, or refused to make one.
     // Refusing is the honest answer; inventing a destination would move the
@@ -1788,24 +1800,26 @@ function inboxChildPrefix(entry: ImapMailboxDescriptor): string | null {
 }
 
 /**
- * CREATE the Archive and SUBSCRIBE to it. ALREADYEXISTS is success: another
- * client made the folder between our LIST and our CREATE, and it is there
- * either way. Any other refusal is the same 409 as having no folder at all,
- * because retrying cannot make a server accept a CREATE it declined. A
- * declined SUBSCRIBE is ignored: the folder is usable unsubscribed, and only
- * clients that list LSUB would miss it.
+ * CREATE the Archive and SUBSCRIBE to it. True when the folder is there
+ * afterwards, false when the server answered the CREATE with a refusal, which
+ * is the same 409 as having no folder at all, because retrying cannot make a
+ * server accept a CREATE it declined. ALREADYEXISTS is success: another client
+ * made the folder between our LIST and our CREATE, and it is there either way.
+ * An error with no server answer in it, a socket that closed or a deadline
+ * that closed it, is not a refusal and is thrown as the transport failure it
+ * is. A declined SUBSCRIBE is ignored: the folder is usable unsubscribed, and
+ * only clients that list LSUB would miss it.
  */
 async function createArchiveMailbox(
   client: ImapSessionClient,
   path: string,
-): Promise<void> {
+): Promise<boolean> {
   let created: string;
   try {
     created = (await client.mailboxCreate(path)).path;
   } catch (error) {
-    if (serverResponseCode(error) !== "ALREADYEXISTS") {
-      throw new MailProviderSyncError("mail_provider_mutation_unsupported");
-    }
+    if (!isServerAnswer(error)) throw mapImapProviderError(error);
+    if (serverResponseCode(error) !== "ALREADYEXISTS") return false;
     created = path;
   }
   try {
@@ -1813,6 +1827,27 @@ async function createArchiveMailbox(
   } catch {
     // Subscription is a courtesy to other clients, not a condition of the move.
   }
+  return true;
+}
+
+/**
+ * Whether the error carries a tagged NO or BAD from the server. ImapFlow puts
+ * the parsed response on `response`, its status on `responseStatus` and any
+ * bracketed code on `serverResponseCode`; a `NoConnection` error, the shape a
+ * dead socket takes, has none of the three.
+ */
+function isServerAnswer(error: unknown): boolean {
+  if (error === null || typeof error !== "object") return false;
+  const answer = error as {
+    readonly response?: unknown;
+    readonly responseStatus?: unknown;
+    readonly serverResponseCode?: unknown;
+  };
+  return (
+    answer.response !== undefined ||
+    typeof answer.responseStatus === "string" ||
+    typeof answer.serverResponseCode === "string"
+  );
 }
 
 /** ImapFlow's `serverResponseCode`, the bracketed code from a NO or BAD. */

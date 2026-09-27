@@ -15,6 +15,8 @@ import { act, useEffect, useReducer } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { apiFetch } from "@/lib/client";
+import { DUR, EASE_OUT } from "@/lib/motion";
+import type { MotionProps } from "@/test/framer-motion-mock";
 import { resetMailComposeAvailable } from "./mail-compose-available";
 import { Shell } from "./shell";
 
@@ -27,7 +29,21 @@ vi.mock("next-themes", () => ({
   useTheme: () => ({ theme: "system", setTheme: vi.fn() }),
 }));
 
-vi.mock("framer-motion", () => import("@/test/framer-motion-mock"));
+/** The motion props the shell root hands framer, per render, so the recede
+ *  under the compose sheet can be read off the last one. */
+const shellMotion: { reduce: boolean; renders: MotionProps[] } = { reduce: false, renders: [] };
+
+vi.mock("framer-motion", async () => {
+  const { createFramerMotionMock } = await import("@/test/framer-motion-mock");
+  return createFramerMotionMock({
+    reducedMotion: () => shellMotion.reduce,
+    onRender: ({ motion, props }) => {
+      if (String(props.className ?? "").split(" ").includes("brain-shell")) {
+        shellMotion.renders.push(motion);
+      }
+    },
+  });
+});
 
 // The real `./mail-surface` module, not a fake: the latch's own `take()`
 // effect is the seam under test, so it has to run. `next/dynamic` is stubbed
@@ -308,6 +324,13 @@ describe("the compose ask, through the assembled shell", () => {
     expect(shell?.hasAttribute("inert")).toBe(true);
     expect(shell?.getAttribute("aria-hidden")).toBe("true");
     expect(document.body.querySelector('nav[aria-label="Primary"]')).toBeNull();
+    // The shell recedes under the sheet: scale .98 at half opacity over the
+    // page duration, and comes back the same way.
+    expect(shellMotion.renders.at(-1)?.animate).toEqual({ scale: 0.98, opacity: 0.5 });
+    expect(shellMotion.renders.at(-1)?.transition).toEqual({
+      duration: DUR.page,
+      ease: EASE_OUT,
+    });
 
     const chord = async (key: string, code: string) => {
       await act(async () => {
@@ -335,8 +358,33 @@ describe("the compose ask, through the assembled shell", () => {
     expect(main?.hasAttribute("inert")).toBe(false);
     expect(shell?.hasAttribute("inert")).toBe(false);
     expect(document.body.querySelector('nav[aria-label="Primary"]')).not.toBeNull();
+    expect(shellMotion.renders.at(-1)?.animate).toEqual({ scale: 1, opacity: 1 });
 
     await chord("\\", "Backslash");
     expect(focusChip()).toBe(true);
+  });
+
+  it("does not recede under reduced motion: the shell keeps its scale and its opacity", async () => {
+    shellMotion.reduce = true;
+    window.history.replaceState({}, "", "/mail");
+    await act(async () =>
+      root.render(<Shell tree={[]} initialSelectedId={null} initialSurface="mail" />),
+    );
+    await settle();
+    const compose = await findLazy(
+      () =>
+        [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+          (button) => button.getAttribute("aria-label") === "New message",
+        ),
+      "the column's New message",
+    );
+    await act(async () => compose.click());
+    await settle();
+    await findLazy(
+      () => document.body.querySelector('textarea[placeholder="Write a message…"]'),
+      "the open composer",
+    );
+    expect(document.body.querySelector(".brain-shell")?.hasAttribute("inert")).toBe(true);
+    expect(shellMotion.renders.at(-1)?.animate).toEqual({ scale: 1, opacity: 1 });
   });
 });

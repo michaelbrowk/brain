@@ -31,6 +31,7 @@ vi.mock("framer-motion", async () => {
 
 import { MailComposer, type MailComposerDraft } from "./mail-composer";
 import type { PublicMailAccount } from "./mail-surface-client";
+import { DUR, EASE_OUT, SHEET_ENTER_Y, SPIN, SPRING_SELECT, SPRING_SHEET } from "@/lib/motion";
 
 const css = readFileSync(path.join(path.resolve(__dirname, ".."), "app/globals.css"), "utf8");
 
@@ -366,5 +367,134 @@ describe("the compose sheet", () => {
     await render({ sendError: "Message wasn’t sent. Try again." });
     const busy = dialog()!.querySelector(".brain-compose-actions")!;
     expect(busy.hasAttribute("data-message")).toBe(true);
+  });
+
+  // THE CHOREOGRAPHY, as the props the sheet hands framer. Every number is
+  // `lib/motion.ts`'s; the distances (12, 8, 4) are the spec's and stand in
+  // the component beside the reason for each.
+  describe("its choreography", () => {
+    /** The last render of a motion element wearing this class. */
+    const motionOf = (className: string) =>
+      [...harness.renders].reverse().find((render) =>
+        render.className.split(" ").includes(className),
+      )?.motion;
+
+    it("enters on the desktop as a fade with a 12px rise over DUR.page and leaves by the way it was dismissed", async () => {
+      await render();
+      const paper = motionOf("brain-compose-paper");
+      expect(paper?.initial).toEqual({ opacity: 0, y: 12 });
+      expect(paper?.animate).toEqual({ opacity: 1, y: 0 });
+      expect(paper?.transition).toEqual({ duration: DUR.page, ease: EASE_OUT });
+      // Dismissed: down and out, fast, ease-in.
+      expect(paper?.exit).toEqual({
+        opacity: 0,
+        y: 8,
+        transition: { duration: DUR.fast, ease: "easeIn" },
+      });
+
+      // Committed (the sheet leaves because the send landed): it lets go
+      // outward, on the page duration, the way a dialog commits.
+      await render({ initialDraft: draft({ to: "ben@example.test" }), sending: true });
+      expect(motionOf("brain-compose-paper")?.exit).toEqual({
+        opacity: 0,
+        scale: 1.02,
+        transition: { duration: DUR.page, ease: EASE_OUT },
+      });
+    });
+
+    it("enters on the phone from 48px below on the sheet spring, and leaves the same way", async () => {
+      stubViewport(true);
+      await render();
+      const paper = motionOf("brain-compose-paper");
+      expect(paper?.initial).toEqual({ opacity: 0, y: SHEET_ENTER_Y });
+      expect(paper?.animate).toEqual({ opacity: 1, y: 0 });
+      expect(paper?.transition).toEqual(SPRING_SHEET);
+      expect(paper?.exit).toEqual({
+        opacity: 0,
+        y: SHEET_ENTER_Y,
+        transition: { duration: DUR.fast, ease: "easeIn" },
+      });
+    });
+
+    it("staggers From, To, Subject, then the fold and the body together, landing at 300ms", async () => {
+      await render();
+      const rows = harness.renders.filter((render) =>
+        render.className.split(" ").includes("brain-compose-row"),
+      );
+      const delays = rows.map(
+        (render) => (render.motion.transition as { delay: number }).delay,
+      );
+      expect(delays).toEqual([0.05, 0.08, 0.11]);
+      for (const row of rows) {
+        expect(row.motion.initial).toEqual({ opacity: 0, y: 4 });
+        expect(row.motion.animate).toEqual({ opacity: 1, y: 0 });
+        expect(row.motion.transition).toMatchObject({ duration: DUR.base, ease: EASE_OUT });
+      }
+      for (const className of ["brain-compose-fold", "brain-compose-body"]) {
+        const part = motionOf(className);
+        expect(part?.initial, className).toEqual({ opacity: 0, y: 4 });
+        expect(part?.transition, className).toEqual({
+          duration: DUR.base,
+          ease: EASE_OUT,
+          delay: 0.14,
+        });
+      }
+    });
+
+    it("grows Cc and Bcc on the select spring from a press, and not for a draft that already carries a copy", async () => {
+      await render();
+      await act(async () => byText("Cc Bcc")?.click());
+      await settle();
+      const rows = motionOf("brain-compose-copies-rows");
+      expect(rows?.initial).toEqual({ height: 0, opacity: 0 });
+      expect(rows?.animate).toEqual({ height: "auto", opacity: 1 });
+      expect(rows?.transition).toEqual(SPRING_SELECT);
+
+      await render({ initialDraft: draft({ cc: "casey@example.test" }) });
+      expect(motionOf("brain-compose-copies-rows")?.initial).toBe(false);
+    });
+
+    it("swaps Send for Sending through a 2px blur and turns the glyph on SPIN, in place", async () => {
+      await render({ initialDraft: draft({ to: "ben@example.test" }) });
+      // The label does not blur in with the sheet: only the swap does.
+      expect(motionOf("brain-compose-send-word")?.initial).toBe(false);
+      expect(motionOf("brain-compose-send-glyph")?.animate).toBeUndefined();
+
+      await render({ initialDraft: draft({ to: "ben@example.test" }), sending: true });
+      const glyph = motionOf("brain-compose-send-glyph");
+      expect(glyph?.animate).toEqual({ rotate: 360 });
+      expect(glyph?.transition).toEqual(SPIN);
+      const word = motionOf("brain-compose-send-word");
+      expect(word?.animate).toEqual({ opacity: 1, filter: "blur(0px)" });
+      expect(word?.transition).toEqual({ duration: DUR.base, ease: EASE_OUT });
+    });
+
+    it("brings a sentence into the slot from 4px above over DUR.base", async () => {
+      await render({ sendError: "Message wasn’t sent. Try again." });
+      const line = motionOf("brain-compose-slot-line");
+      expect(line?.initial).toEqual({ opacity: 0, y: -4 });
+      expect(line?.animate).toEqual({ opacity: 1, y: 0 });
+      expect(line?.transition).toEqual({ duration: DUR.base, ease: EASE_OUT });
+    });
+
+    it("under reduced motion crossfades over DUR.fast and moves, staggers and blurs nothing", async () => {
+      harness.reduce = true;
+      stubViewport(true);
+      await render({ sendError: "Message wasn’t sent. Try again.", sending: true });
+      const paper = motionOf("brain-compose-paper");
+      expect(paper?.initial).toEqual({ opacity: 0 });
+      expect(paper?.animate).toEqual({ opacity: 1 });
+      expect(paper?.transition).toEqual({ duration: DUR.fast });
+      expect(paper?.exit).toEqual({ opacity: 0, transition: { duration: DUR.fast } });
+      for (const className of ["brain-compose-row", "brain-compose-fold", "brain-compose-body"]) {
+        expect(motionOf(className)?.initial, className).toBe(false);
+      }
+      expect(motionOf("brain-compose-slot-line")?.initial).toEqual({ opacity: 0 });
+      // The spinner stands still; the word "Sending" is what says the work
+      // is happening.
+      expect(motionOf("brain-compose-send-glyph")?.animate).toBeUndefined();
+      expect(motionOf("brain-compose-send-word")?.initial).toBe(false);
+      expect(sendButton().textContent).toContain("Sending");
+    });
   });
 });

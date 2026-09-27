@@ -5716,7 +5716,7 @@ export function Shell({
   };
 
   return (
-    <div
+    <motion.div
       className="brain-shell flex h-dvh overflow-hidden"
       data-sidebar-collapsed={focusMode && sidebarCollapsed ? "" : undefined}
       // The compose sheet is a portal at the body, so the whole shell, the
@@ -5725,6 +5725,16 @@ export function Shell({
       // still had to be reachable; the sheet takes the bar with it.
       aria-hidden={composeOpen || undefined}
       inert={composeOpen || undefined}
+      // And it recedes: scale .98 at half opacity over the page duration as
+      // the sheet fades in over it, back the same way as the sheet leaves.
+      // Reduced motion leaves the shell exactly where it is. At rest framer
+      // writes `transform: none`, so nothing fixed inside the shell changes
+      // its containing block while no sheet is up.
+      initial={false}
+      animate={
+        composeOpen && !reduce ? { scale: 0.98, opacity: 0.5 } : { scale: 1, opacity: 1 }
+      }
+      transition={reduce ? { duration: 0 } : { duration: DUR.page, ease: EASE_OUT }}
     >
       {/* the paper and the static edge tints the glass refracts — on the
           shell, which never scrolls; the scroller above it is transparent */}
@@ -6176,6 +6186,6 @@ export function Shell({
         onPauseDelete={pauseDelete}
         onResumeDelete={resumeDelete}
       />
-    </div>
+    </motion.div>
   );
 }

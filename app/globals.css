@@ -4955,6 +4955,11 @@ a.brain-share-url:active {
   padding: 0 8px;
   flex-shrink: 0;
 }
+/* the two rows grow from height 0 when revealed, so the box clips while
+   that plays; the inputs draw no ring of their own for it to cut */
+.brain-compose-copies-rows {
+  overflow: hidden;
+}
 .brain-compose-notice {
   flex-shrink: 0;
   padding: 4px 0 0 calc(var(--compose-gutter) + 12px);

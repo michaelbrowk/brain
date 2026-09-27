@@ -12,7 +12,14 @@ import {
 } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { DUR } from "@/lib/motion";
+import {
+  DUR,
+  EASE_OUT,
+  SHEET_ENTER_Y,
+  SPIN,
+  SPRING_SELECT,
+  SPRING_SHEET,
+} from "@/lib/motion";
 
 import { useSheetGesture } from "./use-sheet-gesture";
 import {
@@ -68,6 +75,10 @@ type SlotMessage = {
   readonly role: "alert" | "status";
 };
 
+/** When each part of the letter arrives, in seconds after the sheet: From,
+ *  To, Subject, then the fold and the body together at the last step. */
+const ROW_DELAYS = [0.05, 0.08, 0.11, 0.14] as const;
+
 /**
  * THE SHEET. Writing a letter takes the whole window: the composer is an
  * opaque paper surface in a portal at the body, on `--z-modal`, and the shell
@@ -101,6 +112,38 @@ export function MailComposePaper({
 }) {
   const reduce = useReducedMotion();
   const sheet = useSheetGesture();
+  /** The arrival. A desktop sheet fades up 12px over the page duration while
+   *  the shell recedes behind it; a phone sheet rises from `SHEET_ENTER_Y` on
+   *  the sheet spring, the way every sheet on the phone arrives. Reduced
+   *  motion: a crossfade over `DUR.fast` and nothing travels. */
+  const enter = reduce
+    ? { initial: { opacity: 0 }, animate: { opacity: 1 }, transition: { duration: DUR.fast } }
+    : sheet
+      ? {
+          initial: { opacity: 0, y: SHEET_ENTER_Y },
+          animate: { opacity: 1, y: 0 },
+          transition: SPRING_SHEET,
+        }
+      : {
+          initial: { opacity: 0, y: 12 },
+          animate: { opacity: 1, y: 0 },
+          transition: { duration: DUR.page, ease: EASE_OUT },
+        };
+  /** The leaving, by the way it was dismissed. A sheet still `sending` when
+   *  it goes is one whose send landed: it lets go outward (scale to 1.02)
+   *  over the page duration, the way a dialog commits. Anything else is a
+   *  dismissal, down and out, fast, ease-in: 8px on a desktop, the sheet's
+   *  own distance on a phone. framer reads this off the last render, which is
+   *  why the send flow never has to tell the sheet how it is leaving. */
+  const exit = reduce
+    ? { opacity: 0, transition: { duration: DUR.fast } }
+    : sending
+      ? { opacity: 0, scale: 1.02, transition: { duration: DUR.page, ease: EASE_OUT } }
+      : {
+          opacity: 0,
+          y: sheet ? SHEET_ENTER_Y : 8,
+          transition: { duration: DUR.fast, ease: "easeIn" as const },
+        };
   return (
     <Dialog.Root
       open
@@ -128,10 +171,10 @@ export function MailComposePaper({
           <motion.div
             className="brain-compose-paper"
             data-sheet={sheet ? "" : undefined}
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            transition={{ duration: reduce ? DUR.fast : DUR.fast }}
+            initial={enter.initial}
+            animate={enter.animate}
+            exit={exit}
+            transition={enter.transition}
           >
             <Dialog.Title className="sr-only">{title}</Dialog.Title>
             {children}
@@ -181,6 +224,9 @@ export function MailComposer({
   const [subject, setSubject] = useState(initialDraft.subject);
   const [text, setText] = useState(initialDraft.text);
   const [showCopies, setShowCopies] = useState(Boolean(initialDraft.cc || initialDraft.bcc));
+  /** True once the Cc Bcc press revealed the rows: they grow into place.
+   *  A draft that already carried a copy shows them standing. */
+  const [revealedByPress, setRevealedByPress] = useState(false);
   const [validation, setValidation] = useState<{
     readonly field: MailRecipientField;
     readonly message: string;
@@ -202,8 +248,30 @@ export function MailComposer({
   const bccId = useId();
   const subjectId = useId();
   const reportedInitial = useRef(false);
+  const reduce = useReducedMotion();
+  /** How many times `sending` has flipped since the sheet stood, so the label
+   *  swap knows it is a swap: the word arrives through a blur when the state
+   *  flips and not when the sheet itself arrives. State adjusted during the
+   *  render rather than a ref read in it (React's own pattern for a previous
+   *  prop), so the count is right on the very render that remounts the word. */
+  const [swaps, setSwaps] = useState({ sending, count: 0 });
+  if (swaps.sending !== sending) setSwaps({ sending, count: swaps.count + 1 });
+  const swapping = swaps.count > 0;
   const title = composerTitle(initialDraft.mode);
   const fromName = account.displayName || account.emailAddress;
+
+  /** The rows arrive one after another, each a 4px rise over `DUR.base`:
+   *  From, To, Subject, then the fold and the body together, so the last of
+   *  them lands at 300ms with the sheet. Reduced motion: they are simply
+   *  there. The steps are the spec's own numbers. */
+  const arrive = (step: 0 | 1 | 2 | 3) =>
+    reduce
+      ? { initial: false as const }
+      : {
+          initial: { opacity: 0, y: 4 },
+          animate: { opacity: 1, y: 0 },
+          transition: { duration: DUR.base, ease: EASE_OUT, delay: ROW_DELAYS[step] },
+        };
 
   useEffect(() => {
     if (!reportedInitial.current) {
@@ -353,10 +421,10 @@ export function MailComposer({
                 <motion.span
                   key={message.key}
                   className="brain-compose-slot-line"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
+                  initial={reduce ? { opacity: 0 } : { opacity: 0, y: -4 }}
+                  animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
                   exit={{ opacity: 0, transition: { duration: DUR.fast } }}
-                  transition={{ duration: DUR.fast }}
+                  transition={{ duration: DUR.base, ease: EASE_OUT }}
                 >
                   <span
                     id={errorId}
@@ -432,14 +500,33 @@ export function MailComposer({
             disabled={sendBlocked}
             className="brain-compose-send brain-touch-hit"
           >
-            <span className="brain-compose-send-glyph">
+            {/* The wait is the glyph turning on SPIN; under reduced motion
+                it stands still and the word says the work is happening. */}
+            <motion.span
+              key={sending ? "working" : "waiting"}
+              className="brain-compose-send-glyph"
+              animate={sending && !reduce ? { rotate: 360 } : undefined}
+              transition={sending && !reduce ? SPIN : undefined}
+            >
               <Icon name={sending ? "restart-linear" : "plain-linear"} size={16} />
-            </span>
+            </motion.span>
             <span className="brain-compose-send-label">
               <span aria-hidden className="brain-compose-send-ghost">
                 Sending
               </span>
-              <span className="brain-compose-send-word">{sending ? "Sending" : "Send"}</span>
+              {/* Two words changing in one place read as two words unless
+                  something bridges them, so the swap resolves from a 2px blur
+                  over DUR.base. Only the swap: the word does not blur in with
+                  the sheet. */}
+              <motion.span
+                key={sending ? "working" : "waiting"}
+                className="brain-compose-send-word"
+                initial={reduce || !swapping ? false : { opacity: 0.5, filter: "blur(2px)" }}
+                animate={{ opacity: 1, filter: "blur(0px)" }}
+                transition={{ duration: DUR.base, ease: EASE_OUT }}
+              >
+                {sending ? "Sending" : "Send"}
+              </motion.span>
             </span>
           </Button>
         </div>
@@ -452,11 +539,11 @@ export function MailComposer({
         <ScrollEdge variant="fade" className="brain-compose-scroll">
           <div className="brain-compose-column">
             <div className="brain-compose-envelope">
-              <div className="brain-compose-row brain-compose-from">
+              <motion.div className="brain-compose-row brain-compose-from" {...arrive(0)}>
                 <span className="brain-compose-label text-control">From</span>
                 <span className="brain-compose-value text-table truncate">{fromName}</span>
-              </div>
-              <div className="brain-compose-row">
+              </motion.div>
+              <motion.div className="brain-compose-row" {...arrive(1)}>
                 <label htmlFor={toId} className="brain-compose-label text-control">
                   To
                 </label>
@@ -482,6 +569,7 @@ export function MailComposer({
                       className="brain-compose-copies"
                       onClick={() => {
                         focusCcRef.current = true;
+                        setRevealedByPress(true);
                         setShowCopies(true);
                       }}
                       exit={{ opacity: 0, transition: { duration: DUR.fast } }}
@@ -490,9 +578,17 @@ export function MailComposer({
                     </Button>
                   )}
                 </AnimatePresence>
-              </div>
+              </motion.div>
               {showCopies && (
-                <div className="brain-compose-copies-rows">
+                /* From a press the two rows grow into place on the select
+                   spring and the caret lands in Cc; a resumed draft that
+                   already carries a copy shows them standing. */
+                <motion.div
+                  className="brain-compose-copies-rows"
+                  initial={reduce || !revealedByPress ? false : { height: 0, opacity: 0 }}
+                  animate={{ height: "auto", opacity: 1 }}
+                  transition={SPRING_SELECT}
+                >
                   <div className="brain-compose-row">
                     <label htmlFor={ccId} className="brain-compose-label text-control">
                       Cc
@@ -526,11 +622,11 @@ export function MailComposer({
                       aria-describedby={validation?.field === "bcc" ? errorId : undefined}
                     />
                   </div>
-                </div>
+                </motion.div>
               )}
               {/* The subject is the letter's heading, not a field with a
                   label: it stands on the values' rule at the subheading size. */}
-              <div className="brain-compose-row brain-compose-subject">
+              <motion.div className="brain-compose-row brain-compose-subject" {...arrive(2)}>
                 <label htmlFor={subjectId} className="sr-only">
                   Subject
                 </label>
@@ -543,7 +639,7 @@ export function MailComposer({
                   readOnly={sending}
                   placeholder="Subject"
                 />
-              </div>
+              </motion.div>
             </div>
 
             {initialDraft.notice && (
@@ -551,10 +647,10 @@ export function MailComposer({
             )}
 
             {/* The one line on the sheet: where the envelope ends and the
-                letter begins. */}
-            <div className="brain-compose-fold" aria-hidden />
+                letter begins. It arrives with the body. */}
+            <motion.div className="brain-compose-fold" aria-hidden {...arrive(3)} />
 
-            <label className="brain-compose-body">
+            <motion.label className="brain-compose-body" {...arrive(3)}>
               <span className="sr-only">Message</span>
               <textarea
                 ref={bodyRef}
@@ -564,7 +660,7 @@ export function MailComposer({
                 placeholder="Write a message…"
                 className="text-body"
               />
-            </label>
+            </motion.label>
           </div>
         </ScrollEdge>
       </form>

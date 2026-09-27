@@ -1202,7 +1202,7 @@ test("Mail builds Reply all and Forward without client-owned threading", async (
   await page.getByText(thread.subject, { exact: true }).click();
   await page.getByRole("button", { name: "More mail actions" }).click();
   await page.getByRole("menuitem", { name: "Forward" }).click();
-  await expect(page.getByRole("form", { name: "Forward" })).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "Forward" })).toBeVisible();
   await expect(page.getByText("Original attachments aren’t included.")).toBeVisible();
   await expect(page.getByPlaceholder("Subject")).toHaveValue(
     "Fwd: Lunch this Friday?",

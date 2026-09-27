@@ -228,6 +228,27 @@ describe("IMAP thread mutations", () => {
     expect(opened.count).toBe(1);
   });
 
+  it("refuses, after one CREATE and two LISTs, when the created folder never shows up", async () => {
+    // A server that says OK to the CREATE and then hides the folder from LIST
+    // is not a server this adapter can archive into. Without the once-per-adapter
+    // flag the fresh LIST would lead to another CREATE, and that to another
+    // LIST, with nothing to stop it.
+    const server = serverFixture({
+      mailboxes: [{ path: "Sent" }],
+      hideCreated: true,
+    });
+    const { provider } = providerFor(server);
+
+    await expect(
+      provider.archiveThread("i77u1", signal()),
+    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+
+    expect(server.commands.filter((command) => command.name === "create")).toHaveLength(1);
+    expect(server.commands.filter((command) => command.name === "list")).toHaveLength(2);
+    expect(server.commands.some((command) => command.name === "move")).toBe(false);
+    expect(server.mailbox("INBOX").messages.has(1)).toBe(true);
+  });
+
   it("reports a session that died under CREATE as unavailable and tries again next time", async () => {
     // No answer is not a refusal. The adapter is long-lived, so a 409 here
     // would refuse the account from cache until a restart over a socket that
@@ -643,6 +664,8 @@ function serverFixture(options?: {
    * server well.
    */
   readonly createAnswers?: "created" | "already_exists" | "no" | "drop";
+  /** CREATE answers OK, and LIST still does not show the folder afterwards. */
+  readonly hideCreated?: boolean;
 }): FakeServer {
   const uidplus = options?.uidplus ?? true;
   const capabilities = new Map<string, boolean | number>([["IMAP4rev1", true]]);
@@ -792,7 +815,7 @@ function serverFixture(options?: {
           code: "NoConnection",
         });
       }
-      if (!mailboxes.has(path)) {
+      if (!mailboxes.has(path) && options?.hideCreated !== true) {
         mailboxes.set(path, {
           path,
           uidValidity: BigInt(900 + mailboxes.size),

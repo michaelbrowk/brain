@@ -661,13 +661,13 @@ describe("multi mail account service", () => {
     // Receive-only stays reachable without the runtime: connecting without
     // SMTP and removing SMTP never touch the verifier.
     const connected = await service.add(createInput(2), requestFixture());
-    expect(connected.account.smtp).toBeUndefined();
+    expect(connected.account).not.toHaveProperty("smtp");
     const removed = await service.update(
       existing.account.accountId,
       { smtp: null },
       requestFixture(),
     );
-    expect(removed.account.smtp).toBeUndefined();
+    expect(removed.account).not.toHaveProperty("smtp");
   });
 
   it("never saves SMTP configuration when AUTH preflight fails", async () => {

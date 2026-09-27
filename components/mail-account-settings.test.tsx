@@ -567,10 +567,25 @@ describe("MailAccountSettings", () => {
       "smtp_authentication_failed",
       "The outgoing server rejected the username or password. Providers with two-step sign-in need an app password.",
     ],
-    ["smtp_dns_failed", "We couldn't find this outgoing (SMTP) server."],
-    ["smtp_tls_failed", "The secure connection to the outgoing server failed."],
-    ["smtp_connection_failed", "We couldn't reach the outgoing (SMTP) server."],
-    ["smtp_connection_timeout", "The outgoing (SMTP) server didn't respond."],
+    // a wrong guess at the outgoing server (a provider the defaults do not
+    // know) must not refuse the whole connect, so each of the four names
+    // the way out: the switch, and receive-only
+    [
+      "smtp_dns_failed",
+      'We couldn\'t find this outgoing (SMTP) server. Check the server name, or turn off "Send from this account" to connect receive-only.',
+    ],
+    [
+      "smtp_tls_failed",
+      'The secure connection to the outgoing server failed. Check the server and security setting, or turn off "Send from this account" to connect receive-only.',
+    ],
+    [
+      "smtp_connection_failed",
+      'We couldn\'t reach the outgoing (SMTP) server. Check the server and port, or whether this server only accepts connections from your work network, or turn off "Send from this account" to connect receive-only.',
+    ],
+    [
+      "smtp_connection_timeout",
+      'The outgoing (SMTP) server didn\'t respond. Check the port, or whether this server only accepts connections from your work network, or turn off "Send from this account" to connect receive-only.',
+    ],
     // the service has no direct SMTP: the owner either connects receive-only
     // or enables it on the host, and the sentence names both ways out
     [
@@ -758,6 +773,12 @@ describe("MailAccountSettings", () => {
   it.each([
     ["person@gmail.com", "imap.gmail.com", "smtp.gmail.com", "465", "implicit"],
     ["person@fastmail.com", "imap.fastmail.com", "smtp.fastmail.com", "465", "implicit"],
+    // the three Microsoft consumer domains share one pair of servers, and a
+    // derived `smtp.outlook.com` would name a host Microsoft does not run
+    ["person@outlook.com", "outlook.office365.com", "smtp-mail.outlook.com", "587", "starttls"],
+    ["person@hotmail.com", "outlook.office365.com", "smtp-mail.outlook.com", "587", "starttls"],
+    ["person@live.com", "outlook.office365.com", "smtp-mail.outlook.com", "587", "starttls"],
+    ["person@yahoo.com", "imap.mail.yahoo.com", "smtp.mail.yahoo.com", "465", "implicit"],
     ["misha@studio.example", "imap.studio.example", "smtp.studio.example", "465", "implicit"],
   ] as const)(
     "fills both servers for %s",

@@ -1499,8 +1499,9 @@ interface MailProviderDefaults {
  * the server, port, and security before saving.
  *
  * The outgoing half follows the same rule. An entry names the submission
- * server with its own security and port pair (iCloud submits over STARTTLS on
- * 587, the others over implicit TLS on 465); a domain without an entry gets
+ * server with its own security and port pair (iCloud and Outlook submit over
+ * STARTTLS on 587, the others over implicit TLS on 465); a domain without an
+ * entry gets
  * `smtp.<domain>:465`, the guess the operator reviews in the form. Connect
  * posts `smtp` only while "Send from this account" is on, and the endpoint
  * carries no password: the service signs in to it with the mailbox password.
@@ -1535,6 +1536,33 @@ const MAIL_PROVIDER_DEFAULTS: ReadonlyMap<string, MailProviderDefaults> = new Ma
       imapPort: 993,
       imapTls: "implicit",
       smtpHostname: "smtp.fastmail.com",
+      smtpPort: 465,
+      smtpTls: "implicit",
+    },
+  ],
+  // Microsoft's three consumer domains share one pair of servers, and the
+  // derived guess misses both halves: there is no `imap.outlook.com` and no
+  // `smtp.outlook.com`.
+  ...(["outlook.com", "hotmail.com", "live.com"] as const).map(
+    (domain): [string, MailProviderDefaults] => [
+      domain,
+      {
+        imapHostname: "outlook.office365.com",
+        imapPort: 993,
+        imapTls: "implicit",
+        smtpHostname: "smtp-mail.outlook.com",
+        smtpPort: 587,
+        smtpTls: "starttls",
+      },
+    ],
+  ),
+  [
+    "yahoo.com",
+    {
+      imapHostname: "imap.mail.yahoo.com",
+      imapPort: 993,
+      imapTls: "implicit",
+      smtpHostname: "smtp.mail.yahoo.com",
       smtpPort: 465,
       smtpTls: "implicit",
     },
@@ -1751,19 +1779,23 @@ function messageForError(error: unknown): string {
     // The outgoing half of the account. Same shape as the IMAP answers above,
     // and the same rule: a company-only host can refuse Brain's server while
     // the identical settings work from the work network.
+    // Each of the four ends with the way out. The outgoing server is a guess
+    // for any domain the defaults do not know, and a wrong guess must not
+    // refuse the whole connect: the switch is right there, and receive-only
+    // is a complete account.
     case "smtp_dns_failed":
-      return "We couldn't find this outgoing (SMTP) server. Check the server name.";
+      return 'We couldn\'t find this outgoing (SMTP) server. Check the server name, or turn off "Send from this account" to connect receive-only.';
     case "smtp_tls_failed":
-      return "The secure connection to the outgoing server failed. Check the server and security setting.";
+      return 'The secure connection to the outgoing server failed. Check the server and security setting, or turn off "Send from this account" to connect receive-only.';
     // The one credential works for incoming and fails for outgoing at the
     // providers that gate submission behind an app password, so the second
     // sentence names the fix the first cannot.
     case "smtp_authentication_failed":
       return "The outgoing server rejected the username or password. Providers with two-step sign-in need an app password.";
     case "smtp_connection_timeout":
-      return "The outgoing (SMTP) server didn't respond. Check the port, or whether this server only accepts connections from your work network.";
+      return 'The outgoing (SMTP) server didn\'t respond. Check the port, or whether this server only accepts connections from your work network, or turn off "Send from this account" to connect receive-only.';
     case "smtp_connection_failed":
-      return "We couldn't reach the outgoing (SMTP) server. Check the server and port, or whether this server only accepts connections from your work network.";
+      return 'We couldn\'t reach the outgoing (SMTP) server. Check the server and port, or whether this server only accepts connections from your work network, or turn off "Send from this account" to connect receive-only.';
     // 503 from the service when the payload carries smtp and direct SMTP is
     // not enabled on this Brain. Not retryable and not the settings' fault,
     // so the sentence names both ways out.

@@ -567,6 +567,11 @@ describe("multi mail account service", () => {
       },
     });
     expect(JSON.stringify(created)).not.toMatch(/password|credential|binding/i);
+    // Saved with a verifier on a service whose worker is ready: the account
+    // can send from the moment it is connected.
+    await expect(service.listCapabilities()).resolves.toMatchObject({
+      accounts: [{ capabilities: { compose: true, send: true, reply: true } }],
+    });
     const first = await store.readAccount(created.account.accountId);
     expect(first?.providerKind).toBe("imap");
     if (first?.providerKind !== "imap") throw new Error("expected IMAP");
@@ -617,6 +622,52 @@ describe("multi mail account service", () => {
     if (receiveOnly?.providerKind !== "imap") throw new Error("expected IMAP");
     expect(receiveOnly.account.smtp).toBeUndefined();
     expect(smtpVerifier.verify).toHaveBeenCalledTimes(2);
+    await expect(service.listCapabilities()).resolves.toMatchObject({
+      accounts: [
+        { capabilities: { compose: false, send: false, reply: false } },
+      ],
+    });
+  });
+
+  it("names the missing SMTP runtime instead of a generic state failure", async () => {
+    const existing = storedMultiFixture(1);
+    const store = memoryMultiStore([existing]);
+    const service = new MultiMailAccountService({
+      store,
+      verifier: { verify: vi.fn(async () => undefined) },
+      now: incrementingNow(),
+    });
+    const smtp = {
+      hostname: "smtp.example.test",
+      port: 465,
+      tls: "implicit" as const,
+      username: "person-2@example.test",
+    };
+
+    await expect(
+      service.add({ ...createInput(2), smtp }, requestFixture()),
+    ).rejects.toMatchObject({ code: "smtp_submission_unavailable" });
+    expect(await store.countAccounts()).toBe(1);
+
+    await expect(
+      service.update(
+        existing.account.accountId,
+        { imap: { password: "rotated-test-password" }, smtp },
+        requestFixture(),
+      ),
+    ).rejects.toMatchObject({ code: "smtp_submission_unavailable" });
+    expect(await store.readAccount(existing.account.accountId)).toEqual(existing);
+
+    // Receive-only stays reachable without the runtime: connecting without
+    // SMTP and removing SMTP never touch the verifier.
+    const connected = await service.add(createInput(2), requestFixture());
+    expect(connected.account.smtp).toBeUndefined();
+    const removed = await service.update(
+      existing.account.accountId,
+      { smtp: null },
+      requestFixture(),
+    );
+    expect(removed.account.smtp).toBeUndefined();
   });
 
   it("never saves SMTP configuration when AUTH preflight fails", async () => {

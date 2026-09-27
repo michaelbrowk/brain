@@ -444,7 +444,7 @@ export class MultiMailAccountService implements MailAccountServiceV2 {
       });
       if (account.smtp) {
         if (!this.smtpVerifier) {
-          throw new MailAccountError("account_state_unavailable");
+          throw new MailAccountError("smtp_submission_unavailable");
         }
         await this.smtpVerifier.verify({
           endpoint: account.smtp.endpoint,
@@ -572,7 +572,7 @@ export class MultiMailAccountService implements MailAccountServiceV2 {
       });
       if (account.smtp) {
         if (!this.smtpVerifier) {
-          throw new MailAccountError("account_state_unavailable");
+          throw new MailAccountError("smtp_submission_unavailable");
         }
         await this.smtpVerifier.verify({
           endpoint: account.smtp.endpoint,

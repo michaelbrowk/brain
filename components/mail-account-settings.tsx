@@ -45,8 +45,21 @@ type PublicMailAccount =
 
 type LoadState = "loading" | "ready" | "error";
 type View = "list" | "providers" | "details" | "imap-form";
-type FormField = "email" | "hostname" | "username" | "password" | "port";
+type FormField =
+  | "email"
+  | "hostname"
+  | "username"
+  | "password"
+  | "port"
+  | "smtpHostname"
+  | "smtpUsername"
+  | "smtpPort";
 type FieldErrors = Partial<Record<FormField, string>>;
+/** How the "Send from this account" switch was decided. A new connect starts
+ *  in `auto`: on as soon as the address names a domain (every domain has an
+ *  outgoing guess), off with a hint before that. A press makes it explicit,
+ *  and an edit starts explicit at whatever the account has saved. */
+type SmtpChoice = "auto" | "on" | "off";
 
 /**
  * Mirror of `MAIL_RESOURCE_LIMITS.maxAccounts`. That module reaches node:crypto
@@ -68,9 +81,29 @@ const FORM_FIELD_ORDER: FormField[] = [
   "username",
   "password",
   "port",
+  "smtpHostname",
+  "smtpUsername",
+  "smtpPort",
 ];
+const FIELD_IDS: Record<FormField, string> = {
+  email: "mail-email",
+  hostname: "mail-hostname",
+  username: "mail-username",
+  password: "mail-password",
+  port: "mail-port",
+  smtpHostname: "mail-smtp-hostname",
+  smtpUsername: "mail-smtp-username",
+  smtpPort: "mail-smtp-port",
+};
 const REENTER_PASSWORD_COPY =
   "Re-enter the password after changing the server, security, port, or username.";
+/** Adding or redirecting the outgoing server re-verifies the one credential
+ *  the account has, so the service asks for it again, the way it does for
+ *  the incoming server (mirrors `sameConnectionIdentity` in the service). */
+const REENTER_PASSWORD_SMTP_COPY =
+  "Re-enter the password to add or change the outgoing server.";
+const SEND_SWITCH_LABEL = "Send from this account";
+const SEND_SWITCH_OFF_HINT = "Turn on to reply and send from Brain";
 // Last parsed account list. A revisit of the Mail tab renders it at once and
 // revalidates in the background instead of flashing the skeleton again.
 let lastLoadedAccounts: PublicMailAccount[] | null = null;
@@ -106,6 +139,11 @@ export function MailAccountSettings({
   const [password, setPassword] = useState("");
   const [tls, setTls] = useState<MailTlsMode>("implicit");
   const [port, setPort] = useState("993");
+  const [smtpChoice, setSmtpChoice] = useState<SmtpChoice>("auto");
+  const [smtpHostname, setSmtpHostname] = useState("");
+  const [smtpUsername, setSmtpUsername] = useState("");
+  const [smtpTls, setSmtpTls] = useState<MailTlsMode>("implicit");
+  const [smtpPort, setSmtpPort] = useState("465");
   const [fieldErrors, setFieldErrors] = useState<FieldErrors>({});
   const [requestError, setRequestError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -116,8 +154,13 @@ export function MailAccountSettings({
     username: false,
     port: false,
     tls: false,
+    smtpHostname: false,
+    smtpUsername: false,
+    smtpPort: false,
+    smtpTls: false,
   });
   const advancedRef = useRef<HTMLDetailsElement | null>(null);
+  const smtpAdvancedRef = useRef<HTMLDetailsElement | null>(null);
   const pendingInitialAccountRef = useRef<string | null>(
     initialAccountId ?? null,
   );
@@ -133,12 +176,28 @@ export function MailAccountSettings({
     view === "imap-form" && selectedAccount?.providerKind === "imap"
       ? selectedAccount
       : null;
-  const connectionIdentityChanged =
+  const smtpEnabled =
+    smtpChoice === "auto" ? smtpDefaultsForEmail(email) !== null : smtpChoice === "on";
+  const imapIdentityChanged =
     editingAccount !== null &&
     (hostname.trim() !== editingAccount.imap.hostname ||
       Number(port) !== editingAccount.imap.port ||
       tls !== editingAccount.imap.tls ||
       username !== editingAccount.imap.username);
+  // Turning the outgoing server off never needs the password: removal
+  // discloses nothing. Adding one, or pointing it elsewhere, does.
+  const smtpIdentityChanged =
+    editingAccount !== null &&
+    smtpEnabled &&
+    (editingAccount.smtp === undefined ||
+      smtpHostname.trim() !== editingAccount.smtp.hostname ||
+      Number(smtpPort) !== editingAccount.smtp.port ||
+      smtpTls !== editingAccount.smtp.tls ||
+      smtpUsername !== editingAccount.smtp.username);
+  const connectionIdentityChanged = imapIdentityChanged || smtpIdentityChanged;
+  const reenterPasswordCopy = imapIdentityChanged
+    ? REENTER_PASSWORD_COPY
+    : REENTER_PASSWORD_SMTP_COPY;
 
   const resetForm = useCallback((account: PublicMailAccount | null) => {
     setFieldErrors({});
@@ -151,11 +210,30 @@ export function MailAccountSettings({
       setUsername(account.imap.username);
       setTls(account.imap.tls);
       setPort(String(account.imap.port));
+      // A receive-only account still gets the guess for its own domain, so
+      // turning the switch on offers a filled group to review, not a blank.
+      const smtp = account.smtp ?? {
+        ...(smtpDefaultsForEmail(account.emailAddress) ?? {
+          hostname: "",
+          port: 465,
+          tls: "implicit" as const,
+        }),
+        username: account.imap.username,
+      };
+      setSmtpChoice(account.smtp ? "on" : "off");
+      setSmtpHostname(smtp.hostname);
+      setSmtpUsername(smtp.username);
+      setSmtpTls(smtp.tls);
+      setSmtpPort(String(smtp.port));
       manuallyEdited.current = {
         hostname: true,
         username: true,
         port: true,
         tls: true,
+        smtpHostname: account.smtp !== undefined,
+        smtpUsername: account.smtp !== undefined,
+        smtpPort: account.smtp !== undefined,
+        smtpTls: account.smtp !== undefined,
       };
       return;
     }
@@ -165,11 +243,20 @@ export function MailAccountSettings({
     setUsername("");
     setTls("implicit");
     setPort("993");
+    setSmtpChoice("auto");
+    setSmtpHostname("");
+    setSmtpUsername("");
+    setSmtpTls("implicit");
+    setSmtpPort("465");
     manuallyEdited.current = {
       hostname: false,
       username: false,
       port: false,
       tls: false,
+      smtpHostname: false,
+      smtpUsername: false,
+      smtpPort: false,
+      smtpTls: false,
     };
   }, []);
 
@@ -236,9 +323,20 @@ export function MailAccountSettings({
     setEmail(value);
     clearFieldError("email");
     const suggestedHostname = imapHostForEmail(value);
+    // The outgoing username follows the incoming one, which follows the
+    // address; each link holds until its own field is edited by hand.
+    const suggestedUsername = manuallyEdited.current.username
+      ? username
+      : suggestedHostname
+        ? value.trim()
+        : "";
     if (!manuallyEdited.current.username) {
-      setUsername(suggestedHostname ? value.trim() : "");
+      setUsername(suggestedUsername);
       clearFieldError("username");
+    }
+    if (!manuallyEdited.current.smtpUsername) {
+      setSmtpUsername(suggestedUsername);
+      clearFieldError("smtpUsername");
     }
     if (!manuallyEdited.current.hostname) {
       setHostname(suggestedHostname);
@@ -249,11 +347,36 @@ export function MailAccountSettings({
     // it. An explicit port alone still survives the provider's security.
     const provider = mailProviderDefaultsForEmail(value);
     if (provider && !manuallyEdited.current.tls) {
-      setTls(provider.tls);
+      setTls(provider.imapTls);
       if (!manuallyEdited.current.port) {
         setPort(String(provider.imapPort));
         clearFieldError("port");
       }
+    }
+    // The outgoing pair is derived for every domain, not only a provider's,
+    // so leaving iCloud's 587/STARTTLS for an unknown domain lands back on
+    // the 465/TLS the derived guess stands for.
+    const smtpDefaults = smtpDefaultsForEmail(value);
+    if (!manuallyEdited.current.smtpHostname) {
+      setSmtpHostname(smtpDefaults?.hostname ?? "");
+      clearFieldError("smtpHostname");
+    }
+    if (smtpDefaults && !manuallyEdited.current.smtpTls) {
+      setSmtpTls(smtpDefaults.tls);
+      if (!manuallyEdited.current.smtpPort) {
+        setSmtpPort(String(smtpDefaults.port));
+        clearFieldError("smtpPort");
+      }
+    }
+  };
+
+  const changeUsername = (value: string) => {
+    manuallyEdited.current.username = true;
+    setUsername(value);
+    clearFieldError("username");
+    if (!manuallyEdited.current.smtpUsername) {
+      setSmtpUsername(value);
+      clearFieldError("smtpUsername");
     }
   };
 
@@ -263,6 +386,15 @@ export function MailAccountSettings({
     if (!manuallyEdited.current.port) {
       setPort(value === "implicit" ? "993" : "143");
       clearFieldError("port");
+    }
+  };
+
+  const changeSmtpTls = (value: MailTlsMode) => {
+    manuallyEdited.current.smtpTls = true;
+    setSmtpTls(value);
+    if (!manuallyEdited.current.smtpPort) {
+      setSmtpPort(value === "implicit" ? "465" : "587");
+      clearFieldError("smtpPort");
     }
   };
 
@@ -291,14 +423,22 @@ export function MailAccountSettings({
     }
     if (!password) {
       if (!editingAccount) next.password = "Enter the password or app password.";
-      else if (connectionIdentityChanged) next.password = REENTER_PASSWORD_COPY;
+      else if (connectionIdentityChanged) next.password = reenterPasswordCopy;
     }
-    if (
-      !Number.isInteger(normalizedPort) ||
-      normalizedPort < 1 ||
-      normalizedPort > 65_535
-    ) {
+    if (!isValidPort(normalizedPort)) {
       next.port = "Enter a port from 1 to 65535.";
+    }
+    if (smtpEnabled) {
+      const normalizedSmtpHostname = smtpHostname.trim();
+      if (!normalizedSmtpHostname || /[\s/]/.test(normalizedSmtpHostname)) {
+        next.smtpHostname = "Enter the outgoing (SMTP) server name.";
+      }
+      if (!smtpUsername || /[\r\n ]/.test(smtpUsername)) {
+        next.smtpUsername = "Enter the username for the outgoing server.";
+      }
+      if (!isValidPort(Number(smtpPort))) {
+        next.smtpPort = "Enter a port from 1 to 65535.";
+      }
     }
     return next;
   };
@@ -323,8 +463,11 @@ export function MailAccountSettings({
       if (firstError === "port" && advancedRef.current) {
         advancedRef.current.open = true;
       }
+      if (firstError === "smtpPort" && smtpAdvancedRef.current) {
+        smtpAdvancedRef.current.open = true;
+      }
       window.requestAnimationFrame(() => {
-        document.getElementById(`mail-${firstError}`)?.focus();
+        document.getElementById(FIELD_IDS[firstError])?.focus();
       });
       return;
     }
@@ -332,6 +475,16 @@ export function MailAccountSettings({
     setSubmitting(true);
     setRequestError(null);
     const editing = editingAccount !== null;
+    // The outgoing server carries no password of its own: the service signs
+    // in to it with the mailbox password it already holds inside `imap`.
+    const smtp = smtpEnabled
+      ? {
+          hostname: smtpHostname.trim(),
+          port: Number(smtpPort),
+          tls: smtpTls,
+          username: smtpUsername,
+        }
+      : null;
     mutationControllerRef.current?.abort();
     const controller = new AbortController();
     const requestSequence = mutationSequenceRef.current + 1;
@@ -362,6 +515,13 @@ export function MailAccountSettings({
                     username,
                     password: password || null,
                   },
+                  // `smtp: null` is the removal; an account that never had
+                  // an outgoing server has nothing to remove and says nothing
+                  ...(smtp
+                    ? { smtp }
+                    : editingAccount.smtp
+                      ? { smtp: null }
+                      : {}),
                 }
               : {
                   providerKind: "imap",
@@ -374,6 +534,7 @@ export function MailAccountSettings({
                     username,
                     password,
                   },
+                  ...(smtp ? { smtp } : {}),
                 },
           ),
         },
@@ -737,11 +898,7 @@ export function MailAccountSettings({
               aria-describedby={
                 fieldErrors.username ? "mail-username-error" : undefined
               }
-              onChange={(event) => {
-                manuallyEdited.current.username = true;
-                setUsername(event.target.value);
-                clearFieldError("username");
-              }}
+              onChange={(event) => changeUsername(event.target.value)}
               onBlur={() => validateOne("username")}
               className="w-full"
             />
@@ -753,7 +910,7 @@ export function MailAccountSettings({
             hint={
               editingAccount
                 ? connectionIdentityChanged
-                  ? REENTER_PASSWORD_COPY
+                  ? reenterPasswordCopy
                   : "Leave blank to keep the saved password."
                 : undefined
             }
@@ -829,6 +986,132 @@ export function MailAccountSettings({
               />
             </FormRow>
           </details>
+        </SettingsGroup>
+
+        <SettingsGroup
+          title="Outgoing (SMTP)"
+          description="Needed to reply and send. Uses the same password as incoming."
+        >
+          <SettingsRow
+            label={SEND_SWITCH_LABEL}
+            hint={smtpEnabled ? undefined : SEND_SWITCH_OFF_HINT}
+          >
+            <Segmented
+              label={SEND_SWITCH_LABEL}
+              value={smtpEnabled ? "on" : "off"}
+              disabled={submitting}
+              options={[
+                { value: "off", label: "Off" },
+                { value: "on", label: "On" },
+              ]}
+              onChange={(value) => setSmtpChoice(value === "on" ? "on" : "off")}
+            />
+          </SettingsRow>
+          {smtpEnabled && (
+            <>
+              <FormRow
+                id="mail-smtp-hostname"
+                label="SMTP server"
+                error={fieldErrors.smtpHostname}
+              >
+                <Field
+                  id="mail-smtp-hostname"
+                  value={smtpHostname}
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  disabled={submitting}
+                  aria-invalid={!!fieldErrors.smtpHostname}
+                  aria-describedby={
+                    fieldErrors.smtpHostname ? "mail-smtp-hostname-error" : undefined
+                  }
+                  onChange={(event) => {
+                    manuallyEdited.current.smtpHostname = true;
+                    setSmtpHostname(event.target.value);
+                    clearFieldError("smtpHostname");
+                  }}
+                  onBlur={() => validateOne("smtpHostname")}
+                  className="w-full"
+                />
+              </FormRow>
+
+              <FormRow
+                id="mail-smtp-username"
+                label="Username"
+                error={fieldErrors.smtpUsername}
+              >
+                <Field
+                  id="mail-smtp-username"
+                  value={smtpUsername}
+                  autoComplete="section-brain-mail-smtp username"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  disabled={submitting}
+                  aria-invalid={!!fieldErrors.smtpUsername}
+                  aria-describedby={
+                    fieldErrors.smtpUsername ? "mail-smtp-username-error" : undefined
+                  }
+                  onChange={(event) => {
+                    manuallyEdited.current.smtpUsername = true;
+                    setSmtpUsername(event.target.value);
+                    clearFieldError("smtpUsername");
+                  }}
+                  onBlur={() => validateOne("smtpUsername")}
+                  className="w-full"
+                />
+              </FormRow>
+
+              <details ref={smtpAdvancedRef} className="group">
+                <summary className="brain-settings-row brain-settings-rootrow brain-touch-min focus-inset cursor-pointer list-none [&::-webkit-details-marker]:hidden">
+                  <Icon
+                    name="alt-arrow-right-linear"
+                    size={16}
+                    className="shrink-0 text-ink-3 transition-transform group-open:rotate-90"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-table font-medium text-ink">
+                    Advanced
+                  </span>
+                </summary>
+                <SettingsRow label="Security">
+                  {/* the visible row says "Security" like the incoming one;
+                      the control's own name tells the two groups apart */}
+                  <Segmented
+                    label="Outgoing security"
+                    value={smtpTls}
+                    disabled={submitting}
+                    options={[
+                      { value: "implicit", label: securityLabel("implicit") },
+                      { value: "starttls", label: securityLabel("starttls") },
+                    ]}
+                    onChange={(value) => changeSmtpTls(value as MailTlsMode)}
+                  />
+                </SettingsRow>
+                <FormRow id="mail-smtp-port" label="Port" error={fieldErrors.smtpPort}>
+                  <Field
+                    id="mail-smtp-port"
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    max={65_535}
+                    value={smtpPort}
+                    disabled={submitting}
+                    aria-invalid={!!fieldErrors.smtpPort}
+                    aria-describedby={
+                      fieldErrors.smtpPort ? "mail-smtp-port-error" : undefined
+                    }
+                    onChange={(event) => {
+                      manuallyEdited.current.smtpPort = true;
+                      setSmtpPort(event.target.value);
+                      clearFieldError("smtpPort");
+                    }}
+                    onBlur={() => validateOne("smtpPort")}
+                    className="w-24"
+                  />
+                </FormRow>
+              </details>
+            </>
+          )}
         </SettingsGroup>
 
         {requestError && (
@@ -1047,7 +1330,10 @@ function FormRow({
 interface MailProviderDefaults {
   readonly imapHostname: string;
   readonly imapPort: number;
-  readonly tls: MailTlsMode;
+  readonly imapTls: MailTlsMode;
+  readonly smtpHostname: string;
+  readonly smtpPort: number;
+  readonly smtpTls: MailTlsMode;
 }
 
 /**
@@ -1060,18 +1346,69 @@ interface MailProviderDefaults {
  * the form fills in completely rather than half. The operator can overwrite
  * the server, port, and security before saving.
  *
- * Receive only. Connect deliberately posts no `smtp` endpoint, because three
- * things fail closed today: this form has no SMTP field to review or override,
- * `parsePublicAccount` rejects an account payload that carries `smtp`, and with
- * `BRAIN_MAIL_SMTP_EGRESS_ENABLED` unset the service has no SMTP verifier and
- * answers `account_state_unavailable`. Adding the endpoint here would break
- * connect and the account list rather than configure send.
+ * The outgoing half follows the same rule. An entry names the submission
+ * server with its own security and port pair (iCloud submits over STARTTLS on
+ * 587, the others over implicit TLS on 465); a domain without an entry gets
+ * `smtp.<domain>:465`, the guess the operator reviews in the form. Connect
+ * posts `smtp` only while "Send from this account" is on, and the endpoint
+ * carries no password: the service signs in to it with the mailbox password.
  */
 const MAIL_PROVIDER_DEFAULTS: ReadonlyMap<string, MailProviderDefaults> = new Map([
-  ["icloud.com", { imapHostname: "imap.mail.me.com", imapPort: 993, tls: "implicit" }],
-  ["gmail.com", { imapHostname: "imap.gmail.com", imapPort: 993, tls: "implicit" }],
-  ["fastmail.com", { imapHostname: "imap.fastmail.com", imapPort: 993, tls: "implicit" }],
+  [
+    "icloud.com",
+    {
+      imapHostname: "imap.mail.me.com",
+      imapPort: 993,
+      imapTls: "implicit",
+      smtpHostname: "smtp.mail.me.com",
+      smtpPort: 587,
+      smtpTls: "starttls",
+    },
+  ],
+  [
+    "gmail.com",
+    {
+      imapHostname: "imap.gmail.com",
+      imapPort: 993,
+      imapTls: "implicit",
+      smtpHostname: "smtp.gmail.com",
+      smtpPort: 465,
+      smtpTls: "implicit",
+    },
+  ],
+  [
+    "fastmail.com",
+    {
+      imapHostname: "imap.fastmail.com",
+      imapPort: 993,
+      imapTls: "implicit",
+      smtpHostname: "smtp.fastmail.com",
+      smtpPort: 465,
+      smtpTls: "implicit",
+    },
+  ],
 ]);
+
+interface SmtpDefaults {
+  readonly hostname: string;
+  readonly port: number;
+  readonly tls: MailTlsMode;
+}
+
+/** The outgoing guess for a complete address, provider entry or derived
+ *  `smtp.<domain>:465`, or null while the address names no domain yet. */
+function smtpDefaultsForEmail(value: string): SmtpDefaults | null {
+  const domain = emailDomain(value);
+  if (!domain) return null;
+  const provider = MAIL_PROVIDER_DEFAULTS.get(domain);
+  return provider
+    ? { hostname: provider.smtpHostname, port: provider.smtpPort, tls: provider.smtpTls }
+    : { hostname: `smtp.${domain}`, port: 465, tls: "implicit" };
+}
+
+function isValidPort(value: number): boolean {
+  return Number.isInteger(value) && value >= 1 && value <= 65_535;
+}
 
 /** Lowercased domain of a complete address, or "" when it is not one yet. */
 function emailDomain(value: string): string {

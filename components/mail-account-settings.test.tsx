@@ -92,20 +92,48 @@ function button(label: string): HTMLButtonElement {
   return match;
 }
 
-/** Security is the shared Segmented control — a radiogroup of role=radio
- *  buttons, not native radio inputs. */
-function securityOption(value: "implicit" | "starttls"): HTMLButtonElement {
-  const group = document.querySelector(
-    '[role="radiogroup"][aria-label="Security"]',
+/** One option of a Segmented control — a radiogroup of role=radio buttons,
+ *  not native radio inputs — found by the group's label and the option's
+ *  own text. */
+function segmentedOption(group: string, label: string): HTMLButtonElement {
+  const radiogroup = document.querySelector(
+    `[role="radiogroup"][aria-label="${group}"]`,
   );
-  const label = value === "implicit" ? "TLS" : "STARTTLS";
-  const match = [...(group?.querySelectorAll('[role="radio"]') ?? [])].find(
+  const match = [...(radiogroup?.querySelectorAll('[role="radio"]') ?? [])].find(
     (candidate) => candidate.textContent?.trim() === label,
   );
   if (!(match instanceof HTMLButtonElement)) {
-    throw new Error(`Missing security option: ${label}`);
+    throw new Error(`Missing ${group} option: ${label}`);
   }
   return match;
+}
+
+/** Security of the incoming server; the outgoing server has its own group. */
+function securityOption(value: "implicit" | "starttls"): HTMLButtonElement {
+  return segmentedOption("Security", value === "implicit" ? "TLS" : "STARTTLS");
+}
+
+function outgoingSecurityOption(value: "implicit" | "starttls"): HTMLButtonElement {
+  return segmentedOption(
+    "Outgoing security",
+    value === "implicit" ? "TLS" : "STARTTLS",
+  );
+}
+
+const SEND_SWITCH = "Send from this account";
+
+function sendSwitch(value: "on" | "off"): HTMLButtonElement {
+  return segmentedOption(SEND_SWITCH, value === "on" ? "On" : "Off");
+}
+
+function sendSwitchIs(value: "on" | "off"): boolean {
+  return sendSwitch(value).getAttribute("aria-checked") === "true";
+}
+
+function submitForm(host: HTMLElement) {
+  (host.querySelector('form[autocomplete="off"]') as HTMLFormElement).dispatchEvent(
+    new Event("submit", { bubbles: true, cancelable: true }),
+  );
 }
 
 async function settle() {
@@ -258,7 +286,8 @@ describe("MailAccountSettings", () => {
     expect(fetchMock.mock.calls[1][0]).toBe("/api/mail/accounts");
     const request = fetchMock.mock.calls[1][1] as RequestInit;
     expect(request.method).toBe("POST");
-    expect(JSON.parse(String(request.body))).toEqual({
+    const body = JSON.parse(String(request.body)) as { smtp: Record<string, unknown> };
+    expect(body).toEqual({
       providerKind: "imap",
       emailAddress: created.emailAddress,
       displayName: "Personal",
@@ -269,7 +298,16 @@ describe("MailAccountSettings", () => {
         username: created.emailAddress,
         password: "SECRET password",
       },
+      // a complete address turns the outgoing server on with the derived
+      // guess; the password travels once, inside imap, never beside smtp
+      smtp: {
+        hostname: "smtp.example.test",
+        port: 465,
+        tls: "implicit",
+        username: created.emailAddress,
+      },
     });
+    expect(Object.prototype.hasOwnProperty.call(body.smtp, "password")).toBe(false);
     expect(document.body.textContent).not.toContain("SECRET password");
     expect(onToast).toHaveBeenCalledWith("Mail account connected");
     expect(onOpenMail).toHaveBeenCalledTimes(1);
@@ -679,10 +717,272 @@ describe("MailAccountSettings", () => {
     expect(body).toMatchObject({
       emailAddress: "person@icloud.com",
       imap: { hostname: "imap.internal.example", port: 993 },
+      // the outgoing server is the provider's own; an incoming override
+      // says nothing about it
+      smtp: { hostname: "smtp.mail.me.com", port: 587, tls: "starttls" },
     });
-    // The form has no SMTP field, so connect must not post an endpoint the
-    // operator could never review or override.
+  });
+
+  it("starts receive-only until the address is complete, then offers the provider's outgoing server", async () => {
+    await openFormWithAccounts();
+    expect(document.body.textContent).toContain("Outgoing (SMTP)");
+    expect(document.body.textContent).toContain(
+      "Needed to reply and send. Uses the same password as incoming.",
+    );
+    expect(sendSwitchIs("off")).toBe(true);
+    expect(document.body.textContent).toContain("Turn on to reply and send from Brain");
+    expect(document.getElementById("mail-smtp-hostname")).toBeNull();
+
+    await act(async () => inputValue(field("mail-email"), "person@icloud.com"));
+
+    expect(sendSwitchIs("on")).toBe(true);
+    expect(document.body.textContent).not.toContain("Turn on to reply and send from Brain");
+    expect(field("mail-smtp-hostname").value).toBe("smtp.mail.me.com");
+    expect(field("mail-smtp-username").value).toBe("person@icloud.com");
+    expect(field("mail-smtp-port").value).toBe("587");
+    expect(outgoingSecurityOption("starttls").getAttribute("aria-checked")).toBe("true");
+    // every outgoing input is a Field atom too
+    for (const id of ["mail-smtp-hostname", "mail-smtp-username", "mail-smtp-port"]) {
+      expect(field(id).closest("label.field")).not.toBeNull();
+    }
+  });
+
+  it.each([
+    ["person@gmail.com", "imap.gmail.com", "smtp.gmail.com", "465", "implicit"],
+    ["person@fastmail.com", "imap.fastmail.com", "smtp.fastmail.com", "465", "implicit"],
+    ["misha@studio.example", "imap.studio.example", "smtp.studio.example", "465", "implicit"],
+  ] as const)(
+    "fills both servers for %s",
+    async (address, imapHost, smtpHost, smtpPort, smtpTls) => {
+      await openFormWithAccounts();
+      await act(async () => inputValue(field("mail-email"), address));
+
+      expect(field("mail-hostname").value).toBe(imapHost);
+      expect(field("mail-smtp-hostname").value).toBe(smtpHost);
+      expect(field("mail-smtp-port").value).toBe(smtpPort);
+      expect(field("mail-smtp-username").value).toBe(address);
+      expect(outgoingSecurityOption(smtpTls).getAttribute("aria-checked")).toBe("true");
+    },
+  );
+
+  it("returns the outgoing server to the derived pair after leaving the provider domain", async () => {
+    await openFormWithAccounts();
+    await act(async () => inputValue(field("mail-email"), "person@icloud.com"));
+    expect(field("mail-smtp-port").value).toBe("587");
+
+    await act(async () => inputValue(field("mail-email"), "misha@studio.example"));
+
+    expect(field("mail-smtp-hostname").value).toBe("smtp.studio.example");
+    expect(field("mail-smtp-port").value).toBe("465");
+    expect(outgoingSecurityOption("implicit").getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("pairs outgoing security with its port unless the port was entered by hand", async () => {
+    await openFormWithAccounts();
+    await act(async () => inputValue(field("mail-email"), "misha@studio.example"));
+    await act(async () => outgoingSecurityOption("starttls").click());
+    expect(field("mail-smtp-port").value).toBe("587");
+    await act(async () => outgoingSecurityOption("implicit").click());
+    expect(field("mail-smtp-port").value).toBe("465");
+    // the incoming pair is untouched by the outgoing choice
+    expect(field("mail-port").value).toBe("993");
+    expect(securityChecked("implicit")).toBe(true);
+
+    await act(async () => inputValue(field("mail-smtp-port"), "2525"));
+    await act(async () => outgoingSecurityOption("starttls").click());
+    expect(field("mail-smtp-port").value).toBe("2525");
+  });
+
+  it("follows the incoming username until the outgoing one is edited by hand", async () => {
+    await openFormWithAccounts();
+    await act(async () => inputValue(field("mail-email"), "misha@studio.example"));
+    await act(async () => inputValue(field("mail-username"), "misha"));
+    expect(field("mail-smtp-username").value).toBe("misha");
+
+    await act(async () => inputValue(field("mail-smtp-username"), "misha-out"));
+    await act(async () => inputValue(field("mail-username"), "misha-in"));
+    expect(field("mail-smtp-username").value).toBe("misha-out");
+  });
+
+  it("connects receive-only when the switch is turned off", async () => {
+    const created = imapAccount();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(accounts()))
+      .mockResolvedValueOnce(response(result(created)));
+    vi.stubGlobal("fetch", fetchMock);
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+    await openOtherEmail();
+    await act(async () => {
+      inputValue(field("mail-email"), created.emailAddress);
+      inputValue(field("mail-password"), "password");
+    });
+    await act(async () => sendSwitch("off").click());
+    expect(document.body.textContent).toContain("Turn on to reply and send from Brain");
+    expect(document.getElementById("mail-smtp-hostname")).toBeNull();
+    await act(async () => submitForm(host));
+    await settle();
+
+    const body: unknown = JSON.parse(String(fetchMock.mock.calls[1][1].body));
     expect(Object.prototype.hasOwnProperty.call(body, "smtp")).toBe(false);
+    expect(onToast).toHaveBeenCalledWith("Mail account connected");
+  });
+
+  it("refuses an empty outgoing server while the switch is on", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response(accounts()));
+    vi.stubGlobal("fetch", fetchMock);
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+    await openOtherEmail();
+    await act(async () => {
+      inputValue(field("mail-email"), "misha@studio.example");
+      inputValue(field("mail-password"), "password");
+      inputValue(field("mail-smtp-hostname"), "");
+    });
+    await act(async () => submitForm(host));
+
+    expect(document.getElementById("mail-smtp-hostname-error")?.textContent).toBe(
+      "Enter the outgoing (SMTP) server name.",
+    );
+    expect(document.activeElement).toBe(field("mail-smtp-hostname"));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("edits an account with an outgoing server and keeps it without asking for the password", async () => {
+    const original = imapAccountWithSmtp();
+    const updated = { ...original, displayName: "Work", updatedAt: original.updatedAt + 1 };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(accounts(original)))
+      .mockResolvedValueOnce(response(result(updated)));
+    vi.stubGlobal("fetch", fetchMock);
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+    await act(async () => button("Personalperson@example.test · IMAP").click());
+    await act(async () => button("Edit").click());
+
+    expect(sendSwitchIs("on")).toBe(true);
+    expect(field("mail-smtp-hostname").value).toBe("smtp.example.test");
+    expect(field("mail-smtp-username").value).toBe("person@example.test");
+    expect(field("mail-smtp-port").value).toBe("465");
+    await act(async () => inputValue(field("mail-display-name"), "Work"));
+    await act(async () => submitForm(host));
+    await settle();
+
+    const request = fetchMock.mock.calls[1][1] as RequestInit;
+    expect(request.method).toBe("PATCH");
+    expect(JSON.parse(String(request.body))).toEqual({
+      emailAddress: "person@example.test",
+      displayName: "Work",
+      imap: {
+        hostname: "imap.example.test",
+        port: 993,
+        tls: "implicit",
+        username: "person@example.test",
+        password: null,
+      },
+      smtp: {
+        hostname: "smtp.example.test",
+        port: 465,
+        tls: "implicit",
+        username: "person@example.test",
+      },
+    });
+    expect(onToast).toHaveBeenCalledWith("Mail settings saved");
+  });
+
+  it("turns the outgoing server off on edit as smtp: null, with no password", async () => {
+    const original = imapAccountWithSmtp();
+    const updated = { ...imapAccount(), updatedAt: original.updatedAt + 1 };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(accounts(original)))
+      .mockResolvedValueOnce(response(result(updated)));
+    vi.stubGlobal("fetch", fetchMock);
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+    await act(async () => button("Personalperson@example.test · IMAP").click());
+    await act(async () => button("Edit").click());
+    await act(async () => sendSwitch("off").click());
+    expect(document.getElementById("mail-smtp-hostname")).toBeNull();
+    await act(async () => submitForm(host));
+    await settle();
+
+    const body = JSON.parse(String(fetchMock.mock.calls[1][1].body));
+    expect(body.smtp).toBeNull();
+    expect(body.imap.password).toBeNull();
+    expect(onToast).toHaveBeenCalledWith("Mail settings saved");
+  });
+
+  it("requires the password again to add an outgoing server to an account", async () => {
+    const original = imapAccount();
+    const updated = imapAccountWithSmtp();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(accounts(original)))
+      .mockResolvedValueOnce(response(result(updated)));
+    vi.stubGlobal("fetch", fetchMock);
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+    await act(async () => button("Personalperson@example.test · IMAP").click());
+    await act(async () => button("Edit").click());
+    expect(sendSwitchIs("off")).toBe(true);
+
+    await act(async () => sendSwitch("on").click());
+    // the guess for the account's own domain, ready to be reviewed
+    expect(field("mail-smtp-hostname").value).toBe("smtp.example.test");
+    expect(field("mail-smtp-username").value).toBe("person@example.test");
+    expect(document.getElementById("mail-password-hint")?.textContent).toBe(
+      "Re-enter the password to add or change the outgoing server.",
+    );
+    await act(async () => submitForm(host));
+    expect(document.getElementById("mail-password-error")?.textContent).toBe(
+      "Re-enter the password to add or change the outgoing server.",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => inputValue(field("mail-password"), "app password"));
+    await act(async () => submitForm(host));
+    await settle();
+
+    const body = JSON.parse(String(fetchMock.mock.calls[1][1].body));
+    expect(body.imap.password).toBe("app password");
+    expect(body.smtp).toEqual({
+      hostname: "smtp.example.test",
+      port: 465,
+      tls: "implicit",
+      username: "person@example.test",
+    });
+    expect(onToast).toHaveBeenCalledWith("Mail settings saved");
+  });
+
+  it("requires the password again after the outgoing server changes", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(response(accounts(imapAccountWithSmtp())));
+    vi.stubGlobal("fetch", fetchMock);
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+    await act(async () => button("Personalperson@example.test · IMAP").click());
+    await act(async () => button("Edit").click());
+    await act(async () => inputValue(field("mail-smtp-hostname"), "smtp.changed.example.test"));
+    await act(async () => submitForm(host));
+
+    expect(document.getElementById("mail-password-error")?.textContent).toBe(
+      "Re-enter the password to add or change the outgoing server.",
+    );
+    expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
   it("submits the provider autoconfig endpoint when defaults are unchanged", async () => {

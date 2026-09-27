@@ -2108,6 +2108,11 @@ test("@release a send holds the sheet still, refuses Esc, and then the sheet is 
         fields.every((field) => (field as HTMLInputElement).readOnly),
       ),
   ).toBe(true);
+  // The cross reads as inert, not only behaves so.
+  await expect(sheet.getByRole("button", { name: "Close draft" })).toHaveAttribute(
+    "aria-disabled",
+    "true",
+  );
   await page.keyboard.press("Escape");
   await page.waitForTimeout(200);
   await expect(sheet).toHaveCount(1);

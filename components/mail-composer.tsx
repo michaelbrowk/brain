@@ -418,15 +418,20 @@ export function MailComposer({
             place, so a sentence arriving in it moves nothing else. On the
             phone From reads here as quiet text and yields the row to the slot
             while a sentence stands (`data-message`). */}
+        {/* While a send is out the cross, the trash and Cc Bcc do not only
+            refuse, they read as inert: `aria-disabled` and `disabled` take
+            the atoms' own dimmed state, and `data-sending` names the row's. */}
         <div
           className="brain-compose-actions"
           data-message={message ? "" : undefined}
+          data-sending={sending ? "" : undefined}
         >
           <IconButton
             type="button"
             size={28}
             aria-label="Close draft"
             title="Close draft"
+            aria-disabled={sending || undefined}
             onClick={close}
             className="brain-touch-hit"
           >
@@ -493,6 +498,7 @@ export function MailComposer({
               size={28}
               aria-label="Discard draft"
               title="Discard draft"
+              aria-disabled={sending || undefined}
               onClick={(event) => discard(event)}
               className="brain-touch-hit"
             >
@@ -589,6 +595,7 @@ export function MailComposer({
                       type="button"
                       variant="quiet"
                       className="brain-compose-copies"
+                      disabled={sending}
                       onClick={() => {
                         focusCcRef.current = true;
                         setRevealedByPress(true);

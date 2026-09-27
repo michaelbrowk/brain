@@ -423,6 +423,21 @@ describe("the compose sheet", () => {
     expect(busy.querySelector(".brain-compose-send-word")?.textContent).toBe("Sending");
   });
 
+  it("reads the cross, the trash and Cc Bcc as inert while a send is out", async () => {
+    await render({ initialDraft: draft({ to: "ben@example.test" }), sending: true });
+    const actions = dialog()!.querySelector(".brain-compose-actions")!;
+    expect(actions.hasAttribute("data-sending")).toBe(true);
+    expect(byLabel("Close draft")?.getAttribute("aria-disabled")).toBe("true");
+    expect(byLabel("Discard draft")?.getAttribute("aria-disabled")).toBe("true");
+    expect(byText("Cc Bcc")?.disabled).toBe(true);
+
+    await render({ initialDraft: draft({ to: "ben@example.test" }) });
+    expect(dialog()!.querySelector(".brain-compose-actions")!.hasAttribute("data-sending")).toBe(false);
+    expect(byLabel("Close draft")?.getAttribute("aria-disabled")).toBeNull();
+    expect(byLabel("Discard draft")?.getAttribute("aria-disabled")).toBeNull();
+    expect(byText("Cc Bcc")?.disabled).toBe(false);
+  });
+
   it("says From once on the phone: the envelope's From row is hidden below 768 and stands from it", () => {
     expect(rule(".brain-compose-from")).toContain("display: none");
     expect(mdRule(".brain-compose-from")).toContain("display: flex");

@@ -523,6 +523,36 @@ describe("MailAccountSettings", () => {
     expect(onOpenMail).not.toHaveBeenCalled();
   });
 
+  it("names both servers when the service refuses the request as invalid", async () => {
+    // The 400 covers the outgoing half too (a port and security the service
+    // does not pair, an extra field), so a sentence that lists only the
+    // incoming fields sends the reader to check the wrong group.
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(accounts()))
+      .mockResolvedValueOnce(
+        response({ apiVersion: 2, error: { code: "account_request_invalid" } }, 400),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+    await openOtherEmail();
+    await act(async () => {
+      inputValue(document.getElementById("mail-email") as HTMLInputElement, "person@example.test");
+      inputValue(document.getElementById("mail-password") as HTMLInputElement, "password");
+    });
+    await act(async () => submitForm(host));
+    await settle();
+
+    expect(document.body.textContent).toContain(
+      "Check the email, username, and password, and the incoming and outgoing server names and ports.",
+    );
+    expect(document.getElementById("mail-email")).not.toBeNull();
+    expect(onOpenMail).not.toHaveBeenCalled();
+  });
+
   it("explains an unreachable company IMAP host without blaming the settings", async () => {
     const fetchMock = vi
       .fn()

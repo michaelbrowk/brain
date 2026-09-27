@@ -1789,8 +1789,10 @@ function readErrorCode(value: unknown): string {
 function messageForError(error: unknown): string {
   const code = error instanceof Error ? error.message : "mail_service_unavailable";
   switch (code) {
+    // The 400 covers both servers: an outgoing port and security the service
+    // does not pair, or an extra field, land here as much as a bad address.
     case "account_request_invalid":
-      return "Check the email, server, port, username, and password.";
+      return "Check the email, username, and password, and the incoming and outgoing server names and ports.";
     case "account_already_exists":
       return "This mail account is already connected.";
     case "account_limit_reached":

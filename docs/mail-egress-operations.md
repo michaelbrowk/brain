@@ -258,6 +258,11 @@ ceilings all sit on this path already, and the unit needs no edit:
 what lets IMAP out today. No Cloudflare resource, credential file or drop-in
 is involved. The flag is read by `readOptionalSmtpTransportConfig` in
 [`lib/mail/service/smtp-runtime-config.ts`](../lib/mail/service/smtp-runtime-config.ts).
+One limit is worth knowing before the first provider is configured: a
+hostname that resolves to more than 16 addresses across A and AAAA
+(`MAIL_RESOURCE_LIMITS.maxDnsAnswers`) fails the whole DNS generation and
+surfaces as `smtp_dns_failed`, on save and on every send attempt, the same
+rule IMAP already lives under.
 
 The value is exactly `0`, `1` or absent. `1` together with
 `BRAIN_MAIL_SMTP_EGRESS_ENABLED=1` is a refusal at start
@@ -273,7 +278,7 @@ holds `BRAIN_PUBLIC_ORIGIN`; append, do not rewrite:
 
 ```bash
 sudo test -f /etc/brain/brain-mail.env
-sudo grep -q '^BRAIN_MAIL_SMTP_EGRESS_ENABLED=1' /etc/brain/brain-mail.env && echo "relay is on: remove it first" && exit 1
+sudo grep -q '^BRAIN_MAIL_SMTP_EGRESS_ENABLED=1' /etc/brain/brain-mail.env && { echo "relay is on: remove it first"; false; }
 printf 'BRAIN_MAIL_SMTP_DIRECT_ENABLED=1\n' | sudo tee -a /etc/brain/brain-mail.env >/dev/null
 sudo systemctl restart brain-mail.service
 ```

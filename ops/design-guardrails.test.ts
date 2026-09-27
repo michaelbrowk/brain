@@ -274,12 +274,12 @@ describe("design guardrails", () => {
   });
 
   it("keeps source files free of raw control bytes", () => {
-    // A regex once carried a literal NUL where ` ` was meant. The code
+    // A regex once carried a literal NUL where `\u0000` was meant. The code
     // ran, and grep and ripgrep both declared the file binary and skipped it
     // from then on: every search of the tree quietly missed one component.
     // Tab, newline and carriage return are text; every other C0 byte is a
     // paste that went wrong and belongs in the file as an escape.
-    const control = /[ --]/;
+    const control = /[\u0000-\u0008\u000b\u000c\u000e-\u001f]/;
 
     const offenders: string[] = [];
     for (const file of sourceFiles()) {

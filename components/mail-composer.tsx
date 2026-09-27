@@ -97,6 +97,7 @@ const ROW_DELAYS = [0.05, 0.08, 0.095, 0.11, 0.14] as const;
 export function MailComposePaper({
   title,
   sending,
+  holdEscape = false,
   focusOnOpen,
   onDismiss,
   children,
@@ -105,6 +106,13 @@ export function MailComposePaper({
   /** While a send is out nothing on the sheet answers: Esc and the cross are
    *  inert, so the dialog refuses its own dismissal until it is over. */
   sending: boolean;
+  /** A menu inside the sheet is open, and Esc belongs to it. Two copies of
+   *  Radix's dismissable layer live in node_modules (the dialog's and the
+   *  menu's), so neither knows the other is above it and one Esc used to
+   *  reach both: the menu closed and the letter went with it. Until the
+   *  copies are deduplicated the sheet refuses Esc while a menu of its own
+   *  is up; after, this stays harmless. */
+  holdEscape?: boolean;
   /** Where the caret goes the moment the sheet stands. Placed from Radix's
    *  own mount hook rather than `autoFocus`, so the element Radix remembers
    *  as "focused before" is the button that opened the sheet and not the
@@ -115,6 +123,15 @@ export function MailComposePaper({
 }) {
   const reduce = useReducedMotion();
   const sheet = useSheetGesture();
+  /** Read by the Esc guard through a ref rather than its closure: Radix
+   *  registers the document listener once and its effect-event wrapper hands
+   *  it the handler of the layer's own last render, which is not always the
+   *  sheet's last render. A ref is current whichever render the handler
+   *  came from. */
+  const escapeHeldRef = useRef(sending || holdEscape);
+  useEffect(() => {
+    escapeHeldRef.current = sending || holdEscape;
+  }, [sending, holdEscape]);
   /** Whatever had the focus when the sheet was asked for: the New message
    *  pill, a Reply button in the reader, a draft's row. Read on the first
    *  render, before Radix moves the caret in, and focused again when the
@@ -175,7 +192,7 @@ export function MailComposePaper({
             focusOnOpen()?.focus({ preventScroll: true });
           }}
           onEscapeKeyDown={(event) => {
-            if (sending) event.preventDefault();
+            if (escapeHeldRef.current) event.preventDefault();
           }}
           onCloseAutoFocus={(event) => {
             event.preventDefault();
@@ -301,60 +318,19 @@ export function MailComposer({
    */
   const canSwitchFrom =
     initialDraft.mode === "compose" && accounts.length >= 2 && onSwitchAccount !== undefined;
+  /** Whether either copy of the From menu is open: while one is, Esc is the
+   *  menu's and the sheet holds still (`holdEscape`). */
+  const [fromMenuOpen, setFromMenuOpen] = useState(false);
   const fromValue = () =>
     canSwitchFrom ? (
-      <Dropdown.Root>
-        <Dropdown.Trigger asChild>
-          <button
-            type="button"
-            className="brain-compose-from-switch"
-            aria-label={`From: ${fromName}`}
-            disabled={sending}
-          >
-            <span className="truncate">{fromName}</span>
-            <Icon name="alt-arrow-down-linear" size={14} className="brain-compose-from-mark" />
-          </button>
-        </Dropdown.Trigger>
-        <Dropdown.Portal>
-          <Dropdown.Content
-            side="bottom"
-            align="start"
-            sideOffset={6}
-            collisionPadding={8}
-            className="brain-menu brain-compose-from-menu z-[var(--z-modal)]"
-          >
-            <Dropdown.RadioGroup
-              value={account.accountId}
-              onValueChange={(accountId) => {
-                if (accountId === account.accountId) return;
-                onSwitchAccount?.(accountId, { to, cc, bcc, subject, text });
-              }}
-            >
-              {accounts.map((candidate) => (
-                <Dropdown.RadioItem
-                  key={candidate.accountId}
-                  value={candidate.accountId}
-                  className="brain-menu-item"
-                >
-                  <span className="brain-compose-from-lines">
-                    <span className="truncate">
-                      {candidate.displayName || candidate.emailAddress}
-                    </span>
-                    {candidate.displayName && (
-                      <span className="text-caption truncate text-ink-3">
-                        {candidate.emailAddress}
-                      </span>
-                    )}
-                  </span>
-                  {candidate.accountId === account.accountId && (
-                    <Icon name="check-linear" size={14} className="shrink-0 text-ink-2" />
-                  )}
-                </Dropdown.RadioItem>
-              ))}
-            </Dropdown.RadioGroup>
-          </Dropdown.Content>
-        </Dropdown.Portal>
-      </Dropdown.Root>
+      <FromSwitch
+        account={account}
+        accounts={accounts}
+        fromName={fromName}
+        disabled={sending}
+        onOpenChange={setFromMenuOpen}
+        onSwitch={(accountId) => onSwitchAccount?.(accountId, { to, cc, bcc, subject, text })}
+      />
     ) : (
       <span className="truncate">{fromName}</span>
     );
@@ -484,6 +460,7 @@ export function MailComposer({
     <MailComposePaper
       title={title}
       sending={sending}
+      holdEscape={fromMenuOpen}
       focusOnOpen={() => (initialDraft.mode === "compose" ? toRef.current : bodyRef.current)}
       onDismiss={close}
     >
@@ -803,6 +780,93 @@ export function MailComposer({
         </ScrollEdge>
       </form>
     </MailComposePaper>
+  );
+}
+
+/**
+ * The From menu: the value as a quiet button with a chevron, and a Radix menu
+ * of the accounts that can send, the current one marked. Controlled, so Esc
+ * can close it by hand: the menu's dismissable layer and the dialog's are two
+ * copies that cannot see each other, so the menu takes Esc itself and the
+ * sheet, told through `onOpenChange`, refuses the same key.
+ */
+function FromSwitch({
+  account,
+  accounts,
+  fromName,
+  disabled,
+  onOpenChange,
+  onSwitch,
+}: {
+  account: PublicMailAccount;
+  accounts: readonly PublicMailAccount[];
+  fromName: string;
+  disabled: boolean;
+  onOpenChange: (open: boolean) => void;
+  onSwitch: (accountId: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const setOpenState = (next: boolean) => {
+    setOpen(next);
+    onOpenChange(next);
+  };
+  return (
+    <Dropdown.Root open={open} onOpenChange={setOpenState}>
+      <Dropdown.Trigger asChild>
+        <button
+          type="button"
+          className="brain-compose-from-switch"
+          aria-label={`From: ${fromName}`}
+          disabled={disabled}
+        >
+          <span className="truncate">{fromName}</span>
+          <Icon name="alt-arrow-down-linear" size={14} className="brain-compose-from-mark" />
+        </button>
+      </Dropdown.Trigger>
+      <Dropdown.Portal>
+        <Dropdown.Content
+          side="bottom"
+          align="start"
+          sideOffset={6}
+          collisionPadding={8}
+          className="brain-menu brain-compose-from-menu z-[var(--z-modal)]"
+          onEscapeKeyDown={(event) => {
+            event.preventDefault();
+            setOpenState(false);
+          }}
+        >
+          <Dropdown.RadioGroup
+            value={account.accountId}
+            onValueChange={(accountId) => {
+              if (accountId === account.accountId) return;
+              onSwitch(accountId);
+            }}
+          >
+            {accounts.map((candidate) => (
+              <Dropdown.RadioItem
+                key={candidate.accountId}
+                value={candidate.accountId}
+                className="brain-menu-item"
+              >
+                <span className="brain-compose-from-lines">
+                  <span className="truncate">
+                    {candidate.displayName || candidate.emailAddress}
+                  </span>
+                  {candidate.displayName && (
+                    <span className="text-caption truncate text-ink-3">
+                      {candidate.emailAddress}
+                    </span>
+                  )}
+                </span>
+                {candidate.accountId === account.accountId && (
+                  <Icon name="check-linear" size={14} className="shrink-0 text-ink-2" />
+                )}
+              </Dropdown.RadioItem>
+            ))}
+          </Dropdown.RadioGroup>
+        </Dropdown.Content>
+      </Dropdown.Portal>
+    </Dropdown.Root>
   );
 }
 

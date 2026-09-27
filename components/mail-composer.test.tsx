@@ -490,6 +490,34 @@ describe("the compose sheet", () => {
       });
     });
 
+    it("Esc inside the From menu closes the menu and leaves the sheet standing", async () => {
+      // Two copies of Radix's dismissable layer live in node_modules (the
+      // dialog's and the menu's), so each thinks it is the top layer and one
+      // Esc used to reach both: the menu closed and the letter went with it.
+      // Real Radix here, not a stub: the seam under test is theirs.
+      const p = await render({ accounts: [account, second], onSwitchAccount: vi.fn() });
+      await openFrom();
+      expect(document.body.querySelectorAll('[role="menuitemradio"]')).toHaveLength(2);
+      await act(async () => {
+        document.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+        );
+      });
+      await settle();
+      expect(document.body.querySelectorAll('[role="menuitemradio"]')).toHaveLength(0);
+      expect(dialog()).not.toBeNull();
+      expect(p.onCancel).not.toHaveBeenCalled();
+
+      // With the menu closed, Esc is the sheet's again.
+      await act(async () => {
+        document.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+        );
+      });
+      await settle();
+      expect(p.onCancel).toHaveBeenCalledTimes(1);
+    });
+
     it("choosing the account already in From changes nothing", async () => {
       const onSwitchAccount = vi.fn();
       await render({ accounts: [account, second], onSwitchAccount });

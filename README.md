@@ -190,7 +190,8 @@ Nothing in notes depends on it. With it stopped, the web app starts and works
 as before, and the Mail surface says "Mail couldn’t load" with a Try again
 button. To run without it, delete the `mail` service and web's
 `depends_on: [mail]` line from the compose file — Compose refuses a
-`depends_on` that names a service the file no longer has.
+`depends_on` that names a service the file no longer has. On an IMAP account
+without an archive folder, Brain creates `Archive` the first time you archive.
 
 **Settings → Modules** turns Mail or Tasks off for this installation. Off means
 hidden and stopped, never deleted: Mail keeps its accounts, its tokens and its

@@ -3796,6 +3796,81 @@ describe("MailSurface", () => {
     expect(client.deleteDraft).toHaveBeenCalledTimes(1);
   });
 
+  it("lets a parked discard go when the Mail surface unmounts, and the pill loses its Undo", async () => {
+    // A route change inside Brain takes the surface that could bring the
+    // sheet back with it. `visibilitychange: hidden` deliberately does NOT
+    // do this: an OS tab discard inside the window keeps the draft and the
+    // way back, and a parked delete behind an in-flight autosave at unload
+    // may not leave, the same limit the autosave itself has.
+    vi.useFakeTimers();
+    const client = makeClient();
+    const { onToast, draftId } = await parkedDiscard(client);
+    onToast.mockClear();
+
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await settle();
+    expect(client.deleteDraft).not.toHaveBeenCalled();
+    expect(onToast).not.toHaveBeenCalled();
+
+    await act(async () => root.render(<div>Home</div>));
+    await settle();
+    expect(client.deleteDraft).toHaveBeenCalledTimes(1);
+    expect(client.deleteDraft).toHaveBeenCalledWith(expect.objectContaining({ draftId }));
+    const respoken = onToast.mock.calls.find(([title]) => title === "Draft discarded");
+    expect(respoken?.[1]).toMatchObject({ id: "mail-draft-discard" });
+    expect((respoken?.[1] as ToastOptions | undefined)?.actionLabel).toBeUndefined();
+  });
+
+  it("re-arms the autosave Undo brings back on its own pause rather than firing it", async () => {
+    vi.useFakeTimers();
+    const client = makeClient();
+    const onToast = vi.fn();
+    await act(async () =>
+      root.render(
+        <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+      ),
+    );
+    await settle();
+    await enterSingleAccount();
+    await click(findButton("New message"));
+    const textarea = () => document.body.querySelector("textarea") as HTMLTextAreaElement;
+    await setInput(textarea(), "Saved first");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(700);
+    });
+    await settle();
+    expect(client.createDraft).toHaveBeenCalledTimes(1);
+    // A newer edit still inside the pause when the trash is pressed.
+    await setInput(textarea(), "Saved first, then more");
+    await click(findButton("Discard draft"));
+    await settle();
+    await act(async () => {
+      discardPill(onToast).onAction?.();
+    });
+    await settle();
+    expect(textarea().value).toBe("Saved first, then more");
+    // Nothing fired at the press of Undo; the pause runs again from here.
+    expect(client.patchDraft).not.toHaveBeenCalledWith(
+      expect.objectContaining({ patch: expect.objectContaining({ text: "Saved first, then more" }) }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(699);
+    });
+    expect(client.patchDraft).not.toHaveBeenCalledWith(
+      expect.objectContaining({ patch: expect.objectContaining({ text: "Saved first, then more" }) }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2);
+    });
+    await settle();
+    expect(client.patchDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ patch: expect.objectContaining({ text: "Saved first, then more" }) }),
+    );
+    expect(client.deleteDraft).not.toHaveBeenCalled();
+  });
+
   it("resuming the draft that was just discarded is its Undo", async () => {
     vi.useFakeTimers();
     const client = makeClient();

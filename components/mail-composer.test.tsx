@@ -403,6 +403,26 @@ describe("the compose sheet", () => {
     expect(rule(".brain-compose-actions")).toContain("margin-top: var(--inset)");
   });
 
+  it("draws Send as a 28 capsule on the desktop, with the glyph only while sending", async () => {
+    expect(mdRule(".brain-compose-send")).toContain("height: 28px");
+    expect(rule(".brain-compose-send-label")).toContain("justify-items: center");
+
+    await render({ initialDraft: draft({ to: "ben@example.test" }) });
+    const rest = sendButton();
+    expect(rest.querySelector(".brain-compose-send-glyph")).toBeNull();
+    expect(rest.querySelector(".brain-compose-send-word")?.textContent).toBe("Send");
+    // The hidden cell holds the widest state, glyph and word, so the capsule
+    // is the same size before and after the press.
+    const ghost = rest.querySelector(".brain-compose-send-ghost");
+    expect(ghost?.querySelector("svg")).not.toBeNull();
+    expect(ghost?.textContent).toBe("Sending");
+
+    await render({ initialDraft: draft({ to: "ben@example.test" }), sending: true });
+    const busy = sendButton();
+    expect(busy.querySelector(".brain-compose-send-word .brain-compose-send-glyph svg")).not.toBeNull();
+    expect(busy.querySelector(".brain-compose-send-word")?.textContent).toBe("Sending");
+  });
+
   it("says From once on the phone: the envelope's From row is hidden below 768 and stands from it", () => {
     expect(rule(".brain-compose-from")).toContain("display: none");
     expect(mdRule(".brain-compose-from")).toContain("display: flex");

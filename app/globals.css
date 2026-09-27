@@ -4867,21 +4867,26 @@ a.brain-share-url:active {
   display: none;
   flex-shrink: 0;
 }
-/* Send keeps its size across the label swap: a hidden "Sending" holds the
-   width, and the live word sits over it */
+/* Send keeps its size across the label swap: a hidden cell holds the widest
+   state (the glyph and "Sending"), the live cell sits over it, and both are
+   centred in the capsule so "Send" alone stands in the middle */
 .brain-compose-send {
-  flex-shrink: 0;
-}
-.brain-compose-send-glyph {
-  display: inline-flex;
   flex-shrink: 0;
 }
 .brain-compose-send-label {
   display: inline-grid;
+  justify-items: center;
 }
 .brain-compose-send-label > * {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   grid-area: 1 / 1;
-  text-align: left;
+  white-space: nowrap;
+}
+.brain-compose-send-glyph {
+  display: inline-flex;
+  flex-shrink: 0;
 }
 .brain-compose-send-ghost {
   visibility: hidden;
@@ -5010,6 +5015,12 @@ a.brain-share-url:active {
   }
   .brain-compose-kbd {
     display: inline-flex;
+  }
+  /* the capsule the other controls in the row are: 28, not the dialog
+     primary's 32; the phone keeps 32 for the thumb */
+  .brain-compose-send {
+    height: 28px;
+    padding: 0 10px;
   }
   .brain-compose-column {
     padding: 24px 32px 40px;

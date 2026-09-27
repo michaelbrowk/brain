@@ -504,12 +504,14 @@ export function MailComposer({
           <span aria-hidden className="brain-compose-kbd">
             <Kbd>⌘↵</Kbd>
           </span>
-          {/* The one ink fill on the surface (§2 → Primary). The label swaps
-              inside a box that never changes size: a hidden "Sending" holds
-              the width, so the button is the same object before and after
-              the press. The wait is a glyph, and the press is refused by the
-              submit handler rather than by `disabled`, so the button still
-              reads as the way out. */}
+          {/* The one ink fill on the surface (§2 → Primary), a 28 capsule
+              like the controls beside it. At rest it is the one word; while
+              a send is out the word is "Sending" with the glyph turning
+              before it. The label swaps inside a box that never changes
+              size: a hidden cell holds the widest state (glyph and
+              "Sending"), so the button is the same object before and after
+              the press. The press is refused by the submit handler rather
+              than by `disabled`, so the button still reads as the way out. */}
           <Button
             type="submit"
             variant="ink"
@@ -518,24 +520,17 @@ export function MailComposer({
             disabled={sendBlocked}
             className="brain-compose-send brain-touch-hit"
           >
-            {/* The wait is the glyph turning on SPIN; under reduced motion
-                it stands still and the word says the work is happening. */}
-            <motion.span
-              key={sending ? "working" : "waiting"}
-              className="brain-compose-send-glyph"
-              animate={sending && !reduce ? { rotate: 360 } : undefined}
-              transition={sending && !reduce ? SPIN : undefined}
-            >
-              <Icon name={sending ? "restart-linear" : "plain-linear"} size={16} />
-            </motion.span>
             <span className="brain-compose-send-label">
               <span aria-hidden className="brain-compose-send-ghost">
+                <Icon name="restart-linear" size={16} />
                 Sending
               </span>
               {/* Two words changing in one place read as two words unless
                   something bridges them, so the swap resolves from a 2px blur
                   over DUR.base. Only the swap: the word does not blur in with
-                  the sheet. */}
+                  the sheet. The wait is the glyph turning on SPIN; under
+                  reduced motion it stands still and the word says the work
+                  is happening. */}
               <motion.span
                 key={sending ? "working" : "waiting"}
                 className="brain-compose-send-word"
@@ -543,6 +538,15 @@ export function MailComposer({
                 animate={{ opacity: 1, filter: "blur(0px)" }}
                 transition={{ duration: DUR.base, ease: EASE_OUT }}
               >
+                {sending && (
+                  <motion.span
+                    className="brain-compose-send-glyph"
+                    animate={reduce ? undefined : { rotate: 360 }}
+                    transition={reduce ? undefined : SPIN}
+                  >
+                    <Icon name="restart-linear" size={16} />
+                  </motion.span>
+                )}
                 {sending ? "Sending" : "Send"}
               </motion.span>
             </span>

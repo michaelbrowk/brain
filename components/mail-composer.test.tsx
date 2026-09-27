@@ -607,6 +607,16 @@ describe("the compose sheet", () => {
     expect(dialog()!.querySelector('.brain-compose-slot [role="status"]')).toBeNull();
   });
 
+  it("keeps 16px inputs on a touch screen at any width: the 14 at md is gated on a fine pointer", () => {
+    expect(rule(".brain-compose-input")).toContain("font-size: 16px");
+    // The plain md step no longer sizes the input: an iPad at 1024 is past md
+    // and would zoom on a 14.
+    expect(composeMd()).not.toMatch(/\.brain-compose-input \{[^}]*font-size: 14px/);
+    expect(css).toMatch(
+      /@media \(min-width: 768px\) and \(pointer: fine\) \{\s*\.brain-compose-input \{[^}]*font-size: 14px/,
+    );
+  });
+
   it("keeps the phone's bottom safe area under the letter", () => {
     expect(rule(".brain-compose-column")).toContain(
       "calc(24px + env(safe-area-inset-bottom, 0px))",

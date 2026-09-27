@@ -5019,7 +5019,8 @@ a.brain-share-url:active {
   background: transparent;
   color: var(--ink);
   outline: none;
-  /* 16px on touch: iOS zooms the page on any focused field below it */
+  /* 16px wherever the screen may be touched: iOS zooms the page on any
+     focused field below it. The 14 for a fine pointer is gated below. */
   font-size: 16px;
 }
 .brain-compose-input::placeholder {
@@ -5100,11 +5101,14 @@ a.brain-share-url:active {
   .brain-compose-from {
     display: flex;
   }
+}
+/* Table 14 for the values only where a pointer is fine: width alone is not
+   the desktop, and an iPad at 1024 is past md with a touch screen that zooms
+   on any focused field below 16. The subject keeps its own 17 by its own
+   specificity, so it needs no line here. */
+@media (min-width: 768px) and (pointer: fine) {
   .brain-compose-input {
     font-size: 14px;
-  }
-  .brain-compose-subject > .brain-compose-input {
-    font-size: 17px;
   }
 }
 

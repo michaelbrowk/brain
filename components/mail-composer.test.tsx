@@ -617,6 +617,15 @@ describe("the compose sheet", () => {
     );
   });
 
+  it("draws Cc Bcc as quiet ink-3 text that turns to ink under the pointer, with no glass fill", () => {
+    expect(rule(".brain-compose-copies")).toContain("color: var(--ink-3)");
+    // The quiet atom's hover is a capsule's glass fill; at the row's end this
+    // is a word, and a word answers the pointer with its colour alone.
+    expect(css).toMatch(
+      /@media \(hover: hover\) \{\s*\.brain-compose-copies:hover,\s*\.brain-compose-copies\[data-hover\] \{[^}]*background-color: transparent;[^}]*color: var\(--ink\)/,
+    );
+  });
+
   it("keeps the phone's bottom safe area under the letter", () => {
     expect(rule(".brain-compose-column")).toContain(
       "calc(24px + env(safe-area-inset-bottom, 0px))",

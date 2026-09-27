@@ -5031,10 +5031,22 @@ a.brain-share-url:active {
 .brain-compose-subject > .brain-compose-input {
   font-size: 17px;
 }
+/* quiet text at the row's end, not a capsule: ink-3 that turns to ink under
+   the pointer and nothing else changes. The quiet atom's hover is a glass
+   fill, which is right for a capsule in a pill and wrong for a word standing
+   on the rule beside the address, so the fill is taken back here. */
 .brain-compose-copies {
   height: 28px;
   padding: 0 8px;
   flex-shrink: 0;
+  color: var(--ink-3);
+}
+@media (hover: hover) {
+  .brain-compose-copies:hover,
+  .brain-compose-copies[data-hover] {
+    background-color: transparent;
+    color: var(--ink);
+  }
 }
 /* the two rows grow from height 0 when revealed, so the box clips while
    that plays; the inputs draw no ring of their own for it to cut */

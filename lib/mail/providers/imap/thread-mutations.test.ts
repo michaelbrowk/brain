@@ -173,7 +173,7 @@ describe("IMAP thread mutations", () => {
         .map((command) =>
           command.name === "move" ? `move ${command.destination}` : commandLabel(command),
         ),
-    ).toEqual(["list", "create Archive", "subscribe Archive", "list", "move Archive"]);
+    ).toEqual(["list", "create Archive", "list", "move Archive"]);
     expect(server.mailbox("INBOX").messages.has(1)).toBe(false);
     expect(server.mailbox("Archive").messages.size).toBe(1);
     expect(opened.count).toBe(1);
@@ -188,13 +188,14 @@ describe("IMAP thread mutations", () => {
     await provider.archiveThread("i77u1", signal());
 
     expect(server.commands).toContainEqual({ name: "create", path: "INBOX.Archive" });
-    expect(server.commands).toContainEqual({ name: "subscribe", path: "INBOX.Archive" });
     expect(server.mailbox("INBOX.Archive").messages.size).toBe(1);
   });
 
-  it("treats ALREADYEXISTS from CREATE as success and goes on to LIST and MOVE", async () => {
+  it("treats a folder another client created first (created: false) as success and subscribes to it", async () => {
     // Another client created the folder between our LIST and our CREATE.
-    // ImapFlow reports the server's ALREADYEXISTS as `created: false`.
+    // ImapFlow reports the server's ALREADYEXISTS as `created: false` and
+    // subscribes only what it created itself, so this is the one case where
+    // the adapter sends the SUBSCRIBE.
     const server = serverFixture({
       mailboxes: [{ path: "Sent" }],
       createAnswers: "already_exists",
@@ -204,6 +205,7 @@ describe("IMAP thread mutations", () => {
     await provider.archiveThread("i77u1", signal());
 
     expect(server.commands).toContainEqual({ name: "create", path: "Archive" });
+    expect(server.commands).toContainEqual({ name: "subscribe", path: "Archive" });
     expect(server.commands.filter((command) => command.name === "list")).toHaveLength(2);
     expect(server.mailbox("Archive").messages.size).toBe(1);
   });

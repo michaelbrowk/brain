@@ -142,7 +142,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
   private readonly relocations = new Map<string, ThreadLocation>();
   private mailboxRoles: ReadonlyMap<ImapMailboxRole, string | null> | null = null;
   /** Where a CREATE would put an Archive on this server, read off the same LIST. */
-  private archiveCreatePath: string | null = null;
+  private archiveCreatePath = archiveCreatePath([]);
   /**
    * Whether this adapter has already asked the server to CREATE an Archive.
    * One attempt per adapter: a server that refuses once will refuse the next
@@ -598,11 +598,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     }
     const path = this.mailboxRoles.get(role) ?? null;
     if (path !== null) return path;
-    if (
-      role === "archive" &&
-      !this.archiveCreateAttempted &&
-      this.archiveCreatePath !== null
-    ) {
+    if (role === "archive" && !this.archiveCreateAttempted) {
       let exists: boolean;
       try {
         exists = await createArchiveMailbox(client, this.archiveCreatePath);
@@ -1800,30 +1796,34 @@ function inboxChildPrefix(entry: ImapMailboxDescriptor): string | null {
 }
 
 /**
- * CREATE the Archive and SUBSCRIBE to it. True when the folder is there
- * afterwards, false when the server answered the CREATE with a refusal, which
- * is the same 409 as having no folder at all, because retrying cannot make a
- * server accept a CREATE it declined. ALREADYEXISTS is success: another client
- * made the folder between our LIST and our CREATE, and it is there either way.
- * An error with no server answer in it, a socket that closed or a deadline
- * that closed it, is not a refusal and is thrown as the transport failure it
- * is. A declined SUBSCRIBE is ignored: the folder is usable unsubscribed, and
- * only clients that list LSUB would miss it.
+ * CREATE the Archive. True when the folder is there afterwards, false when
+ * the server answered the CREATE with a refusal, which is the same 409 as
+ * having no folder at all, because retrying cannot make a server accept a
+ * CREATE it declined. An error with no server answer in it, a socket that
+ * closed or a deadline that closed it, is not a refusal and is thrown as the
+ * transport failure it is.
+ *
+ * ImapFlow subscribes to what it creates and answers `created: false` to the
+ * server's ALREADYEXISTS, which is success too: another client made the folder
+ * between our LIST and our CREATE. That folder is the one nobody subscribed
+ * for us, so the SUBSCRIBE goes out only then, and a declined one is ignored:
+ * the folder is usable unsubscribed, and only clients that list LSUB would
+ * miss it.
  */
 async function createArchiveMailbox(
   client: ImapSessionClient,
   path: string,
 ): Promise<boolean> {
-  let created: string;
+  let outcome: { readonly path: string; readonly created: boolean };
   try {
-    created = (await client.mailboxCreate(path)).path;
+    outcome = await client.mailboxCreate(path);
   } catch (error) {
     if (!isServerAnswer(error)) throw mapImapProviderError(error);
-    if (serverResponseCode(error) !== "ALREADYEXISTS") return false;
-    created = path;
+    return false;
   }
+  if (outcome.created) return true;
   try {
-    await client.mailboxSubscribe(created);
+    await client.mailboxSubscribe(outcome.path);
   } catch {
     // Subscription is a courtesy to other clients, not a condition of the move.
   }
@@ -1848,13 +1848,6 @@ function isServerAnswer(error: unknown): boolean {
     typeof answer.responseStatus === "string" ||
     typeof answer.serverResponseCode === "string"
   );
-}
-
-/** ImapFlow's `serverResponseCode`, the bracketed code from a NO or BAD. */
-function serverResponseCode(error: unknown): string | null {
-  if (error === null || typeof error !== "object") return null;
-  const code = (error as { readonly serverResponseCode?: unknown }).serverResponseCode;
-  return typeof code === "string" ? code.toUpperCase() : null;
 }
 
 function isSelectableMailbox(entry: ImapMailboxDescriptor): boolean {

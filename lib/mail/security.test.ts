@@ -1205,6 +1205,7 @@ describe("mail security and resource contracts", () => {
       remoteImageCount: 3,
       remoteImageAttemptCount: 2,
       errorCode: "imap_timeout",
+      transport: "direct",
       queueDepth: 9,
       nested: {
         errorCode: "must_not_survive",
@@ -1223,7 +1224,15 @@ describe("mail security and resource contracts", () => {
       remoteImageCount: 3,
       remoteImageAttemptCount: 2,
       errorCode: "imap_timeout",
+      transport: "direct",
     });
+    // The transport is a stable code, never a host: a hostname is dropped.
+    expect(
+      projectMailLogRecord({
+        event: "mail_service_started",
+        transport: "smtp.example.test",
+      }),
+    ).toEqual({ event: "mail_service_started" });
   });
 
   it("drops credentials, server text, arrays, buffers, and unknown nested data", () => {

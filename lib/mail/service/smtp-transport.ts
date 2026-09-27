@@ -189,7 +189,7 @@ function mapAuthenticationError(errorCode: string): MailAccountErrorCode {
   return "smtp_connection_failed";
 }
 
-type CreateDirectConnection = (options: {
+export type CreateDirectConnection = (options: {
   readonly host: string;
   readonly port: number;
   readonly family: 4 | 6;

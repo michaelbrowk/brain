@@ -1548,6 +1548,7 @@ const MAIL_LOG_CODE_FIELDS = Object.freeze([
   "phase",
   "durationBucket",
   "errorCode",
+  "transport",
 ] as const);
 const MAIL_LOG_STABLE_CODE = /^[a-z][a-z0-9_]{0,63}$/;
 const MAIL_LOG_SAFE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;

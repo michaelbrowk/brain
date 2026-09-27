@@ -2,9 +2,14 @@ import { expect, test, type Page, type Route } from "playwright/test";
 
 import {
   validateMailDraftCreateInput,
+  validateMailDraftDeleteInput,
   validateMailDraftMutationInput,
 } from "../lib/mail/draft-codec";
-import type { MailDraftDto, MailDraftMutationInput } from "../lib/mail/draft-types";
+import type {
+  MailDraftDeleteInput,
+  MailDraftDto,
+  MailDraftMutationInput,
+} from "../lib/mail/draft-types";
 import { MAIL_MUTATION_TIMEOUT_MS } from "../components/mail-surface-client";
 
 const gmailCapabilities = {
@@ -252,6 +257,7 @@ async function installMailRoutes(
   const mutationBodies: unknown[] = [];
   const searchBodies: unknown[] = [];
   const threadListRequests: string[] = [];
+  const deleteRequests: MailDraftDeleteInput[] = [];
   const drafts = new Map<string, MailDraftDto>();
   let sentThreadTrashed = false;
   // Server truth for thread-1's read state: opening the thread auto-fires
@@ -450,9 +456,22 @@ async function installMailRoutes(
         operationId: null,
       });
     }
+    if (parts.length === 4 && request.method() === "DELETE") {
+      const input = validateMailDraftDeleteInput(request.postDataJSON());
+      deleteRequests.push(input);
+      if (
+        input.draftId !== draftId ||
+        input.accountId !== draft.accountId ||
+        input.expectedRevision !== draft.revision
+      ) {
+        return route.fulfill({ status: 409, body: "{}" });
+      }
+      drafts.delete(draftId);
+      return fulfill(route, { apiVersion: 1, deleted: true, replayed: false });
+    }
     return route.fulfill({ status: 405, body: "{}" });
   });
-  return { sendRequests, mutationBodies, searchBodies, threadListRequests };
+  return { sendRequests, deleteRequests, mutationBodies, searchBodies, threadListRequests };
 }
 
 async function installImapMailRoutes(page: Page) {
@@ -2198,6 +2217,75 @@ test("@mobile @release on a phone the sheet is the window, Send is on top, and r
   expect(geometry.fontSizes.every((size) => size >= 16)).toBe(true);
   expect(geometry.dialogTransform).toBe("none");
   expect(geometry.shellTransform).toBe("none");
+});
+
+test("@release Discard takes the sheet down at once and parks the delete behind Undo", async ({
+  page,
+}) => {
+  await login(page);
+  const { deleteRequests } = await installMailRoutes(page);
+  await page.goto("/mail");
+  await enterSingleAccount(page);
+
+  // A draft the server knows: the first keystroke's autosave has landed.
+  const created: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "POST" && new URL(request.url()).pathname === "/api/mail/drafts") {
+      created.push(request.url());
+    }
+  });
+  await page.getByRole("button", { name: "New message" }).click();
+  const sheet = page.locator('[role="dialog"][aria-label="New message"]');
+  await expect(page.getByLabel("To", { exact: true })).toBeFocused();
+  await page.getByLabel("Message", { exact: true }).fill("Never mind");
+  await expect.poll(() => created.length).toBe(1);
+  await composeSettled(page);
+
+  // No question in the way: the sheet is gone within the dismiss exit, and
+  // nothing has been deleted.
+  const pressedAt = Date.now();
+  await sheet.getByRole("button", { name: "Discard draft" }).click();
+  await expect(page.locator('[role="alertdialog"]')).toHaveCount(0);
+  await expect(sheet).toHaveCount(0);
+  expect(Date.now() - pressedAt).toBeLessThanOrEqual(300);
+  expect(deleteRequests).toHaveLength(0);
+
+  // The way back: a pill with the ring, since there is a deadline to draw.
+  const pill = page.locator(".brain-toast", { hasText: "Draft discarded" });
+  await expect(pill).toBeVisible();
+  await expect(pill.locator("[data-toast-ring]")).toHaveCount(1);
+
+  // Undo brings the same letter back, and no delete ever goes out.
+  await pill.getByRole("button", { name: "Undo" }).click();
+  await expect(sheet).toBeVisible();
+  await expect(page.getByLabel("Message", { exact: true })).toHaveValue("Never mind");
+  await expect(pill).toHaveCount(0);
+  await page.waitForTimeout(500);
+  expect(deleteRequests).toHaveLength(0);
+  expect(created).toHaveLength(1);
+
+  // Discarded again and left alone: exactly one delete, once the window is
+  // spent. The window is the real 9 seconds (`SMART_UNDO_SEC`), not a test
+  // flag, so this waits it out.
+  await sheet.getByRole("button", { name: "Discard draft" }).click();
+  await expect(sheet).toHaveCount(0);
+  await expect(pill).toBeVisible();
+  await expect.poll(() => deleteRequests.length, { timeout: 12_000 }).toBe(1);
+  await expect(pill).toHaveCount(0);
+  await page.waitForTimeout(500);
+  expect(deleteRequests).toHaveLength(1);
+  // The create carried the empty fields and the patch the text: revision 1.
+  expect(deleteRequests[0]?.expectedRevision).toBe(1);
+
+  // An empty composer has nothing to bring back: it leaves without a pill.
+  await page.getByRole("button", { name: "New message" }).click();
+  await expect(page.getByLabel("To", { exact: true })).toBeFocused();
+  await sheet.getByRole("button", { name: "Discard draft" }).click();
+  await expect(sheet).toHaveCount(0);
+  await page.waitForTimeout(300);
+  await expect(page.locator(".brain-toast")).toHaveCount(0);
+  expect(deleteRequests).toHaveLength(1);
+  expect(created).toHaveLength(1);
 });
 
 /** The sheet and its rows arrive on transforms, and a box measured while they

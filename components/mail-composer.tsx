@@ -28,7 +28,6 @@ import {
   type MailRecipientField,
 } from "@/lib/mail/recipients";
 import { Button, IconButton } from "./ui/button";
-import { ConfirmDialog } from "./ui/confirm-dialog";
 import { Icon } from "./ui/icon";
 import { Kbd, useShortcutTitle } from "./ui/primitives";
 import { ScrollEdge } from "./ui/scroll-edge";
@@ -252,11 +251,6 @@ export function MailComposer({
    *  the writer types on: it answered a gesture, and the next gesture is
    *  the writer moving past it. */
   const [dropRefused, setDropRefused] = useState(false);
-  const [confirmDiscard, setConfirmDiscard] = useState(false);
-  /** The Discard button, held past the state clear so the confirmation can
-   *  hand focus back to it — Radix asks where focus goes as it unmounts, and
-   *  Cancel has to leave the composer exactly as it was. */
-  const discardInvokerRef = useRef<HTMLElement | null>(null);
   const toRef = useRef<HTMLInputElement | null>(null);
   const ccRef = useRef<HTMLInputElement | null>(null);
   const bodyRef = useRef<HTMLTextAreaElement | null>(null);
@@ -308,8 +302,6 @@ export function MailComposer({
     ccRef.current?.focus({ preventScroll: true });
   }, [showCopies]);
 
-  const dirty = Boolean(to.trim() || cc.trim() || bcc.trim() || subject.trim() || text.trim());
-
   /** Close keeps the draft and asks nothing. Inert while a send is out. */
   const close = () => {
     if (sending) return;
@@ -318,18 +310,14 @@ export function MailComposer({
 
   /**
    * Discard is not Close. Closing keeps the draft — it is already saved and
-   * the writer finds it in Drafts — and asks nothing. Discard DELETES it from
-   * the provider, which nothing undoes, so it asks, and the question names
-   * what disappears rather than saying "this draft". An empty composer has
-   * nothing to lose and goes without a word.
+   * the writer finds it in Drafts. Discard removes it, and it no longer asks
+   * first: the sheet goes at the press and the surface puts up a pill with
+   * Undo, holding the provider delete behind it for the pill's window. The
+   * protection is the way back, not a question in the way. Inert while a
+   * send is out.
    */
-  const discard = (event: { currentTarget: HTMLElement }) => {
+  const discard = () => {
     if (sending) return;
-    if (dirty) {
-      discardInvokerRef.current = event.currentTarget;
-      setConfirmDiscard(true);
-      return;
-    }
     onDiscard();
   };
 
@@ -520,7 +508,7 @@ export function MailComposer({
               aria-label="Discard draft"
               title="Discard draft"
               aria-disabled={sending || undefined}
-              onClick={(event) => discard(event)}
+              onClick={discard}
               className="brain-touch-hit"
             >
               <Icon name="trash-bin-trash-linear" size={16} />
@@ -720,23 +708,6 @@ export function MailComposer({
           </div>
         </ScrollEdge>
       </form>
-
-      <ConfirmDialog
-        open={confirmDiscard}
-        onOpenChange={setConfirmDiscard}
-        title="Discard this draft?"
-        description={
-          subject.trim()
-            ? `“${subject.trim()}” will be deleted from Drafts. This can’t be undone — closing the composer instead keeps it there.`
-            : "This draft will be deleted from Drafts. This can’t be undone — closing the composer instead keeps it there."
-        }
-        confirmLabel="Discard"
-        returnFocus={() => discardInvokerRef.current}
-        onConfirm={() => {
-          setConfirmDiscard(false);
-          onDiscard();
-        }}
-      />
     </MailComposePaper>
   );
 }

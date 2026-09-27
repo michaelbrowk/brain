@@ -324,6 +324,7 @@ export interface MailSurfaceClient {
   deleteDraft(
     input: MailDraftDeleteInput,
     signal?: AbortSignal,
+    options?: { readonly keepalive?: boolean },
   ): Promise<MailDraftDeleteResult>;
   sendDraft(
     input: MailDraftSendInput,
@@ -573,7 +574,7 @@ export const defaultMailSurfaceClient: MailSurfaceClient = {
     return readDraftMutationResult(payload);
   },
 
-  async deleteDraft(input, signal) {
+  async deleteDraft(input, signal, options) {
     if (!isDraftId(input.draftId)) throw new Error("invalid mail draft request");
     const payload = await requestJson(
       `/api/mail/drafts/${encodeURIComponent(input.draftId)}`,
@@ -587,6 +588,9 @@ export const defaultMailSurfaceClient: MailSurfaceClient = {
           expectedRevision: input.expectedRevision,
         }),
         signal,
+        // The delete a discard parked behind its Undo goes out at pagehide
+        // like the last autosave: allowed to outlive the tab.
+        keepalive: options?.keepalive,
       },
     );
     return readDraftDeleteResult(payload);

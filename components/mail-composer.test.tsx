@@ -382,6 +382,22 @@ describe("the compose sheet", () => {
     expect(p.onCancel).toHaveBeenCalledTimes(2);
   });
 
+  it("takes the sheet down from the trash without a question, and not while sending", async () => {
+    // Discard used to ask through a ConfirmDialog. The way back is the
+    // surface's undo pill now, so the press is answered at once and the sheet
+    // owns no second dialog.
+    const p = await render({ initialDraft: draft({ subject: "Half a thought", text: "Hi" }) });
+    await act(async () => byLabel("Discard draft")?.click());
+    await settle();
+    expect(p.onDiscard).toHaveBeenCalledTimes(1);
+    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(document.body.textContent).not.toContain("Discard this draft?");
+
+    const busy = await render({ initialDraft: draft({ text: "Hi" }), sending: true });
+    await act(async () => byLabel("Discard draft")?.click());
+    expect(busy.onDiscard).not.toHaveBeenCalled();
+  });
+
   it("reveals Cc and Bcc from the quiet text at To's end and puts the caret in Cc", async () => {
     await render();
     const sheet = dialog()!;

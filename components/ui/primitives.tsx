@@ -89,6 +89,15 @@ export type ToastOptions = {
    * down at the press looked spent over a run that had not been stopped.
    */
   readonly onAction?: () => boolean | void | Promise<unknown>;
+  /**
+   * The pill left WITHOUT its action being spent: its window ran out, or a
+   * message wearing its `id` took its place. A caller that parked real work
+   * behind the way back (the compose sheet's Discard holds the provider
+   * delete behind its Undo) does that work here, and only here — the shell
+   * owns the window, hover included, so the shell is the one that knows when
+   * the way back is gone. Never called after `onAction` spent the pill.
+   */
+  readonly onExpire?: () => void;
   /** What the button says while a promise from `onAction` is still open. */
   readonly pendingLabel?: string;
   /**

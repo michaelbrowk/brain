@@ -505,6 +505,11 @@ export function Shell({
   const urgentTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** The standing toast, readable synchronously from inside `showToast`. */
   const toastRef = useRef<ShellToast | null>(null);
+  /** True from the moment an action spends the standing pill until the next
+   *  message is presented, so `presentToast` can tell a pill its action took
+   *  down from one the window or a same-id message took: only the second
+   *  owes its caller `onExpire`. */
+  const toastSpentRef = useRef(false);
   /** Messages waiting for a standing undo to live out its window. */
   const toastQueue = useRef<ShellToast[]>([]);
   const toastEndsAt = useRef(0);
@@ -767,8 +772,16 @@ export function Shell({
    */
   const presentToast = useCallback(
     (next: ShellToast | null) => {
+      // A pill leaving unspent is an event its caller may be waiting on — a
+      // delete parked behind an Undo goes out at this moment and no other.
+      // Spent by its own action it owes nothing; taken by its window or by a
+      // message wearing its id, it says so through `onExpire`.
+      const standing = toastRef.current;
+      const spent = toastSpentRef.current;
+      toastSpentRef.current = false;
       toastRef.current = next;
       setToast(next);
+      if (standing && standing !== next && !spent) standing.onExpire?.();
       if (!next || next.durationMs === null) {
         if (toastTimer.current) clearTimeout(toastTimer.current);
         toastTimer.current = null;
@@ -836,6 +849,7 @@ export function Shell({
       const outcome = action();
       if (outcome === false) return;
       if (!(outcome instanceof Promise)) {
+        toastSpentRef.current = true;
         presentToastRef.current(toastQueue.current.shift() ?? null);
         return;
       }
@@ -855,6 +869,7 @@ export function Shell({
         toastActionPendingRef.current = false;
         setToastActionPending(false);
         if (toastRef.current !== standing) return;
+        toastSpentRef.current = true;
         presentToastRef.current(toastQueue.current.shift() ?? null);
       });
     },

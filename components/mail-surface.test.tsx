@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { emitMailCommand } from "./mail-commands";
 import { accountWords } from "./mail-row";
 import { MailSurface, UNIFIED_FANOUT_LIMIT } from "./mail-surface";
+import { SMART_UNDO_MS } from "./shell/helpers";
 import type { ToastOptions } from "./ui/primitives";
 
 // Animation playback is not under test — assert structure and props. The real
@@ -3062,8 +3063,11 @@ describe("MailSurface", () => {
     const pendingDelete = deferred<{ replayed: boolean }>();
     const deleteDraft = vi.fn().mockReturnValue(pendingDelete.promise);
     const client = makeClient({ patchDraft, deleteDraft });
+    const onToast = vi.fn();
     await act(async () =>
-      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      root.render(
+        <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+      ),
     );
     await settle();
     await enterSingleAccount();
@@ -3087,7 +3091,10 @@ describe("MailSurface", () => {
     expect(document.body.textContent).toContain("Not saved");
 
     await click(findButton("Discard draft"));
-    await confirmSystemDialog("Discard");
+    await settle();
+    await act(async () => {
+      discardPill(onToast).onExpire?.();
+    });
     await vi.waitFor(() => expect(deleteDraft).toHaveBeenCalledTimes(1));
 
     expect(patchDraft).toHaveBeenCalledTimes(2);
@@ -3401,11 +3408,27 @@ describe("MailSurface", () => {
     expect(window.localStorage.getItem(removedKey)).toBeNull();
   });
 
-  it("discards a saved draft when the writer taps discard", async () => {
-    vi.useFakeTimers();
-    const client = makeClient();
+  // DISCARD WITHOUT A MODAL. The trash takes the sheet down at once and a
+  // pill offers the way back; the provider delete is parked behind that pill
+  // and goes out only when the way back is gone: the window ran out, the page
+  // is unloading, or the writer opened another message. Undo brings the same
+  // draft back (same draftId, revision and text) and nothing is ever deleted.
+
+  /** The pill the surface posted for the discard, with its two callbacks. */
+  function discardPill(onToast: ReturnType<typeof vi.fn>): ToastOptions {
+    const call = onToast.mock.calls.find(([title]) => title === "Draft discarded");
+    if (!call) throw new Error("no Draft discarded pill was posted");
+    return call[1] as ToastOptions;
+  }
+
+  /** A composer with a saved draft ("Never mind", created after the autosave
+   *  pause) whose trash was just pressed. */
+  async function parkedDiscard(client: MailSurfaceClient) {
+    const onToast = vi.fn();
     await act(async () =>
-      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      root.render(
+        <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+      ),
     );
     await settle();
     await enterSingleAccount();
@@ -3418,22 +3441,106 @@ describe("MailSurface", () => {
       await vi.advanceTimersByTimeAsync(700);
     });
     await settle();
-    expect(client.createDraft).toHaveBeenCalled();
-
+    expect(client.createDraft).toHaveBeenCalledTimes(1);
+    const draftId = vi.mocked(client.createDraft).mock.calls[0]?.[0].draftId as string;
     await click(findButton("Discard draft"));
-    await confirmSystemDialog("Discard");
     await settle();
-    await settle();
+    return { onToast, draftId };
+  }
 
-    expect(client.deleteDraft).toHaveBeenCalled();
+  it("takes the sheet down at the trash and parks the delete behind Undo", async () => {
+    vi.useFakeTimers();
+    const client = makeClient();
+    const { onToast } = await parkedDiscard(client);
+
+    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull();
+    expect(document.body.querySelector("textarea")).toBeNull();
+    expect(client.deleteDraft).not.toHaveBeenCalled();
+    const pill = discardPill(onToast);
+    expect(pill).toMatchObject({
+      icon: "trash-bin-trash-linear",
+      actionLabel: "Undo",
+      durationMs: SMART_UNDO_MS,
+      id: "mail-draft-discard",
+    });
+    expect(typeof pill.onAction).toBe("function");
+    expect(typeof pill.onExpire).toBe("function");
+  });
+
+  it("Undo brings the same draft back, and no delete ever goes out", async () => {
+    vi.useFakeTimers();
+    const client = makeClient();
+    const { onToast, draftId } = await parkedDiscard(client);
+    const pill = discardPill(onToast);
+
+    await act(async () => {
+      pill.onAction?.();
+    });
+    await settle();
+    const textarea = document.body.querySelector("textarea") as HTMLTextAreaElement;
+    expect(textarea.value).toBe("Never mind");
+    // The same draft, not a new one: the next edit patches the draft that was
+    // created, at the revision it reached, and nothing is created again.
+    await setInput(textarea, "Never mind, again");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(700);
+    });
+    await settle();
+    expect(client.createDraft).toHaveBeenCalledTimes(1);
+    // The create carried the empty fields and the first patch the text, so
+    // the draft stood at revision 1 when it was parked; the next edit names
+    // that revision.
+    expect(client.patchDraft).toHaveBeenCalledWith(
+      expect.objectContaining({
+        draftId,
+        expectedRevision: 1,
+        patch: expect.objectContaining({ text: "Never mind, again" }),
+      }),
+    );
+    // A stale window closing over a restored draft deletes nothing.
+    await act(async () => {
+      pill.onExpire?.();
+    });
+    await settle();
+    expect(client.deleteDraft).not.toHaveBeenCalled();
+  });
+
+  it("lets the delete go once the window closes, exactly once", async () => {
+    vi.useFakeTimers();
+    const client = makeClient();
+    const { onToast, draftId } = await parkedDiscard(client);
+    const pill = discardPill(onToast);
+
+    await act(async () => {
+      pill.onExpire?.();
+    });
+    await settle();
+    await settle();
+    expect(client.deleteDraft).toHaveBeenCalledTimes(1);
+    expect(client.deleteDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ draftId, expectedRevision: 1 }),
+    );
+    expect(window.localStorage.length).toBe(0);
+
+    // Nothing reaches a settled discard twice: not a second expiry, not a
+    // late Undo.
+    await act(async () => {
+      pill.onExpire?.();
+      pill.onAction?.();
+    });
+    await settle();
+    expect(client.deleteDraft).toHaveBeenCalledTimes(1);
     expect(document.body.querySelector("textarea")).toBeNull();
   });
 
-  it("discards a local-only draft before its first autosave", async () => {
+  it("parks a local-only draft too, and Undo gets its text back with nothing created or deleted", async () => {
     vi.useFakeTimers();
     const client = makeClient();
+    const onToast = vi.fn();
     await act(async () =>
-      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      root.render(
+        <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+      ),
     );
     await settle();
     await enterSingleAccount();
@@ -3446,13 +3553,126 @@ describe("MailSurface", () => {
     expect(window.localStorage.length).toBe(1);
 
     await click(findButton("Discard draft"));
-    await confirmSystemDialog("Discard");
     await settle();
+    expect(document.body.querySelector("textarea")).toBeNull();
+    const first = discardPill(onToast);
+    await act(async () => {
+      first.onAction?.();
+    });
+    await settle();
+    expect(
+      (document.body.querySelector("textarea") as HTMLTextAreaElement).value,
+    ).toBe("Local only draft");
+    expect(client.createDraft).not.toHaveBeenCalled();
 
+    // Discarded again and left to expire: no draft was ever on the server, so
+    // nothing is created to be deleted, and the local copy goes.
+    onToast.mockClear();
+    await click(findButton("Discard draft"));
+    await settle();
+    await act(async () => {
+      discardPill(onToast).onExpire?.();
+    });
+    await settle();
     expect(client.createDraft).not.toHaveBeenCalled();
     expect(client.deleteDraft).not.toHaveBeenCalled();
     expect(window.localStorage.length).toBe(0);
     expect(document.body.querySelector("textarea")).toBeNull();
+  });
+
+  it("an empty composer leaves at the trash without a pill", async () => {
+    const client = makeClient();
+    const onToast = vi.fn();
+    await act(async () =>
+      root.render(
+        <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+      ),
+    );
+    await settle();
+    await enterSingleAccount();
+    await click(findButton("New message"));
+    await click(findButton("Discard draft"));
+    await settle();
+
+    expect(document.body.querySelector("textarea")).toBeNull();
+    expect(onToast).not.toHaveBeenCalled();
+    expect(client.createDraft).not.toHaveBeenCalled();
+    expect(client.deleteDraft).not.toHaveBeenCalled();
+  });
+
+  it("opening another message lets a parked discard go and spends its pill", async () => {
+    vi.useFakeTimers();
+    const client = makeClient();
+    const { onToast, draftId } = await parkedDiscard(client);
+    onToast.mockClear();
+
+    await click(findButton("New message"));
+    await settle();
+    expect(client.deleteDraft).toHaveBeenCalledTimes(1);
+    expect(client.deleteDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ draftId }),
+    );
+    // The pill is said again under its id with no way back: the same
+    // sentence, now without an Undo that could do nothing.
+    const respoken = onToast.mock.calls.find(([title]) => title === "Draft discarded");
+    expect(respoken?.[1]).toMatchObject({ id: "mail-draft-discard" });
+    expect((respoken?.[1] as ToastOptions | undefined)?.actionLabel).toBeUndefined();
+    expect(document.body.querySelector("textarea")).not.toBeNull();
+  });
+
+  it("flushes a parked discard with keepalive when the page starts unloading", async () => {
+    vi.useFakeTimers();
+    const client = makeClient();
+    const { draftId } = await parkedDiscard(client);
+
+    await act(async () => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+    await settle();
+    expect(client.deleteDraft).toHaveBeenCalledTimes(1);
+    expect(client.deleteDraft).toHaveBeenCalledWith(
+      expect.objectContaining({ draftId }),
+      undefined,
+      { keepalive: true },
+    );
+  });
+
+  it("resuming the draft that was just discarded is its Undo", async () => {
+    vi.useFakeTimers();
+    const client = makeClient();
+    const { onToast, draftId } = await parkedDiscard(client);
+    // The delete has not gone out, so Drafts still lists it. Opening that row
+    // must not delete the draft on the way in and then fail to find it.
+    vi.mocked(client.listDrafts).mockResolvedValue([
+      {
+        draftId,
+        accountId: accountA.accountId,
+        revision: 0,
+        state: "editing",
+        intent: { kind: "compose" },
+        subject: "",
+        updatedAt: 1_700_000_000_000,
+      },
+    ]);
+
+    await goTo("Drafts");
+    await settle();
+    const row = document.body.querySelector(
+      '[aria-label="Saved drafts"] [role="listitem"] button.brain-mail-row',
+    );
+    expect(row).not.toBeNull();
+    await click(row as HTMLButtonElement);
+    await settle();
+    expect(
+      (document.body.querySelector("textarea") as HTMLTextAreaElement).value,
+    ).toBe("Never mind");
+    expect(client.deleteDraft).not.toHaveBeenCalled();
+    // The pill's own callbacks are spent with it.
+    await act(async () => {
+      discardPill(onToast).onExpire?.();
+    });
+    await settle();
+    expect(client.deleteDraft).not.toHaveBeenCalled();
   });
 
   it("replays a response-lost create before discarding its server draft", async () => {
@@ -3473,8 +3693,11 @@ describe("MailSurface", () => {
         }),
       );
     const client = makeClient({ createDraft });
+    const onToast = vi.fn();
     await act(async () =>
-      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      root.render(
+        <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+      ),
     );
     await settle();
     await enterSingleAccount();
@@ -3492,7 +3715,11 @@ describe("MailSurface", () => {
     await settle();
 
     await click(findButton("Discard draft"));
-    await confirmSystemDialog("Discard");
+    await settle();
+    // The window closes; only now does the parked delete go out.
+    await act(async () => {
+      discardPill(onToast).onExpire?.();
+    });
     await vi.waitFor(() => expect(client.deleteDraft).toHaveBeenCalledTimes(1));
 
     expect(createDraft).toHaveBeenCalledTimes(2);
@@ -3515,8 +3742,11 @@ describe("MailSurface", () => {
       .mockReturnValueOnce(firstCreate)
       .mockRejectedValueOnce(new Error("replay unavailable"));
     const client = makeClient({ createDraft });
+    const onToast = vi.fn();
     await act(async () =>
-      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      root.render(
+        <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+      ),
     );
     await settle();
     await enterSingleAccount();
@@ -3533,7 +3763,10 @@ describe("MailSurface", () => {
     await settle();
 
     await click(findButton("Discard draft"));
-    await confirmSystemDialog("Discard");
+    await settle();
+    await act(async () => {
+      discardPill(onToast).onExpire?.();
+    });
     await vi.waitFor(() => expect(createDraft).toHaveBeenCalledTimes(2));
 
     expect(client.deleteDraft).not.toHaveBeenCalled();
@@ -3803,84 +4036,6 @@ describe("MailSurface", () => {
     expect(client.deleteDraft).not.toHaveBeenCalled();
     await settleFocus();
     expect(document.activeElement).toBe(invoker);
-  });
-
-  it("names the draft it is about to discard, and keeps it on Cancel", async () => {
-    const client = makeClient();
-    await act(async () =>
-      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
-    );
-    await settle();
-    await enterSingleAccount();
-    await click(findButton("New message"));
-    await setInput(
-      document.body.querySelector(
-        'input[placeholder="Subject"]',
-      ) as HTMLInputElement,
-      "Half a thought",
-    );
-    await click(findButton("Discard draft"));
-
-    expect(document.body.textContent).toContain("Discard this draft?");
-    expect(document.body.textContent).toContain(
-      "“Half a thought” will be deleted from Drafts",
-    );
-    await confirmSystemDialog("Cancel");
-
-    // Still writing, and nothing was deleted: Discard deletes, Close keeps,
-    // and the question belongs to the one that cannot be taken back.
-    expect(client.deleteDraft).not.toHaveBeenCalled();
-    expect(
-      (
-        document.body.querySelector(
-          'input[placeholder="Subject"]',
-        ) as HTMLInputElement
-      ).value,
-    ).toBe("Half a thought");
-  });
-
-  it("answers Esc as Cancel on the composer's question too, and returns focus", async () => {
-    const client = makeClient();
-    await act(async () =>
-      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
-    );
-    await settle();
-    await enterSingleAccount();
-    await click(findButton("New message"));
-    await setInput(
-      document.body.querySelector(
-        'input[placeholder="Subject"]',
-      ) as HTMLInputElement,
-      "Still writing",
-    );
-
-    const invoker = findButton("Discard draft");
-    await click(invoker);
-    const dialog = document.body.querySelector('[role="alertdialog"]');
-    expect(dialog).not.toBeNull();
-    // Cancel holds focus, so Enter can never be the destructive answer.
-    expect(dialog?.contains(document.activeElement)).toBe(true);
-    expect(document.activeElement?.textContent?.trim()).toBe("Cancel");
-
-    await act(async () => {
-      document.dispatchEvent(
-        new KeyboardEvent("keydown", { key: "Escape", bubbles: true }),
-      );
-    });
-    await settle();
-
-    expect(document.body.querySelector('[role="alertdialog"]')).toBeNull();
-    expect(client.deleteDraft).not.toHaveBeenCalled();
-    // Cancel leaves the composer exactly as it was, focus included.
-    await settleFocus();
-    expect(document.activeElement).toBe(invoker);
-    expect(
-      (
-        document.body.querySelector(
-          'input[placeholder="Subject"]',
-        ) as HTMLInputElement
-      ).value,
-    ).toBe("Still writing");
   });
 
   it("stacks a draft row's two lines instead of laying them side by side", async () => {

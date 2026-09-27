@@ -28,6 +28,21 @@ function imapAccount(
   };
 }
 
+function imapAccountWithSmtp(
+  accountId = "account-a0123456789abcdef0123456789abcdef",
+  emailAddress = "person@example.test",
+) {
+  return {
+    ...imapAccount(accountId, emailAddress),
+    smtp: {
+      hostname: "smtp.example.test",
+      port: 465,
+      tls: "implicit",
+      username: emailAddress,
+    },
+  };
+}
+
 function gmailAccount() {
   return {
     accountId: "account-affffffffffffffffffffffffffffffff",
@@ -704,23 +719,37 @@ describe("MailAccountSettings", () => {
     });
   });
 
-  it("fails closed on an account carrying SMTP, pinning the unbuilt send surface", async () => {
-    // Known gap, not desired behaviour. parsePublicAccount accepts an exact
-    // field set with no "smtp", so the moment any account stores an SMTP
-    // endpoint the whole list stops rendering. Whoever adds the SMTP review
-    // field must widen the parser and delete this test.
-    const withSmtp = {
-      ...imapAccount(),
-      smtp: { hostname: "smtp.example.test", port: 465, tls: "implicit", username: "a@b.test" },
-    };
-    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(accounts(withSmtp))));
+  it("renders an account carrying an outgoing server", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(response(accounts(imapAccountWithSmtp()))),
+    );
+    await act(async () =>
+      root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
+    );
+    await settle();
+
+    expect(document.body.textContent).not.toContain("Mail setup is unavailable");
+    expect(document.body.textContent).toContain("person@example.test");
+  });
+
+  it.each([
+    ["a port outside the range", { hostname: "smtp.example.test", port: 0, tls: "implicit", username: "a@b.test" }],
+    ["an unknown security mode", { hostname: "smtp.example.test", port: 465, tls: "ssl", username: "a@b.test" }],
+    ["an empty server name", { hostname: "", port: 465, tls: "implicit", username: "a@b.test" }],
+    ["an extra field", { hostname: "smtp.example.test", port: 465, tls: "implicit", username: "a@b.test", password: "x" }],
+  ])("fails closed on an outgoing server with %s", async (_label, smtp) => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(response(accounts({ ...imapAccount(), smtp }))),
+    );
     await act(async () =>
       root.render(<MailAccountSettings onOpenMail={onOpenMail} onToast={onToast} />),
     );
     await settle();
 
     expect(document.body.textContent).toContain("Mail setup is unavailable right now.");
-    expect(document.body.textContent).not.toContain("imap.example.test");
+    expect(document.body.textContent).not.toContain("person@example.test");
   });
 
   it("still derives imap.<domain> for a domain with no provider entry", async () => {

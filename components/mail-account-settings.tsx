@@ -23,15 +23,23 @@ type PublicMailAccountBase = {
   readonly updatedAt: number;
 };
 
+/** One server of an IMAP account, incoming or outgoing. The outgoing one
+ *  carries no password of its own: the service signs in to both with the
+ *  mailbox password, which is why the form never asks for a second one. */
+type MailEndpoint = {
+  readonly hostname: string;
+  readonly port: number;
+  readonly tls: MailTlsMode;
+  readonly username: string;
+};
+
 type PublicMailAccount =
   | (PublicMailAccountBase & {
       readonly providerKind: "imap";
-      readonly imap: {
-        readonly hostname: string;
-        readonly port: number;
-        readonly tls: MailTlsMode;
-        readonly username: string;
-      };
+      readonly imap: MailEndpoint;
+      /** Missing means receive only, the shape every account had before
+       *  the form could configure an outgoing server. */
+      readonly smtp?: MailEndpoint;
     })
   | (PublicMailAccountBase & { readonly providerKind: "gmail" });
 
@@ -1122,6 +1130,11 @@ function parsePublicAccount(value: unknown): PublicMailAccount {
     "updatedAt",
     "providerKind",
     ...(value.providerKind === "imap" ? ["imap"] : []),
+    // the outgoing server is optional on the wire, so its key is admitted
+    // only when the account carries one; an exact record stays exact
+    ...(value.providerKind === "imap" && Object.prototype.hasOwnProperty.call(value, "smtp")
+      ? ["smtp"]
+      : []),
   ];
   if (
     !isExactRecord(value, fields) ||
@@ -1149,29 +1162,37 @@ function parsePublicAccount(value: unknown): PublicMailAccount {
   if (value.providerKind === "gmail") {
     return { ...base, providerKind: "gmail" };
   }
-  if (
-    !isExactRecord(value.imap, ["hostname", "port", "tls", "username"]) ||
-    typeof value.imap.hostname !== "string" ||
-    !value.imap.hostname ||
-    !Number.isSafeInteger(value.imap.port) ||
-    (value.imap.port as number) < 1 ||
-    (value.imap.port as number) > 65_535 ||
-    (value.imap.tls !== "implicit" && value.imap.tls !== "starttls") ||
-    typeof value.imap.username !== "string" ||
-    !value.imap.username
-  ) {
-    throw new Error("mail_service_invalid_response");
-  }
-  const imapPort = value.imap.port as number;
+  const imap = parseEndpoint(value.imap);
+  const smtp = "smtp" in value ? parseEndpoint(value.smtp) : undefined;
   return {
     ...base,
     providerKind: "imap",
-    imap: {
-      hostname: value.imap.hostname,
-      port: imapPort,
-      tls: value.imap.tls,
-      username: value.imap.username,
-    },
+    imap,
+    ...(smtp ? { smtp } : {}),
+  };
+}
+
+/** The same checks for both servers of an account: an exact record, a real
+ *  port, one of the two security modes, a non-empty name on each side. */
+function parseEndpoint(value: unknown): MailEndpoint {
+  if (
+    !isExactRecord(value, ["hostname", "port", "tls", "username"]) ||
+    typeof value.hostname !== "string" ||
+    !value.hostname ||
+    !Number.isSafeInteger(value.port) ||
+    (value.port as number) < 1 ||
+    (value.port as number) > 65_535 ||
+    (value.tls !== "implicit" && value.tls !== "starttls") ||
+    typeof value.username !== "string" ||
+    !value.username
+  ) {
+    throw new Error("mail_service_invalid_response");
+  }
+  return {
+    hostname: value.hostname,
+    port: value.port as number,
+    tls: value.tls,
+    username: value.username,
   };
 }
 

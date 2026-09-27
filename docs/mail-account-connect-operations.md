@@ -45,6 +45,22 @@ folders other than the Inbox and conversation grouping remain unavailable for
 custom-domain accounts. This is not a production-readiness claim: the exact artifact still needs an isolated
 runtime smoke and a read-only real-provider canary.
 
+An IMAP account can also carry an outgoing (SMTP) server, the "Outgoing
+(SMTP)" group of the same Settings form. For a mailbox a provider hosts at your
+own domain, enter the submission server the provider's own help pages name
+(the `smtp.` host of the provider, not of your domain), port `465` with TLS or
+`587` with STARTTLS, and the full address as the username. There is no second
+password: Brain signs in to the outgoing server with the same app password it
+uses for incoming, so a provider with two-step sign-in needs an app password
+for both, and the account password is refused. Adding or redirecting the
+outgoing server asks for that password again; removing it ("Remove outgoing
+server" on the account card) is a `PATCH { "smtp": null }` and asks for
+nothing. Sending itself needs direct SMTP enabled on the service
+(`docs/mail-egress-operations.md`); without it a connect that carries `smtp`
+is refused with `smtp_submission_unavailable`, and an account saved with one
+before the flag went away shows "sending is unavailable" on its card until the
+service is back.
+
 With no account, health reports `receiveReadiness` and `sendReadiness` as
 `not_configured`. A wired account reports both paths as `degraded` until a real
 Gmail canary proves readiness. Neither state may be presented as proof that the

@@ -516,6 +516,48 @@ describe("the compose sheet", () => {
     expect(actions().hasAttribute("data-message")).toBe(false);
   });
 
+  it("gives focus back to what opened it when it goes, or to the shell's fallback if that is inert", async () => {
+    // Radix returns focus from a timeout after the unmount.
+    const afterUnmount = () =>
+      act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      });
+
+    const opener = document.createElement("button");
+    opener.textContent = "New message";
+    document.body.appendChild(opener);
+    opener.focus();
+    await render();
+    expect(document.activeElement).not.toBe(opener);
+    await act(async () => root.unmount());
+    await afterUnmount();
+    expect(document.activeElement).toBe(opener);
+    opener.remove();
+
+    // The opener is under an inert ancestor (a route change left the shell
+    // inert): focus lands on the shell's own fallback instead.
+    const fallback = document.createElement("main");
+    fallback.tabIndex = -1;
+    fallback.setAttribute("data-dialog-focus-fallback", "");
+    document.body.appendChild(fallback);
+    const inertShell = document.createElement("div");
+    inertShell.setAttribute("inert", "");
+    const inertOpener = document.createElement("button");
+    inertShell.appendChild(inertOpener);
+    document.body.appendChild(inertShell);
+    inertOpener.focus();
+    // `render` unmounts the previous root first; there is none standing.
+    root = createRoot(host);
+    await act(async () => root.render(<MailComposer {...props()} />));
+    await settle();
+    await act(async () => root.unmount());
+    await afterUnmount();
+    expect(document.activeElement).toBe(fallback);
+    fallback.remove();
+    inertShell.remove();
+    root = createRoot(host);
+  });
+
   it("says From once on the phone: the envelope's From row is hidden below 768 and stands from it", () => {
     expect(rule(".brain-compose-from")).toContain("display: none");
     expect(mdRule(".brain-compose-from")).toContain("display: flex");

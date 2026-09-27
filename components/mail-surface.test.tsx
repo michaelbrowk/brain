@@ -5231,6 +5231,49 @@ describe("MailSurface", () => {
       ).toBeNull();
     });
 
+    it("leaves the reader alone when a layer above has already answered Escape", async () => {
+      // One pane: the panes do not fit, so Escape's next branch would close
+      // the reader.
+      vi.stubGlobal("matchMedia", (query: string) => ({
+        matches: false,
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      }));
+      const client = keyboardClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+
+      await pressKey("j");
+      expect(client.readThread).toHaveBeenCalledTimes(1);
+      expect(document.body.querySelector(".brain-mail-reader-head")).not.toBeNull();
+      await pressKey("c");
+      expect(
+        document.body.querySelector('[role="dialog"][aria-label="New message"]'),
+      ).not.toBeNull();
+
+      // Escape at the document, where the sheet's own layer answers it and
+      // marks it handled before it reaches mail's window listener.
+      await act(async () => {
+        document.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }),
+        );
+      });
+      await settle();
+      expect(
+        document.body.querySelector('[role="dialog"][aria-label="New message"]'),
+      ).toBeNull();
+      expect(document.body.querySelector(".brain-mail-reader-head")).not.toBeNull();
+      expect(client.readThread).toHaveBeenCalledTimes(1);
+    });
+
     it("c is a no-op when the account cannot compose", async () => {
       const client = keyboardClient({
         loadAccounts: vi.fn().mockResolvedValue([imapAccount]),

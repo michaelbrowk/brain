@@ -4794,8 +4794,9 @@ a.brain-share-url:active {
   background: var(--paper);
   color: var(--ink);
   outline: none;
-  /* the gutter the envelope's labels hang in; the values, the subject and
-     the body all start on the rule to its right */
+  /* the gutter the envelope's labels hang in, with the values on the rule to
+     its right; the subject, the notice and the body start under the labels
+     at the document's own left edge, the way the showcase reads */
   --compose-gutter: 40px;
 }
 .brain-compose-form {
@@ -4948,10 +4949,8 @@ a.brain-share-url:active {
 .brain-compose-input::placeholder {
   color: var(--ink-3);
 }
-/* the subject stands on the values' rule at its own size (Subheading 17) */
-.brain-compose-subject {
-  padding-left: calc(var(--compose-gutter) + 12px);
-}
+/* the subject is the letter's heading at its own size (Subheading 17), at
+   the document's left edge under the labels */
 .brain-compose-subject > .brain-compose-input {
   font-size: 17px;
 }
@@ -4967,7 +4966,7 @@ a.brain-share-url:active {
 }
 .brain-compose-notice {
   flex-shrink: 0;
-  padding: 4px 0 0 calc(var(--compose-gutter) + 12px);
+  padding-top: 4px;
   color: var(--ink-2);
 }
 .brain-compose-fold {
@@ -4984,7 +4983,6 @@ a.brain-share-url:active {
   min-height: 0;
   flex: 1 0 auto;
   flex-direction: column;
-  padding-left: calc(var(--compose-gutter) + 12px);
 }
 .brain-compose-body > textarea {
   width: 100%;

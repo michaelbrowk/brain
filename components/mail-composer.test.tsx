@@ -383,6 +383,22 @@ describe("the compose sheet", () => {
     ).toBe(true);
   });
 
+  it("starts the subject, the body and the notice at the document's left edge, under the labels", () => {
+    // A selector with no flat rule of its own declares nothing, which is the
+    // point: nothing indents these off the column's edge.
+    const declared = (selector: string) => {
+      try {
+        return rule(selector);
+      } catch {
+        return "";
+      }
+    };
+    for (const selector of [".brain-compose-subject", ".brain-compose-body", ".brain-compose-notice"]) {
+      expect(declared(selector), selector).not.toContain("padding-left");
+      expect(declared(selector), selector).not.toMatch(/padding: [^;]*calc\(var\(--compose-gutter\)/);
+    }
+  });
+
   it("says From once on the phone: the envelope's From row is hidden below 768 and stands from it", () => {
     expect(rule(".brain-compose-from")).toContain("display: none");
     expect(mdRule(".brain-compose-from")).toContain("display: flex");

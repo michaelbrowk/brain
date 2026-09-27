@@ -6,7 +6,7 @@
 
 ## What this component does
 
-DigitalOcean blocked outbound SMTP ports 465 and 587 when this component was designed, and the feasibility Worker was the answer: it opens one raw TCP connection to an already validated public IP and relays bytes over WebSocket. The block has since been lifted for Brain's droplet, so the relay is now the alternative route and direct submission from the host is the primary one; see "Direct submission" at the end. Either way Brain owns SMTP, STARTTLS, TLS certificate verification, original-hostname SNI, AUTH, and the message body.
+DigitalOcean blocked outbound SMTP ports 465 and 587 when this component was designed, and the feasibility Worker was the answer: it opens one raw TCP connection to an already validated public IP and relays bytes over WebSocket. The block still stands on DigitalOcean by default (re-measured 2026-09-27), so the relay remains the way to send from such a host until the provider lifts it; direct submission is for hosts that permit the ports. Either way Brain owns SMTP, STARTTLS, TLS certificate verification, original-hostname SNI, AUTH, and the message body.
 
 The control envelope never contains a provider hostname, SMTP password, token, MIME metadata, or a request to “send mail”. On port 587 the pre-STARTTLS greeting and EHLO remain ordinary transport bytes and can contain hostnames; the Worker does not parse or log them. It accepts only a signed literal IPv4/IPv6 address on port 465 or 587.
 

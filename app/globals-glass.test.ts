@@ -41,7 +41,7 @@ describe("liquid glass foundations", () => {
       // carries no blur.
       /^\.brain-cover-foot > i:nth-child\([12]\)$/,
       /^\.brain-cover-left > i$/,
-      /^\.(btn-glass|crumb|toolbar-pill|brain-menu|brain-share-popover|brain-dialog|brain-palette|brain-mail-search|brain-composer-sheet|brain-when-panel)$/,
+      /^\.(btn-glass|crumb|toolbar-pill|brain-menu|brain-share-popover|brain-dialog|brain-palette|brain-mail-search|brain-when-panel)$/,
       /^\.milkdown \.milkdown-table-block \.cell-handle \.button-group$/,
     ];
     for (const owner of owners) {

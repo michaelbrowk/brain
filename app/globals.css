@@ -2876,7 +2876,8 @@ a.brain-share-url:active {
 .brain-palette,
 .brain-palette-mobile,
 .brain-toast,
-.brain-mobile-pages {
+.brain-mobile-pages,
+.brain-compose-paper {
   --ink: var(--ink-v2);
   --ink-2: var(--ink-2-v2);
   --ink-3: var(--ink-3-v2);
@@ -2884,9 +2885,16 @@ a.brain-share-url:active {
   font-family: var(--font-sf);
   font-optical-sizing: auto;
 }
-.brain-shell {
+/* The sidebar's width and the canvas offset live on :root, not on the shell:
+   the toast column is a portal at the body (outside the shell root, so it
+   stands over the compose sheet) and still centres on the canvas, so it has
+   to read the same offset the shell's own descendants read. The offset
+   follows the shell's collapsed state through :has(). */
+:root {
   --sidebar-w: 280px;
   --canvas-offset: 0px;
+}
+.brain-shell {
   /* the band the floating chrome occupies at the top of the canvas */
   --chrome-top: calc(env(safe-area-inset-top, 0px) + var(--inset) + 36px);
   position: relative;
@@ -2895,10 +2903,10 @@ a.brain-share-url:active {
   background: transparent;
 }
 @media (min-width: 768px) {
-  .brain-shell {
+  :root:has(.brain-shell) {
     --canvas-offset: calc(var(--inset) * 2 + var(--sidebar-w));
   }
-  .brain-shell[data-sidebar-collapsed] {
+  :root:has(.brain-shell[data-sidebar-collapsed]) {
     --canvas-offset: 0px;
   }
 }
@@ -4773,85 +4781,275 @@ a.brain-share-url:active {
   background-color: var(--fill-active);
 }
 
-/* P5-c — the composer. A thick sheet inside the pane on the standard inset:
-   it floats over the canvas the way a dialog does and materializes on open
-   (keyframes on data-state — framer is kept for what physically moves). Every
-   writing surface inside it is a paper inset: the To/Cc/Bcc/Subject fields are
-   the `.field` atom and the message body is a paper block with the same
-   hairline → blue focus ring, because glass never sits under editable text
-   (ban #2). The actions are plain buttons on the sheet rather than a
-   ToolbarPill: a second material inside a material is ban #1. Concentric:
-   sheet 20 = control 10 + padding 10.
-   Below md the composer keeps the sheet form — it slides in from the bottom
-   edge and the grip drags it away on a spring from the current value (ban
-   #8), so there the entrance belongs to framer and the keyframe stays off. */
-.brain-composer {
+/* P5-c — the compose sheet. Writing a letter takes the whole window: an
+   opaque paper surface fixed over everything on --z-modal, in a portal at the
+   body, with the shell inert under it. No glass, no rings: the To/Cc/Bcc and
+   Subject rows and the body are text on the paper with nothing drawn around
+   them, and a label at ink-3 that turns to ink when its row holds the caret
+   is the whole focus signal (the keyboard's ring stays global). The actions
+   row sits ON TOP, so on a phone Send is never under the keyboard. One fold
+   line (--hair) is the only line on the sheet. Everything here is a token,
+   so the dark theme is the same rules. */
+.brain-compose-paper {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
   display: flex;
-  min-width: 0;
-  min-height: 0;
-  flex: 1;
-  padding-top: 8px;
-  /* The bar floats over the canvas, and the sheet fills its parent, so without
-     this the footer and its Send button sit underneath the bar. */
-  padding-bottom: var(--tabbar-reserve);
+  flex-direction: column;
+  height: 100dvh;
+  padding-top: env(safe-area-inset-top, 0px);
+  background: var(--paper);
+  color: var(--ink);
+  outline: none;
+  /* the gutter the envelope's labels hang in, with the values on the rule to
+     its right; the subject, the notice and the body start under the labels
+     at the document's own left edge, the way the showcase reads */
+  --compose-gutter: 40px;
 }
-.brain-composer-sheet {
-  position: relative;
-  isolation: isolate;
+.brain-compose-form {
   display: flex;
-  min-width: 0;
   min-height: 0;
-  width: 100%;
   flex: 1;
   flex-direction: column;
-  margin-inline: auto;
-  border-radius: var(--r-sheet) var(--r-sheet) 0 0;
-  background: var(--glass-thick);
-  -webkit-backdrop-filter: var(--blur-thick);
-  backdrop-filter: var(--blur-thick);
-  box-shadow: var(--rim), var(--shadow-3);
-  color: var(--ink);
-  --kbd-fill: var(--fill-kbd-glass);
-  --kbd-rim: 0 0 0 0.5px var(--fill-rim);
-  --skeleton-fill: var(--fill-skeleton-glass);
 }
-/* the sheen and the edge-light ride their own layer so materialize can bring
-   the edge in at 60% without ever animating the blur */
-.brain-composer-sheet::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  border-radius: inherit;
-  background: var(--glass-sheen);
-  box-shadow: var(--edge-light);
-  pointer-events: none;
+/* the actions row: 44 on a phone (a thumb's row), 36 on a desktop; the
+   window's own inset above it and from either edge, like every other strip
+   of chrome (§4: nothing floating touches the window edge) */
+.brain-compose-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 44px;
+  margin-top: var(--inset);
+  padding-inline: max(var(--inset), env(safe-area-inset-left, 0px))
+    max(var(--inset), env(safe-area-inset-right, 0px));
+}
+/* From as quiet text in the row, on the phone only; while a sentence stands
+   in the slot the row is the slot's (`data-message`) */
+.brain-compose-actions-from {
+  display: none;
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* Control's line-height 1 clips descenders on a truncating span (§3) */
+  line-height: 1.25;
+  color: var(--ink-2);
+}
+.brain-compose-paper[data-sheet] .brain-compose-actions:not([data-message]) .brain-compose-actions-from {
+  display: block;
+}
+.brain-compose-paper[data-sheet] .brain-compose-actions:not([data-message]) .brain-compose-slot {
+  flex: 0 0 0px;
+  overflow: hidden;
+}
+/* the slot always keeps its place: a sentence arriving in it moves nothing */
+.brain-compose-slot {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  align-items: center;
+}
+.brain-compose-slot-line {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 2px;
+  line-height: 1.25;
+}
+.brain-compose-slot-line > [role] {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.brain-compose-slot-action {
+  height: 28px;
+  padding: 0 8px;
+  flex-shrink: 0;
+}
+.brain-compose-kbd {
+  display: none;
+  flex-shrink: 0;
+}
+/* Send keeps its size across the label swap: a hidden cell holds the widest
+   state (the glyph and "Sending"), the live cell sits over it, and both are
+   centred in the capsule so "Send" alone stands in the middle */
+.brain-compose-send {
+  flex-shrink: 0;
+}
+.brain-compose-send-label {
+  display: inline-grid;
+  justify-items: center;
+}
+.brain-compose-send-label > * {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  grid-area: 1 / 1;
+  white-space: nowrap;
+}
+.brain-compose-send-glyph {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+.brain-compose-send-ghost {
+  visibility: hidden;
+}
+/* the one scroller on the sheet: the mask edge, invisible until the letter
+   runs past an edge */
+.brain-compose-scroll {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}
+.brain-compose-column {
+  display: flex;
+  width: 100%;
+  max-width: 700px;
+  min-height: 100%;
+  flex: 1 0 auto;
+  flex-direction: column;
+  margin-inline: auto;
+  /* the phone's home indicator sits under the last line otherwise */
+  padding: 4px 16px calc(24px + env(safe-area-inset-bottom, 0px));
+}
+.brain-compose-envelope {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
+}
+.brain-compose-row {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 12px;
+}
+.brain-compose-label {
+  flex: 0 0 var(--compose-gutter);
+  color: var(--ink-3);
+  transition: color 160ms var(--ease-out);
+}
+.brain-compose-row:focus-within > .brain-compose-label {
+  color: var(--ink);
+}
+/* a field the form refused says so through its label, in the one hue errors
+   own; the sentence itself stands in the slot above */
+.brain-compose-row:has(> [aria-invalid="true"]) > .brain-compose-label {
+  color: var(--red);
+}
+/* From is said once: on the phone it reads as quiet text in the actions row,
+   so the envelope's row stands only from 768 */
+.brain-compose-from {
+  display: none;
+}
+.brain-compose-value {
+  min-width: 0;
+  color: var(--ink-2);
+}
+.brain-compose-input {
+  min-width: 0;
+  flex: 1;
+  align-self: stretch;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  outline: none;
+  /* 16px on touch: iOS zooms the page on any focused field below it */
+  font-size: 16px;
+}
+.brain-compose-input::placeholder {
+  color: var(--ink-3);
+}
+/* the subject is the letter's heading at its own size (Subheading 17), at
+   the document's left edge under the labels */
+.brain-compose-subject > .brain-compose-input {
+  font-size: 17px;
+}
+.brain-compose-copies {
+  height: 28px;
+  padding: 0 8px;
+  flex-shrink: 0;
+}
+/* the two rows grow from height 0 when revealed, so the box clips while
+   that plays; the inputs draw no ring of their own for it to cut */
+.brain-compose-copies-rows {
+  overflow: hidden;
+}
+.brain-compose-notice {
+  flex-shrink: 0;
+  padding-top: 4px;
+  color: var(--ink-2);
+}
+.brain-compose-fold {
+  height: 1px;
+  flex-shrink: 0;
+  margin: 8px 0 12px;
+  background: var(--hair);
+}
+/* the letter: text on the paper, nothing around it. field-sizing grows the
+   textarea and the sheet's scroller takes over; browsers without it keep the
+   min-height and scroll the textarea. */
+.brain-compose-body {
+  display: flex;
+  min-height: 0;
+  flex: 1 0 auto;
+  flex-direction: column;
+}
+.brain-compose-body > textarea {
+  width: 100%;
+  max-width: 72ch;
+  min-height: 200px;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--ink);
+  outline: none;
+  resize: none;
+  field-sizing: content;
+}
+.brain-compose-body > textarea::placeholder {
+  color: var(--ink-3);
 }
 @media (min-width: 768px) {
-  .brain-composer {
-    padding: var(--inset);
+  .brain-compose-paper {
+    --compose-gutter: 52px;
   }
-  .brain-composer-sheet {
-    max-width: 700px;
-    border-radius: var(--r-sheet);
+  .brain-compose-actions {
+    height: 36px;
   }
-  .brain-composer-sheet[data-state="open"] {
-    animation: materialize-in 220ms var(--ease-out) both;
+  .brain-compose-kbd {
+    display: inline-flex;
   }
-  .brain-composer-sheet[data-state="open"]::before {
-    animation: materialize-edge 220ms linear both;
+  /* the capsule the other controls in the row are: 28, not the dialog
+     primary's 32; the phone keeps 32 for the thumb */
+  .brain-compose-send {
+    height: 28px;
+    padding: 0 10px;
+  }
+  .brain-compose-column {
+    padding: 24px 32px calc(40px + env(safe-area-inset-bottom, 0px));
+  }
+  .brain-compose-row {
+    min-height: 32px;
+  }
+  .brain-compose-from {
+    display: flex;
+  }
+  .brain-compose-input {
+    font-size: 14px;
+  }
+  .brain-compose-subject > .brain-compose-input {
+    font-size: 17px;
   }
 }
-@media (prefers-reduced-motion: reduce) {
-  .brain-composer-sheet[data-state="open"] {
-    animation-name: dialog-fade;
-  }
-  .brain-composer-sheet[data-state="open"]::before {
-    animation: none;
-  }
-}
+
 /* the grip is the only drag surface — the sheet itself must stay scrollable
-   and selectable, so the drag listener is off everywhere else */
+   and selectable, so the drag listener is off everywhere else. It belongs to
+   the New sheet and the When picker; the composer no longer wears one. */
 .brain-composer-grip {
   display: grid;
   flex-shrink: 0;
@@ -4871,155 +5069,6 @@ a.brain-share-url:active {
   border-radius: 9999px;
   background: var(--ink-4);
   opacity: 0.5;
-}
-.brain-composer-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-  padding: 10px 10px 8px;
-}
-.brain-composer-grip + .brain-composer-head {
-  padding-top: 4px;
-}
-/* the one scroller on the sheet: inside a glass panel the edge is the fade
-   (mask on the scroller, no second backdrop layer), gated by data-scrolled /
-   data-scroll-more — invisible until the content actually runs past an edge */
-.brain-composer-scroll {
-  display: flex;
-  min-height: 0;
-  flex: 1;
-  flex-direction: column;
-  gap: 8px;
-  padding: 0 10px;
-}
-.brain-composer-fields {
-  display: flex;
-  flex-shrink: 0;
-  flex-direction: column;
-  gap: 4px;
-}
-.brain-composer-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-.brain-composer-field {
-  min-width: 0;
-}
-/* `flex: 1` belongs to the row, not to the atom. In the column the same
-   declaration resolves to `flex-basis: 0%` on the MAIN axis, which beats the
-   field's own 32px height and collapsed Subject / Cc / Bcc to their content
-   (22px) — off the §4 control scale and under the touch minimum. */
-.brain-composer-row > .brain-composer-field {
-  flex: 1;
-}
-/* The To row has to end on the same rule as the Subject row under it. A
-   text-only button ends at its glyph, 12px inside its own box, so the two
-   rows read as a ragged right edge; the ring puts the toggle's edge back on
-   the fields' rule and gives it the second hover signal a control owes. */
-.brain-composer-copies {
-  background-color: var(--paper);
-  box-shadow: 0 0 0 1px var(--hair);
-  transition:
-    background-color 160ms var(--ease-out),
-    box-shadow 160ms var(--ease-out),
-    color 160ms var(--ease-out),
-    transform 100ms ease-out;
-}
-/* It has a fill of its own, so the tint rides the `.tint-hover` layer (§8) —
-   the quiet variant's tint is a `background-color` and would replace the
-   paper instead of sitting over it. Paper is restated here to hold it. */
-.brain-composer-copies:active {
-  background-color: var(--paper);
-}
-@media (hover: hover) {
-  .brain-composer-copies:hover {
-    background-color: var(--paper);
-    box-shadow: 0 0 0 1px var(--hair-strong);
-  }
-}
-.brain-composer-field > span,
-.brain-composer-from > span:first-child {
-  flex-shrink: 0;
-  min-width: 52px;
-  color: var(--ink-3);
-}
-/* From is draft metadata, not a control: it reads on the label rule the
-   fields use, but carries no ring and no hover — nothing here is clickable
-   until the composer can actually switch accounts. */
-.brain-composer-from {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-  padding: 0 10px 2px;
-  /* Control's line-height 1 clips descenders on a truncating span (§3) */
-  line-height: 1.25;
-  color: var(--ink-2);
-}
-/* 16px on touch: iOS zooms the page on any focused field below it. The md
-   step drops to the field register (Table 14). */
-.brain-composer-field > input {
-  font-size: 16px;
-}
-.brain-composer-notice {
-  flex-shrink: 0;
-  padding: 0 2px;
-  color: var(--ink-2);
-}
-/* the message body: a paper inset, never glass under the text. It carries the
-   field's own ring convention — hairline, stronger on hover, blue on focus
-   for every modality. */
-.brain-composer-body {
-  position: relative;
-  display: flex;
-  min-height: 0;
-  flex: 1 0 auto;
-  flex-direction: column;
-  border-radius: var(--r-control);
-  background: var(--paper);
-  box-shadow: 0 0 0 1px var(--hair);
-  transition: box-shadow 160ms var(--ease-out);
-}
-@media (hover: hover) {
-  .brain-composer-body:hover {
-    box-shadow: 0 0 0 1px var(--hair-strong);
-    transition-duration: 80ms;
-  }
-}
-.brain-composer-body:focus-within {
-  box-shadow: 0 0 0 1.5px var(--blue);
-}
-/* field-sizing grows the textarea and lets the sheet's own scroller take
-   over; browsers without it keep the min-height and scroll the textarea. */
-.brain-composer-body > textarea {
-  width: 100%;
-  min-height: 200px;
-  flex: 1;
-  padding: 12px 14px;
-  border-radius: inherit;
-  background: transparent;
-  color: var(--ink);
-  outline: none;
-  resize: none;
-  field-sizing: content;
-}
-.brain-composer-body > textarea::placeholder {
-  color: var(--ink-3);
-}
-.brain-composer-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  flex-shrink: 0;
-  padding: 8px 10px 10px;
-}
-@media (min-width: 768px) {
-  .brain-composer-field > input {
-    font-size: 14px;
-  }
 }
 
 /* Mail account fields remain visually quiet, but their bottom edge must stay

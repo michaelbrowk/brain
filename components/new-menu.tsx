@@ -20,10 +20,10 @@
 // decides it, and the mail surface checks capabilities again before it opens a
 // composer, so a stale yes costs a toast and never a wrong window.
 //
-// ON A PHONE IT IS A SHEET, the form the When picker and the composer already
-// take below md: the same `brain-menu` material, the grip, `SPRING_SHEET` in
-// and the drag out. The rows and their order do not change, because a sheet is
-// a shape and not a second menu.
+// ON A PHONE IT IS A SHEET, the form the When picker already takes below md:
+// the same `brain-menu` material, the grip, `SPRING_SHEET` in and the drag
+// out. The rows and their order do not change, because a sheet is a shape and
+// not a second menu.
 
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { animate, motion, useDragControls, useMotionValue, useReducedMotion } from "framer-motion";

@@ -595,10 +595,12 @@ test("@release no glass intersects the mail iframe (DESIGN.md v2 → Materials)"
   }
 });
 
-/** P5-c (Mail): the composer is a thick sheet, but the writing surfaces on it
- *  are paper insets — nothing glass may sit under editable text (ban #2), and
- *  no second material may nest inside the sheet (ban #1). The sheet's own
- *  scroller keeps the edge invisible until the content runs past it. */
+/** P5-c (Mail): the composer is an opaque paper sheet over the whole window,
+ *  and a letter is written on the paper itself — no glass anywhere inside it
+ *  (ban #2), no ring around a row or the body at rest or in focus, nothing
+ *  painted under an editable but the paper, and exactly one line, the fold
+ *  between the envelope and the letter. The sheet's own scroller keeps the
+ *  edge invisible until the content runs past it. */
 test("@release the mail composer writes on paper, not on glass", async ({ page }) => {
   await login(page);
   const account = {
@@ -650,36 +652,85 @@ test("@release the mail composer writes on paper, not on glass", async ({ page }
     "Mailbox: Inbox",
   );
   await page.getByRole("button", { name: "New message" }).click();
-  const sheet = page.locator(".brain-composer-sheet");
+  const sheet = page.getByRole("dialog", { name: "New message" });
   await expect(sheet).toBeVisible();
+  await expect(page.getByLabel("To", { exact: true })).toBeFocused();
 
-  // ban #1 — the sheet is the only backdrop layer in the composer
+  // no glass: not one backdrop layer anywhere on the sheet, the sheet included
   expect(
-    await page.$$eval(".brain-composer-sheet *", (nodes) =>
+    await page.$$eval('[role="dialog"], [role="dialog"] *', (nodes) =>
       nodes
         .filter((node) => getComputedStyle(node).backdropFilter !== "none")
         .map((node) => String(node.className).split(" ")[0]),
     ),
   ).toEqual([]);
 
-  // ban #2 — every writing surface is opaque paper, not the material
+  // no rings: every row and the body draw no box-shadow, at rest and with the
+  // caret in them. The caret is already in To; the body is focused after.
+  const rings = async () =>
+    page.$$eval(".brain-compose-row, .brain-compose-body", (nodes) =>
+      nodes.map((node) => ({
+        who: String(node.className).split(" ").slice(0, 2).join(" "),
+        shadow: getComputedStyle(node).boxShadow,
+        outline: getComputedStyle(node).outlineStyle,
+      })),
+    );
+  const atRest = await rings();
+  expect(atRest.length).toBeGreaterThanOrEqual(4);
+  for (const row of atRest) expect(row.shadow, row.who).toBe("none");
+  await page.getByLabel("Message", { exact: true }).focus();
+  await page.getByPlaceholder("Subject").focus();
+  for (const row of await rings()) {
+    expect(row.shadow, row.who).toBe("none");
+    expect(row.outline, row.who).toBe("none");
+  }
+
+  // ban #2 — nothing but the paper is painted under an editable: every
+  // ancestor up to the dialog is transparent or the paper, and the dialog
+  // itself is the paper.
   const fills = await page.evaluate(() => {
     const probe = document.createElement("div");
     probe.style.background = "var(--paper)";
     document.body.append(probe);
     const paper = getComputedStyle(probe).backgroundColor;
     probe.remove();
-    const surfaces = [
-      ...document.querySelectorAll(".brain-composer-field, .brain-composer-body"),
-    ];
-    return { paper, surfaces: surfaces.map((el) => getComputedStyle(el).backgroundColor) };
+    const dialog = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    const painted: string[] = [];
+    for (const editable of dialog.querySelectorAll("input, textarea")) {
+      let node: HTMLElement | null = editable.parentElement;
+      while (node && node !== dialog) {
+        const fill = getComputedStyle(node).backgroundColor;
+        if (fill !== "rgba(0, 0, 0, 0)" && fill !== paper) painted.push(node.className);
+        node = node.parentElement;
+      }
+    }
+    return { paper, dialog: getComputedStyle(dialog).backgroundColor, painted };
   });
-  expect(fills.surfaces.length).toBeGreaterThan(1);
-  for (const fill of fills.surfaces) expect(fill).toBe(fills.paper);
+  expect(fills.dialog).toBe(fills.paper);
+  expect(fills.painted).toEqual([]);
 
-  // the scroll-edge is gated: a composer that fits shows no edge
+  // one line: the fold, and nothing else on the sheet draws a border
+  expect(await page.locator(".brain-compose-fold").count()).toBe(1);
   expect(
-    await page.locator(".brain-composer-scroll").evaluate((el) => el.dataset.scrolled ?? null),
+    await page.$$eval('[role="dialog"] *', (nodes) =>
+      nodes
+        .filter((node) => {
+          const style = getComputedStyle(node);
+          return (
+            ["Top", "Right", "Bottom", "Left"].some(
+              (side) =>
+                style.getPropertyValue(`border-${side.toLowerCase()}-style`) !== "none" &&
+                Number.parseFloat(style.getPropertyValue(`border-${side.toLowerCase()}-width`)) > 0,
+            ) && node.getClientRects().length > 0
+          );
+        })
+        .map((node) => String(node.className).split(" ")[0]),
+    ),
+  ).toEqual([]);
+
+  // the scroll-edge is gated: a letter that fits shows no edge
+  expect(
+    await page.locator(".brain-compose-scroll").evaluate((el) => el.dataset.scrolled ?? null),
   ).toBeNull();
 });
 

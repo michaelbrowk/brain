@@ -15,6 +15,8 @@ import { act, useEffect, useReducer } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { apiFetch } from "@/lib/client";
+import { DUR, EASE_OUT } from "@/lib/motion";
+import type { MotionProps } from "@/test/framer-motion-mock";
 import { resetMailComposeAvailable } from "./mail-compose-available";
 import { Shell } from "./shell";
 
@@ -27,7 +29,21 @@ vi.mock("next-themes", () => ({
   useTheme: () => ({ theme: "system", setTheme: vi.fn() }),
 }));
 
-vi.mock("framer-motion", () => import("@/test/framer-motion-mock"));
+/** The motion props the shell root hands framer, per render, so the recede
+ *  under the compose sheet can be read off the last one. */
+const shellMotion: { reduce: boolean; renders: MotionProps[] } = { reduce: false, renders: [] };
+
+vi.mock("framer-motion", async () => {
+  const { createFramerMotionMock } = await import("@/test/framer-motion-mock");
+  return createFramerMotionMock({
+    reducedMotion: () => shellMotion.reduce,
+    onRender: ({ motion, props }) => {
+      if (String(props.className ?? "").split(" ").includes("brain-shell")) {
+        shellMotion.renders.push(motion);
+      }
+    },
+  });
+});
 
 // The real `./mail-surface` module, not a fake: the latch's own `take()`
 // effect is the seam under test, so it has to run. `next/dynamic` is stubbed
@@ -219,7 +235,9 @@ describe("the compose ask, through the assembled shell", () => {
 
     await act(async () => root.render(<Shell tree={[]} initialSelectedId={null} />));
     await settle();
-    expect(document.body.querySelector('form[aria-label="New message"]')).toBeNull();
+    expect(
+      document.body.querySelector('[role="dialog"][aria-label="New message"]'),
+    ).toBeNull();
 
     // The palette's "New message" row: unconditional on `onNewMessage`, so
     // the ask does not have to wait on the compose-availability fetch first.
@@ -252,9 +270,132 @@ describe("the compose ask, through the assembled shell", () => {
     // is what this proves: dropping it (review mutation M4) leaves the ask
     // standing and this composer never opens.
     const composer = await findLazy(
-      () => document.body.querySelector('form[aria-label="New message"]'),
+      () => document.body.querySelector('[role="dialog"][aria-label="New message"]'),
       "the composer opened by the standing ask",
     );
     expect(composer).not.toBeNull();
+  });
+
+  // THE SHEET TAKES THE SHELL OVER, ON EVERY WIDTH. What Pages and the phone's
+  // search already did below md, the composer does everywhere: the shell goes
+  // inert and out of the accessibility tree, the tab bar leaves, and the two
+  // chords that live on the shell (⌘K, ⌘\) fall silent, because a palette or
+  // a folding sidebar under an opaque sheet is a thing that happens to a
+  // window nobody can see. The proof is the same chord working again the
+  // moment the sheet is gone: the guard is the composer, not the harness.
+  it("makes the shell inert and silences its chords while the composer is up", async () => {
+    // A desktop, so ⌘\ has a sidebar to fold and the control case is real.
+    vi.stubGlobal("matchMedia", (query: string) => ({
+      matches: query === "(min-width: 768px)",
+      media: query,
+      onchange: null,
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      addListener: vi.fn(),
+      removeListener: vi.fn(),
+      dispatchEvent: vi.fn(),
+    }));
+    window.history.replaceState({}, "", "/mail");
+    await act(async () =>
+      root.render(<Shell tree={[]} initialSelectedId={null} initialSurface="mail" />),
+    );
+    await settle();
+    const compose = await findLazy(
+      () =>
+        [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+          (button) => button.getAttribute("aria-label") === "New message",
+        ),
+      "the column's New message",
+    );
+    const main = document.body.querySelector("main");
+    const shell = document.body.querySelector(".brain-shell");
+    expect(main?.hasAttribute("inert")).toBe(false);
+    expect(document.body.querySelector('nav[aria-label="Primary"]')).not.toBeNull();
+
+    await act(async () => compose.click());
+    await settle();
+    await findLazy(
+      () => document.body.querySelector('textarea[placeholder="Write a message…"]'),
+      "the open composer",
+    );
+
+    expect(main?.hasAttribute("inert")).toBe(true);
+    expect(main?.getAttribute("aria-hidden")).toBe("true");
+    expect(shell?.hasAttribute("inert")).toBe(true);
+    expect(shell?.getAttribute("aria-hidden")).toBe("true");
+    expect(document.body.querySelector('nav[aria-label="Primary"]')).toBeNull();
+    // The toast column stands at the body, outside the shell root, so a pill
+    // that fires while the sheet is up is over it, pressable and in the
+    // accessibility tree: not inside the inert shell, and not aria-hidden by
+    // the dialog (Radix's hideOthers leaves live regions alone).
+    const stack = document.body.querySelector(".brain-toast-stack");
+    expect(stack).not.toBeNull();
+    expect(stack?.closest(".brain-shell")).toBeNull();
+    expect(stack?.closest("[inert]")).toBeNull();
+    expect(
+      stack?.querySelector('[aria-live]')?.closest('[aria-hidden="true"]') ?? null,
+    ).toBeNull();
+    // The shell recedes under the sheet: scale .98 at half opacity over the
+    // page duration, and comes back the same way.
+    expect(shellMotion.renders.at(-1)?.animate).toEqual({ scale: 0.98, opacity: 0.5 });
+    expect(shellMotion.renders.at(-1)?.transition).toEqual({
+      duration: DUR.page,
+      ease: EASE_OUT,
+    });
+
+    const chord = async (key: string, code: string) => {
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", { key, code, metaKey: true, bubbles: true }),
+        );
+      });
+      await settle();
+    };
+    const focusChip = () =>
+      [...document.body.querySelectorAll("button")].some((button) =>
+        button.getAttribute("title")?.startsWith("Exit focus mode"),
+      );
+    await chord("k", "KeyK");
+    expect(document.body.querySelector("[cmdk-input]")).toBeNull();
+    await chord("\\", "Backslash");
+    expect(focusChip()).toBe(false);
+
+    const close = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+      (button) => button.getAttribute("aria-label") === "Close draft",
+    );
+    expect(close).toBeDefined();
+    await act(async () => close?.click());
+    await settle();
+    expect(main?.hasAttribute("inert")).toBe(false);
+    expect(shell?.hasAttribute("inert")).toBe(false);
+    expect(document.body.querySelector('nav[aria-label="Primary"]')).not.toBeNull();
+    expect(shellMotion.renders.at(-1)?.animate).toEqual({ scale: 1, opacity: 1 });
+
+    await chord("\\", "Backslash");
+    expect(focusChip()).toBe(true);
+  });
+
+  it("does not recede under reduced motion: the shell keeps its scale and its opacity", async () => {
+    shellMotion.reduce = true;
+    window.history.replaceState({}, "", "/mail");
+    await act(async () =>
+      root.render(<Shell tree={[]} initialSelectedId={null} initialSurface="mail" />),
+    );
+    await settle();
+    const compose = await findLazy(
+      () =>
+        [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+          (button) => button.getAttribute("aria-label") === "New message",
+        ),
+      "the column's New message",
+    );
+    await act(async () => compose.click());
+    await settle();
+    await findLazy(
+      () => document.body.querySelector('textarea[placeholder="Write a message…"]'),
+      "the open composer",
+    );
+    expect(document.body.querySelector(".brain-shell")?.hasAttribute("inert")).toBe(true);
+    expect(shellMotion.renders.at(-1)?.animate).toEqual({ scale: 1, opacity: 1 });
   });
 });

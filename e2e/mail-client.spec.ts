@@ -1957,10 +1957,13 @@ test("@release the compose sheet takes the window and the shell goes inert under
           }
         : null;
     };
+    const tabbar = document.querySelector('nav[aria-label="Primary"]');
     return {
       sidebar: state(".brain-sidebar"),
       list: state(".brain-mail-list"),
-      tabbar: document.querySelector('nav[aria-label="Primary"]') === null,
+      // The bar stays mounted and leaves on its own 200ms (`data-hidden`),
+      // rather than unmounting in a frame.
+      tabbar: tabbar ? tabbar.hasAttribute("data-hidden") : null,
     };
   });
   expect(under.sidebar).toEqual({ inert: true, hidden: true });
@@ -2204,7 +2207,9 @@ test("@mobile @release on a phone the sheet is the window, Send is on top, and r
       sendBottom: send.bottom,
       dialogTransform: getComputedStyle(dialog).transform,
       shellTransform: getComputedStyle(document.querySelector(".brain-shell")!).transform,
-      tabbarGone: document.querySelector('nav[aria-label="Primary"]') === null,
+      tabbarGone:
+        document.querySelector('nav[aria-label="Primary"]')?.hasAttribute("data-hidden") ??
+        null,
       fontSizes: [...dialog.querySelectorAll("input, textarea")].map((field) =>
         Number.parseFloat(getComputedStyle(field).fontSize),
       ),

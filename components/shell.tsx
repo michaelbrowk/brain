@@ -5456,8 +5456,10 @@ export function Shell({
   const mobileSearchOpen = paletteOpen && mobileViewport;
   // A surface that owns the whole window. Pages and the phone's search did
   // this below md; the compose sheet does it on every width. While one is up
-  // the canvas is inert and out of the accessibility tree and the tab bar is
-  // gone, because what is under an opaque sheet is not a place.
+  // the canvas is inert and out of the accessibility tree and the tab bar
+  // leaves (unmounted under Pages and search, which draw their own; hidden on
+  // its 200ms under the sheet), because what is under an opaque sheet is not
+  // a place.
   const blockingSurfaceOpen = mobilePagesOpen || mobileSearchOpen || composeOpen;
   // The sidebar is translated off-canvas on mobile (Pages is its own view)
   // and in desktop focus mode. Off-screen must also mean out of the tab order
@@ -6100,7 +6102,14 @@ export function Shell({
         onSelect={select}
       />
 
-      {!blockingSurfaceOpen && <MobileTabBar {...mobileTabBarProps} />}
+      {/* Pages and the phone's search bring their own copy of the bar, so it
+          unmounts under them. The compose sheet does not: the bar stays and
+          leaves on its own 200ms (`data-hidden`), the way it does under the
+          keyboard, rather than vanishing in a frame while the shell recedes
+          around it. */}
+      {!(mobilePagesOpen || mobileSearchOpen) && (
+        <MobileTabBar {...mobileTabBarProps} hidden={mobileTabBarHidden || composeOpen} />
+      )}
       {commandPalette}
 
       <ShellOverlays

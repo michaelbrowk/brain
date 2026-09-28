@@ -316,7 +316,7 @@ for (const scheme of ["light", "dark"]) {
           .map((el) => el.className.toString().slice(0, 40)),
       ),
     );
-    const input = page.locator('input[aria-label="Search pages and text"]');
+    const input = page.locator('input[aria-label="Search pages, mail and tasks"]');
     await input.fill("Field");
     await page.waitForTimeout(500);
     await fullShot(page, "palette-mobile-query", scheme);

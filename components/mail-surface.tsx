@@ -2588,6 +2588,10 @@ export function MailSurface({
     switched: boolean;
     listAtSwitch: MailThreadListState | null;
     fetched: boolean;
+    /** The column was moved back to Inbox with an empty query for this
+     *  request; a second move would be a loop, so the request is dropped
+     *  instead if the column is still elsewhere after the first. */
+    reset: boolean;
   } | null>(null);
 
   const fetchRequestedThread = useCallback(
@@ -2633,6 +2637,7 @@ export function MailSurface({
         switched: false,
         listAtSwitch: null,
         fetched: false,
+        reset: false,
       };
       openRequestRef.current = ledger;
     }
@@ -2666,12 +2671,27 @@ export function MailSurface({
     }
 
     // The mailbox on screen is the one an incoming request is about, whichever
-    // account it names. Checked before the switch below rather than
-    // after it: switching resets to Inbox and clears the query on its way,
-    // so a cross-account request would otherwise answer where a same-account
-    // one is dropped, for the same reader standing on the same other folder.
+    // account it names. Checked before the switch below rather than after
+    // it: switching resets to Inbox and clears the query on its way, so a
+    // cross-account request would otherwise answer where a same-account one
+    // did not, for the same reader standing on the same other folder. A
+    // request that arrives on Sent, or over a search, moves the column to
+    // Inbox with an empty query and stays standing: the press came from
+    // outside Mail (the palette, the centre) and named a letter, and a folder
+    // the reader was on a moment ago is not a reason to lose it. Once, per
+    // request: the reset commits a new list, the effect runs again on it, and
+    // a second reset would only spin.
     if (selectedMailboxId !== "inbox" || searchQuery.trim() !== "") {
-      clearOpenThreadRequest();
+      if (ledger.reset) {
+        clearOpenThreadRequest();
+        return;
+      }
+      ledger.reset = true;
+      // `selectMailbox` clears the query on its way to Inbox, but it stands
+      // down where there is no single account to move (the merged stream
+      // only ever searches), so the query is cleared on its own as well.
+      selectMailbox("inbox");
+      changeSearchQuery("");
       return;
     }
 
@@ -2693,10 +2713,12 @@ export function MailSurface({
     void fetchRequestedThread(pendingOpen);
   }, [
     accountsState,
+    changeSearchQuery,
     fetchRequestedThread,
     pendingOpen,
     searchQuery,
     selectAccount,
+    selectMailbox,
     selectThread,
     selectedAccountId,
     selectedMailboxId,
@@ -2708,9 +2730,21 @@ export function MailSurface({
   // reader who leaves Mail before an account switch or a fetch resolves, or
   // whose accounts never finish loading, should not have the next Mail mount
   // answer a press this one already gave up on.
+  //
+  // The clear waits one microtask and checks the instance is still gone.
+  // `next dev` mounts every effect, unmounts it and mounts it again inside
+  // the same commit, and a clear made straight from the cleanup answered that
+  // rehearsal by dropping the letter the palette or the centre had just
+  // asked for, on every development mount. A real unmount is still gone when
+  // the microtask runs; the rehearsal has mounted again by then.
+  const mountedRef = useRef(false);
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      clearOpenThreadRequest();
+      mountedRef.current = false;
+      queueMicrotask(() => {
+        if (!mountedRef.current) clearOpenThreadRequest();
+      });
     };
   }, []);
 

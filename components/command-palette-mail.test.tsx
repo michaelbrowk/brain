@@ -23,7 +23,7 @@ function mailGroup(): HTMLElement | null {
   return (
     [...document.body.querySelectorAll("[cmdk-group]")].find(
       (group) =>
-        group.querySelector("[cmdk-group-heading]")?.textContent === "Mail",
+        group.querySelector("[cmdk-group-heading]")?.textContent === "Mail actions",
     ) ?? null
   ) as HTMLElement | null;
 }

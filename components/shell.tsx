@@ -15,6 +15,7 @@ import {
 } from "@/lib/autosave";
 import { canonicalPageMarkdown } from "@/lib/page-markdown";
 import { openTodayCount } from "./tasks-lists";
+import { requestOpenThread } from "./mail-surface-client";
 import { reloadTasks, useTasks } from "./tasks-client";
 import { parseTaskLines } from "@/lib/tasks/task-lines";
 import { sectionPageIds } from "@/lib/dated-sections";
@@ -5564,6 +5565,19 @@ export function Shell({
       onOpenChange={onPaletteOpenChange}
       tree={tree}
       onSelect={(selection: CommandPaletteSelection) => {
+        if (selection.kind === "mail") {
+          // The same door the notification centre uses: the ids go into the
+          // latch, Mail mounts and answers them when its list is in.
+          requestOpenThread(selection.accountId, selection.threadId);
+          openMail();
+          return;
+        }
+        if (selection.kind === "task") {
+          // A task row is a `/tasks?task=<id>` href, and openNotification
+          // already knows the three steps that make the surface find it.
+          openNotification(`/tasks?task=${encodeURIComponent(selection.id)}`);
+          return;
+        }
         if (selection.kind === "text" && !selection.target) {
           select(selection.id);
           showToast("That search match changed. Opened the page instead.");
@@ -5588,6 +5602,11 @@ export function Shell({
       onOpenTasks={modules.tasks ? openTasks : undefined}
       onNewTask={modules.tasks ? newTask : undefined}
       onNewMessage={modules.mail ? newMessage : undefined}
+      // The Mail and Tasks groups follow the same switches: a module that is
+      // off has no group and the palette asks its route for nothing.
+      searchMail={modules.mail}
+      tasks={modules.tasks ? taskRecords.tasks : undefined}
+      today={taskRecords.day?.today}
       onOpenTrash={() => setTrashOpen(true)}
       onOpenSettings={openSettings}
       onToggleTheme={toggleTheme}

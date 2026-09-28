@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { emitMailCommand } from "./mail-commands";
@@ -8322,6 +8322,64 @@ describe("MailSurface", () => {
       expect(document.body.textContent).toContain("Lunch this Friday?");
     });
 
+    it("moves the column back to Inbox with an empty query and opens the letter from Sent", async () => {
+      vi.useFakeTimers();
+      const sentThread = {
+        ...thread,
+        threadId: "thread-sent",
+        subject: "Sent project update",
+        unread: false,
+      };
+      const listMailboxThreads = vi.fn().mockImplementation(({ mailboxId }) =>
+        Promise.resolve(
+          mailboxThreadPage(mailboxId, mailboxId === "sent" ? [sentThread] : []),
+        ),
+      );
+      // The search over Sent finds only the sent letter: the one the request
+      // names is in the Inbox and nowhere on screen, which is the case.
+      const searchThreads = vi
+        .fn()
+        .mockResolvedValue(searchThreadPage("sent", [sentThread]));
+      const client = makeClient({ listMailboxThreads, searchThreads });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("Sent");
+      expect(document.body.textContent).toContain("Sent project update");
+      const input = document.body.querySelector(
+        'input[aria-label="Search mail"]',
+      ) as HTMLInputElement;
+      await setInput(input, "project");
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      await settle();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Sent");
+
+      // The palette's pick: a letter of the Inbox, named while the reader
+      // stands on Sent over a search.
+      await act(async () => {
+        requestOpenThread(accountA.accountId, thread.threadId);
+      });
+      // The clock is fake here for the search debounce above, so the wait
+      // advances it as well as the microtasks the other cases settle on.
+      for (let round = 0; round < 60; round += 1) {
+        if (vi.mocked(client.readThread).mock.calls.length > 0) break;
+        await act(async () => vi.advanceTimersByTimeAsync(20));
+        await settle();
+      }
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+      });
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+      expect(
+        (document.body.querySelector('input[aria-label="Search mail"]') as HTMLInputElement)
+          .value,
+      ).toBe("");
+      expect(pendingOpenThread()).toBeNull();
+    });
+
     it("stays on the letter it was last asked for when an abandoned request's fetch resolves late", async () => {
       const abandonedFetch = deferred<MailThreadDetail>();
       const secondFetch = deferred<MailThreadDetail>();
@@ -8418,7 +8476,7 @@ describe("MailSurface", () => {
       expect(pendingOpenThread()).toBeNull();
     });
 
-    it("drops a same-account request when the reader is off Inbox", async () => {
+    it("brings a same-account request back to Inbox when the reader is off it", async () => {
       const client = makeClient();
       await act(async () =>
         root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
@@ -8430,13 +8488,18 @@ describe("MailSurface", () => {
       await act(async () => {
         requestOpenThread(accountA.accountId, "thread-elsewhere");
       });
-      await until(() => pendingOpenThread() === null, "the request is dropped");
+      await until(() => pendingOpenThread() === null, "the request is answered");
 
-      expect(client.readThread).not.toHaveBeenCalled();
-      expect(navTrigger()?.getAttribute("aria-label")).toContain("Sent");
+      // The press named a letter, so the column moves to Inbox and the
+      // letter, not in the page, is fetched from there.
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: "thread-elsewhere",
+      });
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
     });
 
-    it("drops a cross-account request the same way when the reader is off Inbox", async () => {
+    it("brings a cross-account request back to Inbox and then across", async () => {
       const client = makeClient({
         loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
         listThreads: vi
@@ -8455,13 +8518,17 @@ describe("MailSurface", () => {
       await act(async () => {
         requestOpenThread(accountB.accountId, other.threadId);
       });
-      await until(() => pendingOpenThread() === null, "the request is dropped");
+      await until(() => pendingOpenThread() === null, "the request is answered");
 
-      expect(client.readThread).not.toHaveBeenCalled();
-      // The switch this used to trigger reset the column to Inbox on its
-      // way: the same guard now applies before that reset can bypass it.
-      expect(navTrigger()?.getAttribute("aria-label")).toContain("Sent");
-      expect(document.body.textContent).not.toContain("The other address");
+      // Inbox first, then the other account's own Inbox, where the letter is
+      // in the page: one switch, one read.
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountB.accountId,
+        threadId: other.threadId,
+      });
+      expect(client.readThread).toHaveBeenCalledTimes(1);
+      expect(navTrigger()?.getAttribute("aria-label")).toContain("Inbox");
+      expect(document.body.textContent).toContain("The other address");
     });
 
     it("clears an unanswered request when the Mail surface unmounts", async () => {
@@ -8479,6 +8546,36 @@ describe("MailSurface", () => {
 
       await act(async () => root.render(<div>Home</div>));
 
+      expect(pendingOpenThread()).toBeNull();
+    });
+
+    it("keeps the request through StrictMode's rehearsed unmount at mount", async () => {
+      // `next dev` mounts every effect, unmounts it and mounts it again, and
+      // the unmount clear ran on that rehearsal: a press from the palette or
+      // the centre lost its letter on every development mount, and no browser
+      // test had opened one from outside Mail to see it.
+      requestOpenThread(accountA.accountId, thread.threadId);
+      const client = makeClient();
+      await act(async () =>
+        root.render(
+          <StrictMode>
+            <MailSurface client={client} onOpenSettings={() => {}} />
+          </StrictMode>,
+        ),
+      );
+      await settle();
+      await enterSingleAccount();
+
+      await until(
+        () => vi.mocked(client.readThread).mock.calls.length > 0,
+        "the thread is read under StrictMode",
+      );
+      expect(pendingOpenThread()).toBeNull();
+
+      // And a real unmount still takes an unanswered request with it.
+      requestOpenThread(accountA.accountId, "thread-later");
+      await act(async () => root.render(<div>Home</div>));
+      await settle();
       expect(pendingOpenThread()).toBeNull();
     });
   });

@@ -10,16 +10,36 @@ import { Icon } from "./ui/icon";
 import { Kbd } from "./ui/primitives";
 import { useScrollEdge } from "./ui/scroll-edge";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import type { ReactNode } from "react";
 import { emitMailCommand, type MailCommand } from "./mail-commands";
+import { renderTaskCheck } from "./tasks-checkbox";
 import { emitTaskCommand, type TaskCommand } from "./tasks-commands";
+import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
+import type {
+  MailSearchAllResponse,
+  MailThreadListItem,
+} from "@/lib/mail/message-types";
 import type { TreeNode } from "@/lib/store/types";
 import type { SearchHit } from "@/lib/search";
 import type { SearchTextTarget } from "@/lib/search-navigation";
+import type { TaskView } from "@/lib/tasks/model";
 
 export type CommandPaletteSelection =
   | { kind: "page"; id: string }
-  | { kind: "text"; id: string; target: SearchTextTarget | null };
+  | { kind: "text"; id: string; target: SearchTextTarget | null }
+  | { kind: "mail"; accountId: string; threadId: string }
+  | { kind: "task"; id: string };
+
+/** What the palette keeps of a mail answer: the rows, and each account's own
+ *  address so a row's meta can name the correspondent rather than the reader. */
+interface MailResults {
+  readonly threads: readonly MailThreadListItem[];
+  readonly ownAddresses: ReadonlyMap<string, string>;
+  readonly indexBuilding: boolean;
+}
+
+const NO_MAIL: MailResults = { threads: [], ownAddresses: new Map(), indexBuilding: false };
 
 interface FlatPage {
   id: string;
@@ -63,6 +83,11 @@ function flattenPages(tree: TreeNode[]): FlatPage[] {
 type PageFilter = { type: "tag" | "cat"; value: string };
 
 const PAGE_LIMIT = 12;
+/** A group shows its five best rows and a `Show all N` row for the rest. */
+const GROUP_FOLD = 5;
+/** What the palette asks the mail route for, and so the most Show all can
+ *  open: the route's own ceiling. */
+const MAIL_LIMIT = 20;
 const MARK_CLASS = "rounded-[2px] bg-fill-active text-ink"; // no px — padding split words apart ("Журав лев")
 // Group headings (Label 11, sentence case) and rows (r10, the selected one a
 // white capsule) are styled once, in globals.css, for the desktop panel and
@@ -282,6 +307,109 @@ function highlightText(text: string, query: string, fallbackToSubsequence = fals
   return parts;
 }
 
+/** The Tasks group, ranked the way Pages are ranked, over titles the shell
+ *  already holds: open tasks first, then the done ones from the Logbook, ties
+ *  by rank and then by the most recently touched. No request is made, which
+ *  is why this is a plain function rather than a state machine. */
+export function rankTasks(tasks: readonly TaskView[], query: string): TaskView[] {
+  if (query.length < 2) return [];
+  return tasks
+    .map((task) => ({ task, rank: rankTitleMatch(task.title, query) }))
+    .filter((entry): entry is { task: TaskView; rank: number } => entry.rank !== null)
+    .sort(
+      (a, b) =>
+        Number(a.task.done) - Number(b.task.done) ||
+        a.rank - b.rank ||
+        (a.task.updated < b.task.updated ? 1 : a.task.updated > b.task.updated ? -1 : 0),
+    )
+    .map((entry) => entry.task);
+}
+
+/** The day after a `YYYY-MM-DD`, in the calendar and not through the local
+ *  clock, the way `lib/tasks/lists.ts` steps days. */
+function dayAfter(day: string): string {
+  const next = new Date(
+    Date.UTC(Number(day.slice(0, 4)), Number(day.slice(5, 7)) - 1, Number(day.slice(8, 10)) + 1),
+  );
+  return next.toISOString().slice(0, 10);
+}
+
+/** The trailing word on a task row, the one the When chip on the surface
+ *  would say: Today, Tomorrow, a date, Someday, or Inbox for a task that has no
+ *  day yet. A done task says only that it is done. */
+function taskWhenLabel(task: TaskView, today: string | undefined): string {
+  if (task.done) return "Done";
+  const when = task.when;
+  if (when === undefined) return "Inbox";
+  if (when === "someday") return "Someday";
+  const day =
+    when === today
+      ? "Today"
+      : today !== undefined && when === dayAfter(today)
+        ? "Tomorrow"
+        : new Intl.DateTimeFormat(undefined, {
+            month: "short",
+            day: "numeric",
+            timeZone: "UTC",
+          }).format(new Date(`${when}T00:00:00Z`));
+  return task.evening ? `${day} Evening` : day;
+}
+
+/** A short date for a mail row: the clock for today, a word for yesterday,
+ *  the day inside this year, the year alone before that. */
+function mailDateLabel(value: number | null, now = new Date()): string {
+  if (value === null) return "";
+  const date = new Date(value);
+  const dayOf = (d: Date) => `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+  if (dayOf(date) === dayOf(now)) {
+    return `Today ${new Intl.DateTimeFormat(undefined, {
+      hour: "numeric",
+      minute: "2-digit",
+    }).format(date)}`;
+  }
+  const yesterday = new Date(now);
+  yesterday.setDate(now.getDate() - 1);
+  if (dayOf(date) === dayOf(yesterday)) return "Yesterday";
+  if (date.getFullYear() === now.getFullYear()) {
+    return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(date);
+  }
+  return String(date.getFullYear());
+}
+
+/** Who the letter is with: the first participant that is not the account
+ *  itself, by display name or address. A thread the reader wrote to nobody
+ *  else keeps the reader's own name rather than going blank. */
+function correspondentLabel(
+  thread: MailThreadListItem,
+  ownAddresses: ReadonlyMap<string, string>,
+): string {
+  const own = ownAddresses.get(thread.accountId)?.toLowerCase();
+  const other =
+    thread.participants.find((person) => person.address.toLowerCase() !== own) ??
+    thread.participants[0];
+  if (!other) return "Unknown sender";
+  return other.name?.trim() || other.address;
+}
+
+/** The task's box, drawn by `renderTaskCheck` so it is the same mark the
+ *  Logbook draws and not a second checkbox. A mark, not a control: the palette
+ *  row opens the task, it does not tick it. */
+function TaskMark({ checked, label }: { checked: boolean; label: string }) {
+  const hostRef = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    const host = hostRef.current;
+    if (!host) return;
+    const mark = renderTaskCheck(checked, label);
+    host.append(mark);
+    return () => mark.remove();
+  }, [checked, label]);
+  // Hidden from assistive tech: the mark's own label is the task's title, which
+  // the row already reads, and the trailing word says whether it is done.
+  return (
+    <span ref={hostRef} aria-hidden="true" className="grid size-5 shrink-0 place-items-center" />
+  );
+}
+
 export function CommandPalette({
   open,
   onOpenChange,
@@ -300,6 +428,9 @@ export function CommandPalette({
   onOpenTrash,
   onOpenSettings,
   onToggleTheme,
+  searchMail = false,
+  tasks,
+  today,
   mobile = false,
   mobileFooter,
 }: {
@@ -321,6 +452,14 @@ export function CommandPalette({
   onOpenTrash?: () => void | Promise<void>;
   onOpenSettings?: () => void | Promise<void>;
   onToggleTheme?: () => void | Promise<void>;
+  /** Search mail too (the shell passes Mail's module switch). Off, and the
+   *  palette shows no Mail group and asks the mail route for nothing. */
+  searchMail?: boolean;
+  /** Every task the shell holds, for the Tasks group. Absent when Tasks is
+   *  off, and then there is no group. */
+  tasks?: readonly TaskView[];
+  /** The reader's own day, `YYYY-MM-DD`, for the Today and Tomorrow words. */
+  today?: string;
   mobile?: boolean;
   mobileFooter?: ReactNode;
 }) {
@@ -331,6 +470,35 @@ export function CommandPalette({
   >("idle");
   const [resolvedQuery, setResolvedQuery] = useState("");
   const [searchRetry, setSearchRetry] = useState(0);
+  // Mail is its own machine beside the page search: it loads, fails and is
+  // retried on its own, so a mail service that is down never takes the pages
+  // with it, and vice versa.
+  const [mail, setMail] = useState<MailResults>(NO_MAIL);
+  const [mailState, setMailState] = useState<"idle" | "loading" | "ready" | "error">("idle");
+  const [mailResolvedQuery, setMailResolvedQuery] = useState("");
+  const [mailRetry, setMailRetry] = useState(0);
+  const mailDebounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Show all opens one group for the query it was pressed on, and no further:
+  // each holds the query it was opened for, so the next keystroke folds both
+  // groups back to their five without an effect watching the input.
+  const [mailExpandedFor, setMailExpandedFor] = useState<string | null>(null);
+  const [tasksExpandedFor, setTasksExpandedFor] = useState<string | null>(null);
+  // The keyboard cursor, held here rather than inside cmdk, so Show all can
+  // put it on the first row it reveals. Left to itself cmdk sends the cursor
+  // back to the top of the list once the Show all row it stood on goes away.
+  const [cursor, setCursor] = useState("");
+  // The shell can close the palette through `open` without passing through
+  // `handleOpenChange`, so the expansions fold back on the edge of `open`
+  // itself, adjusted during render the way React's docs adjust state to a
+  // prop, rather than from an effect.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (wasOpen !== open) {
+    setWasOpen(open);
+    if (!open) {
+      setMailExpandedFor(null);
+      setTasksExpandedFor(null);
+    }
+  }
   const pages = useMemo(() => flattenPages(tree), [tree]);
   const pageById = useMemo(() => new Map(pages.map((page) => [page.id, page])), [pages]);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -595,12 +763,94 @@ export function CommandPalette({
     };
   }, [q, open, searchRetry]);
 
+  // The `tag:` and `cat:` grammar is about pages, so a filtered query has no
+  // Mail or Tasks group at all, and Mail asks for nothing while it is off.
+  // Mail also asks for nothing the route would refuse (punctuation alone, too
+  // many or too long terms): the palette runs the route's own normalizer, so a
+  // query with no searchable term has no group rather than a failure row.
+  const mailWanted =
+    searchMail && !hasPageFilter && q.length >= 2 && normalizeMailSearchQueryText(q) !== null;
+  const tasksWanted = tasks !== undefined && !hasPageFilter && q.length >= 2;
+
+  // mail search across every account, on the same debounce as the pages
+  useEffect(() => {
+    if (mailDebounce.current) {
+      clearTimeout(mailDebounce.current);
+      mailDebounce.current = null;
+    }
+    if (!open || !mailWanted) return;
+    const controller = new AbortController();
+    mailDebounce.current = setTimeout(async () => {
+      setMailState("loading");
+      try {
+        const response = await fetch("/api/mail/search/all", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: q, limit: MAIL_LIMIT }),
+          signal: controller.signal,
+        });
+        // A paused module answers 409 from the gate, and a query the route
+        // will not search answers 400. Neither is a failure to report: a
+        // module that is off or a query with nothing to look for has no
+        // group, the same as when the shell never asked. A lapsed session
+        // (401, 403) is a failure, and says so.
+        if (
+          response.status >= 400 &&
+          response.status < 500 &&
+          response.status !== 401 &&
+          response.status !== 403
+        ) {
+          setMail(NO_MAIL);
+          setMailResolvedQuery(q);
+          setMailState("ready");
+          return;
+        }
+        if (!response.ok) throw new Error("mail search unavailable");
+        const body = (await response.json()) as Partial<MailSearchAllResponse>;
+        // An answer that lands after the query moved on is dropped, not kept
+        // as the rows of a query the reader has left.
+        if (controller.signal.aborted) return;
+        if (!Array.isArray(body.threads)) throw new Error("invalid mail search response");
+        const ownAddresses = new Map<string, string>();
+        for (const account of body.accounts ?? []) {
+          ownAddresses.set(account.accountId, account.emailAddress);
+        }
+        setMail({
+          threads: body.threads,
+          ownAddresses,
+          indexBuilding: body.indexBuilding === true,
+        });
+        setMailResolvedQuery(q);
+        setMailState("ready");
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        console.error("Mail search request failed", error);
+        setMail(NO_MAIL);
+        setMailResolvedQuery(q);
+        setMailState("error");
+      }
+    }, 200);
+    return () => {
+      controller.abort();
+      if (mailDebounce.current) {
+        clearTimeout(mailDebounce.current);
+        mailDebounce.current = null;
+      }
+    };
+  }, [q, open, mailWanted, mailRetry]);
+
   const handleOpenChange = (nextOpen: boolean) => {
     if (!nextOpen) {
       setQuery("");
       setHits([]);
       setResolvedQuery("");
       setSearchState("idle");
+      setMail(NO_MAIL);
+      setMailResolvedQuery("");
+      setMailState("idle");
+      setMailExpandedFor(null);
+      setTasksExpandedFor(null);
     }
     onOpenChange(nextOpen);
   };
@@ -613,6 +863,26 @@ export function CommandPalette({
   const pickText = (hit: SearchHit) => {
     onSelect({ kind: "text", id: hit.id, target: hit.target ?? null });
     handleOpenChange(false);
+  };
+
+  const pickMail = (thread: MailThreadListItem) => {
+    onSelect({ kind: "mail", accountId: thread.accountId, threadId: thread.threadId });
+    handleOpenChange(false);
+  };
+
+  const pickTask = (task: TaskView) => {
+    onSelect({ kind: "task", id: task.id });
+    handleOpenChange(false);
+  };
+
+  // Show all hands the cursor to the first row it reveals. cmdk sends the
+  // cursor to the top of the list when the row it stands on unmounts, so the
+  // cursor steps up to the last folded row first, in its own commit, and only
+  // then does the group open and the cursor land on the sixth row.
+  const showAll = (lastShown: string, firstRevealed: string, expand: () => void) => {
+    flushSync(() => setCursor(lastShown));
+    expand();
+    setCursor(firstRevealed);
   };
 
   const runAction = (action: PaletteAction) => {
@@ -637,14 +907,40 @@ export function CommandPalette({
           return page ? pageMatchesFilter(page, activeFilter) : !activeFilter;
         })
       : [];
+  // A stale mail answer reads as loading, exactly as `resolvedQuery` does for
+  // pages: the rows on screen are never from a query the reader has left.
+  const effectiveMailState = !mailWanted
+    ? "idle"
+    : mailResolvedQuery === q
+      ? mailState
+      : "loading";
+  const mailThreads = effectiveMailState === "ready" ? mail.threads : [];
+  const mailExpanded = mailExpandedFor === q;
+  const visibleMail = mailExpanded
+    ? mailThreads.slice(0, MAIL_LIMIT)
+    : mailThreads.slice(0, GROUP_FOLD);
+  const taskResults = useMemo(
+    () => (tasksWanted && tasks ? rankTasks(tasks, q) : []),
+    [q, tasks, tasksWanted],
+  );
+  const tasksExpanded = tasksExpandedFor === q;
+  const visibleTasks = tasksExpanded ? taskResults : taskResults.slice(0, GROUP_FOLD);
+  // While the panel-wide "Searching…" stands, it speaks for Mail too: one
+  // status line at a time, so a screen reader hears the search once.
+  const panelSearching = effectiveSearchState === "loading";
+  const mailSearching = effectiveMailState === "loading" && !panelSearching;
+  const mailGroupShown =
+    mailSearching || effectiveMailState === "error" || mailThreads.length > 0;
   const nothing =
     effectiveSearchState !== "loading" &&
     effectiveSearchState !== "error" &&
+    !mailGroupShown &&
     filteredActions.length === 0 &&
     filteredRouteActions.length === 0 &&
     recentPages.length === 0 &&
     pageResults.length === 0 &&
-    visibleHits.length === 0;
+    visibleHits.length === 0 &&
+    taskResults.length === 0;
 
   const paletteItems = (
     <>
@@ -689,7 +985,7 @@ export function CommandPalette({
               ? "No filtered pages match"
               : q.length === 1
                 ? "Keep typing to search inside pages"
-                : "Searches titles and page text"}
+                : "Searches page titles and text, mail and tasks"}
           </p>
         </div>
       )}
@@ -714,7 +1010,9 @@ export function CommandPalette({
       )}
 
       {filteredRouteActions.length > 0 && (
-        <Command.Group heading="Mail">
+        // "actions" in the heading, because the results below carry a Mail or
+        // Tasks group of their own and two headings with one name read as one
+        <Command.Group heading={mailOpen ? "Mail actions" : "Tasks actions"}>
           {filteredRouteActions.map((action) => (
             <Command.Item
               key={action.id}
@@ -826,6 +1124,126 @@ export function CommandPalette({
           ))}
         </Command.Group>
       )}
+
+      {/* Mail arrives on its own clock, so the group carries its own quiet
+          status rather than holding the pages back, and its own failure row
+          rather than the panel-wide one. */}
+      {mailGroupShown && (
+        <Command.Group heading="Mail">
+          {mailSearching && (
+            <div role="status" aria-live="polite" className="px-2.5 py-2 text-[12px] text-ink-2">
+              Searching…
+            </div>
+          )}
+          {effectiveMailState === "error" && (
+            <>
+              <div role="alert" className="px-2.5 pt-2 text-[13px] text-ink">
+                Mail search failed
+              </div>
+              <Command.Item
+                value="mail-retry"
+                onSelect={() => setMailRetry((value) => value + 1)}
+                className={`${ITEM_CLASS} text-ink-2`}
+              >
+                <span className="grid size-5 shrink-0 place-items-center">
+                  <Icon name="restart-linear" size={15} />
+                </span>
+                <span className="min-w-0 flex-1 truncate">Try again</span>
+              </Command.Item>
+            </>
+          )}
+          {effectiveMailState === "ready" && mail.indexBuilding && !panelSearching && (
+            <div role="status" className="px-2.5 pt-2 text-[12px] text-ink-2">
+              Mail index is still building
+            </div>
+          )}
+          {visibleMail.map((t) => {
+            const subject = t.subject?.trim() || "(no subject)";
+            const snippet = t.snippet?.trim() ?? "";
+            return (
+              <Command.Item
+                key={`mail-${t.accountId}-${t.threadId}`}
+                value={`mail-${t.accountId}-${t.threadId}`}
+                onSelect={() => pickMail(t)}
+                className="brain-palette-item flex cursor-pointer flex-col gap-0.5 px-2.5 py-2"
+              >
+                <span className="flex items-center gap-2.5 text-[14px] text-ink">
+                  <span className="grid size-5 shrink-0 place-items-center text-ink-2">
+                    <Icon name="letter-linear" size={15} />
+                  </span>
+                  <span className={`min-w-0 flex-1 truncate${t.unread ? " font-semibold" : ""}`}>
+                    {highlightText(subject, q)}
+                  </span>
+                  <span className="max-w-[45%] shrink-0 truncate text-[12px] text-ink-2">
+                    {correspondentLabel(t, mail.ownAddresses)}
+                    {t.lastMessageAt !== null && ` · ${mailDateLabel(t.lastMessageAt)}`}
+                  </span>
+                </span>
+                {snippet !== "" && (
+                  <span className="truncate pl-[30px] text-[12px] text-ink-2">
+                    {highlightText(snippet, q)}
+                  </span>
+                )}
+              </Command.Item>
+            );
+          })}
+          {!mailExpanded && mailThreads.length > GROUP_FOLD && (
+            <Command.Item
+              value="mail-show-all"
+              onSelect={() => {
+                const last = mailThreads[GROUP_FOLD - 1];
+                const next = mailThreads[GROUP_FOLD];
+                showAll(
+                  `mail-${last.accountId}-${last.threadId}`,
+                  `mail-${next.accountId}-${next.threadId}`,
+                  () => setMailExpandedFor(q),
+                );
+              }}
+              className={`${ITEM_CLASS} text-ink-2`}
+            >
+              <span className="grid size-5 shrink-0 place-items-center" aria-hidden />
+              <span className="min-w-0 flex-1 truncate">
+                Show all {Math.min(mailThreads.length, MAIL_LIMIT)}
+              </span>
+            </Command.Item>
+          )}
+        </Command.Group>
+      )}
+
+      {taskResults.length > 0 && (
+        <Command.Group heading="Tasks">
+          {visibleTasks.map((t) => (
+            <Command.Item
+              key={`task-${t.id}`}
+              value={`task-${t.id}`}
+              onSelect={() => pickTask(t)}
+              className={ITEM_CLASS}
+            >
+              <TaskMark checked={t.done} label={t.title} />
+              <span className={`min-w-0 flex-1 truncate${t.done ? " line-through text-ink-2" : ""}`}>
+                {highlightText(t.title, q, true)}
+              </span>
+              <span className="shrink-0 text-[12px] text-ink-2">{taskWhenLabel(t, today)}</span>
+            </Command.Item>
+          ))}
+          {!tasksExpanded && taskResults.length > GROUP_FOLD && (
+            <Command.Item
+              value="tasks-show-all"
+              onSelect={() =>
+                showAll(
+                  `task-${taskResults[GROUP_FOLD - 1].id}`,
+                  `task-${taskResults[GROUP_FOLD].id}`,
+                  () => setTasksExpandedFor(q),
+                )
+              }
+              className={`${ITEM_CLASS} text-ink-2`}
+            >
+              <span className="grid size-5 shrink-0 place-items-center" aria-hidden />
+              <span className="min-w-0 flex-1 truncate">Show all {taskResults.length}</span>
+            </Command.Item>
+          )}
+        </Command.Group>
+      )}
     </>
   );
 
@@ -862,12 +1280,14 @@ export function CommandPalette({
           >
             <Dialog.Title className="sr-only">Search</Dialog.Title>
             <Dialog.Description className="sr-only">
-              Search pages, page text, and Brain actions.
+              Search pages, mail, tasks and Brain actions.
             </Dialog.Description>
             <PaletteSheet>
               <Command
                 label="Search and commands"
                 shouldFilter={false}
+                value={cursor}
+                onValueChange={setCursor}
                 onKeyDown={(event) => {
                   if (event.key === "Escape") handleOpenChange(false);
                 }}
@@ -896,8 +1316,8 @@ export function CommandPalette({
                     ref={mobileInputRef}
                     value={query}
                     onValueChange={setQuery}
-                    aria-label="Search pages and text"
-                    placeholder="Search pages and text…"
+                    aria-label="Search pages, mail and tasks"
+                    placeholder="Search pages, mail and tasks"
                   />
                   {query && (
                     <IconButton
@@ -948,9 +1368,15 @@ export function CommandPalette({
         >
           <Dialog.Title className="sr-only">Search and commands</Dialog.Title>
           <Dialog.Description className="sr-only">
-            Search pages, page text, and Brain actions.
+            Search pages, mail, tasks and Brain actions.
           </Dialog.Description>
-          <Command label="Search and commands" shouldFilter={false} className="flex min-h-0 flex-col">
+          <Command
+            label="Search and commands"
+            shouldFilter={false}
+            value={cursor}
+            onValueChange={setCursor}
+            className="flex min-h-0 flex-col"
+          >
             <div className="flex items-center gap-2.5 px-4">
               <Icon name="magnifer-linear" size={18} className="shrink-0 text-ink-2" />
               {activeFilter && (
@@ -961,8 +1387,8 @@ export function CommandPalette({
               <Command.Input
                 value={query}
                 onValueChange={setQuery}
-                aria-label="Search pages and text"
-                placeholder="Search pages and text…"
+                aria-label="Search pages, mail and tasks"
+                placeholder="Search pages, mail and tasks"
                 autoFocus
                 className="text-subheading h-14 min-w-0 flex-1 bg-transparent text-ink outline-none placeholder:font-medium placeholder:text-ink-2"
               />

@@ -311,6 +311,21 @@ function highlightText(text: string, query: string, fallbackToSubsequence = fals
  *  already holds: open tasks first, then the done ones from the Logbook, ties
  *  by rank and then by the most recently touched. No request is made, which
  *  is why this is a plain function rather than a state machine. */
+/** The stable code in a mail route's error body, or null when there is none. */
+async function mailErrorCode(response: Response): Promise<string | null> {
+  try {
+    const body = (await response.json()) as { error?: { code?: unknown } | unknown };
+    const error = body.error;
+    if (typeof error === "object" && error !== null && "code" in error) {
+      const code = (error as { code?: unknown }).code;
+      return typeof code === "string" ? code : null;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export function rankTasks(tasks: readonly TaskView[], query: string): TaskView[] {
   if (query.length < 2) return [];
   return tasks
@@ -806,6 +821,19 @@ export function CommandPalette({
           setMailState("ready");
           return;
         }
+        // Brain without its mail container answers every mail route with 503
+        // mail_service_unavailable. That is an install that has no mail, and
+        // it has no group, the way a paused module has none.
+        if (
+          response.status === 503 &&
+          (await mailErrorCode(response)) === "mail_service_unavailable"
+        ) {
+          if (controller.signal.aborted) return;
+          setMail(NO_MAIL);
+          setMailResolvedQuery(q);
+          setMailState("ready");
+          return;
+        }
         if (!response.ok) throw new Error("mail search unavailable");
         const body = (await response.json()) as Partial<MailSearchAllResponse>;
         // An answer that lands after the query moved on is dropped, not kept
@@ -825,7 +853,9 @@ export function CommandPalette({
         setMailState("ready");
       } catch (error) {
         if (controller.signal.aborted) return;
-        console.error("Mail search request failed", error);
+        // A warning, not an error: the group already says it failed, and a
+        // console error raises Next's development overlay over the page.
+        console.warn("Mail search request failed", error);
         setMail(NO_MAIL);
         setMailResolvedQuery(q);
         setMailState("error");

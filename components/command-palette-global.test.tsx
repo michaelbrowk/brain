@@ -381,6 +381,39 @@ describe("CommandPalette global search", () => {
     expect(rows("Mail")[0].textContent).toContain("Quarterly launch review");
   });
 
+  it("has no Mail group when the mail service is not running, and logs no error", async () => {
+    // Brain runs without its mail container, and the route then answers 503
+    // mail_service_unavailable for every query. That is an install without
+    // mail, not an outage: a failure row under every search would be noise,
+    // and a console error would raise the development overlay.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    mailAnswer = async () =>
+      response({ apiVersion: 1, error: { code: "mail_service_unavailable" } }, 503);
+    await render({ tree: [node()] });
+    await type("quarterly");
+
+    expect(mailRequests()).toHaveLength(1);
+    expect(group("Mail")).toBeNull();
+    expect(document.body.textContent).not.toContain("Mail search failed");
+    expect(rows("Pages")).toHaveLength(1);
+    expect(errors).not.toHaveBeenCalled();
+    errors.mockRestore();
+  });
+
+  it("reports a real failure without a console error", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warnings = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mailAnswer = async () => response({ error: "boom" }, 500);
+    await render({ tree: [node()] });
+    await type("quarterly");
+
+    expect(group("Mail")?.textContent).toContain("Mail search failed");
+    expect(errors).not.toHaveBeenCalled();
+    expect(warnings).toHaveBeenCalled();
+    errors.mockRestore();
+    warnings.mockRestore();
+  });
+
   it("treats a paused module's 409 as no group at all", async () => {
     mailAnswer = async () => response({ error: "module_off" }, 409);
     await render({ tree: [node()] });

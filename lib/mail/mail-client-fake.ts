@@ -4,11 +4,8 @@ import {
   type MailTlsMode,
   type PublicMailAccountV2,
   type PublicMailAccountV3,
-} from "@/lib/mail/brain-mail-client";
-import type {
-  MailMessageDto,
-  MailThreadListItem,
-} from "@/lib/mail/message-types";
+} from "./brain-mail-client";
+import type { MailMessageDto, MailThreadListItem } from "./message-types";
 
 /** THE RECORDING STAND-IN EVERY MAIL TOOL'S TESTS INSTALL.
  *

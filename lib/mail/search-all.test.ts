@@ -6,7 +6,7 @@ import {
   createMailClientFake,
   fakeAccountV2,
   fakeThread,
-} from "@/app/api/mcp/mail-client-fake";
+} from "./mail-client-fake";
 import { BrainMailClientError } from "./brain-mail-client";
 import type { MailSearchThreadPage, MailThreadListItem } from "./message-types";
 import {

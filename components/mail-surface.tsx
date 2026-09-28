@@ -2730,9 +2730,21 @@ export function MailSurface({
   // reader who leaves Mail before an account switch or a fetch resolves, or
   // whose accounts never finish loading, should not have the next Mail mount
   // answer a press this one already gave up on.
+  //
+  // The clear waits one microtask and checks the instance is still gone.
+  // `next dev` mounts every effect, unmounts it and mounts it again inside
+  // the same commit, and a clear made straight from the cleanup answered that
+  // rehearsal by dropping the letter the palette or the centre had just
+  // asked for, on every development mount. A real unmount is still gone when
+  // the microtask runs; the rehearsal has mounted again by then.
+  const mountedRef = useRef(false);
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
-      clearOpenThreadRequest();
+      mountedRef.current = false;
+      queueMicrotask(() => {
+        if (!mountedRef.current) clearOpenThreadRequest();
+      });
     };
   }, []);
 

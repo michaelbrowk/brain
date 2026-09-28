@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from "react";
+import { act, StrictMode } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { emitMailCommand } from "./mail-commands";
@@ -8546,6 +8546,36 @@ describe("MailSurface", () => {
 
       await act(async () => root.render(<div>Home</div>));
 
+      expect(pendingOpenThread()).toBeNull();
+    });
+
+    it("keeps the request through StrictMode's rehearsed unmount at mount", async () => {
+      // `next dev` mounts every effect, unmounts it and mounts it again, and
+      // the unmount clear ran on that rehearsal: a press from the palette or
+      // the centre lost its letter on every development mount, and no browser
+      // test had opened one from outside Mail to see it.
+      requestOpenThread(accountA.accountId, thread.threadId);
+      const client = makeClient();
+      await act(async () =>
+        root.render(
+          <StrictMode>
+            <MailSurface client={client} onOpenSettings={() => {}} />
+          </StrictMode>,
+        ),
+      );
+      await settle();
+      await enterSingleAccount();
+
+      await until(
+        () => vi.mocked(client.readThread).mock.calls.length > 0,
+        "the thread is read under StrictMode",
+      );
+      expect(pendingOpenThread()).toBeNull();
+
+      // And a real unmount still takes an unanswered request with it.
+      requestOpenThread(accountA.accountId, "thread-later");
+      await act(async () => root.render(<div>Home</div>));
+      await settle();
       expect(pendingOpenThread()).toBeNull();
     });
   });

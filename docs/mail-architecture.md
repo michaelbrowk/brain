@@ -84,7 +84,12 @@ a folder — a `Projects/2019/Archive` is a folder about something else, and
 without the depth rule it wins the tier and receives mail the reader archived. Unselectable
 mailboxes and the Inbox itself are never candidates, two folders answering to
 one name are a refusal rather than a choice, so the answer does not depend on
-LIST order, and a localized name is not matched. A server
+LIST order. The archive's name tier also knows the word mail clients use in
+the languages they ship (`Архив`, `Archiv`, `Archivo`, `Archivio`, `Arquivo`,
+`Archiwum` and a few more): a server that lists over XLIST has no `\Archive`
+attribute to give, names the folder in the account's language, and refuses a
+CREATE of `Archive` beside it, so the name is the only thing that finds it.
+Trash and junk keep their English tiers. A server
 that advertises nothing and names nothing has no mailbox for that role, and the
 mutation is refused with `mail_provider_mutation_unsupported` — a 409, not a
 retryable 503, because retrying cannot conjure a folder. Nothing is moved on a
@@ -93,7 +98,10 @@ mailbox gets one, `Archive` at the account root, or `INBOX.Archive` where the
 listed trash, junk, sent and drafts all sit under the Inbox with that
 delimiter, created and subscribed once per adapter, with ALREADYEXISTS counted
 as success and any other refusal as the same 409. LIST is then asked again and
-the role resolved from its answer. Trash and junk are never invented.
+the role resolved from its answer. Trash and junk are never invented. LIST's
+answer, and with it a refusal and the spent CREATE, is trusted for ten minutes;
+after that the next action asks again, so a folder the owner makes in another
+client is found without restarting the service.
 
 One code, seven refusals, and the journal says which. The 409 alone could not:
 `mail_provider_mutation_unsupported` is raised from six places in the adapter,

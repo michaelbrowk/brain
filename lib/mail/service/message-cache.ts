@@ -2399,6 +2399,33 @@ export class SqliteMailMessageCache {
     });
   }
 
+  /**
+   * One bounded step of the search index build, for the background scheduler.
+   *
+   * The index used to advance only inside a search, 500 threads per query, so
+   * an account with a few thousand threads answered from a fraction of its
+   * mail until the owner had searched a dozen times. The scheduler now calls
+   * this beside every sync step until it reports no more work: the same reset
+   * a new generation gets and the same bounded batch a search takes, so a
+   * step costs one short transaction and never holds the database for a
+   * whole mailbox.
+   */
+  advanceSearchIndexStep(): { readonly hasMore: boolean } {
+    const database = this.requireDatabase();
+    const generation = readableGeneration(this.readSyncState());
+    if (generation < 1) return Object.freeze({ hasMore: false });
+    let searchState = this.readSearchState(database);
+    if (searchState.generation !== generation) {
+      this.transaction(() => this.resetSearchIndex(database, generation));
+      searchState = this.readSearchState(database);
+    }
+    if (searchState.status === "building") {
+      this.transaction(() => this.advanceSearchIndex(database));
+      searchState = this.readSearchState(database);
+    }
+    return Object.freeze({ hasMore: searchState.status === "building" });
+  }
+
   searchThreads(input: {
     readonly mailboxId: MailCacheMailbox;
     readonly query: string;

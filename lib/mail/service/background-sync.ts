@@ -26,6 +26,13 @@ export interface MailBackgroundPrivacyCachePort {
   ): Promise<{ readonly hasMore: boolean }>;
 }
 
+export interface MailBackgroundSearchIndexPort {
+  runBackgroundSearchIndexStep(
+    accountId: string,
+    signal: AbortSignal,
+  ): Promise<{ readonly hasMore: boolean }>;
+}
+
 /**
  * One serialized poller for the isolated service. A failed account never
  * prevents the remaining accounts from syncing, and a slow pass cannot overlap
@@ -38,6 +45,7 @@ export class MailBackgroundSyncScheduler {
   private readonly continuationDelayMs: number;
   private readonly maxItems: number;
   private readonly privacyCache: MailBackgroundPrivacyCachePort | null;
+  private readonly searchIndex: MailBackgroundSearchIndexPort | null;
   private readonly accountQueue: string[] = [];
   private readonly nextEligibleAt = new Map<string, number>();
   private readonly syncBackoffUntil = new Map<string, number>();
@@ -55,6 +63,7 @@ export class MailBackgroundSyncScheduler {
       readonly continuationDelayMs?: number;
       readonly maxItems?: number;
       readonly privacyCache?: MailBackgroundPrivacyCachePort;
+      readonly searchIndex?: MailBackgroundSearchIndexPort;
     } = {},
   ) {
     this.port = port;
@@ -73,6 +82,13 @@ export class MailBackgroundSyncScheduler {
       throw new Error("mail background privacy cache is invalid");
     }
     this.privacyCache = options.privacyCache ?? null;
+    if (
+      options.searchIndex !== undefined &&
+      typeof options.searchIndex.runBackgroundSearchIndexStep !== "function"
+    ) {
+      throw new Error("mail background search index is invalid");
+    }
+    this.searchIndex = options.searchIndex ?? null;
   }
 
   start(): void {
@@ -212,7 +228,7 @@ export class MailBackgroundSyncScheduler {
       let privacyHasMore = false;
       if (this.privacyCache !== null) {
         try {
-          privacyHasMore = validatePrivacyCacheStep(
+          privacyHasMore = validateHasMoreStep(
             await this.privacyCache.runBackgroundPrefetchStep(
               accountId,
               signal,
@@ -223,7 +239,22 @@ export class MailBackgroundSyncScheduler {
         }
       }
       if (signal.aborted) return false;
-      if (syncHasMore || privacyHasMore) {
+      // The search index builds beside the sync, one bounded batch a page,
+      // so a new account is searchable in full within minutes instead of
+      // after a dozen searches. A failed step is only a slower build: the
+      // next pass asks again, and a search still advances it on its own.
+      let indexHasMore = false;
+      if (this.searchIndex !== null) {
+        try {
+          indexHasMore = validateHasMoreStep(
+            await this.searchIndex.runBackgroundSearchIndexStep(accountId, signal),
+          ).hasMore;
+        } catch {
+          if (signal.aborted) return false;
+        }
+      }
+      if (signal.aborted) return false;
+      if (syncHasMore || privacyHasMore || indexHasMore) {
         this.accountQueue.push(accountId);
       } else {
         this.nextEligibleAt.set(accountId, Date.now() + this.intervalMs);
@@ -234,7 +265,7 @@ export class MailBackgroundSyncScheduler {
   }
 }
 
-function validatePrivacyCacheStep(value: {
+function validateHasMoreStep(value: {
   readonly hasMore: boolean;
 }): { readonly hasMore: boolean } {
   if (
@@ -246,7 +277,7 @@ function validatePrivacyCacheStep(value: {
     Object.keys(value).join(",") !== "hasMore" ||
     typeof value.hasMore !== "boolean"
   ) {
-    throw new Error("mail background privacy cache step is invalid");
+    throw new Error("mail background step is invalid");
   }
   return Object.freeze({ hasMore: value.hasMore });
 }

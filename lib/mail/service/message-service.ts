@@ -339,6 +339,14 @@ export class AccountMailMessageService implements MailMessageService {
     });
   }
 
+  /** One bounded step of the account's search index build; see the cache. */
+  async runBackgroundSearchIndexStep(
+    accountId: string,
+  ): Promise<{ readonly hasMore: boolean }> {
+    this.assertAccount(accountId);
+    return this.cache.advanceSearchIndexStep();
+  }
+
   async runBackgroundSyncStep(
     accountId: string,
     options: { readonly maxItems: number },

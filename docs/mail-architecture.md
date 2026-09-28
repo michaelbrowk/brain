@@ -451,7 +451,13 @@ Rules:
 
 The per-account FTS5 index in `messages.sqlite3` holds subjects, participants
 and previews, never bodies, and nothing is fetched from a provider to answer a
-search. Two Brain routes read it. `POST /api/mail/search` answers one account
+search. A thread that arrives by sync is indexed as it lands; the threads a
+new generation already holds are indexed in bounded batches of 500, and the
+background scheduler runs one batch beside each account's sync step until the
+index reports `ready`, so an account with thousands of threads is searchable
+in full minutes after it connects or resyncs. A search also advances the build
+by one batch, which is all that drove it before the scheduler did. Two Brain
+routes read it. `POST /api/mail/search` answers one account
 in one mailbox behind a cursor and is the Mail surface's search. `POST
 /api/mail/search/all` takes `{ query, limit }` alone, asks every connected
 account in its widest mailbox (`all` where the account's capabilities list it,

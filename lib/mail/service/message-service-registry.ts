@@ -182,6 +182,17 @@ export class MultiAccountMailMessageService implements MailMessageService {
     );
   }
 
+  async runBackgroundSearchIndexStep(
+    accountId: string,
+    signal?: AbortSignal,
+  ): Promise<{ readonly hasMore: boolean }> {
+    const callerSignal = signal ?? new AbortController().signal;
+    return this.withEntry(accountId, (entry, lifecycleSignal) => {
+      AbortSignal.any([callerSignal, lifecycleSignal]).throwIfAborted();
+      return entry.service.runBackgroundSearchIndexStep(accountId);
+    });
+  }
+
   async runBackgroundSyncStep(
     accountId: string,
     options: { readonly maxItems: number },

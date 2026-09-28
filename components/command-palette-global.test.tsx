@@ -264,7 +264,7 @@ describe("CommandPalette global search", () => {
 
     expect(rows("Mail")[0].textContent).toContain("(no subject)");
     expect(rows("Mail")[0].querySelector(".font-semibold")).toBeNull();
-    expect(group("Mail")?.textContent).toContain("Mail index is still building");
+    expect(group("Mail")?.textContent).toContain("Older mail is still being indexed");
   });
 
   it("ranks tasks by title with open ones first and labels each by its day", async () => {

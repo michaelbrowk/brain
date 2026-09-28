@@ -16,7 +16,7 @@ import {
   createMailClientFake,
   fakeAccountV3,
   fakeThread,
-} from "@/app/api/mcp/mail-client-fake";
+} from "@/lib/mail/mail-client-fake";
 import { BrainMailClientError } from "@/lib/mail/brain-mail-client";
 import type {
   MailSearchAllResponse,
@@ -217,6 +217,51 @@ describe("POST /api/mail/search/all", () => {
       "thread-2",
     ]);
     expect(body.truncated).toBe(true);
+  });
+
+  it("says truncated when an account still has a page behind it", async () => {
+    install({
+      searchThreads: async (input) =>
+        input.accountId === FAKE_ACCOUNT_ID
+          ? page(
+              [
+                fakeThread({ threadId: "thread-1", lastMessageAt: 1 }),
+                fakeThread({ threadId: "thread-2", lastMessageAt: 2 }),
+              ],
+              { nextCursor: "cursor-one", resultsTruncated: false },
+            )
+          : page([]),
+    });
+
+    const body = (await (
+      await POST(request({ query: "invoice", limit: 2 }))
+    ).json()) as MailSearchAllResponse;
+
+    expect(body.threads.map((thread) => thread.threadId)).toEqual([
+      "thread-2",
+      "thread-1",
+    ]);
+    expect(body.truncated).toBe(true);
+  });
+
+  it("is not truncated when the merge holds exactly the limit and every account ran to the end", async () => {
+    install({
+      searchThreads: async (input) =>
+        page([
+          fakeThread({
+            accountId: input.accountId,
+            threadId: `thread-${input.accountId}`,
+            lastMessageAt: input.accountId === FAKE_ACCOUNT_ID ? 1 : 2,
+          }),
+        ]),
+    });
+
+    const body = (await (
+      await POST(request({ query: "invoice", limit: 2 }))
+    ).json()) as MailSearchAllResponse;
+
+    expect(body.threads).toHaveLength(2);
+    expect(body.truncated).toBe(false);
   });
 
   it("says truncated when an account cut its own page short", async () => {

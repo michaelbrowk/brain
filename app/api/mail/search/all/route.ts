@@ -115,11 +115,16 @@ export async function POST(request: Request) {
       indexBuilding: statuses.some(
         (status) => "indexStatus" in status && status.indexStatus === "building",
       ),
+      // Three ways the answer can be short of the whole: the merge held more
+      // than the limit, an account cut its own page short, or an account has
+      // a page behind the one it answered. The palette has no cursor, so the
+      // third reads as "more than shown" too.
       truncated:
         merged.threads.length > input.limit ||
         statuses.some(
           (status) => "resultsTruncated" in status && status.resultsTruncated,
-        ),
+        ) ||
+        Object.values(merged.next).some((cursor) => cursor !== null),
     };
   }, 1);
 }

@@ -1548,6 +1548,9 @@ const MAIL_LOG_CODE_FIELDS = Object.freeze([
   "phase",
   "durationBucket",
   "errorCode",
+  // Which of several sites raised one error code. The same stable-code shape
+  // as the code itself, so server text can never ride in under this name.
+  "reason",
 ] as const);
 /** The only two things the start record may say about the SMTP transport. */
 const MAIL_LOG_TRANSPORT_KINDS = Object.freeze([

@@ -1,5 +1,5 @@
 import type { FetchMessageObject, MailboxObject } from "imapflow";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { StoredImapMailAccount } from "../../service/account-types";
 import type { ImapSessionClient } from "../../service/imapflow-adapter";
@@ -217,12 +217,21 @@ describe("IMAP thread mutations", () => {
     });
     const { provider, opened } = providerFor(server);
 
+    // The first refusal is the server declining the CREATE it was sent. The
+    // second never reaches the server: LIST has answered and the one attempt
+    // is spent, so the adapter refuses from what it already knows.
     await expect(
       provider.archiveThread("i77u1", signal()),
-    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+    ).rejects.toMatchObject({
+      code: "mail_provider_mutation_unsupported",
+      reason: "archive_create_refused",
+    });
     await expect(
       provider.archiveThread("i77u1", signal()),
-    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+    ).rejects.toMatchObject({
+      code: "mail_provider_mutation_unsupported",
+      reason: "role_refused_cached",
+    });
 
     expect(server.commands.filter((command) => command.name === "create")).toHaveLength(1);
     expect(server.commands.some((command) => command.name === "move")).toBe(false);
@@ -241,14 +250,59 @@ describe("IMAP thread mutations", () => {
     });
     const { provider } = providerFor(server);
 
+    // The CREATE was accepted, so this is not a refused CREATE: the second
+    // LIST names no archive and the one attempt is already spent.
     await expect(
       provider.archiveThread("i77u1", signal()),
-    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+    ).rejects.toMatchObject({
+      code: "mail_provider_mutation_unsupported",
+      reason: "no_mailbox_for_role",
+    });
 
     expect(server.commands.filter((command) => command.name === "create")).toHaveLength(1);
     expect(server.commands.filter((command) => command.name === "list")).toHaveLength(2);
     expect(server.commands.some((command) => command.name === "move")).toBe(false);
     expect(server.mailbox("INBOX").messages.has(1)).toBe(true);
+  });
+
+  it("writes one mail_imap_archive_create record per CREATE, naming how the server answered", async () => {
+    // The 409 alone cannot say whether the adapter ever asked for the folder.
+    // This record is the other half of that diagnosis: it exists only when a
+    // CREATE went out, and it says what came back.
+    for (const [createAnswers, outcome] of [
+      ["created", "created"],
+      ["already_exists", "already_there"],
+      ["no", "refused"],
+    ] as const) {
+      const server = serverFixture({
+        mailboxes: [{ path: "Sent" }],
+        createAnswers,
+      });
+      const { provider } = providerFor(server);
+      const written = captureStderr();
+      try {
+        await provider.archiveThread("i77u1", signal()).catch(() => undefined);
+      } finally {
+        written.restore();
+      }
+
+      expect(written.records()).toEqual([
+        { event: "mail_imap_archive_create", accountId: ACCOUNT_ID, reason: outcome },
+      ]);
+    }
+  });
+
+  it("writes no mail_imap_archive_create record when no CREATE was sent", async () => {
+    const server = serverFixture({ mailboxes: [{ path: "Sent" }] });
+    const { provider } = providerFor(server);
+    const written = captureStderr();
+    try {
+      await provider.trashThread("i77u1", signal()).catch(() => undefined);
+    } finally {
+      written.restore();
+    }
+
+    expect(written.records()).toEqual([]);
   });
 
   it("treats a throttled CREATE as unavailable, not as a refusal", async () => {
@@ -299,7 +353,10 @@ describe("IMAP thread mutations", () => {
 
     await expect(
       provider.trashThread("i77u1", signal()),
-    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+    ).rejects.toMatchObject({
+      code: "mail_provider_mutation_unsupported",
+      reason: "no_mailbox_for_role",
+    });
 
     expect(server.commands.some((command) => command.name === "create")).toBe(false);
     expect(server.commands.some((command) => command.name === "move")).toBe(false);
@@ -320,7 +377,10 @@ describe("IMAP thread mutations", () => {
 
     await expect(
       provider.archiveThread("i77u1", signal()),
-    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+    ).rejects.toMatchObject({
+      code: "mail_provider_mutation_unsupported",
+      reason: "move_capability_missing",
+    });
 
     expect(server.commands.some((command) => command.name === "move")).toBe(false);
     expect(server.mailbox("INBOX").messages.has(1)).toBe(true);
@@ -347,14 +407,20 @@ describe("IMAP thread mutations", () => {
 
     await expect(
       provider.trashThread("i77u1", signal()),
-    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+    ).rejects.toMatchObject({
+      code: "mail_provider_mutation_unsupported",
+      reason: "no_mailbox_for_role",
+    });
     expect(opened.count).toBe(1);
 
     // LIST has already answered for this account. Connecting again to say the
     // same no is a login per thread for a whole section Done.
     await expect(
       provider.trashThread("i77u1", signal()),
-    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+    ).rejects.toMatchObject({
+      code: "mail_provider_mutation_unsupported",
+      reason: "role_refused_cached",
+    });
     expect(opened.count).toBe(1);
     expect(server.commands.filter((command) => command.name === "list")).toHaveLength(1);
   });
@@ -425,7 +491,10 @@ describe("IMAP thread mutations", () => {
 
     await expect(
       provider.archiveThread("i77u1", signal()),
-    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+    ).rejects.toMatchObject({
+      code: "mail_provider_mutation_unsupported",
+      reason: "move_answered_no",
+    });
 
     expect(server.mailbox("INBOX").messages.has(1)).toBe(true);
     expect(server.mailbox("Archive").messages.size).toBe(0);
@@ -478,7 +547,10 @@ describe("IMAP thread mutations", () => {
 
     await expect(
       provider.setThreadStarred("i77u1", true, signal()),
-    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+    ).rejects.toMatchObject({
+      code: "mail_provider_mutation_unsupported",
+      reason: "flag_not_permanent",
+    });
 
     expect(server.commands.some((command) => command.name === "store")).toBe(false);
   });
@@ -512,7 +584,10 @@ describe("IMAP thread mutations", () => {
 
     await expect(
       provider.setThreadRead("i77u1", true, signal()),
-    ).rejects.toMatchObject({ code: "mail_provider_mutation_unsupported" });
+    ).rejects.toMatchObject({
+      code: "mail_provider_mutation_unsupported",
+      reason: "mailbox_read_only",
+    });
 
     expect(server.commands.some((command) => command.name === "store")).toBe(false);
   });
@@ -993,6 +1068,24 @@ function providerFor(server: FakeServer) {
 
 function signal(): AbortSignal {
   return new AbortController().signal;
+}
+
+/** The mail log writes projected records to stderr, one JSON line each. */
+function captureStderr() {
+  const lines: string[] = [];
+  const spy = vi
+    .spyOn(process.stderr, "write")
+    .mockImplementation((chunk: unknown) => {
+      lines.push(String(chunk));
+      return true;
+    });
+  return {
+    records: () =>
+      lines
+        .filter((line) => line.includes("mail_imap_archive_create"))
+        .map((line) => JSON.parse(line) as unknown),
+    restore: () => spy.mockRestore(),
+  };
 }
 
 function accountFixture(): StoredImapMailAccount {

@@ -11,7 +11,7 @@ import type {
   MailThreadListItem,
 } from "../../message-types";
 import type { MailIncomingBlobStorePort } from "../../ports";
-import { MAIL_RESOURCE_LIMITS } from "../../security";
+import { MAIL_RESOURCE_LIMITS, writeMailLogRecord } from "../../security";
 import {
   MailContentSourceError,
   type MailContentSourceFetchInput,
@@ -449,7 +449,11 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
       // session spent to repeat it is a TCP connect, a TLS handshake and an
       // AUTH for a refusal that is already known, and a section Done is that
       // once per thread.
-      throw new MailProviderSyncError("mail_provider_mutation_unsupported");
+      throw new MailProviderSyncError(
+        "mail_provider_mutation_unsupported",
+        null,
+        "role_refused_cached",
+      );
     }
     await this.run(signal, async (client) => {
       const target =
@@ -496,7 +500,11 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
             // exactly as the caller found it, and LIST is asked again next
             // time in case the layout is what changed.
             this.mailboxRoles = null;
-            throw new MailProviderSyncError("mail_provider_mutation_unsupported");
+            throw new MailProviderSyncError(
+              "mail_provider_mutation_unsupported",
+              null,
+              "move_answered_no",
+            );
           }
           return Object.freeze({ message, result });
         },
@@ -599,9 +607,9 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     const path = this.mailboxRoles.get(role) ?? null;
     if (path !== null) return path;
     if (role === "archive" && !this.archiveCreateAttempted) {
-      let exists: boolean;
+      let outcome: ArchiveCreateOutcome;
       try {
-        exists = await createArchiveMailbox(client, this.archiveCreatePath);
+        outcome = await createArchiveMailbox(client, this.archiveCreatePath);
       } catch (error) {
         // The server never answered: the socket died, or the deadline closed
         // it. Nothing is known about the folder, so the attempt does not
@@ -611,18 +619,38 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
       }
       // Only a server answer spends the one attempt, whichever way it went.
       this.archiveCreateAttempted = true;
-      if (exists) {
-        // The folder exists now. LIST is the only reading of the layout this
-        // adapter trusts, so the cache is dropped and the role resolved from a
-        // fresh answer rather than from the path that was sent.
-        this.mailboxRoles = null;
-        return this.rolePath(client, role);
+      // The 409 that may follow cannot say whether a CREATE was ever sent.
+      // This record can: it is written only here, once per adapter, and
+      // names the server's answer and nothing else about the folder.
+      writeMailLogRecord({
+        event: "mail_imap_archive_create",
+        accountId: this.account.account.accountId,
+        reason: outcome,
+      });
+      if (outcome === "refused") {
+        // The server declined the CREATE it was sent. Retrying cannot make it
+        // accept one, and inventing another destination would move the
+        // owner's mail somewhere no mail client will look for it.
+        throw new MailProviderSyncError(
+          "mail_provider_mutation_unsupported",
+          null,
+          "archive_create_refused",
+        );
       }
+      // The folder exists now. LIST is the only reading of the layout this
+      // adapter trusts, so the cache is dropped and the role resolved from a
+      // fresh answer rather than from the path that was sent.
+      this.mailboxRoles = null;
+      return this.rolePath(client, role);
     }
-    // The server offers no mailbox for this role, or refused to make one.
-    // Refusing is the honest answer; inventing a destination would move the
-    // owner's mail somewhere no mail client will look for it.
-    throw new MailProviderSyncError("mail_provider_mutation_unsupported");
+    // The server offers no mailbox for this role, and none will be invented:
+    // trash and junk never are, and the archive's one CREATE is spent.
+    // Refusing is the honest answer.
+    throw new MailProviderSyncError(
+      "mail_provider_mutation_unsupported",
+      null,
+      "no_mailbox_for_role",
+    );
   }
 
   /**
@@ -943,7 +971,11 @@ async function withMailbox<T>(
  */
 function assertMoveSupported(client: ImapSessionClient): void {
   if (client.capabilities.has(MOVE_CAPABILITY)) return;
-  throw new MailProviderSyncError("mail_provider_mutation_unsupported");
+  throw new MailProviderSyncError(
+    "mail_provider_mutation_unsupported",
+    null,
+    "move_capability_missing",
+  );
 }
 
 /** INBOX is the one case-insensitive mailbox name in IMAP (RFC 3501 5.1). */
@@ -992,7 +1024,11 @@ function assertFlagStorable(
   present: boolean,
 ): void {
   if (mailbox.readOnly === true) {
-    throw new MailProviderSyncError("mail_provider_mutation_unsupported");
+    throw new MailProviderSyncError(
+      "mail_provider_mutation_unsupported",
+      null,
+      "mailbox_read_only",
+    );
   }
   if (!present) return;
   const permanent = mailbox.permanentFlags;
@@ -1001,7 +1037,11 @@ function assertFlagStorable(
     !permanent.has("\\*") &&
     !permanent.has(flag)
   ) {
-    throw new MailProviderSyncError("mail_provider_mutation_unsupported");
+    throw new MailProviderSyncError(
+      "mail_provider_mutation_unsupported",
+      null,
+      "flag_not_permanent",
+    );
   }
 }
 
@@ -1813,22 +1853,29 @@ function inboxChildPrefix(entry: ImapMailboxDescriptor): string | null {
 async function createArchiveMailbox(
   client: ImapSessionClient,
   path: string,
-): Promise<boolean> {
+): Promise<ArchiveCreateOutcome> {
   let outcome: { readonly path: string; readonly created: boolean };
   try {
     outcome = await client.mailboxCreate(path);
   } catch (error) {
     if (!isServerAnswer(error)) throw mapImapProviderError(error);
-    return false;
+    return "refused";
   }
-  if (outcome?.created) return true;
+  if (outcome?.created) return "created";
   try {
     await client.mailboxSubscribe(outcome.path);
   } catch {
     // Subscription is a courtesy to other clients, not a condition of the move.
   }
-  return true;
+  return "already_there";
 }
+
+/**
+ * How the server answered an archive CREATE, as the log will say it. Only the
+ * three answers exist: a folder made, a folder another client made first, or
+ * a tagged NO. A socket that closed is none of them and is thrown instead.
+ */
+type ArchiveCreateOutcome = "created" | "already_there" | "refused";
 
 /**
  * Whether the error carries a tagged NO or BAD from the server. ImapFlow puts

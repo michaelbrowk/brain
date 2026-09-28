@@ -15,9 +15,7 @@ import { emitMailCommand, type MailCommand } from "./mail-commands";
 import { renderTaskCheck } from "./tasks-checkbox";
 import { emitTaskCommand, type TaskCommand } from "./tasks-commands";
 import type {
-  MailMailboxAvailability,
-  MailSearchIndexStatus,
-  MailSystemMailbox,
+  MailSearchAllResponse,
   MailThreadListItem,
 } from "@/lib/mail/message-types";
 import type { TreeNode } from "@/lib/store/types";
@@ -30,35 +28,6 @@ export type CommandPaletteSelection =
   | { kind: "text"; id: string; target: SearchTextTarget | null }
   | { kind: "mail"; accountId: string; threadId: string }
   | { kind: "task"; id: string };
-
-/** The answer of `POST /api/mail/search/all`, one search across every
- *  account. The route and these two types are PR1's, declared in
- *  `lib/mail/message-types.ts` under the same names; this copy exists so the
- *  palette can be built against the contract before the two branches meet,
- *  and it goes when they do. */
-type MailSearchAllAccountStatus =
-  | {
-      readonly accountId: string;
-      readonly emailAddress: string;
-      readonly mailboxId: MailSystemMailbox;
-      readonly availability: MailMailboxAvailability;
-      readonly indexStatus: MailSearchIndexStatus;
-      readonly resultsTruncated: boolean;
-    }
-  | {
-      readonly accountId: string;
-      readonly emailAddress: string;
-      readonly error: string;
-      readonly reason?: string;
-    };
-
-interface MailSearchAllResponse {
-  readonly apiVersion: 1;
-  readonly threads: readonly MailThreadListItem[];
-  readonly accounts: readonly MailSearchAllAccountStatus[];
-  readonly indexBuilding: boolean;
-  readonly truncated: boolean;
-}
 
 /** What the palette keeps of a mail answer: the rows, and each account's own
  *  address so a row's meta can name the correspondent rather than the reader. */

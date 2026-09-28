@@ -245,6 +245,75 @@ describe("Mail background sync scheduler", () => {
     await scheduler.stop();
   });
 
+  it("builds each account's search index beside its sync, until the index is done", async () => {
+    vi.useFakeTimers();
+    let providerCalls = 0;
+    let indexCalls = 0;
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA],
+        runBackgroundSyncStep: async () => {
+          providerCalls += 1;
+          return syncResult(false);
+        },
+      },
+      {
+        searchIndex: {
+          async runBackgroundSearchIndexStep(accountId, signal) {
+            expect(accountId).toBe(accountA);
+            expect(signal.aborted).toBe(false);
+            indexCalls += 1;
+            return { hasMore: indexCalls < 3 };
+          },
+        },
+        initialDelayMs: 10,
+        intervalMs: 1_000,
+        continuationDelayMs: 25,
+      },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(10);
+    // The index keeps the account queued, so the burst runs it three times
+    // and then the account rests for an interval like any finished one.
+    expect(indexCalls).toBe(3);
+    expect(providerCalls).toBe(3);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(indexCalls).toBe(3);
+    await scheduler.stop();
+  });
+
+  it("keeps syncing when a search-index step fails", async () => {
+    vi.useFakeTimers();
+    let providerCalls = 0;
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA],
+        runBackgroundSyncStep: async () => {
+          providerCalls += 1;
+          return syncResult(false);
+        },
+      },
+      {
+        searchIndex: {
+          async runBackgroundSearchIndexStep() {
+            throw new Error("index unavailable");
+          },
+        },
+        initialDelayMs: 10,
+        intervalMs: 1_000,
+        continuationDelayMs: 25,
+      },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(10);
+    expect(providerCalls).toBe(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(providerCalls).toBe(2);
+    await scheduler.stop();
+  });
+
   it("runs the privacy-cache step on every page, not only after the last one", async () => {
     vi.useFakeTimers();
     let providerCalls = 0;

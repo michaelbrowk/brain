@@ -207,6 +207,7 @@ async function main(): Promise<void> {
   );
   const backgroundSync = new MailBackgroundSyncScheduler(messages, {
     privacyCache: content,
+    searchIndex: messages,
   });
   kickBackgroundSync = () => backgroundSync.kick();
   // Everything the pause turns off, in the order they are started below.

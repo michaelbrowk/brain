@@ -4039,6 +4039,78 @@ describe("per-account message cache", () => {
     fixture.cache.close();
   });
 
+  it("builds the search index in the background, one bounded batch per step", async () => {
+    const fixture = await createCache();
+    // Nothing synced yet: there is nothing to index and nothing to wait for.
+    expect(fixture.cache.advanceSearchIndexStep()).toEqual({ hasMore: false });
+
+    const generation = fixture.cache.beginInitial("100");
+    fixture.cache.putInitialPage(
+      generation,
+      Array.from({ length: 1_100 }, (_, index) =>
+        searchThreadFixture(`backlog-${String(index).padStart(4, "0")}`, index, {
+          subject: index === 3 ? "Receipt from the oldest ride" : "Weekly digest",
+        }),
+      ),
+      null,
+      null,
+    );
+    fixture.cache.completeInitial(generation, 6_000);
+
+    // 500 a step, so 1,100 threads take three, and the third reports done.
+    expect(fixture.cache.advanceSearchIndexStep()).toEqual({ hasMore: true });
+    expect(fixture.cache.advanceSearchIndexStep()).toEqual({ hasMore: true });
+    expect(fixture.cache.advanceSearchIndexStep()).toEqual({ hasMore: false });
+    expect(fixture.cache.advanceSearchIndexStep()).toEqual({ hasMore: false });
+
+    // No search ran during the build, and the first one finds every thread.
+    const page = fixture.cache.searchThreads({
+      mailboxId: "inbox",
+      query: "oldest ride",
+      limit: 20,
+    });
+    expect(page.indexStatus).toBe("ready");
+    expect(page.items.map((item) => item.threadId)).toEqual(["backlog-0003"]);
+    fixture.cache.close();
+  });
+
+  it("starts the background build over when a new generation replaces the old one", async () => {
+    const fixture = await createCache();
+    const first = fixture.cache.beginInitial("100");
+    fixture.cache.putInitialPage(
+      first,
+      [searchThreadFixture("before-resync", 1, { subject: "Before the resync" })],
+      null,
+      null,
+    );
+    fixture.cache.completeInitial(first, 1_000);
+    expect(fixture.cache.advanceSearchIndexStep()).toEqual({ hasMore: false });
+
+    const second = fixture.cache.beginInitial("200");
+    fixture.cache.putInitialPage(
+      second,
+      Array.from({ length: 600 }, (_, index) =>
+        searchThreadFixture(`after-${String(index).padStart(3, "0")}`, index, {
+          subject: "After the resync",
+        }),
+      ),
+      null,
+      null,
+    );
+    fixture.cache.completeInitial(second, 2_000);
+
+    expect(fixture.cache.advanceSearchIndexStep()).toEqual({ hasMore: true });
+    expect(fixture.cache.advanceSearchIndexStep()).toEqual({ hasMore: false });
+    const page = fixture.cache.searchThreads({
+      mailboxId: "inbox",
+      query: "before resync",
+      limit: 20,
+    });
+    expect(page.indexStatus).toBe("ready");
+    expect(page.items).toHaveLength(0);
+    fixture.cache.close();
+  });
+
   it("keeps backfill and result windows bounded and reports partial results honestly", async () => {
     const fixture = await createCache();
     const generation = fixture.cache.beginInitial("100");

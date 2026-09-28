@@ -1184,7 +1184,7 @@ export function CommandPalette({
           )}
           {effectiveMailState === "ready" && mail.indexBuilding && !panelSearching && (
             <div role="status" className="px-2.5 pt-2 text-[12px] text-ink-2">
-              Mail index is still building
+              Older mail is still being indexed
             </div>
           )}
           {visibleMail.map((t) => {

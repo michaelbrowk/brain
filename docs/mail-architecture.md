@@ -95,6 +95,22 @@ delimiter, created and subscribed once per adapter, with ALREADYEXISTS counted
 as success and any other refusal as the same 409. LIST is then asked again and
 the role resolved from its answer. Trash and junk are never invented.
 
+One code, seven refusals, and the journal says which. The 409 alone could not:
+`mail_provider_mutation_unsupported` is raised from six places in the adapter,
+and an operator reading `mail_request_failed` saw the same line for all of
+them. The error now carries a `reason`, a stable code the record keeps and the
+body never does — `role_refused_cached` (LIST already answered no for this
+account and no session was opened), `move_answered_no` (the server said NO to
+the MOVE), `no_mailbox_for_role` (LIST names nothing for the role and nothing
+will be invented: trash, junk, or an archive whose one CREATE is spent),
+`archive_create_refused` (the CREATE was sent and the server declined it),
+`move_capability_missing`, `mailbox_read_only`, `flag_not_permanent`. The
+other half of the diagnosis is whether the CREATE ran at all, so sending one
+writes `mail_imap_archive_create` with the account and a `reason` of
+`created`, `already_there` or `refused`, once per adapter, when the server
+answers; a socket that closed under the CREATE writes nothing, because
+nothing is known.
+
 A MOVE changes the message's UID, so the adapter remembers where it put each
 thread for its own lifetime and keeps the Brain thread id stable across the
 move. The destination UID comes from UIDPLUS `COPYUID` when the server offers
@@ -933,6 +949,7 @@ Allowed structured log fields:
 - account, mailbox, message, attachment, recipient, queued-submission, remote-image, and remote-image-attempt counts
 - raw-MIME, cache, temporary, and WAL byte counts
 - stable error code
+- refusal reason, a stable code naming which site raised the error code
 - SMTP transport kind, `direct` or `authenticated_byte_relay`, on the start record
 
 Never log subjects, addresses, Message-IDs, filenames, headers, body fragments, raw MIME, credentials, IMAP command payloads, SMTP payloads, or server response text that can echo message data. [`projectMailLogRecord`](../lib/mail/security.ts) constructs the final record from the complete top-level allowlist and discards every unknown or nested value. Raw adapter errors and configuration objects never reach it. Invalid event names reject the whole record.

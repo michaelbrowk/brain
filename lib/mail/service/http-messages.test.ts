@@ -677,24 +677,36 @@ describe("brain-mail message HTTP surface", () => {
       });
     try {
       const messages = messageServiceFixture();
+      // One code is raised from six places in the IMAP adapter. The reason is
+      // what tells them apart, and it is the log's to carry, not the body's.
       vi.mocked(messages.updateThread).mockRejectedValue(
-        new MailProviderSyncError("mail_provider_mutation_unsupported"),
+        new MailProviderSyncError(
+          "mail_provider_mutation_unsupported",
+          null,
+          "move_capability_missing",
+        ),
       );
       const socketPath = await startServer(messages, sendServiceFixture());
 
-      await requestJson(
+      const answer = await requestJson(
         socketPath,
         "PATCH",
         `/v1/threads/${THREAD_ID}`,
         JSON.stringify({ accountId: ACCOUNT_ID, archive: true }),
       );
 
+      expect(answer.status).toBe(409);
+      expect(answer.body).toEqual({
+        apiVersion: 1,
+        error: { code: "mail_thread_mutation_unsupported" },
+      });
       expect(written.map((line) => JSON.parse(line))).toEqual([
         {
           event: "mail_request_failed",
           errorCode: "mail_thread_mutation_unsupported",
           phase: "thread_patch",
           accountId: ACCOUNT_ID,
+          reason: "move_capability_missing",
         },
       ]);
       // The thread id is message data and has no allowlisted field to sit in.

@@ -1278,6 +1278,27 @@ describe("mail security and resource contracts", () => {
     );
   });
 
+  it("admits a reason only in stable-code shape", () => {
+    // A reason names which of several refusal sites fired, so it is a code
+    // like the others: a slash or a space is server text and is dropped.
+    expect(
+      projectMailLogRecord({
+        event: "mail_request_failed",
+        errorCode: "mail_thread_mutation_unsupported",
+        reason: "archive_create_refused",
+      }),
+    ).toEqual({
+      event: "mail_request_failed",
+      errorCode: "mail_thread_mutation_unsupported",
+      reason: "archive_create_refused",
+    });
+    for (const reason of ["INBOX/Archive", "no such folder", "Refused", ""]) {
+      expect(
+        projectMailLogRecord({ event: "mail_request_failed", reason }),
+      ).toEqual({ event: "mail_request_failed" });
+    }
+  });
+
   it("fails closed on unstable or unsafe allowed log values", () => {
     expect(projectMailLogRecord({ event: "Mail Sync Failed", accountId: "account-1" })).toBeNull();
     expect(projectMailLogRecord(["mail_sync_failed"])).toBeNull();

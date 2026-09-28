@@ -7,6 +7,7 @@ import type {
   MailSendOperation,
   MailSendResult,
   MailSendStatus,
+  MailSearchAllInput,
   MailSearchInput,
   MailSearchThreadPage,
   MailSyncResult,
@@ -31,6 +32,9 @@ const SAFE_IDEMPOTENCY_KEY = /^[A-Za-z0-9_-]{16,128}$/;
 const MAX_RECIPIENTS = 100;
 const MAX_MESSAGES_PER_THREAD = 200;
 const MAX_LIST_ITEMS = 100;
+/** The palette shows twenty rows at most, and a merge across every account
+ *  asks each for that many, so a wider page would only be thrown away. */
+const MAX_SEARCH_ALL_LIMIT = 20;
 const MAX_TEXT_BYTES = 1024 * 1024;
 const MAX_HTML_BYTES = 2 * 1024 * 1024;
 const SYSTEM_MAILBOXES = new Set<MailSystemMailbox>([
@@ -166,6 +170,37 @@ export function validateMailSearchInput(value: unknown): MailSearchInput {
     cursor: options.cursor,
     limit: options.limit,
   });
+}
+
+/**
+ * The every-account search takes two keys and nothing else: no account, no
+ * mailbox, no cursor, because the route chooses the mailbox per account and
+ * never pages. The query is only checked to be a string here. Its terms are
+ * checked by the route with `normalizeMailSearchQueryText`, so an empty or
+ * over-long query is refused as `invalid_query`, which a palette can show as
+ * "nothing to search for", rather than as the shape refusal a malformed body
+ * earns.
+ */
+export function validateMailSearchAllInput(value: unknown): MailSearchAllInput {
+  if (!isPlainRecord(value)) throw requestInvalid();
+  const allowed = new Set(["limit", "query"]);
+  const keys = Reflect.ownKeys(value);
+  if (
+    keys.some((key) => typeof key !== "string" || !allowed.has(key)) ||
+    !Object.prototype.hasOwnProperty.call(value, "query") ||
+    typeof value.query !== "string"
+  ) {
+    throw requestInvalid();
+  }
+  const limit = value.limit ?? MAX_SEARCH_ALL_LIMIT;
+  if (
+    !Number.isSafeInteger(limit) ||
+    (limit as number) < 1 ||
+    (limit as number) > MAX_SEARCH_ALL_LIMIT
+  ) {
+    throw requestInvalid();
+  }
+  return Object.freeze({ query: value.query, limit: limit as number });
 }
 
 /**

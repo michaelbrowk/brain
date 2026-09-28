@@ -439,6 +439,23 @@ Rules:
 8. Garbage collection never removes a blob referenced by local state or an active cache generation.
 9. Mail data never enters `/opt/brain/notes` unless the user explicitly saves a message as a Brain page.
 
+### Local search
+
+The per-account FTS5 index in `messages.sqlite3` holds subjects, participants
+and previews, never bodies, and nothing is fetched from a provider to answer a
+search. Two Brain routes read it. `POST /api/mail/search` answers one account
+in one mailbox behind a cursor and is the Mail surface's search. `POST
+/api/mail/search/all` takes `{ query, limit }` alone, asks every connected
+account in its widest mailbox (`all` where the account's capabilities list it,
+otherwise `inbox`), merges the pages newest first and cuts the merge to
+`limit` (1 to 20, 20 by default), naming per account the mailbox searched, the
+index state and whether that account's page was cut short, plus one folded
+`indexBuilding` and `truncated`. It is the ⌘K palette's door and has no
+cursor. The every-account route shares its fan-out and merge order with the
+MCP tool `search_mail` through `lib/mail/search-all.ts`, so an agent and the
+palette read the same rows in the same order for the same query; the
+single-account route calls the service's search directly.
+
 ### Draft API contract
 
 Draft IDs and mutation IDs are random UUID-based values created by the client.

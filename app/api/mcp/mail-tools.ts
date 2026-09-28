@@ -4,19 +4,19 @@ import {
   createBrainMailClient,
   type PublicMailAccountV3,
 } from "@/lib/mail/brain-mail-client";
-import type {
-  MailMailboxAvailability,
-  MailSearchIndexStatus,
-  MailThreadListItem,
-  MailThreadMutationInput,
-} from "@/lib/mail/message-types";
+import type { MailThreadMutationInput } from "@/lib/mail/message-types";
 import { sanitizeSnippet } from "@/lib/mail/reader-content";
+import {
+  decodeSearchCursor,
+  encodeSearchCursor,
+  searchAllAccounts,
+  type SearchCursor,
+} from "@/lib/mail/search-all";
 import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
 import {
   logMailActivity,
   mailOutcome,
   mailRefusal,
-  mailRefusalFields,
   sendBlockedReasonOf,
 } from "./mail-tool-kit";
 import { hasScope, hints, insufficientScope, refusal, text } from "./tool-kit";
@@ -71,20 +71,6 @@ function invalidId(label: string, reason: string) {
   return refusal(`that ${label} is not valid`, reason);
 }
 
-/** One queried account's own state in a merged search: either the page it
- *  answered, carrying the same completeness signals the browser reads, or
- *  the reason it did not answer at all. An agent reading `threads` alone
- *  cannot tell an empty mailbox from one still indexing or one account down;
- *  this is what tells it. */
-type SearchAccountStatus =
-  | {
-      readonly accountId: string;
-      readonly availability: MailMailboxAvailability;
-      readonly indexStatus: MailSearchIndexStatus;
-      readonly resultsTruncated: boolean;
-    }
-  | { readonly accountId: string; readonly error: string; readonly reason: string };
-
 /** Brain's shape, not the service's. One address field, named `address`,
  *  because it is the only address any mail tool ever answers with. An account
  *  that can send names no reason, which is why the shared derivation is asked
@@ -101,36 +87,6 @@ function mcpAccount(account: PublicMailAccountV3) {
     canSend: account.capabilities.send,
     ...(sendBlockedReason === null ? {} : { sendBlockedReason }),
   };
-}
-
-type SearchCursor = Record<string, string | null>;
-
-/** Opaque by construction. An agent hands back the one string it was given and
- *  never unpacks a cursor per account. */
-function encodeSearchCursor(per: SearchCursor): string {
-  return Buffer.from(JSON.stringify({ v: 1, per })).toString("base64url");
-}
-
-function decodeSearchCursor(cursor: string): SearchCursor | null {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-  } catch {
-    return null;
-  }
-  if (typeof parsed !== "object" || parsed === null) return null;
-  const value = parsed as { v?: unknown; per?: unknown };
-  if (value.v !== 1 || typeof value.per !== "object" || value.per === null) {
-    return null;
-  }
-  const per: SearchCursor = {};
-  for (const [accountId, entry] of Object.entries(
-    value.per as Record<string, unknown>,
-  )) {
-    if (entry !== null && typeof entry !== "string") return null;
-    per[accountId] = entry;
-  }
-  return per;
 }
 
 /** The words in an HTML-only message, for the one shape the service's own
@@ -152,17 +108,6 @@ function textFromSanitizedHtml(html: string): string | null {
     .map((line) => sanitizeSnippet(line))
     .filter((line) => line.length > 0);
   return lines.length === 0 ? null : lines.join("\n");
-}
-
-/** A total order, so two pages of the same search always merge the same way.
- *  `threadId` breaks a tie because two threads can carry one timestamp, and a
- *  page that reshuffles between calls drops rows across the cursor. */
-function byNewest(left: MailThreadListItem, right: MailThreadListItem): number {
-  const leftAt = left.lastMessageAt ?? 0;
-  const rightAt = right.lastMessageAt ?? 0;
-  if (leftAt !== rightAt) return rightAt - leftAt;
-  if (left.threadId === right.threadId) return 0;
-  return left.threadId < right.threadId ? -1 : 1;
 }
 
 const sleep = (ms: number) =>
@@ -342,61 +287,37 @@ export function registerMailTools(server: McpToolServer): void {
             resultsTruncated: page.resultsTruncated,
           });
         }
-        const accountIds = (await client.listAccounts()).accounts.map(
-          (account) => account.accountId,
-        );
+        const { accounts } = await client.listAccounts();
         let per: SearchCursor | null = null;
         if (cursor !== undefined) {
           per = decodeSearchCursor(cursor);
           if (
             per === null ||
-            Object.keys(per).some((id) => !accountIds.includes(id))
+            Object.keys(per).some(
+              (id) => !accounts.some((account) => account.accountId === id),
+            )
           ) {
             return refusal("that cursor is not usable any more", "stale_cursor");
           }
         }
-        const items: MailThreadListItem[] = [];
-        const next: SearchCursor = {};
-        const accounts: SearchAccountStatus[] = [];
-        for (const id of accountIds) {
-          const named =
-            per !== null && Object.prototype.hasOwnProperty.call(per, id);
-          // An account the previous page ran to the end keeps its null and is
-          // not asked again. An account the cursor never named is new since
-          // that page, so it starts from the beginning.
-          if (named && per?.[id] === null) {
-            next[id] = null;
-            continue;
-          }
-          try {
-            const page = await client.searchThreads({
-              accountId: id,
-              mailboxId,
-              query,
-              cursor: named ? (per?.[id] ?? null) : null,
-              limit: pageLimit,
-            });
-            items.push(...page.items);
-            next[id] = page.nextCursor;
-            accounts.push({
-              accountId: id,
-              availability: page.availability,
-              indexStatus: page.indexStatus,
-              resultsTruncated: page.resultsTruncated,
-            });
-          } catch (error) {
-            // One account down does not take the merge with it. `next` keeps
-            // no entry for this account, so a cursor built from this answer
-            // asks it again from the start rather than marking it exhausted.
-            accounts.push({ accountId: id, ...mailRefusalFields(error) });
-          }
-        }
-        items.sort(byNewest);
-        const exhausted = Object.values(next).every((value) => value === null);
-        return text({
-          threads: items,
-          nextCursor: exhausted ? null : encodeSearchCursor(next),
+        // The fan-out and the merge are `lib/mail/search-all.ts`, shared with
+        // the browser's `/api/mail/search/all`. Only the cursor's encoding is
+        // this tool's: one opaque string, `null` once every account has run
+        // to the end.
+        const merged = await searchAllAccounts(client, {
+          query,
+          limit: pageLimit,
           accounts,
+          mailboxFor: () => mailboxId,
+          cursor: per,
+        });
+        const exhausted = Object.values(merged.next).every(
+          (value) => value === null,
+        );
+        return text({
+          threads: merged.threads,
+          nextCursor: exhausted ? null : encodeSearchCursor(merged.next),
+          accounts: merged.accounts,
         });
       } catch (error) {
         return mailRefusal(error);

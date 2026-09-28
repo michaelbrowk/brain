@@ -62,6 +62,7 @@ describe("the module API gate", () => {
       "/api/mail/oauth/google/start",
       "/api/mail/remote-images/x",
       "/api/mail/search",
+      "/api/mail/search/all",
       "/api/mail/send",
       "/api/mail/send/x",
       "/api/mail/sender-icon/x",

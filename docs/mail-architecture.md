@@ -435,9 +435,10 @@ otherwise `inbox`), merges the pages newest first and cuts the merge to
 `limit` (1 to 20, 20 by default), naming per account the mailbox searched, the
 index state and whether that account's page was cut short, plus one folded
 `indexBuilding` and `truncated`. It is the ⌘K palette's door and has no
-cursor. Both routes share the fan-out and merge order with the MCP tool
-`search_mail` through `lib/mail/search-all.ts`, so an agent and the palette
-read the same rows in the same order for the same query.
+cursor. The every-account route shares its fan-out and merge order with the
+MCP tool `search_mail` through `lib/mail/search-all.ts`, so an agent and the
+palette read the same rows in the same order for the same query; the
+single-account route calls the service's search directly.
 
 ### Draft API contract
 

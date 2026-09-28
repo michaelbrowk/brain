@@ -454,4 +454,197 @@ describe("CommandPalette global search", () => {
     expect(group("Tasks actions")?.textContent).toContain("Move to Today");
     expect(group("Tasks")?.textContent).toContain("Today review");
   });
+
+  it("asks nothing for a query the route would refuse, and hides the group on a refusal", async () => {
+    await render({ tree: [node()] });
+    // Punctuation only: no term for the index, so no request and no group.
+    await type("..");
+    expect(mailRequests()).toHaveLength(0);
+    expect(group("Mail")).toBeNull();
+    expect(document.body.textContent).not.toContain("Mail search failed");
+
+    // A refusal the palette did not foresee is still not an outage to report.
+    mailAnswer = async () =>
+      response({ apiVersion: 1, error: { code: "invalid_query" } }, 400);
+    await type("quarterly");
+    expect(mailRequests()).toHaveLength(1);
+    expect(group("Mail")).toBeNull();
+    expect(document.body.textContent).not.toContain("Mail search failed");
+    expect(rows("Pages")).toHaveLength(1);
+
+    // A session that has lapsed is.
+    mailAnswer = async () => response({ error: "unauthorized" }, 401);
+    await type("quarterly launch");
+    expect(group("Mail")?.textContent).toContain("Mail search failed");
+  });
+
+  it("keeps the cursor on the first revealed row after Show all", async () => {
+    mailAnswer = async () =>
+      response(
+        mailBody(
+          Array.from({ length: 8 }, (_, index) =>
+            thread(`thread-${index}`, `Quarterly letter ${index}`),
+          ),
+        ),
+      );
+    await render();
+    const input = await type("quarterly");
+    const selected = () =>
+      document.body.querySelector('[cmdk-item][aria-selected="true"]')?.textContent;
+    // Nothing above the mail rows here, so End lands on Show all.
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "End", bubbles: true })),
+    );
+    await settle();
+    expect(selected()).toContain("Show all 8");
+
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "Enter", bubbles: true })),
+    );
+    await settle();
+
+    expect(rows("Mail")).toHaveLength(8);
+    expect(selected()).toContain("Quarterly letter 5");
+    // The arrows carry on from there.
+    await act(async () =>
+      input.dispatchEvent(new KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true })),
+    );
+    await settle();
+    expect(selected()).toContain("Quarterly letter 6");
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it("shows one status line at a time while both searches run", async () => {
+    let releasePages!: () => void;
+    const pages = new Promise<Response>((resolve) => {
+      releasePages = () => resolve(response({ hits: [] }));
+    });
+    let releaseMail!: () => void;
+    mailAnswer = () =>
+      new Promise<Response>((resolve) => {
+        releaseMail = () =>
+          resolve(response(mailBody([thread("thread-1", "Quarterly launch review")])));
+      });
+    vi.mocked(fetch).mockImplementation(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.startsWith("/api/search?")) return pages;
+      if (url === "/api/mail/search/all") return mailAnswer();
+      throw new Error(`unexpected fetch: ${url}`);
+    });
+    await render();
+    await type("quarterly");
+
+    const statuses = () => [...document.body.querySelectorAll('[role="status"]')];
+    expect(statuses()).toHaveLength(1);
+    expect(group("Mail")).toBeNull();
+
+    await act(async () => releasePages());
+    await settle();
+    // Pages are in; Mail is still searching, and says so in its own group.
+    expect(statuses()).toHaveLength(1);
+    expect(group("Mail")?.textContent).toContain("Searching");
+
+    await act(async () => releaseMail());
+    await settle();
+    expect(statuses()).toHaveLength(0);
+    expect(rows("Mail")).toHaveLength(1);
+  });
+
+  it("hides the task mark from assistive tech, the trailing word carrying the state", async () => {
+    await render({ tasks: [task("t1", "Quarterly task", { done: true })], searchMail: false });
+    await type("quarterly");
+    const mark = rows("Tasks")[0].querySelector('[role="checkbox"]');
+    expect(mark?.getAttribute("aria-checked")).toBe("true");
+    expect(mark?.closest('[aria-hidden="true"]')).not.toBeNull();
+    expect(rows("Tasks")[0].textContent).toContain("Done");
+  });
+
+  it("reads a mail answer for a query the reader has left as loading, never as rows", async () => {
+    const pending = new Map<string, (value: Response) => void>();
+    vi.mocked(fetch).mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.startsWith("/api/search?")) return response({ hits: [] });
+        if (url === "/api/mail/search/all") {
+          const { query } = JSON.parse(String(init?.body)) as { query: string };
+          return new Promise<Response>((resolve) => pending.set(query, resolve));
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+    );
+    await render();
+    await type("quarterly");
+    await type("quarterly launch");
+    expect([...pending.keys()]).toEqual(["quarterly", "quarterly launch"]);
+
+    // The older answer lands first, carrying a subject the newer one lacks.
+    await act(async () =>
+      pending.get("quarterly")!(
+        response(mailBody([thread("thread-old", "Quarterly stale letter")])),
+      ),
+    );
+    await settle();
+    expect(document.body.textContent).not.toContain("Quarterly stale letter");
+    expect(group("Mail")?.textContent).toContain("Searching");
+
+    await act(async () =>
+      pending.get("quarterly launch")!(
+        response(mailBody([thread("thread-new", "Quarterly launch review")])),
+      ),
+    );
+    await settle();
+    expect(rows("Mail")).toHaveLength(1);
+    expect(rows("Mail")[0].textContent).toContain("Quarterly launch review");
+  });
+
+  it("aborts the mail request in flight when the palette closes", async () => {
+    let signal: AbortSignal | null | undefined;
+    vi.mocked(fetch).mockImplementation(
+      async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.startsWith("/api/search?")) return response({ hits: [] });
+        if (url === "/api/mail/search/all") {
+          signal = init?.signal;
+          // never answers: the abort is what ends it
+          return new Promise<Response>(() => {});
+        }
+        throw new Error(`unexpected fetch: ${url}`);
+      },
+    );
+    await render();
+    await type("quarterly");
+    expect(signal?.aborted).toBe(false);
+
+    await render({ open: false });
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("does not claim no results while tasks alone match, and names every scope when nothing does", async () => {
+    await render({ searchMail: false, tasks: [task("t1", "Quarterly task")] });
+    await type("quarterly");
+    expect(rows("Tasks")).toHaveLength(1);
+    expect(document.body.textContent).not.toContain("No results for");
+
+    await type("zzzz");
+    expect(document.body.textContent).toContain("No results for");
+    expect(document.body.textContent).toContain(
+      "Searches page titles and text, mail and tasks",
+    );
+  });
+
+  it("folds an expanded group back when the palette closes", async () => {
+    const tasks = Array.from({ length: 7 }, (_, index) =>
+      task(`t${index}`, `Quarterly task ${index}`),
+    );
+    await render({ tasks, searchMail: false });
+    await type("quarterly");
+    await act(async () => item("Show all 7").click());
+    expect(rows("Tasks")).toHaveLength(7);
+
+    await render({ tasks, searchMail: false, open: false });
+    await render({ tasks, searchMail: false, open: true });
+    await type("quarterly");
+    expect(rows("Tasks")).toHaveLength(6);
+    expect(rows("Tasks")[5].textContent).toContain("Show all 7");
+  });
 });

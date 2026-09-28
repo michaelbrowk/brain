@@ -10,10 +10,12 @@ import { Icon } from "./ui/icon";
 import { Kbd } from "./ui/primitives";
 import { useScrollEdge } from "./ui/scroll-edge";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { flushSync } from "react-dom";
 import type { ReactNode } from "react";
 import { emitMailCommand, type MailCommand } from "./mail-commands";
 import { renderTaskCheck } from "./tasks-checkbox";
 import { emitTaskCommand, type TaskCommand } from "./tasks-commands";
+import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
 import type {
   MailSearchAllResponse,
   MailThreadListItem,
@@ -401,7 +403,11 @@ function TaskMark({ checked, label }: { checked: boolean; label: string }) {
     host.append(mark);
     return () => mark.remove();
   }, [checked, label]);
-  return <span ref={hostRef} className="grid size-5 shrink-0 place-items-center" />;
+  // Hidden from assistive tech: the mark's own label is the task's title, which
+  // the row already reads, and the trailing word says whether it is done.
+  return (
+    <span ref={hostRef} aria-hidden="true" className="grid size-5 shrink-0 place-items-center" />
+  );
 }
 
 export function CommandPalette({
@@ -477,6 +483,22 @@ export function CommandPalette({
   // groups back to their five without an effect watching the input.
   const [mailExpandedFor, setMailExpandedFor] = useState<string | null>(null);
   const [tasksExpandedFor, setTasksExpandedFor] = useState<string | null>(null);
+  // The keyboard cursor, held here rather than inside cmdk, so Show all can
+  // put it on the first row it reveals. Left to itself cmdk sends the cursor
+  // back to the top of the list once the Show all row it stood on goes away.
+  const [cursor, setCursor] = useState("");
+  // The shell can close the palette through `open` without passing through
+  // `handleOpenChange`, so the expansions fold back on the edge of `open`
+  // itself, adjusted during render the way React's docs adjust state to a
+  // prop, rather than from an effect.
+  const [wasOpen, setWasOpen] = useState(open);
+  if (wasOpen !== open) {
+    setWasOpen(open);
+    if (!open) {
+      setMailExpandedFor(null);
+      setTasksExpandedFor(null);
+    }
+  }
   const pages = useMemo(() => flattenPages(tree), [tree]);
   const pageById = useMemo(() => new Map(pages.map((page) => [page.id, page])), [pages]);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -743,7 +765,11 @@ export function CommandPalette({
 
   // The `tag:` and `cat:` grammar is about pages, so a filtered query has no
   // Mail or Tasks group at all, and Mail asks for nothing while it is off.
-  const mailWanted = searchMail && !hasPageFilter && q.length >= 2;
+  // Mail also asks for nothing the route would refuse (punctuation alone, too
+  // many or too long terms): the palette runs the route's own normalizer, so a
+  // query with no searchable term has no group rather than a failure row.
+  const mailWanted =
+    searchMail && !hasPageFilter && q.length >= 2 && normalizeMailSearchQueryText(q) !== null;
   const tasksWanted = tasks !== undefined && !hasPageFilter && q.length >= 2;
 
   // mail search across every account, on the same debounce as the pages
@@ -764,10 +790,17 @@ export function CommandPalette({
           body: JSON.stringify({ query: q, limit: MAIL_LIMIT }),
           signal: controller.signal,
         });
-        // A paused module answers 409 from the gate. That is not a failure to
-        // report: a module that is off has no group, the same as when the
-        // shell never asked.
-        if (response.status === 409) {
+        // A paused module answers 409 from the gate, and a query the route
+        // will not search answers 400. Neither is a failure to report: a
+        // module that is off or a query with nothing to look for has no
+        // group, the same as when the shell never asked. A lapsed session
+        // (401, 403) is a failure, and says so.
+        if (
+          response.status >= 400 &&
+          response.status < 500 &&
+          response.status !== 401 &&
+          response.status !== 403
+        ) {
           setMail(NO_MAIL);
           setMailResolvedQuery(q);
           setMailState("ready");
@@ -775,6 +808,9 @@ export function CommandPalette({
         }
         if (!response.ok) throw new Error("mail search unavailable");
         const body = (await response.json()) as Partial<MailSearchAllResponse>;
+        // An answer that lands after the query moved on is dropped, not kept
+        // as the rows of a query the reader has left.
+        if (controller.signal.aborted) return;
         if (!Array.isArray(body.threads)) throw new Error("invalid mail search response");
         const ownAddresses = new Map<string, string>();
         for (const account of body.accounts ?? []) {
@@ -839,6 +875,16 @@ export function CommandPalette({
     handleOpenChange(false);
   };
 
+  // Show all hands the cursor to the first row it reveals. cmdk sends the
+  // cursor to the top of the list when the row it stands on unmounts, so the
+  // cursor steps up to the last folded row first, in its own commit, and only
+  // then does the group open and the cursor land on the sixth row.
+  const showAll = (lastShown: string, firstRevealed: string, expand: () => void) => {
+    flushSync(() => setCursor(lastShown));
+    expand();
+    setCursor(firstRevealed);
+  };
+
   const runAction = (action: PaletteAction) => {
     try {
       void action.run();
@@ -879,7 +925,12 @@ export function CommandPalette({
   );
   const tasksExpanded = tasksExpandedFor === q;
   const visibleTasks = tasksExpanded ? taskResults : taskResults.slice(0, GROUP_FOLD);
-  const mailGroupShown = effectiveMailState === "loading" || effectiveMailState === "error" || mailThreads.length > 0;
+  // While the panel-wide "Searching…" stands, it speaks for Mail too: one
+  // status line at a time, so a screen reader hears the search once.
+  const panelSearching = effectiveSearchState === "loading";
+  const mailSearching = effectiveMailState === "loading" && !panelSearching;
+  const mailGroupShown =
+    mailSearching || effectiveMailState === "error" || mailThreads.length > 0;
   const nothing =
     effectiveSearchState !== "loading" &&
     effectiveSearchState !== "error" &&
@@ -1079,7 +1130,7 @@ export function CommandPalette({
           rather than the panel-wide one. */}
       {mailGroupShown && (
         <Command.Group heading="Mail">
-          {effectiveMailState === "loading" && (
+          {mailSearching && (
             <div role="status" aria-live="polite" className="px-2.5 py-2 text-[12px] text-ink-2">
               Searching…
             </div>
@@ -1101,7 +1152,7 @@ export function CommandPalette({
               </Command.Item>
             </>
           )}
-          {effectiveMailState === "ready" && mail.indexBuilding && (
+          {effectiveMailState === "ready" && mail.indexBuilding && !panelSearching && (
             <div role="status" className="px-2.5 pt-2 text-[12px] text-ink-2">
               Mail index is still building
             </div>
@@ -1139,7 +1190,15 @@ export function CommandPalette({
           {!mailExpanded && mailThreads.length > GROUP_FOLD && (
             <Command.Item
               value="mail-show-all"
-              onSelect={() => setMailExpandedFor(q)}
+              onSelect={() => {
+                const last = mailThreads[GROUP_FOLD - 1];
+                const next = mailThreads[GROUP_FOLD];
+                showAll(
+                  `mail-${last.accountId}-${last.threadId}`,
+                  `mail-${next.accountId}-${next.threadId}`,
+                  () => setMailExpandedFor(q),
+                );
+              }}
               className={`${ITEM_CLASS} text-ink-2`}
             >
               <span className="grid size-5 shrink-0 place-items-center" aria-hidden />
@@ -1170,7 +1229,13 @@ export function CommandPalette({
           {!tasksExpanded && taskResults.length > GROUP_FOLD && (
             <Command.Item
               value="tasks-show-all"
-              onSelect={() => setTasksExpandedFor(q)}
+              onSelect={() =>
+                showAll(
+                  `task-${taskResults[GROUP_FOLD - 1].id}`,
+                  `task-${taskResults[GROUP_FOLD].id}`,
+                  () => setTasksExpandedFor(q),
+                )
+              }
               className={`${ITEM_CLASS} text-ink-2`}
             >
               <span className="grid size-5 shrink-0 place-items-center" aria-hidden />
@@ -1221,6 +1286,8 @@ export function CommandPalette({
               <Command
                 label="Search and commands"
                 shouldFilter={false}
+                value={cursor}
+                onValueChange={setCursor}
                 onKeyDown={(event) => {
                   if (event.key === "Escape") handleOpenChange(false);
                 }}
@@ -1303,7 +1370,13 @@ export function CommandPalette({
           <Dialog.Description className="sr-only">
             Search pages, mail, tasks and Brain actions.
           </Dialog.Description>
-          <Command label="Search and commands" shouldFilter={false} className="flex min-h-0 flex-col">
+          <Command
+            label="Search and commands"
+            shouldFilter={false}
+            value={cursor}
+            onValueChange={setCursor}
+            className="flex min-h-0 flex-col"
+          >
             <div className="flex items-center gap-2.5 px-4">
               <Icon name="magnifer-linear" size={18} className="shrink-0 text-ink-2" />
               {activeFilter && (

@@ -189,4 +189,15 @@ describe("Shell global search", () => {
     // read the query again: it shows up as one more load of the records.
     expect(tasksLoads()).toBe(before + 1);
   });
+
+  it("encodes the task id into the href", async () => {
+    await render();
+
+    await act(async () =>
+      harness.paletteProps?.onSelect({ kind: "task", id: "task/1 a" }),
+    );
+    await settle();
+
+    expect(window.location.search).toBe("?task=task%2F1%20a");
+  });
 });

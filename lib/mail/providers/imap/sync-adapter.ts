@@ -69,6 +69,8 @@ const MAX_TRACKED_RELOCATIONS = 256;
  * for why ImapFlow's emulation of it is refused rather than accepted.
  */
 const MOVE_CAPABILITY = "MOVE";
+/** How long LIST's answer about role folders, and a refused CREATE, are trusted. */
+const ROLE_REFUSAL_TTL_MS = 10 * 60_000;
 
 export interface ImapReadSessions {
   withSession<T>(
@@ -149,10 +151,19 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    * thread too, and a section Done must not become a CREATE per thread.
    */
   private archiveCreateAttempted = false;
+  /**
+   * When LIST last answered, on this adapter's clock. A remembered refusal and
+   * the spent CREATE both lapse ROLE_REFUSAL_TTL_MS after it: the owner can
+   * make the folder in another client, and an adapter that lives as long as
+   * the service would otherwise refuse until the next restart.
+   */
+  private mailboxRolesAt = 0;
+  private readonly now: () => number;
 
   constructor(
     account: StoredImapMailAccount,
     sessions: ImapReadSessions,
+    options: { readonly now?: () => number } = {},
   ) {
     if (
       account.providerKind !== "imap" ||
@@ -162,6 +173,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     }
     this.account = account;
     this.sessions = sessions;
+    this.now = options.now ?? Date.now;
   }
 
   async getSyncAnchor(signal: AbortSignal): Promise<string> {
@@ -587,6 +599,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
     client: ImapSessionClient,
     role: ImapMailboxRole,
   ): Promise<string> {
+    this.expireRoleRefusal();
     if (this.mailboxRoles === null) {
       let listed: unknown;
       try {
@@ -603,6 +616,7 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
         ["junk", selectImapMailboxPath("junk", listed)],
       ]);
       this.archiveCreatePath = archiveCreatePath(listed);
+      this.mailboxRolesAt = this.now();
     }
     const path = this.mailboxRoles.get(role) ?? null;
     if (path !== null) return path;
@@ -659,9 +673,21 @@ export class ImapMailSyncAdapter implements MailProviderSyncPort {
    * it is never older than the last thing the server actually did.
    */
   private roleRefusedFromCache(role: ImapMailboxRole): boolean {
+    this.expireRoleRefusal();
     return (
       this.mailboxRoles !== null && (this.mailboxRoles.get(role) ?? null) === null
     );
+  }
+
+  /** Forgets LIST's answer, and the spent CREATE with it, once it is old. */
+  private expireRoleRefusal(): void {
+    if (
+      this.mailboxRoles !== null &&
+      this.now() - this.mailboxRolesAt > ROLE_REFUSAL_TTL_MS
+    ) {
+      this.mailboxRoles = null;
+      this.archiveCreateAttempted = false;
+    }
   }
 
   private locate(threadId: string): ThreadLocation {
@@ -1695,7 +1721,28 @@ const ROLE_TIERS: Readonly<Record<ImapMailboxRole, readonly RoleTier[]>> =
   Object.freeze({
     archive: Object.freeze<readonly RoleTier[]>([
       Object.freeze({ kind: "special_use", attribute: "\\Archive" }),
-      Object.freeze({ kind: "name", names: Object.freeze(["archive", "archives"]) }),
+      // XLIST has no \Archive attribute, so a server that lists over it, and
+      // names its folders in the account's language, is found by the name it
+      // shows the owner: CREATE "Archive" beside it is refused there. These
+      // are the words mail clients use for the folder in the languages they
+      // ship; each still has to sit at the root or directly under the Inbox.
+      Object.freeze({
+        kind: "name",
+        names: Object.freeze([
+          "archive",
+          "archives",
+          "архив",
+          "архів",
+          "archiv",
+          "archivio",
+          "archivo",
+          "arquivo",
+          "archiwum",
+          "arşiv",
+          "archief",
+          "arkiv",
+        ]),
+      }),
       Object.freeze({ kind: "special_use", attribute: "\\All" }),
       Object.freeze({ kind: "name", names: Object.freeze(["all mail"]) }),
     ]),

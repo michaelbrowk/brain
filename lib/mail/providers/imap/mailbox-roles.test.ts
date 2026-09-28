@@ -81,8 +81,39 @@ describe("IMAP mailbox role discovery", () => {
 
   it("still refuses a name it does not know", () => {
     expect(
-      selectImapMailboxPath("archive", [{ path: "Архив", delimiter: "/" }]),
+      selectImapMailboxPath("archive", [{ path: "Old stuff", delimiter: "/" }]),
     ).toBeNull();
+  });
+
+  it("takes the archive under the name a localized server gives it", () => {
+    for (const name of [
+      "Архив",
+      "Архів",
+      "Archiv",
+      "Archivio",
+      "Archivo",
+      "Arquivo",
+      "Archiwum",
+      "Arşiv",
+      "Archief",
+      "Arkiv",
+    ]) {
+      expect(
+        selectImapMailboxPath("archive", [
+          { path: "Sent", name: "Sent", delimiter: "|" },
+          { path: name, name, delimiter: "|" },
+        ]),
+      ).toBe(name);
+    }
+  });
+
+  it("keeps the stated attribute above a localized name", () => {
+    expect(
+      selectImapMailboxPath("archive", [
+        { path: "Архив", name: "Архив", delimiter: "|" },
+        { path: "Saved", name: "Saved", delimiter: "|", specialUse: "\\Archive" },
+      ]),
+    ).toBe("Saved");
   });
 
   it("ranks a named Archive above an all-mail view", () => {

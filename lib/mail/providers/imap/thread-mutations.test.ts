@@ -239,6 +239,64 @@ describe("IMAP thread mutations", () => {
     expect(opened.count).toBe(1);
   });
 
+  it("archives into a folder named in the owner's language, and creates nothing", async () => {
+    // A server that lists folders over XLIST has no \\Archive attribute to
+    // give, and one that names its folders in the account's language lists
+    // the archive as "Архив". CREATE "Archive" there is refused, so reading
+    // the name is the only way the button works.
+    const server = serverFixture({
+      mailboxes: [{ path: "Отправленные" }, { path: "Архив" }],
+      createAnswers: "no",
+    });
+    const { provider } = providerFor(server);
+
+    await provider.archiveThread("i77u1", signal());
+
+    expect(server.commands.some((command) => command.name === "create")).toBe(false);
+    expect(server.mailbox("Архив").messages.size).toBe(1);
+    expect(server.mailbox("INBOX").messages.has(1)).toBe(false);
+  });
+
+  it("asks the server again once a remembered refusal is ten minutes old", async () => {
+    let clock = 1_800_000_000_000;
+    const server = serverFixture({ mailboxes: [{ path: "Sent" }], createAnswers: "no" });
+    const { provider } = providerFor(server, () => clock);
+
+    await expect(provider.archiveThread("i77u1", signal())).rejects.toMatchObject({
+      reason: "archive_create_refused",
+    });
+    // The owner makes the folder in another client. Inside the window the
+    // adapter still answers from what it knows, without a session.
+    server.addMailbox("Archive");
+    clock += 9 * 60_000;
+    await expect(provider.archiveThread("i77u1", signal())).rejects.toMatchObject({
+      reason: "role_refused_cached",
+    });
+
+    // Past it, LIST is asked again and the new folder is found.
+    clock += 60_000 + 1;
+    await provider.archiveThread("i77u1", signal());
+
+    expect(server.mailbox("Archive").messages.size).toBe(1);
+    expect(server.commands.filter((command) => command.name === "list")).toHaveLength(2);
+  });
+
+  it("spends a second CREATE only after the refusal has aged out", async () => {
+    let clock = 1_800_000_000_000;
+    const server = serverFixture({ mailboxes: [{ path: "Sent" }], createAnswers: "no" });
+    const { provider } = providerFor(server, () => clock);
+
+    await expect(provider.archiveThread("i77u1", signal())).rejects.toMatchObject({
+      reason: "archive_create_refused",
+    });
+    clock += 10 * 60_000 + 1;
+    await expect(provider.archiveThread("i77u1", signal())).rejects.toMatchObject({
+      reason: "archive_create_refused",
+    });
+
+    expect(server.commands.filter((command) => command.name === "create")).toHaveLength(2);
+  });
+
   it("refuses, after one CREATE and two LISTs, when the created folder never shows up", async () => {
     // A server that says OK to the CREATE and then hides the folder from LIST
     // is not a server this adapter can archive into. Without the once-per-adapter
@@ -720,6 +778,8 @@ interface FakeServer {
   readonly locks: { readonly path: string; readonly readOnly: boolean }[];
   readonly client: ImapSessionClient;
   mailbox(path: string): FakeMailbox;
+  /** Another client (a webmail, a phone) makes a folder behind the adapter's back. */
+  addMailbox(path: string): void;
 }
 
 /**
@@ -1022,6 +1082,14 @@ function serverFixture(options?: {
     locks,
     client: client as unknown as ImapSessionClient,
     mailbox: require,
+    addMailbox(path: string) {
+      mailboxes.set(path, {
+        path,
+        uidValidity: BigInt(900 + mailboxes.size),
+        uidNext: 1,
+        messages: new Map(),
+      });
+    },
   };
 }
 
@@ -1046,7 +1114,7 @@ function projected(message: FakeMessage): FetchMessageObject {
   } as FetchMessageObject;
 }
 
-function providerFor(server: FakeServer) {
+function providerFor(server: FakeServer, now?: () => number) {
   /* Every session is a TCP connect, a TLS handshake and an AUTH on the wire,
      so how many were opened is part of what a test can assert. */
   const opened = { count: 0 };
@@ -1061,7 +1129,11 @@ function providerFor(server: FakeServer) {
     },
   };
   return {
-    provider: new ImapMailSyncAdapter(accountFixture(), sessions),
+    provider: new ImapMailSyncAdapter(
+      accountFixture(),
+      sessions,
+      now === undefined ? {} : { now },
+    ),
     opened,
   };
 }

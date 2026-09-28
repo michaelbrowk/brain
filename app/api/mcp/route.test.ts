@@ -2892,6 +2892,29 @@ describe("the mail read tools", () => {
     expect(payload.nextCursor).not.toContain("cursor-one");
   });
 
+  it("answers no cursor at all once every account has run to the end", async () => {
+    const fake = createMailClientFake({
+      listAccounts: async () => ({
+        apiVersion: 2,
+        accounts: [
+          fakeAccountV2(FAKE_ACCOUNT_ID),
+          fakeAccountV2(FAKE_ACCOUNT_ID_TWO),
+        ],
+      }),
+    });
+    mocks.createBrainMailClient.mockReturnValue(fake.client);
+
+    const { payload } = await toolPayload(
+      await callTool("search_mail", { query: "invoice" }, 206),
+    );
+
+    expect(payload.threads).toEqual([]);
+    expect(payload.nextCursor).toBeNull();
+    expect(
+      fake.calls.filter((call) => call.method === "searchThreads"),
+    ).toHaveLength(2);
+  });
+
   it("hands a merged cursor back as the per-account cursors it came from", async () => {
     const fake = twoAccountSearchFake();
     mocks.createBrainMailClient.mockReturnValue(fake.client);

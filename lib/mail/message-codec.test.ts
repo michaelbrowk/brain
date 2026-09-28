@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   normalizeMailSearchQuery,
   validateMailMailboxThreadPage,
+  validateMailSearchAllInput,
   validateMailSearchInput,
   validateMailSearchThreadPage,
   validateMailSendInput,
@@ -238,6 +239,37 @@ describe("Mail message boundary codec", () => {
       `${"é".repeat(65)}`,
     ]) {
       expect(() => normalizeMailSearchQuery(invalid)).toThrow(
+        "mail_request_invalid",
+      );
+    }
+  });
+
+  it("accepts an every-account search of a query and a bounded limit", () => {
+    expect(validateMailSearchAllInput({ query: "Quarterly launch" })).toEqual({
+      query: "Quarterly launch",
+      limit: 20,
+    });
+    expect(validateMailSearchAllInput({ query: "***", limit: 1 })).toEqual({
+      query: "***",
+      limit: 1,
+    });
+    expect(Object.isFrozen(validateMailSearchAllInput({ query: "x" }))).toBe(
+      true,
+    );
+    for (const invalid of [
+      null,
+      [],
+      {},
+      { query: 5 },
+      { query: "x", limit: 0 },
+      { query: "x", limit: 21 },
+      { query: "x", limit: 2.5 },
+      { query: "x", limit: "5" },
+      { query: "x", accountId },
+      { query: "x", mailboxId: "inbox" },
+      { query: "x", cursor: "cursor_1" },
+    ]) {
+      expect(() => validateMailSearchAllInput(invalid), JSON.stringify(invalid)).toThrow(
         "mail_request_invalid",
       );
     }

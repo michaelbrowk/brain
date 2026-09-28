@@ -135,6 +135,59 @@ export interface MailSearchInput {
   readonly limit: number;
 }
 
+/**
+ * The body of `POST /api/mail/search/all`, the palette's door: one query
+ * across every connected account, no cursor. `query` is the person's own
+ * text, still to be checked by `normalizeMailSearchQueryText`, so the route
+ * can refuse an empty or over-long one under its own code rather than the
+ * generic shape refusal. `limit` bounds the merged answer and each account's
+ * page alike, 1 to 20.
+ */
+export interface MailSearchAllInput {
+  readonly query: string;
+  readonly limit: number;
+}
+
+/**
+ * One account's part in a merged search: the page it answered, with the
+ * mailbox it was asked in and the same completeness signals a single-account
+ * search carries, or the words for why it did not answer. The address is here
+ * so a row's account can be named without a second request.
+ */
+export type MailSearchAllAccountStatus =
+  | {
+      readonly accountId: string;
+      readonly emailAddress: string;
+      readonly mailboxId: MailSystemMailbox;
+      readonly availability: MailMailboxAvailability;
+      readonly indexStatus: MailSearchIndexStatus;
+      readonly resultsTruncated: boolean;
+    }
+  | {
+      readonly accountId: string;
+      readonly emailAddress: string;
+      readonly error: string;
+      readonly reason: string;
+    };
+
+/**
+ * Every account's search merged newest first and cut to the asked limit.
+ * `indexBuilding` and `truncated` fold the per-account signals so a reader
+ * that shows one list can say "still indexing" or "more than shown" without
+ * walking `accounts`; the per-account entries stay for a reader that wants
+ * to name which one.
+ */
+export interface MailSearchAllResponse {
+  readonly apiVersion: 1;
+  readonly threads: readonly MailThreadListItem[];
+  readonly accounts: readonly MailSearchAllAccountStatus[];
+  /** True when any searched account reports its index still building. */
+  readonly indexBuilding: boolean;
+  /** True when the merge held more rows than `limit`, or any account cut its
+   *  own page short. */
+  readonly truncated: boolean;
+}
+
 export interface MailMessageDto {
   readonly accountId: string;
   readonly messageId: string;

@@ -51,9 +51,15 @@ export type MailProviderSyncErrorCode =
   | "mail_provider_thread_stale";
 
 export class MailProviderSyncError extends Error {
+  /**
+   * `reason` names which of several sites raised one code, as a stable code
+   * of its own (`[a-z][a-z0-9_]*`). It exists for the log: the message stays
+   * the code, and nothing on the wire carries it.
+   */
   constructor(
     readonly code: MailProviderSyncErrorCode,
     readonly retryAfterMs: number | null = null,
+    readonly reason: string | null = null,
   ) {
     super(code);
     this.name = "MailProviderSyncError";

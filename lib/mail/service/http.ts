@@ -234,6 +234,10 @@ class MailHttpError extends Error {
    *  needs to act on — a size, and the ceiling it crossed. It reaches the
    *  answer's body; the log record stays the stable code and nothing else. */
   readonly detail: string | null;
+  /** Which of several sites raised the code, as a stable code of its own.
+   *  The opposite of `detail`: it reaches the log record and never the body,
+   *  because it is for the operator reading the journal, not for a surface. */
+  readonly reason: string | null;
 
   constructor(
     status: number,
@@ -241,6 +245,7 @@ class MailHttpError extends Error {
     closeConnection = false,
     enqueued = false,
     detail: string | null = null,
+    reason: string | null = null,
   ) {
     super(detail === null ? code : `${code}: ${detail}`);
     this.name = "MailHttpError";
@@ -249,6 +254,7 @@ class MailHttpError extends Error {
     this.closeConnection = closeConnection;
     this.detail = detail;
     this.enqueued = enqueued;
+    this.reason = reason;
   }
 }
 
@@ -1086,7 +1092,8 @@ async function handleRequest(
  * no folder for an archive, a 404 for a thread the reader can still see, a 429
  * from a provider — each of them is a decision the service made about the
  * owner's mail, and each of them used to leave nothing behind. A record carries
- * the stable code, the route family and the account, all three already on the
+ * the stable code, the route family, the account and, when the error names
+ * one, the reason that tells apart the sites raising one code, all four on the
  * section 13 allowlist. The projection drops anything else, including an
  * account id that does not look like one.
  */
@@ -1100,6 +1107,7 @@ function logRequestFailure(
     errorCode: httpError.code,
     phase,
     ...(accountId === null ? {} : { accountId }),
+    ...(httpError.reason === null ? {} : { reason: httpError.reason }),
   });
 }
 
@@ -1606,7 +1614,16 @@ function toHttpError(error: unknown): MailHttpError {
     }
     if (error.code === "mail_provider_mutation_unsupported") {
       // The server has no mailbox for this action. Retrying cannot find one.
-      return new MailHttpError(409, "mail_thread_mutation_unsupported");
+      // The adapter raises this one code from several places and says which
+      // in `reason`; it rides to the log record and stays out of the body.
+      return new MailHttpError(
+        409,
+        "mail_thread_mutation_unsupported",
+        false,
+        false,
+        null,
+        error.reason,
+      );
     }
     if (error.code === "mail_provider_thread_stale") {
       // The thread is not where the account last saw it. No retry brings the

@@ -95,6 +95,22 @@ delimiter, created and subscribed once per adapter, with ALREADYEXISTS counted
 as success and any other refusal as the same 409. LIST is then asked again and
 the role resolved from its answer. Trash and junk are never invented.
 
+One code, seven refusals, and the journal says which. The 409 alone could not:
+`mail_provider_mutation_unsupported` is raised from six places in the adapter,
+and an operator reading `mail_request_failed` saw the same line for all of
+them. The error now carries a `reason`, a stable code the record keeps and the
+body never does — `role_refused_cached` (LIST already answered no for this
+account and no session was opened), `move_answered_no` (the server said NO to
+the MOVE), `no_mailbox_for_role` (LIST names nothing for the role and nothing
+will be invented: trash, junk, or an archive whose one CREATE is spent),
+`archive_create_refused` (the CREATE was sent and the server declined it),
+`move_capability_missing`, `mailbox_read_only`, `flag_not_permanent`. The
+other half of the diagnosis is whether the CREATE ran at all, so sending one
+writes `mail_imap_archive_create` with the account and a `reason` of
+`created`, `already_there` or `refused`, once per adapter, when the server
+answers; a socket that closed under the CREATE writes nothing, because
+nothing is known.
+
 A MOVE changes the message's UID, so the adapter remembers where it put each
 thread for its own lifetime and keeps the Brain thread id stable across the
 move. The destination UID comes from UIDPLUS `COPYUID` when the server offers
@@ -422,6 +438,23 @@ Rules:
 7. A database row becomes visible only after its blob is durably written and verified.
 8. Garbage collection never removes a blob referenced by local state or an active cache generation.
 9. Mail data never enters `/opt/brain/notes` unless the user explicitly saves a message as a Brain page.
+
+### Local search
+
+The per-account FTS5 index in `messages.sqlite3` holds subjects, participants
+and previews, never bodies, and nothing is fetched from a provider to answer a
+search. Two Brain routes read it. `POST /api/mail/search` answers one account
+in one mailbox behind a cursor and is the Mail surface's search. `POST
+/api/mail/search/all` takes `{ query, limit }` alone, asks every connected
+account in its widest mailbox (`all` where the account's capabilities list it,
+otherwise `inbox`), merges the pages newest first and cuts the merge to
+`limit` (1 to 20, 20 by default), naming per account the mailbox searched, the
+index state and whether that account's page was cut short, plus one folded
+`indexBuilding` and `truncated`. It is the ⌘K palette's door and has no
+cursor. The every-account route shares its fan-out and merge order with the
+MCP tool `search_mail` through `lib/mail/search-all.ts`, so an agent and the
+palette read the same rows in the same order for the same query; the
+single-account route calls the service's search directly.
 
 ### Draft API contract
 
@@ -933,6 +966,7 @@ Allowed structured log fields:
 - account, mailbox, message, attachment, recipient, queued-submission, remote-image, and remote-image-attempt counts
 - raw-MIME, cache, temporary, and WAL byte counts
 - stable error code
+- refusal reason, a stable code naming which site raised the error code
 - SMTP transport kind, `direct` or `authenticated_byte_relay`, on the start record
 
 Never log subjects, addresses, Message-IDs, filenames, headers, body fragments, raw MIME, credentials, IMAP command payloads, SMTP payloads, or server response text that can echo message data. [`projectMailLogRecord`](../lib/mail/security.ts) constructs the final record from the complete top-level allowlist and discards every unknown or nested value. Raw adapter errors and configuration objects never reach it. Invalid event names reject the whole record.

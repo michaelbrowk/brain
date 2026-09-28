@@ -158,7 +158,7 @@ for (const scheme of passes.includes("phone") ? ["light", "dark"] : []) {
   // 9 — the palette's clear-search cross
   // cmdk labels its input through the Command, so the accessible name is
   // "Search and commands" on both palettes — reach the phone one by attribute.
-  const field = page.locator('input[aria-label="Search pages and text"]');
+  const field = page.locator('input[aria-label="Search pages, mail and tasks"]');
   // The tab bar can still be settling right after the shell mounts; one retry
   // beats a flake that loses the whole run.
   for (let attempt = 0; attempt < 3 && !(await field.isVisible()); attempt++) {

@@ -254,7 +254,7 @@ describe("the chip on a search hit in the command palette", () => {
       );
     });
     const input = document.body.querySelector(
-      'input[aria-label="Search pages and text"]',
+      'input[aria-label="Search pages, mail and tasks"]',
     ) as HTMLInputElement;
     await act(async () => {
       const setter = Object.getOwnPropertyDescriptor(

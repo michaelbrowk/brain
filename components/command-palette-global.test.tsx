@@ -208,7 +208,7 @@ describe("CommandPalette global search", () => {
 
   async function type(value: string) {
     const input = document.body.querySelector(
-      'input[aria-label="Search pages and text"]',
+      'input[aria-label="Search pages, mail and tasks"]',
     ) as HTMLInputElement;
     await act(async () => {
       Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!.call(
@@ -442,10 +442,16 @@ describe("CommandPalette global search", () => {
     expect(onSelect).toHaveBeenLastCalledWith({ kind: "task", id: "t1" });
   });
 
-  it("names the route actions after the route they belong to", async () => {
+  it("names the route actions after the route they belong to, apart from the results", async () => {
     window.history.replaceState({}, "", "/tasks");
-    await render({ onOpenTasks: vi.fn() });
-    expect(group("Tasks")?.textContent).toContain("Move to Today");
-    expect(group("Mail")).toBeNull();
+    await render({ onOpenTasks: vi.fn(), tasks: [task("t1", "Today review")] });
+    expect(group("Tasks actions")?.textContent).toContain("Move to Today");
+    expect(group("Tasks")).toBeNull();
+    expect(group("Mail actions")).toBeNull();
+    // A word both an action and a task answer to: both groups stand, under two
+    // headings a reader can tell apart.
+    await type("today");
+    expect(group("Tasks actions")?.textContent).toContain("Move to Today");
+    expect(group("Tasks")?.textContent).toContain("Today review");
   });
 });

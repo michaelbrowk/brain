@@ -934,7 +934,7 @@ export function CommandPalette({
               ? "No filtered pages match"
               : q.length === 1
                 ? "Keep typing to search inside pages"
-                : "Searches titles and page text"}
+                : "Searches page titles and text, mail and tasks"}
           </p>
         </div>
       )}
@@ -959,7 +959,9 @@ export function CommandPalette({
       )}
 
       {filteredRouteActions.length > 0 && (
-        <Command.Group heading={mailOpen ? "Mail" : "Tasks"}>
+        // "actions" in the heading, because the results below carry a Mail or
+        // Tasks group of their own and two headings with one name read as one
+        <Command.Group heading={mailOpen ? "Mail actions" : "Tasks actions"}>
           {filteredRouteActions.map((action) => (
             <Command.Item
               key={action.id}
@@ -1213,7 +1215,7 @@ export function CommandPalette({
           >
             <Dialog.Title className="sr-only">Search</Dialog.Title>
             <Dialog.Description className="sr-only">
-              Search pages, page text, and Brain actions.
+              Search pages, mail, tasks and Brain actions.
             </Dialog.Description>
             <PaletteSheet>
               <Command
@@ -1247,8 +1249,8 @@ export function CommandPalette({
                     ref={mobileInputRef}
                     value={query}
                     onValueChange={setQuery}
-                    aria-label="Search pages and text"
-                    placeholder="Search pages and text…"
+                    aria-label="Search pages, mail and tasks"
+                    placeholder="Search pages, mail and tasks"
                   />
                   {query && (
                     <IconButton
@@ -1299,7 +1301,7 @@ export function CommandPalette({
         >
           <Dialog.Title className="sr-only">Search and commands</Dialog.Title>
           <Dialog.Description className="sr-only">
-            Search pages, page text, and Brain actions.
+            Search pages, mail, tasks and Brain actions.
           </Dialog.Description>
           <Command label="Search and commands" shouldFilter={false} className="flex min-h-0 flex-col">
             <div className="flex items-center gap-2.5 px-4">
@@ -1312,8 +1314,8 @@ export function CommandPalette({
               <Command.Input
                 value={query}
                 onValueChange={setQuery}
-                aria-label="Search pages and text"
-                placeholder="Search pages and text…"
+                aria-label="Search pages, mail and tasks"
+                placeholder="Search pages, mail and tasks"
                 autoFocus
                 className="text-subheading h-14 min-w-0 flex-1 bg-transparent text-ink outline-none placeholder:font-medium placeholder:text-ink-2"
               />

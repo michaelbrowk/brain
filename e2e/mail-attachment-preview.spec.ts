@@ -5,7 +5,9 @@ import { MAIL_ATTACHMENT_CONTENT_SECURITY_POLICY } from "../lib/mail/content-typ
 /*  Part of the compact release gate (@release). A letter's pictures and PDFs
  *  open inside Brain: the tiles, the viewer's keyboard, and a real PDF drawn by
  *  pdf.js in its own module worker, which is the part no unit test can reach.
- *  Only the mail transport is stubbed; the attachment bytes are real files. */
+ *  Only the mail transport is stubbed; the attachment bytes are real files,
+ *  and the download route answers the way the mail service does: two
+ *  downloads at a time, and 409 `capacity_exceeded` for a third. */
 
 const account = {
   accountId: "account-a0123456789abcdef0123456789abcdef",
@@ -107,20 +109,30 @@ function attachmentId(digit: string): string {
   return `attachment-a${digit.repeat(32)}`;
 }
 
+const photos = ["1", "2", "3", "4"].map((digit, index) => ({
+  id: attachmentId(digit),
+  filename: `photo-${digit}.png`,
+  mimeType: "image/png",
+  bytes: index % 2 === 0 ? RED_PNG : GREEN_PNG,
+}));
+
 const files = [
-  { id: attachmentId("1"), filename: "photo-1.png", mimeType: "image/png", bytes: RED_PNG },
-  { id: attachmentId("2"), filename: "photo-2.png", mimeType: "image/png", bytes: GREEN_PNG },
-  { id: attachmentId("3"), filename: "agenda.pdf", mimeType: "application/pdf", bytes: PDF },
-  { id: attachmentId("4"), filename: "archive.zip", mimeType: "application/zip", bytes: ZIP },
+  ...photos,
+  { id: attachmentId("5"), filename: "agenda.pdf", mimeType: "application/pdf", bytes: PDF },
+  { id: attachmentId("6"), filename: "archive.zip", mimeType: "application/zip", bytes: ZIP },
   // The signature logo the letter's HTML draws, which must not be listed again.
   {
-    id: attachmentId("5"),
+    id: attachmentId("7"),
     filename: "image001.png",
     mimeType: "image/png",
-    bytes: RED_PNG,
+    bytes: GREEN_PNG,
     inline: "logo@example.test",
   },
 ] as const;
+
+/** How long the stubbed service holds a download open, so the ones the
+ *  browser asks for together really do overlap. */
+const DOWNLOAD_MS = 150;
 
 async function login(page: Page) {
   await page.goto("/login");
@@ -137,6 +149,7 @@ async function login(page: Page) {
 }
 
 async function installRoutes(page: Page) {
+  const downloads = { active: 0, most: 0, refused: 0, served: [] as string[] };
   const fulfill = (route: Route, body: unknown) =>
     route.fulfill({
       status: 200,
@@ -182,13 +195,29 @@ async function installRoutes(page: Page) {
       })),
     }),
   );
-  // The download route's own headers, so the body's inline fetch verifies.
-  await page.route(/\/api\/mail\/attachments\/([^?]+)\?/, (route) => {
+  // The download route with the service's own admission: two streams at a
+  // time, a third refused outright, and the route's exact headers so the
+  // reader's verification passes.
+  await page.route(/\/api\/mail\/attachments\/([^?]+)\?/, async (route) => {
     const id = decodeURIComponent(
       new URL(route.request().url()).pathname.split("/").at(-1) ?? "",
     );
     const file = files.find((candidate) => candidate.id === id);
     if (!file) return route.fulfill({ status: 404, body: "" });
+    downloads.active += 1;
+    downloads.most = Math.max(downloads.most, downloads.active);
+    if (downloads.active > 2) {
+      downloads.active -= 1;
+      downloads.refused += 1;
+      return route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ apiVersion: 1, error: { code: "capacity_exceeded" } }),
+      });
+    }
+    await new Promise((resolve) => setTimeout(resolve, DOWNLOAD_MS));
+    downloads.active -= 1;
+    downloads.served.push(file.filename);
     return route.fulfill({
       status: 200,
       body: file.bytes,
@@ -203,47 +232,81 @@ async function installRoutes(page: Page) {
       },
     });
   });
+  return downloads;
 }
 
 test("@release a letter's pictures and PDF open in the viewer, and Esc hands the tile back", async ({
   page,
 }) => {
   await login(page);
-  await installRoutes(page);
+  const downloads = await installRoutes(page);
   await page.goto("/mail");
   await expect(page.locator('button[aria-label="Mailbox: Inbox"]')).toHaveCount(1);
   await page.getByText(thread.subject, { exact: true }).click();
 
-  // Three tiles in list order, a chip for the zip, nothing for the logo the
-  // body already draws.
+  // Four picture tiles and a PDF in list order, a chip for the zip, nothing
+  // for the logo the body already draws.
   const attachments = page.getByRole("group", { name: "Attachments" });
   const tiles = attachments.locator("button.brain-mail-tile");
-  await expect(tiles).toHaveCount(3);
-  await expect(tiles.nth(0)).toHaveAccessibleName(/^photo-1\.png, /);
-  await expect(tiles.nth(1)).toHaveAccessibleName(/^photo-2\.png, /);
-  await expect(tiles.nth(2)).toHaveAccessibleName(/^agenda\.pdf, /);
+  await expect(tiles).toHaveCount(5);
+  for (const [index, photo] of photos.entries()) {
+    await expect(tiles.nth(index)).toHaveAccessibleName(new RegExp(`^${photo.filename}, `));
+  }
+  await expect(tiles.nth(4)).toHaveAccessibleName(/^agenda\.pdf, /);
   await expect(attachments.locator("a.brain-mail-chip")).toHaveCount(1);
   await expect(attachments.locator("a.brain-mail-chip")).toHaveAttribute("download", "archive.zip");
   await expect(attachments.getByText("image001.png")).toHaveCount(0);
+
+  // Every tile shows its picture, drawn at thumbnail size, and the body
+  // shows the logo: the five downloads shared the service's two slots and
+  // none of them was refused.
+  for (let index = 0; index < photos.length; index += 1) {
+    await expect
+      .poll(() =>
+        tiles
+          .nth(index)
+          .locator("canvas")
+          .evaluate((canvas: HTMLCanvasElement) => {
+            if (canvas.width === 0 || canvas.width > 448) return `size ${canvas.width}`;
+            const alpha = canvas
+              .getContext("2d")!
+              .getImageData(Math.floor(canvas.width / 2), Math.floor(canvas.height / 2), 1, 1)
+              .data[3];
+            return alpha === 255 ? "drawn" : `alpha ${alpha}`;
+          }),
+      )
+      .toBe("drawn");
+  }
   await expect
     .poll(() =>
-      tiles.nth(0).locator("img").evaluate((image: HTMLImageElement) => image.naturalWidth),
+      page
+        .locator("iframe")
+        .first()
+        .evaluate(
+          (frame: HTMLIFrameElement) =>
+            frame.contentDocument?.querySelector("img")?.naturalWidth ?? 0,
+        ),
     )
     .toBe(2);
+  expect(downloads.most).toBeLessThanOrEqual(2);
+  expect(downloads.refused).toBe(0);
+  expect([...downloads.served].sort()).toEqual(
+    ["image001.png", ...photos.map((photo) => photo.filename)].sort(),
+  );
 
   await tiles.nth(0).click();
   const viewer = page.locator('[role="dialog"]');
   await expect(viewer).toBeVisible();
   await expect(viewer).toHaveAttribute("aria-modal", "true");
   await expect(viewer.locator("h2")).toHaveText("photo-1.png");
-  await expect(viewer.locator("[data-viewer-counter]")).toHaveText("1 of 3");
+  await expect(viewer.locator("[data-viewer-counter]")).toHaveText("1 of 5");
   expect(
     await page.evaluate(() => document.querySelector(".brain-shell")?.hasAttribute("inert")),
   ).toBe(true);
 
   await page.keyboard.press("ArrowRight");
   await expect(viewer.locator("h2")).toHaveText("photo-2.png");
-  await expect(viewer.locator("[data-viewer-counter]")).toHaveText("2 of 3");
+  await expect(viewer.locator("[data-viewer-counter]")).toHaveText("2 of 5");
   await expect
     .poll(() =>
       viewer
@@ -251,10 +314,14 @@ test("@release a letter's pictures and PDF open in the viewer, and Esc hands the
         .evaluate((image: HTMLImageElement) => image.complete && image.naturalWidth),
     )
     .toBe(2);
+  // The viewer drew from the tile's download: nothing was fetched again.
+  expect(downloads.served.filter((name) => name === "photo-2.png")).toHaveLength(1);
 
-  await page.keyboard.press("ArrowRight");
+  for (const expected of ["3 of 5", "4 of 5", "5 of 5"]) {
+    await page.keyboard.press("ArrowRight");
+    await expect(viewer.locator("[data-viewer-counter]")).toHaveText(expected);
+  }
   await expect(viewer.locator("h2")).toHaveText("agenda.pdf");
-  await expect(viewer.locator("[data-viewer-counter]")).toHaveText("3 of 3");
   await expect(viewer.getByText("Page 1 of 1")).toBeVisible();
   // pdf.js drew the page: a canvas with a real backing store, blue in the
   // middle where the square is.
@@ -276,14 +343,16 @@ test("@release a letter's pictures and PDF open in the viewer, and Esc hands the
       { timeout: 15_000 },
     )
     .toBe("blue");
-
-  // The end stops: → leaves the PDF where it is.
+  // The pages hold the keyboard, and → still belongs to the viewer: it
+  // stops at the last preview.
+  await expect(viewer.locator(".brain-viewer-pdf-scroll")).toBeFocused();
   await page.keyboard.press("ArrowRight");
-  await expect(viewer.locator("[data-viewer-counter]")).toHaveText("3 of 3");
+  await expect(viewer.locator("[data-viewer-counter]")).toHaveText("5 of 5");
+  expect(downloads.refused).toBe(0);
 
   await page.keyboard.press("Escape");
   await expect(viewer).toHaveCount(0);
-  await expect(tiles.nth(2)).toBeFocused();
+  await expect(tiles.nth(4)).toBeFocused();
   expect(
     await page.evaluate(() => document.querySelector(".brain-shell")?.hasAttribute("inert")),
   ).toBe(false);

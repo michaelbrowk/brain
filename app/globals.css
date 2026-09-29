@@ -355,9 +355,10 @@
   --scrim-v2: oklch(0.23 0.024 249 / 0.18);
   /* The attachment viewer's ground, the same in both themes (the dark block
      does not redefine it): a picture is judged against near-black, and at
-     .94 the receding shell is a shape behind it rather than a second image.
+     .96 the receding shell is a shape behind it rather than text to read,
+     in the dark theme too, where .94 still let the letter through.
      The dark paper's own warm hue, one step darker. */
-  --scrim-viewer: oklch(0.16 0.006 75 / 0.94);
+  --scrim-viewer: oklch(0.16 0.006 75 / 0.96);
   --lift: 0 12px 28px -8px oklch(0.23 0.024 249 / 0.22); /* drag only */
   --shadow-sticker: 0 10px 24px -10px oklch(0.457 0.093 90 / 0.35); /* warm, an object on the desk */
 
@@ -4960,6 +4961,15 @@ a.brain-share-url:active {
   min-height: 0;
   min-width: 0;
 }
+/* The picture and the PDF fill the item by position rather than by a
+   percentage: a grid row sizes itself to a picture's own height before the
+   stage's height can bound it, and a 1600×1000 photo then ran off the
+   window's foot instead of being fitted into it. */
+.brain-viewer-image,
+.brain-viewer-pdf {
+  position: absolute;
+  inset: 0;
+}
 .brain-viewer-image {
   width: 100%;
   height: 100%;
@@ -4988,9 +4998,6 @@ a.brain-share-url:active {
    that has not been drawn yet is its own shape in the faint fill, so the
    scroll has its full length from the start. */
 .brain-viewer-pdf {
-  position: relative;
-  width: 100%;
-  height: 100%;
   min-height: 0;
 }
 .brain-viewer-pdf-scroll {
@@ -5034,7 +5041,9 @@ a.brain-share-url:active {
   -webkit-backdrop-filter: var(--blur-reg);
   backdrop-filter: var(--blur-reg);
   box-shadow: var(--rim), var(--shadow-2);
-  color: var(--ink-2);
+  /* ink, not ink-2: the capsule stands over a white page as often as over
+     the dark ground, and the secondary grey lost to both */
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
   pointer-events: none;

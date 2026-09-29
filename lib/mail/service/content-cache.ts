@@ -30,7 +30,7 @@ const MAX_FILENAME_BYTES = 1024;
 const MAX_CONTENT_ID_BYTES = 998;
 
 /** Increment whenever parser output or sanitizer policy changes incompatibly. */
-export const MAIL_CONTENT_FORMAT_VERSION = 8;
+export const MAIL_CONTENT_FORMAT_VERSION = 9;
 
 const databaseTails = new Map<string, Promise<void>>();
 

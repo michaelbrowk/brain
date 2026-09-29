@@ -14,12 +14,18 @@ describe("brain-mail MIME worker deployment contracts", () => {
     expect(packageJson.dependencies.mailparser).toBe("3.9.14");
     expect(packageJson.dependencies["@zone-eu/mailsplit"]).toBe("5.4.14");
     expect(packageJson.dependencies.htmlparser2).toBe("10.1.0");
+    expect(packageJson.dependencies.parse5).toBe("8.0.1");
     const workspace = read("pnpm-workspace.yaml");
     expect(workspace).toContain(
       "'@zone-eu/mailsplit@5.4.14': patches/@zone-eu__mailsplit@5.4.14.patch",
     );
     expect(workspace).toContain(
       "mailparser@3.9.14: patches/mailparser@3.9.14.patch",
+    );
+    expect(workspace).toContain("parse5@8.0.1: patches/parse5@8.0.1.patch");
+    const tokenizerPatch = read("patches/parse5@8.0.1.patch");
+    expect(tokenizerPatch).toContain(
+      "+        if (!this.currentAttrNames.has(this.currentAttr.name)) {",
     );
     const splitPatch = read("patches/@zone-eu__mailsplit@5.4.14.patch");
     expect(splitPatch).toContain("maxTotalHeadSize");
@@ -103,6 +109,7 @@ describe("brain-mail MIME worker deployment contracts", () => {
     expect(build).toContain("mailparser@3.9.14");
     expect(build).toContain("@zone-eu/mailsplit@5.4.14");
     expect(build).toContain("htmlparser2@10.1.0");
+    expect(build).toContain("parse5@8.0.1");
     expect(build).toContain("/^(?:licen[cs]e|copying)(?:[-.]|$)/i");
     expect(build).toContain("/^licen[cs]e(?:[-.]mit)(?:\\.txt)?$/i");
   });

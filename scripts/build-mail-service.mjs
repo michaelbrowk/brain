@@ -190,6 +190,9 @@ async function createThirdPartyNotices(inputs) {
   if (!packages.has("htmlparser2@10.1.0")) {
     throw new Error("mail bundle does not contain the pinned htmlparser2 package");
   }
+  if (!packages.has("parse5@8.0.1")) {
+    throw new Error("mail bundle does not contain the pinned parse5 package");
+  }
   const sections = [...packages.values()]
     .sort((left, right) =>
       `${left.name}@${left.version}`.localeCompare(`${right.name}@${right.version}`),

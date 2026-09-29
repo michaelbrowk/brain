@@ -10,6 +10,7 @@ import { Icon } from "./ui/icon";
 import { Skeleton } from "./ui/primitives";
 import { ScrollEdge } from "./ui/scroll-edge";
 import { ToolbarPill } from "./ui/toolbar-pill";
+import { MailAttachments } from "./mail-attachments";
 import { MailSenderIcon } from "./mail-sender-icon";
 import { formatThreadTime } from "./mail-thread-list";
 import type {
@@ -23,9 +24,10 @@ import type { MailMessageDto } from "@/lib/mail/message-types";
 import {
   MAIL_ATTACHMENT_CONTENT_SECURITY_POLICY,
   MAIL_INLINE_IMAGE_MAX_BYTES,
-  type MailContentAttachmentDto,
   type MailMessageContent,
 } from "@/lib/mail/content-types";
+import { attachmentUrl } from "@/lib/mail/attachment-preview";
+import { isVerifiedAttachmentResponse } from "@/lib/mail/attachment-blobs";
 import {
   createMailHtmlDocument,
   MAIL_READER_IFRAME_SANDBOX,
@@ -71,6 +73,7 @@ export function MailReader({
   capabilities,
   onAction,
   contentClient,
+  onAttachmentViewerOpenChange,
 }: {
   state: MailReaderState;
   mutating: boolean;
@@ -86,6 +89,9 @@ export function MailReader({
     MailSurfaceClient,
     "getMessageContent" | "requestMessageContent"
   >;
+  /** Whether an attachment viewer is up. It is a portal over the whole
+   *  window, like the compose sheet, so the shell steps back from it. */
+  onAttachmentViewerOpenChange?: (open: boolean) => void;
 }) {
   const reduce = useReducedMotion();
   if (state.kind === "idle") {
@@ -295,6 +301,7 @@ export function MailReader({
                         message={message}
                         client={contentClient}
                         priority={message.sentAt ?? index}
+                        onAttachmentViewerOpenChange={onAttachmentViewerOpenChange}
                       />
                     ) : (
                       <MailHeaderPreview message={message} />
@@ -563,10 +570,12 @@ function MailMessageContentView({
   message,
   client,
   priority,
+  onAttachmentViewerOpenChange,
 }: {
   message: MailMessageDto;
   client: Pick<MailSurfaceClient, "getMessageContent" | "requestMessageContent">;
   priority: number;
+  onAttachmentViewerOpenChange?: (open: boolean) => void;
 }) {
   const reduce = useReducedMotion();
   const [state, setState] = useState<ContentViewState>({ kind: "loading" });
@@ -739,27 +748,12 @@ function MailMessageContentView({
       ) : (
         <p className="text-[13px] text-ink-3">This message has no readable body.</p>
       )}
-      {content.attachments.length > 0 && (
-        <ul aria-label="Attachments" className="mt-6 flex flex-wrap gap-2 border-t border-hair-soft pt-4">
-          {content.attachments.map((attachment) => (
-            <li key={attachment.attachmentId} className="min-w-0">
-              <a
-                href={attachmentUrl(message.accountId, attachment.attachmentId)}
-                download={attachment.filename ?? undefined}
-                className="brain-mail-chip"
-              >
-                <Icon name="paperclip-linear" size={14} className="shrink-0 text-ink-2" />
-                <span className="min-w-0 truncate">
-                  {attachment.filename || "Attachment"}
-                </span>
-                <span className="text-caption shrink-0 tabular-nums text-ink-2">
-                  {formatBytes(attachment.bytes)}
-                </span>
-              </a>
-            </li>
-          ))}
-        </ul>
-      )}
+      <MailAttachments
+        accountId={message.accountId}
+        attachments={content.attachments}
+        renderedHtml={renderedHtml}
+        onViewerOpenChange={onAttachmentViewerOpenChange}
+      />
     </motion.div>
   );
 }
@@ -788,52 +782,61 @@ function useInlineCidSources(
     );
     if (attachments.length === 0) return () => controller.abort();
 
-    const load = async () => {
-      const loaded: Array<readonly [string, string]> = [];
-      for (const attachment of attachments) {
-        try {
-          const blob = await mailCidFetchGate.run(
-            controller.signal,
-            async () => {
-              const response = await fetch(
-                attachmentUrl(message.accountId, attachment.attachmentId),
-                {
-                  signal: controller.signal,
-                  credentials: "same-origin",
-                  cache: "no-store",
-                  referrerPolicy: "no-referrer",
-                  redirect: "error",
-                },
-              );
-              if (!isVerifiedInlineResponse(response, attachment)) {
-                await response.body?.cancel().catch(() => undefined);
-                return null;
-              }
-              const candidate = await response.blob();
-              return candidate.size === attachment.bytes &&
-                candidate.type === attachment.mimeType
-                ? candidate
-                : null;
-            },
-          );
-          if (disposed || controller.signal.aborted || blob === null) {
-            if (disposed || controller.signal.aborted) return;
-            continue;
-          }
-          const source = URL.createObjectURL(blob);
-          if (disposed || controller.signal.aborted) {
-            URL.revokeObjectURL(source);
-            return;
-          }
-          objectUrls.push(source);
-          loaded.push([attachment.contentId!, source] as const);
-        } catch {
-          // A broken inline part leaves its inert alt text in the message.
+    // Every inline image is queued in the gate at once rather than one after
+    // another. The gate still runs two at a time, but a letter's own images
+    // are all waiting at their priority when a slot frees, so the tiles
+    // under the letter (a lower priority) never take a slot between two of
+    // them. They are published together, as before, once all have settled.
+    const loadOne = async (
+      attachment: (typeof attachments)[number],
+    ): Promise<readonly [string, string] | null> => {
+      try {
+        const blob = await mailCidFetchGate.run(
+          controller.signal,
+          async () => {
+            const response = await fetch(
+              attachmentUrl(message.accountId, attachment.attachmentId),
+              {
+                signal: controller.signal,
+                credentials: "same-origin",
+                cache: "no-store",
+                referrerPolicy: "no-referrer",
+                redirect: "error",
+              },
+            );
+            if (!isVerifiedAttachmentResponse(response, attachment)) {
+              await response.body?.cancel().catch(() => undefined);
+              return null;
+            }
+            const candidate = await response.blob();
+            return candidate.size === attachment.bytes &&
+              candidate.type === attachment.mimeType
+              ? candidate
+              : null;
+          },
+        );
+        if (disposed || controller.signal.aborted || blob === null) return null;
+        const source = URL.createObjectURL(blob);
+        if (disposed || controller.signal.aborted) {
+          URL.revokeObjectURL(source);
+          return null;
         }
-        if (disposed || controller.signal.aborted) return;
+        objectUrls.push(source);
+        return [attachment.contentId!, source] as const;
+      } catch {
+        // A broken inline part leaves its inert alt text in the message.
+        return null;
       }
+    };
+    const load = async () => {
+      const loaded = await Promise.all(attachments.map(loadOne));
       if (!disposed && !controller.signal.aborted) {
-        setState({ key, sources: new Map(loaded) });
+        setState({
+          key,
+          sources: new Map(
+            loaded.filter((entry): entry is readonly [string, string] => entry !== null),
+          ),
+        });
       }
     };
     void load();
@@ -1070,25 +1073,6 @@ function verifiedRemoteImageResponse(
   return Object.freeze({ mimeType, bytes });
 }
 
-function isVerifiedInlineResponse(
-  response: Response,
-  attachment: MailContentAttachmentDto,
-): boolean {
-  return (
-    response.ok &&
-    response.status === 200 &&
-    !response.redirected &&
-    response.headers.get("Content-Type") === attachment.mimeType &&
-    response.headers.get("Content-Length") === String(attachment.bytes) &&
-    response.headers.get("X-Content-Type-Options") === "nosniff" &&
-    response.headers.get("Cross-Origin-Resource-Policy") === "same-origin" &&
-    response.headers.get("Cache-Control") === "private, no-store" &&
-    response.headers.get("Content-Security-Policy") ===
-      MAIL_ATTACHMENT_CONTENT_SECURITY_POLICY &&
-    /^attachment;/i.test(response.headers.get("Content-Disposition") ?? "")
-  );
-}
-
 const EMPTY_CID_SOURCES: ReadonlyMap<string, string> = new Map();
 const EMPTY_REMOTE_SOURCES: ReadonlyMap<string, string> = new Map();
 /** Silence, not waiting: it runs from the last answer, not from the open. */
@@ -1190,20 +1174,9 @@ export function waitForContentPoll(
   });
 }
 
-function attachmentUrl(accountId: string, attachmentId: string): string {
-  const query = new URLSearchParams({ accountId });
-  return `/api/mail/attachments/${encodeURIComponent(attachmentId)}?${query}`;
-}
-
 function remoteImageUrl(accountId: string, remoteImageId: string): string {
   const query = new URLSearchParams({ accountId });
   return `/api/mail/remote-images/${encodeURIComponent(remoteImageId)}?${query}`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1_024) return `${bytes} B`;
-  if (bytes < 1_024 * 1_024) return `${Math.ceil(bytes / 1_024)} KB`;
-  return `${(bytes / (1_024 * 1_024)).toFixed(1)} MB`;
 }
 
 function ReaderSkeleton() {

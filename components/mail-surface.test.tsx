@@ -1376,8 +1376,10 @@ describe("MailSurface", () => {
         attachments: [
           {
             attachmentId: "attachment-a33333333333333333333333333333333",
-            filename: "report.pdf",
-            mimeType: "application/pdf",
+            // A type the reader cannot preview, so it stays the download chip.
+            filename: "report.docx",
+            mimeType:
+              "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             disposition: "attachment",
             contentId: null,
             bytes: 1_536,
@@ -1393,7 +1395,7 @@ describe("MailSurface", () => {
     await click(findButton("Lunch this Friday?"));
 
     const frame = document.body.querySelector("iframe") as HTMLIFrameElement;
-    const download = document.body.querySelector('a[download="report.pdf"]') as HTMLAnchorElement;
+    const download = document.body.querySelector('a[download="report.docx"]') as HTMLAnchorElement;
     expect(frame.getAttribute("sandbox")).toBe("allow-same-origin");
     expect(frame.getAttribute("srcdoc")).toContain("default-src 'none'");
     expect(frame.getAttribute("srcdoc")).toContain("script-src 'none'");
@@ -1401,6 +1403,79 @@ describe("MailSurface", () => {
       `/api/mail/attachments/attachment-a33333333333333333333333333333333?accountId=${accountA.accountId}`,
     );
     expect(document.body.textContent).toContain("2 KB");
+  });
+
+  it("hands the window to an attachment viewer, and the list keys go quiet under it", async () => {
+    // The picture's download answers only by being aborted: this test is
+    // about the window, and a tile still waiting stays a tile. It honours the
+    // abort so the slot it holds in the shared gate comes back afterwards.
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        (_input: string, init?: RequestInit) =>
+          new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener("abort", () =>
+              reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+            );
+          }),
+      ),
+    );
+    const client = makeClient({
+      requestMessageContent: vi.fn().mockResolvedValue({
+        ...readyContent,
+        attachments: [
+          {
+            attachmentId: "attachment-a44444444444444444444444444444444",
+            filename: "photo.png",
+            mimeType: "image/png",
+            disposition: "attachment",
+            contentId: null,
+            bytes: 2_048,
+          },
+        ],
+      }),
+    });
+    const onSheetOpenChange = vi.fn();
+    await act(async () =>
+      root.render(
+        <MailSurface
+          client={client}
+          onOpenSettings={() => {}}
+          onSheetOpenChange={onSheetOpenChange}
+        />,
+      ),
+    );
+    await settle();
+    await enterSingleAccount();
+    await click(findButton("Lunch this Friday?"));
+    expect(onSheetOpenChange).toHaveBeenLastCalledWith(false);
+
+    await click(findButton("photo.png, 2 KB"));
+    expect(document.body.querySelector('[role="dialog"] h2')?.textContent).toBe("photo.png");
+    expect(onSheetOpenChange).toHaveBeenLastCalledWith(true);
+
+    // `u` would mark the letter under the picture unread, and `e` archive it.
+    vi.mocked(client.updateThread).mockClear();
+    for (const key of ["u", "e", "s"]) {
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key, cancelable: true }));
+      });
+    }
+    await settle();
+    expect(client.updateThread).not.toHaveBeenCalled();
+
+    await click(findButton("Close"));
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(onSheetOpenChange).toHaveBeenLastCalledWith(false);
+
+    // And the guard lets go with the viewer: `e` archives again.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "e", cancelable: true }));
+    });
+    await settle();
+    expect(client.updateThread).toHaveBeenLastCalledWith(
+      expect.objectContaining({ threadId: "thread-1", archive: true }),
+    );
   });
 
   it("loads a verified CID through the parent proxy and revokes its blob URL", async () => {
@@ -3686,7 +3761,7 @@ describe("MailSurface", () => {
 
   it("lets a parked discard go when its account vanishes, and the pill loses its Undo", async () => {
     // Undo after the account is gone would restore a composer with no
-    // account to draw it for: `composeOpen` true, the shell inert, nothing on
+    // account to draw it for: `sheetOpen` true, the shell inert, nothing on
     // top. So the accounts load flushes a parcel whose account left, and the
     // pill is said again without a way back.
     vi.useFakeTimers();
@@ -3696,13 +3771,13 @@ describe("MailSurface", () => {
       .mockResolvedValueOnce([accountB]);
     const client = makeClient({ loadAccounts });
     const onToast = vi.fn();
-    const onComposeOpenChange = vi.fn();
+    const onSheetOpenChange = vi.fn();
     const surface = (refreshToken: number) => (
       <MailSurface
         client={client}
         onOpenSettings={() => {}}
         onToast={onToast}
-        onComposeOpenChange={onComposeOpenChange}
+        onSheetOpenChange={onSheetOpenChange}
         refreshToken={refreshToken}
       />
     );
@@ -3740,7 +3815,7 @@ describe("MailSurface", () => {
     });
     await settle();
     expect(document.body.querySelector('[role="dialog"]')).toBeNull();
-    expect(onComposeOpenChange.mock.calls.at(-1)?.[0]).toBe(false);
+    expect(onSheetOpenChange.mock.calls.at(-1)?.[0]).toBe(false);
     expect(client.deleteDraft).toHaveBeenCalledTimes(1);
   });
 

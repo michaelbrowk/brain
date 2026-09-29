@@ -409,11 +409,12 @@ export function Shell({
   const [localRecoveryUnavailableIds, setLocalRecoveryUnavailableIds] =
     useState<Set<string>>(new Set());
   const [mobilePagesOpen, setMobilePagesOpen] = useState(false);
-  /** The mail composer is up. It reports through `MailSurface`'s
-   *  `onComposeOpenChange`, the way the surface already reports its account
-   *  status: the sheet is a portal at the body and the shell cannot see it in
-   *  its own tree, but the shell is what has to step back from it. */
-  const [composeOpen, setComposeOpen] = useState(false);
+  /** A mail sheet is up: the composer or an attachment viewer. It reports
+   *  through `MailSurface`'s `onSheetOpenChange`, the way the surface
+   *  already reports its account status: the sheet is a portal at the body
+   *  and the shell cannot see it in its own tree, but the shell is what has
+   *  to step back from it. */
+  const [mailSheetOpen, setMailSheetOpen] = useState(false);
   const [mobileViewport, setMobileViewport] = useState(false);
   const mobileSearchTabRef = useRef<HTMLButtonElement | null>(null);
   const mobilePagesTabRef = useRef<HTMLButtonElement | null>(null);
@@ -2702,10 +2703,10 @@ export function Shell({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (!e.metaKey && !e.ctrlKey) return;
-      // The compose sheet owns the window while it is up. The shell under it
-      // is inert, and a chord that opened the palette or folded the sidebar
-      // there would act on a window nobody can see. ⌘↵ is the sheet's own.
-      if (composeOpen) return;
+      // A mail sheet owns the window while it is up. The shell under it is
+      // inert, and a chord that opened the palette or folded the sidebar
+      // there would act on a window nobody can see. ⌘↵ is the composer's own.
+      if (mailSheetOpen) return;
       // ⌘K — match by key (K is never a dead key)
       if (e.key.toLowerCase() === "k" && !e.altKey) {
         e.preventDefault();
@@ -2734,7 +2735,7 @@ export function Shell({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [composeOpen, createPage, onPaletteOpenChange, openPalette, paletteOpen]);
+  }, [mailSheetOpen, createPage, onPaletteOpenChange, openPalette, paletteOpen]);
 
   const clearDeleteTimers = useCallback(() => {
     if (deleteTimer.current) clearTimeout(deleteTimer.current);
@@ -5467,12 +5468,12 @@ export function Shell({
 
   const mobileSearchOpen = paletteOpen && mobileViewport;
   // A surface that owns the whole window. Pages and the phone's search did
-  // this below md; the compose sheet does it on every width. While one is up
-  // the canvas is inert and out of the accessibility tree and the tab bar
-  // leaves (unmounted under Pages and search, which draw their own; hidden on
-  // its 200ms under the sheet), because what is under an opaque sheet is not
-  // a place.
-  const blockingSurfaceOpen = mobilePagesOpen || mobileSearchOpen || composeOpen;
+  // this below md; the mail sheets (the composer, an attachment viewer) do it
+  // on every width. While one is up the canvas is inert and out of the
+  // accessibility tree and the tab bar leaves (unmounted under Pages and
+  // search, which draw their own; hidden on its 200ms under a sheet), because
+  // what is under a sheet that takes the window is not a place.
+  const blockingSurfaceOpen = mobilePagesOpen || mobileSearchOpen || mailSheetOpen;
   // The sidebar is translated off-canvas on mobile (Pages is its own view)
   // and in desktop focus mode. Off-screen must also mean out of the tab order
   // and the accessibility tree, or Tab walks into invisible controls. That is
@@ -5766,12 +5767,12 @@ export function Shell({
     <motion.div
       className="brain-shell flex h-dvh overflow-hidden"
       data-sidebar-collapsed={focusMode && sidebarCollapsed ? "" : undefined}
-      // The compose sheet is a portal at the body, so the whole shell, the
+      // A mail sheet is a portal at the body, so the whole shell, the
       // sidebar and the pills included, is what stands under it. `<main>`
       // alone carried this for the phone's surfaces because their tab bar
       // still had to be reachable; the sheet takes the bar with it.
-      aria-hidden={composeOpen || undefined}
-      inert={composeOpen || undefined}
+      aria-hidden={mailSheetOpen || undefined}
+      inert={mailSheetOpen || undefined}
       // And it recedes: scale .98 at half opacity over the page duration as
       // the sheet fades in over it, back the same way as the sheet leaves.
       // Reduced motion leaves the shell exactly where it is. At rest framer
@@ -5779,7 +5780,7 @@ export function Shell({
       // its containing block while no sheet is up.
       initial={false}
       animate={
-        composeOpen && !reduce ? { scale: 0.98, opacity: 0.5 } : { scale: 1, opacity: 1 }
+        mailSheetOpen && !reduce ? { scale: 0.98, opacity: 0.5 } : { scale: 1, opacity: 1 }
       }
       transition={reduce ? { duration: 0 } : { duration: DUR.page, ease: EASE_OUT }}
     >
@@ -5902,7 +5903,7 @@ export function Shell({
                   openSettings("mail", { accountId })
                 }
                 onToast={showToast}
-                onComposeOpenChange={setComposeOpen}
+                onSheetOpenChange={setMailSheetOpen}
                 refreshToken={mailSurfaceRevision}
               />
             ) : settingsActive ? (
@@ -6133,12 +6134,12 @@ export function Shell({
       />
 
       {/* Pages and the phone's search bring their own copy of the bar, so it
-          unmounts under them. The compose sheet does not: the bar stays and
-          leaves on its own 200ms (`data-hidden`), the way it does under the
+          unmounts under them. A mail sheet does not: the bar stays and leaves
+          on its own 200ms (`data-hidden`), the way it does under the
           keyboard, rather than vanishing in a frame while the shell recedes
           around it. */}
       {!(mobilePagesOpen || mobileSearchOpen) && (
-        <MobileTabBar {...mobileTabBarProps} hidden={mobileTabBarHidden || composeOpen} />
+        <MobileTabBar {...mobileTabBarProps} hidden={mobileTabBarHidden || mailSheetOpen} />
       )}
       {commandPalette}
 

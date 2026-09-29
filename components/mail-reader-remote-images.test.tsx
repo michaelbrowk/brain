@@ -154,7 +154,16 @@ describe("MailReader remote image lifecycle", () => {
   });
 
   it("does not fetch remote or CID images when clean plain text is preferred", async () => {
-    const fetchMock = vi.fn();
+    // Pending until aborted, the way a real request is, so the tile's slot in
+    // the shared attachment gate is handed back when the reader unmounts.
+    const fetchMock = vi.fn(
+      (_input: string, init?: RequestInit) =>
+        new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          );
+        }),
+    );
     vi.stubGlobal("fetch", fetchMock);
     const client = contentClient({
       apiVersion: 1,
@@ -184,7 +193,18 @@ describe("MailReader remote image lifecycle", () => {
 
     expect(host.querySelector("iframe")).toBeNull();
     expect(host.textContent).toContain("Readable plain message");
-    expect(fetchMock).not.toHaveBeenCalled();
+    // The body draws neither image. The logo is listed under the letter
+    // instead, since the text part does not show it, and its tile is the one
+    // download the reader makes; the remote image is never asked for.
+    expect(
+      host.querySelector('button.brain-mail-tile[aria-label="logo.png, 4 B"]'),
+    ).not.toBeNull();
+    expect(
+      fetchMock.mock.calls.map(([input]) => String(input)).filter((input) =>
+        input.includes("/api/mail/remote-images/"),
+      ),
+    ).toEqual([]);
+    expect(fetchMock.mock.calls.length).toBeLessThanOrEqual(1);
   });
 
   it("revokes completed blob URLs immediately when pending image work is aborted", async () => {

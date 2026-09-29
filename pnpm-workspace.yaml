@@ -8,6 +8,13 @@ allowBuilds:
   unrs-resolver: true
   workerd: true
 
+# pdfjs-dist lists @napi-rs/canvas as an optional dependency for drawing pages
+# under Node. Brain runs pdf.js only in the browser (the mail attachment
+# viewer), so the native canvas and its per-platform binaries would be weight
+# in every install that nothing loads.
+ignoredOptionalDependencies:
+  - "@napi-rs/canvas"
+
 # Security floors (audits 2026-08-19, 2026-09-21): parents of these transitive
 # deps pin vulnerable ranges. Selectors are version-scoped so future majors are
 # never hijacked. postcss stays an exact pin (was 8.5.16 since the July

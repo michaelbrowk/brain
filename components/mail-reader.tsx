@@ -24,10 +24,10 @@ import type { MailMessageDto } from "@/lib/mail/message-types";
 import {
   MAIL_ATTACHMENT_CONTENT_SECURITY_POLICY,
   MAIL_INLINE_IMAGE_MAX_BYTES,
-  type MailContentAttachmentDto,
   type MailMessageContent,
 } from "@/lib/mail/content-types";
 import { attachmentUrl } from "@/lib/mail/attachment-preview";
+import { isVerifiedAttachmentResponse } from "@/lib/mail/attachment-blobs";
 import {
   createMailHtmlDocument,
   MAIL_READER_IFRAME_SANDBOX,
@@ -799,7 +799,7 @@ function useInlineCidSources(
                   redirect: "error",
                 },
               );
-              if (!isVerifiedInlineResponse(response, attachment)) {
+              if (!isVerifiedAttachmentResponse(response, attachment)) {
                 await response.body?.cancel().catch(() => undefined);
                 return null;
               }
@@ -1062,25 +1062,6 @@ function verifiedRemoteImageResponse(
     return null;
   }
   return Object.freeze({ mimeType, bytes });
-}
-
-function isVerifiedInlineResponse(
-  response: Response,
-  attachment: MailContentAttachmentDto,
-): boolean {
-  return (
-    response.ok &&
-    response.status === 200 &&
-    !response.redirected &&
-    response.headers.get("Content-Type") === attachment.mimeType &&
-    response.headers.get("Content-Length") === String(attachment.bytes) &&
-    response.headers.get("X-Content-Type-Options") === "nosniff" &&
-    response.headers.get("Cross-Origin-Resource-Policy") === "same-origin" &&
-    response.headers.get("Cache-Control") === "private, no-store" &&
-    response.headers.get("Content-Security-Policy") ===
-      MAIL_ATTACHMENT_CONTENT_SECURITY_POLICY &&
-    /^attachment;/i.test(response.headers.get("Content-Disposition") ?? "")
-  );
 }
 
 const EMPTY_CID_SOURCES: ReadonlyMap<string, string> = new Map();

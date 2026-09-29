@@ -2772,6 +2772,54 @@ describe("MailSurface", () => {
 
       expect(threadList()).not.toContain("Lunch this Friday?");
     });
+
+    /** The Inbox's search results, with the letter Move to Inbox put there. */
+    async function searchedInbox(client: MailSurfaceClient) {
+      const pill = await movedFromAllMail(client);
+      await goTo("Inbox");
+      await setInput(
+        document.body.querySelector('input[aria-label="Search mail"]') as HTMLInputElement,
+        "Lunch",
+      );
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 200)));
+      await settle();
+      expect(threadList()).toContain("Lunch this Friday?");
+      return pill;
+    }
+
+    it("keeps the results on screen while the quiet search after Undo is out", async () => {
+      const { client } = inboxTruthClient();
+      const pill = await searchedInbox(client);
+      const again = deferred<MailSearchThreadPage>();
+      vi.mocked(client.searchThreads).mockImplementationOnce(() => again.promise);
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+
+      // Nobody asked to watch this search run: no skeleton stands in for it.
+      expect(threadList()).toContain("Lunch this Friday?");
+      await act(async () => again.resolve(searchThreadPage("inbox", [])));
+      await settle();
+      expect(threadList()).not.toContain("Lunch this Friday?");
+    });
+
+    it("keeps the results when the quiet search after Undo fails", async () => {
+      const { client } = inboxTruthClient();
+      const pill = await searchedInbox(client);
+      vi.mocked(client.searchThreads).mockRejectedValueOnce(new Error("offline"));
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+
+      // A quiet refresh that fails leaves the list usable, as the unsearched
+      // list's does.
+      expect(threadList()).not.toContain("couldn’t load");
+      expect(threadList()).toContain("Lunch this Friday?");
+    });
   });
 
   it("uses the confirmed thread label for Star and blocks duplicate actions", async () => {

@@ -1630,7 +1630,14 @@ export function MailSurface({
       mailboxId: MailSystemMailbox,
       query: string,
       signal?: AbortSignal,
-      visibleLoading = true,
+      /**
+       * `visible` is the search the reader typed: its loading and its failure
+       * are the list's. `background` re-reads the results on screen without a
+       * skeleton, and a failure still says so. `silent` is a refresh nobody
+       * asked to watch: only fresh results change the list, as a failed
+       * silent list refresh leaves the list as it was.
+       */
+      presentation: "visible" | "background" | "silent" = "visible",
     ) => {
       if (
         signal?.aborted ||
@@ -1647,10 +1654,12 @@ export function MailSurface({
       const sort = threadSortRef.current;
       const listEpoch = ++listEpochRef.current;
       if (normalizeMailSearchQueryText(query) === null) {
-        commitThreadState({ kind: "invalid-search" });
+        if (presentation !== "silent") {
+          commitThreadState({ kind: "invalid-search" });
+        }
         return;
       }
-      if (visibleLoading) commitThreadState({ kind: "loading" });
+      if (presentation === "visible") commitThreadState({ kind: "loading" });
       try {
         const page = await client.searchThreads(
           { accountId, mailboxId, query, limit: 50 },
@@ -1670,6 +1679,7 @@ export function MailSurface({
         commitThreadState({ kind: "ready", page });
       } catch {
         if (
+          presentation !== "silent" &&
           !signal?.aborted &&
           listEpochRef.current === listEpoch &&
           selectedAccountIdRef.current === accountId &&
@@ -1787,7 +1797,7 @@ export function MailSurface({
         pending.mailboxId,
         query,
         new AbortController().signal,
-        false,
+        "silent",
       );
       return;
     }
@@ -2237,7 +2247,13 @@ export function MailSurface({
     const controller = new AbortController();
     const timeout = setTimeout(() => {
       if (!controller.signal.aborted) {
-        void loadSearch(accountId, mailboxId, query, controller.signal, false);
+        void loadSearch(
+          accountId,
+          mailboxId,
+          query,
+          controller.signal,
+          "background",
+        );
       }
     }, 250);
     return () => {

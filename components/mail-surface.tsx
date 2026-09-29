@@ -119,6 +119,19 @@ import {
 export const UNIFIED_FANOUT_LIMIT = 3;
 
 /**
+ * How long a unified stream a sync is holding waits before it is read again,
+ * and how many times it is, before its row says it couldn't load.
+ *
+ * The service answers a list read with 409 `mail_sync_in_progress` while a
+ * sync moves the account's cache under it: a page cursor taken before the
+ * move names a snapshot that is gone. That is a wait, not an outage, and the
+ * account answers again a moment later. Three reads a second and a half apart
+ * cover a sync's commit without leaving a real failure unreported for long.
+ */
+const SYNC_HOLD_RETRY_MS = 1_500;
+const SYNC_HOLD_RETRIES = 3;
+
+/**
  * `Promise.allSettled(inputs.map(run))` with at most `limit` of them running
  * at a time. Results come back in input order, so every caller can keep
  * pairing result `i` with input `i`, and a rejection settles its own slot and
@@ -1760,6 +1773,76 @@ export function MailSurface({
   }, [refreshAfterRun, threadState]);
 
   /**
+   * THE WAIT A SYNC ASKS FOR, taken by the surface rather than the reader.
+   *
+   * A stream whose read a sync held stands as `loading`: no row, no notice,
+   * no horizon. Its first page is read again `SYNC_HOLD_RETRY_MS` later, up to
+   * `SYNC_HOLD_RETRIES` times, and only a read that still fails, or fails
+   * some other way, puts up the row that says it couldn't load. Page one and
+   * not the page that was held, because a held cursor names a snapshot the
+   * sync has since replaced; this is the read Try again makes, made for the
+   * reader.
+   *
+   * One chain per account, cancelled by a newer one and by leaving All
+   * inboxes, so a read that lands late never writes into a column it no
+   * longer belongs to.
+   */
+  const syncHoldsRef = useRef(new Map<string, AbortController>());
+  const stopSyncHolds = useCallback(() => {
+    for (const controller of syncHoldsRef.current.values()) controller.abort();
+    syncHoldsRef.current.clear();
+  }, []);
+  useEffect(() => {
+    if (selectedAccountId !== UNIFIED_ACCOUNT_ID) return;
+    return stopSyncHolds;
+  }, [selectedAccountId, stopSyncHolds]);
+
+  const holdUnifiedStream = useCallback(
+    async (accountId: string) => {
+      const holds = syncHoldsRef.current;
+      holds.get(accountId)?.abort();
+      const controller = new AbortController();
+      holds.set(accountId, controller);
+      const { signal } = controller;
+      let page: MailThreadPage | null = null;
+      for (
+        let attempt = 0;
+        attempt < SYNC_HOLD_RETRIES && page === null;
+        attempt += 1
+      ) {
+        await pause(SYNC_HOLD_RETRY_MS, signal);
+        if (signal.aborted) return;
+        try {
+          page = await client.listThreads(
+            { accountId, limit: UNIFIED_PAGE_SIZE },
+            signal,
+          );
+        } catch (error) {
+          if (signal.aborted) return;
+          if (!isSyncHold(error)) break;
+        }
+      }
+      if (signal.aborted) return;
+      holds.delete(accountId);
+      if (selectedAccountIdRef.current !== UNIFIED_ACCOUNT_ID) return;
+      const current = unifiedStateRef.current;
+      if (current.kind !== "ready") return;
+      commitUnifiedState({
+        kind: "ready",
+        streams: current.streams.map((stream) => {
+          if (stream.accountId !== accountId || stream.status !== "loading") {
+            return stream;
+          }
+          return page === null
+            ? { ...stream, status: "error" as const }
+            : reconcileStreamPageOne(stream, page);
+        }),
+      });
+    },
+    [client, commitUnifiedState],
+  );
+
+  /**
    * Page-1 loads for every eligible account, `UNIFIED_FANOUT_LIMIT` at a time.
    * One account failing degrades to a per-stream notice — the rest still
    * merge. The first-sync kick is deliberately skipped in unified mode:
@@ -1802,6 +1885,7 @@ export function MailSurface({
       connected.forEach((account, index) => {
         pages.set(account.accountId, results[index]!);
       });
+      const held: string[] = [];
       const streams = eligible.map((account): UnifiedStream => {
         const base = {
           accountId: account.accountId,
@@ -1814,7 +1898,11 @@ export function MailSurface({
           return { ...base, status: "reauth" };
         }
         const result = pages.get(account.accountId)!;
-        if (result.status === "rejected") return { ...base, status: "error" };
+        if (result.status === "rejected") {
+          if (!isSyncHold(result.reason)) return { ...base, status: "error" };
+          held.push(account.accountId);
+          return { ...base, status: "loading" };
+        }
         return {
           ...base,
           items: result.value.items,
@@ -1824,8 +1912,9 @@ export function MailSurface({
         };
       });
       commitUnifiedState({ kind: "ready", streams });
+      for (const accountId of held) void holdUnifiedStream(accountId);
     },
-    [client, commitUnifiedState],
+    [client, commitUnifiedState, holdUnifiedStream],
   );
 
   /** Fetch the next page of exactly the streams that starve the horizon,
@@ -1865,6 +1954,7 @@ export function MailSurface({
     starved.forEach((stream, index) => {
       byAccount.set(stream.accountId, results[index]!);
     });
+    const held: string[] = [];
     commitUnifiedState({
       kind: "ready",
       streams: current.streams.map((stream) => {
@@ -1873,6 +1963,11 @@ export function MailSurface({
         if (result.status === "rejected") {
           // A stale cursor or an outage degrades this stream to a notice with
           // retry; its loaded rows keep merging and no longer hold a horizon.
+          // A cursor a sync outdated waits for its quiet re-read instead.
+          if (isSyncHold(result.reason)) {
+            held.push(stream.accountId);
+            return { ...stream, nextCursor: null, status: "loading" as const };
+          }
           return { ...stream, nextCursor: null, status: "error" as const };
         }
         const seen = new Set(stream.items.map(unifiedThreadKey));
@@ -1890,7 +1985,8 @@ export function MailSurface({
         };
       }),
     });
-  }, [client, commitUnifiedState]);
+    for (const accountId of held) void holdUnifiedStream(accountId);
+  }, [client, commitUnifiedState, holdUnifiedStream]);
 
   /**
    * The 60s tick in unified mode refreshes page-1 windows per account and
@@ -2575,12 +2671,18 @@ export function MailSurface({
    *
    *  Three answers, in this order. The letter is in the list in hand, and
    *  `selectThread` opens it exactly as a press on the row would. It is in
-   *  another account, and the column moves there first, one switch per
-   *  request, and the list that follows brings the letter with it. Or it is in
-   *  neither, and one `readThread` fetches the row to open it with. A
-   *  request that cannot be answered is dropped rather than retried: Mail is
-   *  open at the list it was going to show anyway, which is not a failure to
-   *  report to whoever pressed a notification.
+   *  another account or another mailbox, and the column moves there first,
+   *  by way of the letter's own Inbox and at most once per kind of move, and
+   *  the list that follows brings the letter with it. Or it is in neither,
+   *  and one read of that mailbox fetches the row to open it with. A request
+   *  that cannot be answered is dropped rather than retried: Mail is open at
+   *  the list it was going to show anyway, which is not a failure to report
+   *  to whoever pressed a notification.
+   *
+   *  The mailbox is the request's own: Inbox for the centre, and for the
+   *  palette whichever mailbox its search read in that account, All Mail on
+   *  Gmail. A letter the palette found there may have left Inbox long ago,
+   *  and the Inbox read answers 404 for it, which opened nothing.
    */
   const pendingOpen = useSyncExternalStore(
     subscribeOpenThread,
@@ -2589,34 +2691,50 @@ export function MailSurface({
   );
   /** What has already been tried for the request in hand. A switch and a fetch
    *  are each worth one attempt, and without this ledger the effect would
-   *  switch accounts every time the list it asked for commits. `listAtSwitch`
-   *  is the list that was on screen when the switch was asked for: the fetch
-   *  waits for a commit that is not it, so the account's own page gets its
-   *  chance first. */
+   *  switch accounts every time the list it asked for commits. `listAtMove`
+   *  is the list that was on screen when the column was last moved, by a
+   *  switch or a reset: the fetch waits for a commit that is not it, so the
+   *  destination's own page gets its chance first. */
   const openRequestRef = useRef<{
     key: string;
     opened: boolean;
     switched: boolean;
-    listAtSwitch: MailThreadListState | null;
+    listAtMove: MailThreadListState | null;
     fetched: boolean;
     /** The column was moved back to Inbox with an empty query for this
      *  request; a second move would be a loop, so the request is dropped
      *  instead if the column is still elsewhere after the first. */
     reset: boolean;
+    /** The column was moved on from the letter's own Inbox to the mailbox the
+     *  request names. Once, for the same reason. */
+    followed: boolean;
   } | null>(null);
 
   const fetchRequestedThread = useCallback(
-    async (request: MailOpenRequest) => {
+    async (request: MailOpenRequest, mailboxId: MailSystemMailbox) => {
       let detail: MailThreadDetail;
       try {
-        detail = await client.readThread({
-          accountId: request.accountId,
-          threadId: request.threadId,
-        });
+        detail =
+          mailboxId === "inbox"
+            ? await client.readThread({
+                accountId: request.accountId,
+                threadId: request.threadId,
+              })
+            : await client.readMailboxThread({
+                accountId: request.accountId,
+                mailboxId,
+                threadId: request.threadId,
+              });
       } catch {
         // A later press replaces the slot before this one answers: only the
         // request still standing there is this fetch's to clear.
-        if (isPendingRequest(request)) clearOpenThreadRequest();
+        if (!isPendingRequest(request)) return;
+        clearOpenThreadRequest();
+        // Only the palette names a mailbox other than Inbox, and its row was
+        // on screen a moment ago: a pick that lands silently on "Choose a
+        // message" reads as a press that did nothing. The centre's letters
+        // are new mail, and one of those gone by now is no news.
+        if (request.mailboxId !== "inbox") onToast?.("Couldn’t open that letter.");
         return;
       }
       // The slot may already hold a different request by the time this
@@ -2627,7 +2745,7 @@ export function MailSurface({
       clearOpenThreadRequest();
       void selectThread(detail.thread);
     },
-    [client, selectThread],
+    [client, onToast, selectThread],
   );
 
   useEffect(() => {
@@ -2639,29 +2757,36 @@ export function MailSurface({
     // one, and the column may still be choosing which it stands in.
     if (accountsState.kind !== "ready") return;
 
-    const key = unifiedThreadKey(pendingOpen);
+    const key = `${unifiedThreadKey(pendingOpen)}\u0000${pendingOpen.mailboxId}`;
     let ledger = openRequestRef.current;
     if (ledger === null || ledger.key !== key) {
       ledger = {
         key,
         opened: false,
         switched: false,
-        listAtSwitch: null,
+        listAtMove: null,
         fetched: false,
         reset: false,
+        followed: false,
       };
       openRequestRef.current = ledger;
     }
 
     // An account that is no longer connected has no letter to open.
-    if (
-      !accountsState.accounts.some(
-        (account) => account.accountId === pendingOpen.accountId,
-      )
-    ) {
+    const requestedAccount = accountsState.accounts.find(
+      (account) => account.accountId === pendingOpen.accountId,
+    );
+    if (!requestedAccount) {
       clearOpenThreadRequest();
       return;
     }
+    // A mailbox the account does not offer cannot be moved to, so the request
+    // is answered in Inbox, which every account has.
+    const mailboxId = requestedAccount.capabilities.mailboxes.includes(
+      pendingOpen.mailboxId,
+    )
+      ? pendingOpen.mailboxId
+      : "inbox";
 
     const loaded = loadedThread(
       pendingOpen,
@@ -2681,8 +2806,40 @@ export function MailSurface({
       return;
     }
 
-    // The mailbox on screen is the one an incoming request is about, whichever
-    // account it names. Checked before the switch below rather than after
+    const sameAccount = selectedAccountId === pendingOpen.accountId;
+    const plain = searchQuery.trim() === "";
+    // The list on screen has not committed since the column last moved, so
+    // "not in the list" is not yet an answer.
+    const listPending =
+      threadState.kind === "loading" || threadState === ledger.listAtMove;
+
+    // At the letter's own mailbox with no query: its page was the last list
+    // to look in, and the letter is fetched from that mailbox.
+    if (sameAccount && selectedMailboxId === mailboxId && plain) {
+      if (listPending || ledger.fetched) return;
+      ledger.fetched = true;
+      void fetchRequestedThread(pendingOpen, mailboxId);
+      return;
+    }
+
+    // In the letter's own Inbox, for a letter found in another mailbox. Most
+    // of what the palette finds in All Mail is in Inbox too, and there it
+    // opens with its Archive, so the Inbox page is waited for; only a letter
+    // it does not hold is followed to the mailbox the request names.
+    if (sameAccount && selectedMailboxId === "inbox" && plain) {
+      if (listPending) return;
+      if (ledger.followed) {
+        clearOpenThreadRequest();
+        return;
+      }
+      ledger.followed = true;
+      ledger.listAtMove = threadState;
+      selectMailbox(mailboxId);
+      return;
+    }
+
+    // Anywhere else the column goes back to Inbox first, whichever account
+    // the request names. Checked before the switch below rather than after
     // it: switching resets to Inbox and clears the query on its way, so a
     // cross-account request would otherwise answer where a same-account one
     // did not, for the same reader standing on the same other folder. A
@@ -2692,12 +2849,13 @@ export function MailSurface({
     // the reader was on a moment ago is not a reason to lose it. Once, per
     // request: the reset commits a new list, the effect runs again on it, and
     // a second reset would only spin.
-    if (selectedMailboxId !== "inbox" || searchQuery.trim() !== "") {
+    if (selectedMailboxId !== "inbox" || !plain) {
       if (ledger.reset) {
         clearOpenThreadRequest();
         return;
       }
       ledger.reset = true;
+      ledger.listAtMove = threadState;
       // `selectMailbox` clears the query on its way to Inbox, but it stands
       // down where there is no single account to move (the merged stream
       // only ever searches), so the query is cleared on its own as well.
@@ -2706,22 +2864,12 @@ export function MailSurface({
       return;
     }
 
-    if (selectedAccountId !== pendingOpen.accountId) {
-      if (ledger.switched) return;
-      ledger.switched = true;
-      ledger.listAtSwitch = threadState;
-      selectAccount(pendingOpen.accountId);
-      return;
-    }
-
-    // The list the switch asked for has not committed yet, so "not in the
-    // list" is not yet an answer.
-    if (threadState.kind === "loading" || threadState === ledger.listAtSwitch) {
-      return;
-    }
-    if (ledger.fetched) return;
-    ledger.fetched = true;
-    void fetchRequestedThread(pendingOpen);
+    // In another account's Inbox, or in All inboxes: the switch lands on the
+    // letter's own Inbox, and the list that follows brings it or does not.
+    if (ledger.switched) return;
+    ledger.switched = true;
+    ledger.listAtMove = threadState;
+    selectAccount(pendingOpen.accountId);
   }, [
     accountsState,
     changeSearchQuery,
@@ -3210,11 +3358,7 @@ export function MailSurface({
           return;
         }
         singleHoldRef.current = true;
-        const patchItem = (item: MailThreadListItem): MailThreadListItem => {
-          if (action === "toggle-read") return { ...item, unread: !item.unread };
-          if (action === "star") return { ...item, starred: true };
-          return { ...item, starred: false };
-        };
+        const patchItem = (item: MailThreadListItem) => withReadOrStar(item, action);
         const current = threadStateRef.current;
         if (current.kind === "ready") {
           commitThreadState({
@@ -3349,7 +3493,27 @@ export function MailSurface({
         const refreshedThread = page.items.find(
           (item) => item.accountId === accountId && item.threadId === threadId,
         );
-        if (!refreshedThread) {
+        const reader = readerStateRef.current;
+        if (
+          !refreshedThread &&
+          (action === "toggle-read" || action === "star" || action === "unstar") &&
+          reader.kind === "ready" &&
+          reader.detail.thread.accountId === accountId &&
+          reader.detail.thread.threadId === threadId
+        ) {
+          // A letter beyond the mailbox's first page, the palette's pick from
+          // deep in All Mail, is missing from the refetch without having gone
+          // anywhere. A read or a star moves nothing, so the reader stays and
+          // takes the answer in place, as the held path does. Only an action
+          // that moves the letter closes it.
+          setReaderState({
+            kind: "ready",
+            detail: {
+              ...reader.detail,
+              thread: withReadOrStar(reader.detail.thread, action),
+            },
+          });
+        } else if (!refreshedThread) {
           selectedThreadIdRef.current = null;
           setSelectedThreadId(null);
           setReaderState({ kind: "idle" });
@@ -4969,7 +5133,8 @@ function isPendingRequest(request: MailOpenRequest): boolean {
   return (
     pending !== null &&
     pending.accountId === request.accountId &&
-    pending.threadId === request.threadId
+    pending.threadId === request.threadId &&
+    pending.mailboxId === request.mailboxId
   );
 }
 
@@ -5567,6 +5732,16 @@ function pageWithHeldThread(
   return { ...fresh, items };
 }
 
+/** A read or star action's answer, applied to the row it was taken on. */
+function withReadOrStar(
+  item: MailThreadListItem,
+  action: Extract<MailReaderAction, "toggle-read" | "star" | "unstar">,
+): MailThreadListItem {
+  if (action === "toggle-read") return { ...item, unread: !item.unread };
+  if (action === "star") return { ...item, starred: true };
+  return { ...item, starred: false };
+}
+
 function threadMutationInput(
   thread: MailThreadListItem,
   action: MailReaderAction,
@@ -5605,6 +5780,28 @@ function isMutationUnsupported(error: unknown): boolean {
  */
 function isThreadStale(error: unknown): boolean {
   return error instanceof MailApiError && error.code === "mail_thread_stale";
+}
+
+/** The service's `mail_sync_in_progress` on a list read: a sync is moving the
+ *  account's cache, and the same account answers again a moment later. */
+function isSyncHold(error: unknown): boolean {
+  return error instanceof MailApiError && error.code === "mail_sync_in_progress";
+}
+
+/** Waits `ms`, or less if `signal` aborts first; the caller reads the signal
+ *  after. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
 }
 
 /**

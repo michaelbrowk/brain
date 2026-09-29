@@ -5568,8 +5568,14 @@ export function Shell({
       onSelect={(selection: CommandPaletteSelection) => {
         if (selection.kind === "mail") {
           // The same door the notification centre uses: the ids go into the
-          // latch, Mail mounts and answers them when its list is in.
-          requestOpenThread(selection.accountId, selection.threadId);
+          // latch, Mail mounts and answers them when its list is in. The
+          // mailbox rides along, because the search read the account's widest
+          // one and the letter may not be in Inbox.
+          requestOpenThread(
+            selection.accountId,
+            selection.threadId,
+            selection.mailboxId,
+          );
           openMail();
           return;
         }

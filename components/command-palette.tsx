@@ -15,9 +15,11 @@ import type { ReactNode } from "react";
 import { emitMailCommand, type MailCommand } from "./mail-commands";
 import { renderTaskCheck } from "./tasks-checkbox";
 import { emitTaskCommand, type TaskCommand } from "./tasks-commands";
+import { sanitizeSnippet } from "@/lib/mail/reader-content";
 import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
 import type {
   MailSearchAllResponse,
+  MailSystemMailbox,
   MailThreadListItem,
 } from "@/lib/mail/message-types";
 import type { TreeNode } from "@/lib/store/types";
@@ -28,18 +30,32 @@ import type { TaskView } from "@/lib/tasks/model";
 export type CommandPaletteSelection =
   | { kind: "page"; id: string }
   | { kind: "text"; id: string; target: SearchTextTarget | null }
-  | { kind: "mail"; accountId: string; threadId: string }
+  | {
+      kind: "mail";
+      accountId: string;
+      threadId: string;
+      /** The mailbox the search read in that account, where Mail opens it. */
+      mailboxId: MailSystemMailbox;
+    }
   | { kind: "task"; id: string };
 
-/** What the palette keeps of a mail answer: the rows, and each account's own
- *  address so a row's meta can name the correspondent rather than the reader. */
+/** What the palette keeps of a mail answer: the rows, each account's own
+ *  address so a row's meta can name the correspondent rather than the reader,
+ *  and the mailbox each account's search read. A row is found there and not
+ *  necessarily in Inbox, so a pick hands Mail that mailbox to open it in. */
 interface MailResults {
   readonly threads: readonly MailThreadListItem[];
   readonly ownAddresses: ReadonlyMap<string, string>;
+  readonly mailboxes: ReadonlyMap<string, MailSystemMailbox>;
   readonly indexBuilding: boolean;
 }
 
-const NO_MAIL: MailResults = { threads: [], ownAddresses: new Map(), indexBuilding: false };
+const NO_MAIL: MailResults = {
+  threads: [],
+  ownAddresses: new Map(),
+  mailboxes: new Map(),
+  indexBuilding: false,
+};
 
 interface FlatPage {
   id: string;
@@ -841,12 +857,17 @@ export function CommandPalette({
         if (controller.signal.aborted) return;
         if (!Array.isArray(body.threads)) throw new Error("invalid mail search response");
         const ownAddresses = new Map<string, string>();
+        const mailboxes = new Map<string, MailSystemMailbox>();
         for (const account of body.accounts ?? []) {
           ownAddresses.set(account.accountId, account.emailAddress);
+          // An account whose search failed reports no mailbox, and has no
+          // rows to pick either.
+          if ("mailboxId" in account) mailboxes.set(account.accountId, account.mailboxId);
         }
         setMail({
           threads: body.threads,
           ownAddresses,
+          mailboxes,
           indexBuilding: body.indexBuilding === true,
         });
         setMailResolvedQuery(q);
@@ -896,7 +917,14 @@ export function CommandPalette({
   };
 
   const pickMail = (thread: MailThreadListItem) => {
-    onSelect({ kind: "mail", accountId: thread.accountId, threadId: thread.threadId });
+    onSelect({
+      kind: "mail",
+      accountId: thread.accountId,
+      threadId: thread.threadId,
+      // Inbox when the answer named no mailbox for the account: every account
+      // has one, and it is where the notification centre's letters open too.
+      mailboxId: mail.mailboxes.get(thread.accountId) ?? "inbox",
+    });
     handleOpenChange(false);
   };
 
@@ -1189,7 +1217,10 @@ export function CommandPalette({
           )}
           {visibleMail.map((t) => {
             const subject = t.subject?.trim() || "(no subject)";
-            const snippet = t.snippet?.trim() ?? "";
+            // The list row's rule, so the same letter reads the same in both:
+            // Gmail escapes its snippets, and the highlight has to run over
+            // the decoded text or a match beside an entity loses its mark.
+            const snippet = sanitizeSnippet(t.snippet);
             return (
               <Command.Item
                 key={`mail-${t.accountId}-${t.threadId}`}

@@ -6396,6 +6396,155 @@ describe("MailSurface", () => {
       expect(document.body.textContent).not.toContain("couldn’t load");
     });
 
+    /** A SYNC HOLDING THE ACCOUNT IS NOT AN OUTAGE. The service answers a list
+     *  read with 409 `mail_sync_in_progress` while a sync moves the account's
+     *  cache under it, and a second later the same account answers. The red
+     *  row and its Try again were the reader's to press for a wait the
+     *  surface can take on its own. */
+    describe("a stream a sync is holding", () => {
+      const itemA = unifiedThread({
+        accountId: accountA.accountId,
+        threadId: "Healthy thread",
+      });
+      const itemB = unifiedThread({
+        accountId: accountB.accountId,
+        threadId: "Recovered thread",
+      });
+      const held = () => new MailApiError(409, "mail_sync_in_progress");
+
+      function pageOneCalls(
+        listThreads: ReturnType<typeof vi.fn>,
+        accountId: string,
+      ): number {
+        return listThreads.mock.calls.filter(
+          ([input]) => input.accountId === accountId && !input.cursor,
+        ).length;
+      }
+
+      async function wait(ms: number) {
+        await act(async () => vi.advanceTimersByTimeAsync(ms));
+        await settle();
+      }
+
+      it("is read again quietly and joins the merge when the sync lets go", async () => {
+        vi.useFakeTimers();
+        let holds = 2;
+        const listThreads = vi.fn().mockImplementation(({ accountId }) => {
+          if (accountId === accountB.accountId && holds > 0) {
+            holds -= 1;
+            return Promise.reject(held());
+          }
+          return Promise.resolve(
+            pageOf(accountId === accountA.accountId ? [itemA] : [itemB]),
+          );
+        });
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+
+        // The other account merges at once, and the held one says nothing.
+        expect(document.body.textContent).toContain("Healthy thread");
+        expect(document.body.textContent).not.toContain("couldn’t load");
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(1);
+
+        await wait(1_499);
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(1);
+        await wait(1);
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(2);
+        expect(document.body.textContent).not.toContain("couldn’t load");
+
+        await wait(1_500);
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(3);
+        expect(document.body.textContent).toContain("Recovered thread");
+        expect(document.body.textContent).not.toContain("couldn’t load");
+
+        // Answered: nothing is left scheduled to ask again.
+        await wait(10_000);
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(3);
+      });
+
+      it("reports the stream after three quiet reads the sync still holds", async () => {
+        vi.useFakeTimers();
+        const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+          accountId === accountB.accountId
+            ? Promise.reject(held())
+            : Promise.resolve(pageOf([itemA])),
+        );
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+
+        await wait(1_500);
+        await wait(1_500);
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(3);
+        expect(document.body.textContent).not.toContain("couldn’t load");
+
+        await wait(1_500);
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(4);
+        expect(document.body.textContent).toContain(
+          `${accountB.emailAddress} couldn’t load`,
+        );
+
+        await wait(10_000);
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(4);
+      });
+
+      it("reads page one again when a sync holds a Load more", async () => {
+        vi.useFakeTimers();
+        const deepA = [
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: "A newest",
+            lastMessageAt: 1_700_000_000_900,
+          }),
+        ];
+        const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) => {
+          if (cursor) return Promise.reject(held());
+          return Promise.resolve(
+            accountId === accountA.accountId
+              ? pageOf(deepA, "cursor-a")
+              : pageOf([itemB]),
+          );
+        });
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+
+        await click(findButton("Load more"));
+        expect(listThreads).toHaveBeenLastCalledWith({
+          accountId: accountA.accountId,
+          cursor: "cursor-a",
+          limit: 50,
+        });
+        expect(document.body.textContent).not.toContain("couldn’t load");
+
+        // The cursor is from before the sync, so the same page is not asked
+        // again: the stream's first page is, as Try again would.
+        await wait(1_500);
+        expect(listThreads.mock.lastCall?.[0]).toEqual({
+          accountId: accountA.accountId,
+          limit: 50,
+        });
+        expect(document.body.textContent).toContain("A newest");
+        expect(document.body.textContent).not.toContain("couldn’t load");
+      });
+    });
+
     it("fetches only the starved stream on Load more", async () => {
       const deepA = [
         unifiedThread({
@@ -8379,11 +8528,14 @@ describe("MailSurface", () => {
     });
 
     it("leaves the list standing when the thread is nowhere to be found", async () => {
+      const onToast = vi.fn();
       const client = makeClient({
         readThread: vi.fn().mockRejectedValue(new MailApiError(404, "not_found")),
       });
       await act(async () =>
-        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        root.render(
+          <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+        ),
       );
       await settle();
       await enterSingleAccount();
@@ -8395,7 +8547,51 @@ describe("MailSurface", () => {
       // A row that cannot be opened is not an error to report to whoever
       // pressed it: Mail is open, at the list it was going to show anyway.
       expect(document.body.textContent).toContain("Lunch this Friday?");
+      expect(onToast).not.toHaveBeenCalled();
     });
+
+    it.each([
+      [404, "mail_thread_not_found"],
+      [503, "mail_sync_unavailable"],
+      [409, "mail_sync_in_progress"],
+    ])(
+      "says so once when the mailbox the search named cannot give the letter (%i)",
+      async (status, code) => {
+        // The palette's row was on screen a moment ago and the reader chose
+        // it. A pick that silently lands on "Choose a message" reads as a
+        // press that did nothing, which is how this bug was found.
+        const onToast = vi.fn();
+        const client = makeClient({
+          readThread: vi
+            .fn()
+            .mockRejectedValue(new MailApiError(404, "mail_thread_not_found")),
+          readMailboxThread: vi
+            .fn()
+            .mockRejectedValue(new MailApiError(status, code)),
+        });
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={client}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        await enterSingleAccount();
+
+        await act(async () => {
+          requestOpenThread(accountA.accountId, "thread-gone", "all");
+        });
+        await until(() => pendingOpenThread() === null, "the request is dropped");
+        await settle();
+
+        expect(onToast).toHaveBeenCalledTimes(1);
+        expect(onToast).toHaveBeenCalledWith("Couldn’t open that letter.");
+        expect(reader()?.textContent).toContain("Choose a message");
+      },
+    );
 
     it("moves the column back to Inbox with an empty query and opens the letter from Sent", async () => {
       vi.useFakeTimers();
@@ -8604,6 +8800,394 @@ describe("MailSurface", () => {
       expect(client.readThread).toHaveBeenCalledTimes(1);
       expect(navTrigger()?.getAttribute("aria-label")).toContain("Inbox");
       expect(document.body.textContent).toContain("The other address");
+    });
+
+    /** The palette searches each account's widest mailbox, All Mail on Gmail,
+     *  so a pick can name a letter archived long ago. The Inbox read answers
+     *  404 for it, and a request that only knew Inbox opened nothing. The
+     *  request now carries the mailbox the search used, and the column goes
+     *  there. */
+    const archived: MailThreadListItem = {
+      ...thread,
+      threadId: "thread-archived",
+      subject: "The archived letter",
+    };
+
+    function reader(): HTMLElement | null {
+      return document.body.querySelector('section[aria-label="Message reader"]');
+    }
+
+    function readerButtons(): string[] {
+      return [...(reader()?.querySelectorAll("button") ?? [])].map(
+        (button) => button.textContent?.trim() ?? "",
+      );
+    }
+
+    it("opens a letter found outside Inbox in the mailbox the search used", async () => {
+      const readMailboxThread = vi.fn().mockResolvedValue(detailFor(archived));
+      const client = makeClient({
+        readThread: vi
+          .fn()
+          .mockRejectedValue(new MailApiError(404, "mail_thread_not_found")),
+        readMailboxThread,
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, archived.threadId, "all");
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+      await until(
+        () => reader()?.textContent?.includes("The archived letter") === true,
+        "the reader opens the archived letter",
+      );
+
+      expect(readMailboxThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        mailboxId: "all",
+        threadId: archived.threadId,
+      });
+      expect(client.readThread).not.toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: archived.threadId }),
+      );
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: All Mail");
+      // All Mail's reader: a letter already out of Inbox has no Archive.
+      expect(readerButtons()).not.toContain("Archive");
+    });
+
+    /** A letter the palette opens from deep in All Mail is not on that
+     *  mailbox's first page, and the refetch after an action read its absence
+     *  there as the letter having left: the reader closed on "Choose a
+     *  message". Only an action that moves the letter may close it. The client
+     *  is server truth: a mutation changes what the next read returns. */
+    function deepLetterClient(initial: { unread: boolean }) {
+      let unread = initial.unread;
+      let starred = false;
+      const updateThread = vi.fn().mockImplementation(async (input) => {
+        if ("read" in input) unread = !input.read;
+        if ("starred" in input) starred = input.starred;
+      });
+      const client = makeClient({
+        readThread: vi
+          .fn()
+          .mockRejectedValue(new MailApiError(404, "mail_thread_not_found")),
+        readMailboxThread: vi
+          .fn()
+          .mockImplementation(() =>
+            Promise.resolve(detailFor({ ...archived, unread, starred })),
+          ),
+        updateThread,
+      });
+      return { client, updateThread };
+    }
+
+    async function openDeepLetter(client: MailSurfaceClient) {
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await act(async () => {
+        requestOpenThread(accountA.accountId, archived.threadId, "all");
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+      await until(
+        () => reader()?.textContent?.includes("The archived letter") === true,
+        "the reader opens the archived letter",
+      );
+    }
+
+    async function openMoreActions() {
+      await act(async () => {
+        findButton("More mail actions").dispatchEvent(
+          new PointerEvent("pointerdown", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+          }),
+        );
+      });
+      await settle();
+    }
+
+    it("keeps an unread letter from deep in All Mail open once it is read", async () => {
+      const { client, updateThread } = deepLetterClient({ unread: true });
+      await openDeepLetter(client);
+      await until(
+        () => updateThread.mock.calls.length > 0,
+        "the letter is read on open",
+      );
+      await settle();
+
+      expect(updateThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: archived.threadId,
+        read: true,
+      });
+      expect(reader()?.textContent).toContain("The archived letter");
+      expect(reader()?.textContent).not.toContain("Choose a message");
+      // Read, and the header offers the reverse.
+      expect(readerButtons()).toContain("Mark unread");
+    });
+
+    it("keeps a letter from deep in All Mail open and starred after Star", async () => {
+      const { client, updateThread } = deepLetterClient({ unread: false });
+      await openDeepLetter(client);
+      expect(updateThread).not.toHaveBeenCalled();
+
+      await openMoreActions();
+      await click(findMenuItem("Star"));
+      await settle();
+
+      expect(updateThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: archived.threadId,
+        starred: true,
+      });
+      expect(reader()?.textContent).toContain("The archived letter");
+      await openMoreActions();
+      expect(findMenuItem("Remove star")).toBeInstanceOf(HTMLElement);
+    });
+
+    it("opens a letter the search found in All Mail from Inbox when Inbox holds it", async () => {
+      // Pressed before Mail exists, so the request is in hand while the Inbox
+      // page is still loading. Most of what the palette finds in All Mail is
+      // in Inbox too, and Inbox is where the letter keeps its Archive: the
+      // column waits for that page before it moves anywhere.
+      requestOpenThread(accountA.accountId, thread.threadId, "all");
+      const client = makeClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+
+      await until(
+        () => vi.mocked(client.readThread).mock.calls.length > 0,
+        "the thread is read from Inbox",
+      );
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+      });
+      expect(client.listMailboxThreads).not.toHaveBeenCalled();
+      expect(client.readMailboxThread).not.toHaveBeenCalled();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+      expect(pendingOpenThread()).toBeNull();
+    });
+
+    /** From another folder of the same account, or over a search, the column
+     *  goes to Inbox first as well, and follows the letter to All Mail only
+     *  when Inbox does not hold it: the same letter opens in the same place
+     *  whichever folder the reader happened to be standing on. */
+    function inboxFirstClient() {
+      return makeClient({
+        // Sent and the search hold nothing; All Mail holds the letter too, so
+        // a column that skipped Inbox would open it there.
+        listMailboxThreads: vi.fn().mockImplementation(({ mailboxId }) =>
+          Promise.resolve(mailboxThreadPage(mailboxId, mailboxId === "all" ? [thread] : [])),
+        ),
+        searchThreads: vi
+          .fn()
+          .mockImplementation(({ mailboxId }) =>
+            Promise.resolve(searchThreadPage(mailboxId, [])),
+          ),
+      });
+    }
+
+    it("looks in Inbox before All Mail when the request arrives on Sent", async () => {
+      const client = inboxFirstClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("Sent");
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, thread.threadId, "all");
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+      await settle();
+
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+      });
+      expect(client.readMailboxThread).not.toHaveBeenCalled();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+    });
+
+    it("looks in Inbox before All Mail when the request arrives over a search", async () => {
+      vi.useFakeTimers();
+      const client = inboxFirstClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      const input = document.body.querySelector(
+        'input[aria-label="Search mail"]',
+      ) as HTMLInputElement;
+      await setInput(input, "nothing here");
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      await settle();
+      expect(client.searchThreads).toHaveBeenCalled();
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, thread.threadId, "all");
+      });
+      for (let round = 0; round < 60; round += 1) {
+        if (vi.mocked(client.readThread).mock.calls.length > 0) break;
+        await act(async () => vi.advanceTimersByTimeAsync(20));
+        await settle();
+      }
+
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+      });
+      expect(client.readMailboxThread).not.toHaveBeenCalled();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+      expect(
+        (document.body.querySelector('input[aria-label="Search mail"]') as HTMLInputElement)
+          .value,
+      ).toBe("");
+    });
+
+    it("opens a letter found outside Inbox from All inboxes too", async () => {
+      const archivedB: MailThreadListItem = {
+        ...archived,
+        accountId: accountB.accountId,
+      };
+      const readMailboxThread = vi.fn().mockResolvedValue(detailFor(archivedB));
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+        listThreads: vi
+          .fn()
+          .mockImplementation(({ accountId }: { accountId: string }) =>
+            Promise.resolve(pageFor(accountId)),
+          ),
+        readThread: vi
+          .fn()
+          .mockRejectedValue(new MailApiError(404, "mail_thread_not_found")),
+        readMailboxThread,
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: All inboxes");
+
+      await act(async () => {
+        requestOpenThread(accountB.accountId, archivedB.threadId, "all");
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+      await until(
+        () => reader()?.textContent?.includes("The archived letter") === true,
+        "the reader opens the archived letter",
+      );
+
+      expect(readMailboxThread).toHaveBeenCalledWith({
+        accountId: accountB.accountId,
+        mailboxId: "all",
+        threadId: archivedB.threadId,
+      });
+      expect(client.readThread).not.toHaveBeenCalled();
+      expect(navTrigger()?.getAttribute("aria-label")).toContain("All Mail");
+    });
+
+    it("takes a cross-account request to the other account's mailbox from a folder", async () => {
+      // Sent resets to Inbox before the switch, the switch lands on the other
+      // account's Inbox, and the move to All Mail after it is that account's
+      // own: two moves for one request, neither of them a loop.
+      const archivedB: MailThreadListItem = {
+        ...archived,
+        accountId: accountB.accountId,
+      };
+      const readMailboxThread = vi.fn().mockResolvedValue(detailFor(archivedB));
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+        listThreads: vi
+          .fn()
+          .mockImplementation(({ accountId }: { accountId: string }) =>
+            Promise.resolve(pageFor(accountId)),
+          ),
+        readMailboxThread,
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount(accountA);
+      await goTo("Sent");
+
+      await act(async () => {
+        requestOpenThread(accountB.accountId, archivedB.threadId, "all");
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+      await until(
+        () => reader()?.textContent?.includes("The archived letter") === true,
+        "the reader opens the archived letter",
+      );
+
+      expect(readMailboxThread).toHaveBeenCalledWith({
+        accountId: accountB.accountId,
+        mailboxId: "all",
+        threadId: archivedB.threadId,
+      });
+      expect(navTrigger()?.getAttribute("aria-label")).toContain("All Mail");
+    });
+
+    it("still lands a request that names no mailbox on Inbox", async () => {
+      // The notification centre names no mailbox: its letters are new mail.
+      const client = makeClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, "thread-elsewhere");
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: "thread-elsewhere",
+      });
+      expect(client.readMailboxThread).not.toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: "thread-elsewhere" }),
+      );
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+    });
+
+    it("answers in Inbox when the account has no such mailbox", async () => {
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue([imapAccount]),
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount(imapAccount);
+
+      await act(async () => {
+        requestOpenThread(imapAccount.accountId, "thread-elsewhere", "all");
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: imapAccount.accountId,
+        threadId: "thread-elsewhere",
+      });
+      expect(client.readMailboxThread).not.toHaveBeenCalled();
     });
 
     it("clears an unanswered request when the Mail surface unmounts", async () => {

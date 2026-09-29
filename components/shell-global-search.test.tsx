@@ -154,7 +154,7 @@ describe("Shell global search", () => {
     expect(harness.paletteProps?.tasks).toBeUndefined();
   });
 
-  it("latches a mail pick and opens Mail", async () => {
+  it("latches a mail pick, with the mailbox it was found in, and opens Mail", async () => {
     await render();
 
     await act(async () =>
@@ -162,11 +162,16 @@ describe("Shell global search", () => {
         kind: "mail",
         accountId: ACCOUNT_ID,
         threadId: "thread-1",
+        mailboxId: "all",
       }),
     );
     await settle();
 
-    expect(pendingOpenThread()).toEqual({ accountId: ACCOUNT_ID, threadId: "thread-1" });
+    expect(pendingOpenThread()).toEqual({
+      accountId: ACCOUNT_ID,
+      threadId: "thread-1",
+      mailboxId: "all",
+    });
     expect(window.location.pathname).toBe("/mail");
   });
 

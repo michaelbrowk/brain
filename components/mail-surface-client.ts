@@ -348,10 +348,17 @@ export interface MailSurfaceClient {
  *  Module state and not React state for the same reason the request exists at
  *  all: the two sides never share a tree. One request at a time, because a
  *  second press before the first is answered is a change of mind.
+ *
+ *  The mailbox is where the letter was found. The centre's letters are new
+ *  mail and stand in Inbox, but the palette searches each account's widest
+ *  mailbox, and a letter it finds there may have left Inbox long ago: the
+ *  Inbox read answers 404 for it, so the surface has to look where the search
+ *  did.
  */
 export interface MailOpenRequest {
   readonly accountId: string;
   readonly threadId: string;
+  readonly mailboxId: MailSystemMailbox;
 }
 
 let openRequest: MailOpenRequest | null = null;
@@ -361,11 +368,22 @@ function publishOpenRequest(): void {
   for (const listener of openRequestListeners) listener();
 }
 
-/** Ask Mail to open this thread. Ids no mail route could serve are dropped
- *  here rather than becoming a request the surface cannot answer. */
-export function requestOpenThread(accountId: string, threadId: string): void {
-  if (!SAFE_ACCOUNT_ID.test(accountId) || !SAFE_RESOURCE_ID.test(threadId)) return;
-  openRequest = { accountId, threadId };
+/** Ask Mail to open this thread, in the mailbox it was found in. Ids no mail
+ *  route could serve are dropped here rather than becoming a request the
+ *  surface cannot answer. */
+export function requestOpenThread(
+  accountId: string,
+  threadId: string,
+  mailboxId: MailSystemMailbox = "inbox",
+): void {
+  if (
+    !SAFE_ACCOUNT_ID.test(accountId) ||
+    !SAFE_RESOURCE_ID.test(threadId) ||
+    !isMailSystemMailbox(mailboxId)
+  ) {
+    return;
+  }
+  openRequest = { accountId, threadId, mailboxId };
   publishOpenRequest();
 }
 

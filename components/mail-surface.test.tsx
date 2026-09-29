@@ -8813,6 +8813,100 @@ describe("MailSurface", () => {
       expect(readerButtons()).not.toContain("Archive");
     });
 
+    /** A letter the palette opens from deep in All Mail is not on that
+     *  mailbox's first page, and the refetch after an action read its absence
+     *  there as the letter having left: the reader closed on "Choose a
+     *  message". Only an action that moves the letter may close it. The client
+     *  is server truth: a mutation changes what the next read returns. */
+    function deepLetterClient(initial: { unread: boolean }) {
+      let unread = initial.unread;
+      let starred = false;
+      const updateThread = vi.fn().mockImplementation(async (input) => {
+        if ("read" in input) unread = !input.read;
+        if ("starred" in input) starred = input.starred;
+      });
+      const client = makeClient({
+        readThread: vi
+          .fn()
+          .mockRejectedValue(new MailApiError(404, "mail_thread_not_found")),
+        readMailboxThread: vi
+          .fn()
+          .mockImplementation(() =>
+            Promise.resolve(detailFor({ ...archived, unread, starred })),
+          ),
+        updateThread,
+      });
+      return { client, updateThread };
+    }
+
+    async function openDeepLetter(client: MailSurfaceClient) {
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await act(async () => {
+        requestOpenThread(accountA.accountId, archived.threadId, "all");
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+      await until(
+        () => reader()?.textContent?.includes("The archived letter") === true,
+        "the reader opens the archived letter",
+      );
+    }
+
+    async function openMoreActions() {
+      await act(async () => {
+        findButton("More mail actions").dispatchEvent(
+          new PointerEvent("pointerdown", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+          }),
+        );
+      });
+      await settle();
+    }
+
+    it("keeps an unread letter from deep in All Mail open once it is read", async () => {
+      const { client, updateThread } = deepLetterClient({ unread: true });
+      await openDeepLetter(client);
+      await until(
+        () => updateThread.mock.calls.length > 0,
+        "the letter is read on open",
+      );
+      await settle();
+
+      expect(updateThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: archived.threadId,
+        read: true,
+      });
+      expect(reader()?.textContent).toContain("The archived letter");
+      expect(reader()?.textContent).not.toContain("Choose a message");
+      // Read, and the header offers the reverse.
+      expect(readerButtons()).toContain("Mark unread");
+    });
+
+    it("keeps a letter from deep in All Mail open and starred after Star", async () => {
+      const { client, updateThread } = deepLetterClient({ unread: false });
+      await openDeepLetter(client);
+      expect(updateThread).not.toHaveBeenCalled();
+
+      await openMoreActions();
+      await click(findMenuItem("Star"));
+      await settle();
+
+      expect(updateThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: archived.threadId,
+        starred: true,
+      });
+      expect(reader()?.textContent).toContain("The archived letter");
+      await openMoreActions();
+      expect(findMenuItem("Remove star")).toBeInstanceOf(HTMLElement);
+    });
+
     it("opens a letter the search found in All Mail from Inbox when Inbox holds it", async () => {
       // Pressed before Mail exists, so the request is in hand while the Inbox
       // page is still loading. Most of what the palette finds in All Mail is

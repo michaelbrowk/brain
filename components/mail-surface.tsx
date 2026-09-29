@@ -3346,11 +3346,7 @@ export function MailSurface({
           return;
         }
         singleHoldRef.current = true;
-        const patchItem = (item: MailThreadListItem): MailThreadListItem => {
-          if (action === "toggle-read") return { ...item, unread: !item.unread };
-          if (action === "star") return { ...item, starred: true };
-          return { ...item, starred: false };
-        };
+        const patchItem = (item: MailThreadListItem) => withReadOrStar(item, action);
         const current = threadStateRef.current;
         if (current.kind === "ready") {
           commitThreadState({
@@ -3485,7 +3481,27 @@ export function MailSurface({
         const refreshedThread = page.items.find(
           (item) => item.accountId === accountId && item.threadId === threadId,
         );
-        if (!refreshedThread) {
+        const reader = readerStateRef.current;
+        if (
+          !refreshedThread &&
+          (action === "toggle-read" || action === "star" || action === "unstar") &&
+          reader.kind === "ready" &&
+          reader.detail.thread.accountId === accountId &&
+          reader.detail.thread.threadId === threadId
+        ) {
+          // A letter beyond the mailbox's first page, the palette's pick from
+          // deep in All Mail, is missing from the refetch without having gone
+          // anywhere. A read or a star moves nothing, so the reader stays and
+          // takes the answer in place, as the held path does. Only an action
+          // that moves the letter closes it.
+          setReaderState({
+            kind: "ready",
+            detail: {
+              ...reader.detail,
+              thread: withReadOrStar(reader.detail.thread, action),
+            },
+          });
+        } else if (!refreshedThread) {
           selectedThreadIdRef.current = null;
           setSelectedThreadId(null);
           setReaderState({ kind: "idle" });
@@ -5702,6 +5718,16 @@ function pageWithHeldThread(
   );
   items.splice(Math.min(heldIndex, items.length), 0, heldItem);
   return { ...fresh, items };
+}
+
+/** A read or star action's answer, applied to the row it was taken on. */
+function withReadOrStar(
+  item: MailThreadListItem,
+  action: Extract<MailReaderAction, "toggle-read" | "star" | "unstar">,
+): MailThreadListItem {
+  if (action === "toggle-read") return { ...item, unread: !item.unread };
+  if (action === "star") return { ...item, starred: true };
+  return { ...item, starred: false };
 }
 
 function threadMutationInput(

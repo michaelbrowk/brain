@@ -426,6 +426,19 @@ export function MailSurface({
   const [syncing, setSyncing] = useState(false);
   const [mutating, setMutating] = useState(false);
   const [unifiedState, setUnifiedState] = useState<UnifiedState>({ kind: "idle" });
+  // Load mores the column asked for and never got: refused under a mail
+  // action's lock, or answered after the column's epoch moved and dropped.
+  // Nothing about the rows changed, so the list's scroll sentinel, which
+  // re-arms on the rows, takes this count too and asks again. A refusal is
+  // counted only once the lock lets go, or the sentinel would ask straight
+  // back into it.
+  const [unifiedUnserved, setUnifiedUnserved] = useState(0);
+  const loadMoreRefusedRef = useRef(false);
+  useEffect(() => {
+    if (mutating || !loadMoreRefusedRef.current) return;
+    loadMoreRefusedRef.current = false;
+    queueMicrotask(() => setUnifiedUnserved((count) => count + 1));
+  }, [mutating]);
   // Which sections are open is an external store, not component state: it
   // outlives every unified mount in this session (see the store below).
   const unifiedExpand = useSyncExternalStore(
@@ -1936,8 +1949,11 @@ export function MailSurface({
   /** Fetch the next page of exactly the streams that starve the horizon,
    *  under the same fan-out bound the first load runs at. */
   const loadMoreUnified = useCallback(async () => {
-    if (mutationLockRef.current) return;
     if (selectedAccountIdRef.current !== UNIFIED_ACCOUNT_ID) return;
+    if (mutationLockRef.current) {
+      loadMoreRefusedRef.current = true;
+      return;
+    }
     const state = unifiedStateRef.current;
     if (state.kind !== "ready") return;
     const { starvedAccountIds } = mergedDisplayItems(state.streams);
@@ -1992,10 +2008,9 @@ export function MailSurface({
         return { ...page, items };
       },
     );
-    if (
-      listEpochRef.current !== listEpoch ||
-      selectedAccountIdRef.current !== UNIFIED_ACCOUNT_ID
-    ) {
+    if (selectedAccountIdRef.current !== UNIFIED_ACCOUNT_ID) return;
+    if (listEpochRef.current !== listEpoch) {
+      setUnifiedUnserved((count) => count + 1);
       return;
     }
     const current = unifiedStateRef.current;
@@ -5061,6 +5076,7 @@ export function MailSurface({
             expand={unifiedExpand}
             selectedThreadKey={selectedThreadKey}
             exitFades={mutating}
+            unserved={unifiedUnserved}
             onToggleExpand={toggleUnifiedExpand}
             onSelectThread={(thread) => void selectThread(thread)}
             onCompose={

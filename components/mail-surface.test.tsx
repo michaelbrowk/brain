@@ -7026,8 +7026,9 @@ describe("MailSurface", () => {
       /** The column scrolled to its end. Every observer the list makes reports
        *  its sentinel in view as soon as it observes it, the way a real one
        *  does, and none reports once disconnected. Nothing here presses the
-       *  sr-only Load more, so what pages is what scrolling does. */
-      function sentinelInView() {
+       *  sr-only Load more, so what pages is what scrolling does. `view` lets
+       *  a test bring the end into view later. */
+      function sentinelInView(view: { inView: boolean } = { inView: true }) {
         vi.stubGlobal(
           "IntersectionObserver",
           class {
@@ -7038,7 +7039,7 @@ describe("MailSurface", () => {
               queueMicrotask(() => {
                 if (!this.targets.has(target)) return;
                 this.callback(
-                  [{ target, isIntersecting: true } as IntersectionObserverEntry],
+                  [{ target, isIntersecting: view.inView } as IntersectionObserverEntry],
                   this as unknown as IntersectionObserver,
                 );
               });
@@ -7218,6 +7219,234 @@ describe("MailSurface", () => {
         await settle();
 
         expect(cursorsAsked(listThreads)).not.toContain("s2-page-3");
+      });
+
+      /** A deep account whose page two the test answers by hand: the first
+       *  read of it waits on `pageTwo`, any later one answers at once. */
+      function pageTwoByHand(
+        pageTwo: Promise<MailThreadPage>,
+        top?: MailThreadListItem,
+      ) {
+        let pageTwoReads = 0;
+        return vi.fn().mockImplementation(({ accountId, cursor }) => {
+          if (accountId === accountB.accountId) {
+            return Promise.resolve(
+              pageOf([
+                unifiedThread({
+                  accountId: accountB.accountId,
+                  threadId: "B only",
+                  lastMessageAt: 1_600_000_000_000,
+                }),
+              ]),
+            );
+          }
+          if (!cursor) {
+            return Promise.resolve(
+              pageOf(
+                top ? [top, ...deepRows.slice(0, 49)] : deepRows.slice(0, 50),
+                "p2",
+              ),
+            );
+          }
+          if (cursor === "p2") {
+            pageTwoReads += 1;
+            return pageTwoReads === 1
+              ? pageTwo
+              : Promise.resolve(pageOf(deepRows.slice(50, 100)));
+          }
+          return Promise.reject(new Error(`unexpected cursor ${cursor}`));
+        });
+      }
+
+      it("asks the scrolled-to end only once while its page is on the way", async () => {
+        sentinelInView();
+        const pageTwo = deferred<MailThreadPage>();
+        const listThreads = pageTwoByHand(pageTwo.promise);
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+
+        // Every render makes the list a new observer, which reports the end
+        // in view again; the rows have not moved, so it asks for nothing.
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+        await settle();
+        expect(cursorsAsked(listThreads)).toEqual(["p2"]);
+      });
+
+      it("asks again after the minute's refresh drops a page on the way", async () => {
+        vi.useFakeTimers();
+        sentinelInView();
+        const pageTwo = deferred<MailThreadPage>();
+        const listThreads = pageTwoByHand(pageTwo.promise);
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+
+        // The refresh moves the column's epoch, and the page that lands after
+        // it is dropped without a row. The end is still in view.
+        await wait(60_000);
+        expect(pageOneCalls(listThreads, accountA.accountId)).toBe(2);
+        await act(async () => pageTwo.resolve(pageOf(deepRows.slice(50, 100))));
+        await settle();
+
+        await until(() => cursorsAsked(listThreads).length === 2, "the end asks again");
+        expect(cursorsAsked(listThreads)).toEqual(["p2", "p2"]);
+      });
+
+      it("asks again after opening a letter drops a page on the way", async () => {
+        sentinelInView();
+        const top = unifiedThread({
+          accountId: accountA.accountId,
+          threadId: "A unread top",
+          lastMessageAt: 1_700_000_999_000,
+          unread: true,
+        });
+        const pageTwo = deferred<MailThreadPage>();
+        const listThreads = pageTwoByHand(pageTwo.promise, top);
+        const updateThread = vi.fn().mockResolvedValue(undefined);
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+          updateThread,
+          readThread: vi.fn().mockResolvedValue({
+            ...detail,
+            thread: top,
+            messages: detail.messages.map((message) => ({
+              ...message,
+              threadId: top.threadId,
+            })),
+          }),
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+
+        // Opening an unread letter reads it, and that mutation moves the
+        // column's epoch under the page still on the way.
+        await click(findButton("A unread top"));
+        await until(() => updateThread.mock.calls.length === 1, "the letter is read");
+        await act(async () => pageTwo.resolve(pageOf(deepRows.slice(50, 100))));
+        await settle();
+
+        await until(() => cursorsAsked(listThreads).length === 2, "the end asks again");
+      });
+
+      const newsletters = Array.from({ length: 5 }, (_value, index) =>
+        unifiedThread({
+          accountId: accountA.accountId,
+          threadId: `Letter ${index}`,
+          category: "newsletter",
+          lastMessageAt: 1_700_000_999_000 - index,
+        }),
+      );
+
+      it("asks once a Done that refused the end lets go", async () => {
+        // Done empties Newsletters, the column gets short, and its end comes
+        // into view while Done's requests are still going out. Load more is
+        // refused under their lock, and the end is still in view after.
+        const view = { inView: false };
+        sentinelInView(view);
+        const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) => {
+          if (accountId === accountB.accountId) return Promise.resolve(pageOf([]));
+          if (!cursor) {
+            return Promise.resolve(
+              pageOf([...newsletters, ...deepRows.slice(0, 45)], "p2"),
+            );
+          }
+          return Promise.resolve(pageOf(deepRows.slice(45, 95)));
+        });
+        const archive = deferred<void>();
+        const updateThread = vi.fn().mockImplementation(() => archive.promise);
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+          updateThread,
+        });
+        await act(async () =>
+          root.render(
+            <MailSurface client={client} onOpenSettings={() => {}} onToast={vi.fn()} />,
+          ),
+        );
+        await settle();
+        expect(cursorsAsked(listThreads)).toEqual([]);
+
+        view.inView = true;
+        await click(findButton("Done — archive all 5 in Newsletters"));
+        expect(cursorsAsked(listThreads)).toEqual([]);
+        await act(async () => archive.resolve());
+        await until(
+          () => updateThread.mock.calls.length === 10,
+          "Done archives and reads all five",
+        );
+
+        await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+      });
+
+      it("asks again once a Done that dropped its page lets go", async () => {
+        sentinelInView();
+        const pageTwo = deferred<MailThreadPage>();
+        let pageTwoReads = 0;
+        const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) => {
+          if (accountId === accountB.accountId) {
+            return Promise.resolve(
+              pageOf([
+                unifiedThread({
+                  accountId: accountB.accountId,
+                  threadId: "B only",
+                  lastMessageAt: 1_600_000_000_000,
+                }),
+              ]),
+            );
+          }
+          if (!cursor) {
+            return Promise.resolve(
+              pageOf([...newsletters, ...deepRows.slice(0, 45)], "p2"),
+            );
+          }
+          pageTwoReads += 1;
+          return pageTwoReads === 1
+            ? pageTwo.promise
+            : Promise.resolve(pageOf(deepRows.slice(45, 95)));
+        });
+        const archive = deferred<void>();
+        const updateThread = vi.fn().mockImplementation(() => archive.promise);
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+          updateThread,
+        });
+        await act(async () =>
+          root.render(
+            <MailSurface client={client} onOpenSettings={() => {}} onToast={vi.fn()} />,
+          ),
+        );
+        await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+
+        await click(findButton("Done — archive all 5 in Newsletters"));
+        await act(async () => pageTwo.resolve(pageOf(deepRows.slice(45, 95))));
+        await settle();
+        expect(cursorsAsked(listThreads)).toEqual(["p2"]);
+        await act(async () => archive.resolve());
+        await until(
+          () => updateThread.mock.calls.length >= 5,
+          "Done archives the section",
+        );
+
+        await until(() => cursorsAsked(listThreads).length === 2, "the end asks again");
       });
     });
 

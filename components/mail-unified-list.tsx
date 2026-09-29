@@ -50,6 +50,7 @@ export function MailUnifiedList({
   expand,
   selectedThreadKey,
   exitFades,
+  unserved,
   onToggleExpand,
   onSelectThread,
   onCompose,
@@ -74,6 +75,12 @@ export function MailUnifiedList({
    * and moves rows as a plain re-render.
    */
   exitFades: boolean;
+  /**
+   * How many Load mores the surface refused under a mail action's lock or
+   * dropped when the column moved on under them. Each is a request the rows
+   * never answered, so the scroll sentinel asks again.
+   */
+  unserved: number;
   onToggleExpand: (key: UnifiedExpandKey) => void;
   onSelectThread: (thread: MailThreadListItem) => void;
   onCompose?: () => void;
@@ -156,7 +163,9 @@ export function MailUnifiedList({
   // the loaded count actually moved, so a sentinel that stays on screen after
   // a page lands cannot spin the fetch, or when a stream healed: a sync hold
   // or a failed page took the stream's cursor, and the page-one read that
-  // gives it back can bring exactly the rows the stream already had.
+  // gives it back can bring exactly the rows the stream already had. It
+  // re-arms too when a request went unserved, refused or dropped by the
+  // surface, since the rows it waited for never came.
   const loadedCount =
     sections === null
       ? 0
@@ -165,7 +174,7 @@ export function MailUnifiedList({
         sections.newsletters.items.length +
         sections.seen.items.length;
   const heals = streams.reduce((total, stream) => total + (stream.heals ?? 0), 0);
-  const armedAt = `${heals}:${loadedCount}`;
+  const armedAt = `${unserved}:${heals}:${loadedCount}`;
   const moreRef = useRef<HTMLDivElement | null>(null);
   const requestedAtRef = useRef<string | null>(null);
   useEffect(() => {

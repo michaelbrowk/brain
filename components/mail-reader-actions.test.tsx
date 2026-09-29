@@ -4,7 +4,12 @@ import { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MailMessageDto } from "@/lib/mail/message-types";
-import { directActionForMailbox, MailReader } from "./mail-reader";
+import {
+  directActionForMailbox,
+  letterInInbox,
+  MailReader,
+  type MailReaderState,
+} from "./mail-reader";
 import type {
   MailAccountCapabilities,
   MailSurfaceClient,
@@ -67,6 +72,20 @@ function detailFor(inInbox: boolean): MailThreadDetail {
   };
 }
 
+/** One conversation, a message per flag, each in the Inbox or not. */
+function conversation(...inInbox: readonly boolean[]): MailThreadDetail {
+  const single = detailFor(false);
+  return {
+    ...single,
+    thread: { ...single.thread, messageCount: inInbox.length },
+    messages: inInbox.map((flag, index) => ({
+      ...single.messages[0]!,
+      messageId: `message-${index + 1}`,
+      inInbox: flag,
+    })),
+  };
+}
+
 const client: Pick<MailSurfaceClient, "getMessageContent" | "requestMessageContent"> = {
   getMessageContent: vi.fn(),
   requestMessageContent: vi.fn(),
@@ -94,6 +113,15 @@ describe("directActionForMailbox", () => {
   });
 });
 
+describe("letterInInbox", () => {
+  it("counts a conversation as in the Inbox while any message is", () => {
+    // Both providers answer for the thread as a whole, so a reply that came
+    // back to the Inbox brings the whole conversation with it.
+    expect(letterInInbox(conversation(false, true))).toBe(true);
+    expect(letterInInbox(conversation(false, false))).toBe(false);
+  });
+});
+
 describe("MailReader's way back to the Inbox", () => {
   let host: HTMLDivElement;
   let root: Root;
@@ -117,10 +145,14 @@ describe("MailReader's way back to the Inbox", () => {
   });
 
   async function render(mailboxId: MailSystemMailbox, inInbox: boolean) {
+    await renderState(mailboxId, { kind: "ready", detail: detailFor(inInbox) });
+  }
+
+  async function renderState(mailboxId: MailSystemMailbox, state: MailReaderState) {
     await act(async () =>
       root.render(
         <MailReader
-          state={{ kind: "ready", detail: detailFor(inInbox) }}
+          state={state}
           mutating={false}
           onBack={() => {}}
           onRetry={() => {}}
@@ -179,6 +211,20 @@ describe("MailReader's way back to the Inbox", () => {
     await render("all", true);
     expect(toolbarButtons()).not.toContain("Move to Inbox");
     expect(await menuItems()).not.toContain("Move to Inbox");
+  });
+
+  it("offers no Move to Inbox for a conversation with one message in the Inbox", async () => {
+    await renderState("all", { kind: "ready", detail: conversation(false, true) });
+    expect(toolbarButtons()).not.toContain("Move to Inbox");
+    expect(await menuItems()).not.toContain("Move to Inbox");
+  });
+
+  it("draws no Move to Inbox while the letter is still loading", async () => {
+    // Whether it is in the Inbox is unknown until it arrives. Drawing the
+    // action disabled meanwhile would flash it on every letter All Mail opens
+    // that turns out to be in the Inbox.
+    await renderState("all", { kind: "loading", thread: detailFor(false).thread });
+    expect(toolbarButtons()).not.toContain("Move to Inbox");
   });
 
   it.each(["spam", "trash"] as const)(

@@ -245,6 +245,7 @@ describe("brain-mail systemd contracts", () => {
       "service/dns.js",
       "service/drafts.js",
       "service/http.js",
+      "service/imap-idle.js",
       "service/imapflow-adapter.js",
       "service/limits.js",
       "service/mail-html-sanitizer.js",

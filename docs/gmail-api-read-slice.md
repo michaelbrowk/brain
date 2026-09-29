@@ -95,8 +95,10 @@ propagated:
   backoff, capped Gmail `Retry-After`, and an authoritative gate shared by
   background and manual sync.
 - fair round-robin draining of at most six provider pages per burst; unfinished
-  accounts continue after 250 ms while completed accounts return to the normal
-  60-second interval.
+  accounts continue after 250 ms while completed accounts return to their own
+  cadence, 20 seconds for Gmail against a 60-second fallback; cache work and
+  kicks never call the provider between two due passes (`docs/operations.md`,
+  "Mail sync cadence").
 - credential-version recovery: a newly persisted OAuth grant clears a parked
   backoff or `reauth_required` state without discarding the staged Gmail page.
 - aggregate health reports the oldest successful account sync and a stable,

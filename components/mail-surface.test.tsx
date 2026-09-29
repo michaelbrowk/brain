@@ -29,6 +29,7 @@ vi.mock("./notifications-read", () => ({
 import {
   clearOpenThreadRequest,
   defaultMailSurfaceClient,
+  MAIL_MUTATION_TIMEOUT_MS,
   MailApiError,
   pendingOpenThread,
   requestOpenThread,
@@ -304,9 +305,31 @@ function makeClient(overrides: Partial<MailSurfaceClient> = {}): MailSurfaceClie
         status: "sent",
       }),
     ),
+    getSenderScreenState: vi.fn().mockResolvedValue(SENDER_STATE),
+    setSenderScreenEnabled: vi.fn().mockResolvedValue(SENDER_STATE),
+    decideSender: vi.fn().mockResolvedValue({
+      apiVersion: 1,
+      decisionId: DECISION_ID,
+      archived: [],
+      pending: false,
+    }),
+    undoSenderDecision: vi
+      .fn()
+      .mockResolvedValue({ apiVersion: 1, restored: [], pending: false }),
+    listBlockedSenders: vi.fn().mockResolvedValue({ apiVersion: 1, blocked: [] }),
     ...overrides,
   };
 }
+
+const DECISION_ID = `decision-a${"0".repeat(30)}ab`;
+
+const SENDER_STATE = {
+  apiVersion: 1,
+  enabled: true,
+  enabledAt: 1_600_000_000_000,
+  backfillComplete: true,
+  domainScopeRefused: ["gmail.example"],
+} as const;
 
 function response(body: unknown, status = 200): Response {
   return {
@@ -10044,6 +10067,1147 @@ describe("MailSurface", () => {
       expect(archiveButton()).not.toBeUndefined();
     });
   });
+
+  /** NEW SENDERS. A first letter from a stranger waits first in the column
+   *  for one decision, and the column shows the decision before the service's
+   *  next list read does, with a way back in the toast. */
+  describe("new senders", () => {
+    const lena = { name: "Lena Okafor", address: "lena@okafor.example" };
+    const mika = { name: "Mika Okafor", address: "mika@okafor.example" };
+
+    function waiting(
+      threadId: string,
+      from = lena,
+      overrides: Partial<MailThreadListItem> = {},
+    ): MailThreadListItem {
+      return {
+        ...thread,
+        threadId,
+        subject: `Subject ${threadId}`,
+        unread: true,
+        // Someone else is listed first: the decision is about the first From.
+        participants: [{ name: "Priya Raman", address: "priya@example.test" }],
+        newSender: true,
+        newSenderFrom: from,
+        lastMessageAt: 1_700_000_000_500,
+        ...overrides,
+      };
+    }
+
+    function friend(threadId: string): MailThreadListItem {
+      return {
+        ...thread,
+        threadId,
+        subject: `Subject ${threadId}`,
+        unread: true,
+        participants: [{ name: "Tomas Lindqvist", address: "tomas@example.test" }],
+      };
+    }
+
+    function page(items: readonly MailThreadListItem[]): MailThreadPage {
+      return {
+        apiVersion: 1,
+        items,
+        nextCursor: null,
+        sync: { status: "idle", lastSuccessfulAt: 1_700_000_000_000 },
+      };
+    }
+
+    async function mount(
+      items: readonly MailThreadListItem[],
+      overrides: Partial<MailSurfaceClient> = {},
+      accounts: readonly PublicMailAccount[] = [accountA, accountB],
+    ) {
+      const onToast = vi.fn<(title: string, options?: ToastOptions) => void>();
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue(accounts),
+        listThreads: vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(page(accountId === accountA.accountId ? items : [])),
+        ),
+        readThread: vi.fn().mockImplementation(({ threadId }) =>
+          Promise.resolve({
+            ...detail,
+            thread: items.find((item) => item.threadId === threadId) ?? thread,
+          }),
+        ),
+        ...overrides,
+      });
+      await act(async () =>
+        root.render(
+          <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+        ),
+      );
+      await settle();
+      return { client, onToast };
+    }
+
+    function section(label: string): HTMLElement | null {
+      return document.body.querySelector(`section[aria-label="${label}"]`);
+    }
+
+    function toastFor(
+      onToast: ReturnType<typeof vi.fn>,
+      title: string,
+    ): ToastOptions | undefined {
+      const call = onToast.mock.calls.find((entry) => entry[0] === title);
+      return call?.[1] as ToastOptions | undefined;
+    }
+
+    async function openLetter(subject: string) {
+      const row = [...document.body.querySelectorAll("button.brain-mail-row")].find(
+        (candidate) => candidate.textContent?.includes(subject),
+      );
+      if (!(row instanceof HTMLButtonElement)) throw new Error(`No row for ${subject}`);
+      await click(row);
+      await settle();
+    }
+
+    it("waits first in All inboxes and accepts in place, with an Undo that puts it back", async () => {
+      const { client, onToast } = await mount([waiting("lena-1"), friend("friend-1")]);
+
+      const waitingGroup = section("New senders");
+      expect(waitingGroup?.textContent).toContain("Lena Okafor");
+      expect(waitingGroup?.textContent).toContain("okafor.example");
+      expect(section("People")?.textContent).not.toContain("Subject lena-1");
+
+      await click(findButton("Accept Lena Okafor"));
+      await settle();
+
+      expect(client.decideSender).toHaveBeenCalledWith({
+        address: "lena@okafor.example",
+        scope: "address",
+        decision: "accept",
+      });
+      // The last decided row takes the header with it.
+      expect(section("New senders")).toBeNull();
+      expect(section("People")?.textContent).toContain("Subject lena-1");
+      const toast = toastFor(onToast, "Accepted Lena Okafor");
+      expect(toast).toMatchObject({
+        icon: "user-check-rounded-linear",
+        subtitle: "In People. Next ones come straight in.",
+        actionLabel: "Undo",
+        durationMs: SMART_UNDO_MS,
+      });
+
+      await act(async () => {
+        await toast!.onAction!();
+      });
+      await settle();
+      expect(client.undoSenderDecision).toHaveBeenCalledWith({ decisionId: DECISION_ID });
+      expect(section("New senders")?.textContent).toContain("Subject lena-1");
+      expect(section("People")?.textContent ?? "").not.toContain("Subject lena-1");
+    });
+
+    it("blocks out of the column and brings the letter back on Undo", async () => {
+      const { client, onToast } = await mount([waiting("lena-1"), friend("friend-1")]);
+
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+
+      expect(client.decideSender).toHaveBeenCalledWith({
+        address: "lena@okafor.example",
+        scope: "address",
+        decision: "block",
+      });
+      expect(document.body.textContent).not.toContain("Subject lena-1");
+      const toast = toastFor(onToast, "Blocked Lena Okafor");
+      expect(toast).toMatchObject({
+        icon: "user-block-rounded-linear",
+        subtitle: "Next letters go to Blocked too.",
+        actionLabel: "Undo",
+        durationMs: SMART_UNDO_MS,
+      });
+
+      await act(async () => {
+        await toast!.onAction!();
+      });
+      await settle();
+      expect(client.undoSenderDecision).toHaveBeenCalledWith({ decisionId: DECISION_ID });
+      expect(section("New senders")?.textContent).toContain("Subject lena-1");
+    });
+
+    it("rolls a refused decision back and says so at once", async () => {
+      const { onToast } = await mount([waiting("lena-1")], {
+        decideSender: vi
+          .fn()
+          .mockRejectedValue(new MailApiError(503, "mail_senders_unavailable")),
+      });
+
+      await click(findButton("Accept Lena Okafor"));
+      await settle();
+
+      expect(section("New senders")?.textContent).toContain("Subject lena-1");
+      expect(onToast).toHaveBeenCalledWith("Couldn’t accept Lena Okafor. Try again.", {
+        urgent: true,
+      });
+      expect(toastFor(onToast, "Accepted Lena Okafor")).toBeUndefined();
+    });
+
+    it("says nothing when an Undo finds its decision already replaced or gone", async () => {
+      for (const failure of [
+        new MailApiError(409, "mail_sender_decision_changed"),
+        new MailApiError(404, "mail_sender_decision_not_found"),
+      ]) {
+        const { onToast } = await mount([waiting("lena-1")], {
+          undoSenderDecision: vi.fn().mockRejectedValue(failure),
+        });
+        await click(findButton("Accept Lena Okafor"));
+        await settle();
+        const before = onToast.mock.calls.length;
+        await act(async () => {
+          await toastFor(onToast, "Accepted Lena Okafor")!.onAction!();
+        });
+        await settle();
+        expect(onToast.mock.calls.length).toBe(before);
+        await act(async () => root.unmount());
+        root = createRoot(host);
+      }
+    });
+
+    it("swaps the reader's pill for the decision, and gives Reply back once it is made", async () => {
+      const { client } = await mount([waiting("lena-1"), waiting("mika-1", mika)]);
+      await openLetter("Subject lena-1");
+
+      const reader = document.body.querySelector('section[aria-label="Message reader"]')!;
+      expect(reader.textContent).toContain("first letter from this sender");
+      const pillWords = () =>
+        [...reader.querySelectorAll(".toolbar-pill button")].map(
+          (button) => button.textContent?.trim() ?? "",
+        );
+      expect(pillWords()).toContain("Block");
+      expect(pillWords()).toContain("Accept");
+      expect(pillWords()).not.toContain("Reply");
+      expect(pillWords()).not.toContain("Archive");
+
+      const everyone = [...reader.querySelectorAll('[role="radio"]')].find((radio) =>
+        radio.textContent?.includes("Everyone at okafor.example"),
+      ) as HTMLElement;
+      expect(
+        [...reader.querySelectorAll('[role="radio"]')].map((radio) => radio.textContent),
+      ).toEqual(["Only this address", "Everyone at okafor.example"]);
+      await click(everyone);
+      expect(pillWords()).toContain("Accept 2 senders");
+
+      await click(findButton("Accept 2 senders"));
+      await settle();
+      expect(client.decideSender).toHaveBeenCalledWith({
+        address: "lena@okafor.example",
+        scope: "domain",
+        decision: "accept",
+      });
+      expect(pillWords()).toContain("Reply");
+      expect(pillWords()).toContain("Archive");
+      expect(reader.textContent).not.toContain("first letter from this sender");
+    });
+
+    it("names the domain and wears the group glyph for everyone at it", async () => {
+      const { onToast } = await mount([waiting("lena-1"), waiting("mika-1", mika)]);
+      await openLetter("Subject lena-1");
+      const everyone = [...document.body.querySelectorAll('[role="radio"]')].find((radio) =>
+        radio.textContent?.includes("Everyone at"),
+      ) as HTMLElement;
+      await click(everyone);
+      const readerBlock = [
+        ...document.body.querySelectorAll(
+          'section[aria-label="Message reader"] .toolbar-pill button',
+        ),
+      ].find((button) => button.textContent?.trim() === "Block") as HTMLButtonElement;
+      await click(readerBlock);
+      await settle();
+      expect(toastFor(onToast, "Blocked okafor.example")).toMatchObject({
+        icon: "users-group-rounded-linear",
+        subtitle: "Next letters go to Blocked too.",
+      });
+      expect(document.body.textContent).not.toContain("Subject mika-1");
+    });
+
+    it("offers no domain for a provider everyone shares", async () => {
+      const shared = { name: "Sam Rivera", address: "sam@gmail.example" };
+      await mount([waiting("sam-1", shared)]);
+      await openLetter("Subject sam-1");
+      expect(document.body.querySelector('[role="radio"]')).toBeNull();
+      expect(findButton("Accept")).toBeTruthy();
+    });
+
+    it("takes a and b for the open letter's sender", async () => {
+      const { client } = await mount([waiting("lena-1"), friend("friend-1")]);
+      await openLetter("Subject lena-1");
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "b", bubbles: true }));
+      });
+      await settle();
+      expect(client.decideSender).toHaveBeenCalledWith({
+        address: "lena@okafor.example",
+        scope: "address",
+        decision: "block",
+      });
+    });
+
+    it("stands first in a lone account's Inbox, with the rest as a group under it", async () => {
+      await mount([waiting("lena-1"), friend("friend-1")], {}, [accountA]);
+      const groups = [...document.body.querySelectorAll('[role="list"] > section')].map(
+        (group) => group.getAttribute("aria-label"),
+      );
+      expect(groups).toEqual(["New senders", "Inbox"]);
+      expect(section("Inbox")?.textContent).toContain("Subject friend-1");
+      expect(section("Inbox")?.textContent).not.toContain("Subject lena-1");
+    });
+
+    it("decides for the letter on screen once j has moved the reader on, not the row pressed before", async () => {
+      const { client } = await mount([waiting("lena-1"), waiting("mika-1", mika)]);
+      const order = [...document.body.querySelectorAll("button.brain-mail-row")].map((b) =>
+        b.textContent?.includes("Subject mika-1") ? "mika" : b.textContent?.includes("Subject lena-1") ? "lena" : "?",
+      );
+      expect(order).toEqual(["mika", "lena"]);
+      await openLetter("Subject mika-1");
+      // A mouse click in Chrome leaves focus on the row button it pressed.
+      const mikaRow = [...document.body.querySelectorAll("button.brain-mail-row")].find((b) =>
+        b.textContent?.includes("Subject mika-1"),
+      ) as HTMLButtonElement;
+      mikaRow.focus();
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }));
+      });
+      await settle();
+      const reader = document.body.querySelector('section[aria-label="Message reader"]')!;
+      expect(reader.textContent).toContain("Subject lena-1");
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "b", bubbles: true }));
+      });
+      await settle();
+      expect(client.decideSender).toHaveBeenCalledTimes(1);
+      expect(client.decideSender).toHaveBeenCalledWith({
+        address: "lena@okafor.example",
+        scope: "address",
+        decision: "block",
+      });
+    });
+
+    it("hides what a block archived in the Inbox, and nowhere else", async () => {
+      const blocked = waiting("lena-1");
+      const { client } = await mount([blocked, friend("friend-1")], {
+        decideSender: vi.fn().mockResolvedValue({
+          apiVersion: 1,
+          decisionId: DECISION_ID,
+          archived: [{ accountId: accountA.accountId, threadId: "lena-1" }],
+          pending: false,
+        }),
+        listMailboxThreads: vi.fn().mockImplementation(({ mailboxId }) =>
+          Promise.resolve(
+            mailboxThreadPage(
+              mailboxId,
+              mailboxId === "all"
+                ? [{ ...friend("lena-1"), subject: "Subject lena-1" }, friend("other-1")]
+                : [],
+            ),
+          ),
+        ),
+      }, [accountA]);
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      expect(document.body.textContent).not.toContain("Subject lena-1");
+      await goTo("All Mail");
+      await settle();
+      expect(client.listMailboxThreads).toHaveBeenCalled();
+      expect(document.body.textContent).toContain("Subject other-1");
+      expect(document.body.textContent).toContain("Subject lena-1");
+      // The keys walk the same list the column draws there.
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }));
+      });
+      await settle();
+      expect(client.readMailboxThread).toHaveBeenLastCalledWith(
+        expect.objectContaining({ mailboxId: "all", threadId: "lena-1" }),
+      );
+    });
+
+    it("lets a block's archive show again once a list read that began after it has landed", async () => {
+      let items: MailThreadListItem[] = [waiting("lena-1"), friend("friend-1")];
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      await mount([], {
+        listThreads: vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(page(accountId === accountA.accountId ? items : [])),
+        ),
+        decideSender: vi.fn().mockResolvedValue({
+          apiVersion: 1,
+          decisionId: DECISION_ID,
+          archived: [{ accountId: accountA.accountId, threadId: "friend-1" }],
+          pending: false,
+        }),
+      });
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      expect(document.body.textContent).not.toContain("Subject friend-1");
+      // The owner moved it back elsewhere: the next Inbox read lists it, and
+      // the column believes the read over the block's old answer.
+      items = [friend("friend-1")];
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await settle();
+      visibility.mockRestore();
+      expect(document.body.textContent).toContain("Subject friend-1");
+    });
+
+    it("re-reads the list after an Undo that went through, and after one already undone or replaced", async () => {
+      for (const failure of [
+        null,
+        new MailApiError(404, "mail_sender_decision_not_found"),
+        new MailApiError(409, "mail_sender_decision_changed"),
+      ]) {
+        for (const verdict of ["Accept", "Block"] as const) {
+          const { client, onToast } = await mount([waiting("lena-1")], {
+            undoSenderDecision:
+              failure === null
+                ? vi.fn().mockResolvedValue({ apiVersion: 1, restored: [], pending: false })
+                : vi.fn().mockRejectedValue(failure),
+          });
+          await click(findButton(`${verdict} Lena Okafor`));
+          await settle();
+          const reads = (client.listThreads as ReturnType<typeof vi.fn>).mock.calls.length;
+          await act(async () => {
+            await toastFor(
+              onToast,
+              verdict === "Accept" ? "Accepted Lena Okafor" : "Blocked Lena Okafor",
+            )!.onAction!();
+          });
+          await settle();
+          expect(
+            (client.listThreads as ReturnType<typeof vi.fn>).mock.calls.length,
+          ).toBeGreaterThan(reads);
+          await act(async () => root.unmount());
+          root = createRoot(host);
+        }
+      }
+    });
+
+    it("puts a blocked row back at the Undo press, before any read returns", async () => {
+      let items: MailThreadListItem[] | null = [waiting("lena-1"), friend("friend-1")];
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const { onToast } = await mount([], {
+        listThreads: vi.fn().mockImplementation(({ accountId }) =>
+          items === null
+            ? new Promise(() => {})
+            : Promise.resolve(page(accountId === accountA.accountId ? items : [])),
+        ),
+      });
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      // The service archived it, and a read that lands says so.
+      items = [friend("friend-1")];
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await settle();
+      visibility.mockRestore();
+      // From here on no read answers at all.
+      items = null;
+      await act(async () => {
+        await toastFor(onToast, "Blocked Lena Okafor")!.onAction!();
+      });
+      await settle();
+      expect(section("New senders")?.textContent).toContain("Subject lena-1");
+    });
+
+    it("undoes an Accept after a refresh and puts the row back under New senders", async () => {
+      let items: MailThreadListItem[] = [waiting("lena-1"), friend("friend-1")];
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const { onToast, client } = await mount([], {
+        listThreads: vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(page(accountId === accountA.accountId ? items : [])),
+        ),
+      });
+      await click(findButton("Accept Lena Okafor"));
+      await settle();
+      // The service now knows Lena: the next list read no longer flags her.
+      items = [
+        { ...friend("lena-1"), subject: "Subject lena-1", participants: waiting("lena-1").participants },
+        friend("friend-1"),
+      ];
+      const before = (client.listThreads as ReturnType<typeof vi.fn>).mock.calls.length;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await settle();
+      expect((client.listThreads as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(before);
+      expect(section("People")?.textContent).toContain("Subject lena-1");
+      // Undo, and no read answers after it: the row goes back at the press.
+      (client.listThreads as ReturnType<typeof vi.fn>).mockImplementation(
+        () => new Promise(() => {}),
+      );
+      await act(async () => {
+        await toastFor(onToast, "Accepted Lena Okafor")!.onAction!();
+      });
+      await settle();
+      visibility.mockRestore();
+      expect(section("New senders")?.textContent ?? "").toContain("Subject lena-1");
+      expect(section("People")?.textContent ?? "").not.toContain("Subject lena-1");
+    });
+
+    it("leaves the letter keys alone while a menu is open", async () => {
+      const { client } = await mount([waiting("lena-1"), friend("friend-1")]);
+      await openLetter("Subject lena-1");
+      await openNav();
+      const target = (document.activeElement as HTMLElement) ?? document.body;
+      expect(target.closest('[role="menu"]')).not.toBeNull();
+      for (const key of ["a", "b", "e", "u", "s", "j", "k"]) {
+        await act(async () => {
+          target.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+        });
+      }
+      await settle();
+      expect(client.decideSender).not.toHaveBeenCalled();
+      expect(client.updateThread).not.toHaveBeenCalledWith(
+        expect.objectContaining({ archive: true }),
+      );
+      expect(client.updateThread).not.toHaveBeenCalledWith(
+        expect.objectContaining({ starred: true }),
+      );
+      expect(
+        document.body.querySelector('section[aria-label="Message reader"]')?.textContent,
+      ).toContain("Subject lena-1");
+    });
+
+    it("leaves the letter keys alone while a menu is open, whatever element the key reaches", async () => {
+      const { client } = await mount([waiting("lena-1"), friend("friend-1")]);
+      await openLetter("Subject lena-1");
+      await openNav();
+      expect(document.querySelector('[role="menu"][data-state="open"]')).not.toBeNull();
+      for (const key of ["a", "b"]) {
+        await act(async () => {
+          window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+        });
+      }
+      await settle();
+      expect(client.decideSender).not.toHaveBeenCalled();
+    });
+
+    it("hands focus to the same control on the next waiting row, else the next row, else the list", async () => {
+      await mount([waiting("lena-1"), waiting("mika-1", mika), friend("friend-1")]);
+      // mika-1 stands first, lena-1 under it.
+      const accept = findButton("Accept Mika Okafor");
+      accept.focus();
+      await click(accept);
+      await settle();
+      expect(document.activeElement).toBe(findButton("Accept Lena Okafor"));
+
+      const block = findButton("Block Lena Okafor");
+      block.focus();
+      await click(block);
+      await settle();
+      // Nobody waits any more: the next row the column holds takes it.
+      const active = document.activeElement as HTMLElement;
+      expect(active).not.toBe(document.body);
+      expect(active.closest('section[aria-label="Mailbox"]')).not.toBeNull();
+    });
+
+    it("decides the letter on screen while its messages are still loading", async () => {
+      const { client } = await mount([waiting("lena-1"), friend("friend-1")], {
+        readThread: vi.fn().mockReturnValue(new Promise(() => {})),
+      });
+      await openLetter("Subject lena-1");
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "b", bubbles: true }));
+      });
+      await settle();
+      expect(client.decideSender).toHaveBeenCalledWith({
+        address: "lena@okafor.example",
+        scope: "address",
+        decision: "block",
+      });
+    });
+
+    it("keeps the reach chosen for a letter still loading, and B decides with it", async () => {
+      const { client } = await mount([waiting("lena-1"), waiting("mika-1", mika)], {
+        readThread: vi.fn().mockReturnValue(new Promise(() => {})),
+      });
+      await openLetter("Subject lena-1");
+      const everyone = [
+        ...document.body.querySelectorAll(
+          'section[aria-label="Message reader"] [role="radio"]',
+        ),
+      ].find((radio) => radio.textContent?.includes("Everyone at okafor.example"));
+      expect(everyone).toBeTruthy();
+      await click(everyone as HTMLElement);
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "b", bubbles: true }));
+      });
+      await settle();
+      expect(client.decideSender).toHaveBeenCalledWith({
+        address: "lena@okafor.example",
+        scope: "domain",
+        decision: "block",
+      });
+    });
+
+    it("decides the focused row when no letter is open", async () => {
+      const { client } = await mount([waiting("lena-1"), waiting("mika-1", mika)]);
+      findButton("Accept Lena Okafor").focus();
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "b", bubbles: true }));
+      });
+      await settle();
+      expect(client.decideSender).toHaveBeenCalledWith({
+        address: "lena@okafor.example",
+        scope: "address",
+        decision: "block",
+      });
+    });
+
+    it("closes the letter a Block from the reader takes away", async () => {
+      await mount([waiting("lena-1"), friend("friend-1")]);
+      await openLetter("Subject lena-1");
+      const readerBlock = [
+        ...document.body.querySelectorAll(
+          'section[aria-label="Message reader"] .toolbar-pill button',
+        ),
+      ].find((button) => button.textContent?.trim() === "Block") as HTMLButtonElement;
+      await click(readerBlock);
+      await settle();
+      const reader = document.body.querySelector('section[aria-label="Message reader"]');
+      expect(reader?.textContent).toContain("Choose a message");
+    });
+
+    it("reads a plain Accept when only one sender waits at the domain", async () => {
+      await mount([waiting("lena-1"), friend("friend-1")]);
+      await openLetter("Subject lena-1");
+      const everyone = [...document.body.querySelectorAll('[role="radio"]')].find((radio) =>
+        radio.textContent?.includes("Everyone at okafor.example"),
+      ) as HTMLElement;
+      await click(everyone);
+      const words = [
+        ...document.body.querySelectorAll(
+          'section[aria-label="Message reader"] .toolbar-pill button',
+        ),
+      ].map((button) => button.textContent?.trim());
+      expect(words).toContain("Accept");
+      expect(words.some((word) => word?.startsWith("Accept 1"))).toBe(false);
+    });
+
+    it("counts every sender a domain Accept takes in its toast", async () => {
+      const { onToast } = await mount([waiting("lena-1"), waiting("mika-1", mika)]);
+      await openLetter("Subject lena-1");
+      const everyone = [...document.body.querySelectorAll('[role="radio"]')].find((radio) =>
+        radio.textContent?.includes("Everyone at okafor.example"),
+      ) as HTMLElement;
+      await click(everyone);
+      await click(findButton("Accept 2 senders"));
+      await settle();
+      expect(toastFor(onToast, "Accepted okafor.example")).toMatchObject({
+        icon: "users-group-rounded-linear",
+        subtitle: "2 senders in. Next ones come straight in.",
+      });
+    });
+
+    it("names the Inbox group only while someone waits above it", async () => {
+      await mount([friend("friend-1"), friend("friend-2")], {}, [accountA]);
+      const rows = document.body.querySelector('[data-flip="section:inbox"]')!;
+      expect(rows).not.toBeNull();
+      expect(rows.getAttribute("aria-label")).toBeNull();
+      expect(rows.classList.contains("brain-mail-section")).toBe(false);
+    });
+
+    it("keeps the rest of a lone Inbox mounted when the last waiting row is decided", async () => {
+      await mount([waiting("lena-1"), friend("friend-1"), friend("friend-2")], {}, [accountA]);
+      const before = [...document.body.querySelectorAll('[role="listitem"]')].find((el) =>
+        el.textContent?.includes("Subject friend-1"),
+      )!;
+      expect(before).toBeTruthy();
+      await click(findButton("Accept Lena Okafor"));
+      await settle();
+      const after = [...document.body.querySelectorAll('[role="listitem"]')].find((el) =>
+        el.textContent?.includes("Subject friend-1"),
+      )!;
+      expect(after).toBe(before);
+      expect(before.isConnected).toBe(true);
+    });
+
+    it("waits for an Undo still going out before deciding the same sender again", async () => {
+      const undo = deferred<{ apiVersion: 1; restored: []; pending: false }>();
+      const { client, onToast } = await mount([waiting("lena-1")], {
+        undoSenderDecision: vi.fn().mockReturnValue(undo.promise),
+      });
+      await click(findButton("Accept Lena Okafor"));
+      await settle();
+      let undone: Promise<unknown> = Promise.resolve();
+      await act(async () => {
+        undone = toastFor(onToast, "Accepted Lena Okafor")!.onAction!() as Promise<unknown>;
+      });
+      await settle();
+      // The row is back at the press; the DELETE has not answered.
+      await click(findButton("Accept Lena Okafor"));
+      await settle();
+      expect(client.decideSender).toHaveBeenCalledTimes(1);
+      await act(async () => {
+        undo.resolve({ apiVersion: 1, restored: [], pending: false });
+        await undone;
+      });
+      await settle();
+      expect(client.decideSender).toHaveBeenCalledTimes(2);
+      expect(section("People")?.textContent).toContain("Subject lena-1");
+    });
+
+    it("decides once for a held key", async () => {
+      const { client } = await mount([waiting("lena-1"), waiting("mika-1", mika)]);
+      await openLetter("Subject mika-1");
+      const lenaAccept = findButton("Accept Lena Okafor");
+      lenaAccept.focus();
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+      });
+      await settle();
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, repeat: true }));
+      });
+      await settle();
+      expect(client.decideSender).toHaveBeenCalledTimes(1);
+    });
+
+    it("decides once for a key held on a row, though the focus moves on to the next", async () => {
+      const { client } = await mount([waiting("lena-1"), waiting("mika-1", mika)]);
+      findButton("Accept Mika Okafor").focus();
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+      });
+      await settle();
+      // The focus is on Lena's Accept now; the repeat must not take her too.
+      expect(document.activeElement).toBe(findButton("Accept Lena Okafor"));
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, repeat: true }));
+      });
+      await settle();
+      expect(client.decideSender).toHaveBeenCalledTimes(1);
+    });
+
+    // Lena's other letter: not waiting (it is not a first letter), so only a
+    // block's `archived` answer takes it out of the column.
+    function lenaOther(threadId: string, at: number): MailThreadListItem {
+      return {
+        ...thread,
+        threadId,
+        subject: `Subject ${threadId}`,
+        unread: true,
+        participants: [lena],
+        lastMessageAt: at,
+      };
+    }
+    function filler(index: number): MailThreadListItem {
+      return {
+        ...thread,
+        threadId: `seen-${index}`,
+        subject: `Subject seen-${index}`,
+        unread: false,
+        lastMessageAt: 1_700_000_000_400 - index * 1000,
+      };
+    }
+    const blockAnswer = {
+      apiVersion: 1 as const,
+      decisionId: DECISION_ID,
+      archived: [
+        { accountId: accountA.accountId, threadId: "lena-1" },
+        { accountId: accountA.accountId, threadId: "lena-old" },
+      ],
+      pending: false,
+    };
+
+    it("keeps the archive out when a read begun before the block answered lands after it", async () => {
+      const items = [
+        waiting("lena-1"),
+        lenaOther("lena-old", 1_690_000_000_000),
+        friend("friend-1"),
+      ];
+      const late = deferred<MailThreadPage>();
+      let hold = false;
+      const decision = deferred<typeof blockAnswer>();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      await mount(
+        [],
+        {
+          listThreads: vi
+            .fn()
+            .mockImplementation(({ accountId }) =>
+              accountId === accountA.accountId && hold
+                ? late.promise
+                : Promise.resolve(page(accountId === accountA.accountId ? items : [])),
+            ),
+          decideSender: vi.fn().mockReturnValue(decision.promise),
+        },
+        [accountA],
+      );
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      hold = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await act(async () => {
+        decision.resolve(blockAnswer);
+      });
+      await settle();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+      // The read left before the archive and says the letter is still there.
+      await act(async () => {
+        late.resolve(page(items));
+      });
+      await settle();
+      visibility.mockRestore();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+    });
+
+    it("keeps the archive out while a read begun after the answer has not landed", async () => {
+      const items = [
+        waiting("lena-1"),
+        lenaOther("lena-old", 1_690_000_000_000),
+        friend("friend-1"),
+      ];
+      let hold = false;
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      await mount([], {
+        listThreads: vi
+          .fn()
+          .mockImplementation(({ accountId }) =>
+            hold
+              ? new Promise(() => {})
+              : Promise.resolve(page(accountId === accountA.accountId ? items : [])),
+          ),
+        decideSender: vi.fn().mockResolvedValue(blockAnswer),
+      });
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      hold = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      visibility.mockRestore();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+    });
+
+    it("keeps one account's archive out when another account's read lands", async () => {
+      const items = [
+        waiting("lena-1"),
+        lenaOther("lena-old", 1_690_000_000_000),
+        friend("friend-1"),
+      ];
+      let hold = false;
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      await mount([], {
+        listThreads: vi.fn().mockImplementation(({ accountId }) => {
+          if (accountId !== accountA.accountId) return Promise.resolve(page([]));
+          return hold ? new Promise(() => {}) : Promise.resolve(page(items));
+        }),
+        decideSender: vi.fn().mockResolvedValue(blockAnswer),
+      });
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      hold = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await settle();
+      visibility.mockRestore();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+    });
+
+    it("skips a letter the block archived when j walks a lone Inbox", async () => {
+      const { client } = await mount(
+        [waiting("lena-1"), lenaOther("lena-old", 1_700_000_000_300), friend("friend-1")],
+        { decideSender: vi.fn().mockResolvedValue(blockAnswer) },
+        [accountA],
+      );
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }));
+      });
+      await settle();
+      expect(client.readThread).not.toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: "lena-old" }),
+      );
+    });
+
+    it("hands focus to the column when the last waiting row goes and nothing else is left", async () => {
+      await mount([waiting("lena-1")]);
+      const accept = findButton("Accept Lena Okafor");
+      accept.focus();
+      await click(accept);
+      await settle();
+      expect((document.activeElement as HTMLElement).classList.contains("brain-mail-list")).toBe(
+        true,
+      );
+    });
+
+    it("puts a refreshed row back under New senders when an Accept is undone in a lone Inbox", async () => {
+      let items: MailThreadListItem[] = [waiting("lena-1"), friend("friend-1")];
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const { onToast, client } = await mount(
+        [],
+        { listThreads: vi.fn().mockImplementation(() => Promise.resolve(page(items))) },
+        [accountA],
+      );
+      await click(findButton("Accept Lena Okafor"));
+      await settle();
+      items = [
+        { ...friend("lena-1"), participants: waiting("lena-1").participants },
+        friend("friend-1"),
+      ];
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await settle();
+      (client.listThreads as ReturnType<typeof vi.fn>).mockImplementation(
+        () => new Promise(() => {}),
+      );
+      await act(async () => {
+        await toastFor(onToast, "Accepted Lena Okafor")!.onAction!();
+      });
+      await settle();
+      visibility.mockRestore();
+      expect(section("New senders")?.textContent ?? "").toContain("Subject lena-1");
+    });
+
+    it("keeps a blocked letter out of a deep All inboxes stream after the page-one refresh", async () => {
+      const deep = [
+        waiting("lena-1"),
+        ...Array.from({ length: 58 }, (_, index) => filler(index)),
+        lenaOther("lena-old", 1_600_000_000_000),
+      ];
+      let items: MailThreadListItem[] = deep;
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      await mount([], {
+        listThreads: vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(page(accountId === accountA.accountId ? items : [])),
+        ),
+        decideSender: vi.fn().mockResolvedValue(blockAnswer),
+      });
+      expect(document.body.textContent).toContain("Subject lena-old");
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+      // The service archived both. The tick reads page one only (50 rows):
+      // lena-old was never on it, and the deep stream keeps its older tail.
+      items = deep
+        .filter((item) => item.threadId !== "lena-1" && item.threadId !== "lena-old")
+        .slice(0, 50);
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await settle();
+      visibility.mockRestore();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+    });
+
+    it("keeps a blocked letter out when a lone Inbox loads more after the block", async () => {
+      const first = [
+        waiting("lena-1"),
+        friend("friend-1"),
+        lenaOther("lena-old", 1_690_000_000_000),
+      ];
+      const older = { ...friend("friend-9"), lastMessageAt: 1_600_000_000_000 };
+      await mount(
+        [],
+        {
+          listThreads: vi
+            .fn()
+            .mockImplementation(({ cursor }) =>
+              Promise.resolve(cursor ? page([older]) : { ...page(first), nextCursor: "cursor-2" }),
+            ),
+          decideSender: vi.fn().mockResolvedValue(blockAnswer),
+        },
+        [accountA],
+      );
+      expect(document.body.textContent).toContain("Subject lena-old");
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+      await click(findButton("Load more"));
+      await settle();
+      expect(document.body.textContent).toContain("Subject friend-9");
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+    });
+
+    it.each([
+      ["the merged Inboxes", [accountA, accountB]],
+      ["a lone Inbox", [accountA]],
+    ] as const)("takes a marked letter out of %s and shows it once a read clears the mark", async (_, accounts) => {
+      let items: MailThreadListItem[] = [
+        { ...friend("held"), senderBlocked: true },
+        friend("friend-1"),
+      ];
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      await mount(
+        [],
+        {
+          listThreads: vi
+            .fn()
+            .mockImplementation(({ accountId }) =>
+              Promise.resolve(page(accountId === accountA.accountId ? items : [])),
+            ),
+        },
+        accounts,
+      );
+      expect(document.body.textContent).toContain("Subject friend-1");
+      expect(document.body.textContent).not.toContain("Subject held");
+      items = [friend("held"), friend("friend-1")];
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await settle();
+      visibility.mockRestore();
+      expect(document.body.textContent).toContain("Subject held");
+    });
+
+    it("keeps a blocked letter the request did not archive out after the next read", async () => {
+      let items: MailThreadListItem[] = [waiting("lena-1"), friend("friend-1")];
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      await mount([], {
+        listThreads: vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(page(accountId === accountA.accountId ? items : [])),
+        ),
+        decideSender: vi.fn().mockResolvedValue({
+          apiVersion: 1,
+          decisionId: DECISION_ID,
+          archived: [],
+          pending: true,
+        }),
+      });
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      expect(document.body.textContent).not.toContain("Subject lena-1");
+      // The service no longer flags her (she is decided) and marks the thread
+      // blocked until the scheduler's archive lands.
+      const blockedItem: MailThreadListItem = {
+        ...friend("lena-1"),
+        participants: [lena],
+        newSender: false,
+        senderBlocked: true,
+      };
+      items = [blockedItem, friend("friend-1")];
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await settle();
+      visibility.mockRestore();
+      expect(document.body.textContent).not.toContain("Subject lena-1");
+    });
+
+    it("says an Undo nobody answered failed, and then sends the next decision about that sender", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        // The client's deadline (`MAIL_MUTATION_TIMEOUT_MS`) is what ends a
+        // DELETE nobody answers; this is how it ends it.
+        const { client, onToast } = await mount([waiting("lena-1")], {
+          undoSenderDecision: vi.fn().mockImplementation(
+            () =>
+              new Promise((_resolve, reject) => {
+                setTimeout(
+                  () => reject(new DOMException("unanswered", "TimeoutError")),
+                  MAIL_MUTATION_TIMEOUT_MS,
+                );
+              }),
+          ),
+        });
+        await click(findButton("Accept Lena Okafor"));
+        await settle();
+        await act(async () => {
+          void toastFor(onToast, "Accepted Lena Okafor")!.onAction!();
+        });
+        await settle();
+        await click(findButton("Accept Lena Okafor"));
+        await settle();
+        expect(client.decideSender).toHaveBeenCalledTimes(1);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(MAIL_MUTATION_TIMEOUT_MS);
+        });
+        await settle();
+        expect(onToast).toHaveBeenCalledWith("Couldn’t undo. Try again.", { urgent: true });
+        expect(client.decideSender).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    /** Lena's first letter open from All Mail, blocked with the reader's
+     *  Block. */
+    async function blockFromAllMail(overrides: Partial<MailSurfaceClient> = {}) {
+      const lenaAll = waiting("lena-1");
+      const mounted = await mount(
+        [friend("friend-1")],
+        {
+          listMailboxThreads: vi
+            .fn()
+            .mockImplementation(({ mailboxId }) =>
+              Promise.resolve(
+                mailboxThreadPage(
+                  mailboxId,
+                  mailboxId === "all" ? [lenaAll, friend("other-1")] : [],
+                ),
+              ),
+            ),
+          readMailboxThread: vi
+            .fn()
+            .mockImplementation(() => Promise.resolve({ ...detail, thread: lenaAll })),
+          decideSender: vi.fn().mockResolvedValue({
+            apiVersion: 1,
+            decisionId: DECISION_ID,
+            archived: [{ accountId: accountA.accountId, threadId: "lena-1" }],
+            pending: false,
+          }),
+          ...overrides,
+        },
+        [accountA],
+      );
+      await goTo("All Mail");
+      await settle();
+      await openLetter("Subject lena-1");
+      const readerBlock = [
+        ...document.body.querySelectorAll(
+          'section[aria-label="Message reader"] .toolbar-pill button',
+        ),
+      ].find((button) => button.textContent?.trim() === "Block") as HTMLButtonElement;
+      expect(readerBlock).toBeTruthy();
+      await click(readerBlock);
+      await settle();
+      return mounted;
+    }
+
+    it("leaves the reader on the letter when an Undo of a Block in All Mail fails", async () => {
+      const { onToast } = await blockFromAllMail({
+        undoSenderDecision: vi
+          .fn()
+          .mockRejectedValue(new MailApiError(503, "mail_senders_unavailable")),
+      });
+      await act(async () => {
+        await toastFor(onToast, "Blocked Lena Okafor")!.onAction!();
+      });
+      await settle();
+      expect(onToast).toHaveBeenCalledWith("Couldn’t undo. Try again.", { urgent: true });
+      expect(
+        document.body.querySelector('section[aria-label="Message reader"]')?.textContent,
+      ).not.toContain("Choose a message");
+    });
+
+    it("leaves the letter listed, and the reader on it, after a Block made from All Mail", async () => {
+      await blockFromAllMail();
+      const list = document.body.querySelector('section[aria-label="Mailbox"]')!;
+      expect(list.textContent).toContain("Subject lena-1");
+      expect(
+        document.body.querySelector('section[aria-label="Message reader"]')?.textContent,
+      ).not.toContain("Choose a message");
+    });
+
+    it("draws no leaving ghost over a row a Block in All Mail leaves where it stands", async () => {
+      Object.defineProperty(HTMLElement.prototype, "animate", {
+        configurable: true,
+        writable: true,
+        value: vi.fn(() => ({ finished: new Promise(() => {}), cancel: () => {} })),
+      });
+      try {
+        await blockFromAllMail();
+        const copies = [
+          ...document.body.querySelectorAll('section[aria-label="Mailbox"] *'),
+        ].filter(
+          (element) =>
+            element.getAttribute("aria-hidden") === "true" &&
+            element.textContent?.includes("Subject lena-1"),
+        );
+        expect(copies).toEqual([]);
+      } finally {
+        delete (HTMLElement.prototype as { animate?: unknown }).animate;
+      }
+    });
+  });
+
   /** OPENING MAIL ANSWERS THE BELL'S MAIL ROW. The centre holds one row for
    *  new mail, "10 new messages", and Mail being open is what reads it —
    *  whichever way Mail was opened, which is why the call is on the mount and

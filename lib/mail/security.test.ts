@@ -1219,6 +1219,7 @@ describe("mail security and resource contracts", () => {
       remoteImageCount: 3,
       remoteImageAttemptCount: 2,
       threadCount: 5,
+      failureCount: 6,
       errorCode: "imap_timeout",
       transport: "direct",
       queueDepth: 9,
@@ -1239,6 +1240,7 @@ describe("mail security and resource contracts", () => {
       remoteImageCount: 3,
       remoteImageAttemptCount: 2,
       threadCount: 5,
+      failureCount: 6,
       errorCode: "imap_timeout",
       transport: "direct",
     });

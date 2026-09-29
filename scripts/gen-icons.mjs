@@ -100,6 +100,13 @@ const WANT = [
   "file-corrupted-linear",
   // The attachment viewer's Download, at the end of its top bar.
   "download-minimalistic-linear",
+  // New senders: the section's glyph, what an Accept and a Block say in their
+  // toasts and menus, and everyone at a domain at once. Each person keeps the
+  // user-rounded head People already wears.
+  "user-plus-rounded-linear",
+  "user-check-rounded-linear",
+  "user-block-rounded-linear",
+  "users-group-rounded-linear",
 ];
 
 /**

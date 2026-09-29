@@ -265,6 +265,33 @@ describe("multi-account message registry", () => {
     await service.close();
   });
 
+  it("names each syncing account's provider for the scheduler's cadence", async () => {
+    const imapAccountId = "account-a22222222222222222222222222222222";
+    const parkedAccountId = "account-a33333333333333333333333333333333";
+    const imap = imapAccountFixture();
+    const parked = gmailAccountFixture(1, "reauth_required");
+    const store = storeFixture();
+    vi.mocked(store.listAccounts).mockResolvedValue([
+      gmailAccountFixture(),
+      { ...imap, account: { ...imap.account, accountId: imapAccountId } },
+      { ...parked, account: { ...parked.account, accountId: parkedAccountId } },
+    ]);
+    const service = new MultiAccountMailMessageService({
+      stateDirectory: "/var/lib/brain-mail",
+      store,
+      providerFactory: { create: vi.fn() },
+    });
+
+    await expect(service.listSyncAccounts()).resolves.toEqual([
+      { accountId: ACCOUNT_ID, providerKind: "gmail" },
+      { accountId: imapAccountId, providerKind: "imap" },
+    ]);
+    await expect(service.listAccountIds()).resolves.toEqual([
+      ACCOUNT_ID,
+      imapAccountId,
+    ]);
+  });
+
   it("reports provider-aware reauth health for IMAP accounts", async () => {
     const stateDirectory = await mkdtemp(path.join(tmpdir(), "brain-mail-registry-"));
     roots.push(stateDirectory);

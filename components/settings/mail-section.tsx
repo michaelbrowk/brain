@@ -14,6 +14,14 @@ const MailAccountSettings = dynamic(
   { ssr: false, loading: () => <MailSettingsSkeleton /> },
 );
 
+// New senders and Blocked senders, under the accounts. Split the same way, and
+// drawing nothing while it loads: the groups appear once the service answers,
+// or never, when it cannot.
+const MailSenderSettings = dynamic(
+  () => import("../mail-sender-settings").then((m) => m.MailSenderSettings),
+  { ssr: false },
+);
+
 export function MailSection({
   onOpenMail,
   onAccountStatusChange,
@@ -31,6 +39,7 @@ export function MailSection({
       onAccountStatusChange={onAccountStatusChange}
       onToast={onToast}
       initialAccountId={initialAccountId}
+      listFooter={<MailSenderSettings onToast={onToast} />}
     />
   );
 }

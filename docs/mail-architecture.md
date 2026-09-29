@@ -304,7 +304,7 @@ The service socket is not bound to TCP. Nginx and Cloudflare never expose it. A 
 
 PR2 fixes the service-shell limits below. The process fails closed unless systemd passes exactly one descriptor named `brain-mail` as file descriptor 3. It never binds a path, listens on TCP, or unlinks the socket.
 
-The immutable Brain release remains `root:brain` and is never made readable by the `brain-mail` identity. Immediately before service start, a root-owned helper resolves one immutable release and projects exactly 64 allowlisted compiled Mail files across four allowlisted directories into `/run/brain-mail-runtime/current`. The frozen release also carries generated third-party notices. The set includes twelve Gmail OAuth, API, sync, send, and content modules under `providers/gmail`, the custom-domain Inbox sync, thread-mutation, and raw-message content adapter under `providers/imap`, plus the provider-neutral message cache, background sync, durable outbox, dormant draft contracts, local search, content cache, bounded raster inspector, MIME client modules, the owner's sync pause, and the optional SMTP runtime bundle. ImapFlow, `ws`, and the SMTP transport are bundled into audited runtime artifacts, and `jose` is bundled into the Gmail OAuth module, so the isolated runtime does not read the application `node_modules` tree. That projection is `root:brain-mail-runtime`, directories are `0550`, files are `0440`, and the service has read-only membership in that dedicated group. The same group receives execute-only traversal on `/opt/brain` so the process can reach the separately root-owned Node runtime, but it cannot list the directory or traverse the `root:brain` release and notes directories. `/etc/brain` and `/opt/brain/notes` are also hidden from the Mail namespace. The main Brain unit remains unchanged until the staged `brain-mail-client` drop-in is deliberately installed through the operations gate.
+The immutable Brain release remains `root:brain` and is never made readable by the `brain-mail` identity. Immediately before service start, a root-owned helper resolves one immutable release and projects exactly 65 allowlisted compiled Mail files across four allowlisted directories into `/run/brain-mail-runtime/current`. The frozen release also carries generated third-party notices. The set includes twelve Gmail OAuth, API, sync, send, and content modules under `providers/gmail`, the custom-domain Inbox sync, thread-mutation, and raw-message content adapter under `providers/imap`, plus the provider-neutral message cache, background sync, the IMAP IDLE supervisor, durable outbox, dormant draft contracts, local search, content cache, bounded raster inspector, MIME client modules, the owner's sync pause, and the optional SMTP runtime bundle. ImapFlow, `ws`, and the SMTP transport are bundled into audited runtime artifacts, and `jose` is bundled into the Gmail OAuth module, so the isolated runtime does not read the application `node_modules` tree. That projection is `root:brain-mail-runtime`, directories are `0550`, files are `0440`, and the service has read-only membership in that dedicated group. The same group receives execute-only traversal on `/opt/brain` so the process can reach the separately root-owned Node runtime, but it cannot list the directory or traverse the `root:brain` release and notes directories. `/etc/brain` and `/opt/brain/notes` are also hidden from the Mail namespace. The main Brain unit remains unchanged until the staged `brain-mail-client` drop-in is deliberately installed through the operations gate.
 
 | Boundary | Limit |
 | --- | ---: |
@@ -568,7 +568,31 @@ the highest one the build knows, so a later client still gets every field
 this service has; a service from before tier 5 reads `5` as the original
 shape, which strips stars and categories for as long as a release that pairs
 a new Brain with an old service lasts. A failure reading the screen answers
-`false` for the page rather than failing the list.
+`false` for the page rather than failing the list. A waiting thread also
+carries `newSenderFrom`, its first message's From with the address normalized
+as a decision reads it and the display name as cached, and no other thread
+carries one: a decision names that sender, and neither the first entry of
+`participants` nor a Reply-To is that. It is tier 5 with `newSender` and
+leaves with it in every lower projection. The name is passed through for the
+UI to say and is never written to `senders.sqlite3`. While the switch is on, a
+thread carries `senderBlocked: true` only while the next archive step will
+try to take it out of the Inbox: the mark reads the archiver's own targets
+(`archiveTargets`), so it cannot promise an archive the archiver will not
+make. Those are the Inbox threads within the archiver's scan whose first
+sender the archiver's rule blocks (the address's block, or the domain's block
+for an address the owner does not know), less the ones the owner put back
+after the block archived them with nothing newer since from anyone but him
+(by the thread's own record, or an IMAP copy by its Message-ID), and less
+the ones the archiver leaves alone for an hour after a failed archive. A
+thread in that hour carries no mark and shows in the Inbox until the next
+try, so a letter the provider refuses outright shows between its hourly
+tries rather than vanishing for good. The pre-check is cheap (a standing
+block for an Inbox letter), and the archiver's Inbox listing is read at most
+once per page and only when it passes. No waiting thread carries the mark,
+and it leaves the lower projections with the other two. The mail push reads
+it to stay quiet about a letter already refused in the minute between its
+arrival and that archive, and the Inboxes in the UI leave a marked thread
+out.
 
 **Replies.** A first message that carries `In-Reply-To` or `References`
 answers someone, and cold outreach carries neither, so a reply-shaped letter
@@ -910,6 +934,12 @@ MODSEQ is either absent or a positive unsigned 63-bit decimal value as required 
 
 IDLE is a notification hint, not a source of truth. Restart IDLE before 29 minutes, then run a bounded sync. Polling remains the recovery path when IDLE is missing or disconnected.
 
+[`imap-idle.ts`](../lib/mail/service/imap-idle.ts) is that rule as code. Once a pass has left an IMAP account's provider sync caught up, the scheduler hands the account to the IDLE supervisor, which holds one session per account: authenticated through the same DNS, binding and credential checks as every other session, INBOX examined read-only (EXAMINE, never SELECT, so it cannot clear `\Recent`), and nothing issued after that but IDLE and NOOP. The session's first act is to ask for one more pass, because the pass that opened it read INBOX before it was examined. An EXISTS, EXPUNGE or FLAGS update for INBOX leaves IDLE (a NOOP makes ImapFlow send DONE) and asks the scheduler for the same bounded pass the poll runs; IDLE is entered again after that pass. The server does not hold back an update that happens while that pass is pending: RFC 3501 5.3 has it sent between commands, and it is not repeated once IDLE starts again, so the session remembers it and asks for one more pass before it goes back to IDLE, however many arrived. The scheduler keeps the passes IDLE asks for at least five seconds apart per account, and hints inside that window fold into the one pass at its end, so a server that reports something every time IDLE starts costs a login every five seconds rather than one a second; its single loop keeps one pass per account in flight. Leaving IDLE has thirty seconds: a server that never answers DONE while it keeps the socket busy loses the session (`reason` `done_unanswered`), and the pass it was left for still runs. At `idleRestartMs` (25 minutes) the session leaves IDLE the same way, a pass runs, and IDLE starts again on the same connection. The update only asks for a pass and never writes the cache: every byte that reaches the cache comes through a pass on its own session, whose peer is proved through `unbind()`, which the IDLE session cannot use without giving up its socket. The password buffer is wiped as soon as the session is open, but ImapFlow's own string copy lives as long as the session does rather than until the next collection; section 4 says why process isolation is the control for those copies.
+
+The 60-second poll stays on underneath. A server that does not advertise IDLE, a session that will not open, an IDLE that ends without its DONE and a connection that drops all fall back to it with one `mail_imap_idle_fallback` line (`reason`, the stable `errorCode` for a failed open, and `failureCount`, the failures in a row), and the account is asked again only after 1, 2, 4, 8 and 16 minutes, then every 30; a server without IDLE waits the 30 at once. The retry rides on the scheduler's passes rather than on a timer of its own, so a flapping server costs at most one attempt per pass. A session that completes a clean cycle resets the count, and so does one that lived longer than three minutes before it ended: a server that closes IDLE sessions on a schedule of its own then costs a minute of poll each time, not a climb to thirty. Pausing Mail, the module switch and shutdown stop the scheduler, and the scheduler's stop closes every session; an account that stops syncing loses its session on the next pass, and removal or a credential edit closes it first through the account removal guard. `BRAIN_MAIL_IMAP_IDLE=0` turns IDLE off and leaves the poll alone.
+
+Two clocks. Everything the scheduler in [`background-sync.ts`](../lib/mail/service/background-sync.ts) and the IDLE supervisor keep in memory (due times, the IDLE floor, the armed timer, IDLE's backoff and a session's age) is on the monotonic clock, so neither a wall clock set back by NTP or a restored VM nor one pushed forward stops or bunches the sync. The provider backoff the message cache keeps (`retry_at` in `background_sync_control`, 30 seconds doubling to 30 minutes after failed syncs) stays on the wall clock, because it is durable and has to hold across a restart, which a monotonic reading cannot. A clock set back therefore holds an account that was already resting for the jump plus what was left of its rest; an account that was not resting is not affected, and a forward jump only ends a rest early.
+
 The executable transition rules live in [`lib/mail/sync-state.ts`](../lib/mail/sync-state.ts).
 
 ## 9. Submission state machine
@@ -1131,8 +1161,8 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 | Flags per message | 64 |
 | Vanished UIDs per page | 2,000 |
 | Mailboxes per account | 256 |
-| Active IMAP connections | 5 |
-| Concurrent IDLE sessions | 3 |
+| Active IMAP connections | 14 (two per account) |
+| Concurrent IDLE sessions | 7 (one per IMAP account) |
 | Queued submissions | 100 |
 | Cache | 2 GiB / 100,000 messages |
 | Message bodies | 48 MiB per account, least recently sent or opened evicted first |
@@ -1153,6 +1183,8 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 | Process CPU/tasks | 35% CPU quota / 32 tasks contract |
 | Parser memory | `MemoryHigh=128 MiB`, `MemoryMax=192 MiB` contract |
 | Parser CPU/tasks/FDs | 20% CPU quota / 8 tasks / 64 file descriptors contract |
+
+The two IMAP connection rows are written per account in `security.ts`, so they follow the account cap. They are design targets, not enforced limits: `MailSystemAdmissionPort` is not wired to the IMAP sessions, so nothing refuses a connection past them. The one-session-per-account IDLE figure holds because the supervisor keeps one per account by construction, not because a counter checks it. IDLE (section 8) adds exactly one long-lived connection per custom-domain account, held from the end of its first caught-up pass until Mail is paused, the account stops syncing or the connection drops, on top of the short working sessions a pass, a message fetch or a thread mutation opens and closes. A Gmail account holds none. A host that caps concurrent sessions per user sees that one extra; `BRAIN_MAIL_IMAP_IDLE=0` gives it back and leaves the account on the poll.
 
 The two outgoing rows are set by the process contract three rows above them, not by what a provider would accept. `MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes` is the one number: 10 MiB of decoded attachments per message.
 
@@ -1243,7 +1275,7 @@ Allowed structured log fields:
 - operation ID
 - state phase
 - duration bucket
-- account, mailbox, message, thread, attachment, recipient, queued-submission, remote-image, and remote-image-attempt counts
+- account, mailbox, message, thread, attachment, recipient, queued-submission, remote-image, remote-image-attempt, and IMAP IDLE failure counts
 - raw-MIME, cache, temporary, and WAL byte counts
 - stable error code
 - refusal reason, a stable code naming which site raised the error code
@@ -1257,7 +1289,7 @@ A `phase` is a route family and its verb — `thread_patch`, `message_content_po
 
 The account id in a `mail_request_failed` record is the one the request named, and it is written only when it has the shape of one: `account-a` and thirty-two hex digits. The projection's own guard admits any 128-character identifier, which is wide enough for a token pasted into the query, so the router checks the shape before the record does and a request that names something else is recorded without an account.
 
-The service writes on two streams, and under one name each. `writeMailLogRecord` in [`security.ts`](../lib/mail/security.ts) puts an answered failure on stderr; `writeServiceLog` in [`main.ts`](../lib/mail/service/main.ts) puts the service's own lifecycle and worker events — `mail_service_started` (carrying `"phase": "running"` or `"phase": "paused"`, which is what that start did rather than what the stored flag says, and `"transport": "direct"` or `"authenticated_byte_relay"` when the flags composed an SMTP runtime, with no field for a relay URL or a provider host), `mail_service_stopping`, a worker's stop failure, the remote-image pipeline's `mail_remote_image_drain_started`, `mail_remote_image_settled` and `mail_remote_image_drain_finished`, and the new-senders screen's `mail_sender_blocked_archived` and `mail_sender_restore_failed` (a `threadCount` per account each), `mail_sender_screen_failed` and `mail_service_senders_unavailable` — on stdout. A settled image carries its outcome as the `phase` (`fetched`, `blocked`, `origin_refused`, `budget_exhausted`, `transient`), the fetcher's stable code as `errorCode`, and the bytes a fetched image added to the cache as `cacheBytes`; a transient retry is always one interval away, so the record does not repeat it. A drain starts with the images it means to take as `remoteImageCount` and finishes with the ones it attempted as `remoteImageAttemptCount`, which differ when teardown cut it short or another path settled an image first. No field names an image, a URL or a host. Both go through the same projection. The artifact smoke reads the two apart, which is why the router never imports the stderr writer under the stdout writer's name.
+The service writes on two streams, and under one name each. `writeMailLogRecord` in [`security.ts`](../lib/mail/security.ts) puts an answered failure on stderr; `writeServiceLog` in [`main.ts`](../lib/mail/service/main.ts) puts the service's own lifecycle and worker events — `mail_service_started` (carrying `"phase": "running"` or `"phase": "paused"`, which is what that start did rather than what the stored flag says, and `"transport": "direct"` or `"authenticated_byte_relay"` when the flags composed an SMTP runtime, with no field for a relay URL or a provider host), `mail_service_stopping`, a worker's stop failure, the remote-image pipeline's `mail_remote_image_drain_started`, `mail_remote_image_settled` and `mail_remote_image_drain_finished`, the new-senders screen's `mail_sender_blocked_archived` and `mail_sender_restore_failed` (a `threadCount` per account each), `mail_sender_screen_failed` and `mail_service_senders_unavailable`, and IMAP IDLE's `mail_imap_idle_connected` and `mail_imap_idle_fallback` (a `reason`, a stable `errorCode` for a session that never opened, and the `failureCount` in a row) — on stdout. A settled image carries its outcome as the `phase` (`fetched`, `blocked`, `origin_refused`, `budget_exhausted`, `transient`), the fetcher's stable code as `errorCode`, and the bytes a fetched image added to the cache as `cacheBytes`; a transient retry is always one interval away, so the record does not repeat it. A drain starts with the images it means to take as `remoteImageCount` and finishes with the ones it attempted as `remoteImageAttemptCount`, which differ when teardown cut it short or another path settled an image first. No field names an image, a URL or a host. Both go through the same projection. The artifact smoke reads the two apart, which is why the router never imports the stderr writer under the stdout writer's name.
 
 Brain's own proxy layer writes two events, because a failure it manufactures is one the service never saw and cannot record. `mail_proxy_request_failed` covers the three cases where the service's answer was never heard — `mail_service_timeout`, `mail_service_unavailable`, and `mail_service_invalid_response` — and `mail_api_action_failed` covers a route handler throwing something that is not a service answer at all. A cancelled request is not logged: the browser dropping a read it no longer needs happens on every thread switch. A code the service coined is not logged twice.
 

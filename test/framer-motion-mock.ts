@@ -46,6 +46,7 @@ export const MOTION_PROP_NAMES = [
   "dragConstraints",
   "dragElastic",
   "dragMomentum",
+  "dragDirectionLock",
   "onDragStart",
   "onDrag",
   "onDragEnd",

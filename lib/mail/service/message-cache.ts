@@ -536,8 +536,10 @@ export interface MailReplyContext {
 }
 
 /** A thread's first message as the new-senders screen reads it. The address
- *  is the cached one, not yet normalized. */
+ *  is the cached one, not yet normalized; the display name rides along only
+ *  so a waiting thread can say who wrote it. */
 export interface MailCacheThreadFirstSender {
+  readonly name: string | null;
   readonly address: string | null;
   readonly firstMessageAt: number | null;
   readonly startsConversation: boolean;
@@ -6346,8 +6348,10 @@ function firstSenderFromRow(row: Record<string, unknown>): MailCacheThreadFirstS
   ) {
     throw new MailCacheError("mail_cache_invalid");
   }
+  const from = row.from_json === null ? null : parseAddressJson(row.from_json as string);
   return Object.freeze({
-    address: row.from_json === null ? null : parseAddressJson(row.from_json as string).address,
+    name: from?.name ?? null,
+    address: from?.address ?? null,
     firstMessageAt: row.sent_at as number | null,
     startsConversation: row.is_reply === 0,
     fromOwner: row.from_owner === 1,

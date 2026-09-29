@@ -1602,6 +1602,9 @@ const MAIL_LOG_NUMERIC_FIELDS = Object.freeze([
   "walBytes",
   "remoteImageCount",
   "remoteImageAttemptCount",
+  // IMAP IDLE's failures in a row for one account. The journal is the only
+  // place the count lives, which is how a reconnect storm would show itself.
+  "failureCount",
 ] as const);
 
 export type MailLogRecord = Readonly<Record<string, string | number>> & {

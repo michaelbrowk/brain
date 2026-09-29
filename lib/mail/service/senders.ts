@@ -427,25 +427,38 @@ export class SqliteMailSenderStore {
   }
 
   /**
-   * The decision that speaks for an address: its own, or its domain's when
-   * it has none. An address accepted on its own is spared a domain block.
+   * Every decision, read once, as the rule for which one speaks for an
+   * address: its own, or its domain's when it has none, so an address
+   * accepted on its own is spared a domain block. A block walks thousands of
+   * Inbox threads, and one read beats a query for each of them.
    */
-  governingDecision(address: string): MailSenderGoverningDecision | null {
-    return this.read((database) => {
-      const statement = database.prepare(
-        `SELECT decision_id, decision FROM sender_decisions
-          WHERE kind = ? AND key = ?`,
-      );
-      const row =
-        statement.get("address", address) ??
-        statement.get("domain", senderDomainOf(address));
-      if (row === undefined) return null;
-      const decision = decisionKind(row.decision);
-      if (decision === null || typeof row.decision_id !== "string") {
-        throw new MailSenderError("mail_senders_unavailable");
+  readDecisionIndex(): (address: string) => MailSenderGoverningDecision | null {
+    const byKind = this.read((database) => {
+      const addresses = new Map<string, MailSenderGoverningDecision>();
+      const domains = new Map<string, MailSenderGoverningDecision>();
+      for (const row of database
+        .prepare("SELECT decision_id, key, kind, decision FROM sender_decisions")
+        .all()) {
+        const decision = decisionKind(row.decision);
+        if (
+          decision === null ||
+          typeof row.decision_id !== "string" ||
+          typeof row.key !== "string" ||
+          (row.kind !== "address" && row.kind !== "domain")
+        ) {
+          throw new MailSenderError("mail_senders_unavailable");
+        }
+        (row.kind === "address" ? addresses : domains).set(
+          row.key,
+          Object.freeze({ decisionId: row.decision_id, decision }),
+        );
       }
-      return Object.freeze({ decisionId: row.decision_id, decision });
+      return { addresses, domains };
     });
+    return (address) =>
+      byKind.addresses.get(address) ??
+      byKind.domains.get(senderDomainOf(address)) ??
+      null;
   }
 
   hasBlockDecisions(): boolean {
@@ -863,6 +876,7 @@ export class MailSenderScreen implements MailSenderScreenService {
     }
     const targets: MailSenderThreadRef[] = [];
     let pending = false;
+    const governing = this.store.readDecisionIndex();
     for (const accountId of await this.mail.listAccountIds()) {
       let threads: readonly MailInboxThreadSender[];
       try {
@@ -873,7 +887,7 @@ export class MailSenderScreen implements MailSenderScreenService {
         continue;
       }
       for (const thread of threads) {
-        if (this.governedBy(thread.address)?.decisionId === decisionId) {
+        if (governedBy(governing, thread.address)?.decisionId === decisionId) {
           targets.push(Object.freeze({ accountId, threadId: thread.threadId }));
         }
       }
@@ -992,12 +1006,6 @@ export class MailSenderScreen implements MailSenderScreenService {
     return state.enabledAt;
   }
 
-  private governedBy(raw: string | null): MailSenderGoverningDecision | null {
-    if (raw === null) return null;
-    const address = normalizeSenderAddress(raw);
-    return address === null ? null : this.store.governingDecision(address);
-  }
-
   private async backfillStep(accountId: string, enabledAt: number): Promise<boolean> {
     const progress = this.store.readBackfillProgress(accountId);
     if (progress?.complete) return false;
@@ -1036,8 +1044,9 @@ export class MailSenderScreen implements MailSenderScreenService {
       if (retryAt <= now) this.archiveBackoff.delete(key);
     }
     const targets: Array<{ readonly ref: MailSenderThreadRef; readonly decisionId: string }> = [];
+    const index = this.store.readDecisionIndex();
     for (const thread of await this.mail.listInboxThreadFirstSenders(accountId)) {
-      const governing = this.governedBy(thread.address);
+      const governing = governedBy(index, thread.address);
       if (
         governing?.decision === "block" &&
         !this.archiveBackoff.has(`${accountId}/${thread.threadId}`)
@@ -1236,6 +1245,15 @@ export class MailSenderScreenedMessageService implements MailMessageService {
     const [thread] = await this.screen.annotateItems(accountId, [detail.thread]);
     return Object.freeze({ ...detail, thread: thread! });
   }
+}
+
+function governedBy(
+  index: (address: string) => MailSenderGoverningDecision | null,
+  raw: string | null,
+): MailSenderGoverningDecision | null {
+  if (raw === null) return null;
+  const address = normalizeSenderAddress(raw);
+  return address === null ? null : index(address);
 }
 
 function withNewSender(item: MailThreadListItem, newSender: boolean): MailThreadListItem {

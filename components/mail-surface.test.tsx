@@ -10565,6 +10565,20 @@ describe("MailSurface", () => {
       ).toContain("Subject lena-1");
     });
 
+    it("leaves the letter keys alone while a menu is open, whatever element the key reaches", async () => {
+      const { client } = await mount([waiting("lena-1"), friend("friend-1")]);
+      await openLetter("Subject lena-1");
+      await openNav();
+      expect(document.querySelector('[role="menu"][data-state="open"]')).not.toBeNull();
+      for (const key of ["a", "b"]) {
+        await act(async () => {
+          window.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true }));
+        });
+      }
+      await settle();
+      expect(client.decideSender).not.toHaveBeenCalled();
+    });
+
     it("hands focus to the same control on the next waiting row, else the next row, else the list", async () => {
       await mount([waiting("lena-1"), waiting("mika-1", mika), friend("friend-1")]);
       // mika-1 stands first, lena-1 under it.
@@ -10596,6 +10610,29 @@ describe("MailSurface", () => {
       expect(client.decideSender).toHaveBeenCalledWith({
         address: "lena@okafor.example",
         scope: "address",
+        decision: "block",
+      });
+    });
+
+    it("keeps the reach chosen for a letter still loading, and B decides with it", async () => {
+      const { client } = await mount([waiting("lena-1"), waiting("mika-1", mika)], {
+        readThread: vi.fn().mockReturnValue(new Promise(() => {})),
+      });
+      await openLetter("Subject lena-1");
+      const everyone = [
+        ...document.body.querySelectorAll(
+          'section[aria-label="Message reader"] [role="radio"]',
+        ),
+      ].find((radio) => radio.textContent?.includes("Everyone at okafor.example"));
+      expect(everyone).toBeTruthy();
+      await click(everyone as HTMLElement);
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "b", bubbles: true }));
+      });
+      await settle();
+      expect(client.decideSender).toHaveBeenCalledWith({
+        address: "lena@okafor.example",
+        scope: "domain",
         decision: "block",
       });
     });
@@ -10657,6 +10694,14 @@ describe("MailSurface", () => {
         icon: "users-group-rounded-linear",
         subtitle: "2 senders in. Next ones come straight in.",
       });
+    });
+
+    it("names the Inbox group only while someone waits above it", async () => {
+      await mount([friend("friend-1"), friend("friend-2")], {}, [accountA]);
+      const rows = document.body.querySelector('[data-flip="section:inbox"]')!;
+      expect(rows).not.toBeNull();
+      expect(rows.getAttribute("aria-label")).toBeNull();
+      expect(rows.classList.contains("brain-mail-section")).toBe(false);
     });
 
     it("keeps the rest of a lone Inbox mounted when the last waiting row is decided", async () => {
@@ -11044,9 +11089,9 @@ describe("MailSurface", () => {
 
     /** Lena's first letter open from All Mail, blocked with the reader's
      *  Block. */
-    async function blockFromAllMail() {
+    async function blockFromAllMail(overrides: Partial<MailSurfaceClient> = {}) {
       const lenaAll = waiting("lena-1");
-      await mount(
+      const mounted = await mount(
         [friend("friend-1")],
         {
           listMailboxThreads: vi
@@ -11068,6 +11113,7 @@ describe("MailSurface", () => {
             archived: [{ accountId: accountA.accountId, threadId: "lena-1" }],
             pending: false,
           }),
+          ...overrides,
         },
         [accountA],
       );
@@ -11082,7 +11128,24 @@ describe("MailSurface", () => {
       expect(readerBlock).toBeTruthy();
       await click(readerBlock);
       await settle();
+      return mounted;
     }
+
+    it("leaves the reader on the letter when an Undo of a Block in All Mail fails", async () => {
+      const { onToast } = await blockFromAllMail({
+        undoSenderDecision: vi
+          .fn()
+          .mockRejectedValue(new MailApiError(503, "mail_senders_unavailable")),
+      });
+      await act(async () => {
+        await toastFor(onToast, "Blocked Lena Okafor")!.onAction!();
+      });
+      await settle();
+      expect(onToast).toHaveBeenCalledWith("Couldn’t undo. Try again.", { urgent: true });
+      expect(
+        document.body.querySelector('section[aria-label="Message reader"]')?.textContent,
+      ).not.toContain("Choose a message");
+    });
 
     it("leaves the letter listed, and the reader on it, after a Block made from All Mail", async () => {
       await blockFromAllMail();

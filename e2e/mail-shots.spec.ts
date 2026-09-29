@@ -12,7 +12,7 @@
 // them here: the forbidden-path step of `pnpm check` refuses a tracked path
 // the list names.
 
-import { expect, test, type Page, type Route } from "playwright/test";
+import { expect, test, type Locator, type Page, type Route } from "playwright/test";
 import path from "node:path";
 import fs from "node:fs/promises";
 import sharp from "sharp";
@@ -490,14 +490,58 @@ for (const scheme of ["light", "dark"] as const) {
     await expect(sheet.getByLabel("Cc", { exact: true })).toBeVisible();
     await page.waitForTimeout(400);
     await page.screenshot({ path: path.join(OUT, `composer-copies-${scheme}.png`) });
+
+    // 5 — two files on the shelf under Subject, and then one past the cap
+    // refused in the slot while the shelf keeps what it had.
+    await attachTwoFiles(page, sheet);
+    await page.screenshot({ path: path.join(OUT, `composer-attachments-${scheme}.png`) });
+    await refuseOnePastTheCap(page, sheet);
+    await page.screenshot({
+      path: path.join(OUT, `composer-attachments-refused-${scheme}.png`),
+    });
   });
 }
 
-// The two questions mail asks. Both were `window.confirm` until the owner sent
-// a screenshot of one — a system alert wearing the origin as its title, in the
-// OS's own type, saying nothing about what was about to disappear. Both, both
-// themes: the one that deletes a saved draft from the Drafts list, and the one
-// the composer's Discard opens over the sheet.
+/** Two files through the paperclip's chooser, the way a writer attaches
+ *  them, settled on the shelf. */
+async function attachTwoFiles(page: Page, sheet: Locator) {
+  const chooser = page.waitForEvent("filechooser");
+  await sheet.getByRole("button", { name: "Attach files" }).click();
+  await (await chooser).setFiles([
+    {
+      name: "Stairwell quote from Dmitri.pdf",
+      mimeType: "application/pdf",
+      buffer: Buffer.alloc(1_258_291, 0x20),
+    },
+    { name: "floor-plan.png", mimeType: "image/png", buffer: Buffer.alloc(348_160, 0x20) },
+  ]);
+  await expect(sheet.locator(".brain-compose-attachment")).toHaveCount(2);
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.waitForTimeout(500);
+}
+
+/** A 12 MiB file, past the codec's 10: refused in the slot. */
+async function refuseOnePastTheCap(page: Page, sheet: Locator) {
+  const chooser = page.waitForEvent("filechooser");
+  await sheet.getByRole("button", { name: "Attach files" }).click();
+  await (await chooser).setFiles({
+    name: "site-survey.mov",
+    mimeType: "video/quicktime",
+    buffer: Buffer.alloc(12 * 1024 * 1024),
+  });
+  await expect(sheet.locator('.brain-compose-slot [role="status"]')).toHaveText(
+    "A message can carry 10 MB of files.",
+  );
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.waitForTimeout(500);
+}
+
+// The question mail asks, and the one it stopped asking. Both were
+// `window.confirm` until the owner sent a screenshot of one — a system alert
+// wearing the origin as its title, in the OS's own type, saying nothing about
+// what was about to disappear. Both themes: the question that deletes a saved
+// draft from the Drafts list, and the composer's Discard, which now answers
+// with an Undo instead of a question.
 const SAVED_DRAFT = {
   apiVersion: 1,
   draftId: "draft-1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d",
@@ -565,9 +609,9 @@ for (const scheme of ["light", "dark"] as const) {
     await page.getByRole("menuitemradio", { name: /^Inbox/ }).click();
     await expect(navTrigger(page)).toHaveAttribute("aria-label", "Mailbox: Inbox");
 
-    // 2 — the composer's Discard, over the open sheet. Closing keeps the
-    // draft and asks nothing; this button deletes it, which is the whole
-    // difference the text has to carry.
+    // 2 — the composer's Discard. It no longer asks: the sheet goes at the
+    // press and the way back is the pill's Undo, with the delete parked
+    // behind it, so the frame is the pill standing where the sheet was.
     await page.getByRole("button", { name: "New message" }).click();
     const sheet = page.getByRole("dialog", { name: "New message" });
     await expect(sheet).toBeVisible();
@@ -576,10 +620,11 @@ for (const scheme of ["light", "dark"] as const) {
       .getByPlaceholder("Write a message…")
       .fill("Half a thought and nowhere to put it yet.");
     await sheet.getByRole("button", { name: "Discard draft" }).click();
-    await expect(page.getByRole("alertdialog")).toBeVisible();
+    await expect(sheet).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Undo" })).toBeVisible();
     await page.waitForTimeout(500);
     await page.screenshot({
-      path: path.join(OUT, `confirm-discard-${scheme}.png`),
+      path: path.join(OUT, `discard-undo-${scheme}.png`),
     });
   });
 }
@@ -1660,13 +1705,11 @@ test.describe("mail on a phone", () => {
       await page.screenshot({ path: slot("notes", scheme) });
 
       // The list: the floating head, the rows, and the tab bar under them
-      // with the last row scrolled clear of it.
-      await page.goto("/mail");
-      await openNav(page);
-      await page
-        .getByRole("menuitemradio", { name: `Open ${ACCOUNT.emailAddress}` })
-        .click();
-      await expect(page.getByText(THREADS[0].subject, { exact: true })).toBeVisible();
+      // with the last row scrolled clear of it. A lone account opens straight
+      // into its Inbox, the way the desktop frames reach it: the menu's
+      // "Open <account>" row exists only beside a second account, and asking
+      // for it here is where these frames used to stop.
+      await openMailbox(page);
       await page.waitForTimeout(600);
       await page.screenshot({ path: slot("list", scheme) });
 
@@ -1712,6 +1755,13 @@ test.describe("mail on a phone", () => {
       await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
       await page.waitForTimeout(600);
       await page.screenshot({ path: slot("composer", scheme) });
+
+      // Two files on the shelf, and one past the cap refused on the slot's
+      // own second line under the actions.
+      await attachTwoFiles(page, sheet);
+      await page.screenshot({ path: slot("composer-attachments", scheme) });
+      await refuseOnePastTheCap(page, sheet);
+      await page.screenshot({ path: slot("composer-attachments-refused", scheme) });
     });
   }
 });

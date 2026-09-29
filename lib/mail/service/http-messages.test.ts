@@ -283,8 +283,14 @@ describe("brain-mail message HTTP surface", () => {
         newSender: false,
       });
 
-      const garbage = await itemFor(routePath, {
+      // A later client's tier reads as the highest this service knows.
+      const later = await itemFor(routePath, {
         "x-brain-mail-thread-state": "999",
+      });
+      expect(later).toMatchObject({ category: "people", newSender: false });
+
+      const garbage = await itemFor(routePath, {
+        "x-brain-mail-thread-state": "tier-9",
       });
       expect(garbage).not.toHaveProperty("starred");
       expect(garbage).not.toHaveProperty("listMessage");

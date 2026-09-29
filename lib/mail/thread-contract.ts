@@ -3,21 +3,24 @@ export const MAIL_THREAD_STATE_CONTRACT_VALUE = "5";
 
 export type MailThreadStateContractTier = 1 | 2 | 3 | 4 | 5;
 
+const HIGHEST_TIER: MailThreadStateContractTier = 5;
+
 /**
  * Additive thread-state fields ship in tiers so old exact-record clients keep
  * working: tier 1 is the original apiVersion 1 shape, tier 2 added starred,
  * tier 3 added listMessage and sizeBytes, tier 4 added category, tier 5 added
- * newSender. A client states its tier with the header above; anything
- * unrecognized gets the original shape.
+ * newSender. A client states its tier with the header above as a number, and
+ * a number above the highest tier this build knows reads as that tier, so a
+ * newer client talking to this service still gets every field it has.
+ * Anything that is not a whole number gets the original shape.
  */
 export function mailThreadStateContractTier(
   value: string | readonly string[] | null | undefined,
 ): MailThreadStateContractTier {
-  if (value === "5") return 5;
-  if (value === "4") return 4;
-  if (value === "3") return 3;
-  if (value === "2") return 2;
-  return 1;
+  if (typeof value !== "string" || !/^[0-9]{1,6}$/.test(value)) return 1;
+  const tier = Number(value);
+  if (tier < 1) return 1;
+  return Math.min(tier, HIGHEST_TIER) as MailThreadStateContractTier;
 }
 
 export function projectMailThreadStateContract(

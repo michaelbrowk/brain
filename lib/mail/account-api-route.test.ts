@@ -90,6 +90,7 @@ describe("runMailThreadApiAction", () => {
         listMessage: true,
         sizeBytes: 4_096,
         category: "newsletter",
+        newSender: false,
       },
     ],
     nextCursor: null,
@@ -110,27 +111,38 @@ describe("runMailThreadApiAction", () => {
       {
         header: undefined,
         kept: [],
-        stripped: ["starred", "listMessage", "sizeBytes", "category"],
+        stripped: ["starred", "listMessage", "sizeBytes", "category", "newSender"],
       },
       {
         header: "2",
         kept: ["starred"],
-        stripped: ["listMessage", "sizeBytes", "category"],
+        stripped: ["listMessage", "sizeBytes", "category", "newSender"],
       },
       {
         header: "3",
         kept: ["starred", "listMessage", "sizeBytes"],
-        stripped: ["category"],
+        stripped: ["category", "newSender"],
       },
       {
         header: "4",
         kept: ["starred", "listMessage", "sizeBytes", "category"],
+        stripped: ["newSender"],
+      },
+      {
+        header: "5",
+        kept: ["starred", "listMessage", "sizeBytes", "category", "newSender"],
+        stripped: [],
+      },
+      // A later client's tier reads as the highest one this build knows.
+      {
+        header: "999",
+        kept: ["starred", "listMessage", "sizeBytes", "category", "newSender"],
         stripped: [],
       },
       {
-        header: "999",
+        header: "latest",
         kept: [],
-        stripped: ["starred", "listMessage", "sizeBytes", "category"],
+        stripped: ["starred", "listMessage", "sizeBytes", "category", "newSender"],
       },
     ];
     for (const testCase of cases) {

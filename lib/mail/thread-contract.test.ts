@@ -11,14 +11,23 @@ describe("mail thread-state contract", () => {
     expect(MAIL_THREAD_STATE_CONTRACT_VALUE).toBe("5");
   });
 
+  // A number, clamped: a client from a later release asks for more than
+  // this service knows and gets everything it does know, never the bare
+  // original shape.
   it.each([
     ["5", 5],
     ["4", 4],
     ["3", 3],
     ["2", 2],
     ["1", 1],
-    ["6", 1],
+    ["6", 5],
+    ["17", 5],
+    ["0", 1],
     ["", 1],
+    ["5.5", 1],
+    ["-3", 1],
+    ["4a", 1],
+    ["9999999999999999999999", 1],
     [null, 1],
     [undefined, 1],
     [["4"], 1],

@@ -133,12 +133,13 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
   /* A cohort message whose thread the provider sizes past this is fetched
    * when opened, not before. The size is what the sync already has, the sum
    * of the thread's messages, so a long conversation can be held back with a
-   * big attachment. On the prefetch probe the service's peak follows the
-   * largest letter it parses: 148 MiB with 1 MiB marketing letters, 151 MiB
-   * with a 1.85 MiB attachment on them (about the most this admits), 186 MiB
-   * at 6 MiB and 220 MiB at 15 MiB, past the 217 MiB bar. Letters that size
-   * would also fill `bodyCacheMaxBytes` on their own: ten with 15 MiB
-   * attachments left 27 of 200 bodies under it. */
+   * big attachment, and so does one the provider gave no size for. On the
+   * prefetch probe the service's peak follows the largest letter it parses:
+   * 133 MiB with 1 MiB marketing letters, 150 MiB with a 1.85 MiB attachment
+   * on them (about the most this admits), 186 MiB at 6 MiB and 220 MiB at
+   * 15 MiB, past the 217 MiB bar. Letters that size would also fill
+   * `bodyCacheMaxBytes` on their own: ten with 15 MiB attachments left 27 of
+   * 200 bodies under it. */
   privacyPrefetchMaxThreadBytes: 4 * 1024 * 1024,
   /* The images a sync may fetch without an open, a prefix of the body cohort.
    * These stayed where they were when the body cohort grew: a fetched image
@@ -150,8 +151,8 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
   /* Every blob a ready body holds on disk, per account: raw MIME, the text and
    * sanitized HTML parts, attachments and fetched images. Two hundred letters
    * at a median of 60 KiB of HTML and text are about 15 MiB before the raw
-   * copy and the heavier marketing mail; past the budget the oldest unopened
-   * body goes first. */
+   * copy and the heavier marketing mail; past the budget the body least
+   * recently sent or opened goes first. */
   bodyCacheMaxBytes: 48 * 1024 * 1024,
   maxInlineImagePixels: 12_000_000,
   maxInlineImageFrames: 100,

@@ -15,6 +15,7 @@ import type { ReactNode } from "react";
 import { emitMailCommand, type MailCommand } from "./mail-commands";
 import { renderTaskCheck } from "./tasks-checkbox";
 import { emitTaskCommand, type TaskCommand } from "./tasks-commands";
+import { sanitizeSnippet } from "@/lib/mail/reader-content";
 import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
 import type {
   MailSearchAllResponse,
@@ -1216,7 +1217,10 @@ export function CommandPalette({
           )}
           {visibleMail.map((t) => {
             const subject = t.subject?.trim() || "(no subject)";
-            const snippet = t.snippet?.trim() ?? "";
+            // The list row's rule, so the same letter reads the same in both:
+            // Gmail escapes its snippets, and the highlight has to run over
+            // the decoded text or a match beside an entity loses its mark.
+            const snippet = sanitizeSnippet(t.snippet);
             return (
               <Command.Item
                 key={`mail-${t.accountId}-${t.threadId}`}

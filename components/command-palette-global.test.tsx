@@ -267,6 +267,29 @@ describe("CommandPalette global search", () => {
     expect(group("Mail")?.textContent).toContain("Older mail is still being indexed");
   });
 
+  it("reads a snippet's entities the way the mail list does", async () => {
+    // Gmail sends snippets HTML-escaped. The list row decodes them through
+    // `sanitizeSnippet`, and the palette row showed the same letter raw.
+    mailAnswer = async () =>
+      response(
+        mailBody([
+          thread("thread-1", "Quarterly launch review", {
+            snippet: "[image] what&#39;s next &amp; more",
+          }),
+        ]),
+      );
+    await render();
+    await type("next");
+
+    const row = rows("Mail")[0];
+    expect(row.textContent).toContain("what's next & more");
+    expect(row.textContent).not.toContain("&#39;");
+    expect(row.textContent).not.toContain("&amp;");
+    expect(row.textContent).not.toContain("[image]");
+    // The highlight runs over the decoded text, so the match still marks.
+    expect(row.querySelector("mark")?.textContent).toBe("next");
+  });
+
   it("ranks tasks by title with open ones first and labels each by its day", async () => {
     const tasks = [
       task("done", "Quarterly numbers", {

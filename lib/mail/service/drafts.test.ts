@@ -611,6 +611,20 @@ describe("provider-neutral draft service", () => {
         await expect(commitForged(varied(100_000), moveBreak(511))).resolves.toEqual(refused);
       });
 
+      it("refuses the line break between two chunks written as other bytes", async () => {
+        // The two bytes between the 512th and the 513th line belong to no
+        // chunk's comparison; only the check at the chunk's edge reads them.
+        for (const between of ["\r ", "  "]) {
+          await expect(
+            commitForged(varied(100_000), (raw, body) => {
+              const at = body.start + 512 * 78 - 2;
+              expect(raw.slice(at, at + 2)).toBe("\r\n");
+              return raw.slice(0, at) + between + raw.slice(at + 2);
+            }),
+          ).resolves.toEqual(refused);
+        }
+      });
+
       it("refuses a closing delimiter changed after the last file", async () => {
         await expect(
           commitForged(varied(1_000), (raw) => {

@@ -7559,6 +7559,36 @@ describe("MailSurface", () => {
         expect(cursorsAsked(listThreads)).not.toContain("s2-page-3");
       });
 
+      it("stops walking once the minute's refresh moves the column on", async () => {
+        vi.useFakeTimers();
+        const pageTwo = deferred<MailThreadPage>();
+        const { listThreads } = deepStreamClient(held, {
+          ...secondSnapshot,
+          "s2-page-2": pageTwo.promise,
+        });
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+        await click(findButton("Load more"));
+        await click(findButton("Load more"));
+        await wait(1_500);
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads).at(-1)).toBe("s2-page-2");
+
+        // Still in All inboxes, but the refresh re-read page one under the
+        // walk, whose answer is dropped: the pages after it are not read.
+        await wait(60_000);
+        await act(async () => pageTwo.resolve(await secondSnapshot["s2-page-2"]!));
+        await settle();
+
+        expect(cursorsAsked(listThreads)).not.toContain("s2-page-3");
+      });
+
       /** A deep account whose page two the test answers by hand: the first
        *  read of it waits on `pageTwo`, any later one answers at once. */
       function pageTwoByHand(

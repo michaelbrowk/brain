@@ -823,6 +823,17 @@ describe("appendStreamPage", () => {
     expect(next.items).toEqual([answered, loaded[0], older]);
   });
 
+  it("keeps the later read's copy where a walk's pages overlap", () => {
+    // Read between the walk's two reads: the second copy is the current one.
+    const older = item({ accountId: ACCOUNT_A, threadId: "t3", lastMessageAt: 100 });
+    const readSince = { ...older, unread: false };
+    const next = appendStreamPage(
+      stream(ACCOUNT_A, { items: loaded, nextCursor: "this", repage: true }),
+      page([older, readSince], null),
+    );
+    expect(next.items).toEqual([...loaded, readSince]);
+  });
+
   it.each([false, true])(
     "keeps one row per thread when the pages overlap (re-paged %s)",
     (repage) => {

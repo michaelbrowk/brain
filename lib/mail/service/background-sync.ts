@@ -17,6 +17,16 @@ const MAX_PROVIDER_PAGES_PER_BURST = 6;
 const IDLE_PASS_FLOOR_MS = 5_000;
 const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
 
+/**
+ * Every time this scheduler keeps is on the monotonic clock. A due time on
+ * the wall clock stops all sync for as long as NTP or a restored VM sets the
+ * clock back, and a forward jump leaves the armed timer looking earlier than
+ * a request that should replace it.
+ */
+function monotonicNow(): number {
+  return performance.now();
+}
+
 export type MailBackgroundSyncProvider = "gmail" | "imap";
 
 export interface MailBackgroundSyncAccount {
@@ -54,9 +64,10 @@ export interface MailBackgroundSearchIndexPort {
 }
 
 /**
- * The new-senders screen's step. `syncSucceeded` says whether this page's
- * sync reached the provider and came back healthy: the archiver and the
- * restores only touch the provider after one that did.
+ * The new-senders screen's step. `syncSucceeded` says whether the account's
+ * last provider sync came back healthy, on this visit or on the one that last
+ * asked the provider: the archiver and the restores only touch the provider
+ * while it is, and a backlog keeps draining on the visits in between.
  */
 export interface MailBackgroundSenderPort {
   runBackgroundSenderStep(
@@ -117,6 +128,8 @@ export class MailBackgroundSyncScheduler {
   private readonly providers = new Map<string, MailBackgroundSyncProvider | null>();
   /** Accounts IDLE asked for while a pass was in flight. */
   private readonly requested = new Set<string>();
+  /** Accounts whose last provider sync came back healthy. */
+  private readonly syncHealthy = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private timerDueAt = 0;
   private controller: AbortController | null = null;
@@ -204,6 +217,7 @@ export class MailBackgroundSyncScheduler {
     this.lastIdlePassAt.clear();
     this.providers.clear();
     this.requested.clear();
+    this.syncHealthy.clear();
     this.visitAll = false;
   }
 
@@ -220,7 +234,7 @@ export class MailBackgroundSyncScheduler {
       return;
     }
     const dueAt = this.bringSyncForward(accountId);
-    this.schedule(Math.max(0, dueAt - Date.now()));
+    this.schedule(Math.max(0, dueAt - monotonicNow()));
   }
 
   /**
@@ -276,7 +290,7 @@ export class MailBackgroundSyncScheduler {
   /** The earliest timer wins: a later request never pushes a pass back. */
   private schedule(delayMs: number): void {
     if (!this.started) return;
-    const dueAt = Date.now() + delayMs;
+    const dueAt = monotonicNow() + delayMs;
     if (this.timer !== null) {
       if (this.timerDueAt <= dueAt) return;
       clearTimeout(this.timer);
@@ -291,7 +305,7 @@ export class MailBackgroundSyncScheduler {
 
   private delayUntilNextDue(): number {
     if (this.providers.size === 0) return this.intervalMs;
-    const now = Date.now();
+    const now = monotonicNow();
     let earliest = Number.POSITIVE_INFINITY;
     for (const accountId of this.providers.keys()) {
       earliest = Math.min(earliest, this.syncDueAt.get(accountId) ?? now);
@@ -311,7 +325,7 @@ export class MailBackgroundSyncScheduler {
 
   /** Makes the account's sync due for IDLE; answers when it now is. */
   private bringSyncForward(accountId: string): number {
-    const now = Date.now();
+    const now = monotonicNow();
     const floorAt =
       (this.lastIdlePassAt.get(accountId) ?? Number.NEGATIVE_INFINITY) +
       IDLE_PASS_FLOOR_MS;
@@ -344,6 +358,9 @@ export class MailBackgroundSyncScheduler {
       accounts = await this.listAccounts();
     } catch {
       this.accountQueue.length = 0;
+      // With no accounts known the next pass is a fallback interval away;
+      // the stale list would have it due every continuation instead.
+      this.providers.clear();
       return false;
     }
     if (signal.aborted) return false;
@@ -357,7 +374,7 @@ export class MailBackgroundSyncScheduler {
       active.has(accountId),
     );
     const queued = new Set(retained);
-    const now = Date.now();
+    const now = monotonicNow();
     // The accounts whose sync is due, or every account after a kick: a Gmail
     // account on its 20 s cadence must not drag the others along with it.
     for (const accountId of accountIds) {
@@ -371,6 +388,7 @@ export class MailBackgroundSyncScheduler {
       this.syncPending,
       this.idleRequested,
       this.lastIdlePassAt,
+      this.syncHealthy,
     ]) {
       for (const accountId of state.keys()) {
         if (!active.has(accountId)) state.delete(accountId);
@@ -398,9 +416,9 @@ export class MailBackgroundSyncScheduler {
       // keeps draining, and a busy provider interleaves with it.
       let syncHasMore = false;
       let syncSucceeded = false;
-      if (this.syncPending.has(accountId) || this.isSyncDue(accountId, Date.now())) {
+      if (this.syncPending.has(accountId) || this.isSyncDue(accountId, monotonicNow())) {
         if (this.idleRequested.delete(accountId)) {
-          this.lastIdlePassAt.set(accountId, Date.now());
+          this.lastIdlePassAt.set(accountId, monotonicNow());
         }
         let failed = false;
         try {
@@ -418,13 +436,15 @@ export class MailBackgroundSyncScheduler {
           if (signal.aborted) return false;
           failed = true;
         }
+        if (syncSucceeded) this.syncHealthy.add(accountId);
+        else this.syncHealthy.delete(accountId);
         if (syncHasMore) {
           this.syncPending.add(accountId);
         } else {
           this.syncPending.delete(accountId);
           this.syncDueAt.set(
             accountId,
-            Date.now() + (failed ? this.intervalMs : this.cadenceOf(accountId)),
+            monotonicNow() + (failed ? this.intervalMs : this.cadenceOf(accountId)),
           );
         }
         if (signal.aborted) return false;
@@ -434,6 +454,8 @@ export class MailBackgroundSyncScheduler {
         if (!syncHasMore && this.providers.get(accountId) === "imap") {
           this.idle?.afterSync(accountId);
         }
+      } else {
+        syncSucceeded = this.syncHealthy.has(accountId);
       }
       if (signal.aborted) return false;
       let privacyHasMore = false;

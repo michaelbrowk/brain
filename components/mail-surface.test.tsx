@@ -6988,6 +6988,90 @@ describe("MailSurface", () => {
           "every page the walk crossed lands",
         );
       });
+
+      /** A deep stream that failed and was healed by Try again, so its next
+       *  Load more is a walk from the new snapshot's page two. */
+      async function healedByTryAgain(
+        listThreads: ReturnType<typeof deepStreamClient>["listThreads"],
+      ) {
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+        await click(findButton("Load more"));
+        await click(findButton("Load more"));
+        await click(findButton("Try again"));
+        expect(cursorsAsked(listThreads)).toEqual(["s1-page-2", "s1-page-3"]);
+      }
+
+      it("walks no further than the stream's depth and a page more on one press", async () => {
+        // A snapshot whose pages keep landing inside the rows the stream
+        // holds. A hundred rows are two pages; one more covers what moved.
+        const inside = (next: string) => pageOf(deepRows.slice(50, 100), next);
+        const { listThreads } = deepStreamClient(() => new Error("outage"), {
+          "s2-page-2": inside("s2-page-3"),
+          "s2-page-3": inside("s2-page-4"),
+          "s2-page-4": inside("s2-page-5"),
+          "s2-page-5": inside("s2-page-6"),
+          "s2-page-6": pageOf(deepRows.slice(100, 150)),
+        });
+        await healedByTryAgain(listThreads);
+
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads).slice(2)).toEqual([
+          "s2-page-2",
+          "s2-page-3",
+          "s2-page-4",
+        ]);
+
+        // The walk stopped short of the stream's last row, so the next press
+        // walks on from where it stopped rather than appending out of order.
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads).slice(5)).toEqual([
+          "s2-page-5",
+          "s2-page-6",
+        ]);
+        expect(() => findButton("Load more")).toThrow();
+      });
+
+      it("stops walking at a cursor it has already read", async () => {
+        const inside = (next: string) => pageOf(deepRows.slice(50, 100), next);
+        const { listThreads } = deepStreamClient(() => new Error("outage"), {
+          "s2-page-2": inside("s2-page-3"),
+          "s2-page-3": inside("s2-page-2"),
+        });
+        await healedByTryAgain(listThreads);
+
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads).slice(2)).toEqual([
+          "s2-page-2",
+          "s2-page-3",
+        ]);
+        // Following it again only reads the same pages again: the stream
+        // stops paging rather than asking for them on every press.
+        expect(() => findButton("Load more")).toThrow();
+      });
+
+      it("stops walking once the reader leaves All inboxes", async () => {
+        const pageTwo = deferred<MailThreadPage>();
+        const { listThreads } = deepStreamClient(() => new Error("outage"), {
+          ...secondSnapshot,
+          "s2-page-2": pageTwo.promise,
+        });
+        await healedByTryAgain(listThreads);
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads).at(-1)).toBe("s2-page-2");
+
+        await enterSingleAccount(accountA);
+        await act(async () => pageTwo.resolve(await secondSnapshot["s2-page-2"]!));
+        await settle();
+
+        expect(cursorsAsked(listThreads)).not.toContain("s2-page-3");
+      });
     });
 
     it("fetches only the starved stream on Load more", async () => {

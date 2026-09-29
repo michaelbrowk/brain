@@ -787,6 +787,19 @@ describe("appendStreamPage", () => {
     expect(next.nextCursor).toBeNull();
     expect(next.repage).toBe(false);
   });
+
+  it("keeps the mark for a walk its cap stopped short of the last loaded row", () => {
+    const moved = item({ accountId: ACCOUNT_A, threadId: "moved", lastMessageAt: 250 });
+    const next = appendStreamPage(
+      stream(ACCOUNT_A, { items: loaded, nextCursor: "this", repage: true }),
+      page([loaded[0]!, moved, loaded[1]!], "further"),
+    );
+    // The next press walks on from "further", and what it brings still sorts
+    // in among the loaded rows.
+    expect(next.items).toEqual([loaded[0], moved, loaded[1]]);
+    expect(next.nextCursor).toBe("further");
+    expect(next.repage).toBe(true);
+  });
 });
 
 describe("removeStreamItems", () => {

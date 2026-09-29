@@ -1952,12 +1952,27 @@ export function MailSurface({
         // Pages that end at or above its last row bring nothing but what
         // moved, and a press that added no row would not re-arm the scroll
         // sentinel, so one Load more walks on to the page that reaches past.
+        // It walks no more pages than the stream is deep, plus one for the
+        // rows that moved down, and none after the column moved on: that
+        // answer is dropped below, and every page it still read was waste.
+        // A cursor it has already read leads back over the same pages, so it
+        // ends the stream's paging instead of being followed or kept.
+        const cap = Math.ceil(stream.items.length / UNIFIED_PAGE_SIZE) + 1;
+        const asked = new Set([stream.nextCursor as string]);
         const items = [...page.items];
         while (
+          asked.size < cap &&
           page.nextCursor !== null &&
           page.items.length > 0 &&
-          compareUnified(page.items.at(-1)!, last) <= 0
+          compareUnified(page.items.at(-1)!, last) <= 0 &&
+          listEpochRef.current === listEpoch &&
+          selectedAccountIdRef.current === UNIFIED_ACCOUNT_ID
         ) {
+          if (asked.has(page.nextCursor)) {
+            page = { ...page, nextCursor: null };
+            break;
+          }
+          asked.add(page.nextCursor);
           page = await read(page.nextCursor);
           items.push(...page.items);
         }

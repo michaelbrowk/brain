@@ -236,7 +236,9 @@ export function reconcileStreamPageOne(
  * stream's last row and goes on the end, less any row already loaded. A
  * re-paged walk crossed rows the stream holds, so what it adds can sort
  * anywhere among them: it goes in by the merge's order, which keeps the stream
- * the sorted prefix its horizon is read from.
+ * the sorted prefix its horizon is read from. A walk its cap stopped before it
+ * reached past the last loaded row keeps the mark, so the next press walks on
+ * from where it stopped instead of putting what it finds on the end.
  */
 export function appendStreamPage(
   stream: UnifiedStream,
@@ -244,13 +246,20 @@ export function appendStreamPage(
 ): UnifiedStream {
   const seen = new Set(stream.items.map(unifiedThreadKey));
   const fresh = page.items.filter((item) => !seen.has(unifiedThreadKey(item)));
+  const last = stream.items.at(-1);
+  const end = page.items.at(-1);
+  const stoppedShort =
+    stream.repage === true &&
+    page.nextCursor !== null &&
+    last !== undefined &&
+    (end === undefined || compareUnified(end, last) <= 0);
   return {
     ...stream,
     items: stream.repage
       ? [...stream.items, ...fresh].sort(compareUnified)
       : [...stream.items, ...fresh],
     nextCursor: page.nextCursor,
-    repage: false,
+    repage: stoppedShort,
     status: "ready",
     sync: page.sync,
   };

@@ -2480,6 +2480,14 @@ describe("MailSurface", () => {
             items: inInbox && accountId === thread.accountId ? [thread] : [],
           }),
         ),
+        searchThreads: vi.fn().mockImplementation(({ mailboxId }) =>
+          Promise.resolve(
+            searchThreadPage(
+              mailboxId,
+              inInbox || mailboxId !== "inbox" ? [thread] : [],
+            ),
+          ),
+        ),
         readThread: vi.fn().mockImplementation(() => Promise.resolve(letter())),
         readMailboxThread: vi
           .fn()
@@ -2637,6 +2645,81 @@ describe("MailSurface", () => {
       await settle();
 
       expect(threadList()).toContain("Inbox zero");
+    });
+
+    function rowButton(subject: string): HTMLButtonElement {
+      const row = [
+        ...document.body.querySelectorAll('section[aria-label="Mailbox"] button'),
+      ].find((candidate) => candidate.textContent?.includes(subject));
+      if (!(row instanceof HTMLButtonElement)) throw new Error(`No row: ${subject}`);
+      return row;
+    }
+
+    it("closes the letter open in the Inbox when Undo takes it out again", async () => {
+      const { client } = inboxTruthClient();
+      const pill = await movedFromAllMail(client);
+      await goTo("Inbox");
+      await click(rowButton("Lunch this Friday?"));
+      expect(readerButtons()).toContain("Archive");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+
+      // As Archive leaves it: the letter is gone from the folder on screen,
+      // and so is the reader that showed it there.
+      expect(threadList()).not.toContain("Lunch this Friday?");
+      expect(
+        document.body.querySelector('section[aria-label="Message reader"]')
+          ?.textContent,
+      ).toContain("Choose a message");
+    });
+
+    it("re-reads an Inbox that was still loading when Undo landed", async () => {
+      const { client } = inboxTruthClient();
+      const pill = await movedFromAllMail(client);
+      // The Inbox is read while the letter is in it, and the answer lands
+      // only after Undo took it out again.
+      const listThreads = vi.mocked(client.listThreads);
+      const read = listThreads.getMockImplementation()!;
+      const landing = deferred<void>();
+      listThreads.mockImplementationOnce(async (input, signal) => {
+        const page = await read(input, signal);
+        await landing.promise;
+        return page;
+      });
+      await goTo("Inbox");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+      await act(async () => landing.resolve());
+      await settle();
+      await settle();
+
+      expect(threadList()).not.toContain("Lunch this Friday?");
+    });
+
+    it("searches the Inbox again when Undo lands on its results", async () => {
+      const { client } = inboxTruthClient();
+      const pill = await movedFromAllMail(client);
+      await goTo("Inbox");
+      await setInput(
+        document.body.querySelector('input[aria-label="Search mail"]') as HTMLInputElement,
+        "Lunch",
+      );
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 200)));
+      await settle();
+      expect(threadList()).toContain("Lunch this Friday?");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+
+      expect(threadList()).not.toContain("Lunch this Friday?");
     });
   });
 

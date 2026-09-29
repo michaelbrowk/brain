@@ -1742,10 +1742,12 @@ export function MailSurface({
 
   /**
    * A single list the reader switched into while a Done was still landing
-   * archives on that account. The list loaded at the switch, before the last
-   * request landed, so it can still show a row the server has since
-   * archived — and the next silent refresh is up to a minute away. Asked
-   * again as soon as it is ready; a switch elsewhere drops the request.
+   * archives on that account, or an Inbox an Undo of Move to Inbox took a
+   * letter out of. The list loaded before the last request landed, so it can
+   * still show a row the server has since archived — and the next silent
+   * refresh is up to a minute away, and never comes for a search. Asked
+   * again as soon as it is ready, a search searched again; a switch elsewhere
+   * drops the request.
    */
   const refreshAfterRunRef = useRef<{
     readonly accountId: string;
@@ -1765,12 +1767,23 @@ export function MailSurface({
     // back here when it lands.
     if (threadStateRef.current.kind !== "ready") return;
     refreshAfterRunRef.current = null;
+    const query = searchQueryRef.current;
+    if (query.trim() !== "") {
+      void loadSearch(
+        pending.accountId,
+        pending.mailboxId,
+        query,
+        new AbortController().signal,
+        false,
+      );
+      return;
+    }
     void refreshThreadsSilently(
       pending.accountId,
       pending.mailboxId,
       new AbortController().signal,
     );
-  }, [refreshThreadsSilently]);
+  }, [loadSearch, refreshThreadsSilently]);
   useEffect(() => {
     refreshAfterRun();
   }, [refreshAfterRun, threadState]);
@@ -3348,10 +3361,13 @@ export function MailSurface({
   /**
    * Undo of Move to Inbox: the letter leaves the Inbox again. The pill stands
    * for nine seconds and the reader may have moved on inside them, so the
-   * answer goes where the letter is on screen. A reader still on it takes it
-   * in place and offers Move to Inbox again. An Inbox column, the account's
-   * own or All inboxes, re-reads its first page, which no longer holds the
-   * row. Any other folder lists the letter either way.
+   * answer goes where the letter is on screen. An Inbox column, the account's
+   * own or All inboxes, no longer holds it: a reader open on it there closes,
+   * as Archive closes it, and the column is read again. The account's Inbox is
+   * read the way a Done that landed late reads it, so a list still loading or
+   * showing a search is not skipped. Any other folder lists the letter either
+   * way, and a reader on it there takes it in place and offers Move to Inbox
+   * again.
    */
   const undoMoveToInbox = useCallback(
     async (thread: MailThreadListItem) => {
@@ -3367,8 +3383,22 @@ export function MailSurface({
         mutationLockRef.current = false;
         setMutating(false);
       }
+      const unified = selectedAccountIdRef.current === UNIFIED_ACCOUNT_ID;
+      const accountInbox =
+        selectedAccountIdRef.current === accountId &&
+        selectedMailboxIdRef.current === "inbox";
       const reader = readerStateRef.current;
       if (
+        (unified || accountInbox) &&
+        selectedThreadIdRef.current === threadId &&
+        selectedThreadAccountIdRef.current === accountId
+      ) {
+        selectedThreadIdRef.current = null;
+        selectedThreadAccountIdRef.current = null;
+        setSelectedThreadId(null);
+        setReaderState({ kind: "idle" });
+        clearStickyOpen();
+      } else if (
         reader.kind === "ready" &&
         reader.detail.thread.accountId === accountId &&
         reader.detail.thread.threadId === threadId
@@ -3378,20 +3408,20 @@ export function MailSurface({
           detail: withLetterInInbox(reader.detail, false),
         });
       }
-      if (selectedAccountIdRef.current === UNIFIED_ACCOUNT_ID) {
+      if (unified) {
         void refreshUnifiedSilently(new AbortController().signal);
-      } else if (
-        selectedAccountIdRef.current === accountId &&
-        selectedMailboxIdRef.current === "inbox"
-      ) {
-        void refreshThreadsSilently(
-          accountId,
-          "inbox",
-          new AbortController().signal,
-        );
+      } else if (accountInbox) {
+        refreshAfterRunRef.current = { accountId, mailboxId: "inbox" };
+        refreshAfterRun();
       }
     },
-    [client, onToast, refreshThreadsSilently, refreshUnifiedSilently],
+    [
+      clearStickyOpen,
+      client,
+      onToast,
+      refreshAfterRun,
+      refreshUnifiedSilently,
+    ],
   );
 
   /** The sentence a landed reader action says. Move to Inbox carries an Undo,

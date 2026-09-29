@@ -73,6 +73,13 @@ export type UnifiedStream = {
    * counts as the next page.
    */
   readonly repage?: boolean;
+  /**
+   * How many times a page-one read has brought this stream back from a sync
+   * hold or a failure. The list's scroll sentinel re-arms on it: a heal can
+   * hand back exactly the rows the stream had, and a sentinel that waited for
+   * the row count to move never asked for the next page again.
+   */
+  readonly heals?: number;
   readonly status: UnifiedStreamStatus;
   readonly sync: MailThreadPage["sync"] | null;
 };
@@ -193,12 +200,15 @@ export function reconcileStreamPageOne(
   stream: UnifiedStream,
   page: Pick<MailThreadPage, "items" | "nextCursor" | "sync">,
 ): UnifiedStream {
+  const cursorLost = stream.status !== "ready";
+  const heals = cursorLost ? (stream.heals ?? 0) + 1 : stream.heals;
   if (stream.items.length <= UNIFIED_PAGE_SIZE || page.items.length === 0) {
     return {
       ...stream,
       items: page.items,
       nextCursor: page.nextCursor,
       repage: false,
+      heals,
       status: "ready",
       sync: page.sync,
     };
@@ -210,12 +220,12 @@ export function reconcileStreamPageOne(
       compareUnified(item, lastPageItem) > 0 &&
       !pageKeys.has(unifiedThreadKey(item)),
   );
-  const cursorLost = stream.status !== "ready";
   return {
     ...stream,
     items: [...page.items, ...tail],
     nextCursor: cursorLost ? page.nextCursor : stream.nextCursor,
     repage: cursorLost ? page.nextCursor !== null : stream.repage,
+    heals,
     status: "ready",
     sync: page.sync,
   };

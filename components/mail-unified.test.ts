@@ -295,6 +295,26 @@ describe("reconcileStreamPageOne", () => {
     expect(next.items).toEqual(fresh);
   });
 
+  it("counts a heal, shallow or deep, and not a refresh of a ready stream", () => {
+    // The scroll sentinel re-arms on this count: a heal can hand back exactly
+    // the rows the stream had, so the row count alone never moves.
+    const rows = (length: number) =>
+      Array.from({ length }, (_value, index) =>
+        item({
+          accountId: ACCOUNT_A,
+          threadId: `t${String(index).padStart(2, "0")}`,
+          lastMessageAt: 10_000 - index * 10,
+        }),
+      );
+    const shallow = stream(ACCOUNT_A, { items: rows(50), status: "loading" });
+    const healed = reconcileStreamPageOne(shallow, page(rows(50)));
+    expect(healed.heals).toBe(1);
+    expect(reconcileStreamPageOne(healed, page(rows(50))).heals).toBe(1);
+
+    const deep = stream(ACCOUNT_A, { items: rows(60), status: "error", heals: 1 });
+    expect(reconcileStreamPageOne(deep, page(rows(60).slice(0, 50))).heals).toBe(2);
+  });
+
   it("treats an empty fresh page as authoritative even for a deep stream", () => {
     const deepItems = Array.from({ length: 60 }, (_value, index) =>
       item({

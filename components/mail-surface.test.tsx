@@ -6851,6 +6851,111 @@ describe("MailSurface", () => {
         ]);
         expect(() => findButton("Load more")).toThrow();
       });
+
+      /** The column scrolled to its end. Every observer the list makes reports
+       *  its sentinel in view as soon as it observes it, the way a real one
+       *  does, and none reports once disconnected. Nothing here presses the
+       *  sr-only Load more, so what pages is what scrolling does. */
+      function sentinelInView() {
+        vi.stubGlobal(
+          "IntersectionObserver",
+          class {
+            private readonly targets = new Set<Element>();
+            constructor(private readonly callback: IntersectionObserverCallback) {}
+            observe(target: Element) {
+              this.targets.add(target);
+              queueMicrotask(() => {
+                if (!this.targets.has(target)) return;
+                this.callback(
+                  [{ target, isIntersecting: true } as IntersectionObserverEntry],
+                  this as unknown as IntersectionObserver,
+                );
+              });
+            }
+            unobserve(target: Element) {
+              this.targets.delete(target);
+            }
+            disconnect() {
+              this.targets.clear();
+            }
+            takeRecords() {
+              return [];
+            }
+          },
+        );
+      }
+
+      async function until(ok: () => boolean, what: string) {
+        for (let round = 0; round < 60; round += 1) {
+          if (ok()) return;
+          await settle();
+        }
+        throw new Error(`not reached: ${what}`);
+      }
+
+      it("scrolls on past its loaded rows after a sync holds a deep page", async () => {
+        vi.useFakeTimers();
+        sentinelInView();
+        const { listThreads } = deepStreamClient(held);
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await until(
+          () => cursorsAsked(listThreads).length === 2,
+          "scrolling reaches the held page",
+        );
+        expect(cursorsAsked(listThreads)).toEqual(["s1-page-2", "s1-page-3"]);
+
+        // The quiet re-read heals the stream with exactly the rows it had,
+        // and the sentinel still in view asks for what comes after them.
+        await wait(1_500);
+        await until(
+          () => cursorsAsked(listThreads).length === 4,
+          "scrolling goes on after the heal",
+        );
+        expect(cursorsAsked(listThreads)).toEqual([
+          "s1-page-2",
+          "s1-page-3",
+          "s2-page-2",
+          "s2-page-3",
+        ]);
+      });
+
+      it("scrolls on past its loaded rows after Try again heals a deep page", async () => {
+        sentinelInView();
+        const { listThreads } = deepStreamClient(() => new Error("outage"));
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await until(
+          () =>
+            document.body.textContent?.includes(
+              `${accountA.emailAddress} couldn’t load`,
+            ) ?? false,
+          "scrolling reaches the page that fails",
+        );
+        expect(cursorsAsked(listThreads)).toEqual(["s1-page-2", "s1-page-3"]);
+
+        await click(findButton("Try again"));
+        await until(
+          () => cursorsAsked(listThreads).length === 4,
+          "scrolling goes on after Try again",
+        );
+        expect(cursorsAsked(listThreads)).toEqual([
+          "s1-page-2",
+          "s1-page-3",
+          "s2-page-2",
+          "s2-page-3",
+        ]);
+      });
     });
 
     it("fetches only the starved stream on Load more", async () => {

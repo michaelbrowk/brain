@@ -707,16 +707,20 @@ export const defaultMailSurfaceClient: MailSurfaceClient = {
   },
 
   async decideSender(input, signal) {
-    const payload = await requestJson("/api/mail/senders/decisions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        address: input.address,
-        scope: input.scope,
-        decision: input.decision,
-      }),
-      signal,
-    });
+    const payload = await requestJsonWithin(
+      "/api/mail/senders/decisions",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          address: input.address,
+          scope: input.scope,
+          decision: input.decision,
+        }),
+        signal,
+      },
+      MAIL_MUTATION_TIMEOUT_MS,
+    );
     return readSenderDecisionResult(payload);
   },
 
@@ -725,9 +729,10 @@ export const defaultMailSurfaceClient: MailSurfaceClient = {
       throw new Error("invalid mail sender decision");
     }
     const query = input.restore === false ? "?restore=false" : "";
-    const payload = await requestJson(
+    const payload = await requestJsonWithin(
       `/api/mail/senders/decisions/${input.decisionId}${query}`,
       { method: "DELETE", signal },
+      MAIL_MUTATION_TIMEOUT_MS,
     );
     return readSenderUndoResult(payload);
   },

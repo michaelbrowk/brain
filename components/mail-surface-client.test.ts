@@ -1318,6 +1318,46 @@ describe("defaultMailSurfaceClient mutation deadline", () => {
     return { fetchMock, signals };
   }
 
+  it.each([
+    [
+      "decision",
+      () =>
+        defaultMailSurfaceClient.decideSender({
+          address: "lena@example.test",
+          scope: "address",
+          decision: "block",
+        }),
+    ],
+    [
+      "Undo",
+      () =>
+        defaultMailSurfaceClient.undoSenderDecision({
+          decisionId: `decision-a${"0".repeat(30)}ab`,
+        }),
+    ],
+  ])("gives up on a sender %s nobody answers, and says it was the clock", async (_, call) => {
+    vi.useFakeTimers();
+    try {
+      hangingFetch();
+      const outcome = call().then(
+        () => "resolved",
+        (error: unknown) => error,
+      );
+      await vi.advanceTimersByTimeAsync(MAIL_MUTATION_TIMEOUT_MS - 1);
+      let settled = false;
+      void outcome.then(() => {
+        settled = true;
+      });
+      await Promise.resolve();
+      expect(settled).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(isMailMutationTimeout(await outcome)).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("gives up on a thread mutation nobody answers, and says it was the clock", async () => {
     vi.useFakeTimers();
     try {

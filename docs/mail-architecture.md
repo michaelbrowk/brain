@@ -551,7 +551,13 @@ as a decision reads it and the display name as cached, and no other thread
 carries one: a decision names that sender, and neither the first entry of
 `participants` nor a Reply-To is that. It is tier 5 with `newSender` and
 leaves with it in every lower projection. The name is passed through for the
-UI to say and is never written to `senders.sqlite3`.
+UI to say and is never written to `senders.sqlite3`. While the switch is on, a
+thread whose first sender the archiver's own rule blocks (the address's block,
+or the domain's block for an address the owner does not know) carries
+`senderBlocked: true` until the next archive step takes it out of the Inbox;
+no waiting thread carries it, and it leaves the lower projections with the
+other two. The mail push reads it to stay quiet about a letter already
+refused in the minute between its arrival and that archive.
 
 **Replies.** A first message that carries `In-Reply-To` or `References`
 answers someone, and cold outreach carries neither, so a reply-shaped letter

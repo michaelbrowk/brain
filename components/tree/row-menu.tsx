@@ -145,8 +145,10 @@ export function RowMenu({
  * The same right-click menu for a row that is not a page: the panel, its
  * entrance and its items are the tree's, fed the row's own actions, so a menu
  * on a mail row and a menu on a page cannot drift apart. Radix opens it on a
- * long press as well, which is how a phone reaches it. `wide` takes the nav
- * menu's 264 for items that carry an address.
+ * long press as well, which is how a phone reaches it. `wide` is for items
+ * that carry an address: the nav menu's 264 at least, growing to its words
+ * up to 360 so "everyone at" a domain is read whole, and never past the
+ * window's inset.
  */
 export function ActionContextMenu({
   actions,
@@ -162,7 +164,11 @@ export function ActionContextMenu({
       <Context.Trigger asChild>{children}</Context.Trigger>
       <Context.Portal>
         <Context.Content
-          className={wide ? "brain-menu z-[var(--z-modal)] w-[264px]" : PANEL}
+          className={
+            wide
+              ? "brain-menu z-[var(--z-modal)] min-w-[264px] max-w-[min(360px,calc(100vw-16px))]"
+              : PANEL
+          }
         >
           {actions.map((a) => (
             <div key={a.key}>

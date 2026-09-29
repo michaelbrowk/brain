@@ -186,7 +186,7 @@ export function MailRow({
             <span
               className={`min-w-0 truncate text-[13px] ${
                 thread.unread ? "font-semibold text-ink" : "text-ink-2"
-              }`}
+              }${waitingOn ? " max-w-full shrink-0" : ""}`}
             >
               {sender}
             </span>

@@ -8980,6 +8980,85 @@ describe("MailSurface", () => {
       expect(pendingOpenThread()).toBeNull();
     });
 
+    /** From another folder of the same account, or over a search, the column
+     *  goes to Inbox first as well, and follows the letter to All Mail only
+     *  when Inbox does not hold it: the same letter opens in the same place
+     *  whichever folder the reader happened to be standing on. */
+    function inboxFirstClient() {
+      return makeClient({
+        // Sent and the search hold nothing; All Mail holds the letter too, so
+        // a column that skipped Inbox would open it there.
+        listMailboxThreads: vi.fn().mockImplementation(({ mailboxId }) =>
+          Promise.resolve(mailboxThreadPage(mailboxId, mailboxId === "all" ? [thread] : [])),
+        ),
+        searchThreads: vi
+          .fn()
+          .mockImplementation(({ mailboxId }) =>
+            Promise.resolve(searchThreadPage(mailboxId, [])),
+          ),
+      });
+    }
+
+    it("looks in Inbox before All Mail when the request arrives on Sent", async () => {
+      const client = inboxFirstClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("Sent");
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, thread.threadId, "all");
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+      await settle();
+
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+      });
+      expect(client.readMailboxThread).not.toHaveBeenCalled();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+    });
+
+    it("looks in Inbox before All Mail when the request arrives over a search", async () => {
+      vi.useFakeTimers();
+      const client = inboxFirstClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      const input = document.body.querySelector(
+        'input[aria-label="Search mail"]',
+      ) as HTMLInputElement;
+      await setInput(input, "nothing here");
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      await settle();
+      expect(client.searchThreads).toHaveBeenCalled();
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, thread.threadId, "all");
+      });
+      for (let round = 0; round < 60; round += 1) {
+        if (vi.mocked(client.readThread).mock.calls.length > 0) break;
+        await act(async () => vi.advanceTimersByTimeAsync(20));
+        await settle();
+      }
+
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+      });
+      expect(client.readMailboxThread).not.toHaveBeenCalled();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+      expect(
+        (document.body.querySelector('input[aria-label="Search mail"]') as HTMLInputElement)
+          .value,
+      ).toBe("");
+    });
+
     it("opens a letter found outside Inbox from All inboxes too", async () => {
       const archivedB: MailThreadListItem = {
         ...archived,

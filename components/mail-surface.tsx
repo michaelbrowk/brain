@@ -2672,12 +2672,12 @@ export function MailSurface({
    *  Three answers, in this order. The letter is in the list in hand, and
    *  `selectThread` opens it exactly as a press on the row would. It is in
    *  another account or another mailbox, and the column moves there first,
-   *  one switch and one move per request, and the list that follows brings
-   *  the letter with it. Or it is in neither, and one read of that mailbox
-   *  fetches the row to open it with. A request that cannot be answered is
-   *  dropped rather than retried: Mail is open at the list it was going to
-   *  show anyway, which is not a failure to report to whoever pressed a
-   *  notification.
+   *  by way of the letter's own Inbox and at most once per kind of move, and
+   *  the list that follows brings the letter with it. Or it is in neither,
+   *  and one read of that mailbox fetches the row to open it with. A request
+   *  that cannot be answered is dropped rather than retried: Mail is open at
+   *  the list it was going to show anyway, which is not a failure to report
+   *  to whoever pressed a notification.
    *
    *  The mailbox is the request's own: Inbox for the centre, and for the
    *  palette whichever mailbox its search read in that account, All Mail on
@@ -2701,12 +2701,13 @@ export function MailSurface({
     switched: boolean;
     listAtMove: MailThreadListState | null;
     fetched: boolean;
-    /** The column was moved to the request's mailbox with an empty query; a
-     *  second move would be a loop, so the request is dropped instead if the
-     *  column is still elsewhere after the first. The switch re-arms it once:
-     *  it lands on the other account's Inbox, a column this request has not
-     *  moved yet. */
+    /** The column was moved back to Inbox with an empty query for this
+     *  request; a second move would be a loop, so the request is dropped
+     *  instead if the column is still elsewhere after the first. */
     reset: boolean;
+    /** The column was moved on from the letter's own Inbox to the mailbox the
+     *  request names. Once, for the same reason. */
+    followed: boolean;
   } | null>(null);
 
   const fetchRequestedThread = useCallback(
@@ -2766,6 +2767,7 @@ export function MailSurface({
         listAtMove: null,
         fetched: false,
         reset: false,
+        followed: false,
       };
       openRequestRef.current = ledger;
     }
@@ -2804,66 +2806,70 @@ export function MailSurface({
       return;
     }
 
-    // The mailbox on screen is the one an incoming request is about, whichever
-    // account it names. Checked before the switch below rather than after
+    const sameAccount = selectedAccountId === pendingOpen.accountId;
+    const plain = searchQuery.trim() === "";
+    // The list on screen has not committed since the column last moved, so
+    // "not in the list" is not yet an answer.
+    const listPending =
+      threadState.kind === "loading" || threadState === ledger.listAtMove;
+
+    // At the letter's own mailbox with no query: its page was the last list
+    // to look in, and the letter is fetched from that mailbox.
+    if (sameAccount && selectedMailboxId === mailboxId && plain) {
+      if (listPending || ledger.fetched) return;
+      ledger.fetched = true;
+      void fetchRequestedThread(pendingOpen, mailboxId);
+      return;
+    }
+
+    // In the letter's own Inbox, for a letter found in another mailbox. Most
+    // of what the palette finds in All Mail is in Inbox too, and there it
+    // opens with its Archive, so the Inbox page is waited for; only a letter
+    // it does not hold is followed to the mailbox the request names.
+    if (sameAccount && selectedMailboxId === "inbox" && plain) {
+      if (listPending) return;
+      if (ledger.followed) {
+        clearOpenThreadRequest();
+        return;
+      }
+      ledger.followed = true;
+      ledger.listAtMove = threadState;
+      selectMailbox(mailboxId);
+      return;
+    }
+
+    // Anywhere else the column goes back to Inbox first, whichever account
+    // the request names. Checked before the switch below rather than after
     // it: switching resets to Inbox and clears the query on its way, so a
     // cross-account request would otherwise answer where a same-account one
     // did not, for the same reader standing on the same other folder. A
     // request that arrives on Sent, or over a search, moves the column to
     // Inbox with an empty query and stays standing: the press came from
     // outside Mail (the palette, the centre) and named a letter, and a folder
-    // the reader was on a moment ago is not a reason to lose it. In the
-    // letter's own account the move goes straight to the request's mailbox;
-    // in any other it goes to Inbox, where the switch would land anyway. Once
-    // per column: the reset commits a new list, the effect runs again on it,
-    // and a second reset would only spin.
-    const sameAccount = selectedAccountId === pendingOpen.accountId;
-    const home = sameAccount ? mailboxId : "inbox";
-    // The list on screen has not committed since the column last moved, so
-    // "not in the list" is not yet an answer.
-    const listPending =
-      threadState.kind === "loading" || threadState === ledger.listAtMove;
-    // Standing in the letter's own Inbox, a request for another mailbox waits
-    // for the Inbox page before it moves. Most of what the palette finds in
-    // All Mail is in Inbox too, and there it opens with its Archive; only a
-    // letter the page does not hold is followed to the mailbox it came from.
-    if (
-      sameAccount &&
-      home !== "inbox" &&
-      selectedMailboxId === "inbox" &&
-      searchQuery.trim() === "" &&
-      listPending
-    ) {
-      return;
-    }
-    if (selectedMailboxId !== home || searchQuery.trim() !== "") {
+    // the reader was on a moment ago is not a reason to lose it. Once, per
+    // request: the reset commits a new list, the effect runs again on it, and
+    // a second reset would only spin.
+    if (selectedMailboxId !== "inbox" || !plain) {
       if (ledger.reset) {
         clearOpenThreadRequest();
         return;
       }
       ledger.reset = true;
       ledger.listAtMove = threadState;
-      // `selectMailbox` clears the query on its way, but it stands down where
-      // there is no single account to move (the merged stream only ever
-      // searches), so the query is cleared on its own as well.
-      selectMailbox(home);
+      // `selectMailbox` clears the query on its way to Inbox, but it stands
+      // down where there is no single account to move (the merged stream
+      // only ever searches), so the query is cleared on its own as well.
+      selectMailbox("inbox");
       changeSearchQuery("");
       return;
     }
 
-    if (!sameAccount) {
-      if (ledger.switched) return;
-      ledger.switched = true;
-      ledger.listAtMove = threadState;
-      ledger.reset = false;
-      selectAccount(pendingOpen.accountId);
-      return;
-    }
-
-    if (listPending) return;
-    if (ledger.fetched) return;
-    ledger.fetched = true;
-    void fetchRequestedThread(pendingOpen, mailboxId);
+    // In another account's Inbox, or in All inboxes: the switch lands on the
+    // letter's own Inbox, and the list that follows brings it or does not.
+    if (ledger.switched) return;
+    ledger.switched = true;
+    ledger.listAtMove = threadState;
+    selectAccount(pendingOpen.accountId);
   }, [
     accountsState,
     changeSearchQuery,

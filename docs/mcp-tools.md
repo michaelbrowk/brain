@@ -14,6 +14,15 @@ such an origin, and it is worth reading: the bearer tokens cross that network in
 the clear, and anything else on it can read them. Every other `http` origin,
 including a public name like `http://brain.example.com`, is refused.
 
+No variable turns that refusal off. MCP on a public name needs a TLS terminator in front of Brain: it holds the
+certificate, answers on `https://`, and forwards to Brain on the loopback, and
+`BRAIN_PUBLIC_ORIGIN` is set to the `https://` origin it answers on. The
+installer sets one up with Caddy when it is given a domain (`BRAIN_DOMAIN`, see
+`README.md`), and `ops/nginx/brain.conf.example` is the same terminator for
+nginx on a host with nothing in front of it. A house install that wants its
+tokens off the clear can do the same on its private name with a certificate
+from its own authority, since an `https` origin is accepted on any host.
+
 Two rules hold for every row. An answer is JSON in one text block, so a client
 parses `content[0].text` and nothing else. A refusal Brain decided on is an
 `{ error, reason }` object with `isError` set, not a transport error, so the

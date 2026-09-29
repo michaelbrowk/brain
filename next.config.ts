@@ -94,7 +94,11 @@ const nextConfig: NextConfig = {
       "./node_modules/.pnpm/node_modules/html-encoding-sniffer/**/*",
       "./node_modules/.pnpm/node_modules/is-potential-custom-element-name/**/*",
       "./node_modules/.pnpm/node_modules/lru-cache/**/*",
-      "./node_modules/.pnpm/node_modules/parse5/**/*",
+      // parse5 is the exception: the mail sanitizer depends on it directly,
+      // so pnpm links it at the top level and no longer hoists a copy into
+      // the fallback. Node reaches the top-level link from jsdom's directory
+      // just the same, walking up past the store.
+      "./node_modules/parse5/**/*",
       "./node_modules/.pnpm/node_modules/saxes/**/*",
       "./node_modules/.pnpm/node_modules/symbol-tree/**/*",
       "./node_modules/.pnpm/node_modules/tough-cookie/**/*",

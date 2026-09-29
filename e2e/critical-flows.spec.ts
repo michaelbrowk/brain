@@ -7125,6 +7125,15 @@ test("an external edit is never overwritten by a stale local draft", async ({
   // so typing lands inside Milkdown's 200 ms serialization window.
   await page.getByRole("button", { name: "Home" }).click();
   await expect(page).toHaveURL("/");
+  // The canvas leaves through its exit transition (`AnimatePresence
+  // mode="wait"`), and until that ends this page's editor is still in the
+  // document, visible and editable. Coming back inside that window found it
+  // again: the fill below typed into the departing instance, the canvas that
+  // mounted after it read the cached "Base body", and the typed text went to
+  // the draft while the editor on screen showed the old body, about one run
+  // in three. Waiting for it to be gone makes the return mount a fresh editor
+  // from the cache, which is the path this test is about.
+  await expect(page.getByRole("textbox", { name: "Page content" })).toHaveCount(0);
 
   // A first Milkdown serialization can normalize the stored Markdown. Let any
   // such navigation flush finish before simulating an independent writer.

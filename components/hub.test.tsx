@@ -68,6 +68,56 @@ describe("Hub", () => {
     vi.unstubAllGlobals();
   });
 
+  describe("the arrival focus", () => {
+    /** The first frame held back, so a case can do what a slow machine does
+     *  between the Hub's mount and the frame its focus waits for. */
+    function holdFirstFrame(): () => void {
+      let frame: FrameRequestCallback | null = null;
+      vi.stubGlobal(
+        "requestAnimationFrame",
+        vi.fn((callback: FrameRequestCallback) => {
+          frame = callback;
+          return 1;
+        }),
+      );
+      return () => frame?.(0);
+    }
+
+    const capture = () =>
+      host.querySelector('input[aria-label="New thought"]') as HTMLInputElement;
+
+    it("puts the caret in the capture field on a pointer device", async () => {
+      const runFrame = holdFirstFrame();
+      await act(async () =>
+        root.render(<Hub tree={[]} onSelect={() => {}} onCreate={async () => null} />),
+      );
+      await act(async () => runFrame());
+      expect(document.activeElement).toBe(capture());
+    });
+
+    it("leaves focus in a dialog that opened before its frame", async () => {
+      // ⌘K pressed the moment the shell listened, on a machine slow enough
+      // that the palette opened before this frame: the search typed into the
+      // capture field behind the dialog, and Enter would have made it a task.
+      const runFrame = holdFirstFrame();
+      await act(async () =>
+        root.render(<Hub tree={[]} onSelect={() => {}} onCreate={async () => null} />),
+      );
+      const dialog = document.createElement("div");
+      dialog.setAttribute("role", "dialog");
+      const search = document.createElement("input");
+      dialog.appendChild(search);
+      document.body.appendChild(dialog);
+      try {
+        search.focus();
+        await act(async () => runFrame());
+        expect(document.activeElement).toBe(search);
+      } finally {
+        dialog.remove();
+      }
+    });
+  });
+
   it("explains the three sidebar items a new notebook shows", async () => {
     await act(async () =>
       root.render(

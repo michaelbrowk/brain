@@ -24,6 +24,7 @@ overrides:
 patchedDependencies:
   '@zone-eu/mailsplit@5.4.14': 452069ef428842215c414c3f726bc5daff01c0bed5d52de6d1cd0ad731ad86e3
   mailparser@3.9.14: e869d63d31d4a908b7bc96747013bd9f00e9b652e5a3592b528601f06687f2de
+  parse5@8.0.1: 8af1aebe5e81179f321a0cd8f3b8d0aa8846ece0eb9ffdfdca7a8402d0cff877
 
 importers:
 
@@ -122,6 +123,9 @@ importers:
       next-themes:
         specifier: ^0.4.6
         version: 0.4.6(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      parse5:
+        specifier: 8.0.1
+        version: 8.0.1(patch_hash=8af1aebe5e81179f321a0cd8f3b8d0aa8846ece0eb9ffdfdca7a8402d0cff877)
       pdfjs-dist:
         specifier: 6.3.289
         version: 6.3.289
@@ -8382,7 +8386,7 @@ snapshots:
       html-encoding-sniffer: 6.0.0
       is-potential-custom-element-name: 1.0.1
       lru-cache: 11.5.2
-      parse5: 8.0.1
+      parse5: 8.0.1(patch_hash=8af1aebe5e81179f321a0cd8f3b8d0aa8846ece0eb9ffdfdca7a8402d0cff877)
       saxes: 6.0.0
       symbol-tree: 3.2.4
       tough-cookie: 6.0.2
@@ -9167,7 +9171,7 @@ snapshots:
       is-decimal: 2.0.1
       is-hexadecimal: 2.0.1
 
-  parse5@8.0.1:
+  parse5@8.0.1(patch_hash=8af1aebe5e81179f321a0cd8f3b8d0aa8846ece0eb9ffdfdca7a8402d0cff877):
     dependencies:
       entities: 8.0.0
 

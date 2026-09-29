@@ -1,4 +1,12 @@
 import { Parser } from "htmlparser2";
+import {
+  defaultTreeAdapter,
+  html,
+  parseFragment,
+  serialize,
+  type DefaultTreeAdapterMap,
+  type TreeAdapter,
+} from "parse5";
 
 import { validateMailRemoteImageSourceUrl } from "../security";
 
@@ -110,8 +118,25 @@ const OVERFLOW_KEYWORDS = Object.freeze([
   "scroll",
   "auto",
 ]);
+/**
+ * The deepest element the tree builder may nest; a deeper message is refused
+ * like any other over budget. parse5 walks its stack of open elements on most
+ * tags and its serializer recurses once per level, so without a bound both
+ * the time and the call stack would be the sender's choice. Chromium's parser
+ * nests no deeper than 512 either.
+ */
+const MAX_TREE_DEPTH = 512;
+/**
+ * The most attributes one element may carry; a message with more is refused
+ * like any other over budget. A busy table cell in bulk mail carries about
+ * thirty.
+ */
+const MAX_ELEMENT_ATTRIBUTES = 256;
 
-/** Event-based sanitizer. It never builds a DOM and never retains remote resources. */
+/**
+ * Sanitizes the tree a browser would build from the markup, event by event,
+ * and never retains remote resources.
+ */
 export function sanitizeMailHtml(
   source: string,
   budget: MailHtmlSanitizerBudget,
@@ -140,6 +165,9 @@ function sanitizeMailHtmlInternal(
   budget: MailHtmlSanitizerBudget,
   allocateRemoteImageId: ((sourceUrl: string) => string) | null,
 ): SanitizedMailHtmlResult {
+  if (source.length > budget.maxCharacters) {
+    throw limitError("HTML exceeds the character limit");
+  }
   const output: string[] = [];
   const emittedStack: string[] = [];
   const remoteImageSuppressionStack: Array<{
@@ -153,6 +181,10 @@ function sanitizeMailHtmlInternal(
   let nodes = 0;
   let attributes = 0;
   let suppressedDepth = 0;
+  // htmlparser2 reports each character reference as its own text event, and
+  // the markup it reads spells a no-break space, `&`, `<` and `>` that way. A
+  // run of text between two tags is still one node in the frame.
+  let inTextRun = false;
 
   const append = (value: string) => {
     if (value.length === 0) return;
@@ -174,6 +206,7 @@ function sanitizeMailHtmlInternal(
   const parser = new Parser(
     {
       onopentag(name, rawAttributes) {
+        inTextRun = false;
         const normalizedName = name.toLowerCase();
         const ancestorSuppressesRemoteImages =
           remoteImageSuppressionStack.at(-1)?.suppressed ?? false;
@@ -277,16 +310,22 @@ function sanitizeMailHtmlInternal(
         );
 
         append(`<${normalizedName}${safeAttributes.length ? ` ${safeAttributes.join(" ")}` : ""}>`);
+        // A parser drops the newline straight after `<pre>`. parse5 already
+        // dropped the sender's, so the frame is given one of its own to drop
+        // and a leading blank line in the text survives.
+        if (normalizedName === "pre") append("\n");
         if (!HTML_VOID_TAGS.has(normalizedName)) emittedStack.push(normalizedName);
       },
       ontext(value) {
         if (suppressedDepth > 0) return;
         const text = sanitizeText(value);
         if (text.length === 0) return;
-        admitNode();
+        if (!inTextRun) admitNode();
+        inTextRun = true;
         append(escapeHtml(text));
       },
       onclosetag(name) {
+        inTextRun = false;
         const normalizedName = name.toLowerCase();
         closeRemoteImageSuppressionFrame(
           remoteImageSuppressionStack,
@@ -311,7 +350,7 @@ function sanitizeMailHtmlInternal(
       recognizeSelfClosing: true,
     },
   );
-  parser.write(source);
+  parser.write(browserTreeMarkup(source, budget));
   parser.end();
   while (emittedStack.length > 0) {
     const emitted = emittedStack.pop()!;
@@ -322,6 +361,171 @@ function sanitizeMailHtmlInternal(
     html: sanitized.length === 0 ? null : sanitized,
     remoteImages: Object.freeze(remoteImages),
   });
+}
+
+/**
+ * The markup again, as the tree a browser builds from it. htmlparser2 closes
+ * an element on any matching end tag, straight through the table boundaries a
+ * browser respects, so a stray `</td>` in a nested table closed the outer cell
+ * and pulled the rest of the layout out of it. parse5 applies the HTML tree
+ * construction rules instead, and its serialization closes every element
+ * explicitly, which the event sanitizer below then reads without repairing.
+ *
+ * The context is a body element in a no-quirks document because the reader
+ * frame renders this output inside `<main>` of a `<!doctype html>` page: this
+ * is the tree the frame itself would build from the raw markup. Head elements
+ * land in place and are dropped as before. Scripting is off because the frame
+ * runs none, which is also how the frame reads the inside of a `<noscript>`:
+ * as markup, so an attribute value cannot end the element early.
+ */
+function browserTreeMarkup(
+  source: string,
+  budget: MailHtmlSanitizerBudget,
+): string {
+  const treeAdapter = boundedTreeAdapter(budget);
+  const fragment = parseFragment(
+    defaultTreeAdapter.createElement("body", html.NS.HTML, []),
+    source,
+    { scriptingEnabled: false, treeAdapter },
+  );
+  return serialize(fragment, { scriptingEnabled: false, treeAdapter });
+}
+
+type TreeParent = DefaultTreeAdapterMap["parentNode"];
+type TreeChild = DefaultTreeAdapterMap["childNode"];
+
+/**
+ * parse5's own tree, held to the sanitizer's budget while it is built.
+ *
+ * Every node counts when it is created: an element (a browser reopens an
+ * unclosed formatting element inside every block after it, so a short message
+ * can build far more elements than it spells), a comment, and a text node,
+ * which parse5 creates only when the text cannot join the node before it.
+ *
+ * The time it takes is the length of the markup times a constant, and three
+ * things keep it there. The patch in `patches/parse5@8.0.1.patch` finds a
+ * duplicate attribute in constant time, where parse5 scanned every attribute
+ * before it on the same tag. `MAX_TREE_DEPTH` bounds the stack of open
+ * elements parse5 walks on most tags, and with it the list of open formatting
+ * elements it walks on some: that bound is the constant, and it makes the
+ * worst message of the full size take about half a second. And the child
+ * arrays below change only at their ends. parse5 moves a parent's children
+ * one at a time by detaching the first, which as a splice shifts every child
+ * behind it, so detaching the first child only advances a count past it and
+ * the detached entries are cut off in one go when the whole array is next
+ * read. A node parse5 inserts before, or detaches from anywhere else, sits
+ * at or near the end of its parent, where the search starts.
+ */
+function boundedTreeAdapter(
+  budget: MailHtmlSanitizerBudget,
+): TreeAdapter<DefaultTreeAdapterMap> {
+  let nodes = 0;
+  let attributes = 0;
+  const admitNode = () => {
+    if (++nodes > budget.maxNodes) {
+      throw limitError("sanitized HTML exceeds the node limit");
+    }
+  };
+  // A template's content is a fragment with no parent of its own.
+  const templateHosts = new WeakMap<object, TreeParent>();
+  const assertDepth = (parent: TreeParent) => {
+    let depth = 1;
+    for (
+      let node: TreeParent | null = parent;
+      node !== null;
+      node = "parentNode" in node ? node.parentNode : (templateHosts.get(node) ?? null)
+    ) {
+      if (++depth > MAX_TREE_DEPTH) {
+        throw limitError("sanitized HTML exceeds the nesting limit");
+      }
+    }
+  };
+  const detachedFront = new WeakMap<TreeParent, number>();
+  const frontOf = (parent: TreeParent) => detachedFront.get(parent) ?? 0;
+  const insertAt = (parent: TreeParent, node: TreeChild, index: number) => {
+    parent.childNodes.splice(index, 0, node);
+    node.parentNode = parent;
+  };
+  return {
+    ...defaultTreeAdapter,
+    createElement(tagName, namespaceURI, attrs) {
+      if (attrs.length > MAX_ELEMENT_ATTRIBUTES) {
+        throw limitError("sanitized HTML exceeds the attribute limit of one element");
+      }
+      attributes += attrs.length;
+      if (attributes > budget.maxAttributes) {
+        throw limitError("sanitized HTML exceeds the attribute limit");
+      }
+      admitNode();
+      return defaultTreeAdapter.createElement(tagName, namespaceURI, attrs);
+    },
+    createCommentNode(data) {
+      admitNode();
+      return defaultTreeAdapter.createCommentNode(data);
+    },
+    // Every stray `<html>` tag merges its attributes into the root, and each
+    // merge reads the root's whole list, so the root obeys the same cap.
+    adoptAttributes(recipient, attrs) {
+      defaultTreeAdapter.adoptAttributes(recipient, attrs);
+      if (recipient.attrs.length > MAX_ELEMENT_ATTRIBUTES) {
+        throw limitError("sanitized HTML exceeds the attribute limit of one element");
+      }
+    },
+    insertText(parent, text) {
+      const last =
+        parent.childNodes.length > frontOf(parent) ? parent.childNodes.at(-1) : undefined;
+      if (last !== undefined && defaultTreeAdapter.isTextNode(last)) {
+        last.value += text;
+        return;
+      }
+      admitNode();
+      defaultTreeAdapter.appendChild(parent, defaultTreeAdapter.createTextNode(text));
+    },
+    insertTextBefore(parent, text, reference) {
+      const index = parent.childNodes.lastIndexOf(reference);
+      const previous = index > frontOf(parent) ? parent.childNodes[index - 1] : undefined;
+      if (previous !== undefined && defaultTreeAdapter.isTextNode(previous)) {
+        previous.value += text;
+        return;
+      }
+      admitNode();
+      insertAt(parent, defaultTreeAdapter.createTextNode(text), index);
+    },
+    appendChild(parent, node) {
+      if (defaultTreeAdapter.isElementNode(node)) assertDepth(parent);
+      defaultTreeAdapter.appendChild(parent, node);
+    },
+    insertBefore(parent, node, reference) {
+      if (defaultTreeAdapter.isElementNode(node)) assertDepth(parent);
+      insertAt(parent, node, parent.childNodes.lastIndexOf(reference));
+    },
+    detachNode(node) {
+      const parent = node.parentNode;
+      if (parent === null) return;
+      const front = frontOf(parent);
+      if (parent.childNodes[front] === node) {
+        detachedFront.set(parent, front + 1);
+      } else {
+        parent.childNodes.splice(parent.childNodes.lastIndexOf(node), 1);
+      }
+      node.parentNode = null;
+    },
+    getFirstChild(node) {
+      return node.childNodes[frontOf(node)];
+    },
+    getChildNodes(node) {
+      const front = detachedFront.get(node);
+      if (front !== undefined) {
+        node.childNodes.splice(0, front);
+        detachedFront.delete(node);
+      }
+      return node.childNodes;
+    },
+    setTemplateContent(template, content) {
+      templateHosts.set(content, template);
+      defaultTreeAdapter.setTemplateContent(template, content);
+    },
+  };
 }
 
 function sanitizeText(value: string): string {

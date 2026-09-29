@@ -293,6 +293,12 @@ test("@release the live palette's results scroll under the fade atom", async ({ 
   await openPalette(page);
   const palette = page.getByTestId("desktop-command-palette");
   await expect(palette).toBeVisible();
+  // The keys below go wherever focus is. Under memory pressure the Hub's
+  // arrival focus used to land a frame after ⌘K and pull it into the capture
+  // field behind the dialog, so the query became a thought and the list
+  // stayed empty. `components/hub.tsx` no longer takes focus out of a dialog;
+  // this is the state the typing depends on, asserted rather than assumed.
+  await expect(palette.getByRole("combobox")).toBeFocused();
   await page.keyboard.type("Palette fade");
   const list = palette.locator("[cmdk-list]");
   await expect(list.locator("[cmdk-item]")).toHaveCount(12);

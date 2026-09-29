@@ -170,10 +170,11 @@ symptom is a password that never works.
 `BRAIN_PUBLIC_ORIGIN` is the exact origin your browser shows — scheme, host,
 port, no path or trailing slash. `.env.example` ships a placeholder you have
 to edit. Trying Brain on this machine only: set `http://localhost:3020` —
-notes, login, share links and IMAP mail accounts all work with it. Two things
-wait for an `https://` origin — the MCP endpoint, whose route refuses to load
-under `http://` even with a static `MCP_TOKEN` (the MCP panel in Settings
-cannot load its details until then), and Gmail's Connect flow. The value also
+notes, login, share links and IMAP mail accounts all work with it. MCP works
+over plain `http://` only on your own network (loopback, a private address, or
+a name like `brain.lan`); on a public name it is refused until a TLS terminator
+is in front, as `docs/mcp-tools.md` describes. Gmail's Connect flow waits for
+an `https://` origin whatever the host. The value also
 has to match the address bar exactly: set `http://localhost:3020`, open
 `http://127.0.0.1:3020`, and adding a mail account is refused.
 
@@ -301,7 +302,7 @@ unusual-looking pin is worth much less than a knowingly vulnerable parser.
 | `NOTES_ROOT`         | Absolute host path of the notes folder (git-backed source of truth) |
 | `AUTH_SECRET`        | 32+ byte secret for cookies and domain-separated OAuth keys     |
 | `AUTH_PASSWORD_HASH` | bcrypt hash of the login password                               |
-| `BRAIN_PUBLIC_ORIGIN` | Exact origin the browser shows — `http://localhost:3020` for a local trial, `https://` before MCP and Gmail work |
+| `BRAIN_PUBLIC_ORIGIN` | Exact origin the browser shows — `http://localhost:3020` for a local trial, `https://` before Gmail works and before MCP works on a public name |
 | `MCP_TOKEN`          | Legacy full-access MCP token kept during the OAuth migration     |
 | `MCP_TOKEN_NAME`     | What the client on that token is called in the bell and under Connections (default `API token`) |
 | `BRAIN_EDGE_RATE_SECRET` | 256-bit edge proof shared only by nginx and Brain           |

@@ -1,0 +1,40 @@
+diff --git a/dist/tokenizer/index.js b/dist/tokenizer/index.js
+index 95f784618b9f2c72987257e56730a1fefa12c457..5927cd2931fd27d65a1462d87b82bcedc2ba1be2 100644
+--- a/dist/tokenizer/index.js
++++ b/dist/tokenizer/index.js
+@@ -160,6 +160,9 @@ export class Tokenizer {
+         this.currentCharacterToken = null;
+         this.currentToken = null;
+         this.currentAttr = { name: '', value: '' };
++        // Names already on the current tag, so a duplicate is found in constant
++        // time instead of by scanning every attribute before it.
++        this.currentAttrNames = new Set();
+         this.preprocessor = new Preprocessor(handler);
+         this.currentLocation = this.getCurrentLocation(-1);
+         this.entityDecoder = new EntityDecoder(htmlDecodeTree, (cp, consumed) => {
+@@ -285,6 +288,7 @@ export class Tokenizer {
+             attrs: [],
+             location: this.getCurrentLocation(1),
+         };
++        this.currentAttrNames = new Set();
+     }
+     _createEndTagToken() {
+         this.currentToken = {
+@@ -296,6 +300,7 @@ export class Tokenizer {
+             attrs: [],
+             location: this.getCurrentLocation(2),
+         };
++        this.currentAttrNames = new Set();
+     }
+     _createCommentToken(offset) {
+         this.currentToken = {
+@@ -333,7 +338,8 @@ export class Tokenizer {
+         var _a;
+         var _b;
+         const token = this.currentToken;
+-        if (getTokenAttr(token, this.currentAttr.name) === null) {
++        if (!this.currentAttrNames.has(this.currentAttr.name)) {
++            this.currentAttrNames.add(this.currentAttr.name);
+             token.attrs.push(this.currentAttr);
+             if (token.location && this.currentLocation) {
+                 const attrLocations = ((_a = (_b = token.location).attrs) !== null && _a !== void 0 ? _a : (_b.attrs = Object.create(null)));

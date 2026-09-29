@@ -313,8 +313,18 @@ export function Hub({
       // autofocus only where a pointer hovers: on a touch device a focused
       // field raises the keyboard on every arrival at Home, and the width
       // says nothing about the finger — an iPad at 1024 is as much a touch
-      // device as a phone at 390
-      if (window.matchMedia?.("(hover: hover)").matches) inputRef.current?.focus();
+      // device as a phone at 390.
+      //
+      // And never out of a dialog. This runs a frame after mount, and on a
+      // slow machine ⌘K lands inside that frame: the palette opened, took
+      // focus, and then this pulled it into the field behind the dialog, so
+      // the search was typed into a thought and Enter would have filed it.
+      if (
+        window.matchMedia?.("(hover: hover)").matches &&
+        !document.activeElement?.closest('[role="dialog"], [role="alertdialog"]')
+      ) {
+        inputRef.current?.focus();
+      }
     });
     return () => window.cancelAnimationFrame(frame);
   }, []);

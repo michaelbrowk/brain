@@ -4769,6 +4769,9 @@ export function MailSurface({
         );
         if (!account?.capabilities.threadMutations) return;
         if (event.key === "e") {
+          // Outside the Inbox `e` is a toggle, Move to Inbox and then Archive,
+          // so a held key's repeats would move the letter back and forth.
+          if (event.repeat) return;
           const direct = directActionForMailbox(
             selectedMailboxIdRef.current,
             letterInInbox(reader.detail),

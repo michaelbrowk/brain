@@ -2633,6 +2633,31 @@ describe("MailSurface", () => {
       expect(readerButtons()).not.toContain("Archive");
     });
 
+    it("moves the letter once for a held e, not back and forth with the key repeat", async () => {
+      const { client, updateThread } = inboxTruthClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      await click(findButton("Lunch this Friday?"));
+
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "e", cancelable: true }));
+      });
+      await settle();
+      // The key is still down: the repeats that follow are not presses.
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "e", repeat: true, cancelable: true }),
+        );
+      });
+      await settle();
+
+      expect(updateThread.mock.calls.map(([input]) => input.archive)).toEqual([false]);
+    });
+
     it("runs Move to Inbox from e where the letter is out of the Inbox", async () => {
       const { client, updateThread } = inboxTruthClient();
       await act(async () =>

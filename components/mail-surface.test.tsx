@@ -8528,11 +8528,14 @@ describe("MailSurface", () => {
     });
 
     it("leaves the list standing when the thread is nowhere to be found", async () => {
+      const onToast = vi.fn();
       const client = makeClient({
         readThread: vi.fn().mockRejectedValue(new MailApiError(404, "not_found")),
       });
       await act(async () =>
-        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        root.render(
+          <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+        ),
       );
       await settle();
       await enterSingleAccount();
@@ -8544,7 +8547,51 @@ describe("MailSurface", () => {
       // A row that cannot be opened is not an error to report to whoever
       // pressed it: Mail is open, at the list it was going to show anyway.
       expect(document.body.textContent).toContain("Lunch this Friday?");
+      expect(onToast).not.toHaveBeenCalled();
     });
+
+    it.each([
+      [404, "mail_thread_not_found"],
+      [503, "mail_sync_unavailable"],
+      [409, "mail_sync_in_progress"],
+    ])(
+      "says so once when the mailbox the search named cannot give the letter (%i)",
+      async (status, code) => {
+        // The palette's row was on screen a moment ago and the reader chose
+        // it. A pick that silently lands on "Choose a message" reads as a
+        // press that did nothing, which is how this bug was found.
+        const onToast = vi.fn();
+        const client = makeClient({
+          readThread: vi
+            .fn()
+            .mockRejectedValue(new MailApiError(404, "mail_thread_not_found")),
+          readMailboxThread: vi
+            .fn()
+            .mockRejectedValue(new MailApiError(status, code)),
+        });
+        await act(async () =>
+          root.render(
+            <MailSurface
+              client={client}
+              onOpenSettings={() => {}}
+              onToast={onToast}
+            />,
+          ),
+        );
+        await settle();
+        await enterSingleAccount();
+
+        await act(async () => {
+          requestOpenThread(accountA.accountId, "thread-gone", "all");
+        });
+        await until(() => pendingOpenThread() === null, "the request is dropped");
+        await settle();
+
+        expect(onToast).toHaveBeenCalledTimes(1);
+        expect(onToast).toHaveBeenCalledWith("Couldn’t open that letter.");
+        expect(reader()?.textContent).toContain("Choose a message");
+      },
+    );
 
     it("moves the column back to Inbox with an empty query and opens the letter from Sent", async () => {
       vi.useFakeTimers();

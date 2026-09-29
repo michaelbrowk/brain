@@ -2727,7 +2727,13 @@ export function MailSurface({
       } catch {
         // A later press replaces the slot before this one answers: only the
         // request still standing there is this fetch's to clear.
-        if (isPendingRequest(request)) clearOpenThreadRequest();
+        if (!isPendingRequest(request)) return;
+        clearOpenThreadRequest();
+        // Only the palette names a mailbox other than Inbox, and its row was
+        // on screen a moment ago: a pick that lands silently on "Choose a
+        // message" reads as a press that did nothing. The centre's letters
+        // are new mail, and one of those gone by now is no news.
+        if (request.mailboxId !== "inbox") onToast?.("Couldn’t open that letter.");
         return;
       }
       // The slot may already hold a different request by the time this
@@ -2738,7 +2744,7 @@ export function MailSurface({
       clearOpenThreadRequest();
       void selectThread(detail.thread);
     },
-    [client, selectThread],
+    [client, onToast, selectThread],
   );
 
   useEffect(() => {

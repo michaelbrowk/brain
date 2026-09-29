@@ -6753,11 +6753,21 @@ describe("MailSurface", () => {
         lastMessageAt: 1_700_000_900_000 - 75_500,
       });
 
+      /** A letter the stream loaded read, marked unread elsewhere since: the
+       *  walk re-reads it, and its fresh copy is the one that counts. */
+      const unreadSince = { ...deepRows[60]!, unread: true };
+
       const secondSnapshot: Readonly<
         Record<string, MailThreadPage | Promise<MailThreadPage>>
       > = {
         "s2-page-2": pageOf(
-          [...deepRows.slice(50, 76), arrivedDeep, ...deepRows.slice(76, 100)],
+          [
+            ...deepRows.slice(50, 60),
+            unreadSince,
+            ...deepRows.slice(61, 76),
+            arrivedDeep,
+            ...deepRows.slice(76, 100),
+          ],
           "s2-page-3",
         ),
         "s2-page-3": pageOf(deepRows.slice(100, 150)),
@@ -6864,6 +6874,7 @@ describe("MailSurface", () => {
 
         await click(findButton("Try again"));
         expect(document.body.textContent).not.toContain("couldn’t load");
+        expect(document.body.textContent).not.toContain(unreadSince.subject);
 
         await click(findButton("Load more"));
         expect(cursorsAsked(listThreads)).toEqual([
@@ -6873,6 +6884,8 @@ describe("MailSurface", () => {
           "s2-page-3",
         ]);
         expect(document.body.textContent).toContain("A arrived deep");
+        // Unread again, so it stands as a row of its own rather than in Seen.
+        expect(document.body.textContent).toContain(unreadSince.subject);
         expect(() => findButton("Load more")).toThrow();
       });
 

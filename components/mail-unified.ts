@@ -234,18 +234,29 @@ export function reconcileStreamPageOne(
 /**
  * Fold a Load more's answer into its stream. An ordinary page follows the
  * stream's last row and goes on the end, less any row already loaded. A
- * re-paged walk crossed rows the stream holds, so what it adds can sort
- * anywhere among them: it goes in by the merge's order, which keeps the stream
- * the sorted prefix its horizon is read from. A walk its cap stopped before it
- * reached past the last loaded row keeps the mark, so the next press walks on
- * from where it stopped instead of putting what it finds on the end.
+ * re-paged walk re-read rows the stream holds, from a newer snapshot, so its
+ * copy of a thread is the current one (a thread read, starred or answered
+ * since takes it), and what it adds can sort anywhere among them: it goes in
+ * by the merge's order, which keeps the stream the sorted prefix its horizon
+ * is read from. A walk its cap stopped before it reached past the last loaded
+ * row keeps the mark, so the next press walks on from where it stopped instead
+ * of putting what it finds on the end.
  */
 export function appendStreamPage(
   stream: UnifiedStream,
   page: Pick<MailThreadPage, "items" | "nextCursor" | "sync">,
 ): UnifiedStream {
-  const seen = new Set(stream.items.map(unifiedThreadKey));
-  const fresh = page.items.filter((item) => !seen.has(unifiedThreadKey(item)));
+  // A walk's pages overlap where a row moved down between two reads: one row
+  // per thread, in the later read's copy.
+  const incoming = new Map<string, MailThreadListItem>();
+  for (const item of page.items) incoming.set(unifiedThreadKey(item), item);
+  const kept = stream.repage
+    ? stream.items.filter((item) => !incoming.has(unifiedThreadKey(item)))
+    : stream.items;
+  const keptKeys = new Set(kept.map(unifiedThreadKey));
+  const fresh = [...incoming.values()].filter(
+    (item) => !keptKeys.has(unifiedThreadKey(item)),
+  );
   const last = stream.items.at(-1);
   const end = page.items.at(-1);
   const stoppedShort =
@@ -256,8 +267,8 @@ export function appendStreamPage(
   return {
     ...stream,
     items: stream.repage
-      ? [...stream.items, ...fresh].sort(compareUnified)
-      : [...stream.items, ...fresh],
+      ? [...kept, ...fresh].sort(compareUnified)
+      : [...kept, ...fresh],
     nextCursor: page.nextCursor,
     repage: stoppedShort,
     status: "ready",

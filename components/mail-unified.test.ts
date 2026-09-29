@@ -800,6 +800,42 @@ describe("appendStreamPage", () => {
     expect(next.nextCursor).toBe("further");
     expect(next.repage).toBe(true);
   });
+
+  it("takes a walk's fresh row over the loaded copy of the same thread", () => {
+    // Read elsewhere since the stream loaded it: the walk re-read it from the
+    // newer snapshot, and the loaded copy is the stale one.
+    const readSince = { ...loaded[0]!, unread: false };
+    const older = item({ accountId: ACCOUNT_A, threadId: "t3", lastMessageAt: 100 });
+    const next = appendStreamPage(
+      stream(ACCOUNT_A, { items: loaded, nextCursor: "this", repage: true }),
+      page([readSince, loaded[1]!, older], null),
+    );
+    expect(next.items).toEqual([readSince, loaded[1], older]);
+  });
+
+  it("moves a thread a walk found with newer mail to where it now sorts", () => {
+    const answered = { ...loaded[1]!, lastMessageAt: 400 };
+    const older = item({ accountId: ACCOUNT_A, threadId: "t3", lastMessageAt: 100 });
+    const next = appendStreamPage(
+      stream(ACCOUNT_A, { items: loaded, nextCursor: "this", repage: true }),
+      page([answered, loaded[0]!, older], null),
+    );
+    expect(next.items).toEqual([answered, loaded[0], older]);
+  });
+
+  it.each([false, true])(
+    "keeps one row per thread when the pages overlap (re-paged %s)",
+    (repage) => {
+      // A row that moved down between two of a walk's reads is on both pages.
+      const older = item({ accountId: ACCOUNT_A, threadId: "t3", lastMessageAt: 100 });
+      const oldest = item({ accountId: ACCOUNT_A, threadId: "t4", lastMessageAt: 50 });
+      const next = appendStreamPage(
+        stream(ACCOUNT_A, { items: loaded, nextCursor: "this", repage }),
+        page([older, older, oldest], null),
+      );
+      expect(next.items).toEqual([...loaded, older, oldest]);
+    },
+  );
 });
 
 describe("removeStreamItems", () => {

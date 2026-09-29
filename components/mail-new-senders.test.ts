@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   applyShownDecisions,
+  domainScopeAllowed,
   senderDomain,
   senderName,
   splitNewSenders,
@@ -102,6 +103,24 @@ describe("new senders", () => {
       decision("address", "lena@okafor.example", "block", [`${ACCOUNT}\u0000old`]),
     ]);
     expect(shown).toEqual([]);
+  });
+
+  it("keeps an archived thread in every list the archive does not empty", () => {
+    const items = [thread("old", null), thread("other", null)];
+    const blocked = [decision("address", "lena@okafor.example", "block", [`${ACCOUNT}\u0000old`])];
+    expect(applyShownDecisions(items, blocked, { inbox: false })).toBe(items);
+    expect(
+      applyShownDecisions(items, blocked, { inbox: true }).map((item) => item.threadId),
+    ).toEqual(["other"]);
+  });
+
+  it("offers a domain only where the service takes one, and never before it has said", () => {
+    const screen = { domainScopeRefused: ["gmail.example", "own.example"] };
+    expect(domainScopeAllowed(screen, "okafor.example")).toBe(true);
+    expect(domainScopeAllowed(screen, "gmail.example")).toBe(false);
+    expect(domainScopeAllowed(screen, "own.example")).toBe(false);
+    expect(domainScopeAllowed(screen, "")).toBe(false);
+    expect(domainScopeAllowed(null, "okafor.example")).toBe(false);
   });
 
   it("lets an address decision outrank its domain's, as the service does", () => {

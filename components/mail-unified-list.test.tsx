@@ -308,6 +308,37 @@ describe("MailUnifiedList", () => {
       expect(props.onSelectThread).toHaveBeenCalledTimes(1);
     });
 
+    it("offers everyone at a domain in the row menu only where the service takes one", async () => {
+      vi.stubGlobal("PointerEvent", MouseEvent);
+      await render([
+        waiting("Flat in Lisbon"),
+        waiting("Shared inbox", { name: "Sam Rivera", address: "sam@gmail.example" }),
+      ]);
+      const menuFor = async (subject: string) => {
+        const row = [...document.body.querySelectorAll(".brain-mail-swipe")].find((node) =>
+          node.textContent?.includes(subject),
+        ) as HTMLElement;
+        await act(async () => {
+          row.dispatchEvent(
+            new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 2 }),
+          );
+          row.dispatchEvent(
+            new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2 }),
+          );
+        });
+        const items = [...document.body.querySelectorAll('[role="menuitem"]')].map(
+          (item) => item.textContent,
+        );
+        await act(async () => {
+          document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
+        });
+        return items;
+      };
+      expect(await menuFor("Shared inbox")).toEqual(["Accept Sam Rivera", "Block Sam Rivera"]);
+      expect(await menuFor("Flat in Lisbon")).toContain("Block everyone at okafor.example");
+      vi.unstubAllGlobals();
+    });
+
     it("walks the waiting rows as one queue with the others", async () => {
       await render([
         item({ accountId: accountA.accountId, threadId: "Friend" }),

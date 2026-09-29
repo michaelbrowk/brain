@@ -210,6 +210,7 @@ export function MailUnifiedList({
       aria-label="Mailbox"
       className="brain-mail-list"
       data-chrome-rows="1"
+      tabIndex={-1}
     >
       {/* ONE ROW, AND NO SEARCH CAPSULE. Unified reads no cross-account index
           — search is one account's cached headers — so the second row is not

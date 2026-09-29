@@ -4712,6 +4712,13 @@ a.brain-share-url:active {
 .brain-mail-groups > .brain-mail-section:first-child::before {
   content: none;
 }
+/* The column takes the focus only as the last place a decided row can hand
+   it, when no row is left to take it (`handFocusOn` in mail-flip.ts). A ring
+   around the whole column would say nothing a row cannot, so it draws none;
+   the next Tab lands on the first control inside it. */
+html[data-kbd] .brain-mail-list:focus-visible {
+  outline: none;
+}
 .brain-mail-gate {
   position: absolute;
   top: 50%;

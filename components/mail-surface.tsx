@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -91,6 +92,7 @@ import {
 import { MailUnifiedList, NewSendersSection } from "./mail-unified-list";
 import {
   applyShownDecisions,
+  domainScopeAllowed,
   senderDomain,
   senderName,
   splitNewSenders,
@@ -104,6 +106,7 @@ import {
   flipElements,
   flipRowKey,
   ghostFlip,
+  handFocusOn,
   playFlip,
   snapshotFlip,
 } from "./mail-flip";
@@ -390,11 +393,18 @@ type SectionDoneRun = {
  * the POST answers so the toast's Undo can name it, and holds the threads it
  * took so an Undo of a Block can put back rows a refresh has since dropped.
  * Taking it off the list is the whole of an Undo or a rollback on screen.
+ *
+ * A Block's `archived` set is the service's answer at one moment, and the
+ * Inbox reads that follow are truer than it: the owner may move a letter back
+ * by hand. So it is laid only over the Inbox and the merged list, and each
+ * account's share of it ends once an Inbox read of that account that began
+ * after the answer (`answeredAt`, a count of reads begun) has landed.
  */
 type SenderDecisionEntry = ShownSenderDecision & {
   readonly token: number;
   readonly decisionId: string | null;
   readonly taken: readonly MailThreadListItem[];
+  readonly answeredAt: number | null;
 };
 
 /** "1 thread" / "9 threads" — the toast counts out loud, so it has to agree. */
@@ -408,7 +418,7 @@ export function MailSurface({
   onSheetOpenChange,
   onToast,
   refreshToken,
-  client = defaultMailSurfaceClient,
+  client: givenClient = defaultMailSurfaceClient,
 }: {
   /** Open Mail settings; `accountId` deep-links that account's details
    *  (/settings/mail?account=<id>) — the reauth affordances pass it. */
@@ -423,6 +433,27 @@ export function MailSurface({
   refreshToken?: number;
   client?: MailSurfaceClient;
 }) {
+  /* EVERY INBOX READ IS COUNTED ON ITS WAY OUT AND REPORTED ON ITS WAY IN.
+     A Block's archived answer holds rows out of the column only until a read
+     of that account that began after the answer has landed (see
+     `SenderDecisionEntry`), and a read is begun from a dozen places, so the
+     count lives on the one door they all pass through. */
+  const inboxReadsRef = useRef(0);
+  const inboxReadLandedRef = useRef<(accountId: string, startedAt: number) => void>(
+    () => {},
+  );
+  const client = useMemo<MailSurfaceClient>(
+    () => ({
+      ...givenClient,
+      listThreads: async (...request) => {
+        const startedAt = ++inboxReadsRef.current;
+        const page = await givenClient.listThreads(...request);
+        inboxReadLandedRef.current(request[0].accountId, startedAt);
+        return page;
+      },
+    }),
+    [givenClient],
+  );
   const [accountsState, setAccountsState] = useState<AccountsState>({ kind: "loading" });
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
   const [selectedMailboxId, setSelectedMailboxId] =
@@ -554,6 +585,26 @@ export function MailSurface({
   useEffect(() => {
     reduceMotionRef.current = reduceMotion;
   }, [reduceMotion]);
+  /* An Inbox read of one account that began after a block answered has
+     landed: from here on the list says which of that account's letters the
+     block archived, and says it better (the owner may have moved one back),
+     so the block's own answer stops holding them out. */
+  useEffect(() => {
+    inboxReadLandedRef.current = (accountId, startedAt) => {
+      const prefix = `${accountId}\u0000`;
+      let changed = false;
+      const next = senderDecisionsRef.current.map((entry) => {
+        if (entry.answeredAt === null || startedAt <= entry.answeredAt) return entry;
+        const kept = new Set([...entry.archived].filter((key) => !key.startsWith(prefix)));
+        if (kept.size === entry.archived.size) return entry;
+        changed = true;
+        return { ...entry, archived: kept };
+      });
+      if (!changed) return;
+      senderDecisionsRef.current = next;
+      setSenderDecisions(next);
+    };
+  }, []);
 
   const commitThreadState = useCallback((next: MailThreadListState) => {
     threadStateRef.current = next;
@@ -4114,13 +4165,28 @@ export function MailSurface({
     return state.kind === "ready" ? state.page.items : [];
   }, []);
 
-  /** "Everyone at <domain>" is offered only where the service will take it:
-   *  never for the big mail providers or the owner's own domains, and nowhere
-   *  while the screen's state could not be read. */
-  const domainScopeOf = useCallback((domain: string) => {
-    const screen = senderScreenRef.current;
-    return screen !== null && domain !== "" && !screen.domainScopeRefused.includes(domain);
-  }, []);
+  /** Whether the column stands at a list a block's archive empties. */
+  const columnIsInbox = useCallback(
+    () =>
+      selectedAccountIdRef.current === UNIFIED_ACCOUNT_ID ||
+      selectedMailboxIdRef.current === "inbox",
+    [],
+  );
+
+  /** Some rows, as the reader's decisions leave them in the column. */
+  const shownRows = useCallback(
+    (
+      items: readonly MailThreadListItem[],
+      decisions: readonly SenderDecisionEntry[] = senderDecisionsRef.current,
+    ) => applyShownDecisions(items, decisions, { inbox: columnIsInbox() }),
+    [columnIsInbox],
+  );
+
+  /** "Everyone at <domain>", as the handlers ask it (`domainScopeAllowed`). */
+  const domainScopeOf = useCallback(
+    (domain: string) => domainScopeAllowed(senderScreenRef.current, domain),
+    [],
+  );
 
   /** Close the reader when the letter it holds is one a Block takes away. */
   const closeReaderOn = useCallback(
@@ -4183,9 +4249,10 @@ export function MailSurface({
         root && motion.leave && motion.leave.size > 0
           ? flipElements(root, motion.leave)
           : [];
-      const stillWaiting = applyShownDecisions(rawListItems(), next).some(
+      const stillWaiting = shownRows(rawListItems(), next).some(
         (item) => waitsOn(item) !== null,
       );
+      if (root) handFocusOn(root, new Set([...(motion.leave ?? []), ...(motion.travel ?? [])]));
       const header =
         root && !stillWaiting
           ? root.querySelector<HTMLElement>(
@@ -4215,7 +4282,7 @@ export function MailSurface({
         });
       }
     },
-    [rawListItems],
+    [rawListItems, shownRows],
   );
 
   /**
@@ -4226,58 +4293,129 @@ export function MailSurface({
    * speak for, so neither says anything. Any other failure means the decision
    * still stands, and the column shows it again and says so.
    */
+  /** A quiet read of whatever the column stands at, for after the service
+   *  has changed its mind about who waits. */
+  const rereadColumn = useCallback(() => {
+    const accountId = selectedAccountIdRef.current;
+    if (accountId === UNIFIED_ACCOUNT_ID) {
+      void refreshUnifiedSilently(new AbortController().signal);
+    } else if (accountId !== null) {
+      void refreshThreadsSilently(
+        accountId,
+        selectedMailboxIdRef.current,
+        new AbortController().signal,
+      );
+    }
+  }, [refreshThreadsSilently, refreshUnifiedSilently]);
+
+  /**
+   * The threads an Undo gives back to New senders, as waiting rows again in
+   * the lists that hold them. A read that landed after the Accept already
+   * lists them as ordinary letters, and without this they would sit in
+   * People until the read after the Undo.
+   */
+  const waitAgain = useCallback(
+    (taken: readonly MailThreadListItem[]) => {
+      const byKey = new Map(taken.map((item) => [unifiedThreadKey(item), item]));
+      const rewait = (item: MailThreadListItem) => {
+        const before = byKey.get(unifiedThreadKey(item));
+        return before && !item.newSender && before.newSenderFrom
+          ? { ...item, newSender: true, newSenderFrom: before.newSenderFrom }
+          : item;
+      };
+      const unified = unifiedStateRef.current;
+      if (selectedAccountIdRef.current === UNIFIED_ACCOUNT_ID && unified.kind === "ready") {
+        commitUnifiedState({
+          kind: "ready",
+          streams: unified.streams.map((stream) => ({
+            ...stream,
+            items: stream.items.map(rewait),
+          })),
+        });
+        return;
+      }
+      const single = threadStateRef.current;
+      if (single.kind === "ready") {
+        commitThreadState({
+          kind: "ready",
+          page: { ...single.page, items: single.page.items.map(rewait) },
+        });
+      }
+    },
+    [commitThreadState, commitUnifiedState],
+  );
+
+  /**
+   * Decisions and Undos about one key, in the order they were made. The
+   * service answers the same verdict with the id that stands, so an Accept
+   * sent while the Undo of the last Accept is still out could be answered
+   * with the id that DELETE is about to remove. Each waits for the one
+   * before it about the same key.
+   */
+  const senderLanesRef = useRef(new Map<string, Promise<void>>());
+  const inSenderLane = useCallback((lane: string, work: () => Promise<void>) => {
+    const lanes = senderLanesRef.current;
+    const run = (lanes.get(lane) ?? Promise.resolve()).then(work, work);
+    const settled = run.catch(() => {});
+    lanes.set(lane, settled);
+    void settled.then(() => {
+      if (lanes.get(lane) === settled) lanes.delete(lane);
+    });
+    return run;
+  }, []);
+
   const undoSenderDecision = useCallback(
     async (token: number): Promise<void> => {
       const entry = senderDecisionsRef.current.find((each) => each.token === token);
       if (!entry || entry.decisionId === null) return;
+      const decisionId = entry.decisionId;
       const keys = new Set(entry.taken.map(flipRowKey));
       showSenderDecisions(
         senderDecisionsRef.current.filter((each) => each.token !== token),
         entry.verdict === "accept" ? { travel: keys } : { enter: keys },
-        entry.verdict === "block" ? () => putBackUnifiedThreads(entry.taken) : undefined,
+        entry.verdict === "block"
+          ? () => putBackUnifiedThreads(entry.taken)
+          : () => waitAgain(entry.taken),
       );
-      try {
-        await client.undoSenderDecision({ decisionId: entry.decisionId });
-      } catch (error) {
-        if (
-          error instanceof MailApiError &&
-          (error.code === "mail_sender_decision_not_found" ||
-            error.code === "mail_sender_decision_changed")
-        ) {
-          return;
+      await inSenderLane(`${entry.scope}:${entry.key}`, async () => {
+        try {
+          await client.undoSenderDecision({ decisionId });
+        } catch (error) {
+          if (
+            !(
+              error instanceof MailApiError &&
+              (error.code === "mail_sender_decision_not_found" ||
+                error.code === "mail_sender_decision_changed")
+            )
+          ) {
+            showSenderDecisions(
+              [...senderDecisionsRef.current, entry],
+              entry.verdict === "accept"
+                ? { travel: keys }
+                : { leave: keys, leaveMode: "left" },
+              entry.verdict === "block" ? () => closeReaderOn(entry.taken) : undefined,
+            );
+            onToast?.("Couldn’t undo. Try again.", { urgent: true });
+            return;
+          }
+          // Already undone, or replaced by a later decision: nothing to say,
+          // but the service's lists are the truth now, so the column reads.
         }
-        showSenderDecisions(
-          [...senderDecisionsRef.current, entry],
-          entry.verdict === "accept"
-            ? { travel: keys }
-            : { leave: keys, leaveMode: "left" },
-          entry.verdict === "block" ? () => closeReaderOn(entry.taken) : undefined,
-        );
-        onToast?.("Couldn’t undo. Try again.", { urgent: true });
-        return;
-      }
-      if (entry.verdict !== "block") return;
-      // The service moved back what the block archived, which can be more
-      // than the column held. A quiet read brings the rest in.
-      const accountId = selectedAccountIdRef.current;
-      if (accountId === UNIFIED_ACCOUNT_ID) {
-        void refreshUnifiedSilently(new AbortController().signal);
-      } else if (accountId !== null) {
-        void refreshThreadsSilently(
-          accountId,
-          selectedMailboxIdRef.current,
-          new AbortController().signal,
-        );
-      }
+        // The service moved back what a block archived, which can be more than
+        // the column held, and flags again who an accept had let in. A quiet
+        // read brings the column level with it.
+        rereadColumn();
+      });
     },
     [
       client,
       closeReaderOn,
+      inSenderLane,
       onToast,
       putBackUnifiedThreads,
-      refreshThreadsSilently,
-      refreshUnifiedSilently,
+      rereadColumn,
       showSenderDecisions,
+      waitAgain,
     ],
   );
 
@@ -4307,9 +4445,7 @@ export function MailSurface({
         const other = sender.address.toLowerCase();
         return scope === "domain" ? senderDomain(other) === key : other === key;
       };
-      const taken = applyShownDecisions(rawListItems(), senderDecisionsRef.current).filter(
-        covered,
-      );
+      const taken = shownRows(rawListItems()).filter(covered);
       if (
         !taken.some(
           (item) => item.accountId === thread.accountId && item.threadId === thread.threadId,
@@ -4325,6 +4461,7 @@ export function MailSurface({
         archived: new Set(),
         decisionId: null,
         taken,
+        answeredAt: null,
       };
       const keys = new Set(taken.map(flipRowKey));
       const dragged =
@@ -4342,7 +4479,7 @@ export function MailSurface({
       const senders = new Set(
         taken.map((item) => waitsOn(item)?.address.toLowerCase() ?? ""),
       ).size;
-      void (async () => {
+      void inSenderLane(`${scope}:${key}`, async () => {
         let decided: { readonly decisionId: string; readonly archived: ReadonlySet<string> };
         try {
           const result = await client.decideSender({
@@ -4370,14 +4507,19 @@ export function MailSurface({
           // A block can archive more than the column was showing under New
           // senders; any of those still on screen leave the same way.
           const more = new Set(
-            applyShownDecisions(rawListItems(), current)
+            shownRows(rawListItems(), current)
               .filter((item) => decided.archived.has(unifiedThreadKey(item)))
               .map(flipRowKey),
           );
           showSenderDecisions(
             current.map((each) =>
               each.token === entry.token
-                ? { ...each, decisionId: decided.decisionId, archived: decided.archived }
+                ? {
+                    ...each,
+                    decisionId: decided.decisionId,
+                    archived: decided.archived,
+                    answeredAt: inboxReadsRef.current,
+                  }
                 : each,
             ),
             { leave: more, leaveMode: "left" },
@@ -4402,15 +4544,17 @@ export function MailSurface({
           id: `mail-sender:${entry.token}`,
           onAction: () => undoSenderDecision(entry.token),
         });
-      })();
+      });
     },
     [
       client,
       closeReaderOn,
       domainScopeOf,
+      inSenderLane,
       onToast,
       rawListItems,
       showSenderDecisions,
+      shownRows,
       undoSenderDecision,
     ],
   );
@@ -4423,7 +4567,7 @@ export function MailSurface({
   } | null => {
     const reader = readerStateRef.current;
     if (reader.kind !== "ready") return null;
-    const [open] = applyShownDecisions([reader.detail.thread], senderDecisionsRef.current);
+    const [open] = shownRows([reader.detail.thread]);
     const from = open ? waitsOn(open) : null;
     if (!open || from === null) return null;
     const held = readerScopeRef.current;
@@ -4434,27 +4578,27 @@ export function MailSurface({
         ? "domain"
         : "address";
     return { thread: open, scope };
-  }, [domainScopeOf]);
+  }, [domainScopeOf, shownRows]);
 
-  /** What A and B act on: the New senders row that holds the keyboard focus,
-   *  else the open letter while it still waits, with the reach its switch
-   *  holds. Null when neither is a first letter. */
+  /** What A and B act on. While a letter is open it is that letter (still
+   *  waiting, else nothing): j and k move the reader and leave the focus
+   *  where a press put it, so a row focused earlier is not what the reader is
+   *  looking at. With nothing open, the New senders row the keyboard stands
+   *  on. Null when neither is a first letter. */
   const waitingTargetForKey = useCallback((): {
     readonly thread: MailThreadListItem;
     readonly scope: SenderScope;
   } | null => {
-    const decisions = senderDecisionsRef.current;
+    if (readerStateRef.current.kind !== "idle") return openLetterTarget();
     const active = document.activeElement;
     const row =
       active instanceof HTMLElement ? active.closest<HTMLElement>("[data-waiting]") : null;
-    if (row) {
-      const found = applyShownDecisions(rawListItems(), decisions).find(
-        (item) => flipRowKey(item) === row.dataset.waiting && waitsOn(item) !== null,
-      );
-      if (found) return { thread: found, scope: "address" };
-    }
-    return openLetterTarget();
-  }, [openLetterTarget, rawListItems]);
+    if (row === null) return null;
+    const found = shownRows(rawListItems()).find(
+      (item) => flipRowKey(item) === row.dataset.waiting && waitsOn(item) !== null,
+    );
+    return found ? { thread: found, scope: "address" } : null;
+  }, [openLetterTarget, rawListItems, shownRows]);
 
   /** The reader's two controls for a first letter: the reach its switch
    *  holds for the letter now open, and the decision made with that reach. */
@@ -5163,6 +5307,16 @@ export function MailSurface({
          composer away behind it, which is the opposite of what Cancel
          means. */
       if (document.querySelector('[role="alertdialog"]')) return;
+      /* An open menu owns the keyboard too. Radix reads letters for its
+         typeahead without marking them handled, so an a typed to reach
+         "Accept" in a row menu, or an e in the nav menu, would otherwise
+         also decide or archive the open letter behind it. */
+      if (
+        (event.target instanceof Element && event.target.closest('[role="menu"]')) ||
+        document.querySelector('[role="menu"][data-state="open"]')
+      ) {
+        return;
+      }
       /* The attachment viewer owns the keyboard the same way, and all of it:
          it answers ←, → and Esc itself, and an e or a u that fell through
          would archive or mark the letter under the picture. */
@@ -5222,7 +5376,7 @@ export function MailSurface({
         } else {
           const state = threadStateRef.current;
           if (state.kind !== "ready") return;
-          const shown = applyShownDecisions(state.page.items, senderDecisionsRef.current);
+          const shown = shownRows(state.page.items);
           // A plain Inbox draws New senders first, so it walks them first.
           if (
             selectedMailboxIdRef.current === "inbox" &&
@@ -5316,10 +5470,17 @@ export function MailSurface({
         return;
       }
 
-      /* A accepts and B blocks: the New senders row the keyboard stands on,
-         else the open letter when it is a first one. The open letter takes
-         the reach its switch holds; a row decides for its own address. */
+      /* A accepts and B blocks: the open letter when one is open (j and k
+         move the reader, not the focus, so a row pressed earlier can still
+         hold it), else the New senders row the keyboard stands on. The open
+         letter takes the reach its switch holds; a row decides for its own
+         address. A held key decides once: the second decision would land on
+         whatever the first one brought up next. */
       if (event.key === "a" || event.key === "b") {
+        if (event.repeat) {
+          event.preventDefault();
+          return;
+        }
         const target = waitingTargetForKey();
         if (target === null) return;
         event.preventDefault();
@@ -5367,6 +5528,7 @@ export function MailSurface({
       decideSender,
       mutateOpenThread,
       selectThread,
+      shownRows,
       startCompose,
       waitingTargetForKey,
     ],
@@ -5596,8 +5758,10 @@ export function MailSurface({
   let listWaiting: readonly MailThreadListItem[] = unifiedSections
     ? unifiedSections.newSenders.items
     : [];
+  // A block's archive leaves the Inboxes and nowhere else.
+  const overlay = { inbox: unifiedMode || selectedMailboxId === "inbox" };
   if (!unifiedMode && threadState.kind === "ready") {
-    const shown = applyShownDecisions(threadState.page.items, senderDecisions);
+    const shown = applyShownDecisions(threadState.page.items, senderDecisions, overlay);
     if (singleSectioned) {
       const split = splitNewSenders(shown);
       listWaiting = split.waiting;
@@ -5609,12 +5773,9 @@ export function MailSurface({
       listThreadState = { kind: "ready", page: { ...threadState.page, items: shown } };
     }
   }
-  const domainScopeFor = (domain: string) =>
-    senderScreen !== null &&
-    domain !== "" &&
-    !senderScreen.domainScopeRefused.includes(domain);
+  const domainScopeFor = (domain: string) => domainScopeAllowed(senderScreen, domain);
   const shownReaderThread = readerThread
-    ? (applyShownDecisions([readerThread], senderDecisions)[0] ?? null)
+    ? (applyShownDecisions([readerThread], senderDecisions, overlay)[0] ?? null)
     : null;
   const readerFrom = shownReaderThread ? waitsOn(shownReaderThread) : null;
   const readerDomain = readerFrom ? senderDomain(readerFrom.address) : "";

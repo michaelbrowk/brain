@@ -156,6 +156,7 @@ export function NewSenderRow({
               variant="quiet"
               aria-label={`Block ${name}`}
               title={`Block ${name}`}
+              data-gate="block"
               className="brain-touch-hit"
               onClick={() => onDecide(thread, "block", "address")}
             >
@@ -166,6 +167,7 @@ export function NewSenderRow({
               variant="quiet"
               aria-label={`Accept ${name}`}
               title={`Accept ${name}`}
+              data-gate="accept"
               className="brain-mail-accept tint-hover brain-touch-hit"
               onClick={() => onDecide(thread, "accept", "address")}
             >

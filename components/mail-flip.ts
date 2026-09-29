@@ -61,6 +61,35 @@ export function flipElements(
   return [...found.values()];
 }
 
+/**
+ * Takes the keyboard focus off a row that is about to leave its place, before
+ * it goes: a focused node that unmounts drops the focus on the body, and the
+ * next Tab starts from the top of the page. It lands on the same control of
+ * the next waiting row (Accept on Accept, Block on Block, the row on the
+ * row), else on the next row the column keeps, else on any row it keeps,
+ * else on the column itself.
+ */
+export function handFocusOn(root: HTMLElement, leaving: ReadonlySet<string>): void {
+  const active = document.activeElement;
+  if (!(active instanceof HTMLElement) || !root.contains(active)) return;
+  const row = active.closest<HTMLElement>('[data-flip^="row:"]');
+  if (!row || !leaving.has(row.dataset.flip ?? "")) return;
+  const control = active.closest<HTMLElement>("[data-gate]")?.dataset.gate ?? null;
+  const rows = [...root.querySelectorAll<HTMLElement>('[data-flip^="row:"]')];
+  const kept = (candidate: HTMLElement) => !leaving.has(candidate.dataset.flip ?? "");
+  const after = rows.slice(rows.indexOf(row) + 1).filter(kept);
+  const nextWaiting = after.find((candidate) => candidate.hasAttribute("data-waiting"));
+  const target =
+    (nextWaiting &&
+      (control
+        ? nextWaiting.querySelector<HTMLElement>(`[data-gate="${control}"]`)
+        : nextWaiting.querySelector<HTMLElement>("button.brain-mail-row"))) ??
+    after[0]?.querySelector<HTMLElement>("button.brain-mail-row") ??
+    rows.filter(kept)[0]?.querySelector<HTMLElement>("button.brain-mail-row") ??
+    root;
+  target.focus({ preventScroll: true });
+}
+
 /** Where every flipping element stands now. */
 export function snapshotFlip(root: ParentNode): FlipSnapshot {
   const rects = new Map<string, { readonly left: number; readonly top: number }>();

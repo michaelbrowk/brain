@@ -44,6 +44,18 @@ export function senderName(from: MailAddress): string {
   return name ? name : from.address;
 }
 
+/** Whether "everyone at <domain>" may be offered and made: never for a domain
+ *  the service refuses whole (the big providers, the owner's own), and never
+ *  while the screen's state has not been read. One rule for the row menu, the
+ *  reader's switch and the keys, so none of them can offer what another
+ *  refuses. */
+export function domainScopeAllowed(
+  screen: { readonly domainScopeRefused: readonly string[] } | null,
+  domain: string,
+): boolean {
+  return screen !== null && domain !== "" && !screen.domainScopeRefused.includes(domain);
+}
+
 /** The waiting group and everything else, each in the order it arrived. */
 export function splitNewSenders(items: readonly MailThreadListItem[]): {
   readonly waiting: readonly MailThreadListItem[];
@@ -103,19 +115,28 @@ function standingFor(
 /**
  * The list as the reader's own decisions leave it: an accepted sender's
  * letters stop waiting and fall into the group they belong to, a blocked
- * sender's letters leave, and so does any thread a block reported archiving.
- * The same array comes back when nothing in it is touched, so a render that
- * decided nothing costs nothing downstream.
+ * sender's letters leave, and so does any thread a block reported archiving
+ * from a list the archive empties. The same array comes back when nothing in
+ * it is touched, so a render that decided nothing costs nothing downstream.
  */
 export function applyShownDecisions(
   items: readonly MailThreadListItem[],
   decisions: readonly ShownSenderDecision[],
+  options: {
+    /** Whether the list is one a block's archive leaves: an Inbox, or the
+     *  merged Inboxes. All Mail and the other mailboxes still hold the
+     *  letter, and a search there has to find it. */
+    readonly inbox: boolean;
+  } = { inbox: true },
 ): readonly MailThreadListItem[] {
   if (decisions.length === 0) return items;
   let changed = false;
   const shown: MailThreadListItem[] = [];
   for (const item of items) {
-    if (decisions.some((decision) => decision.archived.has(unifiedThreadKey(item)))) {
+    if (
+      options.inbox &&
+      decisions.some((decision) => decision.archived.has(unifiedThreadKey(item)))
+    ) {
       changed = true;
       continue;
     }

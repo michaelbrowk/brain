@@ -111,6 +111,7 @@ export function MailThreadList({
       aria-label="Mailbox"
       className="brain-mail-list"
       data-chrome-rows="2"
+      tabIndex={-1}
     >
       <header className="brain-mail-head">
         <div className="brain-mail-navrow">
@@ -338,6 +339,13 @@ export function MailThreadList({
  * The Inbox's own rows. Alone they need no group; under New senders they are
  * a group like any other, bounded by the one rule, so the waiting letters
  * and the rest read as two blocks and not as one list with a gap in it.
+ *
+ * The wrapper is the same element either way and only its class and name
+ * change, so the first stranger's letter arriving, or the last one decided,
+ * never remounts every row of the Inbox under the reader's eye (a remount
+ * also drops whatever the rows were holding: focus, a press, an entrance
+ * that already played). Without its name it is not a region, and without
+ * the section class it draws no rule and takes no air.
  */
 function InboxRows({
   grouped,
@@ -346,9 +354,12 @@ function InboxRows({
   grouped: boolean;
   children: React.ReactNode;
 }) {
-  if (!grouped) return <>{children}</>;
   return (
-    <section aria-label="Inbox" className="brain-mail-section" data-flip="section:inbox">
+    <section
+      aria-label={grouped ? "Inbox" : undefined}
+      className={grouped ? "brain-mail-section" : undefined}
+      data-flip="section:inbox"
+    >
       {children}
     </section>
   );

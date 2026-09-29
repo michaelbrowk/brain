@@ -65,6 +65,13 @@ const jsdomDependencies = Object.keys(
   ).dependencies ?? {},
 );
 
+const directDependencies = new Set(
+  Object.keys(
+    JSON.parse(readFileSync(join(import.meta.dirname, "package.json"), "utf8"))
+      .dependencies ?? {},
+  ),
+);
+
 describe("Next standalone tracing", () => {
   const includes = nextConfig.outputFileTracingIncludes?.["/*"] ?? [];
   const excludes = nextConfig.outputFileTracingExcludes?.["/*"] ?? [];
@@ -74,11 +81,15 @@ describe("Next standalone tracing", () => {
     expect(excludes).toContain(DEPENDENCY_SUBTREE_EXCLUDE);
   });
 
-  it("carries every jsdom dependency from the hoisted fallback", () => {
+  // A package Brain depends on directly is linked at the top level, and pnpm
+  // hoists no second copy into the fallback, so it is traced from its link.
+  it("carries every jsdom dependency from the hoisted fallback or its top-level link", () => {
     expect(jsdomDependencies.length).toBeGreaterThan(0);
     for (const dependency of jsdomDependencies) {
       expect(includes).toContain(
-        `./node_modules/.pnpm/node_modules/${dependency}/**/*`,
+        directDependencies.has(dependency)
+          ? `./node_modules/${dependency}/**/*`
+          : `./node_modules/.pnpm/node_modules/${dependency}/**/*`,
       );
     }
   });

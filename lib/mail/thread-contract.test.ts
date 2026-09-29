@@ -50,6 +50,20 @@ describe("mail thread-state contract", () => {
     );
   });
 
+  it("keeps a blocked sender's mark at tier 5 and drops it below", () => {
+    const blocked = {
+      ...threadItemFixture(),
+      newSender: false,
+      newSenderFrom: undefined,
+      senderBlocked: true,
+    };
+    delete (blocked as Record<string, unknown>).newSenderFrom;
+    expect(projectMailThreadStateContract(blocked, 5)).toEqual(blocked);
+    for (const tier of [4, 3, 2, 1] as const) {
+      expect(projectMailThreadStateContract(blocked, tier)).not.toHaveProperty("senderBlocked");
+    }
+  });
+
   it("drops newSender and category from deep items at tier 3", () => {
     const projected = projectMailThreadStateContract(
       threadPageFixture(),

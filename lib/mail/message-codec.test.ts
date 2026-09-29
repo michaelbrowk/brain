@@ -438,6 +438,33 @@ describe("Mail message boundary codec", () => {
     }
   });
 
+  it("reads a blocked sender's mark, and only as a mark", () => {
+    const page = (item: Record<string, unknown>) =>
+      validateMailThreadPage({
+        apiVersion: 1,
+        items: [item],
+        nextCursor: null,
+        sync: { status: "idle", lastSuccessfulAt: 123 },
+      });
+    expect(
+      page({ ...threadFixture(), newSender: false, senderBlocked: true }).items[0],
+    ).toMatchObject({ senderBlocked: true });
+    expect(page({ ...threadFixture(), newSender: false }).items[0]!.senderBlocked).toBeUndefined();
+    for (const invalid of [
+      { ...threadFixture(), newSender: false, senderBlocked: false },
+      { ...threadFixture(), newSender: false, senderBlocked: "yes" },
+      // A letter cannot wait on a sender already blocked.
+      {
+        ...threadFixture(),
+        newSender: true,
+        newSenderFrom: { name: null, address: "x@example.test" },
+        senderBlocked: true,
+      },
+    ]) {
+      expect(() => page(invalid)).toThrow("mail_response_invalid");
+    }
+  });
+
   it("reads the sender a waiting thread names, and only on a waiting thread", () => {
     const from = { name: "Lena Okafor", address: "lena@okafor.example" };
     const page = (item: Record<string, unknown>) =>

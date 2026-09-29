@@ -65,6 +65,15 @@ export interface MailThreadListItem {
    * stores it.
    */
   readonly newSenderFrom?: MailAddress;
+  /**
+   * Tier-5 mark, present (and true) only while the screen is on and the
+   * thread's first sender is blocked, so the service's next archive step
+   * will take the thread out of the Inbox. It is never on a waiting thread.
+   * The push that announces new mail reads it to stay quiet about a letter
+   * the owner has already refused, in the moments between its arrival and
+   * that archive.
+   */
+  readonly senderBlocked?: true;
 }
 
 /**

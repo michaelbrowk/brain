@@ -112,6 +112,9 @@ export function newMailLetters(
     // agreed to receive on the lock screen. The mark above has already moved
     // past it, so an Accept later does not make it news either.
     if (item.newSender) continue;
+    // A blocked sender's new letter sits in the Inbox only until the
+    // service's next archive step takes it, and the owner refused it already.
+    if (item.senderBlocked) continue;
     // Read already, so either the owner wrote the newest message in it or the
     // reader has seen it. See the header.
     if (!item.unread) continue;

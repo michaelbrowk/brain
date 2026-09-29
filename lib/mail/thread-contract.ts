@@ -5,9 +5,10 @@ export type MailThreadStateContractTier = 1 | 2 | 3 | 4 | 5;
 
 const HIGHEST_TIER: MailThreadStateContractTier = 5;
 
-/** The two fields tier 5 added. They leave together: a sender named on a
- *  thread whose waiting flag is gone would be a contradiction. */
-const TIER_5_FIELDS = ["newSender", "newSenderFrom"] as const;
+/** The fields tier 5 added. They leave together: a sender named on a thread
+ *  whose waiting flag is gone would be a contradiction, and the blocked mark
+ *  is the same screen's other answer about the same sender. */
+const TIER_5_FIELDS = ["newSender", "newSenderFrom", "senderBlocked"] as const;
 
 /**
  * Additive thread-state fields ship in tiers so old exact-record clients keep

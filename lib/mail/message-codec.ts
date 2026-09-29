@@ -813,6 +813,11 @@ function validateThreadListItem(value: unknown): MailThreadListItem {
   const hasNewSenderFrom =
     isPlainRecord(value) &&
     Object.prototype.hasOwnProperty.call(value, "newSenderFrom");
+  // The blocked mark is a mark: present and true, or absent, and never on a
+  // thread that waits for a decision about the same sender.
+  const hasSenderBlocked =
+    isPlainRecord(value) &&
+    Object.prototype.hasOwnProperty.call(value, "senderBlocked");
   if (
     !isRecordWithExactFields(value, [
       ...baseFields,
@@ -821,8 +826,10 @@ function validateThreadListItem(value: unknown): MailThreadListItem {
       ...(hasCategory ? ["category"] : []),
       ...(hasNewSender ? ["newSender"] : []),
       ...(hasNewSenderFrom ? ["newSenderFrom"] : []),
+      ...(hasSenderBlocked ? ["senderBlocked"] : []),
     ]) ||
     (hasNewSenderFrom && value.newSender !== true) ||
+    (hasSenderBlocked && (value.senderBlocked !== true || value.newSender === true)) ||
     !SAFE_ACCOUNT_ID.test(typeof value.accountId === "string" ? value.accountId : "") ||
     !SAFE_RESOURCE_ID.test(typeof value.threadId === "string" ? value.threadId : "") ||
     !Array.isArray(value.participants) ||
@@ -863,6 +870,7 @@ function validateThreadListItem(value: unknown): MailThreadListItem {
       : "people",
     newSender: hasNewSender ? (value.newSender as boolean) : false,
     ...(hasNewSenderFrom ? { newSenderFrom: validateAddress(value.newSenderFrom) } : {}),
+    ...(hasSenderBlocked ? { senderBlocked: true as const } : {}),
   });
 }
 

@@ -345,6 +345,37 @@ describe("defaultMailSurfaceClient system mailboxes", () => {
     }
   });
 
+  it("reads a blocked sender's mark, and only as a mark", async () => {
+    const list = (items: readonly unknown[]) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          response({
+            apiVersion: 1,
+            items,
+            nextCursor: null,
+            sync: { status: "idle", lastSuccessfulAt: 1_700_000_000_000 },
+          }),
+        ),
+      );
+      return defaultMailSurfaceClient.listThreads({ accountId: ACCOUNT_ID });
+    };
+    await expect(
+      list([{ ...thread, newSender: false, senderBlocked: true }]),
+    ).resolves.toMatchObject({ items: [{ senderBlocked: true }] });
+    for (const invalid of [
+      { ...thread, newSender: false, senderBlocked: false },
+      {
+        ...thread,
+        newSender: true,
+        newSenderFrom: { name: null, address: "x@example.test" },
+        senderBlocked: true,
+      },
+    ]) {
+      await expect(list([invalid])).rejects.toThrow("invalid mail thread");
+    }
+  });
+
   it("reads the sender a waiting thread names, and only on a waiting thread", async () => {
     const list = (items: readonly unknown[]) => {
       vi.stubGlobal(

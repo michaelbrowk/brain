@@ -1935,6 +1935,42 @@ describe("the new-senders screen", () => {
     expect(await newSenders(world, ACCOUNT_A, ["fresh"])).toEqual([false]);
   });
 
+  it("marks a letter the next archive will take, so a push can stay quiet until it does", async () => {
+    const world = await createWorld();
+    // Known before the screen: a domain block does not reach this address.
+    world.mail.addThread(ACCOUNT_A, { threadId: "old-friend", from: "friend@team.test", at: 500 });
+    await finishBackfill(world);
+    await world.screen.decide(block("news@growth.test"), NO_DEADLINE);
+    await world.screen.decide(block("someone@team.test", "domain"), NO_DEADLINE);
+    // Letters that arrive after the decisions, before any archive has run.
+    world.mail.addThread(ACCOUNT_A, { threadId: "growth-2", from: "news@growth.test", at: LATER + 10 });
+    world.mail.addThread(ACCOUNT_A, { threadId: "team-new", from: "new@team.test", at: LATER + 10 });
+    world.mail.addThread(ACCOUNT_A, { threadId: "friend-new", from: "friend@team.test", at: LATER + 10 });
+    world.mail.addThread(ACCOUNT_A, { threadId: "stranger", from: "x@elsewhere.test", at: LATER + 10 });
+
+    const items = await world.screen.annotateItems(
+      ACCOUNT_A,
+      ["growth-2", "team-new", "friend-new", "stranger"].map((threadId) =>
+        world.mail.item(ACCOUNT_A, threadId),
+      ),
+    );
+    expect(
+      items.map((item) => [item.threadId, item.senderBlocked ?? false, item.newSender]),
+    ).toEqual([
+      ["growth-2", true, false],
+      ["team-new", true, false],
+      ["friend-new", false, false],
+      ["stranger", false, true],
+    ]);
+
+    // Switched off, nothing is screened and nothing is archived.
+    await world.screen.setEnabled(false);
+    const off = await world.screen.annotateItems(ACCOUNT_A, [
+      { ...world.mail.item(ACCOUNT_A, "growth-2"), senderBlocked: true },
+    ]);
+    expect(off[0]).not.toHaveProperty("senderBlocked");
+  });
+
   it("names the first sender on a waiting thread and on no other", async () => {
     const world = await readyWorld();
     world.mail.addThread(ACCOUNT_A, {

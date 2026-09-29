@@ -97,6 +97,16 @@ describe("newMailLetters", () => {
     ).toEqual(["Lena Okafor"]);
   });
 
+  it("keeps a blocked sender's new letter quiet while it waits for its archive", () => {
+    const result = newMailLetters(
+      [item({ threadId: "blocked", senderBlocked: true })],
+      Date.parse("2026-09-14T10:00:00.000Z"),
+      AT,
+    );
+    expect(result.letters).toEqual([]);
+    expect(result.watermark).toBe(Date.parse("2026-09-14T11:00:00.000Z"));
+  });
+
   it("produces nothing for a list message even when the category says people", () => {
     const result = newMailLetters(
       [item({ listMessage: true })],

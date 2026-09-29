@@ -1288,6 +1288,9 @@ function readThreadListItem(value: unknown): MailThreadListItem {
   // The sender a waiting thread names comes only with a thread that waits.
   const hasNewSenderFrom =
     isRecord(value) && Object.prototype.hasOwnProperty.call(value, "newSenderFrom");
+  // A mark, present and true or absent, and never on a thread that waits.
+  const hasSenderBlocked =
+    isRecord(value) && Object.prototype.hasOwnProperty.call(value, "senderBlocked");
   if (
     !isExactRecord(value, [
       ...baseFields,
@@ -1296,9 +1299,11 @@ function readThreadListItem(value: unknown): MailThreadListItem {
       ...(hasCategory ? ["category"] : []),
       ...(hasNewSender ? ["newSender"] : []),
       ...(hasNewSenderFrom ? ["newSenderFrom"] : []),
+      ...(hasSenderBlocked ? ["senderBlocked"] : []),
     ]) ||
     (hasNewSenderFrom &&
       (value.newSender !== true || !isMailAddress(value.newSenderFrom))) ||
+    (hasSenderBlocked && (value.senderBlocked !== true || value.newSender === true)) ||
     !isAccountId(value.accountId) ||
     !isResourceId(value.threadId) ||
     !isNullableText(value.subject, 998) ||
@@ -1342,6 +1347,7 @@ function readThreadListItem(value: unknown): MailThreadListItem {
       : "people",
     newSender: hasNewSender ? (value.newSender as boolean) : false,
     ...(hasNewSenderFrom ? { newSenderFrom: readAddress(value.newSenderFrom) } : {}),
+    ...(hasSenderBlocked ? { senderBlocked: true as const } : {}),
   };
 }
 

@@ -1270,9 +1270,12 @@ export class MailSenderScreen implements MailSenderScreenService {
   }
 
   /**
-   * Sets `newSender` on each item. A failure reading the screen answers false
-   * for the page rather than failing it: mail stays readable when the screen
-   * is not, and a thread that should have waited only arrives ungrouped.
+   * Sets `newSender` on each item, and `senderBlocked` on a thread the next
+   * archive step will take (the archiver runs while the switch is on, whether
+   * or not this account gates yet). A failure reading the screen answers
+   * false for the page rather than failing it: mail stays readable when the
+   * screen is not, and a thread that should have waited only arrives
+   * ungrouped.
    */
   async annotateItems(
     accountId: string,
@@ -1280,10 +1283,10 @@ export class MailSenderScreen implements MailSenderScreenService {
   ): Promise<readonly MailThreadListItem[]> {
     if (items.length === 0) return items;
     try {
-      const gateMoment = this.readGateMoment(accountId);
-      if (gateMoment === null) {
+      if (!this.store.readState().enabled) {
         return Object.freeze(items.map((item) => withNewSender(item, null)));
       }
+      const gateMoment = this.readGateMoment(accountId);
       const own = await this.readOwn();
       const senders = await this.mail.readThreadFirstSenders(
         accountId,
@@ -1320,6 +1323,7 @@ export class MailSenderScreen implements MailSenderScreenService {
         let gated = isMailSenderGated(input);
         if (
           !gated &&
+          gateMoment !== null &&
           first !== null &&
           sender !== null &&
           !input.startsConversation &&
@@ -1327,10 +1331,20 @@ export class MailSenderScreen implements MailSenderScreenService {
         ) {
           gated = await this.followsStranger(accountId, sender, first.references, gateMoment);
         }
+        // The archiver's own rule (`blockingDecision`): an address's own
+        // decision speaks first, and a domain's block reaches only an address
+        // the owner does not know.
+        const blocked =
+          facts !== null &&
+          (facts.addressDecision === "block" ||
+            (facts.addressDecision === null &&
+              facts.domainDecision === "block" &&
+              !facts.known));
         annotated.push(
           withNewSender(
             item,
             gated && sender !== null ? { name: first?.name ?? null, address: sender } : null,
+            blocked,
           ),
         );
       }
@@ -2083,18 +2097,30 @@ function normalizeAll(raw: readonly string[]): string[] {
 }
 
 /** A waiting thread carries the sender it waits on; any other carries none,
- *  whatever the item it was built from said. */
+ *  and only a thread whose sender is blocked carries the blocked mark,
+ *  whatever the item it was built from said. A thread cannot be both. */
 function withNewSender(
   item: MailThreadListItem,
   waitsOn: MailAddress | null,
+  blocked = false,
 ): MailThreadListItem {
-  if (waitsOn === null) {
-    if (!item.newSender && item.newSenderFrom === undefined) return item;
-    const rest: MailThreadListItem = { ...item, newSender: false };
-    delete (rest as { newSenderFrom?: MailAddress }).newSenderFrom;
-    return Object.freeze(rest);
+  const marked = waitsOn === null && blocked;
+  if (
+    waitsOn === null &&
+    !item.newSender &&
+    item.newSenderFrom === undefined &&
+    (item.senderBlocked === true) === marked
+  ) {
+    return item;
   }
-  return Object.freeze({ ...item, newSender: true, newSenderFrom: Object.freeze({ ...waitsOn }) });
+  const next: {
+    -readonly [Key in keyof MailThreadListItem]: MailThreadListItem[Key];
+  } = { ...item, newSender: waitsOn !== null };
+  delete next.newSenderFrom;
+  delete next.senderBlocked;
+  if (waitsOn !== null) next.newSenderFrom = Object.freeze({ ...waitsOn });
+  if (marked) next.senderBlocked = true;
+  return Object.freeze(next);
 }
 
 function isPermanentMutationFailure(error: unknown): boolean {

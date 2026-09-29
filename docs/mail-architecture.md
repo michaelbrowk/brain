@@ -502,13 +502,14 @@ Only Gmail teaches aliases; an IMAP account syncs its Inbox alone and carries
 no sent mark, so an alias used only from IMAP stays unknown to the screen. A
 decision about an own address (address scope) or an own domain (domain
 scope) is refused with `mail_sender_own_address`, and a thread whose first
-From is an own address is never archived, on any provider. Whether such a
-thread is the owner's for the gate depends on the provider. On Gmail only the
-sent mark counts: a letter that merely claims an own address in its From is
-common spam there, so it waits like any stranger's and is not taken as known
-(the cost is that a letter the owner sends himself from another account waits
-once in a Gmail Inbox, and cannot be decided on). On IMAP, where there is no
-mark to ask, the address is trusted. Domain scope is also refused for the big
+message is the owner's, by the sent mark or by its From being an own
+address, is never gated and never archived, on every provider. The address
+has to be enough: a letter the owner sends from one of his accounts to
+another carries no sent mark where it lands, and since no decision can be
+made about an own address, holding it would hold it for good. The residual is
+a forgery: spam that puts the owner's own address in its From passes the
+screen, and catching it stays the provider's spam filter's job, as it was
+before the screen existed. Domain scope is also refused for the big
 mail providers (`MAIL_SENDER_DOMAIN_SCOPE_REFUSED`, with
 `mail_sender_domain_scope_refused`), and the state answer lists those
 domains and the owner's own as `domainScopeRefused`, so the UI never offers

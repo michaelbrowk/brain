@@ -1223,20 +1223,19 @@ describe("the new-senders screen", () => {
     expect(accepted.decisionId).not.toBe(blocked.decisionId);
   });
 
-  it("gates a Gmail letter that only claims the owner's address, and trusts the address on IMAP", async () => {
+  it("treats every account's address as the owner's on every provider, so nothing the owner writes gets stuck", async () => {
     const world = await readyWorld();
-    world.mail.setProviderKind(ACCOUNT_A, "gmail");
-    world.mail.addThread(ACCOUNT_A, { threadId: "spoof", from: "Me <me@a.test>", at: LATER });
-    world.mail.addThread(ACCOUNT_A, {
-      threadId: "really-mine",
-      from: "me@a.test",
-      at: LATER,
-      fromOwner: true,
-    });
-    world.mail.addThread(ACCOUNT_B, { threadId: "imap-mine", from: "me@b.test", at: LATER });
+    // Say A is the Gmail account. A letter from the owner's other account (B's
+    // address) carries no sent mark in A, and must not wait: no decision can
+    // be made about an own address, so it could never leave New senders.
+    world.mail.addThread(ACCOUNT_A, { threadId: "from-b", from: "Me <me@b.test>", at: LATER });
+    // A letter claiming A's own address is not held either; a forgery of it
+    // is the provider's spam filter's to catch, as before the screen.
+    world.mail.addThread(ACCOUNT_A, { threadId: "claims-a", from: "me@a.test", at: LATER });
+    world.mail.addThread(ACCOUNT_B, { threadId: "from-a", from: "me@a.test", at: LATER });
 
-    expect(await newSenders(world, ACCOUNT_A, ["spoof", "really-mine"])).toEqual([true, false]);
-    expect(await newSenders(world, ACCOUNT_B, ["imap-mine"])).toEqual([false]);
+    expect(await newSenders(world, ACCOUNT_A, ["from-b", "claims-a"])).toEqual([false, false]);
+    expect(await newSenders(world, ACCOUNT_B, ["from-a"])).toEqual([false]);
     await expect(
       world.screen.decide(block("me@a.test"), NO_DEADLINE),
     ).rejects.toMatchObject({ code: "mail_sender_own_address" });
@@ -1455,7 +1454,6 @@ interface FakeThread {
 interface FakeAccount {
   readonly address: string;
   cacheReady: boolean;
-  providerKind: "gmail" | "imap";
 }
 
 /**
@@ -1467,7 +1465,7 @@ function createFakeMail(initial: Readonly<Record<string, string>>) {
   const accounts = new Map<string, FakeAccount>(
     Object.entries(initial).map(([accountId, address]) => [
       accountId,
-      { address, cacheReady: true, providerKind: "imap" },
+      { address, cacheReady: true },
     ]),
   );
   const threads = new Map<string, FakeThread[]>(
@@ -1537,7 +1535,6 @@ function createFakeMail(initial: Readonly<Record<string, string>>) {
         accountId,
         address: account.address,
         connected: true,
-        providerKind: account.providerKind,
       }));
     },
     readThreadFirstSenders,
@@ -1641,17 +1638,10 @@ function createFakeMail(initial: Readonly<Record<string, string>>) {
     addAccount(
       accountId: string,
       address: string,
-      options: { readonly cacheReady: boolean; readonly providerKind?: "gmail" | "imap" },
+      options: { readonly cacheReady: boolean },
     ) {
-      accounts.set(accountId, {
-        address,
-        cacheReady: options.cacheReady,
-        providerKind: options.providerKind ?? "imap",
-      });
+      accounts.set(accountId, { address, cacheReady: options.cacheReady });
       threads.set(accountId, []);
-    },
-    setProviderKind(accountId: string, providerKind: "gmail" | "imap") {
-      accounts.get(accountId)!.providerKind = providerKind;
     },
     setCacheReady(accountId: string) {
       accounts.get(accountId)!.cacheReady = true;

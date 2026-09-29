@@ -1065,7 +1065,6 @@ export interface MailSenderAccount {
   readonly accountId: string;
   readonly address: string;
   readonly connected: boolean;
-  readonly providerKind: "gmail" | "imap";
 }
 
 /** What the screen needs from the accounts and their caches. */
@@ -1125,9 +1124,6 @@ export interface MailSenderScreenService {
 
 interface OwnSenders {
   readonly connectedAccountIds: readonly string[];
-  /** Gmail accounts, where only the provider's sent mark proves a letter is
-   *  the owner's: a From claiming an own address is common spam there. */
-  readonly gmailAccountIds: ReadonlySet<string>;
   readonly addresses: ReadonlySet<string>;
   readonly domains: ReadonlySet<string>;
 }
@@ -1222,7 +1218,6 @@ export class MailSenderScreen implements MailSenderScreenService {
         return Object.freeze(items.map((item) => withNewSender(item, false)));
       }
       const own = await this.readOwn();
-      const trustsOwnAddress = !own.gmailAccountIds.has(accountId);
       const senders = await this.mail.readThreadFirstSenders(
         accountId,
         items.map((item) => item.threadId),
@@ -1234,12 +1229,14 @@ export class MailSenderScreen implements MailSenderScreenService {
           first === null || first.address === null
             ? null
             : normalizeSenderAddress(first.address);
-        const claimsOwner = sender !== null && own.addresses.has(sender);
-        const isOwn = first?.fromOwner === true || (claimsOwner && trustsOwnAddress);
-        // On Gmail a letter that only claims an own address is not the
-        // owner's, and it is not a correspondent either: it waits.
-        const facts =
-          sender === null || isOwn || claimsOwner ? null : this.store.readSenderFacts(sender);
+        // Every account address and learned alias is the owner's, on every
+        // provider: a letter the owner sends between his own accounts carries
+        // no sent mark where it lands, and no decision can be made about an
+        // own address, so holding it would hold it for good. A forgery of an
+        // own address is the provider's spam filter's to catch.
+        const isOwn =
+          first?.fromOwner === true || (sender !== null && own.addresses.has(sender));
+        const facts = sender === null || isOwn ? null : this.store.readSenderFacts(sender);
         const input: MailSenderGateInput = {
           gateMoment,
           category: item.category,
@@ -1516,11 +1513,6 @@ export class MailSenderScreen implements MailSenderScreenService {
       connectedAccountIds: Object.freeze(
         accounts.filter((account) => account.connected).map((account) => account.accountId),
       ),
-      gmailAccountIds: new Set(
-        accounts
-          .filter((account) => account.providerKind === "gmail")
-          .map((account) => account.accountId),
-      ),
       addresses,
       domains: new Set([...addresses].map(senderDomainOf)),
     });
@@ -1547,8 +1539,7 @@ export class MailSenderScreen implements MailSenderScreenService {
 
   /**
    * The block that archives a thread, if any, from an index read once for a
-   * whole walk. The owner's threads never have one, whatever the provider:
-   * archiving the owner's own letter is worse than letting a forgery stay.
+   * whole walk. The owner's threads never have one.
    * An address's own decision speaks first; a domain's block only reaches an
    * address the owner has never decided about and does not know.
    */

@@ -1296,11 +1296,12 @@ export class MailSenderScreen implements MailSenderScreenService {
       // once for the page.
       let effects: MailSenderArchiveEffects | null = null;
       let inboxDates: ReadonlyMap<string, number | null> | null = null;
-      const movedBack = async (threadId: string, address: string): Promise<boolean> => {
-        const standing = this.store.readBlockingDecision(address);
-        if (standing === null) return true;
+      /** Whether this block archived this very thread once and the owner put
+       *  it back, with nothing newer from anyone but him since
+       *  (`ownerMovedBack`, by the thread's own record). */
+      const movedBack = async (decisionId: string, threadId: string): Promise<boolean> => {
         effects ??= this.store.readArchiveEffects(accountId);
-        const record = effects.byThread.get(archiveEffectKey(standing.decisionId, threadId));
+        const record = effects.byThread.get(archiveEffectKey(decisionId, threadId));
         if (record?.state !== "done") return false;
         inboxDates ??= new Map(
           (await this.mail.listInboxThreadFirstSenders(accountId, ownAddressTest(own))).map(
@@ -1353,21 +1354,18 @@ export class MailSenderScreen implements MailSenderScreenService {
         ) {
           gated = await this.followsStranger(accountId, sender, first.references, gateMoment);
         }
-        // The archiver's own rule (`blockingDecision`): an address's own
+        // The archiver's own rule (`readBlockingDecision`): an address's own
         // decision speaks first, and a domain's block reaches only an address
         // the owner does not know. It moves only what is in the Inbox, and
-        // leaves a thread its block archived once and the owner put back
-        // (`ownerMovedBack`, by the thread's own record). An IMAP copy put
-        // back under a new UID has no record of its own and stays marked.
+        // leaves a thread its block archived once and the owner put back. An
+        // IMAP copy put back under a new UID has no record of its own and
+        // stays marked.
+        const standing =
+          sender !== null && !isOwn && first?.inInbox === true
+            ? this.store.readBlockingDecision(sender)
+            : null;
         const blocked =
-          sender !== null &&
-          facts !== null &&
-          first?.inInbox === true &&
-          (facts.addressDecision === "block" ||
-            (facts.addressDecision === null &&
-              facts.domainDecision === "block" &&
-              !facts.known)) &&
-          !(await movedBack(item.threadId, sender));
+          standing !== null && !(await movedBack(standing.decisionId, item.threadId));
         annotated.push(
           withNewSender(
             item,

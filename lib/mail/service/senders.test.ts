@@ -2014,6 +2014,41 @@ describe("the new-senders screen", () => {
     ]);
   });
 
+  it("never marks a blocked sender's thread the owner had filed before the block", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_A, {
+      threadId: "filed",
+      from: "news@growth.test",
+      at: LATER,
+      inbox: false,
+    });
+    await world.screen.decide(block("news@growth.test"), NO_DEADLINE);
+    const [item] = await world.screen.annotateItems(ACCOUNT_A, [
+      world.mail.item(ACCOUNT_A, "filed"),
+    ]);
+    expect(item).not.toHaveProperty("senderBlocked");
+  });
+
+  it("never marks a letter from the owner's alias, learned after a block of its domain", async () => {
+    const world = await readyWorld();
+    await world.screen.decide(block("spammer@corp.test", "domain"), NO_DEADLINE);
+    world.mail.addThread(ACCOUNT_A, {
+      threadId: "sent-as-alias",
+      from: "owner@corp.test",
+      to: ["someone@elsewhere.test"],
+      at: LATER,
+      inbox: false,
+      sent: true,
+      fromOwner: true,
+    });
+    await step(world, ACCOUNT_A, true);
+    world.mail.addThread(ACCOUNT_B, { threadId: "alias-to-b", from: "owner@corp.test", at: LATER + 1 });
+    const [item] = await world.screen.annotateItems(ACCOUNT_B, [
+      world.mail.item(ACCOUNT_B, "alias-to-b"),
+    ]);
+    expect(item).not.toHaveProperty("senderBlocked");
+  });
+
   it("marks a thread the owner moved back once its sender writes again, not for his own reply", async () => {
     const world = await readyWorld();
     world.mail.addThread(ACCOUNT_A, { threadId: "again", from: "news@growth.test", at: LATER });

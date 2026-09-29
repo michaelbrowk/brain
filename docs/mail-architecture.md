@@ -525,9 +525,9 @@ added_at)`, `own_senders(address, added_at)`, `sender_decisions(decision_id,
 key, kind, decision, decided_at, replaced_by)` (one standing decision per key;
 a verdict a later one replaced stays, marked, with its own effects),
 `decision_effects` (the known entry an accept added, and every thread a block
-archived with the newest date of a letter the owner did not send and its first
-message's Message-ID at the time, each `pending` until the provider has
-answered), `backfill_progress` (each account's cursors and the moment its
+archived or claimed as a copy of one it archived, with the newest date of a
+letter the owner did not send and its first message's Message-ID at the time,
+each `pending` until the provider has answered), `backfill_progress` (each account's cursors and the moment its
 backfill finished) and `pending_restores`. Only addresses, domains, thread ids and
 times are stored. A file that cannot be opened leaves the service running
 without the screen: every thread ungated, the routes answering
@@ -612,14 +612,20 @@ whose archive is on record. The rest, and every later letter from a blocked
 sender, are archived by the scheduler after a sync pass that reached the
 provider, 25 a step. A thread the owner moved back to the Inbox by hand stays
 there until a newer letter from someone other than the owner arrives in it;
-his own reply in it does not count. The thread's own archive record decides.
-An IMAP message comes back under a new UID and so a new thread id, and is
-recognised instead by another record for the same first Message-ID with
-exactly the same newest date, and only when no other thread the same
-decision governs in the listing carries that Message-ID: two copies of one
-letter delivered twice are two letters to archive, not one moved back. An
-IMAP letter with no Message-ID that the owner moves back cannot be told from
-a new one, and is archived again. It only archives,
+his own reply in it does not count, however his address is written (addresses
+are compared normalized, an international domain in its ASCII form). The
+thread's own archive record decides. An IMAP message comes back under a new
+UID and so a new thread id with no record of its own, and copies of one letter
+delivered in the same second cannot be told apart either, so they are
+counted: the Inbox threads a decision governs with the same first Message-ID
+and the same newest date stay while the finished archives of that Message-ID
+and date whose threads have left the Inbox number at least as many as those
+threads without a record of their own. The first copy archived claims the
+others with a `pending` record, so a walk that stops between two copies
+leaves the second to be archived rather than matched to the first. Two
+residuals follow: a same-second copy delivered after its twin was archived
+stays in the Inbox, and an IMAP letter with no Message-ID that the owner
+moves back cannot be told from a new one and is archived again. It only archives,
 never deletes and never marks spam. A thread the provider would not archive
 is left alone for an hour. Each step that archives writes
 `mail_sender_blocked_archived` with the account, `phase` (`decision` or

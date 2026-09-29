@@ -1258,6 +1258,243 @@ describe("the new-senders screen", () => {
     expect(world.mail.inbox(ACCOUNT_B)).toEqual([]);
   });
 
+  it("leaves both copies of a letter delivered twice in the Inbox once the owner moves both back", async () => {
+    const world = await readyWorld();
+    for (const threadId of ["uid-1", "uid-2"]) {
+      world.mail.addThread(ACCOUNT_B, {
+        threadId,
+        from: "spam@bulk.test",
+        at: LATER,
+        messageId: "<dup@bulk.test>",
+      });
+    }
+    await world.screen.decide(block("spam@bulk.test"), NO_DEADLINE);
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual([]);
+    // A client that shows conversations moves both back; IMAP gives new UIDs.
+    for (const threadId of ["uid-3", "uid-4"]) {
+      world.mail.addThread(ACCOUNT_B, {
+        threadId,
+        from: "spam@bulk.test",
+        at: LATER,
+        messageId: "<dup@bulk.test>",
+      });
+    }
+
+    await step(world, ACCOUNT_B, true);
+
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual(["uid-3", "uid-4"]);
+  });
+
+  it("leaves copies of a letter delivered twice in the Inbox when the owner moves them back one at a time", async () => {
+    const world = await readyWorld();
+    for (const threadId of ["uid-1", "uid-2"]) {
+      world.mail.addThread(ACCOUNT_B, {
+        threadId,
+        from: "spam@bulk.test",
+        at: LATER,
+        messageId: "<dup@bulk.test>",
+      });
+    }
+    await world.screen.decide(block("spam@bulk.test"), NO_DEADLINE);
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "uid-3",
+      from: "spam@bulk.test",
+      at: LATER,
+      messageId: "<dup@bulk.test>",
+    });
+    await step(world, ACCOUNT_B, true);
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual(["uid-3"]);
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "uid-4",
+      from: "spam@bulk.test",
+      at: LATER,
+      messageId: "<dup@bulk.test>",
+    });
+
+    await step(world, ACCOUNT_B, true);
+
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual(["uid-3", "uid-4"]);
+  });
+
+  it("leaves two copies of one letter delivered seconds apart in the Inbox once the owner moves both back", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "uid-1",
+      from: "rep@sales.test",
+      at: LATER,
+      messageId: "<post@sales.test>",
+    });
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "uid-2",
+      from: "rep@sales.test",
+      at: LATER + 3,
+      messageId: "<post@sales.test>",
+    });
+    await world.screen.decide(block("rep@sales.test"), NO_DEADLINE);
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual([]);
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "uid-3",
+      from: "rep@sales.test",
+      at: LATER,
+      messageId: "<post@sales.test>",
+    });
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "uid-4",
+      from: "rep@sales.test",
+      at: LATER + 3,
+      messageId: "<post@sales.test>",
+    });
+
+    await step(world, ACCOUNT_B, true);
+
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual(["uid-3", "uid-4"]);
+  });
+
+  it("archives the second copy of a letter delivered twice when the Block's walk stopped between the two", async () => {
+    const world = await readyWorld();
+    for (const threadId of ["uid-1", "uid-2"]) {
+      world.mail.addThread(ACCOUNT_B, {
+        threadId,
+        from: "spam@bulk.test",
+        at: LATER,
+        messageId: "<dup@bulk.test>",
+      });
+    }
+    const controller = new AbortController();
+    const honest = world.mail.updateThread.getMockImplementation()!;
+    world.mail.updateThread.mockImplementation(async (input, signal) => {
+      const answer = await honest(input, signal);
+      // The client leaves right after the first copy.
+      if (input.threadId === "uid-1") controller.abort();
+      return answer;
+    });
+    const decision = await world.screen.decide(block("spam@bulk.test"), {
+      deadlineAt: Number.MAX_SAFE_INTEGER,
+      signal: controller.signal,
+    });
+    world.mail.updateThread.mockImplementation(honest);
+    expect(decision.pending).toBe(true);
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual(["uid-2"]);
+
+    await step(world, ACCOUNT_B, true);
+
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual([]);
+  });
+
+  it("archives the second copy of a letter delivered twice when the archiver's step ended between the two", async () => {
+    const world = await readyWorld();
+    await world.screen.decide(block("spam@bulk.test"), NO_DEADLINE);
+    for (let index = 0; index < 24; index += 1) {
+      world.mail.addThread(ACCOUNT_B, {
+        threadId: `f-${String(index).padStart(2, "0")}`,
+        from: "spam@bulk.test",
+        at: LATER + 100 + index,
+      });
+    }
+    for (const threadId of ["uid-2", "uid-1"]) {
+      world.mail.addThread(ACCOUNT_B, {
+        threadId,
+        from: "spam@bulk.test",
+        at: LATER + 5,
+        messageId: "<dup@bulk.test>",
+      });
+    }
+    await step(world, ACCOUNT_B, true);
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual(["uid-1"]);
+
+    await step(world, ACCOUNT_B, true);
+
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual([]);
+  });
+
+  it("archives a new copy of a letter whose archived copy the owner put back under its own thread id", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "c1",
+      from: "spam@bulk.test",
+      at: LATER,
+      messageId: "<dup@bulk.test>",
+    });
+    await world.screen.decide(block("spam@bulk.test"), NO_DEADLINE);
+    await world.mail.port.updateThread(
+      { accountId: ACCOUNT_B, threadId: "c1", archive: false },
+      new AbortController().signal,
+    );
+    // The archive of c1 accounts for c1 itself, still listed, not for this one.
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "uid-9",
+      from: "spam@bulk.test",
+      at: LATER,
+      messageId: "<dup@bulk.test>",
+    });
+
+    await step(world, ACCOUNT_B, true);
+    await step(world, ACCOUNT_B, true);
+
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual(["c1"]);
+  });
+
+  it("tells a copy the owner moved back from its twin whose archive failed, when the same Block is made again", async () => {
+    const world = await readyWorld();
+    for (const threadId of ["c1", "c2"]) {
+      world.mail.addThread(ACCOUNT_B, {
+        threadId,
+        from: "spam@bulk.test",
+        at: LATER,
+        messageId: "<dup@bulk.test>",
+      });
+    }
+    const honest = world.mail.updateThread.getMockImplementation()!;
+    world.mail.updateThread.mockImplementation(async (input, signal) => {
+      if (input.threadId === "c2") throw new Error("the provider timed out");
+      return honest(input, signal);
+    });
+    const first = await world.screen.decide(block("spam@bulk.test"), NO_DEADLINE);
+    world.mail.updateThread.mockImplementation(honest);
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual(["c2"]);
+    // The owner moves c1 back; IMAP gives it a new UID.
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "n1",
+      from: "spam@bulk.test",
+      at: LATER,
+      messageId: "<dup@bulk.test>",
+    });
+
+    const again = await world.screen.decide(block("spam@bulk.test"), NO_DEADLINE);
+
+    expect(again.decisionId).toBe(first.decisionId);
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual(["n1"]);
+  });
+
+  it("answers a Block made again after an Accept replaced the first one with a new decision of its own", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_A, { threadId: "t1", from: "x@growth.test", at: LATER });
+    const first = await world.screen.decide(block("x@growth.test"), NO_DEADLINE);
+    const middle = await world.screen.decide(accept("x@growth.test"), NO_DEADLINE);
+    world.mail.addThread(ACCOUNT_A, { threadId: "t2", from: "x@growth.test", at: LATER + 10 });
+
+    const last = await world.screen.decide(block("x@growth.test"), NO_DEADLINE);
+
+    expect(new Set([first.decisionId, middle.decisionId, last.decisionId]).size).toBe(3);
+    expect(last.archived).toEqual([{ accountId: ACCOUNT_A, threadId: "t2" }]);
+    expect(world.store.listBlocked(10).map((entry) => entry.decisionId)).toEqual([
+      last.decisionId,
+    ]);
+    await expect(
+      world.screen.undo(middle.decisionId, { restore: true }, NO_DEADLINE),
+    ).rejects.toMatchObject({ code: "mail_sender_decision_changed" });
+    // Each Undo gives back the verdict before it, down to the first Block.
+    expect((await world.screen.undo(last.decisionId, { restore: true }, NO_DEADLINE)).restored).toEqual([
+      { accountId: ACCOUNT_A, threadId: "t2" },
+    ]);
+    expect(world.store.isKnown("x@growth.test")).toBe(true);
+    expect((await world.screen.undo(middle.decisionId, { restore: true }, NO_DEADLINE)).restored).toEqual([]);
+    expect(world.store.isKnown("x@growth.test")).toBe(false);
+    expect(world.store.listBlocked(10).map((entry) => entry.decisionId)).toEqual([
+      first.decisionId,
+    ]);
+  });
+
   it("drops the intent when the provider refuses the archive outright, so an Undo leaves the owner's own archive alone", async () => {
     const world = await readyWorld();
     world.mail.addThread(ACCOUNT_A, { threadId: "f", from: "x@growth.test", at: LATER });
@@ -1924,7 +2161,7 @@ function createFakeMail(initial: Readonly<Record<string, string>>) {
         cacheReady,
       };
     },
-    async listInboxThreadFirstSenders(accountId, ownAddresses) {
+    async listInboxThreadFirstSenders(accountId, isOwnAddress) {
       const hold = listHolds.get(accountId);
       if (hold !== undefined) {
         listHolds.delete(accountId);
@@ -1936,7 +2173,7 @@ function createFakeMail(initial: Readonly<Record<string, string>>) {
         .map((thread) => {
           const foreign = thread.messages.filter(
             (message) =>
-              !message.fromOwner && !ownAddresses.includes(lower(message.from) ?? ""),
+              !message.fromOwner && (message.from === null || !isOwnAddress(message.from)),
           );
           return {
             threadId: thread.threadId,

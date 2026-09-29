@@ -41,6 +41,7 @@ import {
 const MAX_PAGE_ITEMS = 20;
 const MAX_INITIAL_MESSAGES = 200;
 const MAX_LIST_HEADER_BYTES = 32 * 1024;
+const MAX_HEADER_NAME_BYTES = 128;
 const FULL_REBUILD_AFTER_CYCLES = 10;
 const MAX_UID_COMPONENT = 0xffff_ffff;
 const BIGINT_ZERO = BigInt(0);
@@ -1081,7 +1082,7 @@ function metadataFetchQuery() {
     size: true,
     // imapflow fetches named headers with BODY.PEEK[HEADER.FIELDS (…)], so
     // the read-only session stays flag-neutral.
-    headers: ["list-id", "list-unsubscribe", "precedence", "auto-submitted", "references"],
+    headers: ["list-id", "list-unsubscribe", "precedence", "auto-submitted"],
   });
 }
 
@@ -1147,9 +1148,10 @@ export function imapMessageToCached(
     listMessage,
     category,
     sizeEstimate,
-    // The envelope carries In-Reply-To; a reply that names its parent in
-    // References alone is read from the fetched header block.
-    isReply: inReplyTo !== null || hasReferencesHeader(source.headers),
+    // The envelope's In-Reply-To is the whole signal. References is not
+    // fetched: its length is the sender's to choose, and a reply that names
+    // its parent there alone is gated like a first letter, the safe way.
+    isReply: inReplyTo !== null,
     fromOwner: false,
   });
   const participants = Object.freeze(from === null ? [] : [from]);
@@ -1473,21 +1475,12 @@ interface ParsedListHeaders {
   readonly autoSubmitted: string | null;
 }
 
-/** Whether the fetched header block names a References header at all. */
-export function hasReferencesHeader(headers: Buffer | undefined): boolean {
-  if (headers === undefined || headers.byteLength === 0) return false;
-  return headers
-    .subarray(0, MAX_LIST_HEADER_BYTES)
-    .toString("latin1")
-    .split(/\r?\n/)
-    .some((line) => /^references\s*:/i.test(line));
-}
-
 /**
  * Reads only the four list-classification headers out of the fetched header
  * block: presence for List-Id and List-Unsubscribe, the trimmed first value
  * for Precedence and Auto-Submitted. Folded continuation lines are unfolded,
- * names match case-insensitively, and the block is bounded before parsing.
+ * names match case-insensitively, each value read is bounded, and a field
+ * nobody reads is stepped over whatever its length.
  */
 export function parseListHeaders(
   headers: Buffer | undefined,
@@ -1497,22 +1490,15 @@ export function parseListHeaders(
   let precedence: string | null = null;
   let autoSubmitted: string | null = null;
   if (headers !== undefined && headers.byteLength > 0) {
-    const text = headers
-      .subarray(0, MAX_LIST_HEADER_BYTES)
-      .toString("latin1")
-      .replace(/\r?\n[ \t]+/g, " ");
-    for (const line of text.split(/\r?\n/)) {
-      const separator = line.indexOf(":");
-      if (separator < 1) continue;
-      const name = line.slice(0, separator).trim().toLowerCase();
-      if (name === "list-id") {
+    for (const field of headerFields(headers)) {
+      if (field.name === "list-id") {
         hasListId = true;
-      } else if (name === "list-unsubscribe") {
+      } else if (field.name === "list-unsubscribe") {
         hasListUnsubscribe = true;
-      } else if (name === "precedence" && precedence === null) {
-        precedence = line.slice(separator + 1).trim();
-      } else if (name === "auto-submitted" && autoSubmitted === null) {
-        autoSubmitted = line.slice(separator + 1).trim();
+      } else if (field.name === "precedence" && precedence === null) {
+        precedence = headerFieldValue(headers, field);
+      } else if (field.name === "auto-submitted" && autoSubmitted === null) {
+        autoSubmitted = headerFieldValue(headers, field);
       }
     }
   }
@@ -1522,6 +1508,55 @@ export function parseListHeaders(
     precedence,
     autoSubmitted,
   });
+}
+
+interface HeaderField {
+  readonly name: string;
+  readonly valueStart: number;
+  readonly end: number;
+}
+
+/**
+ * The fields of a header block, found by their line breaks without decoding
+ * the ones nobody reads. A field runs until a line break that is not followed
+ * by a space or a tab. Only a name of a plausible length is decoded, so a
+ * long field anywhere in the block costs one scan and never hides the fields
+ * after it.
+ */
+function* headerFields(block: Buffer): Generator<HeaderField> {
+  let start = 0;
+  while (start < block.byteLength) {
+    let end = block.byteLength;
+    let searchFrom = start;
+    for (;;) {
+      const lineFeed = block.indexOf(0x0a, searchFrom);
+      if (lineFeed === -1) break;
+      const next = block[lineFeed + 1];
+      if (next === 0x20 || next === 0x09) {
+        searchFrom = lineFeed + 1;
+        continue;
+      }
+      end = lineFeed + 1;
+      break;
+    }
+    const colon = block.indexOf(0x3a, start);
+    if (colon > start && colon < end && colon - start <= MAX_HEADER_NAME_BYTES) {
+      yield {
+        name: block.subarray(start, colon).toString("latin1").trim().toLowerCase(),
+        valueStart: colon + 1,
+        end,
+      };
+    }
+    start = end;
+  }
+}
+
+function headerFieldValue(block: Buffer, field: HeaderField): string {
+  return block
+    .subarray(field.valueStart, Math.min(field.end, field.valueStart + MAX_LIST_HEADER_BYTES))
+    .toString("latin1")
+    .replace(/\r?\n[ \t]+/g, " ")
+    .trim();
 }
 
 /**

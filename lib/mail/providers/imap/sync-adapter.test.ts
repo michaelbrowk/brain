@@ -269,7 +269,7 @@ describe("IMAP metadata sync adapter", () => {
     });
   });
 
-  it("marks a message that answers another by In-Reply-To or by References alone", () => {
+  it("marks a message that answers another by its envelope's In-Reply-To", () => {
     const message = (envelope: Record<string, unknown>, headers?: string) =>
       imapMessageToCached(ACCOUNT_ID, BigInt(77), {
         seq: 1,
@@ -286,7 +286,8 @@ describe("IMAP metadata sync adapter", () => {
 
     expect(message({}).isReply).toBe(false);
     expect(message({ inReplyTo: "<parent@example.test>" }).isReply).toBe(true);
-    expect(message({}, "References: <root@example.test>\r\n").isReply).toBe(true);
+    // References is not fetched: its size is the sender's to choose, and a
+    // reply without In-Reply-To is gated like a first letter, the safe way.
     expect(message({}, "List-Id: <news.example.test>\r\n").isReply).toBe(false);
   });
 });
@@ -304,15 +305,24 @@ describe("IMAP list-message classification and size", () => {
       "1:3",
       expect.objectContaining({
         size: true,
-        headers: [
-          "list-id",
-          "list-unsubscribe",
-          "precedence",
-          "auto-submitted",
-          "references",
-        ],
+        headers: ["list-id", "list-unsubscribe", "precedence", "auto-submitted"],
       }),
     );
+  });
+
+  it("finds List-Id past a header of any length that it does not read", () => {
+    const references = Array.from(
+      { length: 600 },
+      (_, index) => `<message-${index}-${"x".repeat(40)}@lists.example.test>`,
+    ).join(" ");
+    const parsed = parseListHeaders(
+      Buffer.from(
+        `References: ${references}\r\nList-Id: <dev.lists.example.test>\r\nPrecedence: list\r\n`,
+        "latin1",
+      ),
+    );
+
+    expect(parsed).toMatchObject({ hasListId: true, precedence: "list" });
   });
 
   it("unfolds continuations and matches header names case-insensitively", () => {

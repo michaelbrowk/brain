@@ -29,6 +29,7 @@ vi.mock("./notifications-read", () => ({
 import {
   clearOpenThreadRequest,
   defaultMailSurfaceClient,
+  MAIL_MUTATION_TIMEOUT_MS,
   MailApiError,
   pendingOpenThread,
   requestOpenThread,
@@ -10728,6 +10729,389 @@ describe("MailSurface", () => {
       });
       await settle();
       expect(client.decideSender).toHaveBeenCalledTimes(1);
+    });
+
+    // Lena's other letter: not waiting (it is not a first letter), so only a
+    // block's `archived` answer takes it out of the column.
+    function lenaOther(threadId: string, at: number): MailThreadListItem {
+      return {
+        ...thread,
+        threadId,
+        subject: `Subject ${threadId}`,
+        unread: true,
+        participants: [lena],
+        lastMessageAt: at,
+      };
+    }
+    function filler(index: number): MailThreadListItem {
+      return {
+        ...thread,
+        threadId: `seen-${index}`,
+        subject: `Subject seen-${index}`,
+        unread: false,
+        lastMessageAt: 1_700_000_000_400 - index * 1000,
+      };
+    }
+    const blockAnswer = {
+      apiVersion: 1 as const,
+      decisionId: DECISION_ID,
+      archived: [
+        { accountId: accountA.accountId, threadId: "lena-1" },
+        { accountId: accountA.accountId, threadId: "lena-old" },
+      ],
+      pending: false,
+    };
+
+    it("keeps the archive out when a read begun before the block answered lands after it", async () => {
+      const items = [
+        waiting("lena-1"),
+        lenaOther("lena-old", 1_690_000_000_000),
+        friend("friend-1"),
+      ];
+      const late = deferred<MailThreadPage>();
+      let hold = false;
+      const decision = deferred<typeof blockAnswer>();
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      await mount(
+        [],
+        {
+          listThreads: vi
+            .fn()
+            .mockImplementation(({ accountId }) =>
+              accountId === accountA.accountId && hold
+                ? late.promise
+                : Promise.resolve(page(accountId === accountA.accountId ? items : [])),
+            ),
+          decideSender: vi.fn().mockReturnValue(decision.promise),
+        },
+        [accountA],
+      );
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      hold = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await act(async () => {
+        decision.resolve(blockAnswer);
+      });
+      await settle();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+      // The read left before the archive and says the letter is still there.
+      await act(async () => {
+        late.resolve(page(items));
+      });
+      await settle();
+      visibility.mockRestore();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+    });
+
+    it("keeps the archive out while a read begun after the answer has not landed", async () => {
+      const items = [
+        waiting("lena-1"),
+        lenaOther("lena-old", 1_690_000_000_000),
+        friend("friend-1"),
+      ];
+      let hold = false;
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      await mount([], {
+        listThreads: vi
+          .fn()
+          .mockImplementation(({ accountId }) =>
+            hold
+              ? new Promise(() => {})
+              : Promise.resolve(page(accountId === accountA.accountId ? items : [])),
+          ),
+        decideSender: vi.fn().mockResolvedValue(blockAnswer),
+      });
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      hold = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      visibility.mockRestore();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+    });
+
+    it("keeps one account's archive out when another account's read lands", async () => {
+      const items = [
+        waiting("lena-1"),
+        lenaOther("lena-old", 1_690_000_000_000),
+        friend("friend-1"),
+      ];
+      let hold = false;
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      await mount([], {
+        listThreads: vi.fn().mockImplementation(({ accountId }) => {
+          if (accountId !== accountA.accountId) return Promise.resolve(page([]));
+          return hold ? new Promise(() => {}) : Promise.resolve(page(items));
+        }),
+        decideSender: vi.fn().mockResolvedValue(blockAnswer),
+      });
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      hold = true;
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await settle();
+      visibility.mockRestore();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+    });
+
+    it("skips a letter the block archived when j walks a lone Inbox", async () => {
+      const { client } = await mount(
+        [waiting("lena-1"), lenaOther("lena-old", 1_700_000_000_300), friend("friend-1")],
+        { decideSender: vi.fn().mockResolvedValue(blockAnswer) },
+        [accountA],
+      );
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }));
+      });
+      await settle();
+      expect(client.readThread).not.toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: "lena-old" }),
+      );
+    });
+
+    it("hands focus to the column when the last waiting row goes and nothing else is left", async () => {
+      await mount([waiting("lena-1")]);
+      const accept = findButton("Accept Lena Okafor");
+      accept.focus();
+      await click(accept);
+      await settle();
+      expect((document.activeElement as HTMLElement).classList.contains("brain-mail-list")).toBe(
+        true,
+      );
+    });
+
+    it("puts a refreshed row back under New senders when an Accept is undone in a lone Inbox", async () => {
+      let items: MailThreadListItem[] = [waiting("lena-1"), friend("friend-1")];
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      const { onToast, client } = await mount(
+        [],
+        { listThreads: vi.fn().mockImplementation(() => Promise.resolve(page(items))) },
+        [accountA],
+      );
+      await click(findButton("Accept Lena Okafor"));
+      await settle();
+      items = [
+        { ...friend("lena-1"), participants: waiting("lena-1").participants },
+        friend("friend-1"),
+      ];
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await settle();
+      (client.listThreads as ReturnType<typeof vi.fn>).mockImplementation(
+        () => new Promise(() => {}),
+      );
+      await act(async () => {
+        await toastFor(onToast, "Accepted Lena Okafor")!.onAction!();
+      });
+      await settle();
+      visibility.mockRestore();
+      expect(section("New senders")?.textContent ?? "").toContain("Subject lena-1");
+    });
+
+    it("keeps a blocked letter out of a deep All inboxes stream after the page-one refresh", async () => {
+      const deep = [
+        waiting("lena-1"),
+        ...Array.from({ length: 58 }, (_, index) => filler(index)),
+        lenaOther("lena-old", 1_600_000_000_000),
+      ];
+      let items: MailThreadListItem[] = deep;
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      await mount([], {
+        listThreads: vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(page(accountId === accountA.accountId ? items : [])),
+        ),
+        decideSender: vi.fn().mockResolvedValue(blockAnswer),
+      });
+      expect(document.body.textContent).toContain("Subject lena-old");
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+      // The service archived both. The tick reads page one only (50 rows):
+      // lena-old was never on it, and the deep stream keeps its older tail.
+      items = deep
+        .filter((item) => item.threadId !== "lena-1" && item.threadId !== "lena-old")
+        .slice(0, 50);
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await settle();
+      visibility.mockRestore();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+    });
+
+    it("keeps a blocked letter out when a lone Inbox loads more after the block", async () => {
+      const first = [
+        waiting("lena-1"),
+        friend("friend-1"),
+        lenaOther("lena-old", 1_690_000_000_000),
+      ];
+      const older = { ...friend("friend-9"), lastMessageAt: 1_600_000_000_000 };
+      await mount(
+        [],
+        {
+          listThreads: vi
+            .fn()
+            .mockImplementation(({ cursor }) =>
+              Promise.resolve(cursor ? page([older]) : { ...page(first), nextCursor: "cursor-2" }),
+            ),
+          decideSender: vi.fn().mockResolvedValue(blockAnswer),
+        },
+        [accountA],
+      );
+      expect(document.body.textContent).toContain("Subject lena-old");
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+      await click(findButton("Load more"));
+      await settle();
+      expect(document.body.textContent).toContain("Subject friend-9");
+      expect(document.body.textContent).not.toContain("Subject lena-old");
+    });
+
+    it("keeps a blocked letter the request did not archive out after the next read", async () => {
+      let items: MailThreadListItem[] = [waiting("lena-1"), friend("friend-1")];
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      await mount([], {
+        listThreads: vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve(page(accountId === accountA.accountId ? items : [])),
+        ),
+        decideSender: vi.fn().mockResolvedValue({
+          apiVersion: 1,
+          decisionId: DECISION_ID,
+          archived: [],
+          pending: true,
+        }),
+      });
+      await click(findButton("Block Lena Okafor"));
+      await settle();
+      expect(document.body.textContent).not.toContain("Subject lena-1");
+      // The service no longer flags her (she is decided) and marks the thread
+      // blocked until the scheduler's archive lands.
+      const blockedItem: MailThreadListItem = {
+        ...friend("lena-1"),
+        participants: [lena],
+        newSender: false,
+        senderBlocked: true,
+      };
+      items = [blockedItem, friend("friend-1")];
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await settle();
+      visibility.mockRestore();
+      expect(document.body.textContent).not.toContain("Subject lena-1");
+    });
+
+    it("says an Undo nobody answered failed, and then sends the next decision about that sender", async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        // The client's deadline (`MAIL_MUTATION_TIMEOUT_MS`) is what ends a
+        // DELETE nobody answers; this is how it ends it.
+        const { client, onToast } = await mount([waiting("lena-1")], {
+          undoSenderDecision: vi.fn().mockImplementation(
+            () =>
+              new Promise((_resolve, reject) => {
+                setTimeout(
+                  () => reject(new DOMException("unanswered", "TimeoutError")),
+                  MAIL_MUTATION_TIMEOUT_MS,
+                );
+              }),
+          ),
+        });
+        await click(findButton("Accept Lena Okafor"));
+        await settle();
+        await act(async () => {
+          void toastFor(onToast, "Accepted Lena Okafor")!.onAction!();
+        });
+        await settle();
+        await click(findButton("Accept Lena Okafor"));
+        await settle();
+        expect(client.decideSender).toHaveBeenCalledTimes(1);
+        await act(async () => {
+          await vi.advanceTimersByTimeAsync(MAIL_MUTATION_TIMEOUT_MS);
+        });
+        await settle();
+        expect(onToast).toHaveBeenCalledWith("Couldn’t undo. Try again.", { urgent: true });
+        expect(client.decideSender).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    /** Lena's first letter open from All Mail, blocked with the reader's
+     *  Block. */
+    async function blockFromAllMail() {
+      const lenaAll = waiting("lena-1");
+      await mount(
+        [friend("friend-1")],
+        {
+          listMailboxThreads: vi
+            .fn()
+            .mockImplementation(({ mailboxId }) =>
+              Promise.resolve(
+                mailboxThreadPage(
+                  mailboxId,
+                  mailboxId === "all" ? [lenaAll, friend("other-1")] : [],
+                ),
+              ),
+            ),
+          readMailboxThread: vi
+            .fn()
+            .mockImplementation(() => Promise.resolve({ ...detail, thread: lenaAll })),
+          decideSender: vi.fn().mockResolvedValue({
+            apiVersion: 1,
+            decisionId: DECISION_ID,
+            archived: [{ accountId: accountA.accountId, threadId: "lena-1" }],
+            pending: false,
+          }),
+        },
+        [accountA],
+      );
+      await goTo("All Mail");
+      await settle();
+      await openLetter("Subject lena-1");
+      const readerBlock = [
+        ...document.body.querySelectorAll(
+          'section[aria-label="Message reader"] .toolbar-pill button',
+        ),
+      ].find((button) => button.textContent?.trim() === "Block") as HTMLButtonElement;
+      expect(readerBlock).toBeTruthy();
+      await click(readerBlock);
+      await settle();
+    }
+
+    it("leaves the letter listed, and the reader on it, after a Block made from All Mail", async () => {
+      await blockFromAllMail();
+      const list = document.body.querySelector('section[aria-label="Mailbox"]')!;
+      expect(list.textContent).toContain("Subject lena-1");
+      expect(
+        document.body.querySelector('section[aria-label="Message reader"]')?.textContent,
+      ).not.toContain("Choose a message");
+    });
+
+    it("draws no leaving ghost over a row a Block in All Mail leaves where it stands", async () => {
+      Object.defineProperty(HTMLElement.prototype, "animate", {
+        configurable: true,
+        writable: true,
+        value: vi.fn(() => ({ finished: new Promise(() => {}), cancel: () => {} })),
+      });
+      try {
+        await blockFromAllMail();
+        const copies = [
+          ...document.body.querySelectorAll('section[aria-label="Mailbox"] *'),
+        ].filter(
+          (element) =>
+            element.getAttribute("aria-hidden") === "true" &&
+            element.textContent?.includes("Subject lena-1"),
+        );
+        expect(copies).toEqual([]);
+      } finally {
+        delete (HTMLElement.prototype as { animate?: unknown }).animate;
+      }
     });
   });
 

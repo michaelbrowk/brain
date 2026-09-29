@@ -396,9 +396,11 @@ type SectionDoneRun = {
  *
  * A Block's `archived` set is the service's answer at one moment, and the
  * Inbox reads that follow are truer than it: the owner may move a letter back
- * by hand. So it is laid only over the Inbox and the merged list, and each
- * account's share of it ends once an Inbox read of that account that began
- * after the answer (`answeredAt`, a count of reads begun) has landed.
+ * by hand. So it is laid only over the Inbox and the merged list, and a
+ * thread leaves the set once an Inbox read that began after the answer
+ * (`answeredAt`, a count of reads begun) lands with that thread in it. A read
+ * that does not list it says nothing: a page-one refresh or a Load more never
+ * reaches the older rows a deep list still holds from before the answer.
  */
 type SenderDecisionEntry = ShownSenderDecision & {
   readonly token: number;
@@ -434,21 +436,21 @@ export function MailSurface({
   client?: MailSurfaceClient;
 }) {
   /* EVERY INBOX READ IS COUNTED ON ITS WAY OUT AND REPORTED ON ITS WAY IN.
-     A Block's archived answer holds rows out of the column only until a read
-     of that account that began after the answer has landed (see
+     A Block's archived answer holds a row out of the column only until a read
+     that began after the answer lists that thread (see
      `SenderDecisionEntry`), and a read is begun from a dozen places, so the
      count lives on the one door they all pass through. */
   const inboxReadsRef = useRef(0);
-  const inboxReadLandedRef = useRef<(accountId: string, startedAt: number) => void>(
-    () => {},
-  );
+  const inboxReadLandedRef = useRef<
+    (startedAt: number, listed: readonly MailThreadListItem[]) => void
+  >(() => {});
   const client = useMemo<MailSurfaceClient>(
     () => ({
       ...givenClient,
       listThreads: async (...request) => {
         const startedAt = ++inboxReadsRef.current;
         const page = await givenClient.listThreads(...request);
-        inboxReadLandedRef.current(request[0].accountId, startedAt);
+        inboxReadLandedRef.current(startedAt, page.items);
         return page;
       },
     }),
@@ -585,17 +587,17 @@ export function MailSurface({
   useEffect(() => {
     reduceMotionRef.current = reduceMotion;
   }, [reduceMotion]);
-  /* An Inbox read of one account that began after a block answered has
-     landed: from here on the list says which of that account's letters the
-     block archived, and says it better (the owner may have moved one back),
-     so the block's own answer stops holding them out. */
+  /* An Inbox read that began after a block answered has landed: a thread it
+     lists is in the Inbox after the archive (the owner moved it back), which
+     says it better than the block's answer, so the answer stops holding that
+     one out. */
   useEffect(() => {
-    inboxReadLandedRef.current = (accountId, startedAt) => {
-      const prefix = `${accountId}\u0000`;
+    inboxReadLandedRef.current = (startedAt, listed) => {
+      const present = new Set(listed.map(unifiedThreadKey));
       let changed = false;
       const next = senderDecisionsRef.current.map((entry) => {
         if (entry.answeredAt === null || startedAt <= entry.answeredAt) return entry;
-        const kept = new Set([...entry.archived].filter((key) => !key.startsWith(prefix)));
+        const kept = new Set([...entry.archived].filter((key) => !present.has(key)));
         if (kept.size === entry.archived.size) return entry;
         changed = true;
         return { ...entry, archived: kept };
@@ -4285,14 +4287,6 @@ export function MailSurface({
     [rawListItems, shownRows],
   );
 
-  /**
-   * The toast's Undo. The rows come back at the press, the way they left,
-   * and the DELETE follows. A decision the service no longer has
-   * (`mail_sender_decision_not_found`) is one already undone, and one a later
-   * decision replaced (`mail_sender_decision_changed`) is the later toast's to
-   * speak for, so neither says anything. Any other failure means the decision
-   * still stands, and the column shows it again and says so.
-   */
   /** A quiet read of whatever the column stands at, for after the service
    *  has changed its mind about who waits. */
   const rereadColumn = useCallback(() => {
@@ -4364,6 +4358,14 @@ export function MailSurface({
     return run;
   }, []);
 
+  /**
+   * The toast's Undo. The rows come back at the press, the way they left,
+   * and the DELETE follows. A decision the service no longer has
+   * (`mail_sender_decision_not_found`) is one already undone, and one a later
+   * decision replaced (`mail_sender_decision_changed`) is the later toast's to
+   * speak for, so neither says anything. Any other failure means the decision
+   * still stands, and the column shows it again and says so.
+   */
   const undoSenderDecision = useCallback(
     async (token: number): Promise<void> => {
       const entry = senderDecisionsRef.current.find((each) => each.token === token);
@@ -4372,7 +4374,11 @@ export function MailSurface({
       const keys = new Set(entry.taken.map(flipRowKey));
       showSenderDecisions(
         senderDecisionsRef.current.filter((each) => each.token !== token),
-        entry.verdict === "accept" ? { travel: keys } : { enter: keys },
+        !columnIsInbox()
+          ? {}
+          : entry.verdict === "accept"
+            ? { travel: keys }
+            : { enter: keys },
         entry.verdict === "block"
           ? () => putBackUnifiedThreads(entry.taken)
           : () => waitAgain(entry.taken),
@@ -4388,12 +4394,15 @@ export function MailSurface({
                 error.code === "mail_sender_decision_changed")
             )
           ) {
+            const inbox = columnIsInbox();
             showSenderDecisions(
               [...senderDecisionsRef.current, entry],
-              entry.verdict === "accept"
-                ? { travel: keys }
-                : { leave: keys, leaveMode: "left" },
-              entry.verdict === "block" ? () => closeReaderOn(entry.taken) : undefined,
+              !inbox
+                ? {}
+                : entry.verdict === "accept"
+                  ? { travel: keys }
+                  : { leave: keys, leaveMode: "left" },
+              entry.verdict === "block" && inbox ? () => closeReaderOn(entry.taken) : undefined,
             );
             onToast?.("Couldn’t undo. Try again.", { urgent: true });
             return;
@@ -4410,6 +4419,7 @@ export function MailSurface({
     [
       client,
       closeReaderOn,
+      columnIsInbox,
       inSenderLane,
       onToast,
       putBackUnifiedThreads,
@@ -4425,8 +4435,9 @@ export function MailSurface({
    * The decision names the sender by the thread's first From
    * (`newSenderFrom`), never by `participants` or a Reply-To. It shows at once
    * and for every row it covers: an Accept sends them to their sections, a
-   * Block takes them out of the column (and closes the letter if it is the
-   * one open). The POST follows; a refusal takes the decision back off the
+   * Block takes them out of an Inbox (and closes the letter if it is the one
+   * open). Any other list still holds a blocked sender's letters, so there
+   * they only stop waiting. The POST follows; a refusal takes the decision back off the
    * column and says so at once, and an answer brings the toast with its
    * Undo. The service recomputes `newSender` only on the next list read, so
    * until then the shown decision is what keeps the rows where the reader
@@ -4468,12 +4479,17 @@ export function MailSurface({
         options?.dragged !== undefined && options.dragged !== 0
           ? { key: flipRowKey(thread), x: options.dragged }
           : undefined;
+      // Any list but an Inbox keeps the rows where they stand, settled, and
+      // the letter open.
+      const inbox = columnIsInbox();
       showSenderDecisions(
         [...senderDecisionsRef.current, entry],
-        verdict === "accept"
-          ? { travel: keys, leaveMode: "fade", dragged }
-          : { leave: keys, leaveMode: "left", dragged },
-        verdict === "block" ? () => closeReaderOn(taken) : undefined,
+        !inbox
+          ? {}
+          : verdict === "accept"
+            ? { travel: keys, leaveMode: "fade", dragged }
+            : { leave: keys, leaveMode: "left", dragged },
+        verdict === "block" && inbox ? () => closeReaderOn(taken) : undefined,
       );
       const name = scope === "domain" ? key : senderName(from);
       const senders = new Set(
@@ -4496,7 +4512,11 @@ export function MailSurface({
           if (current.some((each) => each.token === entry.token)) {
             showSenderDecisions(
               current.filter((each) => each.token !== entry.token),
-              verdict === "accept" ? { travel: keys } : { enter: keys },
+              !columnIsInbox()
+                ? {}
+                : verdict === "accept"
+                  ? { travel: keys }
+                  : { enter: keys },
             );
           }
           onToast?.(senderDecisionFailure(error, verdict, name), { urgent: true });
@@ -4505,11 +4525,14 @@ export function MailSurface({
         const current = senderDecisionsRef.current;
         if (current.some((each) => each.token === entry.token)) {
           // A block can archive more than the column was showing under New
-          // senders; any of those still on screen leave the same way.
+          // senders; any of those still on screen in an Inbox leave the same
+          // way.
           const more = new Set(
-            shownRows(rawListItems(), current)
-              .filter((item) => decided.archived.has(unifiedThreadKey(item)))
-              .map(flipRowKey),
+            columnIsInbox()
+              ? shownRows(rawListItems(), current)
+                  .filter((item) => decided.archived.has(unifiedThreadKey(item)))
+                  .map(flipRowKey)
+              : [],
           );
           showSenderDecisions(
             current.map((each) =>
@@ -4549,6 +4572,7 @@ export function MailSurface({
     [
       client,
       closeReaderOn,
+      columnIsInbox,
       domainScopeOf,
       inSenderLane,
       onToast,

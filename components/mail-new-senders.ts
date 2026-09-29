@@ -114,10 +114,12 @@ function standingFor(
 
 /**
  * The list as the reader's own decisions leave it: an accepted sender's
- * letters stop waiting and fall into the group they belong to, a blocked
- * sender's letters leave, and so does any thread a block reported archiving
- * from a list the archive empties. The same array comes back when nothing in
- * it is touched, so a render that decided nothing costs nothing downstream.
+ * letters stop waiting and fall into the group they belong to. A blocked
+ * sender's letters leave a list the archive empties, and so does any thread a
+ * block reported archiving or the service marks blocked until its archive
+ * lands. Every other list keeps them, settled. The same array comes back when
+ * nothing in it is touched, so a render that decided nothing costs nothing
+ * downstream.
  */
 export function applyShownDecisions(
   items: readonly MailThreadListItem[],
@@ -129,13 +131,13 @@ export function applyShownDecisions(
     readonly inbox: boolean;
   } = { inbox: true },
 ): readonly MailThreadListItem[] {
-  if (decisions.length === 0) return items;
   let changed = false;
   const shown: MailThreadListItem[] = [];
   for (const item of items) {
     if (
       options.inbox &&
-      decisions.some((decision) => decision.archived.has(unifiedThreadKey(item)))
+      (item.senderBlocked === true ||
+        decisions.some((decision) => decision.archived.has(unifiedThreadKey(item))))
     ) {
       changed = true;
       continue;
@@ -147,7 +149,7 @@ export function applyShownDecisions(
       continue;
     }
     changed = true;
-    if (standing.verdict === "block") continue;
+    if (standing.verdict === "block" && options.inbox) continue;
     shown.push(settled(item));
   }
   return changed ? shown : items;

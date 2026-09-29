@@ -114,6 +114,31 @@ describe("new senders", () => {
     ).toEqual(["other"]);
   });
 
+  it("settles a blocked sender's letters in a list the archive does not empty", () => {
+    const items = [thread("lena", lena), thread("mia", mia)];
+    const shown = applyShownDecisions(
+      items,
+      [decision("address", "lena@okafor.example", "block")],
+      { inbox: false },
+    );
+    expect(shown.map((item) => [item.threadId, item.newSender])).toEqual([
+      ["lena", false],
+      ["mia", true],
+    ]);
+    expect(shown[0]).not.toHaveProperty("newSenderFrom");
+  });
+
+  it("drops a thread the service marks blocked from an Inbox, with or without a decision", () => {
+    const items = [thread("held", null, { senderBlocked: true }), thread("other", null)];
+    expect(applyShownDecisions(items, []).map((item) => item.threadId)).toEqual(["other"]);
+    expect(
+      applyShownDecisions(items, [decision("address", "lena@okafor.example", "accept")]).map(
+        (item) => item.threadId,
+      ),
+    ).toEqual(["other"]);
+    expect(applyShownDecisions(items, [], { inbox: false })).toBe(items);
+  });
+
   it("offers a domain only where the service takes one, and never before it has said", () => {
     const screen = { domainScopeRefused: ["gmail.example", "own.example"] };
     expect(domainScopeAllowed(screen, "okafor.example")).toBe(true);

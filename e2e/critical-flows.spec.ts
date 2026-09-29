@@ -7135,15 +7135,6 @@ test("an external edit is never overwritten by a stale local draft", async ({
   // so typing lands inside Milkdown's 200 ms serialization window.
   await page.getByRole("button", { name: "Home" }).click();
   await expect(page).toHaveURL("/");
-  // The canvas leaves through its exit transition (`AnimatePresence
-  // mode="wait"`), and until that ends this page's editor is still in the
-  // document, visible and editable. Coming back inside that window found it
-  // again: the fill below typed into the departing instance, the canvas that
-  // mounted after it read the cached "Base body", and the typed text went to
-  // the draft while the editor on screen showed the old body, about one run
-  // in three. Waiting for it to be gone makes the return mount a fresh editor
-  // from the cache, which is the path this test is about.
-  await expect(page.getByRole("textbox", { name: "Page content" })).toHaveCount(0);
 
   // A first Milkdown serialization can normalize the stored Markdown. Let any
   // such navigation flush finish before simulating an independent writer.
@@ -7205,6 +7196,95 @@ test("an external edit is never overwritten by a stale local draft", async ({
   }, created.id);
   expect(storedDraft?.trimEnd()).toBe("Local draft that must survive");
 });
+
+// THE LEAVING CANVAS TAKES NO KEYS.
+//
+// The canvas swaps under `AnimatePresence mode="wait"`, so the page being left
+// stays in the document, visible and, until `components/shell/canvas-presence
+// .tsx`, editable, through its exit. A return inside that window found it: the
+// keys went into the leaving editor, the canvas that mounted next read the
+// cached body, and the page showed the old text over a draft that held the new
+// one. The exit is 80 ms, which a person hits and a test rarely does, so the
+// document timeline is slowed until it spans seconds. The same holds under
+// reduced motion, where the preset is a crossfade.
+for (const reducedMotion of ["no-preference", "reduce"] as const) {
+  test(`a return during the canvas exit types into the arriving editor (${reducedMotion} motion)`, async ({
+    page,
+  }) => {
+    await page.emulateMedia({ reducedMotion });
+    await login(page);
+    const title = `Exit return ${reducedMotion}`;
+    const createdResponse = await browserJson(page, "/api/page", {
+      method: "POST",
+      body: { title, markdown: "Base body" },
+    });
+    expect(createdResponse.ok).toBeTruthy();
+    const created = createdResponse.body as { id: string };
+
+    await page.goto(`/p/${created.id}`);
+    const content = page.getByRole("textbox", { name: "Page content" });
+    await expect(content).toContainText("Base body");
+    await content.focus();
+    await page.keyboard.press("End");
+
+    const timeline = await page.context().newCDPSession(page);
+    await timeline.send("Animation.enable");
+    await timeline.send("Animation.setPlaybackRate", { playbackRate: 0.02 });
+
+    // Home by a click that leaves focus where it was, the way a shortcut or
+    // the browser's own history does, so the caret is still in the editor as
+    // its canvas starts to leave.
+    const leaving = await page.evaluate(async () => {
+      const editor = document.querySelector('[aria-label="Page content"]');
+      const home = [...document.querySelectorAll("button")].find(
+        (button) => button.getAttribute("aria-label") === "Home",
+      );
+      if (!editor || !home) throw new Error("no editor or no Home button");
+      const hadFocus = editor.contains(document.activeElement);
+      home.click();
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+      await new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+      return {
+        hadFocus,
+        attached: editor.isConnected,
+        inert: !!editor.closest("[inert]"),
+        hidden: editor.closest('[aria-hidden="true"]') !== null,
+        focusInside: editor.contains(document.activeElement),
+      };
+    });
+    await expect(page).toHaveURL("/");
+    expect(leaving).toEqual({
+      hadFocus: true,
+      attached: true,
+      inert: true,
+      hidden: true,
+      focusInside: false,
+    });
+    // Keys pressed now have no editor to go to. They must not reach the one
+    // on its way out.
+    await page.keyboard.type("lost");
+    await expect(page.locator('[aria-label="Page content"]')).not.toContainText("lost");
+
+    // Straight back while the exit still runs, and type the way a person
+    // does: into whatever editor the page offers.
+    await page.locator("aside.brain-sidebar").getByRole("button", { name: title }).click();
+    await expect(page).toHaveURL(`/p/${created.id}`);
+    await expect(page.locator('[inert] [aria-label="Page content"]')).toHaveCount(1);
+    await content.fill("Typed on the return");
+    await expect(page.locator('[aria-label="Page content"]')).toHaveCount(1);
+    await expect(content).toHaveText("Typed on the return");
+    await timeline.send("Animation.setPlaybackRate", { playbackRate: 1 });
+
+    await expect
+      .poll(async () => {
+        const read = await browserJson(page, `/api/page/${created.id}`);
+        return (read.body as { markdown?: string }).markdown?.trimEnd();
+      })
+      .toBe("Typed on the return");
+    await expect(content).toHaveText("Typed on the return");
+    await expect(page.getByText("Page changed elsewhere")).toHaveCount(0);
+  });
+}
 
 test("a stale parent edit removes only the reference after conflict", async ({
   page,

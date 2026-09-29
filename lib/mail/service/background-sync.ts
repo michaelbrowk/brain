@@ -34,9 +34,10 @@ export interface MailBackgroundSearchIndexPort {
 }
 
 /**
- * The new-senders screen's step. `syncSucceeded` says whether this page's
- * sync reached the provider and came back healthy: the archiver and the
- * restores only touch the provider after one that did.
+ * The new-senders screen's step. `syncSucceeded` says whether the account's
+ * latest sync reached the provider and came back healthy, this page's own or,
+ * on a page with no sync due, the one before it: the archiver and the
+ * restores only touch the provider while that holds.
  */
 export interface MailBackgroundSenderPort {
   runBackgroundSenderStep(
@@ -62,7 +63,10 @@ export class MailBackgroundSyncScheduler {
   private readonly senders: MailBackgroundSenderPort | null;
   private readonly accountQueue: string[] = [];
   private readonly nextEligibleAt = new Map<string, number>();
-  private readonly syncBackoffUntil = new Map<string, number>();
+  /** When each account's provider sync is next due; absent means now. */
+  private readonly syncDueAt = new Map<string, number>();
+  /** Whether each account's last provider sync came back healthy. */
+  private readonly syncHealthy = new Map<string, boolean>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private controller: AbortController | null = null;
   private inFlight: Promise<void> | null = null;
@@ -128,7 +132,8 @@ export class MailBackgroundSyncScheduler {
     await this.inFlight?.catch(() => undefined);
     this.accountQueue.length = 0;
     this.nextEligibleAt.clear();
-    this.syncBackoffUntil.clear();
+    this.syncDueAt.clear();
+    this.syncHealthy.clear();
   }
 
   /**
@@ -211,9 +216,10 @@ export class MailBackgroundSyncScheduler {
           this.nextEligibleAt.delete(accountId);
         }
       }
-      for (const accountId of this.syncBackoffUntil.keys()) {
+      for (const accountId of this.syncDueAt.keys()) {
         if (!active.has(accountId)) {
-          this.syncBackoffUntil.delete(accountId);
+          this.syncDueAt.delete(accountId);
+          this.syncHealthy.delete(accountId);
         }
       }
     }
@@ -231,9 +237,17 @@ export class MailBackgroundSyncScheduler {
       // A provider that is failing or has pages to spare must not starve
       // it: a failure rests the provider for one interval while the cache
       // keeps draining, and a busy provider interleaves with it.
+      //
+      // The provider itself is dialed only when this account's sync is due:
+      // an interval after its last sync, or at once while it has pages left.
+      // A page that exists for the caches alone, a privacy-cache
+      // continuation or a kick after a body landed, runs their steps without
+      // it. Otherwise draining two hundred bodies would be two hundred
+      // history walks for every account. Such a page tells the senders step
+      // how the last sync went.
       let syncHasMore = false;
-      let syncSucceeded = false;
-      if ((this.syncBackoffUntil.get(accountId) ?? 0) <= Date.now()) {
+      let syncSucceeded = this.syncHealthy.get(accountId) ?? false;
+      if ((this.syncDueAt.get(accountId) ?? 0) <= Date.now()) {
         try {
           const step = validateBackgroundSyncStep(
             await this.port.runBackgroundSyncStep(
@@ -245,10 +259,16 @@ export class MailBackgroundSyncScheduler {
           syncHasMore = step.hasMore;
           syncSucceeded =
             step.result.status === "idle" || step.result.status === "syncing";
+          this.syncDueAt.set(
+            accountId,
+            syncHasMore ? 0 : Date.now() + this.intervalMs,
+          );
         } catch {
           if (signal.aborted) return false;
-          this.syncBackoffUntil.set(accountId, Date.now() + this.intervalMs);
+          syncSucceeded = false;
+          this.syncDueAt.set(accountId, Date.now() + this.intervalMs);
         }
+        this.syncHealthy.set(accountId, syncSucceeded);
       }
       if (signal.aborted) return false;
       let privacyHasMore = false;

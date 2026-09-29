@@ -47,49 +47,63 @@ describe("Mail background sync scheduler", () => {
 
   it("fast-forwards a kicked pass and coalesces kicks during a running pass", async () => {
     vi.useFakeTimers();
-    let calls = 0;
+    let providerCalls = 0;
+    let passes = 0;
     let blockNext = false;
     let release: (() => void) | undefined;
     const scheduler = new MailBackgroundSyncScheduler(
       {
         listAccountIds: async () => [accountA],
         runBackgroundSyncStep: async () => {
-          calls += 1;
-          if (blockNext) {
-            blockNext = false;
-            await new Promise<void>((resolve) => {
-              release = resolve;
-            });
-          }
+          providerCalls += 1;
           return syncResult(false);
         },
       },
-      { initialDelayMs: 10, intervalMs: 60_000, continuationDelayMs: 25 },
+      {
+        privacyCache: {
+          async runBackgroundPrefetchStep() {
+            passes += 1;
+            if (blockNext) {
+              blockNext = false;
+              await new Promise<void>((resolve) => {
+                release = resolve;
+              });
+            }
+            return { hasMore: false };
+          },
+        },
+        initialDelayMs: 10,
+        intervalMs: 60_000,
+        continuationDelayMs: 25,
+      },
     );
 
     scheduler.kick();
     await vi.advanceTimersByTimeAsync(0);
-    expect(calls).toBe(0);
+    expect(passes).toBe(0);
 
     scheduler.start();
     await vi.advanceTimersByTimeAsync(10);
-    expect(calls).toBe(1);
+    expect(passes).toBe(1);
+    expect(providerCalls).toBe(1);
 
     scheduler.kick();
     await vi.advanceTimersByTimeAsync(0);
-    expect(calls).toBe(2);
+    expect(passes).toBe(2);
 
     blockNext = true;
     scheduler.kick();
     await vi.advanceTimersByTimeAsync(0);
-    expect(calls).toBe(3);
+    expect(passes).toBe(3);
     scheduler.kick();
     release?.();
     await vi.runAllTicks();
     await vi.advanceTimersByTimeAsync(24);
-    expect(calls).toBe(3);
+    expect(passes).toBe(3);
     await vi.advanceTimersByTimeAsync(1);
-    expect(calls).toBe(4);
+    expect(passes).toBe(4);
+    // A kick is work for the caches, never a reason to dial the provider.
+    expect(providerCalls).toBe(1);
     await scheduler.stop();
   });
 
@@ -201,7 +215,7 @@ describe("Mail background sync scheduler", () => {
     await scheduler.stop();
   });
 
-  it("drains privacy-cache items in bounded continuation bursts", async () => {
+  it("drains privacy-cache items in bounded continuation bursts without dialing the provider", async () => {
     vi.useFakeTimers();
     let providerCalls = 0;
     let privacyCalls = 0;
@@ -228,20 +242,61 @@ describe("Mail background sync scheduler", () => {
       },
     );
 
+    // The pages the cache asks for run its step alone: the provider is dialed
+    // when the account's sync is due, not once per page.
     scheduler.start();
     await vi.advanceTimersByTimeAsync(10);
-    expect(providerCalls).toBe(6);
+    expect(providerCalls).toBe(1);
     expect(privacyCalls).toBe(6);
     await vi.advanceTimersByTimeAsync(24);
-    expect(providerCalls).toBe(6);
     expect(privacyCalls).toBe(6);
     await vi.advanceTimersByTimeAsync(1);
-    expect(providerCalls).toBe(7);
+    expect(providerCalls).toBe(1);
     expect(privacyCalls).toBe(7);
     await vi.advanceTimersByTimeAsync(999);
-    expect(providerCalls).toBe(7);
+    expect(providerCalls).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
-    expect(providerCalls).toBe(8);
+    expect(providerCalls).toBe(2);
+    await scheduler.stop();
+  });
+
+  it("keeps a two-hundred-body drain from dialing any provider more than once a minute", async () => {
+    vi.useFakeTimers();
+    const accounts = [accountA, accountB, accountC];
+    const syncedAt = new Map<string, number[]>(accounts.map((id) => [id, []]));
+    const remaining = new Map(accounts.map((id) => [id, 200]));
+    const scheduler: MailBackgroundSyncScheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => accounts,
+        runBackgroundSyncStep: async (accountId) => {
+          syncedAt.get(accountId)!.push(Date.now());
+          return syncResult(false);
+        },
+      },
+      {
+        privacyCache: {
+          async runBackgroundPrefetchStep(accountId) {
+            const left = Math.max(0, remaining.get(accountId)! - 1);
+            remaining.set(accountId, left);
+            // Each body that lands wakes the scheduler, as an owner's does.
+            scheduler.kick();
+            return { hasMore: left > 0 };
+          },
+        },
+        initialDelayMs: 10,
+      },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    expect([...remaining.values()]).toEqual([0, 0, 0]);
+    for (const accountId of accounts) {
+      const times = syncedAt.get(accountId)!;
+      expect(times.length).toBeGreaterThan(0);
+      for (const [index, time] of times.entries()) {
+        if (index > 0) expect(time - times[index - 1]!).toBeGreaterThanOrEqual(60_000);
+      }
+    }
     await scheduler.stop();
   });
 
@@ -274,10 +329,11 @@ describe("Mail background sync scheduler", () => {
 
     scheduler.start();
     await vi.advanceTimersByTimeAsync(10);
-    // The index keeps the account queued, so the burst runs it three times
-    // and then the account rests for an interval like any finished one.
+    // The index keeps the account queued, so the burst runs it three times,
+    // dialing the provider once, and then the account rests for an interval
+    // like any finished one.
     expect(indexCalls).toBe(3);
-    expect(providerCalls).toBe(3);
+    expect(providerCalls).toBe(1);
     await vi.advanceTimersByTimeAsync(500);
     expect(indexCalls).toBe(3);
     await scheduler.stop();
@@ -356,14 +412,21 @@ describe("Mail background sync scheduler", () => {
     scheduler.start();
     await vi.advanceTimersByTimeAsync(10);
     // The first sync succeeds and the backfill asks for more, so the burst
-    // runs the account again; that sync fails, and the senders step still
-    // runs, told that nothing reached the provider.
+    // runs the account again. No sync is due on that page, so the provider
+    // is not dialed and the senders step hears the last one was healthy.
+    expect(providerCalls).toBe(1);
     expect(senderSteps).toEqual([
       { accountId: accountA, syncSucceeded: true },
-      { accountId: accountA, syncSucceeded: false },
+      { accountId: accountA, syncSucceeded: true },
     ]);
     await vi.advanceTimersByTimeAsync(1_000);
+    // The next due sync fails, and the senders step still runs, told that
+    // nothing reached the provider.
+    expect(providerCalls).toBe(2);
+    expect(senderSteps.at(-1)).toEqual({ accountId: accountA, syncSucceeded: false });
+    await vi.advanceTimersByTimeAsync(1_000);
     // A sync the cache refused for backoff did not reach the provider either.
+    expect(providerCalls).toBe(3);
     expect(senderSteps.at(-1)).toEqual({ accountId: accountA, syncSucceeded: false });
     await scheduler.stop();
   });

@@ -779,7 +779,7 @@ export class MailContentCoordinator
         background,
         // Each prefetch that lets go claims the next one for its account, so
         // the pipeline refills itself instead of waking the whole scheduler,
-        // whose pass would run every account's cache steps to find it.
+        // whose pass would visit every account to find it.
         ...(background
           ? { onSettled: () => this.refillBackgroundPrefetch(accountId) }
           : {}),
@@ -1333,7 +1333,7 @@ export class MailContentCoordinator
           // Their drain starts here, detached from this attempt; the
           // scheduler still hears about it for whatever the drain leaves.
           // A prefetch does not wake it: two hundred bodies would be two
-          // hundred passes over every account's caches for nothing, since the
+          // hundred passes over every account for nothing, since the
           // prefetch claims its own next body, and the scheduler's own
           // interval already covers what a drain leaves behind.
           this.startRemoteImageDrain(input.accountId, input.messageId);

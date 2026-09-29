@@ -1247,7 +1247,14 @@ describe("MailContentCoordinator", () => {
       MESSAGE_ID,
     ];
     const gated = gatedRunner(ids.length);
-    const coordinator = fixture.coordinator(gated.runner);
+    const wakeScheduler = vi.fn();
+    const coordinator = fixture.coordinator(
+      gated.runner,
+      undefined,
+      undefined,
+      undefined,
+      wakeScheduler,
+    );
     const step = () =>
       coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
     const fetching = () => statesOf(coordinator, ids, "fetching");
@@ -1269,6 +1276,9 @@ describe("MailContentCoordinator", () => {
     await expect(statesOf(coordinator, ids, "ready")).resolves.toEqual(ids);
     expect(gated.started()).toEqual(ids);
     await expect(step()).resolves.toEqual({ hasMore: false });
+    // The whole cohort landed without waking the scheduler, the one part of
+    // the service that syncs with the provider.
+    expect(wakeScheduler).not.toHaveBeenCalled();
   });
 
   it("runs an owner's open of a queued prefetch ahead of the prefetch still running", async () => {

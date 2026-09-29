@@ -96,6 +96,9 @@ export interface FramerMotionMock {
   motion: Record<string, MotionComponent>;
   AnimatePresence: (props: AnimatePresenceProps) => ReactNode;
   useReducedMotion: () => boolean;
+  /** The passthrough `AnimatePresence` never runs an exit, so every child it
+   *  renders is present. A test about the leaving child uses the real one. */
+  useIsPresent: () => boolean;
   useDragControls: () => DragControlsStub;
   useMotionValue: <T>(initial: T) => MotionValueStub<T>;
   /** Playback is never under test, so a subscription is a no-op: a component
@@ -199,6 +202,7 @@ export function createFramerMotionMock(
     AnimatePresence: AnimatePresence ?? passthroughPresence,
     useReducedMotion:
       typeof reducedMotion === "function" ? reducedMotion : () => reducedMotion,
+    useIsPresent: () => true,
     useDragControls: () => dragControlsStub,
     useMotionValue: useMotionValueStub,
     useMotionValueEvent: () => {},
@@ -211,6 +215,7 @@ const defaultMock = createFramerMotionMock();
 export const motion = defaultMock.motion;
 export const AnimatePresence = defaultMock.AnimatePresence;
 export const useReducedMotion = defaultMock.useReducedMotion;
+export const useIsPresent = defaultMock.useIsPresent;
 export const useDragControls = defaultMock.useDragControls;
 export const useMotionValue = defaultMock.useMotionValue;
 export const useMotionValueEvent = defaultMock.useMotionValueEvent;

@@ -19,6 +19,10 @@ import type {
   StoredMailDraftAttachment,
 } from "./draft-types";
 import { MAIL_DRAFT_API_VERSION } from "./draft-types";
+import {
+  validateMailSendAttachments,
+  type MailSendAttachment,
+} from "./send-attachment-codec";
 import type { MailSendErrorCode } from "./service/outbound";
 
 export const MAIL_DRAFT_LIMITS = Object.freeze({
@@ -157,27 +161,41 @@ export function validateMailDraftMutationInput(
       patch: validatePatch(value.patch),
     });
   }
+  const sendKeys = [
+    "accountId",
+    "draftId",
+    "expectedRevision",
+    "kind",
+    "mutationId",
+    "sendIdempotencyKey",
+    "sendOperationId",
+  ];
+  const carriesFiles = Object.prototype.hasOwnProperty.call(value, "attachments");
   if (
     value.kind === "send" &&
-    hasExactKeys(value, [
-      "accountId",
-      "draftId",
-      "expectedRevision",
-      "kind",
-      "mutationId",
-      "sendIdempotencyKey",
-      "sendOperationId",
-    ]) &&
+    hasExactKeys(value, carriesFiles ? [...sendKeys, "attachments"] : sendKeys) &&
     typeof value.sendIdempotencyKey === "string" &&
     SAFE_IDEMPOTENCY_KEY.test(value.sendIdempotencyKey) &&
     typeof value.sendOperationId === "string" &&
     SAFE_SEND_OPERATION_ID.test(value.sendOperationId)
   ) {
+    // The compose sheet's files, under the one codec every outgoing file
+    // answers to. An empty list is no files, and is kept off the result so a
+    // send without them is the mutation it always was.
+    let attachments: readonly MailSendAttachment[] = [];
+    if (carriesFiles) {
+      try {
+        attachments = validateMailSendAttachments(value.attachments);
+      } catch {
+        throw requestInvalid();
+      }
+    }
     return Object.freeze({
       ...base,
       kind: "send" as const,
       sendIdempotencyKey: value.sendIdempotencyKey,
       sendOperationId: value.sendOperationId,
+      ...(attachments.length > 0 ? { attachments } : {}),
     });
   }
   throw requestInvalid();
@@ -684,6 +702,19 @@ export function fingerprintMailDraftMutation(
             mutationId: input.mutationId,
             sendIdempotencyKey: input.sendIdempotencyKey,
             sendOperationId: input.sendOperationId,
+            // Each file by its digest rather than its base64, the way the
+            // send's own fingerprint counts them, and only when there are
+            // files, so a receipt written before files could travel keeps
+            // meaning what it meant.
+            ...(input.attachments
+              ? {
+                  attachments: input.attachments.map((attachment) => [
+                    attachment.filename,
+                    attachment.mimeType,
+                    sha256(attachment.dataBase64),
+                  ]),
+                }
+              : {}),
           },
     ),
   );

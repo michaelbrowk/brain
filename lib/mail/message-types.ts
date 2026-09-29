@@ -272,7 +272,8 @@ export interface MailSendInput {
   readonly subject: string;
   readonly text: string;
   readonly replyToMessageId: string | null;
-  /** Files from a page's own attachments. The composer sends none today. */
+  /** Files from a page's own attachments (an agent's send), or the files the
+   *  writer put on the compose sheet. */
   readonly attachments: readonly MailSendAttachment[];
   /** Who wrote it. Only "mcp" earns the X-Brain-Agent header. */
   readonly origin: MailSendOrigin;

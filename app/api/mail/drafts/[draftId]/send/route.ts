@@ -2,6 +2,7 @@ import { createBrainMailClient } from "@/lib/mail/brain-mail-client";
 import {
   mailApiBodyError,
   readBoundedMailJson,
+  refuseMailAttachments,
   runMailApiAction,
   validateMailMutationRequest,
 } from "@/lib/mail/account-api-route";
@@ -30,6 +31,11 @@ export async function POST(request: Request, { params }: Context) {
   } catch (error) {
     return mailApiBodyError(error, "mail_draft_request_invalid", 1);
   }
+  // The compose sheet's files ride on the send, never on the draft, and the
+  // body carrying them was cut off by its bytes above (24 MiB, the service's
+  // own draft body cap). What the codec refuses is answered here.
+  const refused = refuseMailAttachments(input);
+  if (refused) return refused;
   const { draftId } = await params;
   return runMailApiAction(
     () =>

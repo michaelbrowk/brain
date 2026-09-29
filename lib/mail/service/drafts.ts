@@ -34,6 +34,7 @@ import type {
   MailSendOperation,
 } from "../message-types";
 import { parseMailRecipientFields } from "../recipients";
+import type { MailSendAttachment } from "../send-attachment-codec";
 import { mailAccountCapabilities } from "./account-types";
 import {
   createMailSendSubmissionProposal,
@@ -312,7 +313,11 @@ export class ProviderNeutralMailDraftService implements MailDraftService {
       build = () =>
         createMailSendSubmissionProposal({
           account,
-          input: mailSendInputFromDraft(draft, mutation.sendIdempotencyKey),
+          input: mailSendInputFromDraft(
+            draft,
+            mutation.sendIdempotencyKey,
+            mutation.attachments,
+          ),
           reply: replyContextFromDraft(draft),
           operationId: mutation.sendOperationId,
           createdAt,
@@ -521,10 +526,16 @@ function assertIntentCapabilities(
  * draft, so both sides must normalize recipients identically — a second parser
  * here produced a fingerprint mismatch and a permanent idempotency conflict for
  * any address the writer typed with a capital letter.
+ *
+ * The files are the send's, not the draft's: the compose sheet holds them in
+ * memory and they ride on the send mutation, so both sides pass the mutation's
+ * own list and the fingerprint (which counts each file by its digest) proves
+ * the same files on both.
  */
 export function mailSendInputFromDraft(
   draft: StoredMailDraft,
   idempotencyKey: string,
+  attachments: readonly MailSendAttachment[] = [],
 ): MailSendInput {
   const replyMode =
     draft.intent.kind === "reply" || draft.intent.kind === "reply_all";
@@ -547,9 +558,9 @@ export function mailSendInputFromDraft(
       subject: draft.subject,
       text: draft.text,
       replyToMessageId: replyMode ? draft.intent.sourceMessageId : null,
-      // A draft is the composer's, and the composer sends no files and
-      // carries no agent mark. createDraft refuses a draft with attachments.
-      attachments: [],
+      // A draft is the composer's and carries no agent mark. Its files come
+      // with the send; createDraft refuses a draft that stores any.
+      attachments: [...attachments],
       origin: "app",
       agentLine: false,
     });

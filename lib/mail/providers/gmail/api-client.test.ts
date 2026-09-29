@@ -289,6 +289,14 @@ describe("Gmail API read slice", () => {
       response: { id: "thread-a" },
     },
     {
+      // The reader's Move to Inbox: INBOX goes back on the whole thread.
+      name: "move thread back to the inbox",
+      run: (client: GmailApiClient) => client.unarchiveThread("thread-a"),
+      path: "/gmail/v1/users/me/threads/thread-a/modify",
+      body: { addLabelIds: ["INBOX"], removeLabelIds: [] },
+      response: { id: "thread-a" },
+    },
+    {
       name: "mark message unread",
       run: (client: GmailApiClient) => client.markMessageRead("message-a", false),
       path: "/gmail/v1/users/me/messages/message-a/modify",

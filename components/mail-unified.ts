@@ -66,6 +66,21 @@ export type UnifiedStream = {
   readonly items: readonly MailThreadListItem[];
   /** null = exhausted (or not loadable: error/reauth streams carry null). */
   readonly nextCursor: string | null;
+  /**
+   * `nextCursor` starts at page two of a snapshot newer than the loaded rows,
+   * which go deeper than that. A sync or a failure took the stream's own
+   * cursor, and a page-one re-read hands back only page one's, so the next
+   * Load more walks from there past the last loaded row before what it brings
+   * counts as the next page.
+   */
+  readonly repage?: boolean;
+  /**
+   * How many times a page-one read has brought this stream back from a sync
+   * hold or a failure. The list's scroll sentinel re-arms on it: a heal can
+   * hand back exactly the rows the stream had, and a sentinel that waited for
+   * the row count to move never asked for the next page again.
+   */
+  readonly heals?: number;
   readonly status: UnifiedStreamStatus;
   readonly sync: MailThreadPage["sync"] | null;
 };
@@ -175,16 +190,26 @@ export function mergedDisplayItems(
  * discarding loaded depth. A shallow stream (nothing beyond page 1) is
  * replaced wholesale; a deep stream keeps its older tail and its cursor, with
  * the same duplicate/gap tolerance the load-more dedupe already accepts.
+ *
+ * The same fold heals a stream a sync held or a read failed (the quiet re-read,
+ * Try again, the tick over an errored stream). Such a stream carries null
+ * because its page was never answered, not because it ended, so a deep one
+ * takes page one's cursor and the mark to re-page from it: keeping the null
+ * stopped that account paging until a reload.
  */
 export function reconcileStreamPageOne(
   stream: UnifiedStream,
   page: Pick<MailThreadPage, "items" | "nextCursor" | "sync">,
 ): UnifiedStream {
+  const cursorLost = stream.status !== "ready";
+  const heals = cursorLost ? (stream.heals ?? 0) + 1 : stream.heals;
   if (stream.items.length <= UNIFIED_PAGE_SIZE || page.items.length === 0) {
     return {
       ...stream,
       items: page.items,
       nextCursor: page.nextCursor,
+      repage: false,
+      heals,
       status: "ready",
       sync: page.sync,
     };
@@ -199,7 +224,54 @@ export function reconcileStreamPageOne(
   return {
     ...stream,
     items: [...page.items, ...tail],
-    nextCursor: stream.nextCursor,
+    nextCursor: cursorLost ? page.nextCursor : stream.nextCursor,
+    repage: cursorLost ? page.nextCursor !== null : stream.repage,
+    heals,
+    status: "ready",
+    sync: page.sync,
+  };
+}
+
+/**
+ * Fold a Load more's answer into its stream. An ordinary page follows the
+ * stream's last row and goes on the end, less any row already loaded. A
+ * re-paged walk re-read rows the stream holds, from a newer snapshot, so its
+ * copy of a thread is the current one (a thread read, starred or answered
+ * since takes it), and what it adds can sort anywhere among them: it goes in
+ * by the merge's order, which keeps the stream the sorted prefix its horizon
+ * is read from. A walk its cap stopped before it reached past the last loaded
+ * row keeps the mark, so the next press walks on from where it stopped instead
+ * of putting what it finds on the end.
+ */
+export function appendStreamPage(
+  stream: UnifiedStream,
+  page: Pick<MailThreadPage, "items" | "nextCursor" | "sync">,
+): UnifiedStream {
+  // A walk's pages overlap where a row moved down between two reads: one row
+  // per thread, in the later read's copy.
+  const incoming = new Map<string, MailThreadListItem>();
+  for (const item of page.items) incoming.set(unifiedThreadKey(item), item);
+  const kept = stream.repage
+    ? stream.items.filter((item) => !incoming.has(unifiedThreadKey(item)))
+    : stream.items;
+  const keptKeys = new Set(kept.map(unifiedThreadKey));
+  const fresh = [...incoming.values()].filter(
+    (item) => !keptKeys.has(unifiedThreadKey(item)),
+  );
+  const last = stream.items.at(-1);
+  const end = page.items.at(-1);
+  const stoppedShort =
+    stream.repage === true &&
+    page.nextCursor !== null &&
+    last !== undefined &&
+    (end === undefined || compareUnified(end, last) <= 0);
+  return {
+    ...stream,
+    items: stream.repage
+      ? [...kept, ...fresh].sort(compareUnified)
+      : [...kept, ...fresh],
+    nextCursor: page.nextCursor,
+    repage: stoppedShort,
     status: "ready",
     sync: page.sync,
   };

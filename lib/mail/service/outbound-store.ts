@@ -40,6 +40,10 @@ import {
 import type { MailEnvelope } from "../ports";
 import { MAIL_RESOURCE_LIMITS, writeMailLogRecord } from "../security";
 import {
+  mailSendAttachmentBytes,
+  type MailSendAttachment,
+} from "../send-attachment-codec";
+import {
   mailSendInputFromDraft,
   type MailDraftCreateResult,
   type MailDraftDeleteResult,
@@ -58,6 +62,7 @@ import {
   type StoredMailSendMessage,
   type StoredMailSendSubmission,
 } from "./outbound";
+import { base64BodyCarries, base64BodyLength } from "./outbound-attachments";
 import { buildOutboundRfc2822 } from "./outbound-message";
 import {
   type MailSmtpSubmissionIdentity,
@@ -3155,8 +3160,14 @@ function draftMatchesSubmission(
   let expectedRaw: Buffer | null = null;
   try {
     // Shares the service's derivation on purpose: a second recipient parser
-    // here silently changed the fingerprint and rejected honest sends.
-    const input = mailSendInputFromDraft(draft, mutation.sendIdempotencyKey);
+    // here silently changed the fingerprint and rejected honest sends. The
+    // files are the mutation's, never the draft's, and the fingerprint counts
+    // each by its digest, so a replay that carried other files fails here.
+    const input = mailSendInputFromDraft(
+      draft,
+      mutation.sendIdempotencyKey,
+      mutation.attachments,
+    );
     if (fingerprintMailSendInput(input) !== submission.requestFingerprint) {
       return false;
     }
@@ -3180,19 +3191,34 @@ function draftMatchesSubmission(
               inReplyTo: threading.rfcMessageId!,
               references: threading.references,
             },
-      attachments: [],
+      // With files, the message is rebuilt with every file empty: the parts
+      // around them are compared byte for byte below and each file's own
+      // body is compared, a chunk at a time, with the writer's encoding of
+      // the mutation's base64, so the proof never holds a second message at
+      // the attachment cap (`rawCarriesFiles`).
+      attachments: input.attachments.map((attachment) => ({
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        bytes: Buffer.alloc(0),
+      })),
       origin: input.origin,
       agentLine: input.agentLine,
     });
     expectedRaw = built.rawRfc2822;
+    const raw = submission.message.rawRfc2822;
     // The bytes are compared to the bytes, in constant time neither before nor
     // now: what this decides is whether a replay rebuilt the same message, and
-    // both sides are this service's own.
+    // both sides are this service's own. With files it is still bytes to
+    // bytes, the files' bodies included (`base64BodyCarries` never decodes the
+    // message's side), so a body only a lenient decoder reads as the file is
+    // refused. The digest is read off the stored message itself.
     return (
       equalEnvelope(built.envelope, submission.message.envelope) &&
-      expectedRaw.byteLength === submission.message.rawRfc2822Bytes &&
-      expectedRaw.equals(submission.message.rawRfc2822) &&
-      createHash("sha256").update(expectedRaw).digest("hex") ===
+      raw.byteLength === submission.message.rawRfc2822Bytes &&
+      (input.attachments.length === 0
+        ? expectedRaw.equals(raw)
+        : rawCarriesFiles(expectedRaw, raw, input.attachments)) &&
+      createHash("sha256").update(raw).digest("hex") ===
         submission.message.rawRfc2822Sha256
     );
   } catch {
@@ -3200,6 +3226,66 @@ function draftMatchesSubmission(
   } finally {
     expectedRaw?.fill(0);
   }
+}
+
+const PART_HEADER_END = Buffer.from("\r\n\r\n", "ascii");
+
+/**
+ * A finished message against the same message rebuilt with every file empty.
+ * The rebuilt one is the whole message but for each file's body, which sits
+ * right after its part header; the part headers end on a blank line, and the
+ * first two blank lines in the message end its own header and the text part's
+ * (base64 lines never make one), so the files' places are the third blank line
+ * on, one per file. Everything between them is compared exactly and each body
+ * is compared by `base64BodyCarries`, at the length the writer gives that file.
+ */
+function rawCarriesFiles(
+  skeleton: Buffer,
+  raw: Buffer,
+  attachments: readonly MailSendAttachment[],
+): boolean {
+  const places: number[] = [];
+  let from = 0;
+  for (let found = 0; places.length < attachments.length; ) {
+    const at = skeleton.indexOf(PART_HEADER_END, from);
+    if (at === -1) return false;
+    from = at + PART_HEADER_END.byteLength;
+    found += 1;
+    if (found >= 3) places.push(from);
+  }
+  const lengths = attachments.map((attachment) =>
+    base64BodyLength(mailSendAttachmentBytes(attachment.dataBase64)),
+  );
+  if (
+    raw.byteLength !==
+    skeleton.byteLength + lengths.reduce((sum, length) => sum + length, 0)
+  ) {
+    return false;
+  }
+  let inSkeleton = 0;
+  let inRaw = 0;
+  for (let index = 0; index < attachments.length; index += 1) {
+    const between = places[index]! - inSkeleton;
+    if (
+      !raw
+        .subarray(inRaw, inRaw + between)
+        .equals(skeleton.subarray(inSkeleton, places[index]))
+    ) {
+      return false;
+    }
+    inRaw += between;
+    inSkeleton = places[index]!;
+    if (
+      !base64BodyCarries(
+        raw.subarray(inRaw, inRaw + lengths[index]!),
+        attachments[index]!.dataBase64,
+      )
+    ) {
+      return false;
+    }
+    inRaw += lengths[index]!;
+  }
+  return raw.subarray(inRaw).equals(skeleton.subarray(inSkeleton));
 }
 
 function equalEnvelope(

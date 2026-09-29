@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  isSafeAttachmentFilename,
   MAIL_SEND_ATTACHMENT_LIMITS,
   mailSendAttachmentBytes,
+  safeAttachmentFilename,
   validateMailSendAttachments,
 } from "./send-attachment-codec";
 
@@ -160,6 +162,33 @@ describe("outgoing attachment codec", () => {
     // A length that is not a whole number of groups cannot reach the
     // validator, and the exported reader still answers a whole number.
     expect(Number.isInteger(mailSendAttachmentBytes("AAAAA"))).toBe(true);
+  });
+
+  describe("in the browser, where the compose sheet asks it", () => {
+    afterEach(() => {
+      vi.unstubAllGlobals();
+    });
+
+    it("counts a filename's bytes without Node's Buffer", () => {
+      // The sheet refuses a name before the send does, with the same rule,
+      // and a browser has no `Buffer`. "é" is two bytes in UTF-8, so 127 of
+      // them fit under 255 and 128 do not.
+      vi.stubGlobal("Buffer", undefined);
+      expect(isSafeAttachmentFilename("é".repeat(127))).toBe(true);
+      expect(isSafeAttachmentFilename("é".repeat(128))).toBe(false);
+    });
+
+    it("turns the characters a header cannot carry into underscores", () => {
+      // A file on a disk may be called anything a header parameter may not
+      // hold. The sheet sends it under a name the rule admits rather than
+      // refusing the writer's own file for its punctuation.
+      expect(safeAttachmentFilename('Report "final" \\ v2.pdf')).toBe(
+        "Report _final_ _ v2.pdf",
+      );
+      expect(safeAttachmentFilename("a/b\r\nc\u0000d\u007f.txt")).toBe("a_b__c_d_.txt");
+      expect(safeAttachmentFilename("plain name.pdf")).toBe("plain name.pdf");
+      expect(isSafeAttachmentFilename(safeAttachmentFilename('x"\\/\n.txt'))).toBe(true);
+    });
   });
 
   it("pins the three caps a sender and a tool both read", () => {

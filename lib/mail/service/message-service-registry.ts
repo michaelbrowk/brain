@@ -220,6 +220,26 @@ export class MultiAccountMailMessageService implements MailMessageService {
     );
   }
 
+  /** The same accounts with their provider, which sets the sync cadence. */
+  async listSyncAccounts(): Promise<
+    readonly {
+      readonly accountId: string;
+      readonly providerKind: StoredMailAccount["providerKind"];
+    }[]
+  > {
+    const accounts = await this.store.listAccounts();
+    return Object.freeze(
+      accounts
+        .filter((account) => account.status === "connected")
+        .map((account) =>
+          Object.freeze({
+            accountId: account.account.accountId,
+            providerKind: account.providerKind,
+          }),
+        ),
+    );
+  }
+
   async updateThread(
     input: MailThreadMutationInput & { readonly threadId: string },
     signal: AbortSignal,

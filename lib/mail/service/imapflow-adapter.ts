@@ -19,12 +19,16 @@ import type {
   MailEndpoint,
   ValidatedMailDialTarget,
 } from "../ports";
-import { canonicalizeMailPeerAddress } from "../security";
+import {
+  canonicalizeMailPeerAddress,
+  MAIL_RESOURCE_LIMITS,
+} from "../security";
 import type { MultiMailAccountStore } from "./account-store";
 import {
   MailAccountError,
   type StoredImapMailAccount,
 } from "./account-types";
+import type { ImapIdleClient } from "./imap-idle";
 
 const MAX_IMAP_HANDSHAKE_LINE_BYTES = 64 * 1024;
 const MAX_IMAP_HANDSHAKE_LITERAL_BYTES = 64 * 1024;
@@ -32,6 +36,13 @@ const MAX_IMAP_TARGET_ATTEMPT_MS = 3_000;
 /** Largest single IMAP literal a read session accepts from the provider. */
 export const MAX_IMAP_READ_LITERAL_BYTES = 256 * 1024;
 const MAX_IMAP_READ_OPERATION_MS = 10_000;
+/**
+ * How long an IDLE session's socket may stay silent. A quiet INBOX is normal
+ * for the whole of an IDLE, and the supervisor breaks IDLE at
+ * `idleRestartMs`, so the socket gives up only on a session that missed that.
+ */
+const IMAP_IDLE_SOCKET_TIMEOUT_MS = MAIL_RESOURCE_LIMITS.idleRestartMs + 5 * 60_000;
+const INBOX_PATH = "INBOX";
 
 export interface ImapCredentialVerificationRequest {
   readonly endpoint: MailEndpoint;
@@ -146,16 +157,32 @@ export interface ImapSessionClient extends ImapReadClient, ImapMutationCommands 
 
 type ImapReadClientFactory = (options: ImapFlowOptions) => ImapSessionClient;
 
+/** What opening an IDLE session needs beyond what the supervisor drives. */
+export interface ImapIdleSessionClient extends ImapIdleClient {
+  readonly secureConnection: boolean;
+  readonly authenticated: boolean | string;
+  readonly mailbox: { readonly path: string } | false;
+  connect(): Promise<void>;
+  mailboxOpen(
+    path: string,
+    options: { readonly readOnly: true },
+  ): Promise<unknown>;
+}
+
+type ImapIdleClientFactory = (options: ImapFlowOptions) => ImapIdleSessionClient;
+
 /**
  * Opens one bounded provider session for a trusted IMAP account. DNS and
  * binding metadata are validated before the password is decrypted. The password
  * buffer is owned here and is overwritten on every exit. Reads take a read-only
- * mailbox lock; a thread mutation takes a writable one.
+ * mailbox lock; a thread mutation takes a writable one. `openIdleSession` is
+ * the one session that outlives its call, for IMAP IDLE.
  */
 export class ImapFlowReadSessionFactory {
   private readonly dns: MailDnsResolverPort;
   private readonly store: MultiMailAccountStore;
   private readonly createClient: ImapReadClientFactory;
+  private readonly createIdleClient: ImapIdleClientFactory;
   private readonly now: () => number;
   private readonly operationTimeoutMs: number;
 
@@ -163,12 +190,15 @@ export class ImapFlowReadSessionFactory {
     readonly dns: MailDnsResolverPort;
     readonly store: MultiMailAccountStore;
     readonly createClient?: ImapReadClientFactory;
+    readonly createIdleClient?: ImapIdleClientFactory;
     readonly now?: () => number;
     readonly operationTimeoutMs?: number;
   }) {
     this.dns = options.dns;
     this.store = options.store;
     this.createClient = options.createClient ?? ((config) => new ImapFlow(config));
+    this.createIdleClient =
+      options.createIdleClient ?? ((config) => new ImapFlow(config));
     this.now = options.now ?? Date.now;
     const timeout = options.operationTimeoutMs ?? MAX_IMAP_READ_OPERATION_MS;
     if (!Number.isSafeInteger(timeout) || timeout < 1 || timeout > 10_000) {
@@ -187,6 +217,45 @@ export class ImapFlowReadSessionFactory {
     if (!sameImapBinding(current, expected)) {
       throw new MailAccountError("account_state_invalid");
     }
+    return this.dialEachTarget(expected, signal, (target, password, deadlineAt) =>
+      this.runTarget(target, expected, password, signal, deadlineAt, operation),
+    );
+  }
+
+  /**
+   * One authenticated session with INBOX examined read-only, handed to the
+   * IDLE supervisor open. The same DNS, binding and credential checks as every
+   * other session come first. It never carries message data into the cache:
+   * an update on it only asks for a pass, which runs on a session of its own.
+   * Removal and credential edits close it through the account removal guard.
+   */
+  async openIdleSession(
+    accountId: string,
+    signal: AbortSignal,
+  ): Promise<ImapIdleClient> {
+    signal.throwIfAborted();
+    const expected = await this.store.readAccount(accountId);
+    if (
+      expected === null ||
+      expected.providerKind !== "imap" ||
+      expected.status !== "connected"
+    ) {
+      throw new MailAccountError("account_state_invalid");
+    }
+    return this.dialEachTarget(expected, signal, (target, password, deadlineAt) =>
+      this.openIdleTarget(target, expected, password, signal, deadlineAt),
+    );
+  }
+
+  private async dialEachTarget<T>(
+    expected: StoredImapMailAccount,
+    signal: AbortSignal,
+    attemptTarget: (
+      target: ValidatedMailDialTarget,
+      password: Buffer,
+      deadlineAt: number,
+    ) => Promise<ImapTargetAttempt<T>>,
+  ): Promise<T> {
     const deadlineAt = this.now() + this.operationTimeoutMs;
     const targets = await this.dns.resolve(
       "imap",
@@ -218,13 +287,10 @@ export class ImapFlowReadSessionFactory {
           (index === targets.length - 1
             ? remainingMs
             : Math.min(MAX_IMAP_TARGET_ATTEMPT_MS, fairTargetBudgetMs));
-        const attempt = await this.runTarget(
+        const attempt = await attemptTarget(
           target,
-          expected,
           loaded.password,
-          signal,
           Math.min(deadlineAt, targetDeadlineAt, target.expiresAt),
-          operation,
         );
         if (attempt.ok) return attempt.value;
         if (attempt.sessionReady || attempt.error.code === "imap_authentication_failed") {
@@ -349,7 +415,101 @@ export class ImapFlowReadSessionFactory {
       else client.close();
     }
   }
+
+  /**
+   * The IDLE session's dial. Unlike `runTarget` it cannot prove the observed
+   * peer through `unbind()`, which would take the socket away from the session
+   * it is handing over. The dial is still to the validated literal with
+   * original-hostname SNI and `rejectUnauthorized`, and the session carries
+   * nothing but hints, so every byte that reaches the cache still comes
+   * through a session whose peer was proved.
+   */
+  private async openIdleTarget(
+    target: ValidatedMailDialTarget,
+    account: StoredImapMailAccount,
+    password: Buffer,
+    signal: AbortSignal,
+    deadlineAt: number,
+  ): Promise<ImapTargetAttempt<ImapIdleClient>> {
+    const remainingMs = deadlineAt - this.now();
+    if (remainingMs < 1) {
+      return Object.freeze({
+        ok: false,
+        error: new MailAccountError("imap_connection_timeout"),
+        sessionReady: false,
+      });
+    }
+    const client = this.createIdleClient(
+      createIdleOptions(target, account.account.username, password, remainingMs),
+    );
+    client.on("error", () => undefined);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let abortHandler: (() => void) | undefined;
+    let sessionReady = false;
+    let handedOver = false;
+    try {
+      await Promise.race([
+        (async () => {
+          await client.connect();
+          if (client.secureConnection !== true) {
+            throw new MailAccountError("imap_tls_failed");
+          }
+          if (
+            client.authenticated !== true &&
+            (typeof client.authenticated !== "string" ||
+              client.authenticated.length === 0)
+          ) {
+            throw new MailAccountError("imap_authentication_failed");
+          }
+          sessionReady = true;
+          // EXAMINE, never SELECT: a read-only selection cannot clear
+          // \Recent, and nothing after it is issued but IDLE and NOOP.
+          await client.mailboxOpen(INBOX_PATH, { readOnly: true });
+          if (
+            client.mailbox === false ||
+            client.mailbox.path.toUpperCase() !== INBOX_PATH
+          ) {
+            throw new MailAccountError("imap_connection_failed");
+          }
+        })(),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(() => {
+            client.close();
+            reject(new MailAccountError("imap_connection_timeout"));
+          }, remainingMs);
+        }),
+        new Promise<never>((_resolve, reject) => {
+          abortHandler = () => {
+            client.close();
+            reject(new MailAccountError("imap_connection_timeout"));
+          };
+          if (signal.aborted) abortHandler();
+          else signal.addEventListener("abort", abortHandler, { once: true });
+        }),
+      ]);
+      handedOver = true;
+      return Object.freeze({ ok: true, value: client });
+    } catch (error) {
+      return Object.freeze({
+        ok: false,
+        error: mapImapError(error),
+        sessionReady,
+      });
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+      if (abortHandler) signal.removeEventListener("abort", abortHandler);
+      if (!handedOver) client.close();
+    }
+  }
 }
+
+type ImapTargetAttempt<T> =
+  | { readonly ok: true; readonly value: T }
+  | {
+      readonly ok: false;
+      readonly error: MailAccountError;
+      readonly sessionReady: boolean;
+    };
 
 type ImapVerificationClientFactory = (
   options: ImapFlowOptions,
@@ -578,6 +738,49 @@ export function createReadOptions(
     maxLineLength: MAX_IMAP_HANDSHAKE_LINE_BYTES,
     maxLiteralSize: MAX_IMAP_READ_LITERAL_BYTES,
     maxLockHoldTime: timeoutMs,
+  });
+}
+
+/**
+ * The IDLE session's options: the read session's pinning and switches, a
+ * socket that may stay quiet for a whole IDLE, and handshake-sized literals,
+ * because nothing is fetched over it. ImapFlow's own IDLE (`disableAutoIdle`)
+ * and restart (`maxIdleTime`) stay off: the supervisor drives both.
+ */
+export function createIdleOptions(
+  target: ValidatedMailDialTarget,
+  username: string,
+  password: Buffer,
+  timeoutMs: number,
+): ImapFlowOptions {
+  const implicitTls = target.tls === "implicit";
+  return Object.freeze({
+    host: target.address,
+    port: target.port,
+    secure: implicitTls,
+    doSTARTTLS: implicitTls ? false : true,
+    servername: target.hostname,
+    auth: Object.freeze({
+      user: username,
+      pass: new TextDecoder("utf-8", { fatal: true }).decode(password),
+    }),
+    tls: Object.freeze({
+      rejectUnauthorized: true,
+      minVersion: "TLSv1.2" as const,
+    }),
+    logger: false,
+    logRaw: false,
+    emitLogs: false,
+    disableAutoIdle: true,
+    disableCompression: true,
+    disableAutoEnable: true,
+    disableBinary: true,
+    qresync: false,
+    connectionTimeout: timeoutMs,
+    greetingTimeout: timeoutMs,
+    socketTimeout: IMAP_IDLE_SOCKET_TIMEOUT_MS,
+    maxLineLength: MAX_IMAP_HANDSHAKE_LINE_BYTES,
+    maxLiteralSize: MAX_IMAP_HANDSHAKE_LITERAL_BYTES,
   });
 }
 

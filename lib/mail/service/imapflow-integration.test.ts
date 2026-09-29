@@ -11,10 +11,16 @@ import {
   type Server as TlsServer,
 } from "node:tls";
 import { ImapFlow, type ImapFlowOptions } from "imapflow";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { MailDnsResolverPort, ValidatedMailDialTarget } from "../ports";
-import { ImapFlowCredentialVerifier } from "./imapflow-adapter";
+import type { MultiMailAccountStore } from "./account-store";
+import type { StoredImapMailAccount } from "./account-types";
+import { MailImapIdleSupervisor } from "./imap-idle";
+import {
+  ImapFlowCredentialVerifier,
+  ImapFlowReadSessionFactory,
+} from "./imapflow-adapter";
 
 const require = createRequire(import.meta.url);
 const testTls = require("imapflow/test/fixtures/test-tls.js") as {
@@ -76,6 +82,167 @@ describe("ImapFlow verifier against a real fake IMAP server", () => {
     ]);
   });
 });
+
+describe("IMAP IDLE against a real ImapFlow session", () => {
+  it("examines INBOX, idles, and leaves IDLE with DONE and one pass on EXISTS", async () => {
+    const commands: string[] = [];
+    let session: TLSSocket | undefined;
+    const server = createTlsServer(testTls, (socket) => {
+      session = socket;
+      serveIdleImap(socket, commands);
+    });
+    const port = await listen(server);
+    const passes: string[] = [];
+    const events: unknown[] = [];
+    const account = imapAccountFor(port);
+    const supervisor = new MailImapIdleSupervisor({
+      connector: new ImapFlowReadSessionFactory({
+        dns: { resolve: async () => [targetFor(port, "implicit")] },
+        store: storeFor(account),
+        createClient: () => {
+          throw new Error("no read session in this test");
+        },
+        createIdleClient: (options: ImapFlowOptions) =>
+          new ImapFlow({ ...options, tls: { ...options.tls, ca: testTls.cert } }),
+      }),
+      onChange: (accountId) => passes.push(accountId),
+      onEvent: (record) => events.push(record),
+    });
+    supervisor.start();
+    const accountId = account.account.accountId;
+
+    try {
+      supervisor.afterSync(accountId);
+      await vi.waitFor(() => expect(passes).toEqual([accountId]));
+      supervisor.afterSync(accountId);
+      await vi.waitFor(() => expect(commandNames(commands).at(-1)).toBe("IDLE"));
+
+      session?.write("* 5 EXISTS\r\n");
+      await vi.waitFor(() => expect(passes).toEqual([accountId, accountId]));
+      supervisor.afterSync(accountId);
+      await vi.waitFor(() =>
+        expect(commandNames(commands).filter((name) => name === "IDLE")).toHaveLength(2),
+      );
+    } finally {
+      await supervisor.stop();
+    }
+
+    // DONE is the one untagged line the client sends.
+    const names = commands.map((line) =>
+      line === "DONE" ? "DONE" : commandNames([line])[0],
+    );
+    // Read-only from start to end: EXAMINE, never SELECT, and nothing that
+    // stores a flag, moves or expunges. LIST and LSUB are how ImapFlow finds
+    // the path it opens.
+    expect(
+      names
+        .slice(names.indexOf("LOGIN"))
+        .filter((name) => !["CAPABILITY", "LIST", "LSUB"].includes(name ?? "")),
+    ).toEqual(["LOGIN", "EXAMINE", "IDLE", "DONE", "NOOP", "IDLE"]);
+    expect(commands.find((line) => line.includes("EXAMINE"))).toMatch(/EXAMINE "?INBOX"?/);
+    expect(events).toEqual([{ event: "mail_imap_idle_connected", accountId }]);
+  });
+});
+
+function serveIdleImap(socket: TLSSocket, commands: string[]): void {
+  socket.once("error", () => undefined);
+  socket.write("* OK fake IMAP ready\r\n");
+  let idleTag: string | null = null;
+  attachLineReader(socket, commands, (tag, command) => {
+    if (tag.toUpperCase() === "DONE" && idleTag !== null) {
+      socket.write(`${idleTag} OK IDLE terminated\r\n`);
+      idleTag = null;
+      return;
+    }
+    if (command === "CAPABILITY") {
+      socket.write(
+        `* CAPABILITY IMAP4rev1 IDLE\r\n${tag} OK CAPABILITY completed\r\n`,
+      );
+      return;
+    }
+    if (command === "LOGIN") {
+      socket.write(`${tag} OK LOGIN completed\r\n`);
+      return;
+    }
+    // ImapFlow resolves the path it opens through LIST and LSUB first.
+    if (command === "LIST" || command === "LSUB") {
+      const entry = commands.at(-1)?.includes("INBOX")
+        ? `* ${command} (\\HasNoChildren) "/" INBOX\r\n`
+        : `* ${command} (\\Noselect) "/" ""\r\n`;
+      socket.write(`${entry}${tag} OK ${command} completed\r\n`);
+      return;
+    }
+    if (command === "EXAMINE") {
+      socket.write(
+        "* FLAGS (\\Answered \\Flagged \\Deleted \\Seen \\Draft)\r\n" +
+          "* OK [PERMANENTFLAGS ()] No permanent flags permitted\r\n" +
+          "* 4 EXISTS\r\n" +
+          "* OK [UIDVALIDITY 77] UIDs valid\r\n" +
+          "* OK [UIDNEXT 5] Predicted next UID\r\n" +
+          `${tag} OK [READ-ONLY] EXAMINE completed\r\n`,
+      );
+      return;
+    }
+    if (command === "IDLE") {
+      idleTag = tag;
+      socket.write("+ idling\r\n");
+      return;
+    }
+    if (command === "NOOP") {
+      socket.write(`${tag} OK NOOP completed\r\n`);
+      return;
+    }
+    if (command === "LOGOUT") {
+      socket.end(`* BYE\r\n${tag} OK LOGOUT completed\r\n`);
+      return;
+    }
+    socket.write(`${tag} BAD unsupported test command\r\n`);
+  });
+}
+
+function imapAccountFor(port: number): StoredImapMailAccount {
+  return Object.freeze({
+    account: Object.freeze({
+      accountId: "account-a11111111111111111111111111111111",
+      emailAddress: "person@example.test",
+      endpoint: Object.freeze({ hostname: "localhost", port, tls: "implicit" as const }),
+      username: "person@example.test",
+      credentialRef: Object.freeze({
+        id: "credential-r11111111111111111111111111111111",
+        version: 1,
+      }),
+      transportBindingRef: Object.freeze({
+        id: "binding-r11111111111111111111111111111111",
+        version: 1,
+      }),
+      connectedAt: 1,
+    }),
+    providerKind: "imap",
+    displayName: null,
+    status: "connected",
+    createdAt: 1,
+    updatedAt: 1,
+  });
+}
+
+function storeFor(stored: StoredImapMailAccount): MultiMailAccountStore {
+  return {
+    localSchemaVersion: 2,
+    initialize: vi.fn().mockResolvedValue(undefined),
+    close: vi.fn(),
+    countAccounts: vi.fn().mockResolvedValue(1),
+    listAccounts: vi.fn().mockResolvedValue([stored]),
+    readAccount: vi.fn().mockResolvedValue(stored),
+    loadProvisionedAccount: vi.fn(async () => ({
+      stored,
+      password: Buffer.from("test-only-password"),
+    })),
+    save: vi.fn().mockResolvedValue(undefined),
+    updateMetadata: vi.fn().mockResolvedValue(undefined),
+    loadGmailCredential: vi.fn().mockResolvedValue(null),
+    deleteAccount: vi.fn().mockResolvedValue(true),
+  };
+}
 
 function verifierFor(port: number, tls: "implicit" | "starttls") {
   const target = targetFor(port, tls);

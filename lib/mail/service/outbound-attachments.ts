@@ -122,8 +122,48 @@ export function encodeBase64Body(bytes: Buffer): Buffer {
   return body;
 }
 
+/**
+ * Whether a wrapped base64 body in a finished message carries the same bytes
+ * as a file's own base64, read without building either in full.
+ *
+ * The draft lane's replay proof used to rebuild the whole message and compare
+ * it byte for byte. With the compose sheet's files that rebuild is a second
+ * message at the attachment cap inside the same held turn, measured at 50 MiB
+ * over the lane's own peak and past `MemoryHigh`. So the parts around the files
+ * are still rebuilt and compared exactly, and each file's body is read here: a
+ * line break after every full 76-character line, and the two decoded a whole
+ * number of lines at a time, so neither side ever stands in memory at full
+ * size. 76 characters are 57 bytes, which is why line `k` of the message and
+ * characters `76k` onward of the file decode to the same bytes whatever the
+ * file's own base64 spelled its last bits as.
+ */
+export function base64BodyCarries(body: Buffer, dataBase64: string): boolean {
+  const stride = BASE64_LINE_LENGTH + CRLF.byteLength;
+  for (let at = BASE64_LINE_LENGTH; at < body.byteLength; at += stride) {
+    if (body[at] !== 0x0d || body[at + 1] !== 0x0a) return false;
+  }
+  const lines = 512;
+  for (let line = 0; line * stride < body.byteLength; line += lines) {
+    const fromMessage = Buffer.from(
+      body
+        .subarray(line * stride, Math.min(body.byteLength, (line + lines) * stride))
+        .toString("latin1"),
+      "base64",
+    );
+    const fromFile = Buffer.from(
+      dataBase64.slice(line * BASE64_LINE_LENGTH, (line + lines) * BASE64_LINE_LENGTH),
+      "base64",
+    );
+    const same = fromMessage.equals(fromFile);
+    fromMessage.fill(0);
+    fromFile.fill(0);
+    if (!same) return false;
+  }
+  return true;
+}
+
 /** How many bytes `writeBase64Body` will write, measured without writing. */
-function base64BodyLength(byteLength: number): number {
+export function base64BodyLength(byteLength: number): number {
   if (byteLength === 0) return 0;
   const fullLines = Math.floor(byteLength / BASE64_LINE_SOURCE_BYTES);
   const remainder = byteLength - fullLines * BASE64_LINE_SOURCE_BYTES;

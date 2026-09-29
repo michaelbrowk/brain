@@ -4,16 +4,22 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { MailDraftMutationInput } from "../draft-types";
-import { MAIL_DRAFT_LIMITS } from "../draft-codec";
 import {
+  fingerprintMailDraftMutation,
+  MAIL_DRAFT_LIMITS,
+  validateMailDraftMutationInput,
+} from "../draft-codec";
+import {
+  mailSendInputFromDraft,
   MailDraftError,
   ProviderNeutralMailDraftService,
   type MailDraftSendProcessor,
 } from "./drafts";
-import type {
-  MailReplyContextResolver,
-  MailSendAccount,
-  MailSendAccountResolver,
+import {
+  createMailSendSubmissionProposal,
+  type MailReplyContextResolver,
+  type MailSendAccount,
+  type MailSendAccountResolver,
 } from "./outbound";
 import { SqliteMailSendStore } from "./outbound-store";
 
@@ -359,6 +365,131 @@ describe("provider-neutral draft service", () => {
     const stored = await fixture.store.readByOperationId(SEND_OPERATION_ID);
     expect(stored?.message.rawRfc2822Bytes).toBeGreaterThan(1024 * 1024);
     await fixture.store.close();
+  });
+
+  // THE COMPOSE SHEET'S FILES, THROUGH THE DRAFT DOOR. The files ride on the
+  // send mutation and into the message built from the draft; the draft itself
+  // never stores one. So the letter is bound to its draft the way a letter
+  // without files is: the draft goes to submitting with the send, and a
+  // second send of it is a conflict rather than a second letter.
+  describe("with the compose sheet's files", () => {
+    const quote = {
+      filename: "quote.pdf",
+      mimeType: "application/pdf",
+      dataBase64: Buffer.from("%PDF-1.4 the quote").toString("base64"),
+    };
+
+    it("builds the files into the message from the draft, and stores none on the draft", async () => {
+      const fixture = await createFixture();
+      await fixture.service.create(
+        { ...createInput(), to: "friend@example.test", subject: "The quote", text: "Attached." },
+        requestContext(),
+      );
+
+      await expect(
+        fixture.service.send(sendMutation({ attachments: [quote] }), requestContext()),
+      ).resolves.toMatchObject({ created: true, status: "queued", operationId: SEND_OPERATION_ID });
+
+      const stored = await fixture.store.readByOperationId(SEND_OPERATION_ID);
+      const raw = stored?.message.rawRfc2822.toString("latin1") ?? "";
+      expect(raw).toContain('Content-Disposition: attachment; filename="quote.pdf"');
+      expect(raw).toContain(quote.dataBase64);
+      expect(raw).toContain(Buffer.from("Attached.").toString("base64"));
+      await expect(fixture.store.readDraft(ACCOUNT_ID, DRAFT_ID)).resolves.toMatchObject({
+        state: "submitting",
+        sendOperationId: SEND_OPERATION_ID,
+        attachments: [],
+      });
+      await fixture.store.close();
+    });
+
+    it("replays the same send with the same files, and refuses the same mutation with other files", async () => {
+      const fixture = await createFixture();
+      await fixture.service.create(
+        { ...createInput(), to: "friend@example.test", text: "Attached." },
+        requestContext(),
+      );
+      const mutation = sendMutation({ attachments: [quote] });
+      await fixture.service.send(mutation, requestContext());
+
+      await expect(fixture.service.send(mutation, requestContext())).resolves.toMatchObject({
+        replayed: true,
+        created: false,
+        operationId: SEND_OPERATION_ID,
+      });
+      await expect(
+        fixture.service.send(
+          sendMutation({ attachments: [{ ...quote, filename: "other.pdf" }] }),
+          requestContext(),
+        ),
+      ).rejects.toEqual(new MailDraftError("mail_draft_idempotency_conflict"));
+      await expect(
+        fixture.service.send(sendMutation(), requestContext()),
+      ).rejects.toEqual(new MailDraftError("mail_draft_idempotency_conflict"));
+      await fixture.store.close();
+    });
+
+    it("commits only a message whose files are the mutation's own bytes, not just their digests", async () => {
+      // The outbox proves a submission against its draft before the row is
+      // written. With files that proof reads the files in the message itself:
+      // a submission claiming the right fingerprint but carrying other bytes
+      // of the same length is refused, and the honest one commits.
+      const fixture = await createFixture();
+      await fixture.service.create(
+        { ...createInput(), to: "friend@example.test", text: "Attached." },
+        requestContext(),
+      );
+      const draft = await fixture.store.readDraft(ACCOUNT_ID, DRAFT_ID);
+      if (draft === null) throw new Error("missing draft");
+      const mutation = validateMailDraftMutationInput(sendMutation({ attachments: [quote] }));
+      if (mutation.kind !== "send") throw new Error("not a send");
+      const proposal = (files: readonly (typeof quote)[]) =>
+        createMailSendSubmissionProposal({
+          account: gmailAccount(),
+          input: mailSendInputFromDraft(draft, mutation.sendIdempotencyKey, files),
+          reply: null,
+          operationId: SEND_OPERATION_ID,
+          createdAt: 100,
+        });
+      const honest = proposal([quote]);
+      const forged = proposal([
+        { ...quote, dataBase64: Buffer.from("%PDF-1.4 the QUOTE").toString("base64") },
+      ]);
+      expect(forged.message.rawRfc2822Bytes).toBe(honest.message.rawRfc2822Bytes);
+
+      await expect(
+        fixture.store.commitDraftSend(
+          mutation,
+          fingerprintMailDraftMutation(mutation),
+          { ...forged, requestFingerprint: honest.requestFingerprint },
+          100,
+        ),
+      ).rejects.toEqual(new MailDraftError("mail_draft_idempotency_conflict"));
+      await expect(
+        fixture.store.commitDraftSend(mutation, fingerprintMailDraftMutation(mutation), honest, 100),
+      ).resolves.toMatchObject({ created: true, operationId: SEND_OPERATION_ID });
+      await fixture.store.close();
+    });
+
+    it("refuses files the codec refuses before anything is built", async () => {
+      const fixture = await createFixture();
+      await fixture.service.create(
+        { ...createInput(), to: "friend@example.test" },
+        requestContext(),
+      );
+
+      await expect(
+        fixture.service.send(
+          sendMutation({ attachments: [{ ...quote, dataBase64: "!!!=" }] }),
+          requestContext(),
+        ),
+      ).rejects.toMatchObject({ code: "mail_draft_request_invalid" });
+      await expect(fixture.store.readByOperationId(SEND_OPERATION_ID)).resolves.toBeNull();
+      await expect(fixture.store.readDraft(ACCOUNT_ID, DRAFT_ID)).resolves.toMatchObject({
+        state: "editing",
+      });
+      await fixture.store.close();
+    });
   });
 
   it("uses deterministic mutation receipts and distinguishes stale delete", async () => {

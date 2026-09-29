@@ -1,17 +1,12 @@
 import { createBrainMailClient } from "@/lib/mail/brain-mail-client";
 import {
   mailApiBodyError,
-  mailApiError,
   readBoundedMailJson,
+  refuseMailAttachments,
   runMailApiAction,
   validateMailMutationRequest,
 } from "@/lib/mail/account-api-route";
 import type { MailSendInput } from "@/lib/mail/message-types";
-import {
-  MAIL_SEND_ATTACHMENT_LIMITS,
-  mailSendAttachmentBytes,
-  validateMailSendAttachments,
-} from "@/lib/mail/send-attachment-codec";
 
 export const dynamic = "force-dynamic";
 
@@ -47,26 +42,10 @@ export async function POST(request: Request) {
     place that says what a send request is, and its refusal names the request
     rather than an origin this route invented for it.
   */
-  /*
-    The compose sheet's files arrive here as base64 inside the JSON, on the
-    MCP tool's own wire and under its own codec. The body was cut off by its
-    bytes above, before a character of it was parsed; what is left to ask is
-    the codec's question, and it is asked here rather than a socket away so
-    a refused file never travels on to the service and the sheet gets an
-    answer it can word. A set over the total cap is a 413, the size the
-    sheet says; anything else the codec refuses is the files' own 400. A
-    body with no `attachments` at all is the codec's too, and the service's
-    refusal of it names the request.
-  */
-  if (
-    typeof input === "object" &&
-    input !== null &&
-    !Array.isArray(input) &&
-    Object.prototype.hasOwnProperty.call(input, "attachments")
-  ) {
-    const refused = refuseAttachments((input as Record<string, unknown>).attachments);
-    if (refused) return refused;
-  }
+  // Files are the codec's question, asked here before the service is: the
+  // body was cut off by its bytes above (`refuseMailAttachments`).
+  const refused = refuseMailAttachments(input);
+  if (refused) return refused;
   const owned: unknown =
     typeof input === "object" && input !== null && !Array.isArray(input)
       ? { ...(input as Record<string, unknown>), origin: "app" }
@@ -75,27 +54,4 @@ export async function POST(request: Request) {
     () => createBrainMailClient().sendMessage(owned as MailSendInput, request.signal),
     1,
   );
-}
-
-function refuseAttachments(value: unknown): Response | null {
-  try {
-    validateMailSendAttachments(value);
-    return null;
-  } catch {
-    // Which refusal it was is read off the sizes the codec measures, without
-    // decoding a byte: a set whose payloads add up past the cap is too large
-    // whatever else is wrong with it.
-    const total = Array.isArray(value)
-      ? value.reduce<number>((sum, entry: unknown) => {
-          const data =
-            typeof entry === "object" && entry !== null
-              ? (entry as Record<string, unknown>).dataBase64
-              : undefined;
-          return typeof data === "string" ? sum + mailSendAttachmentBytes(data) : sum;
-        }, 0)
-      : 0;
-    return total > MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes
-      ? mailApiError(413, "mail_send_attachments_too_large", 1)
-      : mailApiError(400, "mail_send_attachments_invalid", 1);
-  }
 }

@@ -16,6 +16,7 @@ import {
   subscribeOpenThread,
   type MailDraftState,
   type MailDraftSummary,
+  type MailSystemMailbox,
 } from "./mail-surface-client";
 
 const ACCOUNT_ID = "account-a0123456789abcdef0123456789abcdef";
@@ -1313,11 +1314,30 @@ describe("a thread asked for from outside Mail", () => {
     const heard = vi.fn();
     const stop = subscribeOpenThread(heard);
     requestOpenThread(ACCOUNT_ID, THREAD_ID);
-    expect(pendingOpenThread()).toEqual({ accountId: ACCOUNT_ID, threadId: THREAD_ID });
+    // A caller that names no mailbox is the centre, whose letters are new
+    // mail: Inbox.
+    expect(pendingOpenThread()).toEqual({
+      accountId: ACCOUNT_ID,
+      threadId: THREAD_ID,
+      mailboxId: "inbox",
+    });
     expect(heard).toHaveBeenCalledTimes(1);
     stop();
     requestOpenThread(ACCOUNT_ID, "thread-2");
     expect(heard).toHaveBeenCalledTimes(1);
+  });
+
+  it("carries the mailbox the letter was found in", () => {
+    requestOpenThread(ACCOUNT_ID, THREAD_ID, "all");
+    expect(pendingOpenThread()).toEqual({
+      accountId: ACCOUNT_ID,
+      threadId: THREAD_ID,
+      mailboxId: "all",
+    });
+    requestOpenThread(ACCOUNT_ID, THREAD_ID, "archive" as MailSystemMailbox);
+    // A mailbox no route knows is a request nothing could answer: the one
+    // before it stays.
+    expect(pendingOpenThread()?.mailboxId).toBe("all");
   });
 
   it("keeps the last request, because a second press is a change of mind", () => {

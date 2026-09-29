@@ -2575,12 +2575,18 @@ export function MailSurface({
    *
    *  Three answers, in this order. The letter is in the list in hand, and
    *  `selectThread` opens it exactly as a press on the row would. It is in
-   *  another account, and the column moves there first, one switch per
-   *  request, and the list that follows brings the letter with it. Or it is in
-   *  neither, and one `readThread` fetches the row to open it with. A
-   *  request that cannot be answered is dropped rather than retried: Mail is
-   *  open at the list it was going to show anyway, which is not a failure to
-   *  report to whoever pressed a notification.
+   *  another account or another mailbox, and the column moves there first,
+   *  one switch and one move per request, and the list that follows brings
+   *  the letter with it. Or it is in neither, and one read of that mailbox
+   *  fetches the row to open it with. A request that cannot be answered is
+   *  dropped rather than retried: Mail is open at the list it was going to
+   *  show anyway, which is not a failure to report to whoever pressed a
+   *  notification.
+   *
+   *  The mailbox is the request's own: Inbox for the centre, and for the
+   *  palette whichever mailbox its search read in that account, All Mail on
+   *  Gmail. A letter the palette found there may have left Inbox long ago,
+   *  and the Inbox read answers 404 for it, which opened nothing.
    */
   const pendingOpen = useSyncExternalStore(
     subscribeOpenThread,
@@ -2589,30 +2595,39 @@ export function MailSurface({
   );
   /** What has already been tried for the request in hand. A switch and a fetch
    *  are each worth one attempt, and without this ledger the effect would
-   *  switch accounts every time the list it asked for commits. `listAtSwitch`
-   *  is the list that was on screen when the switch was asked for: the fetch
-   *  waits for a commit that is not it, so the account's own page gets its
-   *  chance first. */
+   *  switch accounts every time the list it asked for commits. `listAtMove`
+   *  is the list that was on screen when the column was last moved, by a
+   *  switch or a reset: the fetch waits for a commit that is not it, so the
+   *  destination's own page gets its chance first. */
   const openRequestRef = useRef<{
     key: string;
     opened: boolean;
     switched: boolean;
-    listAtSwitch: MailThreadListState | null;
+    listAtMove: MailThreadListState | null;
     fetched: boolean;
-    /** The column was moved back to Inbox with an empty query for this
-     *  request; a second move would be a loop, so the request is dropped
-     *  instead if the column is still elsewhere after the first. */
+    /** The column was moved to the request's mailbox with an empty query; a
+     *  second move would be a loop, so the request is dropped instead if the
+     *  column is still elsewhere after the first. The switch re-arms it once:
+     *  it lands on the other account's Inbox, a column this request has not
+     *  moved yet. */
     reset: boolean;
   } | null>(null);
 
   const fetchRequestedThread = useCallback(
-    async (request: MailOpenRequest) => {
+    async (request: MailOpenRequest, mailboxId: MailSystemMailbox) => {
       let detail: MailThreadDetail;
       try {
-        detail = await client.readThread({
-          accountId: request.accountId,
-          threadId: request.threadId,
-        });
+        detail =
+          mailboxId === "inbox"
+            ? await client.readThread({
+                accountId: request.accountId,
+                threadId: request.threadId,
+              })
+            : await client.readMailboxThread({
+                accountId: request.accountId,
+                mailboxId,
+                threadId: request.threadId,
+              });
       } catch {
         // A later press replaces the slot before this one answers: only the
         // request still standing there is this fetch's to clear.
@@ -2639,14 +2654,14 @@ export function MailSurface({
     // one, and the column may still be choosing which it stands in.
     if (accountsState.kind !== "ready") return;
 
-    const key = unifiedThreadKey(pendingOpen);
+    const key = `${unifiedThreadKey(pendingOpen)}\u0000${pendingOpen.mailboxId}`;
     let ledger = openRequestRef.current;
     if (ledger === null || ledger.key !== key) {
       ledger = {
         key,
         opened: false,
         switched: false,
-        listAtSwitch: null,
+        listAtMove: null,
         fetched: false,
         reset: false,
       };
@@ -2654,14 +2669,20 @@ export function MailSurface({
     }
 
     // An account that is no longer connected has no letter to open.
-    if (
-      !accountsState.accounts.some(
-        (account) => account.accountId === pendingOpen.accountId,
-      )
-    ) {
+    const requestedAccount = accountsState.accounts.find(
+      (account) => account.accountId === pendingOpen.accountId,
+    );
+    if (!requestedAccount) {
       clearOpenThreadRequest();
       return;
     }
+    // A mailbox the account does not offer cannot be moved to, so the request
+    // is answered in Inbox, which every account has.
+    const mailboxId = requestedAccount.capabilities.mailboxes.includes(
+      pendingOpen.mailboxId,
+    )
+      ? pendingOpen.mailboxId
+      : "inbox";
 
     const loaded = loadedThread(
       pendingOpen,
@@ -2689,39 +2710,45 @@ export function MailSurface({
     // request that arrives on Sent, or over a search, moves the column to
     // Inbox with an empty query and stays standing: the press came from
     // outside Mail (the palette, the centre) and named a letter, and a folder
-    // the reader was on a moment ago is not a reason to lose it. Once, per
-    // request: the reset commits a new list, the effect runs again on it, and
-    // a second reset would only spin.
-    if (selectedMailboxId !== "inbox" || searchQuery.trim() !== "") {
+    // the reader was on a moment ago is not a reason to lose it. In the
+    // letter's own account the move goes straight to the request's mailbox;
+    // in any other it goes to Inbox, where the switch would land anyway. Once
+    // per column: the reset commits a new list, the effect runs again on it,
+    // and a second reset would only spin.
+    const sameAccount = selectedAccountId === pendingOpen.accountId;
+    const home = sameAccount ? mailboxId : "inbox";
+    if (selectedMailboxId !== home || searchQuery.trim() !== "") {
       if (ledger.reset) {
         clearOpenThreadRequest();
         return;
       }
       ledger.reset = true;
-      // `selectMailbox` clears the query on its way to Inbox, but it stands
-      // down where there is no single account to move (the merged stream
-      // only ever searches), so the query is cleared on its own as well.
-      selectMailbox("inbox");
+      ledger.listAtMove = threadState;
+      // `selectMailbox` clears the query on its way, but it stands down where
+      // there is no single account to move (the merged stream only ever
+      // searches), so the query is cleared on its own as well.
+      selectMailbox(home);
       changeSearchQuery("");
       return;
     }
 
-    if (selectedAccountId !== pendingOpen.accountId) {
+    if (!sameAccount) {
       if (ledger.switched) return;
       ledger.switched = true;
-      ledger.listAtSwitch = threadState;
+      ledger.listAtMove = threadState;
+      ledger.reset = false;
       selectAccount(pendingOpen.accountId);
       return;
     }
 
-    // The list the switch asked for has not committed yet, so "not in the
+    // The list the move asked for has not committed yet, so "not in the
     // list" is not yet an answer.
-    if (threadState.kind === "loading" || threadState === ledger.listAtSwitch) {
+    if (threadState.kind === "loading" || threadState === ledger.listAtMove) {
       return;
     }
     if (ledger.fetched) return;
     ledger.fetched = true;
-    void fetchRequestedThread(pendingOpen);
+    void fetchRequestedThread(pendingOpen, mailboxId);
   }, [
     accountsState,
     changeSearchQuery,
@@ -4969,7 +4996,8 @@ function isPendingRequest(request: MailOpenRequest): boolean {
   return (
     pending !== null &&
     pending.accountId === request.accountId &&
-    pending.threadId === request.threadId
+    pending.threadId === request.threadId &&
+    pending.mailboxId === request.mailboxId
   );
 }
 

@@ -8606,6 +8606,195 @@ describe("MailSurface", () => {
       expect(document.body.textContent).toContain("The other address");
     });
 
+    /** The palette searches each account's widest mailbox, All Mail on Gmail,
+     *  so a pick can name a letter archived long ago. The Inbox read answers
+     *  404 for it, and a request that only knew Inbox opened nothing. The
+     *  request now carries the mailbox the search used, and the column goes
+     *  there. */
+    const archived: MailThreadListItem = {
+      ...thread,
+      threadId: "thread-archived",
+      subject: "The archived letter",
+    };
+
+    function reader(): HTMLElement | null {
+      return document.body.querySelector('section[aria-label="Message reader"]');
+    }
+
+    function readerButtons(): string[] {
+      return [...(reader()?.querySelectorAll("button") ?? [])].map(
+        (button) => button.textContent?.trim() ?? "",
+      );
+    }
+
+    it("opens a letter found outside Inbox in the mailbox the search used", async () => {
+      const readMailboxThread = vi.fn().mockResolvedValue(detailFor(archived));
+      const client = makeClient({
+        readThread: vi
+          .fn()
+          .mockRejectedValue(new MailApiError(404, "mail_thread_not_found")),
+        readMailboxThread,
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, archived.threadId, "all");
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+      await until(
+        () => reader()?.textContent?.includes("The archived letter") === true,
+        "the reader opens the archived letter",
+      );
+
+      expect(readMailboxThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        mailboxId: "all",
+        threadId: archived.threadId,
+      });
+      expect(client.readThread).not.toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: archived.threadId }),
+      );
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: All Mail");
+      // All Mail's reader: a letter already out of Inbox has no Archive.
+      expect(readerButtons()).not.toContain("Archive");
+    });
+
+    it("opens a letter found outside Inbox from All inboxes too", async () => {
+      const archivedB: MailThreadListItem = {
+        ...archived,
+        accountId: accountB.accountId,
+      };
+      const readMailboxThread = vi.fn().mockResolvedValue(detailFor(archivedB));
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+        listThreads: vi
+          .fn()
+          .mockImplementation(({ accountId }: { accountId: string }) =>
+            Promise.resolve(pageFor(accountId)),
+          ),
+        readThread: vi
+          .fn()
+          .mockRejectedValue(new MailApiError(404, "mail_thread_not_found")),
+        readMailboxThread,
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: All inboxes");
+
+      await act(async () => {
+        requestOpenThread(accountB.accountId, archivedB.threadId, "all");
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+      await until(
+        () => reader()?.textContent?.includes("The archived letter") === true,
+        "the reader opens the archived letter",
+      );
+
+      expect(readMailboxThread).toHaveBeenCalledWith({
+        accountId: accountB.accountId,
+        mailboxId: "all",
+        threadId: archivedB.threadId,
+      });
+      expect(client.readThread).not.toHaveBeenCalled();
+      expect(navTrigger()?.getAttribute("aria-label")).toContain("All Mail");
+    });
+
+    it("takes a cross-account request to the other account's mailbox from a folder", async () => {
+      // Sent resets to Inbox before the switch, the switch lands on the other
+      // account's Inbox, and the move to All Mail after it is that account's
+      // own: two moves for one request, neither of them a loop.
+      const archivedB: MailThreadListItem = {
+        ...archived,
+        accountId: accountB.accountId,
+      };
+      const readMailboxThread = vi.fn().mockResolvedValue(detailFor(archivedB));
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+        listThreads: vi
+          .fn()
+          .mockImplementation(({ accountId }: { accountId: string }) =>
+            Promise.resolve(pageFor(accountId)),
+          ),
+        readMailboxThread,
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount(accountA);
+      await goTo("Sent");
+
+      await act(async () => {
+        requestOpenThread(accountB.accountId, archivedB.threadId, "all");
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+      await until(
+        () => reader()?.textContent?.includes("The archived letter") === true,
+        "the reader opens the archived letter",
+      );
+
+      expect(readMailboxThread).toHaveBeenCalledWith({
+        accountId: accountB.accountId,
+        mailboxId: "all",
+        threadId: archivedB.threadId,
+      });
+      expect(navTrigger()?.getAttribute("aria-label")).toContain("All Mail");
+    });
+
+    it("still lands a request that names no mailbox on Inbox", async () => {
+      // The notification centre names no mailbox: its letters are new mail.
+      const client = makeClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, "thread-elsewhere");
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: "thread-elsewhere",
+      });
+      expect(client.readMailboxThread).not.toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: "thread-elsewhere" }),
+      );
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+    });
+
+    it("answers in Inbox when the account has no such mailbox", async () => {
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue([imapAccount]),
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount(imapAccount);
+
+      await act(async () => {
+        requestOpenThread(imapAccount.accountId, "thread-elsewhere", "all");
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: imapAccount.accountId,
+        threadId: "thread-elsewhere",
+      });
+      expect(client.readMailboxThread).not.toHaveBeenCalled();
+    });
+
     it("clears an unanswered request when the Mail surface unmounts", async () => {
       const client = makeClient({
         loadAccounts: vi

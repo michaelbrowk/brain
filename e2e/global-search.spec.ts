@@ -321,3 +321,116 @@ test("@release a paused Mail has no group and the palette asks the mail route fo
     await setModule(page, "mail", true);
   }
 });
+
+test("@release a letter the palette found outside Inbox opens in the mailbox its search read", async ({
+  page,
+}) => {
+  test.setTimeout(90_000);
+  await login(page);
+  await installMailRoutes(page);
+
+  // Gmail's search reads All Mail, so it finds a letter archived long ago,
+  // and the Inbox read answers 404 for it, as production's nginx showed. The
+  // mailbox read is where it is. Routes registered later win, so these stand
+  // over the shared ones for this test only.
+  const archived = {
+    ...thread,
+    threadId: "thread-archived",
+    subject: "Quarterly insurance renewal",
+    snippet: "Your policy renews next month",
+  };
+  const archivedDetail = {
+    ...detail,
+    thread: archived,
+    messages: [
+      {
+        ...detail.messages[0],
+        messageId: "message-archived",
+        threadId: archived.threadId,
+        subject: archived.subject,
+        inInbox: false,
+        snippet: archived.snippet,
+        textBody: "Your insurance policy renews on the first of next month.",
+      },
+    ],
+  };
+  const reads = { inbox: 0, mailbox: 0 };
+  const fulfill = (route: Route, body: unknown, status = 200) =>
+    route.fulfill({
+      status,
+      contentType: "application/json; charset=utf-8",
+      body: JSON.stringify(body),
+    });
+  await page.route(/\/api\/mail\/threads\/thread-archived(?:\?.*)?$/, (route) => {
+    reads.inbox += 1;
+    return fulfill(route, { apiVersion: 1, error: { code: "mail_thread_not_found" } }, 404);
+  });
+  await page.route(/\/api\/mail\/mailboxes\/all\/threads\?.*$/, (route) =>
+    fulfill(route, {
+      apiVersion: 1,
+      mailboxId: "all",
+      items: [thread],
+      nextCursor: null,
+      availability: {
+        status: "available",
+        lastSuccessfulAt: 1_700_000_000_000,
+        windowTruncated: false,
+      },
+    }),
+  );
+  await page.route(/\/api\/mail\/mailboxes\/all\/threads\/thread-archived(?:\?.*)?$/, (route) => {
+    reads.mailbox += 1;
+    return fulfill(route, archivedDetail);
+  });
+  await page.route(/\/api\/mail\/message-content\/message-archived(?:\?.*)?$/, (route) =>
+    fulfill(route, {
+      apiVersion: 1,
+      accountId: account.accountId,
+      messageId: "message-archived",
+      state: "ready",
+      textBody: archivedDetail.messages[0].textBody,
+      htmlBody: null,
+      attachments: [],
+    }),
+  );
+  await page.route("**/api/mail/search/all", (route) =>
+    fulfill(route, {
+      apiVersion: 1,
+      threads: [archived],
+      accounts: [
+        {
+          accountId: account.accountId,
+          emailAddress: account.emailAddress,
+          mailboxId: "all",
+          availability: {
+            status: "available",
+            lastSuccessfulAt: 1_700_000_000_000,
+            windowTruncated: false,
+          },
+          indexStatus: "ready",
+          resultsTruncated: false,
+        },
+      ],
+      indexBuilding: false,
+      truncated: false,
+    }),
+  );
+  await page.goto("/");
+
+  await openPalette(page);
+  await page.getByRole("combobox", { name: "Search and commands" }).fill("insurance");
+  await page.getByRole("option", { name: /Quarterly insurance renewal/ }).click();
+
+  // Mail stands in All Mail, where the search found the letter, and the
+  // reader has it open: the pick no longer ends on "Choose a message".
+  await expect(page).toHaveURL("/mail");
+  await expect(page.locator('button[aria-label^="Mailbox: "]')).toHaveAttribute(
+    "aria-label",
+    "Mailbox: All Mail",
+  );
+  const reader = page.locator('section[aria-label="Message reader"]');
+  await expect(reader).toContainText("Quarterly insurance renewal");
+  await expect(reader).not.toContainText("Choose a message");
+  expect(reads.mailbox).toBeGreaterThanOrEqual(1);
+  expect(reads.inbox).toBe(0);
+});

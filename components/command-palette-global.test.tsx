@@ -446,6 +446,7 @@ describe("CommandPalette global search", () => {
       kind: "mail",
       accountId: ACCOUNT_ID,
       threadId: "thread-1",
+      mailboxId: "all",
     });
     // A pick clears the query, as a close does, so the list is typed again.
     await type("quarterly");
@@ -462,6 +463,7 @@ describe("CommandPalette global search", () => {
       kind: "mail",
       accountId: ACCOUNT_ID,
       threadId: "thread-1",
+      mailboxId: "all",
     });
 
     await act(async () => root.unmount());
@@ -473,6 +475,65 @@ describe("CommandPalette global search", () => {
     expect(group("Tasks")).not.toBeNull();
     await act(async () => item("Quarterly task").click());
     expect(onSelect).toHaveBeenLastCalledWith({ kind: "task", id: "t1" });
+  });
+
+  it("names on a mail pick the mailbox that account's search read", async () => {
+    // Gmail searches All Mail and a server without one searches Inbox, and
+    // Mail opens the letter where it was found: a letter archived long ago
+    // is not in Inbox, and the Inbox read answers 404 for it.
+    const OTHER_ID = "account-affffffffffffffffffffffffffffffff";
+    const [allMail] = mailBody([]).accounts;
+    mailAnswer = async () =>
+      response(
+        mailBody(
+          [
+            thread("thread-1", "Quarterly launch review"),
+            thread("thread-2", "Quarterly office move", { accountId: OTHER_ID }),
+          ],
+          {
+            accounts: [
+              allMail,
+              {
+                ...allMail,
+                accountId: OTHER_ID,
+                emailAddress: "work@example.test",
+                mailboxId: "inbox",
+              },
+            ],
+          },
+        ),
+      );
+    await render();
+    await type("quarterly");
+
+    await act(async () => item("Quarterly launch review").click());
+    expect(onSelect).toHaveBeenLastCalledWith({
+      kind: "mail",
+      accountId: ACCOUNT_ID,
+      threadId: "thread-1",
+      mailboxId: "all",
+    });
+    await type("quarterly");
+    await act(async () => item("Quarterly office move").click());
+    expect(onSelect).toHaveBeenLastCalledWith({
+      kind: "mail",
+      accountId: OTHER_ID,
+      threadId: "thread-2",
+      mailboxId: "inbox",
+    });
+
+    // An answer that names no mailbox for the row's account leaves Inbox,
+    // where every account has its new mail.
+    mailAnswer = async () =>
+      response(mailBody([thread("thread-1", "Quarterly launch review")], { accounts: [] }));
+    await type("quarterly l");
+    await act(async () => item("Quarterly launch review").click());
+    expect(onSelect).toHaveBeenLastCalledWith({
+      kind: "mail",
+      accountId: ACCOUNT_ID,
+      threadId: "thread-1",
+      mailboxId: "inbox",
+    });
   });
 
   it("names the route actions after the route they belong to, apart from the results", async () => {

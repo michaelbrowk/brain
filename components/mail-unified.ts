@@ -65,6 +65,14 @@ export type UnifiedStream = {
   readonly items: readonly MailThreadListItem[];
   /** null = exhausted (or not loadable: error/reauth streams carry null). */
   readonly nextCursor: string | null;
+  /**
+   * `nextCursor` starts at page two of a snapshot newer than the loaded rows,
+   * which go deeper than that. A sync or a failure took the stream's own
+   * cursor, and a page-one re-read hands back only page one's, so the next
+   * Load more walks from there past the last loaded row before what it brings
+   * counts as the next page.
+   */
+  readonly repage?: boolean;
   readonly status: UnifiedStreamStatus;
   readonly sync: MailThreadPage["sync"] | null;
 };
@@ -174,6 +182,12 @@ export function mergedDisplayItems(
  * discarding loaded depth. A shallow stream (nothing beyond page 1) is
  * replaced wholesale; a deep stream keeps its older tail and its cursor, with
  * the same duplicate/gap tolerance the load-more dedupe already accepts.
+ *
+ * The same fold heals a stream a sync held or a read failed (the quiet re-read,
+ * Try again, the tick over an errored stream). Such a stream carries null
+ * because its page was never answered, not because it ended, so a deep one
+ * takes page one's cursor and the mark to re-page from it: keeping the null
+ * stopped that account paging until a reload.
  */
 export function reconcileStreamPageOne(
   stream: UnifiedStream,
@@ -184,6 +198,7 @@ export function reconcileStreamPageOne(
       ...stream,
       items: page.items,
       nextCursor: page.nextCursor,
+      repage: false,
       status: "ready",
       sync: page.sync,
     };
@@ -195,10 +210,37 @@ export function reconcileStreamPageOne(
       compareUnified(item, lastPageItem) > 0 &&
       !pageKeys.has(unifiedThreadKey(item)),
   );
+  const cursorLost = stream.status !== "ready";
   return {
     ...stream,
     items: [...page.items, ...tail],
-    nextCursor: stream.nextCursor,
+    nextCursor: cursorLost ? page.nextCursor : stream.nextCursor,
+    repage: cursorLost ? page.nextCursor !== null : stream.repage,
+    status: "ready",
+    sync: page.sync,
+  };
+}
+
+/**
+ * Fold a Load more's answer into its stream. An ordinary page follows the
+ * stream's last row and goes on the end, less any row already loaded. A
+ * re-paged walk crossed rows the stream holds, so what it adds can sort
+ * anywhere among them: it goes in by the merge's order, which keeps the stream
+ * the sorted prefix its horizon is read from.
+ */
+export function appendStreamPage(
+  stream: UnifiedStream,
+  page: Pick<MailThreadPage, "items" | "nextCursor" | "sync">,
+): UnifiedStream {
+  const seen = new Set(stream.items.map(unifiedThreadKey));
+  const fresh = page.items.filter((item) => !seen.has(unifiedThreadKey(item)));
+  return {
+    ...stream,
+    items: stream.repage
+      ? [...stream.items, ...fresh].sort(compareUnified)
+      : [...stream.items, ...fresh],
+    nextCursor: page.nextCursor,
+    repage: false,
     status: "ready",
     sync: page.sync,
   };

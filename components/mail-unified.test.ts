@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  appendStreamPage,
   compareUnified,
   deriveUnifiedSections,
   mergedDisplayItems,
@@ -228,6 +229,62 @@ describe("reconcileStreamPageOne", () => {
     expect(next.items.slice(0, 50)).toEqual(freshTop);
     expect(next.items.slice(50)).toEqual(deepItems.slice(49));
     expect(next.nextCursor).toBe("deep-cursor");
+  });
+
+  it.each(["loading", "error"] as const)(
+    "gives a deep %s stream page one's cursor to re-page from, keeping its rows",
+    (status) => {
+      // A sync hold or a failed Load more took the cursor (null because the
+      // page was never answered, not because the stream ended). Keeping that
+      // null stopped the account paging until a reload.
+      const deepItems = Array.from({ length: 60 }, (_value, index) =>
+        item({
+          accountId: ACCOUNT_A,
+          threadId: `t${String(index).padStart(2, "0")}`,
+          lastMessageAt: 10_000 - index * 10,
+        }),
+      );
+      const before = stream(ACCOUNT_A, {
+        items: deepItems,
+        nextCursor: null,
+        status,
+      });
+      const next = reconcileStreamPageOne(
+        before,
+        page(deepItems.slice(0, 50), "fresh-page-two"),
+      );
+      expect(next.items).toEqual(deepItems);
+      expect(next.status).toBe("ready");
+      expect(next.nextCursor).toBe("fresh-page-two");
+      expect(next.repage).toBe(true);
+    },
+  );
+
+  it("leaves a deep stream that ended as ended", () => {
+    const deepItems = Array.from({ length: 60 }, (_value, index) =>
+      item({
+        accountId: ACCOUNT_A,
+        threadId: `t${String(index).padStart(2, "0")}`,
+        lastMessageAt: 10_000 - index * 10,
+      }),
+    );
+    const before = stream(ACCOUNT_A, { items: deepItems, nextCursor: null });
+    const next = reconcileStreamPageOne(
+      before,
+      page(deepItems.slice(0, 50), "fresh-page-two"),
+    );
+    expect(next.nextCursor).toBeNull();
+    expect(next.repage).toBeFalsy();
+  });
+
+  it("drops the re-page mark when page one replaces the stream", () => {
+    const before = stream(ACCOUNT_A, {
+      items: [item({ accountId: ACCOUNT_A, threadId: "old" })],
+      nextCursor: "fresh-page-two",
+      repage: true,
+    });
+    const next = reconcileStreamPageOne(before, page([], null));
+    expect(next.repage).toBe(false);
   });
 
   it("heals an errored stream to ready", () => {
@@ -671,6 +728,44 @@ describe("restoreStreamItems", () => {
   it("is a no-op when nothing moved", () => {
     const streams = [stream(ACCOUNT_A, { items: [newer] })];
     expect(restoreStreamItems(streams, [])).toBe(streams);
+  });
+});
+
+describe("appendStreamPage", () => {
+  const page = (
+    items: readonly MailThreadListItem[],
+    nextCursor: string | null = "next",
+  ) => ({
+    items,
+    nextCursor,
+    sync: { status: "idle" as const, lastSuccessfulAt: 1_700_000_000_500 },
+  });
+  const loaded = [
+    item({ accountId: ACCOUNT_A, threadId: "t1", lastMessageAt: 300 }),
+    item({ accountId: ACCOUNT_A, threadId: "t2", lastMessageAt: 200 }),
+  ];
+
+  it("puts an ordinary page on the end, less the rows already loaded", () => {
+    const older = item({ accountId: ACCOUNT_A, threadId: "t3", lastMessageAt: 100 });
+    const next = appendStreamPage(
+      stream(ACCOUNT_A, { items: loaded, nextCursor: "this" }),
+      page([loaded[1]!, older]),
+    );
+    expect(next.items).toEqual([...loaded, older]);
+    expect(next.nextCursor).toBe("next");
+  });
+
+  it("sorts a re-paged walk's rows in among the loaded ones and drops the mark", () => {
+    // Moved back into Inbox since the rows were loaded: between them by date.
+    const moved = item({ accountId: ACCOUNT_A, threadId: "moved", lastMessageAt: 250 });
+    const older = item({ accountId: ACCOUNT_A, threadId: "t3", lastMessageAt: 100 });
+    const next = appendStreamPage(
+      stream(ACCOUNT_A, { items: loaded, nextCursor: "this", repage: true }),
+      page([loaded[0]!, moved, loaded[1]!, older], null),
+    );
+    expect(next.items).toEqual([loaded[0], moved, loaded[1], older]);
+    expect(next.nextCursor).toBeNull();
+    expect(next.repage).toBe(false);
   });
 });
 

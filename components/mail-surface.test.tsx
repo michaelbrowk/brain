@@ -6542,6 +6542,132 @@ describe("MailSurface", () => {
         });
         expect(document.body.textContent).toContain("A newest");
         expect(document.body.textContent).not.toContain("couldn’t load");
+
+        // Page one was all the stream had, so page one's cursor is the one
+        // Load more goes on from.
+        await click(findButton("Load more"));
+        expect(listThreads).toHaveBeenLastCalledWith({
+          accountId: accountA.accountId,
+          cursor: "cursor-a",
+          limit: 50,
+        });
+      });
+
+      /** A stream two pages deep whose third page a sync (or an outage) held.
+       *  The re-read hands back page one of the new snapshot and its cursor,
+       *  and the stream's hundred rows stay. Keeping the lost cursor's null
+       *  stopped the account paging until a reload. */
+      function deepStreamClient(third: () => Error) {
+        const rows = Array.from({ length: 150 }, (_value, index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `A row ${String(index).padStart(3, "0")}`,
+            lastMessageAt: 1_700_000_900_000 - index * 1_000,
+            unread: false,
+          }),
+        );
+        let snapshot = 1;
+        let failed = false;
+        const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) => {
+          if (accountId === accountB.accountId) {
+            return Promise.resolve(
+              pageOf([
+                unifiedThread({
+                  accountId: accountB.accountId,
+                  threadId: "B only",
+                  lastMessageAt: 1_600_000_000_000,
+                }),
+              ]),
+            );
+          }
+          if (!cursor) {
+            return Promise.resolve(
+              pageOf(rows.slice(0, 50), `s${snapshot}-page-2`),
+            );
+          }
+          if (cursor === "s1-page-2") {
+            return Promise.resolve(pageOf(rows.slice(50, 100), "s1-page-3"));
+          }
+          if (cursor === "s1-page-3" && !failed) {
+            failed = true;
+            snapshot = 2;
+            return Promise.reject(third());
+          }
+          if (cursor === "s2-page-2") {
+            return Promise.resolve(pageOf(rows.slice(50, 100), "s2-page-3"));
+          }
+          if (cursor === "s2-page-3") {
+            return Promise.resolve(pageOf(rows.slice(100, 150)));
+          }
+          return Promise.reject(new Error(`unexpected cursor ${cursor}`));
+        });
+        return { listThreads, rows };
+      }
+
+      function cursorsAsked(listThreads: ReturnType<typeof vi.fn>): string[] {
+        return listThreads.mock.calls
+          .map(([input]) => input.cursor)
+          .filter((cursor): cursor is string => typeof cursor === "string");
+      }
+
+      it("pages on past its loaded rows after a sync holds a deep Load more", async () => {
+        vi.useFakeTimers();
+        const { listThreads } = deepStreamClient(held);
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+        await click(findButton("Load more"));
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads)).toEqual(["s1-page-2", "s1-page-3"]);
+
+        await wait(1_500);
+        expect(document.body.textContent).not.toContain("couldn’t load");
+
+        // One press walks the new snapshot from its page two past the
+        // hundredth row, where the rows the stream has not seen begin.
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads)).toEqual([
+          "s1-page-2",
+          "s1-page-3",
+          "s2-page-2",
+          "s2-page-3",
+        ]);
+        // The account ran out, so nothing is left to ask for.
+        expect(() => findButton("Load more")).toThrow();
+      });
+
+      it("pages on past its loaded rows after Try again heals a deep Load more", async () => {
+        const { listThreads } = deepStreamClient(() => new Error("outage"));
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+        await click(findButton("Load more"));
+        await click(findButton("Load more"));
+        expect(document.body.textContent).toContain(
+          `${accountA.emailAddress} couldn’t load`,
+        );
+
+        await click(findButton("Try again"));
+        expect(document.body.textContent).not.toContain("couldn’t load");
+
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads)).toEqual([
+          "s1-page-2",
+          "s1-page-3",
+          "s2-page-2",
+          "s2-page-3",
+        ]);
+        expect(() => findButton("Load more")).toThrow();
       });
     });
 

@@ -65,6 +65,8 @@ import {
   type MailThreadListState,
 } from "./mail-thread-list";
 import {
+  appendStreamPage,
+  compareUnified,
   deriveUnifiedSections,
   mergedDisplayItems,
   reconcileStreamPageOne,
@@ -1935,12 +1937,31 @@ export function MailSurface({
     const results = await settleWithLimit(
       starved,
       UNIFIED_FANOUT_LIMIT,
-      (stream) =>
-        client.listThreads({
-          accountId: stream.accountId,
-          cursor: stream.nextCursor as string,
-          limit: UNIFIED_PAGE_SIZE,
-        }),
+      async (stream) => {
+        const read = (cursor: string) =>
+          client.listThreads({
+            accountId: stream.accountId,
+            cursor,
+            limit: UNIFIED_PAGE_SIZE,
+          });
+        let page = await read(stream.nextCursor as string);
+        const last = stream.items.at(-1);
+        if (!stream.repage || last === undefined) return page;
+        // A re-paging stream's cursor starts inside rows it already holds.
+        // Pages that end at or above its last row bring nothing but what
+        // moved, and a press that added no row would not re-arm the scroll
+        // sentinel, so one Load more walks on to the page that reaches past.
+        const items = [...page.items];
+        while (
+          page.nextCursor !== null &&
+          page.items.length > 0 &&
+          compareUnified(page.items.at(-1)!, last) <= 0
+        ) {
+          page = await read(page.nextCursor);
+          items.push(...page.items);
+        }
+        return { ...page, items };
+      },
     );
     if (
       listEpochRef.current !== listEpoch ||
@@ -1970,19 +1991,7 @@ export function MailSurface({
           }
           return { ...stream, nextCursor: null, status: "error" as const };
         }
-        const seen = new Set(stream.items.map(unifiedThreadKey));
-        return {
-          ...stream,
-          items: [
-            ...stream.items,
-            ...result.value.items.filter(
-              (item) => !seen.has(unifiedThreadKey(item)),
-            ),
-          ],
-          nextCursor: result.value.nextCursor,
-          status: "ready" as const,
-          sync: result.value.sync,
-        };
+        return appendStreamPage(stream, result.value);
       }),
     });
     for (const accountId of held) void holdUnifiedStream(accountId);

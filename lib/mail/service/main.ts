@@ -13,7 +13,6 @@ import {
   type MailAccountProtocolMutationGuard,
 } from "./accounts";
 import { MailAccountError } from "./account-types";
-import { AtomicMailSystemAdmission } from "./admission";
 import { MailBackgroundSyncScheduler } from "./background-sync";
 import { MailContentCoordinator } from "./content-coordinator";
 import {
@@ -101,9 +100,6 @@ async function main(): Promise<void> {
       });
     },
   });
-  // One ledger for the whole process: the download routes and the body
-  // prefetch count against the same two fetch streams.
-  const admission = new AtomicMailSystemAdmission();
   // The scheduler is constructed after the coordinator it polls; the kick
   // holder closes the cycle so an owner-demanded message can start its
   // remote-image pass without waiting for the next timer tick.
@@ -119,7 +115,6 @@ async function main(): Promise<void> {
       }),
       parser: new UnixSocketMailMimeParser(),
     }),
-    admission,
     draftSources: {
       listDraftSourceMessageIds: (accountId) =>
         listDraftSourceMessageIds(outbox, accountId),
@@ -240,11 +235,11 @@ async function main(): Promise<void> {
       outboundWorker,
       ...(smtpRuntime ? { smtpWorker: smtpRuntime.worker } : {}),
       backgroundSync,
+      bodyPrefetch: content,
     }),
   });
   const server = createMailServiceHttpServer({
     build,
-    admission,
     accounts,
     gmailOAuth,
     messages: senderScreen
@@ -273,6 +268,10 @@ async function main(): Promise<void> {
     await smtpRuntime?.worker.start();
     backgroundSync.start();
     workersRunning = true;
+  } else {
+    // Nothing drives the prefetch with the scheduler down, but it comes up
+    // stopped all the same, so a resume is the one thing that starts it.
+    await content.stopBackgroundPrefetch();
   }
   // The `phase` is what this start actually did, not what the stored flag
   // says. An operator reading the journal after a restart needs to see that

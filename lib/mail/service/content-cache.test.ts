@@ -1538,7 +1538,7 @@ describe("background body cohort and byte budget", () => {
     );
   });
 
-  it("orders body prefetch newest twenty first, then the rest oldest first", async () => {
+  it("orders body prefetch newest first, the order the budget keeps", async () => {
     const fixture = await createFixture({ active: true });
     const recent = Array.from({ length: 25 }, (_, index) => ({
       threadId: `recent-${index}`,
@@ -1555,18 +1555,110 @@ describe("background body cohort and byte budget", () => {
       await fixture.content.markBackgroundContentPrefetchStarted(messageId, NOW);
       await claimLease(fixture.content, messageId, NOW);
     }
-    const byIndex = (index: number) => `message-recent-${index}`;
-    expect(order).toEqual([
-      ...Array.from({ length: 20 }, (_, index) => byIndex(index)),
-      byIndex(24),
-      byIndex(23),
-      byIndex(22),
-      byIndex(21),
-      byIndex(20),
-    ]);
+    expect(order).toEqual(recent.map((entry) => `message-${entry.threadId}`));
   });
 
-  it("leaves a message whose thread is past the prefetch size for its open", async () => {
+  it("claims no letter older than one the budget let go, or than the one it would let go next", async () => {
+    const fixture = await createFixture({ active: true });
+    const ids = ["a", "b", "c", "d", "e"];
+    activateThreads(
+      fixture,
+      ids.map((id, index) => ({ threadId: id, sentAt: NOW - (index + 1) * HOUR })),
+      "200",
+    );
+    await fixture.content.refreshBackgroundPrivacyCohort(NOW);
+    await publishBody(fixture, "message-c", NOW, { raw: Buffer.alloc(100, "c") });
+    await fixture.content.evictBodiesOverBudget({
+      maxBytes: 0,
+      now: NOW,
+      pinnedMessageIds: [],
+    });
+
+    // c went for space, so d and e, older still, would go the same way.
+    const candidates = async (newerThan: number | null) => {
+      const order: string[] = [];
+      for (let step = 0; step < ids.length; step += 1) {
+        const messageId = await fixture.content.findBackgroundContentCandidate(
+          NOW,
+          newerThan,
+        );
+        if (messageId === null) break;
+        order.push(messageId);
+        await claimLease(fixture.content, messageId, NOW);
+      }
+      return order;
+    };
+    // A budget that is full takes only what is newer than its next victim.
+    await expect(candidates(NOW - 1 * HOUR - 1)).resolves.toEqual(["message-a"]);
+    await expect(candidates(null)).resolves.toEqual(["message-b"]);
+  });
+
+  it("clears an eviction mark when a new generation arrives", async () => {
+    const fixture = await createFixture({ active: true });
+    await fixture.content.refreshBackgroundPrivacyCohort(1_000);
+    await publishBody(fixture, "message-thread-a", 1_001, {
+      raw: Buffer.from("raw MIME evicted once"),
+    });
+    await fixture.content.evictBodiesOverBudget({
+      maxBytes: 0,
+      now: 1_002,
+      pinnedMessageIds: [],
+    });
+    await expect(
+      fixture.content.findBackgroundContentCandidate(1_003),
+    ).resolves.toBeNull();
+
+    // A full resync is a new generation: what the budget let go before is a
+    // candidate again, and the old eviction no longer holds anything back.
+    // A hidden mailbox still on the old generation keeps its rows, so the
+    // cohort row the refresh meets is the old one, mark and all.
+    const writer = new DatabaseSync(fixture.databasePath);
+    try {
+      writer
+        .prepare(
+          `UPDATE mailbox_sync_state
+              SET active_thread_generation = ?, staged_thread_generation = NULL,
+                  status = 'idle', observed_history_id = '100',
+                  last_successful_at = 1
+            WHERE account_id = ? AND mailbox_id = 'all'`,
+        )
+        .run(fixture.generation, ACCOUNT_ID);
+    } finally {
+      writer.close();
+    }
+    activateOnlyThread(fixture, "thread-a", 1_000, "300");
+    await fixture.content.refreshBackgroundPrivacyCohort(1_004);
+    await expect(readCohort(fixture.databasePath)).toEqual([
+      { messageId: "message-thread-a", remoteImagePrefetch: 1, evictedAt: null },
+    ]);
+    await expect(
+      fixture.content.findBackgroundContentCandidate(1_004),
+    ).resolves.toBe("message-thread-a");
+  });
+
+  it("writes nothing when a refresh finds the cohort unchanged", async () => {
+    const fixture = await createFixture({ active: true });
+    activateThreads(
+      fixture,
+      Array.from({ length: 50 }, (_, index) => ({
+        threadId: `steady-${index}`,
+        sentAt: NOW - (index + 1) * 60_000,
+      })),
+      "200",
+    );
+    await fixture.content.refreshBackgroundPrivacyCohort(NOW);
+    const observer = new DatabaseSync(fixture.databasePath, { readOnly: true });
+    try {
+      const version = () => observer.prepare("PRAGMA data_version").get();
+      const before = version();
+      await fixture.content.refreshBackgroundPrivacyCohort(NOW + 60_000);
+      expect(version()).toEqual(before);
+    } finally {
+      observer.close();
+    }
+  });
+
+  it("leaves a message whose thread is past the prefetch size, or unsized, for its open", async () => {
     const fixture = await createFixture({ active: true });
     const ceiling = MAIL_RESOURCE_LIMITS.privacyPrefetchMaxThreadBytes;
     activateThreads(
@@ -1574,13 +1666,14 @@ describe("background body cohort and byte budget", () => {
       [
         { threadId: "heavy", sentAt: NOW - 1 * HOUR, sizeEstimate: ceiling + 1 },
         { threadId: "at-limit", sentAt: NOW - 2 * HOUR, sizeEstimate: ceiling },
+        { threadId: "unsized", sentAt: NOW - 150 * 60_000, sizeEstimate: null },
         { threadId: "light", sentAt: NOW - 3 * HOUR, sizeEstimate: 60 * 1024 },
       ],
       "200",
     );
     await expect(
       fixture.content.refreshBackgroundPrivacyCohort(NOW),
-    ).resolves.toEqual({ selectedMessages: 3, purgedContent: false });
+    ).resolves.toEqual({ selectedMessages: 4, purgedContent: false });
 
     const order: string[] = [];
     for (let step = 0; step < 4; step += 1) {
@@ -1655,18 +1748,37 @@ describe("background body cohort and byte budget", () => {
     const text = Buffer.from("plain text part");
     const html = Buffer.from("<p>html part</p>");
     const attachment = Buffer.from("attachment bytes that count too");
+    const remoteImageId = `remote-image-a${"c".repeat(32)}`;
     await publishBody(fixture, "message-thread-a", 100, {
       raw,
       text,
       html,
       attachment,
+      remoteImages: [
+        { remoteImageId, sourceUrl: "https://images.example.com/counted.png" },
+      ],
+    });
+    const parts =
+      raw.byteLength + text.byteLength + html.byteLength + attachment.byteLength;
+    await expect(fixture.content.readBodyCacheBytes()).resolves.toBe(parts);
+
+    // A fetched image is on disk because of the body, so it counts as well.
+    const pending = await fixture.content.inspectRemoteImage(remoteImageId, 101);
+    if (pending?.state !== "pending") throw new Error("expected a pending image");
+    const image = testPng(3, 2);
+    await fixture.content.storeRemoteImage({
+      snapshot: pending,
+      mimeType: "image/png",
+      data: image,
+      raster: { width: 3, height: 2, frames: 1 },
+      now: 102,
     });
     await expect(fixture.content.readBodyCacheBytes()).resolves.toBe(
-      raw.byteLength + text.byteLength + html.byteLength + attachment.byteLength,
+      parts + image.byteLength,
     );
   });
 
-  it("evicts unopened bodies oldest first, then opened ones by last open, never a pinned one", async () => {
+  it("evicts the body least recently sent or opened first, never a pinned one", async () => {
     const fixture = await createFixture({ active: true });
     const ids = ["m1", "m2", "m3", "m4", "m5", "m6"];
     activateThreads(
@@ -1687,21 +1799,26 @@ describe("background body cohort and byte budget", () => {
     await fixture.content.recordUserContentDemand("message-m5", NOW - 60_000);
     await expect(fixture.content.readBodyCacheBytes()).resolves.toBe(600);
 
-    // m2 is the source of a draft. The oldest unopened bodies go first, and
-    // the newest unopened one goes before the one opened long ago.
+    // One key: when the body was sent or last opened, whichever is later. m2
+    // is the source of a draft. Eviction stops the moment the account is at
+    // the budget, not one body past it.
     await expect(
       fixture.content.evictBodiesOverBudget({
-        maxBytes: 350,
+        maxBytes: 400,
         now: NOW,
         pinnedMessageIds: ["message-m2"],
       }),
-    ).resolves.toEqual({ evictedMessages: 3, remainingBytes: 300 });
+    ).resolves.toEqual({
+      evictedMessages: 2,
+      remainingBytes: 400,
+      oldestKeptKey: NOW - 2 * HOUR,
+    });
     const state = async (id: string) =>
       (await fixture.content.inspect(`message-${id}`)).kind;
     expect(
       await Promise.all(ids.map(async (id) => [id, await state(id)])),
     ).toEqual([
-      ["m1", "not_requested"],
+      ["m1", "ready"],
       ["m2", "ready"],
       ["m3", "not_requested"],
       ["m4", "ready"],
@@ -1709,16 +1826,22 @@ describe("background body cohort and byte budget", () => {
       ["m6", "not_requested"],
     ]);
 
-    // Opened bodies count and go last, least recently opened first. What is
-    // pinned stays even when the budget cannot be met without it.
+    // An opened body is not kept for good: m4, opened two hours ago, goes
+    // before m1, sent an hour ago. What is pinned stays even when the budget
+    // cannot be met without it, and then nothing is left to give up.
     await expect(
       fixture.content.evictBodiesOverBudget({
         maxBytes: 0,
         now: NOW,
         pinnedMessageIds: ["message-m2"],
       }),
-    ).resolves.toEqual({ evictedMessages: 1, remainingBytes: 200 });
+    ).resolves.toEqual({
+      evictedMessages: 2,
+      remainingBytes: 200,
+      oldestKeptKey: null,
+    });
     await expect(state("m4")).resolves.toBe("not_requested");
+    await expect(state("m1")).resolves.toBe("not_requested");
     await expect(state("m2")).resolves.toBe("ready");
     await expect(state("m5")).resolves.toBe("ready");
     await expect(fixture.content.collectGarbage()).resolves.toHaveLength(4);
@@ -1743,7 +1866,7 @@ describe("background body cohort and byte budget", () => {
         now: 1_002,
         pinnedMessageIds: [],
       }),
-    ).resolves.toEqual({ evictedMessages: 1, remainingBytes: 0 });
+    ).resolves.toEqual({ evictedMessages: 1, remainingBytes: 0, oldestKeptKey: null });
 
     await fixture.content.refreshBackgroundPrivacyCohort(1_003);
     await expect(
@@ -1753,6 +1876,29 @@ describe("background body cohort and byte budget", () => {
     await expect(
       fixture.content.claim("message-thread-a", 1_004),
     ).resolves.toMatchObject({ kind: "claimed" });
+  });
+
+  it("voids the leases a process that stopped mid-fetch left behind", async () => {
+    const fixture = await createFixture({ active: true });
+    const lease = await claimLease(fixture.content, "message-thread-a", 1_000);
+    // Still live by the clock: without the void an open would wait it out.
+    await expect(
+      fixture.content.claim("message-thread-a", 2_000),
+    ).resolves.toMatchObject({ kind: "busy" });
+
+    await expect(fixture.content.voidInterruptedLeases()).resolves.toBe(1);
+    await expect(
+      fixture.content.claim("message-thread-a", 2_001),
+    ).resolves.toMatchObject({ kind: "claimed" });
+    // The old worker can no longer commit.
+    await expect(
+      fixture.content.markFailure({
+        lease,
+        kind: "transient",
+        errorCode: "late_worker",
+        now: 2_002,
+      }),
+    ).rejects.toMatchObject({ code: "mail_content_lease_stale" });
   });
 
   it("adds the image and eviction columns to a cohort table written before them", async () => {
@@ -1937,7 +2083,7 @@ function threadFixture(
   sentAt: number,
   accountId = ACCOUNT_ID,
   inInbox = true,
-  sizeEstimate: number | null = null,
+  sizeEstimate: number | null = 2_048,
 ): CachedProviderThread {
   const message: CachedProviderMessage = Object.freeze({
     accountId,
@@ -1994,7 +2140,8 @@ function activateThreads(
     readonly threadId: string;
     readonly sentAt: number;
     readonly inInbox?: boolean;
-    readonly sizeEstimate?: number;
+    /** Null is a size the provider did not give. */
+    readonly sizeEstimate?: number | null;
   }[],
   historyId: string,
 ): void {
@@ -2007,7 +2154,7 @@ function activateThreads(
         entry.sentAt,
         ACCOUNT_ID,
         entry.inInbox ?? true,
-        entry.sizeEstimate ?? null,
+        entry.sizeEstimate,
       ),
     ),
     null,

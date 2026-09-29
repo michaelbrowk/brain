@@ -5668,6 +5668,7 @@ function threadFixture(
     listMessage: false,
     sizeBytes: 0,
     category: "people",
+    newSender: false,
   });
   return Object.freeze({
     thread,
@@ -5797,4 +5798,136 @@ function withDatabase(
   } finally {
     database.close();
   }
+}
+
+describe("the cache's answers for the new-senders screen", () => {
+  it("names each thread's first message sender and when it arrived", async () => {
+    const { cache } = await createCache();
+    const generation = cache.beginInitial("100");
+    cache.putInitialPage(
+      generation,
+      [
+        conversationFixture("thread-reply", [
+          { from: "Late <late@example.test>", sentAt: 2_000 },
+          { from: "First <first@example.test>", sentAt: 1_000 },
+        ]),
+        conversationFixture("thread-sent", [{ from: "me@example.test", sentAt: 500 }], [
+          "all",
+          "sent",
+        ]),
+      ],
+      null,
+      null,
+    );
+    cache.completeInitial(generation, 3_000);
+
+    const senders = cache.readThreadFirstSenders([
+      "thread-reply",
+      "thread-sent",
+      "thread-missing",
+    ]);
+
+    expect(Object.fromEntries(senders)).toEqual({
+      "thread-reply": { address: "first@example.test", firstMessageAt: 1_000 },
+      "thread-sent": { address: "me@example.test", firstMessageAt: 500 },
+    });
+    expect(cache.listInboxThreadFirstSenders()).toEqual([
+      { threadId: "thread-reply", address: "first@example.test" },
+    ]);
+  });
+
+  it("reads From before the switch and every Sent recipient in bounded windows", async () => {
+    const { cache } = await createCache();
+    const generation = cache.beginInitial("100");
+    cache.putInitialPage(
+      generation,
+      [
+        conversationFixture("thread-old", [{ from: "old@example.test", sentAt: 900 }]),
+        conversationFixture("thread-new", [{ from: "new@example.test", sentAt: 1_100 }]),
+        conversationFixture(
+          "thread-sent",
+          [
+            {
+              from: "me@example.test",
+              sentAt: 1_200,
+              to: ["colleague@example.test"],
+              cc: ["boss@example.test"],
+            },
+          ],
+          ["all", "sent"],
+        ),
+      ],
+      null,
+      null,
+    );
+    cache.completeInitial(generation, 3_000);
+
+    const addresses: string[] = [];
+    let fromCursor = 0;
+    let sentCursor = 0;
+    let steps = 0;
+    for (;;) {
+      const batch = cache.readSenderBackfillBatch({
+        fromCursor,
+        sentCursor,
+        enabledAt: 1_000,
+        window: 1,
+      });
+      addresses.push(...batch.addresses);
+      fromCursor = batch.fromCursor;
+      sentCursor = batch.sentCursor;
+      steps += 1;
+      if (batch.done) break;
+      expect(steps).toBeLessThan(20);
+    }
+
+    expect(addresses.sort()).toEqual([
+      "boss@example.test",
+      "colleague@example.test",
+      "old@example.test",
+    ]);
+    expect(steps).toBeGreaterThan(2);
+    expect(
+      cache.readSenderBackfillBatch({ fromCursor, sentCursor, enabledAt: 1_000, window: 1 }),
+    ).toEqual({ addresses: [], fromCursor, sentCursor, done: true });
+  });
+});
+
+function conversationFixture(
+  threadId: string,
+  messages: readonly {
+    readonly from: string;
+    readonly sentAt: number;
+    readonly to?: readonly string[];
+    readonly cc?: readonly string[];
+  }[],
+  mailboxes: readonly MailCacheMailbox[] = Object.freeze(["all", "inbox"]),
+): CachedProviderThread {
+  const base = threadFixture(threadId, messages[0]!.sentAt, mailboxes);
+  const address = (value: string) => {
+    const match = /^(?:(.*) )?<(.+)>$/.exec(value);
+    return Object.freeze(
+      match ? { name: match[1] ?? null, address: match[2]! } : { name: null, address: value },
+    );
+  };
+  const cached = messages.map((message, index) =>
+    Object.freeze({
+      ...base.messages[0]!,
+      messageId: `message-${threadId}-${index}`,
+      rfcMessageId: `<${threadId}-${index}@example.test>`,
+      from: address(message.from),
+      to: Object.freeze((message.to ?? ["reader@example.test"]).map(address)),
+      cc: Object.freeze((message.cc ?? []).map(address)),
+      sentAt: message.sentAt,
+    }),
+  );
+  return Object.freeze({
+    ...base,
+    thread: Object.freeze({
+      ...base.thread,
+      messageCount: cached.length,
+      lastMessageAt: Math.max(...messages.map((message) => message.sentAt)),
+    }),
+    messages: Object.freeze(cached),
+  });
 }

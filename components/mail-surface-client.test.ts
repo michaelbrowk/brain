@@ -333,7 +333,7 @@ describe("defaultMailSurfaceClient system mailboxes", () => {
       `/api/mail/mailboxes/spam/threads/${THREAD_ID}?accountId=${ACCOUNT_ID}`,
       expect.objectContaining({
         cache: "no-store",
-        headers: { "x-brain-mail-thread-state": "4" },
+        headers: { "x-brain-mail-thread-state": "5" },
       }),
     );
   });
@@ -371,7 +371,7 @@ describe("defaultMailSurfaceClient system mailboxes", () => {
       `/api/mail/threads/${THREAD_ID}`,
       expect.objectContaining({
         headers: expect.objectContaining({
-          "x-brain-mail-thread-state": "4",
+          "x-brain-mail-thread-state": "5",
         }),
       }),
     );

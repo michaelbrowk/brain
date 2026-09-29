@@ -22,6 +22,9 @@ import {
   type ImapSessionClient,
 } from "./imapflow-adapter";
 import {
+  type MailCacheInboxThreadSender,
+  type MailCacheSenderBackfillBatch,
+  type MailCacheThreadFirstSender,
   type MailReplyContext,
   selectWorstMailSyncError,
   SqliteMailMessageCache,
@@ -231,6 +234,39 @@ export class MultiAccountMailMessageService implements MailMessageService {
     messageId: string,
   ): Promise<MailReplyContext | null> {
     return this.withEntry(accountId, (entry) => entry.cache.readReplyContext(messageId));
+  }
+
+  /** The new-senders screen's reads. Each is one cache read under the same
+   *  lease every other read takes, and none reaches a provider. */
+  async readThreadFirstSenders(
+    accountId: string,
+    threadIds: readonly string[],
+  ): Promise<ReadonlyMap<string, MailCacheThreadFirstSender>> {
+    return this.withEntry(accountId, (entry) =>
+      entry.cache.readThreadFirstSenders(threadIds),
+    );
+  }
+
+  async listInboxThreadFirstSenders(
+    accountId: string,
+  ): Promise<readonly MailCacheInboxThreadSender[]> {
+    return this.withEntry(accountId, (entry) => entry.cache.listInboxThreadFirstSenders());
+  }
+
+  async readSenderBackfillBatch(
+    accountId: string,
+    input: {
+      readonly fromCursor: number;
+      readonly sentCursor: number;
+      readonly enabledAt: number;
+      readonly window: number;
+    },
+  ): Promise<MailCacheSenderBackfillBatch> {
+    return this.withEntry(accountId, (entry) => entry.cache.readSenderBackfillBatch(input));
+  }
+
+  async readAccountAddress(accountId: string): Promise<string | null> {
+    return (await this.store.readAccount(accountId))?.account.emailAddress ?? null;
   }
 
   /**

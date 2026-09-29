@@ -474,6 +474,7 @@ function cachedThreadFixture(threadId: string): CachedProviderThread {
       listMessage: false,
       sizeBytes: 0,
       category: "people" as const,
+      newSender: false,
     }),
     messages: Object.freeze([
       Object.freeze({

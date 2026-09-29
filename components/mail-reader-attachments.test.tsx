@@ -66,6 +66,7 @@ const detail: MailThreadDetail = {
     listMessage: false,
     sizeBytes: 0,
     category: "people",
+    newSender: false,
   },
   messages: [message],
 };

@@ -64,6 +64,10 @@ const MAX_BACKGROUND_SYNC_FAILURES = 31;
 const MAX_SEARCH_BACKFILL_THREADS = 500;
 const MAX_SEARCH_RESULTS = 500;
 const MAX_SEARCH_CURSOR_OFFSET = MAX_SEARCH_RESULTS - 1;
+/** The archiver of blocked senders reads at most this many Inbox threads,
+ *  newest first, per account and step. */
+const MAX_INBOX_SENDER_SCAN = 5_000;
+const MAX_SENDER_BACKFILL_WINDOW = 10_000;
 
 export type MailCacheMailbox =
   | "all"
@@ -512,6 +516,25 @@ export interface MailReplyContext {
   readonly providerThreadId: string;
   readonly rfcMessageId: string | null;
   readonly references: readonly string[];
+}
+
+/** A thread's first message as the new-senders screen reads it. The address
+ *  is the cached one, not yet normalized. */
+export interface MailCacheThreadFirstSender {
+  readonly address: string | null;
+  readonly firstMessageAt: number | null;
+}
+
+export interface MailCacheInboxThreadSender {
+  readonly threadId: string;
+  readonly address: string | null;
+}
+
+export interface MailCacheSenderBackfillBatch {
+  readonly addresses: readonly string[];
+  readonly fromCursor: number;
+  readonly sentCursor: number;
+  readonly done: boolean;
 }
 
 export interface MailCacheSyncState {
@@ -2791,6 +2814,199 @@ export class SqliteMailMessageCache {
     });
   }
 
+  /**
+   * The From address and date of each named thread's first message, for the
+   * new-senders screen. A page can come from the Inbox or from any hidden
+   * mailbox's snapshot, so each thread is looked for in the readable
+   * generation first and in the mailbox generations after it. A thread the
+   * cache does not hold is absent from the answer. The first message is the
+   * earliest dated one; an undated message only counts when none has a date.
+   */
+  readThreadFirstSenders(
+    threadIds: readonly string[],
+  ): ReadonlyMap<string, MailCacheThreadFirstSender> {
+    if (threadIds.length > MAX_THREADS_PER_PAGE) {
+      throw new MailCacheError("mail_cache_invalid");
+    }
+    const database = this.requireDatabase();
+    const generations = this.readSenderGenerations(database);
+    const statement = database.prepare(
+      `SELECT from_json, sent_at FROM messages
+        WHERE account_id = ? AND generation = ? AND thread_id = ?
+        ORDER BY sent_at IS NULL ASC, sent_at ASC, message_id ASC
+        LIMIT 1`,
+    );
+    const senders = new Map<string, MailCacheThreadFirstSender>();
+    for (const value of threadIds) {
+      const threadId = validateProviderId(value);
+      for (const generation of generations) {
+        const row = statement.get(this.accountId, generation, threadId);
+        if (row === undefined) continue;
+        senders.set(threadId, firstSenderFromRow(row));
+        break;
+      }
+    }
+    return senders;
+  }
+
+  /**
+   * Every Inbox thread's first sender, newest first and bounded, for the
+   * archiver that moves a blocked sender's letters out of the Inbox.
+   */
+  listInboxThreadFirstSenders(): readonly MailCacheInboxThreadSender[] {
+    const generation = readableGeneration(this.readSyncState());
+    if (generation < 1) return Object.freeze([]);
+    const rows = this.requireDatabase()
+      .prepare(
+        `SELECT thread.thread_id AS thread_id,
+                (SELECT message.from_json FROM messages AS message
+                  WHERE message.account_id = thread.account_id
+                    AND message.generation = thread.generation
+                    AND message.thread_id = thread.thread_id
+                  ORDER BY message.sent_at IS NULL ASC, message.sent_at ASC,
+                           message.message_id ASC
+                  LIMIT 1) AS from_json
+           FROM threads AS thread
+          WHERE thread.account_id = ? AND thread.generation = ? AND thread.in_inbox = 1
+          ORDER BY COALESCE(thread.last_message_at, -1) DESC, thread.thread_id DESC
+          LIMIT ?`,
+      )
+      .all(this.accountId, generation, MAX_INBOX_SENDER_SCAN);
+    return Object.freeze(
+      rows.map((row) => {
+        if (
+          typeof row.thread_id !== "string" ||
+          (row.from_json !== null && typeof row.from_json !== "string")
+        ) {
+          throw new MailCacheError("mail_cache_invalid");
+        }
+        return Object.freeze({
+          threadId: validateProviderId(row.thread_id),
+          address: row.from_json === null ? null : parseAddressJson(row.from_json).address,
+        });
+      }),
+    );
+  }
+
+  /**
+   * One step of the new-senders backfill: a window of message rows by rowid.
+   * The From phase walks every cached message dated at or before the moment
+   * the screen was switched on; the Sent phase then walks the same rows again
+   * for the To and Cc of every message in a thread the Sent mailbox holds.
+   * Rows are read, never written, and nothing reaches a provider.
+   */
+  readSenderBackfillBatch(input: {
+    readonly fromCursor: number;
+    readonly sentCursor: number;
+    readonly enabledAt: number;
+    readonly window: number;
+  }): MailCacheSenderBackfillBatch {
+    if (
+      !Number.isSafeInteger(input.fromCursor) ||
+      input.fromCursor < 0 ||
+      !Number.isSafeInteger(input.sentCursor) ||
+      input.sentCursor < 0 ||
+      !Number.isSafeInteger(input.window) ||
+      input.window < 1 ||
+      input.window > MAX_SENDER_BACKFILL_WINDOW
+    ) {
+      throw new MailCacheError("mail_cache_invalid");
+    }
+    const enabledAt = validateTimestamp(input.enabledAt);
+    const database = this.requireDatabase();
+    const maxRowid = database
+      .prepare("SELECT COALESCE(MAX(rowid), 0) AS max_rowid FROM messages")
+      .get()?.max_rowid;
+    if (!Number.isSafeInteger(maxRowid)) throw new MailCacheError("mail_cache_invalid");
+    const last = maxRowid as number;
+    if (input.fromCursor < last) {
+      const end = Math.min(input.fromCursor + input.window, last);
+      const rows = database
+        .prepare(
+          `SELECT from_json FROM messages
+            WHERE rowid > ? AND rowid <= ? AND account_id = ?
+              AND from_json IS NOT NULL
+              AND (sent_at IS NULL OR sent_at <= ?)`,
+        )
+        .all(input.fromCursor, end, this.accountId, enabledAt);
+      return Object.freeze({
+        addresses: Object.freeze(
+          rows.map((row) => {
+            if (typeof row.from_json !== "string") {
+              throw new MailCacheError("mail_cache_invalid");
+            }
+            return parseAddressJson(row.from_json).address;
+          }),
+        ),
+        fromCursor: end,
+        sentCursor: input.sentCursor,
+        done: end >= last && input.sentCursor >= last,
+      });
+    }
+    if (input.sentCursor < last) {
+      const end = Math.min(input.sentCursor + input.window, last);
+      const rows = database
+        .prepare(
+          `SELECT message.to_json, message.cc_json FROM messages AS message
+            WHERE message.rowid > ? AND message.rowid <= ? AND message.account_id = ?
+              AND EXISTS (
+                SELECT 1 FROM thread_mailboxes AS mailbox
+                 WHERE mailbox.account_id = message.account_id
+                   AND mailbox.mailbox_id = 'sent'
+                   AND mailbox.generation = message.generation
+                   AND mailbox.thread_id = message.thread_id)`,
+        )
+        .all(input.sentCursor, end, this.accountId);
+      return Object.freeze({
+        addresses: Object.freeze(
+          rows.flatMap((row) => {
+            if (typeof row.to_json !== "string" || typeof row.cc_json !== "string") {
+              throw new MailCacheError("mail_cache_invalid");
+            }
+            return [
+              ...parseAddressesJson(row.to_json),
+              ...parseAddressesJson(row.cc_json),
+            ].map((address) => address.address);
+          }),
+        ),
+        fromCursor: input.fromCursor,
+        sentCursor: end,
+        done: end >= last,
+      });
+    }
+    return Object.freeze({
+      addresses: Object.freeze([]),
+      fromCursor: input.fromCursor,
+      sentCursor: input.sentCursor,
+      done: true,
+    });
+  }
+
+  /** The readable generation, then every mailbox snapshot's, each once. */
+  private readSenderGenerations(database: DatabaseSync): readonly number[] {
+    const generations: number[] = [];
+    const add = (value: unknown) => {
+      if (
+        Number.isSafeInteger(value) &&
+        (value as number) > 0 &&
+        !generations.includes(value as number)
+      ) {
+        generations.push(value as number);
+      }
+    };
+    add(readableGeneration(this.readSyncState()));
+    for (const row of database
+      .prepare(
+        `SELECT active_thread_generation, staged_thread_generation
+           FROM mailbox_sync_state WHERE account_id = ?`,
+      )
+      .all(this.accountId)) {
+      add(row.active_thread_generation);
+      add(row.staged_thread_generation);
+    }
+    return generations;
+  }
+
   private initializeSchema(database: DatabaseSync): void {
     const versionRow = database.prepare("PRAGMA user_version").get();
     const version = versionRow?.user_version;
@@ -4774,6 +4990,9 @@ export class SqliteMailMessageCache {
       listMessage: row.list_message === 1,
       sizeBytes: row.size_bytes as number,
       category: row.category,
+      // Provider truth has no opinion about senders; the screen sets this
+      // when the list is read.
+      newSender: false,
     });
   }
 
@@ -5916,6 +6135,19 @@ function validateTimestamp(value: number): number {
     throw new MailCacheError("mail_cache_invalid");
   }
   return value;
+}
+
+function firstSenderFromRow(row: Record<string, unknown>): MailCacheThreadFirstSender {
+  if (
+    (row.from_json !== null && typeof row.from_json !== "string") ||
+    (row.sent_at !== null && !Number.isSafeInteger(row.sent_at))
+  ) {
+    throw new MailCacheError("mail_cache_invalid");
+  }
+  return Object.freeze({
+    address: row.from_json === null ? null : parseAddressJson(row.from_json as string).address,
+    firstMessageAt: row.sent_at as number | null,
+  });
 }
 
 function validateCredentialVersion(value: number): number {

@@ -618,8 +618,8 @@ describe("Brain Mail Unix-socket client", () => {
 
     await expect(
       createBrainMailClient({ socketPath }).listThreads(accountId),
-    ).resolves.toMatchObject({ items: [{ starred: false }] });
-    expect(requestedContract).toBe("4");
+    ).resolves.toMatchObject({ items: [{ starred: false, newSender: false }] });
+    expect(requestedContract).toBe("5");
   });
 
   it("serializes view and sort only when non-default and reads the tier-3 fields", async () => {

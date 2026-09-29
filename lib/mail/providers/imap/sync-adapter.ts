@@ -1163,6 +1163,7 @@ export function imapMessageToCached(
     listMessage,
     sizeBytes: sizeEstimate ?? 0,
     category,
+    newSender: false,
   });
   return Object.freeze({
     thread,

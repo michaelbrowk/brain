@@ -368,6 +368,7 @@ export function gmailThreadToCached(
       : messages.some((message) => message.category === "notification")
         ? "notification"
         : "people",
+    newSender: false,
   });
   return Object.freeze({
     thread,

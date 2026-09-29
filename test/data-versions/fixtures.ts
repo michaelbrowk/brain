@@ -86,6 +86,7 @@ export function threadFixture(): CachedProviderThread {
       listMessage: false,
       sizeBytes: 0,
       category: "people",
+      newSender: false,
     }),
     messages: Object.freeze([message]),
     inInbox: true,

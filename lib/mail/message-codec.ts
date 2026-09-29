@@ -1,5 +1,6 @@
 import type {
   MailAddress,
+  MailBlockedSenders,
   MailMailboxAvailability,
   MailMailboxThreadPage,
   MailMessageDto,
@@ -10,6 +11,11 @@ import type {
   MailSearchAllInput,
   MailSearchInput,
   MailSearchThreadPage,
+  MailSenderDecisionInput,
+  MailSenderDecisionResult,
+  MailSenderScreenState,
+  MailSenderThreadRef,
+  MailSenderUndoResult,
   MailSyncResult,
   MailSyncStatus,
   MailSystemMailbox,
@@ -532,6 +538,166 @@ export function validateMailSyncResult(value: unknown): MailSyncResult {
   });
 }
 
+const SAFE_SENDER_DECISION_ID = /^decision-a[0-9a-f]{32}$/;
+const MAX_BLOCKED_SENDERS = 1_000;
+const MAX_SENDER_THREAD_REFS = 200;
+
+/** The body of `PUT /v1/senders/state`. */
+export function validateMailSenderScreenInput(value: unknown): {
+  readonly enabled: boolean;
+} {
+  if (!isRecordWithExactFields(value, ["enabled"])) throw requestInvalid();
+  if (typeof value.enabled !== "boolean") throw requestInvalid();
+  return Object.freeze({ enabled: value.enabled });
+}
+
+export function validateMailSenderScreenState(value: unknown): MailSenderScreenState {
+  if (
+    !isRecordWithExactFields(value, [
+      "apiVersion",
+      "backfillComplete",
+      "enabled",
+      "enabledAt",
+    ]) ||
+    value.apiVersion !== 1 ||
+    typeof value.enabled !== "boolean" ||
+    typeof value.backfillComplete !== "boolean" ||
+    (value.enabled !== (value.enabledAt !== null)) ||
+    (!value.enabled && value.backfillComplete)
+  ) {
+    throw responseInvalid();
+  }
+  return Object.freeze({
+    apiVersion: 1,
+    enabled: value.enabled,
+    enabledAt: nullableTimestamp(value.enabledAt),
+    backfillComplete: value.backfillComplete,
+  });
+}
+
+/**
+ * The body of `POST /v1/senders/decisions`. The address is checked for shape
+ * only; which address it names is the service's to decide, through the one
+ * normalizer it keeps.
+ */
+export function validateMailSenderDecisionInput(value: unknown): MailSenderDecisionInput {
+  if (
+    !isRecordWithExactFields(value, ["address", "decision", "scope"]) ||
+    (value.scope !== "address" && value.scope !== "domain") ||
+    (value.decision !== "accept" && value.decision !== "block")
+  ) {
+    throw requestInvalid();
+  }
+  return Object.freeze({
+    address: boundedString(value.address, 998, false, "request"),
+    scope: value.scope,
+    decision: value.decision,
+  });
+}
+
+export function validateMailSenderDecisionId(value: unknown): string {
+  if (typeof value !== "string" || !SAFE_SENDER_DECISION_ID.test(value)) {
+    throw requestInvalid();
+  }
+  return value;
+}
+
+export function validateMailSenderDecisionResult(
+  value: unknown,
+): MailSenderDecisionResult {
+  if (
+    !isRecordWithExactFields(value, ["apiVersion", "archived", "decisionId", "pending"]) ||
+    value.apiVersion !== 1 ||
+    typeof value.decisionId !== "string" ||
+    !SAFE_SENDER_DECISION_ID.test(value.decisionId) ||
+    typeof value.pending !== "boolean"
+  ) {
+    throw responseInvalid();
+  }
+  return Object.freeze({
+    apiVersion: 1,
+    decisionId: value.decisionId,
+    archived: validateSenderThreadRefs(value.archived),
+    pending: value.pending,
+  });
+}
+
+export function validateMailSenderUndoResult(value: unknown): MailSenderUndoResult {
+  if (
+    !isRecordWithExactFields(value, ["apiVersion", "pending", "restored"]) ||
+    value.apiVersion !== 1 ||
+    typeof value.pending !== "boolean"
+  ) {
+    throw responseInvalid();
+  }
+  return Object.freeze({
+    apiVersion: 1,
+    restored: validateSenderThreadRefs(value.restored),
+    pending: value.pending,
+  });
+}
+
+export function validateMailBlockedSenders(value: unknown): MailBlockedSenders {
+  if (
+    !isRecordWithExactFields(value, ["apiVersion", "blocked"]) ||
+    value.apiVersion !== 1 ||
+    !Array.isArray(value.blocked) ||
+    value.blocked.length > MAX_BLOCKED_SENDERS
+  ) {
+    throw responseInvalid();
+  }
+  return Object.freeze({
+    apiVersion: 1,
+    blocked: Object.freeze(
+      value.blocked.map((entry: unknown) => {
+        if (
+          !isRecordWithExactFields(entry, [
+            "archivedCount",
+            "decidedAt",
+            "decisionId",
+            "key",
+            "scope",
+          ]) ||
+          typeof entry.decisionId !== "string" ||
+          !SAFE_SENDER_DECISION_ID.test(entry.decisionId) ||
+          (entry.scope !== "address" && entry.scope !== "domain") ||
+          !Number.isSafeInteger(entry.archivedCount) ||
+          (entry.archivedCount as number) < 0
+        ) {
+          throw responseInvalid();
+        }
+        return Object.freeze({
+          decisionId: entry.decisionId,
+          key: boundedString(entry.key, 254, false, "response"),
+          scope: entry.scope,
+          decidedAt: requiredTimestamp(entry.decidedAt),
+          archivedCount: entry.archivedCount as number,
+        });
+      }),
+    ),
+  });
+}
+
+function validateSenderThreadRefs(value: unknown): readonly MailSenderThreadRef[] {
+  if (!Array.isArray(value) || value.length > MAX_SENDER_THREAD_REFS) {
+    throw responseInvalid();
+  }
+  return Object.freeze(
+    value.map((entry: unknown) => {
+      if (
+        !isRecordWithExactFields(entry, ["accountId", "threadId"]) ||
+        typeof entry.accountId !== "string" ||
+        !SAFE_ACCOUNT_ID.test(entry.accountId) ||
+        typeof entry.threadId !== "string" ||
+        !SAFE_RESOURCE_ID.test(entry.threadId)
+      ) {
+        throw responseInvalid();
+      }
+      return Object.freeze({ accountId: entry.accountId, threadId: entry.threadId });
+    }),
+  );
+}
+
 /** What `PATCH /v1/sync` answers: the state that stands after the call, so a
  *  caller never has to ask a second time. */
 export function validateMailSyncPauseResult(value: unknown): {
@@ -628,12 +794,18 @@ function validateThreadListItem(value: unknown): MailThreadListItem {
   const hasCategory =
     isPlainRecord(value) &&
     Object.prototype.hasOwnProperty.call(value, "category");
+  // newSender is tier 5 and travels alone too. A service older than the
+  // screen never sends it, and its threads read as not waiting on anyone.
+  const hasNewSender =
+    isPlainRecord(value) &&
+    Object.prototype.hasOwnProperty.call(value, "newSender");
   if (
     !isRecordWithExactFields(value, [
       ...baseFields,
       ...(hasStarred ? ["starred"] : []),
       ...(hasListMessage ? ["listMessage", "sizeBytes"] : []),
       ...(hasCategory ? ["category"] : []),
+      ...(hasNewSender ? ["newSender"] : []),
     ]) ||
     !SAFE_ACCOUNT_ID.test(typeof value.accountId === "string" ? value.accountId : "") ||
     !SAFE_RESOURCE_ID.test(typeof value.threadId === "string" ? value.threadId : "") ||
@@ -652,6 +824,7 @@ function validateThreadListItem(value: unknown): MailThreadListItem {
       value.category !== "people" &&
       value.category !== "notification" &&
       value.category !== "newsletter") ||
+    (hasNewSender && typeof value.newSender !== "boolean") ||
     typeof value.hasAttachments !== "boolean"
   ) {
     throw responseInvalid();
@@ -672,6 +845,7 @@ function validateThreadListItem(value: unknown): MailThreadListItem {
     category: hasCategory
       ? (value.category as MailThreadCategory)
       : "people",
+    newSender: hasNewSender ? (value.newSender as boolean) : false,
   });
 }
 

@@ -92,6 +92,7 @@ REQUIRED_FILES = (
     Path("service/outbound.js"),
     Path("service/remote-image-fetcher.js"),
     Path("service/runtime-config.js"),
+    Path("service/senders.js"),
     Path("service/smtp-runtime.js"),
     Path("service/smtp-state-store.js"),
     Path("service/sync-pause.js"),

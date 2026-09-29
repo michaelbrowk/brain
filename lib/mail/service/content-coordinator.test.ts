@@ -1582,6 +1582,7 @@ function threadFixture(
     listMessage: false,
     sizeBytes: 0,
     category: "people",
+    newSender: false,
   });
   return Object.freeze({
     thread,

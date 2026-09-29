@@ -136,6 +136,7 @@ export function fakeThread(
     listMessage: false,
     sizeBytes: 0,
     category: "people",
+    newSender: false,
     ...overrides,
   };
 }

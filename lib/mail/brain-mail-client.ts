@@ -206,6 +206,7 @@ export const SAFE_SERVICE_ERROR_CODES = new Set([
   "mail_sender_own_address",
   "mail_sender_domain_scope_refused",
   "mail_sender_decision_not_found",
+  "mail_sender_decision_changed",
   "mail_senders_unavailable",
 ]);
 

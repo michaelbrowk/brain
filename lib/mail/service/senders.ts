@@ -78,15 +78,17 @@ const MAX_BLOCKED_LIST = 1_000;
 /**
  * Domains where "Everyone at <domain>" would speak for millions of unrelated
  * people. A decision there takes the address scope only; the state route
- * hands this list to the UI so it never offers the other. Regional portals
- * can join it when someone meets them; a wrong absence costs one refused
- * domain decision, never a flood.
+ * hands this list to the UI so it never offers the other. A provider missing
+ * here can still be decided whole, and one block of it would archive mail
+ * from every stranger who uses it, so a regional provider belongs here as
+ * soon as someone meets one.
  */
 export const MAIL_SENDER_DOMAIN_SCOPE_REFUSED: ReadonlySet<string> = new Set([
   "126.com",
   "163.com",
   "aol.com",
   "bk.ru",
+  "comcast.net",
   "fastmail.com",
   "gmail.com",
   "gmx.com",
@@ -96,18 +98,26 @@ export const MAIL_SENDER_DOMAIN_SCOPE_REFUSED: ReadonlySet<string> = new Set([
   "hey.com",
   "hotmail.co.uk",
   "hotmail.com",
+  "hotmail.de",
+  "hotmail.es",
   "hotmail.fr",
+  "hotmail.it",
   "icloud.com",
   "inbox.ru",
+  "libero.it",
   "list.ru",
   "live.co.uk",
   "live.com",
+  "live.fr",
   "mac.com",
+  "mail.com",
   "mail.ru",
   "me.com",
   "msn.com",
   "naver.com",
+  "orange.fr",
   "outlook.com",
+  "outlook.de",
   "outlook.fr",
   "pm.me",
   "proton.me",
@@ -115,8 +125,12 @@ export const MAIL_SENDER_DOMAIN_SCOPE_REFUSED: ReadonlySet<string> = new Set([
   "qq.com",
   "rambler.ru",
   "rocketmail.com",
+  "seznam.cz",
+  "t-online.de",
   "tutanota.com",
   "web.de",
+  "wp.pl",
+  "yahoo.co.jp",
   "yahoo.co.uk",
   "yahoo.com",
   "yahoo.de",
@@ -130,6 +144,7 @@ export type MailSenderErrorCode =
   | "mail_sender_own_address"
   | "mail_sender_domain_scope_refused"
   | "mail_sender_decision_not_found"
+  | "mail_sender_decision_changed"
   | "mail_senders_unavailable";
 
 export class MailSenderError extends Error {
@@ -197,6 +212,12 @@ export interface MailSenderGateInput {
   readonly firstMessageAt: number | null;
   /** The first message carries neither In-Reply-To nor References. */
   readonly startsConversation: boolean;
+  /**
+   * The first message answers something, but what it answers is the same
+   * sender's own letter, or the sender already has a letter waiting: a
+   * stranger's follow-up in a cold sequence, which waits like the first.
+   */
+  readonly followsStranger: boolean;
   /** The normalized address of the thread's first message's From. */
   readonly sender: string | null;
   /** The first message is the owner's: an account address, an alias the
@@ -210,8 +231,8 @@ export interface MailSenderGateInput {
 /**
  * Whether a thread waits for the owner's first decision. Every clause is a
  * way for it not to: the switch and the backfill, the category, the Inbox,
- * the moment, a letter that answers another, and anything the screen knows
- * about the sender.
+ * the moment, a letter that answers someone other than its own sender, and
+ * anything the screen knows about the sender.
  */
 export function isMailSenderGated(input: MailSenderGateInput): boolean {
   return (
@@ -220,7 +241,7 @@ export function isMailSenderGated(input: MailSenderGateInput): boolean {
     input.inInbox &&
     input.firstMessageAt !== null &&
     input.firstMessageAt > input.gateMoment &&
-    input.startsConversation &&
+    (input.startsConversation || input.followsStranger) &&
     input.sender !== null &&
     !input.own &&
     !input.known &&
@@ -268,6 +289,7 @@ const SCHEMA_SQL = `
     target TEXT NOT NULL CHECK(length(target) BETWEEN 1 AND 255),
     state TEXT NOT NULL CHECK(state IN ('pending', 'done')),
     thread_last_at INTEGER CHECK(thread_last_at IS NULL OR thread_last_at >= 0),
+    message_key TEXT CHECK(message_key IS NULL OR length(message_key) BETWEEN 3 AND 998),
     added_at INTEGER NOT NULL CHECK(added_at >= 0),
     PRIMARY KEY(decision_id, effect, account_id, target),
     CHECK((effect = 'known') = (account_id = '')),
@@ -276,6 +298,12 @@ const SCHEMA_SQL = `
 
   CREATE INDEX decision_effects_by_thread
     ON decision_effects(account_id, effect, target);
+
+  CREATE TABLE replaced_decisions (
+    old_id TEXT PRIMARY KEY CHECK(length(old_id) = 42),
+    new_id TEXT NOT NULL CHECK(length(new_id) = 42),
+    replaced_at INTEGER NOT NULL CHECK(replaced_at >= 0)
+  ) STRICT;
 
   CREATE TABLE backfill_progress (
     account_id TEXT PRIMARY KEY,
@@ -313,6 +341,10 @@ export interface MailSenderDecisionIndex {
 export interface MailSenderArchiveEffect {
   readonly state: "pending" | "done";
   readonly threadLastAt: number | null;
+  /** The Message-ID of the thread's first message when it was archived. An
+   *  IMAP message moved back to the Inbox comes back under a new UID and so a
+   *  new thread id; this is how the screen still recognises it. */
+  readonly messageKey: string | null;
 }
 
 interface RemovedDecision {
@@ -572,6 +604,29 @@ export class SqliteMailSenderStore {
     });
   }
 
+  /**
+   * The block that archives mail from an address right now, read in one
+   * transaction: the address's own decision if it has one, otherwise its
+   * domain's block unless the address is known. A known address is archived
+   * only by a block of the address itself.
+   */
+  readBlockingDecision(address: string): MailSenderStandingDecision | null {
+    return this.read((database) => {
+      const statement = database.prepare(
+        "SELECT decision_id, decision FROM sender_decisions WHERE kind = ? AND key = ?",
+      );
+      const own = standingDecision(statement.get("address", address));
+      if (own !== null) return own.decision === "block" ? own : null;
+      const domain = standingDecision(statement.get("domain", senderDomainOf(address)));
+      if (domain?.decision !== "block") return null;
+      const known =
+        database.prepare("SELECT 1 AS present FROM known_senders WHERE address = ?").get(
+          address,
+        ) !== undefined;
+      return known ? null : domain;
+    });
+  }
+
   hasBlockDecisions(): boolean {
     return this.read(
       (database) =>
@@ -614,7 +669,9 @@ export class SqliteMailSenderStore {
           )
           .run(input.decisionId, input.key, input.kind, input.decision, now);
       } else {
-        // The effects carry forward through the foreign key's ON UPDATE.
+        // The effects carry forward through the foreign key's ON UPDATE, and
+        // the old id is remembered so the toast that holds it can be told the
+        // verdict changed rather than that nothing is there.
         database
           .prepare(
             `UPDATE sender_decisions
@@ -622,6 +679,12 @@ export class SqliteMailSenderStore {
               WHERE decision_id = ?`,
           )
           .run(input.decisionId, input.decision, now, existing.decision_id as string);
+        database
+          .prepare(
+            `INSERT OR REPLACE INTO replaced_decisions(old_id, new_id, replaced_at)
+             VALUES (?, ?, ?)`,
+          )
+          .run(existing.decision_id as string, input.decisionId, now);
       }
       if (input.knownAddress !== null) {
         const added = database
@@ -654,6 +717,7 @@ export class SqliteMailSenderStore {
     decisionId: string,
     ref: MailSenderThreadRef,
     threadLastAt: number | null,
+    messageKey: string | null,
   ): boolean {
     const now = validTimestamp(this.now());
     return this.transaction(
@@ -661,21 +725,38 @@ export class SqliteMailSenderStore {
         database
           .prepare(
             `INSERT INTO decision_effects(
-               decision_id, effect, account_id, target, state, thread_last_at, added_at
+               decision_id, effect, account_id, target, state, thread_last_at,
+               message_key, added_at
              )
-             SELECT decision_id, 'archived', ?, ?, 'pending', ?, ?
+             SELECT decision_id, 'archived', ?, ?, 'pending', ?, ?, ?
                FROM sender_decisions WHERE decision_id = ?
              ON CONFLICT(decision_id, effect, account_id, target) DO UPDATE
-               SET state = 'pending', thread_last_at = excluded.thread_last_at`,
+               SET state = 'pending', thread_last_at = excluded.thread_last_at,
+                   message_key = excluded.message_key`,
           )
           .run(
             validAccountId(ref.accountId),
             validThreadId(ref.threadId),
             threadLastAt === null ? null : validTimestamp(threadLastAt),
+            validMessageKey(messageKey),
             now,
             decisionId,
           ).changes === 1,
     );
+  }
+
+  /** The provider refused the archive outright, so there is nothing an undo
+   *  should move back. */
+  dropArchiveEffect(decisionId: string, ref: MailSenderThreadRef): void {
+    this.transaction((database) => {
+      database
+        .prepare(
+          `DELETE FROM decision_effects
+            WHERE decision_id = ? AND effect = 'archived' AND account_id = ? AND target = ?
+              AND state = 'pending'`,
+        )
+        .run(decisionId, ref.accountId, ref.threadId);
+    });
   }
 
   finishArchiveEffect(decisionId: string, ref: MailSenderThreadRef): boolean {
@@ -697,7 +778,7 @@ export class SqliteMailSenderStore {
       const effects = new Map<string, MailSenderArchiveEffect>();
       for (const row of database
         .prepare(
-          `SELECT decision_id, target, state, thread_last_at FROM decision_effects
+          `SELECT decision_id, target, state, thread_last_at, message_key FROM decision_effects
             WHERE account_id = ? AND effect = 'archived'`,
         )
         .all(validAccountId(accountId))) {
@@ -705,21 +786,75 @@ export class SqliteMailSenderStore {
           typeof row.decision_id !== "string" ||
           typeof row.target !== "string" ||
           (row.state !== "pending" && row.state !== "done") ||
-          (row.thread_last_at !== null && !Number.isSafeInteger(row.thread_last_at))
+          (row.thread_last_at !== null && !Number.isSafeInteger(row.thread_last_at)) ||
+          (row.message_key !== null && typeof row.message_key !== "string")
         ) {
           throw new MailSenderError("mail_senders_unavailable");
         }
-        effects.set(
-          archiveEffectKey(row.decision_id, row.target),
-          Object.freeze({ state: row.state, threadLastAt: row.thread_last_at as number | null }),
-        );
+        const effect = Object.freeze({
+          state: row.state,
+          threadLastAt: row.thread_last_at as number | null,
+          messageKey: row.message_key as string | null,
+        });
+        effects.set(archiveEffectKey(row.decision_id, row.target), effect);
+        if (effect.messageKey !== null) {
+          const byMessage = archiveMessageKey(row.decision_id, effect.messageKey);
+          // A finished archive speaks for the message over a pending one.
+          if (effects.get(byMessage)?.state !== "done") effects.set(byMessage, effect);
+        }
       }
       return effects;
     });
   }
 
   /**
-   * Removes a decision. The known entry an accept added goes with it. With
+   * The archive this decision recorded for a thread, found by its thread id
+   * or by its first message's Message-ID, a finished one before a pending
+   * one. Null when there is none.
+   */
+  readArchiveEffect(
+    decisionId: string,
+    ref: MailSenderThreadRef,
+    messageKey: string | null,
+  ): MailSenderArchiveEffect | null {
+    return this.read((database) => {
+      const rows = database
+        .prepare(
+          `SELECT state, thread_last_at, message_key FROM decision_effects
+            WHERE decision_id = ? AND effect = 'archived' AND account_id = ?
+              AND (target = ? OR (? IS NOT NULL AND message_key = ?))
+            ORDER BY state = 'done' DESC`,
+        )
+        .all(decisionId, validAccountId(ref.accountId), ref.threadId, messageKey, messageKey);
+      const row = rows[0];
+      if (row === undefined) return null;
+      if (
+        (row.state !== "pending" && row.state !== "done") ||
+        (row.thread_last_at !== null && !Number.isSafeInteger(row.thread_last_at)) ||
+        (row.message_key !== null && typeof row.message_key !== "string")
+      ) {
+        throw new MailSenderError("mail_senders_unavailable");
+      }
+      return Object.freeze({
+        state: row.state,
+        threadLastAt: row.thread_last_at as number | null,
+        messageKey: row.message_key as string | null,
+      });
+    });
+  }
+
+  decisionExists(decisionId: string): boolean {
+    return this.read(
+      (database) =>
+        database
+          .prepare("SELECT 1 AS present FROM sender_decisions WHERE decision_id = ?")
+          .get(decisionId) !== undefined,
+    );
+  }
+
+  /**
+   * Removes a decision. The known entry an accept added goes with it; an id
+   * a changed verdict replaced answers `mail_sender_decision_changed`. With
    * `restore`, every thread archived under it, finished or still pending, is
    * queued for the move back in the same transaction, so a restore cut short
    * is finished by the scheduler rather than forgotten.
@@ -733,17 +868,30 @@ export class SqliteMailSenderStore {
       const row = database
         .prepare("SELECT decision FROM sender_decisions WHERE decision_id = ?")
         .get(decisionId);
-      if (row === undefined) return null;
+      if (row === undefined) {
+        const replaced = database
+          .prepare("SELECT 1 AS present FROM replaced_decisions WHERE old_id = ?")
+          .get(decisionId);
+        if (replaced !== undefined) {
+          throw new MailSenderError("mail_sender_decision_changed");
+        }
+        return null;
+      }
       const decision = decisionKind(row.decision);
       if (decision === null) throw new MailSenderError("mail_senders_unavailable");
-      database
-        .prepare(
-          `DELETE FROM known_senders
-            WHERE source = 'accept' AND address IN (
-              SELECT target FROM decision_effects
-               WHERE decision_id = ? AND effect = 'known')`,
-        )
-        .run(decisionId);
+      // Only an accept takes its known entry back. A block that replaced an
+      // accept carries that entry too, and undoing the block returns to the
+      // accept's world, where the address was known.
+      if (decision === "accept") {
+        database
+          .prepare(
+            `DELETE FROM known_senders
+              WHERE source = 'accept' AND address IN (
+                SELECT target FROM decision_effects
+                 WHERE decision_id = ? AND effect = 'known')`,
+          )
+          .run(decisionId);
+      }
       const restoreRefs: MailSenderThreadRef[] = [];
       if (options.restore) {
         const rows = database
@@ -887,6 +1035,8 @@ export interface MailThreadFirstSender {
   /** The provider marks the first message as sent by the account. */
   readonly fromOwner: boolean;
   readonly inInbox: boolean;
+  /** The Message-IDs the first message names as its parents, as cached. */
+  readonly references: readonly string[];
 }
 
 export interface MailInboxThreadSender {
@@ -894,6 +1044,8 @@ export interface MailInboxThreadSender {
   readonly address: string | null;
   readonly fromOwner: boolean;
   readonly lastMessageAt: number | null;
+  /** The first message's Message-ID, when it has one. */
+  readonly firstMessageId: string | null;
 }
 
 export interface MailSenderBackfillBatch {
@@ -913,6 +1065,7 @@ export interface MailSenderAccount {
   readonly accountId: string;
   readonly address: string;
   readonly connected: boolean;
+  readonly providerKind: "gmail" | "imap";
 }
 
 /** What the screen needs from the accounts and their caches. */
@@ -922,6 +1075,17 @@ export interface MailSenderMailPort {
     accountId: string,
     threadIds: readonly string[],
   ): Promise<ReadonlyMap<string, MailThreadFirstSender>>;
+  /** The From of every cached message with one of these Message-IDs. */
+  readReferencedSenders(
+    accountId: string,
+    messageIds: readonly string[],
+  ): Promise<readonly string[]>;
+  /** Whether an Inbox people thread whose first message starts a conversation
+   *  came from this address after this moment. */
+  hasConversationStart(
+    accountId: string,
+    input: { readonly address: string; readonly after: number },
+  ): Promise<boolean>;
   readSenderBackfillBatch(
     accountId: string,
     input: {
@@ -961,11 +1125,25 @@ export interface MailSenderScreenService {
 
 interface OwnSenders {
   readonly connectedAccountIds: readonly string[];
+  /** Gmail accounts, where only the provider's sent mark proves a letter is
+   *  the owner's: a From claiming an own address is common spam there. */
+  readonly gmailAccountIds: ReadonlySet<string>;
   readonly addresses: ReadonlySet<string>;
   readonly domains: ReadonlySet<string>;
 }
 
-type ArchiveOutcome = "archived" | "failed" | "gone";
+interface ArchiveTarget {
+  readonly ref: MailSenderThreadRef;
+  readonly thread: MailInboxThreadSender;
+}
+
+interface QueuedWork {
+  readonly signal: AbortSignal;
+  /** Set for work inside a request: nothing starts this close to its end. */
+  readonly deadlineAt?: number;
+}
+
+type ArchiveOutcome = "archived" | "skipped" | "failed" | "deferred" | "gone";
 type RestoreOutcome = "restored" | "kept" | "dropped";
 
 export class MailSenderScreen implements MailSenderScreenService {
@@ -977,10 +1155,11 @@ export class MailSenderScreen implements MailSenderScreenService {
   private readonly archiveBackoff = new Map<string, number>();
   /**
    * One queue for every change a decision makes: recording or removing it,
-   * and each single archive or restore. A decision is re-read inside the
-   * queue before its provider call, so an undo that lands between two
-   * archives stops the rest, and one that lands during an archive waits for
-   * it and then moves it back.
+   * and each single archive or restore. Everything a queued archive depends
+   * on is read again once its turn comes, so an undo that lands between two
+   * archives stops the rest and one that lands during an archive waits for
+   * it and then moves it back. Work whose caller gave up while it waited is
+   * dropped without writing anything.
    */
   private tail: Promise<void> = Promise.resolve();
 
@@ -1043,37 +1222,50 @@ export class MailSenderScreen implements MailSenderScreenService {
         return Object.freeze(items.map((item) => withNewSender(item, false)));
       }
       const own = await this.readOwn();
+      const trustsOwnAddress = !own.gmailAccountIds.has(accountId);
       const senders = await this.mail.readThreadFirstSenders(
         accountId,
         items.map((item) => item.threadId),
       );
-      return Object.freeze(
-        items.map((item) => {
-          const first = senders.get(item.threadId) ?? null;
-          const sender =
-            first === null || first.address === null
-              ? null
-              : normalizeSenderAddress(first.address);
-          const isOwn =
-            first?.fromOwner === true || (sender !== null && own.addresses.has(sender));
-          const facts = sender === null || isOwn ? null : this.store.readSenderFacts(sender);
-          return withNewSender(
-            item,
-            isMailSenderGated({
-              gateMoment,
-              category: item.category,
-              inInbox: first?.inInbox ?? false,
-              firstMessageAt: first?.firstMessageAt ?? null,
-              startsConversation: first?.startsConversation ?? false,
-              sender,
-              own: isOwn,
-              known: facts?.known ?? false,
-              addressDecision: facts?.addressDecision ?? null,
-              domainDecision: facts?.domainDecision ?? null,
-            }),
-          );
-        }),
-      );
+      const annotated: MailThreadListItem[] = [];
+      for (const item of items) {
+        const first = senders.get(item.threadId) ?? null;
+        const sender =
+          first === null || first.address === null
+            ? null
+            : normalizeSenderAddress(first.address);
+        const claimsOwner = sender !== null && own.addresses.has(sender);
+        const isOwn = first?.fromOwner === true || (claimsOwner && trustsOwnAddress);
+        // On Gmail a letter that only claims an own address is not the
+        // owner's, and it is not a correspondent either: it waits.
+        const facts =
+          sender === null || isOwn || claimsOwner ? null : this.store.readSenderFacts(sender);
+        const input: MailSenderGateInput = {
+          gateMoment,
+          category: item.category,
+          inInbox: first?.inInbox ?? false,
+          firstMessageAt: first?.firstMessageAt ?? null,
+          startsConversation: first?.startsConversation ?? false,
+          followsStranger: false,
+          sender,
+          own: isOwn,
+          known: facts?.known ?? false,
+          addressDecision: facts?.addressDecision ?? null,
+          domainDecision: facts?.domainDecision ?? null,
+        };
+        let gated = isMailSenderGated(input);
+        if (
+          !gated &&
+          first !== null &&
+          sender !== null &&
+          !input.startsConversation &&
+          isMailSenderGated({ ...input, followsStranger: true })
+        ) {
+          gated = await this.followsStranger(accountId, sender, first.references, gateMoment);
+        }
+        annotated.push(withNewSender(item, gated));
+      }
+      return Object.freeze(annotated);
     } catch {
       this.onEvent({
         event: "mail_sender_screen_failed",
@@ -1101,14 +1293,16 @@ export class MailSenderScreen implements MailSenderScreenService {
     ) {
       throw new MailSenderError("mail_sender_own_address");
     }
-    const { decisionId } = await this.exclusive(() =>
-      this.store.recordDecision({
-        decisionId: `decision-a${randomBytes(16).toString("hex")}`,
-        key: input.scope === "domain" ? domain : address,
-        kind: input.scope,
-        decision: input.decision,
-        knownAddress: input.decision === "accept" ? address : null,
-      }),
+    const { decisionId } = await this.exclusive(
+      () =>
+        this.store.recordDecision({
+          decisionId: `decision-a${randomBytes(16).toString("hex")}`,
+          key: input.scope === "domain" ? domain : address,
+          kind: input.scope,
+          decision: input.decision,
+          knownAddress: input.decision === "accept" ? address : null,
+        }),
+      context.signal,
     );
     if (input.decision === "accept") {
       return Object.freeze({
@@ -1118,8 +1312,7 @@ export class MailSenderScreen implements MailSenderScreenService {
         pending: false,
       });
     }
-    const targets: Array<{ readonly ref: MailSenderThreadRef; readonly lastAt: number | null }> =
-      [];
+    const targets: ArchiveTarget[] = [];
     let pending = false;
     const index = this.store.readDecisionIndex();
     for (const accountId of own.connectedAccountIds) {
@@ -1131,15 +1324,13 @@ export class MailSenderScreen implements MailSenderScreenService {
         pending = true;
         continue;
       }
-      const effects = this.store.readArchiveEffects(accountId);
+      // A thread this decision already archived, and the owner put back, is
+      // recognised inside the queue, where a second walk of the same block
+      // cannot race the first.
       for (const thread of threads) {
         const blocking = this.blockingDecision(index, own, thread);
         if (blocking?.decisionId !== decisionId) continue;
-        if (ownerMovedBack(effects, decisionId, thread)) continue;
-        targets.push({
-          ref: Object.freeze({ accountId, threadId: thread.threadId }),
-          lastAt: thread.lastMessageAt,
-        });
+        targets.push({ ref: Object.freeze({ accountId, threadId: thread.threadId }), thread });
       }
     }
     const archived: MailSenderThreadRef[] = [];
@@ -1152,10 +1343,20 @@ export class MailSenderScreen implements MailSenderScreenService {
         pending = true;
         break;
       }
-      const outcome = await this.archive(decisionId, target.ref, target.lastAt, context.signal);
+      let outcome: ArchiveOutcome;
+      try {
+        outcome = await this.archive(decisionId, target, own, context);
+      } catch (error) {
+        if (!context.signal.aborted) throw error;
+        pending = true;
+        break;
+      }
       if (outcome === "gone") break;
       if (outcome === "archived") archived.push(target.ref);
-      else pending = true;
+      else if (outcome === "deferred") {
+        pending = true;
+        break;
+      } else if (outcome === "failed") pending = true;
     }
     this.logCounts("mail_sender_blocked_archived", "decision", archived);
     return Object.freeze({
@@ -1174,9 +1375,12 @@ export class MailSenderScreen implements MailSenderScreenService {
     if (!SAFE_DECISION_ID.test(decisionId)) {
       throw new MailSenderError("mail_request_invalid");
     }
-    const removed = await this.exclusive(() =>
-      this.store.removeDecision(decisionId, { restore: options.restore }),
-    );
+    const removed = await this.exclusive(() => {
+      if (Date.now() >= context.deadlineAt) {
+        throw new MailSenderError("mail_senders_unavailable");
+      }
+      return this.store.removeDecision(decisionId, { restore: options.restore });
+    }, context.signal);
     if (removed === null) throw new MailSenderError("mail_sender_decision_not_found");
     const restored: MailSenderThreadRef[] = [];
     const dropped: MailSenderThreadRef[] = [];
@@ -1190,7 +1394,14 @@ export class MailSenderScreen implements MailSenderScreenService {
         pending = true;
         break;
       }
-      const outcome = await this.restore(ref, context.signal);
+      let outcome: RestoreOutcome;
+      try {
+        outcome = await this.restore(ref, context);
+      } catch (error) {
+        if (!context.signal.aborted) throw error;
+        pending = true;
+        break;
+      }
       if (outcome === "restored") restored.push(ref);
       else if (outcome === "kept") pending = true;
       else dropped.push(ref);
@@ -1248,13 +1459,43 @@ export class MailSenderScreen implements MailSenderScreenService {
     return Object.freeze({ hasMore });
   }
 
-  private exclusive<T>(operation: () => Promise<T> | T): Promise<T> {
-    const run = this.tail.then(operation);
+  /**
+   * Runs `operation` after everything queued before it. A caller that gives
+   * up while its work waits is answered at once with
+   * `mail_senders_unavailable`, and its work is dropped unstarted, the way
+   * the message service's own mutation queue treats an aborted request.
+   */
+  private exclusive<T>(operation: () => Promise<T> | T, signal?: AbortSignal): Promise<T> {
+    let started = false;
+    const execute = async () => {
+      started = true;
+      if (signal?.aborted) throw new MailSenderError("mail_senders_unavailable");
+      return operation();
+    };
+    const run = this.tail.then(execute);
     this.tail = run.then(
       () => undefined,
       () => undefined,
     );
-    return run;
+    if (signal === undefined) return run;
+    return new Promise<T>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void) => {
+        if (settled) return;
+        settled = true;
+        signal.removeEventListener("abort", onAbort);
+        callback();
+      };
+      const onAbort = () => {
+        if (!started) finish(() => reject(new MailSenderError("mail_senders_unavailable")));
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      run.then(
+        (value) => finish(() => resolve(value)),
+        (error: unknown) => finish(() => reject(error)),
+      );
+      if (signal.aborted) onAbort();
+    });
   }
 
   /** When this account starts gating, or null while it gates nothing. */
@@ -1275,24 +1516,49 @@ export class MailSenderScreen implements MailSenderScreenService {
       connectedAccountIds: Object.freeze(
         accounts.filter((account) => account.connected).map((account) => account.accountId),
       ),
+      gmailAccountIds: new Set(
+        accounts
+          .filter((account) => account.providerKind === "gmail")
+          .map((account) => account.accountId),
+      ),
       addresses,
       domains: new Set([...addresses].map(senderDomainOf)),
     });
   }
 
   /**
-   * The block that archives a thread, if any. The owner's own threads never
-   * have one. An address's own decision speaks first; a domain's block only
-   * reaches an address the owner has never decided about and does not know.
+   * Whether a reply-shaped first letter is a stranger's follow-up: what it
+   * answers is the same sender's own letter, or the sender already has a
+   * letter waiting in this account. A fresh stranger who forges In-Reply-To
+   * passes; nothing the cache holds says otherwise.
+   */
+  private async followsStranger(
+    accountId: string,
+    sender: string,
+    references: readonly string[],
+    gateMoment: number,
+  ): Promise<boolean> {
+    if (references.length > 0) {
+      const answered = normalizeAll(await this.mail.readReferencedSenders(accountId, references));
+      if (answered.includes(sender)) return true;
+    }
+    return this.mail.hasConversationStart(accountId, { address: sender, after: gateMoment });
+  }
+
+  /**
+   * The block that archives a thread, if any, from an index read once for a
+   * whole walk. The owner's threads never have one, whatever the provider:
+   * archiving the owner's own letter is worse than letting a forgery stay.
+   * An address's own decision speaks first; a domain's block only reaches an
+   * address the owner has never decided about and does not know.
    */
   private blockingDecision(
     index: MailSenderDecisionIndex,
     own: OwnSenders,
     thread: { readonly address: string | null; readonly fromOwner: boolean },
   ): MailSenderStandingDecision | null {
-    if (thread.fromOwner || thread.address === null) return null;
-    const address = normalizeSenderAddress(thread.address);
-    if (address === null || own.addresses.has(address)) return null;
+    const address = this.nonOwnSender(own, thread);
+    if (address === null) return null;
     const addressDecision = index.addresses.get(address);
     if (addressDecision !== undefined) {
       return addressDecision.decision === "block" ? addressDecision : null;
@@ -1300,6 +1566,15 @@ export class MailSenderScreen implements MailSenderScreenService {
     const domainDecision = index.domains.get(senderDomainOf(address));
     if (domainDecision?.decision !== "block") return null;
     return this.store.isKnown(address) ? null : domainDecision;
+  }
+
+  private nonOwnSender(
+    own: OwnSenders,
+    thread: { readonly address: string | null; readonly fromOwner: boolean },
+  ): string | null {
+    if (thread.fromOwner || thread.address === null) return null;
+    const address = normalizeSenderAddress(thread.address);
+    return address === null || own.addresses.has(address) ? null : address;
   }
 
   private async backfillStep(accountId: string, enabledAt: number): Promise<boolean> {
@@ -1334,11 +1609,7 @@ export class MailSenderScreen implements MailSenderScreenService {
     const own = await this.readOwn();
     const index = this.store.readDecisionIndex();
     const effects = this.store.readArchiveEffects(accountId);
-    const targets: Array<{
-      readonly ref: MailSenderThreadRef;
-      readonly decisionId: string;
-      readonly lastAt: number | null;
-    }> = [];
+    const targets: Array<ArchiveTarget & { readonly decisionId: string }> = [];
     for (const thread of await this.mail.listInboxThreadFirstSenders(accountId)) {
       const blocking = this.blockingDecision(index, own, thread);
       if (
@@ -1350,8 +1621,8 @@ export class MailSenderScreen implements MailSenderScreenService {
       }
       targets.push({
         ref: Object.freeze({ accountId, threadId: thread.threadId }),
+        thread,
         decisionId: blocking.decisionId,
-        lastAt: thread.lastMessageAt,
       });
     }
     const archived: MailSenderThreadRef[] = [];
@@ -1360,7 +1631,7 @@ export class MailSenderScreen implements MailSenderScreenService {
       if (attempted >= BACKGROUND_MUTATIONS_PER_STEP) break;
       signal.throwIfAborted();
       attempted += 1;
-      const outcome = await this.archive(target.decisionId, target.ref, target.lastAt, signal);
+      const outcome = await this.archive(target.decisionId, target, own, { signal });
       if (outcome === "archived") {
         archived.push(target.ref);
       } else if (outcome === "failed") {
@@ -1379,47 +1650,67 @@ export class MailSenderScreen implements MailSenderScreenService {
     const dropped: MailSenderThreadRef[] = [];
     for (const ref of pending.slice(0, BACKGROUND_MUTATIONS_PER_STEP)) {
       signal.throwIfAborted();
-      if ((await this.restore(ref, signal)) === "dropped") dropped.push(ref);
+      if ((await this.restore(ref, { signal })) === "dropped") dropped.push(ref);
     }
     this.logCounts("mail_sender_restore_failed", "sync", dropped);
     return pending.length > BACKGROUND_MUTATIONS_PER_STEP;
   }
 
   /**
-   * One archive, in the queue: the intent is written first and only while
-   * the decision stands, then the provider is asked, then the record is
-   * finished. A provider failure leaves the intent pending, which an undo
-   * still moves back and the archiver tries again after its rest.
+   * One archive, in the queue. When its turn comes it checks, before writing
+   * anything, that its caller still has time, that this decision still
+   * speaks for the thread (a domain block may have met a newly known
+   * address), and that the thread is not already archived by it. Then the
+   * intent is written, the provider is asked, and the record is finished. A
+   * provider that refuses outright leaves nothing behind; any other failure
+   * leaves the intent pending, which an undo still moves back.
    */
   private archive(
     decisionId: string,
-    ref: MailSenderThreadRef,
-    threadLastAt: number | null,
-    signal: AbortSignal,
+    target: ArchiveTarget,
+    own: OwnSenders,
+    work: QueuedWork,
   ): Promise<ArchiveOutcome> {
+    const { ref, thread } = target;
     return this.exclusive(async (): Promise<ArchiveOutcome> => {
-      if (!this.store.beginArchiveEffect(decisionId, ref, threadLastAt)) return "gone";
+      if (work.deadlineAt !== undefined && Date.now() >= work.deadlineAt - REQUEST_DEADLINE_MARGIN_MS) {
+        return "deferred";
+      }
+      const address = this.nonOwnSender(own, thread);
+      const current = address === null ? null : this.store.readBlockingDecision(address);
+      if (current?.decisionId !== decisionId) {
+        return this.store.decisionExists(decisionId) ? "skipped" : "gone";
+      }
+      const effect = this.store.readArchiveEffect(decisionId, ref, thread.firstMessageId);
+      if (effect !== null && finishedAndNotNewer(effect, thread)) return "skipped";
+      if (!this.store.beginArchiveEffect(decisionId, ref, thread.lastMessageAt, thread.firstMessageId)) {
+        return "gone";
+      }
       try {
         await this.mail.updateThread(
           { accountId: ref.accountId, threadId: ref.threadId, archive: true },
-          signal,
+          work.signal,
         );
-      } catch {
+      } catch (error) {
+        if (isPermanentMutationFailure(error)) this.store.dropArchiveEffect(decisionId, ref);
         return "failed";
       }
       return this.store.finishArchiveEffect(decisionId, ref) ? "archived" : "gone";
-    });
+    }, work.signal);
   }
 
-  private restore(ref: MailSenderThreadRef, signal: AbortSignal): Promise<RestoreOutcome> {
+  private restore(ref: MailSenderThreadRef, work: QueuedWork): Promise<RestoreOutcome> {
     return this.exclusive(async (): Promise<RestoreOutcome> => {
+      if (work.deadlineAt !== undefined && Date.now() >= work.deadlineAt - REQUEST_DEADLINE_MARGIN_MS) {
+        return "kept";
+      }
       try {
         await this.mail.updateThread(
           { accountId: ref.accountId, threadId: ref.threadId, archive: false },
-          signal,
+          work.signal,
         );
       } catch (error) {
-        if (signal.aborted) return "kept";
+        if (work.signal.aborted) return "kept";
         const settled = this.store.settlePendingRestore(
           ref,
           isPermanentMutationFailure(error) ? "given_up" : "failed",
@@ -1428,7 +1719,7 @@ export class MailSenderScreen implements MailSenderScreenService {
       }
       this.store.settlePendingRestore(ref, "done");
       return "restored";
-    });
+    }, work.signal);
   }
 
   /** Counts per account and nothing else: no address, no thread id. */
@@ -1563,25 +1854,61 @@ export class MailSenderScreenedMessageService implements MailMessageService {
 
 /**
  * Whether the owner put a thread back in the Inbox after this decision
- * archived it: the archive is on record and nothing newer has arrived since.
- * Such a thread stays; a new letter in it goes the way the first one went.
+ * archived it: the archive is on record, found by thread id or, for an IMAP
+ * message that came back under a new UID, by its Message-ID, and nothing
+ * newer has arrived since. Such a thread stays; a new letter in it goes the
+ * way the first one went.
  */
 function ownerMovedBack(
   effects: ReadonlyMap<string, MailSenderArchiveEffect>,
   decisionId: string,
-  thread: { readonly threadId: string; readonly lastMessageAt: number | null },
+  thread: MailInboxThreadSender,
 ): boolean {
-  const effect = effects.get(archiveEffectKey(decisionId, thread.threadId));
-  if (effect === undefined || effect.state !== "done") return false;
+  const byThread = effects.get(archiveEffectKey(decisionId, thread.threadId));
+  const byMessage =
+    thread.firstMessageId === null
+      ? undefined
+      : effects.get(archiveMessageKey(decisionId, thread.firstMessageId));
+  return [byThread, byMessage].some(
+    (effect) => effect !== undefined && finishedAndNotNewer(effect, thread),
+  );
+}
+
+function finishedAndNotNewer(
+  effect: MailSenderArchiveEffect,
+  thread: { readonly lastMessageAt: number | null },
+): boolean {
   return (
-    thread.lastMessageAt === null ||
-    effect.threadLastAt === null ||
-    thread.lastMessageAt <= effect.threadLastAt
+    effect.state === "done" &&
+    (thread.lastMessageAt === null ||
+      effect.threadLastAt === null ||
+      thread.lastMessageAt <= effect.threadLastAt)
   );
 }
 
 function archiveEffectKey(decisionId: string, threadId: string): string {
   return `${decisionId}/${threadId}`;
+}
+
+function archiveMessageKey(decisionId: string, messageKey: string): string {
+  return `${decisionId}/message/${messageKey}`;
+}
+
+function standingDecision(row: Record<string, unknown> | undefined): MailSenderStandingDecision | null {
+  if (row === undefined) return null;
+  const decision = decisionKind(row.decision);
+  if (decision === null || typeof row.decision_id !== "string") {
+    throw new MailSenderError("mail_senders_unavailable");
+  }
+  return Object.freeze({ decisionId: row.decision_id, decision });
+}
+
+function validMessageKey(value: string | null): string | null {
+  if (value === null) return null;
+  if (typeof value !== "string" || value.length < 3 || value.length > 998) {
+    throw new MailSenderError("mail_senders_unavailable");
+  }
+  return value;
 }
 
 function normalizeAll(raw: readonly string[]): string[] {

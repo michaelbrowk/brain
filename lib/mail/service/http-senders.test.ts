@@ -175,7 +175,9 @@ describe("brain-mail new-senders routes", () => {
       .mockRejectedValueOnce(new MailSenderError("mail_request_invalid"))
       .mockRejectedValueOnce(new MailSenderError("mail_sender_own_address"))
       .mockRejectedValueOnce(new MailSenderError("mail_sender_domain_scope_refused"));
-    senders.undo.mockRejectedValueOnce(new MailSenderError("mail_sender_decision_not_found"));
+    senders.undo
+      .mockRejectedValueOnce(new MailSenderError("mail_sender_decision_not_found"))
+      .mockRejectedValueOnce(new MailSenderError("mail_sender_decision_changed"));
     senders.listBlocked.mockRejectedValueOnce(new MailSenderError("mail_senders_unavailable"));
     const socketPath = await startServer(senders);
     const decide = () =>
@@ -191,6 +193,7 @@ describe("brain-mail new-senders routes", () => {
       await decide(),
       await decide(),
       await requestJson(socketPath, "DELETE", `/v1/senders/decisions/${DECISION_ID}`),
+      await requestJson(socketPath, "DELETE", `/v1/senders/decisions/${DECISION_ID}`),
       await requestJson(socketPath, "GET", "/v1/senders/blocked"),
     ];
 
@@ -199,6 +202,7 @@ describe("brain-mail new-senders routes", () => {
       [400, "mail_sender_own_address"],
       [400, "mail_sender_domain_scope_refused"],
       [404, "mail_sender_decision_not_found"],
+      [409, "mail_sender_decision_changed"],
       [503, "mail_senders_unavailable"],
     ]);
   });

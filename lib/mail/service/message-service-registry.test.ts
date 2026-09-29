@@ -190,7 +190,12 @@ describe("multi-account message registry", () => {
       Object.fromEntries(page.items.map((item) => [item.threadId, item.newSender])),
     ).toEqual({ "thread-stranger": true, "thread-friend": false });
     await expect(service.listAccounts()).resolves.toEqual([
-      { accountId: ACCOUNT_ID, address: "reader@example.test", connected: true },
+      {
+        accountId: ACCOUNT_ID,
+        address: "reader@example.test",
+        connected: true,
+        providerKind: "gmail",
+      },
     ]);
 
     const block = await screen.decide(

@@ -247,6 +247,20 @@ export class MultiAccountMailMessageService implements MailMessageService {
     );
   }
 
+  async readReferencedSenders(
+    accountId: string,
+    messageIds: readonly string[],
+  ): Promise<readonly string[]> {
+    return this.withEntry(accountId, (entry) => entry.cache.readReferencedSenders(messageIds));
+  }
+
+  async hasConversationStart(
+    accountId: string,
+    input: { readonly address: string; readonly after: number },
+  ): Promise<boolean> {
+    return this.withEntry(accountId, (entry) => entry.cache.hasConversationStart(input));
+  }
+
   async listInboxThreadFirstSenders(
     accountId: string,
   ): Promise<readonly MailCacheInboxThreadSender[]> {
@@ -268,7 +282,12 @@ export class MultiAccountMailMessageService implements MailMessageService {
   /** Every account with its address: the owner's own addresses, and which
    *  of them the scheduler syncs. */
   async listAccounts(): Promise<
-    readonly { readonly accountId: string; readonly address: string; readonly connected: boolean }[]
+    readonly {
+      readonly accountId: string;
+      readonly address: string;
+      readonly connected: boolean;
+      readonly providerKind: StoredMailAccount["providerKind"];
+    }[]
   > {
     const accounts = await this.store.listAccounts();
     return Object.freeze(
@@ -277,6 +296,7 @@ export class MultiAccountMailMessageService implements MailMessageService {
           accountId: account.account.accountId,
           address: account.account.emailAddress,
           connected: account.status === "connected",
+          providerKind: account.providerKind,
         }),
       ),
     );

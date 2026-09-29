@@ -197,6 +197,7 @@ export const MAIL_SERVICE_ERROR_CODES = Object.freeze({
     "mail_sender_own_address",
     "mail_sender_domain_scope_refused",
     "mail_sender_decision_not_found",
+    "mail_sender_decision_changed",
     "mail_senders_unavailable",
   ] as const),
   transport: Object.freeze([
@@ -1710,6 +1711,12 @@ function toHttpError(error: unknown): MailHttpError {
     }
     if (error.code === "mail_sender_decision_not_found") {
       return new MailHttpError(404, error.code);
+    }
+    // The toast still holds an id a later verdict replaced. Nothing is
+    // undone, and the owner is told the decision moved on rather than that
+    // it vanished.
+    if (error.code === "mail_sender_decision_changed") {
+      return new MailHttpError(409, error.code);
     }
     return new MailHttpError(503, error.code, true);
   }

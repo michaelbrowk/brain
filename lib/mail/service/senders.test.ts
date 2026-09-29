@@ -36,6 +36,10 @@ const NO_DEADLINE = Object.freeze({
 });
 const roots: string[] = [];
 const stores: SqliteMailSenderStore[] = [];
+const block = (address: string, scope: "address" | "domain" = "address") =>
+  ({ address, scope, decision: "block" }) as const;
+const accept = (address: string, scope: "address" | "domain" = "address") =>
+  ({ address, scope, decision: "accept" }) as const;
 
 afterEach(async () => {
   for (const store of stores.splice(0)) store.close();
@@ -98,6 +102,7 @@ describe("the new-sender gate", () => {
     inInbox: true,
     firstMessageAt: LATER,
     startsConversation: true,
+    followsStranger: false,
     sender: "stranger@example.com",
     own: false,
     known: false,
@@ -107,6 +112,12 @@ describe("the new-sender gate", () => {
 
   it("gates a first letter from a stranger that arrived after the switch", () => {
     expect(isMailSenderGated(gated)).toBe(true);
+  });
+
+  it("gates a stranger's follow-up that answers the stranger's own letter", () => {
+    expect(
+      isMailSenderGated({ ...gated, startsConversation: false, followsStranger: true }),
+    ).toBe(true);
   });
 
   it.each([
@@ -808,7 +819,7 @@ describe("the new-senders screen", () => {
     expect(accept.decisionId).not.toBe(first.decisionId);
     await expect(
       world.screen.undo(first.decisionId, { restore: true }, NO_DEADLINE),
-    ).rejects.toMatchObject({ code: "mail_sender_decision_not_found" });
+    ).rejects.toMatchObject({ code: "mail_sender_decision_changed" });
 
     const undo = await world.screen.undo(accept.decisionId, { restore: true }, NO_DEADLINE);
     expect(undo.restored).toEqual([{ accountId: ACCOUNT_A, threadId: "t1" }]);
@@ -901,6 +912,394 @@ describe("the new-senders screen", () => {
 
     expect(world.store.readBackfillProgress(ACCOUNT_A)).toBeNull();
     expect(world.store.isKnown("friend@example.net")).toBe(false);
+  });
+
+  it("gates a stranger's follow-up to his own letter, and lets a fresh stranger's reply-shaped letter pass", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "cold-1",
+      from: "rep@sales.test",
+      at: LATER + 1,
+      messageId: "<cold-1@sales.test>",
+    });
+    // IMAP keeps one message a thread: the follow-up answers the first letter.
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "cold-2",
+      from: "Rep <REP@sales.test>",
+      at: LATER + 2,
+      references: ["<cold-1@sales.test>"],
+    });
+    // A second follow-up names a letter the cache never saw; the sender
+    // still has a letter waiting, so this one waits too.
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "cold-3",
+      from: "rep@sales.test",
+      at: LATER + 3,
+      references: ["<unseen@sales.test>"],
+    });
+    // A fresh stranger with a forged In-Reply-To is the residual the design
+    // accepts: nothing in the cache says who they are.
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "forged",
+      from: "spam@bulk.test",
+      at: LATER + 4,
+      reply: true,
+    });
+
+    expect(await newSenders(world, ACCOUNT_B, ["cold-1", "cold-2", "cold-3", "forged"])).toEqual([
+      true,
+      true,
+      true,
+      false,
+    ]);
+    // An answer to one of the owner's own letters is still an answer.
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "owner-letter",
+      from: "me@b.test",
+      at: LATER + 5,
+      messageId: "<owner@b.test>",
+      inbox: false,
+    });
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "answer",
+      from: "partner@elsewhere.test",
+      at: LATER + 6,
+      references: ["<owner@b.test>"],
+    });
+    expect(await newSenders(world, ACCOUNT_B, ["answer"])).toEqual([false]);
+  });
+
+  it("leaves an IMAP letter the owner moved back, though the move gave it a new thread id", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "uid-10",
+      from: "news@growth.test",
+      at: LATER,
+      messageId: "<issue-1@growth.test>",
+    });
+    await world.screen.decide(block("news@growth.test"), NO_DEADLINE);
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual([]);
+    // Moving it back to the Inbox gives it a new UID, so the next sync caches
+    // the same message as a new thread.
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "uid-11",
+      from: "news@growth.test",
+      at: LATER,
+      messageId: "<issue-1@growth.test>",
+    });
+
+    await step(world, ACCOUNT_B, true);
+
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual(["uid-11"]);
+    world.mail.addThread(ACCOUNT_B, {
+      threadId: "uid-12",
+      from: "news@growth.test",
+      at: LATER + 1,
+      messageId: "<issue-2@growth.test>",
+    });
+    await step(world, ACCOUNT_B, true);
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual(["uid-11"]);
+  });
+
+  it("never turns a finished archive back into an intent when the same block walks twice", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_A, { threadId: "t1", from: "x@growth.test", at: LATER });
+    const original = world.mail.updateThread.getMockImplementation()!;
+    world.mail.updateThread.mockImplementation(async (input, signal) => {
+      if ("archive" in input && input.archive && !world.mail.inbox(ACCOUNT_A).includes(input.threadId)) {
+        throw new MailProviderSyncError("mail_provider_thread_stale");
+      }
+      return original(input, signal);
+    });
+
+    const [first] = await Promise.all([
+      world.screen.decide(block("x@growth.test"), NO_DEADLINE),
+      world.screen.decide(block("x@growth.test"), NO_DEADLINE),
+    ]);
+
+    expect(world.store.readArchiveEffects(ACCOUNT_A).get(`${first.decisionId}/t1`)).toMatchObject({
+      state: "done",
+    });
+    world.mail.updateThread.mockImplementation(original);
+    await world.mail.port.updateThread(
+      { accountId: ACCOUNT_A, threadId: "t1", archive: false },
+      new AbortController().signal,
+    );
+    await step(world, ACCOUNT_A, true);
+    expect(world.mail.inbox(ACCOUNT_A)).toEqual(["t1"]);
+  });
+
+  it("answers an Undo whose time ran out while it waited, and removes nothing", async () => {
+    const world = await readyWorld();
+    const decision = await world.screen.decide(block("x@growth.test"), NO_DEADLINE);
+    world.mail.addThread(ACCOUNT_A, { threadId: "slow", from: "x@growth.test", at: LATER + 1 });
+    const hold = world.mail.holdArchiveOf("slow");
+    const background = step(world, ACCOUNT_A, true);
+    await hold.reached;
+    const controller = new AbortController();
+
+    const undo = world.screen.undo(
+      decision.decisionId,
+      { restore: true },
+      { deadlineAt: Number.MAX_SAFE_INTEGER, signal: controller.signal },
+    );
+    controller.abort();
+
+    await expect(undo).rejects.toMatchObject({ code: "mail_senders_unavailable" });
+    hold.release();
+    await background;
+    expect(world.store.listBlocked(10).map((entry) => entry.decisionId)).toEqual([
+      decision.decisionId,
+    ]);
+  });
+
+  it("writes no intent for an archive whose step was stopped while it waited", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_A, { threadId: "http", from: "x@growth.test", at: LATER });
+    const hold = world.mail.holdArchiveOf("http");
+    const decided = world.screen.decide(block("x@growth.test"), NO_DEADLINE);
+    await hold.reached;
+    world.mail.addThread(ACCOUNT_B, { threadId: "bg", from: "x@growth.test", at: LATER + 1 });
+    const controller = new AbortController();
+    const background = world.screen
+      .runBackgroundSenderStep(ACCOUNT_B, { syncSucceeded: true }, controller.signal)
+      .then(
+        () => "finished",
+        () => "stopped",
+      );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    controller.abort();
+    hold.release();
+    await decided;
+
+    expect(await background).toBe("stopped");
+    expect(world.store.readArchiveEffects(ACCOUNT_B).size).toBe(0);
+    expect(
+      world.mail.updateThread.mock.calls.filter(([input]) => input.threadId === "bg"),
+    ).toHaveLength(0);
+  });
+
+  it("writes nothing for an archive whose request ran out of time while it waited", async () => {
+    const world = await readyWorld();
+    await world.screen.decide(block("y@other.test"), NO_DEADLINE);
+    world.mail.addThread(ACCOUNT_A, { threadId: "late", from: "x@growth.test", at: LATER });
+    world.mail.addThread(ACCOUNT_B, { threadId: "slow", from: "y@other.test", at: LATER });
+    const listing = world.mail.holdListOf(ACCOUNT_A);
+
+    // Time enough to start when the block walks its threads, gone by the
+    // time the queue frees.
+    const deciding = world.screen.decide(block("x@growth.test"), {
+      deadlineAt: Date.now() + 1_700,
+      signal: new AbortController().signal,
+    });
+    const hold = world.mail.holdArchiveOf("slow");
+    const background = step(world, ACCOUNT_B, true);
+    await hold.reached;
+    listing.release();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    hold.release();
+    await background;
+    const result = await deciding;
+
+    expect(result).toMatchObject({ archived: [], pending: true });
+    expect(world.store.readArchiveEffects(ACCOUNT_A).size).toBe(0);
+    expect(world.mail.inbox(ACCOUNT_A)).toEqual(["late"]);
+  });
+
+  it("leaves a finished archive alone when the archiver queued the same thread behind the block", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_A, { threadId: "t1", from: "x@growth.test", at: LATER });
+    const original = world.mail.updateThread.getMockImplementation()!;
+    world.mail.updateThread.mockImplementation(async (input, signal) => {
+      if ("archive" in input && input.archive && !world.mail.inbox(ACCOUNT_A).includes(input.threadId)) {
+        throw new MailProviderSyncError("mail_provider_thread_stale");
+      }
+      return original(input, signal);
+    });
+    const hold = world.mail.holdArchiveOf("t1");
+    const deciding = world.screen.decide(block("x@growth.test"), NO_DEADLINE);
+    await hold.reached;
+    // The archiver walks the Inbox while the block's archive is in flight.
+    const background = step(world, ACCOUNT_A, true);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    hold.release();
+    const decision = await deciding;
+    await background;
+
+    expect(
+      world.mail.updateThread.mock.calls.filter(
+        ([input]) => input.threadId === "t1" && "archive" in input && input.archive,
+      ),
+    ).toHaveLength(1);
+    expect(world.store.readArchiveEffects(ACCOUNT_A).get(`${decision.decisionId}/t1`)).toMatchObject({
+      state: "done",
+    });
+  });
+
+  it("has nothing more to do when every blocked letter left in the Inbox is one the owner put back", async () => {
+    const world = await readyWorld();
+    for (let index = 0; index < 30; index += 1) {
+      world.mail.addThread(ACCOUNT_B, {
+        threadId: `uid-${index}`,
+        from: "news@growth.test",
+        at: LATER,
+        messageId: `<issue-${index}@growth.test>`,
+      });
+    }
+    await world.screen.decide(block("news@growth.test"), NO_DEADLINE);
+    await step(world, ACCOUNT_B, true);
+    expect(world.mail.inbox(ACCOUNT_B)).toEqual([]);
+    // The owner moves all of them back; IMAP gives each a new UID.
+    for (let index = 0; index < 30; index += 1) {
+      world.mail.addThread(ACCOUNT_B, {
+        threadId: `back-${index}`,
+        from: "news@growth.test",
+        at: LATER,
+        messageId: `<issue-${index}@growth.test>`,
+      });
+    }
+    await finishAccount(world, ACCOUNT_B);
+
+    const next = await step(world, ACCOUNT_B, true);
+
+    expect(next.hasMore).toBe(false);
+    expect(world.mail.inbox(ACCOUNT_B)).toHaveLength(30);
+  });
+
+  it("drops the intent when the provider refuses the archive outright, so an Undo leaves the owner's own archive alone", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_A, { threadId: "f", from: "x@growth.test", at: LATER });
+    world.mail.updateThread.mockImplementationOnce(async () => {
+      throw new MailProviderSyncError("mail_provider_mutation_unsupported");
+    });
+    const decision = await world.screen.decide(block("x@growth.test"), NO_DEADLINE);
+    expect(decision.pending).toBe(true);
+    expect(world.store.readArchiveEffects(ACCOUNT_A).size).toBe(0);
+    // The owner archives the letter himself.
+    await world.mail.port.updateThread(
+      { accountId: ACCOUNT_A, threadId: "f", archive: true },
+      new AbortController().signal,
+    );
+
+    await world.screen.undo(decision.decisionId, { restore: true }, NO_DEADLINE);
+
+    expect(world.mail.inbox(ACCOUNT_A)).toEqual([]);
+  });
+
+  it("asks again, inside the queue, whether a domain block still speaks for each thread", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_A, { threadId: "bob", from: "bob@acme.test", at: LATER + 2 });
+    world.mail.addThread(ACCOUNT_A, { threadId: "alice", from: "alice@acme.test", at: LATER + 1 });
+    const hold = world.mail.holdArchiveOf("bob");
+    const domain = world.screen.decide(block("bob@acme.test", "domain"), NO_DEADLINE);
+    await hold.reached;
+    // Meanwhile the owner writes to alice through Brain: she is known now.
+    world.screen.recordSentRecipients({ to: ["alice@acme.test"], cc: [] });
+    hold.release();
+
+    const result = await domain;
+
+    expect(result.archived.map((ref) => ref.threadId)).toEqual(["bob"]);
+    expect(world.mail.inbox(ACCOUNT_A)).toEqual(["alice"]);
+  });
+
+  it("answers the old id of a changed verdict with its own refusal, and an undone block gives back the accept it replaced", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_A, { threadId: "t1", from: "x@growth.test", at: LATER });
+    const blocked = await world.screen.decide(block("x@growth.test"), NO_DEADLINE);
+    const accepted = await world.screen.decide(accept("x@growth.test"), NO_DEADLINE);
+
+    await expect(
+      world.screen.undo(blocked.decisionId, { restore: true }, NO_DEADLINE),
+    ).rejects.toMatchObject({ code: "mail_sender_decision_changed" });
+
+    world.mail.addThread(ACCOUNT_A, { threadId: "t2", from: "y@growth.test", at: LATER });
+    await world.screen.decide(accept("y@growth.test"), NO_DEADLINE);
+    const blockedY = await world.screen.decide(block("y@growth.test"), NO_DEADLINE);
+    await world.screen.undo(blockedY.decisionId, { restore: true }, NO_DEADLINE);
+    world.mail.addThread(ACCOUNT_A, { threadId: "t3", from: "y@growth.test", at: LATER + 9 });
+    expect(await newSenders(world, ACCOUNT_A, ["t3"])).toEqual([false]);
+    expect(world.mail.inbox(ACCOUNT_A)).toContain("t2");
+    expect(accepted.decisionId).not.toBe(blocked.decisionId);
+  });
+
+  it("gates a Gmail letter that only claims the owner's address, and trusts the address on IMAP", async () => {
+    const world = await readyWorld();
+    world.mail.setProviderKind(ACCOUNT_A, "gmail");
+    world.mail.addThread(ACCOUNT_A, { threadId: "spoof", from: "Me <me@a.test>", at: LATER });
+    world.mail.addThread(ACCOUNT_A, {
+      threadId: "really-mine",
+      from: "me@a.test",
+      at: LATER,
+      fromOwner: true,
+    });
+    world.mail.addThread(ACCOUNT_B, { threadId: "imap-mine", from: "me@b.test", at: LATER });
+
+    expect(await newSenders(world, ACCOUNT_A, ["spoof", "really-mine"])).toEqual([true, false]);
+    expect(await newSenders(world, ACCOUNT_B, ["imap-mine"])).toEqual([false]);
+    await expect(
+      world.screen.decide(block("me@a.test"), NO_DEADLINE),
+    ).rejects.toMatchObject({ code: "mail_sender_own_address" });
+  });
+
+  it("refuses domain scope for the regional providers too", async () => {
+    const world = await readyWorld();
+    for (const domain of ["yahoo.co.jp", "hotmail.de", "t-online.de", "seznam.cz", "wp.pl"]) {
+      await expect(
+        world.screen.decide(block(`someone@${domain}`, "domain"), NO_DEADLINE),
+      ).rejects.toMatchObject({ code: "mail_sender_domain_scope_refused" });
+    }
+  });
+
+  it("tries a pending archive again when the same block is made twice", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_A, { threadId: "t1", from: "x@growth.test", at: LATER });
+    world.mail.updateThread.mockImplementationOnce(async () => {
+      throw new Error("socket reset");
+    });
+    const first = await world.screen.decide(block("x@growth.test"), NO_DEADLINE);
+    expect(first).toMatchObject({ archived: [], pending: true });
+
+    const again = await world.screen.decide(block("x@growth.test"), NO_DEADLINE);
+
+    expect(again.archived).toEqual([{ accountId: ACCOUNT_A, threadId: "t1" }]);
+    expect(world.mail.inbox(ACCOUNT_A)).toEqual([]);
+  });
+
+  it("leaves a thread the owner moved back when the same block is made twice", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_A, { threadId: "t1", from: "x@growth.test", at: LATER });
+    await world.screen.decide(block("x@growth.test"), NO_DEADLINE);
+    await world.mail.port.updateThread(
+      { accountId: ACCOUNT_A, threadId: "t1", archive: false },
+      new AbortController().signal,
+    );
+
+    const again = await world.screen.decide(block("x@growth.test"), NO_DEADLINE);
+
+    expect(again.archived).toEqual([]);
+    expect(world.mail.inbox(ACCOUNT_A)).toEqual(["t1"]);
+  });
+
+  it("writes a new intent before re-archiving a thread a newer letter reopened", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_A, { threadId: "t1", from: "x@growth.test", at: LATER });
+    const decision = await world.screen.decide(block("x@growth.test"), NO_DEADLINE);
+    await world.mail.port.updateThread(
+      { accountId: ACCOUNT_A, threadId: "t1", archive: false },
+      new AbortController().signal,
+    );
+    world.mail.addMessage(ACCOUNT_A, "t1", { from: "x@growth.test", at: LATER + 50 });
+    world.mail.updateThread.mockImplementationOnce(async () => {
+      throw new Error("socket reset");
+    });
+
+    await step(world, ACCOUNT_A, true);
+
+    expect(world.store.readArchiveEffects(ACCOUNT_A).get(`${decision.decisionId}/t1`)).toMatchObject({
+      state: "pending",
+      threadLastAt: LATER + 50,
+    });
   });
 
   it("makes a sent message's recipients known", async () => {
@@ -1041,6 +1440,8 @@ interface FakeMessage {
   readonly sentAt: number | null;
   readonly isReply: boolean;
   readonly fromOwner: boolean;
+  readonly messageId: string;
+  readonly references: readonly string[];
 }
 
 interface FakeThread {
@@ -1054,6 +1455,7 @@ interface FakeThread {
 interface FakeAccount {
   readonly address: string;
   cacheReady: boolean;
+  providerKind: "gmail" | "imap";
 }
 
 /**
@@ -1065,7 +1467,7 @@ function createFakeMail(initial: Readonly<Record<string, string>>) {
   const accounts = new Map<string, FakeAccount>(
     Object.entries(initial).map(([accountId, address]) => [
       accountId,
-      { address, cacheReady: true },
+      { address, cacheReady: true, providerKind: "imap" },
     ]),
   );
   const threads = new Map<string, FakeThread[]>(
@@ -1073,6 +1475,7 @@ function createFakeMail(initial: Readonly<Record<string, string>>) {
   );
   let rowid = 0;
   let beforeNextBackfillRead: (() => void) | null = null;
+  const listHolds = new Map<string, Promise<void>>();
   const find = (accountId: string, threadId: string) =>
     threads.get(accountId)!.find((entry) => entry.threadId === threadId);
   const item = (accountId: string, threadId: string): MailThreadListItem => {
@@ -1118,21 +1521,46 @@ function createFakeMail(initial: Readonly<Record<string, string>>) {
                 startsConversation: !first.isReply,
                 fromOwner: first.fromOwner,
                 inInbox: thread.inInbox,
+                references: first.references,
               },
             ] as const,
           ];
         }),
       ),
   );
+  const firstOf = (thread: FakeThread) => thread.messages[0]!;
+  const lower = (value: string | null) =>
+    value === null ? null : (/<([^<>]+)>\s*$/.exec(value)?.[1] ?? value).trim().toLowerCase();
   const port: MailSenderMailPort = {
     async listAccounts() {
       return [...accounts].map(([accountId, account]) => ({
         accountId,
         address: account.address,
         connected: true,
+        providerKind: account.providerKind,
       }));
     },
     readThreadFirstSenders,
+    async readReferencedSenders(accountId, messageIds) {
+      return threads
+        .get(accountId)!
+        .flatMap((thread) => thread.messages)
+        .filter((message) => messageIds.includes(message.messageId) && message.from !== null)
+        .map((message) => message.from!);
+    },
+    async hasConversationStart(accountId, input) {
+      return threads.get(accountId)!.some((thread) => {
+        const first = firstOf(thread);
+        return (
+          thread.inInbox &&
+          thread.category === "people" &&
+          !first.isReply &&
+          first.sentAt !== null &&
+          first.sentAt > input.after &&
+          lower(first.from) === input.address
+        );
+      });
+    },
     async readSenderBackfillBatch(accountId, input) {
       const hook = beforeNextBackfillRead;
       beforeNextBackfillRead = null;
@@ -1187,14 +1615,20 @@ function createFakeMail(initial: Readonly<Record<string, string>>) {
       };
     },
     async listInboxThreadFirstSenders(accountId) {
+      const hold = listHolds.get(accountId);
+      if (hold !== undefined) {
+        listHolds.delete(accountId);
+        await hold;
+      }
       return threads
         .get(accountId)!
         .filter((thread) => thread.inInbox)
         .map((thread) => ({
           threadId: thread.threadId,
-          address: thread.messages[0]!.from,
-          fromOwner: thread.messages[0]!.fromOwner,
+          address: firstOf(thread).from,
+          fromOwner: firstOf(thread).fromOwner,
           lastMessageAt: thread.messages.at(-1)!.sentAt,
+          firstMessageId: firstOf(thread).messageId,
         }));
     },
     updateThread,
@@ -1204,9 +1638,20 @@ function createFakeMail(initial: Readonly<Record<string, string>>) {
     updateThread,
     readThreadFirstSenders,
     item,
-    addAccount(accountId: string, address: string, options: { readonly cacheReady: boolean }) {
-      accounts.set(accountId, { address, cacheReady: options.cacheReady });
+    addAccount(
+      accountId: string,
+      address: string,
+      options: { readonly cacheReady: boolean; readonly providerKind?: "gmail" | "imap" },
+    ) {
+      accounts.set(accountId, {
+        address,
+        cacheReady: options.cacheReady,
+        providerKind: options.providerKind ?? "imap",
+      });
       threads.set(accountId, []);
+    },
+    setProviderKind(accountId: string, providerKind: "gmail" | "imap") {
+      accounts.get(accountId)!.providerKind = providerKind;
     },
     setCacheReady(accountId: string) {
       accounts.get(accountId)!.cacheReady = true;
@@ -1227,6 +1672,8 @@ function createFakeMail(initial: Readonly<Record<string, string>>) {
         readonly sent?: boolean;
         readonly reply?: boolean;
         readonly fromOwner?: boolean;
+        readonly messageId?: string;
+        readonly references?: readonly string[];
       },
     ) {
       rowid += 1;
@@ -1242,8 +1689,10 @@ function createFakeMail(initial: Readonly<Record<string, string>>) {
             to: input.to ?? [],
             cc: input.cc ?? [],
             sentAt: input.at,
-            isReply: input.reply ?? false,
+            isReply: input.reply ?? (input.references ?? []).length > 0,
             fromOwner: input.fromOwner ?? false,
+            messageId: input.messageId ?? `<${input.threadId}@fake.test>`,
+            references: input.references ?? [],
           },
         ],
       });
@@ -1258,7 +1707,20 @@ function createFakeMail(initial: Readonly<Record<string, string>>) {
         sentAt: input.at,
         isReply: true,
         fromOwner: false,
+        messageId: `<${threadId}-${rowid}@fake.test>`,
+        references: [],
       });
+    },
+    /** Holds the next Inbox listing of one account until released. */
+    holdListOf(accountId: string) {
+      let release!: () => void;
+      listHolds.set(
+        accountId,
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      );
+      return { release };
     },
     /** Holds the archive of one thread until released, so a test can act
      *  while that provider call is in flight. */

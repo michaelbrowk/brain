@@ -242,9 +242,9 @@ describe("the new-senders proxies", () => {
 
   it("relays the screen's own refusal unchanged", async () => {
     const { BrainMailClientError } = await import("@/lib/mail/brain-mail-client");
-    client.undoSenderDecision.mockRejectedValueOnce(
-      new BrainMailClientError(404, "mail_sender_decision_not_found"),
-    );
+    client.undoSenderDecision
+      .mockRejectedValueOnce(new BrainMailClientError(404, "mail_sender_decision_not_found"))
+      .mockRejectedValueOnce(new BrainMailClientError(409, "mail_sender_decision_changed"));
     client.getSenderScreenState.mockRejectedValueOnce(
       new BrainMailClientError(503, "mail_senders_unavailable"),
     );
@@ -258,9 +258,17 @@ describe("the new-senders proxies", () => {
       }),
       { params: Promise.resolve({ decisionId: DECISION }) },
     );
+    const changed = await decision.DELETE(
+      new Request(`${ORIGIN}/api/mail/senders/decisions/${DECISION}`, {
+        method: "DELETE",
+        headers: { origin: ORIGIN },
+      }),
+      { params: Promise.resolve({ decisionId: DECISION }) },
+    );
     const read = await state.GET(new Request(`${ORIGIN}/api/mail/senders/state`));
 
     expect([undo.status, await code(undo)]).toEqual([404, "mail_sender_decision_not_found"]);
+    expect([changed.status, await code(changed)]).toEqual([409, "mail_sender_decision_changed"]);
     expect([read.status, await code(read)]).toEqual([503, "mail_senders_unavailable"]);
   });
 });

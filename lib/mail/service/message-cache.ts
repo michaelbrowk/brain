@@ -68,6 +68,9 @@ const MAX_SEARCH_CURSOR_OFFSET = MAX_SEARCH_RESULTS - 1;
  *  newest first, per account and step. */
 const MAX_INBOX_SENDER_SCAN = 5_000;
 const MAX_SENDER_BACKFILL_WINDOW = 10_000;
+/** A first letter naming more parents than this is looked up by its first
+ *  ones; the rest cannot change the answer much. */
+const MAX_REFERENCES_LOOKED_UP = 100;
 
 export type MailCacheMailbox =
   | "all"
@@ -238,6 +241,9 @@ const SCHEMA_SQL = `
 
   CREATE INDEX messages_thread_idx
     ON messages(account_id, generation, thread_id, sent_at ASC, message_id ASC);
+
+  CREATE INDEX messages_rfc_message_idx
+    ON messages(account_id, rfc_message_id);
 `;
 
 /**
@@ -537,6 +543,7 @@ export interface MailCacheThreadFirstSender {
   readonly startsConversation: boolean;
   readonly fromOwner: boolean;
   readonly inInbox: boolean;
+  readonly references: readonly string[];
 }
 
 export interface MailCacheInboxThreadSender {
@@ -544,6 +551,7 @@ export interface MailCacheInboxThreadSender {
   readonly address: string | null;
   readonly fromOwner: boolean;
   readonly lastMessageAt: number | null;
+  readonly firstMessageId: string | null;
 }
 
 export interface MailCacheSenderBackfillBatch {
@@ -2852,7 +2860,7 @@ export class SqliteMailMessageCache {
     const generations = this.readSenderGenerations(database);
     const statement = database.prepare(
       `SELECT thread.in_inbox, message.from_json, message.sent_at,
-              message.is_reply, message.from_owner
+              message.is_reply, message.from_owner, message.references_json
          FROM threads AS thread
          JOIN messages AS message
            ON message.account_id = thread.account_id
@@ -2886,7 +2894,8 @@ export class SqliteMailMessageCache {
     const rows = this.requireDatabase()
       .prepare(
         `SELECT thread.thread_id AS thread_id, thread.last_message_at AS last_message_at,
-                first.from_json AS from_json, first.from_owner AS from_owner
+                first.from_json AS from_json, first.from_owner AS from_owner,
+                first.rfc_message_id AS rfc_message_id
            FROM threads AS thread
            JOIN messages AS first
              ON first.account_id = thread.account_id
@@ -2910,7 +2919,8 @@ export class SqliteMailMessageCache {
           typeof row.thread_id !== "string" ||
           (row.from_json !== null && typeof row.from_json !== "string") ||
           (row.from_owner !== 0 && row.from_owner !== 1) ||
-          (row.last_message_at !== null && !Number.isSafeInteger(row.last_message_at))
+          (row.last_message_at !== null && !Number.isSafeInteger(row.last_message_at)) ||
+          (row.rfc_message_id !== null && typeof row.rfc_message_id !== "string")
         ) {
           throw new MailCacheError("mail_cache_invalid");
         }
@@ -2919,8 +2929,67 @@ export class SqliteMailMessageCache {
           address: row.from_json === null ? null : parseAddressJson(row.from_json).address,
           fromOwner: row.from_owner === 1,
           lastMessageAt: row.last_message_at as number | null,
+          firstMessageId: row.rfc_message_id as string | null,
         });
       }),
+    );
+  }
+
+  /**
+   * The From of every cached message carrying one of these Message-IDs, in
+   * any generation. A reply-shaped first letter that answers its own
+   * sender's letter is a stranger's follow-up, not an answer to the owner.
+   */
+  readReferencedSenders(messageIds: readonly string[]): readonly string[] {
+    const ids = [...new Set(messageIds)].slice(0, MAX_REFERENCES_LOOKED_UP);
+    if (ids.length === 0) return Object.freeze([]);
+    const rows = this.requireDatabase()
+      .prepare(
+        `SELECT from_json FROM messages
+          WHERE account_id = ? AND rfc_message_id IN (${ids.map(() => "?").join(", ")})
+            AND from_json IS NOT NULL`,
+      )
+      .all(this.accountId, ...ids);
+    return Object.freeze(
+      rows.map((row) => {
+        if (typeof row.from_json !== "string") throw new MailCacheError("mail_cache_invalid");
+        return parseAddressJson(row.from_json).address;
+      }),
+    );
+  }
+
+  /**
+   * Whether this address started a conversation in the Inbox after a moment:
+   * a people thread whose first message is from it and names no parent. The
+   * address is compared without regard to case, which is how it is stored.
+   */
+  hasConversationStart(input: { readonly address: string; readonly after: number }): boolean {
+    const generation = readableGeneration(this.readSyncState());
+    if (generation < 1) return false;
+    return (
+      this.requireDatabase()
+        .prepare(
+          `SELECT 1 AS present
+             FROM threads AS thread
+             JOIN messages AS first
+               ON first.account_id = thread.account_id
+              AND first.generation = thread.generation
+              AND first.message_id = (
+                SELECT message.message_id FROM messages AS message
+                 WHERE message.account_id = thread.account_id
+                   AND message.generation = thread.generation
+                   AND message.thread_id = thread.thread_id
+                 ORDER BY message.sent_at IS NULL ASC, message.sent_at ASC,
+                          message.message_id ASC
+                 LIMIT 1)
+            WHERE thread.account_id = ? AND thread.generation = ? AND thread.in_inbox = 1
+              AND thread.category = 'people'
+              AND first.is_reply = 0 AND first.sent_at > ?
+              AND lower(json_extract(first.from_json, '$.address')) = lower(?)
+            LIMIT 1`,
+        )
+        .get(this.accountId, generation, validateTimestamp(input.after), input.address) !==
+      undefined
     );
   }
 
@@ -3524,6 +3593,11 @@ export class SqliteMailMessageCache {
     }
     database.exec(
       "UPDATE messages SET is_reply = 1 WHERE is_reply = 0 AND references_json <> '[]'",
+    );
+    // A follow-up is recognised by the letter it answers, so the screen looks
+    // messages up by Message-ID.
+    database.exec(
+      "CREATE INDEX IF NOT EXISTS messages_rfc_message_idx ON messages(account_id, rfc_message_id)",
     );
   }
 
@@ -6234,7 +6308,8 @@ function firstSenderFromRow(row: Record<string, unknown>): MailCacheThreadFirstS
     (row.sent_at !== null && !Number.isSafeInteger(row.sent_at)) ||
     (row.in_inbox !== 0 && row.in_inbox !== 1) ||
     (row.is_reply !== 0 && row.is_reply !== 1) ||
-    (row.from_owner !== 0 && row.from_owner !== 1)
+    (row.from_owner !== 0 && row.from_owner !== 1) ||
+    typeof row.references_json !== "string"
   ) {
     throw new MailCacheError("mail_cache_invalid");
   }
@@ -6244,6 +6319,7 @@ function firstSenderFromRow(row: Record<string, unknown>): MailCacheThreadFirstS
     startsConversation: row.is_reply === 0,
     fromOwner: row.from_owner === 1,
     inInbox: row.in_inbox === 1,
+    references: parseReferencesJson(row.references_json),
   });
 }
 

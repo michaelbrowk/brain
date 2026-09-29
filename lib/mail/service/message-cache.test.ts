@@ -5835,6 +5835,7 @@ describe("the cache's answers for the new-senders screen", () => {
         startsConversation: false,
         fromOwner: false,
         inInbox: true,
+        references: [],
       },
       "thread-sent": {
         address: "me@example.test",
@@ -5842,6 +5843,7 @@ describe("the cache's answers for the new-senders screen", () => {
         startsConversation: true,
         fromOwner: true,
         inInbox: false,
+        references: [],
       },
     });
     expect(cache.listInboxThreadFirstSenders()).toEqual([
@@ -5850,6 +5852,7 @@ describe("the cache's answers for the new-senders screen", () => {
         address: "first@example.test",
         fromOwner: false,
         lastMessageAt: 2_000,
+        firstMessageId: "<thread-reply-1@example.test>",
       },
     ]);
   });
@@ -5931,6 +5934,51 @@ describe("the cache's answers for the new-senders screen", () => {
     expect(
       cache.readSenderBackfillBatch({ fromCursor, sentCursor, window: 10, learnFrom: false }),
     ).toMatchObject({ known: [], own: [], fromCursor, done: true });
+  });
+
+  it("finds the senders of referenced letters and a sender's conversation starts", async () => {
+    const { cache } = await createCache();
+    const generation = cache.beginInitial("100");
+    cache.putInitialPage(
+      generation,
+      [
+        conversationFixture("thread-cold", [{ from: "Rep <REP@sales.test>", sentAt: 2_000 }]),
+        conversationFixture("thread-follow", [
+          {
+            from: "rep@sales.test",
+            sentAt: 2_100,
+            references: ["<thread-cold-0@example.test>"],
+          },
+        ]),
+        conversationFixture("thread-list", [{ from: "news@sales.test", sentAt: 2_200 }]),
+        conversationFixture(
+          "thread-mixed",
+          [
+            { from: "me@example.test", sentAt: 1_000, fromOwner: true },
+            { from: "stranger@evil.test", sentAt: 1_100, to: ["me@example.test"] },
+          ],
+          ["all", "sent"],
+        ),
+      ],
+      null,
+      null,
+    );
+    cache.completeInitial(generation, 3_000);
+
+    expect(
+      cache.readReferencedSenders(["<thread-cold-0@example.test>", "<unknown@example.test>"]),
+    ).toEqual(["REP@sales.test"]);
+    expect(cache.hasConversationStart({ address: "rep@sales.test", after: 1_500 })).toBe(true);
+    expect(cache.hasConversationStart({ address: "rep@sales.test", after: 2_000 })).toBe(false);
+    expect(cache.hasConversationStart({ address: "nobody@sales.test", after: 0 })).toBe(false);
+    // Only the owner's own message in a Sent thread names an own address.
+    const batch = cache.readSenderBackfillBatch({
+      fromCursor: 10_000,
+      sentCursor: 0,
+      window: 10_000,
+      learnFrom: false,
+    });
+    expect(batch.own).toEqual(["me@example.test"]);
   });
 
   it("marks cached replies from their references when a cache from before the flag opens", async () => {

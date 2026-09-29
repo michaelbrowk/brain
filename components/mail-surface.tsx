@@ -1933,8 +1933,14 @@ export function MailSurface({
   const singleRefreshPendingRef = useRef<{
     readonly accountId: string;
     readonly mailboxId: MailSystemMailbox;
+    readonly released: string | null;
   } | null>(null);
   const unifiedRefreshPendingRef = useRef<ReadonlySet<string> | null | undefined>(undefined);
+  /** Pages whose cursor starts inside rows they already hold (a mailbox
+   *  cursor re-taken from a fresh page one): the next Load more walks past
+   *  them. Keyed by the committed page, so any other commit (a fresh load, a
+   *  Load more that reached new rows) is not one. */
+  const repagedPagesRef = useRef(new WeakSet<MailThreadListPage>());
   const [refreshPendingTick, setRefreshPendingTick] = useState(0);
   const noteRefreshPending = useCallback(() => {
     setRefreshPendingTick((tick) => tick + 1);
@@ -1955,9 +1961,21 @@ export function MailSurface({
       accountId: string,
       mailboxId: MailSystemMailbox,
       signal: AbortSignal,
+      /** The thread a hold kept on screen and that has just been let go:
+       *  under the Unread view or unread-first sort it leaves the kept rows. */
+      released: string | null = null,
     ) => {
       const markPending = () => {
-        singleRefreshPendingRef.current = { accountId, mailboxId };
+        const owed = singleRefreshPendingRef.current;
+        singleRefreshPendingRef.current = {
+          accountId,
+          mailboxId,
+          released:
+            released ??
+            (owed?.accountId === accountId && owed.mailboxId === mailboxId
+              ? owed.released
+              : null),
+        };
         noteRefreshPending();
       };
       if (
@@ -2012,15 +2030,19 @@ export function MailSurface({
         // fresh page wins everywhere except that row: it keeps its local item
         // and position until the hold releases on selection change or reader
         // close.
-        commitThreadState({
-          kind: "ready",
-          page: pageWithHeldThread(pageWithLoadedDepth(page, current.page), current.page, {
-            accountId: selectedThreadAccountIdRef.current,
-            threadId: singleHoldRef.current
-              ? selectedThreadIdRef.current
+        const folded = pageWithLoadedDepth(page, current.page, {
+          keepCursor: mailboxId === "inbox",
+          drop:
+            released !== null && (view === "unread" || sort === "unread")
+              ? unifiedThreadKey({ accountId, threadId: released })
               : null,
-          }),
         });
+        const next = pageWithHeldThread(folded.page, current.page, {
+          accountId: selectedThreadAccountIdRef.current,
+          threadId: singleHoldRef.current ? selectedThreadIdRef.current : null,
+        });
+        if (folded.repage) repagedPagesRef.current.add(next);
+        commitThreadState({ kind: "ready", page: next });
       } catch {
         // The visible list stays usable. Explicit Sync and Try again own errors.
       }
@@ -2412,6 +2434,7 @@ export function MailSurface({
           single.accountId,
           single.mailboxId,
           new AbortController().signal,
+          single.released,
         );
       }
     }
@@ -3025,6 +3048,7 @@ export function MailSurface({
             listAccountId,
             mailboxId,
             new AbortController().signal,
+            selectedThreadIdRef.current,
           );
         }
       }
@@ -3091,6 +3115,7 @@ export function MailSurface({
     const releaseHold = singleHoldRef.current;
     const accountId = selectedAccountIdRef.current;
     const mailboxId = selectedMailboxIdRef.current;
+    const released = selectedThreadIdRef.current;
     clearStickyOpen();
     selectedThreadIdRef.current = null;
     selectedThreadAccountIdRef.current = null;
@@ -3103,6 +3128,7 @@ export function MailSurface({
         accountId,
         mailboxId,
         new AbortController().signal,
+        released,
       );
     }
   }, [clearStickyOpen, refreshThreadsSilently]);
@@ -5570,36 +5596,88 @@ export function MailSurface({
       if (!account?.capabilities.mailboxes.includes(mailboxId)) return;
       const listInput = {
         accountId,
-        cursor,
         limit: 50,
         ...(view ? { view } : {}),
         ...(sort !== "date" ? { sort } : {}),
       };
       const basePage = baseState.page;
       const listEpoch = ++listEpochRef.current;
-      try {
-        const next: MailThreadListPage =
-          "scope" in basePage
-            ? await client.searchThreads({
-                accountId,
-                mailboxId,
-                query,
-                cursor,
-                limit: 50,
-              })
-            : mailboxId === "inbox"
-            ? await client.listThreads(listInput)
-            : await client.listMailboxThreads({ ...listInput, mailboxId });
-        if (
-          selectedAccountIdRef.current !== accountId ||
-          selectedMailboxIdRef.current !== mailboxId ||
-          selectedViewRef.current !== view ||
-          threadSortRef.current !== sort ||
-          searchQueryRef.current !== query ||
-          listEpochRef.current !== listEpoch
-        ) {
-          return;
+      const stillHere = () =>
+        selectedAccountIdRef.current === accountId &&
+        selectedMailboxIdRef.current === mailboxId &&
+        selectedViewRef.current === view &&
+        threadSortRef.current === sort &&
+        searchQueryRef.current === query &&
+        listEpochRef.current === listEpoch;
+      /** One page from `from`, or page one for `null`. */
+      const read = (from: string | null): Promise<MailThreadListPage> => {
+        if ("scope" in basePage) {
+          return client.searchThreads({
+            accountId,
+            mailboxId,
+            query,
+            ...(from === null ? {} : { cursor: from }),
+            limit: 50,
+          });
         }
+        const input = from === null ? listInput : { ...listInput, cursor: from };
+        return mailboxId === "inbox"
+          ? client.listThreads(input)
+          : client.listMailboxThreads({ ...input, mailboxId });
+      };
+      try {
+        // The rows the new ones go below, and the page they come from.
+        let rows = basePage;
+        let walking = repagedPagesRef.current.has(basePage);
+        let from = cursor;
+        let next: MailThreadListPage;
+        try {
+          next = await read(cursor);
+        } catch (error) {
+          // A cursor a sync has made stale (outside the Inbox any history
+          // advance does it, and a new generation does it everywhere) heals
+          // the way a merged stream does: page one is read again, the rows
+          // below it stay, and the walk goes on from its cursor past them.
+          if ("scope" in basePage || !isSyncHold(error) || !stillHere()) throw error;
+          const pageOne = await read(null);
+          if (!stillHere()) return;
+          const folded = pageWithLoadedDepth(pageOne, basePage, { keepCursor: false, drop: null });
+          rows = folded.page;
+          if (pageOne.nextCursor === null) {
+            next = { ...pageOne, items: [] };
+            walking = false;
+          } else {
+            from = pageOne.nextCursor;
+            next = await read(from);
+            walking = folded.repage;
+          }
+        }
+        if (walking) {
+          // The cursor starts inside rows this list already holds. A page
+          // that brings nothing new is walked past, no more of them than the
+          // list is deep plus one, and a cursor already read ends the walk
+          // rather than leading back over the same pages.
+          const held = new Set(rows.items.map((item) => item.threadId));
+          const cap = Math.ceil(rows.items.length / 50) + 1;
+          const asked = new Set([from]);
+          const gathered = [...next.items];
+          while (
+            asked.size < cap &&
+            next.nextCursor !== null &&
+            gathered.every((item) => held.has(item.threadId)) &&
+            stillHere()
+          ) {
+            if (asked.has(next.nextCursor)) {
+              next = { ...next, nextCursor: null };
+              break;
+            }
+            asked.add(next.nextCursor);
+            next = await read(next.nextCursor);
+            gathered.push(...next.items);
+          }
+          next = { ...next, items: gathered };
+        }
+        if (!stillHere()) return;
         const current = threadStateRef.current;
         if (
           current.kind !== "ready" ||
@@ -5608,13 +5686,13 @@ export function MailSurface({
         ) {
           return;
         }
-        const seen = new Set(basePage.items.map((item) => item.threadId));
+        const seen = new Set(rows.items.map((item) => item.threadId));
         commitThreadState({
           kind: "ready",
           page: {
             ...next,
             items: [
-              ...basePage.items,
+              ...rows.items,
               ...next.items.filter((item) => !seen.has(item.threadId)),
             ],
           },
@@ -7066,25 +7144,51 @@ function isComposerSubmission(
 /**
  * A fresh page one folded into the single-account list on screen, the way the
  * merge folds one into a stream: the fresh window replaces the head, and the
- * rows the list holds below the last one that window still lists stay, with
- * the cursor that loads on from them. Without that, every refresh (now one
- * per change, echoes of the owner's own actions included) threw away the rows
- * Load more had brought in. A fresh page with no cursor is the whole list and
- * stands alone, and so does one that leaves nothing below it.
+ * rows the list holds below the fresh window's last row stay, less any the
+ * window lists itself. Without that, every refresh (now one per change,
+ * echoes of the owner's own actions included) threw away the rows Load more
+ * had brought in. A fresh page with no cursor is the whole list and stands
+ * alone, and so does one that leaves nothing below it.
+ *
+ * The anchor is the window's LAST row, not the last row it lists anywhere: a
+ * deep thread answered moves to the head, and anchoring on it would drop
+ * every row between.
+ *
+ * The cursor: an Inbox cursor names the active generation and outlives an
+ * incremental sync, so the one that loads on from the kept rows stays. A
+ * cursor into any other mailbox carries the history id its snapshot was read
+ * at, and the service calls it stale after the next advance, so the fresh
+ * page's cursor is taken instead and `repage` says the next Load more starts
+ * inside rows the list already holds and has to walk past them.
+ *
+ * `drop` is a thread the list shows only because a hold kept it: released
+ * under the Unread view or unread-first sort, it leaves the kept rows too.
  */
 function pageWithLoadedDepth(
   fresh: MailThreadListPage,
   current: MailThreadListPage,
-): MailThreadListPage {
-  if (fresh.nextCursor === null) return fresh;
+  options: { readonly keepCursor: boolean; readonly drop: string | null },
+): { readonly page: MailThreadListPage; readonly repage: boolean } {
+  if (fresh.nextCursor === null) return { page: fresh, repage: false };
   const listed = new Set(fresh.items.map(unifiedThreadKey));
-  let covered = -1;
-  current.items.forEach((item, index) => {
-    if (listed.has(unifiedThreadKey(item))) covered = index;
-  });
-  const below = current.items.slice(covered + 1);
-  if (below.length === 0) return fresh;
-  return { ...fresh, items: [...fresh.items, ...below], nextCursor: current.nextCursor };
+  const last = fresh.items.at(-1);
+  const anchor =
+    last === undefined
+      ? -1
+      : current.items.findIndex(
+          (item) => unifiedThreadKey(item) === unifiedThreadKey(last),
+        );
+  const below = current.items
+    .slice(anchor + 1)
+    .filter(
+      (item) =>
+        !listed.has(unifiedThreadKey(item)) && unifiedThreadKey(item) !== options.drop,
+    );
+  if (below.length === 0) return { page: fresh, repage: false };
+  const items = [...fresh.items, ...below];
+  return options.keepCursor
+    ? { page: { ...fresh, items, nextCursor: current.nextCursor }, repage: false }
+    : { page: { ...fresh, items }, repage: true };
 }
 
 /**

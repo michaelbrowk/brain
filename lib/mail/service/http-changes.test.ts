@@ -63,6 +63,40 @@ describe("brain-mail change feed route", () => {
     }
   });
 
+  it("answers the held read on close on a connection that closes", async () => {
+    const changes = new MailChangeFeed({ initialCursor: 41 });
+    const socketPath = await startServer({ changes });
+
+    const answer = new Promise<{ status: number; connection: unknown; body: unknown }>(
+      (resolve, reject) => {
+        const request = httpRequest(
+          { socketPath, method: "GET", path: "/v1/changes?cursor=41&wait=25000" },
+          (response) => {
+            const chunks: Buffer[] = [];
+            response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+            response.once("end", () =>
+              resolve({
+                status: response.statusCode ?? 0,
+                connection: response.headers.connection,
+                body: JSON.parse(Buffer.concat(chunks).toString("utf8")),
+              }),
+            );
+          },
+        );
+        request.once("error", reject);
+        request.end();
+      },
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    changes.close();
+
+    await expect(answer).resolves.toEqual({
+      status: 200,
+      connection: "close",
+      body: { apiVersion: 1, cursor: 41, changes: [] },
+    });
+  });
+
   it("refuses a read after close on a connection that closes", async () => {
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
     const changes = new MailChangeFeed({ initialCursor: 41 });

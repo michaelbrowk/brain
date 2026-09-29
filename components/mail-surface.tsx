@@ -3499,12 +3499,17 @@ export function MailSurface({
    * re-sort it away while the reader still shows it. The row and the reader
    * header are patched in place (the unread dot clears, position holds); the
    * list settles through the release refetch when the selection moves on or
-   * the reader closes. No timers.
+   * the reader closes. No timers. Archive and Move to Inbox come here only
+   * outside the Inbox, where the folder lists the letter either way: they
+   * change no row, only the reader's way in or out.
    */
   const updateThreadHeld = useCallback(
     async (
       thread: MailThreadListItem,
-      action: Extract<MailReaderAction, "toggle-read" | "star" | "unstar">,
+      action: Extract<
+        MailReaderAction,
+        "toggle-read" | "star" | "unstar" | "archive" | "move-to-inbox"
+      >,
     ) => {
       if (mutationLockRef.current) return;
       const accountId = thread.accountId;
@@ -3537,6 +3542,24 @@ export function MailSurface({
           return;
         }
         singleHoldRef.current = true;
+        const reader = readerStateRef.current;
+        const readerOnIt =
+          reader.kind === "ready" &&
+          reader.detail.thread.accountId === accountId &&
+          reader.detail.thread.threadId === threadId;
+        if (action === "archive" || action === "move-to-inbox") {
+          if (readerOnIt) {
+            setReaderState({
+              kind: "ready",
+              detail: withLetterInInbox(
+                reader.detail,
+                action === "move-to-inbox",
+              ),
+            });
+          }
+          confirmThreadAction(thread, action);
+          return;
+        }
         const patchItem = (item: MailThreadListItem) => withReadOrStar(item, action);
         const current = threadStateRef.current;
         if (current.kind === "ready") {
@@ -3552,12 +3575,7 @@ export function MailSurface({
             },
           });
         }
-        const reader = readerStateRef.current;
-        if (
-          reader.kind === "ready" &&
-          reader.detail.thread.accountId === accountId &&
-          reader.detail.thread.threadId === threadId
-        ) {
+        if (readerOnIt) {
           setReaderState({
             kind: "ready",
             detail: {
@@ -3576,7 +3594,7 @@ export function MailSurface({
         setMutating(false);
       }
     },
-    [client, commitThreadState, onToast],
+    [client, commitThreadState, confirmThreadAction, onToast],
   );
 
   const updateThread = useCallback(
@@ -3868,9 +3886,16 @@ export function MailSurface({
       if (selectedAccountIdRef.current === UNIFIED_ACCOUNT_ID) {
         return updateUnifiedThread(thread, action);
       }
+      // A held letter keeps its row through what leaves it in the folder on
+      // screen: a read or a star anywhere, and the move in or out of the
+      // Inbox outside the Inbox, which lists the letter either way there.
       if (
         singleHoldRef.current &&
-        (action === "toggle-read" || action === "star" || action === "unstar") &&
+        (action === "toggle-read" ||
+          action === "star" ||
+          action === "unstar" ||
+          ((action === "archive" || action === "move-to-inbox") &&
+            selectedMailboxIdRef.current !== "inbox")) &&
         selectedThreadIdRef.current === thread.threadId &&
         selectedThreadAccountIdRef.current === thread.accountId
       ) {

@@ -6070,6 +6070,107 @@ describe("MailSurface", () => {
       expect(rows()[0]).toContain("Second unread");
       expect(rows()[1]).toContain("First unread");
     });
+
+    it.each([
+      ["Archive", true, "Move to Inbox"],
+      ["Move to Inbox", false, "Archive"],
+    ] as const)(
+      "keeps the held letter in place when %s runs on it in All Mail",
+      async (label, startsInInbox, wayBack) => {
+        // All Mail lists the letter either way, so the move in or out of the
+        // Inbox takes the held path a star takes: under Unread first, the row
+        // the reader opened stays where it was until the selection moves on.
+        const unreadById = new Map([
+          [firstUnread.threadId, true],
+          [secondUnread.threadId, true],
+        ]);
+        let inInbox = startsInInbox;
+        const items = () =>
+          [firstUnread, secondUnread].map((item) => ({
+            ...item,
+            unread: unreadById.get(item.threadId)!,
+          }));
+        const listMailboxThreads = vi.fn().mockImplementation((input) => {
+          let pageItems = items();
+          if (input.sort === "unread") {
+            pageItems = [...pageItems].sort(
+              (a, b) => Number(b.unread) - Number(a.unread),
+            );
+          }
+          return Promise.resolve({
+            ...mailboxThreadPage(input.mailboxId),
+            items: pageItems,
+          });
+        });
+        const readMailboxThread = vi.fn().mockImplementation(({ threadId }) =>
+          Promise.resolve({
+            ...detail,
+            thread: items().find((item) => item.threadId === threadId)!,
+            messages: detail.messages.map((message) => ({
+              ...message,
+              threadId,
+              inInbox,
+            })),
+          }),
+        );
+        const updateThread = vi.fn().mockImplementation(async (input) => {
+          if ("read" in input) unreadById.set(input.threadId, input.read !== true);
+          if ("archive" in input) inInbox = !input.archive;
+        });
+        const client = makeClient({
+          listMailboxThreads,
+          readMailboxThread,
+          updateThread,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+        await enterSingleAccount();
+        await goTo("All Mail");
+        await act(async () => {
+          findButton("Sort: Date").dispatchEvent(
+            new PointerEvent("pointerdown", {
+              bubbles: true,
+              cancelable: true,
+              button: 0,
+            }),
+          );
+        });
+        await settle();
+        await click(findMenuItem("Unread first"));
+        const rows = () =>
+          [...mailboxList().querySelectorAll('[role="list"] button')].map(
+            (button) => button.textContent ?? "",
+          );
+        await click(findButton("First unread"));
+        await settle();
+        expect(rows()[0]).toContain("First unread");
+        const reads = listMailboxThreads.mock.calls.length;
+
+        const reader = () =>
+          document.body.querySelector('section[aria-label="Message reader"]');
+        const action = [...(reader()?.querySelectorAll("button") ?? [])].find(
+          (button) => button.textContent?.trim() === label,
+        ) as HTMLButtonElement;
+        await click(action);
+        await settle();
+
+        expect(updateThread).toHaveBeenLastCalledWith(
+          expect.objectContaining({ archive: startsInInbox }),
+        );
+        // No refetch re-sorted the list under the reader.
+        expect(listMailboxThreads.mock.calls.length).toBe(reads);
+        expect(rows()[0]).toContain("First unread");
+        // The reader stays on the letter and offers the move back.
+        expect(reader()?.textContent).toContain("First unread");
+        expect(
+          [...(reader()?.querySelectorAll("button") ?? [])].map(
+            (button) => button.textContent?.trim(),
+          ),
+        ).toContain(wayBack);
+      },
+    );
   });
 
   describe("keyboard layer", () => {

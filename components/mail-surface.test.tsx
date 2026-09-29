@@ -6396,6 +6396,155 @@ describe("MailSurface", () => {
       expect(document.body.textContent).not.toContain("couldn’t load");
     });
 
+    /** A SYNC HOLDING THE ACCOUNT IS NOT AN OUTAGE. The service answers a list
+     *  read with 409 `mail_sync_in_progress` while a sync moves the account's
+     *  cache under it, and a second later the same account answers. The red
+     *  row and its Try again were the reader's to press for a wait the
+     *  surface can take on its own. */
+    describe("a stream a sync is holding", () => {
+      const itemA = unifiedThread({
+        accountId: accountA.accountId,
+        threadId: "Healthy thread",
+      });
+      const itemB = unifiedThread({
+        accountId: accountB.accountId,
+        threadId: "Recovered thread",
+      });
+      const held = () => new MailApiError(409, "mail_sync_in_progress");
+
+      function pageOneCalls(
+        listThreads: ReturnType<typeof vi.fn>,
+        accountId: string,
+      ): number {
+        return listThreads.mock.calls.filter(
+          ([input]) => input.accountId === accountId && !input.cursor,
+        ).length;
+      }
+
+      async function wait(ms: number) {
+        await act(async () => vi.advanceTimersByTimeAsync(ms));
+        await settle();
+      }
+
+      it("is read again quietly and joins the merge when the sync lets go", async () => {
+        vi.useFakeTimers();
+        let holds = 2;
+        const listThreads = vi.fn().mockImplementation(({ accountId }) => {
+          if (accountId === accountB.accountId && holds > 0) {
+            holds -= 1;
+            return Promise.reject(held());
+          }
+          return Promise.resolve(
+            pageOf(accountId === accountA.accountId ? [itemA] : [itemB]),
+          );
+        });
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+
+        // The other account merges at once, and the held one says nothing.
+        expect(document.body.textContent).toContain("Healthy thread");
+        expect(document.body.textContent).not.toContain("couldn’t load");
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(1);
+
+        await wait(1_499);
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(1);
+        await wait(1);
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(2);
+        expect(document.body.textContent).not.toContain("couldn’t load");
+
+        await wait(1_500);
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(3);
+        expect(document.body.textContent).toContain("Recovered thread");
+        expect(document.body.textContent).not.toContain("couldn’t load");
+
+        // Answered: nothing is left scheduled to ask again.
+        await wait(10_000);
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(3);
+      });
+
+      it("reports the stream after three quiet reads the sync still holds", async () => {
+        vi.useFakeTimers();
+        const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+          accountId === accountB.accountId
+            ? Promise.reject(held())
+            : Promise.resolve(pageOf([itemA])),
+        );
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+
+        await wait(1_500);
+        await wait(1_500);
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(3);
+        expect(document.body.textContent).not.toContain("couldn’t load");
+
+        await wait(1_500);
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(4);
+        expect(document.body.textContent).toContain(
+          `${accountB.emailAddress} couldn’t load`,
+        );
+
+        await wait(10_000);
+        expect(pageOneCalls(listThreads, accountB.accountId)).toBe(4);
+      });
+
+      it("reads page one again when a sync holds a Load more", async () => {
+        vi.useFakeTimers();
+        const deepA = [
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: "A newest",
+            lastMessageAt: 1_700_000_000_900,
+          }),
+        ];
+        const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) => {
+          if (cursor) return Promise.reject(held());
+          return Promise.resolve(
+            accountId === accountA.accountId
+              ? pageOf(deepA, "cursor-a")
+              : pageOf([itemB]),
+          );
+        });
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+
+        await click(findButton("Load more"));
+        expect(listThreads).toHaveBeenLastCalledWith({
+          accountId: accountA.accountId,
+          cursor: "cursor-a",
+          limit: 50,
+        });
+        expect(document.body.textContent).not.toContain("couldn’t load");
+
+        // The cursor is from before the sync, so the same page is not asked
+        // again: the stream's first page is, as Try again would.
+        await wait(1_500);
+        expect(listThreads.mock.lastCall?.[0]).toEqual({
+          accountId: accountA.accountId,
+          limit: 50,
+        });
+        expect(document.body.textContent).toContain("A newest");
+        expect(document.body.textContent).not.toContain("couldn’t load");
+      });
+    });
+
     it("fetches only the starved stream on Load more", async () => {
       const deepA = [
         unifiedThread({

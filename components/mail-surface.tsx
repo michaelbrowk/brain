@@ -119,6 +119,19 @@ import {
 export const UNIFIED_FANOUT_LIMIT = 3;
 
 /**
+ * How long a unified stream a sync is holding waits before it is read again,
+ * and how many times it is, before its row says it couldn't load.
+ *
+ * The service answers a list read with 409 `mail_sync_in_progress` while a
+ * sync moves the account's cache under it: a page cursor taken before the
+ * move names a snapshot that is gone. That is a wait, not an outage, and the
+ * account answers again a moment later. Three reads a second and a half apart
+ * cover a sync's commit without leaving a real failure unreported for long.
+ */
+const SYNC_HOLD_RETRY_MS = 1_500;
+const SYNC_HOLD_RETRIES = 3;
+
+/**
  * `Promise.allSettled(inputs.map(run))` with at most `limit` of them running
  * at a time. Results come back in input order, so every caller can keep
  * pairing result `i` with input `i`, and a rejection settles its own slot and
@@ -1760,6 +1773,76 @@ export function MailSurface({
   }, [refreshAfterRun, threadState]);
 
   /**
+   * THE WAIT A SYNC ASKS FOR, taken by the surface rather than the reader.
+   *
+   * A stream whose read a sync held stands as `loading`: no row, no notice,
+   * no horizon. Its first page is read again `SYNC_HOLD_RETRY_MS` later, up to
+   * `SYNC_HOLD_RETRIES` times, and only a read that still fails, or fails
+   * some other way, puts up the row that says it couldn't load. Page one and
+   * not the page that was held, because a held cursor names a snapshot the
+   * sync has since replaced; this is the read Try again makes, made for the
+   * reader.
+   *
+   * One chain per account, cancelled by a newer one and by leaving All
+   * inboxes, so a read that lands late never writes into a column it no
+   * longer belongs to.
+   */
+  const syncHoldsRef = useRef(new Map<string, AbortController>());
+  const stopSyncHolds = useCallback(() => {
+    for (const controller of syncHoldsRef.current.values()) controller.abort();
+    syncHoldsRef.current.clear();
+  }, []);
+  useEffect(() => {
+    if (selectedAccountId !== UNIFIED_ACCOUNT_ID) return;
+    return stopSyncHolds;
+  }, [selectedAccountId, stopSyncHolds]);
+
+  const holdUnifiedStream = useCallback(
+    async (accountId: string) => {
+      const holds = syncHoldsRef.current;
+      holds.get(accountId)?.abort();
+      const controller = new AbortController();
+      holds.set(accountId, controller);
+      const { signal } = controller;
+      let page: MailThreadPage | null = null;
+      for (
+        let attempt = 0;
+        attempt < SYNC_HOLD_RETRIES && page === null;
+        attempt += 1
+      ) {
+        await pause(SYNC_HOLD_RETRY_MS, signal);
+        if (signal.aborted) return;
+        try {
+          page = await client.listThreads(
+            { accountId, limit: UNIFIED_PAGE_SIZE },
+            signal,
+          );
+        } catch (error) {
+          if (signal.aborted) return;
+          if (!isSyncHold(error)) break;
+        }
+      }
+      if (signal.aborted) return;
+      holds.delete(accountId);
+      if (selectedAccountIdRef.current !== UNIFIED_ACCOUNT_ID) return;
+      const current = unifiedStateRef.current;
+      if (current.kind !== "ready") return;
+      commitUnifiedState({
+        kind: "ready",
+        streams: current.streams.map((stream) => {
+          if (stream.accountId !== accountId || stream.status !== "loading") {
+            return stream;
+          }
+          return page === null
+            ? { ...stream, status: "error" as const }
+            : reconcileStreamPageOne(stream, page);
+        }),
+      });
+    },
+    [client, commitUnifiedState],
+  );
+
+  /**
    * Page-1 loads for every eligible account, `UNIFIED_FANOUT_LIMIT` at a time.
    * One account failing degrades to a per-stream notice — the rest still
    * merge. The first-sync kick is deliberately skipped in unified mode:
@@ -1802,6 +1885,7 @@ export function MailSurface({
       connected.forEach((account, index) => {
         pages.set(account.accountId, results[index]!);
       });
+      const held: string[] = [];
       const streams = eligible.map((account): UnifiedStream => {
         const base = {
           accountId: account.accountId,
@@ -1814,7 +1898,11 @@ export function MailSurface({
           return { ...base, status: "reauth" };
         }
         const result = pages.get(account.accountId)!;
-        if (result.status === "rejected") return { ...base, status: "error" };
+        if (result.status === "rejected") {
+          if (!isSyncHold(result.reason)) return { ...base, status: "error" };
+          held.push(account.accountId);
+          return { ...base, status: "loading" };
+        }
         return {
           ...base,
           items: result.value.items,
@@ -1824,8 +1912,9 @@ export function MailSurface({
         };
       });
       commitUnifiedState({ kind: "ready", streams });
+      for (const accountId of held) void holdUnifiedStream(accountId);
     },
-    [client, commitUnifiedState],
+    [client, commitUnifiedState, holdUnifiedStream],
   );
 
   /** Fetch the next page of exactly the streams that starve the horizon,
@@ -1865,6 +1954,7 @@ export function MailSurface({
     starved.forEach((stream, index) => {
       byAccount.set(stream.accountId, results[index]!);
     });
+    const held: string[] = [];
     commitUnifiedState({
       kind: "ready",
       streams: current.streams.map((stream) => {
@@ -1873,6 +1963,11 @@ export function MailSurface({
         if (result.status === "rejected") {
           // A stale cursor or an outage degrades this stream to a notice with
           // retry; its loaded rows keep merging and no longer hold a horizon.
+          // A cursor a sync outdated waits for its quiet re-read instead.
+          if (isSyncHold(result.reason)) {
+            held.push(stream.accountId);
+            return { ...stream, nextCursor: null, status: "loading" as const };
+          }
           return { ...stream, nextCursor: null, status: "error" as const };
         }
         const seen = new Set(stream.items.map(unifiedThreadKey));
@@ -1890,7 +1985,8 @@ export function MailSurface({
         };
       }),
     });
-  }, [client, commitUnifiedState]);
+    for (const accountId of held) void holdUnifiedStream(accountId);
+  }, [client, commitUnifiedState, holdUnifiedStream]);
 
   /**
    * The 60s tick in unified mode refreshes page-1 windows per account and
@@ -5633,6 +5729,28 @@ function isMutationUnsupported(error: unknown): boolean {
  */
 function isThreadStale(error: unknown): boolean {
   return error instanceof MailApiError && error.code === "mail_thread_stale";
+}
+
+/** The service's `mail_sync_in_progress` on a list read: a sync is moving the
+ *  account's cache, and the same account answers again a moment later. */
+function isSyncHold(error: unknown): boolean {
+  return error instanceof MailApiError && error.code === "mail_sync_in_progress";
+}
+
+/** Waits `ms`, or less if `signal` aborts first; the caller reads the signal
+ *  after. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timer);
+        resolve();
+      },
+      { once: true },
+    );
+  });
 }
 
 /**

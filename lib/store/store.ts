@@ -4161,7 +4161,7 @@ export class Store {
     // page with `kind: app` and no entry, which the canvas draws as the
     // missing-files state, rather than a page with an app's files and no sign
     // that it has them.
-    await this.setAppMeta(meta.id, app, "claude", input.src);
+    let withApp = await this.setAppMeta(meta.id, app, "claude", input.src);
     const owned: PageMeta[] = [];
     for (const child of input.owns ?? []) {
       owned.push(
@@ -4176,12 +4176,20 @@ export class Store {
     // The same map again, now that `owns` has ids to name. A title is a label
     // somebody may change and the write check has to mean the same page
     // tomorrow, so the list only exists once the children do.
-    const withApp = await this.setAppMeta(
-      meta.id,
-      appMetaSchema.parse({ ...app, owns: owned.map((child) => child.id) }),
-      "claude",
-      input.src,
-    );
+    //
+    // Two writes and not one because neither can move. A child's id is
+    // minted by the create that makes it, so the list cannot be written
+    // before the children, and the children cannot be made before the first
+    // map says `kind: app` (above). An app that owns nothing has its whole
+    // map in the first write already, and writes it once.
+    if (owned.length > 0) {
+      withApp = await this.setAppMeta(
+        meta.id,
+        appMetaSchema.parse({ ...app, owns: owned.map((child) => child.id) }),
+        "claude",
+        input.src,
+      );
+    }
     await this.writeAppFiles(meta.id, {
       entryHtml: input.entryHtml,
       assets: input.assets ?? [],

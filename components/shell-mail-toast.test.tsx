@@ -503,5 +503,61 @@ describe("shell toast channels, as mail uses them", () => {
       });
       expect(onExpire).not.toHaveBeenCalled();
     });
+
+    it("still fires when the window runs out after a refused press", async () => {
+      // The press spends the pill before the action runs. A refusal (the
+      // mail lock is held elsewhere) hands that back, so the pill goes on
+      // standing with its window and still owes `onExpire` when the window
+      // closes. Kept spent, the parked delete would never go out.
+      const onExpire = vi.fn();
+      const refuse = vi.fn(() => false as const);
+      await say("Draft discarded", discardReport(onExpire, refuse));
+      await act(async () => {
+        vi.advanceTimersByTime(4_000);
+      });
+      await act(async () => {
+        document.body.querySelector<HTMLButtonElement>(".brain-toast button")!.click();
+      });
+      expect(refuse).toHaveBeenCalledTimes(1);
+      expect(pills().join(" | ")).toContain("Undo");
+      expect(onExpire).not.toHaveBeenCalled();
+      await act(async () => {
+        vi.advanceTimersByTime(5_001);
+      });
+      expect(onExpire).toHaveBeenCalledTimes(1);
+      expect(pills().join(" | ")).not.toContain("Draft discarded");
+    });
+
+    it("still fires when the window runs out while the action is pending", async () => {
+      // A pending action hands the spend back until it settles. The window
+      // that runs out meanwhile takes the pill unspent and says so, and the
+      // late settle takes nothing down and owes nothing a second time.
+      const onExpire = vi.fn();
+      let settle: () => void = () => {};
+      const undo = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            settle = resolve;
+          }),
+      );
+      await say("Draft discarded", discardReport(onExpire, undo));
+      await act(async () => {
+        document.body.querySelector<HTMLButtonElement>(".brain-toast button")!.click();
+      });
+      expect(undo).toHaveBeenCalledTimes(1);
+      expect(pills().join(" | ")).toContain("Draft discarded");
+      expect(onExpire).not.toHaveBeenCalled();
+      await act(async () => {
+        vi.advanceTimersByTime(9_001);
+      });
+      expect(onExpire).toHaveBeenCalledTimes(1);
+      expect(pills().join(" | ")).not.toContain("Draft discarded");
+      await act(async () => {
+        settle();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+      expect(onExpire).toHaveBeenCalledTimes(1);
+    });
   });
 });

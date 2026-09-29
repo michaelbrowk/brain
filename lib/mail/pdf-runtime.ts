@@ -1,4 +1,9 @@
-import { getDocument, PDFWorker, type PDFDocumentProxy } from "pdfjs-dist";
+import {
+  getDocument,
+  PDFWorker,
+  VerbosityLevel,
+  type PDFDocumentProxy,
+} from "pdfjs-dist";
 
 /**
  * pdf.js for the attachment viewer. Nothing imports this module statically:
@@ -16,10 +21,19 @@ import { getDocument, PDFWorker, type PDFDocumentProxy } from "pdfjs-dist";
  *
  * The worker is a same-origin module worker the bundler emits from the
  * package's own file, so it runs under the app's CSP like any other script.
- * The document is opened with XFA off; pdf.js 6 no longer has an eval path to
- * switch off (`isEvalSupported` is gone), and the viewer draws pages to a
- * canvas only, with no annotation, form, link or text layer.
+ * The document is opened with the smallest surface pdf.js offers: no XFA, no
+ * WebAssembly decoders, no `FontFace` added to the page (glyphs are drawn as
+ * paths), an embedded image refused past `PDF_MAX_IMAGE_PIXELS`, and only
+ * errors in the console. pdf.js 6 no longer has an eval path to switch off
+ * (`isEvalSupported` is gone), and the viewer draws pages to a canvas only,
+ * with no annotation, form, link or text layer.
  */
+
+/** The largest image inside a PDF the parser will decode, in pixels: 2^26 is
+ *  an 8192 × 8192 scan, and an image a sender declares past it is skipped
+ *  rather than allocated. */
+export const PDF_MAX_IMAGE_PIXELS = 2 ** 26;
+
 export interface OpenedPdf {
   /** Settles with the parsed document, or rejects with pdf.js's own error
    *  (`PasswordException`, `InvalidPDFException`) or a worker that never
@@ -44,7 +58,15 @@ export function openPdf(data: Uint8Array): OpenedPdf {
       { once: true },
     );
   });
-  const task = getDocument({ data, worker, enableXfa: false });
+  const task = getDocument({
+    data,
+    worker,
+    enableXfa: false,
+    useWasm: false,
+    disableFontFace: true,
+    maxImageSize: PDF_MAX_IMAGE_PIXELS,
+    verbosity: VerbosityLevel.ERRORS,
+  });
   let destroyed: Promise<void> | null = null;
   return {
     document: Promise.race([task.promise, workerFailed]),

@@ -6214,11 +6214,22 @@ describe("MailSurface", () => {
     });
 
     it.each([
-      ["Archive", true, "Move to Inbox"],
-      ["Move to Inbox", false, "Archive"],
+      ["Archive", true, "Move to Inbox", ["Conversation archived"]],
+      [
+        "Move to Inbox",
+        false,
+        "Archive",
+        [
+          "Moved to Inbox",
+          expect.objectContaining({
+            actionLabel: "Undo",
+            durationMs: SMART_UNDO_MS,
+          }),
+        ],
+      ],
     ] as const)(
       "keeps the held letter in place when %s runs on it in All Mail",
-      async (label, startsInInbox, wayBack) => {
+      async (label, startsInInbox, wayBack, toast) => {
         // All Mail lists the letter either way, so the move in or out of the
         // Inbox takes the held path a star takes: under Unread first, the row
         // the reader opened stays where it was until the selection moves on.
@@ -6264,8 +6275,11 @@ describe("MailSurface", () => {
           readMailboxThread,
           updateThread,
         });
+        const onToast = vi.fn();
         await act(async () =>
-          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+          root.render(
+            <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+          ),
         );
         await settle();
         await enterSingleAccount();
@@ -6311,8 +6325,83 @@ describe("MailSurface", () => {
             (button) => button.textContent?.trim(),
           ),
         ).toContain(wayBack);
+        // The same sentence as the unheld path, Move to Inbox's Undo included.
+        expect(onToast).toHaveBeenLastCalledWith(...toast);
       },
     );
+
+    it("takes the held letter's row out of the Inbox when Archive runs on it there", async () => {
+      // In the Inbox, Archive moves the letter out of the folder on screen, so
+      // it is not held: the row leaves and the reader closes, unread first or
+      // not.
+      const unreadById = new Map([
+        [firstUnread.threadId, true],
+        [secondUnread.threadId, true],
+      ]);
+      const archived = new Set<string>();
+      const items = () =>
+        [firstUnread, secondUnread]
+          .filter((item) => !archived.has(item.threadId))
+          .map((item) => ({ ...item, unread: unreadById.get(item.threadId)! }));
+      const listThreads = vi.fn().mockImplementation((input) => {
+        let pageItems = items();
+        if (input.sort === "unread") {
+          pageItems = [...pageItems].sort(
+            (a, b) => Number(b.unread) - Number(a.unread),
+          );
+        }
+        return Promise.resolve({ ...threadPage, items: pageItems });
+      });
+      const readThread = vi.fn().mockImplementation(({ threadId }) =>
+        Promise.resolve({
+          ...detail,
+          thread: [firstUnread, secondUnread].find(
+            (item) => item.threadId === threadId,
+          )!,
+          messages: detail.messages.map((message) => ({ ...message, threadId })),
+        }),
+      );
+      const updateThread = vi.fn().mockImplementation(async (input) => {
+        if ("read" in input) unreadById.set(input.threadId, input.read !== true);
+        if ("archive" in input && input.archive) archived.add(input.threadId);
+      });
+      const client = makeClient({ listThreads, readThread, updateThread });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await act(async () => {
+        findButton("Sort: Date").dispatchEvent(
+          new PointerEvent("pointerdown", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+          }),
+        );
+      });
+      await settle();
+      await click(findMenuItem("Unread first"));
+      await click(findButton("First unread"));
+      await settle();
+      expect(updateThread).toHaveBeenLastCalledWith(
+        expect.objectContaining({ read: true }),
+      );
+
+      const reader = () =>
+        document.body.querySelector('section[aria-label="Message reader"]');
+      const archive = [...(reader()?.querySelectorAll("button") ?? [])].find(
+        (button) => button.textContent?.trim() === "Archive",
+      ) as HTMLButtonElement;
+      await click(archive);
+      await settle();
+
+      expect(updateThread).toHaveBeenLastCalledWith(
+        expect.objectContaining({ archive: true }),
+      );
+      expect(mailboxList().textContent).not.toContain("First unread");
+      expect(reader()?.textContent).toContain("Choose a message");
+    });
   });
 
   describe("keyboard layer", () => {

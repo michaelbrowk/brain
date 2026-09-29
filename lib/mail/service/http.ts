@@ -35,6 +35,11 @@ import {
   AtomicMailSystemAdmission,
   MailAdmissionError,
 } from "./admission";
+import {
+  MAIL_CHANGE_FEED_MAX_WAIT_MS,
+  MailChangeFeedBusyError,
+  type MailChangeFeed,
+} from "./change-feed-ring";
 import { MAIL_SERVICE_HTTP_LIMITS } from "./limits";
 import type { MailSyncPausePort } from "./sync-pause";
 import {
@@ -117,6 +122,7 @@ interface MailServiceHttpOptions {
   readonly content?: MailContentService;
   readonly syncPause?: MailSyncPausePort;
   readonly senders?: MailSenderScreenService;
+  readonly changes?: MailChangeFeed;
 }
 
 /**
@@ -199,6 +205,9 @@ export const MAIL_SERVICE_ERROR_CODES = Object.freeze({
     "mail_sender_decision_not_found",
     "mail_sender_decision_changed",
     "mail_senders_unavailable",
+    // Brain's change-feed loop is the one caller, and it backs off on it: a
+    // second loop, or a request of its own the service still holds.
+    "mail_changes_busy",
   ] as const),
   transport: Object.freeze([
     "headers_too_large",
@@ -280,6 +289,7 @@ export function createMailServiceHttpServer(
   const content = options.content;
   const syncPause = options.syncPause;
   const senders = options.senders;
+  const changes = options.changes;
   const build = validateBuildIdentity(options.build);
   const server = createServer(
     {
@@ -304,6 +314,7 @@ export function createMailServiceHttpServer(
         content,
         syncPause,
         senders,
+        changes,
       );
     },
   );
@@ -359,6 +370,7 @@ async function handleRequest(
   content: MailContentService | undefined,
   syncPause: MailSyncPausePort | undefined,
   senders: MailSenderScreenService | undefined,
+  changes: MailChangeFeed | undefined,
 ): Promise<void> {
   const requestStartedAt = Date.now();
   const deadlineAt =
@@ -422,6 +434,7 @@ async function handleRequest(
           messageContentPath ||
           attachmentPath ||
           url.pathname === "/v1/drafts" ||
+          url.pathname === "/v1/changes" ||
           draftReadPath ||
           remoteImagePath)) ||
       (method === "POST" && messageContentPath) ||
@@ -506,6 +519,37 @@ async function handleRequest(
           syncPause?.isPaused() ?? false,
         ),
       );
+      return;
+    }
+
+    if (url.pathname === "/v1/changes") {
+      if (method !== "GET") throw new MailHttpError(405, "method_not_allowed");
+      assertNoRequestBody(request);
+      if (changes === undefined) throw new MailHttpError(503, "mail_sync_unavailable");
+      const query = readChangesQuery(url);
+      // The one route that outlives the request deadline on purpose: it
+      // answers on the next change or at `wait`. A reader that hangs up
+      // gives its slot back at once instead of holding it to the timeout.
+      const controller = new AbortController();
+      const abortOnClose = () => {
+        if (!response.writableEnded) controller.abort();
+      };
+      response.once("close", abortOnClose);
+      try {
+        const answer = await changes.read({
+          ...query,
+          paused: () => syncPause?.isPaused() ?? false,
+          signal: controller.signal,
+        });
+        if (answer !== null) writeJson(response, 200, answer);
+      } catch (error) {
+        if (error instanceof MailChangeFeedBusyError) {
+          throw new MailHttpError(409, "mail_changes_busy");
+        }
+        throw error;
+      } finally {
+        response.off("close", abortOnClose);
+      }
       return;
     }
 
@@ -1585,6 +1629,34 @@ function readExactDraftAccountQuery(url: URL): string {
   } catch {
     throw new MailHttpError(400, "mail_draft_request_invalid");
   }
+}
+
+/** `cursor` is absent on a first read and a plain non-negative integer after
+ *  it; `wait` is how long a caught-up read may be held, absent meaning not at
+ *  all. Anything else, or either twice, is a request this route does not
+ *  understand. */
+function readChangesQuery(url: URL): {
+  readonly cursor: number | null;
+  readonly waitMs: number;
+} {
+  assertExactQuery(url.searchParams, [], ["cursor", "wait"]);
+  const rawCursor = url.searchParams.get("cursor");
+  const rawWait = url.searchParams.get("wait");
+  if (
+    (rawCursor !== null && !/^(?:0|[1-9][0-9]{0,15})$/.test(rawCursor)) ||
+    (rawWait !== null && !/^(?:0|[1-9][0-9]{0,4})$/.test(rawWait))
+  ) {
+    throw new MailHttpError(400, "mail_request_invalid");
+  }
+  const cursor = rawCursor === null ? null : Number(rawCursor);
+  const waitMs = rawWait === null ? 0 : Number(rawWait);
+  if (
+    (cursor !== null && !Number.isSafeInteger(cursor)) ||
+    waitMs > MAIL_CHANGE_FEED_MAX_WAIT_MS
+  ) {
+    throw new MailHttpError(400, "mail_request_invalid");
+  }
+  return Object.freeze({ cursor, waitMs });
 }
 
 function assertExactQuery(

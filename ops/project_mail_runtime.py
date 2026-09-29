@@ -66,6 +66,7 @@ REQUIRED_FILES = (
     Path("service/accounts.js"),
     Path("service/admission.js"),
     Path("service/background-sync.js"),
+    Path("service/change-feed-ring.js"),
     Path("service/content-blob-store.js"),
     Path("service/content-cache.js"),
     Path("service/content-coordinator.js"),

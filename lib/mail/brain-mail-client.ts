@@ -208,6 +208,7 @@ export const SAFE_SERVICE_ERROR_CODES = new Set([
   "mail_sender_decision_not_found",
   "mail_sender_decision_changed",
   "mail_senders_unavailable",
+  "mail_changes_busy",
 ]);
 
 export type MailTlsMode = "implicit" | "starttls";

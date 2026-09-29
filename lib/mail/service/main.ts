@@ -14,6 +14,7 @@ import {
 } from "./accounts";
 import { MailAccountError } from "./account-types";
 import { MailBackgroundSyncScheduler } from "./background-sync";
+import { MailChangeFeed } from "./change-feed-ring";
 import { MailContentCoordinator } from "./content-coordinator";
 import {
   createProductionMailContentSourceFactory,
@@ -71,6 +72,9 @@ async function main(): Promise<void> {
   });
   const store = new SqliteMailAccountStore(runtime);
   await store.initialize();
+  // What Brain long-polls to hear that mail changed. Memory only: a restart
+  // starts a new ring, and Brain's old cursor reads as a reset against it.
+  const changes = new MailChangeFeed();
   const dns = new CompleteSetMailDnsResolver();
   // One bounded read-only IMAP session factory serves metadata sync and raw
   // message fetches alike, so both paths share DNS and binding validation.
@@ -274,6 +278,7 @@ async function main(): Promise<void> {
     content,
     syncPause,
     ...(senderScreen ? { senders: senderScreen.screen } : {}),
+    changes,
   });
 
   await new Promise<void>((resolve, reject) => {

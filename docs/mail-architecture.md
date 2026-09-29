@@ -304,7 +304,7 @@ The service socket is not bound to TCP. Nginx and Cloudflare never expose it. A 
 
 PR2 fixes the service-shell limits below. The process fails closed unless systemd passes exactly one descriptor named `brain-mail` as file descriptor 3. It never binds a path, listens on TCP, or unlinks the socket.
 
-The immutable Brain release remains `root:brain` and is never made readable by the `brain-mail` identity. Immediately before service start, a root-owned helper resolves one immutable release and projects exactly 65 allowlisted compiled Mail files across four allowlisted directories into `/run/brain-mail-runtime/current`. The frozen release also carries generated third-party notices. The set includes twelve Gmail OAuth, API, sync, send, and content modules under `providers/gmail`, the custom-domain Inbox sync, thread-mutation, and raw-message content adapter under `providers/imap`, plus the provider-neutral message cache, background sync, the IMAP IDLE supervisor, durable outbox, dormant draft contracts, local search, content cache, bounded raster inspector, MIME client modules, the owner's sync pause, and the optional SMTP runtime bundle. ImapFlow, `ws`, and the SMTP transport are bundled into audited runtime artifacts, and `jose` is bundled into the Gmail OAuth module, so the isolated runtime does not read the application `node_modules` tree. That projection is `root:brain-mail-runtime`, directories are `0550`, files are `0440`, and the service has read-only membership in that dedicated group. The same group receives execute-only traversal on `/opt/brain` so the process can reach the separately root-owned Node runtime, but it cannot list the directory or traverse the `root:brain` release and notes directories. `/etc/brain` and `/opt/brain/notes` are also hidden from the Mail namespace. The main Brain unit remains unchanged until the staged `brain-mail-client` drop-in is deliberately installed through the operations gate.
+The immutable Brain release remains `root:brain` and is never made readable by the `brain-mail` identity. Immediately before service start, a root-owned helper resolves one immutable release and projects exactly 66 allowlisted compiled Mail files across four allowlisted directories into `/run/brain-mail-runtime/current`. The frozen release also carries generated third-party notices. The set includes twelve Gmail OAuth, API, sync, send, and content modules under `providers/gmail`, the custom-domain Inbox sync, thread-mutation, and raw-message content adapter under `providers/imap`, plus the provider-neutral message cache, background sync, the IMAP IDLE supervisor, the change feed Brain long-polls, durable outbox, dormant draft contracts, local search, content cache, bounded raster inspector, MIME client modules, the owner's sync pause, and the optional SMTP runtime bundle. ImapFlow, `ws`, and the SMTP transport are bundled into audited runtime artifacts, and `jose` is bundled into the Gmail OAuth module, so the isolated runtime does not read the application `node_modules` tree. That projection is `root:brain-mail-runtime`, directories are `0550`, files are `0440`, and the service has read-only membership in that dedicated group. The same group receives execute-only traversal on `/opt/brain` so the process can reach the separately root-owned Node runtime, but it cannot list the directory or traverse the `root:brain` release and notes directories. `/etc/brain` and `/opt/brain/notes` are also hidden from the Mail namespace. The main Brain unit remains unchanged until the staged `brain-mail-client` drop-in is deliberately installed through the operations gate.
 
 | Boundary | Limit |
 | --- | ---: |
@@ -366,6 +366,27 @@ answers the pair plus `mailService: "unreachable"`, and the Modules row says so
 in a sentence instead of reverting. Separately, every `/api/mail/*` route in
 Brain answers `409 { "error": "module_off", "module": "mail" }` while the switch
 is off, refused in `proxy.ts` before any handler builds a client.
+
+`GET /v1/changes?cursor=<n>&wait=<ms>` is how Brain hears that mail changed
+while the service still never dials out. The service keeps the last 256 change
+records in memory under a monotonic cursor
+([`change-feed-ring.ts`](../lib/mail/service/change-feed-ring.ts)), each
+`{ accountId, mailboxIds, kind }`: `sync` when a pass commits a new generation
+or changes threads, `mutation` when a thread action lands (the owner's, an
+agent's, or the new-senders screen's archive and restore) or a new-senders
+decision or switch changes what the lists show, and `content_ready`, with the
+`messageId`, when a body becomes ready. The answer is `{ apiVersion: 1, cursor,
+changes }`. A read without a cursor answers at once with the cursor to wait
+from. A caught-up read is held for `wait`, at most 25 seconds, and answers on
+the next record or empty with its own cursor. A cursor that has left the ring,
+or that this process never issued, answers `reset: true` rather than the part
+that is left; the cursor starts at a random point of a 2^48 range, so a cursor
+Brain kept across a service restart resets instead of matching a stranger's
+number. One read may be held at a time and a second is refused
+`409 mail_changes_busy`. While Mail is paused the route answers nothing: a held
+read waits out its time and gets its own cursor back, and the records gathered
+meanwhile are still there after the resume. A record names an account, its
+mailboxes and at most a message id, never a subject, an address or a body.
 
 An edit may omit the password to keep the saved secret; first setup may not.
 `DELETE` is local-only, removes only the selected account and its cache, and

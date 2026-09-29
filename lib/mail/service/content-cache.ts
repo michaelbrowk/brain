@@ -1200,8 +1200,10 @@ export class SqliteMailContentCache {
   /**
    * The next cohort message whose body the background should fetch: the
    * newest twenty first, newest to oldest, then the rest from the oldest up.
-   * A body the byte budget evicted is not fetched again while its message
-   * stays in the cohort, or the budget and the prefetch would take turns.
+   * A message whose current body is already here, or on its way, is not a
+   * candidate, whoever fetched it. A body the byte budget evicted is not
+   * fetched again while its message stays in the cohort, or the budget and
+   * the prefetch would take turns.
    */
   async findBackgroundContentCandidate(now: number): Promise<string | null> {
     const inspectedAt = validateTimestamp(now);
@@ -1211,7 +1213,6 @@ export class SqliteMailContentCache {
           `SELECT ranked.provider_message_id
              FROM (
                SELECT cohort.provider_message_id, cohort.source_generation,
-                      cohort.content_prefetch_started_at,
                       cohort.content_evicted_at, message.thread_id,
                       ROW_NUMBER() OVER (
                         ORDER BY message.sent_at DESC, message.message_id DESC
@@ -1230,7 +1231,6 @@ export class SqliteMailContentCache {
               AND content.provider_message_id = ranked.provider_message_id
             WHERE ranked.content_evicted_at IS NULL
               AND (
-                ranked.content_prefetch_started_at IS NULL OR
                 content.provider_message_id IS NULL OR
                 content.source_generation <> ranked.source_generation OR
                 content.source_thread_id <> ranked.thread_id OR

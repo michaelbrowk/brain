@@ -6735,19 +6735,45 @@ describe("MailSurface", () => {
         });
       });
 
+      const deepRows = Array.from({ length: 150 }, (_value, index) =>
+        unifiedThread({
+          accountId: accountA.accountId,
+          threadId: `A row ${String(index).padStart(3, "0")}`,
+          lastMessageAt: 1_700_000_900_000 - index * 1_000,
+          unread: false,
+        }),
+      );
+
+      /** A letter the stream never saw, filed by the new snapshot among rows
+       *  it did see: only the walk's middle page carries it, so a walk that
+       *  kept only its last page loses it. */
+      const arrivedDeep = unifiedThread({
+        accountId: accountA.accountId,
+        threadId: "A arrived deep",
+        lastMessageAt: 1_700_000_900_000 - 75_500,
+      });
+
+      const secondSnapshot: Readonly<
+        Record<string, MailThreadPage | Promise<MailThreadPage>>
+      > = {
+        "s2-page-2": pageOf(
+          [...deepRows.slice(50, 76), arrivedDeep, ...deepRows.slice(76, 100)],
+          "s2-page-3",
+        ),
+        "s2-page-3": pageOf(deepRows.slice(100, 150)),
+      };
+
       /** A stream two pages deep whose third page a sync (or an outage) held.
        *  The re-read hands back page one of the new snapshot and its cursor,
        *  and the stream's hundred rows stay. Keeping the lost cursor's null
-       *  stopped the account paging until a reload. */
-      function deepStreamClient(third: () => Error) {
-        const rows = Array.from({ length: 150 }, (_value, index) =>
-          unifiedThread({
-            accountId: accountA.accountId,
-            threadId: `A row ${String(index).padStart(3, "0")}`,
-            lastMessageAt: 1_700_000_900_000 - index * 1_000,
-            unread: false,
-          }),
-        );
+       *  stopped the account paging until a reload. `pages` is the new
+       *  snapshot past its first page, by cursor. */
+      function deepStreamClient(
+        third: () => Error,
+        pages: Readonly<
+          Record<string, MailThreadPage | Promise<MailThreadPage>>
+        > = secondSnapshot,
+      ) {
         let snapshot = 1;
         let failed = false;
         const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) => {
@@ -6764,26 +6790,21 @@ describe("MailSurface", () => {
           }
           if (!cursor) {
             return Promise.resolve(
-              pageOf(rows.slice(0, 50), `s${snapshot}-page-2`),
+              pageOf(deepRows.slice(0, 50), `s${snapshot}-page-2`),
             );
           }
           if (cursor === "s1-page-2") {
-            return Promise.resolve(pageOf(rows.slice(50, 100), "s1-page-3"));
+            return Promise.resolve(pageOf(deepRows.slice(50, 100), "s1-page-3"));
           }
           if (cursor === "s1-page-3" && !failed) {
             failed = true;
             snapshot = 2;
             return Promise.reject(third());
           }
-          if (cursor === "s2-page-2") {
-            return Promise.resolve(pageOf(rows.slice(50, 100), "s2-page-3"));
-          }
-          if (cursor === "s2-page-3") {
-            return Promise.resolve(pageOf(rows.slice(100, 150)));
-          }
+          if (cursor in pages) return Promise.resolve(pages[cursor]!);
           return Promise.reject(new Error(`unexpected cursor ${cursor}`));
         });
-        return { listThreads, rows };
+        return { listThreads };
       }
 
       function cursorsAsked(listThreads: ReturnType<typeof vi.fn>): string[] {
@@ -6819,6 +6840,8 @@ describe("MailSurface", () => {
           "s2-page-2",
           "s2-page-3",
         ]);
+        // Every page the walk crossed counts, not only the one it ended on.
+        expect(document.body.textContent).toContain("A arrived deep");
         // The account ran out, so nothing is left to ask for.
         expect(() => findButton("Load more")).toThrow();
       });
@@ -6849,6 +6872,7 @@ describe("MailSurface", () => {
           "s2-page-2",
           "s2-page-3",
         ]);
+        expect(document.body.textContent).toContain("A arrived deep");
         expect(() => findButton("Load more")).toThrow();
       });
 
@@ -6923,6 +6947,10 @@ describe("MailSurface", () => {
           "s2-page-2",
           "s2-page-3",
         ]);
+        await until(
+          () => document.body.textContent?.includes("A arrived deep") ?? false,
+          "every page the walk crossed lands",
+        );
       });
 
       it("scrolls on past its loaded rows after Try again heals a deep page", async () => {
@@ -6955,6 +6983,10 @@ describe("MailSurface", () => {
           "s2-page-2",
           "s2-page-3",
         ]);
+        await until(
+          () => document.body.textContent?.includes("A arrived deep") ?? false,
+          "every page the walk crossed lands",
+        );
       });
     });
 

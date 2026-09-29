@@ -428,6 +428,29 @@ test("the reader decides for everyone at a domain and gives Reply back after", a
   await expect(page.getByText("Accepted aalto.example")).toBeVisible();
 });
 
+test("b blocks the letter j moved the reader to, not the row pressed before it", async ({
+  page,
+}) => {
+  await login(page);
+  const world = await install(page);
+  await page.goto("/mail");
+
+  // A press leaves the focus on the row it pressed; j moves the reader only.
+  await waitingGroup(page).getByText("Flat in Lisbon, 12 to 19 October").click();
+  const reader = page.locator('section[aria-label="Message reader"]');
+  await expect(reader.getByRole("heading", { name: "Flat in Lisbon, 12 to 19 October" })).toBeVisible();
+  await page.keyboard.press("j");
+  await expect(reader.getByRole("heading", { name: "Kiln share, spring places" })).toBeVisible();
+  await page.keyboard.press("b");
+  await expect.poll(() => world.posted.length).toBe(1);
+  expect(world.posted[0]).toEqual({
+    address: "mia@aalto.example",
+    scope: "address",
+    decision: "block",
+  });
+  await expect(waitingGroup(page).getByText("Lena Okafor")).toBeVisible();
+});
+
 test("@mobile a swipe right accepts and a swipe left blocks", async ({ page }) => {
   await login(page);
   const world = await install(page);

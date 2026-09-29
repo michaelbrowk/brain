@@ -65,8 +65,7 @@ export function readMailSyncCadenceConfig(input: {
     input.gmailIntervalMs === undefined
       ? Math.min(DEFAULT_GMAIL_INTERVAL_MS, intervalMs)
       : parseInterval(input.gmailIntervalMs);
-  // Gmail backs off to the fallback, so a slower Gmail cadence would turn
-  // the backoff into a speed-up.
+  // The fallback is the slowest any account syncs, Gmail included.
   if (gmailIntervalMs > intervalMs) {
     throw new Error("mail sync cadence configuration is invalid");
   }

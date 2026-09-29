@@ -430,15 +430,16 @@ no account ever has two passes in flight. Its variables live in
 | `BRAIN_MAIL_IMAP_IDLE` | 1 | IMAP IDLE on each custom-domain Inbox; `0` turns it off. |
 
 A Gmail pass is one `history.list` call against the stored history id, so three
-accounts at 20 s make nine calls a minute against a quota of 250 units a
-second. After three passes in a row that found nothing, a Gmail account rests
-at the fallback interval; the first pass that brings a change, or a refresh
-from the Mail surface, puts it back on 20 s. Both values are whole
-milliseconds between 5000 and 3600000, and the Gmail one may not be slower
-than the fallback. Anything else stops the service at startup with
-`mail_service_start_failed`, because a service that guessed would poll a
-provider at a rate nobody chose. The IDLE switch is `0` or `1` for the same
-reason.
+accounts at 20 s make 540 calls an hour against a quota of 250 units a second,
+however quiet the mailbox. That cadence is the whole of it: opening messages,
+downloading bodies for the cache, building the search index and the
+new-senders screen bring the loop round far more often, and none of them asks
+the provider. Only a due cadence, IMAP IDLE (below) or a provider page that
+said there is more does. Both values are whole milliseconds between 5000 and
+3600000, and the Gmail one may not be slower than the fallback. Anything else
+stops the service at startup with `mail_service_start_failed`, because a
+service that guessed would poll a provider at a rate nobody chose. The IDLE
+switch is `0` or `1` for the same reason.
 
 A custom-domain account keeps the 60 s poll and, with IDLE on, holds one more
 connection open to its server: INBOX examined read-only, and a new letter,

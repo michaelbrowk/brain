@@ -1232,66 +1232,6 @@ describe("PATCH /v1/sync", () => {
   });
 });
 
-describe("POST /v1/sync as a demand", () => {
-  it("tells the scheduler which account the owner asked for", async () => {
-    const onSyncDemand = vi.fn();
-    const socketPath = await startServer(
-      messageServiceFixture(),
-      sendServiceFixture(),
-      undefined,
-      undefined,
-      onSyncDemand,
-    );
-    const answer = await requestJson(
-      socketPath,
-      "POST",
-      "/v1/sync",
-      JSON.stringify({ accountId: ACCOUNT_ID, maxItems: 5 }),
-    );
-    expect(answer.status).toBe(200);
-    expect(onSyncDemand).toHaveBeenCalledExactlyOnceWith(ACCOUNT_ID);
-  });
-
-  it("says nothing for a trigger it refused", async () => {
-    const onSyncDemand = vi.fn();
-    const paused = await startServer(
-      messageServiceFixture(),
-      sendServiceFixture(),
-      undefined,
-      { isPaused: () => true, setPaused: vi.fn() },
-      onSyncDemand,
-    );
-    expect(
-      (
-        await requestJson(
-          paused,
-          "POST",
-          "/v1/sync",
-          JSON.stringify({ accountId: ACCOUNT_ID, maxItems: 5 }),
-        )
-      ).status,
-    ).toBe(409);
-    const running = await startServer(
-      messageServiceFixture(),
-      sendServiceFixture(),
-      undefined,
-      undefined,
-      onSyncDemand,
-    );
-    expect(
-      (
-        await requestJson(
-          running,
-          "POST",
-          "/v1/sync",
-          JSON.stringify({ accountId: ACCOUNT_ID, maxItems: 21 }),
-        )
-      ).status,
-    ).toBe(400);
-    expect(onSyncDemand).not.toHaveBeenCalled();
-  });
-});
-
 function messageServiceFixture(): MailMessageService & Record<string, ReturnType<typeof vi.fn>> {
   const thread = threadFixture();
   return {
@@ -1529,7 +1469,6 @@ async function startServer(
   send?: MailSendService,
   accounts?: Parameters<typeof createMailServiceHttpServer>[0]["accounts"],
   syncPause?: Parameters<typeof createMailServiceHttpServer>[0]["syncPause"],
-  onSyncDemand?: Parameters<typeof createMailServiceHttpServer>[0]["onSyncDemand"],
 ): Promise<string> {
   const root = await mkdtemp(path.join(tmpdir(), "brain-mail-http-messages-"));
   const socketPath = path.join(root, "mail.sock");
@@ -1539,7 +1478,6 @@ async function startServer(
     send,
     accounts,
     syncPause,
-    onSyncDemand,
   });
   running.push({ server, root });
   await new Promise<void>((resolve, reject) => {

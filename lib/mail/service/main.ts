@@ -274,7 +274,6 @@ async function main(): Promise<void> {
     content,
     syncPause,
     ...(senderScreen ? { senders: senderScreen.screen } : {}),
-    onSyncDemand: (accountId) => backgroundSync.noteDemand(accountId),
   });
 
   await new Promise<void>((resolve, reject) => {

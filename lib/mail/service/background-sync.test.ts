@@ -47,49 +47,62 @@ describe("Mail background sync scheduler", () => {
 
   it("fast-forwards a kicked pass and coalesces kicks during a running pass", async () => {
     vi.useFakeTimers();
-    let calls = 0;
+    let visits = 0;
+    let providerCalls = 0;
     let blockNext = false;
     let release: (() => void) | undefined;
     const scheduler = new MailBackgroundSyncScheduler(
       {
         listAccountIds: async () => [accountA],
         runBackgroundSyncStep: async () => {
-          calls += 1;
-          if (blockNext) {
-            blockNext = false;
-            await new Promise<void>((resolve) => {
-              release = resolve;
-            });
-          }
+          providerCalls += 1;
           return syncResult(false);
         },
       },
-      { initialDelayMs: 10, intervalMs: 60_000, continuationDelayMs: 25 },
+      {
+        initialDelayMs: 10,
+        intervalMs: 60_000,
+        continuationDelayMs: 25,
+        privacyCache: {
+          async runBackgroundPrefetchStep() {
+            visits += 1;
+            if (blockNext) {
+              blockNext = false;
+              await new Promise<void>((resolve) => {
+                release = resolve;
+              });
+            }
+            return { hasMore: false };
+          },
+        },
+      },
     );
 
     scheduler.kick();
     await vi.advanceTimersByTimeAsync(0);
-    expect(calls).toBe(0);
+    expect(visits).toBe(0);
 
     scheduler.start();
     await vi.advanceTimersByTimeAsync(10);
-    expect(calls).toBe(1);
+    expect(visits).toBe(1);
 
     scheduler.kick();
     await vi.advanceTimersByTimeAsync(0);
-    expect(calls).toBe(2);
+    expect(visits).toBe(2);
 
     blockNext = true;
     scheduler.kick();
     await vi.advanceTimersByTimeAsync(0);
-    expect(calls).toBe(3);
+    expect(visits).toBe(3);
     scheduler.kick();
     release?.();
     await vi.runAllTicks();
     await vi.advanceTimersByTimeAsync(24);
-    expect(calls).toBe(3);
+    expect(visits).toBe(3);
     await vi.advanceTimersByTimeAsync(1);
-    expect(calls).toBe(4);
+    expect(visits).toBe(4);
+    // Four visits for the cache, one call to the provider: kicks never ask it.
+    expect(providerCalls).toBe(1);
     await scheduler.stop();
   });
 
@@ -230,18 +243,20 @@ describe("Mail background sync scheduler", () => {
 
     scheduler.start();
     await vi.advanceTimersByTimeAsync(10);
-    expect(providerCalls).toBe(6);
+    // Six cache visits in the burst, and the provider only on the first:
+    // its sync was due once and said there was nothing more.
+    expect(providerCalls).toBe(1);
     expect(privacyCalls).toBe(6);
     await vi.advanceTimersByTimeAsync(24);
-    expect(providerCalls).toBe(6);
     expect(privacyCalls).toBe(6);
     await vi.advanceTimersByTimeAsync(1);
-    expect(providerCalls).toBe(7);
+    expect(providerCalls).toBe(1);
     expect(privacyCalls).toBe(7);
-    await vi.advanceTimersByTimeAsync(999);
-    expect(providerCalls).toBe(7);
+    // The next provider call is one interval after the last one.
+    await vi.advanceTimersByTimeAsync(974);
+    expect(providerCalls).toBe(1);
     await vi.advanceTimersByTimeAsync(1);
-    expect(providerCalls).toBe(8);
+    expect(providerCalls).toBe(2);
     await scheduler.stop();
   });
 
@@ -274,10 +289,11 @@ describe("Mail background sync scheduler", () => {
 
     scheduler.start();
     await vi.advanceTimersByTimeAsync(10);
-    // The index keeps the account queued, so the burst runs it three times
-    // and then the account rests for an interval like any finished one.
+    // The index keeps the account queued, so the burst visits it three times
+    // and then the account rests for an interval like any finished one. The
+    // provider is asked on the first visit only.
     expect(indexCalls).toBe(3);
-    expect(providerCalls).toBe(3);
+    expect(providerCalls).toBe(1);
     await vi.advanceTimersByTimeAsync(500);
     expect(indexCalls).toBe(3);
     await scheduler.stop();
@@ -356,14 +372,20 @@ describe("Mail background sync scheduler", () => {
     scheduler.start();
     await vi.advanceTimersByTimeAsync(10);
     // The first sync succeeds and the backfill asks for more, so the burst
-    // runs the account again; that sync fails, and the senders step still
-    // runs, told that nothing reached the provider.
+    // visits the account again. That visit does not ask the provider, whose
+    // sync is not due, and the senders step is told so.
     expect(senderSteps).toEqual([
       { accountId: accountA, syncSucceeded: true },
       { accountId: accountA, syncSucceeded: false },
     ]);
+    expect(providerCalls).toBe(1);
     await vi.advanceTimersByTimeAsync(1_000);
-    // A sync the cache refused for backoff did not reach the provider either.
+    // A sync that failed did not reach the provider healthy.
+    expect(providerCalls).toBe(2);
+    expect(senderSteps.at(-1)).toEqual({ accountId: accountA, syncSucceeded: false });
+    await vi.advanceTimersByTimeAsync(1_000);
+    // Nor did one the cache refused for backoff.
+    expect(providerCalls).toBe(3);
     expect(senderSteps.at(-1)).toEqual({ accountId: accountA, syncSucceeded: false });
     await scheduler.stop();
   });
@@ -726,42 +748,39 @@ describe("per-provider sync cadence", () => {
     await scheduler.stop();
   });
 
-  it("backs a quiet Gmail account off to the fallback after three empty passes and returns on the first change", async () => {
+  it("keeps a quiet Gmail account on its cadence, so a letter is found within one interval", async () => {
     vi.useFakeTimers({ now: 0 });
-    const calls: number[] = [];
+    const letters = [300_000, 720_000, 1_380_000, 1_860_000, 2_820_000, 3_300_000];
+    const latencies: number[] = [];
     const scheduler = new MailBackgroundSyncScheduler(
       {
         listAccountIds: async () => [accountA],
         listSyncAccounts: async () => [{ accountId: accountA, providerKind: "gmail" }],
         runBackgroundSyncStep: async () => {
-          calls.push(Date.now());
-          // The fifth pass brings a letter; every other one finds nothing.
-          return calls.length === 5 ? changed() : syncResult(false);
+          const at = letters[0];
+          if (at !== undefined && at <= Date.now()) {
+            letters.shift();
+            latencies.push(Date.now() - at);
+            return changed();
+          }
+          return syncResult(false);
         },
       },
       { initialDelayMs: 10, intervalMs: 60_000, gmailIntervalMs: 20_000 },
     );
 
     scheduler.start();
-    await vi.advanceTimersByTimeAsync(200_010);
-    expect(calls).toEqual([
-      10,
-      20_010,
-      40_010,
-      // Three empty passes in a row: the account rests for the fallback.
-      100_010,
-      160_010,
-      // The fifth pass saw a change, so the next one is back on 20 s.
-      180_010,
-      200_010,
-    ]);
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    // An hour of nothing between letters does not slow the account down.
+    expect(latencies).toHaveLength(6);
+    expect(Math.max(...latencies)).toBeLessThanOrEqual(20_000);
     await scheduler.stop();
   });
 
-  it("counts a pass once, however many continuation visits the cache takes", async () => {
+  it("never calls the provider for the cache's continuation visits", async () => {
     vi.useFakeTimers({ now: 0 });
     const calls: number[] = [];
-    let prefetches = 0;
+    let indexSteps = 0;
     const scheduler = new MailBackgroundSyncScheduler(
       {
         listAccountIds: async () => [accountA],
@@ -776,11 +795,48 @@ describe("per-provider sync cadence", () => {
         intervalMs: 60_000,
         gmailIntervalMs: 20_000,
         continuationDelayMs: 25,
+        searchIndex: {
+          async runBackgroundSearchIndexStep() {
+            indexSteps += 1;
+            return { hasMore: indexSteps < 4_000 };
+          },
+        },
+      },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(60_010);
+    // The index took thousands of visits; the provider was asked on its
+    // cadence and no more.
+    expect(indexSteps).toBeGreaterThan(1_000);
+    expect(calls).toEqual([10, 20_010, 40_010, 60_010]);
+    await scheduler.stop();
+  });
+
+  it("fast-forwards a kick through the cache steps without calling the provider", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const calls: string[] = [];
+    const prefetches: string[] = [];
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA, accountB],
+        listSyncAccounts: async () => [
+          { accountId: accountA, providerKind: "gmail" },
+          { accountId: accountB, providerKind: "imap" },
+        ],
+        runBackgroundSyncStep: async (accountId) => {
+          calls.push(accountId);
+          return syncResult(false);
+        },
+      },
+      {
+        initialDelayMs: 10,
+        intervalMs: 60_000,
+        gmailIntervalMs: 20_000,
         privacyCache: {
-          async runBackgroundPrefetchStep() {
-            prefetches += 1;
-            // Bodies to fetch after a new letter: four more visits.
-            return { hasMore: prefetches < 5 };
+          async runBackgroundPrefetchStep(accountId) {
+            prefetches.push(accountId);
+            return { hasMore: false };
           },
         },
       },
@@ -788,52 +844,26 @@ describe("per-provider sync cadence", () => {
 
     scheduler.start();
     await vi.advanceTimersByTimeAsync(10);
-    expect(calls).toEqual([10, 10, 10, 10, 10]);
-    // One pass that found nothing, not five: the account stays on 20 s.
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect(calls.at(-1)).toBe(20_010);
+    expect(calls).toEqual([accountA, accountB]);
+    await vi.advanceTimersByTimeAsync(5_000);
+    scheduler.kick();
+    await vi.advanceTimersByTimeAsync(0);
+    // Both accounts' cache steps ran at once; neither provider was asked.
+    expect(prefetches).toEqual([accountA, accountB, accountA, accountB]);
+    expect(calls).toEqual([accountA, accountB]);
+    // And the cadence is where it was: Gmail at 20 010, not 5 010 + 20 000.
+    await vi.advanceTimersByTimeAsync(15_000);
+    expect(calls).toEqual([accountA, accountB, accountA]);
     await scheduler.stop();
   });
 
-  it("brings a backed-off Gmail account back to its cadence on an on-demand sync", async () => {
-    vi.useFakeTimers({ now: 0 });
-    const calls: number[] = [];
-    const scheduler = new MailBackgroundSyncScheduler(
-      {
-        listAccountIds: async () => [accountA, accountB],
-        listSyncAccounts: async () => [
-          { accountId: accountA, providerKind: "gmail" },
-          { accountId: accountB, providerKind: "gmail" },
-        ],
-        runBackgroundSyncStep: async (accountId) => {
-          if (accountId === accountA) calls.push(Date.now());
-          return syncResult(false);
-        },
-      },
-      { initialDelayMs: 10, intervalMs: 60_000, gmailIntervalMs: 20_000 },
-    );
-
-    scheduler.start();
-    await vi.advanceTimersByTimeAsync(50_000);
-    expect(calls).toEqual([10, 20_010, 40_010]);
-    // The owner asked for this account: the demand resets the backoff, and
-    // the next pass is one Gmail interval from now instead of at 100 010.
-    scheduler.noteDemand(accountA);
-    await vi.advanceTimersByTimeAsync(19_999);
-    expect(calls).toHaveLength(3);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(calls).toEqual([10, 20_010, 40_010, 70_000]);
-    await vi.advanceTimersByTimeAsync(20_000);
-    expect(calls).toEqual([10, 20_010, 40_010, 70_000, 90_000]);
-    await scheduler.stop();
-  });
-
-  it("never exceeds one pass per account per cadence window, however often it is asked", async () => {
+  it("holds one provider call per account per cadence window through hours of opens and a 200-body drain", async () => {
     vi.useFakeTimers({ now: 0 });
     const gmail = [accountA, accountB, accountC];
     const imap = "account-a44444444444444444444444444444444";
     const calls: Array<{ accountId: string; at: number }> = [];
-    const scheduler = new MailBackgroundSyncScheduler(
+    const bodies = new Map<string, number>();
+    const scheduler: MailBackgroundSyncScheduler = new MailBackgroundSyncScheduler(
       {
         listAccountIds: async () => [...gmail, imap],
         listSyncAccounts: async () => [
@@ -842,30 +872,61 @@ describe("per-provider sync cadence", () => {
         ],
         runBackgroundSyncStep: async (accountId) => {
           calls.push({ accountId, at: Date.now() });
+          await new Promise((resolve) => setTimeout(resolve, 200));
           return changed();
         },
       },
-      { initialDelayMs: 10, intervalMs: 60_000, gmailIntervalMs: 20_000 },
+      {
+        initialDelayMs: 10,
+        intervalMs: 60_000,
+        gmailIntervalMs: 20_000,
+        privacyCache: {
+          // From ten minutes in, two accounts each fetch a 200-body cohort,
+          // one body a visit, and every committed body kicks the scheduler,
+          // as the content coordinator does.
+          async runBackgroundPrefetchStep(accountId) {
+            if (Date.now() < 600_000 || (accountId !== imap && accountId !== accountA)) {
+              return { hasMore: false };
+            }
+            const done = bodies.get(accountId) ?? 0;
+            if (done >= 200) return { hasMore: false };
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            bodies.set(accountId, done + 1);
+            scheduler.kick();
+            return { hasMore: true };
+          },
+        },
+      },
     );
 
     scheduler.start();
-    for (let second = 0; second < 600; second += 1) {
-      // An owner hammering the refresh on every account, every second.
-      for (const accountId of [...gmail, imap]) scheduler.noteDemand(accountId);
-      await vi.advanceTimersByTimeAsync(1_000);
+    // Two hours of reading: a message opened every 15 s, which kicks once
+    // for the demand and once more when its body is committed.
+    for (let t = 0; t < 2 * 3_600_000; t += 15_000) {
+      await vi.advanceTimersByTimeAsync(5_000);
+      scheduler.kick();
+      await vi.advanceTimersByTimeAsync(1_500);
+      scheduler.kick();
+      await vi.advanceTimersByTimeAsync(8_500);
     }
+    expect(bodies.get(imap)).toBe(200);
+    expect(bodies.get(accountA)).toBe(200);
     for (const accountId of gmail) {
       const times = timesOf(calls, accountId);
-      expect(times.length).toBeGreaterThanOrEqual(29);
       expect(Math.min(...gaps(times))).toBeGreaterThanOrEqual(20_000);
+      // 180 an hour is the cadence; the 200 ms a call takes is the slack.
+      expect(times.length).toBeLessThanOrEqual(361);
+      expect(times.length).toBeGreaterThanOrEqual(340);
     }
     const imapTimes = timesOf(calls, imap);
-    expect(imapTimes.length).toBeGreaterThanOrEqual(9);
     expect(Math.min(...gaps(imapTimes))).toBeGreaterThanOrEqual(60_000);
-    await scheduler.stop();
+    expect(imapTimes.length).toBeLessThanOrEqual(121);
+    const stopping = scheduler.stop();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await stopping;
   });
 
-  it("refuses a Gmail cadence slower than the fallback it backs off to", () => {
+  it("refuses a Gmail cadence slower than the fallback", () => {
     expect(
       () =>
         new MailBackgroundSyncScheduler(
@@ -1017,15 +1078,64 @@ describe("IMAP IDLE in the scheduler", () => {
     await vi.advanceTimersByTimeAsync(1_000);
     expect(calls).toBe(2);
     release?.();
-    await vi.advanceTimersByTimeAsync(24);
+    // Fifty requests during the pass are one pass after it, five seconds
+    // after the IDLE pass before it.
+    await vi.advanceTimersByTimeAsync(3_999);
     expect(calls).toBe(2);
-    // Fifty requests during the pass are one pass after it.
     await vi.advanceTimersByTimeAsync(1);
     expect(calls).toBe(3);
-    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(10_000);
     expect(calls).toBe(3);
     expect(most).toBe(1);
     await scheduler.stop();
+  });
+
+  it("holds IDLE-requested passes five seconds apart and folds the hints between into one", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const calls: number[] = [];
+    let echo = false;
+    const scheduler: MailBackgroundSyncScheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA],
+        listSyncAccounts: async () => [{ accountId: accountA, providerKind: "imap" }],
+        runBackgroundSyncStep: async () => {
+          calls.push(Date.now());
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          // A server that reports an update the moment IDLE starts again.
+          if (echo) setTimeout(() => scheduler.requestSync(accountA), 20);
+          return syncResult(false);
+        },
+      },
+      { initialDelayMs: 10, intervalMs: 60_000, idle: idlePort() },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(calls).toEqual([10]);
+    scheduler.requestSync(accountA);
+    await vi.advanceTimersByTimeAsync(1_000);
+    for (const at of [21_000, 22_000, 24_000]) {
+      await vi.advanceTimersByTimeAsync(at - Date.now());
+      scheduler.requestSync(accountA);
+    }
+    await vi.advanceTimersByTimeAsync(31_000 - Date.now());
+    scheduler.requestSync(accountA);
+    await vi.advanceTimersByTimeAsync(0);
+    // One pass for the first hint, one at the end of its window for the
+    // three inside it, and the next hint after the window at once.
+    expect(calls).toEqual([10, 20_000, 25_000, 31_000]);
+
+    echo = true;
+    const before = calls.length;
+    await vi.advanceTimersByTimeAsync(60_000);
+    // A pass every five seconds at most, however eager the server.
+    expect(calls.length - before).toBeGreaterThanOrEqual(11);
+    expect(calls.length - before).toBeLessThanOrEqual(13);
+    expect(Math.min(...gaps(calls.slice(1)))).toBeGreaterThanOrEqual(5_000);
+    // The step in flight waits on a fake timer, so the stop is advanced too.
+    const stopping = scheduler.stop();
+    await vi.advanceTimersByTimeAsync(1_000);
+    await stopping;
   });
 
   it("stops IDLE with the scheduler, ignores it while stopped, and starts it again", async () => {

@@ -9,8 +9,12 @@ export const DEFAULT_GMAIL_INTERVAL_MS = 20_000;
 const DEFAULT_CONTINUATION_DELAY_MS = 250;
 const DEFAULT_MAX_ITEMS = 5;
 const MAX_PROVIDER_PAGES_PER_BURST = 6;
-/** Empty Gmail passes in a row before the account rests for the fallback. */
-const EMPTY_PASSES_BEFORE_BACKOFF = 3;
+/**
+ * The least time between two passes IDLE asks for on one account. A server
+ * that reports an update every time IDLE starts would otherwise cost a login
+ * a second; hints inside the window fold into the one pass at its end.
+ */
+const IDLE_PASS_FLOOR_MS = 5_000;
 const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
 
 export type MailBackgroundSyncProvider = "gmail" | "imap";
@@ -79,14 +83,16 @@ export interface MailBackgroundIdlePort {
  * prevents the remaining accounts from syncing, and a slow pass cannot overlap
  * the next one. Provider-specific backoff stays inside the sync service.
  *
- * Each account keeps its own due time. A Gmail account is due every
- * `gmailIntervalMs`, because `history.list` against a stored history id is one
- * cheap call, and after three empty passes in a row it rests for the fallback
- * interval until a pass brings a change or the owner asks for the account.
- * Every other account is due every `intervalMs`. The scheduler is one loop, so
- * no account ever has two passes in flight, and a timer pass takes only the
- * accounts that are due. An IMAP account holding IDLE keeps that poll as its
- * recovery, and IDLE's requests for a pass go through the same loop.
+ * The provider is asked only when an account's sync is due: on its cadence,
+ * which is `gmailIntervalMs` for Gmail (one `history.list` against a stored
+ * history id) and `intervalMs` for everything else; when IDLE asks, at most
+ * once every `IDLE_PASS_FLOOR_MS`; or because the previous page said there is
+ * more. Everything else that brings the scheduler round (a kick from the
+ * content cache, a continuation for the privacy cache, the search index or
+ * the senders screen) runs the cache steps and leaves the provider alone, so
+ * an owner reading mail and a cohort of bodies downloading cost the provider
+ * nothing beyond the cadence. The scheduler is one loop, so no account ever
+ * has two passes in flight.
  */
 export class MailBackgroundSyncScheduler {
   private readonly port: MailBackgroundSyncPort;
@@ -100,16 +106,15 @@ export class MailBackgroundSyncScheduler {
   private readonly senders: MailBackgroundSenderPort | null;
   private readonly idle: MailBackgroundIdlePort | null;
   private readonly accountQueue: string[] = [];
-  private readonly nextEligibleAt = new Map<string, number>();
-  private readonly syncBackoffUntil = new Map<string, number>();
+  /** When each account's provider sync is next due; absent means now. */
+  private readonly syncDueAt = new Map<string, number>();
+  /** Accounts whose last sync page said there is more to fetch. */
+  private readonly syncPending = new Set<string>();
+  /** Accounts whose due time IDLE brought forward and that have not synced since. */
+  private readonly idleRequested = new Set<string>();
+  /** When IDLE last had a pass of each account, for the floor. */
+  private readonly lastIdlePassAt = new Map<string, number>();
   private readonly providers = new Map<string, MailBackgroundSyncProvider | null>();
-  private readonly emptyPasses = new Map<string, number>();
-  /**
-   * Accounts whose current pass has seen a change so far. A pass is every
-   * visit from the one that was due to the one that rests, however many
-   * continuation visits the cache steps add, and it is counted once.
-   */
-  private readonly passChanged = new Set<string>();
   /** Accounts IDLE asked for while a pass was in flight. */
   private readonly requested = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
@@ -117,6 +122,8 @@ export class MailBackgroundSyncScheduler {
   private controller: AbortController | null = null;
   private inFlight: Promise<void> | null = null;
   private started = false;
+  /** The next pass visits every account for its cache steps. */
+  private visitAll = false;
   private kickRequested = false;
 
   constructor(
@@ -138,8 +145,7 @@ export class MailBackgroundSyncScheduler {
       options.initialDelayMs ?? DEFAULT_INITIAL_DELAY_MS,
     );
     this.intervalMs = validateDelay(options.intervalMs ?? DEFAULT_INTERVAL_MS);
-    // Gmail backs off to the fallback, so a Gmail cadence slower than the
-    // fallback would turn the backoff into a speed-up.
+    // The fallback is the slowest any account syncs, Gmail included.
     this.gmailIntervalMs = validateDelay(
       options.gmailIntervalMs ??
         Math.min(DEFAULT_GMAIL_INTERVAL_MS, this.intervalMs),
@@ -192,18 +198,20 @@ export class MailBackgroundSyncScheduler {
     await this.inFlight?.catch(() => undefined);
     await this.idle?.stop();
     this.accountQueue.length = 0;
-    this.nextEligibleAt.clear();
-    this.syncBackoffUntil.clear();
+    this.syncDueAt.clear();
+    this.syncPending.clear();
+    this.idleRequested.clear();
+    this.lastIdlePassAt.clear();
     this.providers.clear();
-    this.emptyPasses.clear();
-    this.passChanged.clear();
     this.requested.clear();
+    this.visitAll = false;
   }
 
   /**
-   * IDLE saw INBOX change (or restarted): one pass of this account now, or
-   * right after the pass in flight. Requests during a pass coalesce into that
-   * one follow-up, so an update storm is still one pass at a time.
+   * IDLE saw INBOX change (or restarted): the account's sync is due now, or
+   * at the end of the floor after IDLE's last pass, whichever is later. A
+   * request during a pass is applied when that pass settles, so the pass that
+   * was already reading the account cannot swallow it.
    */
   requestSync(accountId: string): void {
     if (!this.started) return;
@@ -211,40 +219,24 @@ export class MailBackgroundSyncScheduler {
       this.requested.add(accountId);
       return;
     }
-    this.nextEligibleAt.delete(accountId);
-    void this.runNow();
+    const dueAt = this.bringSyncForward(accountId);
+    this.schedule(Math.max(0, dueAt - Date.now()));
   }
 
   /**
    * Coalesced fast-forward for freshly observed work (an owner content demand
-   * or a new ready commit): runs a pass over every account now, or schedules
-   * one continuation right after the pass that is already in flight.
+   * or a new ready commit): the cache steps of every account run now, or right
+   * after the pass that is already in flight. No provider is asked on its
+   * account: that waits for the account's own due time.
    */
   kick(): void {
     if (!this.started) return;
+    this.visitAll = true;
     if (this.inFlight !== null) {
       this.kickRequested = true;
       return;
     }
-    this.nextEligibleAt.clear();
     void this.runNow();
-  }
-
-  /**
-   * The owner asked for this account (`POST /v1/sync`, which syncs it on its
-   * own). That ends a Gmail backoff: the account is due one Gmail interval
-   * from now at the latest. It never brings a pass sooner than that, so a
-   * refresh held down cannot run an account faster than its cadence.
-   */
-  noteDemand(accountId: string): void {
-    if (!this.started) return;
-    this.emptyPasses.delete(accountId);
-    const dueAt = Date.now() + this.cadenceOf(accountId);
-    const current = this.nextEligibleAt.get(accountId);
-    if (current !== undefined && current > dueAt) {
-      this.nextEligibleAt.set(accountId, dueAt);
-    }
-    if (this.inFlight === null) this.schedule(this.delayUntilNextDue());
   }
 
   runNow(): Promise<void> {
@@ -263,16 +255,12 @@ export class MailBackgroundSyncScheduler {
         if (this.inFlight === task) this.inFlight = null;
         if (this.kickRequested) {
           this.kickRequested = false;
-          this.nextEligibleAt.clear();
           hasContinuation = true;
         }
-        if (this.requested.size > 0) {
-          for (const accountId of this.requested) {
-            this.nextEligibleAt.delete(accountId);
-          }
-          this.requested.clear();
-          hasContinuation = true;
+        for (const accountId of this.requested) {
+          this.bringSyncForward(accountId);
         }
+        this.requested.clear();
         if (this.started) {
           this.schedule(
             hasContinuation
@@ -302,16 +290,36 @@ export class MailBackgroundSyncScheduler {
   }
 
   private delayUntilNextDue(): number {
-    if (this.nextEligibleAt.size === 0) return this.intervalMs;
-    const earliest = Math.min(...this.nextEligibleAt.values());
-    return Math.max(this.continuationDelayMs, earliest - Date.now());
+    if (this.providers.size === 0) return this.intervalMs;
+    const now = Date.now();
+    let earliest = Number.POSITIVE_INFINITY;
+    for (const accountId of this.providers.keys()) {
+      earliest = Math.min(earliest, this.syncDueAt.get(accountId) ?? now);
+    }
+    return Math.max(this.continuationDelayMs, earliest - now);
   }
 
   private cadenceOf(accountId: string): number {
-    return this.providers.get(accountId) === "gmail" &&
-      (this.emptyPasses.get(accountId) ?? 0) < EMPTY_PASSES_BEFORE_BACKOFF
+    return this.providers.get(accountId) === "gmail"
       ? this.gmailIntervalMs
       : this.intervalMs;
+  }
+
+  private isSyncDue(accountId: string, now: number): boolean {
+    return (this.syncDueAt.get(accountId) ?? 0) <= now;
+  }
+
+  /** Makes the account's sync due for IDLE; answers when it now is. */
+  private bringSyncForward(accountId: string): number {
+    const now = Date.now();
+    const floorAt =
+      (this.lastIdlePassAt.get(accountId) ?? Number.NEGATIVE_INFINITY) +
+      IDLE_PASS_FLOOR_MS;
+    const dueAt = Math.max(now, floorAt);
+    const current = this.syncDueAt.get(accountId) ?? now;
+    if (current > dueAt) this.syncDueAt.set(accountId, dueAt);
+    this.idleRequested.add(accountId);
+    return Math.min(current, dueAt);
   }
 
   private async listAccounts(): Promise<
@@ -330,11 +338,12 @@ export class MailBackgroundSyncScheduler {
 
   private async runPass(signal: AbortSignal): Promise<boolean> {
     let accounts: Awaited<ReturnType<MailBackgroundSyncScheduler["listAccounts"]>>;
+    const visitAll = this.visitAll;
+    this.visitAll = false;
     try {
       accounts = await this.listAccounts();
     } catch {
       this.accountQueue.length = 0;
-      this.nextEligibleAt.clear();
       return false;
     }
     if (signal.aborted) return false;
@@ -349,22 +358,19 @@ export class MailBackgroundSyncScheduler {
     );
     const queued = new Set(retained);
     const now = Date.now();
-    // Only the accounts that are due: a Gmail account on its 20 s cadence
-    // must not drag every other account along with it.
+    // The accounts whose sync is due, or every account after a kick: a Gmail
+    // account on its 20 s cadence must not drag the others along with it.
     for (const accountId of accountIds) {
-      if (
-        !queued.has(accountId) &&
-        (this.nextEligibleAt.get(accountId) ?? 0) <= now
-      ) {
+      if (!queued.has(accountId) && (visitAll || this.isSyncDue(accountId, now))) {
         retained.push(accountId);
       }
     }
     this.accountQueue.splice(0, this.accountQueue.length, ...retained);
     for (const state of [
-      this.nextEligibleAt,
-      this.syncBackoffUntil,
-      this.emptyPasses,
-      this.passChanged,
+      this.syncDueAt,
+      this.syncPending,
+      this.idleRequested,
+      this.lastIdlePassAt,
     ]) {
       for (const accountId of state.keys()) {
         if (!active.has(accountId)) state.delete(accountId);
@@ -386,13 +392,17 @@ export class MailBackgroundSyncScheduler {
       const accountId = this.accountQueue.shift();
       if (accountId === undefined) return false;
       pages += 1;
-      // The privacy cache runs on every page, whatever the provider said.
-      // A provider that is failing or has pages to spare must not starve
-      // it: a failure rests the provider for one interval while the cache
+      // The cache steps run on every visit, whatever the provider said; the
+      // provider only when its sync is due or its last page had more. A
+      // failure rests the provider for one fallback interval while the cache
       // keeps draining, and a busy provider interleaves with it.
       let syncHasMore = false;
       let syncSucceeded = false;
-      if ((this.syncBackoffUntil.get(accountId) ?? 0) <= Date.now()) {
+      if (this.syncPending.has(accountId) || this.isSyncDue(accountId, Date.now())) {
+        if (this.idleRequested.delete(accountId)) {
+          this.lastIdlePassAt.set(accountId, Date.now());
+        }
+        let failed = false;
         try {
           const step = validateBackgroundSyncStep(
             await this.port.runBackgroundSyncStep(
@@ -404,24 +414,28 @@ export class MailBackgroundSyncScheduler {
           syncHasMore = step.hasMore;
           syncSucceeded =
             step.result.status === "idle" || step.result.status === "syncing";
-          // A new generation still being written counts as a change even on
-          // a page that happened to carry no thread.
-          if (step.result.changedCount > 0 || step.result.status === "syncing") {
-            this.passChanged.add(accountId);
-          }
         } catch {
           if (signal.aborted) return false;
-          this.syncBackoffUntil.set(accountId, Date.now() + this.intervalMs);
+          failed = true;
+        }
+        if (syncHasMore) {
+          this.syncPending.add(accountId);
+        } else {
+          this.syncPending.delete(accountId);
+          this.syncDueAt.set(
+            accountId,
+            Date.now() + (failed ? this.intervalMs : this.cadenceOf(accountId)),
+          );
+        }
+        if (signal.aborted) return false;
+        // Straight after the sync rather than after the cache steps below, so
+        // IDLE is back on INBOX while the bodies download. A failed sync gets
+        // here too, which keeps IDLE's own backoff moving on the poll.
+        if (!syncHasMore && this.providers.get(accountId) === "imap") {
+          this.idle?.afterSync(accountId);
         }
       }
       if (signal.aborted) return false;
-      // Straight after the sync rather than after the cache steps below, so
-      // IDLE is back on INBOX while the bodies download. An account whose
-      // provider is resting still gets here, which keeps IDLE's own backoff
-      // moving without a timer of its own.
-      if (!syncHasMore && this.providers.get(accountId) === "imap") {
-        this.idle?.afterSync(accountId);
-      }
       let privacyHasMore = false;
       if (this.privacyCache !== null) {
         try {
@@ -470,31 +484,10 @@ export class MailBackgroundSyncScheduler {
       if (signal.aborted) return false;
       if (syncHasMore || privacyHasMore || indexHasMore || sendersHasMore) {
         this.accountQueue.push(accountId);
-      } else {
-        this.recordPassOutcome(accountId);
-        this.nextEligibleAt.set(accountId, Date.now() + this.cadenceOf(accountId));
       }
     }
     const hasContinuation = !signal.aborted && this.accountQueue.length > 0;
     return hasContinuation;
-  }
-
-  /**
-   * One finished pass. A pass whose sync failed, or rested for a provider
-   * backoff, saw no change either, so it counts toward the Gmail backoff.
-   */
-  private recordPassOutcome(accountId: string): void {
-    if (this.passChanged.delete(accountId)) {
-      this.emptyPasses.delete(accountId);
-      return;
-    }
-    this.emptyPasses.set(
-      accountId,
-      Math.min(
-        EMPTY_PASSES_BEFORE_BACKOFF,
-        (this.emptyPasses.get(accountId) ?? 0) + 1,
-      ),
-    );
   }
 }
 

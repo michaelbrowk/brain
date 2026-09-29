@@ -117,8 +117,6 @@ interface MailServiceHttpOptions {
   readonly content?: MailContentService;
   readonly syncPause?: MailSyncPausePort;
   readonly senders?: MailSenderScreenService;
-  /** An admitted `POST /v1/sync`: the owner asked for this account. */
-  readonly onSyncDemand?: (accountId: string) => void;
 }
 
 /**
@@ -282,7 +280,6 @@ export function createMailServiceHttpServer(
   const content = options.content;
   const syncPause = options.syncPause;
   const senders = options.senders;
-  const onSyncDemand = options.onSyncDemand;
   const build = validateBuildIdentity(options.build);
   const server = createServer(
     {
@@ -307,7 +304,6 @@ export function createMailServiceHttpServer(
         content,
         syncPause,
         senders,
-        onSyncDemand,
       );
     },
   );
@@ -363,7 +359,6 @@ async function handleRequest(
   content: MailContentService | undefined,
   syncPause: MailSyncPausePort | undefined,
   senders: MailSenderScreenService | undefined,
-  onSyncDemand: ((accountId: string) => void) | undefined,
 ): Promise<void> {
   const requestStartedAt = Date.now();
   const deadlineAt =
@@ -733,9 +728,6 @@ async function handleRequest(
       if (syncPause?.isPaused()) throw new MailHttpError(409, "sync_paused");
       const service = requireMessageService(messages);
       const input = validateMailSyncInput(await readJsonBody(request, deadlineAt));
-      // Before the sync, so a Gmail account in backoff is back on its own
-      // cadence even when this one fails.
-      onSyncDemand?.(input.accountId);
       writeJson(
         response,
         200,

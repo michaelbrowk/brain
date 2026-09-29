@@ -73,8 +73,7 @@ describe("mail sync cadence", () => {
       { syncIntervalMs: "3600001" },
       { gmailIntervalMs: "1e4" },
       { gmailIntervalMs: "20000.5" },
-      // A Gmail cadence slower than the fallback would make the backoff a
-      // speed-up.
+      // The fallback is the slowest any account syncs, Gmail included.
       { syncIntervalMs: "30000", gmailIntervalMs: "40000" },
       { imapIdle: "" },
       { imapIdle: "true" },

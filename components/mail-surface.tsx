@@ -7,7 +7,8 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { AnimatePresence } from "framer-motion";
+import { flushSync } from "react-dom";
+import { AnimatePresence, useReducedMotion } from "framer-motion";
 import { isEditableEventTarget } from "@/lib/editable-target";
 import { PROJECT_URL } from "@/lib/project";
 import {
@@ -75,17 +76,37 @@ import {
   UNIFIED_PAGE_SIZE,
   unifiedThreadKey,
   visibleUnifiedItems,
+  waitsOn,
   type UnifiedExpandKey,
   type UnifiedExpandState,
   type UnifiedState,
   type UnifiedStickyOpen,
   type UnifiedStream,
 } from "./mail-unified";
-import { MailUnifiedList } from "./mail-unified-list";
+import { MailUnifiedList, NewSendersSection } from "./mail-unified-list";
+import {
+  applyShownDecisions,
+  senderDomain,
+  senderName,
+  splitNewSenders,
+  waitingAtDomain,
+  type SenderScope,
+  type SenderVerdict,
+  type ShownSenderDecision,
+} from "./mail-new-senders";
+import type { SenderDecide } from "./mail-new-sender-row";
+import {
+  flipElements,
+  flipRowKey,
+  ghostFlip,
+  playFlip,
+  snapshotFlip,
+} from "./mail-flip";
 import { Button } from "./ui/button";
 import { ConfirmDialog } from "./ui/confirm-dialog";
 import { Skeleton, type ToastOptions } from "./ui/primitives";
 import type {
+  MailSenderScreenState,
   MailThreadMutationInput,
   MailThreadPage,
   MailThreadSort,
@@ -347,6 +368,19 @@ type SectionDoneRun = {
   readonly settled: Promise<void>;
 };
 
+/**
+ * One New senders decision the column is showing. It is laid over the lists
+ * the moment it is made (`applyShownDecisions`), keeps the service's id once
+ * the POST answers so the toast's Undo can name it, and holds the threads it
+ * took so an Undo of a Block can put back rows a refresh has since dropped.
+ * Taking it off the list is the whole of an Undo or a rollback on screen.
+ */
+type SenderDecisionEntry = ShownSenderDecision & {
+  readonly token: number;
+  readonly decisionId: string | null;
+  readonly taken: readonly MailThreadListItem[];
+};
+
 /** "1 thread" / "9 threads" — the toast counts out loud, so it has to agree. */
 function threadWord(count: number): string {
   return count === 1 ? "1 thread" : `${count} threads`;
@@ -465,6 +499,27 @@ export function MailSurface({
   const selectedThreadAccountIdRef = useRef<string | null>(null);
   const stickyOpenRef = useRef<UnifiedStickyOpen | null>(null);
   const singleHoldRef = useRef(false);
+  /** New senders: the switch's state as the service last said it (null when
+   *  it could not be read, which offers no domain decision anywhere), the
+   *  decisions the column is showing, and the scope the reader's switch holds
+   *  for the letter it has open. */
+  const [senderScreen, setSenderScreen] = useState<MailSenderScreenState | null>(null);
+  const senderScreenRef = useRef<MailSenderScreenState | null>(null);
+  const [senderDecisions, setSenderDecisions] = useState<readonly SenderDecisionEntry[]>([]);
+  const senderDecisionsRef = useRef<readonly SenderDecisionEntry[]>([]);
+  const senderTokenRef = useRef(0);
+  const [readerScope, setReaderScope] = useState<{
+    readonly key: string;
+    readonly scope: SenderScope;
+  } | null>(null);
+  const readerScopeRef = useRef<{ readonly key: string; readonly scope: SenderScope } | null>(
+    null,
+  );
+  const reduceMotion = useReducedMotion();
+  const reduceMotionRef = useRef(reduceMotion);
+  useEffect(() => {
+    reduceMotionRef.current = reduceMotion;
+  }, [reduceMotion]);
 
   const commitThreadState = useCallback((next: MailThreadListState) => {
     threadStateRef.current = next;
@@ -2661,6 +2716,31 @@ export function MailSurface({
    *  The cleanup ends that, so nothing is marked once Mail is gone. */
   useEffect(() => markMailCentreRead(), []);
 
+  /** THE NEW-SENDERS SWITCH, READ ONCE THERE IS MAIL. Only its refused
+   *  domains matter here: the section itself comes from the lists, which say
+   *  per thread whether it waits. A screen that cannot be read offers no
+   *  domain decision anywhere and nothing else changes, like the palette's
+   *  answer to the same 503. */
+  const senderScreenWanted =
+    accountsState.kind === "ready" && accountsState.accounts.length > 0;
+  useEffect(() => {
+    if (!senderScreenWanted) return;
+    const controller = new AbortController();
+    client.getSenderScreenState(controller.signal).then(
+      (state) => {
+        if (controller.signal.aborted) return;
+        senderScreenRef.current = state;
+        setSenderScreen(state);
+      },
+      () => {
+        if (controller.signal.aborted) return;
+        senderScreenRef.current = null;
+        setSenderScreen(null);
+      },
+    );
+    return () => controller.abort();
+  }, [client, senderScreenWanted]);
+
   /** THE THREAD SOMETHING OUTSIDE MAIL ASKED FOR (spec §7, D6).
    *
    *  An `agent-action` row about a thread is pressed on whatever surface the
@@ -3756,6 +3836,377 @@ export function MailSurface({
     [commitUnifiedState],
   );
 
+  /** The column's rows as the service last listed them, before any shown
+   *  decision is laid over them. */
+  const rawListItems = useCallback((): readonly MailThreadListItem[] => {
+    if (selectedAccountIdRef.current === UNIFIED_ACCOUNT_ID) {
+      const state = unifiedStateRef.current;
+      return state.kind === "ready" ? mergedDisplayItems(state.streams).items : [];
+    }
+    const state = threadStateRef.current;
+    return state.kind === "ready" ? state.page.items : [];
+  }, []);
+
+  /** "Everyone at <domain>" is offered only where the service will take it:
+   *  never for the big mail providers or the owner's own domains, and nowhere
+   *  while the screen's state could not be read. */
+  const domainScopeOf = useCallback((domain: string) => {
+    const screen = senderScreenRef.current;
+    return screen !== null && domain !== "" && !screen.domainScopeRefused.includes(domain);
+  }, []);
+
+  /** Close the reader when the letter it holds is one a Block takes away. */
+  const closeReaderOn = useCallback(
+    (items: readonly MailThreadListItem[]) => {
+      const openThread = selectedThreadIdRef.current;
+      const openAccount = selectedThreadAccountIdRef.current;
+      if (
+        openThread === null ||
+        !items.some(
+          (item) => item.threadId === openThread && item.accountId === openAccount,
+        )
+      ) {
+        return;
+      }
+      selectedThreadIdRef.current = null;
+      selectedThreadAccountIdRef.current = null;
+      setSelectedThreadId(null);
+      setReaderState({ kind: "idle" });
+      clearStickyOpen();
+    },
+    [clearStickyOpen],
+  );
+
+  /**
+   * Shows a new set of decisions, and moves the column to it.
+   *
+   * The change is committed synchronously (`flushSync`) between two
+   * measurements of the column, so what moved can be played back from where
+   * it stood (`mail-flip.ts`): rows that changed sections travel, rows that
+   * leave go as ghosts, rows that return come in from the side they left by.
+   * When nothing will be left waiting, the New senders header leaves with the
+   * last row instead of blinking out under it. `alongside` rides the same
+   * commit, for the reader or a stream that has to change with the column.
+   */
+  const showSenderDecisions = useCallback(
+    (
+      next: readonly SenderDecisionEntry[],
+      motion: {
+        readonly travel?: ReadonlySet<string>;
+        readonly leave?: ReadonlySet<string>;
+        readonly enter?: ReadonlySet<string>;
+        readonly leaveMode?: "left" | "fade";
+        readonly dragged?: { readonly key: string; readonly x: number };
+      } = {},
+      alongside?: () => void,
+    ) => {
+      const root = document.querySelector<HTMLElement>(".brain-mail-list");
+      const reduce = reduceMotionRef.current === true;
+      const before = root ? new Map(snapshotFlip(root)) : null;
+      if (before && motion.dragged) {
+        const from = before.get(motion.dragged.key);
+        if (from) {
+          before.set(motion.dragged.key, {
+            left: from.left + motion.dragged.x,
+            top: from.top,
+          });
+        }
+      }
+      const leaving =
+        root && motion.leave && motion.leave.size > 0
+          ? flipElements(root, motion.leave)
+          : [];
+      const stillWaiting = applyShownDecisions(rawListItems(), next).some(
+        (item) => waitsOn(item) !== null,
+      );
+      const header =
+        root && !stillWaiting
+          ? root.querySelector<HTMLElement>(
+              '[data-flip="section:new-senders"] > .brain-mail-section-head',
+            )
+          : null;
+      const letGo = root
+        ? ghostFlip(
+            root,
+            header ? [...leaving, header] : leaving,
+            motion.leaveMode ?? "left",
+            reduce,
+          )
+        : null;
+      flushSync(() => {
+        senderDecisionsRef.current = next;
+        setSenderDecisions(next);
+        alongside?.();
+      });
+      letGo?.();
+      if (root && before) {
+        playFlip(root, before, {
+          travel: motion.travel,
+          arrive: motion.travel,
+          enter: motion.enter,
+          reduce,
+        });
+      }
+    },
+    [rawListItems],
+  );
+
+  /**
+   * The toast's Undo. The rows come back at the press, the way they left,
+   * and the DELETE follows. A decision the service no longer has
+   * (`mail_sender_decision_not_found`) is one already undone, and one a later
+   * decision replaced (`mail_sender_decision_changed`) is the later toast's to
+   * speak for, so neither says anything. Any other failure means the decision
+   * still stands, and the column shows it again and says so.
+   */
+  const undoSenderDecision = useCallback(
+    async (token: number): Promise<void> => {
+      const entry = senderDecisionsRef.current.find((each) => each.token === token);
+      if (!entry || entry.decisionId === null) return;
+      const keys = new Set(entry.taken.map(flipRowKey));
+      showSenderDecisions(
+        senderDecisionsRef.current.filter((each) => each.token !== token),
+        entry.verdict === "accept" ? { travel: keys } : { enter: keys },
+        entry.verdict === "block" ? () => putBackUnifiedThreads(entry.taken) : undefined,
+      );
+      try {
+        await client.undoSenderDecision({ decisionId: entry.decisionId });
+      } catch (error) {
+        if (
+          error instanceof MailApiError &&
+          (error.code === "mail_sender_decision_not_found" ||
+            error.code === "mail_sender_decision_changed")
+        ) {
+          return;
+        }
+        showSenderDecisions(
+          [...senderDecisionsRef.current, entry],
+          entry.verdict === "accept"
+            ? { travel: keys }
+            : { leave: keys, leaveMode: "left" },
+          entry.verdict === "block" ? () => closeReaderOn(entry.taken) : undefined,
+        );
+        onToast?.("Couldn’t undo. Try again.", { urgent: true });
+        return;
+      }
+      if (entry.verdict !== "block") return;
+      // The service moved back what the block archived, which can be more
+      // than the column held. A quiet read brings the rest in.
+      const accountId = selectedAccountIdRef.current;
+      if (accountId === UNIFIED_ACCOUNT_ID) {
+        void refreshUnifiedSilently(new AbortController().signal);
+      } else if (accountId !== null) {
+        void refreshThreadsSilently(
+          accountId,
+          selectedMailboxIdRef.current,
+          new AbortController().signal,
+        );
+      }
+    },
+    [
+      client,
+      closeReaderOn,
+      onToast,
+      putBackUnifiedThreads,
+      refreshThreadsSilently,
+      refreshUnifiedSilently,
+      showSenderDecisions,
+    ],
+  );
+
+  /**
+   * Accept or Block, from a row, the reader, the row menu, a swipe or a key.
+   *
+   * The decision names the sender by the thread's first From
+   * (`newSenderFrom`), never by `participants` or a Reply-To. It shows at once
+   * and for every row it covers: an Accept sends them to their sections, a
+   * Block takes them out of the column (and closes the letter if it is the
+   * one open). The POST follows; a refusal takes the decision back off the
+   * column and says so at once, and an answer brings the toast with its
+   * Undo. The service recomputes `newSender` only on the next list read, so
+   * until then the shown decision is what keeps the rows where the reader
+   * put them.
+   */
+  const decideSender: SenderDecide = useCallback(
+    (thread, verdict, scope, options) => {
+      const from = waitsOn(thread);
+      if (from === null) return;
+      const address = from.address.toLowerCase();
+      const key = scope === "domain" ? senderDomain(address) : address;
+      if (scope === "domain" && !domainScopeOf(key)) return;
+      const covered = (item: MailThreadListItem) => {
+        const sender = waitsOn(item);
+        if (sender === null) return false;
+        const other = sender.address.toLowerCase();
+        return scope === "domain" ? senderDomain(other) === key : other === key;
+      };
+      const taken = applyShownDecisions(rawListItems(), senderDecisionsRef.current).filter(
+        covered,
+      );
+      if (
+        !taken.some(
+          (item) => item.accountId === thread.accountId && item.threadId === thread.threadId,
+        )
+      ) {
+        taken.push(thread);
+      }
+      const entry: SenderDecisionEntry = {
+        token: ++senderTokenRef.current,
+        scope,
+        key,
+        verdict,
+        archived: new Set(),
+        decisionId: null,
+        taken,
+      };
+      const keys = new Set(taken.map(flipRowKey));
+      const dragged =
+        options?.dragged !== undefined && options.dragged !== 0
+          ? { key: flipRowKey(thread), x: options.dragged }
+          : undefined;
+      showSenderDecisions(
+        [...senderDecisionsRef.current, entry],
+        verdict === "accept"
+          ? { travel: keys, leaveMode: "fade", dragged }
+          : { leave: keys, leaveMode: "left", dragged },
+        verdict === "block" ? () => closeReaderOn(taken) : undefined,
+      );
+      const name = scope === "domain" ? key : senderName(from);
+      const senders = new Set(
+        taken.map((item) => waitsOn(item)?.address.toLowerCase() ?? ""),
+      ).size;
+      void (async () => {
+        let decided: { readonly decisionId: string; readonly archived: ReadonlySet<string> };
+        try {
+          const result = await client.decideSender({
+            address: from.address,
+            scope,
+            decision: verdict,
+          });
+          decided = {
+            decisionId: result.decisionId,
+            archived: new Set(result.archived.map(unifiedThreadKey)),
+          };
+        } catch (error) {
+          const current = senderDecisionsRef.current;
+          if (current.some((each) => each.token === entry.token)) {
+            showSenderDecisions(
+              current.filter((each) => each.token !== entry.token),
+              verdict === "accept" ? { travel: keys } : { enter: keys },
+            );
+          }
+          onToast?.(senderDecisionFailure(error, verdict, name), { urgent: true });
+          return;
+        }
+        const current = senderDecisionsRef.current;
+        if (current.some((each) => each.token === entry.token)) {
+          // A block can archive more than the column was showing under New
+          // senders; any of those still on screen leave the same way.
+          const more = new Set(
+            applyShownDecisions(rawListItems(), current)
+              .filter((item) => decided.archived.has(unifiedThreadKey(item)))
+              .map(flipRowKey),
+          );
+          showSenderDecisions(
+            current.map((each) =>
+              each.token === entry.token
+                ? { ...each, decisionId: decided.decisionId, archived: decided.archived }
+                : each,
+            ),
+            { leave: more, leaveMode: "left" },
+          );
+        }
+        onToast?.(verdict === "accept" ? `Accepted ${name}` : `Blocked ${name}`, {
+          icon:
+            scope === "domain"
+              ? "users-group-rounded-linear"
+              : verdict === "accept"
+                ? "user-check-rounded-linear"
+                : "user-block-rounded-linear",
+          subtitle:
+            verdict === "block"
+              ? "Next letters go to Blocked too."
+              : scope === "domain" && senders > 1
+                ? `${senders} senders in. Next ones come straight in.`
+                : "In People. Next ones come straight in.",
+          actionLabel: "Undo",
+          pendingLabel: "Undoing…",
+          durationMs: SMART_UNDO_MS,
+          id: `mail-sender:${entry.token}`,
+          onAction: () => undoSenderDecision(entry.token),
+        });
+      })();
+    },
+    [
+      client,
+      closeReaderOn,
+      domainScopeOf,
+      onToast,
+      rawListItems,
+      showSenderDecisions,
+      undoSenderDecision,
+    ],
+  );
+
+  /** The open letter while it still waits, with the reach its switch holds
+   *  (the address unless the domain is both chosen and allowed). */
+  const openLetterTarget = useCallback((): {
+    readonly thread: MailThreadListItem;
+    readonly scope: SenderScope;
+  } | null => {
+    const reader = readerStateRef.current;
+    if (reader.kind !== "ready") return null;
+    const [open] = applyShownDecisions([reader.detail.thread], senderDecisionsRef.current);
+    const from = open ? waitsOn(open) : null;
+    if (!open || from === null) return null;
+    const held = readerScopeRef.current;
+    const scope =
+      held?.key === flipRowKey(open) &&
+      held.scope === "domain" &&
+      domainScopeOf(senderDomain(from.address))
+        ? "domain"
+        : "address";
+    return { thread: open, scope };
+  }, [domainScopeOf]);
+
+  /** What A and B act on: the New senders row that holds the keyboard focus,
+   *  else the open letter while it still waits, with the reach its switch
+   *  holds. Null when neither is a first letter. */
+  const waitingTargetForKey = useCallback((): {
+    readonly thread: MailThreadListItem;
+    readonly scope: SenderScope;
+  } | null => {
+    const decisions = senderDecisionsRef.current;
+    const active = document.activeElement;
+    const row =
+      active instanceof HTMLElement ? active.closest<HTMLElement>("[data-waiting]") : null;
+    if (row) {
+      const found = applyShownDecisions(rawListItems(), decisions).find(
+        (item) => flipRowKey(item) === row.dataset.waiting && waitsOn(item) !== null,
+      );
+      if (found) return { thread: found, scope: "address" };
+    }
+    return openLetterTarget();
+  }, [openLetterTarget, rawListItems]);
+
+  /** The reader's two controls for a first letter: the reach its switch
+   *  holds for the letter now open, and the decision made with that reach. */
+  const holdReaderScope = useCallback((scope: SenderScope) => {
+    const reader = readerStateRef.current;
+    if (reader.kind !== "ready") return;
+    const held = { key: flipRowKey(reader.detail.thread), scope };
+    readerScopeRef.current = held;
+    setReaderScope(held);
+  }, []);
+
+  const decideOpenLetter = useCallback(
+    (verdict: SenderVerdict) => {
+      const target = openLetterTarget();
+      if (target !== null) decideSender(target.thread, verdict, target.scope);
+    },
+    [decideSender, openLetterTarget],
+  );
+
   /**
    * Undo of one Done: everything it moved comes back to the inbox, everything
    * it marked read goes back to unread, and everything the loop had not
@@ -4492,7 +4943,10 @@ export function MailSurface({
               : [];
           items = visibleUnifiedItems(
             deriveUnifiedSections(
-              mergedDisplayItems(state.streams).items,
+              applyShownDecisions(
+                mergedDisplayItems(state.streams).items,
+                senderDecisionsRef.current,
+              ),
               accountsForSections,
               stickyOpenRef.current,
             ),
@@ -4501,7 +4955,18 @@ export function MailSurface({
         } else {
           const state = threadStateRef.current;
           if (state.kind !== "ready") return;
-          items = state.page.items;
+          const shown = applyShownDecisions(state.page.items, senderDecisionsRef.current);
+          // A plain Inbox draws New senders first, so it walks them first.
+          if (
+            selectedMailboxIdRef.current === "inbox" &&
+            selectedViewRef.current === null &&
+            searchQueryRef.current.trim() === ""
+          ) {
+            const { waiting, rest } = splitNewSenders(shown);
+            items = [...waiting, ...rest];
+          } else {
+            items = shown;
+          }
         }
         if (items.length === 0) return;
         event.preventDefault();
@@ -4578,6 +5043,17 @@ export function MailSurface({
         return;
       }
 
+      /* A accepts and B blocks: the New senders row the keyboard stands on,
+         else the open letter when it is a first one. The open letter takes
+         the reach its switch holds; a row decides for its own address. */
+      if (event.key === "a" || event.key === "b") {
+        const target = waitingTargetForKey();
+        if (target === null) return;
+        event.preventDefault();
+        decideSender(target.thread, event.key === "a" ? "accept" : "block", target.scope);
+        return;
+      }
+
       if (event.key === "c") {
         if (selectedAccountIdRef.current === UNIFIED_ACCOUNT_ID) {
           const target = firstComposeAccount(accountsStateRef.current);
@@ -4615,9 +5091,11 @@ export function MailSurface({
       changeSearchQuery,
       closeComposer,
       closeReader,
+      decideSender,
       mutateOpenThread,
       selectThread,
       startCompose,
+      waitingTargetForKey,
     ],
   );
 
@@ -4826,8 +5304,65 @@ export function MailSurface({
       ? mergedDisplayItems(unifiedState.streams)
       : null;
   const unifiedSections = unifiedMerged
-    ? deriveUnifiedSections(unifiedMerged.items, accountsState.accounts, stickyOpen)
+    ? deriveUnifiedSections(
+        applyShownDecisions(unifiedMerged.items, senderDecisions),
+        accountsState.accounts,
+        stickyOpen,
+      )
     : null;
+  /* NEW SENDERS IN ONE ACCOUNT. A plain Inbox draws the waiting letters as
+     the same group the merged list draws, first, and the rest under it; a
+     smart view, a search or another mailbox lists them as ordinary rows.
+     Either way the decisions the reader has made are laid over the page. */
+  const singleSectioned =
+    !unifiedMode &&
+    selectedMailboxId === "inbox" &&
+    selectedView === null &&
+    searchQuery.trim() === "";
+  let listThreadState = threadState;
+  let listWaiting: readonly MailThreadListItem[] = unifiedSections
+    ? unifiedSections.newSenders.items
+    : [];
+  if (!unifiedMode && threadState.kind === "ready") {
+    const shown = applyShownDecisions(threadState.page.items, senderDecisions);
+    if (singleSectioned) {
+      const split = splitNewSenders(shown);
+      listWaiting = split.waiting;
+      listThreadState = {
+        kind: "ready",
+        page: { ...threadState.page, items: split.rest },
+      };
+    } else if (shown !== threadState.page.items) {
+      listThreadState = { kind: "ready", page: { ...threadState.page, items: shown } };
+    }
+  }
+  const domainScopeFor = (domain: string) =>
+    senderScreen !== null &&
+    domain !== "" &&
+    !senderScreen.domainScopeRefused.includes(domain);
+  const shownReaderThread = readerThread
+    ? (applyShownDecisions([readerThread], senderDecisions)[0] ?? null)
+    : null;
+  const readerFrom = shownReaderThread ? waitsOn(shownReaderThread) : null;
+  const readerDomain = readerFrom ? senderDomain(readerFrom.address) : "";
+  const readerDomainScope = domainScopeFor(readerDomain);
+  const readerWaiting =
+    shownReaderThread && readerFrom
+      ? {
+          from: readerFrom,
+          scope:
+            readerDomainScope && readerScope?.key === flipRowKey(shownReaderThread)
+              ? readerScope.scope
+              : ("address" as const),
+          domainScope: readerDomainScope,
+          waitingAtDomain: waitingAtDomain(
+            listWaiting.length > 0 ? listWaiting : [shownReaderThread],
+            readerDomain,
+          ),
+          onScope: holdReaderScope,
+          onDecide: decideOpenLetter,
+        }
+      : undefined;
 
   // Which pane owns the surface when only one fits (below `panes`). The
   // composer used to be a third occupant; it is a sheet over the whole window
@@ -4926,6 +5461,8 @@ export function MailSurface({
             onRetryStream={(accountId) => void retryUnifiedStream(accountId)}
             onSectionDone={(items, label) => void markSectionDone(items, label)}
             onOpenSettings={onOpenSettings}
+            onDecideSender={decideSender}
+            domainScope={domainScopeFor}
           />
         ) : selectedAccount ? (
           <MailThreadList
@@ -4937,8 +5474,22 @@ export function MailSurface({
             threadSort={threadSort}
             selectedThreadId={selectedThreadId}
             searchQuery={searchQuery}
-            state={threadState}
+            state={listThreadState}
             syncing={syncing}
+            newSenders={
+              singleSectioned && listWaiting.length > 0 ? (
+                <NewSendersSection
+                  items={listWaiting}
+                  avatars={false}
+                  reduce={reduceMotion}
+                  entrance={false}
+                  selectedThreadKey={selectedThreadKey}
+                  onSelectThread={(thread) => void selectThread(thread)}
+                  onDecideSender={decideSender}
+                  domainScope={domainScopeFor}
+                />
+              ) : undefined
+            }
             onSelectSort={selectSort}
             onSelectThread={(thread) => void selectThread(thread)}
             onSearchQueryChange={changeSearchQuery}
@@ -4992,6 +5543,7 @@ export function MailSurface({
           onAction={(thread, action) => void mutateOpenThread(thread, action)}
           contentClient={client}
           onAttachmentViewerOpenChange={onAttachmentViewerOpenChange}
+          waiting={readerWaiting}
         />
       </div>
 
@@ -5815,6 +6367,28 @@ function threadActionFailure(error: unknown): string {
     return "That conversation changed on the server. Refresh Mail to see it.";
   }
   return "Mail action failed. Try again.";
+}
+
+/**
+ * A refused New senders decision, said at once. Two refusals are the
+ * service's reasons and will not change on a second press, so they say what
+ * the reason is; everything else is the same press worth making again.
+ */
+function senderDecisionFailure(
+  error: unknown,
+  verdict: SenderVerdict,
+  name: string,
+): string {
+  if (error instanceof MailApiError && error.code === "mail_sender_own_address") {
+    return `${name} is one of your own addresses.`;
+  }
+  if (
+    error instanceof MailApiError &&
+    error.code === "mail_sender_domain_scope_refused"
+  ) {
+    return `Everyone at ${name} can’t be decided on at once.`;
+  }
+  return `Couldn’t ${verdict} ${name}. Try again.`;
 }
 
 function threadActionConfirmation(action: Exclude<MailReaderAction, "toggle-read">): string {

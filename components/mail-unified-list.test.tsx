@@ -177,6 +177,8 @@ describe("MailUnifiedList", () => {
       onRetryStream: vi.fn(),
       onSectionDone: vi.fn(),
       onOpenSettings: vi.fn(),
+      onDecideSender: vi.fn(),
+      domainScope: (domain: string) => domain !== "gmail.example",
       ...overrides,
     };
     await act(async () => root.render(<MailUnifiedList {...props} />));
@@ -235,6 +237,89 @@ describe("MailUnifiedList", () => {
     expect(
       sections[3]?.querySelector("[aria-expanded]")?.getAttribute("aria-expanded"),
     ).toBe("false");
+  });
+
+  describe("New senders", () => {
+    const lena = { name: "Lena Okafor", address: "lena@okafor.example" };
+    const waiting = (threadId: string, from = lena, overrides: Partial<MailThreadListItem> = {}) =>
+      item({
+        accountId: accountA.accountId,
+        threadId,
+        newSender: true,
+        newSenderFrom: from,
+        ...overrides,
+      });
+
+    it("stands first, counts who waits, and offers no Done and no disclosure", async () => {
+      await render([
+        item({ accountId: accountB.accountId, threadId: "Friend" }),
+        waiting("Flat in Lisbon"),
+        waiting("Kiln share", { name: "Mia Aalto", address: "mia@aalto.example" }),
+      ]);
+      const sections = [...document.body.querySelectorAll('[role="list"] > section')];
+      expect(sections.map((section) => section.getAttribute("aria-label"))).toEqual([
+        "New senders",
+        "People",
+      ]);
+      const head = sections[0]!.querySelector(".brain-mail-section-head")!;
+      expect(head.textContent).toContain("New senders");
+      expect(head.textContent).toContain("2");
+      expect(head.querySelector("button")).toBeNull();
+      expect(sections[1]!.textContent).not.toContain("Flat in Lisbon");
+    });
+
+    it("draws no section when nobody new is waiting", async () => {
+      await render([item({ accountId: accountA.accountId, threadId: "Friend" })]);
+      expect(document.body.querySelector('section[aria-label="New senders"]')).toBeNull();
+    });
+
+    it("names the sender and its domain, with Block and Accept where the time would be", async () => {
+      const props = await render([
+        waiting("Flat in Lisbon", lena, {
+          participants: [{ name: "Priya Raman", address: "priya@example.test" }],
+        }),
+      ]);
+      const row = document.body.querySelector(
+        'section[aria-label="New senders"] [role="listitem"]',
+      )!;
+      expect(row.textContent).toContain("Lena Okafor");
+      expect(row.textContent).toContain("okafor.example");
+      expect(row.querySelector("time")).toBeNull();
+
+      await act(async () => button("Accept Lena Okafor").click());
+      await act(async () => button("Block Lena Okafor").click());
+      expect(props.onDecideSender).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ threadId: "Flat in Lisbon" }),
+        "accept",
+        "address",
+      );
+      expect(props.onDecideSender).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ threadId: "Flat in Lisbon" }),
+        "block",
+        "address",
+      );
+      // Opening the letter is still a press on the row itself.
+      await act(async () =>
+        (row.querySelector("button.brain-mail-row") as HTMLButtonElement).click(),
+      );
+      expect(props.onSelectThread).toHaveBeenCalledTimes(1);
+    });
+
+    it("walks the waiting rows as one queue with the others", async () => {
+      await render([
+        item({ accountId: accountA.accountId, threadId: "Friend" }),
+        waiting("Flat in Lisbon"),
+      ]);
+      const keys = [...document.body.querySelectorAll("[data-flip^='row:']")].map((node) =>
+        node.getAttribute("data-flip"),
+      );
+      expect(keys).toEqual([
+        `row:${accountA.accountId}:Flat in Lisbon`,
+        `row:${accountA.accountId}:Friend`,
+      ]);
+    });
   });
 
   it("discloses past three rows from the header chevron and toggles through the callback", async () => {

@@ -16,8 +16,12 @@ import {
   stripSubjectSenderPrefix,
 } from "./mail-row";
 import { formatThreadTime } from "./mail-thread-list";
+import { NewSenderRow, type SenderDecide } from "./mail-new-sender-row";
+import { senderDomain, waitingAtDomain } from "./mail-new-senders";
+import { flipRowKey } from "./mail-flip";
 import {
   UNIFIED_SECTION_PREVIEW,
+  waitsOn,
   unifiedBundleSummary,
   unifiedSectionForm,
   visiblePeopleGroups,
@@ -57,6 +61,8 @@ export function MailUnifiedList({
   onRetryStream,
   onSectionDone,
   onOpenSettings,
+  onDecideSender,
+  domainScope,
 }: {
   accounts: readonly PublicMailAccount[];
   /** The one control that owns account and folder navigation, built by the
@@ -82,6 +88,10 @@ export function MailUnifiedList({
   /** Done: archive every thread in one section, naming it for the report. */
   onSectionDone: (items: readonly MailThreadListItem[], label: string) => void;
   onOpenSettings: (invoker: HTMLElement, accountId?: string) => void;
+  /** Accept or Block a New senders row, for one address or its domain. */
+  onDecideSender: SenderDecide;
+  /** Whether "everyone at <domain>" may be offered for this domain. */
+  domainScope: (domain: string) => boolean;
 }) {
   const reduce = useReducedMotion();
   // The entrance fade/stagger belongs to the container context — entering All
@@ -109,6 +119,7 @@ export function MailUnifiedList({
     streams.every((stream) => stream.status === "ready");
   const empty =
     sections !== null &&
+    sections.newSenders.items.length === 0 &&
     sections.people.total === 0 &&
     sections.notifications.items.length === 0 &&
     sections.newsletters.items.length === 0 &&
@@ -158,7 +169,8 @@ export function MailUnifiedList({
   const loadedCount =
     sections === null
       ? 0
-      : sections.people.total +
+      : sections.newSenders.items.length +
+        sections.people.total +
         sections.notifications.items.length +
         sections.newsletters.items.length +
         sections.seen.items.length;
@@ -224,7 +236,7 @@ export function MailUnifiedList({
         <ScrollEdge variant="blur" steps={1} />
         <div className="brain-mail-scrollfoot brain-mail-scrollpad">
         {failedStreams.length > 0 && (
-          <div className="brain-mail-section">
+          <div className="brain-mail-section" data-flip="section:notices">
             {failedStreams.map((stream) => (
               <StreamNotice
                 key={stream.accountId}
@@ -259,8 +271,25 @@ export function MailUnifiedList({
           )
         ) : (
           <div role="list" aria-label="All inboxes threads">
+            {sections.newSenders.items.length > 0 && (
+              <NewSendersSection
+                items={sections.newSenders.items}
+                avatars
+                reduce={reduce}
+                entrance={entrance}
+                selectedThreadKey={selectedThreadKey}
+                rowIndexByKey={rowIndexByKey}
+                onSelectThread={onSelectThread}
+                onDecideSender={onDecideSender}
+                domainScope={domainScope}
+              />
+            )}
             {sections.people.total > 0 && (
-              <section aria-label="People" className="brain-mail-section">
+              <section
+                aria-label="People"
+                className="brain-mail-section"
+                data-flip="section:people"
+              >
                 <SectionHeader
                   icon="user-rounded-linear"
                   label="People"
@@ -306,6 +335,7 @@ export function MailUnifiedList({
                           ? [
                               <motion.div
                                 key={`subheader:${group.accountId}`}
+                                data-flip={`subhead:${group.accountId}`}
                                 exit={
                                   exitFades
                                     ? {
@@ -382,7 +412,11 @@ export function MailUnifiedList({
               />
             )}
             {sections.seen.items.length > 0 && (
-              <section aria-label="Seen" className="brain-mail-section">
+              <section
+                aria-label="Seen"
+                className="brain-mail-section"
+                data-flip="section:seen"
+              >
                 {/* Seen hides all of itself when collapsed, so it is
                     expandable at any count and its digest is a count: read
                     mail owes the reader a number, not a preview. */}
@@ -446,6 +480,7 @@ export function MailUnifiedList({
             aria-busy="true"
             aria-label="Loading more mail"
             className="brain-mail-section brain-mail-more"
+            data-flip="section:more"
           >
             {/* A loading state has the shape of the loaded state: a group
                 bounded by the same rule, its rows taking the wrapper that
@@ -517,7 +552,11 @@ function PlainSection({
   const bundled = unifiedSectionForm(items.length, expanded) === "bundle";
   const visible = visibleSectionItems(items, expanded);
   return (
-    <section aria-label={label} className="brain-mail-section">
+    <section
+      aria-label={label}
+      className="brain-mail-section"
+      data-flip={`section:${sectionKey}`}
+    >
       <SectionHeader
         icon={icon}
         label={label}
@@ -748,8 +787,13 @@ export function formatBundleSenders(summary: UnifiedBundleSummary): string {
  * what someone deliberately kept, is the one this file rejects two paragraphs
  * above when it says the protection is the undo and not the hiding. Spark
  * puts the same control on the same header, which is where the owner met it.
+ *
+ * **New senders has neither.** It is a queue of decisions: Done would archive
+ * letters nobody has decided about, and a queue that hides part of itself
+ * hides decisions, so it passes no `onDone` and no `onToggle` and keeps the
+ * slot like any section that shows itself whole.
  */
-function SectionHeader({
+export function SectionHeader({
   icon,
   label,
   count,
@@ -838,6 +882,82 @@ function SectionHeader({
 }
 
 /**
+ * New senders: first letters from strangers, first in the column and whole.
+ * The section header object every group wears, with no Done and no
+ * disclosure, over rows that carry the decision where the time would be.
+ * When nobody new is waiting the caller draws nothing at all: an empty queue
+ * is not a place. The single-account Inbox takes this same object from the
+ * surface, so the two lists cannot disagree about it.
+ */
+export function NewSendersSection({
+  items,
+  avatars,
+  reduce,
+  entrance,
+  selectedThreadKey,
+  rowIndexByKey,
+  onSelectThread,
+  onDecideSender,
+  domainScope,
+}: {
+  items: readonly MailThreadListItem[];
+  /** The merged list tells senders apart by face; one account does not. */
+  avatars: boolean;
+  reduce: boolean | null;
+  entrance: boolean;
+  selectedThreadKey: string | null;
+  rowIndexByKey?: ReadonlyMap<string, number>;
+  onSelectThread: (thread: MailThreadListItem) => void;
+  onDecideSender: SenderDecide;
+  domainScope: (domain: string) => boolean;
+}) {
+  return (
+    <section
+      aria-label="New senders"
+      className="brain-mail-section"
+      data-flip="section:new-senders"
+    >
+      <SectionHeader
+        icon="user-plus-rounded-linear"
+        label="New senders"
+        count={items.length}
+        expanded={false}
+      />
+      <div role="presentation" className="brain-mail-rows">
+        {items.map((thread, position) => {
+          const from = waitsOn(thread);
+          if (from === null) return null;
+          const domain = senderDomain(from.address);
+          return (
+            <NewSenderRow
+              key={`${thread.accountId}:${thread.threadId}`}
+              thread={thread}
+              from={from}
+              active={`${thread.accountId}:${thread.threadId}` === selectedThreadKey}
+              avatar={
+                avatars ? (
+                  <MailSenderIcon participants={[from]} size={32} />
+                ) : undefined
+              }
+              index={
+                rowIndexByKey?.get(`${thread.accountId}:${thread.threadId}`) ??
+                position
+              }
+              entrance={entrance}
+              reduce={reduce}
+              domainScope={domainScope(domain)}
+              waitingHere={waitingAtDomain(items, domain)}
+              onSelect={() => onSelectThread(thread)}
+              onDecide={onDecideSender}
+            />
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+/**
  * The single-account ThreadRow anatomy with a sender icon leading. Row keys
  * are strictly `${accountId}:${threadId}` — thread ids are provider-scoped,
  * so the same id can exist in two accounts.
@@ -863,6 +983,7 @@ function UnifiedRow({
     <motion.div
       role="listitem"
       className="brain-mail-row-item"
+      data-flip={flipRowKey(thread)}
       initial={
         entrance ? (reduce ? { opacity: 0 } : { opacity: 0, y: 4 }) : false
       }

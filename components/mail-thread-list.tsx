@@ -9,6 +9,7 @@ import { Icon } from "./ui/icon";
 import { ScrollEdge } from "./ui/scroll-edge";
 import { ToolbarDivider, ToolbarPill } from "./ui/toolbar-pill";
 import { MailRow, MailRowSkeleton } from "./mail-row";
+import { flipRowKey } from "./mail-flip";
 import type {
   MailMailboxThreadPage,
   MailSearchThreadPage,
@@ -52,6 +53,7 @@ export function MailThreadList({
   onRetry,
   onLoadMore,
   onOpenSettings,
+  newSenders,
 }: {
   accounts: readonly PublicMailAccount[];
   /** The one control that owns account and folder navigation, built by the
@@ -76,6 +78,11 @@ export function MailThreadList({
   onRetry: () => void;
   onLoadMore: (cursor: string) => void;
   onOpenSettings: (invoker: HTMLElement, accountId?: string) => void;
+  /** The New senders group, built by the surface from the same object the
+   *  merged list draws, and handed in only for a plain Inbox that has someone
+   *  waiting. Its rows are not in `state.page.items`; the rest of the Inbox
+   *  then stands as a group of its own under it. */
+  newSenders?: React.ReactNode;
 }) {
   const reduce = useReducedMotion();
   const agentThreads = useAgentSentThreads(selectedMailboxId, selectedAccountId);
@@ -234,7 +241,7 @@ export function MailThreadList({
             body={mailboxUnavailableBody(unavailable.reason)}
             action={<Button variant="quiet" onClick={onRetry}>Check again</Button>}
           />
-        ) : state.page.items.length === 0 ? (
+        ) : state.page.items.length === 0 && !newSenders ? (
           <ListMessage
             title={"scope" in state.page ? "No matching mail" : `${mailboxLabel} is empty`}
             body={
@@ -265,32 +272,39 @@ export function MailThreadList({
                 key={`${selectedMailboxId}|${selectedView ?? ""}`}
                 role="list"
                 aria-label={`${mailboxLabel} threads`}
+                className={newSenders ? "brain-mail-groups" : undefined}
                 initial={{ opacity: 0 }}
                 animate={{ opacity: 1 }}
                 transition={{ duration: DUR.fast, ease: EASE_OUT }}
               >
-                {state.page.items.map((thread, index) => (
-                  <motion.div
-                    key={thread.threadId}
-                    role="listitem"
-                    className="brain-mail-row-item"
-                    initial={reduce ? { opacity: 0 } : { opacity: 0, y: 4 }}
-                    animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
-                    transition={{
-                      duration: DUR.fast,
-                      ease: EASE_OUT,
-                      delay: reduce || index >= 8 ? 0 : index * 0.025,
-                    }}
-                  >
-                    <ThreadRow
-                      thread={thread}
-                      active={thread.threadId === selectedThreadId}
-                      sizeMode={threadSort === "size"}
-                      sentByAgent={agentThreads.get(thread.threadId)}
-                      onSelect={() => onSelectThread(thread)}
-                    />
-                  </motion.div>
-                ))}
+                {newSenders}
+                {state.page.items.length > 0 && (
+                  <InboxRows grouped={newSenders !== undefined}>
+                    {state.page.items.map((thread, index) => (
+                      <motion.div
+                        key={thread.threadId}
+                        role="listitem"
+                        className="brain-mail-row-item"
+                        data-flip={flipRowKey(thread)}
+                        initial={reduce ? { opacity: 0 } : { opacity: 0, y: 4 }}
+                        animate={reduce ? { opacity: 1 } : { opacity: 1, y: 0 }}
+                        transition={{
+                          duration: DUR.fast,
+                          ease: EASE_OUT,
+                          delay: reduce || index >= 8 ? 0 : index * 0.025,
+                        }}
+                      >
+                        <ThreadRow
+                          thread={thread}
+                          active={thread.threadId === selectedThreadId}
+                          sizeMode={threadSort === "size"}
+                          sentByAgent={agentThreads.get(thread.threadId)}
+                          onSelect={() => onSelectThread(thread)}
+                        />
+                      </motion.div>
+                    ))}
+                  </InboxRows>
+                )}
               </motion.div>
             </AnimatePresence>
             {state.page.nextCursor && (
@@ -316,6 +330,26 @@ export function MailThreadList({
           className="md:hidden"
         />
       </div>
+    </section>
+  );
+}
+
+/**
+ * The Inbox's own rows. Alone they need no group; under New senders they are
+ * a group like any other, bounded by the one rule, so the waiting letters
+ * and the rest read as two blocks and not as one list with a gap in it.
+ */
+function InboxRows({
+  grouped,
+  children,
+}: {
+  grouped: boolean;
+  children: React.ReactNode;
+}) {
+  if (!grouped) return <>{children}</>;
+  return (
+    <section aria-label="Inbox" className="brain-mail-section" data-flip="section:inbox">
+      {children}
     </section>
   );
 }

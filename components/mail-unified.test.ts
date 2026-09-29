@@ -310,6 +310,33 @@ describe("deriveUnifiedSections", () => {
     ]);
     expect(sections.people.total).toBe(3);
   });
+
+  it("puts a thread that waits on its sender in New senders, and only there", () => {
+    const from = { name: "Lena Okafor", address: "lena@okafor.example" };
+    const items = [
+      item({ accountId: ACCOUNT_B, threadId: "friend" }),
+      item({ accountId: ACCOUNT_A, threadId: "lena", newSender: true, newSenderFrom: from }),
+      // Opened already: read first, then decide, so it waits where it was.
+      item({
+        accountId: ACCOUNT_B,
+        threadId: "read-first",
+        unread: false,
+        newSender: true,
+        newSenderFrom: from,
+      }),
+      item({ accountId: ACCOUNT_A, threadId: "old", unread: false }),
+    ];
+    const sections = deriveUnifiedSections(items, accounts);
+    expect(sections.newSenders.items.map((entry) => entry.threadId)).toEqual([
+      "lena",
+      "read-first",
+    ]);
+    expect(sections.people.total).toBe(1);
+    expect(sections.people.groups.flatMap((group) => group.items).map((entry) => entry.threadId)).toEqual([
+      "friend",
+    ]);
+    expect(sections.seen.items.map((entry) => entry.threadId)).toEqual(["old"]);
+  });
 });
 
 describe("deriveUnifiedSections sticky open", () => {
@@ -506,6 +533,31 @@ describe("visibleUnifiedItems", () => {
     const visible = visibleUnifiedItems(sections, UNIFIED_EXPAND_COLLAPSED);
     // Groups render in accounts order (A first): both A rows, then one B row.
     expect(visible.map((entry) => entry.threadId)).toEqual(["a1", "a2", "b1"]);
+  });
+
+  it("walks New senders first, every waiting row whatever the others hide", () => {
+    const from = { name: null, address: "new@stranger.example" };
+    const waiting = Array.from({ length: 5 }, (_value, index) =>
+      item({
+        accountId: ACCOUNT_B,
+        threadId: `w${index}`,
+        newSender: true,
+        newSenderFrom: from,
+      }),
+    );
+    const sections = deriveUnifiedSections(
+      [item({ accountId: ACCOUNT_A, threadId: "p0" }), ...waiting],
+      accounts,
+    );
+    const visible = visibleUnifiedItems(sections, UNIFIED_EXPAND_COLLAPSED);
+    expect(visible.map((entry) => entry.threadId)).toEqual([
+      "w0",
+      "w1",
+      "w2",
+      "w3",
+      "w4",
+      "p0",
+    ]);
   });
 });
 

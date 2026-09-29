@@ -7,6 +7,7 @@
  */
 
 import type {
+  MailAddress,
   MailThreadListItem,
   MailThreadPage,
 } from "@/lib/mail/message-types";
@@ -278,6 +279,8 @@ export type MailUnifiedPeopleGroup = {
 };
 
 export type MailUnifiedSections = {
+  /** First letters from strangers, waiting for Accept or Block. */
+  readonly newSenders: { readonly items: readonly MailThreadListItem[] };
   readonly people: {
     readonly groups: readonly MailUnifiedPeopleGroup[];
     readonly total: number;
@@ -303,12 +306,23 @@ export type UnifiedStickyOpen = {
 };
 
 /**
- * Single order-preserving pass over the merged cut: read threads of any
- * category land in Seen; unread threads split by category. People buckets per
- * account, groups ordered by the accounts array (accounts the list no longer
- * knows keep first-seen order at the end, with the item's own address). The
- * optional `stickyOpen` capture pins the open thread's partition — see
- * `UnifiedStickyOpen`.
+ * The sender a thread waits on, or null when it waits on nobody the column
+ * can name. A thread flagged as waiting with no sender beside it cannot be
+ * decided on, so it stands with the ordinary letters.
+ */
+export function waitsOn(item: MailThreadListItem): MailAddress | null {
+  return item.newSender && item.newSenderFrom !== undefined ? item.newSenderFrom : null;
+}
+
+/**
+ * Single order-preserving pass over the merged cut: a thread that waits on
+ * its sender goes to New senders whatever else is true of it, because a
+ * letter read before it is decided on still waits for the decision; read
+ * threads of any other kind land in Seen; unread threads split by category.
+ * People buckets per account, groups ordered by the accounts array (accounts
+ * the list no longer knows keep first-seen order at the end, with the item's
+ * own address). The optional `stickyOpen` capture pins the open thread's
+ * partition — see `UnifiedStickyOpen`.
  */
 export function deriveUnifiedSections(
   items: readonly MailThreadListItem[],
@@ -318,11 +332,16 @@ export function deriveUnifiedSections(
   }[],
   stickyOpen: UnifiedStickyOpen | null = null,
 ): MailUnifiedSections {
+  const newSenders: MailThreadListItem[] = [];
   const peopleByAccount = new Map<string, MailThreadListItem[]>();
   const notifications: MailThreadListItem[] = [];
   const newsletters: MailThreadListItem[] = [];
   const seen: MailThreadListItem[] = [];
   for (const item of items) {
+    if (waitsOn(item) !== null) {
+      newSenders.push(item);
+      continue;
+    }
     const sticky =
       stickyOpen !== null &&
       item.accountId === stickyOpen.accountId &&
@@ -360,6 +379,7 @@ export function deriveUnifiedSections(
     groups.push({ accountId, emailAddress: "", items: bucket });
   }
   return {
+    newSenders: { items: newSenders },
     people: {
       groups,
       total: groups.reduce((sum, group) => sum + group.items.length, 0),
@@ -421,13 +441,14 @@ export function visibleSectionItems(
  * The flattened rendered order — sections in order, only visible rows:
  * previewed remainders and every bundled section are excluded. The keyboard
  * layer navigates exactly this list, so `j`/`k` can never land on a thread
- * its section is keeping back.
+ * its section is keeping back. New senders comes first and whole: it is a
+ * queue of decisions, and a decision cannot be made on a row kept back.
  */
 export function visibleUnifiedItems(
   sections: MailUnifiedSections,
   expand: UnifiedExpandState,
 ): readonly MailThreadListItem[] {
-  const items: MailThreadListItem[] = [];
+  const items: MailThreadListItem[] = [...sections.newSenders.items];
   for (const group of visiblePeopleGroups(sections.people, expand.people)) {
     items.push(...group.items);
   }

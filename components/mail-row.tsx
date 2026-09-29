@@ -4,6 +4,7 @@ import { Icon } from "./ui/icon";
 import { Skeleton } from "./ui/primitives";
 import type { MailAddress, MailThreadListItem } from "@/lib/mail/message-types";
 import { sanitizeSnippet } from "@/lib/mail/reader-content";
+import { senderDomain, senderName } from "./mail-new-senders";
 
 /**
  * The mail row — one object for both lists (DESIGN.md §13: a mode may drop a
@@ -135,6 +136,7 @@ export function MailRow({
   sizeLabel,
   timeLabel,
   sentByAgent,
+  waitingOn,
   onSelect,
 }: {
   thread: MailThreadListItem;
@@ -150,17 +152,24 @@ export function MailRow({
    *  business. Absent everywhere else, because a thread the agent sent that
    *  has since been replied to is a conversation, not an agent's message. */
   sentByAgent?: string;
+  /** The sender a New senders row waits on. The row names that sender, the
+   *  one a decision is about, with the domain after the name, and gives the
+   *  time's place to Block and Accept, which stand over the row's right edge
+   *  as its siblings (a button cannot hold a button). */
+  waitingOn?: MailAddress;
   onSelect: () => void;
 }) {
   const subject = stripSubjectSenderPrefix(thread.subject, thread.participants);
   const snippet = sanitizeSnippet(thread.snippet);
-  const sender = formatParticipants(thread.participants);
+  const sender = waitingOn ? senderName(waitingOn) : formatParticipants(thread.participants);
   return (
     <button
       type="button"
       aria-current={active ? "true" : undefined}
       onClick={onSelect}
-      className={`brain-mail-row group${avatar ? "" : " brain-mail-row_bare"}`}
+      className={`brain-mail-row group${avatar ? "" : " brain-mail-row_bare"}${
+        waitingOn ? " brain-mail-row_gate" : ""
+      }`}
     >
       {/* The rail. Unread is a column of its own left of the avatar, so every
           dot in the list lines up and the volume of unread mail is legible
@@ -186,11 +195,18 @@ export function MailRow({
                 {thread.messageCount}
               </span>
             )}
+            {/* The domain gives way before the name does: it is the one
+                clue to who a stranger writes for, and still the lesser. */}
+            {waitingOn && (
+              <span className="text-caption min-w-0 shrink-[4] truncate text-ink-3">
+                {senderDomain(waitingOn.address)}
+              </span>
+            )}
           </span>
           {thread.starred && (
             <Icon name="star-linear" size={12} className="shrink-0 self-center text-ink-3" />
           )}
-          {sizeLabel === undefined ? (
+          {waitingOn ? null : sizeLabel === undefined ? (
             <time
               dateTime={
                 thread.lastMessageAt === null

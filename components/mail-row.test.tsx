@@ -247,4 +247,31 @@ describe("MailRow", () => {
     expect(caption!.className).toContain("truncate");
     expect(caption!.textContent).toBe(`Sent by ${longName}`);
   });
+
+  it("names a waiting sender and its domain, and leaves the time's place to the decision", async () => {
+    const lena = { name: "Lena Okafor", address: "lena@okafor.example" };
+    await act(async () =>
+      root.render(
+        <MailRow
+          thread={makeThread({
+            // The first participant is someone else; the row names who the
+            // decision is about.
+            participants: [{ name: "Priya Raman", address: "priya@example.test" }],
+            newSender: true,
+            newSenderFrom: lena,
+          })}
+          active={false}
+          timeLabel="18:24"
+          waitingOn={lena}
+          onSelect={() => {}}
+        />,
+      ),
+    );
+    const row = host.querySelector("button")!;
+    expect(row.className).toContain("brain-mail-row_gate");
+    expect(row.textContent).toContain("Lena Okafor");
+    expect(row.textContent).toContain("okafor.example");
+    expect(row.textContent).not.toContain("Priya Raman");
+    expect(row.querySelector("time")).toBeNull();
+  });
 });

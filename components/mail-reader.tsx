@@ -20,7 +20,13 @@ import type {
   MailThreadDetail,
   MailThreadListItem,
 } from "./mail-surface-client";
-import type { MailMessageDto } from "@/lib/mail/message-types";
+import type { MailAddress, MailMessageDto } from "@/lib/mail/message-types";
+import { Segmented } from "./settings/shared";
+import {
+  senderDomain,
+  type SenderScope,
+  type SenderVerdict,
+} from "./mail-new-senders";
 import {
   MAIL_ATTACHMENT_CONTENT_SECURITY_POLICY,
   MAIL_INLINE_IMAGE_MAX_BYTES,
@@ -51,6 +57,19 @@ export type MailReaderState =
   | { readonly kind: "error"; readonly thread: MailThreadListItem }
   | { readonly kind: "ready"; readonly detail: MailThreadDetail };
 
+/** A first letter the reader has open, and what the pill can decide about
+ *  its sender. `scope` is the reach the switch holds, `domainScope` whether
+ *  the switch is offered at all, and `waitingAtDomain` how many different
+ *  senders at the domain an Accept of everyone there would take. */
+export type ReaderWaiting = {
+  readonly from: MailAddress;
+  readonly scope: SenderScope;
+  readonly domainScope: boolean;
+  readonly waitingAtDomain: number;
+  readonly onScope: (scope: SenderScope) => void;
+  readonly onDecide: (verdict: SenderVerdict) => void;
+};
+
 export type MailReaderAction =
   | "toggle-read"
   | "archive"
@@ -74,6 +93,7 @@ export function MailReader({
   onAction,
   contentClient,
   onAttachmentViewerOpenChange,
+  waiting,
 }: {
   state: MailReaderState;
   mutating: boolean;
@@ -92,6 +112,10 @@ export function MailReader({
   /** Whether an attachment viewer is up. It is a portal over the whole
    *  window, like the compose sheet, so the shell steps back from it. */
   onAttachmentViewerOpenChange?: (open: boolean) => void;
+  /** The open letter is a first letter from a sender nobody has decided on
+   *  yet. The pill then carries the decision instead of Reply and Archive,
+   *  since a reply to a stranger is not what the letter is waiting for. */
+  waiting?: ReaderWaiting;
 }) {
   const reduce = useReducedMotion();
   if (state.kind === "idle") {
@@ -110,10 +134,14 @@ export function MailReader({
   }
 
   const thread = state.kind === "ready" ? state.detail.thread : state.thread;
-  const directAction = capabilities.threadMutations
-    ? directActionForMailbox(mailboxId)
-    : null;
-  const canReply = capabilities.reply && capabilities.send;
+  const directAction =
+    capabilities.threadMutations && !waiting ? directActionForMailbox(mailboxId) : null;
+  const canReply = capabilities.reply && capabilities.send && !waiting;
+  const waitingDomain = waiting ? senderDomain(waiting.from.address) : "";
+  const acceptLabel =
+    waiting && waiting.scope === "domain" && waiting.waitingAtDomain > 1
+      ? `Accept ${waiting.waitingAtDomain} senders`
+      : "Accept";
   const canForward =
     capabilities.compose && capabilities.send && capabilities.messageBodies;
   return (
@@ -151,9 +179,11 @@ export function MailReader({
             {thread.messageCount > 1 && `${thread.messageCount} messages`}
             {thread.messageCount > 1 && thread.lastMessageAt !== null && " · "}
             {thread.lastMessageAt !== null && formatThreadTime(thread.lastMessageAt)}
+            {waiting && (thread.messageCount > 1 || thread.lastMessageAt !== null) && " · "}
+            {waiting && "first letter from this sender"}
           </p>
         </div>
-        {(canReply || capabilities.threadMutations || canForward) && (
+        {(canReply || capabilities.threadMutations || canForward || waiting) && (
           <ToolbarPill className="shrink-0">
             {/* The resting label is drawn only where the strip can hold it
                 beside the subject's floor. The pill does not shrink, so the
@@ -186,6 +216,28 @@ export function MailReader({
                 {directAction.label}
               </Button>
             )}
+            {waiting && (
+              <>
+                <Button
+                  type="button"
+                  variant="quiet"
+                  className="brain-touch-hit shrink-0"
+                  disabled={state.kind !== "ready"}
+                  onClick={() => waiting.onDecide("block")}
+                >
+                  Block
+                </Button>
+                <Button
+                  type="button"
+                  variant="quiet"
+                  className="brain-touch-hit shrink-0"
+                  disabled={state.kind !== "ready"}
+                  onClick={() => waiting.onDecide("accept")}
+                >
+                  {acceptLabel}
+                </Button>
+              </>
+            )}
             {canReply && (
               <Button
                 type="button"
@@ -214,6 +266,23 @@ export function MailReader({
           </ToolbarPill>
         )}
       </header>
+      {/* The decision's reach, beside the words that make it: this one
+          address, or everyone writing from its domain. It is the strip's own
+          second line, in flow above the scroller like the strip itself, and
+          it is drawn only where the service would take a domain at all. */}
+      {waiting?.domainScope && (
+        <div className="brain-mail-reader-scope">
+          <Segmented
+            label="Who the decision covers"
+            value={waiting.scope}
+            options={[
+              { value: "address", label: "Only this address" },
+              { value: "domain", label: `Everyone at ${waitingDomain}` },
+            ]}
+            onChange={(value) => waiting.onScope(value === "domain" ? "domain" : "address")}
+          />
+        </div>
+      )}
 
       {/* tabIndex lets the surface's Enter shortcut hand keyboard scrolling to
           this pane; data-mail-reader-scroll is its lookup handle. `relative`

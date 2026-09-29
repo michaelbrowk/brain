@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BrainMailClientError,
   createBrainMailClient,
+  readMailChanges,
   type MailAccountConnectInput,
   type MailAccountStatus,
 } from "./brain-mail-client";
@@ -1353,6 +1354,75 @@ describe("Brain Mail Unix-socket client", () => {
         code: "mail_service_invalid_response",
       });
     }
+  });
+});
+
+describe("Brain Mail change feed read", () => {
+  const ACCOUNT = "account-a0123456789abcdef0123456789abcdef";
+
+  it("asks from the cursor for up to the wait and hands back a checked answer", async () => {
+    const paths: string[] = [];
+    const answer = {
+      apiVersion: 1,
+      cursor: 42,
+      changes: [
+        { accountId: ACCOUNT, mailboxIds: ["inbox", "all"], kind: "sync" },
+        { accountId: ACCOUNT, mailboxIds: [], kind: "content_ready", messageId: "message-1" },
+      ],
+    };
+    const { socketPath } = await startServer((request, response) => {
+      paths.push(request.url ?? "");
+      writeJson(response, 200, answer);
+    });
+
+    await expect(
+      readMailChanges({ cursor: 41, waitMs: 25_000 }, undefined, { socketPath }),
+    ).resolves.toEqual(answer);
+    await readMailChanges({ cursor: null, waitMs: 25_000 }, undefined, { socketPath });
+    expect(paths).toEqual(["/v1/changes?cursor=41&wait=25000", "/v1/changes?wait=25000"]);
+  });
+
+  it("holds a read past the ordinary request timeout while the service waits", async () => {
+    const { socketPath } = await startServer((_request, response) => {
+      setTimeout(
+        () => writeJson(response, 200, { apiVersion: 1, cursor: 7, changes: [], reset: true }),
+        150,
+      );
+    });
+
+    // The answer comes after the ordinary timeout and inside the wait.
+    await expect(
+      readMailChanges({ cursor: 3, waitMs: 200 }, undefined, {
+        socketPath,
+        requestTimeoutMs: 50,
+      }),
+    ).resolves.toEqual({ apiVersion: 1, cursor: 7, changes: [], reset: true });
+  });
+
+  it("refuses an answer it cannot read and names a busy refusal", async () => {
+    const answers: Array<[number, unknown]> = [
+      [200, { apiVersion: 1, cursor: -1, changes: [] }],
+      [200, { apiVersion: 1, cursor: 1, changes: [{ accountId: ACCOUNT, mailboxIds: [], kind: "moved" }] }],
+      [200, { apiVersion: 1, cursor: 1, changes: [{ accountId: ACCOUNT, mailboxIds: ["drafts"], kind: "sync" }] }],
+      [200, { apiVersion: 1, cursor: 1, changes: [{ accountId: ACCOUNT, mailboxIds: [], kind: "content_ready" }] }],
+      [200, { apiVersion: 1, cursor: 1, changes: [], reset: false }],
+      [200, { apiVersion: 1, cursor: 1, changes: [], subject: "leak" }],
+      [409, { apiVersion: 1, error: { code: "mail_changes_busy" } }],
+    ];
+    const { socketPath } = await startServer((_request, response) => {
+      const [status, body] = answers.shift()!;
+      writeJson(response, status, body);
+    });
+    vi.spyOn(process.stderr, "write").mockImplementation(() => true);
+
+    for (let index = 0; index < 6; index += 1) {
+      await expect(
+        readMailChanges({ cursor: 0, waitMs: 0 }, undefined, { socketPath }),
+      ).rejects.toMatchObject({ code: "mail_service_invalid_response" });
+    }
+    await expect(
+      readMailChanges({ cursor: 0, waitMs: 0 }, undefined, { socketPath }),
+    ).rejects.toMatchObject({ status: 409, code: "mail_changes_busy" });
   });
 });
 

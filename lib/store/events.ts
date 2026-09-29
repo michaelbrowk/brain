@@ -1,5 +1,7 @@
 import { EventEmitter } from "node:events";
 
+import type { BrainMailEvent } from "@/lib/mail/mail-events";
+
 export interface StoreEvent {
   /** `task` carries a task record's id, not a page id. Nothing in the page
    *  tree changes on one, so a client that refreshes its tree on every event
@@ -111,4 +113,16 @@ export function replayStoreEvents(cursor: number): StoreEventReplay {
 
 export function emitStore(ev: StoreEvent): void {
   brainEvents.emit("change", brainEventJournal.append(ev));
+}
+
+/** The emitter's name for a mail event, beside `change`. */
+export const MAIL_EVENT = "mail";
+
+/** A change the mail service reported (`lib/mail/change-feed.ts`). On the
+ *  same emitter as the store's events and deliberately OUTSIDE the journal:
+ *  a background body cohort can report hundreds of ready bodies in a minute,
+ *  and each would push a note event a reconnecting tab needs out of the 256
+ *  it can replay. A tab that reconnects reads its mail again instead. */
+export function emitMail(event: BrainMailEvent): void {
+  brainEvents.emit(MAIL_EVENT, event);
 }

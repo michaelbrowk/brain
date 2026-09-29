@@ -7,6 +7,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/store/events", () => ({
+  MAIL_EVENT: "mail",
   brainEvents: { on: mocks.on, off: mocks.off },
   latestStoreEventSequence: () => 7,
   replayStoreEvents: () => ({
@@ -48,8 +49,9 @@ describe("GET /api/events shutdown registration", () => {
 
     expect(mocks.register).toHaveBeenCalledTimes(1);
     expect(addAbort).not.toHaveBeenCalled();
-    expect(mocks.on).toHaveBeenCalledTimes(1);
-    expect(mocks.off).toHaveBeenCalledTimes(1);
+    // The store's `change` events and the mail service's `mail` events.
+    expect(mocks.on).toHaveBeenCalledTimes(2);
+    expect(mocks.off).toHaveBeenCalledTimes(2);
     expect(unregister).not.toHaveBeenCalled();
   });
 
@@ -74,8 +76,46 @@ describe("GET /api/events shutdown registration", () => {
     expect((await reader?.read())?.done).toBe(false);
     expect((await reader?.read())?.done).toBe(true);
 
-    expect(mocks.off).toHaveBeenCalledTimes(1);
+    expect(mocks.off).toHaveBeenCalledTimes(2);
     expect(unregister).toHaveBeenCalledTimes(1);
     expect(removeAbort).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("GET /api/events mail events", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.register.mockImplementation(() => () => {});
+  });
+
+  it("carries each mail event as a named event with no replay id", async () => {
+    const controller = new AbortController();
+    const response = await GET(
+      new Request("https://brain.test/api/events", { signal: controller.signal }),
+    );
+    const onMail = mocks.on.mock.calls.find(([name]) => name === "mail")?.[1] as
+      | ((event: unknown) => void)
+      | undefined;
+    expect(onMail).toBeDefined();
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    // The ready frame first.
+    expect(decoder.decode((await reader.read()).value)).toContain("event: ready");
+
+    const event = {
+      kind: "mail",
+      changeKind: "sync",
+      accountId: `account-a${"1".repeat(32)}`,
+      mailboxIds: ["inbox"],
+    };
+    onMail!(event);
+
+    // No `id:` line: a mail event is not in the replay journal, so it must not
+    // move the tab's Last-Event-ID off the store's sequence.
+    expect(decoder.decode((await reader.read()).value)).toBe(
+      `event: mail\ndata: ${JSON.stringify(event)}\n\n`,
+    );
+    controller.abort();
+    expect(mocks.off).toHaveBeenCalledWith("mail", onMail);
   });
 });

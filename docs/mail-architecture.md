@@ -388,6 +388,20 @@ read waits out its time and gets its own cursor back, and the records gathered
 meanwhile are still there after the resume. A record names an account, its
 mailboxes and at most a message id, never a subject, an address or a body.
 
+Brain reads the feed from one loop per process,
+[`lib/mail/change-feed.ts`](../lib/mail/change-feed.ts), started beside the
+reminder scan in `instrumentation.ts` and stopped with the SSE streams on
+shutdown. It re-arms the moment an answer lands, backs off from one second to a
+minute after a failed read or a quiet answer the service did not hold, and
+sleeps while the Mail switch is off, waking on the switch's own event. Each
+answer leaves as one `mail` event per account and kind on `brainEvents`, which
+`/api/events` streams to open tabs as `event: mail` with no `id:` line. Mail
+events stay out of the 256-entry replay journal, so a burst of ready bodies
+cannot push out the note events a reconnecting tab needs; a tab that
+reconnects reads its mail again instead of being replayed. A `reset` from the
+service, or a first answer after reads that failed, is one `reset` event, and
+every tab reads what it shows again once.
+
 An edit may omit the password to keep the saved secret; first setup may not.
 `DELETE` is local-only, removes only the selected account and its cache, and
 never opens IMAP or mutates the remote mailbox. Once more than one account

@@ -178,6 +178,7 @@ import { ShellTopbar, type ShellTopbarProps } from "./shell/topbar";
 import { PageCover, PageHead } from "./shell/page-head";
 import { PageBody } from "./shell/page-body";
 import { AppCanvas } from "./shell/app-canvas";
+import { CanvasPresence } from "./shell/canvas-presence";
 import { ShellOverlays } from "./shell/overlays";
 import {
   draftSourcesForOperation,
@@ -5859,9 +5860,10 @@ export function Shell({
 
         <div className="brain-page-scroll flex-1 overflow-y-auto overflow-x-clip">
           {/* initial={false}: the first canvas (hub, or an SSR-seeded page)
-              paints at once instead of fading in behind hydration */}
+              paints at once instead of fading in behind hydration. The
+              leaving canvas goes inert as its exit starts (canvas-presence) */}
           <AnimatePresence mode="wait" initial={false}>
-            <motion.div
+            <CanvasPresence
               key={canvasPresenceKey({
                 selectedId,
                 surface,
@@ -6121,7 +6123,7 @@ export function Shell({
                 pageTitleOf={pageTitleOf}
               />
             )}
-            </motion.div>
+            </CanvasPresence>
           </AnimatePresence>
         </div>
       </main>

@@ -15,7 +15,7 @@ import {
 } from "@milkdown/kit/preset/commonmark";
 import { insertTableCommand } from "@milkdown/kit/preset/gfm";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../ui/icon";
 import { DUR, EASE_OUT } from "@/lib/motion";
 import { insertCalloutCommand } from "./callout";
@@ -23,6 +23,7 @@ import { notifyNestedTableBlocked } from "@/lib/editor-events";
 import { insertToggleCommand } from "./toggle";
 import { insertMathBlockCommand } from "./math";
 import { ensureTaskCommand, isInQuote } from "./task-checkbox";
+import { caretMenuTakesKey } from "./caret-menu-keys";
 import {
   attachmentMarkdown,
   uploadAttachment,
@@ -498,10 +499,19 @@ export function SlashMenu({
     [getEditor, upload],
   );
 
-  // keyboard nav
-  useEffect(() => {
-    if (!state) return;
+  // Keyboard nav, attached in the commit that paints the menu. The state that
+  // opens it is set from a frame, so it is an ordinary update, and a passive
+  // effect runs in a task after the paint. The browser dispatches input
+  // between those tasks: an Enter pressed as the menu appeared reached
+  // ProseMirror, which split the line under a menu still on screen.
+  //
+  // Only while a row is on screen: a `/zzz` that matches nothing draws no
+  // menu, and its Enter is the editor's. `caretMenuTakesKey` says which keys
+  // the document-wide listener has to leave alone.
+  useLayoutEffect(() => {
+    if (!state || results.length === 0) return;
     const onKey = (e: KeyboardEvent) => {
+      if (!caretMenuTakesKey(e, container.current)) return;
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setActive((a) => Math.min(a + 1, results.length - 1));
@@ -517,7 +527,7 @@ export function SlashMenu({
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [state, results, active, run]);
+  }, [state, results, active, run, container]);
 
   // keep the highlighted row inside the scrollport while arrowing
   useEffect(() => {

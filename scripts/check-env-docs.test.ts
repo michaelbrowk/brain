@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it } from "vitest";
 import {
+  documentedEnvExamples,
   documentedEnvNames,
   readEnvNames,
   undocumentedEnvNames,
@@ -46,6 +47,12 @@ describe("environment documentation", () => {
     const documented = await documentedEnvNames(process.cwd());
     expect(documented).toContain("NOTES_ROOT");
     expect(documented).toContain("BRAIN_OAUTH_STATE_DIR");
+  });
+
+  it("keeps the example value each documented name shows", async () => {
+    const examples = await documentedEnvExamples(process.cwd());
+    expect(examples.get("BRAIN_PUSH_STATE_DIR")).toBe("/var/lib/brain/push");
+    expect([...examples.keys()].sort()).toEqual(await documentedEnvNames(process.cwd()));
   });
 
   it("leaves nothing undocumented", async () => {

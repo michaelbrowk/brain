@@ -342,7 +342,7 @@ function threadWord(count: number): string {
 export function MailSurface({
   onOpenSettings,
   onAccountStatusChange,
-  onComposeOpenChange,
+  onSheetOpenChange,
   onToast,
   refreshToken,
   client = defaultMailSurfaceClient,
@@ -351,10 +351,11 @@ export function MailSurface({
    *  (/settings/mail?account=<id>) — the reauth affordances pass it. */
   onOpenSettings: (invoker: HTMLElement, accountId?: string) => void;
   onAccountStatusChange?: (configured: boolean) => void;
-  /** Whether a composer is up. The sheet is a portal at the body, so the
-   *  shell learns it here and steps back (inert, tab bar gone, chords silent)
-   *  rather than reading it off its own tree. Reported false on unmount. */
-  onComposeOpenChange?: (open: boolean) => void;
+  /** Whether a sheet that takes the whole window is up: the composer or an
+   *  attachment viewer. Both are portals at the body, so the shell learns it
+   *  here and steps back (inert, tab bar gone, chords silent) rather than
+   *  reading it off its own tree. Reported false on unmount. */
+  onSheetOpenChange?: (open: boolean) => void;
   onToast?: (title: string, options?: ToastOptions) => void;
   refreshToken?: number;
   client?: MailSurfaceClient;
@@ -370,6 +371,16 @@ export function MailSurface({
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [readerState, setReaderState] = useState<MailReaderState>({ kind: "idle" });
   const [composer, setComposer] = useState<ComposerState | null>(null);
+  /** A letter's attachment viewer is up (the reader reports it). */
+  const [attachmentViewerOpen, setAttachmentViewerOpen] = useState(false);
+  /** The same flag for the window key listener, which runs off refs. It is
+   *  written in the reader's own callback, so it is true before the first
+   *  key can reach the viewer. */
+  const attachmentViewerOpenRef = useRef(false);
+  const onAttachmentViewerOpenChange = useCallback((open: boolean) => {
+    attachmentViewerOpenRef.current = open;
+    setAttachmentViewerOpen(open);
+  }, []);
   const [saveStatus, setSaveStatus] = useState<MailComposerSaveStatus>("idle");
   const [draftsOpen, setDraftsOpen] = useState(false);
   /** The handler-side truth for the same flag — the navigation handlers below
@@ -1249,12 +1260,12 @@ export function MailSurface({
     composerRef.current = composer;
   }, [composer]);
 
-  const composeOpen = composer !== null;
+  const sheetOpen = composer !== null || attachmentViewerOpen;
   useEffect(() => {
-    onComposeOpenChange?.(composeOpen);
+    onSheetOpenChange?.(sheetOpen);
     // Leaving Mail with a sheet up (a route change) must give the shell back.
-    return () => onComposeOpenChange?.(false);
-  }, [composeOpen, onComposeOpenChange]);
+    return () => onSheetOpenChange?.(false);
+  }, [sheetOpen, onSheetOpenChange]);
 
   useEffect(() => {
     readerStateRef.current = readerState;
@@ -4270,6 +4281,10 @@ export function MailSurface({
          composer away behind it, which is the opposite of what Cancel
          means. */
       if (document.querySelector('[role="alertdialog"]')) return;
+      /* The attachment viewer owns the keyboard the same way, and all of it:
+         it answers ←, → and Esc itself, and an e or a u that fell through
+         would archive or mark the letter under the picture. */
+      if (attachmentViewerOpenRef.current) return;
       const composerOpen = composerRef.current !== null;
       if (composerOpen && event.key !== "Escape") return;
 
@@ -4812,11 +4827,12 @@ export function MailSurface({
           capabilities={readerCapabilities}
           onAction={(thread, action) => void mutateOpenThread(thread, action)}
           contentClient={client}
+          onAttachmentViewerOpenChange={onAttachmentViewerOpenChange}
         />
       </div>
 
       {/* THE COMPOSE SHEET. A portal at the body over the whole window; the
-          shell under it is inert (`onComposeOpenChange`). The presence keeps
+          shell under it is inert (`onSheetOpenChange`). The presence keeps
           the sheet mounted through its exit, so the surface's state can go
           null the moment a send lands or a draft closes and the sheet still
           gets to leave the way it was dismissed. */}

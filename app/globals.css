@@ -353,6 +353,11 @@
   --shadow-3:
     0 1px 2px oklch(0.23 0.024 249 / 0.05), 0 16px 40px -12px oklch(0.23 0.024 249 / 0.16);
   --scrim-v2: oklch(0.23 0.024 249 / 0.18);
+  /* The attachment viewer's ground, the same in both themes (the dark block
+     does not redefine it): a picture is judged against near-black, and at
+     .94 the receding shell is a shape behind it rather than a second image.
+     The dark paper's own warm hue, one step darker. */
+  --scrim-viewer: oklch(0.16 0.006 75 / 0.94);
   --lift: 0 12px 28px -8px oklch(0.23 0.024 249 / 0.22); /* drag only */
   --shadow-sticker: 0 10px 24px -10px oklch(0.457 0.093 90 / 0.35); /* warm, an object on the desk */
 
@@ -4779,6 +4784,265 @@ a.brain-share-url:active {
 }
 .brain-mail-chip:active {
   background-color: var(--fill-active);
+}
+
+/* Attachment tiles: a picture or a PDF the reader can draw, as a square that
+   opens the viewer. 112 on a desktop, three to a row on a phone. The square
+   is the chip's material at tile size: the same hairline ring, strengthened
+   on hover with the paper hover fill laid over the picture, and the press is
+   the family's .97. The name (one line) and the size sit under it in Caption,
+   the name in ink and the size in ink-3. The button itself carries the
+   keyboard's ring, around the square and its caption together. */
+.brain-mail-tiles {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+@media (min-width: 768px) {
+  .brain-mail-tiles {
+    grid-template-columns: repeat(auto-fill, 112px);
+  }
+}
+.brain-mail-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+  border-radius: var(--r-control);
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.brain-mail-tile-thumb {
+  position: relative;
+  display: grid;
+  place-content: center;
+  justify-items: center;
+  gap: 2px;
+  width: 100%;
+  aspect-ratio: 1;
+  margin-bottom: 6px;
+  overflow: hidden;
+  border-radius: var(--r-control);
+  background: var(--fill-tint);
+  box-shadow: 0 0 0 1px var(--hair);
+  color: var(--ink-2);
+  transition:
+    box-shadow 160ms var(--ease-out),
+    transform 100ms ease-out;
+}
+.brain-mail-tile-thumb > img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.brain-mail-tile-thumb::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--fill-hover);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms var(--ease-out);
+}
+@media (hover: hover) {
+  .brain-mail-tile:hover .brain-mail-tile-thumb {
+    box-shadow: 0 0 0 1px var(--hair-strong);
+    transition-duration: 80ms, 100ms;
+  }
+  .brain-mail-tile:hover .brain-mail-tile-thumb::after {
+    opacity: 1;
+    transition-duration: 80ms;
+  }
+}
+.brain-mail-tile:active .brain-mail-tile-thumb {
+  transform: scale(0.97);
+}
+.brain-mail-tile:active .brain-mail-tile-thumb::after {
+  opacity: 1;
+}
+.brain-mail-tile-name,
+.brain-mail-tile-size {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.brain-mail-tile-name {
+  color: var(--ink);
+}
+.brain-mail-tile-size {
+  color: var(--ink-3);
+  font-variant-numeric: tabular-nums;
+}
+@media (prefers-reduced-motion: reduce) {
+  .brain-mail-tile:active .brain-mail-tile-thumb {
+    transform: none;
+  }
+}
+
+/* THE ATTACHMENT VIEWER. A letter's pictures and PDFs over the whole window,
+   the compose sheet's kind of surface: fixed on --z-modal in a portal at the
+   body, the shell inert and receding under it. Its ground is --scrim-viewer
+   in both themes, and the root carries `.dark`, so the bar's controls and
+   type take the dark theme's tokens whatever the app is in (and
+   `color-scheme` gives the PDF's scrollbar the same answer). The bar is the
+   compose actions row's: 44 on a phone, 36 on a desktop, the window's inset
+   above it and at both ends. The stage below holds one preview at a time;
+   pictures are fitted whole, and the finger's sideways swipe is the stage's,
+   while a vertical pan and a pinch stay the browser's. */
+.brain-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-modal);
+  display: flex;
+  flex-direction: column;
+  height: 100dvh;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+  background: var(--scrim-viewer);
+  color: var(--ink);
+  color-scheme: dark;
+  outline: none;
+  /* A token built from another is resolved where it is declared, so the one
+     derived token the viewer's controls read (the glass button's hover
+     layer) is derived again here from the dark values. */
+  --hover-tint: linear-gradient(var(--fill-glass-hover), var(--fill-glass-hover));
+}
+.brain-viewer-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 44px;
+  margin-top: var(--inset);
+  padding-inline: max(var(--inset), env(safe-area-inset-left, 0px))
+    max(var(--inset), env(safe-area-inset-right, 0px));
+}
+.brain-viewer-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.brain-viewer-nav {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.brain-viewer-counter {
+  min-width: 52px;
+  /* Control's line-height 1 clips descenders on a truncating span (§3) */
+  line-height: 1.25;
+  text-align: center;
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.brain-viewer-stage {
+  position: relative;
+  display: grid;
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  touch-action: pan-y pinch-zoom;
+}
+/* Every preview stands in the one cell, so the one leaving fades out in place
+   under the one arriving. */
+.brain-viewer-item {
+  position: relative;
+  grid-area: 1 / 1;
+  display: grid;
+  place-items: center;
+  min-height: 0;
+  min-width: 0;
+}
+.brain-viewer-image {
+  width: 100%;
+  height: 100%;
+  padding: var(--inset);
+  object-fit: contain;
+  opacity: 0;
+  transition: opacity 160ms var(--ease-out);
+}
+.brain-viewer-image[data-loaded] {
+  opacity: 1;
+}
+.brain-viewer-status {
+  line-height: 1.25;
+  color: var(--ink-2);
+}
+.brain-viewer-failure {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  padding: 24px;
+  text-align: center;
+}
+/* The PDF: one vertical scroll of pages, each fitted to a column no wider than
+   a page is comfortable to read at, with the window's inset around it. A page
+   that has not been drawn yet is its own shape in the faint fill, so the
+   scroll has its full length from the start. */
+.brain-viewer-pdf {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+.brain-viewer-pdf-scroll {
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.brain-viewer-pdf-column {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: min(100%, 880px);
+  margin-inline: auto;
+  padding: var(--inset) var(--inset) 64px;
+}
+.brain-viewer-pdf-page {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border-radius: var(--r-xs);
+  background: var(--fill-glass-hover);
+}
+.brain-viewer-pdf-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+/* "Page 2 of 7": a capsule on the regular material at the stage's foot. */
+.brain-viewer-page-pill {
+  position: absolute;
+  bottom: var(--inset);
+  left: 50%;
+  display: flex;
+  align-items: center;
+  height: 28px;
+  padding: 0 12px;
+  transform: translateX(-50%);
+  border-radius: 9999px;
+  background: var(--glass-reg);
+  -webkit-backdrop-filter: var(--blur-reg);
+  backdrop-filter: var(--blur-reg);
+  box-shadow: var(--rim), var(--shadow-2);
+  color: var(--ink-2);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+@media (min-width: 768px) {
+  .brain-viewer-bar {
+    height: 36px;
+  }
 }
 
 /* P5-c — the compose sheet. Writing a letter takes the whole window: an

@@ -98,6 +98,8 @@ const WANT = [
   // not on disk.
   "refresh-linear",
   "file-corrupted-linear",
+  // The attachment viewer's Download, at the end of its top bar.
+  "download-minimalistic-linear",
 ];
 
 /**

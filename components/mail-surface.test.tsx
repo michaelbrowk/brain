@@ -10583,6 +10583,22 @@ describe("MailSurface", () => {
       expect(active.closest('section[aria-label="Mailbox"]')).not.toBeNull();
     });
 
+    it("decides the letter on screen while its messages are still loading", async () => {
+      const { client } = await mount([waiting("lena-1"), friend("friend-1")], {
+        readThread: vi.fn().mockReturnValue(new Promise(() => {})),
+      });
+      await openLetter("Subject lena-1");
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "b", bubbles: true }));
+      });
+      await settle();
+      expect(client.decideSender).toHaveBeenCalledWith({
+        address: "lena@okafor.example",
+        scope: "address",
+        decision: "block",
+      });
+    });
+
     it("decides the focused row when no letter is open", async () => {
       const { client } = await mount([waiting("lena-1"), waiting("mika-1", mika)]);
       findButton("Accept Lena Okafor").focus();

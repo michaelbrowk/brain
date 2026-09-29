@@ -4565,9 +4565,11 @@ export function MailSurface({
     readonly thread: MailThreadListItem;
     readonly scope: SenderScope;
   } | null => {
+    // The letter on screen is the one decided, whether or not its messages
+    // have arrived yet: the row it was opened from already names its sender.
     const reader = readerStateRef.current;
-    if (reader.kind !== "ready") return null;
-    const [open] = shownRows([reader.detail.thread]);
+    if (reader.kind === "idle") return null;
+    const [open] = shownRows([reader.kind === "ready" ? reader.detail.thread : reader.thread]);
     const from = open ? waitsOn(open) : null;
     if (!open || from === null) return null;
     const held = readerScopeRef.current;
@@ -4604,8 +4606,11 @@ export function MailSurface({
    *  holds for the letter now open, and the decision made with that reach. */
   const holdReaderScope = useCallback((scope: SenderScope) => {
     const reader = readerStateRef.current;
-    if (reader.kind !== "ready") return;
-    const held = { key: flipRowKey(reader.detail.thread), scope };
+    if (reader.kind === "idle") return;
+    const held = {
+      key: flipRowKey(reader.kind === "ready" ? reader.detail.thread : reader.thread),
+      scope,
+    };
     readerScopeRef.current = held;
     setReaderScope(held);
   }, []);

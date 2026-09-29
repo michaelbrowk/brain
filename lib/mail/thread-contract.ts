@@ -5,14 +5,20 @@ export type MailThreadStateContractTier = 1 | 2 | 3 | 4 | 5;
 
 const HIGHEST_TIER: MailThreadStateContractTier = 5;
 
+/** The fields tier 5 added. They leave together: a sender named on a thread
+ *  whose waiting flag is gone would be a contradiction, and the blocked mark
+ *  is the same screen's other answer about the same sender. */
+const TIER_5_FIELDS = ["newSender", "newSenderFrom", "senderBlocked"] as const;
+
 /**
  * Additive thread-state fields ship in tiers so old exact-record clients keep
  * working: tier 1 is the original apiVersion 1 shape, tier 2 added starred,
  * tier 3 added listMessage and sizeBytes, tier 4 added category, tier 5 added
- * newSender. A client states its tier with the header above as a number, and
- * a number above the highest tier this build knows reads as that tier, so a
- * newer client talking to this service still gets every field it has.
- * Anything that is not a whole number gets the original shape.
+ * newSender and the newSenderFrom that travels with it. A client states its
+ * tier with the header above as a number, and a number above the highest tier
+ * this build knows reads as that tier, so a newer client talking to this
+ * service still gets every field it has. Anything that is not a whole number
+ * gets the original shape.
  */
 export function mailThreadStateContractTier(
   value: string | readonly string[] | null | undefined,
@@ -28,13 +34,13 @@ export function projectMailThreadStateContract(
   tier: MailThreadStateContractTier,
 ): unknown {
   if (tier === 5) return value;
-  if (tier === 4) return omitFields(value, ["newSender"]);
-  if (tier === 3) return omitFields(value, ["newSender", "category"]);
+  if (tier === 4) return omitFields(value, TIER_5_FIELDS);
+  if (tier === 3) return omitFields(value, [...TIER_5_FIELDS, "category"]);
   if (tier === 2) {
-    return omitFields(value, ["newSender", "category", "listMessage", "sizeBytes"]);
+    return omitFields(value, [...TIER_5_FIELDS, "category", "listMessage", "sizeBytes"]);
   }
   return omitFields(value, [
-    "newSender",
+    ...TIER_5_FIELDS,
     "category",
     "listMessage",
     "sizeBytes",

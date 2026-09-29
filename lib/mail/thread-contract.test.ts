@@ -40,14 +40,28 @@ describe("mail thread-state contract", () => {
     expect(projectMailThreadStateContract(page, 5)).toEqual(page);
   });
 
-  it("drops exactly newSender from deep items at tier 4", () => {
+  it("drops exactly newSender and the sender it names from deep items at tier 4", () => {
     const projected = projectMailThreadStateContract(
       threadPageFixture(),
       4,
     ) as { items: Record<string, unknown>[] };
     expect(projected.items[0]).toEqual(
-      omit(threadItemFixture(), ["newSender"]),
+      omit(threadItemFixture(), ["newSender", "newSenderFrom"]),
     );
+  });
+
+  it("keeps a blocked sender's mark at tier 5 and drops it below", () => {
+    const blocked = {
+      ...threadItemFixture(),
+      newSender: false,
+      newSenderFrom: undefined,
+      senderBlocked: true,
+    };
+    delete (blocked as Record<string, unknown>).newSenderFrom;
+    expect(projectMailThreadStateContract(blocked, 5)).toEqual(blocked);
+    for (const tier of [4, 3, 2, 1] as const) {
+      expect(projectMailThreadStateContract(blocked, tier)).not.toHaveProperty("senderBlocked");
+    }
   });
 
   it("drops newSender and category from deep items at tier 3", () => {
@@ -56,7 +70,7 @@ describe("mail thread-state contract", () => {
       3,
     ) as { items: Record<string, unknown>[] };
     expect(projected.items[0]).toEqual(
-      omit(threadItemFixture(), ["newSender", "category"]),
+      omit(threadItemFixture(), ["newSender", "newSenderFrom", "category"]),
     );
   });
 
@@ -68,6 +82,7 @@ describe("mail thread-state contract", () => {
     expect(projected.items[0]).toEqual(
       omit(threadItemFixture(), [
         "newSender",
+        "newSenderFrom",
         "category",
         "listMessage",
         "sizeBytes",
@@ -83,6 +98,7 @@ describe("mail thread-state contract", () => {
     expect(projected.items[0]).toEqual(
       omit(threadItemFixture(), [
         "newSender",
+        "newSenderFrom",
         "category",
         "listMessage",
         "sizeBytes",
@@ -95,7 +111,7 @@ describe("mail thread-state contract", () => {
     const result = { apiVersion: 1, thread: threadItemFixture() };
     expect(projectMailThreadStateContract(result, 3)).toEqual({
       apiVersion: 1,
-      thread: omit(threadItemFixture(), ["newSender", "category"]),
+      thread: omit(threadItemFixture(), ["newSender", "newSenderFrom", "category"]),
     });
     expect(projectMailThreadStateContract(result, 5)).toEqual(result);
   });
@@ -117,6 +133,7 @@ describe("mail thread-state contract", () => {
       apiVersion: 1,
       thread: omit(threadItemFixture(), [
         "newSender",
+        "newSenderFrom",
         "category",
         "listMessage",
         "sizeBytes",
@@ -148,6 +165,7 @@ function threadItemFixture(): Record<string, unknown> {
     sizeBytes: 4_096,
     category: "newsletter",
     newSender: true,
+    newSenderFrom: { name: "Person", address: "person@example.test" },
   };
 }
 

@@ -55,6 +55,25 @@ export interface MailThreadListItem {
    * cache never stores it.
    */
   readonly newSender: boolean;
+  /**
+   * Tier-5 field, present exactly when `newSender` is true: the sender the
+   * thread waits on, which is its first message's From with the address
+   * normalized the way a decision reads it. A decision has to name that
+   * sender, and `participants` cannot: its first entry is whoever the
+   * provider listed first, and a Reply-To is someone else again. The name is
+   * passed through from the cache for the UI to say; the screen never
+   * stores it.
+   */
+  readonly newSenderFrom?: MailAddress;
+  /**
+   * Tier-5 mark, present (and true) only while the screen is on and the
+   * thread's first sender is blocked, so the service's next archive step
+   * will take the thread out of the Inbox. It is never on a waiting thread.
+   * The push that announces new mail reads it to stay quiet about a letter
+   * the owner has already refused, in the moments between its arrival and
+   * that archive.
+   */
+  readonly senderBlocked?: true;
 }
 
 /**

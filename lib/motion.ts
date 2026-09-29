@@ -10,6 +10,20 @@ export const DUR = {
   page: 0.22,
 } as const;
 
+/** The drawer curve, `--ease-drawer` in globals.css: quick off the mark and a
+ *  long settle, the shape of something that has somewhere to be. */
+export const EASE_DRAWER = [0.32, 0.72, 0, 1] as const;
+
+/** A decided New senders row on its way to the section it now belongs to,
+ *  and the rows it passes closing up behind it. The travel is the longer of
+ *  the two so the eye can follow the one object that changed places. */
+export const TRAVEL = { duration: 0.48, ease: EASE_DRAWER } as const;
+export const TRAVEL_NEIGHBOUR = { duration: 0.32, ease: EASE_DRAWER } as const;
+
+/** A row leaving to the left (a Block) or arriving back from there (its
+ *  Undo): far enough to read as a direction, short enough to be gone. */
+export const SLIDE_OUT = { duration: 0.24, ease: EASE_OUT, distance: 0.4 } as const;
+
 /** Snappy spring for overlays/snackbars. */
 export const SPRING = { type: "spring", stiffness: 500, damping: 32 } as const;
 
@@ -81,6 +95,15 @@ export const SPRING_SHEET_GESTURE = { type: "spring", bounce: 0.2, duration: 0.3
  *  become two different numbers. */
 export const SHEET_DISMISS_OFFSET = 120;
 export const SHEET_DISMISS_VELOCITY = 800;
+
+/** A sideways swipe on a New senders row, the way a native list takes one: a
+ *  drag past this share of the row's width decides, and so does a flick past
+ *  the velocity once it has travelled the minimum, so a quick short swipe
+ *  counts and a slow wobble does not. `ROW_SWIPE_ARM` is where the word
+ *  under the row turns to say the release will decide. */
+export const ROW_SWIPE_ARM = 0.35;
+export const ROW_SWIPE_MIN = 48;
+export const ROW_SWIPE_VELOCITY = 500;
 
 /** How far below its resting place a sheet starts, in px. Here for the same
  *  reason the two thresholds are: the second sheet is the moment one number

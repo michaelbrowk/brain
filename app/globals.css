@@ -4687,6 +4687,148 @@ a.brain-share-url:active {
 .brain-mail-subhead {
   padding: 6px var(--inset) 4px var(--mail-rule);
 }
+/* NEW SENDERS. A first letter from a stranger waits in the column's first
+   group with its decision on the row: Block and Accept stand where the time
+   stands on an ordinary row, on the row's own text rule 8 inside the capsule
+   (the place Drafts keeps its delete). They are the row's siblings rather
+   than its children, since a button cannot hold a button, so the row keeps
+   their room on its right: the pair measures 118 at Control 13 (Block 52,
+   Accept 64 at 600, 2 between), and 8 of air before them makes 126, taken
+   up to the 4px step. Both are the quiet button at the row's 28 capsule,
+   which is `--r-row` round; Accept wears the soft fill a small paper object
+   takes and full ink at 600, which is all the weight a choice between two
+   words needs. Its hover is the tint as a layer (`tint-hover`), since the
+   fill is its own. */
+.brain-mail-row_gate {
+  padding-right: 128px;
+}
+/* A single account's Inbox groups only while someone waits: New senders, then
+   the rest under the boundary. Its first group opens under the status line,
+   which is a caption and not a group, so it draws no rule either. */
+.brain-mail-groups > .brain-mail-section:first-child {
+  margin-top: 0;
+  padding-top: 0;
+}
+.brain-mail-groups > .brain-mail-section:first-child::before {
+  content: none;
+}
+/* The column takes the focus only as the last place a decided row can hand
+   it, when no row is left to take it (`handFocusOn` in mail-flip.ts). A ring
+   around the whole column would say nothing a row cannot, so it draws none;
+   the next Tab lands on the first control inside it. */
+html[data-kbd] .brain-mail-list:focus-visible {
+  outline: none;
+}
+.brain-mail-gate {
+  position: absolute;
+  top: 50%;
+  right: calc(var(--inset) + 8px);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  transform: translateY(-50%);
+}
+.brain-mail-gate > .btn {
+  height: 28px;
+  padding: 0 10px;
+  border-radius: var(--r-row);
+}
+.brain-mail-gate > .brain-mail-accept {
+  background-color: var(--fill-tint);
+  color: var(--ink);
+  font-weight: 600;
+}
+@media (hover: hover) {
+  .brain-mail-gate > .brain-mail-accept:hover {
+    background-color: var(--fill-tint);
+  }
+}
+/* The swipe. The body is what a finger carries; the word under it says what
+   the release will do, in the row's own capsule on the soft fill, and turns
+   to full ink at 600 once the drag has gone far enough to decide (red for
+   Block, the one destructive word here). While the row is off its place it
+   is an object lifted over the list, paper with the thin shadow, which is
+   also how it looks while a decision carries it to another section. The
+   vertical axis stays the browser's (`pan-y`), so a scroll that starts on a
+   row is still a scroll. */
+.brain-mail-swipe {
+  position: relative;
+  -webkit-touch-callout: none;
+}
+.brain-mail-swipe-body {
+  position: relative;
+  touch-action: pan-y;
+}
+.brain-mail-swipe-word {
+  position: absolute;
+  inset: 0 var(--inset);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 20px;
+  border-radius: var(--r-row);
+  background: var(--fill-tint);
+  color: var(--ink-2);
+  font-family: var(--font-sf);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  letter-spacing: -0.08px;
+  pointer-events: none;
+  transition: color 120ms var(--ease-out);
+}
+.brain-mail-swipe-word[data-side="block"] {
+  justify-content: flex-end;
+}
+.brain-mail-swipe-word[data-armed] {
+  color: var(--ink);
+  font-weight: 600;
+}
+.brain-mail-swipe-word[data-side="block"][data-armed] {
+  color: var(--red);
+}
+.brain-mail-swipe:has(> .brain-mail-swipe-word) .brain-mail-row,
+.brain-mail-row-item[data-travelling] .brain-mail-row {
+  background-color: var(--paper);
+  box-shadow:
+    var(--shadow-1),
+    inset 0 0 0 1px var(--hair-soft);
+}
+.brain-mail-row-item[data-travelling] .brain-mail-row[aria-current="true"] {
+  background: linear-gradient(var(--blue-tint-2), var(--blue-tint-2)), var(--paper);
+  box-shadow:
+    var(--shadow-1),
+    inset 0 0 0 1px var(--blue-rim);
+}
+/* A travelling row passes over the groups between its old place and its new
+   one, so it is drawn above them, and the box that clips a section's rows
+   for the preview/bundle crossfade lets it through for the length of the
+   trip (`mail-flip.ts`). */
+.brain-mail-row-item[data-travelling] {
+  position: relative;
+  z-index: 1;
+}
+.brain-mail-section:has([data-travelling]) {
+  z-index: 1;
+}
+.brain-mail-rows:has([data-travelling]) {
+  overflow: visible;
+}
+/* Where it went: the row that arrived wears the selection tint for a beat
+   and lets it go. Colour, not movement, so reduced motion keeps it. The open
+   letter is skipped, since it wears the tint already and for good. */
+.brain-mail-row-item[data-arrived] .brain-mail-row:not([aria-current="true"]) {
+  animation: mail-row-arrive 1600ms var(--ease-out);
+}
+@keyframes mail-row-arrive {
+  0%,
+  25% {
+    background-color: var(--blue-tint-2);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
 /* The message body is the one thing on this surface that gets its own plane.
    HTML mail is foreign content written for a white page, so it keeps a paper
    sheet at r14 with a hairline; our own sender and meta markup stay on the
@@ -4752,6 +4894,19 @@ a.brain-share-url:active {
 @media (min-width: 768px) {
   .brain-mail-reader-head {
     padding: 12px max(var(--inset), env(safe-area-inset-right, 0px)) 12px 32px;
+  }
+}
+/* A first letter's second strip line: the reach of the decision, right-aligned
+   under the pill that makes it, on the strip's own right edge. */
+.brain-mail-reader-scope {
+  display: flex;
+  justify-content: flex-end;
+  flex-shrink: 0;
+  padding: 0 max(var(--inset), env(safe-area-inset-right, 0px)) 8px 20px;
+}
+@media (min-width: 768px) {
+  .brain-mail-reader-scope {
+    padding-left: 32px;
   }
 }
 /* Attachment chip on paper: 28 capsule r14, hairline ring, Control 13/500;

@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { domainToASCII } from "node:url";
 
 import type {
+  MailAddress,
   MailBlockedSenders,
   MailMailboxThreadPage,
   MailSearchThreadPage,
@@ -1065,6 +1066,9 @@ export class SqliteMailSenderStore {
 
 /** A cached thread's first message, as the cache holds it. */
 export interface MailThreadFirstSender {
+  /** The From display name as cached. It is handed to the UI on a waiting
+   *  thread so a row and a toast can say who wrote, and never stored here. */
+  readonly name: string | null;
   /** The From address exactly as cached; the screen normalizes it. */
   readonly address: string | null;
   readonly firstMessageAt: number | null;
@@ -1266,9 +1270,12 @@ export class MailSenderScreen implements MailSenderScreenService {
   }
 
   /**
-   * Sets `newSender` on each item. A failure reading the screen answers false
-   * for the page rather than failing it: mail stays readable when the screen
-   * is not, and a thread that should have waited only arrives ungrouped.
+   * Sets `newSender` on each item, and `senderBlocked` on a thread the next
+   * archive step will take (the archiver runs while the switch is on, whether
+   * or not this account gates yet). A failure reading the screen answers
+   * false for the page rather than failing it: mail stays readable when the
+   * screen is not, and a thread that should have waited only arrives
+   * ungrouped.
    */
   async annotateItems(
     accountId: string,
@@ -1276,15 +1283,25 @@ export class MailSenderScreen implements MailSenderScreenService {
   ): Promise<readonly MailThreadListItem[]> {
     if (items.length === 0) return items;
     try {
-      const gateMoment = this.readGateMoment(accountId);
-      if (gateMoment === null) {
-        return Object.freeze(items.map((item) => withNewSender(item, false)));
+      if (!this.store.readState().enabled) {
+        return Object.freeze(items.map((item) => withNewSender(item, null)));
       }
+      const gateMoment = this.readGateMoment(accountId);
       const own = await this.readOwn();
       const senders = await this.mail.readThreadFirstSenders(
         accountId,
         items.map((item) => item.threadId),
       );
+      // Read only when a blocked sender's thread sits in the Inbox, and then
+      // once for the page: the archiver's own targets, so the mark never
+      // promises an archive the archiver will not make.
+      let targets: ReadonlySet<string> | null = null;
+      const archiverTakes = async (threadId: string): Promise<boolean> => {
+        targets ??= new Set(
+          (await this.archiveTargets(accountId, own)).map((target) => target.ref.threadId),
+        );
+        return targets.has(threadId);
+      };
       const annotated: MailThreadListItem[] = [];
       for (const item of items) {
         const first = senders.get(item.threadId) ?? null;
@@ -1316,6 +1333,7 @@ export class MailSenderScreen implements MailSenderScreenService {
         let gated = isMailSenderGated(input);
         if (
           !gated &&
+          gateMoment !== null &&
           first !== null &&
           sender !== null &&
           !input.startsConversation &&
@@ -1323,7 +1341,22 @@ export class MailSenderScreen implements MailSenderScreenService {
         ) {
           gated = await this.followsStranger(accountId, sender, first.references, gateMoment);
         }
-        annotated.push(withNewSender(item, gated));
+        // Whether a block stands for this Inbox letter (`readBlockingDecision`,
+        // the archiver's rule) is the cheap question. The archiver's own
+        // targets answer the rest: its scan, a thread or an IMAP copy the owner
+        // put back, a thread it leaves alone for an hour after a failure.
+        const standing =
+          sender !== null && !isOwn && first?.inInbox === true
+            ? this.store.readBlockingDecision(sender)
+            : null;
+        const blocked = standing !== null && (await archiverTakes(item.threadId));
+        annotated.push(
+          withNewSender(
+            item,
+            gated && sender !== null ? { name: first?.name ?? null, address: sender } : null,
+            blocked,
+          ),
+        );
       }
       return Object.freeze(annotated);
     } catch {
@@ -1332,7 +1365,7 @@ export class MailSenderScreen implements MailSenderScreenService {
         accountId,
         errorCode: "mail_senders_unavailable",
       });
-      return Object.freeze(items.map((item) => withNewSender(item, false)));
+      return Object.freeze(items.map((item) => withNewSender(item, null)));
     }
   }
 
@@ -1667,18 +1700,7 @@ export class MailSenderScreen implements MailSenderScreenService {
       if (retryAt <= now) this.archiveBackoff.delete(key);
     }
     const own = await this.readOwn();
-    const index = this.store.readDecisionIndex();
-    const effects = this.store.readArchiveEffects(accountId);
-    const listing = await this.mail.listInboxThreadFirstSenders(accountId, ownAddressTest(own));
-    const governed = listing.flatMap((thread) => {
-      const blocking = this.blockingDecision(index, own, thread);
-      return blocking === null ? [] : [{ thread, decisionId: blocking.decisionId }];
-    });
-    const targets = withMatchKeys(accountId, listing, governed).filter(
-      (target) =>
-        !this.archiveBackoff.has(`${accountId}/${target.ref.threadId}`) &&
-        !ownerMovedBack(effects, target),
-    );
+    const targets = await this.archiveTargets(accountId, own);
     const archived: MailSenderThreadRef[] = [];
     let attempted = 0;
     for (const target of targets) {
@@ -1697,6 +1719,28 @@ export class MailSenderScreen implements MailSenderScreenService {
     }
     this.logCounts("mail_sender_blocked_archived", "sync", archived);
     return targets.length > attempted;
+  }
+
+  /** What the next archive step would try in this account: Inbox threads a
+   *  standing block governs, within the scan, not moved back by the owner and
+   *  not left alone after a failure. */
+  private async archiveTargets(
+    accountId: string,
+    own: OwnSenders,
+  ): Promise<Array<ArchiveTarget & { readonly decisionId: string }>> {
+    const now = Date.now();
+    const index = this.store.readDecisionIndex();
+    const effects = this.store.readArchiveEffects(accountId);
+    const listing = await this.mail.listInboxThreadFirstSenders(accountId, ownAddressTest(own));
+    const governed = listing.flatMap((thread) => {
+      const blocking = this.blockingDecision(index, own, thread);
+      return blocking === null ? [] : [{ thread, decisionId: blocking.decisionId }];
+    });
+    return withMatchKeys(accountId, listing, governed).filter(
+      (target) =>
+        (this.archiveBackoff.get(`${accountId}/${target.ref.threadId}`) ?? 0) <= now &&
+        !ownerMovedBack(effects, target),
+    );
   }
 
   private async restorePending(accountId: string, signal: AbortSignal): Promise<boolean> {
@@ -2073,8 +2117,31 @@ function normalizeAll(raw: readonly string[]): string[] {
   });
 }
 
-function withNewSender(item: MailThreadListItem, newSender: boolean): MailThreadListItem {
-  return item.newSender === newSender ? item : Object.freeze({ ...item, newSender });
+/** A waiting thread carries the sender it waits on; any other carries none,
+ *  and only a thread whose sender is blocked carries the blocked mark,
+ *  whatever the item it was built from said. A thread cannot be both. */
+function withNewSender(
+  item: MailThreadListItem,
+  waitsOn: MailAddress | null,
+  blocked = false,
+): MailThreadListItem {
+  const marked = waitsOn === null && blocked;
+  if (
+    waitsOn === null &&
+    !item.newSender &&
+    item.newSenderFrom === undefined &&
+    (item.senderBlocked === true) === marked
+  ) {
+    return item;
+  }
+  const next: {
+    -readonly [Key in keyof MailThreadListItem]: MailThreadListItem[Key];
+  } = { ...item, newSender: waitsOn !== null };
+  delete next.newSenderFrom;
+  delete next.senderBlocked;
+  if (waitsOn !== null) next.newSenderFrom = Object.freeze({ ...waitsOn });
+  if (marked) next.senderBlocked = true;
+  return Object.freeze(next);
 }
 
 function isPermanentMutationFailure(error: unknown): boolean {

@@ -545,7 +545,31 @@ the highest one the build knows, so a later client still gets every field
 this service has; a service from before tier 5 reads `5` as the original
 shape, which strips stars and categories for as long as a release that pairs
 a new Brain with an old service lasts. A failure reading the screen answers
-`false` for the page rather than failing the list.
+`false` for the page rather than failing the list. A waiting thread also
+carries `newSenderFrom`, its first message's From with the address normalized
+as a decision reads it and the display name as cached, and no other thread
+carries one: a decision names that sender, and neither the first entry of
+`participants` nor a Reply-To is that. It is tier 5 with `newSender` and
+leaves with it in every lower projection. The name is passed through for the
+UI to say and is never written to `senders.sqlite3`. While the switch is on, a
+thread carries `senderBlocked: true` only while the next archive step will
+try to take it out of the Inbox: the mark reads the archiver's own targets
+(`archiveTargets`), so it cannot promise an archive the archiver will not
+make. Those are the Inbox threads within the archiver's scan whose first
+sender the archiver's rule blocks (the address's block, or the domain's block
+for an address the owner does not know), less the ones the owner put back
+after the block archived them with nothing newer since from anyone but him
+(by the thread's own record, or an IMAP copy by its Message-ID), and less
+the ones the archiver leaves alone for an hour after a failed archive. A
+thread in that hour carries no mark and shows in the Inbox until the next
+try, so a letter the provider refuses outright shows between its hourly
+tries rather than vanishing for good. The pre-check is cheap (a standing
+block for an Inbox letter), and the archiver's Inbox listing is read at most
+once per page and only when it passes. No waiting thread carries the mark,
+and it leaves the lower projections with the other two. The mail push reads
+it to stay quiet about a letter already refused in the minute between its
+arrival and that archive, and the Inboxes in the UI leave a marked thread
+out.
 
 **Replies.** A first message that carries `In-Reply-To` or `References`
 answers someone, and cold outreach carries neither, so a reply-shaped letter

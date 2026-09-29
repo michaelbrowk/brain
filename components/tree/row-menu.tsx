@@ -29,6 +29,8 @@ export interface PageMenuAction {
   returnsFocus?: boolean;
   strong?: boolean;
   divider?: boolean;
+  /** A count at the item's right edge, where the nav menu keeps its own. */
+  tail?: string;
 }
 
 /** Shared registry so the dots menu and right-click menu cannot drift. */
@@ -136,6 +138,53 @@ export function RowMenu({
         </Dropdown.Content>
       </Dropdown.Portal>
     </Dropdown.Root>
+  );
+}
+
+/**
+ * The same right-click menu for a row that is not a page: the panel, its
+ * entrance and its items are the tree's, fed the row's own actions, so a menu
+ * on a mail row and a menu on a page cannot drift apart. Radix opens it on a
+ * long press as well, which is how a phone reaches it. `wide` is for items
+ * that carry an address: the nav menu's 264 at least, growing to its words
+ * up to 360 so "everyone at" a domain is read whole, and never past the
+ * window's inset.
+ */
+export function ActionContextMenu({
+  actions,
+  wide = false,
+  children,
+}: {
+  actions: readonly PageMenuAction[];
+  wide?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <Context.Root>
+      <Context.Trigger asChild>{children}</Context.Trigger>
+      <Context.Portal>
+        <Context.Content
+          className={
+            wide
+              ? "brain-menu z-[var(--z-modal)] min-w-[264px] max-w-[min(360px,calc(100vw-16px))]"
+              : PANEL
+          }
+        >
+          {actions.map((a) => (
+            <div key={a.key}>
+              {a.divider && <div className="brain-menu-sep" />}
+              <Context.Item onSelect={() => a.onSelect(null)} className={ITEM}>
+                <Icon name={a.icon} size={16} className="brain-menu-icon" />
+                <span className="min-w-0 flex-1 truncate">{a.label}</span>
+                {a.tail && (
+                  <span className="shrink-0 tabular-nums text-ink-3">{a.tail}</span>
+                )}
+              </Context.Item>
+            </div>
+          ))}
+        </Context.Content>
+      </Context.Portal>
+    </Context.Root>
   );
 }
 

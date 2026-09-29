@@ -124,6 +124,7 @@ export function MailAccountSettings({
   onAccountStatusChange,
   onToast,
   initialAccountId,
+  listFooter,
 }: {
   onOpenMail: () => void;
   onAccountStatusChange?: (configured: boolean) => void;
@@ -131,6 +132,10 @@ export function MailAccountSettings({
   /** Deep link (/settings/mail?account=<id>): open this account's details
    *  once the account list resolves. */
   initialAccountId?: string | null;
+  /** Groups that belong to Mail as a whole rather than to one account (New
+   *  senders, Blocked senders), drawn under the accounts on the list view
+   *  once there is an account for them to speak about. */
+  listFooter?: React.ReactNode;
 }) {
   const [seededFromCache] = useState(() => lastLoadedAccounts !== null);
   const [loadState, setLoadState] = useState<LoadState>(
@@ -1415,6 +1420,7 @@ export function MailAccountSettings({
       {accounts.length >= MAX_MAIL_ACCOUNTS && (
         <p className="text-caption text-ink-3">{ACCOUNT_LIMIT_COPY}</p>
       )}
+      {accounts.length > 0 && listFooter}
     </motion.div>
   );
 }

@@ -782,52 +782,61 @@ function useInlineCidSources(
     );
     if (attachments.length === 0) return () => controller.abort();
 
-    const load = async () => {
-      const loaded: Array<readonly [string, string]> = [];
-      for (const attachment of attachments) {
-        try {
-          const blob = await mailCidFetchGate.run(
-            controller.signal,
-            async () => {
-              const response = await fetch(
-                attachmentUrl(message.accountId, attachment.attachmentId),
-                {
-                  signal: controller.signal,
-                  credentials: "same-origin",
-                  cache: "no-store",
-                  referrerPolicy: "no-referrer",
-                  redirect: "error",
-                },
-              );
-              if (!isVerifiedAttachmentResponse(response, attachment)) {
-                await response.body?.cancel().catch(() => undefined);
-                return null;
-              }
-              const candidate = await response.blob();
-              return candidate.size === attachment.bytes &&
-                candidate.type === attachment.mimeType
-                ? candidate
-                : null;
-            },
-          );
-          if (disposed || controller.signal.aborted || blob === null) {
-            if (disposed || controller.signal.aborted) return;
-            continue;
-          }
-          const source = URL.createObjectURL(blob);
-          if (disposed || controller.signal.aborted) {
-            URL.revokeObjectURL(source);
-            return;
-          }
-          objectUrls.push(source);
-          loaded.push([attachment.contentId!, source] as const);
-        } catch {
-          // A broken inline part leaves its inert alt text in the message.
+    // Every inline image is queued in the gate at once rather than one after
+    // another. The gate still runs two at a time, but a letter's own images
+    // are all waiting at their priority when a slot frees, so the tiles
+    // under the letter (a lower priority) never take a slot between two of
+    // them. They are published together, as before, once all have settled.
+    const loadOne = async (
+      attachment: (typeof attachments)[number],
+    ): Promise<readonly [string, string] | null> => {
+      try {
+        const blob = await mailCidFetchGate.run(
+          controller.signal,
+          async () => {
+            const response = await fetch(
+              attachmentUrl(message.accountId, attachment.attachmentId),
+              {
+                signal: controller.signal,
+                credentials: "same-origin",
+                cache: "no-store",
+                referrerPolicy: "no-referrer",
+                redirect: "error",
+              },
+            );
+            if (!isVerifiedAttachmentResponse(response, attachment)) {
+              await response.body?.cancel().catch(() => undefined);
+              return null;
+            }
+            const candidate = await response.blob();
+            return candidate.size === attachment.bytes &&
+              candidate.type === attachment.mimeType
+              ? candidate
+              : null;
+          },
+        );
+        if (disposed || controller.signal.aborted || blob === null) return null;
+        const source = URL.createObjectURL(blob);
+        if (disposed || controller.signal.aborted) {
+          URL.revokeObjectURL(source);
+          return null;
         }
-        if (disposed || controller.signal.aborted) return;
+        objectUrls.push(source);
+        return [attachment.contentId!, source] as const;
+      } catch {
+        // A broken inline part leaves its inert alt text in the message.
+        return null;
       }
+    };
+    const load = async () => {
+      const loaded = await Promise.all(attachments.map(loadOne));
       if (!disposed && !controller.signal.aborted) {
-        setState({ key, sources: new Map(loaded) });
+        setState({
+          key,
+          sources: new Map(
+            loaded.filter((entry): entry is readonly [string, string] => entry !== null),
+          ),
+        });
       }
     };
     void load();

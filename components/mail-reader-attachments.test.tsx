@@ -113,11 +113,33 @@ beforeEach(() => {
   ).IS_REACT_ACT_ENVIRONMENT = true;
   vi.stubGlobal(
     "createImageBitmap",
-    vi.fn(async (_blob: Blob, options: ImageBitmapOptions) => ({
-      width: options.resizeWidth ?? 112,
-      height: options.resizeWidth ?? 112,
-      close: () => {},
-    })),
+    vi.fn(
+      async (
+        _blob: Blob,
+        _sx: number,
+        _sy: number,
+        _sw: number,
+        _sh: number,
+        options: ImageBitmapOptions,
+      ) => ({ width: options.resizeWidth!, height: options.resizeHeight!, close: () => {} }),
+    ),
+  );
+  // A tile reads the picture's size from an <img> load of its blob URL.
+  vi.stubGlobal(
+    "Image",
+    class {
+      naturalWidth = 0;
+      naturalHeight = 0;
+      onload: (() => void) | null = null;
+      set src(value: string) {
+        if (!value) return;
+        setTimeout(() => {
+          this.naturalWidth = 600;
+          this.naturalHeight = 800;
+          this.onload?.();
+        }, 0);
+      }
+    },
   );
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
     () => ({ drawImage: () => {} }) as unknown as CanvasRenderingContext2D,
@@ -137,37 +159,39 @@ afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
-it("never has more than two attachment downloads out for a letter, and gets them all", async () => {
-  let inFlight = 0;
-  let most = 0;
-  const requested: string[] = [];
-  const everything = [...photos, logo];
+/** A download route that takes 10ms per file and records the order the
+ *  downloads started in and the most that were ever out at once. */
+function recordingFetch(files: readonly MailContentAttachmentDto[]) {
+  const record = { requested: [] as string[], inFlight: 0, most: 0 };
   vi.stubGlobal(
     "fetch",
     vi.fn(async (input: string) => {
-      requested.push(input);
-      inFlight += 1;
-      most = Math.max(most, inFlight);
+      record.requested.push(input);
+      record.inFlight += 1;
+      record.most = Math.max(record.most, record.inFlight);
       await new Promise((resolve) => setTimeout(resolve, 10));
-      inFlight -= 1;
-      const file = everything.find((candidate) => input.includes(candidate.attachmentId));
+      record.inFlight -= 1;
+      const file = files.find((candidate) => input.includes(candidate.attachmentId));
       return file ? verified(file) : new Response("", { status: 404 });
     }),
   );
+  return record;
+}
+
+async function renderLetter(htmlBody: string, attachments: readonly MailContentAttachmentDto[]) {
   const content = {
     apiVersion: 1 as const,
     accountId: ACCOUNT_ID,
     messageId: message.messageId,
     state: "ready" as const,
     textBody: null,
-    htmlBody: '<p>Photos from the weekend.</p><img data-brain-cid="logo@example.test" alt="Logo">',
-    attachments: everything,
+    htmlBody,
+    attachments,
   };
   const client = {
     getMessageContent: vi.fn().mockResolvedValue(content),
     requestMessageContent: vi.fn().mockResolvedValue(content),
   };
-
   await act(async () =>
     root.render(
       <MailReader
@@ -185,6 +209,51 @@ it("never has more than two attachment downloads out for a letter, and gets them
       />,
     ),
   );
+}
+
+it("starts every image the body draws before the tiles under it take the slots", async () => {
+  const inline = ["5", "6", "7"].map((digit) =>
+    image(digit, {
+      filename: `image00${digit}.png`,
+      disposition: "inline",
+      contentId: `part${digit}@example.test`,
+    }),
+  );
+  const record = recordingFetch([...photos, ...inline]);
+  await renderLetter(
+    [
+      "<p>Photos from the weekend.</p>",
+      ...inline.map((part) => `<img data-brain-cid="${part.contentId}" alt="">`),
+    ].join(""),
+    [...photos, ...inline],
+  );
+  await vi.waitFor(
+    async () => {
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      });
+      expect(record.requested).toHaveLength(7);
+    },
+    { timeout: 3_000 },
+  );
+
+  const started = (file: MailContentAttachmentDto) =>
+    record.requested.findIndex((input) => input.includes(file.attachmentId));
+  const tileStarts = photos.map(started).sort((left, right) => left - right);
+  for (const part of inline) {
+    expect(started(part)).toBeLessThan(tileStarts[1]!);
+  }
+  expect(record.most).toBeLessThanOrEqual(2);
+});
+
+it("never has more than two attachment downloads out for a letter, and gets them all", async () => {
+  const everything = [...photos, logo];
+  const record = recordingFetch(everything);
+  const requested = record.requested;
+  await renderLetter(
+    '<p>Photos from the weekend.</p><img data-brain-cid="logo@example.test" alt="Logo">',
+    everything,
+  );
   await vi.waitFor(
     async () => {
       await act(async () => {
@@ -196,7 +265,7 @@ it("never has more than two attachment downloads out for a letter, and gets them
     { timeout: 3_000 },
   );
 
-  expect(most).toBeLessThanOrEqual(2);
+  expect(record.most).toBeLessThanOrEqual(2);
   expect(new Set(requested).size).toBe(5);
   // Four tiles, each drawn, and the logo drawn in the body rather than listed.
   const tiles = [...host.querySelectorAll("button.brain-mail-tile")];

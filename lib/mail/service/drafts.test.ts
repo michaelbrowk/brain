@@ -465,6 +465,18 @@ describe("provider-neutral draft service", () => {
           100,
         ),
       ).rejects.toEqual(new MailDraftError("mail_draft_idempotency_conflict"));
+      // The same bytes under a part header that names the file otherwise:
+      // what stands around the files is compared as closely as the files.
+      const renamed = proposal([{ ...quote, filename: "quote.PDF" }]);
+      expect(renamed.message.rawRfc2822Bytes).toBe(honest.message.rawRfc2822Bytes);
+      await expect(
+        fixture.store.commitDraftSend(
+          mutation,
+          fingerprintMailDraftMutation(mutation),
+          { ...renamed, requestFingerprint: honest.requestFingerprint },
+          100,
+        ),
+      ).rejects.toEqual(new MailDraftError("mail_draft_idempotency_conflict"));
       await expect(
         fixture.store.commitDraftSend(mutation, fingerprintMailDraftMutation(mutation), honest, 100),
       ).resolves.toMatchObject({ created: true, operationId: SEND_OPERATION_ID });

@@ -99,8 +99,9 @@ describe("directActionForMailbox", () => {
     ["trash", false, "Restore"],
     ["all", false, "Move to Inbox"],
     ["starred", false, "Move to Inbox"],
-    ["all", true, null],
-    ["starred", true, null],
+    // In the Inbox again, and the way out is the Inbox's own.
+    ["all", true, "Archive"],
+    ["starred", true, "Archive"],
     // Sent lists letters that were never in the Inbox. Its way back is the
     // ⋯ menu, not the one action the strip draws.
     ["sent", false, null],
@@ -110,6 +111,11 @@ describe("directActionForMailbox", () => {
 
   it("moves a letter back with its own action", () => {
     expect(directActionForMailbox("all", false)?.action).toBe("move-to-inbox");
+  });
+
+  it("archives a letter in the Inbox from All Mail and Starred as the Inbox does", () => {
+    expect(directActionForMailbox("all", true)?.action).toBe("archive");
+    expect(directActionForMailbox("starred", true)?.action).toBe("archive");
   });
 });
 
@@ -190,6 +196,7 @@ describe("MailReader's way back to the Inbox", () => {
   it("draws Move to Inbox for an archived letter in All Mail, and sends it", async () => {
     await render("all", false);
     expect(toolbarButtons()).toContain("Move to Inbox");
+    expect(toolbarButtons()).not.toContain("Archive");
 
     const button = [...host.querySelectorAll("header button")].find(
       (candidate) => candidate.textContent?.trim() === "Move to Inbox",
@@ -201,9 +208,36 @@ describe("MailReader's way back to the Inbox", () => {
     );
   });
 
+  it.each(["all", "starred"] as const)(
+    "does not repeat the strip's Move to Inbox in the ⋯ menu in %s",
+    async (mailboxId) => {
+      await render(mailboxId, false);
+      expect(toolbarButtons()).toContain("Move to Inbox");
+      expect(await menuItems()).not.toContain("Move to Inbox");
+    },
+  );
+
+  it.each(["all", "starred"] as const)(
+    "draws Archive for a letter in the Inbox in %s, and sends it",
+    async (mailboxId) => {
+      await render(mailboxId, true);
+      expect(toolbarButtons()).toContain("Archive");
+
+      const button = [...host.querySelectorAll("header button")].find(
+        (candidate) => candidate.textContent?.trim() === "Archive",
+      ) as HTMLButtonElement;
+      await act(async () => button.click());
+      expect(onAction).toHaveBeenCalledWith(
+        expect.objectContaining({ threadId: "thread-1" }),
+        "archive",
+      );
+    },
+  );
+
   it("offers Move to Inbox in the ⋯ menu from Sent", async () => {
     await render("sent", false);
     expect(toolbarButtons()).not.toContain("Move to Inbox");
+    expect(toolbarButtons()).not.toContain("Archive");
     expect(await menuItems()).toContain("Move to Inbox");
   });
 
@@ -215,16 +249,17 @@ describe("MailReader's way back to the Inbox", () => {
 
   it("offers no Move to Inbox for a conversation with one message in the Inbox", async () => {
     await renderState("all", { kind: "ready", detail: conversation(false, true) });
+    expect(toolbarButtons()).toContain("Archive");
     expect(toolbarButtons()).not.toContain("Move to Inbox");
     expect(await menuItems()).not.toContain("Move to Inbox");
   });
 
   it("draws no Move to Inbox while the letter is still loading", async () => {
-    // Whether it is in the Inbox is unknown until it arrives. Drawing the
-    // action disabled meanwhile would flash it on every letter All Mail opens
-    // that turns out to be in the Inbox.
+    // Whether it is in the Inbox is unknown until it arrives, and it is taken
+    // as in the Inbox until then, the Inbox's own strip.
     await renderState("all", { kind: "loading", thread: detailFor(false).thread });
     expect(toolbarButtons()).not.toContain("Move to Inbox");
+    expect(toolbarButtons()).toContain("Archive");
   });
 
   it.each(["spam", "trash"] as const)(

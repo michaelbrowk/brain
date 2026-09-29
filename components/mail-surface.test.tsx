@@ -2514,11 +2514,24 @@ describe("MailSurface", () => {
 
     type Pill = ToastOptions & { onAction: () => Promise<unknown> };
 
+    function readerButton(label: string): HTMLButtonElement {
+      const reader = document.body.querySelector(
+        'section[aria-label="Message reader"]',
+      );
+      const found = [...(reader?.querySelectorAll("button") ?? [])].find(
+        (button) => button.textContent?.trim() === label,
+      );
+      if (!(found instanceof HTMLButtonElement)) {
+        throw new Error(`No reader button: ${label}`);
+      }
+      return found;
+    }
+
     async function movedFromAllMail(
       client: MailSurfaceClient,
       accounts: readonly PublicMailAccount[] = [accountA],
+      onToast = vi.fn(),
     ) {
-      const onToast = vi.fn();
       vi.mocked(client.loadAccounts).mockResolvedValue([...accounts]);
       await act(async () =>
         root.render(
@@ -2550,8 +2563,10 @@ describe("MailSurface", () => {
         actionLabel: "Undo",
         durationMs: SMART_UNDO_MS,
       });
-      // In the Inbox now: the letter stays open and the way back is spent.
+      // In the Inbox now: the letter stays open, and its way out is the
+      // Inbox's own.
       expect(readerButtons()).not.toContain("Move to Inbox");
+      expect(readerButtons()).toContain("Archive");
       expect(
         document.body.querySelector('section[aria-label="Message reader"]')
           ?.textContent,
@@ -2595,6 +2610,29 @@ describe("MailSurface", () => {
       await act(async () => star.resolve());
     });
 
+    it("archives the letter again from the strip, and the strip offers the way back", async () => {
+      const { client, updateThread } = inboxTruthClient();
+      const onToast = vi.fn();
+      await movedFromAllMail(client, [accountA], onToast);
+
+      await click(readerButton("Archive"));
+      await settle();
+
+      expect(updateThread).toHaveBeenLastCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+        archive: true,
+      });
+      expect(onToast).toHaveBeenLastCalledWith("Conversation archived");
+      // All Mail still lists it, so the reader stays on it.
+      expect(
+        document.body.querySelector('section[aria-label="Message reader"]')
+          ?.textContent,
+      ).toContain("Lunch this Friday?");
+      expect(readerButtons()).toContain("Move to Inbox");
+      expect(readerButtons()).not.toContain("Archive");
+    });
+
     it("runs Move to Inbox from e where the letter is out of the Inbox", async () => {
       const { client, updateThread } = inboxTruthClient();
       await act(async () =>
@@ -2615,6 +2653,19 @@ describe("MailSurface", () => {
         threadId: thread.threadId,
         archive: false,
       });
+
+      // In the Inbox now, and the same key takes it out again.
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "e", cancelable: true }));
+      });
+      await settle();
+
+      expect(updateThread).toHaveBeenLastCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+        archive: true,
+      });
+      expect(readerButtons()).toContain("Move to Inbox");
     });
 
     it("takes the row out of the Inbox the reader went to when Undo is pressed there", async () => {
@@ -9041,13 +9092,17 @@ describe("MailSurface", () => {
       };
     }
 
-    function detailFor(item: MailThreadListItem): MailThreadDetail {
+    function detailFor(
+      item: MailThreadListItem,
+      inInbox = true,
+    ): MailThreadDetail {
       return {
         ...detail,
         thread: item,
         messages: detail.messages.map((message) => ({
           ...message,
           threadId: item.threadId,
+          inInbox,
         })),
       };
     }
@@ -9449,7 +9504,9 @@ describe("MailSurface", () => {
     }
 
     it("opens a letter found outside Inbox in the mailbox the search used", async () => {
-      const readMailboxThread = vi.fn().mockResolvedValue(detailFor(archived));
+      const readMailboxThread = vi
+        .fn()
+        .mockResolvedValue(detailFor(archived, false));
       const client = makeClient({
         readThread: vi
           .fn()
@@ -9481,8 +9538,10 @@ describe("MailSurface", () => {
         expect.objectContaining({ threadId: archived.threadId }),
       );
       expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: All Mail");
-      // All Mail's reader: a letter already out of Inbox has no Archive.
+      // All Mail's reader: a letter already out of Inbox has no Archive, and
+      // its way back instead.
       expect(readerButtons()).not.toContain("Archive");
+      expect(readerButtons()).toContain("Move to Inbox");
     });
 
     /** A letter the palette opens from deep in All Mail is not on that
@@ -9613,6 +9672,24 @@ describe("MailSurface", () => {
       expect(reader()?.textContent).toContain("The archived letter");
       expect(reader()?.textContent).not.toContain("Choose a message");
       expect(readerButtons()).not.toContain("Move to Inbox");
+      expect(readerButtons()).toContain("Archive");
+
+      // Archived again it is still in All Mail, and still not on its first
+      // page: the reader stays on it and offers the way back once more.
+      const archive = [...(reader()?.querySelectorAll("button") ?? [])].find(
+        (button) => button.textContent?.trim() === "Archive",
+      ) as HTMLButtonElement;
+      await click(archive);
+      await settle();
+
+      expect(updateThread).toHaveBeenLastCalledWith({
+        accountId: accountA.accountId,
+        threadId: archived.threadId,
+        archive: true,
+      });
+      expect(reader()?.textContent).toContain("The archived letter");
+      expect(readerButtons()).toContain("Move to Inbox");
+      expect(readerButtons()).not.toContain("Archive");
     });
 
     it("opens a letter the search found in All Mail from Inbox when Inbox holds it", async () => {

@@ -3634,22 +3634,24 @@ export function MailSurface({
           (action === "toggle-read" ||
             action === "star" ||
             action === "unstar" ||
-            action === "move-to-inbox") &&
+            action === "move-to-inbox" ||
+            (action === "archive" && mailboxId !== "inbox")) &&
           reader.kind === "ready" &&
           reader.detail.thread.accountId === accountId &&
           reader.detail.thread.threadId === threadId
         ) {
           // A letter beyond the mailbox's first page, the palette's pick from
           // deep in All Mail, is missing from the refetch without having gone
-          // anywhere. A read or a star moves nothing, and Move to Inbox,
-          // offered only outside the Inbox, leaves it in the folder on screen,
-          // so the reader stays and takes the answer in place, as the held
-          // path does. Only an action that moves the letter out closes it.
+          // anywhere. A read or a star moves nothing, and a move between the
+          // Inbox and out of it, offered as such only in All Mail and Starred,
+          // leaves it in the folder on screen, so the reader stays and takes
+          // the answer in place, as the held path does. Only an action that
+          // moves the letter out closes it.
           setReaderState({
             kind: "ready",
             detail:
-              action === "move-to-inbox"
-                ? withLetterInInbox(reader.detail, true)
+              action === "move-to-inbox" || action === "archive"
+                ? withLetterInInbox(reader.detail, action === "move-to-inbox")
                 : {
                     ...reader.detail,
                     thread: withReadOrStar(reader.detail.thread, action),

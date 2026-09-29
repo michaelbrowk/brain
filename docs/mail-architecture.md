@@ -239,9 +239,12 @@ The implementation keeps protocol code behind Brain-owned ports:
 - Node's public [`node:net`](https://nodejs.org/api/net.html) and [`node:tls`](https://nodejs.org/api/tls.html) APIs for direct egress where the host permits it
 - an authenticated Cloudflare WebSocket-to-TCP byte relay for SMTP egress from DigitalOcean
 - only the streaming [MailParser](https://nodemailer.com/extras/mailparser) part of Nodemailer for MIME parsing
-- [htmlparser2](https://github.com/fb55/htmlparser2) for the bounded,
-  event-based allowlist sanitizer; the Mail worker never constructs an
-  unbounded browser DOM
+- [parse5](https://parse5.js.org/) to rebuild each message as the tree a
+  browser builds from it, held while it is built to the sanitizer's node and
+  attribute budgets and a 512-level depth, and
+  [htmlparser2](https://github.com/fb55/htmlparser2) for the event-based
+  allowlist sanitizer that reads that tree; the Mail worker never constructs
+  an unbounded browser DOM
 - Node 22's built-in [`node:sqlite`](https://nodejs.org/api/sqlite.html) for the service-owned account database
 
 [EmailEngine](https://emailengine.app/) is not selected. It is a separate email API server with its own Redis, deployment, licensing, and operating surface. That is too much permanent overhead for a single-user self-hosted deployment. Its documentation remains useful as a protocol behavior reference. Reconsider it only if maintaining provider adapters becomes more expensive than running another service.

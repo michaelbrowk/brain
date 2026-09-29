@@ -122,6 +122,9 @@ importers:
       next-themes:
         specifier: ^0.4.6
         version: 0.4.6(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
+      parse5:
+        specifier: 8.0.1
+        version: 8.0.1
       pdfjs-dist:
         specifier: 6.3.289
         version: 6.3.289

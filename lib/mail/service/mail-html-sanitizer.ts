@@ -1,4 +1,12 @@
 import { Parser } from "htmlparser2";
+import {
+  defaultTreeAdapter,
+  html,
+  parseFragment,
+  serialize,
+  type DefaultTreeAdapterMap,
+  type TreeAdapter,
+} from "parse5";
 
 import { validateMailRemoteImageSourceUrl } from "../security";
 
@@ -110,8 +118,19 @@ const OVERFLOW_KEYWORDS = Object.freeze([
   "scroll",
   "auto",
 ]);
+/**
+ * The deepest element the tree builder may nest; a deeper message is refused
+ * like any other over budget. parse5 walks its stack of open elements on most
+ * tags and its serializer recurses once per level, so without a bound both
+ * the time and the call stack would be the sender's choice. Chromium's parser
+ * nests no deeper than 512 either.
+ */
+const MAX_TREE_DEPTH = 512;
 
-/** Event-based sanitizer. It never builds a DOM and never retains remote resources. */
+/**
+ * Sanitizes the tree a browser would build from the markup, event by event,
+ * and never retains remote resources.
+ */
 export function sanitizeMailHtml(
   source: string,
   budget: MailHtmlSanitizerBudget,
@@ -140,6 +159,9 @@ function sanitizeMailHtmlInternal(
   budget: MailHtmlSanitizerBudget,
   allocateRemoteImageId: ((sourceUrl: string) => string) | null,
 ): SanitizedMailHtmlResult {
+  if (source.length > budget.maxCharacters) {
+    throw limitError("HTML exceeds the character limit");
+  }
   const output: string[] = [];
   const emittedStack: string[] = [];
   const remoteImageSuppressionStack: Array<{
@@ -153,6 +175,10 @@ function sanitizeMailHtmlInternal(
   let nodes = 0;
   let attributes = 0;
   let suppressedDepth = 0;
+  // htmlparser2 reports each character reference as its own text event, and
+  // the markup it reads spells a no-break space, `&`, `<` and `>` that way. A
+  // run of text between two tags is still one node in the frame.
+  let inTextRun = false;
 
   const append = (value: string) => {
     if (value.length === 0) return;
@@ -174,6 +200,7 @@ function sanitizeMailHtmlInternal(
   const parser = new Parser(
     {
       onopentag(name, rawAttributes) {
+        inTextRun = false;
         const normalizedName = name.toLowerCase();
         const ancestorSuppressesRemoteImages =
           remoteImageSuppressionStack.at(-1)?.suppressed ?? false;
@@ -277,16 +304,22 @@ function sanitizeMailHtmlInternal(
         );
 
         append(`<${normalizedName}${safeAttributes.length ? ` ${safeAttributes.join(" ")}` : ""}>`);
+        // A parser drops the newline straight after `<pre>`. parse5 already
+        // dropped the sender's, so the frame is given one of its own to drop
+        // and a leading blank line in the text survives.
+        if (normalizedName === "pre") append("\n");
         if (!HTML_VOID_TAGS.has(normalizedName)) emittedStack.push(normalizedName);
       },
       ontext(value) {
         if (suppressedDepth > 0) return;
         const text = sanitizeText(value);
         if (text.length === 0) return;
-        admitNode();
+        if (!inTextRun) admitNode();
+        inTextRun = true;
         append(escapeHtml(text));
       },
       onclosetag(name) {
+        inTextRun = false;
         const normalizedName = name.toLowerCase();
         closeRemoteImageSuppressionFrame(
           remoteImageSuppressionStack,
@@ -311,7 +344,7 @@ function sanitizeMailHtmlInternal(
       recognizeSelfClosing: true,
     },
   );
-  parser.write(source);
+  parser.write(browserTreeMarkup(source, budget));
   parser.end();
   while (emittedStack.length > 0) {
     const emitted = emittedStack.pop()!;
@@ -322,6 +355,89 @@ function sanitizeMailHtmlInternal(
     html: sanitized.length === 0 ? null : sanitized,
     remoteImages: Object.freeze(remoteImages),
   });
+}
+
+/**
+ * The markup again, as the tree a browser builds from it. htmlparser2 closes
+ * an element on any matching end tag, straight through the table boundaries a
+ * browser respects, so a stray `</td>` in a nested table closed the outer cell
+ * and pulled the rest of the layout out of it. parse5 applies the HTML tree
+ * construction rules instead, and its serialization closes every element
+ * explicitly, which the event sanitizer below then reads without repairing.
+ *
+ * The context is a body element in a no-quirks document because the reader
+ * frame renders this output inside `<main>` of a `<!doctype html>` page: this
+ * is the tree the frame itself would build from the raw markup. Head elements
+ * land in place and are dropped as before. Scripting is off because the frame
+ * runs none, which is also how the frame reads the inside of a `<noscript>`:
+ * as markup, so an attribute value cannot end the element early.
+ */
+function browserTreeMarkup(
+  source: string,
+  budget: MailHtmlSanitizerBudget,
+): string {
+  const fragment = parseFragment(
+    defaultTreeAdapter.createElement("body", html.NS.HTML, []),
+    source,
+    { scriptingEnabled: false, treeAdapter: boundedTreeAdapter(budget) },
+  );
+  return serialize(fragment, { scriptingEnabled: false });
+}
+
+type TreeParent = DefaultTreeAdapterMap["parentNode"];
+
+/**
+ * parse5's own tree, held to the sanitizer's budget while it is built. A
+ * browser reopens unclosed formatting elements inside every block that
+ * follows them, so a short message can expand into far more elements than it
+ * spells. Counting at creation stops that before the tree exists, and no tree
+ * this admits holds more elements than the node budget lets through anyway.
+ */
+function boundedTreeAdapter(
+  budget: MailHtmlSanitizerBudget,
+): TreeAdapter<DefaultTreeAdapterMap> {
+  let elements = 0;
+  let attributes = 0;
+  // A template's content is a fragment with no parent of its own.
+  const templateHosts = new WeakMap<object, TreeParent>();
+  const assertDepth = (parent: TreeParent) => {
+    let depth = 1;
+    for (
+      let node: TreeParent | null = parent;
+      node !== null;
+      node = "parentNode" in node ? node.parentNode : (templateHosts.get(node) ?? null)
+    ) {
+      if (++depth > MAX_TREE_DEPTH) {
+        throw limitError("sanitized HTML exceeds the nesting limit");
+      }
+    }
+  };
+  return {
+    ...defaultTreeAdapter,
+    createElement(tagName, namespaceURI, attrs) {
+      elements++;
+      attributes += attrs.length;
+      if (elements > budget.maxNodes) {
+        throw limitError("sanitized HTML exceeds the node limit");
+      }
+      if (attributes > budget.maxAttributes) {
+        throw limitError("sanitized HTML exceeds the attribute limit");
+      }
+      return defaultTreeAdapter.createElement(tagName, namespaceURI, attrs);
+    },
+    appendChild(parent, node) {
+      if (defaultTreeAdapter.isElementNode(node)) assertDepth(parent);
+      defaultTreeAdapter.appendChild(parent, node);
+    },
+    insertBefore(parent, node, reference) {
+      if (defaultTreeAdapter.isElementNode(node)) assertDepth(parent);
+      defaultTreeAdapter.insertBefore(parent, node, reference);
+    },
+    setTemplateContent(template, content) {
+      templateHosts.set(content, template);
+      defaultTreeAdapter.setTemplateContent(template, content);
+    },
+  };
 }
 
 function sanitizeText(value: string): string {

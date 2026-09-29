@@ -1,3 +1,4 @@
+import { parse, serialize, type DefaultTreeAdapterMap } from "parse5";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -11,6 +12,84 @@ const BUDGET = Object.freeze({
   maxAttributes: 4_000,
   maxRemoteImages: 32,
 });
+
+type TreeNode = DefaultTreeAdapterMap["childNode"];
+type TreeElement = DefaultTreeAdapterMap["element"];
+
+const HTML_NAMESPACE = "http://www.w3.org/1999/xhtml";
+const EMITTED_TAGS = new Set([
+  "a", "b", "blockquote", "br", "center", "code", "del", "div", "em", "h1",
+  "h2", "h3", "h4", "h5", "h6", "hr", "i", "img", "li", "ol", "p", "pre", "s",
+  "span", "strong", "sub", "sup", "table", "tbody", "td", "tfoot", "th",
+  "thead", "tr", "u", "ul",
+]);
+const EMITTED_ATTRIBUTES = new Set([
+  "align", "alt", "border", "cellpadding", "cellspacing", "colspan",
+  "data-brain-cid", "data-brain-href", "data-brain-remote-image", "dir",
+  "height", "rowspan", "style", "valign", "width",
+]);
+
+/** The body a browser builds from a whole document, as the frame parses it. */
+function browserBody(html: string): TreeElement {
+  const root = parse(html).childNodes.find(
+    (node): node is TreeElement => node.nodeName === "html",
+  );
+  const body = root?.childNodes.find(
+    (node): node is TreeElement => node.nodeName === "body",
+  );
+  if (body === undefined) throw new Error("the parser built no body");
+  return body;
+}
+
+/** The reader frame's own document around the sanitized markup. */
+function frameBody(sanitized: string | null): TreeElement {
+  return browserBody(`<!doctype html><html><head></head><body>${sanitized ?? ""}</body></html>`);
+}
+
+/** Element nesting and text, which is what the layout is made of. */
+function nesting(nodes: readonly TreeNode[]): string {
+  return nodes
+    .map((node) => {
+      if (node.nodeName === "#text") {
+        return JSON.stringify((node as DefaultTreeAdapterMap["textNode"]).value);
+      }
+      if (!("tagName" in node)) return "";
+      return `${node.tagName}(${nesting(node.childNodes)})`;
+    })
+    .filter((part) => part.length > 0)
+    .join(",");
+}
+
+/** Every namespace, name, attribute and text, so a re-parse cannot hide a change. */
+function everything(nodes: readonly TreeNode[]): string {
+  return nodes
+    .map((node) => {
+      if (node.nodeName === "#text") {
+        return JSON.stringify((node as DefaultTreeAdapterMap["textNode"]).value);
+      }
+      if (!("tagName" in node)) return `#${node.nodeName}`;
+      const attributes = node.attrs
+        .map(({ name, value }) => `${name}=${JSON.stringify(value)}`)
+        .join(" ");
+      return `${node.namespaceURI}:${node.tagName}[${attributes}](${everything(node.childNodes)})`;
+    })
+    .join(",");
+}
+
+function descendants(nodes: readonly TreeNode[]): TreeElement[] {
+  return nodes.flatMap((node) =>
+    "tagName" in node ? [node, ...descendants(node.childNodes)] : [],
+  );
+}
+
+function limitCode(run: () => unknown): unknown {
+  try {
+    run();
+  } catch (error) {
+    return (error as { code?: unknown }).code;
+  }
+  return "no error";
+}
 
 describe("mail HTML sanitizer", () => {
   it("drops document metadata instead of leaking the subject into the message body", () => {
@@ -277,5 +356,137 @@ describe("mail HTML sanitizer", () => {
     expect(result.html).not.toMatch(
       /https:\/\/|pixel\.example|visible\.example|attributes\.gif|max-size\.gif|mixed-size\.gif|unknown-ancestor\.gif/,
     );
+  });
+
+  it("keeps the layout a browser builds from malformed table markup", () => {
+    // Synthetic, in the shape bulk mail breaks: every pattern below makes a
+    // browser repair the markup, and the reader frame renders what we send.
+    const letter = [
+      '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">',
+      "<html><head><style>.hero{width:600px}</style></head><body>",
+      // A row opened straight inside a cell, then the author's closing tags.
+      '<table width="600"><tr><td><table><tr><td><tr><td>Headline</td></tr></td></tr></table>Beside the headline</td><td>Side column</td></tr></table>',
+      // A stray `</td>` inside a nested table.
+      "<table><tr><td><table><tr><td>Feature one</td></td><td>Feature two</td></tr></table>After the features</td><td>Second column</td></tr></table>",
+      // A table inside a paragraph, and the paragraph's end tag in a cell.
+      "<p><span>Intro<table><tr><td>Inside the paragraph</p>After the paragraph</td></tr></table>",
+      // A cell left open when its table ends.
+      "<table><tr><td><table><tr><td>Open cell<td>Next cell</table>Outer cell</td><td>Last column</td></tr></table>",
+      // The first newline after `<pre>` is the parser's, the second is text.
+      "<pre>\n\nIndented after a blank line</pre>",
+      "</body></html>",
+    ].join("");
+
+    const sanitized = sanitizeMailHtml(letter, BUDGET);
+
+    expect(nesting(frameBody(sanitized).childNodes)).toBe(
+      nesting(browserBody(letter).childNodes),
+    );
+  });
+
+  it.each([
+    ['<a href="javascript:alert(1)">script link</a>'],
+    ['<a href="  JaVaScRiPt:alert(1)">spaced link</a>'],
+    ['<a href="java&#x09;script:alert(1)">tab entity link</a>'],
+    ['<a href="&#106;avascript:alert(1)">numeric entity link</a>'],
+    ['<img src="cid:logo@example.test" onerror="alert(1)" onload="alert(1)">'],
+    ['<div onclick="alert(1)" onmouseover="alert(1)">handlers</div>'],
+    ['<body onload="alert(1)"><p>second body</p>'],
+    ["<script>alert(1)</script>"],
+    ['<iframe src="https://evil.test" srcdoc="<script>alert(1)</script>"></iframe>'],
+    ['<object data="https://evil.test/x.swf"><embed src="https://evil.test/x.swf"></object>'],
+    ["<svg><script>alert(1)</script></svg>"],
+    ['<svg><a xlink:href="javascript:alert(1)"><text>svg link</text></a></svg>'],
+    ["<svg><foreignObject><img src=x onerror=alert(1)></foreignObject></svg>"],
+    ["<svg><style><img src=x onerror=alert(1)></style></svg>"],
+    ["<math><mtext><table><mglyph><style><img src=x onerror=alert(1)>"],
+    [
+      '<math><mtext><table><mglyph><style><!--</style><img title="--&gt;&lt;/mglyph&gt;&lt;img&Tab;src=1&Tab;onerror=alert(1)&gt;">',
+    ],
+    ["<form><math><mtext></form><form><mglyph><style></math><img src onerror=alert(1)>"],
+    ['<noscript><p title="</noscript><img src=x onerror=alert(1)>"></noscript>'],
+    ["<template><script>alert(1)</script><img src=x onerror=alert(1)></template>"],
+    ["<!--><img src=x onerror=alert(1)>-->"],
+    ["<!---><img src=x onerror=alert(1)>-->"],
+    ["<!-- --!><img src=x onerror=alert(1)> -->"],
+    ['<!--<img src="--><img src=x onerror=alert(1)>">-->'],
+    ["<!--[if gte mso 9]><img src=x onerror=alert(1)><![endif]-->"],
+    ["<xmp><img src=x onerror=alert(1)></xmp>"],
+    ["<noembed><img src=x onerror=alert(1)></noembed>"],
+    ["<textarea><img src=x onerror=alert(1)></textarea>"],
+    ["<title><img src=x onerror=alert(1)></title>"],
+    ["<style><img src=x onerror=alert(1)></style>"],
+    ['<div title="&quot;&gt;&lt;img src=x onerror=alert(1)&gt;">quoted title</div>'],
+    [
+      '<table><tr><td><a href="https://ok.example.test"><table><tr><td><a href="javascript:alert(1)">nested link</a></td></tr></table></a></td></tr></table>',
+    ],
+  ])("emits nothing executable and nothing a re-parse changes: %s", (payload) => {
+    const sanitized = sanitizeMailHtml(`<p>Before</p>${payload}<p>After</p>`, BUDGET);
+    const frame = frameBody(sanitized);
+
+    expect(sanitized).toContain("<p>Before</p>");
+    // Text is escaped, so every `<` left in the output opens a tag.
+    for (const tag of sanitized?.match(/<[^>]*>/g) ?? []) {
+      expect(tag).not.toMatch(
+        /^<\/?(?:script|iframe|object|embed|svg|math|style|template|noscript|xmp|noembed|textarea|title|form)\b|\son[a-z]+=|javascript:/i,
+      );
+    }
+    for (const element of descendants(frame.childNodes)) {
+      expect(element.namespaceURI).toBe(HTML_NAMESPACE);
+      expect(EMITTED_TAGS).toContain(element.tagName);
+      for (const attribute of element.attrs) {
+        expect(EMITTED_ATTRIBUTES).toContain(attribute.name);
+      }
+    }
+    // Serializing the tree the frame built and parsing it again must give the
+    // same tree: the output carries no markup that mutates on a second parse.
+    expect(everything(frameBody(serialize(frame)).childNodes)).toBe(
+      everything(frame.childNodes),
+    );
+  });
+
+  it("refuses markup longer than the budget before parsing it", () => {
+    // The output would fit: the style is dropped. The input still may not.
+    const source = `<style>${"x".repeat(200)}</style><p>Short</p>`;
+
+    expect(limitCode(() => sanitizeMailHtml(source, { ...BUDGET, maxCharacters: 100 }))).toBe(
+      "EMAXLEN",
+    );
+  });
+
+  it("refuses nesting deeper than a browser builds", () => {
+    const source = `${"<div>".repeat(600)}Deep`;
+
+    expect(
+      limitCode(() => sanitizeMailHtml(source, { ...BUDGET, maxNodes: 50_000 })),
+    ).toBe("EMAXLEN");
+  });
+
+  it("counts a run of text as one node however its characters are spelled", () => {
+    // Every spelling here is one text node in the frame. The parser reports
+    // each character reference as its own event, and the markup the
+    // sanitizer reads spells a no-break space, `&`, `<` and `>` that way.
+    for (const text of [
+      "word ".repeat(2_000),
+      "word&nbsp;".repeat(2_000),
+      "Q&A ".repeat(2_000),
+      "1 &lt; 2 &gt; 0 ".repeat(1_000),
+    ]) {
+      expect(sanitizeMailHtml(`<p>${text}</p>`, BUDGET)).toMatch(/^<p>/);
+    }
+  });
+
+  it("counts the elements a browser rebuilds against the node budget", () => {
+    // Sixty distinct formatting elements left open when their paragraph ends
+    // are reopened inside every paragraph that follows: 400 paragraphs become
+    // 24,000 elements, from about 4,000 characters.
+    const source = [
+      "<p>",
+      Array.from({ length: 60 }, (_, index) => `<b class="c${index}">`).join(""),
+      "x",
+      "</p><p>x".repeat(400),
+    ].join("");
+
+    expect(limitCode(() => sanitizeMailHtml(source, BUDGET))).toBe("EMAXLEN");
   });
 });

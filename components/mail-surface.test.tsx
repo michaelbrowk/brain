@@ -10410,6 +10410,14 @@ describe("MailSurface", () => {
       expect(client.listMailboxThreads).toHaveBeenCalled();
       expect(document.body.textContent).toContain("Subject other-1");
       expect(document.body.textContent).toContain("Subject lena-1");
+      // The keys walk the same list the column draws there.
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "j", bubbles: true }));
+      });
+      await settle();
+      expect(client.readMailboxThread).toHaveBeenLastCalledWith(
+        expect.objectContaining({ mailboxId: "all", threadId: "lena-1" }),
+      );
     });
 
     it("lets a block's archive show again once a list read that began after it has landed", async () => {
@@ -10519,14 +10527,17 @@ describe("MailSurface", () => {
       await settle();
       expect((client.listThreads as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(before);
       expect(section("People")?.textContent).toContain("Subject lena-1");
-      // Undo: the service drops the decision and would flag her again.
-      items = [waiting("lena-1"), friend("friend-1")];
+      // Undo, and no read answers after it: the row goes back at the press.
+      (client.listThreads as ReturnType<typeof vi.fn>).mockImplementation(
+        () => new Promise(() => {}),
+      );
       await act(async () => {
         await toastFor(onToast, "Accepted Lena Okafor")!.onAction!();
       });
       await settle();
       visibility.mockRestore();
       expect(section("New senders")?.textContent ?? "").toContain("Subject lena-1");
+      expect(section("People")?.textContent ?? "").not.toContain("Subject lena-1");
     });
 
     it("leaves the letter keys alone while a menu is open", async () => {
@@ -10680,6 +10691,22 @@ describe("MailSurface", () => {
         window.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
       });
       await settle();
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, repeat: true }));
+      });
+      await settle();
+      expect(client.decideSender).toHaveBeenCalledTimes(1);
+    });
+
+    it("decides once for a key held on a row, though the focus moves on to the next", async () => {
+      const { client } = await mount([waiting("lena-1"), waiting("mika-1", mika)]);
+      findButton("Accept Mika Okafor").focus();
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true }));
+      });
+      await settle();
+      // The focus is on Lena's Accept now; the repeat must not take her too.
+      expect(document.activeElement).toBe(findButton("Accept Lena Okafor"));
       await act(async () => {
         window.dispatchEvent(new KeyboardEvent("keydown", { key: "a", bubbles: true, repeat: true }));
       });

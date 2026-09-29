@@ -208,8 +208,12 @@ export class AttachmentBlobStore {
         redirect: "error",
       });
       const retryAfter = CAPACITY_RETRY_DELAYS_MS[attempt];
-      if (response.status === 409 && retryAfter !== undefined) {
-        await response.body?.cancel().catch(() => undefined);
+      if (response.status === 409) {
+        // Only a full set of download slots is worth another ask; any other
+        // conflict is an answer, and it fails the download now.
+        if (retryAfter === undefined || (await refusalCode(response)) !== "capacity_exceeded") {
+          throw new Error("The attachment's download was refused");
+        }
         await wait(retryAfter, signal);
         continue;
       }
@@ -223,6 +227,20 @@ export class AttachmentBlobStore {
       }
       return blob;
     }
+  }
+}
+
+/** The `error.code` of a mail API refusal (`{ apiVersion, error: { code } }`),
+ *  or null for a body that is not one. */
+async function refusalCode(response: Response): Promise<string | null> {
+  try {
+    const body: unknown = await response.json();
+    if (typeof body !== "object" || body === null || !("error" in body)) return null;
+    const { error } = body;
+    if (typeof error !== "object" || error === null || !("code" in error)) return null;
+    return typeof error.code === "string" ? error.code : null;
+  } catch {
+    return null;
   }
 }
 

@@ -39,7 +39,9 @@ const previews = [
 /** The letter's store, answering each picture with a blob URL of its own. */
 const store = {
   blob: vi.fn(async () => new Blob([])),
-  url: vi.fn(async (attachment: MailContentAttachmentDto) => `blob:brain/${attachment.attachmentId}`),
+  url: vi.fn<
+    (attachment: MailContentAttachmentDto, priority: number, signal: AbortSignal) => Promise<string>
+  >(async (attachment) => `blob:brain/${attachment.attachmentId}`),
 };
 
 function Harness({
@@ -244,6 +246,23 @@ describe("MailAttachmentViewer", () => {
     });
     expect(dialog().querySelector("img")).toBeNull();
     expect(dialog().querySelector('[role="alert"]')?.textContent).toBe("Couldn’t open this file");
+  });
+
+  it("stops waiting for a picture when the viewer closes", async () => {
+    let signal: AbortSignal | undefined;
+    store.url.mockImplementationOnce(
+      (_attachment: MailContentAttachmentDto, _priority: number, waiting: AbortSignal) => {
+        signal = waiting;
+        return new Promise<string>(() => {});
+      },
+    );
+    await act(async () => {
+      root.render(<Harness start={0} onClose={() => {}} onIndexChange={() => {}} />);
+    });
+    expect(dialog().textContent).toContain("Opening image…");
+    expect(signal?.aborted).toBe(false);
+    await act(async () => root.render(<></>));
+    expect(signal?.aborted).toBe(true);
   });
 
   it("drops the counter and the arrows for a letter with one preview", async () => {

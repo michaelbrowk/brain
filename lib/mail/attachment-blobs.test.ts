@@ -181,6 +181,73 @@ describe("AttachmentBlobStore", () => {
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
+  it("reuses a tile's download already under way when the viewer asks for it", async () => {
+    const { calls, fetchMock } = heldFetch();
+    vi.stubGlobal("fetch", fetchMock);
+    const store = new AttachmentBlobStore(ACCOUNT_ID, new MailFetchGate(2));
+    const file = attachment("attachment-one");
+    const tile = store.blob(file, ATTACHMENT_FETCH_PRIORITY.tile, new AbortController().signal);
+    await flush();
+    expect(calls).toHaveLength(1);
+
+    const viewer = store.blob(file, ATTACHMENT_FETCH_PRIORITY.viewer, new AbortController().signal);
+    await flush();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.init.signal?.aborted).toBe(false);
+    calls[0]!.answer(verified(file));
+    const [fromTile, fromViewer] = await Promise.all([tile, viewer]);
+    expect(fromViewer).toBe(fromTile);
+  });
+
+  it("asks again only when the 409 says the download slots are full", async () => {
+    const file = attachment("attachment-one");
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({ apiVersion: 1, error: { code: "operation_already_reserved" } }),
+          { status: 409, headers: { "Content-Type": "application/json" } },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const store = new AttachmentBlobStore(ACCOUNT_ID, new MailFetchGate(2));
+    await expect(
+      store.blob(file, ATTACHMENT_FETCH_PRIORITY.tile, new AbortController().signal),
+    ).rejects.toThrow();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("ends the wait before asking again at once when nobody wants the file any more", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => capacityExceeded());
+    vi.stubGlobal("fetch", fetchMock);
+    const store = new AttachmentBlobStore(ACCOUNT_ID, new MailFetchGate(1));
+    const tile = new AbortController();
+    const load = store.blob(attachment("attachment-one"), ATTACHMENT_FETCH_PRIORITY.tile, tile.signal);
+    const outcome = load.then(
+      () => "loaded",
+      (error: Error) => error.name,
+    );
+    await vi.advanceTimersByTimeAsync(10);
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    tile.abort();
+    await expect(outcome).resolves.toBe("AbortError");
+    // The gate's one slot is free at once, not after the 250ms wait.
+    const next = attachment("attachment-two");
+    fetchMock.mockImplementation(async () => verified(next));
+    const other = store.blob(next, ATTACHMENT_FETCH_PRIORITY.tile, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    await expect(other).resolves.toBeInstanceOf(Blob);
+    await vi.runAllTimersAsync();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("puts tiles behind the body's images and the viewer ahead of them", () => {
+    // The body's inline images run at the gate's default, 0.
+    expect(ATTACHMENT_FETCH_PRIORITY).toEqual({ tile: -1, viewer: 1 });
+  });
+
   it("gives up after a bounded number of refusals", async () => {
     vi.useFakeTimers();
     const fetchMock = vi.fn(async () => capacityExceeded());
@@ -206,6 +273,19 @@ describe("AttachmentBlobStore", () => {
       "fetch",
       vi.fn(async () => verified(file, BYTES, { "Content-Type": "image/svg+xml" })),
     );
+    const store = new AttachmentBlobStore(ACCOUNT_ID, new MailFetchGate(2));
+    await expect(
+      store.blob(file, ATTACHMENT_FETCH_PRIORITY.tile, new AbortController().signal),
+    ).rejects.toThrow();
+  });
+
+  it("refuses a response missing the route's headers even when its bytes look right", async () => {
+    const file = attachment("attachment-one");
+    // The blob would pass on its own: right type, right size. Only the
+    // headers say this answer did not come from the download route.
+    const response = verified(file);
+    response.headers.delete("X-Content-Type-Options");
+    vi.stubGlobal("fetch", vi.fn(async () => response));
     const store = new AttachmentBlobStore(ACCOUNT_ID, new MailFetchGate(2));
     await expect(
       store.blob(file, ATTACHMENT_FETCH_PRIORITY.tile, new AbortController().signal),

@@ -1971,6 +1971,76 @@ describe("the new-senders screen", () => {
     expect(off[0]).not.toHaveProperty("senderBlocked");
   });
 
+  it("never marks an address the owner accepted, under its domain's block", async () => {
+    const world = await readyWorld();
+    await world.screen.decide(
+      { address: "boss@team.test", scope: "address", decision: "accept" },
+      NO_DEADLINE,
+    );
+    await world.screen.decide(block("someone@team.test", "domain"), NO_DEADLINE);
+    world.mail.addThread(ACCOUNT_A, { threadId: "boss-new", from: "boss@team.test", at: LATER + 10 });
+    world.mail.addThread(ACCOUNT_A, { threadId: "team-new", from: "new@team.test", at: LATER + 10 });
+    const items = await world.screen.annotateItems(
+      ACCOUNT_A,
+      ["boss-new", "team-new"].map((threadId) => world.mail.item(ACCOUNT_A, threadId)),
+    );
+    expect(items.map((item) => [item.threadId, item.senderBlocked ?? false])).toEqual([
+      ["boss-new", false],
+      ["team-new", true],
+    ]);
+  });
+
+  it("marks neither a thread the owner moved back nor one already out of the Inbox", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_A, { threadId: "keep", from: "news@growth.test", at: LATER });
+    world.mail.addThread(ACCOUNT_A, { threadId: "gone", from: "news@growth.test", at: LATER });
+    await world.screen.decide(
+      { address: "news@growth.test", scope: "address", decision: "block" },
+      NO_DEADLINE,
+    );
+    await world.mail.port.updateThread(
+      { accountId: ACCOUNT_A, threadId: "keep", archive: false },
+      new AbortController().signal,
+    );
+    await step(world, ACCOUNT_A, true);
+    expect(world.mail.inbox(ACCOUNT_A)).toEqual(["keep"]);
+    const items = await world.screen.annotateItems(
+      ACCOUNT_A,
+      ["keep", "gone"].map((threadId) => world.mail.item(ACCOUNT_A, threadId)),
+    );
+    expect(items.map((item) => [item.threadId, item.senderBlocked ?? false])).toEqual([
+      ["keep", false],
+      ["gone", false],
+    ]);
+  });
+
+  it("marks a thread the owner moved back once its sender writes again, not for his own reply", async () => {
+    const world = await readyWorld();
+    world.mail.addThread(ACCOUNT_A, { threadId: "again", from: "news@growth.test", at: LATER });
+    world.mail.addThread(ACCOUNT_A, { threadId: "answered", from: "news@growth.test", at: LATER });
+    await world.screen.decide(block("news@growth.test"), NO_DEADLINE);
+    for (const threadId of ["again", "answered"]) {
+      await world.mail.port.updateThread(
+        { accountId: ACCOUNT_A, threadId, archive: false },
+        new AbortController().signal,
+      );
+    }
+    world.mail.addMessage(ACCOUNT_A, "again", { from: "news@growth.test", at: LATER + 50 });
+    world.mail.addMessage(ACCOUNT_A, "answered", {
+      from: "me@a.test",
+      at: LATER + 50,
+      fromOwner: true,
+    });
+    const items = await world.screen.annotateItems(
+      ACCOUNT_A,
+      ["again", "answered"].map((threadId) => world.mail.item(ACCOUNT_A, threadId)),
+    );
+    expect(items.map((item) => [item.threadId, item.senderBlocked ?? false])).toEqual([
+      ["again", true],
+      ["answered", false],
+    ]);
+  });
+
   it("names the first sender on a waiting thread and on no other", async () => {
     const world = await readyWorld();
     world.mail.addThread(ACCOUNT_A, {

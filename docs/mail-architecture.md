@@ -552,12 +552,20 @@ carries one: a decision names that sender, and neither the first entry of
 `participants` nor a Reply-To is that. It is tier 5 with `newSender` and
 leaves with it in every lower projection. The name is passed through for the
 UI to say and is never written to `senders.sqlite3`. While the switch is on, a
-thread whose first sender the archiver's own rule blocks (the address's block,
-or the domain's block for an address the owner does not know) carries
-`senderBlocked: true` until the next archive step takes it out of the Inbox;
-no waiting thread carries it, and it leaves the lower projections with the
-other two. The mail push reads it to stay quiet about a letter already
-refused in the minute between its arrival and that archive.
+thread in the Inbox whose first sender the archiver's own rule blocks (the
+address's block, or the domain's block for an address the owner does not
+know) carries `senderBlocked: true` until the next archive step takes it out
+of the Inbox; no waiting thread carries it, and it leaves the lower
+projections with the other two. A thread the standing block already archived
+and the owner put back, with nothing newer since from anyone but the owner,
+is one the archiver leaves, and it carries no mark: the check reads the
+thread's own archive record, as `ownerMovedBack` does first. An IMAP letter
+put back comes back under a new UID and so as a thread with no record of its
+own; the archiver still recognises it by its Message-ID, the mark does not,
+and that copy stays marked, so Brain's Inbox leaves it out while All Mail
+still lists it. That residual is accepted. The mail push reads the mark to
+stay quiet about a letter already refused in the minute between its arrival
+and that archive, and the Inboxes in the UI leave a marked thread out.
 
 **Replies.** A first message that carries `In-Reply-To` or `References`
 answers someone, and cold outreach carries neither, so a reply-shaped letter

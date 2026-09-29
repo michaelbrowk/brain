@@ -136,6 +136,194 @@ const sendableAccount = {
   },
 };
 
+/** A second account that can send, so the sheet's From is a switch. */
+const secondAccount = {
+  ...sendableAccount,
+  accountId: `account-a${"b".repeat(32)}`,
+  emailAddress: "second@example.test",
+  displayName: null,
+};
+
+type Recorded = { readonly url: string; readonly method: string; readonly body: unknown };
+
+type DraftSendBody = {
+  readonly draftId: string;
+  readonly expectedRevision: number;
+  readonly sendOperationId: string;
+  readonly sendIdempotencyKey: string;
+  readonly attachments?: readonly unknown[];
+};
+
+/** How the draft door answers a send: a status and a body, or "lost" for a
+ *  request that reached the service and whose answer never came back. */
+type DraftSendAnswer =
+  | { readonly status: number; readonly body: unknown }
+  | "lost";
+
+/**
+ * The Mail routes as a small server behind `fetch`: drafts are created,
+ * patched, deleted and sent through the draft door the way the service
+ * answers them, and a send operation reads back as the test says.
+ * Everything the sheet asked for is recorded in order, so a test reads the
+ * wire rather than a mock of the surface's own client.
+ */
+function installMailServer(
+  accounts: readonly unknown[],
+  options: {
+    readonly draftSend?: (body: DraftSendBody, index: number) => DraftSendAnswer | null;
+    readonly operationStatus?: string;
+  } = {},
+) {
+  const requests: Recorded[] = [];
+  const revisions = new Map<string, number>();
+  let draftSendIndex = 0;
+  const json = (body: unknown, status = 200) =>
+    Promise.resolve({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+      text: async () => JSON.stringify(body),
+    } as Response);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+      requests.push({ url, method, body });
+      const path = url.split("?")[0]!;
+      if (path === "/api/mail/accounts/capabilities") {
+        return json({ apiVersion: 3, accounts });
+      }
+      if (path.startsWith("/api/mail/threads")) {
+        return json({
+          apiVersion: 1,
+          items: [],
+          nextCursor: null,
+          sync: { status: "idle", lastSuccessfulAt: 1_700_000_000_000 },
+        });
+      }
+      if (path === "/api/mail/drafts" && method === "GET") {
+        return json({ apiVersion: 1, drafts: [] });
+      }
+      if (path === "/api/mail/drafts" && method === "POST") {
+        revisions.set(body.draftId, 0);
+        return json({
+          apiVersion: 1,
+          created: true,
+          draft: {
+            apiVersion: 1,
+            draftId: body.draftId,
+            accountId: body.accountId,
+            revision: 0,
+            state: "editing",
+            intent: body.intent,
+            to: body.to,
+            cc: body.cc,
+            bcc: body.bcc,
+            subject: body.subject,
+            text: body.text,
+            attachments: [],
+            sendOperationId: null,
+            sendErrorCode: null,
+            createdAt: 1_700_000_000_000,
+            updatedAt: 1_700_000_000_000,
+            sentAt: null,
+          },
+        });
+      }
+      if (path.startsWith("/api/mail/drafts/") && method === "PATCH") {
+        const draftId = decodeURIComponent(path.split("/")[4]!);
+        const appliedRevision = (revisions.get(draftId) ?? 0) + 1;
+        revisions.set(draftId, appliedRevision);
+        return json({ apiVersion: 1, replayed: false, appliedRevision, operationId: null });
+      }
+      if (/^\/api\/mail\/drafts\/[^/]+\/send$/.test(path) && method === "POST") {
+        const send = body as DraftSendBody;
+        const answer = options.draftSend?.(send, draftSendIndex++) ?? null;
+        if (answer === "lost") return Promise.reject(new TypeError("Failed to fetch"));
+        if (answer !== null) return json(answer.body, answer.status);
+        const appliedRevision = send.expectedRevision + 1;
+        revisions.set(send.draftId, appliedRevision);
+        return json(
+          {
+            apiVersion: 1,
+            replayed: false,
+            appliedRevision,
+            operationId: send.sendOperationId,
+            created: true,
+            status: "queued",
+          },
+          202,
+        );
+      }
+      if (path.startsWith("/api/mail/drafts/") && method === "DELETE") {
+        return json({ apiVersion: 1, deleted: true, replayed: false });
+      }
+      if (path.startsWith("/api/mail/send/") && method === "GET" && options.operationStatus) {
+        return json({
+          apiVersion: 1,
+          operationId: decodeURIComponent(path.split("/")[4]!),
+          accountId: (accounts[0] as { accountId: string }).accountId,
+          status: options.operationStatus,
+          threadId: null,
+        });
+      }
+      return json({ error: "not found" }, 404);
+    }),
+  );
+  return {
+    requests,
+    creates: () => requests.filter((r) => r.url === "/api/mail/drafts" && r.method === "POST"),
+    patches: () =>
+      requests.filter((r) => r.url.startsWith("/api/mail/drafts/") && r.method === "PATCH"),
+    deletes: () =>
+      requests.filter((r) => r.url.startsWith("/api/mail/drafts/") && r.method === "DELETE"),
+    draftSends: () =>
+      requests.filter((r) => /\/api\/mail\/drafts\/[^/]+\/send$/.test(r.url) && r.method === "POST"),
+    directSends: () => requests.filter((r) => r.url === "/api/mail/send" && r.method === "POST"),
+  };
+}
+
+/** A value typed into a field the way React hears it. */
+async function type(field: HTMLInputElement | HTMLTextAreaElement, value: string) {
+  const proto =
+    field instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(proto, "value")?.set?.call(field, value);
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await settle();
+}
+
+/** Files handed to the sheet the way its file chooser hands them back. */
+async function chooseFiles(files: readonly File[]) {
+  const input = document.body.querySelector<HTMLInputElement>(
+    '[role="dialog"] input[type="file"]',
+  );
+  if (!input) throw new Error("no file input on the sheet");
+  Object.defineProperty(input, "files", { value: files, configurable: true });
+  await act(async () => {
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await settle();
+}
+
+async function until(check: () => boolean, what: string) {
+  await findLazy(() => (check() ? document.body : null), what);
+}
+
+const desktop = (query: string) => ({
+  matches: query === "(min-width: 768px)",
+  media: query,
+  onchange: null,
+  addEventListener: vi.fn(),
+  removeEventListener: vi.fn(),
+  addListener: vi.fn(),
+  removeListener: vi.fn(),
+  dispatchEvent: vi.fn(),
+});
+
 describe("the compose ask, through the assembled shell", () => {
   let host: HTMLDivElement;
   let root: Root;
@@ -404,5 +592,404 @@ describe("the compose ask, through the assembled shell", () => {
     );
     expect(document.body.querySelector(".brain-shell")?.hasAttribute("inert")).toBe(true);
     expect(shellMotion.renders.at(-1)?.animate).toEqual({ scale: 1, opacity: 1 });
+  });
+
+  // THE FILES AND THE FROM SWITCH, AT THE SEAM THEY CROSS. The sheet holds
+  // its files in memory; the surface moves the draft underneath a From
+  // switch, sends the files through the send door, and says what a closing
+  // sheet leaves behind.
+  describe("the sheet's files and its From switch", () => {
+    const openSheet = async (
+      accounts: readonly unknown[],
+      options?: Parameters<typeof installMailServer>[1],
+    ) => {
+      vi.stubGlobal("matchMedia", desktop);
+      const server = installMailServer(accounts, options);
+      window.history.replaceState({}, "", "/mail");
+      await act(async () =>
+        root.render(<Shell tree={[]} initialSelectedId={null} initialSurface="mail" />),
+      );
+      await settle();
+      const compose = await findLazy(
+        () =>
+          [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+            (button) => button.getAttribute("aria-label") === "New message",
+          ),
+        "the column's New message",
+      );
+      await act(async () => compose.click());
+      await settle();
+      const sheet = await findLazy(
+        () => document.body.querySelector<HTMLElement>('[role="dialog"][aria-label="New message"]'),
+        "the open sheet",
+      );
+      return { server, sheet };
+    };
+    const to = () =>
+      document.body.querySelector<HTMLInputElement>('[role="dialog"] input[autocomplete="email"]')!;
+    const body = () => document.body.querySelector<HTMLTextAreaElement>('[role="dialog"] textarea')!;
+    const chipNames = () =>
+      [...document.body.querySelectorAll(".brain-compose-shelf .brain-compose-attachment-name")].map(
+        (node) => node.textContent,
+      );
+    const button = (label: string) =>
+      [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+        (candidate) => candidate.getAttribute("aria-label") === label,
+      );
+
+    it("switches From in place: the same sheet, the focus kept, the files kept, the draft moved underneath", async () => {
+      const { server, sheet } = await openSheet([sendableAccount, secondAccount]);
+      await type(to(), "ben@example.test");
+      await type(body(), "Moving house");
+      await until(() => server.creates().length === 1, "the first draft's create");
+      expect((server.creates()[0]?.body as { accountId: string }).accountId).toBe(
+        sendableAccount.accountId,
+      );
+      await chooseFiles([new File(["quote"], "Quote.pdf", { type: "application/pdf" })]);
+      const toField = to();
+
+      const trigger = document.body.querySelector<HTMLButtonElement>(
+        '.brain-compose-from button[aria-label^="From:"]',
+      )!;
+      trigger.focus();
+      await act(async () => {
+        trigger.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+        );
+      });
+      await settle();
+      const row = [...document.body.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find(
+        (item) => item.textContent?.includes(secondAccount.emailAddress),
+      )!;
+      await act(async () => row.click());
+      await settle();
+
+      // No exit and no enter: the same sheet and the same fields stand, and
+      // there was never a second one.
+      expect(document.body.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+      expect(document.body.querySelector('[role="dialog"]')).toBe(sheet);
+      expect(to()).toBe(toField);
+      expect(chipNames()).toEqual(["Quote.pdf"]);
+      // The caret goes back to the From it was on, not to To.
+      await until(() => document.activeElement === trigger, "the focus back on From");
+      expect(trigger.getAttribute("aria-label")).toBe("From: second@example.test");
+
+      // Underneath: the next create carries the second account and what was
+      // typed, and the first account's draft is deleted.
+      await until(() => server.creates().length === 2, "the second account's create");
+      expect(server.creates()[1]?.body).toMatchObject({
+        accountId: secondAccount.accountId,
+        to: "ben@example.test",
+        text: "Moving house",
+      });
+      await until(() => server.deletes().length === 1, "the first draft's delete");
+      expect(server.deletes()[0]?.body).toMatchObject({ accountId: sendableAccount.accountId });
+    });
+
+    const sendButton = () =>
+      document.body.querySelector<HTMLButtonElement>('[role="dialog"] button[type="submit"]')!;
+    const slotAlert = () =>
+      document.body.querySelector('[role="dialog"] .brain-compose-slot [role="alert"]')
+        ?.textContent ?? null;
+    const fromTrigger = () =>
+      document.body.querySelector<HTMLButtonElement>(
+        '.brain-compose-from button[aria-label^="From:"]',
+      )!;
+    /** Waits longer than `until`: the send watch reads its first answer 5s on. */
+    const longUntil = async (check: () => boolean, what: string) => {
+      for (let round = 0; round < 1_200; round += 1) {
+        if (check()) return;
+        await act(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        });
+      }
+      throw new Error(`timed out: ${what}`);
+    };
+    const writeAndAttach = async (server: ReturnType<typeof installMailServer>) => {
+      await type(to(), "ben@example.test");
+      await type(body(), "The quote, attached.");
+      await until(() => server.creates().length === 1, "the draft's create");
+      await chooseFiles([new File(["hello"], "hello.txt", { type: "text/plain" })]);
+    };
+
+    // THE FILES GO THROUGH THE DRAFT DOOR. The letter is its draft, sent the
+    // way every letter from the sheet is: the draft goes to submitting with
+    // the send and cannot be sent a second time from Drafts, and the files
+    // ride on the send into the message the service builds from it.
+    it("sends the files through the draft door with the draft, and nothing through the other door", async () => {
+      const { server } = await openSheet([sendableAccount]);
+      await writeAndAttach(server);
+      await act(async () => sendButton().click());
+      await until(() => server.draftSends().length === 1, "the draft's send");
+
+      const draftId = (server.creates()[0]!.body as { draftId: string }).draftId;
+      expect(server.draftSends()[0]!.url).toBe(`/api/mail/drafts/${draftId}/send`);
+      expect(server.draftSends()[0]!.body).toMatchObject({
+        kind: "send",
+        accountId: sendableAccount.accountId,
+        draftId,
+        attachments: [{ filename: "hello.txt", mimeType: "text/plain", dataBase64: "aGVsbG8=" }],
+      });
+      expect(server.directSends()).toHaveLength(0);
+      await until(
+        () => document.body.querySelector('[role="dialog"]') === null,
+        "the sheet gone once the letter is queued",
+      );
+      await until(
+        () => document.body.textContent?.includes("Message queued") ?? false,
+        "the queued toast",
+      );
+      // The draft went with the send; nothing is left to delete.
+      expect(server.deletes()).toHaveLength(0);
+    });
+
+    it("puts no files on the wire for a letter without them", async () => {
+      const { server } = await openSheet([sendableAccount]);
+      await type(to(), "ben@example.test");
+      await type(body(), "No files.");
+      await until(() => server.creates().length === 1, "the draft's create");
+      await act(async () => sendButton().click());
+      await until(() => server.draftSends().length === 1, "the draft's send");
+      expect(server.draftSends()[0]!.body).not.toHaveProperty("attachments");
+    });
+
+    it.each([
+      [
+        413,
+        "mail_send_attachments_too_large",
+        "These files are too large to send. A message can carry 10 MB of files.",
+      ],
+      [
+        413,
+        "mail_draft_request_invalid",
+        "These files are too large to send. A message can carry 10 MB of files.",
+      ],
+      [400, "mail_send_attachments_invalid", "One of these files can’t be sent. Remove it and try again."],
+    ])("words a %i %s from the draft door in the slot, and keeps Send live", async (status, code, sentence) => {
+      const { server } = await openSheet([sendableAccount], {
+        draftSend: () => ({ status, body: { apiVersion: 1, error: { code } } }),
+      });
+      await writeAndAttach(server);
+      await act(async () => sendButton().click());
+      await until(() => server.draftSends().length === 1, "the send");
+      await until(() => slotAlert() === sentence, "the refusal in the slot");
+      expect(sendButton().disabled).toBe(false);
+      expect(chipNames()).toEqual(["hello.txt"]);
+    });
+
+    it("sends again after a refusal under a new send identity, with the same files", async () => {
+      const { server } = await openSheet([sendableAccount], {
+        draftSend: (_body, index) =>
+          index === 0
+            ? { status: 400, body: { apiVersion: 1, error: { code: "mail_send_attachments_invalid" } } }
+            : null,
+      });
+      await writeAndAttach(server);
+      await act(async () => sendButton().click());
+      await until(() => slotAlert() !== null, "the refusal");
+      await act(async () => sendButton().click());
+      await until(() => server.draftSends().length === 2, "the second send");
+      const [first, second] = server.draftSends().map((request) => request.body as DraftSendBody);
+      expect(second!.sendIdempotencyKey).not.toBe(first!.sendIdempotencyKey);
+      expect(second!.sendOperationId).not.toBe(first!.sendOperationId);
+      expect(second!.attachments).toEqual(first!.attachments);
+    });
+
+    it("keeps autosave running after a refused send, so the writer's next words are kept", async () => {
+      const { server } = await openSheet([sendableAccount], {
+        draftSend: () => ({
+          status: 400,
+          body: { apiVersion: 1, error: { code: "mail_send_attachments_invalid" } },
+        }),
+      });
+      await writeAndAttach(server);
+      await act(async () => sendButton().click());
+      await until(() => slotAlert() !== null, "the refusal");
+      const patchesBefore = server.patches().length;
+      await type(body(), "The quote, attached. And the plan.");
+      await until(() => server.patches().length > patchesBefore, "the autosave after the refusal");
+    });
+
+    it("blocks after a lost answer: Send and the From switch stay shut, so the files go once", async () => {
+      // The request reached the service; only its answer was lost. A second
+      // press, or a From switch that opened the letter afresh with Send live,
+      // could send the same words and files twice.
+      const { server } = await openSheet([sendableAccount, secondAccount], {
+        draftSend: () => "lost",
+      });
+      await writeAndAttach(server);
+      await act(async () => sendButton().click());
+      await until(() => server.draftSends().length === 1, "the send");
+      await until(
+        () => slotAlert() === "Couldn’t confirm delivery. Check Sent before trying again.",
+        "the blocked slot",
+      );
+      expect(sendButton().disabled).toBe(true);
+      expect(fromTrigger().disabled).toBe(true);
+      await act(async () => sendButton().click());
+      await settle();
+      expect(server.draftSends()).toHaveLength(1);
+      expect(chipNames()).toEqual(["hello.txt"]);
+    });
+
+    it("blocks the From switch after a lost answer on a letter without files too", async () => {
+      const { server } = await openSheet([sendableAccount, secondAccount], {
+        draftSend: () => "lost",
+      });
+      await type(to(), "ben@example.test");
+      await type(body(), "No files.");
+      await until(() => server.creates().length === 1, "the draft's create");
+      await act(async () => sendButton().click());
+      await until(() => sendButton().disabled, "the blocked sheet");
+      expect(fromTrigger().disabled).toBe(true);
+    });
+
+    it("blocks on an unknown delivery and keeps the draft frozen under it", async () => {
+      const { server } = await openSheet([sendableAccount], {
+        draftSend: (send) => ({
+          status: 202,
+          body: {
+            apiVersion: 1,
+            replayed: false,
+            appliedRevision: send.expectedRevision + 1,
+            operationId: send.sendOperationId,
+            created: true,
+            status: "delivery_unknown",
+          },
+        }),
+      });
+      await writeAndAttach(server);
+      await act(async () => sendButton().click());
+      await until(
+        () => slotAlert() === "Delivery status is unknown. Check Sent before trying again.",
+        "the unknown delivery",
+      );
+      expect(sendButton().disabled).toBe(true);
+      // The draft the service holds frozen is not patched from here.
+      const patchesBefore = server.patches().length;
+      await type(body(), "Changed my mind.");
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 900));
+      });
+      expect(server.patches()).toHaveLength(patchesBefore);
+    });
+
+    it("says the files are not in Drafts when the watch finds the letter failed", async () => {
+      const { server } = await openSheet([sendableAccount], { operationStatus: "failed" });
+      await writeAndAttach(server);
+      await act(async () => sendButton().click());
+      await until(() => server.draftSends().length === 1, "the send");
+      await longUntil(
+        () => document.body.textContent?.includes("Message didn’t send.") ?? false,
+        "the watch's failure toast",
+      );
+      expect(document.body.textContent).toContain(
+        "Message didn’t send. It’s in Drafts without its files.",
+      );
+    }, 20_000);
+
+    it("keeps the files out of the draft's local recovery copy", async () => {
+      const { server } = await openSheet([sendableAccount]);
+      await writeAndAttach(server);
+      await type(body(), "The quote, attached. Again.");
+      const stored = Object.keys(localStorage)
+        .map((key) => localStorage.getItem(key) ?? "")
+        .join("\n");
+      expect(stored).toContain("The quote, attached. Again.");
+      expect(stored).not.toContain("hello.txt");
+      expect(stored).not.toContain("aGVsbG8=");
+    });
+
+    it("says the files are gone when an empty letter with files closes", async () => {
+      // Nothing typed is nothing kept: no draft stays, so the sentence is
+      // about the files alone.
+      await openSheet([sendableAccount]);
+      await chooseFiles([new File(["quote"], "Quote.pdf", { type: "application/pdf" })]);
+      await act(async () => button("Close draft")?.click());
+      await settle();
+      await until(
+        () => document.body.textContent?.includes("Files discarded.") ?? false,
+        "the files toast",
+      );
+      expect(document.body.textContent).not.toContain("Draft kept without its files.");
+    });
+
+    // A BLOCKED SHEET CLOSES ON A WARNING, NOT ON ITS FILES. A lost answer or
+    // an unknown delivery means the letter may already be on its way, with
+    // its files; "without its files" would invite the writer to attach them
+    // again and send a second letter.
+    it.each([
+      ["a lost answer", () => "lost" as const],
+      [
+        "an unknown delivery",
+        (send: DraftSendBody) => ({
+          status: 202,
+          body: {
+            apiVersion: 1,
+            replayed: false,
+            appliedRevision: send.expectedRevision + 1,
+            operationId: send.sendOperationId,
+            created: true,
+            status: "delivery_unknown",
+          },
+        }),
+      ],
+    ])("closes a sheet blocked by %s with the warning to check Sent", async (_name, answer) => {
+      const { server } = await openSheet([sendableAccount], { draftSend: answer });
+      await writeAndAttach(server);
+      await act(async () => sendButton().click());
+      await until(() => sendButton().disabled, "the blocked sheet");
+      await act(async () => button("Close draft")?.click());
+      await settle();
+      await until(
+        () =>
+          document.body.textContent?.includes("Draft kept. Check Sent before sending it again.") ??
+          false,
+        "the warning",
+      );
+      expect(document.body.textContent).not.toContain("without its files");
+      expect(document.body.textContent).not.toContain("Files discarded.");
+    });
+
+    it("says at once that the draft it keeps has no files, when the sheet closes with files on it", async () => {
+      await openSheet([sendableAccount]);
+      await type(to(), "ben@example.test");
+      await chooseFiles([new File(["quote"], "Quote.pdf", { type: "application/pdf" })]);
+      await act(async () => button("Close draft")?.click());
+      await settle();
+
+      await until(
+        () => document.body.textContent?.includes("Draft kept without its files.") ?? false,
+        "the files toast",
+      );
+    });
+
+    it("says it when an Undo brings back a discarded sheet that had files", async () => {
+      await openSheet([sendableAccount]);
+      await type(to(), "ben@example.test");
+      await chooseFiles([new File(["quote"], "Quote.pdf", { type: "application/pdf" })]);
+      await act(async () => button("Discard draft")?.click());
+      await settle();
+      await until(
+        () => document.body.textContent?.includes("Draft discarded") ?? false,
+        "the discard pill",
+      );
+      // The files went with the discard; Undo brings back the words only.
+      expect(document.body.textContent).not.toContain("Draft kept without its files.");
+      const undo = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+        (candidate) => candidate.textContent?.trim() === "Undo",
+      );
+      await act(async () => undo?.click());
+      await settle();
+      await until(
+        () => document.body.querySelector('[role="dialog"]') !== null,
+        "the sheet back",
+      );
+      await until(
+        () => document.body.textContent?.includes("Draft kept without its files.") ?? false,
+        "the files toast",
+      );
+      expect(chipNames()).toEqual([]);
+    });
   });
 });

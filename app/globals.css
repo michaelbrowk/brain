@@ -5148,12 +5148,16 @@ a.brain-share-url:active {
 .brain-compose-paper[data-sheet] .brain-compose-actions[data-message] .brain-compose-slot {
   grid-template-rows: 1fr;
 }
+/* the second line starts where the letter does: the actions row stands on
+   the window's inset and the column on its own 16, so the sentence steps in
+   by the difference and reads as the document's first line, not the row's */
 .brain-compose-paper[data-sheet] .brain-compose-slot-line {
   min-height: 0;
   flex-wrap: wrap;
   row-gap: 2px;
   overflow: hidden;
   padding-bottom: 8px;
+  padding-left: calc(16px - var(--inset));
 }
 .brain-compose-paper[data-sheet] .brain-compose-slot-line > [role] {
   overflow: visible;
@@ -5292,7 +5296,16 @@ a.brain-share-url:active {
   cursor: pointer;
   transition: color 160ms var(--ease-out);
 }
-.brain-compose-from-switch > .truncate {
+/* the name is one grid cell, so a switch's outgoing and incoming words cross
+   in the same place; the column may shrink to nothing and the word truncates
+   inside it */
+.brain-compose-from-name {
+  display: inline-grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr);
+}
+.brain-compose-from-name > .brain-compose-from-word {
+  grid-area: 1 / 1;
   min-width: 0;
 }
 .brain-compose-from-mark {
@@ -5372,6 +5385,47 @@ a.brain-share-url:active {
    that plays; the inputs draw no ring of their own for it to cut */
 .brain-compose-copies-rows {
   overflow: hidden;
+}
+/* THE ATTACHMENT SHELF, under Subject and over the fold: the letter's files
+   as chips that wrap, 6 apart like the Tasks chips. The shelf grows from
+   height 0, so it clips while that plays, and the clip keeps the chips' ring
+   reach (3px at +2) on every side: the room is taken straight back on the
+   outside here, the Tasks chips' own rule, and the vertical half travels
+   with the reveal from `CHIP_ROW_RING`. */
+.brain-compose-shelf {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-inline: 5px;
+  margin-inline: -5px;
+  overflow: hidden;
+}
+.brain-compose-shelf-item {
+  display: flex;
+  min-width: 0;
+  max-width: 100%;
+}
+/* a chip is the one button that takes its file off; inside it the name gives
+   way first, and the size and the bare cross keep their width */
+.brain-compose-attachment {
+  max-width: 100%;
+}
+.brain-compose-attachment > .truncate {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+}
+.brain-compose-attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.brain-compose-attachment-size,
+.brain-compose-attachment-remove {
+  flex-shrink: 0;
+  color: var(--ink-2);
 }
 .brain-compose-notice {
   flex-shrink: 0;

@@ -14,8 +14,10 @@ import {
   MailComposer,
   type MailComposerDraft,
   type MailComposerFields,
+  type MailComposerLeaving,
   type MailComposerSaveStatus,
 } from "./mail-composer";
+import { ATTACHMENT_REFUSALS } from "./mail-composer-attachments";
 import { parkDiscard, type DeferredDiscard } from "./mail-deferred-discard";
 import { MailDraftsList, type MailDraftsState } from "./mail-drafts";
 import {
@@ -265,6 +267,17 @@ const DRAFT_AUTOSAVE_DELAY_MS = 700;
 /** The discard pill's id: the sentence said again under it, without an Undo,
  *  takes the standing pill rather than queueing behind its own way back. */
 const DISCARD_TOAST_ID = "mail-draft-discard";
+/** What a sheet that leaves with files leaves behind. The files lived only in
+ *  the sheet's memory and the draft API stores none, so the draft that stays
+ *  is the words: said urgently, at the gesture that lost them. */
+const DRAFT_WITHOUT_FILES = "Draft kept without its files.";
+/** The same gesture on a letter with no words: nothing is kept but the fact
+ *  that the files went. */
+const FILES_DISCARDED = "Files discarded.";
+/** What a blocked sheet (a lost answer, an unknown delivery) leaves with: its
+ *  letter may already be on its way, so the one thing worth saying is where
+ *  to look before sending it again. */
+const DRAFT_KEPT_CHECK_SENT = "Draft kept. Check Sent before sending it again.";
 const DRAFT_RECOVERY_PREFIX = "brain:mail:draft-recovery:v1:";
 const THREAD_SORT_PREFIX = "brain:mail:sort:v1:";
 const SEND_POLL_BASE_DELAY_MS = 5_000;
@@ -881,7 +894,7 @@ export function MailSurface({
    * leaves without a pill; so does one with no toast channel to offer it in.
    * One discard is parked at a time: a second press lets the first go.
    */
-  const discardComposer = useCallback(() => {
+  const discardComposer = useCallback((leaving?: MailComposerLeaving) => {
     const sync = draftSyncRef.current;
     const current = composerRef.current;
     if (!sync || !current || !onToast || isDraftSyncEmpty(sync)) {
@@ -927,6 +940,9 @@ export function MailSurface({
         const parcel = parked.restore();
         if (!parcel) return false;
         restoreDiscardedComposer(parcel);
+        // The files lived only on the sheet and went with the discard; the
+        // letter that comes back is the words, and that is said at once.
+        if (leaving?.withFiles) onToast(DRAFT_WITHOUT_FILES, { urgent: true });
       },
       onExpire: () => {
         if (deferredDiscardRef.current === parked) deferredDiscardRef.current = null;
@@ -954,6 +970,10 @@ export function MailSurface({
       readonly replyToMessageId: string | null;
       readonly notice: string | null;
       readonly recoverySourceDraftId?: string;
+      /** The key of a sheet already standing, handed over by the From switch
+       *  so the letter moves under the same sheet: the key is the sheet's
+       *  identity at its mount, and a new one would replay the whole sheet. */
+      readonly idempotencyKey?: string;
     }) => {
       const existing = draftSyncRef.current;
       if (existing) closeComposer(isDraftSyncEmpty(existing));
@@ -961,7 +981,7 @@ export function MailSurface({
       // closes, and its delete goes out.
       flushDeferredDiscard();
       const draftId = createDraftId();
-      const idempotencyKey = createIdempotencyKey();
+      const idempotencyKey = params.idempotencyKey ?? createIdempotencyKey();
       const createInput: MailDraftCreateInput = {
         draftId,
         accountId: params.accountId,
@@ -1152,7 +1172,10 @@ export function MailSurface({
    * the tab is hidden, aborted when the Mail surface unmounts.
    */
   const watchSendOperation = useCallback(
-    (operationId: string) => {
+    /** `withFiles`: the letter went with the sheet's files, which lived only
+     *  in the sheet. A failed send leaves its words in Drafts and not its
+     *  files, and the sentence says so. */
+    (operationId: string, withFiles = false) => {
       const pollers = sendPollersRef.current;
       if (pollers.has(operationId)) return;
       const controller = new AbortController();
@@ -1179,7 +1202,11 @@ export function MailSurface({
           }
           if (status === "queued" || status === "sending") continue;
           if (status === "failed") {
-            onToast?.("Message didn’t send. It’s in Drafts.");
+            onToast?.(
+              withFiles
+                ? "Message didn’t send. It’s in Drafts without its files."
+                : "Message didn’t send. It’s in Drafts.",
+            );
           } else if (status === "delivery_unknown") {
             onToast?.("Delivery unconfirmed. Check Drafts.");
           } else {
@@ -3031,11 +3058,18 @@ export function MailSurface({
    * the fields as they stand, and the draft it leaves behind closes with
    * delete at once, so the first account's Drafts never lists a letter the
    * writer moved. Compose only: a reply goes from the account it arrived in.
+   *
+   * IN PLACE. The move happens under a sheet that stays: the new composer
+   * state keeps the old one's key, so React keeps the mounted sheet, its
+   * caret and the files that live only in it, and the one thing the writer
+   * sees change is the name in From. The close and the open land in one
+   * render, so there is never a frame without a sheet.
    */
   const switchComposerAccount = useCallback(
     (accountId: string, fields: MailComposerFields) => {
       const account = selectedMailAccount(accountsStateRef.current, accountId);
       if (!account?.capabilities.compose || !account.capabilities.send) return;
+      const sheetKey = composerRef.current?.draft.idempotencyKey;
       closeComposer(true);
       composerActionEpochRef.current += 1;
       openComposer({
@@ -3049,6 +3083,7 @@ export function MailSurface({
         text: fields.text,
         replyToMessageId: null,
         notice: null,
+        idempotencyKey: sheetKey,
       });
     },
     [closeComposer, openComposer],
@@ -3258,6 +3293,10 @@ export function MailSurface({
         }));
         return;
       }
+      // The sheet's files ride on the send, never on the draft: the service
+      // builds them into the message it makes from the draft, so a letter
+      // with files is bound to its draft like any other and cannot go twice.
+      const withFiles = input.attachments.length > 0;
       try {
         const result = await client.sendDraft({
           accountId: sync.accountId,
@@ -3266,6 +3305,7 @@ export function MailSurface({
           expectedRevision: sync.revision,
           sendIdempotencyKey: randomUuidV4(),
           sendOperationId: createSendOperationId(),
+          attachments: input.attachments,
         });
         if (
           !isComposerSubmission(composerRef.current, input) ||
@@ -3291,7 +3331,7 @@ export function MailSurface({
           onToast?.(result.status === "sent" ? "Message sent" : "Message queued");
           // A queued handoff is a promise, not an outcome. Watch the operation
           // so a failure hours from now still reaches the writer.
-          if (result.status !== "sent") watchSendOperation(result.operationId);
+          if (result.status !== "sent") watchSendOperation(result.operationId, withFiles);
           return;
         }
         if (result.status === "failed") {
@@ -5247,11 +5287,26 @@ export function MailSurface({
             sendErrorSettings={composer.errorSettings}
             onOpenSettings={(invoker) => onOpenSettings(invoker, composerAccount.accountId)}
             saveStatus={saveStatus}
-            onCancel={() =>
-              closeComposer(
-                draftSyncRef.current ? isDraftSyncEmpty(draftSyncRef.current) : false,
-              )
-            }
+            onCancel={(leaving) => {
+              const empty = draftSyncRef.current
+                ? isDraftSyncEmpty(draftSyncRef.current)
+                : false;
+              const blocked = composerRef.current?.blocked ?? false;
+              closeComposer(empty);
+              // A blocked sheet's letter may already be on its way, files and
+              // all: the warning is what it leaves with, and nothing about
+              // files, which would read as an invitation to attach them again.
+              if (blocked) {
+                onToast?.(DRAFT_KEPT_CHECK_SENT, { urgent: true });
+                return;
+              }
+              // A kept draft is the words: the files lived only on the sheet.
+              // With no words there is no draft, and the files are all that
+              // went, which is what is said.
+              if (leaving.withFiles) {
+                onToast?.(empty ? FILES_DISCARDED : DRAFT_WITHOUT_FILES, { urgent: true });
+              }
+            }}
             onDiscard={discardComposer}
             onDraftChange={onComposerDraftChange}
             onRetrySave={retryDraftSave}
@@ -5880,7 +5935,12 @@ function classifySendFailure(error: unknown): {
   }
   return {
     blocked: false,
-    message: sendFailureMessage(error.code),
+    // A 413 is the body's size whatever its code: the draft door cuts a body
+    // off by its bytes before it reads a code into it, and only files can
+    // carry a send that far.
+    message: sendFailureMessage(
+      error.status === 413 ? "mail_send_attachments_too_large" : error.code,
+    ),
     settings:
       error.code === "mail_draft_account_reauth_required" ||
       error.code === "mail_send_account_reauth_required",
@@ -5915,6 +5975,10 @@ function sendFailureMessage(code: string | null): string {
       return "Brain couldn’t find this draft. Reopen it from Drafts.";
     case "mail_send_rate_limited":
       return "Too many sends right now. Wait a moment, then try again.";
+    case "mail_send_attachments_too_large":
+      return ATTACHMENT_REFUSALS.tooLarge;
+    case "mail_send_attachments_invalid":
+      return "One of these files can’t be sent. Remove it and try again.";
     default:
       return "This message wasn’t sent. Try again.";
   }

@@ -132,6 +132,72 @@ describe("mail draft codecs", () => {
     );
   });
 
+  describe("a send that carries the compose sheet's files", () => {
+    const SEND = {
+      accountId: ACCOUNT_ID,
+      draftId: DRAFT_ID,
+      mutationId: MUTATION_ID,
+      expectedRevision: 2,
+      kind: "send",
+      sendIdempotencyKey: "draft-send-key-0001",
+      sendOperationId: "send-00000000-0000-4000-8000-000000000001",
+    } as const;
+    const file = { filename: "quote.pdf", mimeType: "application/pdf", dataBase64: "AQID" };
+
+    it("takes the files under the codec, and a send without them reads as it always did", () => {
+      const bare = validateMailDraftMutationInput(SEND);
+      expect(bare).not.toHaveProperty("attachments");
+      const withFiles = validateMailDraftMutationInput({ ...SEND, attachments: [file] });
+      expect(withFiles).toMatchObject({ kind: "send", attachments: [file] });
+      // An empty list is no files: the same mutation, the same fingerprint.
+      const empty = validateMailDraftMutationInput({ ...SEND, attachments: [] });
+      expect(empty).not.toHaveProperty("attachments");
+      expect(fingerprintMailDraftMutation(empty)).toBe(fingerprintMailDraftMutation(bare));
+    });
+
+    it("refuses files the codec refuses, and a patch that names files", () => {
+      for (const attachments of [
+        [{ ...file, dataBase64: "!!!=" }],
+        [{ ...file, filename: "a/b.pdf" }],
+        [{ ...file, mimeType: "Application/PDF" }],
+        Array.from({ length: 11 }, () => file),
+        "quote.pdf",
+      ]) {
+        expect(() => validateMailDraftMutationInput({ ...SEND, attachments })).toThrow(
+          MailDraftCodecError,
+        );
+      }
+      expect(() =>
+        validateMailDraftMutationInput({
+          ...SEND,
+          kind: "patch",
+          patch: { subject: "x" },
+          attachments: [file],
+        }),
+      ).toThrow(MailDraftCodecError);
+    });
+
+    it("fingerprints the files by their digests, so a replay with other files is another mutation", () => {
+      const one = validateMailDraftMutationInput({ ...SEND, attachments: [file] });
+      const other = validateMailDraftMutationInput({
+        ...SEND,
+        attachments: [{ ...file, dataBase64: "AQIE" }],
+      });
+      const renamed = validateMailDraftMutationInput({
+        ...SEND,
+        attachments: [{ ...file, filename: "quote-2.pdf" }],
+      });
+      const bare = validateMailDraftMutationInput(SEND);
+      const prints = new Set(
+        [one, other, renamed, bare].map((mutation) => fingerprintMailDraftMutation(mutation)),
+      );
+      expect(prints.size).toBe(4);
+      expect(fingerprintMailDraftMutation(one)).toBe(
+        fingerprintMailDraftMutation(validateMailDraftMutationInput({ ...SEND, attachments: [file] })),
+      );
+    });
+  });
+
   it("requires sent tombstones to have scrubbed content and attachments", () => {
     const sent = storedDraft({
       revision: 4,

@@ -2126,13 +2126,16 @@ test("@release a send holds the sheet still, refuses Esc, and then the sheet is 
   for (const side of ["x", "y", "width", "height"] as const) {
     expect(Math.abs(during[side] - before[side]), side).toBeLessThanOrEqual(0.5);
   }
+  // The file chooser's input holds no text to freeze: it is disabled instead,
+  // with the paperclip that opens it.
   expect(
     await sheet
-      .locator("input, textarea")
+      .locator('input:not([type="file"]), textarea')
       .evaluateAll((fields) =>
         fields.every((field) => (field as HTMLInputElement).readOnly),
       ),
   ).toBe(true);
+  await expect(sheet.locator('input[type="file"]')).toBeDisabled();
   // The cross reads as inert, not only behaves so.
   await expect(sheet.getByRole("button", { name: "Close draft" })).toHaveAttribute(
     "aria-disabled",
@@ -2296,7 +2299,7 @@ test("@release Discard takes the sheet down at once and parks the delete behind 
   expect(created).toHaveLength(1);
 });
 
-test("@release the From switch moves the letter to another account, and a reply keeps From as text", async ({
+test("@release the From switch moves the letter to another account in place, and a reply keeps From as text", async ({
   page,
 }) => {
   await login(page);
@@ -2319,6 +2322,29 @@ test("@release the From switch moves the letter to another account, and a reply 
   await page.getByLabel("Message", { exact: true }).fill("See you there.");
   await expect.poll(() => creates.length).toBe(1);
   expect(creates[0]?.accountId).toBe(account.accountId);
+  // A file on the shelf, which lives only in the sheet: it survives the
+  // switch only if the sheet does.
+  const chooser = page.waitForEvent("filechooser");
+  await sheet.getByRole("button", { name: "Attach files" }).click();
+  await (await chooser).setFiles({
+    name: "Quote.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.from("%PDF-1.4 quote"),
+  });
+  await expect(sheet.locator(".brain-compose-attachment-name")).toHaveText(["Quote.pdf"]);
+  // Every dialog that ever stands from here on is counted, so a switch that
+  // replayed the sheet (the old one leaving while a new one arrived) is
+  // caught even inside a frame.
+  await page.evaluate(() => {
+    const seen = window as typeof window & { __sheets?: number };
+    const count = () =>
+      document.querySelectorAll('[role="dialog"][aria-label="New message"]').length;
+    seen.__sheets = count();
+    new MutationObserver(() => {
+      seen.__sheets = Math.max(seen.__sheets ?? 0, count());
+    }).observe(document.body, { childList: true, subtree: true });
+  });
+  const sheetNode = await sheet.elementHandle();
 
   // The From value is a quiet menu button; the second account is one row.
   const from = sheet.getByRole("button", { name: "From: Personal" });
@@ -2351,15 +2377,23 @@ test("@release the From switch moves the letter to another account, and a reply 
     subject: "Thursday, then",
     text: "See you there.",
   });
-  // The old sheet plays its dismiss exit while the new one stands: one sheet
-  // again before reading it.
-  await expect(sheet).toHaveCount(1);
+  // IN PLACE: the same sheet stands (never a second one, not for a frame),
+  // the word in From changed, the caret is back on From where the writer
+  // left it, and the file is still on the shelf.
+  const switched = sheet.getByRole("button", { name: "From: second@example.test" });
+  await expect(switched).toBeVisible();
+  await expect(switched).toBeFocused();
+  expect(await sheetNode!.evaluate((node) => node.isConnected)).toBe(true);
+  expect(await page.evaluate(() => (window as typeof window & { __sheets?: number }).__sheets)).toBe(1);
   await expect(page.getByLabel("Message", { exact: true })).toHaveValue("See you there.");
-  await expect(sheet.getByRole("button", { name: "From: second@example.test" })).toBeVisible();
+  await expect(sheet.locator(".brain-compose-attachment-name")).toHaveText(["Quote.pdf"]);
   await expect.poll(() => deleteRequests.length).toBe(1);
   expect(deleteRequests[0]?.accountId).toBe(account.accountId);
+  // Closing with a file on it keeps the draft, and says at once that the
+  // draft it keeps is the words.
   await page.keyboard.press("Escape");
   await expect(sheet).toHaveCount(0);
+  await expect(page.getByText("Draft kept without its files.", { exact: true })).toBeVisible();
 
   // A reply is sent from the account the letter arrived in: From is text.
   await page.getByText(thread.subject, { exact: true }).click();
@@ -2368,6 +2402,104 @@ test("@release the From switch moves the letter to another account, and a reply 
   await expect(reply).toBeVisible();
   await expect(reply.getByRole("button", { name: /^From:/ })).toHaveCount(0);
   await expect(reply.locator(".brain-compose-from .brain-compose-value")).toHaveText("Personal");
+});
+
+test("@release the sheet takes files by the paperclip and by a drop, refuses one past the cap in the slot, and sends them", async ({
+  page,
+}) => {
+  await login(page);
+  const { sendRequests, deleteRequests } = await installMailRoutes(page);
+  // The files go through the draft door with the draft (the mock records
+  // the mutation and the draft it sent), and the watch later reads the
+  // operation as sent.
+  const directSends: unknown[] = [];
+  await page.route(/\/api\/mail\/send$/, (route) => {
+    directSends.push(route.request().postDataJSON());
+    return route.fulfill({ status: 404, body: "{}" });
+  });
+  await page.route(/\/api\/mail\/send\/send-[^/?]+$/, (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json; charset=utf-8",
+      body: JSON.stringify({
+        apiVersion: 1,
+        operationId: new URL(route.request().url()).pathname.split("/").at(-1),
+        accountId: account.accountId,
+        status: "sent",
+        threadId: null,
+      }),
+    }),
+  );
+  await page.goto("/mail");
+  await enterSingleAccount(page);
+
+  await page.getByRole("button", { name: "New message" }).click();
+  const sheet = page.locator('[role="dialog"][aria-label="New message"]');
+  await page.getByLabel("To", { exact: true }).fill("ben@example.test");
+  await page.getByLabel("Message", { exact: true }).fill("The quote and the notes.");
+
+  // Two files by the paperclip, through the system's own chooser.
+  const chooser = page.waitForEvent("filechooser");
+  await sheet.getByRole("button", { name: "Attach files" }).click();
+  await (await chooser).setFiles([
+    { name: "Quote.pdf", mimeType: "application/pdf", buffer: Buffer.from("%PDF-1.4 quote") },
+    { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("three notes") },
+  ]);
+  // One by a drop anywhere on the sheet.
+  const transfer = await page.evaluateHandle(() => {
+    const data = new DataTransfer();
+    data.items.add(new File(["a small photo"], "photo.png", { type: "image/png" }));
+    return data;
+  });
+  const column = sheet.locator(".brain-compose-column");
+  await column.dispatchEvent("dragover", { dataTransfer: transfer });
+  await column.dispatchEvent("drop", { dataTransfer: transfer });
+  const names = sheet.locator(".brain-compose-attachment-name");
+  await expect(names).toHaveText(["Quote.pdf", "notes.txt", "photo.png"]);
+  await expect(sheet.getByRole("button", { name: "Remove notes.txt, 11 B" })).toBeVisible();
+
+  // A 12 MiB file is past the cap: refused in the slot, and the shelf keeps
+  // what it had.
+  const big = page.waitForEvent("filechooser");
+  await sheet.getByRole("button", { name: "Attach files" }).click();
+  await (await big).setFiles({
+    name: "big.bin",
+    mimeType: "application/octet-stream",
+    buffer: Buffer.alloc(12 * 1024 * 1024),
+  });
+  await expect(sheet.locator('.brain-compose-slot [role="status"]')).toHaveText(
+    "“big.bin” is too large. A message can carry 10 MB of files.",
+  );
+  await expect(names).toHaveCount(3);
+
+  // Send carries them as base64 on the draft's own send: the letter is its
+  // draft, from this account, and the files ride on the mutation.
+  await sheet.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(page.getByText("Message queued", { exact: true })).toBeVisible();
+  await expect(sheet).toHaveCount(0);
+  expect(directSends).toHaveLength(0);
+  expect(sendRequests).toHaveLength(1);
+  expect(sendRequests[0]?.draft).toMatchObject({
+    accountId: account.accountId,
+    to: "ben@example.test",
+    text: "The quote and the notes.",
+    attachments: [],
+  });
+  expect(
+    (sendRequests[0]?.request.attachments ?? []).map((file) => ({
+      filename: file.filename,
+      mimeType: file.mimeType,
+      text: Buffer.from(file.dataBase64, "base64").toString("utf8"),
+    })),
+  ).toEqual([
+    { filename: "Quote.pdf", mimeType: "application/pdf", text: "%PDF-1.4 quote" },
+    { filename: "notes.txt", mimeType: "text/plain", text: "three notes" },
+    { filename: "photo.png", mimeType: "image/png", text: "a small photo" },
+  ]);
+  // The draft went with the send, so nothing is deleted, then or after the
+  // watch reads the letter as sent.
+  await expect(page.getByText("Message sent", { exact: true })).toBeVisible({ timeout: 15_000 });
+  expect(deleteRequests).toHaveLength(0);
 });
 
 /** The sheet and its rows arrive on transforms, and a box measured while they

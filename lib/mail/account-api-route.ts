@@ -6,6 +6,11 @@ import {
 } from "./brain-mail-client";
 import { MAIL_ATTACHMENT_CONTENT_SECURITY_POLICY } from "./content-types";
 import { writeMailLogRecord } from "./security";
+import {
+  MAIL_SEND_ATTACHMENT_LIMITS,
+  mailSendAttachmentBytes,
+  validateMailSendAttachments,
+} from "./send-attachment-codec";
 import { MAIL_SERVICE_HTTP_LIMITS } from "./service/limits";
 import {
   MAIL_THREAD_STATE_CONTRACT_HEADER,
@@ -308,6 +313,49 @@ export async function runMailAttachmentApiAction(
       return mailApiError(error.status, error.code, 1);
     }
     return mailApiError(503, "mail_service_unavailable", 1);
+  }
+}
+
+/**
+ * The compose sheet's files, as the browser's send routes answer them. They
+ * arrive as base64 inside the JSON, on the MCP tool's own wire and under its
+ * own codec, in a body the route has already cut off by its bytes. What is
+ * left is the codec's question, asked here rather than a socket away so a
+ * refused file never travels on to the service and the sheet gets an answer
+ * it can word: a set over the total cap is a 413, the size the sheet says,
+ * and anything else the codec refuses is the files' own 400. A body with no
+ * `attachments` is not this function's to judge; the codec behind the route
+ * says what that body is.
+ */
+export function refuseMailAttachments(body: unknown): Response | null {
+  if (
+    typeof body !== "object" ||
+    body === null ||
+    Array.isArray(body) ||
+    !Object.prototype.hasOwnProperty.call(body, "attachments")
+  ) {
+    return null;
+  }
+  const value = (body as Record<string, unknown>).attachments;
+  try {
+    validateMailSendAttachments(value);
+    return null;
+  } catch {
+    // Which refusal it was is read off the sizes the codec measures, without
+    // decoding a byte: a set whose payloads add up past the cap is too large
+    // whatever else is wrong with it.
+    const total = Array.isArray(value)
+      ? value.reduce<number>((sum, entry: unknown) => {
+          const data =
+            typeof entry === "object" && entry !== null
+              ? (entry as Record<string, unknown>).dataBase64
+              : undefined;
+          return typeof data === "string" ? sum + mailSendAttachmentBytes(data) : sum;
+        }, 0)
+      : 0;
+    return total > MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes
+      ? mailApiError(413, "mail_send_attachments_too_large", 1)
+      : mailApiError(400, "mail_send_attachments_invalid", 1);
   }
 }
 

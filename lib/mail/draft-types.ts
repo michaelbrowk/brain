@@ -1,5 +1,6 @@
 import type { MailSendErrorCode } from "./service/outbound";
 import type { MailSendStatus } from "./message-types";
+import type { MailSendAttachment } from "./send-attachment-codec";
 
 export const MAIL_DRAFT_API_VERSION = 1 as const;
 
@@ -143,6 +144,11 @@ export type MailDraftMutationInput =
       readonly kind: "send";
       readonly sendIdempotencyKey: string;
       readonly sendOperationId: string;
+      /** The compose sheet's files, which ride on the send and into the
+       *  message built from the draft. The draft itself never stores them.
+       *  Absent when there are none, so a send without files reads (and
+       *  fingerprints) exactly as it did before files could travel. */
+      readonly attachments?: readonly MailSendAttachment[];
     });
 
 export interface StoredMailDraftMutation {

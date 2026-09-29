@@ -1868,81 +1868,59 @@ describe("background body cohort and byte budget", () => {
     await expect(fixture.content.collectGarbage()).resolves.toHaveLength(4);
   });
 
-  it("gives up a body past the prefetch size before any other", async () => {
+  it("gives up a body only an open fetches before any other, but not a prefetched one", async () => {
     const fixture = await createFixture({ active: true });
     const large = MAIL_RESOURCE_LIMITS.privacyPrefetchMaxThreadBytes;
+    const ids = ["new", "big", "heavy", "old", "older"];
     activateThreads(
       fixture,
-      ["new", "big", "old", "older"].map((id, index) => ({
-        threadId: id,
-        sentAt: NOW - (index + 1) * HOUR,
-      })),
+      ids.map((id, index) => ({ threadId: id, sentAt: NOW - (index + 1) * HOUR })),
       "200",
     );
-    for (const [index, id] of ["new", "old", "older"].entries()) {
-      await publishBody(fixture, `message-${id}`, NOW - 5 * HOUR, {
-        raw: Buffer.alloc(100, index + 1),
-      });
-    }
-    // Staged whole: the helper's three-byte chunks would take a while.
-    const lease = await claimLease(fixture.content, "message-big", NOW - 5 * HOUR);
-    const raw = Buffer.alloc(100, 8);
-    const attachment = Buffer.alloc(large, 9);
-    for (const value of [raw, attachment]) {
-      await fixture.content.stageBlob(
-        lease,
-        descriptorFor(value),
-        chunks(value, value.byteLength),
+    // big's raw message is past the prefetch's size, so only an open fetched
+    // it; heavy's is not, though what it holds on disk is, with its file.
+    for (const [index, id] of ids.entries()) {
+      await publishWhole(
+        fixture,
+        `message-${id}`,
         NOW - 5 * HOUR,
+        Buffer.alloc(id === "big" ? large + 1 : 100, index + 1),
+        id === "heavy" ? Buffer.alloc(large, 9) : null,
       );
     }
-    await fixture.content.commitReady({
-      lease,
-      rawMime: descriptorFor(raw),
-      text: null,
-      sanitizedHtml: null,
-      attachments: [
-        {
-          filename: "large.bin",
-          mimeType: "application/octet-stream",
-          disposition: "attachment",
-          contentId: null,
-          blob: descriptorFor(attachment),
-        },
-      ],
-      remoteImages: [],
-      now: NOW - 5 * HOUR,
-    });
-    const total = large + 400;
+    const total = 2 * large + 401;
     await expect(fixture.content.readBodyCacheBytes()).resolves.toBe(total);
+    const evict = (maxBytes: number) =>
+      fixture.content.evictBodiesOverBudget({ maxBytes, now: NOW, pinnedMessageIds: [] });
 
-    // At the budget the large body is the next to go, so a letter of any
-    // age the prefetch adds would push out that one and not itself.
-    await expect(
-      fixture.content.evictBodiesOverBudget({
-        maxBytes: total,
-        now: NOW,
-        pinnedMessageIds: [],
-      }),
-    ).resolves.toEqual({ evictedMessages: 0, remainingBytes: total, oldestKeptKey: 0 });
-    // Over by one small body, the large one goes rather than the oldest.
-    await expect(
-      fixture.content.evictBodiesOverBudget({
-        maxBytes: total - 100,
-        now: NOW,
-        pinnedMessageIds: [],
-      }),
-    ).resolves.toEqual({
+    // At the budget big is the next to go, so a letter of any age the
+    // prefetch adds would push out that one and not itself.
+    await expect(evict(total)).resolves.toEqual({
+      evictedMessages: 0,
+      remainingBytes: total,
+      oldestKeptKey: 0,
+    });
+    // Over by one small body, big goes rather than the oldest.
+    await expect(evict(total - 100)).resolves.toEqual({
       evictedMessages: 1,
-      remainingBytes: 300,
+      remainingBytes: large + 400,
+      oldestKeptKey: NOW - 5 * HOUR,
+    });
+    // From there it is least recently used again: heavy is not first.
+    await expect(evict(large + 300)).resolves.toEqual({
+      evictedMessages: 1,
+      remainingBytes: large + 300,
       oldestKeptKey: NOW - 4 * HOUR,
     });
-    await expect(fixture.content.inspect("message-big")).resolves.toMatchObject({
-      kind: "not_requested",
-    });
-    await expect(fixture.content.inspect("message-older")).resolves.toMatchObject({
-      kind: "ready",
-    });
+    const state = async (id: string) =>
+      (await fixture.content.inspect(`message-${id}`)).kind;
+    expect(await Promise.all(ids.map(state))).toEqual([
+      "ready",
+      "not_requested",
+      "ready",
+      "ready",
+      "not_requested",
+    ]);
   });
 
   it("prefetches a body the budget evicted again only once there is room for it", async () => {
@@ -2308,6 +2286,45 @@ function activateThreads(
     null,
   );
   fixture.messages.completeInitial(generation, 1);
+}
+
+/** Commits a ready body staged in one chunk each, for bodies of megabytes. */
+async function publishWhole(
+  fixture: { readonly content: SqliteMailContentCache },
+  messageId: string,
+  now: number,
+  raw: Buffer,
+  attachment: Buffer | null,
+) {
+  const lease = await claimLease(fixture.content, messageId, now);
+  for (const value of attachment === null ? [raw] : [raw, attachment]) {
+    await fixture.content.stageBlob(
+      lease,
+      descriptorFor(value),
+      chunks(value, value.byteLength),
+      now,
+    );
+  }
+  return fixture.content.commitReady({
+    lease,
+    rawMime: descriptorFor(raw),
+    text: null,
+    sanitizedHtml: null,
+    attachments:
+      attachment === null
+        ? []
+        : [
+            {
+              filename: "large.bin",
+              mimeType: "application/octet-stream",
+              disposition: "attachment" as const,
+              contentId: null,
+              blob: descriptorFor(attachment),
+            },
+          ],
+    remoteImages: [],
+    now,
+  });
 }
 
 /** Commits a ready body for one message: raw MIME plus any extra parts. */

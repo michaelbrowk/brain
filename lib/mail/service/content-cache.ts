@@ -2099,10 +2099,11 @@ export class SqliteMailContentCache {
 
   /**
    * Brings the account's bodies down to `maxBytes`, least recently used first
-   * (`readyBodySizes` says by which key), except that a body past
-   * `privacyPrefetchMaxThreadBytes` goes before any other: one such open
-   * otherwise stayed while the several letters it displaced waited for it to
-   * age out. A body opened within `MAIL_BODY_OPEN_PIN_MS`, or one a draft
+   * (`readyBodySizes` says by which key), except that a body whose raw
+   * message is past `privacyPrefetchMaxThreadBytes`, which only an open
+   * fetches, goes before any other: one such open otherwise stayed while the
+   * several letters it displaced waited for it to age out. A letter the
+   * prefetch fetched is never one of those, so none is fetched only to go. A body opened within `MAIL_BODY_OPEN_PIN_MS`, or one a draft
    * answers or forwards, is never taken, even when that leaves the account
    * over the budget. An evicted body reads as never fetched: an open fetches
    * it again, and the cohort records when it went and what it held, which
@@ -2144,8 +2145,8 @@ export class SqliteMailContentCache {
               SET content_evicted_at = ?, content_evicted_bytes = ?
             WHERE account_id = ? AND provider_message_id = ?`,
         );
-        const large = (body: { readonly bytes: number }) =>
-          body.bytes > MAIL_RESOURCE_LIMITS.privacyPrefetchMaxThreadBytes;
+        const large = (body: { readonly rawBytes: number }) =>
+          body.rawBytes > MAIL_RESOURCE_LIMITS.privacyPrefetchMaxThreadBytes;
         let oldestKeptKey: number | null = null;
         for (const body of [
           ...bodies.filter(large),
@@ -2636,6 +2637,7 @@ function readyBodySizes(
   readonly messageId: string;
   readonly openedAt: number | null;
   readonly key: number;
+  readonly rawBytes: number;
   readonly bytes: number;
 }[] {
   const rows = database
@@ -2643,6 +2645,7 @@ function readyBodySizes(
       `SELECT content.provider_message_id, demand.requested_at,
               MAX(COALESCE(message.sent_at, 0),
                   COALESCE(demand.requested_at, 0)) AS recency_key,
+              content.raw_bytes,
               content.raw_bytes + COALESCE(content.text_bytes, 0) +
                 COALESCE(content.html_bytes, 0) +
                 COALESCE((
@@ -2681,6 +2684,8 @@ function readyBodySizes(
       !SAFE_PROVIDER_ID.test(row.provider_message_id) ||
       !Number.isSafeInteger(row.bytes) ||
       (row.bytes as number) < 1 ||
+      !Number.isSafeInteger(row.raw_bytes) ||
+      (row.raw_bytes as number) < 0 ||
       !Number.isSafeInteger(row.recency_key) ||
       (row.requested_at !== null && !Number.isSafeInteger(row.requested_at))
     ) {
@@ -2690,6 +2695,7 @@ function readyBodySizes(
       messageId: row.provider_message_id,
       openedAt: row.requested_at as number | null,
       key: row.recency_key as number,
+      rawBytes: row.raw_bytes as number,
       bytes: row.bytes as number,
     });
   });

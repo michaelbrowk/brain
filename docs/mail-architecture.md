@@ -426,6 +426,8 @@ storage:
                      rows: the prefetch cohort and what each body holds
     content-blobs/   rebuildable fetched raw MIME, text and sanitized HTML
                      parts, attachments and remote images, by content hash
+    content-incoming/  a raw message while the provider streams it, before
+                     it is published into content-blobs/; empty at rest
     outbox.sqlite3   durable idempotent send operations and MIME payloads,
                      plus dormant local draft records and mutation receipts
   local.sqlite3       current account metadata and encrypted credentials
@@ -454,12 +456,16 @@ before anyone opens them, plus every body the owner opened. That is mail
 content from senders sitting on the server's disk, as opened letters always
 did, now for letters nobody has read yet. `bodyCacheMaxBytes`, 48 MiB per
 account, bounds all of it together: raw MIME, both rendered parts,
-attachments and fetched images count, and past the budget the oldest unopened
-body goes first, then opened ones by their last open. A body opened in the
-last hour, or the letter a live draft answers or forwards, is never taken, so
-those can hold an account over the budget. An evicted body reads as never
-fetched: opening it fetches it again, and the prefetch leaves it alone while
-it stays in the cohort. §10 says what the prefetch does not fetch.
+attachments and fetched images count. Past the budget the least recently used
+body goes first, by one key: when the letter was sent or last opened,
+whichever is later. An open buys a body the standing of a letter that arrived
+at that moment and no more. The first version ordered every unopened body
+before any opened one, which let opened letters fill the budget until each new
+letter was evicted as it landed. A body opened in the last hour, or the letter
+a live draft answers or forwards, is never taken, so those can hold an account
+over the budget. An evicted body reads as never fetched: opening it fetches it
+again, and the prefetch leaves it alone while it stays in the cohort, along
+with every letter older than it. §10 says what the prefetch does not fetch.
 
 Rules:
 
@@ -1078,9 +1084,13 @@ Remote images are served to the reader only from the server-side privacy cache; 
 
 The on-open fetch starts the moment it is approved, not when the scheduler gets round to it. A demand on a message whose body is already cached, and a ready commit of a body that references images, each start a drain of that message's pending images — detached from the response, serialised per message, deduplicated per image, bound to the account's lifecycle. The scheduler's own pass stays as the backstop: cohort messages the drain never saw, transient failures whose retry window has passed, rows left over from a restart. For a while the drain did not exist and the demand only marked the message eligible; the images waited for a scheduler pass that ran only after the provider sync step reported no more pages, and a provider mid-history-walk or failing outright held them back for tens of seconds while the reader, polling a cache-only endpoint, gave up. The prefetch step now runs on every scheduler page, whatever the provider said. At most two drains run at once across the process: the reader opens a thread's messages together, and without a ceiling a long thread would dial that many origins at the same time, each able to buffer a message's whole image budget. The reader also asks again: after a run of cache misses it re-POSTs the message-content request, which re-records the demand and starts the drain over. Body and images draw on one counter — three message-content POSTs per open, however they are split — and the image load deadline runs from the last answer rather than from the open. The reader endpoint answers 503 for an image the cache does not hold yet, 404 for one it has no live row for, and 410 for one it has refused for good (a blocked tracker, a spent raster budget), so the reader re-asks once for a missing row and never for a refusal.
 
-Bodies arrive ahead of the open; their images do not. The background path fetches the bodies of each account's body cohort, its 200 newest Inbox messages from the last 30 days (`privacyPrefetchMaxMessagesPerAccount`, `privacyPrefetchMaxAgeMs`), through the same fetch, the same parser worker and the same limits as an open, so opening any of them renders from disk with no provider round trip. A message whose thread the provider sizes past 4 MiB (`privacyPrefetchMaxThreadBytes`) is the exception and waits for its open: a letter that size is mostly attachment, the parse of it is the service's heaviest moment (§11), and a few of them would fill the byte budget on their own. The size is the one the sync already holds, the sum over the thread, so a very long conversation waits for its open too. The image cohort above is only the prefix of it that the background path always had: the three newest of those messages from the last seven days (`remoteImagePrefetchMaxMessagesPerAccount`, `remoteImagePrefetchMaxAgeMs`). Every other cohort body is on disk with its images pending until a reader opens it, so the larger body cohort lets no more tracking pixels see the server than the three-message one did. §5 says what the bodies cost on disk and how the byte budget bounds them.
+Bodies arrive ahead of the open; their images do not. The background path fetches the bodies of each account's body cohort, its 200 newest Inbox messages from the last 30 days (`privacyPrefetchMaxMessagesPerAccount`, `privacyPrefetchMaxAgeMs`), through the same fetch, the same parser worker and the same limits as an open, so opening any of them renders from disk with no provider round trip. A message whose thread the provider sizes past 4 MiB (`privacyPrefetchMaxThreadBytes`) is the exception and waits for its open: a letter that size is mostly attachment, the parse of it is the service's heaviest moment (§11), and a few of them would fill the byte budget on their own. The size is the one the sync already holds, the sum over the thread, so a very long conversation waits for its open too, and so does one the provider gave no size for. The image cohort above is only the prefix of it that the background path always had: the three newest of those messages from the last seven days (`remoteImagePrefetchMaxMessagesPerAccount`, `remoteImagePrefetchMaxAgeMs`). Every other cohort body is on disk with its images pending until a reader opens it, so the larger body cohort lets no more tracking pixels see the server than the three-message one did. §5 says what the bodies cost on disk and how the byte budget bounds them.
 
-The body prefetch works through the cohort newest twenty first, then the rest from the oldest up, and keeps two bodies in flight per account. A scheduler step claims the first two, and each body that lands claims the next and checks the budget, so filling the cohort takes no scheduler pass of its own: a body the prefetch finishes wakes nothing, where an owner's open and its commit each wake the scheduler. It never starves an open. The parser queue has two slots and prefetch work takes one at most, behind every owner request: an open starts ahead of queued prefetch work, and opening a message the prefetch has queued moves it into the owner's lane at once, even out of a wait. Each prefetch fetch also takes one of the two `concurrentFetchStreams` from the admission ledger the download routes use, and never keeps the last free one, because the reader streams a letter's pictures two at a time and gives up after two short retries on 409. A refused prefetch keeps its claim, records no failure, and asks again after a second, doubling to thirty. A prefetched body's images drain only if it is in the image cohort. A service that last ran the three-message cohort comes up with those three bodies kept and fills the rest at the same two a step: no body is fetched twice and no step claims more than two.
+The body prefetch works through the cohort newest first, the order the byte budget keeps bodies in, and keeps two bodies in flight per account. The design proposed the newest twenty first and then the rest from the oldest up; against a budget that gives up the oldest first, that order downloaded bodies only to evict them, so newest first replaced it. The fill stops where the budget would start taking back what it fetched: at the budget it claims only a letter newer than the body it would evict next, and never one older than a body it has already evicted. While the drafts cannot say which letters they answer, it evicts nothing and claims nothing. A scheduler step claims the first two, and each body that lands claims the next and checks the budget, so filling the cohort takes no scheduler pass of its own: a body the prefetch finishes wakes nothing, where an owner's open and its commit each wake the scheduler.
+
+An owner's open comes first. The parser queue has two slots, the two connections the parser socket accepts, and prefetch work takes one at most, behind every owner request: an open starts ahead of queued prefetch work, and opening a message the prefetch has queued moves it into the owner's lane at once, even out of a wait for its turn or a retry. When an owner's request would still wait because the other slot is an owner's too, as a thread of two uncached letters does, the running prefetch gives its slot up: it is aborted, its claim is voided, and it goes back in line once its run has wound down. What an owner still waits for is a prefetch's fetch in its last moments, while the abort reaches it. The prefetch takes nothing from the admission ledger the download routes use. It took one of the two `concurrentFetchStreams` once, and the reader, which fetches a letter's pictures two at a time, found one taken for the whole of a fetch and lost the second picture to a 409; its own bound is its single slot. The body streams from the provider into `content-incoming/` without the blob store's lease, which every attachment and picture read on every account waits for, and the lease is taken only to publish it.
+
+On an IMAP account each prefetch fetch is a session of its own, DNS to LOGIN, so the prefetch there takes one body every five seconds: the first fill of two hundred takes about seventeen minutes at twelve logins a minute at most, and afterwards only new mail is fetched. Holding several bodies to one session would save the logins themselves; it belongs in the session factory, where IMAP IDLE now lives. An owner's fetch never waits for that pacing. The Mail switch stops the prefetch as one of its workers: nothing more is claimed, and queued, waiting and running prefetch work is aborted and dropped, its claims given back. A restart voids the leases the last process left, so an open of a body it was fetching claims it at once. A prefetched body's images drain only if it is in the image cohort. A service that last ran the three-message cohort comes up with those three bodies kept and fills the rest at the same two a step: no body is fetched twice and no step claims more than two.
 
 The worker process, patched streaming MailParser/MailSplit limits, sanitizer,
 disk-backed cache, attachment streamer, and malicious corpus are implemented in
@@ -1125,10 +1135,11 @@ The constants in [`lib/mail/security.ts`](../lib/mail/security.ts) are the sourc
 | Concurrent IDLE sessions | 3 |
 | Queued submissions | 100 |
 | Cache | 2 GiB / 100,000 messages |
-| Message bodies | 48 MiB per account, oldest unopened evicted first |
-| Body prefetch cohort | 200 newest Inbox messages from the last 30 days per account |
-| Body prefetch size | threads up to 4 MiB as the provider sizes them; larger ones fetch on open |
-| Body prefetch in flight | 2 per account, 1 parser slot and 1 fetch stream across the process |
+| Message bodies | 48 MiB per account, least recently sent or opened evicted first |
+| Body prefetch cohort | 200 newest Inbox messages from the last 30 days per account, newest first |
+| Body prefetch size | threads up to 4 MiB as the provider sizes them; larger or unsized ones fetch on open |
+| Body prefetch in flight | 2 per account, 1 parser slot across the process, given up to an owner |
+| Body prefetch on IMAP | 1 fetch every 5 seconds per account |
 | Background image cohort | 3 newest Inbox messages from the last 7 days per account |
 | Aggregate temporary data | 128 MiB |
 | SQLite WAL | 64 MiB |

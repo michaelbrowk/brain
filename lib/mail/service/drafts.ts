@@ -521,18 +521,6 @@ function assertIntentCapabilities(
 }
 
 /**
- * The one derivation of a send input from a stored draft. The outbox re-runs it
- * inside the commit transaction to prove the submission still matches the
- * draft, so both sides must normalize recipients identically — a second parser
- * here produced a fingerprint mismatch and a permanent idempotency conflict for
- * any address the writer typed with a capital letter.
- *
- * The files are the send's, not the draft's: the compose sheet holds them in
- * memory and they ride on the send mutation, so both sides pass the mutation's
- * own list and the fingerprint (which counts each file by its digest) proves
- * the same files on both.
- */
-/**
  * The messages an account's live drafts answer or forward: what the body
  * cache keeps under its byte budget so reopening the draft finds its letter.
  * A sent draft is a tombstone and a compose has no source.
@@ -553,6 +541,18 @@ export async function listDraftSourceMessageIds(
   ]);
 }
 
+/**
+ * The one derivation of a send input from a stored draft. The outbox re-runs it
+ * inside the commit transaction to prove the submission still matches the
+ * draft, so both sides must normalize recipients identically — a second parser
+ * here produced a fingerprint mismatch and a permanent idempotency conflict for
+ * any address the writer typed with a capital letter.
+ *
+ * The files are the send's, not the draft's: the compose sheet holds them in
+ * memory and they ride on the send mutation, so both sides pass the mutation's
+ * own list and the fingerprint (which counts each file by its digest) proves
+ * the same files on both.
+ */
 export function mailSendInputFromDraft(
   draft: StoredMailDraft,
   idempotencyKey: string,

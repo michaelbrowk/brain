@@ -68,10 +68,14 @@ Every other step applies unchanged.
   with the mail is the message bodies: the Mail service fetches the bodies of
   an account's 200 newest Inbox messages from the last 30 days before they are
   opened (a thread over 4 MiB waits for its open), keeps the ones the owner
-  opens, and holds all of them to 48 MiB per
-  account (`bodyCacheMaxBytes` in `lib/mail/security.ts`), evicting the oldest
-  unopened body first. Plan the disk for 48 MiB per connected account on top of
-  the message databases, about 150 MiB for three accounts. A letter opened in
+  opens, and holds all of them to 48 MiB per account (`bodyCacheMaxBytes` in
+  `lib/mail/security.ts`), evicting the body least recently sent or opened
+  first. On an IMAP account it fetches one body every five seconds, since each
+  fetch there is a login, so the first fill takes about seventeen minutes. A
+  body arrives in `content-incoming/` and moves into `content-blobs/` once
+  whole; a file a crash leaves in the first is cleared at the next start once
+  it is fifteen minutes old. Plan the disk for 48 MiB per connected account on
+  top of the message databases, about 150 MiB for three accounts. A letter opened in
   the last hour or answered by a live draft is kept even past the budget, so
   the figure is a working level rather than a hard wall. The bodies are
   rebuildable from the provider, but `outbox.sqlite3` in the same directory is

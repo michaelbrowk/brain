@@ -191,7 +191,7 @@ function PdfPages({
           ))}
         </div>
       </div>
-      <p className="brain-viewer-page-pill text-control">
+      <p className="brain-viewer-page-pill mat-thin text-control">
         Page {reading} of {total}
       </p>
     </div>

@@ -5026,7 +5026,8 @@ a.brain-share-url:active {
   width: 100%;
   height: 100%;
 }
-/* "Page 2 of 7": a capsule on the regular material at the stage's foot. */
+/* "Page 2 of 7": a 28 capsule at the stage's foot. Its glass is `mat-thin`
+   (the chip's thickness) on the element, so this rule sets no material. */
 .brain-viewer-page-pill {
   position: absolute;
   bottom: var(--inset);
@@ -5036,11 +5037,6 @@ a.brain-share-url:active {
   height: 28px;
   padding: 0 12px;
   transform: translateX(-50%);
-  border-radius: 9999px;
-  background: var(--glass-reg);
-  -webkit-backdrop-filter: var(--blur-reg);
-  backdrop-filter: var(--blur-reg);
-  box-shadow: var(--rim), var(--shadow-2);
   /* ink, not ink-2: the capsule stands over a white page as often as over
      the dark ground, and the secondary grey lost to both */
   color: var(--ink);

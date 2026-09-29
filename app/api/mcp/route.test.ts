@@ -1119,13 +1119,20 @@ describe("Notion MCP route validation", () => {
       await writeResponse.clone().text(),
     ).toContainEqual(["write-target", canonical, "rev-1", "claude"]);
 
-    await expect(
-      callTool(
-        "append_page",
-        { id: "append-target", markdown },
-        102,
-      ),
-    ).resolves.toMatchObject({ status: 200 });
+    // Read to its end, like the other two. The response resolves as soon as
+    // the stream opens, while the handler is still running, and its activity
+    // line and centre row land only after the store call. Left unread, they
+    // raced the create below and could land after this test, inside a centre
+    // directory the teardown was already removing (`ENOTEMPTY`).
+    const appendResponse = await callTool(
+      "append_page",
+      { id: "append-target", markdown },
+      102,
+    );
+    expect(appendResponse.status).toBe(200);
+    await expect(toolPayload(appendResponse)).resolves.toMatchObject({
+      isError: false,
+    });
     expect(appendPage).toHaveBeenCalledWith(
       "append-target",
       canonical,

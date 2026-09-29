@@ -304,9 +304,31 @@ function makeClient(overrides: Partial<MailSurfaceClient> = {}): MailSurfaceClie
         status: "sent",
       }),
     ),
+    getSenderScreenState: vi.fn().mockResolvedValue(SENDER_STATE),
+    setSenderScreenEnabled: vi.fn().mockResolvedValue(SENDER_STATE),
+    decideSender: vi.fn().mockResolvedValue({
+      apiVersion: 1,
+      decisionId: DECISION_ID,
+      archived: [],
+      pending: false,
+    }),
+    undoSenderDecision: vi
+      .fn()
+      .mockResolvedValue({ apiVersion: 1, restored: [], pending: false }),
+    listBlockedSenders: vi.fn().mockResolvedValue({ apiVersion: 1, blocked: [] }),
     ...overrides,
   };
 }
+
+const DECISION_ID = `decision-a${"0".repeat(30)}ab`;
+
+const SENDER_STATE = {
+  apiVersion: 1,
+  enabled: true,
+  enabledAt: 1_600_000_000_000,
+  backfillComplete: true,
+  domainScopeRefused: ["gmail.example"],
+} as const;
 
 function response(body: unknown, status = 200): Response {
   return {

@@ -1,5 +1,6 @@
 import type {
   MailAddress,
+  MailBlockedSenders,
   MailMailboxThreadPage,
   MailMessageDto,
   MailSendInput,
@@ -7,6 +8,11 @@ import type {
   MailSendResult,
   MailSendStatus,
   MailSearchThreadPage,
+  MailSenderDecisionInput,
+  MailSenderDecisionResult,
+  MailSenderScreenState,
+  MailSenderThreadRef,
+  MailSenderUndoResult,
   MailSystemMailbox,
   MailThreadDetail,
   MailThreadListItem,
@@ -79,7 +85,19 @@ export type {
   MailThreadDetail,
   MailThreadListItem,
   MailThreadPage,
+  MailBlockedSenders,
+  MailSenderDecisionInput,
+  MailSenderDecisionResult,
+  MailSenderScreenState,
+  MailSenderUndoResult,
 } from "@/lib/mail/message-types";
+
+/** Mirrors of the service's bounds (`lib/mail/message-codec.ts`), which this
+ *  bundle cannot import. */
+const SAFE_SENDER_DECISION_ID = /^decision-a[0-9a-f]{32}$/;
+const MAX_BLOCKED_SENDERS = 1_000;
+const MAX_SENDER_THREAD_REFS = 200;
+const MAX_REFUSED_SCOPE_DOMAINS = 500;
 
 export type MailAccountStatus = "connected" | "reauth_required";
 
@@ -334,6 +352,25 @@ export interface MailSurfaceClient {
     operationId: string,
     signal?: AbortSignal,
   ): Promise<MailSendOperation>;
+  /** The new-senders switch and the domains a decision may not take whole. */
+  getSenderScreenState(signal?: AbortSignal): Promise<MailSenderScreenState>;
+  setSenderScreenEnabled(
+    enabled: boolean,
+    signal?: AbortSignal,
+  ): Promise<MailSenderScreenState>;
+  /** Accept or Block, for one address or everyone at its domain. */
+  decideSender(
+    input: MailSenderDecisionInput,
+    signal?: AbortSignal,
+  ): Promise<MailSenderDecisionResult>;
+  /** Without `restore` it is the toast's Undo, which puts a block's archive
+   *  back; `restore: false` is the Blocked list's Unblock, which leaves old
+   *  mail where it is. */
+  undoSenderDecision(
+    input: { readonly decisionId: string; readonly restore?: false },
+    signal?: AbortSignal,
+  ): Promise<MailSenderUndoResult>;
+  listBlockedSenders(signal?: AbortSignal): Promise<MailBlockedSenders>;
 }
 
 /** A THREAD SOMETHING OUTSIDE MAIL ASKED FOR.
@@ -646,7 +683,172 @@ export const defaultMailSurfaceClient: MailSurfaceClient = {
     );
     return readSendOperation(payload, operationId);
   },
+
+  async getSenderScreenState(signal) {
+    const payload = await requestJson("/api/mail/senders/state", { signal });
+    return readSenderScreenState(payload);
+  },
+
+  async setSenderScreenEnabled(enabled, signal) {
+    const payload = await requestJson("/api/mail/senders/state", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled }),
+      signal,
+    });
+    return readSenderScreenState(payload);
+  },
+
+  async decideSender(input, signal) {
+    const payload = await requestJson("/api/mail/senders/decisions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        address: input.address,
+        scope: input.scope,
+        decision: input.decision,
+      }),
+      signal,
+    });
+    return readSenderDecisionResult(payload);
+  },
+
+  async undoSenderDecision(input, signal) {
+    if (!SAFE_SENDER_DECISION_ID.test(input.decisionId)) {
+      throw new Error("invalid mail sender decision");
+    }
+    const query = input.restore === false ? "?restore=false" : "";
+    const payload = await requestJson(
+      `/api/mail/senders/decisions/${input.decisionId}${query}`,
+      { method: "DELETE", signal },
+    );
+    return readSenderUndoResult(payload);
+  },
+
+  async listBlockedSenders(signal) {
+    const payload = await requestJson("/api/mail/senders/blocked", { signal });
+    return readBlockedSenders(payload);
+  },
 };
+
+function readSenderScreenState(value: unknown): MailSenderScreenState {
+  if (
+    !isExactRecord(value, [
+      "apiVersion",
+      "enabled",
+      "enabledAt",
+      "backfillComplete",
+      "domainScopeRefused",
+    ]) ||
+    value.apiVersion !== 1 ||
+    typeof value.enabled !== "boolean" ||
+    !isNullableTimestamp(value.enabledAt) ||
+    value.enabled !== (value.enabledAt !== null) ||
+    typeof value.backfillComplete !== "boolean" ||
+    !Array.isArray(value.domainScopeRefused) ||
+    value.domainScopeRefused.length > MAX_REFUSED_SCOPE_DOMAINS ||
+    !value.domainScopeRefused.every((domain) => isText(domain, 253))
+  ) {
+    throw new Error("invalid mail sender state");
+  }
+  return {
+    apiVersion: 1,
+    enabled: value.enabled,
+    enabledAt: value.enabledAt,
+    backfillComplete: value.backfillComplete,
+    domainScopeRefused: value.domainScopeRefused as string[],
+  };
+}
+
+function readSenderThreadRefs(value: unknown): readonly MailSenderThreadRef[] {
+  if (
+    !Array.isArray(value) ||
+    value.length > MAX_SENDER_THREAD_REFS ||
+    !value.every(
+      (entry) =>
+        isExactRecord(entry, ["accountId", "threadId"]) &&
+        isAccountId(entry.accountId) &&
+        isResourceId(entry.threadId),
+    )
+  ) {
+    throw new Error("invalid mail sender decision");
+  }
+  return value.map((entry: { accountId: string; threadId: string }) => ({
+    accountId: entry.accountId,
+    threadId: entry.threadId,
+  }));
+}
+
+function readSenderDecisionResult(value: unknown): MailSenderDecisionResult {
+  if (
+    !isExactRecord(value, ["apiVersion", "decisionId", "archived", "pending"]) ||
+    value.apiVersion !== 1 ||
+    typeof value.decisionId !== "string" ||
+    !SAFE_SENDER_DECISION_ID.test(value.decisionId) ||
+    typeof value.pending !== "boolean"
+  ) {
+    throw new Error("invalid mail sender decision");
+  }
+  return {
+    apiVersion: 1,
+    decisionId: value.decisionId,
+    archived: readSenderThreadRefs(value.archived),
+    pending: value.pending,
+  };
+}
+
+function readSenderUndoResult(value: unknown): MailSenderUndoResult {
+  if (
+    !isExactRecord(value, ["apiVersion", "restored", "pending"]) ||
+    value.apiVersion !== 1 ||
+    typeof value.pending !== "boolean"
+  ) {
+    throw new Error("invalid mail sender decision");
+  }
+  return {
+    apiVersion: 1,
+    restored: readSenderThreadRefs(value.restored),
+    pending: value.pending,
+  };
+}
+
+function readBlockedSenders(value: unknown): MailBlockedSenders {
+  if (
+    !isExactRecord(value, ["apiVersion", "blocked"]) ||
+    value.apiVersion !== 1 ||
+    !Array.isArray(value.blocked) ||
+    value.blocked.length > MAX_BLOCKED_SENDERS ||
+    !value.blocked.every(
+      (entry) =>
+        isExactRecord(entry, [
+          "decisionId",
+          "key",
+          "scope",
+          "decidedAt",
+          "archivedCount",
+        ]) &&
+        typeof entry.decisionId === "string" &&
+        SAFE_SENDER_DECISION_ID.test(entry.decisionId) &&
+        isText(entry.key, 254) &&
+        (entry.scope === "address" || entry.scope === "domain") &&
+        isTimestamp(entry.decidedAt) &&
+        Number.isSafeInteger(entry.archivedCount) &&
+        (entry.archivedCount as number) >= 0,
+    )
+  ) {
+    throw new Error("invalid blocked senders");
+  }
+  return {
+    apiVersion: 1,
+    blocked: (value.blocked as MailBlockedSenders["blocked"]).map((entry) => ({
+      decisionId: entry.decisionId,
+      key: entry.key,
+      scope: entry.scope,
+      decidedAt: entry.decidedAt,
+      archivedCount: entry.archivedCount,
+    })),
+  };
+}
 
 function mailThreadStateHeaders(): Record<string, string> {
   return {

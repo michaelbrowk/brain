@@ -1428,3 +1428,158 @@ describe("a thread asked for from outside Mail", () => {
     stop();
   });
 });
+
+describe("defaultMailSurfaceClient new senders", () => {
+  const DECISION_ID = `decision-a${"0".repeat(30)}ab`;
+  const state = {
+    apiVersion: 1,
+    enabled: true,
+    enabledAt: 1_700_000_000_000,
+    backfillComplete: true,
+    domainScopeRefused: ["mail.example", "person.example"],
+  };
+
+  it("reads the screen's state and switches it", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(response(state))
+      .mockResolvedValueOnce(response({ ...state, enabled: false, enabledAt: null, backfillComplete: false }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(defaultMailSurfaceClient.getSenderScreenState()).resolves.toEqual(state);
+    await expect(
+      defaultMailSurfaceClient.setSenderScreenEnabled(false),
+    ).resolves.toMatchObject({ enabled: false, enabledAt: null });
+
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/mail/senders/state");
+    const [url, init] = fetchMock.mock.calls[1]!;
+    expect(url).toBe("/api/mail/senders/state");
+    expect(init).toMatchObject({
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ enabled: false }),
+    });
+  });
+
+  it("refuses a state that contradicts itself", async () => {
+    for (const invalid of [
+      { ...state, enabled: true, enabledAt: null },
+      { ...state, domainScopeRefused: [7] },
+      { ...state, extra: true },
+    ]) {
+      vi.stubGlobal("fetch", vi.fn().mockResolvedValue(response(invalid)));
+      await expect(defaultMailSurfaceClient.getSenderScreenState()).rejects.toThrow(
+        "invalid mail sender state",
+      );
+    }
+  });
+
+  it("posts one decision and reads what a block archived", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      response({
+        apiVersion: 1,
+        decisionId: DECISION_ID,
+        archived: [{ accountId: ACCOUNT_ID, threadId: THREAD_ID }],
+        pending: false,
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      defaultMailSurfaceClient.decideSender({
+        address: "lena@okafor.example",
+        scope: "domain",
+        decision: "block",
+      }),
+    ).resolves.toEqual({
+      apiVersion: 1,
+      decisionId: DECISION_ID,
+      archived: [{ accountId: ACCOUNT_ID, threadId: THREAD_ID }],
+      pending: false,
+    });
+    const [url, init] = fetchMock.mock.calls[0]!;
+    expect(url).toBe("/api/mail/senders/decisions");
+    expect(init).toMatchObject({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+    });
+    expect(JSON.parse(init.body as string)).toEqual({
+      address: "lena@okafor.example",
+      scope: "domain",
+      decision: "block",
+    });
+  });
+
+  it("undoes a decision, and unblocks without moving old mail when told", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(response({ apiVersion: 1, restored: [], pending: false }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await defaultMailSurfaceClient.undoSenderDecision({ decisionId: DECISION_ID });
+    await defaultMailSurfaceClient.undoSenderDecision({
+      decisionId: DECISION_ID,
+      restore: false,
+    });
+
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init.method])).toEqual([
+      [`/api/mail/senders/decisions/${DECISION_ID}`, "DELETE"],
+      [`/api/mail/senders/decisions/${DECISION_ID}?restore=false`, "DELETE"],
+    ]);
+  });
+
+  it("refuses to name a decision no route could serve", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      defaultMailSurfaceClient.undoSenderDecision({ decisionId: "../state" }),
+    ).rejects.toThrow("invalid mail sender decision");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("keeps the code of a refused undo so the toast can tell the cases apart", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          response({ apiVersion: 1, error: { code: "mail_sender_decision_changed" } }, 409),
+        ),
+    );
+    const failure = await defaultMailSurfaceClient
+      .undoSenderDecision({ decisionId: DECISION_ID })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(MailApiError);
+    expect((failure as MailApiError).code).toBe("mail_sender_decision_changed");
+  });
+
+  it("lists who is blocked", async () => {
+    const blocked = {
+      apiVersion: 1,
+      blocked: [
+        {
+          decisionId: DECISION_ID,
+          key: "growthly.example",
+          scope: "domain",
+          decidedAt: 1_700_000_000_000,
+          archivedCount: 3,
+        },
+      ],
+    };
+    const fetchMock = vi.fn().mockResolvedValue(response(blocked));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(defaultMailSurfaceClient.listBlockedSenders()).resolves.toEqual(blocked);
+    expect(fetchMock.mock.calls[0]![0]).toBe("/api/mail/senders/blocked");
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        response({ ...blocked, blocked: [{ ...blocked.blocked[0], scope: "everyone" }] }),
+      ),
+    );
+    await expect(defaultMailSurfaceClient.listBlockedSenders()).rejects.toThrow(
+      "invalid blocked senders",
+    );
+  });
+});

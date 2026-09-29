@@ -22,6 +22,11 @@ describe("brain-mail MIME worker deployment contracts", () => {
     expect(workspace).toContain(
       "mailparser@3.9.14: patches/mailparser@3.9.14.patch",
     );
+    expect(workspace).toContain("parse5@8.0.1: patches/parse5@8.0.1.patch");
+    const tokenizerPatch = read("patches/parse5@8.0.1.patch");
+    expect(tokenizerPatch).toContain(
+      "+        if (!this.currentAttrNames.has(this.currentAttr.name)) {",
+    );
     const splitPatch = read("patches/@zone-eu__mailsplit@5.4.14.patch");
     expect(splitPatch).toContain("maxTotalHeadSize");
     expect(splitPatch).toContain("maxNestingDepth");

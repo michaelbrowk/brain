@@ -2836,8 +2836,8 @@ export function MailSurface({
     // The list in hand answers only where the request would have looked
     // anyway: the mailbox it names, or the Inbox every request tries first
     // (the merged column is Inbox too). All Mail holds most of the Inbox, and
-    // a notification's letter found there opened in All Mail, without its
-    // Archive, only because All Mail was the folder on screen.
+    // a notification's letter found there opened in All Mail only because All
+    // Mail was the folder on screen.
     const listAnswers =
       (selectedMailboxId === mailboxId || selectedMailboxId === "inbox") &&
       (selectedAccountId === UNIFIED_ACCOUNT_ID || !listPending);
@@ -3424,8 +3424,9 @@ export function MailSurface({
     ],
   );
 
-  /** The sentence a landed reader action says. Move to Inbox carries an Undo,
-   *  because the folder it was pressed in offers no Archive to reverse it. */
+  /** The sentence a landed reader action says. Move to Inbox carries an Undo:
+   *  the strip's Archive reverses it only while the reader stays on the
+   *  letter, and the pill outlasts a reader that has moved on. */
   const confirmThreadAction = useCallback(
     (
       thread: MailThreadListItem,

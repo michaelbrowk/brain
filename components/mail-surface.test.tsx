@@ -9908,8 +9908,7 @@ describe("MailSurface", () => {
 
     /** A letter in the list on screen is not yet the answer. All Mail holds
      *  most of the Inbox too, and a notification's letter found there opened
-     *  in All Mail, without its Archive, only because All Mail was the folder
-     *  showing. The list counts when it is the mailbox the request named, or
+     *  in All Mail only because All Mail was the folder showing. The list counts when it is the mailbox the request named, or
      *  the Inbox every request looks in first. */
     it("opens a notification's letter in Inbox even when All Mail on screen lists it", async () => {
       const client = makeClient();

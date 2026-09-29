@@ -1,6 +1,7 @@
 import { parse, serialize, type DefaultTreeAdapterMap } from "parse5";
 import { describe, expect, it } from "vitest";
 
+import { MAIL_RESOURCE_LIMITS } from "../security";
 import {
   sanitizeMailHtml,
   sanitizeMailHtmlWithRemoteImages,
@@ -11,6 +12,13 @@ const BUDGET = Object.freeze({
   maxNodes: 1_000,
   maxAttributes: 4_000,
   maxRemoteImages: 32,
+});
+/** The budget the MIME worker gives every message. */
+const MESSAGE_BUDGET = Object.freeze({
+  maxCharacters: MAIL_RESOURCE_LIMITS.htmlCharacters,
+  maxNodes: MAIL_RESOURCE_LIMITS.maxDomNodes,
+  maxAttributes: MAIL_RESOURCE_LIMITS.maxDomAttributes,
+  maxRemoteImages: MAIL_RESOURCE_LIMITS.maxRemoteImagesPerMessage,
 });
 
 type TreeNode = DefaultTreeAdapterMap["childNode"];
@@ -490,3 +498,95 @@ describe("mail HTML sanitizer", () => {
     expect(limitCode(() => sanitizeMailHtml(source, BUDGET))).toBe("EMAXLEN");
   });
 });
+
+/** A message filled to its size limit with numbered parts between two ends. */
+function fillToLimit(part: (index: string) => string, start = "", end = ""): string {
+  const parts = [start];
+  let length = start.length + end.length;
+  for (let index = 0; ; index++) {
+    const next = part(index.toString(36));
+    if (length + next.length > MESSAGE_BUDGET.maxCharacters) break;
+    parts.push(next);
+    length += next.length;
+  }
+  return `${parts.join("")}${end}`;
+}
+
+/** One tag whose distinct attributes fill the message to its size limit. */
+function tagOfAttributes(open: string, close = ">"): string {
+  return fillToLimit((index) => ` a${index}`, open, close);
+}
+
+function repeatToLimit(unit: string, prefix = ""): string {
+  return fillToLimit(() => unit, prefix);
+}
+
+describe("mail HTML sanitizer time bounds", () => {
+  // Each case is a message within the worker's own budget, built to make one
+  // stage superlinear; the worst took parse5 most of a minute. Each now takes
+  // tens of milliseconds, so the bound is generous.
+  it.each([
+    ["a start tag of distinct attributes", () => tagOfAttributes("<x"), "EMAXLEN"],
+    ["an end tag of distinct attributes", () => tagOfAttributes("</x"), "empty"],
+    [
+      "the same tag inside an SVG style, which a streaming parser reads as text",
+      () => tagOfAttributes("<svg><style><x", "></style></svg>"),
+      "EMAXLEN",
+    ],
+    ["empty comments", () => repeatToLimit("<!---->"), "EMAXLEN"],
+    ["text and empty comments", () => repeatToLimit("a<!---->"), "EMAXLEN"],
+    ["49,000 top-level elements", () => "<i></i>".repeat(49_000), "sanitized"],
+    [
+      "49,000 elements moved out of a table",
+      () => `<table>${"<i></i>".repeat(49_000)}</table>`,
+      "sanitized",
+    ],
+    [
+      "49,000 line breaks a misnested end tag moves into a new element",
+      () => `<b><div>${"<br>".repeat(49_000)}</b>`,
+      "sanitized",
+    ],
+    [
+      "a stray html tag per attribute, each merged into the root",
+      () => fillToLimit((index) => `<html a${index}>`),
+      "EMAXLEN",
+    ],
+  ])("bounds %s", (_label, source, expected) => {
+    expect(outcomeWithin(source(), 500)).toBe(expected);
+  });
+
+  // parse5 walks its stack of open elements, and its list of open formatting
+  // elements, on most tags. The depth cap bounds both, so the work stays
+  // proportional to the length of the message, times a constant the cap
+  // sets: these two take under a second, where a square would take minutes.
+  it.each([
+    [
+      "stray end tags under the deepest nesting allowed",
+      () => repeatToLimit("</div>", "<span>".repeat(505)),
+    ],
+    [
+      "formatting elements left open in each of 60 nested cells",
+      () => {
+        let serial = 0;
+        const cell = () =>
+          `<p>${Array.from({ length: 250 }, () => `<b c=${(serial++).toString(36)}>`).join("")}</p><table><tr><td>`;
+        return Array.from({ length: 60 }, cell).join("") + "<i></i>".repeat(33_000);
+      },
+    ],
+  ])("keeps %s within the depth cap's bound", (_label, source) => {
+    expect(outcomeWithin(source(), 5_000)).toBe("sanitized");
+  });
+});
+
+function outcomeWithin(markup: string, milliseconds: number): unknown {
+  expect(markup.length).toBeLessThanOrEqual(MESSAGE_BUDGET.maxCharacters);
+  const started = performance.now();
+  let outcome: unknown;
+  try {
+    outcome = sanitizeMailHtml(markup, MESSAGE_BUDGET) === null ? "empty" : "sanitized";
+  } catch (error) {
+    outcome = (error as { code?: unknown }).code;
+  }
+  expect(performance.now() - started).toBeLessThan(milliseconds);
+  return outcome;
+}

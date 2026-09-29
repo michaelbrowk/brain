@@ -126,6 +126,12 @@ const OVERFLOW_KEYWORDS = Object.freeze([
  * nests no deeper than 512 either.
  */
 const MAX_TREE_DEPTH = 512;
+/**
+ * The most attributes one element may carry; a message with more is refused
+ * like any other over budget. A busy table cell in bulk mail carries about
+ * thirty.
+ */
+const MAX_ELEMENT_ATTRIBUTES = 256;
 
 /**
  * Sanitizes the tree a browser would build from the markup, event by event,
@@ -376,28 +382,50 @@ function browserTreeMarkup(
   source: string,
   budget: MailHtmlSanitizerBudget,
 ): string {
+  const treeAdapter = boundedTreeAdapter(budget);
   const fragment = parseFragment(
     defaultTreeAdapter.createElement("body", html.NS.HTML, []),
     source,
-    { scriptingEnabled: false, treeAdapter: boundedTreeAdapter(budget) },
+    { scriptingEnabled: false, treeAdapter },
   );
-  return serialize(fragment, { scriptingEnabled: false });
+  return serialize(fragment, { scriptingEnabled: false, treeAdapter });
 }
 
 type TreeParent = DefaultTreeAdapterMap["parentNode"];
+type TreeChild = DefaultTreeAdapterMap["childNode"];
 
 /**
- * parse5's own tree, held to the sanitizer's budget while it is built. A
- * browser reopens unclosed formatting elements inside every block that
- * follows them, so a short message can expand into far more elements than it
- * spells. Counting at creation stops that before the tree exists, and no tree
- * this admits holds more elements than the node budget lets through anyway.
+ * parse5's own tree, held to the sanitizer's budget while it is built.
+ *
+ * Every node counts when it is created: an element (a browser reopens an
+ * unclosed formatting element inside every block after it, so a short message
+ * can build far more elements than it spells), a comment, and a text node,
+ * which parse5 creates only when the text cannot join the node before it.
+ *
+ * The time it takes is the length of the markup times a constant, and three
+ * things keep it there. The patch in `patches/parse5@8.0.1.patch` finds a
+ * duplicate attribute in constant time, where parse5 scanned every attribute
+ * before it on the same tag. `MAX_TREE_DEPTH` bounds the stack of open
+ * elements parse5 walks on most tags, and with it the list of open formatting
+ * elements it walks on some: that bound is the constant, and it makes the
+ * worst message of the full size take about half a second. And the child
+ * arrays below change only at their ends. parse5 moves a parent's children
+ * one at a time by detaching the first, which as a splice shifts every child
+ * behind it, so detaching the first child only advances a count past it and
+ * the detached entries are cut off in one go when the whole array is next
+ * read. A node parse5 inserts before, or detaches from anywhere else, sits
+ * at or near the end of its parent, where the search starts.
  */
 function boundedTreeAdapter(
   budget: MailHtmlSanitizerBudget,
 ): TreeAdapter<DefaultTreeAdapterMap> {
-  let elements = 0;
+  let nodes = 0;
   let attributes = 0;
+  const admitNode = () => {
+    if (++nodes > budget.maxNodes) {
+      throw limitError("sanitized HTML exceeds the node limit");
+    }
+  };
   // A template's content is a fragment with no parent of its own.
   const templateHosts = new WeakMap<object, TreeParent>();
   const assertDepth = (parent: TreeParent) => {
@@ -412,18 +440,56 @@ function boundedTreeAdapter(
       }
     }
   };
+  const detachedFront = new WeakMap<TreeParent, number>();
+  const frontOf = (parent: TreeParent) => detachedFront.get(parent) ?? 0;
+  const insertAt = (parent: TreeParent, node: TreeChild, index: number) => {
+    parent.childNodes.splice(index, 0, node);
+    node.parentNode = parent;
+  };
   return {
     ...defaultTreeAdapter,
     createElement(tagName, namespaceURI, attrs) {
-      elements++;
-      attributes += attrs.length;
-      if (elements > budget.maxNodes) {
-        throw limitError("sanitized HTML exceeds the node limit");
+      if (attrs.length > MAX_ELEMENT_ATTRIBUTES) {
+        throw limitError("sanitized HTML exceeds the attribute limit of one element");
       }
+      attributes += attrs.length;
       if (attributes > budget.maxAttributes) {
         throw limitError("sanitized HTML exceeds the attribute limit");
       }
+      admitNode();
       return defaultTreeAdapter.createElement(tagName, namespaceURI, attrs);
+    },
+    createCommentNode(data) {
+      admitNode();
+      return defaultTreeAdapter.createCommentNode(data);
+    },
+    // Every stray `<html>` tag merges its attributes into the root, and each
+    // merge reads the root's whole list, so the root obeys the same cap.
+    adoptAttributes(recipient, attrs) {
+      defaultTreeAdapter.adoptAttributes(recipient, attrs);
+      if (recipient.attrs.length > MAX_ELEMENT_ATTRIBUTES) {
+        throw limitError("sanitized HTML exceeds the attribute limit of one element");
+      }
+    },
+    insertText(parent, text) {
+      const last =
+        parent.childNodes.length > frontOf(parent) ? parent.childNodes.at(-1) : undefined;
+      if (last !== undefined && defaultTreeAdapter.isTextNode(last)) {
+        last.value += text;
+        return;
+      }
+      admitNode();
+      defaultTreeAdapter.appendChild(parent, defaultTreeAdapter.createTextNode(text));
+    },
+    insertTextBefore(parent, text, reference) {
+      const index = parent.childNodes.lastIndexOf(reference);
+      const previous = index > frontOf(parent) ? parent.childNodes[index - 1] : undefined;
+      if (previous !== undefined && defaultTreeAdapter.isTextNode(previous)) {
+        previous.value += text;
+        return;
+      }
+      admitNode();
+      insertAt(parent, defaultTreeAdapter.createTextNode(text), index);
     },
     appendChild(parent, node) {
       if (defaultTreeAdapter.isElementNode(node)) assertDepth(parent);
@@ -431,7 +497,29 @@ function boundedTreeAdapter(
     },
     insertBefore(parent, node, reference) {
       if (defaultTreeAdapter.isElementNode(node)) assertDepth(parent);
-      defaultTreeAdapter.insertBefore(parent, node, reference);
+      insertAt(parent, node, parent.childNodes.lastIndexOf(reference));
+    },
+    detachNode(node) {
+      const parent = node.parentNode;
+      if (parent === null) return;
+      const front = frontOf(parent);
+      if (parent.childNodes[front] === node) {
+        detachedFront.set(parent, front + 1);
+      } else {
+        parent.childNodes.splice(parent.childNodes.lastIndexOf(node), 1);
+      }
+      node.parentNode = null;
+    },
+    getFirstChild(node) {
+      return node.childNodes[frontOf(node)];
+    },
+    getChildNodes(node) {
+      const front = detachedFront.get(node);
+      if (front !== undefined) {
+        node.childNodes.splice(0, front);
+        detachedFront.delete(node);
+      }
+      return node.childNodes;
     },
     setTemplateContent(template, content) {
       templateHosts.set(content, template);

@@ -2698,6 +2698,77 @@ describe("MailSurface", () => {
       expect(threadList()).toContain("Inbox zero");
     });
 
+    it("takes a letter from deep in All inboxes out when Undo is pressed there", async () => {
+      // The letter sits past page one of its account's stream. Page one's
+      // re-read keeps a deep stream's older rows, so only taking the row out
+      // takes it off the column.
+      let inInbox = false;
+      const letter = { ...thread, lastMessageAt: 1_000 };
+      const newer = Array.from({ length: 50 }, (_value, index) => ({
+        ...thread,
+        threadId: `newer-${index}`,
+        subject: `Newer ${index}`,
+        unread: true,
+        lastMessageAt: 1_700_000_000_000 - index,
+      }));
+      const updateThread = vi.fn().mockImplementation(async (input) => {
+        if ("archive" in input) inInbox = !input.archive;
+      });
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+        updateThread,
+        listThreads: vi.fn().mockImplementation(({ accountId, cursor }) =>
+          Promise.resolve(
+            accountId !== accountA.accountId
+              ? { ...threadPage, items: [], nextCursor: null }
+              : cursor
+                ? { ...threadPage, items: inInbox ? [letter] : [], nextCursor: null }
+                : { ...threadPage, items: newer, nextCursor: "a-page-2" },
+          ),
+        ),
+        listMailboxThreads: vi
+          .fn()
+          .mockImplementation(({ mailboxId }) =>
+            Promise.resolve({ ...mailboxThreadPage(mailboxId), items: [letter] }),
+          ),
+        readMailboxThread: vi.fn().mockImplementation(() =>
+          Promise.resolve({
+            ...detail,
+            thread: letter,
+            messages: detail.messages.map((message) => ({ ...message, inInbox })),
+          }),
+        ),
+      });
+      const onToast = vi.fn();
+      await act(async () =>
+        root.render(
+          <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+        ),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      await click(findButton("Lunch this Friday?"));
+      await click(findButton("Move to Inbox"));
+      const pill = onToast.mock.calls.at(-1)![1] as Pill;
+
+      await goTo("All inboxes");
+      await click(findButton("Load more"));
+      // The letter is read, so it is Seen's one thread.
+      expect(document.body.textContent).toContain("1 thread, nothing unread");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+      await settle();
+
+      expect(updateThread).toHaveBeenLastCalledWith(
+        expect.objectContaining({ archive: true }),
+      );
+      expect(document.body.textContent).not.toContain("1 thread, nothing unread");
+    });
+
     function rowButton(subject: string): HTMLButtonElement {
       const row = [
         ...document.body.querySelectorAll('section[aria-label="Mailbox"] button'),

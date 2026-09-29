@@ -3394,7 +3394,9 @@ export function MailSurface({
    * for nine seconds and the reader may have moved on inside them, so the
    * answer goes where the letter is on screen. An Inbox column, the account's
    * own or All inboxes, no longer holds it: a reader open on it there closes,
-   * as Archive closes it, and the column is read again. The account's Inbox is
+   * as Archive closes it, and the column is read again. All inboxes takes the
+   * row out first, as its Archive does, because its re-read is page one and
+   * keeps whatever a deep stream holds below it. The account's Inbox is
    * read the way a Done that landed late reads it, so a list still loading or
    * showing a search is not skipped. Any other folder lists the letter either
    * way, and a reader on it there takes it in place and offers Move to Inbox
@@ -3440,6 +3442,13 @@ export function MailSurface({
         });
       }
       if (unified) {
+        const state = unifiedStateRef.current;
+        if (state.kind === "ready") {
+          commitUnifiedState({
+            kind: "ready",
+            streams: removeStreamItems(state.streams, [thread]),
+          });
+        }
         void refreshUnifiedSilently(new AbortController().signal);
       } else if (accountInbox) {
         refreshAfterRunRef.current = { accountId, mailboxId: "inbox" };
@@ -3449,6 +3458,7 @@ export function MailSurface({
     [
       clearStickyOpen,
       client,
+      commitUnifiedState,
       onToast,
       refreshAfterRun,
       refreshUnifiedSilently,

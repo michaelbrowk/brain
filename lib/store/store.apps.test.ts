@@ -1,7 +1,7 @@
 import { mkdir, mkdtemp, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   APP_ENTRY_MAX_BYTES,
   APP_ENTRY_PATH,
@@ -70,6 +70,29 @@ describe("app pages in the store", () => {
     });
     const dir = store.resolve(meta.id);
     expect(await readFile(path.join(dir, APP_ENTRY_PATH), "utf8")).toBe(ENTRY);
+  });
+
+  it("writes the app map once, and a second time only for children that need ids", async () => {
+    const setAppMeta = vi.spyOn(store, "setAppMeta");
+    const alone = await store.createAppPage(null, "Trainer", {
+      description: "d",
+      entryHtml: ENTRY,
+      builtBy: "Claude",
+    });
+    expect(setAppMeta).toHaveBeenCalledTimes(1);
+    expect(alone.meta.kind).toBe("app");
+    expect(alone.meta.app?.owns).toEqual([]);
+    expect((await store.readPage(alone.meta.id)).meta.app?.owns).toEqual([]);
+
+    setAppMeta.mockClear();
+    const parent = await store.createAppPage(null, "Quiz", {
+      description: "d",
+      entryHtml: ENTRY,
+      owns: [{ title: "Words" }],
+      builtBy: "Claude",
+    });
+    expect(setAppMeta).toHaveBeenCalledTimes(2);
+    expect(parent.meta.app?.owns).toEqual([parent.owned[0].id]);
   });
 
   it("refuses an entry over the cap and writes nothing", async () => {

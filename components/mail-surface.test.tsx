@@ -683,6 +683,80 @@ describe("MailSurface", () => {
     );
   });
 
+  /** An index still building answers a search in part, and the results are
+   *  read again a quarter second later until it is built. Those re-reads are
+   *  the list's own business: no skeleton stands in for one, and one that
+   *  fails says so as the typed search would. */
+  describe("the re-read of an index still building", () => {
+    const building: MailSearchThreadPage = {
+      ...searchThreadPage("inbox"),
+      indexStatus: "building",
+    };
+
+    async function searchLunch(client: MailSurfaceClient) {
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await setInput(
+        document.body.querySelector('input[aria-label="Search mail"]') as HTMLInputElement,
+        "Lunch",
+      );
+      await act(async () => vi.advanceTimersByTimeAsync(180));
+      await settle();
+    }
+
+    async function quarterSecond() {
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      await settle();
+    }
+
+    it("keeps the results on screen and goes on until the index is built", async () => {
+      vi.useFakeTimers();
+      const second = deferred<MailSearchThreadPage>();
+      const searchThreads = vi
+        .fn()
+        .mockResolvedValueOnce(building)
+        .mockImplementationOnce(() => second.promise)
+        .mockResolvedValueOnce(building)
+        .mockResolvedValue(searchThreadPage("inbox"));
+      await searchLunch(makeClient({ searchThreads }));
+      expect(document.body.textContent).toContain("Indexing cached mail");
+
+      await quarterSecond();
+      expect(searchThreads).toHaveBeenCalledTimes(2);
+      // The re-read is out, and the results it will replace stay.
+      expect(document.body.textContent).toContain("Lunch this Friday?");
+
+      await act(async () => second.resolve(building));
+      await settle();
+      await quarterSecond();
+      expect(searchThreads).toHaveBeenCalledTimes(3);
+      await quarterSecond();
+      expect(searchThreads).toHaveBeenCalledTimes(4);
+      expect(document.body.textContent).not.toContain("Indexing cached mail");
+
+      // Built: nothing is left to re-read.
+      await act(async () => vi.advanceTimersByTimeAsync(2_000));
+      await settle();
+      expect(searchThreads).toHaveBeenCalledTimes(4);
+    });
+
+    it("says the Inbox couldn't load when a re-read fails", async () => {
+      vi.useFakeTimers();
+      const searchThreads = vi
+        .fn()
+        .mockResolvedValueOnce(building)
+        .mockRejectedValueOnce(new Error("offline"));
+      await searchLunch(makeClient({ searchThreads }));
+
+      await quarterSecond();
+      expect(searchThreads).toHaveBeenCalledTimes(2);
+      expect(document.body.textContent).toContain("Inbox couldn’t load");
+    });
+  });
+
   it("rejects server-invalid search text before the network without reporting an outage", async () => {
     vi.useFakeTimers();
     const searchThreads = vi.fn().mockResolvedValue(searchThreadPage("inbox"));

@@ -443,12 +443,14 @@ switch is `0` or `1` for the same reason.
 
 A custom-domain account keeps the 60 s poll and, with IDLE on, holds one more
 connection open to its server: INBOX examined read-only, and a new letter,
-an expunge or a flag change starts a sync within seconds. The journal shows
-one `mail_imap_idle_connected` per session. A server without IDLE, or a
-session that drops or will not open, writes `mail_imap_idle_fallback` with a
-`reason` and the `failureCount` in a row, and the account is asked again
-after 1, 2, 4, 8 and 16 minutes, then every 30, so a reconnect storm would be
-a run of those lines with the count climbing. A host that caps concurrent
+an expunge or a flag change starts a sync within seconds, at most one every
+five seconds per account however chatty the server. The journal shows one
+`mail_imap_idle_connected` per session. A server without IDLE, a session that
+drops or will not open, or one that does not answer DONE within 30 s, writes
+`mail_imap_idle_fallback` with a `reason` and the `failureCount` in a row, and
+the account is asked again after 1, 2, 4, 8 and 16 minutes, then every 30, so
+a reconnect storm would be a run of those lines with the count climbing. A
+session that lived three minutes starts that count again from one. A host that caps concurrent
 sessions per user sees the extra connection; set `BRAIN_MAIL_IMAP_IDLE=0` there
 (`docs/mail-architecture.md`, sections 8 and 11).
 

@@ -9,6 +9,18 @@ const DEFAULT_BACKOFF_BASE_MS = 60_000;
  * without IDLE waits before it is asked again.
  */
 const DEFAULT_BACKOFF_CAP_MS = 30 * 60_000;
+/**
+ * How long leaving IDLE may take. A server that never answers DONE, while it
+ * keeps the socket busy enough to beat the socket timeout, would otherwise
+ * hold the session out of IDLE for as long as it likes.
+ */
+const LEAVE_DEADLINE_MS = 30_000;
+/**
+ * A session that lived this long was working. Its end is the first failure of
+ * a new run, not one more of the old, so a server that closes IDLE sessions
+ * on its own schedule costs a minute of poll, not half an hour.
+ */
+const HEALTHY_SESSION_MS = 3 * 60_000;
 
 /**
  * The part of one ImapFlow session the supervisor drives. ImapFlow satisfies
@@ -38,15 +50,23 @@ export interface ImapIdleConnector {
 export interface MailImapIdleEvent {
   readonly event: "mail_imap_idle_connected" | "mail_imap_idle_fallback";
   readonly accountId: string;
-  readonly reason?: "connect_failed" | "connection_dropped" | "idle_unsupported";
+  readonly reason?:
+    | "connect_failed"
+    | "connection_dropped"
+    | "done_unanswered"
+    | "idle_unsupported";
   readonly errorCode?: string;
   readonly failureCount?: number;
 }
 
 interface IdleConnection {
   readonly client: ImapIdleClient;
+  readonly openedAt: number;
   phase: "awaiting_pass" | "idling" | "leaving";
-  restartTimer: ReturnType<typeof setTimeout> | null;
+  /** The restart while idling, the leave deadline while leaving. */
+  timer: ReturnType<typeof setTimeout> | null;
+  /** INBOX changed while a pass was pending, so that pass may not see it. */
+  dirty: boolean;
   closed: boolean;
 }
 
@@ -66,15 +86,18 @@ interface IdleAccount {
  * underneath as the recovery.
  *
  * One session per account, entered after a pass. An update to INBOX (EXISTS,
- * EXPUNGE or FLAGS) leaves IDLE and asks for one pass; a burst of updates is
- * still one pass, because nothing more is asked until the pass has run and IDLE
- * is entered again, and the server repeats anything that changed meanwhile the
- * moment it is. IDLE is left and entered again every `idleRestartMs`, under the
- * 29 minutes RFC 2177 allows, with a pass in between.
+ * EXPUNGE or FLAGS) leaves IDLE and asks for one pass. Updates that arrive
+ * while that pass is pending are not repeated by the server once IDLE starts
+ * again (RFC 3501 5.3 sends them as they happen), so any number of them is
+ * one more pass before IDLE, never one each. The scheduler keeps IDLE's
+ * passes five seconds apart. IDLE is left and entered again every
+ * `idleRestartMs`, under the 29 minutes RFC 2177 allows, with a pass in
+ * between, and leaving has thirty seconds before the session is dropped.
  *
  * A server without IDLE, a session that will not open and a connection that
  * drops all fall back to the poll with one log line, and the account is asked
- * again only after an exponential backoff with a cap. Retries happen on the
+ * again only after an exponential backoff with a cap. A session that lived
+ * three minutes restarts that backoff from the bottom. Retries happen on the
  * scheduler's passes rather than on a timer of their own, so a flapping server
  * can cost at most one attempt per pass.
  */
@@ -126,9 +149,16 @@ export class MailImapIdleSupervisor {
     if (account.opening !== null) return;
     const connection = account.connection;
     if (connection !== null) {
-      if (connection.phase === "awaiting_pass") {
-        this.enterIdle(accountId, account, connection);
+      if (connection.phase !== "awaiting_pass") return;
+      // An update that arrived between commands may postdate what the pass
+      // read, and the server will not repeat it once IDLE starts: one more
+      // pass first, then IDLE.
+      if (connection.dirty) {
+        connection.dirty = false;
+        this.onChange(accountId);
+        return;
       }
+      this.enterIdle(accountId, account, connection);
       return;
     }
     if (Date.now() < account.retryAt) return;
@@ -190,8 +220,10 @@ export class MailImapIdleSupervisor {
   private adopt(accountId: string, account: IdleAccount, client: ImapIdleClient): void {
     const connection: IdleConnection = {
       client,
+      openedAt: Date.now(),
       phase: "awaiting_pass",
-      restartTimer: null,
+      timer: null,
+      dirty: false,
       closed: false,
     };
     const drop = () => this.drop(accountId, account, connection);
@@ -203,11 +235,14 @@ export class MailImapIdleSupervisor {
       return;
     }
     // Only INBOX is examined, so an update naming anything else is not ours
-    // to act on.
+    // to act on. While a pass is pending the update is remembered instead;
+    // while leaving, the pass has not been asked for yet and will see it.
     const update = (value: { readonly path?: string }) => {
-      if (typeof value?.path === "string" && value.path.toUpperCase() === "INBOX") {
-        this.leave(accountId, account, connection);
+      if (typeof value?.path !== "string" || value.path.toUpperCase() !== "INBOX") {
+        return;
       }
+      if (connection.phase === "awaiting_pass") connection.dirty = true;
+      else this.leave(accountId, account, connection);
     };
     client.on("exists", update);
     client.on("expunge", update);
@@ -226,11 +261,11 @@ export class MailImapIdleSupervisor {
     connection: IdleConnection,
   ): void {
     connection.phase = "idling";
-    connection.restartTimer = setTimeout(
+    connection.timer = setTimeout(
       () => this.leave(accountId, account, connection),
       this.restartMs,
     );
-    connection.restartTimer.unref?.();
+    connection.timer.unref?.();
     connection.client.idle().then(
       (result) => {
         // IDLE ends on the DONE that `leave` sends. Ending any other way (the
@@ -252,10 +287,21 @@ export class MailImapIdleSupervisor {
   ): void {
     if (connection.closed || connection.phase !== "idling") return;
     connection.phase = "leaving";
-    clearRestart(connection);
+    clearTimer(connection);
+    connection.timer = setTimeout(() => {
+      if (connection.closed || connection.phase !== "leaving") return;
+      this.drop(accountId, account, connection, "done_unanswered");
+      // What sent the session here still wants its pass; the poll's own
+      // session runs it.
+      if (this.running && this.accounts.get(accountId) === account) {
+        this.onChange(accountId);
+      }
+    }, LEAVE_DEADLINE_MS);
+    connection.timer.unref?.();
     connection.client.noop().then(
       () => {
         if (connection.closed || connection.phase !== "leaving") return;
+        clearTimer(connection);
         connection.phase = "awaiting_pass";
         // A full cycle means the session works, so the next failure starts
         // the backoff from the bottom again.
@@ -270,12 +316,16 @@ export class MailImapIdleSupervisor {
     accountId: string,
     account: IdleAccount,
     connection: IdleConnection,
+    reason: "connection_dropped" | "done_unanswered" = "connection_dropped",
   ): void {
     if (connection.closed) return;
     retire(connection);
     if (account.connection === connection) account.connection = null;
     if (!this.running || this.accounts.get(accountId) !== account) return;
-    this.fail(accountId, account, "connection_dropped");
+    if (Date.now() - connection.openedAt > HEALTHY_SESSION_MS) {
+      account.failures = 0;
+    }
+    this.fail(accountId, account, reason);
   }
 
   private fail(
@@ -316,13 +366,13 @@ export class MailImapIdleSupervisor {
 
 function retire(connection: IdleConnection): void {
   connection.closed = true;
-  clearRestart(connection);
+  clearTimer(connection);
   closeQuietly(connection.client);
 }
 
-function clearRestart(connection: IdleConnection): void {
-  if (connection.restartTimer !== null) clearTimeout(connection.restartTimer);
-  connection.restartTimer = null;
+function clearTimer(connection: IdleConnection): void {
+  if (connection.timer !== null) clearTimeout(connection.timer);
+  connection.timer = null;
 }
 
 function closeQuietly(client: ImapIdleClient): void {

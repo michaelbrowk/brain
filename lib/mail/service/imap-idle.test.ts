@@ -122,14 +122,18 @@ describe("IMAP IDLE supervisor", () => {
       expect(client.calls).toEqual(["idle", "noop"]);
       expect(passes).toEqual([accountA, accountA]);
 
-      // A burst of updates while the pass is pending is one pass, not many.
+      // A burst of updates while the pass is pending is one more pass after
+      // it, not one each.
       client.emit(update, { path: "INBOX" });
       client.emit("exists", { path: "INBOX" });
       await settle();
       expect(passes).toEqual([accountA, accountA]);
+      supervisor.afterSync(accountA);
+      expect(passes).toEqual([accountA, accountA, accountA]);
 
       supervisor.afterSync(accountA);
       expect(client.calls).toEqual(["idle", "noop", "idle"]);
+      expect(passes).toHaveLength(3);
       await supervisor.stop();
     },
   );
@@ -249,12 +253,128 @@ describe("IMAP IDLE supervisor", () => {
     second.emit("exists", { path: "INBOX" });
     await settle();
     expect(second.calls).toEqual(["idle", "noop", "close"]);
+
+    // An IDLE the server ends with OK, when nobody sent DONE, is a session
+    // nobody is driving any more, however politely it ended.
+    await vi.advanceTimersByTimeAsync(2 * BASE_MS);
+    supervisor.afterSync(accountA);
+    await settle();
+    supervisor.afterSync(accountA);
+    opened[2]!.endIdle(true);
+    await settle();
+    expect(opened[2]!.calls).toEqual(["idle", "close"]);
     expect(
       events.filter((record) => record.event === "mail_imap_idle_fallback"),
     ).toEqual([
       { event: "mail_imap_idle_fallback", accountId: accountA, reason: "connection_dropped", failureCount: 1 },
       { event: "mail_imap_idle_fallback", accountId: accountA, reason: "connection_dropped", failureCount: 2 },
+      { event: "mail_imap_idle_fallback", accountId: accountA, reason: "connection_dropped", failureCount: 3 },
     ]);
+    await supervisor.stop();
+  });
+
+  it("gives the next IDLE its own 25 minutes after leaving for an update", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { supervisor, opened } = harness();
+    supervisor.afterSync(accountA);
+    await settle();
+    supervisor.afterSync(accountA);
+    const client = opened[0]!;
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    client.emit("exists", { path: "INBOX" });
+    await settle();
+    supervisor.afterSync(accountA);
+    expect(client.calls).toEqual(["idle", "noop", "idle"]);
+    // The first IDLE's restart would have fired at 25 minutes.
+    await vi.advanceTimersByTimeAsync(MAIL_RESOURCE_LIMITS.idleRestartMs - 1);
+    expect(client.calls).toEqual(["idle", "noop", "idle"]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.calls).toEqual(["idle", "noop", "idle", "noop"]);
+    await supervisor.stop();
+  });
+
+  it("asks for one more pass instead of IDLE when INBOX changed while the pass ran", async () => {
+    const { supervisor, opened, passes } = harness();
+    supervisor.afterSync(accountA);
+    await settle();
+    supervisor.afterSync(accountA);
+    const client = opened[0]!;
+    client.emit("exists", { path: "INBOX" });
+    await settle();
+    expect(passes).toEqual([accountA, accountA]);
+
+    // Between commands the server reports a letter that landed while the pass
+    // was reading INBOX, and it will not report it again once IDLE starts.
+    client.emit("exists", { path: "INBOX" });
+    client.emit("flags", { path: "INBOX" });
+    await settle();
+    expect(passes).toEqual([accountA, accountA]);
+    supervisor.afterSync(accountA);
+    expect(passes).toEqual([accountA, accountA, accountA]);
+    expect(client.calls).toEqual(["idle", "noop"]);
+    // That pass saw it; IDLE starts after it as usual.
+    supervisor.afterSync(accountA);
+    expect(client.calls).toEqual(["idle", "noop", "idle"]);
+    await supervisor.stop();
+  });
+
+  it("drops a session whose server never answers DONE, and still asks for the pass", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { supervisor, opened, passes, events } = harness();
+    supervisor.afterSync(accountA);
+    await settle();
+    supervisor.afterSync(accountA);
+    const client = opened[0]!;
+    client.noop = async () => {
+      client.calls.push("noop");
+      // The server keeps the socket alive and never ends IDLE.
+      await new Promise<void>(() => undefined);
+    };
+    client.emit("exists", { path: "INBOX" });
+    await vi.advanceTimersByTimeAsync(29_999);
+    expect(client.calls).toEqual(["idle", "noop"]);
+    expect(passes).toEqual([accountA]);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(client.calls).toEqual(["idle", "noop", "close"]);
+    expect(passes).toEqual([accountA, accountA]);
+    expect(events.at(-1)).toEqual({
+      event: "mail_imap_idle_fallback",
+      accountId: accountA,
+      reason: "done_unanswered",
+      failureCount: 1,
+    });
+    // And a new session after the backoff, not a session stuck forever.
+    await vi.advanceTimersByTimeAsync(BASE_MS);
+    supervisor.afterSync(accountA);
+    await settle();
+    expect(opened).toHaveLength(2);
+    await supervisor.stop();
+  });
+
+  it("starts the backoff from the bottom after a session that lived longer than three minutes", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const { supervisor, opened, connector, events } = harness();
+    const connectAndIdle = async () => {
+      supervisor.afterSync(accountA);
+      await settle();
+      supervisor.afterSync(accountA);
+    };
+    await connectAndIdle();
+    // Three sessions that die at once: the backoff climbs to four minutes.
+    for (const wait of [BASE_MS, 2 * BASE_MS, 4 * BASE_MS]) {
+      opened.at(-1)!.close();
+      await vi.advanceTimersByTimeAsync(wait);
+      await connectAndIdle();
+    }
+    expect(connector.openIdleSession).toHaveBeenCalledTimes(4);
+    // The fourth idles for ten minutes before its server ends IDLE on its own.
+    await vi.advanceTimersByTimeAsync(10 * 60_000);
+    opened.at(-1)!.endIdle(true);
+    await settle();
+    expect(events.at(-1)).toMatchObject({ reason: "connection_dropped", failureCount: 1 });
+    await vi.advanceTimersByTimeAsync(BASE_MS);
+    await connectAndIdle();
+    expect(connector.openIdleSession).toHaveBeenCalledTimes(5);
     await supervisor.stop();
   });
 

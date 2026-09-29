@@ -567,6 +567,31 @@ describe("ImapFlow IDLE session", () => {
     expect(createIdleClient).toHaveBeenCalledOnce();
   });
 
+  it("refuses a session whose open mailbox is not INBOX", async () => {
+    const expected = imapAccountFixture();
+    for (const mailbox of [{ path: "Archive" }, false as const]) {
+      const client = idleClientFixture();
+      // The open answers as if it worked; what the session holds afterwards
+      // is what the adapter checks.
+      client.mailboxOpen.mockImplementationOnce(async () => {
+        client.mailbox = mailbox;
+        return { path: "INBOX" };
+      });
+      const factory = new ImapFlowReadSessionFactory({
+        dns: { resolve: vi.fn(async () => [targetFixture()]) },
+        store: storeFixture(expected, Buffer.from("test-only-password")),
+        createClient: vi.fn(),
+        createIdleClient: () => client,
+        now: () => 1_000,
+      });
+
+      await expect(
+        factory.openIdleSession(expected.account.accountId, new AbortController().signal),
+      ).rejects.toMatchObject({ code: "imap_connection_failed" });
+      expect(client.close).toHaveBeenCalled();
+    }
+  });
+
   it("closes the client when the caller aborts while it connects", async () => {
     const expected = imapAccountFixture();
     const client = idleClientFixture();

@@ -7816,6 +7816,141 @@ describe("MailSurface", () => {
 
         await until(() => cursorsAsked(listThreads).length === 2, "the end asks again");
       });
+
+      /** Scrolling with the end in view against a five-page account whose
+       *  pages answer 200 ms after they are asked, the way a real server
+       *  staggers them. Each case moves the column's epoch under a page that
+       *  is on the way, so that page's answer is dropped and asked again: once,
+       *  not every time the next Load more drops the one before it. */
+      describe("with answers that take their time", () => {
+        const later = <T,>(value: T, ms = 200) =>
+          new Promise<T>((resolve) => setTimeout(() => resolve(value), ms));
+
+        /** Account A's page `n` (2 to 5) of a five-page stream. */
+        function deepPage(n: number): MailThreadPage {
+          const rows = Array.from({ length: 50 }, (_value, index) =>
+            unifiedThread({
+              accountId: accountA.accountId,
+              threadId: `deep ${n}-${index}`,
+              lastMessageAt: 1_700_000_900_000 - ((n - 1) * 50 + index) * 1_000,
+              unread: false,
+            }),
+          );
+          return pageOf(rows, n < 5 ? `p${n + 1}` : null);
+        }
+
+        const bOnly = unifiedThread({
+          accountId: accountB.accountId,
+          threadId: "B only",
+          lastMessageAt: 1_600_000_000_000,
+        });
+
+        /** Account A answers its pages late; the first read of page two waits
+         *  on `pageTwo`. `answerB` answers B's page-one reads by count. */
+        function slowClient(
+          pageTwo: Promise<MailThreadPage> | null,
+          answerB: (read: number) => Promise<MailThreadPage>,
+        ) {
+          let bReads = 0;
+          let pageTwoReads = 0;
+          return vi.fn().mockImplementation(({ accountId, cursor }) => {
+            if (accountId === accountB.accountId) {
+              bReads += 1;
+              return answerB(bReads);
+            }
+            if (!cursor) return Promise.resolve(pageOf(deepRows.slice(0, 50), "p2"));
+            if (cursor === "p2" && pageTwo !== null) {
+              pageTwoReads += 1;
+              if (pageTwoReads === 1) return pageTwo;
+            }
+            return later(deepPage(Number(cursor.slice(1))));
+          });
+        }
+
+        async function tenSeconds() {
+          for (let step = 0; step < 100; step += 1) await wait(100);
+        }
+
+        it("asks for a dropped page once when the minute's refresh brings new mail", async () => {
+          vi.useFakeTimers();
+          sentinelInView();
+          const pageTwo = deferred<MailThreadPage>();
+          const listThreads = slowClient(pageTwo.promise, (read) =>
+            Promise.resolve(
+              pageOf(
+                read === 1
+                  ? [bOnly]
+                  : [
+                      unifiedThread({
+                        accountId: accountB.accountId,
+                        threadId: "B arrived",
+                        lastMessageAt: 1_700_001_000_000,
+                      }),
+                      bOnly,
+                    ],
+              ),
+            ),
+          );
+          const client = makeClient({
+            loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+            listThreads,
+          });
+          await act(async () =>
+            root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+          );
+          await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+          await wait(60_000);
+          await wait(100);
+          await act(async () => pageTwo.resolve(deepPage(2)));
+          await settle();
+          await tenSeconds();
+
+          expect(cursorsAsked(listThreads)).toEqual(["p2", "p2", "p3", "p4", "p5"]);
+        });
+
+        it("asks for a dropped page once when a held account heals", async () => {
+          vi.useFakeTimers();
+          sentinelInView();
+          const pageTwo = deferred<MailThreadPage>();
+          const listThreads = slowClient(pageTwo.promise, (read) =>
+            read === 1 ? Promise.reject(held()) : Promise.resolve(pageOf([bOnly])),
+          );
+          const client = makeClient({
+            loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+            listThreads,
+          });
+          await act(async () =>
+            root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+          );
+          await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+          await wait(1_500);
+          await wait(100);
+          await act(async () => pageTwo.resolve(deepPage(2)));
+          await settle();
+          await tenSeconds();
+
+          expect(cursorsAsked(listThreads)).toEqual(["p2", "p2", "p3", "p4", "p5"]);
+        });
+
+        it("asks for a dropped page once when Load more is pressed while it is on the way", async () => {
+          vi.useFakeTimers();
+          sentinelInView();
+          const listThreads = slowClient(null, () => Promise.resolve(pageOf([bOnly])));
+          const client = makeClient({
+            loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+            listThreads,
+          });
+          await act(async () =>
+            root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+          );
+          await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+          await wait(100);
+          await click(findButton("Load more"));
+          await tenSeconds();
+
+          expect(cursorsAsked(listThreads)).toEqual(["p2", "p2", "p3", "p4", "p5"]);
+        });
+      });
     });
 
     it("fetches only the starved stream on Load more", async () => {

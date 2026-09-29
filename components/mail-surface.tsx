@@ -434,6 +434,11 @@ export function MailSurface({
   // back into it.
   const [unifiedUnserved, setUnifiedUnserved] = useState(0);
   const loadMoreRefusedRef = useRef(false);
+  // Every Load more moves the column's epoch, so a second one started while
+  // the first is out drops the first's answer. That drop is not unserved: the
+  // newer request is on its way. Only the latest Load more's drop counts, or
+  // each would re-arm the sentinel into the next and drop it in turn.
+  const loadMoreGenerationRef = useRef(0);
   useEffect(() => {
     if (mutating || !loadMoreRefusedRef.current) return;
     loadMoreRefusedRef.current = false;
@@ -1974,6 +1979,7 @@ export function MailSurface({
     );
     if (starved.length === 0) return;
     const listEpoch = ++listEpochRef.current;
+    const generation = ++loadMoreGenerationRef.current;
     const results = await settleWithLimit(
       starved,
       UNIFIED_FANOUT_LIMIT,
@@ -2020,7 +2026,9 @@ export function MailSurface({
     );
     if (selectedAccountIdRef.current !== UNIFIED_ACCOUNT_ID) return;
     if (listEpochRef.current !== listEpoch) {
-      setUnifiedUnserved((count) => count + 1);
+      if (loadMoreGenerationRef.current === generation) {
+        setUnifiedUnserved((count) => count + 1);
+      }
       return;
     }
     const current = unifiedStateRef.current;

@@ -5,6 +5,7 @@ import type { PDFDocumentProxy, PDFPageProxy, RenderTask } from "pdfjs-dist";
 import type { MailContentAttachmentDto } from "@/lib/mail/content-types";
 import { ATTACHMENT_FETCH_PRIORITY, type AttachmentBlobStore } from "@/lib/mail/attachment-blobs";
 import { ATTACHMENT_PDF_PREVIEW_MAX_BYTES } from "@/lib/mail/attachment-preview";
+import { MailFetchGate } from "@/lib/mail/inline-fetch-gate";
 import type { OpenedPdf } from "@/lib/mail/pdf-runtime";
 
 /** A page is drawn at the screen's pixel ratio, but never past 2x: a 3x
@@ -17,6 +18,20 @@ export const PDF_PIXEL_RATIO_CAP = 2;
  *  tall or very wide is drawn at a lower resolution rather than allocated at
  *  whatever size it declares. */
 export const PDF_CANVAS_MAX_PIXELS = 2 ** 24;
+
+/** The longest side a page's canvas may have: past it browsers refuse the
+ *  canvas outright, so a page is scaled down to fit it too. */
+export const PDF_CANVAS_MAX_SIDE = 16_384;
+
+/** Pages drawn to canvases at once, and the pixels all of them may hold
+ *  together (256 MB of RGBA). The canvases go to the pages nearest the one
+ *  being read; the rest stay placeholders until the reader comes closer. */
+export const PDF_LIVE_CANVASES = 8;
+export const PDF_LIVE_PIXELS = 2 ** 26;
+
+/** Pages pdf.js paints at the same time. Each render holds its own working
+ *  memory until it finishes, so the rest wait their turn, nearest first. */
+export const PDF_RENDERS_AT_ONCE = 4;
 
 /** Page boxes laid out in the scroll. A PDF can declare any page count it
  *  likes; past this the reader is sent to the file itself. */
@@ -35,14 +50,20 @@ const PDF_RELEASE_MARGIN = "200% 0px";
 /** The page crossing the middle of the scroller is the one being read. */
 const PDF_READING_LINE = "-50% 0px -50% 0px";
 
+/** A page's size in PDF points, as pdf.js reports it at scale 1. */
+interface PageSize {
+  readonly width: number;
+  readonly height: number;
+}
+
 type PdfState =
   | { readonly kind: "loading" }
   | {
       readonly kind: "ready";
       readonly pdf: PDFDocumentProxy;
-      /** The first page's height over its width: every page box takes it
-       *  until that page is drawn and knows its own. */
-      readonly aspect: number;
+      /** The first page's size: every page box takes its shape until that
+       *  page has been measured. */
+      readonly first: PageSize;
     }
   | { readonly kind: "failed"; readonly reason: "broken" | "password" };
 
@@ -90,7 +111,7 @@ export function MailAttachmentPdf({
         const pdf = await opened.document;
         const first = await pdf.getPage(1);
         const { width, height } = first.getViewport({ scale: 1 });
-        if (!disposed) setState({ kind: "ready", pdf, aspect: pageAspect(width, height) });
+        if (!disposed) setState({ kind: "ready", pdf, first: { width, height } });
       } catch (error) {
         if (disposed) return;
         // Nothing more will be read from a document that failed, so its
@@ -131,7 +152,7 @@ export function MailAttachmentPdf({
   return (
     <PdfPages
       pdf={state.pdf}
-      aspect={state.aspect}
+      first={state.first}
       url={url}
       filename={attachment.filename}
     />
@@ -140,20 +161,28 @@ export function MailAttachmentPdf({
 
 function PdfPages({
   pdf,
-  aspect,
+  first,
   url,
   filename,
 }: {
   pdf: PDFDocumentProxy;
-  aspect: number;
+  first: PageSize;
   url: string;
   filename: string | null;
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
   const columnRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
-  const [live, setLive] = useState<ReadonlySet<number>>(() => new Set());
+  const [near, setNear] = useState<ReadonlySet<number>>(() => new Set());
   const [reading, setReading] = useState(1);
+  /** Page sizes read so far. A page is measured (no pixels, only its size)
+   *  as it comes near, and gets a canvas only once its size is known, so the
+   *  budget below counts what a canvas will really cost. */
+  const [sizes, setSizes] = useState<ReadonlyMap<number, PageSize>>(
+    () => new Map([[1, first]]),
+  );
+  const measuringRef = useRef(new Set<number>());
+  const [renderGate] = useState(() => new MailFetchGate(PDF_RENDERS_AT_ONCE));
   const total = pdf.numPages;
   const shown = Math.min(total, PDF_PAGE_LIMIT);
 
@@ -181,7 +210,7 @@ function PdfPages({
     const pageOf = (target: Element) => Number((target as HTMLElement).dataset.page);
     const draw = new IntersectionObserver(
       (entries) =>
-        setLive((previous) => {
+        setNear((previous) => {
           const next = new Set(previous);
           for (const entry of entries) {
             if (entry.isIntersecting) next.add(pageOf(entry.target));
@@ -192,7 +221,7 @@ function PdfPages({
     );
     const release = new IntersectionObserver(
       (entries) =>
-        setLive((previous) => {
+        setNear((previous) => {
           const next = new Set(previous);
           for (const entry of entries) {
             if (!entry.isIntersecting) next.delete(pageOf(entry.target));
@@ -221,6 +250,34 @@ function PdfPages({
     };
   }, [shown]);
 
+  useEffect(() => {
+    let cancelled = false;
+    for (const pageNumber of near) {
+      if (sizes.has(pageNumber) || measuringRef.current.has(pageNumber)) continue;
+      measuringRef.current.add(pageNumber);
+      pdf
+        .getPage(pageNumber)
+        .then((page) => {
+          const { width: pageWidth, height: pageHeight } = page.getViewport({ scale: 1 });
+          if (cancelled) return;
+          setSizes((previous) =>
+            new Map(previous).set(pageNumber, { width: pageWidth, height: pageHeight }),
+          );
+        })
+        .catch(() => {
+          // A page the parser cannot read keeps the first page's shape and
+          // never gets a canvas.
+        })
+        .finally(() => measuringRef.current.delete(pageNumber));
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [near, pdf, sizes]);
+
+  const ratio = pixelRatio();
+  const granted = grantCanvases(near, sizes, reading, width, ratio);
+
   return (
     <div className="brain-viewer-pdf">
       <div
@@ -230,16 +287,28 @@ function PdfPages({
         className="brain-viewer-pdf-scroll focus-inset"
       >
         <div ref={columnRef} className="brain-viewer-pdf-column">
-          {Array.from({ length: shown }, (_, index) => (
-            <PdfPage
-              key={index + 1}
-              pdf={pdf}
-              pageNumber={index + 1}
-              aspect={aspect}
-              width={width}
-              live={live.has(index + 1)}
-            />
-          ))}
+          {Array.from({ length: shown }, (_, index) => {
+            const pageNumber = index + 1;
+            const size = sizes.get(pageNumber) ?? first;
+            return (
+              <div
+                key={pageNumber}
+                data-page={pageNumber}
+                className="brain-viewer-pdf-page"
+                style={{ aspectRatio: `1 / ${pageAspect(size.width, size.height)}` }}
+              >
+                {granted.has(pageNumber) && (
+                  <PdfCanvas
+                    pdf={pdf}
+                    pageNumber={pageNumber}
+                    width={width}
+                    gate={renderGate}
+                    priority={-Math.abs(pageNumber - reading)}
+                  />
+                )}
+              </div>
+            );
+          })}
           {total > shown && (
             <p className="brain-viewer-pdf-more text-table">
               <a
@@ -260,76 +329,51 @@ function PdfPages({
   );
 }
 
-function PdfPage({
-  pdf,
-  pageNumber,
-  aspect,
-  width,
-  live,
-}: {
-  pdf: PDFDocumentProxy;
-  pageNumber: number;
-  aspect: number;
-  width: number;
-  live: boolean;
-}) {
-  // A page that is not the first one's shape corrects its own box once it
-  // has been drawn, and keeps the correction when it is let go again.
-  const [ownAspect, setOwnAspect] = useState<number | null>(null);
-  return (
-    <div
-      data-page={pageNumber}
-      className="brain-viewer-pdf-page"
-      style={{ aspectRatio: `1 / ${ownAspect ?? aspect}` }}
-    >
-      {live && width > 0 && (
-        <PdfCanvas
-          pdf={pdf}
-          pageNumber={pageNumber}
-          width={width}
-          onAspect={setOwnAspect}
-        />
-      )}
-    </div>
-  );
-}
-
 function PdfCanvas({
   pdf,
   pageNumber,
   width,
-  onAspect,
+  gate,
+  priority,
 }: {
   pdf: PDFDocumentProxy;
   pageNumber: number;
   width: number;
-  onAspect: (aspect: number) => void;
+  gate: MailFetchGate;
+  /** How near the page is to the one being read: its place in the queue for
+   *  a render slot, read when it joins the queue. */
+  priority: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const priorityRef = useRef(priority);
+  useEffect(() => {
+    priorityRef.current = priority;
+  });
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    let cancelled = false;
+    const controller = new AbortController();
     let page: PDFPageProxy | null = null;
     let task: RenderTask | null = null;
     const draw = async () => {
       try {
-        page = await pdf.getPage(pageNumber);
-        if (cancelled) return;
-        const natural = page.getViewport({ scale: 1 });
-        if (!(natural.width > 0 && natural.height > 0)) return;
-        onAspect(pageAspect(natural.width, natural.height));
-        const ratio = Math.min(window.devicePixelRatio || 1, PDF_PIXEL_RATIO_CAP);
-        const fitted = (width / natural.width) * ratio;
-        const area = natural.width * natural.height * fitted * fitted;
-        const scale =
-          area > PDF_CANVAS_MAX_PIXELS ? fitted * Math.sqrt(PDF_CANVAS_MAX_PIXELS / area) : fitted;
-        const viewport = page.getViewport({ scale });
-        canvas.width = Math.floor(viewport.width);
-        canvas.height = Math.floor(viewport.height);
-        task = page.render({ canvas, viewport });
-        await task.promise;
+        await gate.run(
+          controller.signal,
+          async () => {
+            page = await pdf.getPage(pageNumber);
+            if (controller.signal.aborted) return;
+            const natural = page.getViewport({ scale: 1 });
+            const size = canvasSize(natural, width, pixelRatio());
+            if (size === null) return;
+            const viewport = page.getViewport({ scale: size.scale });
+            canvas.width = Math.floor(viewport.width);
+            canvas.height = Math.floor(viewport.height);
+            task = page.render({ canvas, viewport });
+            await task.promise;
+          },
+          priorityRef.current,
+        );
       } catch {
         // A cancelled render rejects, and a page the parser cannot draw
         // leaves its box empty rather than failing the whole document.
@@ -337,7 +381,7 @@ function PdfCanvas({
     };
     void draw();
     return () => {
-      cancelled = true;
+      controller.abort();
       task?.cancel();
       // A canvas holds its pixels until its size changes, whether or not it
       // is still in the document, so the release is written out.
@@ -345,7 +389,7 @@ function PdfCanvas({
       canvas.height = 0;
       page?.cleanup();
     };
-  }, [onAspect, pageNumber, pdf, width]);
+  }, [gate, pageNumber, pdf, width]);
 
   return <canvas ref={canvasRef} className="brain-viewer-pdf-canvas" />;
 }
@@ -372,6 +416,61 @@ export function AttachmentFailure({
       </a>
     </div>
   );
+}
+
+function pixelRatio(): number {
+  return Math.min(window.devicePixelRatio || 1, PDF_PIXEL_RATIO_CAP);
+}
+
+/** The scale a page is drawn at and the canvas it needs: fitted to the
+ *  column at the pixel ratio, then lowered until the canvas holds at most
+ *  `PDF_CANVAS_MAX_PIXELS` and neither side passes `PDF_CANVAS_MAX_SIDE`.
+ *  Null for a page with no usable size. */
+function canvasSize(
+  page: PageSize,
+  columnWidth: number,
+  ratio: number,
+): { readonly scale: number; readonly pixels: number } | null {
+  if (!(page.width > 0 && page.height > 0 && columnWidth > 0)) return null;
+  let scale = (columnWidth / page.width) * ratio;
+  const area = page.width * page.height * scale * scale;
+  if (area > PDF_CANVAS_MAX_PIXELS) scale *= Math.sqrt(PDF_CANVAS_MAX_PIXELS / area);
+  scale = Math.min(scale, PDF_CANVAS_MAX_SIDE / page.width, PDF_CANVAS_MAX_SIDE / page.height);
+  return {
+    scale,
+    pixels: Math.floor(page.width * scale) * Math.floor(page.height * scale),
+  };
+}
+
+/** The pages that hold canvases: of the near pages whose size is known, the
+ *  ones nearest the page being read, while there are fewer than
+ *  `PDF_LIVE_CANVASES` and their canvases together stay within
+ *  `PDF_LIVE_PIXELS`. It stops at the first page that does not fit, so a
+ *  farther page never takes the place of a nearer one. */
+function grantCanvases(
+  near: ReadonlySet<number>,
+  sizes: ReadonlyMap<number, PageSize>,
+  reading: number,
+  columnWidth: number,
+  ratio: number,
+): ReadonlySet<number> {
+  const granted = new Set<number>();
+  let pixels = 0;
+  const nearest = [...near]
+    .filter((pageNumber) => sizes.has(pageNumber))
+    .sort(
+      (left, right) =>
+        Math.abs(left - reading) - Math.abs(right - reading) || left - right,
+    );
+  for (const pageNumber of nearest) {
+    if (granted.size >= PDF_LIVE_CANVASES) break;
+    const size = canvasSize(sizes.get(pageNumber)!, columnWidth, ratio);
+    if (size === null) continue;
+    if (pixels + size.pixels > PDF_LIVE_PIXELS) break;
+    granted.add(pageNumber);
+    pixels += size.pixels;
+  }
+  return granted;
 }
 
 /** A page's height over its width, held inside `PDF_ASPECT_LIMIT` either way

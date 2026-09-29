@@ -29,8 +29,12 @@ import { MailFetchGate } from "@/lib/mail/inline-fetch-gate";
 import {
   MailAttachmentPdf,
   PDF_CANVAS_MAX_PIXELS,
+  PDF_CANVAS_MAX_SIDE,
+  PDF_LIVE_CANVASES,
+  PDF_LIVE_PIXELS,
   PDF_PAGE_LIMIT,
   PDF_PIXEL_RATIO_CAP,
+  PDF_RENDERS_AT_ONCE,
 } from "./mail-attachment-pdf";
 
 const ACCOUNT_ID = "account-a0123456789abcdef0123456789abcdef";
@@ -294,7 +298,8 @@ describe("MailAttachmentPdf", () => {
   });
 
   it("keeps a page's canvas under 2^24 pixels, however tall the sender made it", async () => {
-    const { pages } = await open(fakeDocument(1, () => ({ width: 100, height: 2_000 })));
+    // 1200 × 16,000 at the column's width and 2x: over the area, under the side.
+    const { pages } = await open(fakeDocument(1, () => ({ width: 60, height: 800 })));
     await act(async () => observer("near").report({ 1: true }));
     await settle();
     expect(PDF_CANVAS_MAX_PIXELS).toBe(2 ** 24);
@@ -302,6 +307,70 @@ describe("MailAttachmentPdf", () => {
     expect(pages.get(1)!.render).toHaveBeenCalledTimes(1);
     expect(canvas.width * canvas.height).toBeLessThanOrEqual(2 ** 24);
     expect(canvas.width * canvas.height).toBeGreaterThan(0.95 * 2 ** 24);
+  });
+
+  it("keeps each side of a page's canvas within 16,384 pixels", async () => {
+    await open(fakeDocument(1, () => ({ width: 40, height: 800 })));
+    await act(async () => observer("near").report({ 1: true }));
+    await settle();
+    expect(PDF_CANVAS_MAX_SIDE).toBe(16_384);
+    const canvas = host.querySelector("canvas")!;
+    expect(canvas.height).toBeLessThanOrEqual(16_384);
+    expect(canvas.width).toBeGreaterThan(0);
+  });
+
+  function allNear(count: number): Record<number, boolean> {
+    return Object.fromEntries(Array.from({ length: count }, (_, index) => [index + 1, true]));
+  }
+
+  it("renders at most four pages at a time", async () => {
+    const renders: FakeRender[] = [];
+    const never = () => {
+      const render = { promise: new Promise<void>(() => {}), cancel: vi.fn() };
+      renders.push(render);
+      return render;
+    };
+    await open(fakeDocument(12, undefined, never));
+    await act(async () => observer("near").report(allNear(12)));
+    await settle();
+    expect(PDF_RENDERS_AT_ONCE).toBe(4);
+    expect(renders).toHaveLength(4);
+  });
+
+  it("keeps at most eight canvases, the ones nearest the page being read", async () => {
+    await open(fakeDocument(12));
+    await act(async () => observer("reading").report({ 6: true }));
+    await act(async () => observer("near").report(allNear(12)));
+    await settle();
+    expect(PDF_LIVE_CANVASES).toBe(8);
+    const drawn = [...host.querySelectorAll("[data-page]")]
+      .filter((page) => page.querySelector("canvas"))
+      .map((page) => Number((page as HTMLElement).dataset.page));
+    expect(drawn).toEqual([2, 3, 4, 5, 6, 7, 8, 9]);
+  });
+
+  it("holds all canvases together to 2^26 pixels when later pages are nothing like the first", async () => {
+    // Page one is 20:1 across, so its shape promises small pages; every later
+    // page is 1:20 and each of them fills a canvas to its cap.
+    const { pages } = await open(
+      fakeDocument(12, (pageNumber) =>
+        pageNumber === 1 ? { width: 800, height: 40 } : { width: 40, height: 800 },
+      ),
+    );
+    await act(async () => observer("near").report(allNear(12)));
+    await settle();
+    expect(PDF_LIVE_PIXELS).toBe(2 ** 26);
+    const canvases = [...host.querySelectorAll("canvas")];
+    const pixels = canvases.reduce((sum, canvas) => sum + canvas.width * canvas.height, 0);
+    expect(canvases.length).toBeGreaterThan(1);
+    expect(canvases.length).toBeLessThanOrEqual(8);
+    expect(pixels).toBeLessThanOrEqual(2 ** 26);
+    expect(
+      Math.max(...canvases.map((canvas) => Math.max(canvas.width, canvas.height))),
+    ).toBeLessThanOrEqual(16_384);
+    // The pages left out were never drawn, not drawn and then dropped.
+    const rendered = [...pages.values()].filter((page) => page.render.mock.calls.length > 0);
+    expect(rendered).toHaveLength(canvases.length);
   });
 
   it("draws nothing for a page with no size instead of dividing by it", async () => {
@@ -442,6 +511,8 @@ describe("MailAttachmentPdf", () => {
     expect(alert()).toContain("Couldn’t open this file");
     expect(arrayBuffer).not.toHaveBeenCalled();
     expect(pdfjs.getDocument).not.toHaveBeenCalled();
+    // Asked for at the viewer's priority, ahead of the body's own images.
+    expect(oversized.blob).toHaveBeenCalledWith(agenda, 1, expect.any(AbortSignal));
   });
 
   it("destroys the document and its worker when it closes", async () => {

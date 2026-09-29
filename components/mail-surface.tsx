@@ -20,6 +20,7 @@ import { parkDiscard, type DeferredDiscard } from "./mail-deferred-discard";
 import { MailDraftsList, type MailDraftsState } from "./mail-drafts";
 import {
   directActionForMailbox,
+  letterInInbox,
   MailReader,
   waitForContentPoll,
   type MailReaderAction,
@@ -65,6 +66,8 @@ import {
   type MailThreadListState,
 } from "./mail-thread-list";
 import {
+  appendStreamPage,
+  compareUnified,
   deriveUnifiedSections,
   mergedDisplayItems,
   reconcileStreamPageOne,
@@ -423,6 +426,24 @@ export function MailSurface({
   const [syncing, setSyncing] = useState(false);
   const [mutating, setMutating] = useState(false);
   const [unifiedState, setUnifiedState] = useState<UnifiedState>({ kind: "idle" });
+  // Load mores the column asked for and never got: refused under a mail
+  // action's lock, or answered after the column's epoch moved and dropped.
+  // Nothing about the rows changed, so the list's scroll sentinel, which
+  // re-arms on the rows, takes this count too and asks again. A refusal is
+  // counted only once the lock lets go, or the sentinel would ask straight
+  // back into it.
+  const [unifiedUnserved, setUnifiedUnserved] = useState(0);
+  const loadMoreRefusedRef = useRef(false);
+  // Every Load more moves the column's epoch, so a second one started while
+  // the first is out drops the first's answer. That drop is not unserved: the
+  // newer request is on its way. Only the latest Load more's drop counts, or
+  // each would re-arm the sentinel into the next and drop it in turn.
+  const loadMoreGenerationRef = useRef(0);
+  useEffect(() => {
+    if (mutating || !loadMoreRefusedRef.current) return;
+    loadMoreRefusedRef.current = false;
+    queueMicrotask(() => setUnifiedUnserved((count) => count + 1));
+  }, [mutating]);
   // Which sections are open is an external store, not component state: it
   // outlives every unified mount in this session (see the store below).
   const unifiedExpand = useSyncExternalStore(
@@ -1614,7 +1635,14 @@ export function MailSurface({
       mailboxId: MailSystemMailbox,
       query: string,
       signal?: AbortSignal,
-      visibleLoading = true,
+      /**
+       * `visible` is the search the reader typed: its loading and its failure
+       * are the list's. `background` re-reads the results on screen without a
+       * skeleton, and a failure still says so. `silent` is a refresh nobody
+       * asked to watch: only fresh results change the list, as a failed
+       * silent list refresh leaves the list as it was.
+       */
+      presentation: "visible" | "background" | "silent" = "visible",
     ) => {
       if (
         signal?.aborted ||
@@ -1631,10 +1659,12 @@ export function MailSurface({
       const sort = threadSortRef.current;
       const listEpoch = ++listEpochRef.current;
       if (normalizeMailSearchQueryText(query) === null) {
-        commitThreadState({ kind: "invalid-search" });
+        if (presentation !== "silent") {
+          commitThreadState({ kind: "invalid-search" });
+        }
         return;
       }
-      if (visibleLoading) commitThreadState({ kind: "loading" });
+      if (presentation === "visible") commitThreadState({ kind: "loading" });
       try {
         const page = await client.searchThreads(
           { accountId, mailboxId, query, limit: 50 },
@@ -1662,7 +1692,18 @@ export function MailSurface({
           threadSortRef.current === sort &&
           searchQueryRef.current === query
         ) {
-          commitThreadState({ kind: "error" });
+          if (presentation !== "silent") {
+            commitThreadState({ kind: "error" });
+            return;
+          }
+          // The results stay, but not as the same object. Starting this read
+          // dropped any background re-read of an index still building, and
+          // that re-read re-arms only on a new list state: without one it
+          // never runs again and the list says "Indexing" for good.
+          const current = threadStateRef.current;
+          if (current.kind === "ready") {
+            commitThreadState({ kind: "ready", page: current.page });
+          }
         }
       }
     },
@@ -1739,10 +1780,12 @@ export function MailSurface({
 
   /**
    * A single list the reader switched into while a Done was still landing
-   * archives on that account. The list loaded at the switch, before the last
-   * request landed, so it can still show a row the server has since
-   * archived — and the next silent refresh is up to a minute away. Asked
-   * again as soon as it is ready; a switch elsewhere drops the request.
+   * archives on that account, or an Inbox an Undo of Move to Inbox took a
+   * letter out of. The list loaded before the last request landed, so it can
+   * still show a row the server has since archived — and the next silent
+   * refresh is up to a minute away, and never comes for a search. Asked
+   * again as soon as it is ready, a search searched again; a switch elsewhere
+   * drops the request.
    */
   const refreshAfterRunRef = useRef<{
     readonly accountId: string;
@@ -1762,12 +1805,23 @@ export function MailSurface({
     // back here when it lands.
     if (threadStateRef.current.kind !== "ready") return;
     refreshAfterRunRef.current = null;
+    const query = searchQueryRef.current;
+    if (query.trim() !== "") {
+      void loadSearch(
+        pending.accountId,
+        pending.mailboxId,
+        query,
+        new AbortController().signal,
+        "silent",
+      );
+      return;
+    }
     void refreshThreadsSilently(
       pending.accountId,
       pending.mailboxId,
       new AbortController().signal,
     );
-  }, [refreshThreadsSilently]);
+  }, [loadSearch, refreshThreadsSilently]);
   useEffect(() => {
     refreshAfterRun();
   }, [refreshAfterRun, threadState]);
@@ -1920,8 +1974,11 @@ export function MailSurface({
   /** Fetch the next page of exactly the streams that starve the horizon,
    *  under the same fan-out bound the first load runs at. */
   const loadMoreUnified = useCallback(async () => {
-    if (mutationLockRef.current) return;
     if (selectedAccountIdRef.current !== UNIFIED_ACCOUNT_ID) return;
+    if (mutationLockRef.current) {
+      loadMoreRefusedRef.current = true;
+      return;
+    }
     const state = unifiedStateRef.current;
     if (state.kind !== "ready") return;
     const { starvedAccountIds } = mergedDisplayItems(state.streams);
@@ -1932,20 +1989,56 @@ export function MailSurface({
     );
     if (starved.length === 0) return;
     const listEpoch = ++listEpochRef.current;
+    const generation = ++loadMoreGenerationRef.current;
     const results = await settleWithLimit(
       starved,
       UNIFIED_FANOUT_LIMIT,
-      (stream) =>
-        client.listThreads({
-          accountId: stream.accountId,
-          cursor: stream.nextCursor as string,
-          limit: UNIFIED_PAGE_SIZE,
-        }),
+      async (stream) => {
+        const read = (cursor: string) =>
+          client.listThreads({
+            accountId: stream.accountId,
+            cursor,
+            limit: UNIFIED_PAGE_SIZE,
+          });
+        let page = await read(stream.nextCursor as string);
+        const last = stream.items.at(-1);
+        if (!stream.repage || last === undefined) return page;
+        // A re-paging stream's cursor starts inside rows it already holds.
+        // Pages that end at or above its last row bring nothing but what
+        // moved, and a press that added no row would not re-arm the scroll
+        // sentinel, so one Load more walks on to the page that reaches past.
+        // It walks no more pages than the stream is deep, plus one for the
+        // rows that moved down, and none after the column moved on: that
+        // answer is dropped below, and every page it still read was waste.
+        // A cursor it has already read leads back over the same pages, so it
+        // ends the stream's paging instead of being followed or kept.
+        const cap = Math.ceil(stream.items.length / UNIFIED_PAGE_SIZE) + 1;
+        const asked = new Set([stream.nextCursor as string]);
+        const items = [...page.items];
+        while (
+          asked.size < cap &&
+          page.nextCursor !== null &&
+          page.items.length > 0 &&
+          compareUnified(page.items.at(-1)!, last) <= 0 &&
+          listEpochRef.current === listEpoch &&
+          selectedAccountIdRef.current === UNIFIED_ACCOUNT_ID
+        ) {
+          if (asked.has(page.nextCursor)) {
+            page = { ...page, nextCursor: null };
+            break;
+          }
+          asked.add(page.nextCursor);
+          page = await read(page.nextCursor);
+          items.push(...page.items);
+        }
+        return { ...page, items };
+      },
     );
-    if (
-      listEpochRef.current !== listEpoch ||
-      selectedAccountIdRef.current !== UNIFIED_ACCOUNT_ID
-    ) {
+    if (selectedAccountIdRef.current !== UNIFIED_ACCOUNT_ID) return;
+    if (listEpochRef.current !== listEpoch) {
+      if (loadMoreGenerationRef.current === generation) {
+        setUnifiedUnserved((count) => count + 1);
+      }
       return;
     }
     const current = unifiedStateRef.current;
@@ -1970,19 +2063,7 @@ export function MailSurface({
           }
           return { ...stream, nextCursor: null, status: "error" as const };
         }
-        const seen = new Set(stream.items.map(unifiedThreadKey));
-        return {
-          ...stream,
-          items: [
-            ...stream.items,
-            ...result.value.items.filter(
-              (item) => !seen.has(unifiedThreadKey(item)),
-            ),
-          ],
-          nextCursor: result.value.nextCursor,
-          status: "ready" as const,
-          sync: result.value.sync,
-        };
+        return appendStreamPage(stream, result.value);
       }),
     });
     for (const accountId of held) void holdUnifiedStream(accountId);
@@ -2184,7 +2265,13 @@ export function MailSurface({
     const controller = new AbortController();
     const timeout = setTimeout(() => {
       if (!controller.signal.aborted) {
-        void loadSearch(accountId, mailboxId, query, controller.signal, false);
+        void loadSearch(
+          accountId,
+          mailboxId,
+          query,
+          controller.signal,
+          "background",
+        );
       }
     }, 250);
     return () => {
@@ -2670,6 +2757,7 @@ export function MailSurface({
    *  it has to be found in usually arrives after it.
    *
    *  Three answers, in this order. The letter is in the list in hand, and
+   *  that list is its Inbox or the mailbox the request names, and
    *  `selectThread` opens it exactly as a press on the row would. It is in
    *  another account or another mailbox, and the column moves there first,
    *  by way of the letter's own Inbox and at most once per kind of move, and
@@ -2788,12 +2876,23 @@ export function MailSurface({
       ? pendingOpen.mailboxId
       : "inbox";
 
-    const loaded = loadedThread(
-      pendingOpen,
-      selectedAccountId,
-      threadState,
-      unifiedState,
-    );
+    // The list on screen has not committed since the column last moved, so
+    // "not in the list" is not yet an answer, and neither is "in it": the
+    // rows still standing belong to the folder the column just left.
+    const listPending =
+      threadState.kind === "loading" || threadState === ledger.listAtMove;
+
+    // The list in hand answers only where the request would have looked
+    // anyway: the mailbox it names, or the Inbox every request tries first
+    // (the merged column is Inbox too). All Mail holds most of the Inbox, and
+    // a notification's letter found there opened in All Mail only because All
+    // Mail was the folder on screen.
+    const listAnswers =
+      (selectedMailboxId === mailboxId || selectedMailboxId === "inbox") &&
+      (selectedAccountId === UNIFIED_ACCOUNT_ID || !listPending);
+    const loaded = listAnswers
+      ? loadedThread(pendingOpen, selectedAccountId, threadState, unifiedState)
+      : null;
     if (loaded) {
       // The ledger, not `pendingOpen === null`, is what stops a development
       // double invoke of this effect from opening the same letter twice: the
@@ -2808,10 +2907,6 @@ export function MailSurface({
 
     const sameAccount = selectedAccountId === pendingOpen.accountId;
     const plain = searchQuery.trim() === "";
-    // The list on screen has not committed since the column last moved, so
-    // "not in the list" is not yet an answer.
-    const listPending =
-      threadState.kind === "loading" || threadState === ledger.listAtMove;
 
     // At the letter's own mailbox with no query: its page was the last list
     // to look in, and the letter is fetched from that mailbox.
@@ -3313,6 +3408,108 @@ export function MailSurface({
   );
 
   /**
+   * Undo of Move to Inbox: the letter leaves the Inbox again. The pill stands
+   * for nine seconds and the reader may have moved on inside them, so the
+   * answer goes where the letter is on screen. An Inbox column, the account's
+   * own or All inboxes, no longer holds it: a reader open on it there closes,
+   * as Archive closes it, and the column is read again. All inboxes takes the
+   * row out first, as its Archive does, because its re-read is page one and
+   * keeps whatever a deep stream holds below it. The account's Inbox is
+   * read the way a Done that landed late reads it, so a list still loading or
+   * showing a search is not skipped. Any other folder lists the letter either
+   * way, and a reader on it there takes it in place and offers Move to Inbox
+   * again.
+   */
+  const undoMoveToInbox = useCallback(
+    async (thread: MailThreadListItem) => {
+      const { accountId, threadId } = thread;
+      mutationLockRef.current = true;
+      setMutating(true);
+      try {
+        await client.updateThread({ accountId, threadId, archive: true });
+      } catch (error) {
+        onToast?.(threadActionFailure(error));
+        return;
+      } finally {
+        mutationLockRef.current = false;
+        setMutating(false);
+      }
+      const unified = selectedAccountIdRef.current === UNIFIED_ACCOUNT_ID;
+      const accountInbox =
+        selectedAccountIdRef.current === accountId &&
+        selectedMailboxIdRef.current === "inbox";
+      const reader = readerStateRef.current;
+      if (
+        (unified || accountInbox) &&
+        selectedThreadIdRef.current === threadId &&
+        selectedThreadAccountIdRef.current === accountId
+      ) {
+        selectedThreadIdRef.current = null;
+        selectedThreadAccountIdRef.current = null;
+        setSelectedThreadId(null);
+        setReaderState({ kind: "idle" });
+        clearStickyOpen();
+      } else if (
+        reader.kind === "ready" &&
+        reader.detail.thread.accountId === accountId &&
+        reader.detail.thread.threadId === threadId
+      ) {
+        setReaderState({
+          kind: "ready",
+          detail: withLetterInInbox(reader.detail, false),
+        });
+      }
+      if (unified) {
+        const state = unifiedStateRef.current;
+        if (state.kind === "ready") {
+          commitUnifiedState({
+            kind: "ready",
+            streams: removeStreamItems(state.streams, [thread]),
+          });
+        }
+        void refreshUnifiedSilently(new AbortController().signal);
+      } else if (accountInbox) {
+        refreshAfterRunRef.current = { accountId, mailboxId: "inbox" };
+        refreshAfterRun();
+      }
+    },
+    [
+      clearStickyOpen,
+      client,
+      commitUnifiedState,
+      onToast,
+      refreshAfterRun,
+      refreshUnifiedSilently,
+    ],
+  );
+
+  /** The sentence a landed reader action says. Move to Inbox carries an Undo:
+   *  the strip's Archive reverses it only while the reader stays on the
+   *  letter, and the pill outlasts a reader that has moved on. */
+  const confirmThreadAction = useCallback(
+    (
+      thread: MailThreadListItem,
+      action: Exclude<MailReaderAction, "toggle-read">,
+    ) => {
+      if (action !== "move-to-inbox") {
+        onToast?.(threadActionConfirmation(action));
+        return;
+      }
+      onToast?.(threadActionConfirmation(action), {
+        icon: "inbox-linear",
+        actionLabel: "Undo",
+        pendingLabel: "Undoing…",
+        durationMs: SMART_UNDO_MS,
+        // Refused while another mail action holds the lock: the pill keeps
+        // standing and the press can be made again.
+        onAction: () =>
+          mutationLockRef.current ? false : undoMoveToInbox(thread),
+      });
+    },
+    [onToast, undoMoveToInbox],
+  );
+
+  /**
    * Non-removing mutation for the held open thread (single-account unread
    * view / unread-first sort). The server PATCH fires exactly as everywhere
    * else — server truth stays immediate — but the page-1 refetch is
@@ -3320,12 +3517,17 @@ export function MailSurface({
    * re-sort it away while the reader still shows it. The row and the reader
    * header are patched in place (the unread dot clears, position holds); the
    * list settles through the release refetch when the selection moves on or
-   * the reader closes. No timers.
+   * the reader closes. No timers. Archive and Move to Inbox come here only
+   * outside the Inbox, where the folder lists the letter either way: they
+   * change no row, only the reader's way in or out.
    */
   const updateThreadHeld = useCallback(
     async (
       thread: MailThreadListItem,
-      action: Extract<MailReaderAction, "toggle-read" | "star" | "unstar">,
+      action: Extract<
+        MailReaderAction,
+        "toggle-read" | "star" | "unstar" | "archive" | "move-to-inbox"
+      >,
     ) => {
       if (mutationLockRef.current) return;
       const accountId = thread.accountId;
@@ -3358,6 +3560,24 @@ export function MailSurface({
           return;
         }
         singleHoldRef.current = true;
+        const reader = readerStateRef.current;
+        const readerOnIt =
+          reader.kind === "ready" &&
+          reader.detail.thread.accountId === accountId &&
+          reader.detail.thread.threadId === threadId;
+        if (action === "archive" || action === "move-to-inbox") {
+          if (readerOnIt) {
+            setReaderState({
+              kind: "ready",
+              detail: withLetterInInbox(
+                reader.detail,
+                action === "move-to-inbox",
+              ),
+            });
+          }
+          confirmThreadAction(thread, action);
+          return;
+        }
         const patchItem = (item: MailThreadListItem) => withReadOrStar(item, action);
         const current = threadStateRef.current;
         if (current.kind === "ready") {
@@ -3373,12 +3593,7 @@ export function MailSurface({
             },
           });
         }
-        const reader = readerStateRef.current;
-        if (
-          reader.kind === "ready" &&
-          reader.detail.thread.accountId === accountId &&
-          reader.detail.thread.threadId === threadId
-        ) {
+        if (readerOnIt) {
           setReaderState({
             kind: "ready",
             detail: {
@@ -3397,7 +3612,7 @@ export function MailSurface({
         setMutating(false);
       }
     },
-    [client, commitThreadState, onToast],
+    [client, commitThreadState, confirmThreadAction, onToast],
   );
 
   const updateThread = useCallback(
@@ -3457,9 +3672,7 @@ export function MailSurface({
             setSelectedThreadId(null);
             setReaderState({ kind: "idle" });
             clearStickyOpen();
-            if (action !== "toggle-read") {
-              onToast?.(threadActionConfirmation(action));
-            }
+            if (action !== "toggle-read") confirmThreadAction(thread, action);
             return;
           }
           page =
@@ -3496,22 +3709,31 @@ export function MailSurface({
         const reader = readerStateRef.current;
         if (
           !refreshedThread &&
-          (action === "toggle-read" || action === "star" || action === "unstar") &&
+          (action === "toggle-read" ||
+            action === "star" ||
+            action === "unstar" ||
+            action === "move-to-inbox" ||
+            (action === "archive" && mailboxId !== "inbox")) &&
           reader.kind === "ready" &&
           reader.detail.thread.accountId === accountId &&
           reader.detail.thread.threadId === threadId
         ) {
           // A letter beyond the mailbox's first page, the palette's pick from
           // deep in All Mail, is missing from the refetch without having gone
-          // anywhere. A read or a star moves nothing, so the reader stays and
-          // takes the answer in place, as the held path does. Only an action
-          // that moves the letter closes it.
+          // anywhere. A read or a star moves nothing, and a move between the
+          // Inbox and out of it, offered as such only in All Mail and Starred,
+          // leaves it in the folder on screen, so the reader stays and takes
+          // the answer in place, as the held path does. Only an action that
+          // moves the letter out closes it.
           setReaderState({
             kind: "ready",
-            detail: {
-              ...reader.detail,
-              thread: withReadOrStar(reader.detail.thread, action),
-            },
+            detail:
+              action === "move-to-inbox" || action === "archive"
+                ? withLetterInInbox(reader.detail, action === "move-to-inbox")
+                : {
+                    ...reader.detail,
+                    thread: withReadOrStar(reader.detail.thread, action),
+                  },
           });
         } else if (!refreshedThread) {
           selectedThreadIdRef.current = null;
@@ -3554,9 +3776,7 @@ export function MailSurface({
             }
           }
         }
-        if (action !== "toggle-read") {
-          onToast?.(threadActionConfirmation(action));
-        }
+        if (action !== "toggle-read") confirmThreadAction(thread, action);
       } catch (error) {
         onToast?.(threadActionFailure(error));
       } finally {
@@ -3564,7 +3784,7 @@ export function MailSurface({
         setMutating(false);
       }
     },
-    [clearStickyOpen, client, commitThreadState, onToast],
+    [clearStickyOpen, client, commitThreadState, confirmThreadAction, onToast],
   );
 
   /**
@@ -3684,9 +3904,16 @@ export function MailSurface({
       if (selectedAccountIdRef.current === UNIFIED_ACCOUNT_ID) {
         return updateUnifiedThread(thread, action);
       }
+      // A held letter keeps its row through what leaves it in the folder on
+      // screen: a read or a star anywhere, and the move in or out of the
+      // Inbox outside the Inbox, which lists the letter either way there.
       if (
         singleHoldRef.current &&
-        (action === "toggle-read" || action === "star" || action === "unstar") &&
+        (action === "toggle-read" ||
+          action === "star" ||
+          action === "unstar" ||
+          ((action === "archive" || action === "move-to-inbox") &&
+            selectedMailboxIdRef.current !== "inbox")) &&
         selectedThreadIdRef.current === thread.threadId &&
         selectedThreadAccountIdRef.current === thread.accountId
       ) {
@@ -4560,7 +4787,13 @@ export function MailSurface({
         );
         if (!account?.capabilities.threadMutations) return;
         if (event.key === "e") {
-          const direct = directActionForMailbox(selectedMailboxIdRef.current);
+          // Outside the Inbox `e` is a toggle, Move to Inbox and then Archive,
+          // so a held key's repeats would move the letter back and forth.
+          if (event.repeat) return;
+          const direct = directActionForMailbox(
+            selectedMailboxIdRef.current,
+            letterInInbox(reader.detail),
+          );
           if (!direct) return;
           event.preventDefault();
           void mutateOpenThread(openThread, direct.action);
@@ -4915,6 +5148,7 @@ export function MailSurface({
             expand={unifiedExpand}
             selectedThreadKey={selectedThreadKey}
             exitFades={mutating}
+            unserved={unifiedUnserved}
             onToggleExpand={toggleUnifiedExpand}
             onSelectThread={(thread) => void selectThread(thread)}
             onCompose={
@@ -5732,6 +5966,18 @@ function pageWithHeldThread(
   return { ...fresh, items };
 }
 
+/** A conversation moved into or out of the Inbox, as the provider moves it:
+ *  every message at once. */
+function withLetterInInbox(
+  detail: MailThreadDetail,
+  inInbox: boolean,
+): MailThreadDetail {
+  return {
+    ...detail,
+    messages: detail.messages.map((message) => ({ ...message, inInbox })),
+  };
+}
+
 /** A read or star action's answer, applied to the row it was taken on. */
 function withReadOrStar(
   item: MailThreadListItem,
@@ -5752,6 +5998,7 @@ function threadMutationInput(
   };
   if (action === "toggle-read") return { ...base, read: thread.unread };
   if (action === "archive") return { ...base, archive: true };
+  if (action === "move-to-inbox") return { ...base, archive: false };
   if (action === "trash") return { ...base, trash: true };
   if (action === "restore") return { ...base, restore: true };
   if (action === "mark-spam") return { ...base, spam: true };
@@ -5819,6 +6066,7 @@ function threadActionFailure(error: unknown): string {
 
 function threadActionConfirmation(action: Exclude<MailReaderAction, "toggle-read">): string {
   if (action === "archive") return "Conversation archived";
+  if (action === "move-to-inbox") return "Moved to Inbox";
   if (action === "trash") return "Conversation moved to trash";
   if (action === "restore") return "Conversation restored";
   if (action === "mark-spam") return "Conversation marked as spam";

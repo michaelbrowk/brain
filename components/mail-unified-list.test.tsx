@@ -170,6 +170,7 @@ describe("MailUnifiedList", () => {
       expand,
       selectedThreadKey: null,
       exitFades: false,
+      unserved: 0,
       onToggleExpand: vi.fn(),
       onSelectThread: vi.fn(),
       onLoadMore: vi.fn(),

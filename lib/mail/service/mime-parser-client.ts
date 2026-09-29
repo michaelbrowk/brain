@@ -55,6 +55,25 @@ class ParseFailure extends Error {
   }
 }
 
+/** A write to the worker failed: the connection is gone, not the message. */
+class WorkerHungUp extends Error {
+  constructor() {
+    super("mail MIME worker hung up");
+    this.name = "WorkerHungUp";
+  }
+}
+
+/**
+ * Whether the worker has sent anything back. The parser socket accepts a
+ * connection past its limit and closes it at once, which reads here as a
+ * worker that hung up without a word: `mail_mime_worker_dropped`, which the
+ * content runner tries again. A worker that answered and then went quiet
+ * crashed.
+ */
+interface WorkerExchange {
+  answered: boolean;
+}
+
 export class UnixSocketMailMimeParser implements IsolatedMailParserPort {
   readonly isolation = Object.freeze({
     networkAccess: false as const,
@@ -98,12 +117,15 @@ export class UnixSocketMailMimeParser implements IsolatedMailParserPort {
     }, Math.max(1, projected.budget.deadlineAt - Date.now()));
     timeout.unref();
 
+    const exchange: WorkerExchange = { answered: false };
     try {
-      await writeBmp1JsonFrame(socket, BMP1_FRAME.request, projected);
+      await writeBmp1JsonFrame(socket, BMP1_FRAME.request, projected).catch(() => {
+        throw new WorkerHungUp();
+      });
       const sendTask = settle("send", sendRawMime(socket, request, projected));
       const receiveTask = settle(
         "receive",
-        receiveWorkerResponse(socket, projected),
+        receiveWorkerResponse(socket, projected, exchange),
       );
       const first = await Promise.race([sendTask, receiveTask]);
       if (first.error !== null) {
@@ -151,7 +173,9 @@ export class UnixSocketMailMimeParser implements IsolatedMailParserPort {
     } catch (error) {
       if (terminal !== null) return transientFailure(terminal);
       if (error instanceof ParseFailure) return error.outcome;
-      return transientFailure("mail_mime_worker_crashed");
+      return transientFailure(
+        exchange.answered ? "mail_mime_worker_crashed" : "mail_mime_worker_dropped",
+      );
     } finally {
       clearTimeout(timeout);
       request.signal.removeEventListener("abort", abort);
@@ -181,6 +205,10 @@ async function sendRawMime(
 ): Promise<void> {
   const hash = createHash("sha256");
   let bytes = 0;
+  const write = (type: number, payload?: Uint8Array) =>
+    writeBmp1Frame(socket, type, payload).catch(() => {
+      throw new WorkerHungUp();
+    });
   try {
     for await (const candidate of request.rawMimeStream) {
       if (request.signal.aborted) throw transient("mail_mime_aborted");
@@ -201,12 +229,12 @@ async function sendRawMime(
         }
         hash.update(chunk);
         bytes += chunk.length;
-        if (chunk.length > 0) await writeBmp1Frame(socket, BMP1_FRAME.rawData, chunk);
+        if (chunk.length > 0) await write(BMP1_FRAME.rawData, chunk);
         offset = end;
       }
     }
   } catch (error) {
-    if (error instanceof ParseFailure) throw error;
+    if (error instanceof ParseFailure || error instanceof WorkerHungUp) throw error;
     throw transient("mail_mime_source_unavailable");
   }
   if (
@@ -215,12 +243,13 @@ async function sendRawMime(
   ) {
     throw integrity();
   }
-  await writeBmp1Frame(socket, BMP1_FRAME.rawEnd);
+  await write(BMP1_FRAME.rawEnd);
 }
 
 async function receiveWorkerResponse(
   socket: Socket,
   request: MailMimeWorkerRequest,
+  exchange: WorkerExchange,
 ): Promise<ParsedMailArtifactSet> {
   let current: CurrentArtifact | null = null;
   let text: ParsedMailStagedBlob | null = null;
@@ -232,6 +261,7 @@ async function receiveWorkerResponse(
 
   try {
     for await (const frame of readBmp1Frames(socket)) {
+      exchange.answered = true;
       if (frame.type === BMP1_FRAME.error) throw parseRemoteFailure(frame.payload);
       if (frame.type === BMP1_FRAME.artifactBegin) {
         if (current !== null) throw integrity();
@@ -334,7 +364,9 @@ async function receiveWorkerResponse(
       }
       throw integrity();
     }
-    throw transient("mail_mime_worker_crashed");
+    throw transient(
+      exchange.answered ? "mail_mime_worker_crashed" : "mail_mime_worker_dropped",
+    );
   } finally {
     if (!completed) {
       if (current !== null) zeroCurrentArtifact(current);

@@ -466,6 +466,8 @@ export type MailMimeTransientErrorCode =
   | "mail_mime_aborted"
   | "mail_mime_source_unavailable"
   | "mail_mime_worker_crashed"
+  /** The worker hung up before answering anything: a connection it dropped. */
+  | "mail_mime_worker_dropped"
   | "mail_mime_worker_timeout"
   | "mail_mime_worker_unavailable";
 

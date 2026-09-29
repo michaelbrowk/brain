@@ -1,9 +1,12 @@
 import { createHash } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 
 import type {
   IsolatedMailParserPort,
+  MailBlobDescriptor,
   MailIncomingBlobStorePort,
   MailMimeParseBudget,
+  MailMimeParseOutcome,
   ParsedMailArtifactSet,
 } from "../ports";
 import {
@@ -35,6 +38,18 @@ import {
 } from "./content-source";
 import { CompleteSetMailDnsResolver } from "./dns";
 import { ImapFlowReadSessionFactory } from "./imapflow-adapter";
+
+/**
+ * The waits before each new try of a parse whose connection the parser
+ * dropped unanswered (`mail_mime_worker_dropped`). The parser socket counts a
+ * connection until its worker has exited, a moment after the client hangs
+ * up, and closes at once one made past its limit in that moment. That is a
+ * busy socket, not a failed parse, and the message is already on disk, so it
+ * is parsed again instead of recorded as a failure the reader would show. A
+ * worker that dies before answering reads the same way, so a message that
+ * kills it is parsed three times before it fails as any other would.
+ */
+const DROPPED_PARSE_RETRY_DELAYS_MS = [100, 400] as const;
 
 export interface MailContentSourceLease {
   readonly source: MailContentSourcePort;
@@ -168,13 +183,7 @@ export class ProductionMailContentWorkRunner implements MailContentWorkRunnerPor
         emptyChunks(),
         this.readNow(),
       );
-      const parsed = await this.parser.parse({
-        operationId: operationId(input),
-        rawMime: raw.descriptor,
-        rawMimeStream: input.blobStore.read(raw.descriptor),
-        budget: parserBudget(input.deadlineAt, this.readNow()),
-        signal,
-      });
+      const parsed = await this.parse(input, raw.descriptor, signal);
       if (parsed.kind !== "parsed") throw parserFailure(parsed);
       artifacts = parsed.artifacts;
       artifacts = validateParsedMailArtifactSet(artifacts);
@@ -184,6 +193,32 @@ export class ProductionMailContentWorkRunner implements MailContentWorkRunnerPor
     } finally {
       wipeArtifacts(artifacts);
       sourceLease?.destroy();
+    }
+  }
+
+  /** Parses the staged raw message, again after a dropped connection. */
+  private async parse(
+    input: MailContentWorkInput,
+    rawMime: MailBlobDescriptor,
+    signal: AbortSignal,
+  ): Promise<MailMimeParseOutcome> {
+    for (let attempt = 0; ; attempt += 1) {
+      const parsed = await this.parser.parse({
+        operationId: operationId(input),
+        rawMime,
+        rawMimeStream: input.blobStore.read(rawMime),
+        budget: parserBudget(input.deadlineAt, this.readNow()),
+        signal,
+      });
+      const wait = DROPPED_PARSE_RETRY_DELAYS_MS[attempt];
+      if (
+        parsed.kind !== "transient_failure" ||
+        parsed.errorCode !== "mail_mime_worker_dropped" ||
+        wait === undefined
+      ) {
+        return parsed;
+      }
+      await delay(wait, undefined, { signal });
     }
   }
 

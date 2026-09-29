@@ -698,6 +698,185 @@ describe("Mail background sync scheduler", () => {
   });
 });
 
+describe("per-provider sync cadence", () => {
+  it("runs Gmail accounts on their own cadence and every other account on the fallback", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const calls: Array<{ accountId: string; at: number }> = [];
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA, accountB],
+        listSyncAccounts: async () => [
+          { accountId: accountA, providerKind: "gmail" },
+          { accountId: accountB, providerKind: "imap" },
+        ],
+        runBackgroundSyncStep: async (accountId) => {
+          calls.push({ accountId, at: Date.now() });
+          return changed();
+        },
+      },
+      { initialDelayMs: 10, intervalMs: 60_000, gmailIntervalMs: 20_000 },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(120_010);
+    expect(timesOf(calls, accountA)).toEqual([
+      10, 20_010, 40_010, 60_010, 80_010, 100_010, 120_010,
+    ]);
+    expect(timesOf(calls, accountB)).toEqual([10, 60_010, 120_010]);
+    await scheduler.stop();
+  });
+
+  it("backs a quiet Gmail account off to the fallback after three empty passes and returns on the first change", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const calls: number[] = [];
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA],
+        listSyncAccounts: async () => [{ accountId: accountA, providerKind: "gmail" }],
+        runBackgroundSyncStep: async () => {
+          calls.push(Date.now());
+          // The fifth pass brings a letter; every other one finds nothing.
+          return calls.length === 5 ? changed() : syncResult(false);
+        },
+      },
+      { initialDelayMs: 10, intervalMs: 60_000, gmailIntervalMs: 20_000 },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(200_010);
+    expect(calls).toEqual([
+      10,
+      20_010,
+      40_010,
+      // Three empty passes in a row: the account rests for the fallback.
+      100_010,
+      160_010,
+      // The fifth pass saw a change, so the next one is back on 20 s.
+      180_010,
+      200_010,
+    ]);
+    await scheduler.stop();
+  });
+
+  it("brings a backed-off Gmail account back to its cadence on an on-demand sync", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const calls: number[] = [];
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA, accountB],
+        listSyncAccounts: async () => [
+          { accountId: accountA, providerKind: "gmail" },
+          { accountId: accountB, providerKind: "gmail" },
+        ],
+        runBackgroundSyncStep: async (accountId) => {
+          if (accountId === accountA) calls.push(Date.now());
+          return syncResult(false);
+        },
+      },
+      { initialDelayMs: 10, intervalMs: 60_000, gmailIntervalMs: 20_000 },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(50_000);
+    expect(calls).toEqual([10, 20_010, 40_010]);
+    // The owner asked for this account: the demand resets the backoff, and
+    // the next pass is one Gmail interval from now instead of at 100 010.
+    scheduler.noteDemand(accountA);
+    await vi.advanceTimersByTimeAsync(19_999);
+    expect(calls).toHaveLength(3);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toEqual([10, 20_010, 40_010, 70_000]);
+    await vi.advanceTimersByTimeAsync(20_000);
+    expect(calls).toEqual([10, 20_010, 40_010, 70_000, 90_000]);
+    await scheduler.stop();
+  });
+
+  it("never exceeds one pass per account per cadence window, however often it is asked", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const gmail = [accountA, accountB, accountC];
+    const imap = "account-a44444444444444444444444444444444";
+    const calls: Array<{ accountId: string; at: number }> = [];
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [...gmail, imap],
+        listSyncAccounts: async () => [
+          ...gmail.map((accountId) => ({ accountId, providerKind: "gmail" as const })),
+          { accountId: imap, providerKind: "imap" as const },
+        ],
+        runBackgroundSyncStep: async (accountId) => {
+          calls.push({ accountId, at: Date.now() });
+          return changed();
+        },
+      },
+      { initialDelayMs: 10, intervalMs: 60_000, gmailIntervalMs: 20_000 },
+    );
+
+    scheduler.start();
+    for (let second = 0; second < 600; second += 1) {
+      // An owner hammering the refresh on every account, every second.
+      for (const accountId of [...gmail, imap]) scheduler.noteDemand(accountId);
+      await vi.advanceTimersByTimeAsync(1_000);
+    }
+    for (const accountId of gmail) {
+      const times = timesOf(calls, accountId);
+      expect(times.length).toBeGreaterThanOrEqual(29);
+      expect(Math.min(...gaps(times))).toBeGreaterThanOrEqual(20_000);
+    }
+    const imapTimes = timesOf(calls, imap);
+    expect(imapTimes.length).toBeGreaterThanOrEqual(9);
+    expect(Math.min(...gaps(imapTimes))).toBeGreaterThanOrEqual(60_000);
+    await scheduler.stop();
+  });
+
+  it("refuses a Gmail cadence slower than the fallback it backs off to", () => {
+    expect(
+      () =>
+        new MailBackgroundSyncScheduler(
+          { listAccountIds: async () => [], runBackgroundSyncStep: async () => changed() },
+          { intervalMs: 60_000, gmailIntervalMs: 90_000 },
+        ),
+    ).toThrow();
+  });
+
+  it("fails closed on an account list whose providers are unknown or duplicated", async () => {
+    const calls: string[] = [];
+    for (const accounts of [
+      [{ accountId: accountA, providerKind: "pop3" }],
+      [
+        { accountId: accountA, providerKind: "gmail" },
+        { accountId: accountA, providerKind: "imap" },
+      ],
+    ]) {
+      const scheduler = new MailBackgroundSyncScheduler({
+        listAccountIds: async () => [accountA],
+        listSyncAccounts: async () =>
+          accounts as unknown as readonly { accountId: string; providerKind: "gmail" }[],
+        runBackgroundSyncStep: async (accountId) => {
+          calls.push(accountId);
+          return changed();
+        },
+      });
+      await scheduler.runNow();
+    }
+    expect(calls).toEqual([]);
+  });
+});
+
+function changed(): MailBackgroundSyncStep {
+  return syncResult(false, false, 1);
+}
+
+function timesOf(
+  calls: readonly { readonly accountId: string; readonly at: number }[],
+  accountId: string,
+): number[] {
+  return calls.filter((call) => call.accountId === accountId).map((call) => call.at);
+}
+
+function gaps(times: readonly number[]): number[] {
+  return times.slice(1).map((time, index) => time - times[index]!);
+}
+
 function syncResult(
   hasMore: boolean,
   resultHasMore = hasMore,

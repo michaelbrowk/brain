@@ -37,7 +37,10 @@ import {
 } from "./outbound";
 import { SqliteMailSendStore } from "./outbound-store";
 import { MailOutboundWorker } from "./outbound-worker";
-import { readMailServiceRuntimePaths } from "./runtime-config";
+import {
+  readMailServiceRuntimePaths,
+  readMailSyncCadenceConfig,
+} from "./runtime-config";
 import {
   MailSenderScreen,
   MailSenderScreenedMessageService,
@@ -58,6 +61,12 @@ async function main(): Promise<void> {
   assertInheritedSystemdSocket();
   const build = readBuildIdentity();
   const runtime = readMailServiceRuntimePaths(process.env);
+  // Named reads rather than the whole environment, so the env documentation
+  // check sees each variable this process reads.
+  const cadence = readMailSyncCadenceConfig({
+    syncIntervalMs: process.env.BRAIN_MAIL_SYNC_INTERVAL_MS,
+    gmailIntervalMs: process.env.BRAIN_MAIL_GMAIL_INTERVAL_MS,
+  });
   const store = new SqliteMailAccountStore(runtime);
   await store.initialize();
   const dns = new CompleteSetMailDnsResolver();
@@ -213,6 +222,8 @@ async function main(): Promise<void> {
     store,
   );
   const backgroundSync = new MailBackgroundSyncScheduler(messages, {
+    intervalMs: cadence.intervalMs,
+    gmailIntervalMs: cadence.gmailIntervalMs,
     privacyCache: content,
     searchIndex: messages,
     ...(senderScreen ? { senders: senderScreen.screen } : {}),
@@ -244,6 +255,7 @@ async function main(): Promise<void> {
     content,
     syncPause,
     ...(senderScreen ? { senders: senderScreen.screen } : {}),
+    onSyncDemand: (accountId) => backgroundSync.noteDemand(accountId),
   });
 
   await new Promise<void>((resolve, reject) => {

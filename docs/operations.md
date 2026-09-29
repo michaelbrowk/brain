@@ -416,6 +416,28 @@ Keep that shell and descriptor open. While holding it, verify the target's
 the target commit and perform an authenticated page read. Never change
 `current` outside this lock.
 
+## Mail sync cadence
+
+`brain-mail` syncs every account in the background on one serialized loop, so
+no account ever has two passes in flight. Its variables live in
+`/etc/brain/brain-mail.env`, beside the SMTP flags, and a change takes a
+`systemctl restart brain-mail`:
+
+| Variable | Default | What it sets |
+| --- | ---: | --- |
+| `BRAIN_MAIL_SYNC_INTERVAL_MS` | 60000 | How often every account syncs at the least. |
+| `BRAIN_MAIL_GMAIL_INTERVAL_MS` | 20000 | A Gmail account's own cadence. |
+
+A Gmail pass is one `history.list` call against the stored history id, so three
+accounts at 20 s make nine calls a minute against a quota of 250 units a
+second. After three passes in a row that found nothing, a Gmail account rests
+at the fallback interval; the first pass that brings a change, or a refresh
+from the Mail surface, puts it back on 20 s. Both values are whole
+milliseconds between 5000 and 3600000, and the Gmail one may not be slower
+than the fallback. Anything else stops the service at startup with
+`mail_service_start_failed`, because a service that guessed would poll a
+provider at a rate nobody chose.
+
 ## Attachment privacy cache cutover
 
 Upgrade note. It applies to an install that ran a version before the guarded

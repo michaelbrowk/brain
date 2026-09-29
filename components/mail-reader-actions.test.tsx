@@ -67,6 +67,7 @@ function detailFor(inInbox: boolean): MailThreadDetail {
       listMessage: false,
       sizeBytes: 0,
       category: "people",
+      newSender: false,
     },
     messages: [message],
   };

@@ -7970,6 +7970,81 @@ describe("MailSurface", () => {
         await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
       });
 
+      it("serves a refused Load more once, not after every later mail action", async () => {
+        // Done refuses the end while it runs and the end is asked for once it
+        // lets go. Opening a letter later reads it, which is a mail action of
+        // its own: nothing was refused under that one, so it asks for nothing.
+        const view = { inView: false };
+        sentinelInView(view);
+        const top = unifiedThread({
+          accountId: accountA.accountId,
+          threadId: "A unread top",
+          lastMessageAt: 1_700_001_000_000,
+          unread: true,
+        });
+        const pageThree = deferred<MailThreadPage>();
+        const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) => {
+          if (accountId === accountB.accountId) return Promise.resolve(pageOf([]));
+          if (!cursor) {
+            return Promise.resolve(
+              pageOf([top, ...newsletters, ...deepRows.slice(0, 44)], "p2"),
+            );
+          }
+          if (cursor === "p2") {
+            return Promise.resolve(pageOf(deepRows.slice(44, 94), "p3"));
+          }
+          return pageThree.promise;
+        });
+        const archive = deferred<void>();
+        const readTop = deferred<void>();
+        const updateThread = vi.fn().mockImplementation((input) => {
+          if ("archive" in input) return archive.promise;
+          return input.threadId === top.threadId ? readTop.promise : Promise.resolve();
+        });
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+          updateThread,
+          readThread: vi.fn().mockResolvedValue({
+            ...detail,
+            thread: top,
+            messages: detail.messages.map((message) => ({
+              ...message,
+              threadId: top.threadId,
+            })),
+          }),
+        });
+        await act(async () =>
+          root.render(
+            <MailSurface client={client} onOpenSettings={() => {}} onToast={vi.fn()} />,
+          ),
+        );
+        await settle();
+
+        view.inView = true;
+        await click(findButton("Done — archive all 5 in Newsletters"));
+        expect(cursorsAsked(listThreads)).toEqual([]);
+        await act(async () => archive.resolve());
+        await until(() => cursorsAsked(listThreads).length === 2, "the end pages on");
+        expect(cursorsAsked(listThreads)).toEqual(["p2", "p3"]);
+
+        // Page three is still out. Reading the letter is the next action, and
+        // it holds the lock across a render of its own.
+        await click(findButton("A unread top"));
+        await until(
+          () =>
+            updateThread.mock.calls.some(
+              ([input]) => input.threadId === top.threadId && input.read === true,
+            ),
+          "the letter is read",
+        );
+        await settle();
+        await act(async () => readTop.resolve());
+        await settle();
+        await settle();
+        expect(cursorsAsked(listThreads)).toEqual(["p2", "p3"]);
+      });
+
       it("asks again once a Done that dropped its page lets go", async () => {
         sentinelInView();
         const pageTwo = deferred<MailThreadPage>();

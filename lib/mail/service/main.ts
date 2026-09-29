@@ -97,8 +97,9 @@ async function main(): Promise<void> {
       environment: process.env,
       imapSessions,
     }),
+    onChange: (change) => changes.append(change),
   });
-  const senderScreen = await openSenderScreen(runtime.stateDirectory, messages);
+  const senderScreen = await openSenderScreen(runtime.stateDirectory, messages, changes);
   const outbox = new SqliteMailSendStore({
     cacheRoot: path.join(runtime.stateDirectory, "cache"),
     onSent: (sent) => senderScreen?.screen.recordSentRecipients(sent),
@@ -141,6 +142,8 @@ async function main(): Promise<void> {
     }),
     onBackgroundWorkAvailable: () => kickBackgroundSync(),
     onEvent: writeServiceLog,
+    onContentReady: (accountId, messageId) =>
+      changes.append({ accountId, mailboxIds: [], kind: "content_ready", messageId }),
   });
   const sendAccounts = {
     async readSendAccount(accountId: string) {
@@ -441,6 +444,7 @@ async function finishShutdown(options: {
 async function openSenderScreen(
   stateDirectory: string,
   messages: MultiAccountMailMessageService,
+  changes: MailChangeFeed,
 ): Promise<{ readonly store: SqliteMailSenderStore; readonly screen: MailSenderScreen } | null> {
   const store = new SqliteMailSenderStore({ stateDirectory });
   try {
@@ -454,7 +458,12 @@ async function openSenderScreen(
   }
   return Object.freeze({
     store,
-    screen: new MailSenderScreen({ store, mail: messages, onEvent: writeServiceLog }),
+    screen: new MailSenderScreen({
+      store,
+      mail: messages,
+      onEvent: writeServiceLog,
+      onChange: (change) => changes.append(change),
+    }),
   });
 }
 

@@ -1106,6 +1106,39 @@ describe("MailContentCoordinator", () => {
     expect(onBackgroundWorkAvailable).toHaveBeenCalledTimes(3);
   });
 
+  it("says which message became ready on each ready commit, and only then", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    const runner = new FakeMailContentWorkRunner([
+      (input) => publish(input, { text: Buffer.from("ready body") }),
+    ]);
+    const onContentReady = vi.fn(() => {
+      throw new Error("observer unavailable");
+    });
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      onContentReady,
+    );
+
+    await expect(
+      coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
+    ).resolves.toMatchObject({ state: "fetching" });
+    expect(onContentReady).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(onContentReady).toHaveBeenCalledWith(ACCOUNT_ID, MESSAGE_ID),
+    );
+    // A throwing observer leaves the body ready, and a read of a body that
+    // is already ready is not a second commit.
+    await expect(
+      coordinator.requestContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
+    ).resolves.toMatchObject({ state: "ready" });
+    expect(onContentReady).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps an opened N+1 Inbox message outside the stable top-N cohort", async () => {
     const fixture = await createFixture([ACCOUNT_ID]);
     const cache = fixture.caches[0]!;
@@ -1436,6 +1469,7 @@ async function createFixture(accountIds: readonly string[]): Promise<{
     clock?: () => number,
     onBackgroundWorkAvailable?: () => void,
     onEvent?: (event: MailContentCoordinatorEvent) => void,
+    onContentReady?: (accountId: string, messageId: string) => void,
   ): MailContentCoordinator;
 }> {
   const root = await mkdtemp(path.join(tmpdir(), "brain-mail-content-coordinator-"));
@@ -1469,6 +1503,7 @@ async function createFixture(accountIds: readonly string[]): Promise<{
       clock,
       onBackgroundWorkAvailable,
       onEvent,
+      onContentReady,
     ) {
       const coordinator = new MailContentCoordinator({
         stateDirectory: root,
@@ -1480,6 +1515,7 @@ async function createFixture(accountIds: readonly string[]): Promise<{
           ? {}
           : { onBackgroundWorkAvailable }),
         ...(onEvent === undefined ? {} : { onEvent }),
+        ...(onContentReady === undefined ? {} : { onContentReady }),
         clock: clock ?? (() => 1_000),
       });
       coordinators.push(coordinator);

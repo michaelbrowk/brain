@@ -11,6 +11,11 @@ import type {
   MailThreadView,
 } from "../message-types";
 import {
+  MAIL_CHANGE_ALL_MAILBOXES,
+  type MailServiceChange,
+  type MailServiceChangeKind,
+} from "./change-feed-ring";
+import {
   MAIL_CACHE_HYDRATION_ORDER,
   MailCacheError,
   type CachedProviderThread,
@@ -201,6 +206,7 @@ export class AccountMailMessageService implements MailMessageService {
   private readonly reauthErrorCode: MailCacheReauthErrorCode;
   private readonly hydrateHiddenMailboxes: boolean;
   private readonly now: () => number;
+  private readonly onChange: ((change: MailServiceChange) => void) | null;
   private mutationTail: Promise<void> = Promise.resolve();
 
   constructor(options: {
@@ -210,6 +216,10 @@ export class AccountMailMessageService implements MailMessageService {
     readonly reauthErrorCode: MailCacheReauthErrorCode;
     readonly hydrateHiddenMailboxes?: boolean;
     readonly now?: () => number;
+    /** Told after the cache commits something a listing shows: a published
+     *  generation, an incremental page that changed threads, a published
+     *  hidden mailbox, a mutation. The change feed is the one listener. */
+    readonly onChange?: (change: MailServiceChange) => void;
   }) {
     this.accountId = validateAccountId(options.accountId);
     this.cache = options.cache;
@@ -217,6 +227,23 @@ export class AccountMailMessageService implements MailMessageService {
     this.reauthErrorCode = options.reauthErrorCode;
     this.hydrateHiddenMailboxes = options.hydrateHiddenMailboxes ?? true;
     this.now = options.now ?? Date.now;
+    this.onChange = options.onChange ?? null;
+  }
+
+  /** After the commit, never before it, and never at the commit's expense: a
+   *  listener that throws has missed one record, and the sync it watched
+   *  still answers as it would have. */
+  private recordChange(
+    kind: MailServiceChangeKind,
+    mailboxIds: readonly MailSystemMailbox[],
+  ): void {
+    if (this.onChange === null) return;
+    try {
+      this.onChange({ accountId: this.accountId, mailboxIds, kind });
+    } catch {
+      // The feed is a hint; the next record or the browser's safety net
+      // covers the one lost here.
+    }
   }
 
   async readBackgroundSyncHealth(): Promise<MailBackgroundSyncHealth> {
@@ -389,6 +416,8 @@ export class AccountMailMessageService implements MailMessageService {
         throw new MailProviderSyncError("mail_provider_response_invalid");
       }
       this.cache.replaceActiveThread(refreshed);
+      // A thread action can move a thread in or out of any listing.
+      this.recordChange("mutation", MAIL_CHANGE_ALL_MAILBOXES);
       return Object.freeze({ apiVersion: 1, thread: refreshed.thread });
     });
   }
@@ -488,6 +517,8 @@ export class AccountMailMessageService implements MailMessageService {
     );
     if (page.nextPageToken === null) {
       this.cache.completeInitial(generation, this.now());
+      // Only the completed generation is listed; its staged pages were not.
+      this.recordChange("sync", MAIL_CHANGE_ALL_MAILBOXES);
     }
     return Object.freeze({
       apiVersion: 1,
@@ -562,6 +593,9 @@ export class AccountMailMessageService implements MailMessageService {
       resultingHistoryId: page.resultingHistoryId,
       now: this.now(),
     });
+    // A changed thread may have moved between any of the listings, so each
+    // one is named rather than guessed from the provider's labels.
+    if (changes.length > 0) this.recordChange("sync", MAIL_CHANGE_ALL_MAILBOXES);
     return Object.freeze({
       apiVersion: 1,
       status: page.nextPageToken === null ? "idle" : "syncing",
@@ -678,6 +712,7 @@ export class AccountMailMessageService implements MailMessageService {
             expectedHistoryId: state.postCrawlHistoryId,
             now: this.now(),
           });
+          this.recordChange("sync", [mailboxId]);
           return this.hasPendingHealthyHiddenMailboxWork();
         }
         return true;

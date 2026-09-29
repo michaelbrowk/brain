@@ -23,6 +23,7 @@ import { notifyNestedTableBlocked } from "@/lib/editor-events";
 import { insertToggleCommand } from "./toggle";
 import { insertMathBlockCommand } from "./math";
 import { ensureTaskCommand, isInQuote } from "./task-checkbox";
+import { caretMenuTakesKey } from "./caret-menu-keys";
 import {
   attachmentMarkdown,
   uploadAttachment,
@@ -503,9 +504,14 @@ export function SlashMenu({
   // effect runs in a task after the paint. The browser dispatches input
   // between those tasks: an Enter pressed as the menu appeared reached
   // ProseMirror, which split the line under a menu still on screen.
+  //
+  // Only while a row is on screen: a `/zzz` that matches nothing draws no
+  // menu, and its Enter is the editor's. `caretMenuTakesKey` says which keys
+  // the document-wide listener has to leave alone.
   useLayoutEffect(() => {
-    if (!state) return;
+    if (!state || results.length === 0) return;
     const onKey = (e: KeyboardEvent) => {
+      if (!caretMenuTakesKey(e, container.current)) return;
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setActive((a) => Math.min(a + 1, results.length - 1));
@@ -521,7 +527,7 @@ export function SlashMenu({
     };
     document.addEventListener("keydown", onKey, true);
     return () => document.removeEventListener("keydown", onKey, true);
-  }, [state, results, active, run]);
+  }, [state, results, active, run, container]);
 
   // keep the highlighted row inside the scrollport while arrowing
   useEffect(() => {

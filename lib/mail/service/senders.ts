@@ -1293,27 +1293,14 @@ export class MailSenderScreen implements MailSenderScreenService {
         items.map((item) => item.threadId),
       );
       // Read only when a blocked sender's thread sits in the Inbox, and then
-      // once for the page.
-      let effects: MailSenderArchiveEffects | null = null;
-      let inboxDates: ReadonlyMap<string, number | null> | null = null;
-      /** Whether this block archived this very thread once and the owner put
-       *  it back, with nothing newer from anyone but him since
-       *  (`ownerMovedBack`, by the thread's own record). */
-      const movedBack = async (decisionId: string, threadId: string): Promise<boolean> => {
-        effects ??= this.store.readArchiveEffects(accountId);
-        const record = effects.byThread.get(archiveEffectKey(decisionId, threadId));
-        if (record?.state !== "done") return false;
-        inboxDates ??= new Map(
-          (await this.mail.listInboxThreadFirstSenders(accountId, ownAddressTest(own))).map(
-            (thread) => [thread.threadId, thread.lastForeignMessageAt],
-          ),
+      // once for the page: the archiver's own targets, so the mark never
+      // promises an archive the archiver will not make.
+      let targets: ReadonlySet<string> | null = null;
+      const archiverTakes = async (threadId: string): Promise<boolean> => {
+        targets ??= new Set(
+          (await this.archiveTargets(accountId, own)).map((target) => target.ref.threadId),
         );
-        const lastForeignMessageAt = inboxDates.get(threadId);
-        // Past the archiver's reach it will not be taken either.
-        return (
-          lastForeignMessageAt === undefined ||
-          finishedAndNotNewer(record, { lastForeignMessageAt })
-        );
+        return targets.has(threadId);
       };
       const annotated: MailThreadListItem[] = [];
       for (const item of items) {
@@ -1354,18 +1341,15 @@ export class MailSenderScreen implements MailSenderScreenService {
         ) {
           gated = await this.followsStranger(accountId, sender, first.references, gateMoment);
         }
-        // The archiver's own rule (`readBlockingDecision`): an address's own
-        // decision speaks first, and a domain's block reaches only an address
-        // the owner does not know. It moves only what is in the Inbox, and
-        // leaves a thread its block archived once and the owner put back. An
-        // IMAP copy put back under a new UID has no record of its own and
-        // stays marked.
+        // Whether a block stands for this Inbox letter (`readBlockingDecision`,
+        // the archiver's rule) is the cheap question. The archiver's own
+        // targets answer the rest: its scan, a thread or an IMAP copy the owner
+        // put back, a thread it leaves alone for an hour after a failure.
         const standing =
           sender !== null && !isOwn && first?.inInbox === true
             ? this.store.readBlockingDecision(sender)
             : null;
-        const blocked =
-          standing !== null && !(await movedBack(standing.decisionId, item.threadId));
+        const blocked = standing !== null && (await archiverTakes(item.threadId));
         annotated.push(
           withNewSender(
             item,
@@ -1716,18 +1700,7 @@ export class MailSenderScreen implements MailSenderScreenService {
       if (retryAt <= now) this.archiveBackoff.delete(key);
     }
     const own = await this.readOwn();
-    const index = this.store.readDecisionIndex();
-    const effects = this.store.readArchiveEffects(accountId);
-    const listing = await this.mail.listInboxThreadFirstSenders(accountId, ownAddressTest(own));
-    const governed = listing.flatMap((thread) => {
-      const blocking = this.blockingDecision(index, own, thread);
-      return blocking === null ? [] : [{ thread, decisionId: blocking.decisionId }];
-    });
-    const targets = withMatchKeys(accountId, listing, governed).filter(
-      (target) =>
-        !this.archiveBackoff.has(`${accountId}/${target.ref.threadId}`) &&
-        !ownerMovedBack(effects, target),
-    );
+    const targets = await this.archiveTargets(accountId, own);
     const archived: MailSenderThreadRef[] = [];
     let attempted = 0;
     for (const target of targets) {
@@ -1746,6 +1719,28 @@ export class MailSenderScreen implements MailSenderScreenService {
     }
     this.logCounts("mail_sender_blocked_archived", "sync", archived);
     return targets.length > attempted;
+  }
+
+  /** What the next archive step would try in this account: Inbox threads a
+   *  standing block governs, within the scan, not moved back by the owner and
+   *  not left alone after a failure. */
+  private async archiveTargets(
+    accountId: string,
+    own: OwnSenders,
+  ): Promise<Array<ArchiveTarget & { readonly decisionId: string }>> {
+    const now = Date.now();
+    const index = this.store.readDecisionIndex();
+    const effects = this.store.readArchiveEffects(accountId);
+    const listing = await this.mail.listInboxThreadFirstSenders(accountId, ownAddressTest(own));
+    const governed = listing.flatMap((thread) => {
+      const blocking = this.blockingDecision(index, own, thread);
+      return blocking === null ? [] : [{ thread, decisionId: blocking.decisionId }];
+    });
+    return withMatchKeys(accountId, listing, governed).filter(
+      (target) =>
+        (this.archiveBackoff.get(`${accountId}/${target.ref.threadId}`) ?? 0) <= now &&
+        !ownerMovedBack(effects, target),
+    );
   }
 
   private async restorePending(accountId: string, signal: AbortSignal): Promise<boolean> {

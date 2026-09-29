@@ -11018,6 +11018,36 @@ describe("MailSurface", () => {
       expect(document.body.textContent).not.toContain("Subject lena-old");
     });
 
+    it.each([
+      ["the merged Inboxes", [accountA, accountB]],
+      ["a lone Inbox", [accountA]],
+    ] as const)("takes a marked letter out of %s and shows it once a read clears the mark", async (_, accounts) => {
+      let items: MailThreadListItem[] = [
+        { ...friend("held"), senderBlocked: true },
+        friend("friend-1"),
+      ];
+      const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      await mount(
+        [],
+        {
+          listThreads: vi
+            .fn()
+            .mockImplementation(({ accountId }) =>
+              Promise.resolve(page(accountId === accountA.accountId ? items : [])),
+            ),
+        },
+        accounts,
+      );
+      expect(document.body.textContent).toContain("Subject friend-1");
+      expect(document.body.textContent).not.toContain("Subject held");
+      items = [friend("held"), friend("friend-1")];
+      document.dispatchEvent(new Event("visibilitychange"));
+      await settle();
+      await settle();
+      visibility.mockRestore();
+      expect(document.body.textContent).toContain("Subject held");
+    });
+
     it("keeps a blocked letter the request did not archive out after the next read", async () => {
       let items: MailThreadListItem[] = [waiting("lena-1"), friend("friend-1")];
       const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");

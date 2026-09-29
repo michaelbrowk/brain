@@ -552,20 +552,24 @@ carries one: a decision names that sender, and neither the first entry of
 `participants` nor a Reply-To is that. It is tier 5 with `newSender` and
 leaves with it in every lower projection. The name is passed through for the
 UI to say and is never written to `senders.sqlite3`. While the switch is on, a
-thread in the Inbox whose first sender the archiver's own rule blocks (the
-address's block, or the domain's block for an address the owner does not
-know) carries `senderBlocked: true` until the next archive step takes it out
-of the Inbox; no waiting thread carries it, and it leaves the lower
-projections with the other two. A thread the standing block already archived
-and the owner put back, with nothing newer since from anyone but the owner,
-is one the archiver leaves, and it carries no mark: the check reads the
-thread's own archive record, as `ownerMovedBack` does first. An IMAP letter
-put back comes back under a new UID and so as a thread with no record of its
-own; the archiver still recognises it by its Message-ID, the mark does not,
-and that copy stays marked, so Brain's Inbox leaves it out while All Mail
-still lists it. That residual is accepted. The mail push reads the mark to
-stay quiet about a letter already refused in the minute between its arrival
-and that archive, and the Inboxes in the UI leave a marked thread out.
+thread carries `senderBlocked: true` only while the next archive step will
+try to take it out of the Inbox: the mark reads the archiver's own targets
+(`archiveTargets`), so it cannot promise an archive the archiver will not
+make. Those are the Inbox threads within the archiver's scan whose first
+sender the archiver's rule blocks (the address's block, or the domain's block
+for an address the owner does not know), less the ones the owner put back
+after the block archived them with nothing newer since from anyone but him
+(by the thread's own record, or an IMAP copy by its Message-ID), and less
+the ones the archiver leaves alone for an hour after a failed archive. A
+thread in that hour carries no mark and shows in the Inbox until the next
+try, so a letter the provider refuses outright shows between its hourly
+tries rather than vanishing for good. The pre-check is cheap (a standing
+block for an Inbox letter), and the archiver's Inbox listing is read at most
+once per page and only when it passes. No waiting thread carries the mark,
+and it leaves the lower projections with the other two. The mail push reads
+it to stay quiet about a letter already refused in the minute between its
+arrival and that archive, and the Inboxes in the UI leave a marked thread
+out.
 
 **Replies.** A first message that carries `In-Reply-To` or `References`
 answers someone, and cold outreach carries neither, so a reply-shaped letter

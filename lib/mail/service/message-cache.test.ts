@@ -6135,3 +6135,39 @@ function conversationFixture(
     messages: Object.freeze(cached),
   });
 }
+
+/** Why the blocked mark reads the archiver's own listing: a thread's own read
+ *  still finds an Inbox thread the archiver's bounded scan never reaches. */
+describe("the archiver's Inbox scan", () => {
+  it("stops at the newest 5,000 threads, though an older one is still in the Inbox", async () => {
+    const { cache } = await createCache();
+    const generation = cache.beginInitial("100");
+    const total = 5_001;
+    let expected: string | null = null;
+    for (let start = 0; start < total; start += 100) {
+      const page = [];
+      for (let index = start; index < Math.min(start + 100, total); index += 1) {
+        page.push(
+          conversationFixture(`thread-${index}`, [
+            {
+              from: index === 0 ? "news@blocked.test" : `p${index}@example.test`,
+              sentAt: 1_000 + index,
+            },
+          ]),
+        );
+      }
+      const next = start + 100 < total ? `page-${start + 100}` : null;
+      cache.putInitialPage(generation, page, expected, next);
+      expected = next;
+    }
+    cache.completeInitial(generation, 10_000);
+
+    const scan = cache.listInboxThreadFirstSenders(() => false);
+    expect(scan.length).toBe(5_000);
+    expect(scan.some((thread) => thread.threadId === "thread-0")).toBe(false);
+    expect(cache.readThreadFirstSenders(["thread-0"]).get("thread-0")).toMatchObject({
+      address: "news@blocked.test",
+      inInbox: true,
+    });
+  }, 60_000);
+});

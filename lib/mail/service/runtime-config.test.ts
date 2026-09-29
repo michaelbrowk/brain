@@ -37,24 +37,31 @@ describe("mail service runtime paths", () => {
 });
 
 describe("mail sync cadence", () => {
-  it("polls every minute, and Gmail every twenty seconds, when nothing is set", () => {
+  it("polls every minute, Gmail every twenty seconds, and holds IMAP IDLE when nothing is set", () => {
     expect(readMailSyncCadenceConfig({})).toEqual({
       intervalMs: 60_000,
       gmailIntervalMs: 20_000,
+      imapIdle: true,
     });
   });
 
-  it("takes both intervals from the environment", () => {
+  it("takes both intervals and the IDLE switch from the environment", () => {
     expect(
       readMailSyncCadenceConfig({
         syncIntervalMs: "120000",
         gmailIntervalMs: "15000",
+        imapIdle: "1",
       }),
-    ).toEqual({ intervalMs: 120_000, gmailIntervalMs: 15_000 });
+    ).toEqual({ intervalMs: 120_000, gmailIntervalMs: 15_000, imapIdle: true });
     // A fallback set below the Gmail default carries Gmail down with it.
     expect(readMailSyncCadenceConfig({ syncIntervalMs: "10000" })).toEqual({
       intervalMs: 10_000,
       gmailIntervalMs: 10_000,
+      imapIdle: true,
+    });
+    // `0` is the one way to turn IDLE off; the poll then carries IMAP alone.
+    expect(readMailSyncCadenceConfig({ imapIdle: "0" })).toMatchObject({
+      imapIdle: false,
     });
   });
 
@@ -69,6 +76,9 @@ describe("mail sync cadence", () => {
       // A Gmail cadence slower than the fallback would make the backoff a
       // speed-up.
       { syncIntervalMs: "30000", gmailIntervalMs: "40000" },
+      { imapIdle: "" },
+      { imapIdle: "true" },
+      { imapIdle: "off" },
     ]) {
       expect(() => readMailSyncCadenceConfig(input), JSON.stringify(input)).toThrow();
     }

@@ -862,6 +862,167 @@ describe("per-provider sync cadence", () => {
   });
 });
 
+describe("IMAP IDLE in the scheduler", () => {
+  function idlePort(log: string[] = []) {
+    return {
+      afterSync: vi.fn((accountId: string) => {
+        log.push(`idle ${accountId}`);
+      }),
+      retain: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(async () => undefined),
+    };
+  }
+
+  it("hands an IMAP account to IDLE once its sync has caught up, and never a Gmail one", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const log: string[] = [];
+    const idle = idlePort(log);
+    let imapPages = 0;
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA, accountB],
+        listSyncAccounts: async () => [
+          { accountId: accountA, providerKind: "gmail" },
+          { accountId: accountB, providerKind: "imap" },
+        ],
+        runBackgroundSyncStep: async (accountId) => {
+          if (accountId === accountA) return changed();
+          imapPages += 1;
+          log.push(`page ${imapPages}`);
+          return imapPages === 1 ? syncResult(true) : changed();
+        },
+      },
+      { initialDelayMs: 10, intervalMs: 60_000, gmailIntervalMs: 20_000, idle },
+    );
+
+    scheduler.start();
+    expect(idle.start).toHaveBeenCalledOnce();
+    await vi.advanceTimersByTimeAsync(10);
+    // The first page still had more to come; IDLE waits for the second.
+    expect(log).toEqual(["page 1", "page 2", `idle ${accountB}`]);
+    expect(idle.retain).toHaveBeenLastCalledWith([accountB]);
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(idle.afterSync.mock.calls.map(([accountId]) => accountId)).toEqual([
+      accountB,
+      accountB,
+    ]);
+    await scheduler.stop();
+  });
+
+  it("runs the account IDLE asks for at once, without the accounts that are not due", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const calls: Array<{ accountId: string; at: number }> = [];
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA, accountB],
+        listSyncAccounts: async () => [
+          { accountId: accountA, providerKind: "imap" },
+          { accountId: accountB, providerKind: "imap" },
+        ],
+        runBackgroundSyncStep: async (accountId) => {
+          calls.push({ accountId, at: Date.now() });
+          return syncResult(false);
+        },
+      },
+      { initialDelayMs: 10, intervalMs: 60_000, idle: idlePort() },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(5_000);
+    scheduler.requestSync(accountB);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toEqual([
+      { accountId: accountA, at: 10 },
+      { accountId: accountB, at: 10 },
+      { accountId: accountB, at: 5_000 },
+    ]);
+    // The poll underneath carries on: B's next pass is a fallback interval
+    // after the one IDLE asked for, A's after its own.
+    await vi.advanceTimersByTimeAsync(60_010);
+    expect(timesOf(calls, accountA)).toEqual([10, 60_010]);
+    expect(timesOf(calls, accountB)).toEqual([10, 5_000, 65_000]);
+    await scheduler.stop();
+  });
+
+  it("keeps one pass per account in flight however often IDLE asks during it", async () => {
+    vi.useFakeTimers({ now: 0 });
+    let inFlight = 0;
+    let most = 0;
+    let calls = 0;
+    let release: (() => void) | undefined;
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA],
+        listSyncAccounts: async () => [{ accountId: accountA, providerKind: "imap" }],
+        runBackgroundSyncStep: async () => {
+          calls += 1;
+          inFlight += 1;
+          most = Math.max(most, inFlight);
+          if (calls === 2) {
+            await new Promise<void>((resolve) => {
+              release = resolve;
+            });
+          }
+          inFlight -= 1;
+          return syncResult(false);
+        },
+      },
+      { initialDelayMs: 10, intervalMs: 60_000, continuationDelayMs: 25, idle: idlePort() },
+    );
+
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(10);
+    scheduler.requestSync(accountA);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toBe(2);
+    for (let request = 0; request < 50; request += 1) scheduler.requestSync(accountA);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(calls).toBe(2);
+    release?.();
+    await vi.advanceTimersByTimeAsync(24);
+    expect(calls).toBe(2);
+    // Fifty requests during the pass are one pass after it.
+    await vi.advanceTimersByTimeAsync(1);
+    expect(calls).toBe(3);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(calls).toBe(3);
+    expect(most).toBe(1);
+    await scheduler.stop();
+  });
+
+  it("stops IDLE with the scheduler, ignores it while stopped, and starts it again", async () => {
+    vi.useFakeTimers({ now: 0 });
+    const idle = idlePort();
+    let calls = 0;
+    const scheduler = new MailBackgroundSyncScheduler(
+      {
+        listAccountIds: async () => [accountA],
+        listSyncAccounts: async () => [{ accountId: accountA, providerKind: "imap" }],
+        runBackgroundSyncStep: async () => {
+          calls += 1;
+          return syncResult(false);
+        },
+      },
+      { initialDelayMs: 10, intervalMs: 60_000, idle },
+    );
+
+    scheduler.requestSync(accountA);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(calls).toBe(0);
+    scheduler.start();
+    await vi.advanceTimersByTimeAsync(10);
+    await scheduler.stop();
+    expect(idle.stop).toHaveBeenCalledOnce();
+    scheduler.requestSync(accountA);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(calls).toBe(1);
+    scheduler.start();
+    expect(idle.start).toHaveBeenCalledTimes(2);
+    await scheduler.stop();
+  });
+});
+
 function changed(): MailBackgroundSyncStep {
   return syncResult(false, false, 1);
 }

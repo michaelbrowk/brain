@@ -2,9 +2,11 @@ import type { ImapFlowOptions } from "imapflow";
 import { describe, expect, it, vi } from "vitest";
 
 import type { MailDnsResolverPort, ValidatedMailDialTarget } from "../ports";
+import { MAIL_RESOURCE_LIMITS } from "../security";
 import type { MultiMailAccountStore } from "./account-store";
 import type { StoredImapMailAccount } from "./account-types";
 import {
+  createIdleOptions,
   createReadOptions,
   createVerificationOptions,
   ImapFlowCredentialVerifier,
@@ -443,6 +445,170 @@ describe("ImapFlow read session factory", () => {
     expect(createClient).toHaveBeenCalledTimes(2);
   });
 });
+
+describe("ImapFlow IDLE session", () => {
+  it("pins the literal target and outlives the IDLE restart without idling on its own", () => {
+    const options = createIdleOptions(
+      targetFixture(),
+      "person@example.test",
+      Buffer.from("test-only-password"),
+      8_000,
+    );
+
+    expect(options).toMatchObject({
+      host: "93.184.216.34",
+      port: 993,
+      servername: "imap.example.test",
+      secure: true,
+      doSTARTTLS: false,
+      logger: false,
+      logRaw: false,
+      emitLogs: false,
+      disableAutoIdle: true,
+      disableCompression: true,
+      disableAutoEnable: true,
+      disableBinary: true,
+      qresync: false,
+      connectionTimeout: 8_000,
+      greetingTimeout: 8_000,
+      maxLineLength: 64 * 1024,
+      maxLiteralSize: 64 * 1024,
+      tls: { rejectUnauthorized: true, minVersion: "TLSv1.2" },
+    });
+    // Quiet for a whole IDLE is normal: the socket gives up only after the
+    // supervisor would already have restarted it.
+    expect(options.socketTimeout).toBeGreaterThan(MAIL_RESOURCE_LIMITS.idleRestartMs);
+    expect(options).not.toHaveProperty("proxy");
+    expect(options).not.toHaveProperty("maxIdleTime");
+  });
+
+  it("examines INBOX read-only and hands the session over open", async () => {
+    const order: string[] = [];
+    const expected = imapAccountFixture();
+    const password = Buffer.from("test-only-password");
+    const client = idleClientFixture();
+    const factory = new ImapFlowReadSessionFactory({
+      dns: { resolve: vi.fn(async () => [targetFixture()]) },
+      store: storeFixture(expected, password, order),
+      createClient: vi.fn(),
+      createIdleClient: vi.fn((options: ImapFlowOptions) => {
+        order.push("client_created");
+        expect(options.auth?.pass).toBe("test-only-password");
+        return client;
+      }),
+      now: () => 1_000,
+    });
+
+    await expect(
+      factory.openIdleSession(expected.account.accountId, new AbortController().signal),
+    ).resolves.toBe(client);
+    expect(order).toEqual(["metadata_read", "credential_loaded", "client_created"]);
+    // EXAMINE, not SELECT, and nothing after it: holding IDLE cannot clear
+    // \Recent, move, flag or expunge anything.
+    expect(client.mailboxOpen).toHaveBeenCalledExactlyOnceWith("INBOX", { readOnly: true });
+    expect(client.idle).not.toHaveBeenCalled();
+    expect(client.noop).not.toHaveBeenCalled();
+    expect(client.close).not.toHaveBeenCalled();
+    expect(password.equals(Buffer.alloc(password.length))).toBe(true);
+  });
+
+  it("refuses an account that is not a connected IMAP one before DNS or a secret", async () => {
+    const imap = imapAccountFixture();
+    for (const stored of [
+      { ...imap, status: "reauth_required" as const },
+      { ...imap, providerKind: "gmail" as const },
+      null,
+    ]) {
+      const store = storeFixture(imap, Buffer.from("unused"));
+      vi.mocked(store.readAccount).mockResolvedValue(
+        stored as unknown as StoredImapMailAccount,
+      );
+      const dns: MailDnsResolverPort = { resolve: vi.fn() };
+      const createIdleClient = vi.fn();
+      const factory = new ImapFlowReadSessionFactory({
+        dns,
+        store,
+        createClient: vi.fn(),
+        createIdleClient,
+      });
+      await expect(
+        factory.openIdleSession(imap.account.accountId, new AbortController().signal),
+      ).rejects.toMatchObject({ code: "account_state_invalid" });
+      expect(dns.resolve).not.toHaveBeenCalled();
+      expect(store.loadProvisionedAccount).not.toHaveBeenCalled();
+      expect(createIdleClient).not.toHaveBeenCalled();
+    }
+  });
+
+  it("closes a session whose INBOX will not open, and tries no other address after login", async () => {
+    const expected = imapAccountFixture();
+    const client = idleClientFixture();
+    client.mailboxOpen.mockRejectedValueOnce(new Error("SECRET provider transcript"));
+    const createIdleClient = vi.fn(() => client);
+    const factory = new ImapFlowReadSessionFactory({
+      dns: {
+        resolve: vi.fn(async () => [
+          targetFixture(),
+          { ...targetFixture(), address: "93.184.216.35" },
+        ]),
+      },
+      store: storeFixture(expected, Buffer.from("test-only-password")),
+      createClient: vi.fn(),
+      createIdleClient,
+      now: () => 1_000,
+    });
+
+    const failure = await factory
+      .openIdleSession(expected.account.accountId, new AbortController().signal)
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "imap_connection_failed" });
+    expect(String(failure)).not.toContain("SECRET");
+    expect(client.close).toHaveBeenCalled();
+    expect(createIdleClient).toHaveBeenCalledOnce();
+  });
+
+  it("closes the client when the caller aborts while it connects", async () => {
+    const expected = imapAccountFixture();
+    const client = idleClientFixture();
+    client.connect.mockImplementationOnce(() => new Promise<void>(() => undefined));
+    const controller = new AbortController();
+    const factory = new ImapFlowReadSessionFactory({
+      dns: { resolve: vi.fn(async () => [targetFixture()]) },
+      store: storeFixture(expected, Buffer.from("test-only-password")),
+      createClient: vi.fn(),
+      createIdleClient: () => client,
+      now: () => 1_000,
+    });
+
+    const opening = factory.openIdleSession(expected.account.accountId, controller.signal);
+    await vi.waitFor(() => expect(client.connect).toHaveBeenCalled());
+    controller.abort();
+    await expect(opening).rejects.toMatchObject({ code: "imap_connection_timeout" });
+    expect(client.close).toHaveBeenCalled();
+  });
+});
+
+function idleClientFixture() {
+  const client = {
+    secureConnection: true,
+    authenticated: true,
+    mailbox: false as false | { path: string; readOnly?: boolean },
+    capabilities: new Map<string, boolean | number>([
+      ["IMAP4rev1", true],
+      ["IDLE", true],
+    ]),
+    connect: vi.fn<() => Promise<void>>().mockResolvedValue(undefined),
+    mailboxOpen: vi.fn(async (path: string) => {
+      client.mailbox = { path, readOnly: true };
+      return client.mailbox;
+    }),
+    idle: vi.fn(async () => true),
+    noop: vi.fn(async () => undefined),
+    close: vi.fn(),
+    on: vi.fn().mockReturnThis(),
+  };
+  return client;
+}
 
 function connectRejects(code: string) {
   const client = clientFixture();

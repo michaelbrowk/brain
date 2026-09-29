@@ -23,6 +23,7 @@ import { CompleteSetMailDnsResolver } from "./dns";
 import {
   ProviderNeutralMailDraftService,
 } from "./drafts";
+import { MailImapIdleSupervisor } from "./imap-idle";
 import {
   ImapFlowCredentialVerifier,
   ImapFlowReadSessionFactory,
@@ -66,6 +67,7 @@ async function main(): Promise<void> {
   const cadence = readMailSyncCadenceConfig({
     syncIntervalMs: process.env.BRAIN_MAIL_SYNC_INTERVAL_MS,
     gmailIntervalMs: process.env.BRAIN_MAIL_GMAIL_INTERVAL_MS,
+    imapIdle: process.env.BRAIN_MAIL_IMAP_IDLE,
   });
   const store = new SqliteMailAccountStore(runtime);
   await store.initialize();
@@ -73,6 +75,16 @@ async function main(): Promise<void> {
   // One bounded read-only IMAP session factory serves metadata sync and raw
   // message fetches alike, so both paths share DNS and binding validation.
   const imapSessions = new ImapFlowReadSessionFactory({ dns, store });
+  // IDLE asks the scheduler for passes, and the scheduler is built further
+  // down; the holder closes that cycle the way the kick holder below does.
+  let requestBackgroundSync: (accountId: string) => void = () => undefined;
+  const imapIdle = cadence.imapIdle
+    ? new MailImapIdleSupervisor({
+        connector: imapSessions,
+        onChange: (accountId) => requestBackgroundSync(accountId),
+        onEvent: writeServiceLog,
+      })
+    : null;
   const messages = new MultiAccountMailMessageService({
     stateDirectory: runtime.stateDirectory,
     store,
@@ -187,6 +199,9 @@ async function main(): Promise<void> {
     gmailSender,
     outbox,
     content,
+    // A removed account's IDLE session, or one logged in with the password
+    // an edit is replacing, closes before the change commits.
+    ...(imapIdle ? [imapIdle] : []),
   ]);
   const protocolMutationGuard: MailAccountProtocolMutationGuard = {
     async run<T>(
@@ -227,8 +242,12 @@ async function main(): Promise<void> {
     privacyCache: content,
     searchIndex: messages,
     ...(senderScreen ? { senders: senderScreen.screen } : {}),
+    // The scheduler owns IDLE's lifetime, so the pause, the Mail switch and
+    // shutdown close every session through the stop they already call.
+    ...(imapIdle ? { idle: imapIdle } : {}),
   });
   kickBackgroundSync = () => backgroundSync.kick();
+  requestBackgroundSync = (accountId) => backgroundSync.requestSync(accountId);
   // Everything the pause turns off, in the order they are started below.
   // "Off means nothing leaves" is why the two send-side workers travel in
   // that list beside the receive-side scheduler, and why the list is built by

@@ -427,6 +427,7 @@ no account ever has two passes in flight. Its variables live in
 | --- | ---: | --- |
 | `BRAIN_MAIL_SYNC_INTERVAL_MS` | 60000 | How often every account syncs at the least. |
 | `BRAIN_MAIL_GMAIL_INTERVAL_MS` | 20000 | A Gmail account's own cadence. |
+| `BRAIN_MAIL_IMAP_IDLE` | 1 | IMAP IDLE on each custom-domain Inbox; `0` turns it off. |
 
 A Gmail pass is one `history.list` call against the stored history id, so three
 accounts at 20 s make nine calls a minute against a quota of 250 units a
@@ -436,7 +437,19 @@ from the Mail surface, puts it back on 20 s. Both values are whole
 milliseconds between 5000 and 3600000, and the Gmail one may not be slower
 than the fallback. Anything else stops the service at startup with
 `mail_service_start_failed`, because a service that guessed would poll a
-provider at a rate nobody chose.
+provider at a rate nobody chose. The IDLE switch is `0` or `1` for the same
+reason.
+
+A custom-domain account keeps the 60 s poll and, with IDLE on, holds one more
+connection open to its server: INBOX examined read-only, and a new letter,
+an expunge or a flag change starts a sync within seconds. The journal shows
+one `mail_imap_idle_connected` per session. A server without IDLE, or a
+session that drops or will not open, writes `mail_imap_idle_fallback` with a
+`reason` and the `failureCount` in a row, and the account is asked again
+after 1, 2, 4, 8 and 16 minutes, then every 30, so a reconnect storm would be
+a run of those lines with the count climbing. A host that caps concurrent
+sessions per user sees the extra connection; set `BRAIN_MAIL_IMAP_IDLE=0` there
+(`docs/mail-architecture.md`, sections 8 and 11).
 
 ## Attachment privacy cache cutover
 

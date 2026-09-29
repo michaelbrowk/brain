@@ -63,6 +63,18 @@ export interface MailBackgroundSenderPort {
 }
 
 /**
+ * IMAP IDLE as the scheduler drives it (`imap-idle.ts`). IDLE asks for passes
+ * through `requestSync`; the scheduler tells it when an IMAP account's sync
+ * has caught up, which accounts still sync, and when Mail stops or starts.
+ */
+export interface MailBackgroundIdlePort {
+  afterSync(accountId: string): void;
+  retain(accountIds: readonly string[]): void;
+  start(): void;
+  stop(): Promise<void>;
+}
+
+/**
  * One serialized poller for the isolated service. A failed account never
  * prevents the remaining accounts from syncing, and a slow pass cannot overlap
  * the next one. Provider-specific backoff stays inside the sync service.
@@ -73,7 +85,8 @@ export interface MailBackgroundSenderPort {
  * interval until a pass brings a change or the owner asks for the account.
  * Every other account is due every `intervalMs`. The scheduler is one loop, so
  * no account ever has two passes in flight, and a timer pass takes only the
- * accounts that are due.
+ * accounts that are due. An IMAP account holding IDLE keeps that poll as its
+ * recovery, and IDLE's requests for a pass go through the same loop.
  */
 export class MailBackgroundSyncScheduler {
   private readonly port: MailBackgroundSyncPort;
@@ -85,11 +98,14 @@ export class MailBackgroundSyncScheduler {
   private readonly privacyCache: MailBackgroundPrivacyCachePort | null;
   private readonly searchIndex: MailBackgroundSearchIndexPort | null;
   private readonly senders: MailBackgroundSenderPort | null;
+  private readonly idle: MailBackgroundIdlePort | null;
   private readonly accountQueue: string[] = [];
   private readonly nextEligibleAt = new Map<string, number>();
   private readonly syncBackoffUntil = new Map<string, number>();
   private readonly providers = new Map<string, MailBackgroundSyncProvider | null>();
   private readonly emptyPasses = new Map<string, number>();
+  /** Accounts IDLE asked for while a pass was in flight. */
+  private readonly requested = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private timerDueAt = 0;
   private controller: AbortController | null = null;
@@ -108,6 +124,7 @@ export class MailBackgroundSyncScheduler {
       readonly privacyCache?: MailBackgroundPrivacyCachePort;
       readonly searchIndex?: MailBackgroundSearchIndexPort;
       readonly senders?: MailBackgroundSenderPort;
+      readonly idle?: MailBackgroundIdlePort;
     } = {},
   ) {
     this.port = port;
@@ -149,14 +166,17 @@ export class MailBackgroundSyncScheduler {
       throw new Error("mail background senders step is invalid");
     }
     this.senders = options.senders ?? null;
+    this.idle = options.idle ?? null;
   }
 
   start(): void {
     if (this.started) return;
     this.started = true;
+    this.idle?.start();
     this.schedule(this.initialDelayMs);
   }
 
+  /** Pause and shutdown: the pass in flight drains and IDLE closes. */
   async stop(): Promise<void> {
     this.started = false;
     this.kickRequested = false;
@@ -164,11 +184,28 @@ export class MailBackgroundSyncScheduler {
     this.timer = null;
     this.controller?.abort();
     await this.inFlight?.catch(() => undefined);
+    await this.idle?.stop();
     this.accountQueue.length = 0;
     this.nextEligibleAt.clear();
     this.syncBackoffUntil.clear();
     this.providers.clear();
     this.emptyPasses.clear();
+    this.requested.clear();
+  }
+
+  /**
+   * IDLE saw INBOX change (or restarted): one pass of this account now, or
+   * right after the pass in flight. Requests during a pass coalesce into that
+   * one follow-up, so an update storm is still one pass at a time.
+   */
+  requestSync(accountId: string): void {
+    if (!this.started) return;
+    if (this.inFlight !== null) {
+      this.requested.add(accountId);
+      return;
+    }
+    this.nextEligibleAt.delete(accountId);
+    void this.runNow();
   }
 
   /**
@@ -220,6 +257,13 @@ export class MailBackgroundSyncScheduler {
         if (this.kickRequested) {
           this.kickRequested = false;
           this.nextEligibleAt.clear();
+          hasContinuation = true;
+        }
+        if (this.requested.size > 0) {
+          for (const accountId of this.requested) {
+            this.nextEligibleAt.delete(accountId);
+          }
+          this.requested.clear();
           hasContinuation = true;
         }
         if (this.started) {
@@ -314,6 +358,12 @@ export class MailBackgroundSyncScheduler {
         if (!active.has(accountId)) state.delete(accountId);
       }
     }
+    // An account removed, disconnected or parked for reauth loses its IDLE.
+    this.idle?.retain(
+      accounts
+        .filter((account) => account.providerKind === "imap")
+        .map((account) => account.accountId),
+    );
 
     let pages = 0;
     while (
@@ -354,6 +404,13 @@ export class MailBackgroundSyncScheduler {
         this.recordSyncOutcome(accountId, changed);
       }
       if (signal.aborted) return false;
+      // Straight after the sync rather than after the cache steps below, so
+      // IDLE is back on INBOX while the bodies download. An account whose
+      // provider is resting still gets here, which keeps IDLE's own backoff
+      // moving without a timer of its own.
+      if (!syncHasMore && this.providers.get(accountId) === "imap") {
+        this.idle?.afterSync(accountId);
+      }
       let privacyHasMore = false;
       if (this.privacyCache !== null) {
         try {

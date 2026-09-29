@@ -2670,6 +2670,7 @@ export function MailSurface({
    *  it has to be found in usually arrives after it.
    *
    *  Three answers, in this order. The letter is in the list in hand, and
+   *  that list is its Inbox or the mailbox the request names, and
    *  `selectThread` opens it exactly as a press on the row would. It is in
    *  another account or another mailbox, and the column moves there first,
    *  by way of the letter's own Inbox and at most once per kind of move, and
@@ -2788,12 +2789,23 @@ export function MailSurface({
       ? pendingOpen.mailboxId
       : "inbox";
 
-    const loaded = loadedThread(
-      pendingOpen,
-      selectedAccountId,
-      threadState,
-      unifiedState,
-    );
+    // The list on screen has not committed since the column last moved, so
+    // "not in the list" is not yet an answer, and neither is "in it": the
+    // rows still standing belong to the folder the column just left.
+    const listPending =
+      threadState.kind === "loading" || threadState === ledger.listAtMove;
+
+    // The list in hand answers only where the request would have looked
+    // anyway: the mailbox it names, or the Inbox every request tries first
+    // (the merged column is Inbox too). All Mail holds most of the Inbox, and
+    // a notification's letter found there opened in All Mail, without its
+    // Archive, only because All Mail was the folder on screen.
+    const listAnswers =
+      (selectedMailboxId === mailboxId || selectedMailboxId === "inbox") &&
+      (selectedAccountId === UNIFIED_ACCOUNT_ID || !listPending);
+    const loaded = listAnswers
+      ? loadedThread(pendingOpen, selectedAccountId, threadState, unifiedState)
+      : null;
     if (loaded) {
       // The ledger, not `pendingOpen === null`, is what stops a development
       // double invoke of this effect from opening the same letter twice: the
@@ -2808,10 +2820,6 @@ export function MailSurface({
 
     const sameAccount = selectedAccountId === pendingOpen.accountId;
     const plain = searchQuery.trim() === "";
-    // The list on screen has not committed since the column last moved, so
-    // "not in the list" is not yet an answer.
-    const listPending =
-      threadState.kind === "loading" || threadState === ledger.listAtMove;
 
     // At the letter's own mailbox with no query: its page was the last list
     // to look in, and the letter is fetched from that mailbox.

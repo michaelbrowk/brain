@@ -9168,6 +9168,103 @@ describe("MailSurface", () => {
       expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
     });
 
+    /** A letter in the list on screen is not yet the answer. All Mail holds
+     *  most of the Inbox too, and a notification's letter found there opened
+     *  in All Mail, without its Archive, only because All Mail was the folder
+     *  showing. The list counts when it is the mailbox the request named, or
+     *  the Inbox every request looks in first. */
+    it("opens a notification's letter in Inbox even when All Mail on screen lists it", async () => {
+      const client = makeClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      expect(document.body.textContent).toContain("Lunch this Friday?");
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, thread.threadId);
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+      await until(
+        () => vi.mocked(client.readThread).mock.calls.length > 0,
+        "the letter is read from Inbox",
+      );
+
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+      });
+      expect(client.readMailboxThread).not.toHaveBeenCalled();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+      expect(readerButtons()).toContain("Archive");
+    });
+
+    it("does not answer from the folder the column just left for Inbox", async () => {
+      // The letter left Inbox since the notification was written. The reset
+      // moves the column to Inbox while All Mail's rows are still the list in
+      // hand, and those rows are not Inbox's: opening from them read the
+      // letter from Inbox and put "Message couldn't load" on screen.
+      const onToast = vi.fn();
+      const client = makeClient({
+        listThreads: vi.fn().mockResolvedValue({ ...threadPage, items: [] }),
+        readThread: vi
+          .fn()
+          .mockRejectedValue(new MailApiError(404, "mail_thread_not_found")),
+      });
+      await act(async () =>
+        root.render(
+          <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+        ),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      expect(document.body.textContent).toContain("Lunch this Friday?");
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, thread.threadId);
+      });
+      await until(() => pendingOpenThread() === null, "the request is dropped");
+      await settle();
+
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+      expect(reader()?.textContent).toContain("Choose a message");
+      expect(reader()?.textContent).not.toContain("couldn’t load");
+      expect(onToast).not.toHaveBeenCalled();
+    });
+
+    it("opens a palette pick in All Mail when All Mail on screen lists it", async () => {
+      const client = makeClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      const listReads = vi.mocked(client.listMailboxThreads).mock.calls.length;
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, thread.threadId, "all");
+      });
+      await until(
+        () => vi.mocked(client.readMailboxThread).mock.calls.length > 0,
+        "the letter is read from All Mail",
+      );
+
+      expect(client.readMailboxThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        mailboxId: "all",
+        threadId: thread.threadId,
+      });
+      expect(client.readThread).not.toHaveBeenCalled();
+      // Answered from the list in hand: the column did not move to look.
+      expect(client.listMailboxThreads).toHaveBeenCalledTimes(listReads);
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: All Mail");
+      expect(pendingOpenThread()).toBeNull();
+    });
+
     it("answers in Inbox when the account has no such mailbox", async () => {
       const client = makeClient({
         loadAccounts: vi.fn().mockResolvedValue([imapAccount]),

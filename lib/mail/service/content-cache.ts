@@ -1201,9 +1201,10 @@ export class SqliteMailContentCache {
    * The next cohort message whose body the background should fetch: the
    * newest twenty first, newest to oldest, then the rest from the oldest up.
    * A message whose current body is already here, or on its way, is not a
-   * candidate, whoever fetched it. A body the byte budget evicted is not
-   * fetched again while its message stays in the cohort, or the budget and
-   * the prefetch would take turns.
+   * candidate, whoever fetched it, and neither is one in a thread past
+   * `privacyPrefetchMaxThreadBytes`: that one waits for its open. A body the
+   * byte budget evicted is not fetched again while its message stays in the
+   * cohort, or the budget and the prefetch would take turns.
    */
   async findBackgroundContentCandidate(now: number): Promise<string | null> {
     const inspectedAt = validateTimestamp(now);
@@ -1214,6 +1215,7 @@ export class SqliteMailContentCache {
              FROM (
                SELECT cohort.provider_message_id, cohort.source_generation,
                       cohort.content_evicted_at, message.thread_id,
+                      thread.size_bytes,
                       ROW_NUMBER() OVER (
                         ORDER BY message.sent_at DESC, message.message_id DESC
                       ) AS recency
@@ -1223,6 +1225,10 @@ export class SqliteMailContentCache {
                    ON message.account_id = cohort.account_id
                   AND message.generation = cohort.source_generation
                   AND message.message_id = cohort.provider_message_id
+                 JOIN threads AS thread
+                   ON thread.account_id = message.account_id
+                  AND thread.generation = message.generation
+                  AND thread.thread_id = message.thread_id
                 WHERE cohort.account_id = ?
                   AND cohort.source_generation = sync.active_generation
              ) AS ranked
@@ -1230,6 +1236,7 @@ export class SqliteMailContentCache {
                ON content.account_id = ?
               AND content.provider_message_id = ranked.provider_message_id
             WHERE ranked.content_evicted_at IS NULL
+              AND ranked.size_bytes <= ?
               AND (
                 content.provider_message_id IS NULL OR
                 content.source_generation <> ranked.source_generation OR
@@ -1247,6 +1254,7 @@ export class SqliteMailContentCache {
         .get(
           this.accountId,
           this.accountId,
+          MAIL_RESOURCE_LIMITS.privacyPrefetchMaxThreadBytes,
           this.contentFormatVersion,
           MAIL_RESOURCE_LIMITS.remoteImageTransientRetryMs,
           inspectedAt,

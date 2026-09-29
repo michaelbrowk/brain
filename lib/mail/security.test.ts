@@ -58,6 +58,7 @@ describe("mail security and resource contracts", () => {
       egressTunnelAttachmentBytes: 1024 * 1024,
       privacyPrefetchMaxMessagesPerAccount: 200,
       privacyPrefetchMaxAgeMs: 30 * 24 * 60 * 60 * 1_000,
+      privacyPrefetchMaxThreadBytes: 4 * 1024 * 1024,
       remoteImagePrefetchMaxMessagesPerAccount: 3,
       remoteImagePrefetchMaxAgeMs: 7 * 24 * 60 * 60 * 1_000,
       bodyCacheMaxBytes: 48 * 1024 * 1024,

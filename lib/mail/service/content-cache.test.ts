@@ -1566,6 +1566,36 @@ describe("background body cohort and byte budget", () => {
     ]);
   });
 
+  it("leaves a message whose thread is past the prefetch size for its open", async () => {
+    const fixture = await createFixture({ active: true });
+    const ceiling = MAIL_RESOURCE_LIMITS.privacyPrefetchMaxThreadBytes;
+    activateThreads(
+      fixture,
+      [
+        { threadId: "heavy", sentAt: NOW - 1 * HOUR, sizeEstimate: ceiling + 1 },
+        { threadId: "at-limit", sentAt: NOW - 2 * HOUR, sizeEstimate: ceiling },
+        { threadId: "light", sentAt: NOW - 3 * HOUR, sizeEstimate: 60 * 1024 },
+      ],
+      "200",
+    );
+    await expect(
+      fixture.content.refreshBackgroundPrivacyCohort(NOW),
+    ).resolves.toEqual({ selectedMessages: 3, purgedContent: false });
+
+    const order: string[] = [];
+    for (let step = 0; step < 4; step += 1) {
+      const messageId = await fixture.content.findBackgroundContentCandidate(NOW);
+      if (messageId === null) break;
+      order.push(messageId);
+      await claimLease(fixture.content, messageId, NOW);
+    }
+    expect(order).toEqual(["message-at-limit", "message-light"]);
+    // The owner's open of the heavy one fetches it as before.
+    await expect(
+      fixture.content.claim("message-heavy", NOW),
+    ).resolves.toMatchObject({ kind: "claimed" });
+  });
+
   it("fetches images unasked only for the three newest messages of the last seven days", async () => {
     const fixture = await createFixture({ active: true });
     const entries = [
@@ -1907,6 +1937,7 @@ function threadFixture(
   sentAt: number,
   accountId = ACCOUNT_ID,
   inInbox = true,
+  sizeEstimate: number | null = null,
 ): CachedProviderThread {
   const message: CachedProviderMessage = Object.freeze({
     accountId,
@@ -1928,7 +1959,7 @@ function threadFixture(
     references: Object.freeze([]),
     listMessage: false,
     category: "people",
-    sizeEstimate: null,
+    sizeEstimate,
   });
   const thread: MailThreadListItem = Object.freeze({
     accountId,
@@ -1942,7 +1973,7 @@ function threadFixture(
     starred: false,
     hasAttachments: false,
     listMessage: false,
-    sizeBytes: 0,
+    sizeBytes: sizeEstimate ?? 0,
     category: "people",
     newSender: false,
   });
@@ -1963,6 +1994,7 @@ function activateThreads(
     readonly threadId: string;
     readonly sentAt: number;
     readonly inInbox?: boolean;
+    readonly sizeEstimate?: number;
   }[],
   historyId: string,
 ): void {
@@ -1970,7 +2002,13 @@ function activateThreads(
   fixture.messages.putInitialPage(
     generation,
     threads.map((entry) =>
-      threadFixture(entry.threadId, entry.sentAt, ACCOUNT_ID, entry.inInbox ?? true),
+      threadFixture(
+        entry.threadId,
+        entry.sentAt,
+        ACCOUNT_ID,
+        entry.inInbox ?? true,
+        entry.sizeEstimate ?? null,
+      ),
     ),
     null,
     null,

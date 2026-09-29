@@ -130,6 +130,16 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
   privacyPrefetchMaxMessagesPerAccount: 200,
   privacyPrefetchMaxAgeMs: 30 * 24 * 60 * 60 * 1_000,
   privacyPrefetchMaxFutureSkewMs: 5 * 60 * 1_000,
+  /* A cohort message whose thread the provider sizes past this is fetched
+   * when opened, not before. The size is what the sync already has, the sum
+   * of the thread's messages, so a long conversation can be held back with a
+   * big attachment. On the prefetch probe the service's peak follows the
+   * largest letter it parses: 148 MiB with 1 MiB marketing letters, 151 MiB
+   * with a 1.85 MiB attachment on them (about the most this admits), 186 MiB
+   * at 6 MiB and 220 MiB at 15 MiB, past the 217 MiB bar. Letters that size
+   * would also fill `bodyCacheMaxBytes` on their own: ten with 15 MiB
+   * attachments left 27 of 200 bodies under it. */
+  privacyPrefetchMaxThreadBytes: 4 * 1024 * 1024,
   /* The images a sync may fetch without an open, a prefix of the body cohort.
    * These stayed where they were when the body cohort grew: a fetched image
    * can be a tracking pixel, so more bodies on disk must not mean more pings

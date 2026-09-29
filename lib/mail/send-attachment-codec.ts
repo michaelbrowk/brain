@@ -66,21 +66,37 @@ export class MailSendAttachmentError extends Error {
  * name a path the sender never chose.
  */
 const UNSAFE_FILENAME = /[\u0000-\u001f\u007f"\\/]/u;
+const UNSAFE_FILENAME_CHARACTERS = new RegExp(UNSAFE_FILENAME.source, "gu");
 const MIME_TYPE =
   /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,126}$/;
 const STANDARD_BASE64 = /^[A-Za-z0-9+/]*={0,2}$/;
 
 /**
  * The two rules the service's MIME writer relies on as well, exported so one
- * list decides what may reach a header rather than two that drift.
+ * list decides what may reach a header rather than two that drift. The byte
+ * count is `TextEncoder`'s rather than `Buffer`'s because the compose sheet
+ * asks the same question in a browser, where there is no `Buffer`; both
+ * count a lone surrogate as the three bytes of its replacement character.
  */
 export function isSafeAttachmentFilename(value: unknown): value is string {
   return (
     typeof value === "string" &&
     value.length > 0 &&
-    Buffer.byteLength(value) <= MAIL_SEND_ATTACHMENT_LIMITS.maxFilenameBytes &&
+    new TextEncoder().encode(value).byteLength <=
+      MAIL_SEND_ATTACHMENT_LIMITS.maxFilenameBytes &&
     !UNSAFE_FILENAME.test(value)
   );
+}
+
+/**
+ * A name from someone's disk, made one the rule above admits: every character
+ * a header parameter cannot carry becomes an underscore. A file called
+ * `Report "final".pdf` is the writer's own file, and refusing it for its
+ * quotes would be refusing them for their punctuation. The byte cap is not
+ * this function's to meet; a name that is still too long is refused.
+ */
+export function safeAttachmentFilename(value: string): string {
+  return value.replace(UNSAFE_FILENAME_CHARACTERS, "_");
 }
 
 export function isSafeAttachmentMimeType(value: unknown): value is string {

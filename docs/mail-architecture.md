@@ -497,12 +497,19 @@ decision covers that domain only, not its subdomains.
 
 **The owner.** The owner's own addresses are every account's address plus
 every address the owner has been seen sending from: the From of each cached
-message the provider marks as sent (Gmail's `SENT` label), learned into
-`own_senders`. A thread whose first message is the owner's, by that mark or by
-address, is never gated and never archived, and a decision about an own
-address (address scope) or an own domain (domain scope) is refused with
-`mail_sender_own_address`. Domain scope is also refused for the big mail
-providers (`MAIL_SENDER_DOMAIN_SCOPE_REFUSED`, with
+message Gmail marks as sent (its `SENT` label), learned into `own_senders`.
+Only Gmail teaches aliases; an IMAP account syncs its Inbox alone and carries
+no sent mark, so an alias used only from IMAP stays unknown to the screen. A
+decision about an own address (address scope) or an own domain (domain
+scope) is refused with `mail_sender_own_address`, and a thread whose first
+From is an own address is never archived, on any provider. Whether such a
+thread is the owner's for the gate depends on the provider. On Gmail only the
+sent mark counts: a letter that merely claims an own address in its From is
+common spam there, so it waits like any stranger's and is not taken as known
+(the cost is that a letter the owner sends himself from another account waits
+once in a Gmail Inbox, and cannot be decided on). On IMAP, where there is no
+mark to ask, the address is trusted. Domain scope is also refused for the big
+mail providers (`MAIL_SENDER_DOMAIN_SCOPE_REFUSED`, with
 `mail_sender_domain_scope_refused`), and the state answer lists those
 domains and the owner's own as `domainScopeRefused`, so the UI never offers
 "Everyone at <domain>" for them.
@@ -516,9 +523,10 @@ the same way: `user_version` 1, and a newer file is refused. Its tables are
 added_at)`, `own_senders(address, added_at)`, `sender_decisions(decision_id,
 key, kind, decision, decided_at)`, `decision_effects` (the known entry an
 accept added, and every thread a block archived with the thread's newest date
-at the time, each `pending` until the provider has answered),
-`backfill_progress` (each account's cursors and the moment its backfill
-finished) and `pending_restores`. Only addresses, domains, thread ids and
+and its first message's Message-ID at the time, each `pending` until the
+provider has answered), `replaced_decisions` (the id a changed verdict
+retired, and the one that replaced it), `backfill_progress` (each account's
+cursors and the moment its backfill finished) and `pending_restores`. Only addresses, domains, thread ids and
 times are stored. A file that cannot be opened leaves the service running
 without the screen: every thread ungated, the routes answering
 `mail_senders_unavailable`.
@@ -537,16 +545,26 @@ shape, which strips stars and categories for as long as a release that pairs
 a new Brain with an old service lasts. A failure reading the screen answers
 `false` for the page rather than failing the list.
 
-**Replies.** Only a letter that starts a conversation can wait: a first
-message that carries `In-Reply-To` or `References` answers someone, and cold
-outreach carries neither. The cache keeps the answer in `messages.is_reply`,
-set by both adapters (Gmail from the two headers, IMAP from the envelope's
-In-Reply-To and a fetched `References` header), beside `messages.from_owner`
-for the sent mark. Both columns are additive on schema v1, so an older runtime
-ignores them and writes their defaults. On upgrade no resync is needed:
-`is_reply` is repaired from the stored references on every open, which is
-exact for IMAP and misses only a Gmail reply that sent In-Reply-To alone,
-and `from_owner` fills as each thread is refreshed by a sync.
+**Replies.** A first message that carries `In-Reply-To` or `References`
+answers someone, and cold outreach carries neither, so a reply-shaped letter
+passes unless it is a stranger's follow-up: it still waits when a Message-ID
+it names resolves in the cache to a letter from the same sender, or when that
+sender already has a letter waiting in the account (IMAP keeps one message a
+thread, so a cold sequence arrives as separate reply-shaped threads). A fresh
+stranger who forges `In-Reply-To` passes; nothing the cache holds says who
+they are, and that residual is accepted. The cache keeps the shape in
+`messages.is_reply`, set by both adapters (Gmail from the two headers, IMAP
+from the envelope's In-Reply-To), beside `messages.from_owner` for the sent
+mark, and looks messages up by Message-ID through `messages_rfc_message_idx`.
+IMAP does not fetch `References`: its length is the sender's to choose, a
+reply without In-Reply-To is gated like a first letter, the safe way, and the
+list-header parser steps over any field it does not read, so a long header
+never hides `List-Id`. Both columns and the index are additive on schema v1,
+so an older runtime ignores them and writes the column defaults. On upgrade
+no resync is needed: `is_reply` is repaired from the stored references on
+every open, which is exact for IMAP and misses only a Gmail reply that sent
+In-Reply-To alone, and `from_owner` fills as each thread is refreshed by a
+sync.
 
 **Known.** Switching the screen on is the moment known is computed. Each
 account's backfill, one scheduler step per account page beside the search
@@ -559,11 +577,15 @@ gating: the later of `enabled_at` and that moment. An account whose backfill
 has not finished gates nothing, and the others go on gating; that is also
 what an account whose cache cannot be read does. Once an account gates, its
 From phase stops, so a stranger stays a stranger; its Sent phase goes on
-reading new rows, so people the owner writes to from any client become known
-and new aliases become the owner's. A send that reaches `sent` through
-Brain, on either transport, makes its To and Cc known (the outbox store's
-`onSent`, which never sees Bcc), whether the owner or an agent sending in the
-owner's name wrote it. An Accept makes its address known.
+reading new rows. On Gmail, whose Sent mailbox is cached, that makes the
+people the owner writes to from any client known and teaches new aliases. An
+IMAP account caches its Inbox alone, so it learns only through Brain's own
+sends and the letters that reach its Inbox: someone the owner writes to from
+his phone over IMAP is known only once they write back or once the owner
+writes to them through Brain. A send that reaches `sent` through Brain, on
+either transport, makes its To and Cc known (the outbox store's `onSent`,
+which never sees Bcc), whether the owner or an agent sending in the owner's
+name wrote it. An Accept makes its address known.
 `backfillComplete` in the state answer turns true when every connected
 account has finished. The screen is on by default: the first start of a
 service that has it creates the file switched on.
@@ -580,19 +602,33 @@ inside the request: at most 200, stopping before the provider deadline, with
 whose archive is on record. The rest, and every later letter from a blocked
 sender, are archived by the scheduler after a sync pass that reached the
 provider, 25 a step. A thread the owner moved back to the Inbox by hand stays
-there until a letter newer than the archive arrives in it. It only archives,
+there until a letter newer than the archive arrives in it; an IMAP message
+comes back under a new UID and so a new thread id, and is recognised by its
+first message's Message-ID. It only archives,
 never deletes and never marks spam. A thread the provider would not archive
 is left alone for an hour. Each step that archives writes
 `mail_sender_blocked_archived` with the account, `phase` (`decision` or
 `sync`) and `threadCount`, and nothing else.
 
 **One queue.** Recording or removing a decision, and each single archive or
-restore, run one at a time in the screen. An archive writes its intent as a
-`pending` effect under the decision before the provider is asked, only while
-the decision stands, and marks it done after. So an Undo that lands between
-two archives stops the rest, one that lands during an archive waits for it
-and moves it back, and a process that stops between the provider's archive
-and the record leaves a pending row an Undo still finds.
+restore, run one at a time in the screen. Work whose caller gave up while it
+waited (an aborted request, a stopping scheduler) is answered at once with
+`mail_senders_unavailable` and dropped unstarted, as the message service's own
+mutation queue does, and request work that reaches its turn too close to its
+deadline writes nothing and leaves the thread to the scheduler. When an
+archive's turn comes it asks again whether this decision still speaks for the
+thread (a domain block may meet an address that became known meanwhile) and
+whether the thread is already archived by it with nothing newer since, and
+only then writes its intent as a `pending` effect, asks the provider, and
+marks the effect done. So an Undo that lands between two archives stops the
+rest, one that lands during an archive waits for it and moves it back, and a
+process that stops between the provider's archive and the record leaves a
+pending row an Undo still finds. A provider that refuses the archive outright
+leaves no row behind. Two residuals are accepted: a failure that says
+nothing (a dropped connection) keeps the intent, so an Undo may move back a
+thread the owner archived himself meanwhile, and on Gmail a block made while
+the cache still lists a thread the owner has just archived elsewhere records
+that archive as its own.
 
 **Undo and unblock.** `DELETE /v1/senders/decisions/:id` is the toast's Undo:
 the decision goes, with the known entry an accept added, and every thread
@@ -603,7 +639,10 @@ provider refuses for good (the thread is gone, the folder cannot take it) is
 dropped, one that fails in passing is tried again up to five times, and each
 drop writes `mail_sender_restore_failed` with the account, `phase` (`undo` or
 `sync`) and `threadCount`. A second Undo of the same decision answers
-`mail_sender_decision_not_found`, which the UI reads as already undone.
+`mail_sender_decision_not_found`, which the UI reads as already undone. The
+id of a verdict that was since changed answers `mail_sender_decision_changed`
+(409) and undoes nothing. Undoing a block that replaced an accept keeps the
+accept's known entry, which is the world the owner undoes back to.
 `?restore=false` is the Blocked list's Unblock: the decision goes, future
 letters come in, and old mail stays where it is.
 
@@ -618,9 +657,10 @@ with the same-origin JSON door and the mail module gate, and the typed
 methods on `BrainMailClient` validate both directions. The decision and
 undo answers can name two hundred threads of up to 255 characters each, so
 the client reads them under a 128 KiB ceiling instead of its 32 KiB default.
-Four codes are new and relayed: `mail_sender_own_address` (400),
+Five codes are new and relayed: `mail_sender_own_address` (400),
 `mail_sender_domain_scope_refused` (400), `mail_sender_decision_not_found`
-(404) and `mail_senders_unavailable` (503). No MCP tool reaches any of this:
+(404), `mail_sender_decision_changed` (409) and `mail_senders_unavailable`
+(503). No MCP tool reaches any of this:
 agents do not decide who may write to the owner.
 
 ### Draft API contract

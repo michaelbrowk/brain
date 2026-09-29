@@ -225,19 +225,47 @@ function isWordBoundary(value: string, index: number): boolean {
   return index === 0 || /[^a-z0-9]/i.test(value[index - 1] ?? "");
 }
 
-function findSubsequence(value: string, query: string): number[] | null {
-  const haystack = value.toLowerCase();
-  const needle = query.toLowerCase().replace(/\s+/g, "");
+type TextRange = { start: number; end: number };
+
+/** A lower-cased copy of `text` and, for each of its code units, the span of
+ *  the original character it came from. `toLowerCase()` does not keep length
+ *  ("İ" lowers to two code units), so an index found in the copy goes through
+ *  this map before it slices the original, or the mark lands a letter late. */
+function foldCase(text: string): { folded: string; spans: TextRange[] } {
+  let folded = "";
+  const spans: TextRange[] = [];
+  let index = 0;
+  for (const char of text) {
+    const lower = char.toLowerCase();
+    const span = { start: index, end: index + char.length };
+    for (let unit = 0; unit < lower.length; unit++) spans.push(span);
+    folded += lower;
+    index += char.length;
+  }
+  return { folded, spans };
+}
+
+/** The original span a match of `length` code units at `index` of a folded
+ *  copy covers. */
+function originalRange(spans: TextRange[], index: number, length: number): TextRange {
+  return { start: spans[index].start, end: spans[index + length - 1].end };
+}
+
+/** Each query character's first place in order along `value`, as spans of
+ *  the original string, or null when the query is not a subsequence. */
+function findSubsequence(value: string, query: string): TextRange[] | null {
+  const haystack = foldCase(value);
+  const needle = foldCase(query).folded.replace(/\s+/g, "");
   if (!needle) return [];
-  const indexes: number[] = [];
+  const ranges: TextRange[] = [];
   let from = 0;
   for (const char of needle) {
-    const index = haystack.indexOf(char, from);
+    const index = haystack.folded.indexOf(char, from);
     if (index === -1) return null;
-    indexes.push(index);
-    from = index + 1;
+    ranges.push(originalRange(haystack.spans, index, char.length));
+    from = index + char.length;
   }
-  return indexes;
+  return ranges;
 }
 
 function rankTitleMatch(title: string, query: string): number | null {
@@ -253,15 +281,15 @@ function rankTitleMatch(title: string, query: string): number | null {
 
   const subsequence = findSubsequence(title, query);
   if (!subsequence) return null;
-  const spread = subsequence.at(-1)! - subsequence[0];
-  return 100 + spread + subsequence[0] + title.length / 100;
+  const spread = subsequence.at(-1)!.start - subsequence[0].start;
+  return 100 + spread + subsequence[0].start + title.length / 100;
 }
 
-function mergeRanges(ranges: Array<{ start: number; end: number }>) {
+function mergeRanges(ranges: TextRange[]) {
   const sorted = ranges
     .filter((range) => range.end > range.start)
     .sort((a, b) => a.start - b.start || b.end - a.end);
-  const merged: Array<{ start: number; end: number }> = [];
+  const merged: TextRange[] = [];
   for (const range of sorted) {
     const last = merged.at(-1);
     if (last && range.start <= last.end) {
@@ -273,34 +301,26 @@ function mergeRanges(ranges: Array<{ start: number; end: number }>) {
   return merged;
 }
 
-function rangesForTerms(text: string, query: string): Array<{ start: number; end: number }> {
-  const lower = text.toLowerCase();
+function rangesForTerms(text: string, query: string): TextRange[] {
+  const { folded, spans } = foldCase(text);
   const terms = Array.from(
-    new Set(
-      query
-        .trim()
-        .toLowerCase()
-        .split(/\s+/)
-        .filter(Boolean),
-    ),
+    new Set(foldCase(query.trim()).folded.split(/\s+/).filter(Boolean)),
   ).sort((a, b) => b.length - a.length);
 
-  const ranges: Array<{ start: number; end: number }> = [];
+  const ranges: TextRange[] = [];
   for (const term of terms) {
-    let index = lower.indexOf(term);
+    let index = folded.indexOf(term);
     while (index !== -1) {
-      ranges.push({ start: index, end: index + term.length });
-      index = lower.indexOf(term, index + term.length);
+      ranges.push(originalRange(spans, index, term.length));
+      index = folded.indexOf(term, index + term.length);
     }
   }
 
   return mergeRanges(ranges);
 }
 
-function rangesForSubsequence(text: string, query: string): Array<{ start: number; end: number }> {
-  const indexes = findSubsequence(text, query);
-  if (!indexes) return [];
-  return mergeRanges(indexes.map((index) => ({ start: index, end: index + 1 })));
+function rangesForSubsequence(text: string, query: string): TextRange[] {
+  return mergeRanges(findSubsequence(text, query) ?? []);
 }
 
 function highlightText(text: string, query: string, fallbackToSubsequence = false): ReactNode {

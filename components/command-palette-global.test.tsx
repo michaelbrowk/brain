@@ -676,6 +676,23 @@ describe("CommandPalette global search", () => {
     expect(rows("Tasks")[0].textContent).toContain("Done");
   });
 
+  it("marks the matched letters of a title whose lower case is longer than it", async () => {
+    // "İ" lowers to two code units, so an index found in the lowered copy
+    // lands one character late in the original unless it is mapped back.
+    await render({ tasks: [task("t1", "İstanbul trip")], searchMail: false });
+    await type("stan");
+    expect(rows("Tasks")[0].querySelector("mark")?.textContent).toBe("stan");
+
+    await type("İst");
+    expect(rows("Tasks")[0].querySelector("mark")?.textContent).toBe("İst");
+
+    await type("sbl");
+    const letters = [...rows("Tasks")[0].querySelectorAll("mark")].map(
+      (mark) => mark.textContent,
+    );
+    expect(letters).toEqual(["s", "b", "l"]);
+  });
+
   it("reads a mail answer for a query the reader has left as loading, never as rows", async () => {
     const pending = new Map<string, (value: Response) => void>();
     vi.mocked(fetch).mockImplementation(

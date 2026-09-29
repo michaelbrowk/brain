@@ -135,7 +135,7 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
    * of the thread's messages, so a long conversation can be held back with a
    * big attachment, and so does one the provider gave no size for. On the
    * prefetch probe the service's peak follows the largest letter it parses:
-   * 133 MiB with 1 MiB marketing letters, 150 MiB with a 1.85 MiB attachment
+   * 133 MiB with 1 MiB marketing letters, 140 MiB with a 1.85 MiB attachment
    * on them (about the most this admits), 186 MiB at 6 MiB and 220 MiB at
    * 15 MiB, past the 217 MiB bar. Letters that size would also fill
    * `bodyCacheMaxBytes` on their own: ten with 15 MiB attachments left 27 of

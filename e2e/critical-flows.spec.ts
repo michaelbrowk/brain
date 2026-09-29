@@ -6957,13 +6957,12 @@ test("failed slash page creation unlocks the editor without losing the trigger",
   expect(parentResponse.ok).toBeTruthy();
   const parent = parentResponse.body as { id: string };
 
-  await page.goto(`/p/${parent.id}`);
-  const content = page.getByRole("textbox", { name: "Page content" });
-  await expect(content).toBeVisible();
-  await content.focus();
-  await page.keyboard.type("/");
-  await expect(page.getByTestId("slash-menu")).toBeVisible();
-
+  // The route goes in before the page opens, not between the menu and the
+  // Enter that fires the request. Installed there, it went in a few
+  // milliseconds before the request it had to catch, and once in about fifteen
+  // runs over a full tree that request reached the server without Playwright
+  // reporting it at all: the child was made, the shell opened it, and the wait
+  // below saw nothing.
   let releaseFailure!: () => void;
   const failureGate = new Promise<void>((resolve) => {
     releaseFailure = resolve;
@@ -6994,7 +6993,17 @@ test("failed slash page creation unlocks the editor without losing the trigger",
     return body.parentId === parent.id;
   });
 
+  await page.goto(`/p/${parent.id}`);
+  const content = page.getByRole("textbox", { name: "Page content" });
+  await expect(content).toBeVisible();
+  await content.focus();
+  await page.keyboard.type("/");
+  await expect(page.getByTestId("slash-menu")).toBeVisible();
+
   try {
+    // Pressed the moment the menu shows. The menu's keys are attached in the
+    // commit that paints it (`components/editor/slash-menu.tsx`), so this
+    // reaches "New page" and not ProseMirror's paragraph split.
     await page.keyboard.press("Enter");
     await expect(content).toHaveAttribute("contenteditable", "false");
     await expect(content).toHaveAttribute("aria-busy", "true");
@@ -7025,13 +7034,7 @@ test("failed slash parent save keeps the inserted link in a local draft", async 
   expect(parentResponse.ok).toBeTruthy();
   const parent = parentResponse.body as { id: string };
 
-  await page.goto(`/p/${parent.id}`);
-  const content = page.getByRole("textbox", { name: "Page content" });
-  await expect(content).toBeVisible();
-  await content.focus();
-  await page.keyboard.type("/");
-  await expect(page.getByTestId("slash-menu")).toBeVisible();
-
+  // In before the page opens, for the reason the case above gives.
   await page.route(`**/api/page/${parent.id}`, async (route) => {
     if (route.request().method() === "PUT") {
       const body = route.request().postDataJSON() as { markdown?: string };
@@ -7046,6 +7049,14 @@ test("failed slash parent save keeps the inserted link in a local draft", async 
     }
     await route.continue();
   });
+
+  await page.goto(`/p/${parent.id}`);
+  const content = page.getByRole("textbox", { name: "Page content" });
+  await expect(content).toBeVisible();
+  await content.focus();
+  await page.keyboard.type("/");
+  await expect(page.getByTestId("slash-menu")).toBeVisible();
+
   const createdResponse = page.waitForResponse((response) => {
     if (
       response.request().method() !== "POST" ||
@@ -7068,9 +7079,8 @@ test("failed slash parent save keeps the inserted link in a local draft", async 
     return !!body.markdown?.includes("/p/");
   });
 
-  // This scenario verifies draft recovery, not slash-menu keyboard selection.
-  // Click the explicit item so a slow full-suite worker cannot lose the active
-  // index between route setup and Enter (keyboard navigation is covered above).
+  // This scenario verifies draft recovery, not the menu's keys, so it picks
+  // the item by pointer. Enter as the menu appears is the case above.
   await page
     .getByTestId("slash-menu")
     .getByRole("button", { name: "New page", exact: true })

@@ -1825,6 +1825,47 @@ describe("SMTP ownership handoff and outbox mirror", () => {
     await fixture.store.close();
   });
 
+  it("never tells the sent observer about an SMTP send the server refused", async () => {
+    const sent: unknown[] = [];
+    const fixture = await createStore({ onSent: (value) => sent.push(value) });
+    const imap = submissionFixture({
+      operationId: operationId(28),
+      idempotencyKey: "imap-observed-failed",
+      providerKind: "imap",
+    });
+    await fixture.store.enqueue(imap);
+    let state = (await fixture.store.readSmtpSubmissionState(
+      imap.accountId,
+      imap.operationId,
+    ))!;
+    const attemptId = "attempt-00000000-0000-4000-8000-000000000028";
+    state = await casThrough(
+      fixture.store,
+      state,
+      claimSubmission(state, { attemptId, now: imap.createdAt, leaseMs: 60_000 }),
+    );
+    await casThrough(
+      fixture.store,
+      state,
+      recordSmtpOutcome(state, {
+        attemptId,
+        now: imap.createdAt + 1,
+        outcome: {
+          kind: "rejected",
+          responseCode: 550,
+          retryable: false,
+          errorCode: "smtp_recipient_rejected",
+        },
+      }),
+    );
+
+    await expect(fixture.store.readByOperationId(imap.operationId)).resolves.toMatchObject({
+      status: "failed",
+    });
+    expect(sent).toEqual([]);
+    await fixture.store.close();
+  });
+
   it("tells the sent observer when a Gmail send reaches sent, and never for a failure", async () => {
     const sent: unknown[] = [];
     const fixture = await createStore({ onSent: (value) => sent.push(value) });

@@ -313,6 +313,38 @@ describe("defaultMailSurfaceClient system mailboxes", () => {
     }
   });
 
+  it("reads the tier-5 newSender and reads an older server's thread as not waiting", async () => {
+    const list = (items: readonly unknown[]) => {
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue(
+          response({
+            apiVersion: 1,
+            items,
+            nextCursor: null,
+            sync: { status: "idle", lastSuccessfulAt: 1_700_000_000_000 },
+          }),
+        ),
+      );
+      return defaultMailSurfaceClient.listThreads({ accountId: ACCOUNT_ID });
+    };
+    const older = Object.fromEntries(
+      Object.entries(thread).filter(([key]) => key !== "newSender"),
+    );
+
+    await expect(list([{ ...thread, newSender: true }])).resolves.toMatchObject({
+      items: [{ newSender: true }],
+    });
+    await expect(list([older])).resolves.toMatchObject({ items: [{ newSender: false }] });
+    for (const invalid of [
+      { ...thread, newSender: "yes" },
+      { ...thread, newSender: 1 },
+      { ...thread, newSender: null },
+    ]) {
+      await expect(list([invalid])).rejects.toThrow("invalid mail thread");
+    }
+  });
+
   it("reads a thread through the selected mailbox boundary", async () => {
     const fetchMock = vi.fn().mockResolvedValue(
       response({

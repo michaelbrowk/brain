@@ -21,7 +21,7 @@ type PdfState =
   | { readonly kind: "loading" }
   | {
       readonly kind: "ready";
-      readonly document: PDFDocumentProxy;
+      readonly pdf: PDFDocumentProxy;
       /** The first page's height over its width: every page box takes it
        *  until that page is drawn and knows its own. */
       readonly aspect: number;
@@ -64,10 +64,10 @@ export function MailAttachmentPdf({
         const { openPdf } = await import("@/lib/mail/pdf-runtime");
         if (disposed) return;
         opened = openPdf(data);
-        const document = await opened.document;
-        const first = await document.getPage(1);
+        const pdf = await opened.document;
+        const first = await pdf.getPage(1);
         const { width, height } = first.getViewport({ scale: 1 });
-        if (!disposed) setState({ kind: "ready", document, aspect: height / width });
+        if (!disposed) setState({ kind: "ready", pdf, aspect: height / width });
       } catch (error) {
         if (disposed) return;
         setState({ kind: "failed", reason: passwordProtected(error) ? "password" : "broken" });
@@ -101,14 +101,14 @@ export function MailAttachmentPdf({
       </p>
     );
   }
-  return <PdfPages document={state.document} aspect={state.aspect} />;
+  return <PdfPages pdf={state.pdf} aspect={state.aspect} />;
 }
 
 function PdfPages({
-  document,
+  pdf,
   aspect,
 }: {
-  document: PDFDocumentProxy;
+  pdf: PDFDocumentProxy;
   aspect: number;
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -116,7 +116,7 @@ function PdfPages({
   const [width, setWidth] = useState(0);
   const [live, setLive] = useState<ReadonlySet<number>>(() => new Set());
   const [reading, setReading] = useState(1);
-  const total = document.numPages;
+  const total = pdf.numPages;
 
   useEffect(() => {
     const column = columnRef.current;
@@ -182,7 +182,7 @@ function PdfPages({
           {Array.from({ length: total }, (_, index) => (
             <PdfPage
               key={index + 1}
-              document={document}
+              pdf={pdf}
               pageNumber={index + 1}
               aspect={aspect}
               width={width}
@@ -199,13 +199,13 @@ function PdfPages({
 }
 
 function PdfPage({
-  document,
+  pdf,
   pageNumber,
   aspect,
   width,
   live,
 }: {
-  document: PDFDocumentProxy;
+  pdf: PDFDocumentProxy;
   pageNumber: number;
   aspect: number;
   width: number;
@@ -222,7 +222,7 @@ function PdfPage({
     >
       {live && width > 0 && (
         <PdfCanvas
-          document={document}
+          pdf={pdf}
           pageNumber={pageNumber}
           width={width}
           onAspect={setOwnAspect}
@@ -233,12 +233,12 @@ function PdfPage({
 }
 
 function PdfCanvas({
-  document,
+  pdf,
   pageNumber,
   width,
   onAspect,
 }: {
-  document: PDFDocumentProxy;
+  pdf: PDFDocumentProxy;
   pageNumber: number;
   width: number;
   onAspect: (aspect: number) => void;
@@ -253,7 +253,7 @@ function PdfCanvas({
     let task: RenderTask | null = null;
     const draw = async () => {
       try {
-        page = await document.getPage(pageNumber);
+        page = await pdf.getPage(pageNumber);
         if (cancelled) return;
         const natural = page.getViewport({ scale: 1 });
         onAspect(natural.height / natural.width);
@@ -278,7 +278,7 @@ function PdfCanvas({
       canvas.height = 0;
       page?.cleanup();
     };
-  }, [document, onAspect, pageNumber, width]);
+  }, [onAspect, pageNumber, pdf, width]);
 
   return <canvas ref={canvasRef} className="brain-viewer-pdf-canvas" />;
 }

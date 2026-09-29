@@ -402,6 +402,29 @@ describe("IMAP IDLE supervisor", () => {
     await supervisor.stop();
   });
 
+  it("keeps its backoff on its own clock when the wall clock jumps", async () => {
+    vi.useFakeTimers({ now: 10_000_000 });
+    const { supervisor, connector, opened, events } = harness();
+    supervisor.afterSync(accountA);
+    await settle();
+    supervisor.afterSync(accountA);
+    opened[0]!.close();
+    // The clock goes back an hour: the one-minute backoff is still a minute.
+    vi.setSystemTime(Date.now() - 3_600_000);
+    await vi.advanceTimersByTimeAsync(BASE_MS);
+    supervisor.afterSync(accountA);
+    await settle();
+    expect(connector.openIdleSession).toHaveBeenCalledTimes(2);
+
+    // And forward an hour: a session that lived seconds did not live an
+    // hour, so the backoff keeps climbing.
+    supervisor.afterSync(accountA);
+    vi.setSystemTime(Date.now() + 3_600_000);
+    opened[1]!.close();
+    expect(events.at(-1)).toMatchObject({ reason: "connection_dropped", failureCount: 2 });
+    await supervisor.stop();
+  });
+
   it("falls back to the poll for a server without IDLE and asks again only after the cap", async () => {
     vi.useFakeTimers({ now: 0 });
     const plain = new FakeImapFlow();

@@ -23,6 +23,15 @@ const LEAVE_DEADLINE_MS = 30_000;
 const HEALTHY_SESSION_MS = 3 * 60_000;
 
 /**
+ * The backoff and a session's age are measured on the monotonic clock, like
+ * the scheduler's due times: a wall clock set back an hour would otherwise
+ * hold a one-minute retry for an hour and one minute.
+ */
+function monotonicNow(): number {
+  return performance.now();
+}
+
+/**
  * The part of one ImapFlow session the supervisor drives. ImapFlow satisfies
  * it as it stands: `idle()` stays pending until a later command breaks it with
  * DONE, and updates to the selected mailbox arrive as events.
@@ -161,7 +170,7 @@ export class MailImapIdleSupervisor {
       this.enterIdle(accountId, account, connection);
       return;
     }
-    if (Date.now() < account.retryAt) return;
+    if (monotonicNow() < account.retryAt) return;
     this.open(accountId, account);
   }
 
@@ -220,7 +229,7 @@ export class MailImapIdleSupervisor {
   private adopt(accountId: string, account: IdleAccount, client: ImapIdleClient): void {
     const connection: IdleConnection = {
       client,
-      openedAt: Date.now(),
+      openedAt: monotonicNow(),
       phase: "awaiting_pass",
       timer: null,
       dirty: false,
@@ -322,7 +331,7 @@ export class MailImapIdleSupervisor {
     retire(connection);
     if (account.connection === connection) account.connection = null;
     if (!this.running || this.accounts.get(accountId) !== account) return;
-    if (Date.now() - connection.openedAt > HEALTHY_SESSION_MS) {
+    if (monotonicNow() - connection.openedAt > HEALTHY_SESSION_MS) {
       account.failures = 0;
     }
     this.fail(accountId, account, reason);
@@ -342,7 +351,7 @@ export class MailImapIdleSupervisor {
             DEFAULT_BACKOFF_CAP_MS,
             DEFAULT_BACKOFF_BASE_MS * 2 ** Math.min(account.failures - 1, 16),
           );
-    account.retryAt = Date.now() + waitMs;
+    account.retryAt = monotonicNow() + waitMs;
     this.onEvent({
       event: "mail_imap_idle_fallback",
       accountId,

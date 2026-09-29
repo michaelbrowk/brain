@@ -12,6 +12,7 @@ vi.mock("./mail-attachment-pdf", () => ({
 
 import { MAIL_ATTACHMENT_CONTENT_SECURITY_POLICY } from "@/lib/mail/content-types";
 import type { MailContentAttachmentDto } from "@/lib/mail/content-types";
+import { ATTACHMENT_FETCH_PRIORITY, AttachmentBlobStore } from "@/lib/mail/attachment-blobs";
 import { MailAttachments } from "./mail-attachments";
 
 const ACCOUNT_ID = "account-a0123456789abcdef0123456789abcdef";
@@ -63,11 +64,37 @@ function verified(file: MailContentAttachmentDto): Response {
   });
 }
 
+/** The picture every stubbed `Image` reports once its blob URL loads, or
+ *  null for one that fails to load. */
+let pictureSize: { width: number; height: number } | null = { width: 600, height: 800 };
+
+class FakeImage {
+  naturalWidth = 0;
+  naturalHeight = 0;
+  onload: (() => void) | null = null;
+  onerror: (() => void) | null = null;
+  set src(value: string) {
+    if (!value) return;
+    setTimeout(() => {
+      if (pictureSize === null) {
+        this.onerror?.();
+        return;
+      }
+      this.naturalWidth = pictureSize.width;
+      this.naturalHeight = pictureSize.height;
+      this.onload?.();
+    }, 0);
+  }
+}
+
+type FakeBitmap = { width: number; height: number; close: ReturnType<typeof vi.fn> };
+
 describe("MailAttachments", () => {
   let host: HTMLDivElement;
   let root: Root;
   let fetchMock: ReturnType<typeof vi.fn>;
   let createImageBitmapMock: ReturnType<typeof vi.fn>;
+  let bitmaps: FakeBitmap[];
   let drawImage: ReturnType<typeof vi.fn>;
   let revokeObjectURL: ReturnType<typeof vi.fn<(source: string) => void>>;
 
@@ -86,12 +113,24 @@ describe("MailAttachments", () => {
       return file ? verified(file) : new Response("", { status: 404 });
     });
     vi.stubGlobal("fetch", fetchMock);
-    // A portrait photo: the first decode, by width, already fills the square.
-    createImageBitmapMock = vi.fn(async (_blob: Blob, options: ImageBitmapOptions) => ({
-      width: options.resizeWidth ?? 300,
-      height: (options.resizeWidth ?? 100) * 1.5,
-      close: vi.fn(),
-    }));
+    pictureSize = { width: 600, height: 800 };
+    vi.stubGlobal("Image", FakeImage);
+    // The decoder answers with exactly the size it was asked to resize to.
+    bitmaps = [];
+    createImageBitmapMock = vi.fn(
+      async (
+        _source: Blob,
+        _sx: number,
+        _sy: number,
+        _sw: number,
+        _sh: number,
+        options: ImageBitmapOptions,
+      ) => {
+        const bitmap = { width: options.resizeWidth!, height: options.resizeHeight!, close: vi.fn() };
+        bitmaps.push(bitmap);
+        return bitmap;
+      },
+    );
     vi.stubGlobal("createImageBitmap", createImageBitmapMock);
     drawImage = vi.fn();
     vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockImplementation(
@@ -171,30 +210,107 @@ describe("MailAttachments", () => {
     ]);
   });
 
-  it("decodes a thumbnail at tile size, never the whole photo", async () => {
+  function largestCanvas(): number {
+    return Math.max(
+      0,
+      ...[...host.querySelectorAll("canvas")].map((canvas) => Math.max(canvas.width, canvas.height)),
+    );
+  }
+
+  it("decodes the centred square of the photo at tile size, and lets the bitmap go", async () => {
+    pictureSize = { width: 600, height: 800 };
     await show([first]);
     expect(createImageBitmapMock).toHaveBeenCalledTimes(1);
-    const [blob, options] = createImageBitmapMock.mock.calls[0]!;
+    const [blob, sx, sy, sw, sh, options] = createImageBitmapMock.mock.calls[0]!;
     expect(blob.size).toBe(BYTES.byteLength);
-    expect(options).toMatchObject({ resizeWidth: 112, resizeQuality: "medium" });
+    expect([sx, sy, sw, sh]).toEqual([0, 100, 600, 600]);
+    expect(options).toMatchObject({ resizeWidth: 112, resizeHeight: 112, resizeQuality: "medium" });
     const canvas = tiles()[0]!.querySelector("canvas")!;
-    expect(canvas.width).toBe(112);
-    expect(canvas.height).toBe(168);
+    expect([canvas.width, canvas.height]).toEqual([112, 112]);
     expect(drawImage).toHaveBeenCalledTimes(1);
+    expect(bitmaps[0]!.close).toHaveBeenCalledTimes(1);
   });
 
-  it("decodes a landscape photo again by its height, so the square is filled", async () => {
-    createImageBitmapMock.mockImplementation(async (_blob: Blob, options: ImageBitmapOptions) => ({
-      width: options.resizeWidth ?? (options.resizeHeight ?? 0) * 1.5,
-      height: options.resizeHeight ?? (options.resizeWidth ?? 0) / 1.5,
-      close: vi.fn(),
-    }));
+  it("crops a long picture to its middle square rather than decoding its length", async () => {
+    pictureSize = { width: 600, height: 4_000 };
     await show([first]);
-    expect(createImageBitmapMock).toHaveBeenCalledTimes(2);
-    expect(createImageBitmapMock.mock.calls[1]![1]).toMatchObject({ resizeHeight: 112 });
+    const [, sx, sy, sw, sh] = createImageBitmapMock.mock.calls[0]!;
+    expect([sx, sy, sw, sh]).toEqual([0, 1_700, 600, 600]);
+    expect(largestCanvas()).toBe(112);
+  });
+
+  it("never draws a small picture larger than it is", async () => {
+    pictureSize = { width: 40, height: 60 };
+    await show([first]);
+    const [, sx, sy, sw, sh, options] = createImageBitmapMock.mock.calls[0]!;
+    expect([sx, sy, sw, sh]).toEqual([0, 10, 40, 40]);
+    expect(options).toMatchObject({ resizeWidth: 40, resizeHeight: 40 });
+    expect(largestCanvas()).toBe(40);
+  });
+
+  it("shows a picture past 8:1 either way in an <img>, and never sizes a canvas to it", async () => {
+    for (const size of [
+      { width: 10, height: 1_000 },
+      { width: 1_200, height: 2 },
+      { width: 1, height: 4_000 },
+    ]) {
+      pictureSize = size;
+      createImageBitmapMock.mockClear();
+      await show([first]);
+      expect(createImageBitmapMock).not.toHaveBeenCalled();
+      expect(tiles()[0]!.querySelector("img")?.getAttribute("src")).toMatch(/^blob:brain\//);
+      expect(largestCanvas()).toBeLessThanOrEqual(448);
+      await act(async () => root.render(<></>));
+    }
+  });
+
+  it("gives the tile's canvas memory back when the letter leaves", async () => {
+    await show([first]);
     const canvas = tiles()[0]!.querySelector("canvas")!;
-    expect(canvas.height).toBe(112);
-    expect(canvas.width).toBe(168);
+    expect(canvas.width).toBe(112);
+    act(() => root.render(<></>));
+    expect([canvas.width, canvas.height]).toEqual([0, 0]);
+  });
+
+  it("downloads tiles at the tile priority, behind the body's own images", async () => {
+    const blob = vi.spyOn(AttachmentBlobStore.prototype, "blob");
+    await show([first]);
+    expect(ATTACHMENT_FETCH_PRIORITY.tile).toBe(-1);
+    expect(blob).toHaveBeenCalledWith(first, -1, expect.any(AbortSignal));
+  });
+
+  it("starts a tile from the reader's own scroller, 200px before it shows", async () => {
+    const options: IntersectionObserverInit[] = [];
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(_callback: IntersectionObserverCallback, init: IntersectionObserverInit) {
+          options.push(init);
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    const scroller = document.createElement("div");
+    scroller.setAttribute("data-mail-reader-scroll", "");
+    host.append(scroller);
+    const scrollerRoot = createRoot(scroller);
+    await act(async () => {
+      scrollerRoot.render(
+        <MailAttachments accountId={ACCOUNT_ID} attachments={[first]} renderedHtml={null} />,
+      );
+    });
+    expect(options).toEqual([{ root: scroller, rootMargin: "200px 0px" }]);
+    expect(fetchMock).not.toHaveBeenCalled();
+    act(() => scrollerRoot.unmount());
+  });
+
+  it("turns a picture that will not load back into a chip", async () => {
+    pictureSize = null;
+    await show([first, second]);
+    expect(createImageBitmapMock).not.toHaveBeenCalled();
+    expect(tiles()).toHaveLength(0);
+    expect(chips()).toHaveLength(2);
   });
 
   it("falls back to the blob in an <img> where the engine cannot decode small", async () => {

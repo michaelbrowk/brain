@@ -17,16 +17,24 @@ import {
   type AttachmentSource,
 } from "./mail-attachment-viewer";
 
-/** A tile starts its download once it is this close to the visible part of
- *  the window, the way `loading="lazy"` would have. */
-const TILE_LOAD_MARGIN = "200px";
+/** A tile starts its download once it is this close, above or below, to the
+ *  visible part of the reader's scroller. The scroller is the observer's root:
+ *  measured against the window instead, a tile below the fold is clipped by
+ *  the scroller first and the margin never reaches it. */
+const TILE_LOAD_MARGIN = "200px 0px";
 
-/** The bounds of a thumbnail's short side, in device pixels. It is decoded at
- *  the tile's own size (twice its CSS width on a 2x screen) and not at the
- *  camera's: a 12-megapixel photo held for a 112px square is 48 MB of pixels,
- *  its thumbnail a fraction of one. */
+/** The bounds of a thumbnail's side, in device pixels. The tile is square, so
+ *  the thumbnail is the picture's centred square, decoded at the tile's own
+ *  size (twice its CSS width on a 2x screen) and never above the picture's
+ *  own: a 12-megapixel photo held for a 112px square is 48 MB of pixels, its
+ *  thumbnail a fraction of one. */
 const THUMBNAIL_MIN_SIDE = 112;
 const THUMBNAIL_MAX_SIDE = 448;
+
+/** Past this ratio either way a picture is a strip, not a photo: its centred
+ *  square is a sliver of it, so the tile shows the blob in an `<img>` cropped
+ *  by `object-fit` instead of a decoded square. */
+const THUMBNAIL_MAX_RATIO = 8;
 
 /**
  * A letter's attachments, under its body. Pictures and PDFs the reader can
@@ -212,11 +220,15 @@ function AttachmentTile({
 }
 
 /**
- * The picture in a tile, decoded at thumbnail size into a small canvas. The
- * download is the letter's shared blob, at the tile's priority, started when
- * the tile comes near the window. An engine without a resizing decoder shows
- * the blob through an `<img>` instead, and a picture that decodes in neither
- * turns the tile back into a chip.
+ * The picture in a tile: its centred square decoded at thumbnail size into a
+ * small canvas, so the canvas is never larger than 448 × 448 whatever shape
+ * the sender's file is. The download is the letter's shared blob, at the
+ * tile's priority, started when the tile nears the reader's visible part. The
+ * picture's own size is read from an `<img>` load of the blob URL, which parses
+ * the header without decoding the pixels. A strip past 8:1, or an engine
+ * without a cropping and resizing decoder, shows the blob through an `<img>`
+ * instead, and a picture that loads in neither turns the tile back into a
+ * chip.
  */
 function TileThumbnail({
   attachment,
@@ -243,37 +255,55 @@ function TileThumbnail({
     const canvas = canvasRef.current;
     if (!near || !canvas) return;
     const controller = new AbortController();
+    const { signal } = controller;
     const load = async () => {
       let blob: Blob;
+      let source: string;
+      let size: { readonly width: number; readonly height: number };
       try {
-        blob = await store.blob(attachment, ATTACHMENT_FETCH_PRIORITY.tile, controller.signal);
+        blob = await store.blob(attachment, ATTACHMENT_FETCH_PRIORITY.tile, signal);
+        source = await store.url(attachment, ATTACHMENT_FETCH_PRIORITY.tile, signal);
+        size = await naturalSize(source, signal);
       } catch {
-        if (!controller.signal.aborted) onBrokenRef.current();
+        if (!signal.aborted) onBrokenRef.current();
         return;
       }
+      const square = Math.min(size.width, size.height);
+      const ratio = Math.max(size.width, size.height) / square;
+      if (ratio > THUMBNAIL_MAX_RATIO || typeof createImageBitmap !== "function") {
+        setFallback(source);
+        return;
+      }
+      const side = Math.min(thumbnailSide(canvas), square);
+      let bitmap: ImageBitmap;
       try {
-        const bitmap = await decodeThumbnail(blob, thumbnailSide(canvas));
-        if (controller.signal.aborted) {
-          bitmap.close();
-          return;
-        }
+        bitmap = await createImageBitmap(
+          blob,
+          Math.floor((size.width - square) / 2),
+          Math.floor((size.height - square) / 2),
+          square,
+          square,
+          { resizeWidth: side, resizeHeight: side, resizeQuality: "medium" },
+        );
+      } catch {
+        if (!signal.aborted) setFallback(source);
+        return;
+      }
+      if (!signal.aborted) {
         canvas.width = bitmap.width;
         canvas.height = bitmap.height;
         canvas.getContext("2d")?.drawImage(bitmap, 0, 0);
-        bitmap.close();
-      } catch {
-        if (controller.signal.aborted) return;
-        try {
-          setFallback(
-            await store.url(attachment, ATTACHMENT_FETCH_PRIORITY.tile, controller.signal),
-          );
-        } catch {
-          if (!controller.signal.aborted) onBrokenRef.current();
-        }
       }
+      bitmap.close();
     };
     void load();
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      // A canvas keeps its pixels until its size changes, in the document or
+      // not, so the release is written out.
+      canvas.width = 0;
+      canvas.height = 0;
+    };
   }, [attachment, near, store]);
 
   if (fallback !== null) {
@@ -285,8 +315,9 @@ function TileThumbnail({
   return <canvas ref={canvasRef} role="img" aria-label={name} />;
 }
 
-/** True once the element has come within `TILE_LOAD_MARGIN` of the window,
- *  and from then on. Without an IntersectionObserver it is true at once. */
+/** True once the element has come within `TILE_LOAD_MARGIN` of the reader's
+ *  visible part (the window, outside the reader), and from then on. Without
+ *  an IntersectionObserver it is true at once. */
 function useNearWindow(ref: RefObject<Element | null>): boolean {
   const [near, setNear] = useState(() => typeof IntersectionObserver === "undefined");
   useEffect(() => {
@@ -298,7 +329,10 @@ function useNearWindow(ref: RefObject<Element | null>): boolean {
         observer.disconnect();
         setNear(true);
       },
-      { rootMargin: TILE_LOAD_MARGIN },
+      {
+        root: element.closest<HTMLElement>("[data-mail-reader-scroll]"),
+        rootMargin: TILE_LOAD_MARGIN,
+      },
     );
     observer.observe(element);
     return () => observer.disconnect();
@@ -306,8 +340,43 @@ function useNearWindow(ref: RefObject<Element | null>): boolean {
   return near;
 }
 
-/** The short side to decode to: the tile's own width in device pixels, with
- *  the ratio capped at 2 like the PDF's pages. */
+/** The picture's own size, from an `<img>` load of its blob URL. The load
+ *  parses the header; an image never painted is never decoded. */
+function naturalSize(
+  source: string,
+  signal: AbortSignal,
+): Promise<{ readonly width: number; readonly height: number }> {
+  return new Promise((resolve, reject) => {
+    const image = new Image();
+    const settle = () => {
+      image.onload = null;
+      image.onerror = null;
+      signal.removeEventListener("abort", onAbort);
+    };
+    const onAbort = () => {
+      settle();
+      image.src = "";
+      reject(Object.assign(new Error("thumbnail aborted"), { name: "AbortError" }));
+    };
+    image.onload = () => {
+      settle();
+      if (image.naturalWidth > 0 && image.naturalHeight > 0) {
+        resolve({ width: image.naturalWidth, height: image.naturalHeight });
+      } else {
+        reject(new Error("The picture has no size"));
+      }
+    };
+    image.onerror = () => {
+      settle();
+      reject(new Error("The picture did not load"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    image.src = source;
+  });
+}
+
+/** The side to decode to: the tile's own width in device pixels, with the
+ *  ratio capped at 2 like the PDF's pages. */
 function thumbnailSide(element: Element): number {
   const width = element.getBoundingClientRect().width;
   const ratio = Math.min(window.devicePixelRatio || 1, 2);
@@ -315,18 +384,4 @@ function thumbnailSide(element: Element): number {
     THUMBNAIL_MAX_SIDE,
     Math.max(THUMBNAIL_MIN_SIDE, Math.ceil(width * ratio)),
   );
-}
-
-/** Decodes the picture with its short side at `side` pixels, so the square
- *  crop that `object-fit: cover` takes of it is sharp and nothing larger is
- *  ever held. A decoder without resizing (or a file it refuses) throws. */
-async function decodeThumbnail(blob: Blob, side: number): Promise<ImageBitmap> {
-  if (typeof createImageBitmap !== "function") {
-    throw new Error("No image decoder that resizes");
-  }
-  const byWidth = await createImageBitmap(blob, { resizeWidth: side, resizeQuality: "medium" });
-  if (byWidth.height >= side) return byWidth;
-  // Wider than tall: decode again so the height is the side that fills.
-  byWidth.close();
-  return createImageBitmap(blob, { resizeHeight: side, resizeQuality: "medium" });
 }

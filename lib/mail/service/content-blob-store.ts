@@ -288,10 +288,27 @@ export class AtomicMailBlobStore implements MailIncomingBlobStorePort {
   }
 
   /**
-   * Reserves bounded global capacity before opening a new temporary file. The
-   * root SQLite mutation lease remains held through the write, so the check is
-   * a reservation between cooperating Brain Mail writers, not a TOCTOU claim
-   * about unrelated filesystem users.
+   * Every received body not yet published, whatever its age. Only for a
+   * process's first open of the account, before any download of its own:
+   * each one then belongs to a process that stopped, however recently.
+   */
+  async removeIncomingFiles(): Promise<void> {
+    await this.requireInitialized();
+    try {
+      await this.removeIncomingFilesOlderThan(Number.POSITIVE_INFINITY);
+    } catch (error) {
+      throw blobStoreError(error);
+    }
+  }
+
+  /**
+   * Reserves bounded global capacity before an operation adds to the store:
+   * a new temporary file it writes, or a received body it publishes. The
+   * root SQLite mutation lease remains held through that operation, so the
+   * check is a reservation between cooperating Brain Mail writers, not a
+   * TOCTOU claim about unrelated filesystem users. A body received outside
+   * the lease (`receiveIncoming`) is checked here only when it is published,
+   * against the size it turned out to be.
    *
    * A caller may reclaim stale metadata after the first failed preflight. The
    * callback runs outside the lease because content GC acquires this same
@@ -1020,7 +1037,10 @@ export class AtomicMailBlobStore implements MailIncomingBlobStorePort {
    * must leave alone.
    */
   private async removeStaleIncomingFiles(): Promise<void> {
-    const staleBefore = Date.now() - INCOMING_STALE_MS;
+    await this.removeIncomingFilesOlderThan(Date.now() - INCOMING_STALE_MS);
+  }
+
+  private async removeIncomingFilesOlderThan(staleBefore: number): Promise<void> {
     for (const entry of await readdir(this.incomingDirectory, { withFileTypes: true })) {
       if (!INCOMING_FILE.test(entry.name) || !entry.isFile()) {
         throw new MailBlobStoreError("mail_blob_integrity_failed");

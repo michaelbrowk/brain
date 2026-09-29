@@ -9,6 +9,7 @@ import {
   readdir,
   rm,
   stat,
+  statfs,
   symlink,
   unlink,
   utimes,
@@ -18,6 +19,12 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+// The disk's free space, which a test can make short for one call.
+vi.mock("node:fs/promises", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("node:fs/promises")>();
+  return { ...actual, statfs: vi.fn(actual.statfs) };
+});
 
 import type { MailBlobDescriptor } from "../ports";
 import {
@@ -149,6 +156,103 @@ describe("atomic account mail blob store", () => {
     stores.push(reopened);
     await reopened.initialize();
     expect(await readFileNames(incoming)).toEqual([path.basename(fresh)]);
+  });
+
+  it("clears every received body, however recent, when asked at a first open", async () => {
+    const fixture = await createStore();
+    const incoming = path.join(
+      path.dirname(fixture.store.directoryPath),
+      "content-incoming",
+    );
+    await writeFile(path.join(incoming, `incoming-${"c".repeat(32)}`), "just now", {
+      mode: 0o600,
+    });
+    await fixture.store.removeIncomingFiles();
+    expect(await readFileNames(incoming)).toEqual([]);
+  });
+
+  it("checks the disk has room before the provider streams a byte", async () => {
+    const fixture = await createStore();
+    vi.mocked(statfs).mockResolvedValueOnce({
+      type: 0,
+      bsize: 4096,
+      blocks: 1,
+      bfree: 0,
+      bavail: 0,
+      files: 0,
+      ffree: 0,
+    });
+    let pulled = false;
+    await expect(
+      fixture.store.receiveIncoming(
+        (async function* () {
+          pulled = true;
+          yield Buffer.from("raw");
+        })(),
+        64,
+      ),
+    ).rejects.toMatchObject({ code: "mail_blob_cache_capacity_exhausted" });
+    expect(pulled).toBe(false);
+  });
+
+  it("refuses to receive into an incoming directory others can read", async () => {
+    const fixture = await createStore();
+    await chmod(
+      path.join(path.dirname(fixture.store.directoryPath), "content-incoming"),
+      0o755,
+    );
+    let pulled = false;
+    await expect(
+      fixture.store.receiveIncoming(
+        (async function* () {
+          pulled = true;
+          yield Buffer.from("raw");
+        })(),
+        64,
+      ),
+    ).rejects.toMatchObject({ code: "mail_blob_integrity_failed" });
+    expect(pulled).toBe(false);
+  });
+
+  it("keeps a received body read-only, and publishes it once", async () => {
+    const fixture = await createStore();
+    const incoming = path.join(
+      path.dirname(fixture.store.directoryPath),
+      "content-incoming",
+    );
+    const body = Buffer.from("received, then published");
+    const receipt = await fixture.store.receiveIncoming(chunks(body, 4), 64);
+    const [name] = await readFileNames(incoming);
+    expect((await stat(path.join(incoming, name!))).mode & 0o777).toBe(0o400);
+
+    const publish = () =>
+      fixture.store.withCapacityReservation(body.byteLength, undefined, (lease) =>
+        lease.publishIncoming(receipt),
+      );
+    await expect(publish()).resolves.toEqual(descriptorFor(body));
+    await expect(publish()).rejects.toMatchObject({
+      code: "mail_blob_request_invalid",
+    });
+    expect(await readFileNames(incoming)).toEqual([]);
+  });
+
+  it("leaves nothing received behind when the cache has no room to publish it", async () => {
+    const fixture = await createStore();
+    const small = new AtomicMailBlobStore({
+      cacheRoot: path.dirname(path.dirname(fixture.store.directoryPath)),
+      accountId: ACCOUNT_ID,
+      maxCacheBytes: 16,
+    });
+    stores.push(small);
+    await small.initialize();
+    await expect(
+      small.putIncoming(chunks(Buffer.alloc(64, 1), 8), 128),
+    ).rejects.toMatchObject({ code: "mail_blob_cache_capacity_exhausted" });
+    expect(
+      await readFileNames(
+        path.join(path.dirname(fixture.store.directoryPath), "content-incoming"),
+      ),
+    ).toEqual([]);
   });
 
   it("removes an incoming temporary file when the producer aborts", async () => {

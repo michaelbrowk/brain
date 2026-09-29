@@ -41,13 +41,13 @@ export interface MailSyncCadenceConfig {
 }
 
 /**
- * The background sync's two intervals, from `BRAIN_MAIL_SYNC_INTERVAL_MS`
- * (the fallback every account comes back to, 60 s) and
- * `BRAIN_MAIL_GMAIL_INTERVAL_MS` (Gmail's own cadence, 20 s), and
- * `BRAIN_MAIL_IMAP_IDLE`, on unless it is `0`. A value that is not a plain
- * whole number of milliseconds inside the bounds, or a switch that is not `0`
- * or `1`, is refused rather than read, like the SMTP flags beside it: a
- * service that starts on a guess polls a provider at a rate nobody chose.
+ * The background sync's cadence: `BRAIN_MAIL_SYNC_INTERVAL_MS`, the fallback
+ * every account comes back to (60 s), `BRAIN_MAIL_GMAIL_INTERVAL_MS`, Gmail's
+ * own cadence (20 s), and `BRAIN_MAIL_IMAP_IDLE`, on unless it is `0`. A value
+ * that is not a plain whole number of milliseconds inside the bounds, or a
+ * switch that is not `0` or `1`, is refused rather than read, like the SMTP
+ * flags beside it: a service that starts on a guess polls a provider at a rate
+ * nobody chose.
  */
 export function readMailSyncCadenceConfig(input: {
   readonly syncIntervalMs?: string;

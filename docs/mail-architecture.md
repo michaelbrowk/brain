@@ -239,9 +239,16 @@ The implementation keeps protocol code behind Brain-owned ports:
 - Node's public [`node:net`](https://nodejs.org/api/net.html) and [`node:tls`](https://nodejs.org/api/tls.html) APIs for direct egress where the host permits it
 - an authenticated Cloudflare WebSocket-to-TCP byte relay for SMTP egress from DigitalOcean
 - only the streaming [MailParser](https://nodemailer.com/extras/mailparser) part of Nodemailer for MIME parsing
-- [htmlparser2](https://github.com/fb55/htmlparser2) for the bounded,
-  event-based allowlist sanitizer; the Mail worker never constructs an
-  unbounded browser DOM
+- [parse5](https://parse5.js.org/) to rebuild each message as the tree a
+  browser builds from it, and
+  [htmlparser2](https://github.com/fb55/htmlparser2) for the event-based
+  allowlist sanitizer that reads that tree. While parse5 builds, every
+  element, comment and text node counts against the sanitizer's node budget,
+  no element carries more than 256 attributes and nothing nests deeper than
+  512 levels. With parse5's duplicate-attribute check patched to constant
+  time (`patches/parse5@8.0.1.patch`), the work is proportional to the length
+  of the message: the worst message at the 1 MiB limit takes about half a
+  second of CPU, and the Mail worker never constructs an unbounded DOM
 - Node 22's built-in [`node:sqlite`](https://nodejs.org/api/sqlite.html) for the service-owned account database
 
 [EmailEngine](https://emailengine.app/) is not selected. It is a separate email API server with its own Redis, deployment, licensing, and operating surface. That is too much permanent overhead for a single-user self-hosted deployment. Its documentation remains useful as a protocol behavior reference. Reconsider it only if maintaining provider adapters becomes more expensive than running another service.
@@ -854,8 +861,9 @@ The worker process, patched streaming MailParser/MailSplit limits, sanitizer,
 disk-backed cache, attachment streamer, and malicious corpus are implemented in
 the MIME content slice. The worker cannot share an OS identity, credential
 mount, network namespace, or database access with the transport edge. Content
-format version `8` forces cached pre-verification output to be reparsed before
-reader use. Verified inline CID raster rendering and private downloads are
+format version `9` forces a body cached under an older one to be reparsed
+before reader use: `8` retired pre-verification output, and `9` retired the
+sanitizer that repaired malformed markup differently from a browser. Verified inline CID raster rendering and private downloads are
 implemented; remote images render from the server-side privacy cache as
 described above.
 

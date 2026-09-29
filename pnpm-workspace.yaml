@@ -55,3 +55,7 @@ overrides:
 patchedDependencies:
   '@zone-eu/mailsplit@5.4.14': patches/@zone-eu__mailsplit@5.4.14.patch
   mailparser@3.9.14: patches/mailparser@3.9.14.patch
+  # parse5 found a duplicate attribute by scanning every attribute before it,
+  # so one tag of 200,000 attributes cost the mail sanitizer most of a minute.
+  # The patch keeps the current tag's names in a Set.
+  parse5@8.0.1: patches/parse5@8.0.1.patch

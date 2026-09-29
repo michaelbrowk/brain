@@ -530,7 +530,7 @@ async function refuseOnePastTheCap(page: Page, sheet: Locator) {
     buffer: Buffer.alloc(12 * 1024 * 1024),
   });
   await expect(sheet.locator('.brain-compose-slot [role="status"]')).toHaveText(
-    "A message can carry 10 MB of files.",
+    "“site-survey.mov” is too large. A message can carry 10 MB of files.",
   );
   await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   await page.waitForTimeout(500);

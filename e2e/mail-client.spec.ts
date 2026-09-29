@@ -2408,36 +2408,22 @@ test("@release the sheet takes files by the paperclip and by a drop, refuses one
   page,
 }) => {
   await login(page);
-  const { deleteRequests } = await installMailRoutes(page);
-  // The send door, faked where the browser meets it: what the sheet sent is
-  // recorded, the letter is queued, and the watch later reads it as sent.
-  const sends: Array<{
-    accountId: string;
-    to: string[];
-    text: string;
-    origin: string;
-    attachments: Array<{ filename: string; mimeType: string; dataBase64: string }>;
-  }> = [];
+  const { sendRequests, deleteRequests } = await installMailRoutes(page);
+  // The files go through the draft door with the draft (the mock records
+  // the mutation and the draft it sent), and the watch later reads the
+  // operation as sent.
+  const directSends: unknown[] = [];
   await page.route(/\/api\/mail\/send$/, (route) => {
-    sends.push(route.request().postDataJSON());
-    return route.fulfill({
-      status: 200,
-      contentType: "application/json; charset=utf-8",
-      body: JSON.stringify({
-        apiVersion: 1,
-        operationId: "send-with-files",
-        created: true,
-        status: "queued",
-      }),
-    });
+    directSends.push(route.request().postDataJSON());
+    return route.fulfill({ status: 404, body: "{}" });
   });
-  await page.route(/\/api\/mail\/send\/send-with-files$/, (route) =>
+  await page.route(/\/api\/mail\/send\/send-[^/?]+$/, (route) =>
     route.fulfill({
       status: 200,
       contentType: "application/json; charset=utf-8",
       body: JSON.stringify({
         apiVersion: 1,
-        operationId: "send-with-files",
+        operationId: new URL(route.request().url()).pathname.split("/").at(-1),
         accountId: account.accountId,
         status: "sent",
         threadId: null,
@@ -2482,24 +2468,25 @@ test("@release the sheet takes files by the paperclip and by a drop, refuses one
     buffer: Buffer.alloc(12 * 1024 * 1024),
   });
   await expect(sheet.locator('.brain-compose-slot [role="status"]')).toHaveText(
-    "A message can carry 10 MB of files.",
+    "“big.bin” is too large. A message can carry 10 MB of files.",
   );
   await expect(names).toHaveCount(3);
 
-  // Send carries them as base64 through the send door, from this account and
-  // as the owner's own letter.
+  // Send carries them as base64 on the draft's own send: the letter is its
+  // draft, from this account, and the files ride on the mutation.
   await sheet.getByRole("button", { name: "Send", exact: true }).click();
   await expect(page.getByText("Message queued", { exact: true })).toBeVisible();
   await expect(sheet).toHaveCount(0);
-  expect(sends).toHaveLength(1);
-  expect(sends[0]).toMatchObject({
+  expect(directSends).toHaveLength(0);
+  expect(sendRequests).toHaveLength(1);
+  expect(sendRequests[0]?.draft).toMatchObject({
     accountId: account.accountId,
-    to: ["ben@example.test"],
+    to: "ben@example.test",
     text: "The quote and the notes.",
-    origin: "app",
+    attachments: [],
   });
   expect(
-    sends[0]?.attachments.map((file) => ({
+    (sendRequests[0]?.request.attachments ?? []).map((file) => ({
       filename: file.filename,
       mimeType: file.mimeType,
       text: Buffer.from(file.dataBase64, "base64").toString("utf8"),
@@ -2509,12 +2496,10 @@ test("@release the sheet takes files by the paperclip and by a drop, refuses one
     { filename: "notes.txt", mimeType: "text/plain", text: "three notes" },
     { filename: "photo.png", mimeType: "image/png", text: "a small photo" },
   ]);
-  // The draft that held the words stays until the watch reads the letter as
-  // sent, and goes then.
-  expect(deleteRequests).toHaveLength(0);
+  // The draft went with the send, so nothing is deleted, then or after the
+  // watch reads the letter as sent.
   await expect(page.getByText("Message sent", { exact: true })).toBeVisible({ timeout: 15_000 });
-  await expect.poll(() => deleteRequests.length).toBe(1);
-  expect(deleteRequests[0]?.accountId).toBe(account.accountId);
+  expect(deleteRequests).toHaveLength(0);
 });
 
 /** The sheet and its rows arrive on transforms, and a box measured while they

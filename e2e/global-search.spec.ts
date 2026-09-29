@@ -431,6 +431,10 @@ test("@release a letter the palette found outside Inbox opens in the mailbox its
   const reader = page.locator('section[aria-label="Message reader"]');
   await expect(reader).toContainText("Quarterly insurance renewal");
   await expect(reader).not.toContainText("Choose a message");
+  // Out of the Inbox, so its way back is the strip's one action.
+  await expect(
+    reader.getByRole("button", { name: "Move to Inbox", exact: true }),
+  ).toBeVisible();
   expect(reads.mailbox).toBeGreaterThanOrEqual(1);
   expect(reads.inbox).toBe(0);
 });

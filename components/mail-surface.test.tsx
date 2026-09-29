@@ -684,6 +684,80 @@ describe("MailSurface", () => {
     );
   });
 
+  /** An index still building answers a search in part, and the results are
+   *  read again a quarter second later until it is built. Those re-reads are
+   *  the list's own business: no skeleton stands in for one, and one that
+   *  fails says so as the typed search would. */
+  describe("the re-read of an index still building", () => {
+    const building: MailSearchThreadPage = {
+      ...searchThreadPage("inbox"),
+      indexStatus: "building",
+    };
+
+    async function searchLunch(client: MailSurfaceClient) {
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await setInput(
+        document.body.querySelector('input[aria-label="Search mail"]') as HTMLInputElement,
+        "Lunch",
+      );
+      await act(async () => vi.advanceTimersByTimeAsync(180));
+      await settle();
+    }
+
+    async function quarterSecond() {
+      await act(async () => vi.advanceTimersByTimeAsync(250));
+      await settle();
+    }
+
+    it("keeps the results on screen and goes on until the index is built", async () => {
+      vi.useFakeTimers();
+      const second = deferred<MailSearchThreadPage>();
+      const searchThreads = vi
+        .fn()
+        .mockResolvedValueOnce(building)
+        .mockImplementationOnce(() => second.promise)
+        .mockResolvedValueOnce(building)
+        .mockResolvedValue(searchThreadPage("inbox"));
+      await searchLunch(makeClient({ searchThreads }));
+      expect(document.body.textContent).toContain("Indexing cached mail");
+
+      await quarterSecond();
+      expect(searchThreads).toHaveBeenCalledTimes(2);
+      // The re-read is out, and the results it will replace stay.
+      expect(document.body.textContent).toContain("Lunch this Friday?");
+
+      await act(async () => second.resolve(building));
+      await settle();
+      await quarterSecond();
+      expect(searchThreads).toHaveBeenCalledTimes(3);
+      await quarterSecond();
+      expect(searchThreads).toHaveBeenCalledTimes(4);
+      expect(document.body.textContent).not.toContain("Indexing cached mail");
+
+      // Built: nothing is left to re-read.
+      await act(async () => vi.advanceTimersByTimeAsync(2_000));
+      await settle();
+      expect(searchThreads).toHaveBeenCalledTimes(4);
+    });
+
+    it("says the Inbox couldn't load when a re-read fails", async () => {
+      vi.useFakeTimers();
+      const searchThreads = vi
+        .fn()
+        .mockResolvedValueOnce(building)
+        .mockRejectedValueOnce(new Error("offline"));
+      await searchLunch(makeClient({ searchThreads }));
+
+      await quarterSecond();
+      expect(searchThreads).toHaveBeenCalledTimes(2);
+      expect(document.body.textContent).toContain("Inbox couldn’t load");
+    });
+  });
+
   it("rejects server-invalid search text before the network without reporting an outage", async () => {
     vi.useFakeTimers();
     const searchThreads = vi.fn().mockResolvedValue(searchThreadPage("inbox"));
@@ -2457,6 +2531,602 @@ describe("MailSurface", () => {
     });
     expect(document.body.textContent).toContain("Lunch this Friday?");
     expect(onToast).toHaveBeenCalledWith("Conversation restored");
+  });
+
+  /** A letter shown from All Mail, or any folder but Inbox, Spam and Trash,
+   *  had no way back to the Inbox. The client here is server truth: Archive
+   *  and Move to Inbox change what the next read and the next Inbox list
+   *  say. */
+  describe("Move to Inbox", () => {
+    function inboxTruthClient(overrides: Partial<MailSurfaceClient> = {}) {
+      let inInbox = false;
+      const updateThread = vi.fn().mockImplementation(async (input) => {
+        if ("archive" in input) inInbox = !input.archive;
+      });
+      const letter = (): MailThreadDetail => ({
+        ...detail,
+        messages: detail.messages.map((message) => ({ ...message, inInbox })),
+      });
+      const client = makeClient({
+        updateThread,
+        listThreads: vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve({
+            ...threadPage,
+            items: inInbox && accountId === thread.accountId ? [thread] : [],
+          }),
+        ),
+        searchThreads: vi.fn().mockImplementation(({ mailboxId }) =>
+          Promise.resolve(
+            searchThreadPage(
+              mailboxId,
+              inInbox || mailboxId !== "inbox" ? [thread] : [],
+            ),
+          ),
+        ),
+        readThread: vi.fn().mockImplementation(() => Promise.resolve(letter())),
+        readMailboxThread: vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(letter())),
+        ...overrides,
+      });
+      return { client, updateThread };
+    }
+
+    function readerButtons(): string[] {
+      const reader = document.body.querySelector(
+        'section[aria-label="Message reader"]',
+      );
+      return [...(reader?.querySelectorAll("button") ?? [])].map(
+        (button) => button.textContent?.trim() ?? "",
+      );
+    }
+
+    function threadList(): string {
+      return (
+        document.body.querySelector('section[aria-label="Mailbox"]')?.textContent ?? ""
+      );
+    }
+
+    type Pill = ToastOptions & { onAction: () => Promise<unknown> };
+
+    function readerButton(label: string): HTMLButtonElement {
+      const reader = document.body.querySelector(
+        'section[aria-label="Message reader"]',
+      );
+      const found = [...(reader?.querySelectorAll("button") ?? [])].find(
+        (button) => button.textContent?.trim() === label,
+      );
+      if (!(found instanceof HTMLButtonElement)) {
+        throw new Error(`No reader button: ${label}`);
+      }
+      return found;
+    }
+
+    async function movedFromAllMail(
+      client: MailSurfaceClient,
+      accounts: readonly PublicMailAccount[] = [accountA],
+      onToast = vi.fn(),
+    ) {
+      vi.mocked(client.loadAccounts).mockResolvedValue([...accounts]);
+      await act(async () =>
+        root.render(
+          <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+        ),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      await click(findButton("Lunch this Friday?"));
+      expect(readerButtons()).toContain("Move to Inbox");
+      await click(findButton("Move to Inbox"));
+      const [title, pill] = onToast.mock.calls.at(-1)!;
+      expect(title).toBe("Moved to Inbox");
+      return pill as Pill;
+    }
+
+    it("moves the letter back with an Undo that archives it again", async () => {
+      const { client, updateThread } = inboxTruthClient();
+      const pill = await movedFromAllMail(client);
+
+      expect(updateThread).toHaveBeenLastCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+        archive: false,
+      });
+      expect(pill).toMatchObject({
+        icon: "inbox-linear",
+        actionLabel: "Undo",
+        durationMs: SMART_UNDO_MS,
+      });
+      // In the Inbox now: the letter stays open, and its way out is the
+      // Inbox's own.
+      expect(readerButtons()).not.toContain("Move to Inbox");
+      expect(readerButtons()).toContain("Archive");
+      expect(
+        document.body.querySelector('section[aria-label="Message reader"]')
+          ?.textContent,
+      ).toContain("Lunch this Friday?");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+
+      expect(updateThread).toHaveBeenLastCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+        archive: true,
+      });
+      // Out of the Inbox again, and the reader on it says so.
+      expect(readerButtons()).toContain("Move to Inbox");
+    });
+
+    it("refuses Undo while another mail action is still going out", async () => {
+      const star = deferred<void>();
+      const { client, updateThread } = inboxTruthClient();
+      const settled = updateThread.getMockImplementation()!;
+      updateThread.mockImplementation((input) =>
+        "starred" in input ? star.promise : settled(input),
+      );
+      const pill = await movedFromAllMail(client);
+      await act(async () => {
+        findButton("More mail actions").dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+        );
+      });
+      await settle();
+      await click(findMenuItem("Star"));
+
+      // The pill keeps standing and its press can be made again.
+      expect(pill.onAction()).toBe(false);
+      expect(updateThread).not.toHaveBeenCalledWith(
+        expect.objectContaining({ archive: true }),
+      );
+      await act(async () => star.resolve());
+    });
+
+    it("archives the letter again from the strip, and the strip offers the way back", async () => {
+      const { client, updateThread } = inboxTruthClient();
+      const onToast = vi.fn();
+      await movedFromAllMail(client, [accountA], onToast);
+
+      await click(readerButton("Archive"));
+      await settle();
+
+      expect(updateThread).toHaveBeenLastCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+        archive: true,
+      });
+      expect(onToast).toHaveBeenLastCalledWith("Conversation archived");
+      // All Mail still lists it, so the reader stays on it.
+      expect(
+        document.body.querySelector('section[aria-label="Message reader"]')
+          ?.textContent,
+      ).toContain("Lunch this Friday?");
+      expect(readerButtons()).toContain("Move to Inbox");
+      expect(readerButtons()).not.toContain("Archive");
+    });
+
+    it("moves the letter once for a held e, not back and forth with the key repeat", async () => {
+      const { client, updateThread } = inboxTruthClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      await click(findButton("Lunch this Friday?"));
+
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "e", cancelable: true }));
+      });
+      await settle();
+      // The key is still down: the repeats that follow are not presses.
+      await act(async () => {
+        window.dispatchEvent(
+          new KeyboardEvent("keydown", { key: "e", repeat: true, cancelable: true }),
+        );
+      });
+      await settle();
+
+      expect(updateThread.mock.calls.map(([input]) => input.archive)).toEqual([false]);
+    });
+
+    it("runs Move to Inbox from e where the letter is out of the Inbox", async () => {
+      const { client, updateThread } = inboxTruthClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      await click(findButton("Lunch this Friday?"));
+
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "e", cancelable: true }));
+      });
+      await settle();
+
+      expect(updateThread).toHaveBeenLastCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+        archive: false,
+      });
+
+      // In the Inbox now, and the same key takes it out again.
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "e", cancelable: true }));
+      });
+      await settle();
+
+      expect(updateThread).toHaveBeenLastCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+        archive: true,
+      });
+      expect(readerButtons()).toContain("Move to Inbox");
+    });
+
+    it("takes the row out of the Inbox the reader went to when Undo is pressed there", async () => {
+      const { client } = inboxTruthClient();
+      const pill = await movedFromAllMail(client);
+      await goTo("Inbox");
+      expect(threadList()).toContain("Lunch this Friday?");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+
+      expect(threadList()).not.toContain("Lunch this Friday?");
+    });
+
+    it("takes the row out of All inboxes when Undo is pressed there", async () => {
+      const { client } = inboxTruthClient();
+      const pill = await movedFromAllMail(client, [accountA, accountB]);
+      await goTo("All inboxes");
+      // The letter is read, so it stands in the Seen bundle rather than as a
+      // row of its own: the column's one thread is it.
+      expect(threadList()).not.toContain("Inbox zero");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+
+      expect(threadList()).toContain("Inbox zero");
+    });
+
+    it("lets go of the unread-first hold when Undo closes the letter it held", async () => {
+      // The letter came back to the Inbox unread and was opened there under
+      // Unread first, so its read held the row in place. Undo takes it out
+      // and closes it, and the hold goes with it: the next letter opened is
+      // not a hold to settle.
+      let inInbox = false;
+      let unread = false;
+      const other = {
+        ...thread,
+        threadId: "thread-other",
+        subject: "Another letter",
+        lastMessageAt: thread.lastMessageAt - 1_000,
+      };
+      const moved = () => ({ ...thread, unread });
+      const letterFor = (threadId: string): MailThreadDetail => ({
+        ...detail,
+        thread: threadId === other.threadId ? other : moved(),
+        messages: detail.messages.map((message) => ({
+          ...message,
+          threadId,
+          inInbox: threadId === other.threadId || inInbox,
+        })),
+      });
+      const updateThread = vi.fn().mockImplementation(async (input) => {
+        if ("archive" in input) inInbox = !input.archive;
+        if ("read" in input) unread = !input.read;
+      });
+      const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+        Promise.resolve({
+          ...threadPage,
+          items:
+            accountId === thread.accountId
+              ? [...(inInbox ? [moved()] : []), other]
+              : [],
+        }),
+      );
+      const client = makeClient({
+        updateThread,
+        listThreads,
+        listMailboxThreads: vi
+          .fn()
+          .mockImplementation(({ mailboxId }) =>
+            Promise.resolve(mailboxThreadPage(mailboxId, [moved(), other])),
+          ),
+        readThread: vi
+          .fn()
+          .mockImplementation(({ threadId }) => Promise.resolve(letterFor(threadId))),
+        readMailboxThread: vi
+          .fn()
+          .mockImplementation(({ threadId }) => Promise.resolve(letterFor(threadId))),
+      });
+      const onToast = vi.fn();
+      await act(async () =>
+        root.render(
+          <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+        ),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      await click(rowButton("Lunch this Friday?"));
+      await click(readerButton("Move to Inbox"));
+      const pill = onToast.mock.calls.at(-1)![1] as Pill;
+      await click(readerButton("Mark unread"));
+      expect(unread).toBe(true);
+
+      await goTo("Inbox");
+      await act(async () => {
+        findButton("Sort: Date").dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+        );
+      });
+      await settle();
+      await click(findMenuItem("Unread first"));
+      await click(rowButton("Lunch this Friday?"));
+      await settle();
+      expect(unread).toBe(false);
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+      expect(
+        document.body.querySelector('section[aria-label="Message reader"]')
+          ?.textContent,
+      ).toContain("Choose a message");
+      const reads = listThreads.mock.calls.length;
+
+      await click(rowButton("Another letter"));
+      await settle();
+      expect(listThreads.mock.calls.length).toBe(reads);
+    });
+
+    it("takes a letter from deep in All inboxes out when Undo is pressed there", async () => {
+      // The letter sits past page one of its account's stream. Page one's
+      // re-read keeps a deep stream's older rows, so only taking the row out
+      // takes it off the column.
+      let inInbox = false;
+      const letter = { ...thread, lastMessageAt: 1_000 };
+      const newer = Array.from({ length: 50 }, (_value, index) => ({
+        ...thread,
+        threadId: `newer-${index}`,
+        subject: `Newer ${index}`,
+        unread: true,
+        lastMessageAt: 1_700_000_000_000 - index,
+      }));
+      const updateThread = vi.fn().mockImplementation(async (input) => {
+        if ("archive" in input) inInbox = !input.archive;
+      });
+      const client = makeClient({
+        loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+        updateThread,
+        listThreads: vi.fn().mockImplementation(({ accountId, cursor }) =>
+          Promise.resolve(
+            accountId !== accountA.accountId
+              ? { ...threadPage, items: [], nextCursor: null }
+              : cursor
+                ? { ...threadPage, items: inInbox ? [letter] : [], nextCursor: null }
+                : { ...threadPage, items: newer, nextCursor: "a-page-2" },
+          ),
+        ),
+        listMailboxThreads: vi
+          .fn()
+          .mockImplementation(({ mailboxId }) =>
+            Promise.resolve({ ...mailboxThreadPage(mailboxId), items: [letter] }),
+          ),
+        readMailboxThread: vi.fn().mockImplementation(() =>
+          Promise.resolve({
+            ...detail,
+            thread: letter,
+            messages: detail.messages.map((message) => ({ ...message, inInbox })),
+          }),
+        ),
+      });
+      const onToast = vi.fn();
+      await act(async () =>
+        root.render(
+          <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+        ),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      await click(findButton("Lunch this Friday?"));
+      await click(findButton("Move to Inbox"));
+      const pill = onToast.mock.calls.at(-1)![1] as Pill;
+
+      await goTo("All inboxes");
+      await click(findButton("Load more"));
+      // The letter is read, so it is Seen's one thread.
+      expect(document.body.textContent).toContain("1 thread, nothing unread");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+      await settle();
+
+      expect(updateThread).toHaveBeenLastCalledWith(
+        expect.objectContaining({ archive: true }),
+      );
+      expect(document.body.textContent).not.toContain("1 thread, nothing unread");
+    });
+
+    function rowButton(subject: string): HTMLButtonElement {
+      const row = [
+        ...document.body.querySelectorAll('section[aria-label="Mailbox"] button'),
+      ].find((candidate) => candidate.textContent?.includes(subject));
+      if (!(row instanceof HTMLButtonElement)) throw new Error(`No row: ${subject}`);
+      return row;
+    }
+
+    it("closes the letter open in the Inbox when Undo takes it out again", async () => {
+      const { client } = inboxTruthClient();
+      const pill = await movedFromAllMail(client);
+      await goTo("Inbox");
+      await click(rowButton("Lunch this Friday?"));
+      expect(readerButtons()).toContain("Archive");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+
+      // As Archive leaves it: the letter is gone from the folder on screen,
+      // and so is the reader that showed it there.
+      expect(threadList()).not.toContain("Lunch this Friday?");
+      expect(
+        document.body.querySelector('section[aria-label="Message reader"]')
+          ?.textContent,
+      ).toContain("Choose a message");
+    });
+
+    it("re-reads an Inbox that was still loading when Undo landed", async () => {
+      const { client } = inboxTruthClient();
+      const pill = await movedFromAllMail(client);
+      // The Inbox is read while the letter is in it, and the answer lands
+      // only after Undo took it out again.
+      const listThreads = vi.mocked(client.listThreads);
+      const read = listThreads.getMockImplementation()!;
+      const landing = deferred<void>();
+      listThreads.mockImplementationOnce(async (input, signal) => {
+        const page = await read(input, signal);
+        await landing.promise;
+        return page;
+      });
+      await goTo("Inbox");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+      await act(async () => landing.resolve());
+      await settle();
+      await settle();
+
+      expect(threadList()).not.toContain("Lunch this Friday?");
+    });
+
+    it("searches the Inbox again when Undo lands on its results", async () => {
+      const { client } = inboxTruthClient();
+      const pill = await movedFromAllMail(client);
+      await goTo("Inbox");
+      await setInput(
+        document.body.querySelector('input[aria-label="Search mail"]') as HTMLInputElement,
+        "Lunch",
+      );
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 200)));
+      await settle();
+      expect(threadList()).toContain("Lunch this Friday?");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+
+      expect(threadList()).not.toContain("Lunch this Friday?");
+    });
+
+    /** The Inbox's search results, with the letter Move to Inbox put there. */
+    async function searchedInbox(client: MailSurfaceClient) {
+      const pill = await movedFromAllMail(client);
+      await goTo("Inbox");
+      await setInput(
+        document.body.querySelector('input[aria-label="Search mail"]') as HTMLInputElement,
+        "Lunch",
+      );
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 200)));
+      await settle();
+      expect(threadList()).toContain("Lunch this Friday?");
+      return pill;
+    }
+
+    it("keeps the results on screen while the quiet search after Undo is out", async () => {
+      const { client } = inboxTruthClient();
+      const pill = await searchedInbox(client);
+      const again = deferred<MailSearchThreadPage>();
+      vi.mocked(client.searchThreads).mockImplementationOnce(() => again.promise);
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+
+      // Nobody asked to watch this search run: no skeleton stands in for it.
+      expect(threadList()).toContain("Lunch this Friday?");
+      await act(async () => again.resolve(searchThreadPage("inbox", [])));
+      await settle();
+      expect(threadList()).not.toContain("Lunch this Friday?");
+    });
+
+    it("keeps re-reading an index still building when the quiet search after Undo fails", async () => {
+      // The Inbox's index is still building, so its results are re-read in the
+      // background every quarter second. Undo's quiet search starts while one
+      // of those reads is out, which drops that read's answer, and then fails.
+      // The re-reads have to go on until the index is built.
+      const { client } = inboxTruthClient();
+      let calls = 0;
+      const background = deferred<MailSearchThreadPage>();
+      const results = (
+        mailboxId: MailSystemMailbox,
+        indexStatus: MailSearchThreadPage["indexStatus"],
+      ): MailSearchThreadPage => ({
+        ...searchThreadPage(mailboxId, [thread]),
+        indexStatus,
+      });
+      vi.mocked(client.searchThreads).mockImplementation(({ mailboxId }) => {
+        calls += 1;
+        if (calls === 2) return background.promise;
+        if (calls === 3) return Promise.reject(new Error("offline"));
+        return Promise.resolve(results(mailboxId, calls < 5 ? "building" : "ready"));
+      });
+      const pill = await searchedInbox(client);
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 300)));
+      await settle();
+      expect(calls).toBe(2);
+      expect(threadList()).toContain("Indexing cached mail");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+      expect(calls).toBe(3);
+      await act(async () => background.resolve(results("inbox", "building")));
+      await settle();
+      for (let step = 0; step < 10; step += 1) {
+        await act(async () => new Promise((resolve) => setTimeout(resolve, 100)));
+        await settle();
+      }
+
+      expect(calls).toBeGreaterThanOrEqual(5);
+      expect(threadList()).not.toContain("Indexing cached mail");
+    });
+
+    it("keeps the results when the quiet search after Undo fails", async () => {
+      const { client } = inboxTruthClient();
+      const pill = await searchedInbox(client);
+      vi.mocked(client.searchThreads).mockRejectedValueOnce(new Error("offline"));
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+
+      // A quiet refresh that fails leaves the list usable, as the unsearched
+      // list's does.
+      expect(threadList()).not.toContain("couldn’t load");
+      expect(threadList()).toContain("Lunch this Friday?");
+    });
   });
 
   it("uses the confirmed thread label for Star and blocks duplicate actions", async () => {
@@ -5543,6 +6213,196 @@ describe("MailSurface", () => {
       expect(rows()[0]).toContain("Second unread");
       expect(rows()[1]).toContain("First unread");
     });
+
+    it.each([
+      ["Archive", true, "Move to Inbox", ["Conversation archived"]],
+      [
+        "Move to Inbox",
+        false,
+        "Archive",
+        [
+          "Moved to Inbox",
+          expect.objectContaining({
+            actionLabel: "Undo",
+            durationMs: SMART_UNDO_MS,
+          }),
+        ],
+      ],
+    ] as const)(
+      "keeps the held letter in place when %s runs on it in All Mail",
+      async (label, startsInInbox, wayBack, toast) => {
+        // All Mail lists the letter either way, so the move in or out of the
+        // Inbox takes the held path a star takes: under Unread first, the row
+        // the reader opened stays where it was until the selection moves on.
+        const unreadById = new Map([
+          [firstUnread.threadId, true],
+          [secondUnread.threadId, true],
+        ]);
+        let inInbox = startsInInbox;
+        const items = () =>
+          [firstUnread, secondUnread].map((item) => ({
+            ...item,
+            unread: unreadById.get(item.threadId)!,
+          }));
+        const listMailboxThreads = vi.fn().mockImplementation((input) => {
+          let pageItems = items();
+          if (input.sort === "unread") {
+            pageItems = [...pageItems].sort(
+              (a, b) => Number(b.unread) - Number(a.unread),
+            );
+          }
+          return Promise.resolve({
+            ...mailboxThreadPage(input.mailboxId),
+            items: pageItems,
+          });
+        });
+        const readMailboxThread = vi.fn().mockImplementation(({ threadId }) =>
+          Promise.resolve({
+            ...detail,
+            thread: items().find((item) => item.threadId === threadId)!,
+            messages: detail.messages.map((message) => ({
+              ...message,
+              threadId,
+              inInbox,
+            })),
+          }),
+        );
+        const updateThread = vi.fn().mockImplementation(async (input) => {
+          if ("read" in input) unreadById.set(input.threadId, input.read !== true);
+          if ("archive" in input) inInbox = !input.archive;
+        });
+        const client = makeClient({
+          listMailboxThreads,
+          readMailboxThread,
+          updateThread,
+        });
+        const onToast = vi.fn();
+        await act(async () =>
+          root.render(
+            <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+          ),
+        );
+        await settle();
+        await enterSingleAccount();
+        await goTo("All Mail");
+        await act(async () => {
+          findButton("Sort: Date").dispatchEvent(
+            new PointerEvent("pointerdown", {
+              bubbles: true,
+              cancelable: true,
+              button: 0,
+            }),
+          );
+        });
+        await settle();
+        await click(findMenuItem("Unread first"));
+        const rows = () =>
+          [...mailboxList().querySelectorAll('[role="list"] button')].map(
+            (button) => button.textContent ?? "",
+          );
+        await click(findButton("First unread"));
+        await settle();
+        expect(rows()[0]).toContain("First unread");
+        const reads = listMailboxThreads.mock.calls.length;
+
+        const reader = () =>
+          document.body.querySelector('section[aria-label="Message reader"]');
+        const action = [...(reader()?.querySelectorAll("button") ?? [])].find(
+          (button) => button.textContent?.trim() === label,
+        ) as HTMLButtonElement;
+        await click(action);
+        await settle();
+
+        expect(updateThread).toHaveBeenLastCalledWith(
+          expect.objectContaining({ archive: startsInInbox }),
+        );
+        // No refetch re-sorted the list under the reader.
+        expect(listMailboxThreads.mock.calls.length).toBe(reads);
+        expect(rows()[0]).toContain("First unread");
+        // The reader stays on the letter and offers the move back.
+        expect(reader()?.textContent).toContain("First unread");
+        expect(
+          [...(reader()?.querySelectorAll("button") ?? [])].map(
+            (button) => button.textContent?.trim(),
+          ),
+        ).toContain(wayBack);
+        // The same sentence as the unheld path, Move to Inbox's Undo included.
+        expect(onToast).toHaveBeenLastCalledWith(...toast);
+      },
+    );
+
+    it("takes the held letter's row out of the Inbox when Archive runs on it there", async () => {
+      // In the Inbox, Archive moves the letter out of the folder on screen, so
+      // it is not held: the row leaves and the reader closes, unread first or
+      // not.
+      const unreadById = new Map([
+        [firstUnread.threadId, true],
+        [secondUnread.threadId, true],
+      ]);
+      const archived = new Set<string>();
+      const items = () =>
+        [firstUnread, secondUnread]
+          .filter((item) => !archived.has(item.threadId))
+          .map((item) => ({ ...item, unread: unreadById.get(item.threadId)! }));
+      const listThreads = vi.fn().mockImplementation((input) => {
+        let pageItems = items();
+        if (input.sort === "unread") {
+          pageItems = [...pageItems].sort(
+            (a, b) => Number(b.unread) - Number(a.unread),
+          );
+        }
+        return Promise.resolve({ ...threadPage, items: pageItems });
+      });
+      const readThread = vi.fn().mockImplementation(({ threadId }) =>
+        Promise.resolve({
+          ...detail,
+          thread: [firstUnread, secondUnread].find(
+            (item) => item.threadId === threadId,
+          )!,
+          messages: detail.messages.map((message) => ({ ...message, threadId })),
+        }),
+      );
+      const updateThread = vi.fn().mockImplementation(async (input) => {
+        if ("read" in input) unreadById.set(input.threadId, input.read !== true);
+        if ("archive" in input && input.archive) archived.add(input.threadId);
+      });
+      const client = makeClient({ listThreads, readThread, updateThread });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await act(async () => {
+        findButton("Sort: Date").dispatchEvent(
+          new PointerEvent("pointerdown", {
+            bubbles: true,
+            cancelable: true,
+            button: 0,
+          }),
+        );
+      });
+      await settle();
+      await click(findMenuItem("Unread first"));
+      await click(findButton("First unread"));
+      await settle();
+      expect(updateThread).toHaveBeenLastCalledWith(
+        expect.objectContaining({ read: true }),
+      );
+
+      const reader = () =>
+        document.body.querySelector('section[aria-label="Message reader"]');
+      const archive = [...(reader()?.querySelectorAll("button") ?? [])].find(
+        (button) => button.textContent?.trim() === "Archive",
+      ) as HTMLButtonElement;
+      await click(archive);
+      await settle();
+
+      expect(updateThread).toHaveBeenLastCalledWith(
+        expect.objectContaining({ archive: true }),
+      );
+      expect(mailboxList().textContent).not.toContain("First unread");
+      expect(reader()?.textContent).toContain("Choose a message");
+    });
   });
 
   describe("keyboard layer", () => {
@@ -6543,6 +7403,835 @@ describe("MailSurface", () => {
         });
         expect(document.body.textContent).toContain("A newest");
         expect(document.body.textContent).not.toContain("couldn’t load");
+
+        // Page one was all the stream had, so page one's cursor is the one
+        // Load more goes on from.
+        await click(findButton("Load more"));
+        expect(listThreads).toHaveBeenLastCalledWith({
+          accountId: accountA.accountId,
+          cursor: "cursor-a",
+          limit: 50,
+        });
+      });
+
+      const deepRows = Array.from({ length: 150 }, (_value, index) =>
+        unifiedThread({
+          accountId: accountA.accountId,
+          threadId: `A row ${String(index).padStart(3, "0")}`,
+          lastMessageAt: 1_700_000_900_000 - index * 1_000,
+          unread: false,
+        }),
+      );
+
+      /** A letter the stream never saw, filed by the new snapshot among rows
+       *  it did see: only the walk's middle page carries it, so a walk that
+       *  kept only its last page loses it. */
+      const arrivedDeep = unifiedThread({
+        accountId: accountA.accountId,
+        threadId: "A arrived deep",
+        lastMessageAt: 1_700_000_900_000 - 75_500,
+      });
+
+      /** A letter the stream loaded read, marked unread elsewhere since: the
+       *  walk re-reads it, and its fresh copy is the one that counts. */
+      const unreadSince = { ...deepRows[60]!, unread: true };
+
+      const secondSnapshot: Readonly<
+        Record<string, MailThreadPage | Promise<MailThreadPage>>
+      > = {
+        "s2-page-2": pageOf(
+          [
+            ...deepRows.slice(50, 60),
+            unreadSince,
+            ...deepRows.slice(61, 76),
+            arrivedDeep,
+            ...deepRows.slice(76, 100),
+          ],
+          "s2-page-3",
+        ),
+        "s2-page-3": pageOf(deepRows.slice(100, 150)),
+      };
+
+      /** A stream two pages deep whose third page a sync (or an outage) held.
+       *  The re-read hands back page one of the new snapshot and its cursor,
+       *  and the stream's hundred rows stay. Keeping the lost cursor's null
+       *  stopped the account paging until a reload. `pages` is the new
+       *  snapshot past its first page, by cursor. */
+      function deepStreamClient(
+        third: () => Error,
+        pages: Readonly<
+          Record<string, MailThreadPage | Promise<MailThreadPage>>
+        > = secondSnapshot,
+      ) {
+        let snapshot = 1;
+        let failed = false;
+        const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) => {
+          if (accountId === accountB.accountId) {
+            return Promise.resolve(
+              pageOf([
+                unifiedThread({
+                  accountId: accountB.accountId,
+                  threadId: "B only",
+                  lastMessageAt: 1_600_000_000_000,
+                }),
+              ]),
+            );
+          }
+          if (!cursor) {
+            return Promise.resolve(
+              pageOf(deepRows.slice(0, 50), `s${snapshot}-page-2`),
+            );
+          }
+          if (cursor === "s1-page-2") {
+            return Promise.resolve(pageOf(deepRows.slice(50, 100), "s1-page-3"));
+          }
+          if (cursor === "s1-page-3" && !failed) {
+            failed = true;
+            snapshot = 2;
+            return Promise.reject(third());
+          }
+          if (cursor in pages) return Promise.resolve(pages[cursor]!);
+          return Promise.reject(new Error(`unexpected cursor ${cursor}`));
+        });
+        return { listThreads };
+      }
+
+      function cursorsAsked(listThreads: ReturnType<typeof vi.fn>): string[] {
+        return listThreads.mock.calls
+          .map(([input]) => input.cursor)
+          .filter((cursor): cursor is string => typeof cursor === "string");
+      }
+
+      it("pages on past its loaded rows after a sync holds a deep Load more", async () => {
+        vi.useFakeTimers();
+        const { listThreads } = deepStreamClient(held);
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+        await click(findButton("Load more"));
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads)).toEqual(["s1-page-2", "s1-page-3"]);
+
+        await wait(1_500);
+        expect(document.body.textContent).not.toContain("couldn’t load");
+
+        // One press walks the new snapshot from its page two past the
+        // hundredth row, where the rows the stream has not seen begin.
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads)).toEqual([
+          "s1-page-2",
+          "s1-page-3",
+          "s2-page-2",
+          "s2-page-3",
+        ]);
+        // Every page the walk crossed counts, not only the one it ended on.
+        expect(document.body.textContent).toContain("A arrived deep");
+        // The account ran out, so nothing is left to ask for.
+        expect(() => findButton("Load more")).toThrow();
+      });
+
+      it("pages on past its loaded rows after Try again heals a deep Load more", async () => {
+        const { listThreads } = deepStreamClient(() => new Error("outage"));
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+        await click(findButton("Load more"));
+        await click(findButton("Load more"));
+        expect(document.body.textContent).toContain(
+          `${accountA.emailAddress} couldn’t load`,
+        );
+
+        await click(findButton("Try again"));
+        expect(document.body.textContent).not.toContain("couldn’t load");
+        expect(document.body.textContent).not.toContain(unreadSince.subject);
+
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads)).toEqual([
+          "s1-page-2",
+          "s1-page-3",
+          "s2-page-2",
+          "s2-page-3",
+        ]);
+        expect(document.body.textContent).toContain("A arrived deep");
+        // Unread again, so it stands as a row of its own rather than in Seen.
+        expect(document.body.textContent).toContain(unreadSince.subject);
+        expect(() => findButton("Load more")).toThrow();
+      });
+
+      /** The column scrolled to its end. Every observer the list makes reports
+       *  its sentinel in view as soon as it observes it, the way a real one
+       *  does, and none reports once disconnected. Nothing here presses the
+       *  sr-only Load more, so what pages is what scrolling does. `view` lets
+       *  a test bring the end into view later. */
+      function sentinelInView(view: { inView: boolean } = { inView: true }) {
+        vi.stubGlobal(
+          "IntersectionObserver",
+          class {
+            private readonly targets = new Set<Element>();
+            constructor(private readonly callback: IntersectionObserverCallback) {}
+            observe(target: Element) {
+              this.targets.add(target);
+              queueMicrotask(() => {
+                if (!this.targets.has(target)) return;
+                this.callback(
+                  [{ target, isIntersecting: view.inView } as IntersectionObserverEntry],
+                  this as unknown as IntersectionObserver,
+                );
+              });
+            }
+            unobserve(target: Element) {
+              this.targets.delete(target);
+            }
+            disconnect() {
+              this.targets.clear();
+            }
+            takeRecords() {
+              return [];
+            }
+          },
+        );
+      }
+
+      async function until(ok: () => boolean, what: string) {
+        for (let round = 0; round < 60; round += 1) {
+          if (ok()) return;
+          await settle();
+        }
+        throw new Error(`not reached: ${what}`);
+      }
+
+      it("scrolls on past its loaded rows after a sync holds a deep page", async () => {
+        vi.useFakeTimers();
+        sentinelInView();
+        const { listThreads } = deepStreamClient(held);
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await until(
+          () => cursorsAsked(listThreads).length === 2,
+          "scrolling reaches the held page",
+        );
+        expect(cursorsAsked(listThreads)).toEqual(["s1-page-2", "s1-page-3"]);
+
+        // The quiet re-read heals the stream with exactly the rows it had,
+        // and the sentinel still in view asks for what comes after them.
+        await wait(1_500);
+        await until(
+          () => cursorsAsked(listThreads).length === 4,
+          "scrolling goes on after the heal",
+        );
+        expect(cursorsAsked(listThreads)).toEqual([
+          "s1-page-2",
+          "s1-page-3",
+          "s2-page-2",
+          "s2-page-3",
+        ]);
+        await until(
+          () => document.body.textContent?.includes("A arrived deep") ?? false,
+          "every page the walk crossed lands",
+        );
+      });
+
+      it("scrolls on past its loaded rows after Try again heals a deep page", async () => {
+        sentinelInView();
+        const { listThreads } = deepStreamClient(() => new Error("outage"));
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await until(
+          () =>
+            document.body.textContent?.includes(
+              `${accountA.emailAddress} couldn’t load`,
+            ) ?? false,
+          "scrolling reaches the page that fails",
+        );
+        expect(cursorsAsked(listThreads)).toEqual(["s1-page-2", "s1-page-3"]);
+
+        await click(findButton("Try again"));
+        await until(
+          () => cursorsAsked(listThreads).length === 4,
+          "scrolling goes on after Try again",
+        );
+        expect(cursorsAsked(listThreads)).toEqual([
+          "s1-page-2",
+          "s1-page-3",
+          "s2-page-2",
+          "s2-page-3",
+        ]);
+        await until(
+          () => document.body.textContent?.includes("A arrived deep") ?? false,
+          "every page the walk crossed lands",
+        );
+      });
+
+      /** A deep stream that failed and was healed by Try again, so its next
+       *  Load more is a walk from the new snapshot's page two. */
+      async function healedByTryAgain(
+        listThreads: ReturnType<typeof deepStreamClient>["listThreads"],
+      ) {
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+        await click(findButton("Load more"));
+        await click(findButton("Load more"));
+        await click(findButton("Try again"));
+        expect(cursorsAsked(listThreads)).toEqual(["s1-page-2", "s1-page-3"]);
+      }
+
+      it("walks no further than the stream's depth and a page more on one press", async () => {
+        // A snapshot whose pages keep landing inside the rows the stream
+        // holds. A hundred rows are two pages; one more covers what moved.
+        const inside = (next: string) => pageOf(deepRows.slice(50, 100), next);
+        const { listThreads } = deepStreamClient(() => new Error("outage"), {
+          "s2-page-2": inside("s2-page-3"),
+          "s2-page-3": inside("s2-page-4"),
+          "s2-page-4": inside("s2-page-5"),
+          "s2-page-5": inside("s2-page-6"),
+          "s2-page-6": pageOf(deepRows.slice(100, 150)),
+        });
+        await healedByTryAgain(listThreads);
+
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads).slice(2)).toEqual([
+          "s2-page-2",
+          "s2-page-3",
+          "s2-page-4",
+        ]);
+
+        // The walk stopped short of the stream's last row, so the next press
+        // walks on from where it stopped rather than appending out of order.
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads).slice(5)).toEqual([
+          "s2-page-5",
+          "s2-page-6",
+        ]);
+        expect(() => findButton("Load more")).toThrow();
+      });
+
+      it("stops walking at a cursor it has already read", async () => {
+        const inside = (next: string) => pageOf(deepRows.slice(50, 100), next);
+        const { listThreads } = deepStreamClient(() => new Error("outage"), {
+          "s2-page-2": inside("s2-page-3"),
+          "s2-page-3": inside("s2-page-2"),
+        });
+        await healedByTryAgain(listThreads);
+
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads).slice(2)).toEqual([
+          "s2-page-2",
+          "s2-page-3",
+        ]);
+        // Following it again only reads the same pages again: the stream
+        // stops paging rather than asking for them on every press.
+        expect(() => findButton("Load more")).toThrow();
+      });
+
+      it("stops walking once the reader leaves All inboxes", async () => {
+        const pageTwo = deferred<MailThreadPage>();
+        const { listThreads } = deepStreamClient(() => new Error("outage"), {
+          ...secondSnapshot,
+          "s2-page-2": pageTwo.promise,
+        });
+        await healedByTryAgain(listThreads);
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads).at(-1)).toBe("s2-page-2");
+
+        await enterSingleAccount(accountA);
+        await act(async () => pageTwo.resolve(await secondSnapshot["s2-page-2"]!));
+        await settle();
+
+        expect(cursorsAsked(listThreads)).not.toContain("s2-page-3");
+      });
+
+      it("stops walking once the minute's refresh moves the column on", async () => {
+        vi.useFakeTimers();
+        const pageTwo = deferred<MailThreadPage>();
+        const { listThreads } = deepStreamClient(held, {
+          ...secondSnapshot,
+          "s2-page-2": pageTwo.promise,
+        });
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+        await click(findButton("Load more"));
+        await click(findButton("Load more"));
+        await wait(1_500);
+        await click(findButton("Load more"));
+        expect(cursorsAsked(listThreads).at(-1)).toBe("s2-page-2");
+
+        // Still in All inboxes, but the refresh re-read page one under the
+        // walk, whose answer is dropped: the pages after it are not read.
+        await wait(60_000);
+        await act(async () => pageTwo.resolve(await secondSnapshot["s2-page-2"]!));
+        await settle();
+
+        expect(cursorsAsked(listThreads)).not.toContain("s2-page-3");
+      });
+
+      /** A deep account whose page two the test answers by hand: the first
+       *  read of it waits on `pageTwo`, any later one answers at once. */
+      function pageTwoByHand(
+        pageTwo: Promise<MailThreadPage>,
+        top?: MailThreadListItem,
+      ) {
+        let pageTwoReads = 0;
+        return vi.fn().mockImplementation(({ accountId, cursor }) => {
+          if (accountId === accountB.accountId) {
+            return Promise.resolve(
+              pageOf([
+                unifiedThread({
+                  accountId: accountB.accountId,
+                  threadId: "B only",
+                  lastMessageAt: 1_600_000_000_000,
+                }),
+              ]),
+            );
+          }
+          if (!cursor) {
+            return Promise.resolve(
+              pageOf(
+                top ? [top, ...deepRows.slice(0, 49)] : deepRows.slice(0, 50),
+                "p2",
+              ),
+            );
+          }
+          if (cursor === "p2") {
+            pageTwoReads += 1;
+            return pageTwoReads === 1
+              ? pageTwo
+              : Promise.resolve(pageOf(deepRows.slice(50, 100)));
+          }
+          return Promise.reject(new Error(`unexpected cursor ${cursor}`));
+        });
+      }
+
+      it("asks the scrolled-to end only once while its page is on the way", async () => {
+        sentinelInView();
+        const pageTwo = deferred<MailThreadPage>();
+        const listThreads = pageTwoByHand(pageTwo.promise);
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+
+        // Every render makes the list a new observer, which reports the end
+        // in view again; the rows have not moved, so it asks for nothing.
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await settle();
+        await settle();
+        expect(cursorsAsked(listThreads)).toEqual(["p2"]);
+      });
+
+      it("asks again after the minute's refresh drops a page on the way", async () => {
+        vi.useFakeTimers();
+        sentinelInView();
+        const pageTwo = deferred<MailThreadPage>();
+        const listThreads = pageTwoByHand(pageTwo.promise);
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+
+        // The refresh moves the column's epoch, and the page that lands after
+        // it is dropped without a row. The end is still in view.
+        await wait(60_000);
+        expect(pageOneCalls(listThreads, accountA.accountId)).toBe(2);
+        await act(async () => pageTwo.resolve(pageOf(deepRows.slice(50, 100))));
+        await settle();
+
+        await until(() => cursorsAsked(listThreads).length === 2, "the end asks again");
+        expect(cursorsAsked(listThreads)).toEqual(["p2", "p2"]);
+      });
+
+      it("asks again after opening a letter drops a page on the way", async () => {
+        sentinelInView();
+        const top = unifiedThread({
+          accountId: accountA.accountId,
+          threadId: "A unread top",
+          lastMessageAt: 1_700_000_999_000,
+          unread: true,
+        });
+        const pageTwo = deferred<MailThreadPage>();
+        const listThreads = pageTwoByHand(pageTwo.promise, top);
+        const updateThread = vi.fn().mockResolvedValue(undefined);
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+          updateThread,
+          readThread: vi.fn().mockResolvedValue({
+            ...detail,
+            thread: top,
+            messages: detail.messages.map((message) => ({
+              ...message,
+              threadId: top.threadId,
+            })),
+          }),
+        });
+        await act(async () =>
+          root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+        );
+        await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+
+        // Opening an unread letter reads it, and that mutation moves the
+        // column's epoch under the page still on the way.
+        await click(findButton("A unread top"));
+        await until(() => updateThread.mock.calls.length === 1, "the letter is read");
+        await act(async () => pageTwo.resolve(pageOf(deepRows.slice(50, 100))));
+        await settle();
+
+        await until(() => cursorsAsked(listThreads).length === 2, "the end asks again");
+      });
+
+      const newsletters = Array.from({ length: 5 }, (_value, index) =>
+        unifiedThread({
+          accountId: accountA.accountId,
+          threadId: `Letter ${index}`,
+          category: "newsletter",
+          lastMessageAt: 1_700_000_999_000 - index,
+        }),
+      );
+
+      it("asks once a Done that refused the end lets go", async () => {
+        // Done empties Newsletters, the column gets short, and its end comes
+        // into view while Done's requests are still going out. Load more is
+        // refused under their lock, and the end is still in view after.
+        const view = { inView: false };
+        sentinelInView(view);
+        const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) => {
+          if (accountId === accountB.accountId) return Promise.resolve(pageOf([]));
+          if (!cursor) {
+            return Promise.resolve(
+              pageOf([...newsletters, ...deepRows.slice(0, 45)], "p2"),
+            );
+          }
+          return Promise.resolve(pageOf(deepRows.slice(45, 95)));
+        });
+        const archive = deferred<void>();
+        const updateThread = vi.fn().mockImplementation(() => archive.promise);
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+          updateThread,
+        });
+        await act(async () =>
+          root.render(
+            <MailSurface client={client} onOpenSettings={() => {}} onToast={vi.fn()} />,
+          ),
+        );
+        await settle();
+        expect(cursorsAsked(listThreads)).toEqual([]);
+
+        view.inView = true;
+        await click(findButton("Done — archive all 5 in Newsletters"));
+        expect(cursorsAsked(listThreads)).toEqual([]);
+        await act(async () => archive.resolve());
+        await until(
+          () => updateThread.mock.calls.length === 10,
+          "Done archives and reads all five",
+        );
+
+        await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+      });
+
+      it("serves a refused Load more once, not after every later mail action", async () => {
+        // Done refuses the end while it runs and the end is asked for once it
+        // lets go. Opening a letter later reads it, which is a mail action of
+        // its own: nothing was refused under that one, so it asks for nothing.
+        const view = { inView: false };
+        sentinelInView(view);
+        const top = unifiedThread({
+          accountId: accountA.accountId,
+          threadId: "A unread top",
+          lastMessageAt: 1_700_001_000_000,
+          unread: true,
+        });
+        const pageThree = deferred<MailThreadPage>();
+        const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) => {
+          if (accountId === accountB.accountId) return Promise.resolve(pageOf([]));
+          if (!cursor) {
+            return Promise.resolve(
+              pageOf([top, ...newsletters, ...deepRows.slice(0, 44)], "p2"),
+            );
+          }
+          if (cursor === "p2") {
+            return Promise.resolve(pageOf(deepRows.slice(44, 94), "p3"));
+          }
+          return pageThree.promise;
+        });
+        const archive = deferred<void>();
+        const readTop = deferred<void>();
+        const updateThread = vi.fn().mockImplementation((input) => {
+          if ("archive" in input) return archive.promise;
+          return input.threadId === top.threadId ? readTop.promise : Promise.resolve();
+        });
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+          updateThread,
+          readThread: vi.fn().mockResolvedValue({
+            ...detail,
+            thread: top,
+            messages: detail.messages.map((message) => ({
+              ...message,
+              threadId: top.threadId,
+            })),
+          }),
+        });
+        await act(async () =>
+          root.render(
+            <MailSurface client={client} onOpenSettings={() => {}} onToast={vi.fn()} />,
+          ),
+        );
+        await settle();
+
+        view.inView = true;
+        await click(findButton("Done — archive all 5 in Newsletters"));
+        expect(cursorsAsked(listThreads)).toEqual([]);
+        await act(async () => archive.resolve());
+        await until(() => cursorsAsked(listThreads).length === 2, "the end pages on");
+        expect(cursorsAsked(listThreads)).toEqual(["p2", "p3"]);
+
+        // Page three is still out. Reading the letter is the next action, and
+        // it holds the lock across a render of its own.
+        await click(findButton("A unread top"));
+        await until(
+          () =>
+            updateThread.mock.calls.some(
+              ([input]) => input.threadId === top.threadId && input.read === true,
+            ),
+          "the letter is read",
+        );
+        await settle();
+        await act(async () => readTop.resolve());
+        await settle();
+        await settle();
+        expect(cursorsAsked(listThreads)).toEqual(["p2", "p3"]);
+      });
+
+      it("asks again once a Done that dropped its page lets go", async () => {
+        sentinelInView();
+        const pageTwo = deferred<MailThreadPage>();
+        let pageTwoReads = 0;
+        const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) => {
+          if (accountId === accountB.accountId) {
+            return Promise.resolve(
+              pageOf([
+                unifiedThread({
+                  accountId: accountB.accountId,
+                  threadId: "B only",
+                  lastMessageAt: 1_600_000_000_000,
+                }),
+              ]),
+            );
+          }
+          if (!cursor) {
+            return Promise.resolve(
+              pageOf([...newsletters, ...deepRows.slice(0, 45)], "p2"),
+            );
+          }
+          pageTwoReads += 1;
+          return pageTwoReads === 1
+            ? pageTwo.promise
+            : Promise.resolve(pageOf(deepRows.slice(45, 95)));
+        });
+        const archive = deferred<void>();
+        const updateThread = vi.fn().mockImplementation(() => archive.promise);
+        const client = makeClient({
+          loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+          listThreads,
+          updateThread,
+        });
+        await act(async () =>
+          root.render(
+            <MailSurface client={client} onOpenSettings={() => {}} onToast={vi.fn()} />,
+          ),
+        );
+        await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+
+        await click(findButton("Done — archive all 5 in Newsletters"));
+        await act(async () => pageTwo.resolve(pageOf(deepRows.slice(45, 95))));
+        await settle();
+        expect(cursorsAsked(listThreads)).toEqual(["p2"]);
+        await act(async () => archive.resolve());
+        await until(
+          () => updateThread.mock.calls.length >= 5,
+          "Done archives the section",
+        );
+
+        await until(() => cursorsAsked(listThreads).length === 2, "the end asks again");
+      });
+
+      /** Scrolling with the end in view against a five-page account whose
+       *  pages answer 200 ms after they are asked, the way a real server
+       *  staggers them. Each case moves the column's epoch under a page that
+       *  is on the way, so that page's answer is dropped and asked again: once,
+       *  not every time the next Load more drops the one before it. */
+      describe("with answers that take their time", () => {
+        const later = <T,>(value: T, ms = 200) =>
+          new Promise<T>((resolve) => setTimeout(() => resolve(value), ms));
+
+        /** Account A's page `n` (2 to 5) of a five-page stream. */
+        function deepPage(n: number): MailThreadPage {
+          const rows = Array.from({ length: 50 }, (_value, index) =>
+            unifiedThread({
+              accountId: accountA.accountId,
+              threadId: `deep ${n}-${index}`,
+              lastMessageAt: 1_700_000_900_000 - ((n - 1) * 50 + index) * 1_000,
+              unread: false,
+            }),
+          );
+          return pageOf(rows, n < 5 ? `p${n + 1}` : null);
+        }
+
+        const bOnly = unifiedThread({
+          accountId: accountB.accountId,
+          threadId: "B only",
+          lastMessageAt: 1_600_000_000_000,
+        });
+
+        /** Account A answers its pages late; the first read of page two waits
+         *  on `pageTwo`. `answerB` answers B's page-one reads by count. */
+        function slowClient(
+          pageTwo: Promise<MailThreadPage> | null,
+          answerB: (read: number) => Promise<MailThreadPage>,
+        ) {
+          let bReads = 0;
+          let pageTwoReads = 0;
+          return vi.fn().mockImplementation(({ accountId, cursor }) => {
+            if (accountId === accountB.accountId) {
+              bReads += 1;
+              return answerB(bReads);
+            }
+            if (!cursor) return Promise.resolve(pageOf(deepRows.slice(0, 50), "p2"));
+            if (cursor === "p2" && pageTwo !== null) {
+              pageTwoReads += 1;
+              if (pageTwoReads === 1) return pageTwo;
+            }
+            return later(deepPage(Number(cursor.slice(1))));
+          });
+        }
+
+        async function tenSeconds() {
+          for (let step = 0; step < 100; step += 1) await wait(100);
+        }
+
+        it("asks for a dropped page once when the minute's refresh brings new mail", async () => {
+          vi.useFakeTimers();
+          sentinelInView();
+          const pageTwo = deferred<MailThreadPage>();
+          const listThreads = slowClient(pageTwo.promise, (read) =>
+            Promise.resolve(
+              pageOf(
+                read === 1
+                  ? [bOnly]
+                  : [
+                      unifiedThread({
+                        accountId: accountB.accountId,
+                        threadId: "B arrived",
+                        lastMessageAt: 1_700_001_000_000,
+                      }),
+                      bOnly,
+                    ],
+              ),
+            ),
+          );
+          const client = makeClient({
+            loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+            listThreads,
+          });
+          await act(async () =>
+            root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+          );
+          await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+          await wait(60_000);
+          await wait(100);
+          await act(async () => pageTwo.resolve(deepPage(2)));
+          await settle();
+          await tenSeconds();
+
+          expect(cursorsAsked(listThreads)).toEqual(["p2", "p2", "p3", "p4", "p5"]);
+        });
+
+        it("asks for a dropped page once when a held account heals", async () => {
+          vi.useFakeTimers();
+          sentinelInView();
+          const pageTwo = deferred<MailThreadPage>();
+          const listThreads = slowClient(pageTwo.promise, (read) =>
+            read === 1 ? Promise.reject(held()) : Promise.resolve(pageOf([bOnly])),
+          );
+          const client = makeClient({
+            loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+            listThreads,
+          });
+          await act(async () =>
+            root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+          );
+          await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+          await wait(1_500);
+          await wait(100);
+          await act(async () => pageTwo.resolve(deepPage(2)));
+          await settle();
+          await tenSeconds();
+
+          expect(cursorsAsked(listThreads)).toEqual(["p2", "p2", "p3", "p4", "p5"]);
+        });
+
+        it("asks for a dropped page once when Load more is pressed while it is on the way", async () => {
+          vi.useFakeTimers();
+          sentinelInView();
+          const listThreads = slowClient(null, () => Promise.resolve(pageOf([bOnly])));
+          const client = makeClient({
+            loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+            listThreads,
+          });
+          await act(async () =>
+            root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+          );
+          await until(() => cursorsAsked(listThreads).length === 1, "the end asks p2");
+          await wait(100);
+          await click(findButton("Load more"));
+          await tenSeconds();
+
+          expect(cursorsAsked(listThreads)).toEqual(["p2", "p2", "p3", "p4", "p5"]);
+        });
       });
     });
 
@@ -8417,13 +10106,17 @@ describe("MailSurface", () => {
       };
     }
 
-    function detailFor(item: MailThreadListItem): MailThreadDetail {
+    function detailFor(
+      item: MailThreadListItem,
+      inInbox = true,
+    ): MailThreadDetail {
       return {
         ...detail,
         thread: item,
         messages: detail.messages.map((message) => ({
           ...message,
           threadId: item.threadId,
+          inInbox,
         })),
       };
     }
@@ -8825,7 +10518,9 @@ describe("MailSurface", () => {
     }
 
     it("opens a letter found outside Inbox in the mailbox the search used", async () => {
-      const readMailboxThread = vi.fn().mockResolvedValue(detailFor(archived));
+      const readMailboxThread = vi
+        .fn()
+        .mockResolvedValue(detailFor(archived, false));
       const client = makeClient({
         readThread: vi
           .fn()
@@ -8857,8 +10552,10 @@ describe("MailSurface", () => {
         expect.objectContaining({ threadId: archived.threadId }),
       );
       expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: All Mail");
-      // All Mail's reader: a letter already out of Inbox has no Archive.
+      // All Mail's reader: a letter already out of Inbox has no Archive, and
+      // its way back instead.
       expect(readerButtons()).not.toContain("Archive");
+      expect(readerButtons()).toContain("Move to Inbox");
     });
 
     /** A letter the palette opens from deep in All Mail is not on that
@@ -8953,6 +10650,60 @@ describe("MailSurface", () => {
       expect(reader()?.textContent).toContain("The archived letter");
       await openMoreActions();
       expect(findMenuItem("Remove star")).toBeInstanceOf(HTMLElement);
+    });
+
+    it("keeps a letter from deep in All Mail open once it is moved to the Inbox", async () => {
+      // Moving it to the Inbox leaves it in All Mail, so its absence from the
+      // refetched first page is not a sign that it went anywhere.
+      let inInbox = false;
+      const updateThread = vi.fn().mockImplementation(async (input) => {
+        if ("archive" in input) inInbox = !input.archive;
+      });
+      const client = makeClient({
+        readThread: vi
+          .fn()
+          .mockRejectedValue(new MailApiError(404, "mail_thread_not_found")),
+        readMailboxThread: vi.fn().mockImplementation(() => {
+          const letter = detailFor(archived);
+          return Promise.resolve({
+            ...letter,
+            messages: letter.messages.map((message) => ({ ...message, inInbox })),
+          });
+        }),
+        updateThread,
+      });
+      await openDeepLetter(client);
+      expect(readerButtons()).toContain("Move to Inbox");
+
+      await click(findButton("Move to Inbox"));
+      await settle();
+
+      expect(updateThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: archived.threadId,
+        archive: false,
+      });
+      expect(reader()?.textContent).toContain("The archived letter");
+      expect(reader()?.textContent).not.toContain("Choose a message");
+      expect(readerButtons()).not.toContain("Move to Inbox");
+      expect(readerButtons()).toContain("Archive");
+
+      // Archived again it is still in All Mail, and still not on its first
+      // page: the reader stays on it and offers the way back once more.
+      const archive = [...(reader()?.querySelectorAll("button") ?? [])].find(
+        (button) => button.textContent?.trim() === "Archive",
+      ) as HTMLButtonElement;
+      await click(archive);
+      await settle();
+
+      expect(updateThread).toHaveBeenLastCalledWith({
+        accountId: accountA.accountId,
+        threadId: archived.threadId,
+        archive: true,
+      });
+      expect(reader()?.textContent).toContain("The archived letter");
+      expect(readerButtons()).toContain("Move to Inbox");
+      expect(readerButtons()).not.toContain("Archive");
     });
 
     it("opens a letter the search found in All Mail from Inbox when Inbox holds it", async () => {
@@ -9167,6 +10918,103 @@ describe("MailSurface", () => {
         expect.objectContaining({ threadId: "thread-elsewhere" }),
       );
       expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+    });
+
+    /** A letter in the list on screen is not yet the answer. All Mail holds
+     *  most of the Inbox too, and a notification's letter found there opened
+     *  in All Mail only because All Mail was the folder showing. The list
+     *  counts when it is the mailbox the request named, or the Inbox every
+     *  request looks in first. */
+    it("opens a notification's letter in Inbox even when All Mail on screen lists it", async () => {
+      const client = makeClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      expect(document.body.textContent).toContain("Lunch this Friday?");
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, thread.threadId);
+      });
+      await until(() => pendingOpenThread() === null, "the request is answered");
+      await until(
+        () => vi.mocked(client.readThread).mock.calls.length > 0,
+        "the letter is read from Inbox",
+      );
+
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+      });
+      expect(client.readMailboxThread).not.toHaveBeenCalled();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+      expect(readerButtons()).toContain("Archive");
+    });
+
+    it("does not answer from the folder the column just left for Inbox", async () => {
+      // The letter left Inbox since the notification was written. The reset
+      // moves the column to Inbox while All Mail's rows are still the list in
+      // hand, and those rows are not Inbox's: opening from them read the
+      // letter from Inbox and put "Message couldn't load" on screen.
+      const onToast = vi.fn();
+      const client = makeClient({
+        listThreads: vi.fn().mockResolvedValue({ ...threadPage, items: [] }),
+        readThread: vi
+          .fn()
+          .mockRejectedValue(new MailApiError(404, "mail_thread_not_found")),
+      });
+      await act(async () =>
+        root.render(
+          <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+        ),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      expect(document.body.textContent).toContain("Lunch this Friday?");
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, thread.threadId);
+      });
+      await until(() => pendingOpenThread() === null, "the request is dropped");
+      await settle();
+
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+      expect(reader()?.textContent).toContain("Choose a message");
+      expect(reader()?.textContent).not.toContain("couldn’t load");
+      expect(onToast).not.toHaveBeenCalled();
+    });
+
+    it("opens a palette pick in All Mail when All Mail on screen lists it", async () => {
+      const client = makeClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      const listReads = vi.mocked(client.listMailboxThreads).mock.calls.length;
+
+      await act(async () => {
+        requestOpenThread(accountA.accountId, thread.threadId, "all");
+      });
+      await until(
+        () => vi.mocked(client.readMailboxThread).mock.calls.length > 0,
+        "the letter is read from All Mail",
+      );
+
+      expect(client.readMailboxThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        mailboxId: "all",
+        threadId: thread.threadId,
+      });
+      expect(client.readThread).not.toHaveBeenCalled();
+      // Answered from the list in hand: the column did not move to look.
+      expect(client.listMailboxThreads).toHaveBeenCalledTimes(listReads);
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: All Mail");
+      expect(pendingOpenThread()).toBeNull();
     });
 
     it("answers in Inbox when the account has no such mailbox", async () => {

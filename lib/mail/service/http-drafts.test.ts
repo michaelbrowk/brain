@@ -156,6 +156,28 @@ describe("private mail draft HTTP contract", () => {
     );
   });
 
+  it("takes a draft send carrying the compose sheet's files, far past the 16 KiB default body", async () => {
+    // The files ride on the send, so this door reads the draft body's cap
+    // and not the small default every other mutation has.
+    const service = draftServiceFixture();
+    const socketPath = await startServer(service);
+    const file = {
+      filename: "quote.pdf",
+      mimeType: "application/pdf",
+      dataBase64: Buffer.alloc(200 * 1024, 7).toString("base64"),
+    };
+    const body = JSON.stringify({ ...sendInput(), attachments: [file] });
+    expect(Buffer.byteLength(body)).toBeGreaterThan(16 * 1024 * 10);
+
+    await expect(
+      requestJson(socketPath, "POST", `/v1/drafts/${DRAFT_ID}/send`, body),
+    ).resolves.toMatchObject({ status: 202, body: { created: true } });
+    expect(service.send).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: "send", attachments: [file] }),
+      expect.objectContaining({ signal: expect.any(AbortSignal) }),
+    );
+  });
+
   it("rejects raw JSON with an unpaired surrogate before calling the service", async () => {
     const service = draftServiceFixture();
     const socketPath = await startServer(service);

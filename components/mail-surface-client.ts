@@ -19,6 +19,7 @@ import type {
   MailContentAttachmentDto,
   MailMessageContent,
 } from "@/lib/mail/content-types";
+import type { MailSendAttachment } from "@/lib/mail/send-attachment-codec";
 import {
   MAIL_THREAD_STATE_CONTRACT_HEADER,
   MAIL_THREAD_STATE_CONTRACT_VALUE,
@@ -225,6 +226,9 @@ export interface MailDraftSendInput {
   readonly expectedRevision: number;
   readonly sendIdempotencyKey: string;
   readonly sendOperationId: string;
+  /** The compose sheet's files. They ride on the send and never on the
+   *  draft; a send without them puts no `attachments` on the wire. */
+  readonly attachments?: readonly MailSendAttachment[];
 }
 
 export interface MailDraftMutationResult {
@@ -629,6 +633,9 @@ export const defaultMailSurfaceClient: MailSurfaceClient = {
           expectedRevision: input.expectedRevision,
           sendIdempotencyKey: input.sendIdempotencyKey,
           sendOperationId: input.sendOperationId,
+          ...(input.attachments && input.attachments.length > 0
+            ? { attachments: input.attachments }
+            : {}),
         }),
         signal,
       },

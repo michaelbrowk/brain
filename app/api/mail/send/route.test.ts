@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { MailSendInput } from "@/lib/mail/message-types";
+import { MAIL_SEND_ATTACHMENT_LIMITS } from "@/lib/mail/send-attachment-codec";
+import { MAIL_SERVICE_HTTP_LIMITS } from "@/lib/mail/service/limits";
 
 /** `origin` is Brain's own record of who wrote a message, and the header a
  *  person filters an agent's mail on. The route used to hand the body
@@ -89,13 +91,110 @@ describe("the browser's own send route", () => {
     expect((sendMessage.mock.calls[0][0] as MailSendInput).origin).toBe("app");
   });
 
-  it("refuses a body that carries attachments, which the composer has none of yet", async () => {
-    const response = await post(composed({ attachments: [{ name: "a" }] }));
+  describe("the compose sheet's files", () => {
+    /** "AQID" decodes to three bytes and carries no padding. */
+    const file = (override: Record<string, unknown> = {}) => ({
+      filename: "invoice.pdf",
+      mimeType: "application/pdf",
+      dataBase64: "AQID",
+      ...override,
+    });
+    /** Base64 of exactly `bytes` decoded bytes, one repeated character. */
+    const payloadOf = (bytes: number) => {
+      const groups = Math.ceil(bytes / 3);
+      const padding = groups * 3 - bytes;
+      return "A".repeat(groups * 4 - padding) + "=".repeat(padding);
+    };
+    const refusal = async (response: Response) =>
+      ((await response.json()) as { error: { code: string } }).error.code;
 
-    expect(response.status).toBe(400);
-    expect(sendMessage).not.toHaveBeenCalled();
-    const body = (await response.json()) as { error: { code: string } };
-    expect(body.error.code).toBe("attachments_not_supported");
+    it("hands the files to the service as the codec admits them", async () => {
+      const attachments = [
+        file(),
+        file({ filename: "notes.txt", mimeType: "text/plain", dataBase64: payloadOf(5) }),
+      ];
+      const response = await post(composed({ attachments }));
+
+      expect(response.status).toBe(200);
+      expect((sendMessage.mock.calls[0][0] as MailSendInput).attachments).toEqual(attachments);
+    });
+
+    it("takes a set exactly at the total cap", async () => {
+      const response = await post(
+        composed({
+          attachments: [
+            file({ dataBase64: payloadOf(3) }),
+            file({
+              filename: "second.pdf",
+              dataBase64: payloadOf(MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes - 3),
+            }),
+          ],
+        }),
+      );
+
+      expect(response.status).toBe(200);
+    });
+
+    it("answers a set past the total cap with a 413 the sheet words as too large", async () => {
+      const response = await post(
+        composed({
+          attachments: [
+            file({ dataBase64: payloadOf(3) }),
+            file({
+              filename: "second.pdf",
+              dataBase64: payloadOf(MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes - 2),
+            }),
+          ],
+        }),
+      );
+
+      expect(response.status).toBe(413);
+      expect(await refusal(response)).toBe("mail_send_attachments_too_large");
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [
+        "one file past the count cap",
+        () => Array.from({ length: MAIL_SEND_ATTACHMENT_LIMITS.maxCount + 1 }, () => file()),
+      ],
+      ["base64 that is not base64", () => [file({ dataBase64: "!!!=" })]],
+      ["base64 with a line break in it", () => [file({ dataBase64: "AQID\nAQID" })]],
+      ["base64 that is not a whole number of groups", () => [file({ dataBase64: "AQI" })]],
+      [
+        "a filename one byte past the cap",
+        () => [file({ filename: "a".repeat(MAIL_SEND_ATTACHMENT_LIMITS.maxFilenameBytes + 1) })],
+      ],
+      ["a header break in the filename", () => [file({ filename: "a\r\nBcc: x@y.z" })]],
+      ["an empty filename", () => [file({ filename: "" })]],
+      ["a content type that is not a type", () => [file({ mimeType: "not a type" })]],
+      ["a content type in capitals", () => [file({ mimeType: "Application/PDF" })]],
+      ["a content type with parameters", () => [file({ mimeType: "text/plain; charset=utf-8" })]],
+      ["a fourth key on a file", () => [{ ...file(), inline: true }]],
+      ["a list that is not a list", () => "invoice.pdf"],
+    ])("refuses %s as the files, before the service is asked", async (_name, make) => {
+      const response = await post(composed({ attachments: make() }));
+
+      expect(response.status).toBe(400);
+      expect(await refusal(response)).toBe("mail_send_attachments_invalid");
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
+
+    it("bounds the body by its bytes before a character of it is parsed", async () => {
+      // One byte past the cap, and not JSON at all: a 413 rather than a 400
+      // says the body was cut off by its size before anything decoded it.
+      const { POST } = await import("./route");
+      const response = await POST(
+        new Request("https://brain.test/api/mail/send", {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: "https://brain.test" },
+          body: "x".repeat(MAIL_SERVICE_HTTP_LIMITS.maxSendBodyBytes + 1),
+        }),
+      );
+
+      expect(response.status).toBe(413);
+      expect(sendMessage).not.toHaveBeenCalled();
+    });
   });
 
   it("hands a body that is not an object to the service unchanged", async () => {

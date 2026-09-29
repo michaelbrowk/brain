@@ -92,14 +92,21 @@ export async function readEnvNames(root) {
   return [...names].filter((name) => !AMBIENT.has(name)).sort();
 }
 
-export async function documentedEnvNames(root) {
+// Every name .env.example documents, commented or not, with the example value
+// its first line shows. The browser harness reads the values to tell a state
+// directory (one under /var/lib/brain) from the other paths.
+export async function documentedEnvExamples(root) {
   const body = await readFile(path.join(root, ".env.example"), "utf8");
-  const names = new Set();
+  const examples = new Map();
   for (const line of body.split("\n")) {
-    const match = /^#?\s*([A-Z][A-Z0-9_]*)=/.exec(line.trim());
-    if (match) names.add(match[1]);
+    const match = /^#?\s*([A-Z][A-Z0-9_]*)=(.*)$/.exec(line.trim());
+    if (match && !examples.has(match[1])) examples.set(match[1], match[2]);
   }
-  return [...names].sort();
+  return examples;
+}
+
+export async function documentedEnvNames(root) {
+  return [...(await documentedEnvExamples(root)).keys()].sort();
 }
 
 export async function undocumentedEnvNames(root) {

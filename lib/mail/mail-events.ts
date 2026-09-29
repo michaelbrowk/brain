@@ -32,6 +32,11 @@ export type BrainMailEvent =
  *  a reconnect of the stream itself, which it sends as a `reset`. */
 export const MAIL_CHANGED_EVENT = "brain:mail-changed";
 
+export function dispatchMailChange(event: BrainMailEvent): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent(MAIL_CHANGED_EVENT, { detail: event }));
+}
+
 const SAFE_ACCOUNT_ID = /^account-a[0-9a-f]{32}$/;
 const SAFE_MESSAGE_ID = /^[A-Za-z0-9_-]{1,255}$/;
 const MAILBOXES: ReadonlySet<string> = new Set<MailSystemMailbox>([

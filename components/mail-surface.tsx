@@ -120,6 +120,11 @@ import type {
   MailThreadSort,
   MailThreadView,
 } from "@/lib/mail/message-types";
+import {
+  MAIL_CHANGED_EVENT,
+  parseBrainMailEvent,
+  type BrainMailEvent,
+} from "@/lib/mail/mail-events";
 import { normalizeMailSearchQueryText } from "@/lib/mail/search-query";
 import { readableMailBody } from "@/lib/mail/reader-content";
 import {
@@ -159,6 +164,52 @@ export const UNIFIED_FANOUT_LIMIT = 3;
  */
 const SYNC_HOLD_RETRY_MS = 1_500;
 const SYNC_HOLD_RETRIES = 3;
+
+/**
+ * THE SAFETY NET UNDER THE CHANGE FEED. New mail reaches the column as `mail`
+ * events (`lib/mail/mail-events.ts`), and the list reads itself on this timer
+ * only in case the stream or the loop behind it lost one. The same read runs
+ * on returning to the tab and once when the stream reconnects.
+ */
+export const MAIL_SAFETY_REFRESH_MS = 5 * 60_000;
+
+/** A burst of events about one account is one page-1 read, this long after
+ *  the last of them. */
+export const MAIL_EVENT_DEBOUNCE_MS = 400;
+
+/**
+ * Mail events gathered per account, each account handed on
+ * `MAIL_EVENT_DEBOUNCE_MS` after its own last event, so a busy account never
+ * holds a quiet one back. `null` is a reset and stands for every account.
+ */
+function debounceMailEvents(onDue: (accountIds: ReadonlySet<string> | null) => void): {
+  push(accountId: string | null): void;
+  dispose(): void;
+} {
+  const timers = new Map<string | null, ReturnType<typeof setTimeout>>();
+  return {
+    push(accountId) {
+      const pending = timers.get(accountId);
+      if (pending !== undefined) clearTimeout(pending);
+      timers.set(
+        accountId,
+        setTimeout(() => {
+          timers.delete(accountId);
+          onDue(accountId === null ? null : new Set([accountId]));
+        }, MAIL_EVENT_DEBOUNCE_MS),
+      );
+    },
+    dispose() {
+      for (const timer of timers.values()) clearTimeout(timer);
+      timers.clear();
+    },
+  };
+}
+
+/** The event the shell re-dispatched, or `null` for anything else. */
+function mailEventOf(event: Event): BrainMailEvent | null {
+  return parseBrainMailEvent((event as CustomEvent<unknown>).detail);
+}
 
 /**
  * `Promise.allSettled(inputs.map(run))` with at most `limit` of them running
@@ -2205,15 +2256,17 @@ export function MailSurface({
   }, [client, commitUnifiedState, holdUnifiedStream]);
 
   /**
-   * The 60s tick in unified mode refreshes page-1 windows per account and
+   * The silent refresh in unified mode reads page-1 windows per account and
    * reconciles, never rebuilding: a rebuild would discard loaded depth and
-   * scroll position every minute for no correctness gain — new mail sorts to
-   * the top, so page 1 captures arrivals. This is the fan-out that runs
-   * forever rather than once, so it takes the same bound: at seven accounts
-   * the tick is three short waves a minute, not seven requests at once.
+   * scroll position on every refresh for no correctness gain — new mail sorts
+   * to the top, so page 1 captures arrivals. A mail event names the account
+   * it is about and only that stream is read; the safety net and a reset read
+   * them all. This is the fan-out that runs forever rather than once, so it
+   * takes the same bound: at seven accounts a full read is three short waves,
+   * not seven requests at once.
    */
   const refreshUnifiedSilently = useCallback(
-    async (signal: AbortSignal) => {
+    async (signal: AbortSignal, accountIds: ReadonlySet<string> | null = null) => {
       const state = unifiedStateRef.current;
       if (
         signal.aborted ||
@@ -2224,7 +2277,9 @@ export function MailSurface({
         return;
       }
       const refreshable = state.streams.filter(
-        (stream) => stream.status === "ready" || stream.status === "error",
+        (stream) =>
+          (stream.status === "ready" || stream.status === "error") &&
+          (accountIds === null || accountIds.has(stream.accountId)),
       );
       if (refreshable.length === 0) return;
       const listEpoch = ++listEpochRef.current;
@@ -2432,6 +2487,9 @@ export function MailSurface({
     let requestController: AbortController | null = null;
     let requestRunning = false;
     let requestGeneration = 0;
+    // Asked for while a read is out: the read in flight may have left before
+    // the change it is being asked about, so it runs once more when it lands.
+    let refreshAgain = false;
 
     const stopInterval = () => {
       if (interval !== null) clearInterval(interval);
@@ -2439,10 +2497,14 @@ export function MailSurface({
     };
     const refresh = () => {
       if (document.visibilityState !== "visible") return;
-      // The same tick keeps the Drafts badge honest, so a send that failed in
-      // the durable outbox surfaces within a minute even after a reload.
+      if (requestRunning) {
+        refreshAgain = true;
+        return;
+      }
+      // The same read keeps the Drafts badge honest, so a send that failed in
+      // the durable outbox surfaces with the next change or the safety net,
+      // even after a reload.
       if (account.capabilities.compose) void refreshDraftBadge(selectedAccountId);
-      if (requestRunning) return;
       const generation = ++requestGeneration;
       const controller = new AbortController();
       requestController = controller;
@@ -2455,10 +2517,14 @@ export function MailSurface({
         if (generation !== requestGeneration) return;
         requestRunning = false;
         requestController = null;
+        if (refreshAgain) {
+          refreshAgain = false;
+          refresh();
+        }
       });
     };
     const startInterval = () => {
-      if (interval === null) interval = setInterval(refresh, 60_000);
+      if (interval === null) interval = setInterval(refresh, MAIL_SAFETY_REFRESH_MS);
     };
     const onVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -2471,12 +2537,43 @@ export function MailSurface({
       requestGeneration += 1;
       requestController = null;
       requestRunning = false;
+      refreshAgain = false;
+    };
+    // This column's own account and mailbox, or a reset. A hidden tab lets
+    // them pass: coming back to it reads the column anyway. A mail action
+    // holding the column puts the read back by one debounce instead of
+    // losing it, since the silent read steps aside for the action.
+    const events = debounceMailEvents(() => {
+      if (mutationLockRef.current) {
+        events.push(selectedAccountId);
+        return;
+      }
+      refresh();
+    });
+    const onMailChanged = (event: Event) => {
+      const change = mailEventOf(event);
+      if (change === null || document.visibilityState !== "visible") return;
+      if (change.changeKind === "reset") {
+        events.push(selectedAccountId);
+        return;
+      }
+      if (
+        change.changeKind === "content_ready" ||
+        change.accountId !== selectedAccountId ||
+        !change.mailboxIds.includes(selectedMailboxId)
+      ) {
+        return;
+      }
+      events.push(selectedAccountId);
     };
 
     if (document.visibilityState === "visible") startInterval();
     document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener(MAIL_CHANGED_EVENT, onMailChanged);
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener(MAIL_CHANGED_EVENT, onMailChanged);
+      events.dispose();
       stopInterval();
       requestController?.abort();
       requestGeneration += 1;
@@ -2500,8 +2597,9 @@ export function MailSurface({
     return () => controller.abort();
   }, [accountsState, loadUnified, selectedAccountId]);
 
-  // The unified sibling of the single-account 60s tick: visibility-gated, one
-  // request generation in flight, aborted the moment the tab hides.
+  // The unified sibling of the single-account refresh: visibility-gated, one
+  // request generation in flight, aborted the moment the tab hides. A mail
+  // event reads the one stream it names; the safety net and a reset read all.
   useEffect(() => {
     if (accountsState.kind !== "ready" || selectedAccountId !== UNIFIED_ACCOUNT_ID) {
       return;
@@ -2516,26 +2614,42 @@ export function MailSurface({
     let requestController: AbortController | null = null;
     let requestRunning = false;
     let requestGeneration = 0;
+    // What was asked for while a read was out, run once when it lands:
+    // `undefined` is nothing, `null` every stream.
+    let pending: ReadonlySet<string> | null | undefined;
 
     const stopInterval = () => {
       if (interval !== null) clearInterval(interval);
       interval = null;
     };
-    const refresh = () => {
+    const refresh = (accountIds: ReadonlySet<string> | null = null) => {
       if (document.visibilityState !== "visible") return;
-      if (requestRunning) return;
+      if (requestRunning) {
+        pending =
+          pending === undefined
+            ? accountIds
+            : pending === null || accountIds === null
+              ? null
+              : new Set([...pending, ...accountIds]);
+        return;
+      }
       const generation = ++requestGeneration;
       const controller = new AbortController();
       requestController = controller;
       requestRunning = true;
-      void refreshUnifiedSilently(controller.signal).finally(() => {
+      void refreshUnifiedSilently(controller.signal, accountIds).finally(() => {
         if (generation !== requestGeneration) return;
         requestRunning = false;
         requestController = null;
+        const next = pending;
+        pending = undefined;
+        if (next !== undefined) refresh(next);
       });
     };
     const startInterval = () => {
-      if (interval === null) interval = setInterval(refresh, 60_000);
+      if (interval === null) {
+        interval = setInterval(() => refresh(), MAIL_SAFETY_REFRESH_MS);
+      }
     };
     const onVisibilityChange = () => {
       if (document.visibilityState === "visible") {
@@ -2548,12 +2662,36 @@ export function MailSurface({
       requestGeneration += 1;
       requestController = null;
       requestRunning = false;
+      pending = undefined;
+    };
+    const events = debounceMailEvents((accountIds) => {
+      if (mutationLockRef.current) {
+        if (accountIds === null) events.push(null);
+        else for (const accountId of accountIds) events.push(accountId);
+        return;
+      }
+      refresh(accountIds);
+    });
+    const onMailChanged = (event: Event) => {
+      const change = mailEventOf(event);
+      if (change === null || document.visibilityState !== "visible") return;
+      if (change.changeKind === "reset") {
+        events.push(null);
+        return;
+      }
+      if (change.changeKind === "content_ready" || !change.mailboxIds.includes("inbox")) {
+        return;
+      }
+      events.push(change.accountId);
     };
 
     if (document.visibilityState === "visible") startInterval();
     document.addEventListener("visibilitychange", onVisibilityChange);
+    window.addEventListener(MAIL_CHANGED_EVENT, onMailChanged);
     return () => {
       document.removeEventListener("visibilitychange", onVisibilityChange);
+      window.removeEventListener(MAIL_CHANGED_EVENT, onMailChanged);
+      events.dispose();
       stopInterval();
       requestController?.abort();
       requestGeneration += 1;
@@ -2869,6 +3007,78 @@ export function MailSurface({
       );
     }
   }, [clearStickyOpen, refreshThreadsSilently]);
+
+  /**
+   * THE OPEN LETTER, READ AGAIN WHEN ITS MAILBOX CHANGED: a reply that landed
+   * in the thread, a flag set in another client. Silent, and only while the
+   * same letter is still the one on screen. A read that fails leaves the
+   * letter as it stands: a thread that left its mailbox is the list's news,
+   * and the reader closes only when the owner acts.
+   */
+  const rereadOpenThread = useCallback(async () => {
+    const reader = readerStateRef.current;
+    if (reader.kind !== "ready" || mutationLockRef.current) return;
+    const { accountId, threadId } = reader.detail.thread;
+    const mailboxId = selectedMailboxIdRef.current;
+    let detail: MailThreadDetail;
+    try {
+      detail =
+        mailboxId === "inbox"
+          ? await client.readThread({ accountId, threadId })
+          : await client.readMailboxThread({ accountId, mailboxId, threadId });
+    } catch {
+      return;
+    }
+    const current = readerStateRef.current;
+    if (
+      current.kind !== "ready" ||
+      current.detail.thread.accountId !== accountId ||
+      current.detail.thread.threadId !== threadId ||
+      selectedMailboxIdRef.current !== mailboxId ||
+      mutationLockRef.current
+    ) {
+      return;
+    }
+    setReaderState({ kind: "ready", detail });
+  }, [client]);
+
+  useEffect(() => {
+    const events = debounceMailEvents(() => {
+      if (mutationLockRef.current) {
+        events.push(null);
+        return;
+      }
+      void rereadOpenThread();
+    });
+    const onMailChanged = (event: Event) => {
+      const change = mailEventOf(event);
+      const reader = readerStateRef.current;
+      if (
+        change === null ||
+        document.visibilityState !== "visible" ||
+        reader.kind !== "ready"
+      ) {
+        return;
+      }
+      if (change.changeKind === "reset") {
+        events.push(null);
+        return;
+      }
+      if (
+        change.changeKind === "content_ready" ||
+        change.accountId !== reader.detail.thread.accountId ||
+        !change.mailboxIds.includes(selectedMailboxIdRef.current)
+      ) {
+        return;
+      }
+      events.push(null);
+    };
+    window.addEventListener(MAIL_CHANGED_EVENT, onMailChanged);
+    return () => {
+      window.removeEventListener(MAIL_CHANGED_EVENT, onMailChanged);
+      events.dispose();
+    };
+  }, [rereadOpenThread]);
 
   /** OPENING MAIL ANSWERS THE BELL'S MAIL ROW (spec §7, D6).
    *

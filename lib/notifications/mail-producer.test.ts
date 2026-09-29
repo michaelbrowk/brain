@@ -70,6 +70,33 @@ describe("newMailLetters", () => {
     expect(result.letters).toEqual([]);
   });
 
+  it("keeps a stranger's first letter quiet, and an Accept does not say it later", () => {
+    const before = Date.parse("2026-09-14T10:00:00.000Z");
+    const waiting = item({
+      threadId: "stranger",
+      newSender: true,
+      newSenderFrom: { name: "Lena Okafor", address: "lena@okafor.example" },
+    });
+    const first = newMailLetters([waiting], before, AT);
+    // It waits in its section rather than on the lock screen, and the mark
+    // still moves past it.
+    expect(first.letters).toEqual([]);
+    expect(first.watermark).toBe(Date.parse("2026-09-14T11:00:00.000Z"));
+
+    // Accepted: the same letter, no longer waiting, is not news on the next
+    // pass. A new letter from the same sender afterwards is.
+    const accepted = { ...waiting, newSender: false, newSenderFrom: undefined };
+    expect(newMailLetters([accepted], first.watermark, AT).letters).toEqual([]);
+    const next = item({
+      threadId: "stranger-2",
+      lastMessageAt: Date.parse("2026-09-14T11:30:00.000Z"),
+      participants: [{ name: "Lena Okafor", address: "lena@okafor.example" }],
+    });
+    expect(
+      newMailLetters([next, accepted], first.watermark, AT).letters.map((letter) => letter.title),
+    ).toEqual(["Lena Okafor"]);
+  });
+
   it("produces nothing for a list message even when the category says people", () => {
     const result = newMailLetters(
       [item({ listMessage: true })],

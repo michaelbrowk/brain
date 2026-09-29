@@ -107,6 +107,11 @@ export function newMailLetters(
   for (const item of items) {
     if (item.category !== "people") continue;
     if (item.listMessage) continue;
+    // A stranger's first letter waits in New senders for a decision, and it
+    // waits quietly: a push would put the one letter the owner has not yet
+    // agreed to receive on the lock screen. The mark above has already moved
+    // past it, so an Accept later does not make it news either.
+    if (item.newSender) continue;
     // Read already, so either the owner wrote the newest message in it or the
     // reader has seen it. See the header.
     if (!item.unread) continue;

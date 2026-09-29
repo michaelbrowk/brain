@@ -1382,6 +1382,58 @@ describe("MailContentCoordinator", () => {
     10_000,
   );
 
+  it("keeps an account's bodies under the byte budget and spares the one a draft answers", async () => {
+    const fixture = await createFixture([ACCOUNT_ID]);
+    seedInbox(fixture.caches[0]!, ["m1", "m2", "m3"]);
+    const ids = [
+      "message-thread-m3",
+      "message-thread-m2",
+      "message-thread-m1",
+      MESSAGE_ID,
+    ];
+    // Each body is the shared eight-byte raw MIME and 64 bytes of its own.
+    const runner = new FakeMailContentWorkRunner(
+      ids.map(() => (input: MailContentWorkInput) =>
+        publish(input, {
+          text: Buffer.from(input.providerMessageId.padEnd(64, ".")),
+        }),
+      ),
+    );
+    const listDraftSourceMessageIds = vi.fn(async () => [MESSAGE_ID]);
+    const coordinator = fixture.coordinator(
+      runner,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      {
+        bodyCacheMaxBytes: 2 * 72,
+        draftSources: { listDraftSourceMessageIds },
+      },
+    );
+    const step = () =>
+      coordinator.runBackgroundPrefetchStep(ACCOUNT_ID, new AbortController().signal);
+
+    await step();
+    // Past the budget the oldest unopened body goes first; the fixture's own
+    // message is older still, but a draft answers it.
+    await vi.waitFor(async () => {
+      await expect(statesOf(coordinator, ids, "ready")).resolves.toEqual([
+        "message-thread-m3",
+        MESSAGE_ID,
+      ]);
+    });
+    expect(listDraftSourceMessageIds).toHaveBeenCalledWith(ACCOUNT_ID);
+    await expect(statesOf(coordinator, ids, "not_requested")).resolves.toEqual([
+      "message-thread-m2",
+      "message-thread-m1",
+    ]);
+    // What the budget let go is not fetched again by the next step.
+    await expect(step()).resolves.toEqual({ hasMore: false });
+    expect(runner.calls).toHaveLength(ids.length);
+  });
+
   it("takes a deployed three-message cohort to the new size without a refetch storm", async () => {
     const fixture = await createFixture([ACCOUNT_ID]);
     const seeded = seedInbox(fixture.caches[0]!, [
@@ -1680,7 +1732,13 @@ async function createFixture(accountIds: readonly string[]): Promise<{
     clock?: () => number,
     onBackgroundWorkAvailable?: () => void,
     onEvent?: (event: MailContentCoordinatorEvent) => void,
-    extra?: { readonly admission?: MailSystemAdmissionPort },
+    extra?: {
+      readonly admission?: MailSystemAdmissionPort;
+      readonly bodyCacheMaxBytes?: number;
+      readonly draftSources?: {
+        listDraftSourceMessageIds(accountId: string): Promise<readonly string[]>;
+      };
+    },
   ): MailContentCoordinator;
 }> {
   const root = await mkdtemp(path.join(tmpdir(), "brain-mail-content-coordinator-"));

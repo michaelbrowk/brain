@@ -178,6 +178,11 @@ export interface MailBackgroundContentPrefetchResult {
   readonly hasMore: boolean;
 }
 
+/** The messages a live draft answers or forwards, whose bodies stay put. */
+export interface MailContentDraftSourcePort {
+  listDraftSourceMessageIds(accountId: string): Promise<readonly string[]>;
+}
+
 /**
  * The image pipeline's own record, for the service's stdout stream. Payloads
  * stay inside the section 13 allowlist: a drain starts with the images it
@@ -599,6 +604,8 @@ export class MailContentCoordinator
   private readonly entries = new Map<string, RegistryEntry>();
   private readonly invalidatedAccounts = new Set<string>();
   private readonly admission: MailSystemAdmissionPort;
+  private readonly bodyCacheMaxBytes: number;
+  private readonly draftSources: MailContentDraftSourcePort | null;
   private readonly backgroundFillTails = new Map<string, Promise<void>>();
   private resolutionTail: Promise<void> = Promise.resolve();
   private closed = false;
@@ -616,6 +623,9 @@ export class MailContentCoordinator
      * between them.
      */
     readonly admission?: MailSystemAdmissionPort;
+    /** Per account; `MAIL_RESOURCE_LIMITS.bodyCacheMaxBytes` unless a test sets it. */
+    readonly bodyCacheMaxBytes?: number;
+    readonly draftSources?: MailContentDraftSourcePort;
     readonly onBackgroundWorkAvailable?: () => void;
     readonly onEvent?: (event: MailContentCoordinatorEvent) => void;
     readonly clock?: () => number;
@@ -630,6 +640,12 @@ export class MailContentCoordinator
         (typeof options.admission.reserve !== "function" ||
           typeof options.admission.release !== "function" ||
           typeof options.admission.readUsage !== "function")) ||
+      (options.bodyCacheMaxBytes !== undefined &&
+        (!Number.isSafeInteger(options.bodyCacheMaxBytes) ||
+          options.bodyCacheMaxBytes < 0 ||
+          options.bodyCacheMaxBytes > MAIL_RESOURCE_LIMITS.bodyCacheMaxBytes)) ||
+      (options.draftSources !== undefined &&
+        typeof options.draftSources.listDraftSourceMessageIds !== "function") ||
       (options.onBackgroundWorkAvailable !== undefined &&
         typeof options.onBackgroundWorkAvailable !== "function") ||
       (options.onEvent !== undefined && typeof options.onEvent !== "function")
@@ -643,6 +659,9 @@ export class MailContentCoordinator
     this.queue = options.queue ?? new InMemoryMailContentWorkQueue({ clock: this.clock });
     this.retryPolicy = options.retryPolicy ?? new ExponentialMailContentRetryPolicy();
     this.admission = options.admission ?? new AtomicMailSystemAdmission();
+    this.bodyCacheMaxBytes =
+      options.bodyCacheMaxBytes ?? MAIL_RESOURCE_LIMITS.bodyCacheMaxBytes;
+    this.draftSources = options.draftSources ?? null;
     this.onBackgroundWorkAvailable = options.onBackgroundWorkAvailable ?? null;
     this.onEvent = options.onEvent ?? null;
     this.remoteImageFetcher =
@@ -957,13 +976,14 @@ export class MailContentCoordinator
   }
 
   /**
-   * Claims cohort bodies for the prefetch until the account has
-   * `MAX_BACKGROUND_FETCHES_PER_ACCOUNT` in flight, and answers how many it
-   * claimed. A scheduler step calls it, and so does every prefetch that lets
-   * go, which is what carries the cohort forward between steps. One call
-   * claims two at most, so a cache that has just grown its cohort fills it at
-   * that pace rather than all at once. Calls for one account take turns, or
-   * two of them could each see room for the same slot.
+   * Brings the account under the byte budget, then claims cohort bodies for
+   * the prefetch until the account has `MAX_BACKGROUND_FETCHES_PER_ACCOUNT` in
+   * flight, and answers how many it claimed. A scheduler step calls it, and so
+   * does every prefetch that lets go, which is what carries the cohort forward
+   * between steps and keeps the budget checked after every body that lands.
+   * One call claims two at most, so a cache that has just grown its cohort
+   * fills it at that pace rather than all at once. Calls for one account take
+   * turns, or two of them could each see room for the same slot.
    */
   private fillBackgroundPrefetch(
     entry: RegistryEntry,
@@ -971,6 +991,7 @@ export class MailContentCoordinator
   ): Promise<number> {
     const previous = this.backgroundFillTails.get(accountId) ?? Promise.resolve();
     const run = previous.then(async () => {
+      await this.enforceBodyBudget(entry, accountId);
       let claimed = 0;
       for (
         let round = 0;
@@ -1001,6 +1022,34 @@ export class MailContentCoordinator
       }
     });
     return run;
+  }
+
+  /**
+   * The drafts are asked only once the account is over the budget, since
+   * asking writes to the outbox. When they cannot answer, nothing is evicted
+   * this time: a body a draft needs is worth more than a round of budget.
+   */
+  private async enforceBodyBudget(
+    entry: RegistryEntry,
+    accountId: string,
+  ): Promise<void> {
+    if ((await entry.cache.readBodyCacheBytes()) <= this.bodyCacheMaxBytes) return;
+    let pinnedMessageIds: readonly string[] = [];
+    if (this.draftSources !== null) {
+      try {
+        pinnedMessageIds = (
+          await this.draftSources.listDraftSourceMessageIds(accountId)
+        ).filter(isContentMessageId);
+      } catch {
+        return;
+      }
+    }
+    const result = await entry.cache.evictBodiesOverBudget({
+      maxBytes: this.bodyCacheMaxBytes,
+      now: this.readTime(),
+      pinnedMessageIds,
+    });
+    if (result.evictedMessages > 0) await entry.cache.collectGarbage();
   }
 
   /** Detached: a failed refill waits for the account's next scheduler step. */
@@ -1825,6 +1874,15 @@ function contentMessageId(value: unknown): string {
     return validateMailContentMessageId(value);
   } catch {
     throw requestInvalid();
+  }
+}
+
+function isContentMessageId(value: unknown): value is string {
+  try {
+    validateMailContentMessageId(value);
+    return true;
+  } catch {
+    return false;
   }
 }
 

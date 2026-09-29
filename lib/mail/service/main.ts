@@ -13,6 +13,7 @@ import {
   type MailAccountProtocolMutationGuard,
 } from "./accounts";
 import { MailAccountError } from "./account-types";
+import { AtomicMailSystemAdmission } from "./admission";
 import { MailBackgroundSyncScheduler } from "./background-sync";
 import { MailContentCoordinator } from "./content-coordinator";
 import {
@@ -21,6 +22,7 @@ import {
 } from "./content-work-runner";
 import { CompleteSetMailDnsResolver } from "./dns";
 import {
+  listDraftSourceMessageIds,
   ProviderNeutralMailDraftService,
 } from "./drafts";
 import {
@@ -99,6 +101,9 @@ async function main(): Promise<void> {
       });
     },
   });
+  // One ledger for the whole process: the download routes and the body
+  // prefetch count against the same two fetch streams.
+  const admission = new AtomicMailSystemAdmission();
   // The scheduler is constructed after the coordinator it polls; the kick
   // holder closes the cycle so an owner-demanded message can start its
   // remote-image pass without waiting for the next timer tick.
@@ -114,6 +119,11 @@ async function main(): Promise<void> {
       }),
       parser: new UnixSocketMailMimeParser(),
     }),
+    admission,
+    draftSources: {
+      listDraftSourceMessageIds: (accountId) =>
+        listDraftSourceMessageIds(outbox, accountId),
+    },
     onBackgroundWorkAvailable: () => kickBackgroundSync(),
     onEvent: writeServiceLog,
   });
@@ -234,6 +244,7 @@ async function main(): Promise<void> {
   });
   const server = createMailServiceHttpServer({
     build,
+    admission,
     accounts,
     gmailOAuth,
     messages: senderScreen

@@ -342,6 +342,14 @@ describe("IMAP list-message classification and size", () => {
     expect(performance.now() - startedAt).toBeLessThan(250);
   });
 
+  it("reads a header name of up to 128 bytes and no longer", () => {
+    const named = (width: number) =>
+      parseListHeaders(Buffer.from(`${"List-Id".padEnd(width)}: <x.example.test>\r\n`, "latin1"));
+
+    expect(named(128)).toMatchObject({ hasListId: true });
+    expect(named(129)).toMatchObject({ hasListId: false });
+  });
+
   it("unfolds continuations and matches header names case-insensitively", () => {
     const parsed = parseListHeaders(
       Buffer.from(

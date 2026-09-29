@@ -1405,6 +1405,32 @@ describe("Brain Mail change feed read", () => {
       [200, { apiVersion: 1, cursor: 1, changes: [{ accountId: ACCOUNT, mailboxIds: [], kind: "moved" }] }],
       [200, { apiVersion: 1, cursor: 1, changes: [{ accountId: ACCOUNT, mailboxIds: ["drafts"], kind: "sync" }] }],
       [200, { apiVersion: 1, cursor: 1, changes: [{ accountId: ACCOUNT, mailboxIds: [], kind: "content_ready" }] }],
+      // A message id is a path segment on the way to the reader: only the
+      // provider's safe alphabet, and only on a ready body.
+      [
+        200,
+        {
+          apiVersion: 1,
+          cursor: 1,
+          changes: [{ accountId: ACCOUNT, mailboxIds: [], kind: "content_ready", messageId: "../x" }],
+        },
+      ],
+      [
+        200,
+        {
+          apiVersion: 1,
+          cursor: 1,
+          changes: [{ accountId: ACCOUNT, mailboxIds: [], kind: "content_ready", messageId: "m".repeat(256) }],
+        },
+      ],
+      [
+        200,
+        {
+          apiVersion: 1,
+          cursor: 1,
+          changes: [{ accountId: ACCOUNT, mailboxIds: ["inbox"], kind: "sync", messageId: "message-1" }],
+        },
+      ],
       [200, { apiVersion: 1, cursor: 1, changes: [], reset: false }],
       [200, { apiVersion: 1, cursor: 1, changes: [], subject: "leak" }],
       [409, { apiVersion: 1, error: { code: "mail_changes_busy" } }],
@@ -1415,7 +1441,7 @@ describe("Brain Mail change feed read", () => {
     });
     vi.spyOn(process.stderr, "write").mockImplementation(() => true);
 
-    for (let index = 0; index < 6; index += 1) {
+    for (let index = 0; index < 9; index += 1) {
       await expect(
         readMailChanges({ cursor: 0, waitMs: 0 }, undefined, { socketPath }),
       ).rejects.toMatchObject({ code: "mail_service_invalid_response" });

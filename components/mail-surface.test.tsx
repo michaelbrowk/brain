@@ -3282,6 +3282,187 @@ describe("MailSurface", () => {
     expect(client.listThreads).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps a single account's loaded depth when a mail event refreshes page one", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const deep = {
+      ...thread,
+      threadId: "thread-deep",
+      subject: "Deep row from page two",
+      lastMessageAt: 1_600_000_000_000,
+    };
+    const arrived = {
+      ...thread,
+      threadId: "thread-arrived",
+      subject: "A letter that just arrived",
+      lastMessageAt: 1_700_000_100_000,
+    };
+    let landed = false;
+    const listThreads = vi.fn().mockImplementation((input) =>
+      Promise.resolve(
+        input.cursor === "cursor-1"
+          ? { ...threadPage, items: [deep], nextCursor: null }
+          : {
+              ...threadPage,
+              items: landed ? [arrived, thread] : [thread],
+              nextCursor: "cursor-1",
+            },
+      ),
+    );
+    const client = makeClient({ listThreads });
+    await act(async () =>
+      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+    );
+    await settle();
+    await enterSingleAccount();
+    await click(findButton("Load more"));
+    expect(document.body.textContent).toContain("Deep row from page two");
+
+    // The echo of the owner's own action, or a sync that brought a letter.
+    landed = true;
+    await mailEvent({
+      kind: "mail",
+      changeKind: "mutation",
+      accountId: accountA.accountId,
+      mailboxIds: ["inbox", "all", "sent", "starred", "spam", "trash"],
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+    await settle();
+    expect(listThreads).toHaveBeenCalledTimes(3);
+    expect(document.body.textContent).toContain("A letter that just arrived");
+    expect(document.body.textContent).toContain("Deep row from page two");
+    // Loaded to the end, it stays at the end: no Load more comes back.
+    expect(() => findButton("Load more")).toThrow();
+  });
+
+  it("reads again once the list's own load lands when a mail event came while it was out", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const first = deferred<MailThreadPage>();
+    let calls = 0;
+    const listThreads = vi.fn().mockImplementation(() => {
+      calls += 1;
+      return calls === 1 ? first.promise : Promise.resolve(threadPage);
+    });
+    const client = makeClient({ listThreads });
+    await act(async () =>
+      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+    );
+    await settle();
+    expect(listThreads).toHaveBeenCalledTimes(1);
+    // The mount's read left before the letter; the event arrives while it is out.
+    await mailEvent({
+      kind: "mail",
+      changeKind: "sync",
+      accountId: accountA.accountId,
+      mailboxIds: ["inbox", "all"],
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+    await act(async () => first.resolve(threadPage));
+    await settle();
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    await settle();
+    expect(listThreads).toHaveBeenCalledTimes(2);
+  });
+
+  it("runs one more read after the one out when an event arrives during it, never two at once", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const second = deferred<MailThreadPage>();
+    let calls = 0;
+    const listThreads = vi.fn().mockImplementation(() => {
+      calls += 1;
+      return calls === 2 ? second.promise : Promise.resolve(threadPage);
+    });
+    const client = makeClient({ listThreads });
+    await act(async () =>
+      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+    );
+    await settle();
+    await enterSingleAccount();
+    const event = {
+      kind: "mail",
+      changeKind: "sync",
+      accountId: accountA.accountId,
+      mailboxIds: ["inbox"],
+    } as const;
+    await mailEvent(event);
+    await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+    expect(listThreads).toHaveBeenCalledTimes(2);
+    await mailEvent(event);
+    await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+    expect(listThreads).toHaveBeenCalledTimes(2);
+    await act(async () => second.resolve(threadPage));
+    await settle();
+    expect(listThreads).toHaveBeenCalledTimes(3);
+  });
+
+  it("reads the list once a mail action that held it lands, when an event came during the action", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const pendingUpdate = deferred<void>();
+    const client = makeClient({
+      updateThread: vi.fn().mockImplementation(() => pendingUpdate.promise),
+    });
+    await act(async () =>
+      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+    );
+    await settle();
+    await enterSingleAccount();
+    await click(findButton("Lunch this Friday?"));
+    await click(findButton("Mark unread"));
+    const before = vi.mocked(client.listThreads).mock.calls.length;
+    await mailEvent({
+      kind: "mail",
+      changeKind: "sync",
+      accountId: accountA.accountId,
+      mailboxIds: ["inbox"],
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(3 * MAIL_EVENT_DEBOUNCE_MS));
+    expect(vi.mocked(client.listThreads).mock.calls.length).toBe(before);
+    await act(async () => pendingUpdate.resolve());
+    await settle();
+    await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+    await settle();
+    // The action reads page one once of its own; the event's read follows it
+    // once the lock lets go, and only once.
+    expect(vi.mocked(client.listThreads).mock.calls.length - before).toBe(2);
+  });
+
+  it("brings the open letter up to date when the tab comes back, and on the safety net", async () => {
+    vi.useFakeTimers();
+    const visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("visible");
+    const readThread = vi.fn().mockResolvedValue(detail);
+    const client = makeClient({ readThread });
+    await act(async () =>
+      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+    );
+    await settle();
+    await enterSingleAccount();
+    await click(findButton("Lunch this Friday?"));
+    expect(readThread).toHaveBeenCalledTimes(1);
+
+    // A reply lands while the tab is hidden, and its event is let pass.
+    visibility.mockReturnValue("hidden");
+    document.dispatchEvent(new Event("visibilitychange"));
+    await mailEvent({
+      kind: "mail",
+      changeKind: "sync",
+      accountId: accountA.accountId,
+      mailboxIds: ["inbox", "all"],
+    });
+    visibility.mockReturnValue("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    await settle();
+    expect(readThread).toHaveBeenCalledTimes(2);
+
+    await act(async () => vi.advanceTimersByTimeAsync(MAIL_SAFETY_REFRESH_MS));
+    await settle();
+    expect(readThread).toHaveBeenCalledTimes(3);
+  });
+
   it("refreshes page one once a burst of mail events for the list on screen settles", async () => {
     vi.useFakeTimers();
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
@@ -3463,6 +3644,92 @@ describe("MailSurface", () => {
     expect(document.body.textContent).toContain("The body the feed announced.");
     await act(async () => vi.advanceTimersByTimeAsync(30_000));
     expect(getMessageContent).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks at once after a read that was out when the body was announced", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const fetching = {
+      apiVersion: 1 as const,
+      accountId: accountA.accountId,
+      messageId: "message-1",
+      state: "fetching" as const,
+    };
+    const secondRead = deferred<MailMessageContent>();
+    const getMessageContent = vi
+      .fn()
+      .mockResolvedValueOnce(fetching)
+      .mockReturnValueOnce(secondRead.promise)
+      .mockResolvedValue({ ...readyContent, textBody: "Announced while a read was out." });
+    const client = makeClient({
+      requestMessageContent: vi.fn().mockResolvedValue(fetching),
+      getMessageContent,
+    });
+    await act(async () =>
+      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+    );
+    await settle();
+    await enterSingleAccount();
+    await click(findButton("Lunch this Friday?"));
+    await act(async () => vi.advanceTimersByTimeAsync(300));
+    await settle();
+    expect(getMessageContent).toHaveBeenCalledTimes(2);
+
+    // The event lands while the second read is out, and that read answers
+    // from before the commit.
+    await mailEvent({
+      kind: "mail",
+      changeKind: "content_ready",
+      accountId: accountA.accountId,
+      mailboxIds: [],
+      messageIds: ["message-1"],
+    });
+    await act(async () => secondRead.resolve(fetching));
+    await settle();
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    await settle();
+
+    // Not the 600 ms backoff: the next read goes straight out.
+    expect(getMessageContent).toHaveBeenCalledTimes(3);
+    expect(document.body.textContent).toContain("Announced while a read was out.");
+  });
+
+  it("does not take another account's ready body for this message's", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    const fetching = {
+      apiVersion: 1 as const,
+      accountId: accountA.accountId,
+      messageId: "message-1",
+      state: "fetching" as const,
+    };
+    const getMessageContent = vi.fn().mockResolvedValue(fetching);
+    const client = makeClient({
+      requestMessageContent: vi.fn().mockResolvedValue(fetching),
+      getMessageContent,
+    });
+    await act(async () =>
+      root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+    );
+    await settle();
+    await enterSingleAccount();
+    await click(findButton("Lunch this Friday?"));
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    await settle();
+    expect(getMessageContent).toHaveBeenCalledTimes(1);
+
+    // Message ids are the provider's, and two accounts can share one.
+    await mailEvent({
+      kind: "mail",
+      changeKind: "content_ready",
+      accountId: accountB.accountId,
+      mailboxIds: [],
+      messageIds: ["message-1"],
+    });
+    await settle();
+    await act(async () => vi.advanceTimersByTimeAsync(0));
+    await settle();
+    expect(getMessageContent).toHaveBeenCalledTimes(1);
   });
 
   it("refreshes silently while visible and pauses network work while hidden", async () => {
@@ -10237,6 +10504,122 @@ describe("MailSurface", () => {
       expect(document.body.textContent).toContain("depth-tail");
       expect(document.body.querySelector(".brain-mail-scroll")).toBe(scroller);
       expect(scroller.scrollTop).toBe(480);
+    });
+
+    it("reads the account again when a Load more's landing dropped a mail event's refresh", async () => {
+      vi.useFakeTimers();
+      vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      window.sessionStorage.clear();
+      const pageOne = () =>
+        Array.from({ length: 50 }, (_value, index) =>
+          unifiedThread({
+            accountId: accountA.accountId,
+            threadId: `depth-${String(index).padStart(2, "0")}`,
+            lastMessageAt: 1_700_000_100_000 - index * 1_000,
+          }),
+        );
+      const fresh = unifiedThread({
+        accountId: accountA.accountId,
+        threadId: "just-arrived",
+        lastMessageAt: 1_700_000_200_000,
+      });
+      let arrived = false;
+      let heldOnce = false;
+      const refreshRead = deferred<MailThreadPage>();
+      const listThreads = vi.fn().mockImplementation(({ accountId, cursor }) => {
+        if (accountId !== accountA.accountId) return Promise.resolve(pageOf([]));
+        if (cursor) {
+          return Promise.resolve(
+            pageOf([
+              unifiedThread({
+                accountId: accountA.accountId,
+                threadId: "depth-tail",
+                lastMessageAt: 1_700_000_000_000,
+              }),
+            ]),
+          );
+        }
+        if (arrived && !heldOnce) {
+          heldOnce = true;
+          return refreshRead.promise;
+        }
+        return Promise.resolve(
+          pageOf(arrived ? [fresh, ...pageOne()] : pageOne(), "cursor-deep"),
+        );
+      });
+      const client = makeClient({
+        listThreads,
+        loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await click(findButton("Show all 50 in People"));
+
+      arrived = true;
+      await mailEvent({
+        kind: "mail",
+        changeKind: "sync",
+        accountId: accountA.accountId,
+        mailboxIds: ["inbox", "all"],
+      });
+      await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+      await settle();
+      // The event's page-one read is out; the owner reaches the end.
+      await click(findButton("Load more"));
+      expect(document.body.textContent).toContain("depth-tail");
+      await act(async () =>
+        refreshRead.resolve(pageOf([fresh, ...pageOne()], "cursor-deep")),
+      );
+      await settle();
+      await act(async () => vi.advanceTimersByTimeAsync(0));
+      await settle();
+
+      expect(document.body.textContent).toContain("just-arrived");
+      expect(document.body.textContent).toContain("depth-tail");
+    });
+
+    it("reads another account's event once the read out for the first lands, never beside it", async () => {
+      vi.useFakeTimers();
+      vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+      window.sessionStorage.clear();
+      const aRead = deferred<MailThreadPage>();
+      let armed = false;
+      const listThreads = vi.fn().mockImplementation(({ accountId }) =>
+        armed && accountId === accountA.accountId ? aRead.promise : Promise.resolve(pageOf([])),
+      );
+      const client = makeClient({
+        listThreads,
+        loadAccounts: vi.fn().mockResolvedValue([accountA, accountB]),
+      });
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      armed = true;
+      const bCalls = () =>
+        listThreads.mock.calls.filter(([input]) => input.accountId === accountB.accountId)
+          .length;
+      await mailEvent({
+        kind: "mail",
+        changeKind: "sync",
+        accountId: accountA.accountId,
+        mailboxIds: ["inbox"],
+      });
+      await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+      const bBefore = bCalls();
+      await mailEvent({
+        kind: "mail",
+        changeKind: "sync",
+        accountId: accountB.accountId,
+        mailboxIds: ["inbox"],
+      });
+      await act(async () => vi.advanceTimersByTimeAsync(MAIL_EVENT_DEBOUNCE_MS));
+      expect(bCalls()).toBe(bBefore);
+      await act(async () => aRead.resolve(pageOf([])));
+      await settle();
+      expect(bCalls()).toBe(bBefore + 1);
     });
 
     it("keeps all→single→all epochs isolated", async () => {

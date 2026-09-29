@@ -1539,8 +1539,12 @@ function* headerFields(block: Buffer): Generator<HeaderField> {
       end = lineFeed + 1;
       break;
     }
-    const colon = block.indexOf(0x3a, start);
-    if (colon > start && colon < end && colon - start <= MAX_HEADER_NAME_BYTES) {
+    // A name longer than a header name can plausibly be is not read, so the
+    // search for its colon stops there instead of running ahead through
+    // every line that has none.
+    const nameEnd = Math.min(end, start + MAX_HEADER_NAME_BYTES + 1);
+    const colon = block.subarray(start, nameEnd).indexOf(0x3a) + start;
+    if (colon > start) {
       yield {
         name: block.subarray(start, colon).toString("latin1").trim().toLowerCase(),
         valueStart: colon + 1,

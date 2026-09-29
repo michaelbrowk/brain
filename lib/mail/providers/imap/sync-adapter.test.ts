@@ -325,6 +325,23 @@ describe("IMAP list-message classification and size", () => {
     expect(parsed).toMatchObject({ hasListId: true, precedence: "list" });
   });
 
+  it("unfolds a value folded with a tab", () => {
+    expect(
+      parseListHeaders(Buffer.from("Precedence:\r\n\tbulk\r\nList-Id: <x.example.test>\r\n", "latin1")),
+    ).toMatchObject({ precedence: "bulk", hasListId: true });
+  });
+
+  it("reads megabytes of lines without a colon in time that grows with their length", () => {
+    const lines = Buffer.from(
+      `${"x".repeat(78)}\r\n`.repeat(40_000) + "List-Id: <x.example.test>\r\n",
+      "latin1",
+    );
+    const startedAt = performance.now();
+
+    expect(parseListHeaders(lines)).toMatchObject({ hasListId: true });
+    expect(performance.now() - startedAt).toBeLessThan(250);
+  });
+
   it("unfolds continuations and matches header names case-insensitively", () => {
     const parsed = parseListHeaders(
       Buffer.from(

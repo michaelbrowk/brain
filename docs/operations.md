@@ -63,6 +63,18 @@ Every other step applies unchanged.
   wants abuse reports to reach its own operator should set that variable.
   `docs/notifications.md` lists both of these directories file by file, with
   what each one costs if it is deleted.
+- `/var/lib/brain-mail/cache/<accountId>` holds each mail account's local
+  state; `docs/mail-architecture.md` §5 lists it file by file. What grows there
+  with the mail is the message bodies: the Mail service fetches the bodies of
+  an account's 200 newest Inbox messages from the last 30 days before they are
+  opened, keeps the ones the owner opens, and holds all of them to 48 MiB per
+  account (`bodyCacheMaxBytes` in `lib/mail/security.ts`), evicting the oldest
+  unopened body first. Plan the disk for 48 MiB per connected account on top of
+  the message databases, about 150 MiB for three accounts. A letter opened in
+  the last hour or answered by a live draft is kept even past the budget, so
+  the figure is a working level rather than a hard wall. The bodies are
+  rebuildable from the provider, but `outbox.sqlite3` in the same directory is
+  not: never clear the directory to reclaim space.
 - `/etc/brain/brain.env` contains runtime secrets and is readable only by `root` and the `brain` group.
 - `/etc/brain/deployer.env` contains the read-only GitHub token and merger
   allowlist. It is `root:root` mode `0600` and is never loaded by the app.

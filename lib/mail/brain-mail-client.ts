@@ -63,9 +63,16 @@ import {
   validateMailResourceId,
   validateMailSearchInput,
   validateMailSearchThreadPage,
+  validateMailBlockedSenders,
   validateMailSendInput,
   validateMailSendOperation,
   validateMailSendResult,
+  validateMailSenderDecisionId,
+  validateMailSenderDecisionInput,
+  validateMailSenderDecisionResult,
+  validateMailSenderScreenInput,
+  validateMailSenderScreenState,
+  validateMailSenderUndoResult,
   validateMailSyncEnabledInput,
   validateMailSyncInput,
   validateMailSyncPauseResult,
@@ -78,12 +85,17 @@ import {
   validateMailThreadPage,
 } from "./message-codec";
 import type {
+  MailBlockedSenders,
   MailMailboxThreadPage,
   MailSendInput,
   MailSendOperation,
   MailSendResult,
   MailSyncResult,
   MailSearchThreadPage,
+  MailSenderDecisionInput,
+  MailSenderDecisionResult,
+  MailSenderScreenState,
+  MailSenderUndoResult,
   MailSystemMailbox,
   MailThreadDetail,
   MailThreadMutationInput,
@@ -103,6 +115,7 @@ const MESSAGE_CONTENT_PATH = "/v1/message-content";
 const ATTACHMENTS_PATH = "/v1/attachments";
 const REMOTE_IMAGES_PATH = "/v1/remote-images";
 const SEARCH_PATH = "/v1/search";
+const SENDERS_PATH = "/v1/senders";
 const REQUEST_TIMEOUT_MS = 12_000;
 const MAX_RESPONSE_BYTES = 32 * 1024;
 const MAX_THREAD_LIST_RESPONSE_BYTES = 512 * 1024;
@@ -484,6 +497,24 @@ export interface BrainMailClient {
     remoteImageId: string,
     signal?: AbortSignal,
   ): Promise<MailAttachmentPayload>;
+  /** The new-senders screen: its switch, the owner's decisions, and the
+   *  Blocked list. `undoSenderDecision` with `restore: false` is the Blocked
+   *  list's unblock, which leaves archived mail where it is. */
+  getSenderScreenState(signal?: AbortSignal): Promise<MailSenderScreenState>;
+  setSenderScreenEnabled(
+    enabled: boolean,
+    signal?: AbortSignal,
+  ): Promise<MailSenderScreenState>;
+  decideSender(
+    input: MailSenderDecisionInput,
+    signal?: AbortSignal,
+  ): Promise<MailSenderDecisionResult>;
+  undoSenderDecision(
+    decisionId: string,
+    options: { readonly restore: boolean },
+    signal?: AbortSignal,
+  ): Promise<MailSenderUndoResult>;
+  listBlockedSenders(signal?: AbortSignal): Promise<MailBlockedSenders>;
 }
 
 export function createBrainMailClient(options?: {
@@ -1114,6 +1145,67 @@ export function createBrainMailClient(options?: {
         signal,
       );
     },
+    getSenderScreenState: async (signal?: AbortSignal) =>
+      requestMailService(
+        socketPath,
+        requestTimeoutMs,
+        `${SENDERS_PATH}/state`,
+        "GET",
+        undefined,
+        validateMailSenderScreenState,
+        signal,
+      ),
+    setSenderScreenEnabled: async (enabled: boolean, signal?: AbortSignal) =>
+      requestMailService(
+        socketPath,
+        requestTimeoutMs,
+        `${SENDERS_PATH}/state`,
+        "PUT",
+        validateMessageRequest(() => validateMailSenderScreenInput({ enabled })),
+        validateMailSenderScreenState,
+        signal,
+      ),
+    decideSender: async (input: MailSenderDecisionInput, signal?: AbortSignal) =>
+      requestMailService(
+        socketPath,
+        requestTimeoutMs,
+        `${SENDERS_PATH}/decisions`,
+        "POST",
+        validateMessageRequest(() => validateMailSenderDecisionInput(input)),
+        validateMailSenderDecisionResult,
+        signal,
+      ),
+    undoSenderDecision: async (
+      decisionId: string,
+      options: { readonly restore: boolean },
+      signal?: AbortSignal,
+    ) => {
+      const safeDecisionId = validateMessageRequest(() =>
+        validateMailSenderDecisionId(decisionId),
+      );
+      const query = options.restore ? "" : "?restore=false";
+      return requestMailService(
+        socketPath,
+        requestTimeoutMs,
+        `${SENDERS_PATH}/decisions/${safeDecisionId}${query}`,
+        "DELETE",
+        undefined,
+        validateMailSenderUndoResult,
+        signal,
+      );
+    },
+    listBlockedSenders: async (signal?: AbortSignal) =>
+      requestMailService(
+        socketPath,
+        requestTimeoutMs,
+        `${SENDERS_PATH}/blocked`,
+        "GET",
+        undefined,
+        validateMailBlockedSenders,
+        signal,
+        // A thousand blocked keys, each an address or a domain and a count.
+        MAX_THREAD_LIST_RESPONSE_BYTES,
+      ),
   });
 }
 

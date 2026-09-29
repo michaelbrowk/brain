@@ -29,6 +29,8 @@ export interface PageMenuAction {
   returnsFocus?: boolean;
   strong?: boolean;
   divider?: boolean;
+  /** A count at the item's right edge, where the nav menu keeps its own. */
+  tail?: string;
 }
 
 /** Shared registry so the dots menu and right-click menu cannot drift. */
@@ -136,6 +138,47 @@ export function RowMenu({
         </Dropdown.Content>
       </Dropdown.Portal>
     </Dropdown.Root>
+  );
+}
+
+/**
+ * The same right-click menu for a row that is not a page: the panel, its
+ * entrance and its items are the tree's, fed the row's own actions, so a menu
+ * on a mail row and a menu on a page cannot drift apart. Radix opens it on a
+ * long press as well, which is how a phone reaches it. `wide` takes the nav
+ * menu's 264 for items that carry an address.
+ */
+export function ActionContextMenu({
+  actions,
+  wide = false,
+  children,
+}: {
+  actions: readonly PageMenuAction[];
+  wide?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <Context.Root>
+      <Context.Trigger asChild>{children}</Context.Trigger>
+      <Context.Portal>
+        <Context.Content
+          className={wide ? "brain-menu z-[var(--z-modal)] w-[264px]" : PANEL}
+        >
+          {actions.map((a) => (
+            <div key={a.key}>
+              {a.divider && <div className="brain-menu-sep" />}
+              <Context.Item onSelect={() => a.onSelect(null)} className={ITEM}>
+                <Icon name={a.icon} size={16} className="brain-menu-icon" />
+                <span className="min-w-0 flex-1 truncate">{a.label}</span>
+                {a.tail && (
+                  <span className="shrink-0 tabular-nums text-ink-3">{a.tail}</span>
+                )}
+              </Context.Item>
+            </div>
+          ))}
+        </Context.Content>
+      </Context.Portal>
+    </Context.Root>
   );
 }
 

@@ -41,4 +41,28 @@ describe("the Playwright harness", () => {
     expect(wants.length).toBeGreaterThan(0);
     expect(calls.sort()).toEqual(wants.sort());
   });
+
+  /** EVERY STATE DIRECTORY THE APP READS IS THE RUN'S OWN.
+   *
+   *  In development each of them defaults to a folder under the system temp
+   *  directory named for the uid, which is the folder a developer's own `pnpm
+   *  dev` uses too. A variable the harness does not set is state the run shares
+   *  with that server: the push directory was one, so a run generated the VAPID
+   *  pair the developer's devices then subscribed against. The list is read
+   *  from `.env.example`, which `scripts/check-env-docs.mjs` keeps equal to what
+   *  the code reads, so a directory added later fails here until the harness
+   *  names it. Each has to sit under `stateRoot`, the folder the harness deletes
+   *  when the server exits. */
+  it("gives the server every state directory of its own, under the root it deletes", () => {
+    const documented = readFileSync(path.join(process.cwd(), ".env.example"), "utf8");
+    const harness = readFileSync(path.join(process.cwd(), "scripts/e2e-dev.mjs"), "utf8");
+    const names = [...documented.matchAll(/^#?\s*(BRAIN_[A-Z_]+_STATE_DIR)=/gm)].map(
+      (match) => match[1],
+    );
+    expect(names).toContain("BRAIN_PUSH_STATE_DIR");
+    const unowned = names.filter(
+      (name) => !new RegExp(`\\b${name}: path\\.join\\(stateRoot, "[a-z]+"\\)`).test(harness),
+    );
+    expect(unowned).toEqual([]);
+  });
 });

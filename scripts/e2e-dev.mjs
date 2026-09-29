@@ -40,6 +40,16 @@ const child = spawn(
       // run killed between the two would leave the machine's own `pnpm dev`
       // with Mail or Tasks missing and nothing on screen to explain it.
       BRAIN_SETTINGS_STATE_DIR: path.join(stateRoot, "settings"),
+      // Push holds the VAPID pair, which is generated on first use:
+      // `e2e/notifications.spec.ts` reads the key, and on the shared folder
+      // that read minted the pair the developer's own devices then subscribed
+      // against. The session epoch, the OAuth grants and the update answer
+      // are the same shape of state, and `playwright-config.test.ts` holds the
+      // harness to naming every directory `.env.example` documents.
+      BRAIN_PUSH_STATE_DIR: path.join(stateRoot, "push"),
+      BRAIN_AUTH_STATE_DIR: path.join(stateRoot, "auth"),
+      BRAIN_OAUTH_STATE_DIR: path.join(stateRoot, "oauth"),
+      BRAIN_UPDATE_STATE_DIR: path.join(stateRoot, "update"),
       // A timer writing task files under a temp notes root mid-run is a flake
       // nobody would diagnose twice. NODE_ENV is development here, so the
       // scan's own test guard does not cover this process.

@@ -151,8 +151,9 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
   /* Every blob a ready body holds on disk, per account: raw MIME, the text and
    * sanitized HTML parts, attachments and fetched images. Two hundred letters
    * at a median of 60 KiB of HTML and text are about 15 MiB before the raw
-   * copy and the heavier marketing mail; past the budget the body least
-   * recently sent or opened goes first. */
+   * copy and the heavier marketing mail. Past the budget a body over
+   * `privacyPrefetchMaxThreadBytes` goes first, then the body least recently
+   * sent or opened. */
   bodyCacheMaxBytes: 48 * 1024 * 1024,
   maxInlineImagePixels: 12_000_000,
   maxInlineImageFrames: 100,

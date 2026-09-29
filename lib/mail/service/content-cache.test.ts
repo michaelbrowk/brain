@@ -1549,8 +1549,9 @@ describe("background body cohort and byte budget", () => {
 
     const order: string[] = [];
     for (let step = 0; step < recent.length + 1; step += 1) {
-      const messageId = await fixture.content.findBackgroundContentCandidate(NOW);
-      if (messageId === null) break;
+      const messageId = (await fixture.content.findBackgroundContentCandidate(NOW))
+        ?.messageId;
+      if (messageId === undefined) break;
       order.push(messageId);
       await fixture.content.markBackgroundContentPrefetchStarted(messageId, NOW);
       await claimLease(fixture.content, messageId, NOW);
@@ -1575,14 +1576,17 @@ describe("background body cohort and byte budget", () => {
     });
 
     // c went for space, so d and e, older still, would go the same way.
-    const candidates = async (newerThan: number | null) => {
+    const candidates = async (newerThan: number | null, roomBytes = 0) => {
       const order: string[] = [];
       for (let step = 0; step < ids.length; step += 1) {
-        const messageId = await fixture.content.findBackgroundContentCandidate(
-          NOW,
-          newerThan,
-        );
-        if (messageId === null) break;
+        const messageId = (
+          await fixture.content.findBackgroundContentCandidate(
+            NOW,
+            newerThan,
+            roomBytes,
+          )
+        )?.messageId;
+        if (messageId === undefined) break;
         order.push(messageId);
         await claimLease(fixture.content, messageId, NOW);
       }
@@ -1591,14 +1595,17 @@ describe("background body cohort and byte budget", () => {
     // A budget that is full takes only what is newer than its next victim.
     await expect(candidates(NOW - 1 * HOUR - 1)).resolves.toEqual(["message-a"]);
     await expect(candidates(null)).resolves.toEqual(["message-b"]);
+    // Room lifts both for what fits in it: the evicted body by what it held,
+    // an older letter by its thread's size (2,048 bytes here).
+    await expect(candidates(null, 2_047)).resolves.toEqual(["message-c"]);
+    await expect(candidates(null, 2_048)).resolves.toEqual(["message-d", "message-e"]);
   });
 
   it("clears an eviction mark when a new generation arrives", async () => {
     const fixture = await createFixture({ active: true });
     await fixture.content.refreshBackgroundPrivacyCohort(1_000);
-    await publishBody(fixture, "message-thread-a", 1_001, {
-      raw: Buffer.from("raw MIME evicted once"),
-    });
+    const raw = Buffer.from("raw MIME evicted once");
+    await publishBody(fixture, "message-thread-a", 1_001, { raw });
     await fixture.content.evictBodiesOverBudget({
       maxBytes: 0,
       now: 1_002,
@@ -1607,6 +1614,14 @@ describe("background body cohort and byte budget", () => {
     await expect(
       fixture.content.findBackgroundContentCandidate(1_003),
     ).resolves.toBeNull();
+    expect(readCohort(fixture.databasePath)).toEqual([
+      {
+        messageId: "message-thread-a",
+        remoteImagePrefetch: 1,
+        evictedAt: 1_002,
+        evictedBytes: raw.byteLength,
+      },
+    ]);
 
     // A full resync is a new generation: what the budget let go before is a
     // candidate again, and the old eviction no longer holds anything back.
@@ -1629,11 +1644,16 @@ describe("background body cohort and byte budget", () => {
     activateOnlyThread(fixture, "thread-a", 1_000, "300");
     await fixture.content.refreshBackgroundPrivacyCohort(1_004);
     await expect(readCohort(fixture.databasePath)).toEqual([
-      { messageId: "message-thread-a", remoteImagePrefetch: 1, evictedAt: null },
+      {
+        messageId: "message-thread-a",
+        remoteImagePrefetch: 1,
+        evictedAt: null,
+        evictedBytes: null,
+      },
     ]);
     await expect(
       fixture.content.findBackgroundContentCandidate(1_004),
-    ).resolves.toBe("message-thread-a");
+    ).resolves.toMatchObject({ messageId: "message-thread-a" });
   });
 
   it("writes nothing when a refresh finds the cohort unchanged", async () => {
@@ -1677,8 +1697,9 @@ describe("background body cohort and byte budget", () => {
 
     const order: string[] = [];
     for (let step = 0; step < 4; step += 1) {
-      const messageId = await fixture.content.findBackgroundContentCandidate(NOW);
-      if (messageId === null) break;
+      const messageId = (await fixture.content.findBackgroundContentCandidate(NOW))
+        ?.messageId;
+      if (messageId === undefined) break;
       order.push(messageId);
       await claimLease(fixture.content, messageId, NOW);
     }
@@ -1847,19 +1868,95 @@ describe("background body cohort and byte budget", () => {
     await expect(fixture.content.collectGarbage()).resolves.toHaveLength(4);
   });
 
-  it("never prefetches a body the budget evicted while it stays in the cohort", async () => {
+  it("gives up a body past the prefetch size before any other", async () => {
+    const fixture = await createFixture({ active: true });
+    const large = MAIL_RESOURCE_LIMITS.privacyPrefetchMaxThreadBytes;
+    activateThreads(
+      fixture,
+      ["new", "big", "old", "older"].map((id, index) => ({
+        threadId: id,
+        sentAt: NOW - (index + 1) * HOUR,
+      })),
+      "200",
+    );
+    for (const [index, id] of ["new", "old", "older"].entries()) {
+      await publishBody(fixture, `message-${id}`, NOW - 5 * HOUR, {
+        raw: Buffer.alloc(100, index + 1),
+      });
+    }
+    // Staged whole: the helper's three-byte chunks would take a while.
+    const lease = await claimLease(fixture.content, "message-big", NOW - 5 * HOUR);
+    const raw = Buffer.alloc(100, 8);
+    const attachment = Buffer.alloc(large, 9);
+    for (const value of [raw, attachment]) {
+      await fixture.content.stageBlob(
+        lease,
+        descriptorFor(value),
+        chunks(value, value.byteLength),
+        NOW - 5 * HOUR,
+      );
+    }
+    await fixture.content.commitReady({
+      lease,
+      rawMime: descriptorFor(raw),
+      text: null,
+      sanitizedHtml: null,
+      attachments: [
+        {
+          filename: "large.bin",
+          mimeType: "application/octet-stream",
+          disposition: "attachment",
+          contentId: null,
+          blob: descriptorFor(attachment),
+        },
+      ],
+      remoteImages: [],
+      now: NOW - 5 * HOUR,
+    });
+    const total = large + 400;
+    await expect(fixture.content.readBodyCacheBytes()).resolves.toBe(total);
+
+    // At the budget the large body is the next to go, so a letter of any
+    // age the prefetch adds would push out that one and not itself.
+    await expect(
+      fixture.content.evictBodiesOverBudget({
+        maxBytes: total,
+        now: NOW,
+        pinnedMessageIds: [],
+      }),
+    ).resolves.toEqual({ evictedMessages: 0, remainingBytes: total, oldestKeptKey: 0 });
+    // Over by one small body, the large one goes rather than the oldest.
+    await expect(
+      fixture.content.evictBodiesOverBudget({
+        maxBytes: total - 100,
+        now: NOW,
+        pinnedMessageIds: [],
+      }),
+    ).resolves.toEqual({
+      evictedMessages: 1,
+      remainingBytes: 300,
+      oldestKeptKey: NOW - 4 * HOUR,
+    });
+    await expect(fixture.content.inspect("message-big")).resolves.toMatchObject({
+      kind: "not_requested",
+    });
+    await expect(fixture.content.inspect("message-older")).resolves.toMatchObject({
+      kind: "ready",
+    });
+  });
+
+  it("prefetches a body the budget evicted again only once there is room for it", async () => {
     const fixture = await createFixture({ active: true });
     await fixture.content.refreshBackgroundPrivacyCohort(1_000);
     await expect(
       fixture.content.findBackgroundContentCandidate(1_000),
-    ).resolves.toBe("message-thread-a");
+    ).resolves.toEqual({ messageId: "message-thread-a", estimatedBytes: 2_048 });
     await fixture.content.markBackgroundContentPrefetchStarted(
       "message-thread-a",
       1_000,
     );
-    await publishBody(fixture, "message-thread-a", 1_001, {
-      raw: Buffer.from("raw MIME the budget will not keep"),
-    });
+    const raw = Buffer.from("raw MIME the budget will not keep");
+    await publishBody(fixture, "message-thread-a", 1_001, { raw });
     await expect(
       fixture.content.evictBodiesOverBudget({
         maxBytes: 0,
@@ -1872,10 +1969,52 @@ describe("background body cohort and byte budget", () => {
     await expect(
       fixture.content.findBackgroundContentCandidate(1_003),
     ).resolves.toBeNull();
+    await expect(
+      fixture.content.findBackgroundContentCandidate(1_003, null, raw.byteLength - 1),
+    ).resolves.toBeNull();
+    // Room for what it held, which the eviction recorded, brings it back.
+    await expect(
+      fixture.content.findBackgroundContentCandidate(1_003, null, raw.byteLength),
+    ).resolves.toEqual({
+      messageId: "message-thread-a",
+      estimatedBytes: raw.byteLength,
+    });
     // An owner's open still fetches it again.
     await expect(
       fixture.content.claim("message-thread-a", 1_004),
     ).resolves.toMatchObject({ kind: "claimed" });
+  });
+
+  it("checks a fetch's lease before its provider streams a byte", async () => {
+    const fixture = await createFixture({ active: true });
+    const lease = await claimLease(fixture.content, "message-thread-a", 1_000);
+    await fixture.content.voidInterruptedLeases();
+    fixture.clock.now = 1_001;
+    let pulled = false;
+    await expect(
+      fixture.content.incomingBlobStore(lease).putIncoming(
+        (async function* () {
+          pulled = true;
+          yield Buffer.from("raw MIME");
+        })(),
+        1024,
+      ),
+    ).rejects.toMatchObject({ code: "mail_content_lease_stale" });
+    expect(pulled).toBe(false);
+  });
+
+  it("removes a received body the cache has no room to publish", async () => {
+    const fixture = await createFixture({ active: true, maxCacheBytes: 16 });
+    const lease = await claimLease(fixture.content, "message-thread-a", 1_000);
+    fixture.clock.now = 1_001;
+    await expect(
+      fixture.content
+        .incomingBlobStore(lease)
+        .putIncoming(chunks(Buffer.alloc(64, 1), 8), 1024),
+    ).rejects.toThrow();
+    await expect(
+      readdir(path.join(fixture.cacheRoot, ACCOUNT_ID, "content-incoming")),
+    ).resolves.toEqual([]);
   });
 
   it("voids the leases a process that stopped mid-fetch left behind", async () => {
@@ -1909,7 +2048,8 @@ describe("background body cohort and byte budget", () => {
     try {
       legacy.exec(
         `ALTER TABLE message_content_privacy_cohort DROP COLUMN remote_image_prefetch;
-         ALTER TABLE message_content_privacy_cohort DROP COLUMN content_evicted_at;`,
+         ALTER TABLE message_content_privacy_cohort DROP COLUMN content_evicted_at;
+         ALTER TABLE message_content_privacy_cohort DROP COLUMN content_evicted_bytes;`,
       );
     } finally {
       legacy.close();
@@ -1926,7 +2066,12 @@ describe("background body cohort and byte budget", () => {
       reopened.refreshBackgroundPrivacyCohort(1_001),
     ).resolves.toEqual({ selectedMessages: 1, purgedContent: false });
     expect(readCohort(fixture.databasePath)).toEqual([
-      { messageId: "message-thread-a", remoteImagePrefetch: 1, evictedAt: null },
+      {
+        messageId: "message-thread-a",
+        remoteImagePrefetch: 1,
+        evictedAt: null,
+        evictedBytes: null,
+      },
     ]);
   });
 });
@@ -1935,13 +2080,14 @@ function readCohort(databasePath: string): {
   readonly messageId: string;
   readonly remoteImagePrefetch: number;
   readonly evictedAt: number | null;
+  readonly evictedBytes: number | null;
 }[] {
   const database = new DatabaseSync(databasePath, { readOnly: true });
   try {
     return database
       .prepare(
         `SELECT cohort.provider_message_id, cohort.remote_image_prefetch,
-                cohort.content_evicted_at
+                cohort.content_evicted_at, cohort.content_evicted_bytes
            FROM message_content_privacy_cohort AS cohort
            JOIN messages AS message
              ON message.account_id = cohort.account_id
@@ -1954,6 +2100,7 @@ function readCohort(databasePath: string): {
         messageId: row.provider_message_id as string,
         remoteImagePrefetch: row.remote_image_prefetch as number,
         evictedAt: row.content_evicted_at as number | null,
+        evictedBytes: row.content_evicted_bytes as number | null,
       }));
   } finally {
     database.close();

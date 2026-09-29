@@ -175,6 +175,8 @@ const CONTENT_SCHEMA_SQL = `
       CHECK(remote_image_prefetch IN (0, 1)),
     content_evicted_at INTEGER
       CHECK(content_evicted_at IS NULL OR content_evicted_at >= 0),
+    content_evicted_bytes INTEGER
+      CHECK(content_evicted_bytes IS NULL OR content_evicted_bytes >= 0),
     PRIMARY KEY(account_id, provider_message_id),
     FOREIGN KEY(account_id, source_generation, provider_message_id)
       REFERENCES messages(account_id, generation, message_id)
@@ -1147,8 +1149,8 @@ export class SqliteMailContentCache {
           `INSERT INTO message_content_privacy_cohort(
              account_id, provider_message_id, source_generation, selected_at,
              content_prefetch_started_at, remote_image_prefetch,
-             content_evicted_at
-           ) VALUES (?, ?, ?, ?, NULL, ?, NULL)
+             content_evicted_at, content_evicted_bytes
+           ) VALUES (?, ?, ?, ?, NULL, ?, NULL, NULL)
            ON CONFLICT(account_id, provider_message_id) DO UPDATE SET
              source_generation = excluded.source_generation,
              selected_at = CASE
@@ -1160,7 +1162,10 @@ export class SqliteMailContentCache {
              remote_image_prefetch = excluded.remote_image_prefetch,
              content_evicted_at = CASE
                WHEN source_generation = excluded.source_generation
-               THEN content_evicted_at ELSE NULL END`,
+               THEN content_evicted_at ELSE NULL END,
+             content_evicted_bytes = CASE
+               WHEN source_generation = excluded.source_generation
+               THEN content_evicted_bytes ELSE NULL END`,
         );
         for (const candidate of selected) {
           insert.run(
@@ -1209,17 +1214,29 @@ export class SqliteMailContentCache {
    * would evict that first. `newerThan` narrows it further while the account
    * is at its budget: only a letter newer than the body evicted next is
    * worth a fetch.
+   *
+   * Both of those hold only while the account has no room for the letter.
+   * One that fits in `roomBytes` is a candidate whatever the budget evicted
+   * before: without that, one large open that pushed the cohort out kept it
+   * out for good, since the marks and the line they draw never came back
+   * down. What fits is known exactly for an evicted body, which the eviction
+   * recorded, and estimated for any other by its thread's size. A letter
+   * that estimate undersells is fetched once, evicted, and then known.
    */
   async findBackgroundContentCandidate(
     now: number,
     newerThan: number | null = null,
-  ): Promise<string | null> {
+    roomBytes = 0,
+  ): Promise<{ readonly messageId: string; readonly estimatedBytes: number } | null> {
     const inspectedAt = validateTimestamp(now);
     const lowerBound = newerThan === null ? -1 : validateTimestamp(newerThan);
+    const room = validateReclaimBytes(roomBytes);
     return this.serialized(async () => {
       const row = this.requireDatabase()
         .prepare(
-          `SELECT cohort.provider_message_id
+          `SELECT cohort.provider_message_id,
+                  COALESCE(cohort.content_evicted_bytes, thread.size_bytes)
+                    AS estimated_bytes
              FROM message_content_privacy_cohort AS cohort
              JOIN sync_state AS sync ON sync.account_id = cohort.account_id
              JOIN messages AS message
@@ -1235,24 +1252,28 @@ export class SqliteMailContentCache {
               AND content.provider_message_id = cohort.provider_message_id
             WHERE cohort.account_id = ?
               AND cohort.source_generation = sync.active_generation
-              AND cohort.content_evicted_at IS NULL
               AND thread.size_bytes BETWEEN 1 AND ?
               AND message.sent_at > ?
-              AND message.sent_at > COALESCE((
-                SELECT MAX(MAX(evicted.sent_at, COALESCE(demand.requested_at, 0)))
-                  FROM message_content_privacy_cohort AS gone
-                  JOIN messages AS evicted
-                    ON evicted.account_id = gone.account_id
-                   AND evicted.generation = gone.source_generation
-                   AND evicted.message_id = gone.provider_message_id
-                  LEFT JOIN message_content_user_demand AS demand
-                    ON demand.account_id = gone.account_id
-                   AND demand.provider_message_id = gone.provider_message_id
-                   AND demand.source_generation = gone.source_generation
-                 WHERE gone.account_id = cohort.account_id
-                   AND gone.source_generation = cohort.source_generation
-                   AND gone.content_evicted_at IS NOT NULL
-              ), -1)
+              AND (
+                COALESCE(cohort.content_evicted_bytes, thread.size_bytes) <= ? OR (
+                  cohort.content_evicted_at IS NULL AND
+                  message.sent_at > COALESCE((
+                    SELECT MAX(MAX(evicted.sent_at, COALESCE(demand.requested_at, 0)))
+                      FROM message_content_privacy_cohort AS gone
+                      JOIN messages AS evicted
+                        ON evicted.account_id = gone.account_id
+                       AND evicted.generation = gone.source_generation
+                       AND evicted.message_id = gone.provider_message_id
+                      LEFT JOIN message_content_user_demand AS demand
+                        ON demand.account_id = gone.account_id
+                       AND demand.provider_message_id = gone.provider_message_id
+                       AND demand.source_generation = gone.source_generation
+                     WHERE gone.account_id = cohort.account_id
+                       AND gone.source_generation = cohort.source_generation
+                       AND gone.content_evicted_at IS NOT NULL
+                  ), -1)
+                )
+              )
               AND (
                 content.provider_message_id IS NULL OR
                 content.source_generation <> cohort.source_generation OR
@@ -1269,6 +1290,7 @@ export class SqliteMailContentCache {
           this.accountId,
           MAIL_RESOURCE_LIMITS.privacyPrefetchMaxThreadBytes,
           lowerBound,
+          room,
           this.contentFormatVersion,
           MAIL_RESOURCE_LIMITS.remoteImageTransientRetryMs,
           inspectedAt,
@@ -1277,11 +1299,16 @@ export class SqliteMailContentCache {
       if (row === undefined) return null;
       if (
         typeof row.provider_message_id !== "string" ||
-        !SAFE_PROVIDER_ID.test(row.provider_message_id)
+        !SAFE_PROVIDER_ID.test(row.provider_message_id) ||
+        !Number.isSafeInteger(row.estimated_bytes) ||
+        (row.estimated_bytes as number) < 0
       ) {
         throw integrityFailed();
       }
-      return row.provider_message_id;
+      return Object.freeze({
+        messageId: row.provider_message_id,
+        estimatedBytes: row.estimated_bytes as number,
+      });
     });
   }
 
@@ -2072,13 +2099,18 @@ export class SqliteMailContentCache {
 
   /**
    * Brings the account's bodies down to `maxBytes`, least recently used first
-   * (`readyBodySizes` says by which key). A body opened within
-   * `MAIL_BODY_OPEN_PIN_MS`, or one a draft answers or forwards, is never
-   * taken, even when that leaves the account over the budget. An evicted body
-   * reads as never fetched: an open fetches it again, and the cohort
-   * remembers not to. `oldestKeptKey` is the key of the body the budget would
-   * give up next, or null when every body left is pinned: a prefetch older
-   * than that would only be the next thing evicted.
+   * (`readyBodySizes` says by which key), except that a body past
+   * `privacyPrefetchMaxThreadBytes` goes before any other: one such open
+   * otherwise stayed while the several letters it displaced waited for it to
+   * age out. A body opened within `MAIL_BODY_OPEN_PIN_MS`, or one a draft
+   * answers or forwards, is never taken, even when that leaves the account
+   * over the budget. An evicted body reads as never fetched: an open fetches
+   * it again, and the cohort records when it went and what it held, which
+   * says when there is room for it again (`findBackgroundContentCandidate`).
+   * `oldestKeptKey` is the key of the body the budget would give up next, 0
+   * when that is a large one, which goes before any letter the prefetch could
+   * add, or null when every body left is pinned: a prefetch older than that
+   * would only be the next thing evicted.
    */
   async evictBodiesOverBudget(input: {
     readonly maxBytes: number;
@@ -2108,11 +2140,17 @@ export class SqliteMailContentCache {
             WHERE account_id = ? AND provider_message_id = ? AND state = 'ready'`,
         );
         const mark = database.prepare(
-          `UPDATE message_content_privacy_cohort SET content_evicted_at = ?
+          `UPDATE message_content_privacy_cohort
+              SET content_evicted_at = ?, content_evicted_bytes = ?
             WHERE account_id = ? AND provider_message_id = ?`,
         );
+        const large = (body: { readonly bytes: number }) =>
+          body.bytes > MAIL_RESOURCE_LIMITS.privacyPrefetchMaxThreadBytes;
         let oldestKeptKey: number | null = null;
-        for (const body of bodies) {
+        for (const body of [
+          ...bodies.filter(large),
+          ...bodies.filter((body) => !large(body)),
+        ]) {
           if (
             pinned.has(body.messageId) ||
             (body.openedAt !== null && body.openedAt >= openPinnedSince)
@@ -2120,13 +2158,13 @@ export class SqliteMailContentCache {
             continue;
           }
           if (remainingBytes <= maxBytes) {
-            oldestKeptKey = body.key;
+            oldestKeptKey = large(body) ? 0 : body.key;
             break;
           }
           if (remove.run(this.accountId, body.messageId).changes !== 1) {
             throw integrityFailed();
           }
-          mark.run(evictedAt, this.accountId, body.messageId);
+          mark.run(evictedAt, body.bytes, this.accountId, body.messageId);
           remainingBytes -= body.bytes;
           evictedMessages += 1;
         }
@@ -3353,9 +3391,9 @@ function ensureRemoteImageRasterColumns(database: DatabaseSync): void {
 }
 
 /**
- * The cohort's two later columns, added in place on a cache written before
- * them. Both are additive: a runtime that predates them inserts cohort rows
- * without naming them and gets the defaults, so a rollback still opens it.
+ * The cohort's later columns, added in place on a cache written before them.
+ * All are additive: a runtime that predates them inserts cohort rows without
+ * naming them and gets the defaults, so a rollback still opens it.
  */
 function ensureCohortColumns(database: DatabaseSync): void {
   const columns = [
@@ -3370,6 +3408,13 @@ function ensureCohortColumns(database: DatabaseSync): void {
       name: "content_evicted_at",
       definition:
         "INTEGER CHECK(content_evicted_at IS NULL OR content_evicted_at >= 0)",
+      notnull: 0,
+      dflt: null,
+    },
+    {
+      name: "content_evicted_bytes",
+      definition:
+        "INTEGER CHECK(content_evicted_bytes IS NULL OR content_evicted_bytes >= 0)",
       notnull: 0,
       dflt: null,
     },

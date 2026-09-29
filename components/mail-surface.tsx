@@ -1684,7 +1684,6 @@ export function MailSurface({
         commitThreadState({ kind: "ready", page });
       } catch {
         if (
-          presentation !== "silent" &&
           !signal?.aborted &&
           listEpochRef.current === listEpoch &&
           selectedAccountIdRef.current === accountId &&
@@ -1693,7 +1692,18 @@ export function MailSurface({
           threadSortRef.current === sort &&
           searchQueryRef.current === query
         ) {
-          commitThreadState({ kind: "error" });
+          if (presentation !== "silent") {
+            commitThreadState({ kind: "error" });
+            return;
+          }
+          // The results stay, but not as the same object. Starting this read
+          // dropped any background re-read of an index still building, and
+          // that re-read re-arms only on a new list state: without one it
+          // never runs again and the list says "Indexing" for good.
+          const current = threadStateRef.current;
+          if (current.kind === "ready") {
+            commitThreadState({ kind: "ready", page: current.page });
+          }
         }
       }
     },

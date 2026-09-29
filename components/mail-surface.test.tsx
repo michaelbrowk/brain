@@ -2994,6 +2994,49 @@ describe("MailSurface", () => {
       expect(threadList()).not.toContain("Lunch this Friday?");
     });
 
+    it("keeps re-reading an index still building when the quiet search after Undo fails", async () => {
+      // The Inbox's index is still building, so its results are re-read in the
+      // background every quarter second. Undo's quiet search starts while one
+      // of those reads is out, which drops that read's answer, and then fails.
+      // The re-reads have to go on until the index is built.
+      const { client } = inboxTruthClient();
+      let calls = 0;
+      const background = deferred<MailSearchThreadPage>();
+      const results = (
+        mailboxId: MailSystemMailbox,
+        indexStatus: MailSearchThreadPage["indexStatus"],
+      ): MailSearchThreadPage => ({
+        ...searchThreadPage(mailboxId, [thread]),
+        indexStatus,
+      });
+      vi.mocked(client.searchThreads).mockImplementation(({ mailboxId }) => {
+        calls += 1;
+        if (calls === 2) return background.promise;
+        if (calls === 3) return Promise.reject(new Error("offline"));
+        return Promise.resolve(results(mailboxId, calls < 5 ? "building" : "ready"));
+      });
+      const pill = await searchedInbox(client);
+      await act(async () => new Promise((resolve) => setTimeout(resolve, 300)));
+      await settle();
+      expect(calls).toBe(2);
+      expect(threadList()).toContain("Indexing cached mail");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+      expect(calls).toBe(3);
+      await act(async () => background.resolve(results("inbox", "building")));
+      await settle();
+      for (let step = 0; step < 10; step += 1) {
+        await act(async () => new Promise((resolve) => setTimeout(resolve, 100)));
+        await settle();
+      }
+
+      expect(calls).toBeGreaterThanOrEqual(5);
+      expect(threadList()).not.toContain("Indexing cached mail");
+    });
+
     it("keeps the results when the quiet search after Undo fails", async () => {
       const { client } = inboxTruthClient();
       const pill = await searchedInbox(client);

@@ -1329,7 +1329,7 @@ async function requestMailService<T>(
   socketPath: string,
   requestTimeoutMs: number,
   requestPath: string,
-  method: "GET" | "POST" | "PATCH" | "DELETE",
+  method: "GET" | "POST" | "PUT" | "PATCH" | "DELETE",
   body: unknown | undefined,
   validateSuccess: (value: unknown) => T,
   signal: AbortSignal | undefined,

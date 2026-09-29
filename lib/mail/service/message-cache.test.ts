@@ -14,6 +14,7 @@ import {
   selectWorstMailSyncError,
   SqliteMailMessageCache,
 } from "./message-cache";
+import { normalizeSenderAddress } from "./senders";
 
 const ACCOUNT_ID = "account-a11111111111111111111111111111111";
 const roots: string[] = [];
@@ -5848,7 +5849,7 @@ describe("the cache's answers for the new-senders screen", () => {
         references: [],
       },
     });
-    expect(cache.listInboxThreadFirstSenders([])).toEqual([
+    expect(cache.listInboxThreadFirstSenders(() => false)).toEqual([
       {
         threadId: "thread-reply",
         address: "first@example.test",
@@ -5858,9 +5859,56 @@ describe("the cache's answers for the new-senders screen", () => {
       },
     ]);
     // The newest letter is the owner's once his address is named.
-    expect(cache.listInboxThreadFirstSenders(["late@example.test"])).toMatchObject([
+    expect(cache.listInboxThreadFirstSenders((address) => address === "late@example.test"),
+    ).toMatchObject([
       { threadId: "thread-reply", lastForeignMessageAt: 1_000 },
     ]);
+  });
+
+  it("dates an Inbox thread by its newest letter in the generation it reads, not a rebuild under way", async () => {
+    const { cache } = await createCache();
+    const letters = [
+      { from: "a@example.test", sentAt: 1_000 },
+      { from: "m@example.test", sentAt: 3_000 },
+      { from: "z@example.test", sentAt: 2_000 },
+    ];
+    const first = cache.beginInitial("100");
+    cache.putInitialPage(first, [conversationFixture("thread-x", letters)], null, null);
+    cache.completeInitial(first, 4_000);
+    const rebuild = cache.beginInitial("200");
+    cache.putInitialPage(
+      rebuild,
+      [conversationFixture("thread-x", [...letters, { from: "b@example.test", sentAt: 9_000 }])],
+      null,
+      "next-rebuild-page",
+    );
+
+    expect(cache.listInboxThreadFirstSenders(() => false)).toMatchObject([
+      { threadId: "thread-x", lastForeignMessageAt: 3_000 },
+    ]);
+  });
+
+  it("knows the owner's own reply under an international domain written in its own script", async () => {
+    const { cache } = await createCache();
+    const generation = cache.beginInitial("100");
+    cache.putInitialPage(
+      generation,
+      [
+        conversationFixture("thread-idn", [
+          { from: "a@example.test", sentAt: 1_000 },
+          { from: "Me <Me@Bücher.test>", sentAt: 1_500 },
+        ]),
+      ],
+      null,
+      null,
+    );
+    cache.completeInitial(generation, 2_000);
+
+    expect(
+      cache.listInboxThreadFirstSenders(
+        (address) => normalizeSenderAddress(address) === normalizeSenderAddress("me@bücher.test"),
+      ),
+    ).toMatchObject([{ threadId: "thread-idn", lastForeignMessageAt: 1_000 }]);
   });
 
   it("reads every From, then every Sent recipient and the owner's own From, in bounded windows", async () => {

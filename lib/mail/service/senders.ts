@@ -344,6 +344,8 @@ export interface MailSenderArchiveEffects {
 }
 
 export interface MailSenderArchiveEffect {
+  /** The thread it archived. */
+  readonly target: string;
   readonly state: "pending" | "done";
   readonly threadLastAt: number | null;
   /** The Message-ID of the thread's first message when it was archived. An
@@ -804,7 +806,7 @@ export class SqliteMailSenderStore {
     return this.read((database) => {
       const row = database
         .prepare(
-          `SELECT state, thread_last_at, message_key FROM decision_effects
+          `SELECT target, state, thread_last_at, message_key FROM decision_effects
             WHERE decision_id = ? AND effect = 'archived' AND account_id = ? AND target = ?`,
         )
         .get(decisionId, validAccountId(ref.accountId), ref.threadId);
@@ -813,28 +815,67 @@ export class SqliteMailSenderStore {
   }
 
   /**
-   * Whether this decision finished archiving another copy of the same message
-   * in this account, with the same newest date: what an IMAP message the
-   * owner moved back looks like under its new UID.
+   * The threads this decision finished archiving in this account with this
+   * first Message-ID and this newest date: the copies an IMAP letter the
+   * owner moved back may have been before it came back under a new UID.
    */
-  hasFinishedArchiveOfMessage(
+  finishedArchiveTargetsOfMessage(
     decisionId: string,
     accountId: string,
     messageKey: string,
-    threadLastAt: number | null,
-  ): boolean {
-    if (threadLastAt === null) return false;
-    return this.read(
-      (database) =>
-        database
-          .prepare(
-            `SELECT 1 AS present FROM decision_effects
-              WHERE decision_id = ? AND effect = 'archived' AND account_id = ?
-                AND message_key = ? AND state = 'done' AND thread_last_at = ?
-              LIMIT 1`,
-          )
-          .get(decisionId, validAccountId(accountId), messageKey, threadLastAt) !== undefined,
+    threadLastAt: number,
+  ): readonly string[] {
+    return this.read((database) =>
+      database
+        .prepare(
+          `SELECT target FROM decision_effects
+            WHERE decision_id = ? AND effect = 'archived' AND account_id = ?
+              AND message_key = ? AND state = 'done' AND thread_last_at = ?`,
+        )
+        .all(decisionId, validAccountId(accountId), messageKey, validTimestamp(threadLastAt))
+        .map((row) => {
+          if (typeof row.target !== "string") throw new MailSenderError("mail_senders_unavailable");
+          return row.target;
+        }),
     );
+  }
+
+  /**
+   * The intent to archive each of these threads, written unless one is on
+   * record already or the decision no longer stands. The copies of a letter
+   * delivered more than once are claimed together, so a walk that stops
+   * between them leaves the rest unfinished rather than looking like copies
+   * the owner moved back.
+   */
+  recordArchiveIntents(
+    decisionId: string,
+    refs: readonly MailSenderThreadRef[],
+    threadLastAt: number,
+    messageKey: string,
+  ): void {
+    if (refs.length === 0) return;
+    const now = validTimestamp(this.now());
+    this.transaction((database) => {
+      const record = database.prepare(
+        `INSERT INTO decision_effects(
+           decision_id, effect, account_id, target, state, thread_last_at,
+           message_key, added_at
+         )
+         SELECT decision_id, 'archived', ?, ?, 'pending', ?, ?, ?
+           FROM sender_decisions WHERE decision_id = ? AND replaced_by IS NULL
+         ON CONFLICT(decision_id, effect, account_id, target) DO NOTHING`,
+      );
+      for (const ref of refs) {
+        record.run(
+          validAccountId(ref.accountId),
+          validThreadId(ref.threadId),
+          validTimestamp(threadLastAt),
+          validMessageKey(messageKey),
+          now,
+          decisionId,
+        );
+      }
+    });
   }
 
   decisionExists(decisionId: string): boolean {
@@ -1094,9 +1135,12 @@ export interface MailSenderMailPort {
       readonly learnFrom: boolean;
     },
   ): Promise<MailSenderBackfillBatch>;
+  /** Every Inbox thread's first sender. `isOwnAddress` is asked about each
+   *  raw From address, so a letter from the owner's own address does not
+   *  count as a newer letter however the address is written. */
   listInboxThreadFirstSenders(
     accountId: string,
-    ownAddresses: readonly string[],
+    isOwnAddress: (address: string) => boolean,
   ): Promise<readonly MailInboxThreadSender[]>;
   updateThread(
     input: MailThreadMutationInput & { readonly threadId: string },
@@ -1135,12 +1179,21 @@ interface ArchiveTarget {
   readonly ref: MailSenderThreadRef;
   readonly thread: MailInboxThreadSender;
   /**
-   * The Message-ID another copy's archive may be matched by: the first
-   * message's, unless two or more threads this decision governs in the same
-   * listing carry it. Those are duplicate deliveries of one letter, each to be
-   * archived in its own right, not one letter the owner moved back.
+   * The first message's Message-ID, when the thread has one and a newest
+   * date, by which it may be matched to another copy's archive: an IMAP
+   * letter the owner moved back comes back under a new UID.
    */
   readonly matchKey: string | null;
+  /**
+   * Every thread in the listing this decision governs with the same first
+   * Message-ID and the same newest date, this one included. Copies of one
+   * letter delivered in the same second cannot be told apart, so they are
+   * counted: as many as there are archived copies no longer in the listing
+   * are ones the owner moved back.
+   */
+  readonly copies: readonly MailSenderThreadRef[];
+  /** Every thread id the listing holds. */
+  readonly listed: ReadonlySet<string>;
 }
 
 interface QueuedWork {
@@ -1325,7 +1378,7 @@ export class MailSenderScreen implements MailSenderScreenService {
     for (const accountId of own.connectedAccountIds) {
       let threads: readonly MailInboxThreadSender[];
       try {
-        threads = await this.mail.listInboxThreadFirstSenders(accountId, [...own.addresses]);
+        threads = await this.mail.listInboxThreadFirstSenders(accountId, ownAddressTest(own));
       } catch {
         // The account's next sync finds what this one could not read.
         pending = true;
@@ -1337,6 +1390,7 @@ export class MailSenderScreen implements MailSenderScreenService {
       targets.push(
         ...withMatchKeys(
           accountId,
+          threads,
           threads.flatMap((thread) =>
             this.blockingDecision(index, own, thread)?.decisionId === decisionId
               ? [{ thread, decisionId }]
@@ -1615,13 +1669,12 @@ export class MailSenderScreen implements MailSenderScreenService {
     const own = await this.readOwn();
     const index = this.store.readDecisionIndex();
     const effects = this.store.readArchiveEffects(accountId);
-    const governed = (
-      await this.mail.listInboxThreadFirstSenders(accountId, [...own.addresses])
-    ).flatMap((thread) => {
+    const listing = await this.mail.listInboxThreadFirstSenders(accountId, ownAddressTest(own));
+    const governed = listing.flatMap((thread) => {
       const blocking = this.blockingDecision(index, own, thread);
       return blocking === null ? [] : [{ thread, decisionId: blocking.decisionId }];
     });
-    const targets = withMatchKeys(accountId, governed).filter(
+    const targets = withMatchKeys(accountId, listing, governed).filter(
       (target) =>
         !this.archiveBackoff.has(`${accountId}/${target.ref.threadId}`) &&
         !ownerMovedBack(effects, target),
@@ -1682,21 +1735,33 @@ export class MailSenderScreen implements MailSenderScreenService {
       if (current?.decisionId !== decisionId) {
         return this.store.decisionExists(decisionId) ? "skipped" : "gone";
       }
-      // The thread's own archive record speaks first; another copy's record
-      // counts only for a Message-ID no other copy in the listing carries.
+      // The thread's own archive record speaks first. Without one, the copies
+      // of its letter are counted against the finished archives of the same
+      // letter that have left the listing, as ownerMovedBack counts them.
       const ownRecord = this.store.readArchiveEffect(decisionId, ref);
       if (ownRecord !== null) {
         if (finishedAndNotNewer(ownRecord, thread)) return "skipped";
-      } else if (
-        target.matchKey !== null &&
-        this.store.hasFinishedArchiveOfMessage(
+      } else if (target.matchKey !== null && thread.lastForeignMessageAt !== null) {
+        const unrecorded = target.copies.filter(
+          (copy) => this.store.readArchiveEffect(decisionId, copy) === null,
+        ).length;
+        const archivedElsewhere = this.store
+          .finishedArchiveTargetsOfMessage(
+            decisionId,
+            ref.accountId,
+            target.matchKey,
+            thread.lastForeignMessageAt,
+          )
+          .filter((threadId) => !target.listed.has(threadId)).length;
+        if (archivedElsewhere >= unrecorded) return "skipped";
+        // The first copy's turn claims the others, so a walk that stops here
+        // leaves them unfinished rather than matched to this one's archive.
+        this.store.recordArchiveIntents(
           decisionId,
-          ref.accountId,
-          target.matchKey,
+          target.copies.filter((copy) => copy.threadId !== ref.threadId),
           thread.lastForeignMessageAt,
-        )
-      ) {
-        return "skipped";
+          target.matchKey,
+        );
       }
       if (
         !this.store.beginArchiveEffect(
@@ -1878,10 +1943,12 @@ export class MailSenderScreenedMessageService implements MailMessageService {
  * Whether the owner put a thread back in the Inbox after this decision
  * archived it, and nothing newer from anyone but the owner has arrived since.
  * The thread's own record speaks first. Without one, an IMAP message that came
- * back under a new UID is recognised by another copy's record for the same
- * Message-ID and the same newest date, and only when the Message-ID is not
- * shared by another thread in the listing. Such a thread stays; a new letter
- * in it goes the way the first one went.
+ * back under a new UID is recognised by the finished archives of the same
+ * Message-ID and the same newest date whose threads have left the listing:
+ * while there are at least as many of them as there are copies in the listing
+ * with no record of their own, those copies are the ones the owner moved
+ * back. Such a thread stays; a new letter in it goes the way the first one
+ * went.
  */
 function ownerMovedBack(
   effects: MailSenderArchiveEffects,
@@ -1890,10 +1957,28 @@ function ownerMovedBack(
   const { decisionId, thread } = target;
   const ownRecord = effects.byThread.get(archiveEffectKey(decisionId, thread.threadId));
   if (ownRecord !== undefined) return finishedAndNotNewer(ownRecord, thread);
-  if (target.matchKey === null || thread.lastForeignMessageAt === null) return false;
-  return (effects.byMessage.get(archiveMessageKey(decisionId, target.matchKey)) ?? []).some(
-    (effect) => effect.state === "done" && effect.threadLastAt === thread.lastForeignMessageAt,
-  );
+  if (target.matchKey === null) return false;
+  const unrecorded = target.copies.filter(
+    (copy) => !effects.byThread.has(archiveEffectKey(decisionId, copy.threadId)),
+  ).length;
+  const archivedElsewhere = (
+    effects.byMessage.get(archiveMessageKey(decisionId, target.matchKey)) ?? []
+  ).filter(
+    (effect) =>
+      effect.state === "done" &&
+      effect.threadLastAt === thread.lastForeignMessageAt &&
+      !target.listed.has(effect.target),
+  ).length;
+  return archivedElsewhere >= unrecorded;
+}
+
+/** Whether a raw From address is one of the owner's, compared normalized:
+ *  case folded and an international domain in its ASCII form. */
+function ownAddressTest(own: OwnSenders): (address: string) => boolean {
+  return (raw) => {
+    const address = normalizeSenderAddress(raw);
+    return address !== null && own.addresses.has(address);
+  };
 }
 
 function finishedAndNotNewer(
@@ -1908,34 +1993,40 @@ function finishedAndNotNewer(
   );
 }
 
-/** The targets a listing yields, each with the Message-ID it may be matched
- *  by: none when two or more threads the same decision governs carry it. */
+/** The targets a listing yields, each with the copies it shares its first
+ *  Message-ID and newest date with under the same decision. */
 function withMatchKeys(
   accountId: string,
+  listing: readonly MailInboxThreadSender[],
   governed: readonly { readonly thread: MailInboxThreadSender; readonly decisionId: string }[],
 ): Array<ArchiveTarget & { readonly decisionId: string }> {
-  const carriers = new Map<string, number>();
-  for (const { thread, decisionId } of governed) {
-    if (thread.firstMessageId === null) continue;
-    const key = archiveMessageKey(decisionId, thread.firstMessageId);
-    carriers.set(key, (carriers.get(key) ?? 0) + 1);
-  }
-  return governed.map(({ thread, decisionId }) =>
+  const listed: ReadonlySet<string> = new Set(listing.map((thread) => thread.threadId));
+  const groups = new Map<string, MailSenderThreadRef[]>();
+  const grouped = governed.map(({ thread, decisionId }) => {
+    const ref: MailSenderThreadRef = Object.freeze({ accountId, threadId: thread.threadId });
+    const group =
+      thread.firstMessageId === null || thread.lastForeignMessageAt === null
+        ? null
+        : `${archiveMessageKey(decisionId, thread.firstMessageId)}@${thread.lastForeignMessageAt}`;
+    if (group !== null) groups.set(group, [...(groups.get(group) ?? []), ref]);
+    return { ref, thread, decisionId, group };
+  });
+  for (const copies of groups.values()) Object.freeze(copies);
+  return grouped.map(({ ref, thread, decisionId, group }) =>
     Object.freeze({
-      ref: Object.freeze({ accountId, threadId: thread.threadId }),
+      ref,
       thread,
       decisionId,
-      matchKey:
-        thread.firstMessageId !== null &&
-        carriers.get(archiveMessageKey(decisionId, thread.firstMessageId)) === 1
-          ? thread.firstMessageId
-          : null,
+      matchKey: group === null ? null : thread.firstMessageId,
+      copies: group === null ? Object.freeze([ref]) : groups.get(group)!,
+      listed,
     }),
   );
 }
 
 function archiveEffectFromRow(row: Record<string, unknown>): MailSenderArchiveEffect {
   if (
+    typeof row.target !== "string" ||
     (row.state !== "pending" && row.state !== "done") ||
     (row.thread_last_at !== null && !Number.isSafeInteger(row.thread_last_at)) ||
     (row.message_key !== null && typeof row.message_key !== "string")
@@ -1943,6 +2034,7 @@ function archiveEffectFromRow(row: Record<string, unknown>): MailSenderArchiveEf
     throw new MailSenderError("mail_senders_unavailable");
   }
   return Object.freeze({
+    target: row.target,
     state: row.state,
     threadLastAt: row.thread_last_at as number | null,
     messageKey: row.message_key as string | null,

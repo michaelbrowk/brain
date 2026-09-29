@@ -2887,26 +2887,18 @@ export class SqliteMailMessageCache {
    * Every Inbox thread's first sender, newest first and bounded, for the
    * archiver that moves a blocked sender's letters out of the Inbox and leaves
    * alone the ones the owner put back. Its newest date counts only messages
-   * the owner did not send: neither marked as sent nor from one of the named
-   * addresses, compared without regard to case.
+   * the owner did not send: neither marked as sent nor from an address
+   * `isOwnAddress` calls his, which is asked about each distinct From.
    */
   listInboxThreadFirstSenders(
-    ownAddresses: readonly string[],
+    isOwnAddress: (address: string) => boolean,
   ): readonly MailCacheInboxThreadSender[] {
     const generation = readableGeneration(this.readSyncState());
     if (generation < 1) return Object.freeze([]);
-    const own = JSON.stringify(ownAddresses.map((address) => address.toLowerCase()));
-    const rows = this.requireDatabase()
+    const database = this.requireDatabase();
+    const rows = database
       .prepare(
         `SELECT thread.thread_id AS thread_id,
-                (SELECT MAX(message.sent_at) FROM messages AS message
-                  WHERE message.account_id = thread.account_id
-                    AND message.generation = thread.generation
-                    AND message.thread_id = thread.thread_id
-                    AND message.from_owner = 0
-                    AND (message.from_json IS NULL OR
-                         lower(json_extract(message.from_json, '$.address')) NOT IN (
-                           SELECT value FROM json_each(?)))) AS last_foreign_at,
                 first.from_json AS from_json, first.from_owner AS from_owner,
                 first.rfc_message_id AS rfc_message_id
            FROM threads AS thread
@@ -2925,26 +2917,54 @@ export class SqliteMailMessageCache {
           ORDER BY COALESCE(thread.last_message_at, -1) DESC, thread.thread_id DESC
           LIMIT ?`,
       )
-      .all(own, this.accountId, generation, MAX_INBOX_SENDER_SCAN);
+      .all(this.accountId, generation, MAX_INBOX_SENDER_SCAN);
+    for (const row of rows) {
+      if (
+        typeof row.thread_id !== "string" ||
+        (row.from_json !== null && typeof row.from_json !== "string") ||
+        (row.from_owner !== 0 && row.from_owner !== 1) ||
+        (row.rfc_message_id !== null && typeof row.rfc_message_id !== "string")
+      ) {
+        throw new MailCacheError("mail_cache_invalid");
+      }
+    }
+    // The newest date of each distinct From in these threads; which of them
+    // are the owner's is decided outside SQL, where addresses are normalized.
+    const lastForeignAt = new Map<string, number>();
+    for (const row of database
+      .prepare(
+        `SELECT message.thread_id AS thread_id, message.from_json AS from_json,
+                MAX(message.sent_at) AS last_at
+           FROM messages AS message
+          WHERE message.account_id = ? AND message.generation = ?
+            AND message.from_owner = 0 AND message.sent_at IS NOT NULL
+            AND message.thread_id IN (SELECT value FROM json_each(?))
+          GROUP BY message.thread_id, message.from_json`,
+      )
+      .all(this.accountId, generation, JSON.stringify(rows.map((row) => row.thread_id)))) {
+      if (
+        typeof row.thread_id !== "string" ||
+        (row.from_json !== null && typeof row.from_json !== "string") ||
+        !Number.isSafeInteger(row.last_at)
+      ) {
+        throw new MailCacheError("mail_cache_invalid");
+      }
+      if (row.from_json !== null && isOwnAddress(parseAddressJson(row.from_json).address)) {
+        continue;
+      }
+      const lastAt = row.last_at as number;
+      lastForeignAt.set(row.thread_id, Math.max(lastForeignAt.get(row.thread_id) ?? lastAt, lastAt));
+    }
     return Object.freeze(
-      rows.map((row) => {
-        if (
-          typeof row.thread_id !== "string" ||
-          (row.from_json !== null && typeof row.from_json !== "string") ||
-          (row.from_owner !== 0 && row.from_owner !== 1) ||
-          (row.last_foreign_at !== null && !Number.isSafeInteger(row.last_foreign_at)) ||
-          (row.rfc_message_id !== null && typeof row.rfc_message_id !== "string")
-        ) {
-          throw new MailCacheError("mail_cache_invalid");
-        }
-        return Object.freeze({
-          threadId: validateProviderId(row.thread_id),
-          address: row.from_json === null ? null : parseAddressJson(row.from_json).address,
+      rows.map((row) =>
+        Object.freeze({
+          threadId: validateProviderId(row.thread_id as string),
+          address: row.from_json === null ? null : parseAddressJson(row.from_json as string).address,
           fromOwner: row.from_owner === 1,
-          lastForeignMessageAt: row.last_foreign_at as number | null,
+          lastForeignMessageAt: lastForeignAt.get(row.thread_id as string) ?? null,
           firstMessageId: row.rfc_message_id as string | null,
-        });
-      }),
+        }),
+      ),
     );
   }
 

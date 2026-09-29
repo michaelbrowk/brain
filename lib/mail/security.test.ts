@@ -56,7 +56,20 @@ describe("mail security and resource contracts", () => {
       egressTunnelFrameBytes: 16 * 1024,
       egressTunnelClientBytes: 2 * 1024 * 1024,
       egressTunnelAttachmentBytes: 1024 * 1024,
+      privacyPrefetchMaxMessagesPerAccount: 200,
+      privacyPrefetchMaxAgeMs: 30 * 24 * 60 * 60 * 1_000,
+      remoteImagePrefetchMaxMessagesPerAccount: 3,
+      remoteImagePrefetchMaxAgeMs: 7 * 24 * 60 * 60 * 1_000,
+      bodyCacheMaxBytes: 48 * 1024 * 1024,
     });
+    // The background image cohort is a prefix of the body cohort: the images
+    // a sync may fetch unasked are those of messages whose bodies it holds.
+    expect(
+      MAIL_RESOURCE_LIMITS.remoteImagePrefetchMaxMessagesPerAccount,
+    ).toBeLessThanOrEqual(MAIL_RESOURCE_LIMITS.privacyPrefetchMaxMessagesPerAccount);
+    expect(MAIL_RESOURCE_LIMITS.remoteImagePrefetchMaxAgeMs).toBeLessThanOrEqual(
+      MAIL_RESOURCE_LIMITS.privacyPrefetchMaxAgeMs,
+    );
     // The relay's own allowance has to leave room for the body, the headers
     // and the SMTP conversation inside the tunnel it is read out of, or an
     // account admitted above the socket is refused a layer down with no size

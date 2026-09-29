@@ -123,9 +123,26 @@ export const MAIL_RESOURCE_LIMITS = Object.freeze({
   remoteImageFetchDeadlineMs: 8_000,
   remoteImageMaxRedirects: 3,
   remoteImageTransientRetryMs: 5 * 60_000,
-  privacyPrefetchMaxMessagesPerAccount: 3,
-  privacyPrefetchMaxAgeMs: 7 * 24 * 60 * 60 * 1_000,
+  /* The body cohort: the newest Inbox messages whose bodies a sync fetches
+   * before anyone opens them, so opening one renders from disk. Two hundred
+   * inside thirty days is the owner's figure; `bodyCacheMaxBytes` below is
+   * what bounds the disk it takes. */
+  privacyPrefetchMaxMessagesPerAccount: 200,
+  privacyPrefetchMaxAgeMs: 30 * 24 * 60 * 60 * 1_000,
   privacyPrefetchMaxFutureSkewMs: 5 * 60 * 1_000,
+  /* The images a sync may fetch without an open, a prefix of the body cohort.
+   * These stayed where they were when the body cohort grew: a fetched image
+   * can be a tracking pixel, so more bodies on disk must not mean more pings
+   * the owner never asked for. Everything past this prefix fetches its images
+   * when a reader opens it. */
+  remoteImagePrefetchMaxMessagesPerAccount: 3,
+  remoteImagePrefetchMaxAgeMs: 7 * 24 * 60 * 60 * 1_000,
+  /* Every blob a ready body holds on disk, per account: raw MIME, the text and
+   * sanitized HTML parts, attachments and fetched images. Two hundred letters
+   * at a median of 60 KiB of HTML and text are about 15 MiB before the raw
+   * copy and the heavier marketing mail; past the budget the oldest unopened
+   * body goes first. */
+  bodyCacheMaxBytes: 48 * 1024 * 1024,
   maxInlineImagePixels: 12_000_000,
   maxInlineImageFrames: 100,
   idleRestartMs: 25 * 60_000,

@@ -1106,49 +1106,33 @@ describe("MailContentCoordinator", () => {
     expect(onBackgroundWorkAvailable).toHaveBeenCalledTimes(3);
   });
 
-  it("keeps an opened N+1 Inbox message outside the stable top-N cohort", async () => {
+  it("prefetches every cohort body but fetches images unasked only for the newest three", async () => {
     const fixture = await createFixture([ACCOUNT_ID]);
-    const cache = fixture.caches[0]!;
-    const recent = [
-      { threadId: "thread-b", messageId: "message-thread-b", sentAt: 200 },
-      { threadId: "thread-c", messageId: "message-thread-c", sentAt: 300 },
-      { threadId: "thread-d", messageId: "message-thread-d", sentAt: 400 },
+    const recent = seedInbox(fixture.caches[0]!, ["b", "c", "d", "e"]);
+    const all = [
+      { threadId: "thread-a", messageId: MESSAGE_ID, sentAt: 100 },
+      ...recent,
     ];
-    cache.applyIncrementalPage({
-      expectedHistoryId: "100",
-      expectedPageToken: null,
-      changes: recent.map((candidate) => ({
-        kind: "upsert" as const,
-        value: threadFixture(ACCOUNT_ID, candidate),
-      })),
-      nextPageToken: null,
-      resultingHistoryId: "101",
-      now: 500,
-    });
-    const oldRemoteImageId = `remote-image-a${"5".repeat(32)}`;
-    const expectedBackgroundOrder = recent.toReversed();
-    const runner = new FakeMailContentWorkRunner([
-      (input) => {
-        expect(input.providerMessageId).toBe(MESSAGE_ID);
+    const imageFor = (messageId: string) => {
+      const letter = messageId.slice(-1);
+      return {
+        remoteImageId: `remote-image-a${letter.repeat(32)}`,
+        sourceUrl: `https://images.example.com/${letter}.png`,
+      };
+    };
+    const runner = new FakeMailContentWorkRunner(
+      all.map(() => (input: MailContentWorkInput) => {
+        const remoteImage = imageFor(input.providerMessageId);
         return publish(input, {
           html: Buffer.from(
-            `<img data-brain-remote-image="${oldRemoteImageId}" alt="Old">`,
+            `<img data-brain-remote-image="${remoteImage.remoteImageId}">`,
           ),
-          remoteImages: [
-            {
-              remoteImageId: oldRemoteImageId,
-              sourceUrl: "https://images.example.com/n-plus-one.png",
-            },
-          ],
+          remoteImages: [remoteImage],
         });
-      },
-      ...expectedBackgroundOrder.map((candidate) => (input: MailContentWorkInput) => {
-        expect(input.providerMessageId).toBe(candidate.messageId);
-        return publish(input, { text: Buffer.from(candidate.messageId) });
       }),
-    ]);
+    );
     const image = testPng(10, 10);
-    const fetch = vi.fn(async () => ({
+    const fetch = vi.fn<RemoteImageFetcherPort["fetch"]>(async () => ({
       mimeType: "image/png",
       data: Buffer.from(image),
       raster: { width: 10, height: 10, frames: 1 },
@@ -1159,54 +1143,35 @@ describe("MailContentCoordinator", () => {
       { fetch } satisfies RemoteImageFetcherPort,
     );
 
-    await coordinator.requestContent({
-      accountId: ACCOUNT_ID,
-      messageId: MESSAGE_ID,
-    });
     await vi.waitFor(async () => {
-      await expect(
-        coordinator.getContent({ accountId: ACCOUNT_ID, messageId: MESSAGE_ID }),
-      ).resolves.toMatchObject({ state: "ready" });
-    });
-
-    // The opened N+1 message's image loads at once through its demand row,
-    // but the message itself never displaces the stable top-N content cohort.
-    const opened = await vi.waitFor(() =>
-      coordinator.downloadRemoteImage({
-        accountId: ACCOUNT_ID,
-        remoteImageId: oldRemoteImageId,
-      }),
-    );
-    await opened.dispose();
-    expect(fetch).toHaveBeenCalledTimes(1);
-    for (const candidate of expectedBackgroundOrder) {
-      await expect(
-        coordinator.runBackgroundPrefetchStep(
-          ACCOUNT_ID,
-          new AbortController().signal,
-        ),
-      ).resolves.toEqual({ hasMore: true });
-      await vi.waitFor(async () => {
-        await expect(
-          coordinator.getContent({
-            accountId: ACCOUNT_ID,
-            messageId: candidate.messageId,
-          }),
-        ).resolves.toMatchObject({ state: "ready" });
-      });
-    }
-    await expect(
-      coordinator.runBackgroundPrefetchStep(
+      await coordinator.runBackgroundPrefetchStep(
         ACCOUNT_ID,
         new AbortController().signal,
-      ),
-    ).resolves.toEqual({ hasMore: false });
-    expect(fetch).toHaveBeenCalledTimes(1);
-    const cached = await coordinator.downloadRemoteImage({
-      accountId: ACCOUNT_ID,
-      remoteImageId: oldRemoteImageId,
+      );
+      for (const entry of all) {
+        await expect(
+          coordinator.getContent({ accountId: ACCOUNT_ID, messageId: entry.messageId }),
+        ).resolves.toMatchObject({ state: "ready" });
+      }
     });
-    await cached.dispose();
+    expect(runner.calls).toHaveLength(all.length);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(3));
+    await coordinator.runBackgroundPrefetchStep(
+      ACCOUNT_ID,
+      new AbortController().signal,
+    );
+    expect(fetch.mock.calls.map(([url]) => url).sort()).toEqual(
+      ["c", "d", "e"].map((letter) => `https://images.example.com/${letter}.png`),
+    );
+
+    // The fourth newest body sits on disk; its images wait for the open.
+    await coordinator.requestContent({
+      accountId: ACCOUNT_ID,
+      messageId: "message-thread-b",
+    });
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(4));
+    expect(fetch.mock.calls[3]?.[0]).toBe("https://images.example.com/b.png");
+    expect(runner.calls).toHaveLength(all.length);
   });
 
   it("permanently stops remote fetches after the message raster budget is spent", async () => {
@@ -1590,6 +1555,33 @@ function threadFixture(
     inInbox: true,
     mailboxes: Object.freeze(["all", "inbox"] as const),
   });
+}
+
+/**
+ * Adds one Inbox thread per name beside the fixture's own, each a hundred
+ * milliseconds newer than the one before it.
+ */
+function seedInbox(
+  cache: SqliteMailMessageCache,
+  names: readonly string[],
+): readonly { threadId: string; messageId: string; sentAt: number }[] {
+  const entries = names.map((name, index) => ({
+    threadId: `thread-${name}`,
+    messageId: `message-thread-${name}`,
+    sentAt: 200 + index * 100,
+  }));
+  cache.applyIncrementalPage({
+    expectedHistoryId: "100",
+    expectedPageToken: null,
+    changes: entries.map((entry) => ({
+      kind: "upsert" as const,
+      value: threadFixture(ACCOUNT_ID, entry),
+    })),
+    nextPageToken: null,
+    resultingHistoryId: "101",
+    now: 500,
+  });
+  return entries;
 }
 
 function descriptor(value: Buffer): MailBlobDescriptor {

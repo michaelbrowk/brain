@@ -32,6 +32,22 @@ const MAX_CONTENT_ID_BYTES = 998;
 /** Increment whenever parser output or sanitizer policy changes incompatibly. */
 export const MAIL_CONTENT_FORMAT_VERSION = 9;
 
+/**
+ * How long after an open the byte budget leaves a body alone. The reader asks
+ * for a body when it opens the message and never again while it stays open,
+ * yet its attachments and pictures load from that body later, as they scroll
+ * into view. An hour covers a letter left open while the owner reads it; one
+ * opened earlier than that is still kept, just not ahead of the budget.
+ */
+export const MAIL_BODY_OPEN_PIN_MS = 60 * 60_000;
+
+/**
+ * The newest messages of the body cohort that the prefetch takes first, the
+ * ones most likely to be opened next. The rest of the cohort follows oldest
+ * first.
+ */
+const BODY_PREFETCH_NEWEST_FIRST = 20;
+
 const databaseTails = new Map<string, Promise<void>>();
 
 const CONTENT_SCHEMA_SQL = `
@@ -162,6 +178,10 @@ const CONTENT_SCHEMA_SQL = `
     source_generation INTEGER NOT NULL CHECK(source_generation > 0),
     selected_at INTEGER NOT NULL CHECK(selected_at >= 0),
     content_prefetch_started_at INTEGER,
+    remote_image_prefetch INTEGER NOT NULL DEFAULT 0
+      CHECK(remote_image_prefetch IN (0, 1)),
+    content_evicted_at INTEGER
+      CHECK(content_evicted_at IS NULL OR content_evicted_at >= 0),
     PRIMARY KEY(account_id, provider_message_id),
     FOREIGN KEY(account_id, source_generation, provider_message_id)
       REFERENCES messages(account_id, generation, message_id)
@@ -420,6 +440,7 @@ export class SqliteMailContentCache {
         database.exec(CONTENT_SCHEMA_SQL);
         ensureContentFormatColumn(database);
         ensureRemoteImageRasterColumns(database);
+        ensureCohortColumns(database);
         assertSchemaVersion(database);
         database.exec("COMMIT");
       } catch (error) {
@@ -1036,8 +1057,10 @@ export class SqliteMailContentCache {
   }
 
   /**
-   * Rebuilds a small, stable Inbox cohort from sync metadata only. Read state,
+   * Rebuilds the stable Inbox cohort from sync metadata only. Read state,
    * content requests, and existing remote manifests do not affect selection.
+   * The newest few inside a shorter window are also marked for background
+   * images; the rest of the cohort fetches its images only when opened.
    */
   async refreshBackgroundPrivacyCohort(
     now: number,
@@ -1051,11 +1074,15 @@ export class SqliteMailContentCache {
       Number.MAX_SAFE_INTEGER,
       selectedAt + MAIL_RESOURCE_LIMITS.privacyPrefetchMaxFutureSkewMs,
     );
+    const minimumImageSentAt = Math.max(
+      0,
+      selectedAt - MAIL_RESOURCE_LIMITS.remoteImagePrefetchMaxAgeMs,
+    );
     return this.serialized(async () =>
       this.transaction((database) => {
         const rows = database
           .prepare(
-            `SELECT message.message_id, message.generation
+            `SELECT message.message_id, message.generation, message.sent_at
                FROM sync_state AS sync
                JOIN messages AS message
                  ON message.account_id = sync.account_id
@@ -1072,16 +1099,22 @@ export class SqliteMailContentCache {
             maximumSentAt,
             MAIL_RESOURCE_LIMITS.privacyPrefetchMaxMessagesPerAccount,
           );
-        const selected = rows.map((row) => {
+        const selected = rows.map((row, index) => {
           if (
             typeof row.message_id !== "string" ||
-            !SAFE_PROVIDER_ID.test(row.message_id)
+            !SAFE_PROVIDER_ID.test(row.message_id) ||
+            typeof row.sent_at !== "number"
           ) {
             throw integrityFailed();
           }
           return Object.freeze({
             messageId: row.message_id,
             generation: validateGeneration(row.generation),
+            remoteImagePrefetch:
+              index < MAIL_RESOURCE_LIMITS.remoteImagePrefetchMaxMessagesPerAccount &&
+              row.sent_at >= minimumImageSentAt
+                ? 1
+                : 0,
           });
         });
         const selectedIds = new Set(selected.map((candidate) => candidate.messageId));
@@ -1106,11 +1139,14 @@ export class SqliteMailContentCache {
             remove.run(this.accountId, row.provider_message_id);
           }
         }
+        // The refresh runs on every scheduler page, so a row that has not
+        // changed is left alone rather than rewritten two hundred times.
         const insert = database.prepare(
           `INSERT INTO message_content_privacy_cohort(
              account_id, provider_message_id, source_generation, selected_at,
-             content_prefetch_started_at
-           ) VALUES (?, ?, ?, ?, NULL)
+             content_prefetch_started_at, remote_image_prefetch,
+             content_evicted_at
+           ) VALUES (?, ?, ?, ?, NULL, ?, NULL)
            ON CONFLICT(account_id, provider_message_id) DO UPDATE SET
              source_generation = excluded.source_generation,
              selected_at = CASE
@@ -1118,7 +1154,13 @@ export class SqliteMailContentCache {
                THEN selected_at ELSE excluded.selected_at END,
              content_prefetch_started_at = CASE
                WHEN source_generation = excluded.source_generation
-               THEN content_prefetch_started_at ELSE NULL END`,
+               THEN content_prefetch_started_at ELSE NULL END,
+             remote_image_prefetch = excluded.remote_image_prefetch,
+             content_evicted_at = CASE
+               WHEN source_generation = excluded.source_generation
+               THEN content_evicted_at ELSE NULL END
+           WHERE source_generation <> excluded.source_generation
+              OR remote_image_prefetch <> excluded.remote_image_prefetch`,
         );
         for (const candidate of selected) {
           insert.run(
@@ -1126,6 +1168,7 @@ export class SqliteMailContentCache {
             candidate.messageId,
             candidate.generation,
             selectedAt,
+            candidate.remoteImagePrefetch,
           );
         }
         const purged = database
@@ -1154,42 +1197,62 @@ export class SqliteMailContentCache {
     );
   }
 
+  /**
+   * The next cohort message whose body the background should fetch: the
+   * newest twenty first, newest to oldest, then the rest from the oldest up.
+   * A body the byte budget evicted is not fetched again while its message
+   * stays in the cohort, or the budget and the prefetch would take turns.
+   */
   async findBackgroundContentCandidate(now: number): Promise<string | null> {
     const inspectedAt = validateTimestamp(now);
     return this.serialized(async () => {
       const row = this.requireDatabase()
         .prepare(
-          `SELECT cohort.provider_message_id
-             FROM message_content_privacy_cohort AS cohort
-             JOIN sync_state AS sync ON sync.account_id = cohort.account_id
-             JOIN messages AS message
-               ON message.account_id = cohort.account_id
-              AND message.generation = cohort.source_generation
-              AND message.message_id = cohort.provider_message_id
+          `SELECT ranked.provider_message_id
+             FROM (
+               SELECT cohort.provider_message_id, cohort.source_generation,
+                      cohort.content_prefetch_started_at,
+                      cohort.content_evicted_at, message.thread_id,
+                      ROW_NUMBER() OVER (
+                        ORDER BY message.sent_at DESC, message.message_id DESC
+                      ) AS recency
+                 FROM message_content_privacy_cohort AS cohort
+                 JOIN sync_state AS sync ON sync.account_id = cohort.account_id
+                 JOIN messages AS message
+                   ON message.account_id = cohort.account_id
+                  AND message.generation = cohort.source_generation
+                  AND message.message_id = cohort.provider_message_id
+                WHERE cohort.account_id = ?
+                  AND cohort.source_generation = sync.active_generation
+             ) AS ranked
              LEFT JOIN message_content AS content
-               ON content.account_id = cohort.account_id
-              AND content.provider_message_id = cohort.provider_message_id
-            WHERE cohort.account_id = ?
-              AND cohort.source_generation = sync.active_generation
+               ON content.account_id = ?
+              AND content.provider_message_id = ranked.provider_message_id
+            WHERE ranked.content_evicted_at IS NULL
               AND (
-                cohort.content_prefetch_started_at IS NULL OR
+                ranked.content_prefetch_started_at IS NULL OR
                 content.provider_message_id IS NULL OR
-                content.source_generation <> cohort.source_generation OR
-                content.source_thread_id <> message.thread_id OR
+                content.source_generation <> ranked.source_generation OR
+                content.source_thread_id <> ranked.thread_id OR
                 content.content_format_version <> ? OR
                 (content.state = 'transient_failure' AND
                   content.updated_at + ? <= ?) OR
                 (content.state = 'fetching' AND content.lease_expires_at <= ?)
               )
-            ORDER BY message.sent_at DESC, message.message_id DESC
+            ORDER BY CASE WHEN ranked.recency <= ? THEN 0 ELSE 1 END,
+                     CASE WHEN ranked.recency <= ?
+                       THEN ranked.recency ELSE -ranked.recency END
             LIMIT 1`,
         )
         .get(
+          this.accountId,
           this.accountId,
           this.contentFormatVersion,
           MAIL_RESOURCE_LIMITS.remoteImageTransientRetryMs,
           inspectedAt,
           inspectedAt,
+          BODY_PREFETCH_NEWEST_FIRST,
+          BODY_PREFETCH_NEWEST_FIRST,
         );
       if (row === undefined) return null;
       if (
@@ -1245,9 +1308,11 @@ export class SqliteMailContentCache {
 
   /**
    * Selects one origin image only for a scheduler-owned privacy-cache pass.
-   * A message is eligible through the started background cohort, or through a
-   * live owner demand row at the same generation: opening a message is the
-   * owner's approval to fetch its images server-side (Gmail-web semantics).
+   * A message is eligible through the started image prefix of the background
+   * cohort, or through a live owner demand row at the same generation:
+   * opening a message is the owner's approval to fetch its images
+   * server-side (Gmail-web semantics). A cohort body outside that prefix is
+   * on disk, but its images wait for an open.
    */
   async findBackgroundRemoteImageCandidate(now: number): Promise<string | null> {
     const inspectedAt = validateTimestamp(now);
@@ -1276,7 +1341,8 @@ export class SqliteMailContentCache {
             WHERE remote.account_id = ? AND content.state = 'ready'
               AND content.source_generation = sync.active_generation
               AND content.content_format_version = ?
-              AND (cohort.content_prefetch_started_at IS NOT NULL OR
+              AND ((cohort.content_prefetch_started_at IS NOT NULL AND
+                  cohort.remote_image_prefetch = 1) OR
                 demand.provider_message_id IS NOT NULL)
               AND (
                 (remote.state = 'pending' AND remote.bytes IS NULL) OR
@@ -1303,8 +1369,8 @@ export class SqliteMailContentCache {
    * Every origin image one message still owes, for the drain that an owner
    * demand or a ready commit starts at once. Eligibility is the scheduler's:
    * content ready at the active generation, and the message either in the
-   * started background cohort or under a live owner demand. Ordinal order
-   * keeps the drain in document order.
+   * started image prefix of the background cohort or under a live owner
+   * demand. Ordinal order keeps the drain in document order.
    */
   async listPendingRemoteImages(
     providerMessageId: string,
@@ -1338,7 +1404,8 @@ export class SqliteMailContentCache {
               AND content.state = 'ready'
               AND content.source_generation = sync.active_generation
               AND content.content_format_version = ?
-              AND (cohort.content_prefetch_started_at IS NOT NULL OR
+              AND ((cohort.content_prefetch_started_at IS NOT NULL AND
+                  cohort.remote_image_prefetch = 1) OR
                 demand.provider_message_id IS NOT NULL)
               AND (
                 (remote.state = 'pending' AND remote.bytes IS NULL) OR
@@ -1952,6 +2019,72 @@ export class SqliteMailContentCache {
     );
   }
 
+  /** What the ready bodies of the active generation hold on disk. */
+  async readBodyCacheBytes(): Promise<number> {
+    return this.serialized(async () =>
+      readyBodySizes(
+        this.requireDatabase(),
+        this.accountId,
+        this.contentFormatVersion,
+      ).reduce((total, body) => total + body.bytes, 0),
+    );
+  }
+
+  /**
+   * Brings the account's bodies under `maxBytes`, least recently useful
+   * first: unopened bodies by age, oldest first, and only then opened ones by
+   * their last open. A body opened within `MAIL_BODY_OPEN_PIN_MS`, or one a
+   * draft answers or forwards, is never taken, even when that leaves the
+   * account over the budget. An evicted body reads as never fetched: an open
+   * fetches it again, and the cohort remembers not to.
+   */
+  async evictBodiesOverBudget(input: {
+    readonly maxBytes: number;
+    readonly now: number;
+    readonly pinnedMessageIds: readonly string[];
+  }): Promise<{ readonly evictedMessages: number; readonly remainingBytes: number }> {
+    const maxBytes = validateReclaimBytes(input.maxBytes);
+    const evictedAt = validateTimestamp(input.now);
+    if (!Array.isArray(input.pinnedMessageIds)) throw invalidRequest();
+    const pinned = new Set(input.pinnedMessageIds.map(validateProviderId));
+    const openPinnedSince = evictedAt - MAIL_BODY_OPEN_PIN_MS;
+    return this.serialized(async () =>
+      this.transaction((database) => {
+        const bodies = readyBodySizes(
+          database,
+          this.accountId,
+          this.contentFormatVersion,
+        );
+        let remainingBytes = bodies.reduce((total, body) => total + body.bytes, 0);
+        let evictedMessages = 0;
+        const remove = database.prepare(
+          `DELETE FROM message_content
+            WHERE account_id = ? AND provider_message_id = ? AND state = 'ready'`,
+        );
+        const mark = database.prepare(
+          `UPDATE message_content_privacy_cohort SET content_evicted_at = ?
+            WHERE account_id = ? AND provider_message_id = ?`,
+        );
+        for (const body of bodies) {
+          if (remainingBytes <= maxBytes) break;
+          if (
+            pinned.has(body.messageId) ||
+            (body.openedAt !== null && body.openedAt >= openPinnedSince)
+          ) {
+            continue;
+          }
+          if (remove.run(this.accountId, body.messageId).changes !== 1) {
+            throw integrityFailed();
+          }
+          mark.run(evictedAt, this.accountId, body.messageId);
+          remainingBytes -= body.bytes;
+          evictedMessages += 1;
+        }
+        return Object.freeze({ evictedMessages, remainingBytes });
+      }),
+    );
+  }
+
   private async reclaimCapacity(now: number, minimumBytes: number): Promise<void> {
     if (this.capacityReclaimer !== null) {
       await this.capacityReclaimer.reclaim(now, minimumBytes);
@@ -2396,6 +2529,76 @@ function referencedDescriptors(
       return descriptor;
     }),
   );
+}
+
+/**
+ * Every ready body of the active generation with what it holds on disk, in
+ * the order the byte budget gives them up: unopened ones oldest first, then
+ * opened ones by last open. A blob two bodies share is counted for each, so
+ * the figure errs high rather than low.
+ */
+function readyBodySizes(
+  database: DatabaseSync,
+  accountId: string,
+  contentFormatVersion: number,
+): readonly {
+  readonly messageId: string;
+  readonly openedAt: number | null;
+  readonly bytes: number;
+}[] {
+  const rows = database
+    .prepare(
+      `SELECT content.provider_message_id, demand.requested_at,
+              content.raw_bytes + COALESCE(content.text_bytes, 0) +
+                COALESCE(content.html_bytes, 0) +
+                COALESCE((
+                  SELECT SUM(attachment.bytes)
+                    FROM message_content_attachments AS attachment
+                   WHERE attachment.account_id = content.account_id
+                     AND attachment.provider_message_id = content.provider_message_id
+                ), 0) +
+                COALESCE((
+                  SELECT SUM(remote.bytes)
+                    FROM message_content_remote_images AS remote
+                   WHERE remote.account_id = content.account_id
+                     AND remote.provider_message_id = content.provider_message_id
+                     AND remote.state = 'ready'
+                ), 0) AS bytes
+         FROM message_content AS content
+         JOIN sync_state AS sync ON sync.account_id = content.account_id
+         JOIN messages AS message
+           ON message.account_id = content.account_id
+          AND message.generation = content.source_generation
+          AND message.message_id = content.provider_message_id
+          AND message.thread_id = content.source_thread_id
+         LEFT JOIN message_content_user_demand AS demand
+           ON demand.account_id = content.account_id
+          AND demand.provider_message_id = content.provider_message_id
+          AND demand.source_generation = content.source_generation
+        WHERE content.account_id = ? AND content.state = 'ready'
+          AND content.source_generation = sync.active_generation
+          AND content.content_format_version = ?
+        ORDER BY CASE WHEN demand.requested_at IS NULL THEN 0 ELSE 1 END,
+                 COALESCE(demand.requested_at, 0),
+                 COALESCE(message.sent_at, 0), content.provider_message_id`,
+    )
+    .all(accountId, contentFormatVersion);
+  return rows.map((row) => {
+    if (
+      typeof row.provider_message_id !== "string" ||
+      !SAFE_PROVIDER_ID.test(row.provider_message_id) ||
+      !Number.isSafeInteger(row.bytes) ||
+      (row.bytes as number) < 1 ||
+      (row.requested_at !== null && !Number.isSafeInteger(row.requested_at))
+    ) {
+      throw integrityFailed();
+    }
+    return Object.freeze({
+      messageId: row.provider_message_id,
+      openedAt: row.requested_at as number | null,
+      bytes: row.bytes as number,
+    });
+  });
 }
 
 function deleteOrphanContent(
@@ -3086,6 +3289,54 @@ function ensureRemoteImageRasterColumns(database: DatabaseSync): void {
       column.type !== "INTEGER" ||
       column.notnull !== 0 ||
       column.dflt_value !== null ||
+      column.pk !== 0
+    ) {
+      throw integrityFailed();
+    }
+  }
+}
+
+/**
+ * The cohort's two later columns, added in place on a cache written before
+ * them. Both are additive: a runtime that predates them inserts cohort rows
+ * without naming them and gets the defaults, so a rollback still opens it.
+ */
+function ensureCohortColumns(database: DatabaseSync): void {
+  const columns = [
+    {
+      name: "remote_image_prefetch",
+      definition:
+        "INTEGER NOT NULL DEFAULT 0 CHECK(remote_image_prefetch IN (0, 1))",
+      notnull: 1,
+      dflt: "0",
+    },
+    {
+      name: "content_evicted_at",
+      definition:
+        "INTEGER CHECK(content_evicted_at IS NULL OR content_evicted_at >= 0)",
+      notnull: 0,
+      dflt: null,
+    },
+  ] as const;
+  let rows = database
+    .prepare("PRAGMA table_info(message_content_privacy_cohort)")
+    .all();
+  for (const expected of columns) {
+    if (!rows.some((row) => row.name === expected.name)) {
+      database.exec(
+        `ALTER TABLE message_content_privacy_cohort
+           ADD COLUMN ${expected.name} ${expected.definition}`,
+      );
+      rows = database
+        .prepare("PRAGMA table_info(message_content_privacy_cohort)")
+        .all();
+    }
+    const column = rows.find((row) => row.name === expected.name);
+    if (
+      column === undefined ||
+      column.type !== "INTEGER" ||
+      column.notnull !== expected.notnull ||
+      column.dflt_value !== expected.dflt ||
       column.pk !== 0
     ) {
       throw integrityFailed();

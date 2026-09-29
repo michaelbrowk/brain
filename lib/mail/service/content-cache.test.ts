@@ -17,6 +17,7 @@ import type { MailBlobDescriptor } from "../ports";
 import { MAIL_RESOURCE_LIMITS } from "../security";
 import { AtomicMailBlobStore } from "./content-blob-store";
 import {
+  MAIL_BODY_OPEN_PIN_MS,
   MAIL_CONTENT_FORMAT_VERSION,
   SqliteMailContentCache,
   type MailContentLease,
@@ -1508,6 +1509,281 @@ describe("active-message content metadata cache", () => {
   });
 });
 
+describe("background body cohort and byte budget", () => {
+  const DAY = 24 * 60 * 60 * 1_000;
+  const HOUR = 60 * 60 * 1_000;
+  const NOW = 100 * DAY;
+
+  it("selects the newest 200 Inbox messages of the last 30 days", async () => {
+    const fixture = await createFixture({ active: true });
+    const recent = Array.from({ length: 205 }, (_, index) => ({
+      threadId: `recent-${index}`,
+      sentAt: NOW - (index + 1) * 60_000,
+    }));
+    activateThreads(
+      fixture,
+      [
+        ...recent,
+        { threadId: "stale", sentAt: NOW - 31 * DAY },
+        { threadId: "archived", sentAt: NOW - 1_000, inInbox: false },
+      ],
+      "200",
+    );
+
+    await expect(
+      fixture.content.refreshBackgroundPrivacyCohort(NOW),
+    ).resolves.toEqual({ selectedMessages: 200, purgedContent: false });
+    expect(readCohort(fixture.databasePath).map((row) => row.messageId)).toEqual(
+      recent.slice(0, 200).map((entry) => `message-${entry.threadId}`),
+    );
+  });
+
+  it("orders body prefetch newest twenty first, then the rest oldest first", async () => {
+    const fixture = await createFixture({ active: true });
+    const recent = Array.from({ length: 25 }, (_, index) => ({
+      threadId: `recent-${index}`,
+      sentAt: NOW - (index + 1) * 60_000,
+    }));
+    activateThreads(fixture, recent, "200");
+    await fixture.content.refreshBackgroundPrivacyCohort(NOW);
+
+    const order: string[] = [];
+    for (let step = 0; step < recent.length + 1; step += 1) {
+      const messageId = await fixture.content.findBackgroundContentCandidate(NOW);
+      if (messageId === null) break;
+      order.push(messageId);
+      await fixture.content.markBackgroundContentPrefetchStarted(messageId, NOW);
+      await claimLease(fixture.content, messageId, NOW);
+    }
+    const byIndex = (index: number) => `message-recent-${index}`;
+    expect(order).toEqual([
+      ...Array.from({ length: 20 }, (_, index) => byIndex(index)),
+      byIndex(24),
+      byIndex(23),
+      byIndex(22),
+      byIndex(21),
+      byIndex(20),
+    ]);
+  });
+
+  it("fetches images unasked only for the three newest messages of the last seven days", async () => {
+    const fixture = await createFixture({ active: true });
+    const entries = [
+      { threadId: "one", sentAt: NOW - 1 * HOUR },
+      { threadId: "two", sentAt: NOW - 2 * HOUR },
+      { threadId: "three", sentAt: NOW - 8 * DAY },
+      { threadId: "four", sentAt: NOW - 9 * DAY },
+    ];
+    activateThreads(fixture, entries, "200");
+    const imageIds = new Map<string, string>();
+    for (const [index, entry] of entries.entries()) {
+      const messageId = `message-${entry.threadId}`;
+      const remoteImageId = `remote-image-a${String(index + 1).repeat(32)}`;
+      imageIds.set(messageId, remoteImageId);
+      await publishBody(fixture, messageId, NOW, {
+        raw: Buffer.from(`raw ${messageId}`),
+        html: Buffer.from(`<img data-brain-remote-image="${remoteImageId}">`),
+        remoteImages: [
+          {
+            remoteImageId,
+            sourceUrl: `https://images.example.com/${entry.threadId}.png`,
+          },
+        ],
+      });
+    }
+    await expect(
+      fixture.content.refreshBackgroundPrivacyCohort(NOW),
+    ).resolves.toEqual({ selectedMessages: 4, purgedContent: false });
+    for (const messageId of imageIds.keys()) {
+      await fixture.content.markBackgroundContentPrefetchStarted(messageId, NOW);
+    }
+
+    // Every body is in the cohort, but the images a sync may fetch without
+    // an open are still those of the newest three inside seven days.
+    const pending = async (messageId: string) =>
+      fixture.content.listPendingRemoteImages(messageId, NOW);
+    await expect(pending("message-one")).resolves.toEqual([
+      imageIds.get("message-one"),
+    ]);
+    await expect(pending("message-two")).resolves.toEqual([
+      imageIds.get("message-two"),
+    ]);
+    await expect(pending("message-three")).resolves.toEqual([]);
+    await expect(pending("message-four")).resolves.toEqual([]);
+
+    // Opening a message outside that prefix is what approves its images.
+    await fixture.content.recordUserContentDemand("message-four", NOW);
+    await expect(pending("message-four")).resolves.toEqual([
+      imageIds.get("message-four"),
+    ]);
+  });
+
+  it("counts every blob a ready body holds toward the budget", async () => {
+    const fixture = await createFixture({ active: true });
+    await expect(fixture.content.readBodyCacheBytes()).resolves.toBe(0);
+    const raw = Buffer.from("raw MIME for the budget");
+    const text = Buffer.from("plain text part");
+    const html = Buffer.from("<p>html part</p>");
+    const attachment = Buffer.from("attachment bytes that count too");
+    await publishBody(fixture, "message-thread-a", 100, {
+      raw,
+      text,
+      html,
+      attachment,
+    });
+    await expect(fixture.content.readBodyCacheBytes()).resolves.toBe(
+      raw.byteLength + text.byteLength + html.byteLength + attachment.byteLength,
+    );
+  });
+
+  it("evicts unopened bodies oldest first, then opened ones by last open, never a pinned one", async () => {
+    const fixture = await createFixture({ active: true });
+    const ids = ["m1", "m2", "m3", "m4", "m5", "m6"];
+    activateThreads(
+      fixture,
+      ids.map((id, index) => ({ threadId: id, sentAt: NOW - (index + 1) * HOUR })),
+      "200",
+    );
+    for (const id of ids) {
+      await publishBody(fixture, `message-${id}`, NOW - 3 * HOUR, {
+        raw: Buffer.alloc(100, id),
+      });
+    }
+    // m4 was read long ago; m5 is open in a reader right now.
+    await fixture.content.recordUserContentDemand(
+      "message-m4",
+      NOW - MAIL_BODY_OPEN_PIN_MS - HOUR,
+    );
+    await fixture.content.recordUserContentDemand("message-m5", NOW - 60_000);
+    await expect(fixture.content.readBodyCacheBytes()).resolves.toBe(600);
+
+    // m2 is the source of a draft. The oldest unopened bodies go first, and
+    // the newest unopened one goes before the one opened long ago.
+    await expect(
+      fixture.content.evictBodiesOverBudget({
+        maxBytes: 350,
+        now: NOW,
+        pinnedMessageIds: ["message-m2"],
+      }),
+    ).resolves.toEqual({ evictedMessages: 3, remainingBytes: 300 });
+    const state = async (id: string) =>
+      (await fixture.content.inspect(`message-${id}`)).kind;
+    expect(
+      await Promise.all(ids.map(async (id) => [id, await state(id)])),
+    ).toEqual([
+      ["m1", "not_requested"],
+      ["m2", "ready"],
+      ["m3", "not_requested"],
+      ["m4", "ready"],
+      ["m5", "ready"],
+      ["m6", "not_requested"],
+    ]);
+
+    // Opened bodies count and go last, least recently opened first. What is
+    // pinned stays even when the budget cannot be met without it.
+    await expect(
+      fixture.content.evictBodiesOverBudget({
+        maxBytes: 0,
+        now: NOW,
+        pinnedMessageIds: ["message-m2"],
+      }),
+    ).resolves.toEqual({ evictedMessages: 1, remainingBytes: 200 });
+    await expect(state("m4")).resolves.toBe("not_requested");
+    await expect(state("m2")).resolves.toBe("ready");
+    await expect(state("m5")).resolves.toBe("ready");
+    await expect(fixture.content.collectGarbage()).resolves.toHaveLength(4);
+  });
+
+  it("never prefetches a body the budget evicted while it stays in the cohort", async () => {
+    const fixture = await createFixture({ active: true });
+    await fixture.content.refreshBackgroundPrivacyCohort(1_000);
+    await expect(
+      fixture.content.findBackgroundContentCandidate(1_000),
+    ).resolves.toBe("message-thread-a");
+    await fixture.content.markBackgroundContentPrefetchStarted(
+      "message-thread-a",
+      1_000,
+    );
+    await publishBody(fixture, "message-thread-a", 1_001, {
+      raw: Buffer.from("raw MIME the budget will not keep"),
+    });
+    await expect(
+      fixture.content.evictBodiesOverBudget({
+        maxBytes: 0,
+        now: 1_002,
+        pinnedMessageIds: [],
+      }),
+    ).resolves.toEqual({ evictedMessages: 1, remainingBytes: 0 });
+
+    await fixture.content.refreshBackgroundPrivacyCohort(1_003);
+    await expect(
+      fixture.content.findBackgroundContentCandidate(1_003),
+    ).resolves.toBeNull();
+    // An owner's open still fetches it again.
+    await expect(
+      fixture.content.claim("message-thread-a", 1_004),
+    ).resolves.toMatchObject({ kind: "claimed" });
+  });
+
+  it("adds the image and eviction columns to a cohort table written before them", async () => {
+    const fixture = await createFixture({ active: true });
+    await fixture.content.refreshBackgroundPrivacyCohort(1_000);
+    await fixture.content.close();
+    const legacy = new DatabaseSync(fixture.databasePath);
+    try {
+      legacy.exec(
+        `ALTER TABLE message_content_privacy_cohort DROP COLUMN remote_image_prefetch;
+         ALTER TABLE message_content_privacy_cohort DROP COLUMN content_evicted_at;`,
+      );
+    } finally {
+      legacy.close();
+    }
+
+    const reopened = new SqliteMailContentCache({
+      cacheRoot: fixture.cacheRoot,
+      accountId: ACCOUNT_ID,
+      blobStore: fixture.blobs,
+    });
+    contentCaches.push(reopened);
+    await reopened.initialize();
+    await expect(
+      reopened.refreshBackgroundPrivacyCohort(1_001),
+    ).resolves.toEqual({ selectedMessages: 1, purgedContent: false });
+    expect(readCohort(fixture.databasePath)).toEqual([
+      { messageId: "message-thread-a", remoteImagePrefetch: 1, evictedAt: null },
+    ]);
+  });
+});
+
+function readCohort(databasePath: string): {
+  readonly messageId: string;
+  readonly remoteImagePrefetch: number;
+  readonly evictedAt: number | null;
+}[] {
+  const database = new DatabaseSync(databasePath, { readOnly: true });
+  try {
+    return database
+      .prepare(
+        `SELECT cohort.provider_message_id, cohort.remote_image_prefetch,
+                cohort.content_evicted_at
+           FROM message_content_privacy_cohort AS cohort
+           JOIN messages AS message
+             ON message.account_id = cohort.account_id
+            AND message.generation = cohort.source_generation
+            AND message.message_id = cohort.provider_message_id
+          ORDER BY message.sent_at DESC, message.message_id DESC`,
+      )
+      .all()
+      .map((row) => ({
+        messageId: row.provider_message_id as string,
+        remoteImagePrefetch: row.remote_image_prefetch as number,
+        evictedAt: row.content_evicted_at as number | null,
+      }));
+  } finally {
+    database.close();
+  }
+}
+
 async function createFixture(input: {
   readonly active: boolean;
   readonly maxCacheBytes?: number;
@@ -1630,6 +1906,7 @@ function threadFixture(
   threadId: string,
   sentAt: number,
   accountId = ACCOUNT_ID,
+  inInbox = true,
 ): CachedProviderThread {
   const message: CachedProviderMessage = Object.freeze({
     accountId,
@@ -1642,7 +1919,7 @@ function threadFixture(
     subject: `Subject ${threadId}`,
     sentAt,
     unread: true,
-    inInbox: true,
+    inInbox,
     snippet: `Snippet ${threadId}`,
     textBody: `Body ${threadId}`,
     htmlBody: null,
@@ -1672,8 +1949,74 @@ function threadFixture(
   return Object.freeze({
     thread,
     messages: Object.freeze([message]),
-    inInbox: true,
-    mailboxes: Object.freeze(["all", "inbox"] as const),
+    inInbox,
+    mailboxes: inInbox
+      ? Object.freeze(["all", "inbox"] as const)
+      : Object.freeze(["all"] as const),
+  });
+}
+
+/** Replaces the active generation with exactly these threads. */
+function activateThreads(
+  fixture: { readonly messages: SqliteMailMessageCache },
+  threads: readonly {
+    readonly threadId: string;
+    readonly sentAt: number;
+    readonly inInbox?: boolean;
+  }[],
+  historyId: string,
+): void {
+  const generation = fixture.messages.beginInitial(historyId);
+  fixture.messages.putInitialPage(
+    generation,
+    threads.map((entry) =>
+      threadFixture(entry.threadId, entry.sentAt, ACCOUNT_ID, entry.inInbox ?? true),
+    ),
+    null,
+    null,
+  );
+  fixture.messages.completeInitial(generation, 1);
+}
+
+/** Commits a ready body for one message: raw MIME plus any extra parts. */
+async function publishBody(
+  fixture: { readonly content: SqliteMailContentCache },
+  messageId: string,
+  now: number,
+  parts: {
+    readonly raw: Buffer;
+    readonly text?: Buffer;
+    readonly html?: Buffer;
+    readonly attachment?: Buffer;
+    readonly remoteImages?: readonly {
+      readonly remoteImageId: string;
+      readonly sourceUrl: string;
+    }[];
+  },
+) {
+  const lease = await claimLease(fixture.content, messageId, now);
+  for (const value of [parts.raw, parts.text, parts.html, parts.attachment]) {
+    if (value !== undefined) await stage(fixture, lease, value, now);
+  }
+  return fixture.content.commitReady({
+    lease,
+    rawMime: descriptorFor(parts.raw),
+    text: parts.text === undefined ? null : descriptorFor(parts.text),
+    sanitizedHtml: parts.html === undefined ? null : descriptorFor(parts.html),
+    attachments:
+      parts.attachment === undefined
+        ? []
+        : [
+            {
+              filename: "file.bin",
+              mimeType: "application/octet-stream",
+              disposition: "attachment" as const,
+              contentId: null,
+              blob: descriptorFor(parts.attachment),
+            },
+          ],
+    remoteImages: parts.remoteImages ?? [],
+    now,
   });
 }
 

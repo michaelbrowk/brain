@@ -2458,6 +2458,188 @@ describe("MailSurface", () => {
     expect(onToast).toHaveBeenCalledWith("Conversation restored");
   });
 
+  /** A letter shown from All Mail, or any folder but Inbox, Spam and Trash,
+   *  had no way back to the Inbox. The client here is server truth: Archive
+   *  and Move to Inbox change what the next read and the next Inbox list
+   *  say. */
+  describe("Move to Inbox", () => {
+    function inboxTruthClient(overrides: Partial<MailSurfaceClient> = {}) {
+      let inInbox = false;
+      const updateThread = vi.fn().mockImplementation(async (input) => {
+        if ("archive" in input) inInbox = !input.archive;
+      });
+      const letter = (): MailThreadDetail => ({
+        ...detail,
+        messages: detail.messages.map((message) => ({ ...message, inInbox })),
+      });
+      const client = makeClient({
+        updateThread,
+        listThreads: vi.fn().mockImplementation(({ accountId }) =>
+          Promise.resolve({
+            ...threadPage,
+            items: inInbox && accountId === thread.accountId ? [thread] : [],
+          }),
+        ),
+        readThread: vi.fn().mockImplementation(() => Promise.resolve(letter())),
+        readMailboxThread: vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(letter())),
+        ...overrides,
+      });
+      return { client, updateThread };
+    }
+
+    function readerButtons(): string[] {
+      const reader = document.body.querySelector(
+        'section[aria-label="Message reader"]',
+      );
+      return [...(reader?.querySelectorAll("button") ?? [])].map(
+        (button) => button.textContent?.trim() ?? "",
+      );
+    }
+
+    function threadList(): string {
+      return (
+        document.body.querySelector('section[aria-label="Mailbox"]')?.textContent ?? ""
+      );
+    }
+
+    type Pill = ToastOptions & { onAction: () => Promise<unknown> };
+
+    async function movedFromAllMail(
+      client: MailSurfaceClient,
+      accounts: readonly PublicMailAccount[] = [accountA],
+    ) {
+      const onToast = vi.fn();
+      vi.mocked(client.loadAccounts).mockResolvedValue([...accounts]);
+      await act(async () =>
+        root.render(
+          <MailSurface client={client} onOpenSettings={() => {}} onToast={onToast} />,
+        ),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      await click(findButton("Lunch this Friday?"));
+      expect(readerButtons()).toContain("Move to Inbox");
+      await click(findButton("Move to Inbox"));
+      const [title, pill] = onToast.mock.calls.at(-1)!;
+      expect(title).toBe("Moved to Inbox");
+      return pill as Pill;
+    }
+
+    it("moves the letter back with an Undo that archives it again", async () => {
+      const { client, updateThread } = inboxTruthClient();
+      const pill = await movedFromAllMail(client);
+
+      expect(updateThread).toHaveBeenLastCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+        archive: false,
+      });
+      expect(pill).toMatchObject({
+        icon: "inbox-linear",
+        actionLabel: "Undo",
+        durationMs: SMART_UNDO_MS,
+      });
+      // In the Inbox now: the letter stays open and the way back is spent.
+      expect(readerButtons()).not.toContain("Move to Inbox");
+      expect(
+        document.body.querySelector('section[aria-label="Message reader"]')
+          ?.textContent,
+      ).toContain("Lunch this Friday?");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+
+      expect(updateThread).toHaveBeenLastCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+        archive: true,
+      });
+      // Out of the Inbox again, and the reader on it says so.
+      expect(readerButtons()).toContain("Move to Inbox");
+    });
+
+    it("refuses Undo while another mail action is still going out", async () => {
+      const star = deferred<void>();
+      const { client, updateThread } = inboxTruthClient();
+      const settled = updateThread.getMockImplementation()!;
+      updateThread.mockImplementation((input) =>
+        "starred" in input ? star.promise : settled(input),
+      );
+      const pill = await movedFromAllMail(client);
+      await act(async () => {
+        findButton("More mail actions").dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+        );
+      });
+      await settle();
+      await click(findMenuItem("Star"));
+
+      // The pill keeps standing and its press can be made again.
+      expect(pill.onAction()).toBe(false);
+      expect(updateThread).not.toHaveBeenCalledWith(
+        expect.objectContaining({ archive: true }),
+      );
+      await act(async () => star.resolve());
+    });
+
+    it("runs Move to Inbox from e where the letter is out of the Inbox", async () => {
+      const { client, updateThread } = inboxTruthClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+      await enterSingleAccount();
+      await goTo("All Mail");
+      await click(findButton("Lunch this Friday?"));
+
+      await act(async () => {
+        window.dispatchEvent(new KeyboardEvent("keydown", { key: "e", cancelable: true }));
+      });
+      await settle();
+
+      expect(updateThread).toHaveBeenLastCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+        archive: false,
+      });
+    });
+
+    it("takes the row out of the Inbox the reader went to when Undo is pressed there", async () => {
+      const { client } = inboxTruthClient();
+      const pill = await movedFromAllMail(client);
+      await goTo("Inbox");
+      expect(threadList()).toContain("Lunch this Friday?");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+
+      expect(threadList()).not.toContain("Lunch this Friday?");
+    });
+
+    it("takes the row out of All inboxes when Undo is pressed there", async () => {
+      const { client } = inboxTruthClient();
+      const pill = await movedFromAllMail(client, [accountA, accountB]);
+      await goTo("All inboxes");
+      // The letter is read, so it stands in the Seen bundle rather than as a
+      // row of its own: the column's one thread is it.
+      expect(threadList()).not.toContain("Inbox zero");
+
+      await act(async () => {
+        await pill.onAction();
+      });
+      await settle();
+
+      expect(threadList()).toContain("Inbox zero");
+    });
+  });
+
   it("uses the confirmed thread label for Star and blocks duplicate actions", async () => {
     const starredThread = { ...thread, starred: true };
     const pendingMutation = deferred<void>();
@@ -9078,6 +9260,42 @@ describe("MailSurface", () => {
       expect(reader()?.textContent).toContain("The archived letter");
       await openMoreActions();
       expect(findMenuItem("Remove star")).toBeInstanceOf(HTMLElement);
+    });
+
+    it("keeps a letter from deep in All Mail open once it is moved to the Inbox", async () => {
+      // Moving it to the Inbox leaves it in All Mail, so its absence from the
+      // refetched first page is not a sign that it went anywhere.
+      let inInbox = false;
+      const updateThread = vi.fn().mockImplementation(async (input) => {
+        if ("archive" in input) inInbox = !input.archive;
+      });
+      const client = makeClient({
+        readThread: vi
+          .fn()
+          .mockRejectedValue(new MailApiError(404, "mail_thread_not_found")),
+        readMailboxThread: vi.fn().mockImplementation(() => {
+          const letter = detailFor(archived);
+          return Promise.resolve({
+            ...letter,
+            messages: letter.messages.map((message) => ({ ...message, inInbox })),
+          });
+        }),
+        updateThread,
+      });
+      await openDeepLetter(client);
+      expect(readerButtons()).toContain("Move to Inbox");
+
+      await click(findButton("Move to Inbox"));
+      await settle();
+
+      expect(updateThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: archived.threadId,
+        archive: false,
+      });
+      expect(reader()?.textContent).toContain("The archived letter");
+      expect(reader()?.textContent).not.toContain("Choose a message");
+      expect(readerButtons()).not.toContain("Move to Inbox");
     });
 
     it("opens a letter the search found in All Mail from Inbox when Inbox holds it", async () => {

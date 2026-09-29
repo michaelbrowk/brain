@@ -54,6 +54,7 @@ export type MailReaderState =
 export type MailReaderAction =
   | "toggle-read"
   | "archive"
+  | "move-to-inbox"
   | "trash"
   | "restore"
   | "mark-spam"
@@ -110,8 +111,11 @@ export function MailReader({
   }
 
   const thread = state.kind === "ready" ? state.detail.thread : state.thread;
+  // Unknown until the letter arrives, and taken as in the Inbox until then:
+  // the way back is offered only for a letter known to be out of it.
+  const inInbox = state.kind !== "ready" || letterInInbox(state.detail);
   const directAction = capabilities.threadMutations
-    ? directActionForMailbox(mailboxId)
+    ? directActionForMailbox(mailboxId, inInbox)
     : null;
   const canReply = capabilities.reply && capabilities.send;
   const canForward =
@@ -200,6 +204,7 @@ export function MailReader({
             {(canReply || canForward || capabilities.threadMutations) && (
               <MailActionsMenu
                 mailboxId={mailboxId}
+                inInbox={inInbox}
                 thread={thread}
                 detail={state.kind === "ready" ? state.detail : null}
                 disabled={mutating || state.kind !== "ready"}
@@ -335,6 +340,7 @@ const MAIL_ACTION_ITEM = "brain-menu-item";
 
 function MailActionsMenu({
   mailboxId,
+  inInbox,
   thread,
   detail,
   disabled,
@@ -346,6 +352,7 @@ function MailActionsMenu({
   onAction,
 }: {
   mailboxId: MailSystemMailbox;
+  inInbox: boolean;
   thread: MailThreadListItem;
   detail: MailThreadDetail | null;
   disabled: boolean;
@@ -426,6 +433,20 @@ function MailActionsMenu({
                 Star
               </Dropdown.Item>
             ) : null}
+            {/* Spam and Trash have their own way back (Not spam, Restore),
+                and the Inbox is where this one leads. */}
+            {canMutate &&
+              !inInbox &&
+              mailboxId !== "inbox" &&
+              mailboxId !== "spam" &&
+              mailboxId !== "trash" && (
+              <Dropdown.Item
+                className={MAIL_ACTION_ITEM}
+                onSelect={() => onAction(thread, "move-to-inbox")}
+              >
+                Move to Inbox
+              </Dropdown.Item>
+            )}
             {canMutate &&
               mailboxId !== "spam" &&
               mailboxId !== "trash" &&
@@ -451,15 +472,31 @@ function MailActionsMenu({
   );
 }
 
+/**
+ * The one action the strip draws beside Reply, and the one `e` runs. All Mail
+ * and Starred list letters that left the Inbox, and there the way back is that
+ * action. Sent lists letters that were never in it, so its way back stays in
+ * the ⋯ menu rather than on every sent letter.
+ */
 export function directActionForMailbox(
   mailboxId: MailSystemMailbox,
+  inInbox: boolean,
 ): { readonly action: MailReaderAction; readonly label: string } | null {
   if (mailboxId === "inbox") return { action: "archive", label: "Archive" };
   if (mailboxId === "spam") {
     return { action: "unmark-spam", label: "Not spam" };
   }
   if (mailboxId === "trash") return { action: "restore", label: "Restore" };
+  if ((mailboxId === "all" || mailboxId === "starred") && !inInbox) {
+    return { action: "move-to-inbox", label: "Move to Inbox" };
+  }
   return null;
+}
+
+/** A conversation is in the Inbox while any of its messages is, which is how
+ *  both providers answer it for the thread as a whole. */
+export function letterInInbox(detail: MailThreadDetail): boolean {
+  return detail.messages.some((message) => message.inInbox);
 }
 
 function mailboxLabel(mailboxId: MailSystemMailbox): string {

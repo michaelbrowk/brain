@@ -20,6 +20,7 @@ import { parkDiscard, type DeferredDiscard } from "./mail-deferred-discard";
 import { MailDraftsList, type MailDraftsState } from "./mail-drafts";
 import {
   directActionForMailbox,
+  letterInInbox,
   MailReader,
   waitForContentPoll,
   type MailReaderAction,
@@ -3330,6 +3331,80 @@ export function MailSurface({
   );
 
   /**
+   * Undo of Move to Inbox: the letter leaves the Inbox again. The pill stands
+   * for nine seconds and the reader may have moved on inside them, so the
+   * answer goes where the letter is on screen. A reader still on it takes it
+   * in place and offers Move to Inbox again. An Inbox column, the account's
+   * own or All inboxes, re-reads its first page, which no longer holds the
+   * row. Any other folder lists the letter either way.
+   */
+  const undoMoveToInbox = useCallback(
+    async (thread: MailThreadListItem) => {
+      const { accountId, threadId } = thread;
+      mutationLockRef.current = true;
+      setMutating(true);
+      try {
+        await client.updateThread({ accountId, threadId, archive: true });
+      } catch (error) {
+        onToast?.(threadActionFailure(error));
+        return;
+      } finally {
+        mutationLockRef.current = false;
+        setMutating(false);
+      }
+      const reader = readerStateRef.current;
+      if (
+        reader.kind === "ready" &&
+        reader.detail.thread.accountId === accountId &&
+        reader.detail.thread.threadId === threadId
+      ) {
+        setReaderState({
+          kind: "ready",
+          detail: withLetterInInbox(reader.detail, false),
+        });
+      }
+      if (selectedAccountIdRef.current === UNIFIED_ACCOUNT_ID) {
+        void refreshUnifiedSilently(new AbortController().signal);
+      } else if (
+        selectedAccountIdRef.current === accountId &&
+        selectedMailboxIdRef.current === "inbox"
+      ) {
+        void refreshThreadsSilently(
+          accountId,
+          "inbox",
+          new AbortController().signal,
+        );
+      }
+    },
+    [client, onToast, refreshThreadsSilently, refreshUnifiedSilently],
+  );
+
+  /** The sentence a landed reader action says. Move to Inbox carries an Undo,
+   *  because the folder it was pressed in offers no Archive to reverse it. */
+  const confirmThreadAction = useCallback(
+    (
+      thread: MailThreadListItem,
+      action: Exclude<MailReaderAction, "toggle-read">,
+    ) => {
+      if (action !== "move-to-inbox") {
+        onToast?.(threadActionConfirmation(action));
+        return;
+      }
+      onToast?.(threadActionConfirmation(action), {
+        icon: "inbox-linear",
+        actionLabel: "Undo",
+        pendingLabel: "Undoing…",
+        durationMs: SMART_UNDO_MS,
+        // Refused while another mail action holds the lock: the pill keeps
+        // standing and the press can be made again.
+        onAction: () =>
+          mutationLockRef.current ? false : undoMoveToInbox(thread),
+      });
+    },
+    [onToast, undoMoveToInbox],
+  );
+
+  /**
    * Non-removing mutation for the held open thread (single-account unread
    * view / unread-first sort). The server PATCH fires exactly as everywhere
    * else — server truth stays immediate — but the page-1 refetch is
@@ -3474,9 +3549,7 @@ export function MailSurface({
             setSelectedThreadId(null);
             setReaderState({ kind: "idle" });
             clearStickyOpen();
-            if (action !== "toggle-read") {
-              onToast?.(threadActionConfirmation(action));
-            }
+            if (action !== "toggle-read") confirmThreadAction(thread, action);
             return;
           }
           page =
@@ -3513,22 +3586,29 @@ export function MailSurface({
         const reader = readerStateRef.current;
         if (
           !refreshedThread &&
-          (action === "toggle-read" || action === "star" || action === "unstar") &&
+          (action === "toggle-read" ||
+            action === "star" ||
+            action === "unstar" ||
+            action === "move-to-inbox") &&
           reader.kind === "ready" &&
           reader.detail.thread.accountId === accountId &&
           reader.detail.thread.threadId === threadId
         ) {
           // A letter beyond the mailbox's first page, the palette's pick from
           // deep in All Mail, is missing from the refetch without having gone
-          // anywhere. A read or a star moves nothing, so the reader stays and
-          // takes the answer in place, as the held path does. Only an action
-          // that moves the letter closes it.
+          // anywhere. A read or a star moves nothing, and Move to Inbox,
+          // offered only outside the Inbox, leaves it in the folder on screen,
+          // so the reader stays and takes the answer in place, as the held
+          // path does. Only an action that moves the letter out closes it.
           setReaderState({
             kind: "ready",
-            detail: {
-              ...reader.detail,
-              thread: withReadOrStar(reader.detail.thread, action),
-            },
+            detail:
+              action === "move-to-inbox"
+                ? withLetterInInbox(reader.detail, true)
+                : {
+                    ...reader.detail,
+                    thread: withReadOrStar(reader.detail.thread, action),
+                  },
           });
         } else if (!refreshedThread) {
           selectedThreadIdRef.current = null;
@@ -3571,9 +3651,7 @@ export function MailSurface({
             }
           }
         }
-        if (action !== "toggle-read") {
-          onToast?.(threadActionConfirmation(action));
-        }
+        if (action !== "toggle-read") confirmThreadAction(thread, action);
       } catch (error) {
         onToast?.(threadActionFailure(error));
       } finally {
@@ -3581,7 +3659,7 @@ export function MailSurface({
         setMutating(false);
       }
     },
-    [clearStickyOpen, client, commitThreadState, onToast],
+    [clearStickyOpen, client, commitThreadState, confirmThreadAction, onToast],
   );
 
   /**
@@ -4577,7 +4655,10 @@ export function MailSurface({
         );
         if (!account?.capabilities.threadMutations) return;
         if (event.key === "e") {
-          const direct = directActionForMailbox(selectedMailboxIdRef.current);
+          const direct = directActionForMailbox(
+            selectedMailboxIdRef.current,
+            letterInInbox(reader.detail),
+          );
           if (!direct) return;
           event.preventDefault();
           void mutateOpenThread(openThread, direct.action);
@@ -5749,6 +5830,18 @@ function pageWithHeldThread(
   return { ...fresh, items };
 }
 
+/** A conversation moved into or out of the Inbox, as the provider moves it:
+ *  every message at once. */
+function withLetterInInbox(
+  detail: MailThreadDetail,
+  inInbox: boolean,
+): MailThreadDetail {
+  return {
+    ...detail,
+    messages: detail.messages.map((message) => ({ ...message, inInbox })),
+  };
+}
+
 /** A read or star action's answer, applied to the row it was taken on. */
 function withReadOrStar(
   item: MailThreadListItem,
@@ -5769,6 +5862,7 @@ function threadMutationInput(
   };
   if (action === "toggle-read") return { ...base, read: thread.unread };
   if (action === "archive") return { ...base, archive: true };
+  if (action === "move-to-inbox") return { ...base, archive: false };
   if (action === "trash") return { ...base, trash: true };
   if (action === "restore") return { ...base, restore: true };
   if (action === "mark-spam") return { ...base, spam: true };
@@ -5836,6 +5930,7 @@ function threadActionFailure(error: unknown): string {
 
 function threadActionConfirmation(action: Exclude<MailReaderAction, "toggle-read">): string {
   if (action === "archive") return "Conversation archived";
+  if (action === "move-to-inbox") return "Moved to Inbox";
   if (action === "trash") return "Conversation moved to trash";
   if (action === "restore") return "Conversation restored";
   if (action === "mark-spam") return "Conversation marked as spam";

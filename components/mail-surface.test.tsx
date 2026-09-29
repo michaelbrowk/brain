@@ -8813,6 +8813,32 @@ describe("MailSurface", () => {
       expect(readerButtons()).not.toContain("Archive");
     });
 
+    it("opens a letter the search found in All Mail from Inbox when Inbox holds it", async () => {
+      // Pressed before Mail exists, so the request is in hand while the Inbox
+      // page is still loading. Most of what the palette finds in All Mail is
+      // in Inbox too, and Inbox is where the letter keeps its Archive: the
+      // column waits for that page before it moves anywhere.
+      requestOpenThread(accountA.accountId, thread.threadId, "all");
+      const client = makeClient();
+      await act(async () =>
+        root.render(<MailSurface client={client} onOpenSettings={() => {}} />),
+      );
+      await settle();
+
+      await until(
+        () => vi.mocked(client.readThread).mock.calls.length > 0,
+        "the thread is read from Inbox",
+      );
+      expect(client.readThread).toHaveBeenCalledWith({
+        accountId: accountA.accountId,
+        threadId: thread.threadId,
+      });
+      expect(client.listMailboxThreads).not.toHaveBeenCalled();
+      expect(client.readMailboxThread).not.toHaveBeenCalled();
+      expect(navTrigger()?.getAttribute("aria-label")).toBe("Mailbox: Inbox");
+      expect(pendingOpenThread()).toBeNull();
+    });
+
     it("opens a letter found outside Inbox from All inboxes too", async () => {
       const archivedB: MailThreadListItem = {
         ...archived,

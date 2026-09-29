@@ -2813,6 +2813,23 @@ export function MailSurface({
     // and a second reset would only spin.
     const sameAccount = selectedAccountId === pendingOpen.accountId;
     const home = sameAccount ? mailboxId : "inbox";
+    // The list on screen has not committed since the column last moved, so
+    // "not in the list" is not yet an answer.
+    const listPending =
+      threadState.kind === "loading" || threadState === ledger.listAtMove;
+    // Standing in the letter's own Inbox, a request for another mailbox waits
+    // for the Inbox page before it moves. Most of what the palette finds in
+    // All Mail is in Inbox too, and there it opens with its Archive; only a
+    // letter the page does not hold is followed to the mailbox it came from.
+    if (
+      sameAccount &&
+      home !== "inbox" &&
+      selectedMailboxId === "inbox" &&
+      searchQuery.trim() === "" &&
+      listPending
+    ) {
+      return;
+    }
     if (selectedMailboxId !== home || searchQuery.trim() !== "") {
       if (ledger.reset) {
         clearOpenThreadRequest();
@@ -2837,11 +2854,7 @@ export function MailSurface({
       return;
     }
 
-    // The list the move asked for has not committed yet, so "not in the
-    // list" is not yet an answer.
-    if (threadState.kind === "loading" || threadState === ledger.listAtMove) {
-      return;
-    }
+    if (listPending) return;
     if (ledger.fetched) return;
     ledger.fetched = true;
     void fetchRequestedThread(pendingOpen, mailboxId);

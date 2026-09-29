@@ -14,8 +14,10 @@ import {
   MailComposer,
   type MailComposerDraft,
   type MailComposerFields,
+  type MailComposerLeaving,
   type MailComposerSaveStatus,
 } from "./mail-composer";
+import { ATTACHMENT_REFUSALS } from "./mail-composer-attachments";
 import { parkDiscard, type DeferredDiscard } from "./mail-deferred-discard";
 import { MailDraftsList, type MailDraftsState } from "./mail-drafts";
 import {
@@ -262,6 +264,10 @@ const DRAFT_AUTOSAVE_DELAY_MS = 700;
 /** The discard pill's id: the sentence said again under it, without an Undo,
  *  takes the standing pill rather than queueing behind its own way back. */
 const DISCARD_TOAST_ID = "mail-draft-discard";
+/** What a sheet that leaves with files leaves behind. The files lived only in
+ *  the sheet's memory and the draft API stores none, so the draft that stays
+ *  is the words: said urgently, at the gesture that lost them. */
+const DRAFT_WITHOUT_FILES = "Draft kept without its files.";
 const DRAFT_RECOVERY_PREFIX = "brain:mail:draft-recovery:v1:";
 const THREAD_SORT_PREFIX = "brain:mail:sort:v1:";
 const SEND_POLL_BASE_DELAY_MS = 5_000;
@@ -860,7 +866,7 @@ export function MailSurface({
    * leaves without a pill; so does one with no toast channel to offer it in.
    * One discard is parked at a time: a second press lets the first go.
    */
-  const discardComposer = useCallback(() => {
+  const discardComposer = useCallback((leaving?: MailComposerLeaving) => {
     const sync = draftSyncRef.current;
     const current = composerRef.current;
     if (!sync || !current || !onToast || isDraftSyncEmpty(sync)) {
@@ -906,6 +912,9 @@ export function MailSurface({
         const parcel = parked.restore();
         if (!parcel) return false;
         restoreDiscardedComposer(parcel);
+        // The files lived only on the sheet and went with the discard; the
+        // letter that comes back is the words, and that is said at once.
+        if (leaving?.withFiles) onToast(DRAFT_WITHOUT_FILES, { urgent: true });
       },
       onExpire: () => {
         if (deferredDiscardRef.current === parked) deferredDiscardRef.current = null;
@@ -933,6 +942,10 @@ export function MailSurface({
       readonly replyToMessageId: string | null;
       readonly notice: string | null;
       readonly recoverySourceDraftId?: string;
+      /** The key of a sheet already standing, handed over by the From switch
+       *  so the letter moves under the same sheet: the key is the sheet's
+       *  identity at its mount, and a new one would replay the whole sheet. */
+      readonly idempotencyKey?: string;
     }) => {
       const existing = draftSyncRef.current;
       if (existing) closeComposer(isDraftSyncEmpty(existing));
@@ -940,7 +953,7 @@ export function MailSurface({
       // closes, and its delete goes out.
       flushDeferredDiscard();
       const draftId = createDraftId();
-      const idempotencyKey = createIdempotencyKey();
+      const idempotencyKey = params.idempotencyKey ?? createIdempotencyKey();
       const createInput: MailDraftCreateInput = {
         draftId,
         accountId: params.accountId,
@@ -1131,7 +1144,9 @@ export function MailSurface({
    * the tab is hidden, aborted when the Mail surface unmounts.
    */
   const watchSendOperation = useCallback(
-    (operationId: string) => {
+    /** `onSent` runs once the letter is known sent: a letter that went with
+     *  files leaves its draft standing until then, and this is where it goes. */
+    (operationId: string, onSent?: () => void) => {
       const pollers = sendPollersRef.current;
       if (pollers.has(operationId)) return;
       const controller = new AbortController();
@@ -1163,6 +1178,7 @@ export function MailSurface({
             onToast?.("Delivery unconfirmed. Check Drafts.");
           } else {
             onToast?.("Message sent");
+            onSent?.();
           }
           const accountId = selectedAccountIdRef.current;
           if (accountId) void refreshDraftBadge(accountId);
@@ -2936,11 +2952,18 @@ export function MailSurface({
    * the fields as they stand, and the draft it leaves behind closes with
    * delete at once, so the first account's Drafts never lists a letter the
    * writer moved. Compose only: a reply goes from the account it arrived in.
+   *
+   * IN PLACE. The move happens under a sheet that stays: the new composer
+   * state keeps the old one's key, so React keeps the mounted sheet, its
+   * caret and the files that live only in it, and the one thing the writer
+   * sees change is the name in From. The close and the open land in one
+   * render, so there is never a frame without a sheet.
    */
   const switchComposerAccount = useCallback(
     (accountId: string, fields: MailComposerFields) => {
       const account = selectedMailAccount(accountsStateRef.current, accountId);
       if (!account?.capabilities.compose || !account.capabilities.send) return;
+      const sheetKey = composerRef.current?.draft.idempotencyKey;
       closeComposer(true);
       composerActionEpochRef.current += 1;
       openComposer({
@@ -2954,6 +2977,7 @@ export function MailSurface({
         text: fields.text,
         replyToMessageId: null,
         notice: null,
+        idempotencyKey: sheetKey,
       });
     },
     [closeComposer, openComposer],
@@ -3150,6 +3174,70 @@ export function MailSurface({
         // Autosave is best-effort; the send reconciles from the stored draft.
       }
       if (sync.closed || draftSyncRef.current !== sync) return;
+      if (input.attachments.length > 0) {
+        /*
+          THE SHEET'S FILES GO THROUGH THE SEND DOOR. A stored draft carries
+          no files (its API stores none, and the outbox proves a submission
+          against the draft it came from), so a letter with files is sent as
+          it stands on the sheet, in the MCP tool's own input, under a key of
+          its own for this press. The draft that holds its words stays until
+          the letter is known sent, and the watch deletes it then: a letter
+          that fails later is still in Drafts, which is what the failure
+          toast says.
+        */
+        try {
+          const result = await client.send({
+            ...input,
+            idempotencyKey: createIdempotencyKey(),
+          });
+          if (
+            !isComposerSubmission(composerRef.current, input) ||
+            draftSyncRef.current !== sync
+          ) {
+            return;
+          }
+          if (result.status === "failed" || result.status === "delivery_unknown") {
+            const unknown = result.status === "delivery_unknown";
+            if (!unknown) sync.frozen = false;
+            updateSubmittedComposer((current) => ({
+              ...current,
+              sending: false,
+              blocked: unknown,
+              error: unknown
+                ? "Delivery status is unknown. Check Sent before trying again."
+                : "Message wasn’t sent. Try again.",
+              errorSettings: false,
+            }));
+            return;
+          }
+          clearDraftRecovery(sync.draftId);
+          if (sync.recoverySourceDraftId) {
+            clearDraftRecovery(sync.recoverySourceDraftId);
+            sync.recoverySourceDraftId = null;
+          }
+          sync.closed = true;
+          draftSyncRef.current = null;
+          composerRef.current = null;
+          setComposer(null);
+          setSaveStatus("idle");
+          onToast?.(result.status === "sent" ? "Message sent" : "Message queued");
+          if (result.status === "sent") deleteDraftSync(sync);
+          else watchSendOperation(result.operationId, () => deleteDraftSync(sync));
+        } catch (error) {
+          // The same reading as the draft door's: a refusal left nothing
+          // behind and Send stays live; a lost answer blocks.
+          const failure = classifySendFailure(error);
+          if (!failure.blocked) sync.frozen = false;
+          updateSubmittedComposer((current) => ({
+            ...current,
+            sending: false,
+            blocked: failure.blocked,
+            error: failure.message,
+            errorSettings: failure.settings ?? false,
+          }));
+        }
+        return;
+      }
       if (
         sync.revision === null ||
         (sync.pendingFields !== null &&
@@ -3294,7 +3382,7 @@ export function MailSurface({
         }));
       }
     },
-    [client, flushDraftSync, onToast, watchSendOperation],
+    [client, deleteDraftSync, flushDraftSync, onToast, watchSendOperation],
   );
 
   /**
@@ -5013,11 +5101,16 @@ export function MailSurface({
             sendErrorSettings={composer.errorSettings}
             onOpenSettings={(invoker) => onOpenSettings(invoker, composerAccount.accountId)}
             saveStatus={saveStatus}
-            onCancel={() =>
-              closeComposer(
-                draftSyncRef.current ? isDraftSyncEmpty(draftSyncRef.current) : false,
-              )
-            }
+            onCancel={(leaving) => {
+              const empty = draftSyncRef.current
+                ? isDraftSyncEmpty(draftSyncRef.current)
+                : false;
+              closeComposer(empty);
+              // A kept draft is the words: the files lived only on the sheet.
+              if (leaving.withFiles && !empty) {
+                onToast?.(DRAFT_WITHOUT_FILES, { urgent: true });
+              }
+            }}
             onDiscard={discardComposer}
             onDraftChange={onComposerDraftChange}
             onRetrySave={retryDraftSave}
@@ -5646,7 +5739,12 @@ function classifySendFailure(error: unknown): {
   }
   return {
     blocked: false,
-    message: sendFailureMessage(error.code),
+    // A 413 is the body's size whatever its code: the send door cuts a body
+    // off by its bytes before it reads a code into it, and only files can
+    // carry a letter that far.
+    message: sendFailureMessage(
+      error.status === 413 ? "mail_send_attachments_too_large" : error.code,
+    ),
     settings:
       error.code === "mail_draft_account_reauth_required" ||
       error.code === "mail_send_account_reauth_required",
@@ -5681,6 +5779,10 @@ function sendFailureMessage(code: string | null): string {
       return "Brain couldn’t find this draft. Reopen it from Drafts.";
     case "mail_send_rate_limited":
       return "Too many sends right now. Wait a moment, then try again.";
+    case "mail_send_attachments_too_large":
+      return `These files are too large to send. ${ATTACHMENT_REFUSALS.total}`;
+    case "mail_send_attachments_invalid":
+      return "One of these files can’t be sent. Remove it and try again.";
     default:
       return "This message wasn’t sent. Try again.";
   }

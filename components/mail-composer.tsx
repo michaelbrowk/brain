@@ -14,6 +14,8 @@ import * as Dialog from "@radix-ui/react-dialog";
 import * as Dropdown from "@radix-ui/react-dropdown-menu";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import {
+  CHIP_ROW_AIR,
+  CHIP_ROW_RING,
   DUR,
   EASE_OUT,
   SHEET_ENTER_Y,
@@ -23,12 +25,20 @@ import {
 } from "@/lib/motion";
 
 import { useSheetGesture } from "./use-sheet-gesture";
+import { formatBytes } from "@/lib/mail/attachment-preview";
 import {
   describeMailRecipientProblem,
   parseMailRecipientFields,
   type MailRecipientField,
 } from "@/lib/mail/recipients";
+import {
+  ATTACHMENT_REFUSALS,
+  admitAttachments,
+  encodeAttachments,
+  type ComposeAttachment,
+} from "./mail-composer-attachments";
 import { Button, IconButton } from "./ui/button";
+import { Chip } from "./ui/chip";
 import { Icon } from "./ui/icon";
 import { Kbd, useShortcutTitle } from "./ui/primitives";
 import { ScrollEdge } from "./ui/scroll-edge";
@@ -56,22 +66,46 @@ export type MailComposerFields = {
 
 export type MailComposerSaveStatus = "idle" | "saving" | "saved" | "error";
 
-/** True while the pointer carries files. A file dropped on an unguarded page
- *  navigates the browser to the file itself, which takes the unsaved draft in
- *  React state with it — so the sheet claims the drop and refuses it out
- *  loud. Compose-time attachments do not exist yet: `MailSendInput` carries
- *  no attachment list and the draft API stores none. */
+export type MailComposerLeaving = { readonly withFiles: boolean };
+
+/** True while the pointer carries files. The whole sheet is the drop zone: a
+ *  file dropped on an unguarded page navigates the browser to the file
+ *  itself, which takes the unsaved draft in React state with it, so the
+ *  sheet claims every file drag, whether it takes the file or not. */
 function draggingFiles(event: DragEvent<HTMLElement>): boolean {
   const types = event.dataTransfer?.types;
   return types ? Array.from(types).includes("Files") : false;
 }
 
+/** The files a drop carries, and whether a folder was among them. A folder
+ *  arrives as a file the browser cannot read, so it is told apart by its
+ *  entry, which can only be asked during the drop itself. */
+function droppedFiles(transfer: DataTransfer): {
+  readonly files: readonly File[];
+  readonly folder: boolean;
+} {
+  const items = transfer.items ? Array.from(transfer.items) : [];
+  if (items.length === 0) return { files: Array.from(transfer.files ?? []), folder: false };
+  const files: File[] = [];
+  let folder = false;
+  for (const item of items) {
+    if (item.kind !== "file") continue;
+    if (item.webkitGetAsEntry?.()?.isDirectory) {
+      folder = true;
+      continue;
+    }
+    const file = item.getAsFile();
+    if (file) files.push(file);
+  }
+  return { files, folder };
+}
+
 /** What the actions row's slot says, if anything. One sentence at a time, in
  *  this order: a refusal the writer can fix stands over a refusal from the
- *  service, both stand over a refused drop, and all of them over a save that
- *  did not land. */
+ *  service, both stand over a file the sheet did not take, and all of them
+ *  over a save that did not land. */
 type SlotMessage = {
-  readonly key: "validation" | "send" | "drop" | "save";
+  readonly key: "validation" | "send" | "attach" | "save";
   readonly text: string;
   readonly role: "alert" | "status";
 };
@@ -252,8 +286,11 @@ export function MailComposer({
   /** The send error is a reauth failure — offer Mail settings next to it. */
   sendErrorSettings?: boolean;
   saveStatus?: MailComposerSaveStatus;
-  onCancel: () => void;
-  onDiscard: () => void;
+  /** Close and Discard say whether the sheet left with files on it. The
+   *  files live only in the sheet and go with it, so the surface is told,
+   *  to say that the draft it keeps has none. */
+  onCancel: (leaving: MailComposerLeaving) => void;
+  onDiscard: (leaving: MailComposerLeaving) => void;
   onDraftChange: (fields: MailComposerFields) => void;
   onRetrySave: () => void;
   onSend: (input: MailSendInput) => void;
@@ -277,10 +314,31 @@ export function MailComposer({
     readonly field: MailRecipientField;
     readonly message: string;
   } | null>(null);
-  /** A file was dropped on the sheet. The refusal stands in the slot until
-   *  the writer types on: it answered a gesture, and the next gesture is
-   *  the writer moving past it. */
-  const [dropRefused, setDropRefused] = useState(false);
+  /** The files on the sheet, in its memory only (`mail-composer-attachments`),
+   *  and what the slot says about a file it did not take. The refusal stands
+   *  until the writer types on or changes the shelf: it answered a gesture,
+   *  and the next gesture is the writer moving past it. */
+  const [attachments, setAttachments] = useState<readonly ComposeAttachment[]>([]);
+  const [attachRefusal, setAttachRefusal] = useState<string | null>(null);
+  const nextAttachmentIdRef = useRef(0);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const shelfRef = useRef<HTMLDivElement | null>(null);
+  /** Where the caret goes after a chip leaves: the chip that took its place,
+   *  the one before it, or the paperclip once the shelf is empty. */
+  const refocusRef = useRef<number | "clip" | null>(null);
+  /** The files are being read for the send. A beat, not a state anyone sees
+   *  for long, but the sheet reads as sending through it so nothing can be
+   *  typed into a letter that has already gone to be sent. */
+  const [preparing, setPreparing] = useState(false);
+  const busy = sending || preparing;
+  const aliveRef = useRef(true);
+  useEffect(() => {
+    aliveRef.current = true;
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+  const canAttach = account.capabilities.send;
   const toRef = useRef<HTMLInputElement | null>(null);
   const ccRef = useRef<HTMLInputElement | null>(null);
   const bodyRef = useRef<HTMLTextAreaElement | null>(null);
@@ -300,8 +358,8 @@ export function MailComposer({
    *  flips and not when the sheet itself arrives. State adjusted during the
    *  render rather than a ref read in it (React's own pattern for a previous
    *  prop), so the count is right on the very render that remounts the word. */
-  const [swaps, setSwaps] = useState({ sending, count: 0 });
-  if (swaps.sending !== sending) setSwaps({ sending, count: swaps.count + 1 });
+  const [swaps, setSwaps] = useState({ sending: busy, count: 0 });
+  if (swaps.sending !== busy) setSwaps({ sending: busy, count: swaps.count + 1 });
   const swapping = swaps.count > 0;
   const title = composerTitle(initialDraft.mode);
   const fromName = account.displayName || account.emailAddress;
@@ -328,7 +386,7 @@ export function MailComposer({
         account={account}
         accounts={accounts}
         fromName={fromName}
-        disabled={sending}
+        disabled={busy}
         onOpenChange={setFromMenuOpen}
         onSwitch={(accountId) => onSwitchAccount?.(accountId, { to, cc, bcc, subject, text })}
       />
@@ -364,10 +422,23 @@ export function MailComposer({
     ccRef.current?.focus({ preventScroll: true });
   }, [showCopies]);
 
+  useEffect(() => {
+    const target = refocusRef.current;
+    if (target === null) return;
+    refocusRef.current = null;
+    const next =
+      target === "clip"
+        ? fileInputRef.current?.parentElement?.querySelector<HTMLElement>(
+            ".brain-compose-clip",
+          )
+        : shelfRef.current?.querySelector<HTMLElement>(`[data-attachment="${target}"]`);
+    next?.focus({ preventScroll: true });
+  }, [attachments]);
+
   /** Close keeps the draft and asks nothing. Inert while a send is out. */
   const close = () => {
-    if (sending) return;
-    onCancel();
+    if (busy) return;
+    onCancel({ withFiles: attachments.length > 0 });
   };
 
   /**
@@ -379,13 +450,39 @@ export function MailComposer({
    * send is out.
    */
   const discard = () => {
-    if (sending) return;
-    onDiscard();
+    if (busy) return;
+    onDiscard({ withFiles: attachments.length > 0 });
+  };
+
+  /**
+   * Files from the paperclip or a drop join the shelf when the codec's caps
+   * say they fit; what does not fit is said in the slot. A folder in a drop
+   * is its own refusal, said before the caps'.
+   */
+  const attach = (files: readonly File[], folder = false) => {
+    if (busy || !canAttach) return;
+    const { admitted, refusal } = admitAttachments(attachments, files);
+    if (admitted.length > 0) {
+      setAttachments([
+        ...attachments,
+        ...admitted.map((entry) => ({ ...entry, id: nextAttachmentIdRef.current++ })),
+      ]);
+    }
+    setAttachRefusal(folder ? ATTACHMENT_REFUSALS.folder : refusal);
+  };
+
+  const detach = (id: number) => {
+    if (busy) return;
+    const index = attachments.findIndex((entry) => entry.id === id);
+    const rest = attachments.filter((entry) => entry.id !== id);
+    refocusRef.current = rest[Math.min(index, rest.length - 1)]?.id ?? "clip";
+    setAttachments(rest);
+    setAttachRefusal(null);
   };
 
   const submit = (event?: FormEvent) => {
     event?.preventDefault();
-    if (sending || sendBlocked) return;
+    if (busy || sendBlocked) return;
     // The same contract the Mail service applies to the stored draft text, so
     // the writer never gets an opaque refusal for a list this screen approved.
     const recipients = parseMailRecipientFields({ to, cc, bcc });
@@ -400,7 +497,7 @@ export function MailComposer({
     }
     setValidation(null);
     onDraftChange({ to, cc, bcc, subject, text });
-    onSend({
+    const letter: Omit<MailSendInput, "attachments"> = {
       accountId: account.accountId,
       idempotencyKey: initialDraft.idempotencyKey,
       mode:
@@ -413,12 +510,30 @@ export function MailComposer({
       subject,
       text,
       replyToMessageId: initialDraft.replyToMessageId,
-      // The sheet has no attachment control in this release, and a message
-      // a person typed is never marked as an agent's.
-      attachments: [],
+      // A message a person typed is never marked as an agent's.
       origin: "app",
       agentLine: false,
-    });
+    };
+    if (attachments.length === 0) {
+      onSend({ ...letter, attachments: [] });
+      return;
+    }
+    // The files are read only now, as the letter goes. The hand-off and the
+    // end of the read land in one render, so the sheet reads as sending
+    // from the press straight through to the surface's own `sending`.
+    setPreparing(true);
+    encodeAttachments(attachments).then(
+      (encoded) => {
+        if (!aliveRef.current) return;
+        onSend({ ...letter, attachments: encoded });
+        setPreparing(false);
+      },
+      () => {
+        if (!aliveRef.current) return;
+        setPreparing(false);
+        setAttachRefusal(ATTACHMENT_REFUSALS.unreadable);
+      },
+    );
   };
 
   const onKeyDown = (event: KeyboardEvent<HTMLFormElement>) => {
@@ -428,10 +543,11 @@ export function MailComposer({
     }
   };
 
-  /** Typing on clears what the writer was told about a gesture: the drop
-   *  refusal, and a recipient refusal once that field is being edited. */
+  /** Typing on clears what the writer was told about a gesture: a file the
+   *  sheet did not take, and a recipient refusal once that field is being
+   *  edited. */
   const typed = () => {
-    if (dropRefused) setDropRefused(false);
+    if (attachRefusal) setAttachRefusal(null);
   };
   const recipient =
     (set: (value: string) => void) => (event: FormEvent<HTMLInputElement>) => {
@@ -444,8 +560,8 @@ export function MailComposer({
     ? { key: "validation", text: validation.message, role: "alert" }
     : sendError
       ? { key: "send", text: sendError, role: "alert" }
-      : dropRefused
-        ? { key: "drop", text: "Attachments aren’t available yet.", role: "status" }
+      : attachRefusal
+        ? { key: "attach", text: attachRefusal, role: "status" }
         : saveStatus === "error"
           ? { key: "save", text: "Not saved", role: "status" }
           : null;
@@ -460,7 +576,7 @@ export function MailComposer({
   return (
     <MailComposePaper
       title={title}
-      sending={sending}
+      sending={busy}
       holdEscape={fromMenuOpen}
       focusOnOpen={() => (initialDraft.mode === "compose" ? toRef.current : bodyRef.current)}
       onDismiss={close}
@@ -472,13 +588,15 @@ export function MailComposer({
         onDragOver={(event) => {
           if (!draggingFiles(event)) return;
           event.preventDefault();
+          event.dataTransfer.dropEffect = busy || !canAttach ? "none" : "copy";
         }}
         onDrop={(event) => {
           if (!draggingFiles(event)) return;
           event.preventDefault();
-          // The sheet is the whole window, so the refusal is said on it, in
-          // the slot, and not in a pill somewhere under it.
-          setDropRefused(true);
+          // The sheet is the whole window, so whatever it has to say about
+          // the drop is said on it, in the slot, and not in a pill under it.
+          const { files, folder } = droppedFiles(event.dataTransfer);
+          attach(files, folder);
         }}
       >
         {/* THE ACTIONS ROW, ON TOP. Send stands where a thumb reaches it and
@@ -493,14 +611,14 @@ export function MailComposer({
         <div
           className="brain-compose-actions"
           data-message={message || slotStanding ? "" : undefined}
-          data-sending={sending ? "" : undefined}
+          data-sending={busy ? "" : undefined}
         >
           <IconButton
             type="button"
             size={28}
             aria-label="Close draft"
             title="Close draft"
-            aria-disabled={sending || undefined}
+            aria-disabled={busy || undefined}
             onClick={close}
             className="brain-touch-hit"
           >
@@ -552,25 +670,49 @@ export function MailComposer({
               )}
             </AnimatePresence>
           </div>
-          {/* Attachments are the next slice; the clip stands in its place,
-              disabled and quiet, so the row does not reflow when it arrives. */}
-          <IconButton
-            type="button"
-            size={28}
-            aria-label="Attach files"
-            title="Attachments aren’t available yet."
-            disabled
-            className="brain-touch-hit"
-          >
-            <Icon name="paperclip-linear" size={16} />
-          </IconButton>
+          {/* The paperclip opens the system's file chooser through an input
+              nobody sees or tabs to: the clip is the control. Offered only
+              to an account that can send, and inert while a send is out. */}
+          {canAttach && (
+            <>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                hidden
+                tabIndex={-1}
+                disabled={busy}
+                onChange={(event) => {
+                  const files = Array.from(event.currentTarget.files ?? []);
+                  // Emptied at once, so choosing the same file again is a
+                  // change the input reports.
+                  event.currentTarget.value = "";
+                  attach(files);
+                }}
+              />
+              <IconButton
+                type="button"
+                size={28}
+                aria-label="Attach files"
+                title="Attach files"
+                aria-disabled={busy || undefined}
+                onClick={() => {
+                  if (busy) return;
+                  fileInputRef.current?.click();
+                }}
+                className="brain-compose-clip brain-touch-hit"
+              >
+                <Icon name="paperclip-linear" size={16} />
+              </IconButton>
+            </>
+          )}
           {!sendBlocked && (
             <IconButton
               type="button"
               size={28}
               aria-label="Discard draft"
               title="Discard draft"
-              aria-disabled={sending || undefined}
+              aria-disabled={busy || undefined}
               onClick={discard}
               className="brain-touch-hit"
             >
@@ -594,7 +736,7 @@ export function MailComposer({
             type="submit"
             variant="ink"
             title={sendTitle}
-            aria-busy={sending || undefined}
+            aria-busy={busy || undefined}
             disabled={sendBlocked}
             className="brain-compose-send brain-touch-hit"
           >
@@ -610,13 +752,13 @@ export function MailComposer({
                   reduced motion it stands still and the word says the work
                   is happening. */}
               <motion.span
-                key={sending ? "working" : "waiting"}
+                key={busy ? "working" : "waiting"}
                 className="brain-compose-send-word"
                 initial={reduce || !swapping ? false : { opacity: 0.5, filter: "blur(2px)" }}
                 animate={{ opacity: 1, filter: "blur(0px)" }}
                 transition={{ duration: DUR.base, ease: EASE_OUT }}
               >
-                {sending && (
+                {busy && (
                   <motion.span
                     className="brain-compose-send-glyph"
                     animate={reduce ? undefined : { rotate: 360 }}
@@ -625,7 +767,7 @@ export function MailComposer({
                     <Icon name="restart-linear" size={16} />
                   </motion.span>
                 )}
-                {sending ? "Sending" : "Send"}
+                {busy ? "Sending" : "Send"}
               </motion.span>
             </span>
           </Button>
@@ -656,7 +798,7 @@ export function MailComposer({
                   autoComplete="email"
                   value={to}
                   onChange={recipient(setTo)}
-                  readOnly={sending}
+                  readOnly={busy}
                   placeholder="name@example.com"
                   aria-invalid={validation?.field === "to" || undefined}
                   aria-describedby={validation?.field === "to" ? errorId : undefined}
@@ -667,7 +809,7 @@ export function MailComposer({
                       type="button"
                       variant="quiet"
                       className="brain-compose-copies"
-                      disabled={sending}
+                      disabled={busy}
                       onClick={() => {
                         focusCcRef.current = true;
                         setRevealedByPress(true);
@@ -707,7 +849,7 @@ export function MailComposer({
                       inputMode="email"
                       value={cc}
                       onChange={recipient(setCc)}
-                      readOnly={sending}
+                      readOnly={busy}
                       aria-invalid={validation?.field === "cc" || undefined}
                       aria-describedby={validation?.field === "cc" ? errorId : undefined}
                     />
@@ -723,7 +865,7 @@ export function MailComposer({
                       inputMode="email"
                       value={bcc}
                       onChange={recipient(setBcc)}
-                      readOnly={sending}
+                      readOnly={busy}
                       aria-invalid={validation?.field === "bcc" || undefined}
                       aria-describedby={validation?.field === "bcc" ? errorId : undefined}
                     />
@@ -745,11 +887,92 @@ export function MailComposer({
                     setSubject(event.currentTarget.value);
                     typed();
                   }}
-                  readOnly={sending}
+                  readOnly={busy}
                   placeholder="Subject"
                 />
               </motion.div>
             </div>
+
+            {/* THE SHELF: the letter's files under Subject, over the fold. A
+                chip per file, the document glyph, the name, the size and a
+                bare cross; the whole chip is the one button, and pressing it
+                takes the file off. It grows in the way Cc and Bcc do, on the
+                select spring, with the chips' ring room travelling with it
+                (`CHIP_ROW_RING`, the Tasks chips' own clip); a chip comes and
+                goes by opacity over DUR.fast and the rest close up on the
+                same spring. Reduced motion: the fades only. */}
+            <AnimatePresence initial={false}>
+              {attachments.length > 0 && (
+                <motion.div
+                  key="shelf"
+                  ref={shelfRef}
+                  role="group"
+                  aria-label="Attachments"
+                  className="brain-compose-shelf"
+                  initial={
+                    reduce
+                      ? { opacity: 0 }
+                      : { height: 0, opacity: 0, paddingTop: 0, paddingBottom: 0, marginTop: 0, marginBottom: 0 }
+                  }
+                  animate={{
+                    height: "auto",
+                    opacity: 1,
+                    paddingTop: CHIP_ROW_RING,
+                    paddingBottom: CHIP_ROW_RING,
+                    marginTop: CHIP_ROW_AIR - CHIP_ROW_RING,
+                    marginBottom: CHIP_ROW_AIR - CHIP_ROW_RING,
+                  }}
+                  exit={
+                    reduce
+                      ? { opacity: 0, transition: { duration: DUR.fast } }
+                      : { height: 0, opacity: 0, paddingTop: 0, paddingBottom: 0, marginTop: 0, marginBottom: 0 }
+                  }
+                  transition={reduce ? { duration: DUR.fast } : SPRING_SELECT}
+                >
+                  <AnimatePresence initial={false} mode="popLayout">
+                    {attachments.map((attachment) => {
+                      const size = formatBytes(attachment.file.size);
+                      return (
+                        <motion.div
+                          key={attachment.id}
+                          className="brain-compose-shelf-item"
+                          layout={reduce ? false : "position"}
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          exit={{ opacity: 0 }}
+                          transition={{
+                            opacity: { duration: DUR.fast },
+                            layout: SPRING_SELECT,
+                          }}
+                        >
+                          <Chip
+                            icon="document-text-linear"
+                            className="brain-compose-attachment"
+                            data-attachment={attachment.id}
+                            aria-label={`Remove ${attachment.filename}, ${size}`}
+                            title="Remove"
+                            aria-disabled={busy || undefined}
+                            onClick={() => detach(attachment.id)}
+                          >
+                            <span className="brain-compose-attachment-name">
+                              {attachment.filename}
+                            </span>
+                            <span className="brain-compose-attachment-size text-caption tabular-nums">
+                              {size}
+                            </span>
+                            <Icon
+                              name="close-linear"
+                              size={14}
+                              className="brain-compose-attachment-remove"
+                            />
+                          </Chip>
+                        </motion.div>
+                      );
+                    })}
+                  </AnimatePresence>
+                </motion.div>
+              )}
+            </AnimatePresence>
 
             {initialDraft.notice && (
               /* What a forward or a recovered draft has to say about itself
@@ -779,7 +1002,7 @@ export function MailComposer({
                   setText(event.currentTarget.value);
                   typed();
                 }}
-                readOnly={sending}
+                readOnly={busy}
                 placeholder="Write a message…"
                 className="text-body"
               />
@@ -827,7 +1050,24 @@ function FromSwitch({
           aria-label={`From: ${fromName}`}
           disabled={disabled}
         >
-          <span className="truncate">{fromName}</span>
+          {/* A switch moves the letter under a sheet that stays, so the one
+              thing that changes on it is this word: the old name and the new
+              cross in one cell over DUR.fast. Opacity only, which is also
+              what reduced motion keeps. */}
+          <span className="brain-compose-from-name">
+            <AnimatePresence initial={false}>
+              <motion.span
+                key={account.accountId}
+                className="brain-compose-from-word truncate"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: DUR.fast }}
+              >
+                {fromName}
+              </motion.span>
+            </AnimatePresence>
+          </span>
           <Icon name="alt-arrow-down-linear" size={14} className="brain-compose-from-mark" />
         </button>
       </Dropdown.Trigger>

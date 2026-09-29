@@ -136,6 +136,149 @@ const sendableAccount = {
   },
 };
 
+/** A second account that can send, so the sheet's From is a switch. */
+const secondAccount = {
+  ...sendableAccount,
+  accountId: `account-a${"b".repeat(32)}`,
+  emailAddress: "second@example.test",
+  displayName: null,
+};
+
+type Recorded = { readonly url: string; readonly method: string; readonly body: unknown };
+
+/**
+ * The Mail routes as a small server behind `fetch`: drafts are created,
+ * patched and deleted the way the service answers them, and a send is
+ * queued. Everything the sheet asked for is recorded in order, so a test
+ * reads the wire rather than a mock of the surface's own client.
+ */
+function installMailServer(
+  accounts: readonly unknown[],
+  sendAnswer: { readonly status: number; readonly body: unknown } = {
+    status: 200,
+    body: { apiVersion: 1, operationId: "send-files-1", created: true, status: "queued" },
+  },
+) {
+  const requests: Recorded[] = [];
+  const revisions = new Map<string, number>();
+  const json = (body: unknown, status = 200) =>
+    Promise.resolve({
+      ok: status >= 200 && status < 300,
+      status,
+      json: async () => body,
+      text: async () => JSON.stringify(body),
+    } as Response);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockImplementation((input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? "GET";
+      const body = typeof init?.body === "string" ? JSON.parse(init.body) : null;
+      requests.push({ url, method, body });
+      const path = url.split("?")[0]!;
+      if (path === "/api/mail/accounts/capabilities") {
+        return json({ apiVersion: 3, accounts });
+      }
+      if (path.startsWith("/api/mail/threads")) {
+        return json({
+          apiVersion: 1,
+          items: [],
+          nextCursor: null,
+          sync: { status: "idle", lastSuccessfulAt: 1_700_000_000_000 },
+        });
+      }
+      if (path === "/api/mail/drafts" && method === "GET") {
+        return json({ apiVersion: 1, drafts: [] });
+      }
+      if (path === "/api/mail/drafts" && method === "POST") {
+        revisions.set(body.draftId, 0);
+        return json({
+          apiVersion: 1,
+          created: true,
+          draft: {
+            apiVersion: 1,
+            draftId: body.draftId,
+            accountId: body.accountId,
+            revision: 0,
+            state: "editing",
+            intent: body.intent,
+            to: body.to,
+            cc: body.cc,
+            bcc: body.bcc,
+            subject: body.subject,
+            text: body.text,
+            attachments: [],
+            sendOperationId: null,
+            sendErrorCode: null,
+            createdAt: 1_700_000_000_000,
+            updatedAt: 1_700_000_000_000,
+            sentAt: null,
+          },
+        });
+      }
+      if (path.startsWith("/api/mail/drafts/") && method === "PATCH") {
+        const draftId = decodeURIComponent(path.split("/")[4]!);
+        const appliedRevision = (revisions.get(draftId) ?? 0) + 1;
+        revisions.set(draftId, appliedRevision);
+        return json({ apiVersion: 1, replayed: false, appliedRevision, operationId: null });
+      }
+      if (path.startsWith("/api/mail/drafts/") && method === "DELETE") {
+        return json({ apiVersion: 1, deleted: true, replayed: false });
+      }
+      if (path === "/api/mail/send" && method === "POST") {
+        return json(sendAnswer.body, sendAnswer.status);
+      }
+      return json({ error: "not found" }, 404);
+    }),
+  );
+  return {
+    requests,
+    creates: () => requests.filter((r) => r.url === "/api/mail/drafts" && r.method === "POST"),
+    deletes: () =>
+      requests.filter((r) => r.url.startsWith("/api/mail/drafts/") && r.method === "DELETE"),
+    sends: () => requests.filter((r) => r.url === "/api/mail/send" && r.method === "POST"),
+  };
+}
+
+/** A value typed into a field the way React hears it. */
+async function type(field: HTMLInputElement | HTMLTextAreaElement, value: string) {
+  const proto =
+    field instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
+  await act(async () => {
+    Object.getOwnPropertyDescriptor(proto, "value")?.set?.call(field, value);
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+  });
+  await settle();
+}
+
+/** Files handed to the sheet the way its file chooser hands them back. */
+async function chooseFiles(files: readonly File[]) {
+  const input = document.body.querySelector<HTMLInputElement>(
+    '[role="dialog"] input[type="file"]',
+  );
+  if (!input) throw new Error("no file input on the sheet");
+  Object.defineProperty(input, "files", { value: files, configurable: true });
+  await act(async () => {
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+  await settle();
+}
+
+async function until(check: () => boolean, what: string) {
+  await findLazy(() => (check() ? document.body : null), what);
+}
+
+const desktop = (query: string) => ({
+  matches: query === "(min-width: 768px)",
+  media: query,
+  onchange: null,
+  addEventListener: vi.fn(),
+  removeEventListener: vi.fn(),
+  addListener: vi.fn(),
+  removeListener: vi.fn(),
+  dispatchEvent: vi.fn(),
+});
+
 describe("the compose ask, through the assembled shell", () => {
   let host: HTMLDivElement;
   let root: Root;
@@ -404,5 +547,203 @@ describe("the compose ask, through the assembled shell", () => {
     );
     expect(document.body.querySelector(".brain-shell")?.hasAttribute("inert")).toBe(true);
     expect(shellMotion.renders.at(-1)?.animate).toEqual({ scale: 1, opacity: 1 });
+  });
+
+  // THE FILES AND THE FROM SWITCH, AT THE SEAM THEY CROSS. The sheet holds
+  // its files in memory; the surface moves the draft underneath a From
+  // switch, sends the files through the send door, and says what a closing
+  // sheet leaves behind.
+  describe("the sheet's files and its From switch", () => {
+    const openSheet = async (
+      accounts: readonly unknown[],
+      sendAnswer?: Parameters<typeof installMailServer>[1],
+    ) => {
+      vi.stubGlobal("matchMedia", desktop);
+      const server = installMailServer(accounts, sendAnswer);
+      window.history.replaceState({}, "", "/mail");
+      await act(async () =>
+        root.render(<Shell tree={[]} initialSelectedId={null} initialSurface="mail" />),
+      );
+      await settle();
+      const compose = await findLazy(
+        () =>
+          [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+            (button) => button.getAttribute("aria-label") === "New message",
+          ),
+        "the column's New message",
+      );
+      await act(async () => compose.click());
+      await settle();
+      const sheet = await findLazy(
+        () => document.body.querySelector<HTMLElement>('[role="dialog"][aria-label="New message"]'),
+        "the open sheet",
+      );
+      return { server, sheet };
+    };
+    const to = () =>
+      document.body.querySelector<HTMLInputElement>('[role="dialog"] input[autocomplete="email"]')!;
+    const body = () => document.body.querySelector<HTMLTextAreaElement>('[role="dialog"] textarea')!;
+    const chipNames = () =>
+      [...document.body.querySelectorAll(".brain-compose-shelf .brain-compose-attachment-name")].map(
+        (node) => node.textContent,
+      );
+    const button = (label: string) =>
+      [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+        (candidate) => candidate.getAttribute("aria-label") === label,
+      );
+
+    it("switches From in place: the same sheet, the focus kept, the files kept, the draft moved underneath", async () => {
+      const { server, sheet } = await openSheet([sendableAccount, secondAccount]);
+      await type(to(), "ben@example.test");
+      await type(body(), "Moving house");
+      await until(() => server.creates().length === 1, "the first draft's create");
+      expect((server.creates()[0]?.body as { accountId: string }).accountId).toBe(
+        sendableAccount.accountId,
+      );
+      await chooseFiles([new File(["quote"], "Quote.pdf", { type: "application/pdf" })]);
+      const toField = to();
+
+      const trigger = document.body.querySelector<HTMLButtonElement>(
+        '.brain-compose-from button[aria-label^="From:"]',
+      )!;
+      trigger.focus();
+      await act(async () => {
+        trigger.dispatchEvent(
+          new PointerEvent("pointerdown", { bubbles: true, cancelable: true, button: 0 }),
+        );
+      });
+      await settle();
+      const row = [...document.body.querySelectorAll<HTMLElement>('[role="menuitemradio"]')].find(
+        (item) => item.textContent?.includes(secondAccount.emailAddress),
+      )!;
+      await act(async () => row.click());
+      await settle();
+
+      // No exit and no enter: the same sheet and the same fields stand, and
+      // there was never a second one.
+      expect(document.body.querySelectorAll('[role="dialog"]')).toHaveLength(1);
+      expect(document.body.querySelector('[role="dialog"]')).toBe(sheet);
+      expect(to()).toBe(toField);
+      expect(chipNames()).toEqual(["Quote.pdf"]);
+      // The caret goes back to the From it was on, not to To.
+      await until(() => document.activeElement === trigger, "the focus back on From");
+      expect(trigger.getAttribute("aria-label")).toBe("From: second@example.test");
+
+      // Underneath: the next create carries the second account and what was
+      // typed, and the first account's draft is deleted.
+      await until(() => server.creates().length === 2, "the second account's create");
+      expect(server.creates()[1]?.body).toMatchObject({
+        accountId: secondAccount.accountId,
+        to: "ben@example.test",
+        text: "Moving house",
+      });
+      await until(() => server.deletes().length === 1, "the first draft's delete");
+      expect(server.deletes()[0]?.body).toMatchObject({ accountId: sendableAccount.accountId });
+    });
+
+    it("sends the files through the send door with the letter, from the account in From", async () => {
+      const { server } = await openSheet([sendableAccount]);
+      await type(to(), "ben@example.test");
+      await type(body(), "The quote, attached.");
+      await chooseFiles([new File(["hello"], "hello.txt", { type: "text/plain" })]);
+      const send = document.body.querySelector<HTMLButtonElement>(
+        '[role="dialog"] button[type="submit"]',
+      )!;
+      await act(async () => send.click());
+      await until(() => server.sends().length === 1, "the send");
+
+      expect(server.sends()[0]?.body).toMatchObject({
+        accountId: sendableAccount.accountId,
+        to: ["ben@example.test"],
+        text: "The quote, attached.",
+        attachments: [{ filename: "hello.txt", mimeType: "text/plain", dataBase64: "aGVsbG8=" }],
+      });
+      await until(
+        () => document.body.querySelector('[role="dialog"]') === null,
+        "the sheet gone once the letter is queued",
+      );
+      await until(
+        () => document.body.textContent?.includes("Message queued") ?? false,
+        "the queued toast",
+      );
+      // The draft that held the words stays until the letter is known sent:
+      // a letter that fails later is still in Drafts.
+      expect(server.deletes()).toHaveLength(0);
+    });
+
+    it.each([
+      [
+        413,
+        "mail_send_attachments_too_large",
+        "These files are too large to send. A message can carry 10 MB of files.",
+      ],
+      [
+        413,
+        "mail_send_request_invalid",
+        "These files are too large to send. A message can carry 10 MB of files.",
+      ],
+      [400, "mail_send_attachments_invalid", "One of these files can’t be sent. Remove it and try again."],
+    ])("words a %i %s from the send door in the slot, and keeps Send live", async (status, code, sentence) => {
+      const { server } = await openSheet([sendableAccount], {
+        status,
+        body: { apiVersion: 1, error: { code } },
+      });
+      await type(to(), "ben@example.test");
+      await chooseFiles([new File(["hello"], "hello.txt", { type: "text/plain" })]);
+      const send = document.body.querySelector<HTMLButtonElement>(
+        '[role="dialog"] button[type="submit"]',
+      )!;
+      await act(async () => send.click());
+      await until(() => server.sends().length === 1, "the send");
+      await until(
+        () =>
+          document.body.querySelector('[role="dialog"] .brain-compose-slot [role="alert"]')
+            ?.textContent === sentence,
+        "the refusal in the slot",
+      );
+      expect(send.disabled).toBe(false);
+      expect(chipNames()).toEqual(["hello.txt"]);
+    });
+
+    it("says at once that the draft it keeps has no files, when the sheet closes with files on it", async () => {
+      await openSheet([sendableAccount]);
+      await type(to(), "ben@example.test");
+      await chooseFiles([new File(["quote"], "Quote.pdf", { type: "application/pdf" })]);
+      await act(async () => button("Close draft")?.click());
+      await settle();
+
+      await until(
+        () => document.body.textContent?.includes("Draft kept without its files.") ?? false,
+        "the files toast",
+      );
+    });
+
+    it("says it when an Undo brings back a discarded sheet that had files", async () => {
+      await openSheet([sendableAccount]);
+      await type(to(), "ben@example.test");
+      await chooseFiles([new File(["quote"], "Quote.pdf", { type: "application/pdf" })]);
+      await act(async () => button("Discard draft")?.click());
+      await settle();
+      await until(
+        () => document.body.textContent?.includes("Draft discarded") ?? false,
+        "the discard pill",
+      );
+      // The files went with the discard; Undo brings back the words only.
+      expect(document.body.textContent).not.toContain("Draft kept without its files.");
+      const undo = [...document.body.querySelectorAll<HTMLButtonElement>("button")].find(
+        (candidate) => candidate.textContent?.trim() === "Undo",
+      );
+      await act(async () => undo?.click());
+      await settle();
+      await until(
+        () => document.body.querySelector('[role="dialog"]') !== null,
+        "the sheet back",
+      );
+      await until(
+        () => document.body.textContent?.includes("Draft kept without its files.") ?? false,
+        "the files toast",
+      );
+      expect(chipNames()).toEqual([]);
+    });
   });
 });

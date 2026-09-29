@@ -6957,12 +6957,13 @@ test("failed slash page creation unlocks the editor without losing the trigger",
   expect(parentResponse.ok).toBeTruthy();
   const parent = parentResponse.body as { id: string };
 
-  // The route goes in before the page opens, not between the menu and the
-  // Enter that fires the request. Installed there, it went in a few
-  // milliseconds before the request it had to catch, and once in about fifteen
-  // runs over a full tree that request reached the server without Playwright
-  // reporting it at all: the child was made, the shell opened it, and the wait
-  // below saw nothing.
+  // The route goes in before the page opens. It used to go in between the
+  // menu and the Enter, a few milliseconds before the create it has to catch,
+  // and in one probe run in fifteen over a 150-page tree that create reached
+  // the server with no request reported to Playwright and no route handler
+  // called: the child was made, the shell opened it, and the wait below saw
+  // nothing. Why was not established. Installed before the page opens, the
+  // route is in place long before anything it has to catch.
   let releaseFailure!: () => void;
   const failureGate = new Promise<void>((resolve) => {
     releaseFailure = resolve;
@@ -7285,6 +7286,136 @@ for (const reducedMotion of ["no-preference", "reduce"] as const) {
     await expect(page.getByText("Page changed elsewhere")).toHaveCount(0);
   });
 }
+
+// A slash menu listens on the whole document, so one left open in the editor
+// on its way out heard the next Enter too. The page was returned to while its
+// old canvas was still leaving, and Enter turned the leaving editor's `/h1`
+// into a heading. `components/editor/caret-menu-keys.ts` is the rule.
+test("a slash menu left open in a leaving editor takes no Enter", async ({ page }) => {
+  await login(page);
+  const title = "Leaving slash menu";
+  const createdResponse = await browserJson(page, "/api/page", {
+    method: "POST",
+    body: { title, markdown: "Base body" },
+  });
+  expect(createdResponse.ok).toBeTruthy();
+  const created = createdResponse.body as { id: string };
+
+  await page.goto(`/p/${created.id}`);
+  const content = page.getByRole("textbox", { name: "Page content" });
+  const body = content.locator("p").filter({ hasText: /^Base body$/ });
+  await expect(body).toHaveCount(1);
+  await content.focus();
+  await body.evaluate((element) => {
+    const text = element.firstChild;
+    if (!text) throw new Error("the body paragraph has no text node");
+    const range = document.createRange();
+    range.setStart(text, text.textContent?.length ?? 0);
+    range.collapse(true);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    document.dispatchEvent(new Event("selectionchange"));
+  });
+  await page.keyboard.press("Enter");
+  await page.keyboard.type("/h1");
+  const slashMenu = page.getByTestId("slash-menu");
+  await expect(slashMenu).toBeVisible();
+  await expect(slashMenu.getByRole("button").first()).toHaveText(/Heading 1/);
+
+  // The exit spans seconds instead of 80 ms, so the return is inside it.
+  const timeline = await page.context().newCDPSession(page);
+  await timeline.send("Animation.enable");
+  await timeline.send("Animation.setPlaybackRate", { playbackRate: 0.02 });
+
+  // Home and straight back, by clicks that move no focus, so nothing but the
+  // menu's own rule stands between the Enter below and the leaving editor.
+  await page.evaluate(async (pageTitle) => {
+    const frame = () => new Promise((resolve) => requestAnimationFrame(() => resolve(null)));
+    const home = document.querySelector<HTMLElement>('button[aria-label="Home"]');
+    if (!home) throw new Error("no Home button");
+    home.click();
+    await frame();
+    await frame();
+    const row = [
+      ...document.querySelectorAll<HTMLElement>(
+        'aside.brain-sidebar [role="button"], aside.brain-sidebar button',
+      ),
+    ].find((candidate) => candidate.textContent?.includes(pageTitle));
+    if (!row) throw new Error("no sidebar row for the page");
+    row.click();
+    await frame();
+    await frame();
+  }, title);
+  await expect(page).toHaveURL(`/p/${created.id}`);
+  const leaving = page.locator('[inert] [aria-label="Page content"]');
+  await expect(leaving).toHaveCount(1);
+  await expect(page.locator('[inert] [data-testid="slash-menu"]')).toHaveCount(1);
+
+  await page.keyboard.press("Enter");
+  await expect(leaving.locator("h1")).toHaveCount(0);
+  await expect(leaving).toContainText("/h1");
+  await timeline.send("Animation.setPlaybackRate", { playbackRate: 1 });
+
+  await expect(page.locator('[aria-label="Page content"]')).toHaveCount(1);
+  await expect(content).toContainText("/h1");
+  await expect(content.locator("h1")).toHaveCount(0);
+  await expect
+    .poll(async () => {
+      const read = await browserJson(page, `/api/page/${created.id}`);
+      return (read.body as { markdown?: string }).markdown?.trimEnd();
+    })
+    .toBe("Base body\n\n/h1");
+});
+
+// The ⌘K palette opened over a slash menu that was still up. Enter in its
+// search ran the menu's "New page" in the editor behind it: an Untitled child
+// was filed and linked into the page, and the palette never saw the key.
+test("the palette takes Enter from a slash menu left open behind it", async ({ page }) => {
+  await login(page);
+  const parentResponse = await browserJson(page, "/api/page", {
+    method: "POST",
+    body: { title: "Slash under the palette" },
+  });
+  expect(parentResponse.ok).toBeTruthy();
+  const parent = parentResponse.body as { id: string };
+
+  // Every page this test's Enter could make, by the parent it names.
+  const creates: Array<string | null> = [];
+  page.on("request", (request) => {
+    if (request.method() !== "POST" || new URL(request.url()).pathname !== "/api/page") return;
+    const body = request.postDataJSON() as { parentId?: string | null };
+    creates.push(body.parentId ?? null);
+  });
+
+  await page.goto(`/p/${parent.id}`);
+  const content = page.getByRole("textbox", { name: "Page content" });
+  await expect(content).toBeVisible();
+  await content.focus();
+  await page.keyboard.type("/");
+  await expect(page.getByTestId("slash-menu")).toBeVisible();
+
+  // The menu closes a frame after the palette takes focus, when it hears the
+  // selection move. An Enter inside that frame is the case, and a test cannot
+  // press inside one frame on purpose, so the selection's news is held back
+  // from the menu: it stays open behind the palette for as long as it takes.
+  await page.evaluate(() => {
+    document.addEventListener("selectionchange", (event) => event.stopImmediatePropagation(), true);
+  });
+  await openPalette(page);
+  await expect(page.getByTestId("slash-menu")).toBeVisible();
+  const palette = page.getByTestId("desktop-command-palette");
+  await expect(palette.getByRole("combobox")).toBeFocused();
+  await expect(palette.locator('[cmdk-item][data-selected="true"]')).toHaveText(/New page/);
+  // Enter on the palette's first row, "New page", which files a page at the
+  // top of the tree. The slash menu's "New page" would file it under this one.
+  await page.keyboard.press("Enter");
+
+  await expect(palette).toBeHidden();
+  await expect.poll(() => creates).toEqual([null]);
+  await expect(page).not.toHaveURL(`/p/${parent.id}`);
+  const read = await browserJson(page, `/api/page/${parent.id}`);
+  expect((read.body as { markdown?: string }).markdown ?? "").not.toContain("/p/");
+});
 
 test("a stale parent edit removes only the reference after conflict", async ({
   page,

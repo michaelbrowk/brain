@@ -268,6 +268,9 @@ const DISCARD_TOAST_ID = "mail-draft-discard";
  *  the sheet's memory and the draft API stores none, so the draft that stays
  *  is the words: said urgently, at the gesture that lost them. */
 const DRAFT_WITHOUT_FILES = "Draft kept without its files.";
+/** The same gesture on a letter with no words: nothing is kept but the fact
+ *  that the files went. */
+const FILES_DISCARDED = "Files discarded.";
 const DRAFT_RECOVERY_PREFIX = "brain:mail:draft-recovery:v1:";
 const THREAD_SORT_PREFIX = "brain:mail:sort:v1:";
 const SEND_POLL_BASE_DELAY_MS = 5_000;
@@ -1144,9 +1147,10 @@ export function MailSurface({
    * the tab is hidden, aborted when the Mail surface unmounts.
    */
   const watchSendOperation = useCallback(
-    /** `onSent` runs once the letter is known sent: a letter that went with
-     *  files leaves its draft standing until then, and this is where it goes. */
-    (operationId: string, onSent?: () => void) => {
+    /** `withFiles`: the letter went with the sheet's files, which lived only
+     *  in the sheet. A failed send leaves its words in Drafts and not its
+     *  files, and the sentence says so. */
+    (operationId: string, withFiles = false) => {
       const pollers = sendPollersRef.current;
       if (pollers.has(operationId)) return;
       const controller = new AbortController();
@@ -1173,12 +1177,15 @@ export function MailSurface({
           }
           if (status === "queued" || status === "sending") continue;
           if (status === "failed") {
-            onToast?.("Message didn’t send. It’s in Drafts.");
+            onToast?.(
+              withFiles
+                ? "Message didn’t send. It’s in Drafts without its files."
+                : "Message didn’t send. It’s in Drafts.",
+            );
           } else if (status === "delivery_unknown") {
             onToast?.("Delivery unconfirmed. Check Drafts.");
           } else {
             onToast?.("Message sent");
-            onSent?.();
           }
           const accountId = selectedAccountIdRef.current;
           if (accountId) void refreshDraftBadge(accountId);
@@ -3174,70 +3181,6 @@ export function MailSurface({
         // Autosave is best-effort; the send reconciles from the stored draft.
       }
       if (sync.closed || draftSyncRef.current !== sync) return;
-      if (input.attachments.length > 0) {
-        /*
-          THE SHEET'S FILES GO THROUGH THE SEND DOOR. A stored draft carries
-          no files (its API stores none, and the outbox proves a submission
-          against the draft it came from), so a letter with files is sent as
-          it stands on the sheet, in the MCP tool's own input, under a key of
-          its own for this press. The draft that holds its words stays until
-          the letter is known sent, and the watch deletes it then: a letter
-          that fails later is still in Drafts, which is what the failure
-          toast says.
-        */
-        try {
-          const result = await client.send({
-            ...input,
-            idempotencyKey: createIdempotencyKey(),
-          });
-          if (
-            !isComposerSubmission(composerRef.current, input) ||
-            draftSyncRef.current !== sync
-          ) {
-            return;
-          }
-          if (result.status === "failed" || result.status === "delivery_unknown") {
-            const unknown = result.status === "delivery_unknown";
-            if (!unknown) sync.frozen = false;
-            updateSubmittedComposer((current) => ({
-              ...current,
-              sending: false,
-              blocked: unknown,
-              error: unknown
-                ? "Delivery status is unknown. Check Sent before trying again."
-                : "Message wasn’t sent. Try again.",
-              errorSettings: false,
-            }));
-            return;
-          }
-          clearDraftRecovery(sync.draftId);
-          if (sync.recoverySourceDraftId) {
-            clearDraftRecovery(sync.recoverySourceDraftId);
-            sync.recoverySourceDraftId = null;
-          }
-          sync.closed = true;
-          draftSyncRef.current = null;
-          composerRef.current = null;
-          setComposer(null);
-          setSaveStatus("idle");
-          onToast?.(result.status === "sent" ? "Message sent" : "Message queued");
-          if (result.status === "sent") deleteDraftSync(sync);
-          else watchSendOperation(result.operationId, () => deleteDraftSync(sync));
-        } catch (error) {
-          // The same reading as the draft door's: a refusal left nothing
-          // behind and Send stays live; a lost answer blocks.
-          const failure = classifySendFailure(error);
-          if (!failure.blocked) sync.frozen = false;
-          updateSubmittedComposer((current) => ({
-            ...current,
-            sending: false,
-            blocked: failure.blocked,
-            error: failure.message,
-            errorSettings: failure.settings ?? false,
-          }));
-        }
-        return;
-      }
       if (
         sync.revision === null ||
         (sync.pendingFields !== null &&
@@ -3251,6 +3194,10 @@ export function MailSurface({
         }));
         return;
       }
+      // The sheet's files ride on the send, never on the draft: the service
+      // builds them into the message it makes from the draft, so a letter
+      // with files is bound to its draft like any other and cannot go twice.
+      const withFiles = input.attachments.length > 0;
       try {
         const result = await client.sendDraft({
           accountId: sync.accountId,
@@ -3259,6 +3206,7 @@ export function MailSurface({
           expectedRevision: sync.revision,
           sendIdempotencyKey: randomUuidV4(),
           sendOperationId: createSendOperationId(),
+          attachments: input.attachments,
         });
         if (
           !isComposerSubmission(composerRef.current, input) ||
@@ -3284,7 +3232,7 @@ export function MailSurface({
           onToast?.(result.status === "sent" ? "Message sent" : "Message queued");
           // A queued handoff is a promise, not an outcome. Watch the operation
           // so a failure hours from now still reaches the writer.
-          if (result.status !== "sent") watchSendOperation(result.operationId);
+          if (result.status !== "sent") watchSendOperation(result.operationId, withFiles);
           return;
         }
         if (result.status === "failed") {
@@ -3382,7 +3330,7 @@ export function MailSurface({
         }));
       }
     },
-    [client, deleteDraftSync, flushDraftSync, onToast, watchSendOperation],
+    [client, flushDraftSync, onToast, watchSendOperation],
   );
 
   /**
@@ -5107,8 +5055,10 @@ export function MailSurface({
                 : false;
               closeComposer(empty);
               // A kept draft is the words: the files lived only on the sheet.
-              if (leaving.withFiles && !empty) {
-                onToast?.(DRAFT_WITHOUT_FILES, { urgent: true });
+              // With no words there is no draft, and the files are all that
+              // went, which is what is said.
+              if (leaving.withFiles) {
+                onToast?.(empty ? FILES_DISCARDED : DRAFT_WITHOUT_FILES, { urgent: true });
               }
             }}
             onDiscard={discardComposer}
@@ -5739,9 +5689,9 @@ function classifySendFailure(error: unknown): {
   }
   return {
     blocked: false,
-    // A 413 is the body's size whatever its code: the send door cuts a body
+    // A 413 is the body's size whatever its code: the draft door cuts a body
     // off by its bytes before it reads a code into it, and only files can
-    // carry a letter that far.
+    // carry a send that far.
     message: sendFailureMessage(
       error.status === 413 ? "mail_send_attachments_too_large" : error.code,
     ),
@@ -5780,7 +5730,7 @@ function sendFailureMessage(code: string | null): string {
     case "mail_send_rate_limited":
       return "Too many sends right now. Wait a moment, then try again.";
     case "mail_send_attachments_too_large":
-      return `These files are too large to send. ${ATTACHMENT_REFUSALS.total}`;
+      return ATTACHMENT_REFUSALS.tooLarge;
     case "mail_send_attachments_invalid":
       return "One of these files can’t be sent. Remove it and try again.";
     default:

@@ -29,17 +29,41 @@ export type ComposeAttachment = {
 };
 
 const TOTAL_MB = MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes / (1024 * 1024);
+/** How much of a name a sentence quotes. A name may be 255 bytes, and the
+ *  slot is one line on a desktop: the file is recognised by its start. */
+const QUOTED_NAME_CHARACTERS = 40;
 
-/** What the slot says when a file is not taken. The caps are named in the
- *  unit a person reads a file size in; the codec's MiB is the reader's MB,
- *  the way `formatBytes` counts them on the chips. */
+function quoted(name: string): string {
+  const characters = Array.from(name);
+  return characters.length > QUOTED_NAME_CHARACTERS
+    ? `“${characters.slice(0, QUOTED_NAME_CHARACTERS - 1).join("")}…”`
+    : `“${name}”`;
+}
+
+/** What the slot says when a file is not taken, naming the file it means.
+ *  The caps are named in the unit a person reads a file size in; the codec's
+ *  MiB is the reader's MB, the way `formatBytes` counts them on the chips. */
 export const ATTACHMENT_REFUSALS = Object.freeze({
-  count: `A message can carry ${MAIL_SEND_ATTACHMENT_LIMITS.maxCount} files.`,
-  total: `A message can carry ${TOTAL_MB} MB of files.`,
-  name: "That file’s name is too long to send.",
-  folder: "Folders can’t be attached.",
-  unreadable: "A file couldn’t be read. Remove it and attach it again.",
+  count: (name: string) =>
+    `${quoted(name)} wasn’t attached. A message can carry ${MAIL_SEND_ATTACHMENT_LIMITS.maxCount} files.`,
+  total: (name: string) =>
+    `${quoted(name)} is too large. A message can carry ${TOTAL_MB} MB of files.`,
+  name: (name: string) => `${quoted(name)} has a name too long to send.`,
+  unnamed: "A file with no name can’t be attached.",
+  folder: (name: string) => `${quoted(name)} is a folder. Folders can’t be attached.`,
+  unreadable: (name: string) =>
+    `${quoted(name)} couldn’t be read. Remove it and attach it again.`,
+  /** The service's own refusal of the whole set, which names no file. */
+  tooLarge: `These files are too large to send. A message can carry ${TOTAL_MB} MB of files.`,
 });
+
+/** A file the browser could not read when the letter went, by name. */
+export class UnreadableAttachmentError extends Error {
+  constructor(readonly filename: string) {
+    super("unreadable attachment");
+    this.name = "UnreadableAttachmentError";
+  }
+}
 
 /**
  * Which of `incoming` join the sheet. Each file is judged on its own against
@@ -61,17 +85,21 @@ export function admitAttachments(
     refusal ??= sentence;
   };
   for (const file of incoming) {
+    if (file.name === "") {
+      refuse(ATTACHMENT_REFUSALS.unnamed);
+      continue;
+    }
     const filename = safeAttachmentFilename(file.name);
     if (!isSafeAttachmentFilename(filename)) {
-      refuse(ATTACHMENT_REFUSALS.name);
+      refuse(ATTACHMENT_REFUSALS.name(file.name));
       continue;
     }
     if (count >= MAIL_SEND_ATTACHMENT_LIMITS.maxCount) {
-      refuse(ATTACHMENT_REFUSALS.count);
+      refuse(ATTACHMENT_REFUSALS.count(file.name));
       continue;
     }
     if (total + file.size > MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes) {
-      refuse(ATTACHMENT_REFUSALS.total);
+      refuse(ATTACHMENT_REFUSALS.total(file.name));
       continue;
     }
     count += 1;
@@ -90,16 +118,23 @@ export function attachmentMimeType(type: string): string {
 }
 
 /** The files as the send carries them. One at a time, so ten files never
- *  stand in memory as ten reads at once on top of their own base64. */
+ *  stand in memory as ten reads at once on top of their own base64. A file
+ *  the browser cannot read rejects with its name. */
 export async function encodeAttachments(
   attachments: readonly ComposeAttachment[],
 ): Promise<MailSendAttachment[]> {
   const encoded: MailSendAttachment[] = [];
   for (const attachment of attachments) {
+    let dataBase64: string;
+    try {
+      dataBase64 = await readBase64(attachment.file);
+    } catch {
+      throw new UnreadableAttachmentError(attachment.file.name);
+    }
     encoded.push({
       filename: attachment.filename,
       mimeType: attachmentMimeType(attachment.file.type),
-      dataBase64: await readBase64(attachment.file),
+      dataBase64,
     });
   }
   return encoded;

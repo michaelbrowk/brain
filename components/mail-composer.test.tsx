@@ -744,7 +744,7 @@ describe("the compose sheet", () => {
     it("says in the slot what it refused, as a status, and clears it when the writer types on", async () => {
       await render();
       await choose([sized("big.bin", 12 * MIB), sized("small.txt", 1_024, "text/plain")]);
-      expect(slotStatus()).toBe("A message can carry 10 MB of files.");
+      expect(slotStatus()).toBe("“big.bin” is too large. A message can carry 10 MB of files.");
       expect(dialog()!.querySelector('.brain-compose-slot [role="alert"]')).toBeNull();
       // The file that fitted is on the shelf; the one that did not is not.
       expect(chips()).toHaveLength(1);
@@ -761,13 +761,116 @@ describe("the compose sheet", () => {
       expect(slotStatus()).toBeNull();
 
       await choose(Array.from({ length: 10 }, (_, index) => sized(`${index}.txt`, 10)));
-      expect(slotStatus()).toBe("A message can carry 10 files.");
+      expect(slotStatus()).toBe("“9.txt” wasn’t attached. A message can carry 10 files.");
       expect(chips()).toHaveLength(10);
 
       await render();
       await choose([sized("é".repeat(128), 10)]);
-      expect(slotStatus()).toBe("That file’s name is too long to send.");
+      expect(slotStatus()).toBe(`“${"é".repeat(39)}…” has a name too long to send.`);
       expect(chips()).toHaveLength(0);
+
+      await choose([sized("", 10)]);
+      expect(slotStatus()).toBe("A file with no name can’t be attached.");
+      expect(chips()).toHaveLength(0);
+    });
+
+    it("refuses a folder in a drop by its name and takes the files beside it", async () => {
+      // A folder arrives as a file the browser cannot read; its entry, asked
+      // during the drop, is what tells it apart.
+      await render();
+      const folder = new File([], "Photos");
+      const photo = sized("photo.jpg", 3 * MIB, "image/jpeg");
+      const item = (file: File, isDirectory: boolean) => ({
+        kind: "file",
+        getAsFile: () => file,
+        webkitGetAsEntry: () => ({ isDirectory }),
+      });
+      const event = new Event("drop", { bubbles: true, cancelable: true });
+      Object.defineProperty(event, "dataTransfer", {
+        value: { types: ["Files"], files: [folder, photo], items: [item(folder, true), item(photo, false)] },
+      });
+      await act(async () => {
+        dialog()!.querySelector("form")!.dispatchEvent(event);
+      });
+      await settle();
+      expect(slotStatus()).toBe("“Photos” is a folder. Folders can’t be attached.");
+      expect(chips().map((chip) => chip.querySelector(".brain-compose-attachment-name")?.textContent)).toEqual([
+        "photo.jpg",
+      ]);
+    });
+
+    it("takes no file while a send is out, by the paperclip or by a drop", async () => {
+      await render({ initialDraft: draft({ to: "ben@example.test" }), sending: true });
+      const event = await drop([sized("late.pdf", 10)]);
+      // The drop is still claimed, so the window never navigates to the file.
+      expect(event.defaultPrevented).toBe(true);
+      await choose([sized("late.pdf", 10)]);
+      expect(chips()).toHaveLength(0);
+    });
+
+    it("moves the caret to the chip that takes a removed one's place, and to the paperclip after the last", async () => {
+      await render();
+      await choose([sized("a.pdf", 10), sized("b.pdf", 10)]);
+      const [first] = chips();
+      first!.focus();
+      await act(async () => first!.click());
+      await settle();
+      expect(document.activeElement).toBe(chips()[0]);
+      expect(document.activeElement?.getAttribute("aria-label")).toBe("Remove b.pdf, 10 B");
+      await act(async () => chips()[0]!.click());
+      await settle();
+      expect(document.activeElement).toBe(clip());
+    });
+
+    it("keeps its files out of the draft: attaching is not an edit, and an edit carries only the words", async () => {
+      const onDraftChange = vi.fn();
+      await render({ onDraftChange });
+      await choose([sized("Quote.pdf", 10)]);
+      expect(onDraftChange).not.toHaveBeenCalled();
+      const subject = dialog()!.querySelector<HTMLInputElement>('input[placeholder="Subject"]')!;
+      await act(async () => {
+        Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set?.call(
+          subject,
+          "The quote",
+        );
+        subject.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+      await settle();
+      expect(onDraftChange).toHaveBeenCalledTimes(1);
+      expect(Object.keys(onDraftChange.mock.calls[0]![0]).sort()).toEqual([
+        "bcc",
+        "cc",
+        "subject",
+        "text",
+        "to",
+      ]);
+    });
+
+    it("names the file it could not read when the letter went, and sends nothing", async () => {
+      class FailingReader {
+        onload: (() => void) | null = null;
+        onerror: (() => void) | null = null;
+        error = new DOMException("gone", "NotReadableError");
+        readAsDataURL() {
+          queueMicrotask(() => this.onerror?.());
+        }
+      }
+      const onSend = vi.fn();
+      await render({ initialDraft: draft({ to: "ben@example.test", text: "Hi" }), onSend });
+      await choose([new File(["x"], "gone.pdf", { type: "application/pdf" })]);
+      vi.stubGlobal("FileReader", FailingReader);
+      await act(async () => sendButton().click());
+      await vi.waitFor(() =>
+        expect(slotStatus()).toBe("“gone.pdf” couldn’t be read. Remove it and attach it again."),
+      );
+      expect(onSend).not.toHaveBeenCalled();
+      expect(sendButton().getAttribute("aria-busy")).toBeNull();
+    });
+
+    it("starts the phone's slot line on the column's 16px gutter", () => {
+      expect(
+        css.match(/^\.brain-compose-paper\[data-sheet\] \.brain-compose-slot-line \{([^}]*)\}/m)?.[1],
+      ).toContain("padding-left: calc(16px - var(--inset))");
     });
 
     it("sends the files as base64 with the letter", async () => {

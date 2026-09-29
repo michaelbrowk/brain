@@ -44,15 +44,36 @@ describe("the files a compose sheet admits", () => {
     ]);
   });
 
-  it("refuses the file that would carry the set past the total, and keeps the ones that fit", () => {
+  it("refuses the file that would carry the set past the total, by name, and keeps the ones that fit", () => {
     const { admitted, refusal } = admitAttachments(standing([sized("a.pdf", 4 * MIB)]), [
       sized("big.bin", 12 * MIB),
       sized("small.txt", 1024, "text/plain"),
     ]);
 
     expect(admitted.map((entry) => entry.filename)).toEqual(["small.txt"]);
-    expect(refusal).toBe(ATTACHMENT_REFUSALS.total);
-    expect(refusal).toBe("A message can carry 10 MB of files.");
+    expect(refusal).toBe(ATTACHMENT_REFUSALS.total("big.bin"));
+    expect(refusal).toBe("“big.bin” is too large. A message can carry 10 MB of files.");
+  });
+
+  it("counts the total across what stands and what arrives, not file by file", () => {
+    // Neither file is past the cap on its own; together with what stands,
+    // and together with each other, they are.
+    const onTop = admitAttachments(standing([sized("a.pdf", 6 * MIB)]), [sized("b.pdf", 5 * MIB)]);
+    expect(onTop.admitted).toHaveLength(0);
+    expect(onTop.refusal).toBe(ATTACHMENT_REFUSALS.total("b.pdf"));
+
+    const together = admitAttachments([], [sized("c.pdf", 6 * MIB), sized("d.pdf", 6 * MIB)]);
+    expect(together.admitted.map((entry) => entry.filename)).toEqual(["c.pdf"]);
+    expect(together.refusal).toBe(ATTACHMENT_REFUSALS.total("d.pdf"));
+  });
+
+  it("says the first refusal when several files are turned down", () => {
+    const { refusal } = admitAttachments(
+      [],
+      [sized("big.bin", 12 * MIB), sized("é".repeat(128), 10)],
+    );
+
+    expect(refusal).toBe(ATTACHMENT_REFUSALS.total("big.bin"));
   });
 
   it("admits a set exactly at the total cap", () => {
@@ -65,7 +86,7 @@ describe("the files a compose sheet admits", () => {
     expect(admitted).toHaveLength(1);
   });
 
-  it("refuses the eleventh file", () => {
+  it("refuses the eleventh file by name", () => {
     const nine = standing(Array.from({ length: 9 }, (_, index) => sized(`${index}.txt`, 10)));
     const { admitted, refusal } = admitAttachments(nine, [
       sized("tenth.txt", 10),
@@ -73,11 +94,11 @@ describe("the files a compose sheet admits", () => {
     ]);
 
     expect(admitted.map((entry) => entry.filename)).toEqual(["tenth.txt"]);
-    expect(refusal).toBe(ATTACHMENT_REFUSALS.count);
-    expect(refusal).toBe("A message can carry 10 files.");
+    expect(refusal).toBe(ATTACHMENT_REFUSALS.count("eleventh.txt"));
+    expect(refusal).toBe("“eleventh.txt” wasn’t attached. A message can carry 10 files.");
   });
 
-  it("refuses a name past the codec's byte cap, counted in UTF-8", () => {
+  it("refuses a name past the codec's byte cap, counted in UTF-8, shortened in the sentence", () => {
     // 128 two-byte characters are 256 bytes; 127 fit.
     const { admitted, refusal } = admitAttachments(
       [],
@@ -85,7 +106,25 @@ describe("the files a compose sheet admits", () => {
     );
 
     expect(admitted.map((entry) => entry.filename)).toEqual(["é".repeat(127)]);
-    expect(refusal).toBe(ATTACHMENT_REFUSALS.name);
+    expect(refusal).toBe(ATTACHMENT_REFUSALS.name("é".repeat(128)));
+    expect(refusal).toBe(`“${"é".repeat(39)}…” has a name too long to send.`);
+  });
+
+  it("refuses a file with no name with a sentence of its own", () => {
+    const { admitted, refusal } = admitAttachments([], [sized("", 10)]);
+
+    expect(admitted).toHaveLength(0);
+    expect(refusal).toBe(ATTACHMENT_REFUSALS.unnamed);
+    expect(refusal).toBe("A file with no name can’t be attached.");
+  });
+
+  it("names a folder and a file it could not read", () => {
+    expect(ATTACHMENT_REFUSALS.folder("Photos")).toBe(
+      "“Photos” is a folder. Folders can’t be attached.",
+    );
+    expect(ATTACHMENT_REFUSALS.unreadable("Quote.pdf")).toBe(
+      "“Quote.pdf” couldn’t be read. Remove it and attach it again.",
+    );
   });
 
   it("sends a type the codec cannot carry as octet-stream, and lowers the case of one it can", () => {
@@ -107,5 +146,27 @@ describe("the files a compose sheet admits", () => {
       { filename: "hello.txt", mimeType: "text/plain", dataBase64: "aGVsbG8=" },
       { filename: "empty.bin", mimeType: "application/octet-stream", dataBase64: "" },
     ]);
+  });
+
+  it("names the file it could not read, so the slot can", async () => {
+    // A file moved or changed on disk after it was chosen: the browser's
+    // reader fails, and the refusal names that file.
+    class FailingReader {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      error = new DOMException("gone", "NotReadableError");
+      readAsDataURL() {
+        queueMicrotask(() => this.onerror?.());
+      }
+    }
+    const original = globalThis.FileReader;
+    globalThis.FileReader = FailingReader as unknown as typeof FileReader;
+    try {
+      await expect(
+        encodeAttachments([{ id: 1, file: new File(["x"], "gone.pdf"), filename: "gone.pdf" }]),
+      ).rejects.toMatchObject({ filename: "gone.pdf" });
+    } finally {
+      globalThis.FileReader = original;
+    }
   });
 });

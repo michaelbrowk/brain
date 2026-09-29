@@ -35,6 +35,7 @@ import {
   ATTACHMENT_REFUSALS,
   admitAttachments,
   encodeAttachments,
+  UnreadableAttachmentError,
   type ComposeAttachment,
 } from "./mail-composer-attachments";
 import { Button, IconButton } from "./ui/button";
@@ -82,19 +83,20 @@ function draggingFiles(event: DragEvent<HTMLElement>): boolean {
  *  entry, which can only be asked during the drop itself. */
 function droppedFiles(transfer: DataTransfer): {
   readonly files: readonly File[];
-  readonly folder: boolean;
+  /** The first folder in the drop, by name, or null. */
+  readonly folder: string | null;
 } {
   const items = transfer.items ? Array.from(transfer.items) : [];
-  if (items.length === 0) return { files: Array.from(transfer.files ?? []), folder: false };
+  if (items.length === 0) return { files: Array.from(transfer.files ?? []), folder: null };
   const files: File[] = [];
-  let folder = false;
+  let folder: string | null = null;
   for (const item of items) {
     if (item.kind !== "file") continue;
+    const file = item.getAsFile();
     if (item.webkitGetAsEntry?.()?.isDirectory) {
-      folder = true;
+      folder ??= file?.name ?? "";
       continue;
     }
-    const file = item.getAsFile();
     if (file) files.push(file);
   }
   return { files, folder };
@@ -386,7 +388,10 @@ export function MailComposer({
         account={account}
         accounts={accounts}
         fromName={fromName}
-        disabled={busy}
+        // A blocked sheet is one whose send may already be on its way: a
+        // switch would open the letter afresh in another account, with Send
+        // live again, and the same words and files could go twice.
+        disabled={busy || sendBlocked}
         onOpenChange={setFromMenuOpen}
         onSwitch={(accountId) => onSwitchAccount?.(accountId, { to, cc, bcc, subject, text })}
       />
@@ -456,10 +461,10 @@ export function MailComposer({
 
   /**
    * Files from the paperclip or a drop join the shelf when the codec's caps
-   * say they fit; what does not fit is said in the slot. A folder in a drop
-   * is its own refusal, said before the caps'.
+   * say they fit; what does not fit is said in the slot, by name. A folder
+   * in a drop is its own refusal, said before the caps'.
    */
-  const attach = (files: readonly File[], folder = false) => {
+  const attach = (files: readonly File[], folder: string | null = null) => {
     if (busy || !canAttach) return;
     const { admitted, refusal } = admitAttachments(attachments, files);
     if (admitted.length > 0) {
@@ -468,7 +473,7 @@ export function MailComposer({
         ...admitted.map((entry) => ({ ...entry, id: nextAttachmentIdRef.current++ })),
       ]);
     }
-    setAttachRefusal(folder ? ATTACHMENT_REFUSALS.folder : refusal);
+    setAttachRefusal(folder !== null ? ATTACHMENT_REFUSALS.folder(folder) : refusal);
   };
 
   const detach = (id: number) => {
@@ -528,10 +533,14 @@ export function MailComposer({
         onSend({ ...letter, attachments: encoded });
         setPreparing(false);
       },
-      () => {
+      (error: unknown) => {
         if (!aliveRef.current) return;
         setPreparing(false);
-        setAttachRefusal(ATTACHMENT_REFUSALS.unreadable);
+        setAttachRefusal(
+          ATTACHMENT_REFUSALS.unreadable(
+            error instanceof UnreadableAttachmentError ? error.filename : "",
+          ),
+        );
       },
     );
   };

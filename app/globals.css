@@ -5148,12 +5148,16 @@ a.brain-share-url:active {
 .brain-compose-paper[data-sheet] .brain-compose-actions[data-message] .brain-compose-slot {
   grid-template-rows: 1fr;
 }
+/* the second line starts where the letter does: the actions row stands on
+   the window's inset and the column on its own 16, so the sentence steps in
+   by the difference and reads as the document's first line, not the row's */
 .brain-compose-paper[data-sheet] .brain-compose-slot-line {
   min-height: 0;
   flex-wrap: wrap;
   row-gap: 2px;
   overflow: hidden;
   padding-bottom: 8px;
+  padding-left: calc(16px - var(--inset));
 }
 .brain-compose-paper[data-sheet] .brain-compose-slot-line > [role] {
   overflow: visible;

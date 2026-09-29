@@ -15,7 +15,7 @@ import {
 } from "@milkdown/kit/preset/commonmark";
 import { insertTableCommand } from "@milkdown/kit/preset/gfm";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Icon } from "../ui/icon";
 import { DUR, EASE_OUT } from "@/lib/motion";
 import { insertCalloutCommand } from "./callout";
@@ -498,8 +498,12 @@ export function SlashMenu({
     [getEditor, upload],
   );
 
-  // keyboard nav
-  useEffect(() => {
+  // Keyboard nav, attached in the commit that paints the menu. The state that
+  // opens it is set from a frame, so it is an ordinary update, and a passive
+  // effect runs in a task after the paint. The browser dispatches input
+  // between those tasks: an Enter pressed as the menu appeared reached
+  // ProseMirror, which split the line under a menu still on screen.
+  useLayoutEffect(() => {
     if (!state) return;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "ArrowDown") {

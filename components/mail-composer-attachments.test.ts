@@ -110,6 +110,50 @@ describe("the files a compose sheet admits", () => {
     expect(refusal).toBe(`“${"é".repeat(39)}…” has a name too long to send.`);
   });
 
+  it("quotes a name of exactly 40 characters whole", () => {
+    const name = `${"a".repeat(36)}.pdf`;
+    expect(ATTACHMENT_REFUSALS.total(name)).toBe(
+      `“${name}” is too large. A message can carry 10 MB of files.`,
+    );
+  });
+
+  it("cuts a long name between whole characters as a reader sees them", () => {
+    // A family emoji is one character of several code points; a flag is two
+    // regional indicators; é here is e with a combining accent. None of them
+    // is split by the cut, which keeps 39 of them before the ellipsis.
+    const family = "👨‍👩‍👧";
+    expect(ATTACHMENT_REFUSALS.total(`${"a".repeat(38)}${family} plan.pdf`)).toBe(
+      `“${"a".repeat(38)}${family}…” is too large. A message can carry 10 MB of files.`,
+    );
+    const flag = "🇫🇷";
+    expect(ATTACHMENT_REFUSALS.total(`${"a".repeat(38)}${flag} trip.pdf`)).toContain(
+      `“${"a".repeat(38)}${flag}…”`,
+    );
+    const accented = "é";
+    expect(ATTACHMENT_REFUSALS.total(`${"a".repeat(38)}${accented} résumé.pdf`)).toContain(
+      `“${"a".repeat(38)}${accented}…”`,
+    );
+  });
+
+  it("names the file by the name the writer gave it, not the one it travels under", () => {
+    const { refusal } = admitAttachments([], [sized('Report "final".pdf', 12 * MIB)]);
+    expect(refusal).toBe("“Report \"final\".pdf” is too large. A message can carry 10 MB of files.");
+  });
+
+  it("never quotes an empty name: a sentence without one says it without quotes", () => {
+    expect(ATTACHMENT_REFUSALS.folder("")).toBe("A folder can’t be attached.");
+    expect(ATTACHMENT_REFUSALS.unreadable("")).toBe(
+      "A file couldn’t be read. Remove it and attach it again.",
+    );
+    for (const sentence of [
+      ATTACHMENT_REFUSALS.total(""),
+      ATTACHMENT_REFUSALS.count(""),
+      ATTACHMENT_REFUSALS.name(""),
+    ]) {
+      expect(sentence).not.toContain("“”");
+    }
+  });
+
   it("refuses a file with no name with a sentence of its own", () => {
     const { admitted, refusal } = admitAttachments([], [sized("", 10)]);
 

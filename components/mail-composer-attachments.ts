@@ -33,26 +33,41 @@ const TOTAL_MB = MAIL_SEND_ATTACHMENT_LIMITS.maxTotalBytes / (1024 * 1024);
  *  slot is one line on a desktop: the file is recognised by its start. */
 const QUOTED_NAME_CHARACTERS = 40;
 
+/** A name's characters as a reader counts them: a family emoji, a flag or a
+ *  letter with its accent is one, so a cut never lands inside one. */
+function characters(text: string): string[] {
+  if (typeof Intl.Segmenter === "function") {
+    return Array.from(
+      new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(text),
+      (part) => part.segment,
+    );
+  }
+  return Array.from(text);
+}
+
 function quoted(name: string): string {
-  const characters = Array.from(name);
-  return characters.length > QUOTED_NAME_CHARACTERS
-    ? `“${characters.slice(0, QUOTED_NAME_CHARACTERS - 1).join("")}…”`
+  const parts = characters(name);
+  return parts.length > QUOTED_NAME_CHARACTERS
+    ? `“${parts.slice(0, QUOTED_NAME_CHARACTERS - 1).join("")}…”`
     : `“${name}”`;
 }
 
-/** What the slot says when a file is not taken, naming the file it means.
- *  The caps are named in the unit a person reads a file size in; the codec's
- *  MiB is the reader's MB, the way `formatBytes` counts them on the chips. */
+/** What the slot says when a file is not taken, naming the file it means by
+ *  the name the writer gave it. A name that is empty is never quoted as a
+ *  pair of empty marks: the sentence says "a file" instead. The caps are
+ *  named in the unit a person reads a file size in; the codec's MiB is the
+ *  reader's MB, the way `formatBytes` counts them on the chips. */
 export const ATTACHMENT_REFUSALS = Object.freeze({
   count: (name: string) =>
-    `${quoted(name)} wasn’t attached. A message can carry ${MAIL_SEND_ATTACHMENT_LIMITS.maxCount} files.`,
+    `${name ? quoted(name) : "A file"} wasn’t attached. A message can carry ${MAIL_SEND_ATTACHMENT_LIMITS.maxCount} files.`,
   total: (name: string) =>
-    `${quoted(name)} is too large. A message can carry ${TOTAL_MB} MB of files.`,
-  name: (name: string) => `${quoted(name)} has a name too long to send.`,
+    `${name ? quoted(name) : "A file"} is too large. A message can carry ${TOTAL_MB} MB of files.`,
+  name: (name: string) => `${name ? quoted(name) : "A file"} has a name too long to send.`,
   unnamed: "A file with no name can’t be attached.",
-  folder: (name: string) => `${quoted(name)} is a folder. Folders can’t be attached.`,
+  folder: (name: string) =>
+    name ? `${quoted(name)} is a folder. Folders can’t be attached.` : "A folder can’t be attached.",
   unreadable: (name: string) =>
-    `${quoted(name)} couldn’t be read. Remove it and attach it again.`,
+    `${name ? quoted(name) : "A file"} couldn’t be read. Remove it and attach it again.`,
   /** The service's own refusal of the whole set, which names no file. */
   tooLarge: `These files are too large to send. A message can carry ${TOTAL_MB} MB of files.`,
 });

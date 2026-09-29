@@ -914,6 +914,43 @@ describe("the compose ask, through the assembled shell", () => {
       expect(document.body.textContent).not.toContain("Draft kept without its files.");
     });
 
+    // A BLOCKED SHEET CLOSES ON A WARNING, NOT ON ITS FILES. A lost answer or
+    // an unknown delivery means the letter may already be on its way, with
+    // its files; "without its files" would invite the writer to attach them
+    // again and send a second letter.
+    it.each([
+      ["a lost answer", () => "lost" as const],
+      [
+        "an unknown delivery",
+        (send: DraftSendBody) => ({
+          status: 202,
+          body: {
+            apiVersion: 1,
+            replayed: false,
+            appliedRevision: send.expectedRevision + 1,
+            operationId: send.sendOperationId,
+            created: true,
+            status: "delivery_unknown",
+          },
+        }),
+      ],
+    ])("closes a sheet blocked by %s with the warning to check Sent", async (_name, answer) => {
+      const { server } = await openSheet([sendableAccount], { draftSend: answer });
+      await writeAndAttach(server);
+      await act(async () => sendButton().click());
+      await until(() => sendButton().disabled, "the blocked sheet");
+      await act(async () => button("Close draft")?.click());
+      await settle();
+      await until(
+        () =>
+          document.body.textContent?.includes("Draft kept. Check Sent before sending it again.") ??
+          false,
+        "the warning",
+      );
+      expect(document.body.textContent).not.toContain("without its files");
+      expect(document.body.textContent).not.toContain("Files discarded.");
+    });
+
     it("says at once that the draft it keeps has no files, when the sheet closes with files on it", async () => {
       await openSheet([sendableAccount]);
       await type(to(), "ben@example.test");

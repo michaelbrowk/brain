@@ -271,6 +271,10 @@ const DRAFT_WITHOUT_FILES = "Draft kept without its files.";
 /** The same gesture on a letter with no words: nothing is kept but the fact
  *  that the files went. */
 const FILES_DISCARDED = "Files discarded.";
+/** What a blocked sheet (a lost answer, an unknown delivery) leaves with: its
+ *  letter may already be on its way, so the one thing worth saying is where
+ *  to look before sending it again. */
+const DRAFT_KEPT_CHECK_SENT = "Draft kept. Check Sent before sending it again.";
 const DRAFT_RECOVERY_PREFIX = "brain:mail:draft-recovery:v1:";
 const THREAD_SORT_PREFIX = "brain:mail:sort:v1:";
 const SEND_POLL_BASE_DELAY_MS = 5_000;
@@ -5053,7 +5057,15 @@ export function MailSurface({
               const empty = draftSyncRef.current
                 ? isDraftSyncEmpty(draftSyncRef.current)
                 : false;
+              const blocked = composerRef.current?.blocked ?? false;
               closeComposer(empty);
+              // A blocked sheet's letter may already be on its way, files and
+              // all: the warning is what it leaves with, and nothing about
+              // files, which would read as an invitation to attach them again.
+              if (blocked) {
+                onToast?.(DRAFT_KEPT_CHECK_SENT, { urgent: true });
+                return;
+              }
               // A kept draft is the words: the files lived only on the sheet.
               // With no words there is no draft, and the files are all that
               // went, which is what is said.

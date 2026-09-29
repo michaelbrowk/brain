@@ -779,6 +779,7 @@ describe("the compose sheet", () => {
       // during the drop, is what tells it apart.
       await render();
       const folder = new File([], "Photos");
+      const second = new File([], "Scans");
       const photo = sized("photo.jpg", 3 * MIB, "image/jpeg");
       const item = (file: File, isDirectory: boolean) => ({
         kind: "file",
@@ -786,8 +787,13 @@ describe("the compose sheet", () => {
         webkitGetAsEntry: () => ({ isDirectory }),
       });
       const event = new Event("drop", { bubbles: true, cancelable: true });
+      // Two folders: the first one dropped is the one the sentence names.
       Object.defineProperty(event, "dataTransfer", {
-        value: { types: ["Files"], files: [folder, photo], items: [item(folder, true), item(photo, false)] },
+        value: {
+          types: ["Files"],
+          files: [folder, photo, second],
+          items: [item(folder, true), item(photo, false), item(second, true)],
+        },
       });
       await act(async () => {
         dialog()!.querySelector("form")!.dispatchEvent(event);
